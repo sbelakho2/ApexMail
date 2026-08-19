@@ -341,10 +341,7 @@ mod tests {
         assert_eq!(AuditFilterColumn::Action.predicate(3), "action = $3");
         assert_eq!(AuditFilterColumn::TenantId.predicate(4), "tenant_id = $4");
         assert_eq!(AuditFilterColumn::UserId.predicate(5), "user_id = $5");
-        assert_eq!(
-            AuditFilterColumn::Resource.predicate(6),
-            "resource = $6"
-        );
+        assert_eq!(AuditFilterColumn::Resource.predicate(6), "resource = $6");
         assert_eq!(AuditFilterColumn::Outcome.predicate(7), "outcome = $7");
     }
 

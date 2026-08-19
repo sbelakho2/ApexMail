@@ -216,7 +216,8 @@ impl FeedbackLoopServer {
             } else if cmd.starts_with("RCPT TO") {
                 let addr = extract_addr(&line);
                 if !mail_from_seen {
-                    let _ = write_line(&mut stream, "503 Bad sequence (send MAIL FROM first)\r\n").await;
+                    let _ = write_line(&mut stream, "503 Bad sequence (send MAIL FROM first)\r\n")
+                        .await;
                     continue;
                 }
                 // Accept abuse@, complaints@, fbl@, feedback@, postmaster@
@@ -238,7 +239,11 @@ impl FeedbackLoopServer {
                     continue;
                 }
                 if msgs_this_conn >= self.config.max_messages_per_connection {
-                    let _ = write_line(&mut stream, "452 Too many messages from this connection\r\n").await;
+                    let _ = write_line(
+                        &mut stream,
+                        "452 Too many messages from this connection\r\n",
+                    )
+                    .await;
                     continue;
                 }
                 let _ = write_line(&mut stream, "354 Go ahead\r\n").await;
@@ -311,7 +316,11 @@ impl FeedbackLoopServer {
                     // forever (and never accept the partial payload).
                     let _ = write_line(&mut stream, "421 4.4.2 Data timeout exceeded\r\n").await;
                 } else if too_large {
-                    let _ = write_line(&mut stream, "552 5.3.4 Message size exceeds fixed limit\r\n").await;
+                    let _ = write_line(
+                        &mut stream,
+                        "552 5.3.4 Message size exceeds fixed limit\r\n",
+                    )
+                    .await;
                 } else if terminated {
                     match self.process_complaint(ip, &message).await {
                         Ok(id) => {
@@ -980,7 +989,10 @@ Original-Message-ID: <original@example.com>\r\n";
     fn test_hostname_matches_trusted_rejects_suffix_spoof() {
         assert!(!hostname_matches_trusted("evil-google.com", "google.com"));
         assert!(!hostname_matches_trusted("notgoogle.com", "google.com"));
-        assert!(!hostname_matches_trusted("google.com.evil.com", "google.com"));
+        assert!(!hostname_matches_trusted(
+            "google.com.evil.com",
+            "google.com"
+        ));
         assert!(!hostname_matches_trusted("google.com.", "google.com"));
         assert!(!hostname_matches_trusted("", "google.com"));
     }

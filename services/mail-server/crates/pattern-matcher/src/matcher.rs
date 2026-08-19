@@ -53,13 +53,7 @@ pub struct MatchResult {
 
 impl MatchResult {
     /// Build a sanitized [`MatchResult`] with an opaque pattern identifier.
-    fn new(
-        pattern_index: usize,
-        start: usize,
-        end: usize,
-        label: &str,
-        normalized: bool,
-    ) -> Self {
+    fn new(pattern_index: usize, start: usize, end: usize, label: &str, normalized: bool) -> Self {
         Self {
             pattern_index,
             opaque_id: format!("pat-{pattern_index}"),
@@ -195,19 +189,16 @@ impl PatternMatcher {
     pub fn find_first(&self, text: &str) -> Option<MatchResult> {
         let normalized = Self::normalize(text);
         let offsets_are_normalized = matches!(normalized, Cow::Owned(_));
-        self.automaton
-            .as_ref()?
-            .find(normalized.as_ref())
-            .map(|m| {
-                let entry = &self.patterns[m.pattern().as_usize()];
-                MatchResult::new(
-                    m.pattern().as_usize(),
-                    m.start(),
-                    m.end(),
-                    &entry.label,
-                    offsets_are_normalized,
-                )
-            })
+        self.automaton.as_ref()?.find(normalized.as_ref()).map(|m| {
+            let entry = &self.patterns[m.pattern().as_usize()];
+            MatchResult::new(
+                m.pattern().as_usize(),
+                m.start(),
+                m.end(),
+                &entry.label,
+                offsets_are_normalized,
+            )
+        })
     }
 
     /// Number of patterns in the automaton.

@@ -1,6 +1,6 @@
 # Support & Success Services
 
-ApexMail support is **async-first**. Most questions are answered by the docs and the in-app self-debug diagnostics (`GET /v1/domains/{id}/auth-score`, `GET /v1/domains/{id}/dns-records`). Human support exists for things automation can't solve — billing exceptions, security incidents, capacity planning, and architectural reviews.
+ApexMail support is **async-first**. Most questions are answered by the docs and the in-app self-debug diagnostics (`GET /v1/domains/{id}/auth-status`, `GET /v1/domains/{id}/dns-records`). Human support exists for things automation can't solve — billing exceptions, security incidents, capacity planning, and architectural reviews.
 
 We deliberately do **not** offer:
 
@@ -32,7 +32,7 @@ We do offer scheduled async-first support with hard tier boundaries.
 
 ### Before opening a ticket
 
-1. **Run self-debug.** Most domain/deliverability/auth issues are solved by `auth-score` + `dns-records` in under a minute.
+1. **Run self-debug.** Most domain/deliverability/auth issues are solved by `auth-status` + `dns-records` in under a minute.
 2. **Search the [community forum](https://github.com/sbelakho2/ApexMail/discussions).** Public, searchable, single hub.
 3. **Ask the in-app AI assistant.** It is trained on this exact system and answers most setup, API, billing-readonly, and troubleshooting questions instantly.
 4. **Then open a ticket** if and only if the above three did not resolve it.

@@ -22,7 +22,7 @@ Every comparison page discloses:
 | **ApexMail plan compared** | Exact ApexMail plan used for feature-to-feature mapping |
 | **Monthly volume assumption** | The email volume at which pricing is calculated |
 | **Billing period** | Monthly or annual billing used for price comparison |
-| **Currency** | Currency used (USD for ApexMail; competitor pricing shown in its published denomination) |
+| **Currency** | All prices are shown in EUR. ApexMail prices are published in EUR; when a competitor publishes only USD, the EUR figure is converted at the documented reference rate (1 USD = €0.92, 2026-08-19) and the provider's published USD price is shown in parentheses |
 | **Tax treatment** | All prices exclude VAT unless stated |
 | **Feature definitions** | How each compared feature is defined |
 | **Source policy** | Only public, official documentation and pricing pages |

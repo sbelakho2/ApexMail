@@ -226,14 +226,7 @@ impl EventProcessor {
         clickhouse: clickhouse::Client,
         clickhouse_insert_timeout: Duration,
     ) -> Self {
-        Self::with_config(
-            db,
-            redis,
-            clickhouse,
-            clickhouse_insert_timeout,
-            1_000,
-            100,
-        )
+        Self::with_config(db, redis, clickhouse, clickhouse_insert_timeout, 1_000, 100)
     }
 
     pub fn with_config(
@@ -597,7 +590,10 @@ impl EventProcessor {
             }
         }
         if dropped > 0 {
-            error!(count = dropped, "Dropped poison events exceeding retry budget");
+            error!(
+                count = dropped,
+                "Dropped poison events exceeding retry budget"
+            );
         }
         if let Err(e) = pipe.query_async::<()>(&mut *conn).await {
             error!(error = %e, count = raw.len(),
@@ -713,10 +709,7 @@ impl EventProcessor {
             );
             metrics::counter!("apexmail_tracking_clickhouse_failures_total").increment(1);
         } else {
-            info!(
-                count = events.len(),
-                "ClickHouse ingest successful"
-            );
+            info!(count = events.len(), "ClickHouse ingest successful");
             metrics::counter!(
                 "apexmail_tracking_clickhouse_events_total",
                 "outcome" => "inserted",
@@ -776,10 +769,7 @@ impl EventProcessor {
                 .context("ClickHouse insert handle")?;
             for event in &events {
                 let row = ClickHouseEventRow::from_tracking_event(event);
-                insert
-                    .write(&row)
-                    .await
-                    .context("ClickHouse row write")?;
+                insert.write(&row).await.context("ClickHouse row write")?;
             }
             insert.end().await.context("ClickHouse insert commit")
         })
@@ -1172,9 +1162,8 @@ mod tests {
         };
         let payload = serde_json::to_string(&event).unwrap();
         let cs = sha256_hex8(&payload);
-        let envelope = format!(
-            r#"{{"v":{WAL_VERSION},"r":{MAX_EVENT_RETRIES},"cs":"{cs}","d":{payload}}}"#
-        );
+        let envelope =
+            format!(r#"{{"v":{WAL_VERSION},"r":{MAX_EVENT_RETRIES},"cs":"{cs}","d":{payload}}}"#);
         assert!(bump_envelope_retries(&envelope).is_none());
     }
 
@@ -1260,8 +1249,8 @@ mod tests {
     async fn clickhouse_roundtrip_roundtrip_through_clickhouse() {
         use chrono::TimeZone;
 
-        let url = std::env::var("CLICKHOUSE_TEST_URL")
-            .unwrap_or_else(|_| "http://127.0.0.1:8124".into());
+        let url =
+            std::env::var("CLICKHOUSE_TEST_URL").unwrap_or_else(|_| "http://127.0.0.1:8124".into());
         let user = std::env::var("CLICKHOUSE_TEST_USER").unwrap_or_else(|_| "default".into());
         let password = std::env::var("CLICKHOUSE_TEST_PASSWORD").unwrap_or_default();
         let ch = clickhouse::Client::default()
@@ -1351,9 +1340,11 @@ mod tests {
         assert!(row.4.contains("integration"));
 
         // Best-effort cleanup (mutation is async; this run is already done).
-        ch.query(&format!("ALTER TABLE events DELETE WHERE tenant_id = '{tenant}'"))
-            .execute()
-            .await
-            .ok();
+        ch.query(&format!(
+            "ALTER TABLE events DELETE WHERE tenant_id = '{tenant}'"
+        ))
+        .execute()
+        .await
+        .ok();
     }
 }

@@ -25,7 +25,8 @@ REQUIRED_VAT_NUMBER = "EE102951727"
 REQUIRED_ADDRESS_FRAGMENTS = ["Sakala tn 7-2", "10141 Tallinn", "Estonia"]
 
 PROHIBITED_PATTERNS = [
-    r"(?i)bel\s*consulting\s*(ou|OÜ|ou)",
+    r"16192499",
+    r"16942833",
 ]
 
 FAILED = False
@@ -121,7 +122,13 @@ def check_jsonld(build_dir: Path) -> None:
         return
 
     content = index_file.read_text(encoding="utf-8")
-    match = re.search(r'<script type="application/ld\+json"[^>]*>(.*?)</script>', content, re.DOTALL)
+    # Zola's HTML minifier strips attribute quotes, so the type attribute may
+    # be `application/ld+json` or `"application/ld+json"`.
+    match = re.search(
+        r'<script type=["\']?application/ld\+json["\']?[^>]*>(.*?)</script>',
+        content,
+        re.DOTALL,
+    )
     if not match:
         fail("No JSON-LD script found in index.html")
         return

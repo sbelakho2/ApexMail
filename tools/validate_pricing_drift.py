@@ -351,7 +351,7 @@ def validate_runtime_catalog(errors: list[str]) -> dict[str, ParsedPlan]:
 def display_money(cents: int, annual: bool = False) -> str:
     value = cents / 100
     formatted = f"{value:,.0f}" if value == int(value) else f"{value:,.2f}"
-    return f"${formatted}{'/year' if annual else ''}"
+    return f"€{formatted}{'/year' if annual else ''}"
 
 
 def display_limit(value: int) -> str:
@@ -371,7 +371,7 @@ def validate_pricing_reference(catalog: dict[str, ParsedPlan], errors: list[str]
             id=plan_id,
             name=plan.display_name,
             monthly=display_money(plan.monthly_cents),
-            yearly=("$0" if plan.yearly_cents == 0 else display_money(plan.yearly_cents, annual=True)),
+            yearly=("€0" if plan.yearly_cents == 0 else display_money(plan.yearly_cents, annual=True)),
             emails=display_limit(plan.email_limit),
             api=display_limit(plan.api_call_limit),
         )
@@ -380,7 +380,7 @@ def validate_pricing_reference(catalog: dict[str, ParsedPlan], errors: list[str]
             f"docs/pricing.md catalog row drift for {plan_id}: missing {expected_row!r}",
             errors,
         )
-    for stale in ("Developer", "Business", "€", "10% on every self-serve"):
+    for stale in ("Developer", "Business", "10% on every self-serve"):
         check(stale not in text, f"docs/pricing.md contains stale pricing token {stale!r}", errors)
 
 
@@ -391,9 +391,9 @@ def validate_marketing_data(catalog: dict[str, ParsedPlan], errors: list[str]) -
         errors.append(f"apps/marketing-zola/data/pricing.json is invalid JSON: {error}")
         return
 
-    check(data.get("currency_symbol") == "$", "marketing pricing data must use USD '$'", errors)
-    check(data.get("currency_code") == "USD", "marketing pricing data must declare USD", errors)
-    check(data.get("ip_cost") == 30, "marketing dedicated-IP add-on must be $30/month", errors)
+    check(data.get("currency_symbol") == "€", "marketing pricing data must use EUR '€'", errors)
+    check(data.get("currency_code") == "EUR", "marketing pricing data must declare EUR", errors)
+    check(data.get("ip_cost") == 30, "marketing dedicated-IP add-on must be €30/month", errors)
     plans = data.get("plans")
     if not isinstance(plans, list):
         errors.append("marketing pricing data has no plans array")
@@ -464,7 +464,7 @@ def validate_marketing_source(catalog: dict[str, ParsedPlan], errors: list[str])
             query = "/signup" if plan_id == "free" else f"/signup?plan={plan_id}"
             check(query in cards, f"pricing card for {plan_id} has no vetted signup URL", errors)
 
-    for stale in ("Developer", "Business", "€", "plan=developer", "plan=business"):
+    for stale in ("Developer", "Business", "plan=developer", "plan=business"):
         check(stale not in cards, f"pricing cards contain stale token {stale!r}", errors)
     check("Pay-as-you-go usage pricing is available" in cards, "pricing cards omit PAYG managed-flow disclosure", errors)
     check("HIPAA availability is not currently offered" in cards, "pricing cards omit current HIPAA availability status", errors)
@@ -476,16 +476,16 @@ def validate_marketing_source(catalog: dict[str, ParsedPlan], errors: list[str])
         "Dedicated IPs are available as an add-on from {{ pricing_data.currency_symbol }}30/month on Pro and above",
     ):
         check(needle in calculator, f"calculator source is missing {needle!r}", errors)
-    for stale in ("Developer", "Business", "€", "Private Cloud (dedicated tenant)", "BYOC from", "&minus;10%"):
+    for stale in ("Developer", "Business", "Private Cloud (dedicated tenant)", "BYOC from", "&minus;10%"):
         check(stale not in calculator, f"calculator source contains stale token {stale!r}", errors)
 
-    for needle in ("$25", "$65", "$150", "$350", "$3,000", "$30,000/yr", "$0.40 per additional 1,000 emails"):
+    for needle in ("€25", "€65", "€150", "€350", "€3,000", "€30,000/yr", "€0.40 per additional 1,000 emails"):
         check(needle in island, f"generated pricing island source is missing {needle!r}", errors)
-    for stale in ("Developer", "Business", "€", "SendGrid", "Mailchimp", "You Save"):
+    for stale in ("Developer", "Business", "SendGrid", "Mailchimp", "You Save"):
         check(stale not in island, f"generated pricing island contains stale token {stale!r}", errors)
 
     for needle in (
-        "$0.40 per 1,000 emails",
+        "€0.40 per 1,000 emails",
         "roughly a 17% discount",
         "HIPAA availability is not currently offered",
         "Stripe billing portal",
@@ -634,7 +634,7 @@ def validate_built_output(errors: list[str]) -> None:
         errors.append("no generated home/pricing HTML found; run zola build before pricing validation")
         return
     output = "\n".join(read(path) for path in pages)
-    for needle in ("Starter", "Scale", "$25", "$350", "$30,000", "$0.40 per 1,000 emails"):
+    for needle in ("Starter", "Scale", "€25", "€350", "€30,000", "€0.40 per 1,000 emails"):
         check(needle in output, f"generated marketing output is missing {needle!r}", errors)
     for stale in ("Start Developer", "Start Business", "€29", "€699", "plan=developer", "plan=business"):
         check(stale not in output, f"generated marketing output contains stale token {stale!r}", errors)

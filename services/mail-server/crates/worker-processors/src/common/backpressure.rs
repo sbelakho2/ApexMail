@@ -89,7 +89,8 @@ impl Backpressure {
             Err(_) => {
                 // All permits are taken — fall through to blocking acquire
                 // with a short timeout to avoid unbounded waiting.
-                match tokio::time::timeout(Duration::from_millis(500), self.semaphore.acquire()).await
+                match tokio::time::timeout(Duration::from_millis(500), self.semaphore.acquire())
+                    .await
                 {
                     Ok(Ok(permit)) => Some(permit),
                     _ => {
@@ -132,7 +133,8 @@ impl Backpressure {
 
     /// Current number of in-flight jobs (derived from semaphore capacity).
     pub fn in_flight(&self) -> usize {
-        self.max_concurrency.saturating_sub(self.semaphore.available_permits())
+        self.max_concurrency
+            .saturating_sub(self.semaphore.available_permits())
     }
 
     /// Available capacity (permits remaining).

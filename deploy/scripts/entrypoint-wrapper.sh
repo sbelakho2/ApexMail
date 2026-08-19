@@ -1,4 +1,3 @@
-
 #!/bin/sh
 # =============================================================================
 # ApexMail — Entrypoint wrapper for Docker services

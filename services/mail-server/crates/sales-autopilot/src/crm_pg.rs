@@ -310,16 +310,17 @@ impl SqlxCrmService {
             .await
             .map_err(|e| SalesError::Database(e.to_string()))?;
 
-        let current_status: Option<String> =
-            sqlx::query_scalar("SELECT status FROM sales_leads WHERE id = $1 AND tenant_id = $2 FOR UPDATE")
-                .bind(id)
-                .bind(tenant_id)
-                .fetch_optional(&mut *tx)
-                .await
-                .map_err(|e| SalesError::Database(e.to_string()))?;
+        let current_status: Option<String> = sqlx::query_scalar(
+            "SELECT status FROM sales_leads WHERE id = $1 AND tenant_id = $2 FOR UPDATE",
+        )
+        .bind(id)
+        .bind(tenant_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| SalesError::Database(e.to_string()))?;
 
-        let current_status = current_status
-            .ok_or_else(|| SalesError::LeadNotFound(id.to_string()))?;
+        let current_status =
+            current_status.ok_or_else(|| SalesError::LeadNotFound(id.to_string()))?;
         let current = parse_lead_status(&current_status);
         if !is_valid_transition(&current, &new_status) {
             warn!(

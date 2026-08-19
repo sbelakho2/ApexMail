@@ -619,8 +619,14 @@ fn dmarc_effective_policy(
     message_domain: &str,
     record_owner: &str,
 ) -> DmarcPolicy {
-    let message_domain = message_domain.trim().trim_end_matches('.').to_ascii_lowercase();
-    let record_owner = record_owner.trim().trim_end_matches('.').to_ascii_lowercase();
+    let message_domain = message_domain
+        .trim()
+        .trim_end_matches('.')
+        .to_ascii_lowercase();
+    let record_owner = record_owner
+        .trim()
+        .trim_end_matches('.')
+        .to_ascii_lowercase();
     if message_domain == record_owner {
         record.policy
     } else {
@@ -631,8 +637,14 @@ fn dmarc_effective_policy(
 /// RFC 7489 §3.1 alignment check between the RFC 5322 From domain and the
 /// SPF (envelope) or DKIM `d=` domain, honouring the aspf=/adkim= mode.
 fn domains_aligned(from_domain: &str, auth_domain: &str, mode: DmarcAlignmentMode) -> bool {
-    let from = from_domain.trim().trim_end_matches('.').to_ascii_lowercase();
-    let auth = auth_domain.trim().trim_end_matches('.').to_ascii_lowercase();
+    let from = from_domain
+        .trim()
+        .trim_end_matches('.')
+        .to_ascii_lowercase();
+    let auth = auth_domain
+        .trim()
+        .trim_end_matches('.')
+        .to_ascii_lowercase();
     if from.is_empty() || auth.is_empty() {
         return false;
     }
@@ -772,9 +784,10 @@ mod tests {
 
     #[test]
     fn test_parse_dmarc_record_sp_aspf_adkim() {
-        let record =
-            parse_dmarc_record("v=DMARC1; p=none; sp=reject; aspf=s; adkim=s; rua=mailto:dmarc@example.com")
-                .unwrap();
+        let record = parse_dmarc_record(
+            "v=DMARC1; p=none; sp=reject; aspf=s; adkim=s; rua=mailto:dmarc@example.com",
+        )
+        .unwrap();
         assert_eq!(record.policy, DmarcPolicy::None);
         assert_eq!(record.subdomain_policy, Some(DmarcPolicy::Reject));
         assert_eq!(record.spf_alignment, DmarcAlignmentMode::Strict);
@@ -822,14 +835,8 @@ mod tests {
     #[test]
     fn test_registrable_domain_two_label_cc_tld() {
         // x.co.uk must resolve from the registrable domain x.co.uk, NOT co.uk
-        assert_eq!(
-            registrable_domain("x.co.uk"),
-            Some("x.co.uk".to_string())
-        );
-        assert_eq!(
-            registrable_domain("a.b.co.uk"),
-            Some("b.co.uk".to_string())
-        );
+        assert_eq!(registrable_domain("x.co.uk"), Some("x.co.uk".to_string()));
+        assert_eq!(registrable_domain("a.b.co.uk"), Some("b.co.uk".to_string()));
         assert_eq!(
             registrable_domain("shop.com.au"),
             Some("shop.com.au".to_string())
@@ -841,7 +848,10 @@ mod tests {
 
     #[test]
     fn test_registrable_domain_single_label_and_empty() {
-        assert_eq!(registrable_domain("example.com"), Some("example.com".to_string()));
+        assert_eq!(
+            registrable_domain("example.com"),
+            Some("example.com".to_string())
+        );
         assert_eq!(registrable_domain(""), None);
     }
 
@@ -885,11 +895,31 @@ mod tests {
     #[test]
     fn test_domains_aligned_relaxed_and_strict() {
         let from = "example.com";
-        assert!(domains_aligned(from, "example.com", DmarcAlignmentMode::Strict));
-        assert!(!domains_aligned(from, "sub.example.com", DmarcAlignmentMode::Strict));
-        assert!(domains_aligned(from, "sub.example.com", DmarcAlignmentMode::Relaxed));
-        assert!(!domains_aligned(from, "evil.com", DmarcAlignmentMode::Relaxed));
-        assert!(!domains_aligned("", "evil.com", DmarcAlignmentMode::Relaxed));
+        assert!(domains_aligned(
+            from,
+            "example.com",
+            DmarcAlignmentMode::Strict
+        ));
+        assert!(!domains_aligned(
+            from,
+            "sub.example.com",
+            DmarcAlignmentMode::Strict
+        ));
+        assert!(domains_aligned(
+            from,
+            "sub.example.com",
+            DmarcAlignmentMode::Relaxed
+        ));
+        assert!(!domains_aligned(
+            from,
+            "evil.com",
+            DmarcAlignmentMode::Relaxed
+        ));
+        assert!(!domains_aligned(
+            "",
+            "evil.com",
+            DmarcAlignmentMode::Relaxed
+        ));
     }
 
     #[test]

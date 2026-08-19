@@ -25,7 +25,11 @@ impl InferenceConfig {
     pub fn from_ai_config(config: &AiConfig) -> Self {
         Self {
             enabled: config.model_enabled,
-            endpoint: config.model_endpoint.trim().trim_end_matches('/').to_string(),
+            endpoint: config
+                .model_endpoint
+                .trim()
+                .trim_end_matches('/')
+                .to_string(),
             model: config.model_name.trim().to_string(),
             api_key: (!config.model_api_key.trim().is_empty())
                 .then(|| config.model_api_key.clone()),
@@ -120,14 +124,8 @@ impl LlmClient {
     }
 
     pub async fn plan(&self, system_prompt: &str, user_prompt: &str) -> Result<String, AiError> {
-        self.generate_for_model(
-            &self.config.model,
-            system_prompt,
-            user_prompt,
-            768,
-            0.0,
-        )
-        .await
+        self.generate_for_model(&self.config.model, system_prompt, user_prompt, 768, 0.0)
+            .await
     }
 
     /// Generate a response and invoke the supplied callback with bounded text
@@ -172,8 +170,9 @@ impl LlmClient {
         }
 
         let started = Instant::now();
-        let prompt = serde_json::to_string_pretty(&input)
-            .map_err(|error| AiError::InvalidInput(format!("cannot serialize model input: {error}")))?;
+        let prompt = serde_json::to_string_pretty(&input).map_err(|error| {
+            AiError::InvalidInput(format!("cannot serialize model input: {error}"))
+        })?;
         let text = self
             .generate_for_model(
                 model_id,
@@ -227,7 +226,10 @@ impl LlmClient {
             "stream": false,
         });
 
-        let mut request = self.http.post(self.config.chat_completions_url()).json(&payload);
+        let mut request = self
+            .http
+            .post(self.config.chat_completions_url())
+            .json(&payload);
         if let Some(api_key) = &self.config.api_key {
             request = request.bearer_auth(api_key);
         }
@@ -253,7 +255,10 @@ impl LlmClient {
         let content = json
             .pointer("/choices/0/message/content")
             .and_then(serde_json::Value::as_str)
-            .or_else(|| json.pointer("/choices/0/text").and_then(serde_json::Value::as_str))
+            .or_else(|| {
+                json.pointer("/choices/0/text")
+                    .and_then(serde_json::Value::as_str)
+            })
             .or_else(|| json.get("response").and_then(serde_json::Value::as_str))
             .ok_or_else(|| {
                 AiError::InferenceFailed(

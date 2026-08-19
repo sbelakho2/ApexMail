@@ -746,7 +746,9 @@ mod tests {
         // (a) A self-signed chain with the VMC EKU must NOT validate unless the
         // root is pinned in the trust set.
         let key = rcgen::KeyPair::generate().unwrap();
-        let cert = vmc_leaf_params("vmc.example.com").self_signed(&key).unwrap();
+        let cert = vmc_leaf_params("vmc.example.com")
+            .self_signed(&key)
+            .unwrap();
         let chain = vec![cert.der().to_vec()];
 
         assert!(
@@ -758,7 +760,9 @@ mod tests {
     #[test]
     fn test_vmc_self_signed_chain_passes_when_pinned() {
         let key = rcgen::KeyPair::generate().unwrap();
-        let cert = vmc_leaf_params("vmc.example.com").self_signed(&key).unwrap();
+        let cert = vmc_leaf_params("vmc.example.com")
+            .self_signed(&key)
+            .unwrap();
         let der = cert.der().to_vec();
 
         assert!(
@@ -788,7 +792,8 @@ mod tests {
     fn test_vmc_non_ca_issuer_fails() {
         // (c) An issuer without CA:TRUE / keyCertSign must be rejected.
         let issuer_key = rcgen::KeyPair::generate().unwrap();
-        let mut issuer_params = rcgen::CertificateParams::new(vec!["issuer.example.com".to_string()]).unwrap();
+        let mut issuer_params =
+            rcgen::CertificateParams::new(vec!["issuer.example.com".to_string()]).unwrap();
         issuer_params.is_ca = rcgen::IsCa::ExplicitNoCa;
         issuer_params.key_usages = vec![rcgen::KeyUsagePurpose::DigitalSignature];
         let issuer = issuer_params.self_signed(&issuer_key).unwrap();
@@ -856,7 +861,9 @@ mod tests {
     #[test]
     fn test_parse_pinned_ca_pems() {
         let key = rcgen::KeyPair::generate().unwrap();
-        let cert = vmc_leaf_params("pin.example.com").self_signed(&key).unwrap();
+        let cert = vmc_leaf_params("pin.example.com")
+            .self_signed(&key)
+            .unwrap();
         let pem = cert.pem();
         let parsed = parse_pinned_ca_pems(&pem);
         assert_eq!(parsed.len(), 1);

@@ -390,9 +390,9 @@ mod tests {
             error: None,
             disabled: false,
             autocomplete: None,
-        required: false,
-        name: None,
-    };
+            required: false,
+            name: None,
+        };
         let html = inp.render_html();
         let classes = extract_classes(&html);
         assert!(!classes.is_empty());
@@ -460,8 +460,7 @@ mod tests {
 
     #[test]
     fn control_plane_login_page_selectors_match_behavior_baseline() {
-        let html =
-            leptos_views::control_plane_login_page("");
+        let html = leptos_views::control_plane_login_page("");
         assert!(html.contains("id=\"login-email\""));
         assert!(html.contains("id=\"login-password\""));
         assert!(html.contains("id=\"login-mfa\""));
@@ -649,14 +648,8 @@ mod tests {
     fn all_web_pages_deterministic_parity() {
         let pages: Vec<(&str, String)> = vec![
             ("home", leptos_views::web_home_page()),
-            (
-                "login",
-                leptos_views::web_login_page(""),
-            ),
-            (
-                "signup",
-                leptos_views::web_signup_page(""),
-            ),
+            ("login", leptos_views::web_login_page("")),
+            ("signup", leptos_views::web_signup_page("")),
             ("dashboard", leptos_views::web_dashboard_page()),
             ("campaigns", leptos_views::web_campaigns_page()),
             ("campaigns_new", leptos_views::web_campaigns_new_page()),
@@ -688,10 +681,7 @@ mod tests {
     fn all_cp_pages_deterministic_parity() {
         let pages: Vec<(&str, String)> = vec![
             ("home", leptos_views::control_plane_home_page()),
-            (
-                "login",
-                leptos_views::control_plane_login_page(""),
-            ),
+            ("login", leptos_views::control_plane_login_page("")),
             ("dashboard", leptos_views::control_plane_dashboard_page()),
             ("tenants", leptos_views::control_plane_tenants_page()),
             ("operators", leptos_views::control_plane_operators_page()),
@@ -791,8 +781,7 @@ mod tests {
 
     #[test]
     fn cp_login_preserves_tailwind_classes() {
-        let html =
-            leptos_views::control_plane_login_page("");
+        let html = leptos_views::control_plane_login_page("");
         let classes = extract_classes(&html);
         let flat: Vec<&str> = classes
             .iter()

@@ -12,9 +12,9 @@ use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::net::SocketAddr;
 use std::sync::{Arc, OnceLock};
 use tokio::sync::Semaphore;
-use std::net::SocketAddr;
 use uuid::Uuid;
 
 use crate::error::ApiError;
@@ -199,10 +199,7 @@ pub async fn verify_kiwi_token(
         .await
         .unwrap_or(0);
         if attempts > 0 {
-            tracing::warn!(
-                attempts,
-                "KiwiCaptcha: verify attempt cap exceeded"
-            );
+            tracing::warn!(attempts, "KiwiCaptcha: verify attempt cap exceeded");
             return Err(ApiError::Validation(vec![
                 "CAPTCHA verification failed — please refresh and try again".into(),
             ]));
@@ -286,9 +283,12 @@ pub async fn verify_kiwi_token(
         let semaphore = ARGON2_VERIFY_SEMAPHORE
             .get_or_init(|| Arc::new(Semaphore::new(config.kiwi_argon2_max_concurrent as usize)))
             .clone();
-        Some(semaphore.acquire_owned().await.map_err(|_| {
-            ApiError::Internal("CAPTCHA verification capacity exceeded".into())
-        })?)
+        Some(
+            semaphore
+                .acquire_owned()
+                .await
+                .map_err(|_| ApiError::Internal("CAPTCHA verification capacity exceeded".into()))?,
+        )
     } else {
         None
     };
@@ -307,10 +307,16 @@ pub async fn verify_kiwi_token(
                 .invoke_async(&mut *conn)
                 .await?;
             if consumed == 1 {
-                tracing::info!(duration_ms = solution.duration_ms, counter = solution.counter, "KiwiCaptcha: VERIFIED");
+                tracing::info!(
+                    duration_ms = solution.duration_ms,
+                    counter = solution.counter,
+                    "KiwiCaptcha: VERIFIED"
+                );
                 Ok(())
             } else {
-                tracing::warn!("KiwiCaptcha: challenge already consumed or expired — replay rejected");
+                tracing::warn!(
+                    "KiwiCaptcha: challenge already consumed or expired — replay rejected"
+                );
                 Err(ApiError::Validation(vec![
                     "CAPTCHA challenge already used — please refresh and try again".into(),
                 ]))
@@ -649,12 +655,7 @@ fn register_response() -> RegisterResponse {
 fn build_action_link(base_url: &str, path: &str, _email: &str, token: &str) -> String {
     // CWE-598: Use path-based token instead of query parameters to prevent
     // sensitive token exposure in server logs, referrer headers, and browser history.
-    format!(
-        "{}{}/{}",
-        base_url.trim_end_matches('/'),
-        path,
-        token,
-    )
+    format!("{}{}/{}", base_url.trim_end_matches('/'), path, token,)
 }
 
 fn normalized_login_identifier(email: &str) -> String {
@@ -1186,10 +1187,7 @@ async fn insert_auth_audit_log(
     )
     .fetch_optional(&mut *tx)
     .await?;
-    let signature = audit_log_signature(
-        &hash,
-        previous_hash.as_deref().unwrap_or_default(),
-    )?;
+    let signature = audit_log_signature(&hash, previous_hash.as_deref().unwrap_or_default())?;
 
     sqlx::query(
         "INSERT INTO audit_logs (
@@ -1235,7 +1233,9 @@ fn audit_log_signature(hash: &str, previous_hash: &str) -> Result<String, ApiErr
                     "AUDIT_SIGNING_KEY must be configured in production".into(),
                 ));
             }
-            tracing::warn!("AUDIT_SIGNING_KEY not set — using development fallback for audit signatures");
+            tracing::warn!(
+                "AUDIT_SIGNING_KEY not set — using development fallback for audit signatures"
+            );
             "apexmail-auth-audit-fallback-key".to_string()
         }
     };
@@ -1341,9 +1341,7 @@ async fn login(
             extract_public_client_ip(&headers, addr.ip(), &state.config.trusted_proxies)
         })
         .unwrap_or_else(|| {
-            tracing::warn!(
-                "login request missing ConnectInfo; using shared rate-limit bucket"
-            );
+            tracing::warn!("login request missing ConnectInfo; using shared rate-limit bucket");
             "unknown".to_string()
         });
 
@@ -1450,10 +1448,13 @@ async fn login(
                         return Err(ApiError::Validation(vec!["MFA code is required".into()]));
                     }
                     let key = format!("apexmail:email_mfa:{}", user.id);
-                    let stored: Option<String> = deadpool_redis::redis::AsyncCommands::get(&mut *redis_conn, &key).await?;
+                    let stored: Option<String> =
+                        deadpool_redis::redis::AsyncCommands::get(&mut *redis_conn, &key).await?;
                     match stored {
                         Some(code) if code == mfa_code => {
-                            let _: () = deadpool_redis::redis::AsyncCommands::del(&mut *redis_conn, &key).await?;
+                            let _: () =
+                                deadpool_redis::redis::AsyncCommands::del(&mut *redis_conn, &key)
+                                    .await?;
                         }
                         _ => {
                             record_login_failure(&state.redis, &login_identifier).await?;
@@ -1469,7 +1470,13 @@ async fn login(
                     let code: u32 = rand::rng().random_range(100000..999999);
                     let code_str = code.to_string();
                     let key = format!("apexmail:email_mfa:{}", user.id);
-                    let _: () = deadpool_redis::redis::AsyncCommands::set_ex(&mut *redis_conn, &key, &code_str, 300).await?;
+                    let _: () = deadpool_redis::redis::AsyncCommands::set_ex(
+                        &mut *redis_conn,
+                        &key,
+                        &code_str,
+                        300,
+                    )
+                    .await?;
                     tracing::info!(user_id = %user.id, email = %user.email, code_length = code_str.len(), "Email MFA code generated");
                     drop(redis_conn);
 
@@ -2488,10 +2495,14 @@ async fn create_api_key(
         return Err(ApiError::Validation(vec!["name is required".into()]));
     }
     if body.name.len() > 100 {
-        return Err(ApiError::Validation(vec!["name must be at most 100 characters".into()]));
+        return Err(ApiError::Validation(vec![
+            "name must be at most 100 characters".into(),
+        ]));
     }
     if body.scopes.len() > 50 {
-        return Err(ApiError::Validation(vec!["at most 50 scopes are allowed".into()]));
+        return Err(ApiError::Validation(vec![
+            "at most 50 scopes are allowed".into()
+        ]));
     }
 
     // Privilege-escalation guard: a key can never carry more authority than
@@ -3078,7 +3089,10 @@ mod tests {
 
     #[test]
     fn public_signup_plan_catalog_matches_the_declared_allowlist() {
-        assert_eq!(PUBLIC_SIGNUP_PLAN_IDS, ["free", "starter", "pro", "growth", "scale"]);
+        assert_eq!(
+            PUBLIC_SIGNUP_PLAN_IDS,
+            ["free", "starter", "pro", "growth", "scale"]
+        );
     }
 
     #[test]
@@ -3371,8 +3385,16 @@ mod tests {
             issuer: None,
             kid: 1,
         };
-        let issued = kiwicaptcha::issue_challenge(&kc_config, "login", "1.2.3.4", now_unix, now_unix * 1_000_000_000, 0, None)
-            .expect("challenge issuance succeeds");
+        let issued = kiwicaptcha::issue_challenge(
+            &kc_config,
+            "login",
+            "1.2.3.4",
+            now_unix,
+            now_unix * 1_000_000_000,
+            0,
+            None,
+        )
+        .expect("challenge issuance succeeds");
 
         let record_json = serde_json::to_string(&issued.record).expect("record serializes");
         let key = format!("{KIWI_CHALLENGE_PREFIX}{}", issued.record.nonce);
@@ -3413,8 +3435,9 @@ mod tests {
 
         // The challenge key must be gone from Redis.
         let mut conn = pool.get().await.expect("redis connection available");
-        let exists: Option<String> =
-            deadpool_redis::redis::AsyncCommands::get(&mut *conn, &key).await.unwrap_or(None);
+        let exists: Option<String> = deadpool_redis::redis::AsyncCommands::get(&mut *conn, &key)
+            .await
+            .unwrap_or(None);
         assert!(
             exists.is_none(),
             "challenge key must be deleted after successful verification"

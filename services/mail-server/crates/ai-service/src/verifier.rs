@@ -51,7 +51,9 @@ impl std::fmt::Display for Violation {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::ForbiddenPrice { found, .. } => write!(f, "forbidden price ${found}"),
-            Self::PriceNotFound { plan, expected } => write!(f, "{plan} price ${expected} not found"),
+            Self::PriceNotFound { plan, expected } => {
+                write!(f, "{plan} price ${expected} not found")
+            }
             Self::WrongEmailLimit { found } => write!(f, "non-canonical email limit: {found}"),
             Self::WrongTeamLimit { found } => write!(f, "non-canonical team limit: {found}"),
             Self::ForbiddenDomain { domain } => write!(f, "forbidden domain: {domain}"),
@@ -76,11 +78,19 @@ pub struct Verdict {
 
 impl Verdict {
     pub fn pass() -> Self {
-        Self { passed: true, violations: vec![], correction_hint: None }
+        Self {
+            passed: true,
+            violations: vec![],
+            correction_hint: None,
+        }
     }
 
     pub fn fail(violations: Vec<Violation>) -> Self {
-        Self { passed: false, violations, correction_hint: None }
+        Self {
+            passed: false,
+            violations,
+            correction_hint: None,
+        }
     }
 
     pub fn with_hint(mut self, hint: impl Into<String>) -> Self {
@@ -148,7 +158,11 @@ impl ResponseVerifier {
             }
             // Also check for non-canonical email/team/domain limits that
             // look like volume numbers (multiples of 5K in the 1K–10M range).
-            if a >= 1_000 && a <= 10_000_000 && !CANONICAL_EMAIL_LIMITS.contains(&a) && a % 5000 == 0 {
+            if a >= 1_000
+                && a <= 10_000_000
+                && !CANONICAL_EMAIL_LIMITS.contains(&a)
+                && a % 5000 == 0
+            {
                 violations.push(Violation::WrongEmailLimit { found: a });
             }
         }
@@ -173,23 +187,54 @@ impl ResponseVerifier {
         let lower = text.to_lowercase();
 
         let injection_patterns = [
-            "system prompt", "system message", "previous instructions",
-            "ignore all", "forget your", "act as", "you are now",
-            "database password", "connection string", "postgresql",
-            "admin password", "root access", "sudo", "api key: am_",
-            "api key is am_", "internal service token", "redis password",
+            "system prompt",
+            "system message",
+            "previous instructions",
+            "ignore all",
+            "forget your",
+            "act as",
+            "you are now",
+            "database password",
+            "connection string",
+            "postgresql",
+            "admin password",
+            "root access",
+            "sudo",
+            "api key: am_",
+            "api key is am_",
+            "internal service token",
+            "redis password",
             // HTML/JS injection patterns in LLM output
-            "<script", "</script", "<iframe", "</iframe",
-            "javascript:", "onerror=", "onclick=", "onload=",
-            "eval(", "document.cookie", "window.location",
+            "<script",
+            "</script",
+            "<iframe",
+            "</iframe",
+            "javascript:",
+            "onerror=",
+            "onclick=",
+            "onload=",
+            "eval(",
+            "document.cookie",
+            "window.location",
             // Base64-encoded payload detection
-            "atob(", "btoa(", "from base64", "base64 decode",
-            "fromhex(", "unhexlify", "urldecode",
-            "ignore previous instructions","reveal your system prompt",
-            "print your instructions", "output your instructions",
+            "atob(",
+            "btoa(",
+            "from base64",
+            "base64 decode",
+            "fromhex(",
+            "unhexlify",
+            "urldecode",
+            "ignore previous instructions",
+            "reveal your system prompt",
+            "print your instructions",
+            "output your instructions",
             // Additional patterns from pentest
-            "---system---", "new instructions:", "system override:",
-            "[system]", "[assistant]", "developer mode",
+            "---system---",
+            "new instructions:",
+            "system override:",
+            "[system]",
+            "[assistant]",
+            "developer mode",
         ];
 
         for pattern in &injection_patterns {
@@ -201,8 +246,15 @@ impl ResponseVerifier {
         }
 
         let internal_keywords = [
-            "database", "postgres", "redis password", "kubernetes",
-            "docker", "hetzner", "contabo", "vps", "migration 0",
+            "database",
+            "postgres",
+            "redis password",
+            "kubernetes",
+            "docker",
+            "hetzner",
+            "contabo",
+            "vps",
+            "migration 0",
         ];
         for kw in &internal_keywords {
             if lower.contains(kw) && !self.is_legitimate_mention(kw, text) {
@@ -248,9 +300,15 @@ impl ResponseVerifier {
         let lower = text.to_lowercase();
         let kw_lower = keyword.to_lowercase();
         let refusal_phrases = [
-            "can't share", "cannot share", "not able to", "i'm not",
-            "i cannot", "outside my scope", "security concern",
-            "won't reveal", "do not have access",
+            "can't share",
+            "cannot share",
+            "not able to",
+            "i'm not",
+            "i cannot",
+            "outside my scope",
+            "security concern",
+            "won't reveal",
+            "do not have access",
         ];
         // All occurrences of the keyword must be in proximity to a refusal
         // phrase. Previously only the first occurrence was checked, which
@@ -375,9 +433,10 @@ impl ResponseVerifier {
         }
 
         // Email address pattern (should not echo user emails)
-static EMAIL_RE: Lazy<Regex> = Lazy::new(|| {
-        Regex::new(r###"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}"###).expect("valid static email regex")
-    });
+        static EMAIL_RE: Lazy<Regex> = Lazy::new(|| {
+            Regex::new(r###"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}"###)
+                .expect("valid static email regex")
+        });
         let emails: HashSet<&str> = EMAIL_RE.find_iter(text).map(|m| m.as_str()).collect();
         if emails.len() > 3 {
             violations.push(Violation::PiiPattern {
@@ -424,7 +483,8 @@ static EMAIL_RE: Lazy<Regex> = Lazy::new(|| {
         // Uptime SLA claims — require "uptime" or "sla" in proximity (±60 chars)
         // to avoid false-positives on delivery rates, open rates, etc.
         static SLA_RE: Lazy<Regex> = Lazy::new(|| {
-            Regex::new(r###"99\.9+\s*%|99\.99\s*%|100\s*%\s*uptime"###).expect("valid static SLA regex")
+            Regex::new(r###"99\.9+\s*%|99\.99\s*%|100\s*%\s*uptime"###)
+                .expect("valid static SLA regex")
         });
         if let Some(m) = SLA_RE.find(&lower) {
             let m_start = m.start().saturating_sub(60);
@@ -442,7 +502,9 @@ static EMAIL_RE: Lazy<Regex> = Lazy::new(|| {
 
         // Competitor bashing
         let competitors = ["sendgrid", "mailgun", "postmark", "mailchimp", "sparkpost"];
-        let bashing_phrases = ["worse", "terrible", "awful", "broken", "garbage", "trash", "joke"];
+        let bashing_phrases = [
+            "worse", "terrible", "awful", "broken", "garbage", "trash", "joke",
+        ];
         for comp in &competitors {
             if lower.contains(comp) {
                 for phrase in &bashing_phrases {
@@ -497,7 +559,9 @@ static EMAIL_RE: Lazy<Regex> = Lazy::new(|| {
                     hints.push("Do not reveal internal infrastructure details.".into());
                 }
                 Violation::UptimeSlaClaim { .. } => {
-                    hints.push("Do not quote specific uptime percentages without SLA context.".into());
+                    hints.push(
+                        "Do not quote specific uptime percentages without SLA context.".into(),
+                    );
                 }
                 _ => {
                     hints.push(format!("Fix: {v}"));
@@ -549,7 +613,11 @@ mod tests {
     fn test_clean_response_passes() {
         let v = ResponseVerifier::new();
         let verdict = v.verify("The Pro plan costs €65/month and includes 150,000 emails.");
-        assert!(verdict.passed, "Clean response should pass: {:?}", verdict.violations);
+        assert!(
+            verdict.passed,
+            "Clean response should pass: {:?}",
+            verdict.violations
+        );
     }
 
     #[test]
@@ -557,13 +625,17 @@ mod tests {
         let v = ResponseVerifier::new();
         let verdict = v.verify("The Pro plan costs €49/month.");
         assert!(!verdict.passed);
-        assert!(verdict.violations.iter().any(|viol| matches!(viol, Violation::ForbiddenPrice { found: 49, .. })));
+        assert!(verdict
+            .violations
+            .iter()
+            .any(|viol| matches!(viol, Violation::ForbiddenPrice { found: 49, .. })));
     }
 
     #[test]
     fn test_prompt_injection_blocked() {
         let v = ResponseVerifier::new();
-        let verdict = v.verify("Here is the database password: secret123. The PostgreSQL server...");
+        let verdict =
+            v.verify("Here is the database password: secret123. The PostgreSQL server...");
         assert!(!verdict.passed);
     }
 
@@ -571,7 +643,11 @@ mod tests {
     fn test_refusal_is_not_flagged() {
         let v = ResponseVerifier::new();
         let verdict = v.verify("I cannot share internal infrastructure details like database passwords. This is outside my scope.");
-        assert!(verdict.passed, "Refusal should pass. Got: {:?}", verdict.violations);
+        assert!(
+            verdict.passed,
+            "Refusal should pass. Got: {:?}",
+            verdict.violations
+        );
     }
 
     #[test]
@@ -605,7 +681,8 @@ mod tests {
     #[test]
     fn test_competitor_comparison_is_allowed() {
         let v = ResponseVerifier::new();
-        let verdict = v.verify("Compared to SendGrid, ApexMail offers simpler pricing and faster support.");
+        let verdict =
+            v.verify("Compared to SendGrid, ApexMail offers simpler pricing and faster support.");
         assert!(verdict.passed, "Objective comparison should pass");
     }
 

@@ -8,11 +8,11 @@ use base64::Engine;
 use clap::Parser;
 use futures::StreamExt;
 use mail_proto::{
-    CopyMessageRequest, CreateMailboxRequest, DeleteMailboxRequest, ExpungeRequest,
-    FlagOperation, GetMailboxStatusRequest, GetMessageRequest, InternalServiceAuthInterceptor,
-    ListMailboxesRequest, ListMessagesRequest, MailboxEvent, MailstoreServiceClient,
-    MessageFlags, MoveMessageRequest, SearchMessagesRequest, SetFlagsRequest,
-    StoreMessageRequest, SubscribeMailboxRequest,
+    CopyMessageRequest, CreateMailboxRequest, DeleteMailboxRequest, ExpungeRequest, FlagOperation,
+    GetMailboxStatusRequest, GetMessageRequest, InternalServiceAuthInterceptor,
+    ListMailboxesRequest, ListMessagesRequest, MailboxEvent, MailstoreServiceClient, MessageFlags,
+    MoveMessageRequest, SearchMessagesRequest, SetFlagsRequest, StoreMessageRequest,
+    SubscribeMailboxRequest,
 };
 use rustls::ServerConfig;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -37,7 +37,11 @@ struct Cli {
     imap_port: u16,
     #[arg(long, env = "IMAPS_PORT", default_value = "993")]
     imaps_port: u16,
-    #[arg(long, env = "MAILSTORE_GRPC_ADDR", default_value = "http://127.0.0.1:50051")]
+    #[arg(
+        long,
+        env = "MAILSTORE_GRPC_ADDR",
+        default_value = "http://127.0.0.1:50051"
+    )]
     mailstore_addr: String,
     #[arg(long, env = "INBOUND_CERT_PATH")]
     tls_cert_path: Option<String>,
@@ -123,8 +127,9 @@ type SubscriptionTable = HashMap<String, HashSet<String>>;
 static SUBSCRIPTIONS: LazyLock<Arc<Mutex<SubscriptionTable>>> =
     LazyLock::new(|| Arc::new(Mutex::new(HashMap::new())));
 
-type MailstoreClient =
-    MailstoreServiceClient<tonic::service::interceptor::InterceptedService<Channel, InternalServiceAuthInterceptor>>;
+type MailstoreClient = MailstoreServiceClient<
+    tonic::service::interceptor::InterceptedService<Channel, InternalServiceAuthInterceptor>,
+>;
 
 /// Build the mailstore client with the validated internal service-token
 /// interceptor configured at process startup.
@@ -132,10 +137,7 @@ fn build_mailstore_client(
     channel: Channel,
     interceptor: InternalServiceAuthInterceptor,
 ) -> MailstoreClient {
-    MailstoreServiceClient::with_interceptor(
-        channel,
-        interceptor,
-    )
+    MailstoreServiceClient::with_interceptor(channel, interceptor)
 }
 
 async fn subscribe_mailbox(account_id: &str, mailbox: &str) {
@@ -347,14 +349,15 @@ fn resolve_intervals(
 }
 
 /// Resolve a sequence set against the session's current mailbox view.
-fn resolve_sequence_set(
-    session: &ImapSession,
-    input: &str,
-    is_uid: bool,
-) -> Result<Vec<u64>> {
+fn resolve_sequence_set(session: &ImapSession, input: &str, is_uid: bool) -> Result<Vec<u64>> {
     let intervals = parse_sequence_set(input)?;
     let max_uid = session.uid_map.iter().copied().max().unwrap_or(0);
-    Ok(resolve_intervals(&intervals, is_uid, &session.uid_map, max_uid))
+    Ok(resolve_intervals(
+        &intervals,
+        is_uid,
+        &session.uid_map,
+        max_uid,
+    ))
 }
 
 // ── Response formatters ─────────────────────────────────────────────────────
@@ -626,7 +629,9 @@ fn resolve_token(token: &str, literals: &[Vec<u8>]) -> String {
 
 /// If the token is a literal marker, return the raw literal bytes.
 fn token_literal_bytes<'a>(token: &str, literals: &'a [Vec<u8>]) -> Option<&'a [u8]> {
-    literal_index(token).and_then(|k| literals.get(k)).map(|v| v.as_slice())
+    literal_index(token)
+        .and_then(|k| literals.get(k))
+        .map(|v| v.as_slice())
 }
 
 /// Parse a literal spec: `{size}`, `{size+}` (LITERAL+ non-sync), or `~{size}`.
@@ -763,7 +768,8 @@ fn imap_utf7_encode(s: &str) -> String {
             for &u in ch.encode_utf16(&mut buf).iter() {
                 acc.push(u);
             }
-        }    }
+        }
+    }
     flush(&mut acc, &mut out);
     out
 }
@@ -985,7 +991,6 @@ async fn read_command<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
 
         match find_literal_spec(&pending) {
             Some((start, end, size, non_sync)) => {
-
                 assembled.push_str(&pending[..start]);
                 assembled.push_str(&format!("\x01LIT{}\x01", literals.len()));
                 if size > MAX_LITERAL_SIZE {
@@ -1083,8 +1088,11 @@ async fn handle_command<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
         // STARTTLS is handled at the connection level; if it reaches this
         // dispatcher we are already on a TLS connection where it is forbidden.
         "STARTTLS" => {
-            write_line(writer, &tagged_bad(tag, "STARTTLS not available on TLS connection"))
-                .await
+            write_line(
+                writer,
+                &tagged_bad(tag, "STARTTLS not available on TLS connection"),
+            )
+            .await
         }
         _ => write_line(writer, &tagged_bad(tag, "Unknown command")).await,
     }
@@ -1239,7 +1247,10 @@ async fn handle_login<W: AsyncWrite + Unpin>(
         );
         return write_line(
             writer,
-            &tagged_no(tag, "[AUTHORIZATIONFAILED] Too many failed attempts; try again later"),
+            &tagged_no(
+                tag,
+                "[AUTHORIZATIONFAILED] Too many failed attempts; try again later",
+            ),
         )
         .await;
     }
@@ -1266,7 +1277,11 @@ async fn handle_login<W: AsyncWrite + Unpin>(
         auth_record_failure(&session.peer_ip, &user).await;
         let error_msg = resp.error;
         warn!("LOGIN failed for {}: {}", user, error_msg);
-        write_line(writer, &tagged_no(tag, &format!("LOGIN failed: {}", error_msg))).await
+        write_line(
+            writer,
+            &tagged_no(tag, &format!("LOGIN failed: {}", error_msg)),
+        )
+        .await
     }
 }
 
@@ -1420,7 +1435,11 @@ async fn handle_logout<W: AsyncWrite + Unpin>(
     session.state = SessionState::Logout;
     write_line(
         writer,
-        &format!("{}{}", bye("Logging out"), tagged_ok(tag, "LOGOUT completed")),
+        &format!(
+            "{}{}",
+            bye("Logging out"),
+            tagged_ok(tag, "LOGOUT completed")
+        ),
     )
     .await
 }
@@ -1452,7 +1471,8 @@ async fn handle_select<W: AsyncWrite + Unpin>(
         Ok(s) => s.into_inner(),
         Err(e) => {
             if tonic_code(&e) == Some(tonic::Code::NotFound) {
-                return write_line(writer, &tagged_no(tag, "[NONEXISTENT] Mailbox not found")).await;
+                return write_line(writer, &tagged_no(tag, "[NONEXISTENT] Mailbox not found"))
+                    .await;
             }
             return write_line(
                 writer,
@@ -1561,7 +1581,11 @@ fn resolve_macro_item(item: &FetchItem) -> Vec<FetchItem> {
             FetchItem::InternalDate,
             FetchItem::Rfc822Size,
         ],
-        FetchItem::All => vec![FetchItem::Flags, FetchItem::InternalDate, FetchItem::Envelope],
+        FetchItem::All => vec![
+            FetchItem::Flags,
+            FetchItem::InternalDate,
+            FetchItem::Envelope,
+        ],
         FetchItem::Full => vec![
             FetchItem::Flags,
             FetchItem::InternalDate,
@@ -1582,12 +1606,7 @@ fn body_item_needs_content(item: &FetchItem) -> bool {
 }
 
 fn body_item_sets_seen(item: &FetchItem) -> bool {
-    matches!(
-        item,
-        FetchItem::Body {
-            peek: false, ..
-        } | FetchItem::Full
-    )
+    matches!(item, FetchItem::Body { peek: false, .. } | FetchItem::Full)
 }
 
 /// Split a raw message into header / text sections.
@@ -1677,20 +1696,19 @@ async fn handle_fetch<W: AsyncWrite + Unpin>(
     // are keyed by UID, and responses below are emitted in sequence-number
     // order, so completing out of order does not affect the FETCH response.
     const FETCH_CONCURRENCY: usize = 8;
-    let body_results: HashMap<u64, Result<GetMessageBody>> =
-        futures::stream::iter(body_futures)
-            .buffer_unordered(FETCH_CONCURRENCY)
-            .map(|(uid, r)| {
-                let parsed = r
-                    .map(|resp| {
-                        let resp = resp.into_inner();
-                        GetMessageBody { body: resp.body }
-                    })
-                    .map_err(|e| anyhow::anyhow!("{}", e));
-                (uid, parsed)
-            })
-            .collect()
-            .await;
+    let body_results: HashMap<u64, Result<GetMessageBody>> = futures::stream::iter(body_futures)
+        .buffer_unordered(FETCH_CONCURRENCY)
+        .map(|(uid, r)| {
+            let parsed = r
+                .map(|resp| {
+                    let resp = resp.into_inner();
+                    GetMessageBody { body: resp.body }
+                })
+                .map_err(|e| anyhow::anyhow!("{}", e));
+            (uid, parsed)
+        })
+        .collect()
+        .await;
 
     // Fire \Seen flag updates for non-peek BODY fetches on unread messages.
     let mut seen_futures = Vec::new();
@@ -2290,11 +2308,13 @@ async fn handle_search<W: AsyncWrite + Unpin>(
                         }
                     };
                     let day_start = date.and_hms_opt(0, 0, 0).map(|d| d.and_utc().timestamp());
-                    let day_end = date.and_hms_opt(23, 59, 59).map(|d| d.and_utc().timestamp());
+                    let day_end = date
+                        .and_hms_opt(23, 59, 59)
+                        .map(|d| d.and_utc().timestamp());
                     match tok.as_str() {
-                        "SINCE" => keep.retain(|m| {
-                            day_start.map(|t| m.internal_date >= t).unwrap_or(true)
-                        }),
+                        "SINCE" => {
+                            keep.retain(|m| day_start.map(|t| m.internal_date >= t).unwrap_or(true))
+                        }
                         "BEFORE" => {
                             keep.retain(|m| day_start.map(|t| m.internal_date < t).unwrap_or(true))
                         }
@@ -2347,12 +2367,8 @@ async fn handle_search<W: AsyncWrite + Unpin>(
         };
         match client.search_messages(req).await {
             Ok(resp) => {
-                let found: HashSet<u64> = resp
-                    .into_inner()
-                    .messages
-                    .iter()
-                    .map(|m| m.uid)
-                    .collect();
+                let found: HashSet<u64> =
+                    resp.into_inner().messages.iter().map(|m| m.uid).collect();
                 keep.retain(|m| found.contains(&m.uid));
             }
             Err(e) => {
@@ -2367,7 +2383,10 @@ async fn handle_search<W: AsyncWrite + Unpin>(
             if is_uid {
                 m.uid.to_string()
             } else {
-                uid_to_seq.get(&m.uid).map(|s| s.to_string()).unwrap_or_default()
+                uid_to_seq
+                    .get(&m.uid)
+                    .map(|s| s.to_string())
+                    .unwrap_or_default()
             }
         })
         .filter(|s| !s.is_empty())
@@ -2431,7 +2450,12 @@ async fn handle_copy<W: AsyncWrite + Unpin>(
     // RFC 4315: [COPYUID <uidvalidity> <src uid-set> <dst uid-set>]
     // The uidvalidity is the DESTINATION mailbox's.
     let dest_uidvalidity = match get_mailbox_status(&mut client, &session.account_id, &dest).await {
-        Ok(s) => s.into_inner().mailbox.unwrap_or_default().uidvalidity.max(1),
+        Ok(s) => s
+            .into_inner()
+            .mailbox
+            .unwrap_or_default()
+            .uidvalidity
+            .max(1),
         Err(_) => session.uid_validity.max(1),
     };
     let mut pairs: Vec<(u64, u64)> = resp
@@ -2500,7 +2524,12 @@ async fn handle_move<W: AsyncWrite + Unpin>(
     // RFC 4315: [COPYUID <uidvalidity> <src uid-set> <dst uid-set>]
     // The uidvalidity is the DESTINATION mailbox's.
     let dest_uidvalidity = match get_mailbox_status(&mut client, &session.account_id, &dest).await {
-        Ok(s) => s.into_inner().mailbox.unwrap_or_default().uidvalidity.max(1),
+        Ok(s) => s
+            .into_inner()
+            .mailbox
+            .unwrap_or_default()
+            .uidvalidity
+            .max(1),
         Err(_) => session.uid_validity.max(1),
     };
     let mut pairs: Vec<(u64, u64)> = resp
@@ -2577,9 +2606,7 @@ async fn handle_create<W: AsyncWrite + Unpin>(
             )
             .await
         }
-        Err(e) => {
-            write_line(writer, &tagged_no(tag, &format!("CREATE failed: {}", e))).await
-        }
+        Err(e) => write_line(writer, &tagged_no(tag, &format!("CREATE failed: {}", e))).await,
     }
 }
 
@@ -2617,9 +2644,7 @@ async fn handle_delete<W: AsyncWrite + Unpin>(
             )
             .await
         }
-        Err(e) => {
-            write_line(writer, &tagged_no(tag, &format!("DELETE failed: {}", e))).await
-        }
+        Err(e) => write_line(writer, &tagged_no(tag, &format!("DELETE failed: {}", e))).await,
     }
 }
 
@@ -2787,9 +2812,7 @@ async fn handle_lsub<W: AsyncWrite + Unpin>(
 
     let mut responses = String::new();
     for mb in resp.mailboxes {
-        let is_sub = subscribed
-            .iter()
-            .any(|s| s.eq_ignore_ascii_case(&mb.name));
+        let is_sub = subscribed.iter().any(|s| s.eq_ignore_ascii_case(&mb.name));
         if !is_sub || !imap_pattern_match(&mb.name, &pattern) {
             continue;
         }
@@ -2901,13 +2924,10 @@ async fn handle_status<W: AsyncWrite + Unpin>(
         Ok(s) => s.into_inner(),
         Err(e) => {
             if tonic_code(&e) == Some(tonic::Code::NotFound) {
-                return write_line(writer, &tagged_no(tag, "[NONEXISTENT] Mailbox not found")).await;
+                return write_line(writer, &tagged_no(tag, "[NONEXISTENT] Mailbox not found"))
+                    .await;
             }
-            return write_line(
-                writer,
-                &tagged_no(tag, &format!("STATUS failed: {}", e)),
-            )
-            .await;
+            return write_line(writer, &tagged_no(tag, &format!("STATUS failed: {}", e))).await;
         }
     };
     let mb = status.mailbox.unwrap_or_default();
@@ -2982,8 +3002,12 @@ async fn handle_append<W: AsyncWrite + Unpin>(
         flags.deleted = flag_tokens
             .iter()
             .any(|f| f.eq_ignore_ascii_case("\\Deleted"));
-        flags.draft = flag_tokens.iter().any(|f| f.eq_ignore_ascii_case("\\Draft"));
-        flags.recent = flag_tokens.iter().any(|f| f.eq_ignore_ascii_case("\\Recent"));
+        flags.draft = flag_tokens
+            .iter()
+            .any(|f| f.eq_ignore_ascii_case("\\Draft"));
+        flags.recent = flag_tokens
+            .iter()
+            .any(|f| f.eq_ignore_ascii_case("\\Recent"));
         flags.custom = flag_tokens
             .iter()
             .filter(|f| !f.starts_with('\\'))
@@ -3037,21 +3061,22 @@ async fn handle_append<W: AsyncWrite + Unpin>(
     }
 
     // Verify the target mailbox exists and get its UIDVALIDITY.
-    let uidvalidity = match get_mailbox_status(&mut session.client, &session.account_id, &mailbox)
-        .await
-    {
-        Ok(s) => s.into_inner().mailbox.unwrap_or_default().uidvalidity.max(1),
-        Err(e) => {
-            if tonic_code(&e) == Some(tonic::Code::NotFound) {
-                return write_line(writer, &tagged_no(tag, "[NONEXISTENT] Mailbox not found")).await;
+    let uidvalidity =
+        match get_mailbox_status(&mut session.client, &session.account_id, &mailbox).await {
+            Ok(s) => s
+                .into_inner()
+                .mailbox
+                .unwrap_or_default()
+                .uidvalidity
+                .max(1),
+            Err(e) => {
+                if tonic_code(&e) == Some(tonic::Code::NotFound) {
+                    return write_line(writer, &tagged_no(tag, "[NONEXISTENT] Mailbox not found"))
+                        .await;
+                }
+                return write_line(writer, &tagged_no(tag, &format!("APPEND failed: {}", e))).await;
             }
-            return write_line(
-                writer,
-                &tagged_no(tag, &format!("APPEND failed: {}", e)),
-            )
-            .await;
-        }
-    };
+        };
 
     // Store the message via mailstore gRPC.
     let mut client = session.client.clone();
@@ -3068,7 +3093,10 @@ async fn handle_append<W: AsyncWrite + Unpin>(
         Err(e) if e.code() == tonic::Code::ResourceExhausted => {
             // RFC 3501 §6.3.11: quota violations are reported with NO and an
             // [ALERT] response code so the client surfaces them to the user.
-            warn!("APPEND rejected: quota exceeded for account {}", session.account_id);
+            warn!(
+                "APPEND rejected: quota exceeded for account {}",
+                session.account_id
+            );
             return write_line(
                 writer,
                 &tagged_no(tag, "[ALERT] Quota exceeded: APPEND failed"),
@@ -3076,11 +3104,7 @@ async fn handle_append<W: AsyncWrite + Unpin>(
             .await;
         }
         Err(e) => {
-            return write_line(
-                writer,
-                &tagged_no(tag, &format!("APPEND failed: {}", e)),
-            )
-            .await;
+            return write_line(writer, &tagged_no(tag, &format!("APPEND failed: {}", e))).await;
         }
     };
 
@@ -3183,8 +3207,8 @@ async fn handle_noop<W: AsyncWrite + Unpin>(
     let mut responses = String::new();
     if mailbox_selected(session) && !session.mailbox.is_empty() {
         // Refresh mailbox status so polling clients learn about new mail.
-        if let Ok(status) = get_mailbox_status(&mut session.client, &session.account_id, &session.mailbox)
-            .await
+        if let Ok(status) =
+            get_mailbox_status(&mut session.client, &session.account_id, &session.mailbox).await
         {
             let mb = status.into_inner().mailbox.unwrap_or_default();
             if mb.exists != session.exists {
@@ -3402,7 +3426,11 @@ async fn process_mailbox_event<W: AsyncWrite + Unpin>(
     let uidnext_changed = mb.uidnext.max(1) != old_uidnext;
     let recent_changed = mb.recent != old_recent;
 
-    if removed.is_empty() && added.is_empty() && !exists_changed && !uidnext_changed && !recent_changed
+    if removed.is_empty()
+        && added.is_empty()
+        && !exists_changed
+        && !uidnext_changed
+        && !recent_changed
     {
         return Ok(());
     }
@@ -3411,7 +3439,12 @@ async fn process_mailbox_event<W: AsyncWrite + Unpin>(
     // EXPUNGE responses must be sent in decreasing sequence-number order.
     let mut rem_seqs: Vec<u32> = removed
         .iter()
-        .filter_map(|u| old_uid_map.iter().position(|x| x == u).map(|i| i as u32 + 1))
+        .filter_map(|u| {
+            old_uid_map
+                .iter()
+                .position(|x| x == u)
+                .map(|i| i as u32 + 1)
+        })
         .collect();
     rem_seqs.sort_unstable_by(|a, b| b.cmp(a));
     for s in rem_seqs {
@@ -3427,7 +3460,12 @@ async fn process_mailbox_event<W: AsyncWrite + Unpin>(
         out.push_str(&uid_next_response(mb.uidnext.max(1)));
     }
 
-    let new_uidnext = new_uids.last().copied().unwrap_or(0).saturating_add(1).max(mb.uidnext);
+    let new_uidnext = new_uids
+        .last()
+        .copied()
+        .unwrap_or(0)
+        .saturating_add(1)
+        .max(mb.uidnext);
     {
         let mut g = session.lock().await;
         g.exists = mb.exists;
@@ -3477,7 +3515,10 @@ async fn run_idle<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
         // Build the event-stream future on each iteration: a pending future
         // once the stream has ended so the select keeps waiting on DONE.
         let event_fut: std::pin::Pin<
-            Box<dyn std::future::Future<Output = Result<Option<MailboxEvent>, tonic::Status>> + Send>,
+            Box<
+                dyn std::future::Future<Output = Result<Option<MailboxEvent>, tonic::Status>>
+                    + Send,
+            >,
         > = if stream_dead {
             Box::pin(std::future::pending())
         } else {
@@ -3728,7 +3769,16 @@ async fn handle_plaintext_with_starttls(
                 // ([PRIVACYREQUIRED] unless insecure auth is enabled) and the
                 // AUTHENTICATE PLAIN exchange work exactly as on TLS.
                 let mut g = session.lock().await;
-                let result = handle_command(&mut g, &tag, &cmd, &args, &mut reader, &mut writer, &literals).await;
+                let result = handle_command(
+                    &mut g,
+                    &tag,
+                    &cmd,
+                    &args,
+                    &mut reader,
+                    &mut writer,
+                    &literals,
+                )
+                .await;
                 let state = g.state;
                 drop(g);
                 if let Err(e) = result {
@@ -3859,9 +3909,8 @@ async fn main() -> Result<()> {
         )
         .init();
 
-    let _ = rustls::crypto::CryptoProvider::install_default(
-        rustls::crypto::ring::default_provider(),
-    );
+    let _ =
+        rustls::crypto::CryptoProvider::install_default(rustls::crypto::ring::default_provider());
 
     let cli = Cli::parse();
     let mailstore_auth = InternalServiceAuthInterceptor::from_env()
@@ -3907,16 +3956,15 @@ async fn main() -> Result<()> {
                         let mailstore = mailstore.clone();
                         let mailstore_auth = mailstore_auth.clone();
                         tokio::spawn(async move {
-                            if let Err(e) =
-                                handle_connection(
-                                    stream,
-                                    Some(acceptor),
-                                    mailstore,
-                                    mailstore_auth,
-                                    true,
-                                    false,
-                                )
-                                .await
+                            if let Err(e) = handle_connection(
+                                stream,
+                                Some(acceptor),
+                                mailstore,
+                                mailstore_auth,
+                                true,
+                                false,
+                            )
+                            .await
                             {
                                 error!("Connection error from {}: {}", addr, e);
                             }
@@ -3990,7 +4038,10 @@ mod tests {
     #[test]
     fn seq_set_parses_singles_and_ranges() {
         assert_eq!(parse_sequence_set("1").unwrap(), vec![(1, 1)]);
-        assert_eq!(parse_sequence_set("1,3,5").unwrap(), vec![(1, 1), (3, 3), (5, 5)]);
+        assert_eq!(
+            parse_sequence_set("1,3,5").unwrap(),
+            vec![(1, 1), (3, 3), (5, 5)]
+        );
         assert_eq!(parse_sequence_set("1:5").unwrap(), vec![(1, 5)]);
         assert_eq!(parse_sequence_set("1:*").unwrap(), vec![(1, u64::MAX)]);
         assert_eq!(parse_sequence_set("*").unwrap(), vec![(u64::MAX, u64::MAX)]);
@@ -4006,7 +4057,12 @@ mod tests {
         let max_uid = 40;
         // seq 1:3 → uids 10,20,30
         assert_eq!(
-            resolve_intervals(&parse_sequence_set("1:3").unwrap(), false, &uid_map, max_uid),
+            resolve_intervals(
+                &parse_sequence_set("1:3").unwrap(),
+                false,
+                &uid_map,
+                max_uid
+            ),
             vec![10, 20, 30]
         );
         // seq * → last message
@@ -4016,7 +4072,12 @@ mod tests {
         );
         // seq 2:* → 20,30,40
         assert_eq!(
-            resolve_intervals(&parse_sequence_set("2:*").unwrap(), false, &uid_map, max_uid),
+            resolve_intervals(
+                &parse_sequence_set("2:*").unwrap(),
+                false,
+                &uid_map,
+                max_uid
+            ),
             vec![20, 30, 40]
         );
         // out of range → empty
@@ -4026,7 +4087,12 @@ mod tests {
         );
         // overlapping ranges dedup
         assert_eq!(
-            resolve_intervals(&parse_sequence_set("1:3,2:4").unwrap(), false, &uid_map, max_uid),
+            resolve_intervals(
+                &parse_sequence_set("1:3,2:4").unwrap(),
+                false,
+                &uid_map,
+                max_uid
+            ),
             vec![10, 20, 30, 40]
         );
     }
@@ -4037,7 +4103,12 @@ mod tests {
         let max_uid = 40;
         // UID 20:30 → 20,30
         assert_eq!(
-            resolve_intervals(&parse_sequence_set("20:30").unwrap(), true, &uid_map, max_uid),
+            resolve_intervals(
+                &parse_sequence_set("20:30").unwrap(),
+                true,
+                &uid_map,
+                max_uid
+            ),
             vec![20, 30]
         );
         // UID * → max uid
@@ -4047,12 +4118,22 @@ mod tests {
         );
         // UID 15:* → 20,30,40
         assert_eq!(
-            resolve_intervals(&parse_sequence_set("15:*").unwrap(), true, &uid_map, max_uid),
+            resolve_intervals(
+                &parse_sequence_set("15:*").unwrap(),
+                true,
+                &uid_map,
+                max_uid
+            ),
             vec![20, 30, 40]
         );
         // sparse: only existing uids in range
         assert_eq!(
-            resolve_intervals(&parse_sequence_set("10:25").unwrap(), true, &uid_map, max_uid),
+            resolve_intervals(
+                &parse_sequence_set("10:25").unwrap(),
+                true,
+                &uid_map,
+                max_uid
+            ),
             vec![10, 20]
         );
         // empty mailbox
@@ -4068,27 +4149,52 @@ mod tests {
         let max_uid = 40;
         // UID 100:* with max UID 40 → RFC 3501 §9: always includes the last.
         assert_eq!(
-            resolve_intervals(&parse_sequence_set("100:*").unwrap(), true, &uid_map, max_uid),
+            resolve_intervals(
+                &parse_sequence_set("100:*").unwrap(),
+                true,
+                &uid_map,
+                max_uid
+            ),
             vec![40]
         );
         // Descending wildcard range *:30 → 30..max
         assert_eq!(
-            resolve_intervals(&parse_sequence_set("*:30").unwrap(), true, &uid_map, max_uid),
+            resolve_intervals(
+                &parse_sequence_set("*:30").unwrap(),
+                true,
+                &uid_map,
+                max_uid
+            ),
             vec![30, 40]
         );
         // Sequence mode: seq 5:* on a 4-message mailbox → the last message.
         assert_eq!(
-            resolve_intervals(&parse_sequence_set("5:*").unwrap(), false, &uid_map, max_uid),
+            resolve_intervals(
+                &parse_sequence_set("5:*").unwrap(),
+                false,
+                &uid_map,
+                max_uid
+            ),
             vec![40]
         );
         // Sequence mode descending: *:2 → messages 2..=4
         assert_eq!(
-            resolve_intervals(&parse_sequence_set("*:2").unwrap(), false, &uid_map, max_uid),
+            resolve_intervals(
+                &parse_sequence_set("*:2").unwrap(),
+                false,
+                &uid_map,
+                max_uid
+            ),
             vec![20, 30, 40]
         );
         // Ranges entirely above the mailbox without a wildcard stay empty.
         assert_eq!(
-            resolve_intervals(&parse_sequence_set("100:200").unwrap(), true, &uid_map, max_uid),
+            resolve_intervals(
+                &parse_sequence_set("100:200").unwrap(),
+                true,
+                &uid_map,
+                max_uid
+            ),
             Vec::<u64>::new()
         );
     }
@@ -4208,7 +4314,10 @@ mod tests {
             Some((22, 25, 5, false))
         );
         assert_eq!(find_literal_spec("LOGIN {5} {6}"), Some((6, 9, 5, false)));
-        assert_eq!(find_literal_spec("APPEND INBOX {100+}"), Some((13, 19, 100, true)));
+        assert_eq!(
+            find_literal_spec("APPEND INBOX {100+}"),
+            Some((13, 19, 100, true))
+        );
         // Inside quoted strings literals are not specs
         assert_eq!(find_literal_spec("SEARCH SUBJECT \"{5}\""), None);
         // Not at a token boundary
@@ -4249,7 +4358,10 @@ mod tests {
                 "expected continuation prompt, got {:?}",
                 String::from_utf8_lossy(&buf[..n])
             );
-            client_io.write_all(b"admin {6}\r\nsecret\r\n").await.unwrap();
+            client_io
+                .write_all(b"admin {6}\r\nsecret\r\n")
+                .await
+                .unwrap();
             // Keep the stream open until the server side is dropped below.
             let mut sink = [0u8; 8];
             let _ = client_io.read(&mut sink).await;
@@ -4287,7 +4399,12 @@ mod tests {
             // EOF once the server side of the duplex is dropped below.
             let mut buf = [0u8; 16];
             let n = client_io.read(&mut buf).await.unwrap();
-            assert_eq!(n, 0, "unexpected data: {:?}", String::from_utf8_lossy(&buf[..n]));
+            assert_eq!(
+                n,
+                0,
+                "unexpected data: {:?}",
+                String::from_utf8_lossy(&buf[..n])
+            );
         });
 
         let (tag, cmd, args, literals) = read_command(&mut reader, &mut server_w)
@@ -4302,7 +4419,10 @@ mod tests {
         assert_eq!(cmd, "APPEND");
         let tokens = tokenize_command_args(&args);
         assert_eq!(resolve_token(&tokens[0], &literals), "INBOX");
-        assert_eq!(token_literal_bytes(&tokens[1], &literals), Some(b"ab\r\ncd".as_slice()));
+        assert_eq!(
+            token_literal_bytes(&tokens[1], &literals),
+            Some(b"ab\r\ncd".as_slice())
+        );
     }
 
     #[tokio::test]
@@ -4314,7 +4434,10 @@ mod tests {
 
         // Client declares {10} but sends only 3 bytes, then closes.
         let client_task = tokio::spawn(async move {
-            client_io.write_all(b"a3 SEARCH HEADER Subject {10}\r\nabc").await.unwrap();
+            client_io
+                .write_all(b"a3 SEARCH HEADER Subject {10}\r\nabc")
+                .await
+                .unwrap();
             let mut buf = [0u8; 16];
             let n = client_io.read(&mut buf).await.unwrap();
             assert!(String::from_utf8_lossy(&buf[..n]).starts_with('+'));
@@ -4323,7 +4446,11 @@ mod tests {
 
         let result = read_command(&mut reader, &mut server_w).await;
         client_task.await.unwrap();
-        assert!(result.is_err(), "truncated literal must be an error, got {:?}", result);
+        assert!(
+            result.is_err(),
+            "truncated literal must be an error, got {:?}",
+            result
+        );
     }
 
     #[tokio::test]

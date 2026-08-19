@@ -445,7 +445,8 @@ fn default_metrics_port() -> u16 {
 fn default_health_port() -> u16 {
     8081
 }
-fn default_shutdown_timeout() -> u64 {    30
+fn default_shutdown_timeout() -> u64 {
+    30
 }
 fn default_mailstore_addr() -> String {
     "http://mailstore:50051".into()
@@ -554,9 +555,16 @@ impl MtaConfig {
                 enabled: parse_bool_env("SUBMISSION_ENABLED", true),
                 host: std::env::var("SUBMISSION_HOST").unwrap_or_else(|_| default_host()),
                 port: parse_u16_env("SUBMISSION_PORT", default_submission_port()),
-                hostname: std::env::var("SUBMISSION_HOSTNAME").unwrap_or_else(|_| default_hostname()),
-                max_message_size: parse_usize_env("SUBMISSION_MAX_MESSAGE_SIZE", default_max_message_size()),
-                max_recipients: parse_usize_env("SUBMISSION_MAX_RECIPIENTS", default_max_recipients()),
+                hostname: std::env::var("SUBMISSION_HOSTNAME")
+                    .unwrap_or_else(|_| default_hostname()),
+                max_message_size: parse_usize_env(
+                    "SUBMISSION_MAX_MESSAGE_SIZE",
+                    default_max_message_size(),
+                ),
+                max_recipients: parse_usize_env(
+                    "SUBMISSION_MAX_RECIPIENTS",
+                    default_max_recipients(),
+                ),
                 auth_required: parse_bool_env("SUBMISSION_AUTH_REQUIRED", true),
             },
             dkim: DkimConfig {

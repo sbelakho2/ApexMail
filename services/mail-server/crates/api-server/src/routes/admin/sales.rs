@@ -303,11 +303,12 @@ async fn list_leads(
     .fetch_all(&state.db)
     .await?;
 
-    let status_stats: Vec<(String, String)> =
-        sqlx::query_as("SELECT status, COUNT(*)::text FROM sales_leads WHERE tenant_id = $1 GROUP BY status")
-            .bind(&auth.tenant_id)
-            .fetch_all(&state.db)
-            .await?;
+    let status_stats: Vec<(String, String)> = sqlx::query_as(
+        "SELECT status, COUNT(*)::text FROM sales_leads WHERE tenant_id = $1 GROUP BY status",
+    )
+    .bind(&auth.tenant_id)
+    .fetch_all(&state.db)
+    .await?;
 
     let stats_by_source: serde_json::Value = source_stats
         .into_iter()
@@ -842,12 +843,7 @@ async fn run_discovery(
     // CP admins see every enriched company regardless of which tenant it was
     // enriched for; imported leads are attributed to the system tenant so
     // they show up in the tenant-scoped leads list.
-    let rows: Vec<(
-        String,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-    )> = sqlx::query_as(
+    let rows: Vec<(String, Option<String>, Option<String>, Option<String>)> = sqlx::query_as(
         "SELECT domain, company_name, industry, description
          FROM enriched_companies
          ORDER BY last_enriched_at DESC
@@ -1013,12 +1009,13 @@ async fn start_outreach(
     ensure_campaign_tables(&state.db).await?;
 
     // API-103: Scope outreach query by tenant_id to prevent cross-tenant access.
-    let lead_rows: Vec<(String, Option<String>)> =
-        sqlx::query_as("SELECT id, contact_email FROM sales_leads WHERE id = ANY($1) AND tenant_id = $2")
-            .bind(&body.lead_ids)
-            .bind(&auth.tenant_id)
-            .fetch_all(&state.db)
-            .await?;
+    let lead_rows: Vec<(String, Option<String>)> = sqlx::query_as(
+        "SELECT id, contact_email FROM sales_leads WHERE id = ANY($1) AND tenant_id = $2",
+    )
+    .bind(&body.lead_ids)
+    .bind(&auth.tenant_id)
+    .fetch_all(&state.db)
+    .await?;
 
     let mut valid_recipients = Vec::new();
     let mut skipped = Vec::new();
@@ -1087,14 +1084,14 @@ async fn start_outreach(
     // Build a single query with multiple value tuples for better performance.
     if !valid_recipients.is_empty() {
         let mut query_builder = sqlx::QueryBuilder::new(
-            "INSERT INTO campaign_recipients (campaign_id, lead_id, email, status, created_at) "
+            "INSERT INTO campaign_recipients (campaign_id, lead_id, email, status, created_at) ",
         );
         query_builder.push_values(&valid_recipients, |mut b, (lead_id, email)| {
             b.push_bind(&campaign_id)
-             .push_bind(lead_id)
-             .push_bind(email)
-             .push_bind("queued")
-             .push_bind(chrono::Utc::now());
+                .push_bind(lead_id)
+                .push_bind(email)
+                .push_bind("queued")
+                .push_bind(chrono::Utc::now());
         });
         query_builder.build().execute(&state.db).await?;
     }

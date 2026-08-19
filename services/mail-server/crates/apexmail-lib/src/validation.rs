@@ -23,15 +23,13 @@ use std::sync::LazyLock;
 
 /// RFC 5322 local-part (standard characters): printable ASCII except
 /// specials: `(` `)` `<` `>` `[` `]` `\` `"` `;` `:` `,` `@` and whitespace.
-static STANDARD_LOCAL_RE: LazyLock<Option<Regex>> = LazyLock::new(|| {
-    Regex::new(r"^[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+$").ok()
-});
+static STANDARD_LOCAL_RE: LazyLock<Option<Regex>> =
+    LazyLock::new(|| Regex::new(r"^[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+$").ok());
 
 /// Quoted-string local-part: anything inside double quotes (RFC 5322 §3.2.4).
 /// Allows escaped characters (`\x`) and all printable ASCII inside the quotes.
-static QUOTED_LOCAL_RE: LazyLock<Option<Regex>> = LazyLock::new(|| {
-    Regex::new(r#"^"[^"]*(?:\\.[^"]*)*"$"#).ok()
-});
+static QUOTED_LOCAL_RE: LazyLock<Option<Regex>> =
+    LazyLock::new(|| Regex::new(r#"^"[^"]*(?:\\.[^"]*)*"$"#).ok());
 
 /// Domain part: standard RFC 5322 domain name or domain literal.
 /// - Domain names: letters, digits, hyphens, at least one dot, TLD ≥ 2 chars.
@@ -44,15 +42,12 @@ static DOMAIN_RE: LazyLock<Option<Regex>> = LazyLock::new(|| {
 
 /// Internationalised domain: allows non-ASCII UTF-8 characters (RFC 6531).
 static IDN_DOMAIN_RE: LazyLock<Option<Regex>> = LazyLock::new(|| {
-    Regex::new(
-        r"^(?:[^\x00-\x1F\x7F-\x9F@\s]+\.)+[^\x00-\x1F\x7F-\x9F@\s]{2,}$"
-    ).ok()
+    Regex::new(r"^(?:[^\x00-\x1F\x7F-\x9F@\s]+\.)+[^\x00-\x1F\x7F-\x9F@\s]{2,}$").ok()
 });
 
 /// Domain literal: `[` ... `]` containing IPv4, IPv6, or other text.
-static DOMAIN_LITERAL_RE: LazyLock<Option<Regex>> = LazyLock::new(|| {
-    Regex::new(r"^\[[^\]]+\]$").ok()
-});
+static DOMAIN_LITERAL_RE: LazyLock<Option<Regex>> =
+    LazyLock::new(|| Regex::new(r"^\[[^\]]+\]$").ok());
 
 // #216: UUID regex must be case-insensitive to accept uppercase hex
 static UUID_RE: LazyLock<Option<Regex>> = LazyLock::new(|| {
@@ -139,7 +134,10 @@ fn is_valid_local_part(local: &str) -> bool {
         if local.chars().any(|ch| {
             ch.is_control()
                 || ch.is_whitespace()
-                || matches!(ch, '(' | ')' | '<' | '>' | '[' | ']' | '\\' | '"' | ';' | ':' | ',' | '@')
+                || matches!(
+                    ch,
+                    '(' | ')' | '<' | '>' | '[' | ']' | '\\' | '"' | ';' | ':' | ',' | '@'
+                )
         }) {
             return false;
         }
@@ -224,7 +222,9 @@ mod tests {
         assert!(is_valid_email("a@b.cc"));
         assert!(is_valid_email("simple@example.com"));
         assert!(is_valid_email("very.common@example.com"));
-        assert!(is_valid_email("disposable.style.email.with+symbol@example.com"));
+        assert!(is_valid_email(
+            "disposable.style.email.with+symbol@example.com"
+        ));
         assert!(is_valid_email("other.email-with-hyphen@example.com"));
         assert!(is_valid_email("fully-qualified-domain@example.com"));
         assert!(is_valid_email("user.name+tag+sorting@example.com"));

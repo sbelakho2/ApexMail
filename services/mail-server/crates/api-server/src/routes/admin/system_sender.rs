@@ -46,6 +46,7 @@ async fn verify(
     require_scopes(&auth, &["*"])?;
     require_system_tenant(&auth)?;
     let current_status = system_sender_status(&state).await?;
-    let _verification = verify_domain_for_tenant(&state, SYSTEM_TENANT_ID, &current_status.id).await?;
+    let _verification =
+        verify_domain_for_tenant(&state, SYSTEM_TENANT_ID, &current_status.id).await?;
     Ok(Json(system_sender_status(&state).await?))
 }

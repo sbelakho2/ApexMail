@@ -14,19 +14,19 @@ The ApexMail public pricing page is served from:
 
 | Plan       | Price/mo | Emails/mo   | Annual      |
 |------------|----------|-------------|-------------|
-| Free       | $0       | 30,000      | $0          |
-| Starter    | $25      | 50,000      | $250/yr     |
-| Pro        | $65      | 150,000     | $650/yr     |
-| Growth     | $150     | 500,000     | $1,500/yr   |
-| Scale      | $350     | 2,000,000   | $3,500/yr   |
-| Enterprise | $3,000   | 5,000,000   | $30,000/yr  |
+| Free       | €0       | 30,000      | €0          |
+| Starter    | €25      | 50,000      | €250/yr     |
+| Pro        | €65      | 150,000     | €650/yr     |
+| Growth     | €150     | 500,000     | €1,500/yr   |
+| Scale      | €350     | 2,000,000   | €3,500/yr   |
+| Enterprise | €3,000   | 5,000,000   | €30,000/yr  |
 
 ## Template Logic (`plans.html`)
 
 The pricing template renders each plan as a card with:
 
 - **Plan name** — `Free`, `Starter`, `Pro`, `Growth`, `Scale`, `Enterprise`
-- **Price** — monthly price string (e.g., `$25`)
+- **Price** — monthly price string (e.g., `€25`)
 - **Period** — `"/mo"` for monthly plans, custom for Free (`"forever"`)
 - **Description** — positioning tagline per tier
 - **Features** — bullet list of plan-specific features
@@ -42,18 +42,18 @@ Pay-As-You-Go pricing (for customers not on a subscription plan):
 
 | Volume Tier | Price per email |
 |-------------|----------------|
-| 0–10,000    | $0.001         |
-| 10,001–100K | $0.0008        |
-| 100K–1M     | $0.0005        |
-| 1M+         | $0.0003        |
+| 0–10,000    | €0.001         |
+| 10,001–100K | €0.0008        |
+| 100K–1M     | €0.0005        |
+| 1M+         | €0.0003        |
 
-API calls: first 100K free/month, then $0.10/1K.
+API calls: first 100K free/month, then €0.10/1K.
 
 ## Dedicated IP Add-on
 
 | Plan              | Price            |
 |-------------------|------------------|
-| Pro (add-on)      | $30/mo           |
+| Pro (add-on)      | €30/mo           |
 | Growth            | 1 included       |
 | Scale             | 3 included       |
 | Enterprise        | 10 included      |

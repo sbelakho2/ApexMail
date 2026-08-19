@@ -10,7 +10,7 @@ ApexMail offers a Business Associate Agreement (BAA) as part of the **Enterprise
 
 ## How to Obtain a Signed BAA
 
-1. **Upgrade to Enterprise plan** — BAA is included with Enterprise ($3,000/mo)
+1. **Upgrade to Enterprise plan** — BAA is included with Enterprise (€3,000/mo)
 2. **Contact support** — Email [support@apexmail.ee](mailto:support@apexmail.ee) with your tenant ID
 3. **Review and sign** — ApexMail will provide the current BAA via DocuSign
 4. **Counter-signature** — ApexMail signs within 5 business days

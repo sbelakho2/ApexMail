@@ -69,5 +69,10 @@
       Competitor pricing and plan snapshots were last reviewed on {{ pricing_review_date }} and may change.
     </p>
     {% endif %}
+    {% if page.extra.currency_note %}
+    <p class="mt-2 text-xs font-medium text-surface-500">
+      {{ page.extra.currency_note }}
+    </p>
+    {% endif %}
   </div>
 </section>

@@ -59,7 +59,9 @@ impl TrainingManager {
             return Err(AiError::InvalidInput("invalid model identifier".into()));
         }
         if !(1..=100).contains(&epochs) {
-            return Err(AiError::InvalidInput("epochs must be between 1 and 100".into()));
+            return Err(AiError::InvalidInput(
+                "epochs must be between 1 and 100".into(),
+            ));
         }
 
         let mut job = TrainingJob::new(model_id, epochs);
@@ -83,7 +85,9 @@ impl TrainingManager {
 
         let child = command.spawn().map_err(|error| {
             let _ = self.fail_job(&job_id, format!("could not start training runner: {error}"));
-            AiError::TrainingError(format!("could not start configured training runner: {error}"))
+            AiError::TrainingError(format!(
+                "could not start configured training runner: {error}"
+            ))
         })?;
 
         self.set_running(&job_id)?;
@@ -183,7 +187,10 @@ impl TrainingManager {
                 &job_id,
                 format!("training runner exited with status {status}"),
             ),
-            Err(error) => self.fail_job(&job_id, format!("could not wait for training runner: {error}")),
+            Err(error) => self.fail_job(
+                &job_id,
+                format!("could not wait for training runner: {error}"),
+            ),
         };
         if let Err(error) = status {
             tracing::error!(job_id = %job_id, %error, "failed to persist training job state");
@@ -193,7 +200,10 @@ impl TrainingManager {
     fn load_runner_metrics(&self, job_id: &str) -> Result<RunnerMetrics, AiError> {
         let path = self.job_artifact_dir(job_id).join("metrics.json");
         let bytes = std::fs::read(&path).map_err(|error| {
-            AiError::TrainingError(format!("runner completed without {}: {error}", path.display()))
+            AiError::TrainingError(format!(
+                "runner completed without {}: {error}",
+                path.display()
+            ))
         })?;
         let metrics: RunnerMetrics = serde_json::from_slice(&bytes).map_err(|error| {
             AiError::TrainingError(format!("invalid runner metrics artifact: {error}"))
@@ -264,8 +274,9 @@ impl TrainingManager {
         std::fs::create_dir_all(&directory).map_err(|error| {
             AiError::CheckpointError(format!("could not create {}: {error}", directory.display()))
         })?;
-        let payload = serde_json::to_vec_pretty(job)
-            .map_err(|error| AiError::CheckpointError(format!("could not serialize job: {error}")))?;
+        let payload = serde_json::to_vec_pretty(job).map_err(|error| {
+            AiError::CheckpointError(format!("could not serialize job: {error}"))
+        })?;
         atomic_write(&directory.join("job.json"), &payload)
     }
 }

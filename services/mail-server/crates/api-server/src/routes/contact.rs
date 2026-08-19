@@ -9,7 +9,7 @@ use axum::{
     extract::State,
     response::{IntoResponse, Redirect, Response},
     routing::post,
-    Router, Form,
+    Form, Router,
 };
 use serde::Deserialize;
 use sqlx::PgPool;
@@ -83,11 +83,7 @@ fn validate_field_len(
     }
 }
 
-async fn store_lead(
-    db: &PgPool,
-    form: &ContactForm,
-    source: &str,
-) -> Result<(), ApiError> {
+async fn store_lead(db: &PgPool, form: &ContactForm, source: &str) -> Result<(), ApiError> {
     let email = form
         .work_email
         .as_deref()
@@ -95,7 +91,9 @@ async fn store_lead(
         .unwrap_or("")
         .trim();
     if !apexmail_lib::validation::is_valid_email(email) {
-        return Err(ApiError::Validation(vec!["a valid email is required".into()]));
+        return Err(ApiError::Validation(vec![
+            "a valid email is required".into()
+        ]));
     }
 
     let mut errors = Vec::new();
@@ -147,19 +145,18 @@ async fn store_lead(
         return Err(ApiError::Validation(errors));
     }
 
-    let company = form
-        .company
-        .as_deref()
-        .unwrap_or("Unknown")
-        .trim();
-    let domain = email
-        .split('@')
-        .nth(1)
-        .unwrap_or("unknown");
+    let company = form.company.as_deref().unwrap_or("Unknown").trim();
+    let domain = email.split('@').nth(1).unwrap_or("unknown");
     let notes = vec![
-        form.monthly_volume.as_deref().map(|v| format!("Volume: {v}")),
-        form.peak_hourly_volume.as_deref().map(|v| format!("Peak: {v}")),
-        form.current_provider.as_deref().map(|v| format!("Provider: {v}")),
+        form.monthly_volume
+            .as_deref()
+            .map(|v| format!("Volume: {v}")),
+        form.peak_hourly_volume
+            .as_deref()
+            .map(|v| format!("Peak: {v}")),
+        form.current_provider
+            .as_deref()
+            .map(|v| format!("Provider: {v}")),
         form.message.as_deref().map(|v| format!("Message: {v}")),
         form.phone.as_deref().map(|v| format!("Phone: {v}")),
         form.use_case.as_deref().map(|v| format!("Use case: {v}")),
@@ -249,7 +246,9 @@ mod tests {
         validate_field_len(&mut errors, "message", Some(&long_message), MAX_MESSAGE_LEN);
         assert_eq!(
             errors,
-            vec![format!("message must be at most {MAX_MESSAGE_LEN} characters")]
+            vec![format!(
+                "message must be at most {MAX_MESSAGE_LEN} characters"
+            )]
         );
     }
 

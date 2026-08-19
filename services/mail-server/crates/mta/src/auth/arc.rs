@@ -116,16 +116,14 @@ pub fn generate_arc_headers(
 
     // #125:Validate the existing chain with real cryptographic verification
     // (RFC 8617 §5.2). Without resolvable keys the chain fails closed.
-    let chain_validation = match verify_arc_chain(
-        existing_chain,
-        message_headers,
-        message_body,
-        &|d, s| chain_key_lookup(d, s),
-    ) {
-        ArcChainStatus::Pass => "pass",
-        ArcChainStatus::None => "none",
-        ArcChainStatus::Fail => "fail",
-    };
+    let chain_validation =
+        match verify_arc_chain(existing_chain, message_headers, message_body, &|d, s| {
+            chain_key_lookup(d, s)
+        }) {
+            ArcChainStatus::Pass => "pass",
+            ArcChainStatus::None => "none",
+            ArcChainStatus::Fail => "fail",
+        };
 
     let seal_template = format!(
         "ARC-Seal: i={instance}; a=rsa-sha256; t={timestamp};\r\n\
@@ -258,7 +256,10 @@ pub fn verify_arc_chain(
     // instances, not just the most recent, so any tampered link fails the chain).
     for set in arc_sets {
         if !verify_ams(set, message_headers, message_body, key_lookup) {
-            warn!(instance = set.instance, "ARC AMS signature verification failed");
+            warn!(
+                instance = set.instance,
+                "ARC AMS signature verification failed"
+            );
             return ArcChainStatus::Fail;
         }
     }
@@ -267,7 +268,10 @@ pub fn verify_arc_chain(
     // the prior ARC sets + the current AAR/AMS (RFC 8617 §5.1.1).
     for (idx, _set) in arc_sets.iter().enumerate() {
         if !verify_seal(arc_sets, idx, key_lookup) {
-            warn!(instance = idx as u32 + 1, "ARC seal signature verification failed");
+            warn!(
+                instance = idx as u32 + 1,
+                "ARC seal signature verification failed"
+            );
             return ArcChainStatus::Fail;
         }
     }
@@ -390,7 +394,10 @@ fn verify_rsa_sha256(public_key: RsaPublicKey, message: &[u8], sig_b64: &str) ->
     use rsa::pkcs1v15::VerifyingKey;
     use rsa::signature::Verifier;
 
-    let clean: String = sig_b64.chars().filter(|c| !c.is_ascii_whitespace()).collect();
+    let clean: String = sig_b64
+        .chars()
+        .filter(|c| !c.is_ascii_whitespace())
+        .collect();
     let Ok(sig_bytes) = B64.decode(&clean) else {
         return false;
     };
@@ -810,7 +817,9 @@ mod tests {
         // Tamper one byte of the i=1 AMS signature: set 2's seal covers it,
         // so the whole chain must fail.
         let mut tampered = set1.clone();
-        let b_value = extract_tag_value(&tampered.message_signature, "b").unwrap().to_string();
+        let b_value = extract_tag_value(&tampered.message_signature, "b")
+            .unwrap()
+            .to_string();
         let mut chars: Vec<char> = b_value.chars().collect();
         let last = chars.last_mut().unwrap();
         *last = if *last == 'A' { 'B' } else { 'A' };
@@ -821,12 +830,7 @@ mod tests {
 
         assert_ne!(tampered.message_signature, set1.message_signature);
 
-        let status = verify_arc_chain(
-            &[tampered, set2],
-            TEST_HEADERS,
-            b"Hello world\r\n",
-            &lookup,
-        );
+        let status = verify_arc_chain(&[tampered, set2], TEST_HEADERS, b"Hello world\r\n", &lookup);
         assert_eq!(status, ArcChainStatus::Fail);
     }
 
@@ -853,7 +857,12 @@ mod tests {
                 None
             }
         };
-        let status = verify_arc_chain(&[set], TEST_HEADERS, b"Hello world\r\n", &wrong_domain_lookup);
+        let status = verify_arc_chain(
+            &[set],
+            TEST_HEADERS,
+            b"Hello world\r\n",
+            &wrong_domain_lookup,
+        );
         assert_eq!(status, ArcChainStatus::Fail);
     }
 

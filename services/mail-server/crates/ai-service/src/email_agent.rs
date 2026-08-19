@@ -72,10 +72,8 @@ impl EmailAnsweringConfig {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(30),
-            database_url: std::env::var("DATABASE_URL")
-                .unwrap_or_default(),
-            reply_from: std::env::var("AI_REPLY_FROM")
-                .unwrap_or_else(|_| "ai@apexmail.ee".into()),
+            database_url: std::env::var("DATABASE_URL").unwrap_or_default(),
+            reply_from: std::env::var("AI_REPLY_FROM").unwrap_or_else(|_| "ai@apexmail.ee".into()),
             max_body_chars: std::env::var("AI_EMAIL_MAX_BODY_CHARS")
                 .ok()
                 .and_then(|v| v.parse().ok())
@@ -181,9 +179,9 @@ impl EmailAnswerer {
 
     /// Fetch and process up to 10 unprocessed inbound messages.
     async fn process_batch(&self) -> Result<usize, sqlx::Error> {
-                // Atomically claim rows. A bare `SELECT ... FOR UPDATE` outside a
-                // transaction releases its lock before processing and lets another
-                // worker generate a duplicate draft.
+        // Atomically claim rows. A bare `SELECT ... FOR UPDATE` outside a
+        // transaction releases its lock before processing and lets another
+        // worker generate a duplicate draft.
         let rows: Vec<InboundRow> = sqlx::query_as::<_, InboundRow>(
             r#"
                         WITH candidates AS (
@@ -324,7 +322,10 @@ pub(crate) fn truncate_response(response: &str) -> String {
         response.to_string()
     } else {
         let truncated: String = response.chars().take(MAX_RESPONSE_CHARS_HARD).collect();
-        format!("{}\n\n[Response truncated — length limit reached]", truncated)
+        format!(
+            "{}\n\n[Response truncated — length limit reached]",
+            truncated
+        )
     }
 }
 
@@ -400,7 +401,12 @@ pub(crate) fn build_prompt(from: &str, subject: &str, body: &str) -> String {
 
 /// Format the reply email body with quoting of the original message.
 /// The AI response is sanitized against HTML/XSS injection before inclusion.
-pub(crate) fn format_reply(from: &str, subject: &str, original_body: &str, ai_response: &str) -> String {
+pub(crate) fn format_reply(
+    from: &str,
+    subject: &str,
+    original_body: &str,
+    ai_response: &str,
+) -> String {
     // Sanitize the LLM output to strip any HTML/JS injection the model may have generated.
     let sanitized_response = defense::sanitize_email_body(ai_response, false);
 
@@ -408,7 +414,11 @@ pub(crate) fn format_reply(from: &str, subject: &str, original_body: &str, ai_re
     reply.push_str(&sanitized_response);
     reply.push_str("\n\n");
     reply.push_str("---\n");
-    reply.push_str(&format!("On {}, {} wrote:\n", Utc::now().format("%Y-%m-%d %H:%M UTC"), from));
+    reply.push_str(&format!(
+        "On {}, {} wrote:\n",
+        Utc::now().format("%Y-%m-%d %H:%M UTC"),
+        from
+    ));
     reply.push_str(&format!("> Subject: {}\n", subject));
     for line in original_body.lines() {
         reply.push_str(&format!("> {}\n", line));
@@ -436,7 +446,10 @@ pub async fn generate_email_reply(
     max_tokens: usize,
 ) -> ProcessEmailResult {
     let prompt = build_prompt(from, subject, body);
-    let (response, tokens) = match llm.generate(system_prompt, &prompt, max_tokens as u32).await {
+    let (response, tokens) = match llm
+        .generate(system_prompt, &prompt, max_tokens as u32)
+        .await
+    {
         Ok(r) => {
             let count = r.split_whitespace().count();
             (r, Some(count))

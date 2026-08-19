@@ -105,4 +105,3 @@ fn test_subject_scoring_throughput() {
         elapsed
     );
 }
-

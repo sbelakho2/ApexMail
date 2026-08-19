@@ -14,9 +14,7 @@ use std::net::SocketAddr;
 use crate::error::ApiError;
 use crate::middleware::rate_limiter::extract_public_client_ip;
 use crate::routes::csrf::validate_form_csrf;
-use crate::routes::system_sender::{
-    ensure_system_sender_ready, queue_system_email_in_transaction,
-};
+use crate::routes::system_sender::{ensure_system_sender_ready, queue_system_email_in_transaction};
 use crate::state::AppState;
 
 pub fn router() -> Router<AppState> {
@@ -178,10 +176,7 @@ async fn forgot_password(
         let encoded_token = percent_encode_component(&token);
         // CWE-598: Use path-based token instead of query parameter to prevent
         // sensitive token exposure in server logs, referrer headers, and browser history.
-        let reset_link = format!(
-            "{}/reset-password/{}",
-            state.config.base_url, encoded_token,
-        );
+        let reset_link = format!("{}/reset-password/{}", state.config.base_url, encoded_token,);
         let safe_email = html_escape(&email);
         let safe_link = html_escape(&reset_link);
         let html_body = format!(

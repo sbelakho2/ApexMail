@@ -649,10 +649,7 @@ mod tests {
     #[test]
     fn test_http_urls_and_relative_urls_pass() {
         let props = serde_json::json!({"a": "https://example.com/x?y=1&z=2", "b": "/logo.png"});
-        let result = resolve_placeholders(
-            r#"<a href="{{ a }}"><img src="{{ b }}"></a>"#,
-            &props,
-        );
+        let result = resolve_placeholders(r#"<a href="{{ a }}"><img src="{{ b }}"></a>"#, &props);
         assert!(result.starts_with(r#"<a href="https://example.com/x?y=1&amp;z=2">"#));
         assert!(result.contains(r#"src="/logo.png""#));
     }

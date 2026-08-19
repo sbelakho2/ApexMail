@@ -196,8 +196,7 @@ const VALID_PRIORITIES: &[&str] = &["low", "medium", "high", "urgent"];
 /// replying to a support ticket. Anything else (e.g. "customer") is rejected
 /// so a staff member cannot forge messages that look like they came from a
 /// customer or a different staff role.
-const VALID_STAFF_AUTHOR_TYPES: &[&str] =
-    &["agent", "system", "admin", "owner", "staff"];
+const VALID_STAFF_AUTHOR_TYPES: &[&str] = &["agent", "system", "admin", "owner", "staff"];
 
 struct ReplyInsertResult {
     id: String,
@@ -454,10 +453,7 @@ async fn add_reply(
     // customer or another staff member). author_type is restricted to staff
     // roles so a caller cannot forge "customer" authorship.
     let mut body = body;
-    body.author = auth
-        .user_id
-        .clone()
-        .unwrap_or_else(|| "System".to_string());
+    body.author = auth.user_id.clone().unwrap_or_else(|| "System".to_string());
     if !VALID_STAFF_AUTHOR_TYPES.contains(&body.author_type.as_str()) {
         body.author_type = "agent".to_string();
     }

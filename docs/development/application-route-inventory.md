@@ -236,7 +236,7 @@ All routes are public:
 - /features
 - /compliance
 - /private-cloud
-- /api-console
+- /api-explorer (301 from /api-console)
 - /case-studies
 - /forensic
 - /status
@@ -259,7 +259,7 @@ All routes are public:
 - /features
 - /compliance
 - /private-cloud
-- /api-console
+- /api-explorer (301 from /api-console)
 - /case-studies
 - /forensic
 - /status

@@ -262,7 +262,13 @@ async fn update_message(
         return Err(ApiError::NotFound("message not found".into()));
     }
 
-    log_inbox_audit(&state.db, &auth, &body.id, build_inbox_audit_metadata(&body)).await;
+    log_inbox_audit(
+        &state.db,
+        &auth,
+        &body.id,
+        build_inbox_audit_metadata(&body),
+    )
+    .await;
 
     Ok(Json(serde_json::json!({ "success": true })))
 }

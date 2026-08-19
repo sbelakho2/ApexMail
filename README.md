@@ -251,9 +251,9 @@ The `Makefile` + `deploy/scripts/deploy.sh` path is a **manual/emergency
 fallback only** (it builds images locally on the host and never pushes them);
 do not use it for routine production deploys.
 
-The legacy bare-metal (systemd) and Kubernetes deployment paths are **superseded**
-but preserved for reference under [`deploy/legacy-systemd/`](deploy/legacy-systemd/)
-and [`deploy/legacy-k8s/`](deploy/legacy-k8s/). Do not use them for production.
+The legacy bare-metal (systemd) and Kubernetes deployment paths are **superseded**;
+do not use them for production. Their history lives in git; the only supported
+paths are the GH Actions + Docker Compose pipeline and the Makefile emergency fallback.
 
 ### Local Development
 

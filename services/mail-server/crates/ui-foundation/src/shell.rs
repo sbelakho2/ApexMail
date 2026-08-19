@@ -171,7 +171,7 @@ impl<'a> ShellHeader<'a> {
     pub fn render_html(&self) -> String {
         let theme_icon = shell_icon("moon", "h-4 w-4");
         let safe_avatar = html_escape(self.avatar_fallback);
-        
+
         format!(
             "<header class=\"apex-console-header sticky top-0 z-20 flex h-16 items-center justify-between border-b border-surface-200/60 bg-white px-8\">\
                 <div class=\"flex items-center gap-4\">\
@@ -378,11 +378,11 @@ impl<'a> ControlPlaneShell<'a> {
             })
             .collect::<Vec<_>>()
             .join("");
-            
+
         let sidebar_content = render_cp_sidebar(self.current_path);
         let mobile_script = mobile_menu_script();
         let shortcut_contract = render_shortcut_contract();
-        
+
         format!(
             "<div class=\"apex-cp-shell min-h-screen bg-[#fcfcfc] flex\" data-theme-mode=\"system\" data-theme-storage-key=\"{theme_key}\">\
             {shortcut_contract}\
@@ -509,7 +509,7 @@ fn render_sidebar_content(
                 || (href != &"/" && current_path.starts_with(href))
                 || (href == &"/dashboard" && (current_path == "/" || current_path == "/cp" || current_path == "/dashboard"));
             let active_class = " aria-current=\"page\"";
-            
+
             let classes = if is_active {
                 "flex items-center gap-3 px-3 py-2 text-sm font-semibold transition-all rounded-md bg-brand-50 text-primary"
             } else {
@@ -942,9 +942,7 @@ mod tests {
 
         assert!(web.contains("id=\"mobile-sidebar\""));
         assert!(
-            web.contains(
-                "md:hidden transition-transform duration-300 -translate-x-full"
-            ),
+            web.contains("md:hidden transition-transform duration-300 -translate-x-full"),
             "closed mobile sidebar must be translated off-canvas"
         );
         // No backdrop while closed.

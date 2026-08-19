@@ -210,8 +210,8 @@ mod tests {
             .any(|(url, method, status)| *url == "/v1/auth/session"
                 && *method == "GET"
                 && *status == 200));
-        assert_eq!(endpoints.len(), 14);
-        assert_eq!(patterns.len(), 14);
+        assert_eq!(endpoints.len(), 13);
+        assert_eq!(patterns.len(), 13);
         assert!(patterns.contains(&"/api/v1/operator/*"));
         assert!(endpoints.contains(&"/api/v1/discovery/run"));
         assert!(auth_networks.contains(&("/v1/auth/csrf", "GET", 200)));

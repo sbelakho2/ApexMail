@@ -731,14 +731,13 @@ impl SubmissionServer {
         // tenant_id is VARCHAR(26) referencing tenants(id) — never the user's
         // account UUID. Look up the authenticated user's actual tenant (by
         // email only: `users` has no `username` column).
-        let tenant_id: Option<String> = sqlx::query_scalar(
-            "SELECT tenant_id FROM users WHERE LOWER(email) = LOWER($1)",
-        )
-        .bind(auth_email)
-        .fetch_optional(&mut *tx)
-        .await
-        .map_err(|_| ())?
-        .flatten();
+        let tenant_id: Option<String> =
+            sqlx::query_scalar("SELECT tenant_id FROM users WHERE LOWER(email) = LOWER($1)")
+                .bind(auth_email)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(|_| ())?
+                .flatten();
 
         // Resolve the sender's domain while holding a share lock through queue
         // insertion. This matches the API's authorization predicate and

@@ -12,12 +12,12 @@ last_verified = "2026-07-29"
 methodology = "Public Mailgun documentation at mailgun.com/docs reviewed on the verification date. Pricing compared at Foundation 100K plan. Monthly billing. Features, limits, and pricing may change."
 volume_assumption = "100,000 emails/month"
 billing_period = "monthly"
-currency_note = "USD for ApexMail and Mailgun. Prices exclude applicable taxes."
+currency_note = "Prices are shown in EUR. Where a provider publishes only USD, the EUR figure is converted at 1 USD = €0.92 (reference rate, 2026-08-19) and the provider's published USD price is shown in parentheses. Exclude applicable taxes."
 # Feature comparison counts — update when capabilities change
-apexmail_wins = 8
+apexmail_wins = 4
 competitor_wins = 2
 verdict_title = "How ApexMail differs from Mailgun"
-verdict_points = ["EU/EEA-oriented deployment configuration", "Current public catalog in USD", "Scale and Enterprise access controls", "Audit logs on Growth and above", "Architecture and contract review for non-standard deployments"]
+verdict_points = ["EU/EEA-oriented deployment configuration", "Current public catalog (Mailgun publishes USD; EUR shown at reference conversion)", "Scale and Enterprise access controls", "Audit logs on Growth and above", "Architecture and contract review for non-standard deployments"]
 
 # Comparison data (audit 3.3): rendered by partials/compare/table.html via a
 # single loop, so design changes to the row/winner markup happen in ONE place.
@@ -50,8 +50,8 @@ comparison_sections = [
     { feature = "Audit logs", apex = 'Growth plan and above — account activity, API key usage, configuration changes; searchable, exportable', comp = 'Event logs accessible via Events API; retention varies by plan; no consolidated account-level audit trail<sup><a href="#src-mg7">7</a></sup>', winner = "apexmail" }
   ]},
   { title = "PRICING AT 100K/MO (verified 2026-07-29)", rows = [
-    { feature = "Plan compared", apex = 'Pro: $65/mo (150,000 emails included)', comp = 'Foundation 100K: $75/mo (100,000 emails included)<sup><a href="#src-mg8">8</a></sup>', winner = "none" },
-    { feature = "Usage terms", apex = 'See the current public catalog and checkout for applicable usage terms', comp = '$1.00/1,000 for Foundation; varies by volume tier; Flex pricing available<sup><a href="#src-mg8">8</a></sup>', winner = "none" },
+    { feature = "Plan compared", apex = 'Pro: €65/mo (150,000 emails included)', comp = 'Scale: €82.80 (US$90)/mo (100,000 emails included)<sup><a href="#src-mg8">8</a></sup>', winner = "none" },
+    { feature = "Usage terms", apex = 'See the current public catalog and checkout for applicable usage terms', comp = 'from €1.20 (US$1.30)/1,000 on Foundation overage; tiered rates on Scale<sup><a href="#src-mg8">8</a></sup>', winner = "none" },
     { feature = "Free tier", apex = '30,000 emails/month', comp = '100 emails/day (Flex trial — no credit card)<sup><a href="#src-mg8">8</a></sup>', winner = "apexmail" }
   ]},
   { title = "AREAS WHERE MAILGUN IS STRONGER", rows = [
@@ -74,7 +74,7 @@ sources = [
   { ref = "mg8", n = 8, label = "Mailgun Pricing page", url = "https://www.mailgun.com/pricing/" },
   { ref = "mg9", n = 9, label = "Mailgun Email Validation", url = "https://www.mailgun.com/email-validation/" }
 ]
-sources_disclaimer = "Last verified: 2026-07-29. Volume assumption: 100,000 emails/month, monthly billing. Prices are shown in USD and exclude applicable taxes. Reviewed by: ApexMail marketing engineering."
+sources_disclaimer = "Last verified: 2026-08-19. Volume assumption: 100,000 emails/month, monthly billing. Prices are shown in EUR. Where a provider publishes only USD, the EUR figure is converted at 1 USD = €0.92 (reference rate, 2026-08-19) and the provider's published USD price is shown in parentheses. Exclude applicable taxes. Reviewed by: ApexMail marketing engineering."
 +++
 
 <!-- Comparison rows and sources block are rendered from the

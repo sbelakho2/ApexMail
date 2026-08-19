@@ -48,7 +48,10 @@ async fn main() -> anyhow::Result<()> {
             .install_recorder()
             .map_err(|error| anyhow::anyhow!("failed to start MTA metrics listener: {error}"))?;
         metrics::gauge!("apexmail_mta_info").set(1.0);
-        info!(port = config.metrics.port, "Prometheus metrics listener ready");
+        info!(
+            port = config.metrics.port,
+            "Prometheus metrics listener ready"
+        );
     }
 
     // Database pool

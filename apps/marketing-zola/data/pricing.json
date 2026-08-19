@@ -1,7 +1,7 @@
 {
-  "_comment": "Public calculator data derived from the active subscription catalog in services/mail-server/crates/billing-service/src/plans.rs. All prices are USD; annual_price_per_month is the annual contract total divided by 12.",
-  "currency_symbol": "$",
-  "currency_code": "USD",
+  "_comment": "Public calculator data derived from the active subscription catalog in services/mail-server/crates/billing-service/src/plans.rs. All prices are EUR; annual_price_per_month is the annual contract total divided by 12.",
+  "currency_symbol": "€",
+  "currency_code": "EUR",
   "ip_cost": 30,
   "plans": [
     {

@@ -339,9 +339,9 @@ fn map_usage_error(error: usage::UsageError) -> ApiError {
         usage::UsageError::Audit(audit_error) => ApiError::Internal(audit_error),
         usage::UsageError::Redis(pool_error) => ApiError::from(pool_error),
         usage::UsageError::RedisCmd(redis_error) => ApiError::from(redis_error),
-        usage::UsageError::InvalidQuantity(quantity) => ApiError::BadRequest(format!(
-            "usage quantity must be positive, got {quantity}"
-        )),
+        usage::UsageError::InvalidQuantity(quantity) => {
+            ApiError::BadRequest(format!("usage quantity must be positive, got {quantity}"))
+        }
     }
 }
 
@@ -2720,10 +2720,7 @@ async fn create_checkout_session(
                     "subscription_data[metadata][tenant_id]",
                     auth.tenant_id.clone(),
                 ),
-                (
-                    "subscription_data[metadata][plan_name]",
-                    plan_name.clone(),
-                ),
+                ("subscription_data[metadata][plan_name]", plan_name.clone()),
                 ("allow_promotion_codes", "true".into()),
                 ("billing_address_collection", "required".into()),
                 ("tax_id_collection[enabled]", "true".into()),
@@ -2773,9 +2770,7 @@ async fn active_plan_name_for_stripe_price(
     .fetch_optional(pool)
     .await
     .map(|plan_name| {
-        plan_name.filter(|plan_name| {
-            SELF_SERVE_CHECKOUT_PLAN_IDS.contains(&plan_name.as_str())
-        })
+        plan_name.filter(|plan_name| SELF_SERVE_CHECKOUT_PLAN_IDS.contains(&plan_name.as_str()))
     })
 }
 

@@ -346,12 +346,11 @@ async fn test_webhook(
 
     // RS-071: Return error instead of using unwrap_or_default() which would
     // produce an HMAC of empty data, causing silent signature verification failures.
-    let payload_bytes = serde_json::to_vec(&payload)
-        .map_err(|e| ApiError::Internal(format!("failed to serialize webhook test payload: {e}")))?;
-    let signature = apexmail_lib::crypto::create_hmac_signature(
-        wh.secret.as_bytes(),
-        &payload_bytes,
-    );
+    let payload_bytes = serde_json::to_vec(&payload).map_err(|e| {
+        ApiError::Internal(format!("failed to serialize webhook test payload: {e}"))
+    })?;
+    let signature =
+        apexmail_lib::crypto::create_hmac_signature(wh.secret.as_bytes(), &payload_bytes);
 
     let start = std::time::Instant::now();
     let result = client

@@ -296,8 +296,8 @@ impl PlacementScheduler {
     /// the worst-case per-account polling cycle
     /// (`max_polling_attempts × polling_interval_secs` = 1 h).
     async fn reap_stuck_tests(engine: &PlacementEngine, config: &PlacementConfig) {
-        let cutoff = chrono::Utc::now()
-            - chrono::Duration::seconds(config.stuck_test_timeout_secs as i64);
+        let cutoff =
+            chrono::Utc::now() - chrono::Duration::seconds(config.stuck_test_timeout_secs as i64);
 
         let result = sqlx::query(
             "UPDATE placement_tests \

@@ -276,10 +276,7 @@ impl WebhookProcessor {
         let mut conn = self.redis.get().await?;
 
         // Atomically increment the retry counter
-        let count: u32 = redis::cmd("INCR")
-            .arg(&key)
-            .query_async(&mut *conn)
-            .await?;
+        let count: u32 = redis::cmd("INCR").arg(&key).query_async(&mut *conn).await?;
 
         // Set expiry on first increment
         if count == 1 {

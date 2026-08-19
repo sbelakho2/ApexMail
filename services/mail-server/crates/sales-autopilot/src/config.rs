@@ -187,7 +187,9 @@ fn read_env(names: &[&str]) -> anyhow::Result<Option<String>> {
             // Not set under this name — try the next alias.
             Err(std::env::VarError::NotPresent) => continue,
             Err(err) => {
-                return Err(anyhow::anyhow!("invalid environment variable {name}: {err}"));
+                return Err(anyhow::anyhow!(
+                    "invalid environment variable {name}: {err}"
+                ));
             }
         }
     }

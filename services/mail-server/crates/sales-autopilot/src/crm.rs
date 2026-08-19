@@ -688,10 +688,7 @@ mod tests {
             (&new, &new),
             (&contacted, &contacted),
             (&new, &LeadStatus::Snoozed),
-            (
-                &LeadStatus::Unknown("weird".into()),
-                &LeadStatus::Qualified,
-            ),
+            (&LeadStatus::Unknown("weird".into()), &LeadStatus::Qualified),
         ] {
             assert!(
                 !is_valid_transition(from, to),

@@ -61,10 +61,11 @@ async fn optional_pg_pool(test_name: &str) -> Option<PgPool> {
                     return;
                 }
             };
-            let _ =
-                sqlx::query(&format!("DROP DATABASE IF EXISTS \"{isolated_db}\" WITH (FORCE)"))
-                    .execute(&admin)
-                    .await;
+            let _ = sqlx::query(&format!(
+                "DROP DATABASE IF EXISTS \"{isolated_db}\" WITH (FORCE)"
+            ))
+            .execute(&admin)
+            .await;
             let _ = sqlx::query(&format!("CREATE DATABASE \"{isolated_db}\""))
                 .execute(&admin)
                 .await;
@@ -246,9 +247,7 @@ async fn seed_minimal_subscription_tables(pool: &PgPool, tenant_id: &str) {
 /// would be created.
 #[tokio::test]
 async fn concurrent_wallet_credit_idempotency() {
-    let Some(pool) =
-        optional_pg_pool("concurrent_wallet_credit_idempotency").await
-    else {
+    let Some(pool) = optional_pg_pool("concurrent_wallet_credit_idempotency").await else {
         return;
     };
 
@@ -331,23 +330,24 @@ async fn concurrent_wallet_credit_idempotency() {
     );
 
     // Verify only one row exists
-    let count: (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM wallet_transactions WHERE reference = $1",
-    )
-    .bind(&idem_key)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert_eq!(count.0, 1, "Duplicate wallet credit detected");
-
-    // Verify wallet balance was incremented exactly once
-    let balance: (i64,) =
-        sqlx::query_as("SELECT balance FROM wallets WHERE id = $1")
-            .bind(wallet_id)
+    let count: (i64,) =
+        sqlx::query_as("SELECT COUNT(*) FROM wallet_transactions WHERE reference = $1")
+            .bind(&idem_key)
             .fetch_one(&pool)
             .await
             .unwrap();
-    assert_eq!(balance.0, amount, "Wallet balance mismatch after concurrent credit");
+    assert_eq!(count.0, 1, "Duplicate wallet credit detected");
+
+    // Verify wallet balance was incremented exactly once
+    let balance: (i64,) = sqlx::query_as("SELECT balance FROM wallets WHERE id = $1")
+        .bind(wallet_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        balance.0, amount,
+        "Wallet balance mismatch after concurrent credit"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -358,9 +358,7 @@ async fn concurrent_wallet_credit_idempotency() {
 /// exactly one webhook. Without the UNIQUE constraint, duplicates would be created.
 #[tokio::test]
 async fn concurrent_webhook_creation_uniqueness() {
-    let Some(pool) =
-        optional_pg_pool("concurrent_webhook_creation_uniqueness").await
-    else {
+    let Some(pool) = optional_pg_pool("concurrent_webhook_creation_uniqueness").await else {
         return;
     };
 
@@ -442,8 +440,7 @@ async fn concurrent_webhook_creation_uniqueness() {
 /// The second update must see the first update's result.
 #[tokio::test]
 async fn concurrent_subscription_update_for_update_lock() {
-    let Some(pool) =
-        optional_pg_pool("concurrent_subscription_update_for_update_lock").await
+    let Some(pool) = optional_pg_pool("concurrent_subscription_update_for_update_lock").await
     else {
         return;
     };
@@ -535,13 +532,12 @@ async fn concurrent_subscription_update_for_update_lock() {
     );
 
     // Final state: last writer wins
-    let final_status: (String,) = sqlx::query_as(
-        "SELECT status FROM stripe_subscriptions WHERE tenant_id = $1",
-    )
-    .bind(&tenant_id)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
+    let final_status: (String,) =
+        sqlx::query_as("SELECT status FROM stripe_subscriptions WHERE tenant_id = $1")
+            .bind(&tenant_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     assert!(
         final_status.0 == "suspended" || final_status.0 == "canceled",
         "Final subscription status should be suspended or canceled, got: {}",
@@ -558,9 +554,7 @@ async fn concurrent_subscription_update_for_update_lock() {
 /// delete in the transaction, orphaned queue entries would remain.
 #[tokio::test]
 async fn webhook_deletion_cascades_queue_entries() {
-    let Some(pool) =
-        optional_pg_pool("webhook_deletion_cascades_queue_entries").await
-    else {
+    let Some(pool) = optional_pg_pool("webhook_deletion_cascades_queue_entries").await else {
         return;
     };
 
@@ -593,13 +587,12 @@ async fn webhook_deletion_cascades_queue_entries() {
         .unwrap();
     }
 
-    let queue_count: (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM webhook_queue WHERE webhook_id = $1",
-    )
-    .bind(&webhook_id)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
+    let queue_count: (i64,) =
+        sqlx::query_as("SELECT COUNT(*) FROM webhook_queue WHERE webhook_id = $1")
+            .bind(&webhook_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     assert_eq!(queue_count.0, 10, "Expected 10 queue entries before delete");
 
     // Delete the webhook AND its queue entries in a transaction
@@ -617,23 +610,23 @@ async fn webhook_deletion_cascades_queue_entries() {
     tx.commit().await.unwrap();
 
     // Verify no orphaned queue entries
-    let queue_count: (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM webhook_queue WHERE webhook_id = $1",
-    )
-    .bind(&webhook_id)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert_eq!(queue_count.0, 0, "Orphaned webhook_queue entries after webhook delete");
+    let queue_count: (i64,) =
+        sqlx::query_as("SELECT COUNT(*) FROM webhook_queue WHERE webhook_id = $1")
+            .bind(&webhook_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        queue_count.0, 0,
+        "Orphaned webhook_queue entries after webhook delete"
+    );
 
     // Verify webhook is gone
-    let webhook_count: (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM webhooks WHERE id = $1",
-    )
-    .bind(&webhook_id)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
+    let webhook_count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM webhooks WHERE id = $1")
+        .bind(&webhook_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
     assert_eq!(webhook_count.0, 0, "Webhook still exists after delete");
 }
 
@@ -645,9 +638,7 @@ async fn webhook_deletion_cascades_queue_entries() {
 /// The FOR UPDATE in delete_domain must serialize operations on the same domain.
 #[tokio::test]
 async fn concurrent_domain_delete_and_verify() {
-    let Some(pool) =
-        optional_pg_pool("concurrent_domain_delete_and_verify").await
-    else {
+    let Some(pool) = optional_pg_pool("concurrent_domain_delete_and_verify").await else {
         return;
     };
 
@@ -676,14 +667,12 @@ async fn concurrent_domain_delete_and_verify() {
     .await
     .unwrap();
 
-    sqlx::query(
-        "INSERT INTO domains (id, tenant_id, name) VALUES ($1, $2, 'example.com')",
-    )
-    .bind(&domain_id)
-    .bind(&tenant_id)
-    .execute(&pool)
-    .await
-    .unwrap();
+    sqlx::query("INSERT INTO domains (id, tenant_id, name) VALUES ($1, $2, 'example.com')")
+        .bind(&domain_id)
+        .bind(&tenant_id)
+        .execute(&pool)
+        .await
+        .unwrap();
 
     let pool1 = pool.clone();
     let pool2 = pool.clone();
@@ -757,14 +746,13 @@ async fn concurrent_domain_delete_and_verify() {
     );
     // Most importantly: the final state must be consistent.
     // If deleted, the domain must not exist; if verified, it must.
-    let exists: (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM domains WHERE id = $1 AND tenant_id = $2",
-    )
-    .bind(&domain_id)
-    .bind(&tenant_id)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
+    let exists: (i64,) =
+        sqlx::query_as("SELECT COUNT(*) FROM domains WHERE id = $1 AND tenant_id = $2")
+            .bind(&domain_id)
+            .bind(&tenant_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
 
     if deleted > 0 {
         assert_eq!(exists.0, 0, "Domain still exists after successful delete");
@@ -782,9 +770,7 @@ async fn concurrent_domain_delete_and_verify() {
 /// by pg_advisory_xact_lock to prevent inconsistent state.
 #[tokio::test]
 async fn concurrent_plan_override_advisory_lock() {
-    let Some(pool) =
-        optional_pg_pool("concurrent_plan_override_advisory_lock").await
-    else {
+    let Some(pool) = optional_pg_pool("concurrent_plan_override_advisory_lock").await else {
         return;
     };
 
@@ -862,12 +848,11 @@ async fn concurrent_plan_override_advisory_lock() {
     r2.unwrap();
 
     // Final state must reflect the last writer (serialized by the lock)
-    let plan: (String,) =
-        sqlx::query_as("SELECT plan_id FROM plan_overrides WHERE tenant_id = $1")
-            .bind(&tenant_id)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+    let plan: (String,) = sqlx::query_as("SELECT plan_id FROM plan_overrides WHERE tenant_id = $1")
+        .bind(&tenant_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
     assert!(
         plan.0 == "pro" || plan.0 == "enterprise",
         "Plan override should be one of the two values, got: {}",
@@ -884,9 +869,7 @@ async fn concurrent_plan_override_advisory_lock() {
 /// INSERTs with ON CONFLICT on idempotency key must result in exactly one row.
 #[tokio::test]
 async fn atomic_idempotency_double_insert() {
-    let Some(pool) =
-        optional_pg_pool("atomic_idempotency_double_insert").await
-    else {
+    let Some(pool) = optional_pg_pool("atomic_idempotency_double_insert").await else {
         return;
     };
 
@@ -967,12 +950,13 @@ async fn atomic_idempotency_double_insert() {
         "Atomic idempotency insert: exactly one must succeed"
     );
 
-    let count: (i64,) =
-        sqlx::query_as("SELECT COUNT(*) FROM idempotency_keys WHERE tenant_id = $1 AND idempotency_key = $2")
-            .bind(&tenant_id)
-            .bind(&idem_key)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+    let count: (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM idempotency_keys WHERE tenant_id = $1 AND idempotency_key = $2",
+    )
+    .bind(&tenant_id)
+    .bind(&idem_key)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     assert_eq!(count.0, 1, "Duplicate idempotency key records detected");
 }

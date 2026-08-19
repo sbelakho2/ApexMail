@@ -842,8 +842,8 @@ mod tests {
     async fn engine_e2e() {
         use chrono::{TimeZone, Utc};
 
-        let url = std::env::var("CLICKHOUSE_TEST_URL")
-            .unwrap_or_else(|_| "http://127.0.0.1:8124".into());
+        let url =
+            std::env::var("CLICKHOUSE_TEST_URL").unwrap_or_else(|_| "http://127.0.0.1:8124".into());
         let user = std::env::var("CLICKHOUSE_TEST_USER").unwrap_or_else(|_| "default".into());
         let password = std::env::var("CLICKHOUSE_TEST_PASSWORD").unwrap_or_default();
 
@@ -869,14 +869,13 @@ mod tests {
         // Insert via the crate's own insert path (validates the DateTime64(3)
         // serialization of `ClickHouseEvent`).
         let ts = Utc.timestamp_millis_opt(1783687496789).unwrap();
-        let event = |id: &str, msg: &str, et: &str, recipient: &str, domain: &str| {
-            ClickHouseEvent {
+        let event =
+            |id: &str, msg: &str, et: &str, recipient: &str, domain: &str| ClickHouseEvent {
                 id: id.into(),
                 tenant_id: tenant.clone(),
                 message_id: msg.into(),
                 event_type: et.into(),
-                timestamp: time::OffsetDateTime::from_unix_timestamp(ts.timestamp())
-                    .unwrap()
+                timestamp: time::OffsetDateTime::from_unix_timestamp(ts.timestamp()).unwrap()
                     + time::Duration::nanoseconds(ts.timestamp_subsec_nanos() as i64),
                 recipient: recipient.into(),
                 recipient_domain: domain.into(),
@@ -887,8 +886,7 @@ mod tests {
                 device_type: "".into(),
                 campaign_id: "".into(),
                 metadata: "{}".into(),
-            }
-        };
+            };
         engine
             .insert_events(&[
                 event("e1", "m1", "sent", "a@x.com", "x.com"),
@@ -921,19 +919,30 @@ mod tests {
         assert_eq!(total, 5, "aggregate_by_dimension total");
 
         let funnel = engine
-            .funnel_analysis(&tenant, start, end, &["sent", "delivered", "opened", "clicked"])
+            .funnel_analysis(
+                &tenant,
+                start,
+                end,
+                &["sent", "delivered", "opened", "clicked"],
+            )
             .await
             .unwrap();
         assert_eq!(funnel.len(), 4);
         assert_eq!(funnel[0].count, 2, "funnel sent");
         assert_eq!(funnel[2].count, 1, "funnel opened");
 
-        let metrics = engine.deliverability_metrics(&tenant, start, end).await.unwrap();
+        let metrics = engine
+            .deliverability_metrics(&tenant, start, end)
+            .await
+            .unwrap();
         assert_eq!(metrics.delivery_rate, 0.5, "delivery_rate");
         assert_eq!(metrics.open_rate, 1.0, "open_rate");
         assert_eq!(metrics.click_rate, 1.0, "click_rate");
 
-        let hist = engine.engagement_histogram(&tenant, start, end).await.unwrap();
+        let hist = engine
+            .engagement_histogram(&tenant, start, end)
+            .await
+            .unwrap();
         assert_eq!(hist.len(), 2, "histogram buckets");
 
         let stats = engine.storage_stats().await.unwrap();
@@ -942,7 +951,9 @@ mod tests {
         // Best-effort cleanup (mutation is async; this run is already done).
         engine
             .client
-            .query(&format!("ALTER TABLE events DELETE WHERE tenant_id = '{tenant}'"))
+            .query(&format!(
+                "ALTER TABLE events DELETE WHERE tenant_id = '{tenant}'"
+            ))
             .execute()
             .await
             .ok();

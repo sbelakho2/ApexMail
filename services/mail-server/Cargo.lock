@@ -114,7 +114,6 @@ dependencies = [
  "dashmap 6.1.0",
  "deadpool-redis",
  "hex",
- "mail-builder",
  "observability-service",
  "once_cell",
  "parking_lot",

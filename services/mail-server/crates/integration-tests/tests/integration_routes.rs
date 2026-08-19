@@ -385,7 +385,7 @@ mod ai {
     use ai_service::routes::{build_router, default_app_state};
 
     fn app() -> axum::Router {
-        let mut state = default_app_state();
+        let mut state = default_app_state().expect("default app state");
         Arc::get_mut(&mut state)
             .expect("exclusive app state")
             .service_token = "test-key".into();
@@ -422,21 +422,7 @@ mod ai {
     }
 
     #[tokio::test]
-    async fn retired_predict_route_is_not_exposed() {
-        let resp = app()
-            .oneshot(
-                Request::post("/predict")
-                    .header("x-api-key", "test-key")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
-    }
-
-    #[tokio::test]
-    async fn retired_models_route_is_not_exposed() {
+    async fn models_route_returns_runtime_status() {
         let resp = app()
             .oneshot(
                 Request::get("/models")
@@ -446,7 +432,29 @@ mod ai {
             )
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["success"], true);
+        assert_eq!(json["data"]["runtime_enabled"], false);
+        assert!(json["data"]["models"].is_array());
+    }
+
+    #[tokio::test]
+    async fn predict_route_rejects_invalid_requests() {
+        // Predict is exposed but must reject a malformed/empty request with a
+        // client error (400/422) instead of reaching the LLM provider or
+        // returning 404.
+        let resp = app()
+            .oneshot(
+                Request::post("/predict")
+                    .header("x-api-key", "test-key")
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(resp.status().is_client_error(), "status: {}", resp.status());
     }
 }
 

@@ -333,9 +333,8 @@ K6_API_BASE=http://staging.apexmail.ee \
    # After test completes, compare results
    k6 run ... --summary-export=results/current-summary.json
    # Compare against baseline
-   python3 scripts/compare-baselines.py \
-     --baseline load-tests/baselines/v1.0.json \
-     --current results/current-summary.json
+   ./scripts/compare-baseline.sh results/current-summary.json \
+     --baseline load-tests/baselines/v1.0.json
    ```
 
 ### Expected Throughput Baselines

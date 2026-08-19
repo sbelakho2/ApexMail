@@ -602,8 +602,8 @@ pub fn control_plane_audit_page() -> String {
         disabled: false,
         autocomplete: None,
         required: false,
-            name: None,
-        };
+        name: None,
+    };
 
     let table = Table {
         caption: Some("Audit logs"),
@@ -1307,9 +1307,7 @@ pub fn web_signup_page_with_plan(csrf_token: &str, selected_plan: Option<&str>) 
     )
 }
 
-pub fn web_forgot_password_page(
-    csrf_token: &str,
-) -> String {
+pub fn web_forgot_password_page(csrf_token: &str) -> String {
     let csrf = csrf_hidden_input(csrf_token);
     let kiwi_html = kiwicaptcha::kiwi_widget_html_default();
     let form_html = format!(
@@ -1599,8 +1597,8 @@ pub fn web_campaigns_page() -> String {
                 selected: false,
             },
         ],
-            name: None,
-        }
+        name: None,
+    }
     .render_html();
     let sort_filter = Select {
         placeholder: "Sort",
@@ -1628,8 +1626,8 @@ pub fn web_campaigns_page() -> String {
                 selected: false,
             },
         ],
-            name: None,
-        }
+        name: None,
+    }
     .render_html();
     let filters = format!(
         "<div class=\"grid w-full gap-3 sm:grid-cols-2 lg:w-auto\">{}{}</div>",
@@ -1812,8 +1810,8 @@ pub fn web_contacts_page() -> String {
                 selected: false,
             },
         ],
-            name: None,
-        }
+        name: None,
+    }
     .render_html();
     let segment_filter = Select {
         placeholder: "List",
@@ -1841,8 +1839,8 @@ pub fn web_contacts_page() -> String {
                 selected: false,
             },
         ],
-            name: None,
-        }
+        name: None,
+    }
     .render_html();
     let filters = format!(
         "<div class=\"grid w-full gap-3 sm:grid-cols-2 lg:w-auto\">{}{}</div>",
@@ -2028,8 +2026,8 @@ pub fn web_lists_page() -> String {
                 selected: false,
             },
         ],
-            name: None,
-        }
+        name: None,
+    }
     .render_html();
     let sort_filter = Select {
         placeholder: "Sort",
@@ -2051,8 +2049,8 @@ pub fn web_lists_page() -> String {
                 selected: false,
             },
         ],
-            name: None,
-        }
+        name: None,
+    }
     .render_html();
     let filters = format!(
         "<div class=\"grid w-full gap-3 sm:grid-cols-2 lg:w-auto\">{}{}</div>",
@@ -2154,7 +2152,8 @@ pub fn web_lists_new_page() -> String {
             autocomplete: None,
             required: true,
             name: Some("name"),
-        }.render_html(),
+        }
+        .render_html(),
         save_button = Button {
             variant: "default",
             size: "default",
@@ -2476,7 +2475,13 @@ pub fn web_events_page() -> String {
         .render_html(),
         loading = render_table_loading_state("Loading events", "api", 4),
         table = table.render_html(),
-        empty = EmptyState { title: "No events recorded", description: Some("Email events will appear once you start sending campaigns"), icon_markup: None, action_label: None }.render_html(),
+        empty = EmptyState {
+            title: "No events recorded",
+            description: Some("Email events will appear once you start sending campaigns"),
+            icon_markup: None,
+            action_label: None
+        }
+        .render_html(),
     )
 }
 
@@ -2549,7 +2554,8 @@ pub fn web_domains_new_page() -> String {
             autocomplete: None,
             required: true,
             name: Some("name"),
-        }.render_html(),
+        }
+        .render_html(),
         save_button = Button {
             variant: "default",
             size: "default",
@@ -2575,7 +2581,8 @@ pub fn web_settings_page() -> String {
     );
     let error_state = AsyncState::Error {
         title: "Settings unavailable",
-        description: "Settings could not be loaded. Retry after verifying account and billing services.",
+        description:
+            "Settings could not be loaded. Retry after verifying account and billing services.",
         retry_label: Some("Retry"),
     }
     .render_html();
@@ -3972,9 +3979,7 @@ pub fn marketing_zola_compare_index_page() -> String {
 
 /// Login page for the web app. Reproduces the form structure, field IDs,
 /// aria labels, and error-message data attributes from the React version.
-pub fn web_login_page(
-    csrf_token: &str,
-) -> String {
+pub fn web_login_page(csrf_token: &str) -> String {
     let csrf = csrf_hidden_input(csrf_token);
     let kiwi_html = kiwicaptcha::kiwi_widget_html_default();
     let form_html = format!(
@@ -4026,9 +4031,7 @@ pub fn web_login_page(
 /// share one visual design, while preserving the control-plane-specific form
 /// action (`/api/auth/login`) and field selectors (`#login-email`,
 /// `#login-password`) from the behavior baseline manifest.
-pub fn control_plane_login_page(
-    csrf_token: &str,
-) -> String {
+pub fn control_plane_login_page(csrf_token: &str) -> String {
     let csrf = csrf_hidden_input(csrf_token);
     let kiwi_html = kiwicaptcha::kiwi_widget_html_default();
     let form_html = format!(
@@ -4254,14 +4257,8 @@ mod tests {
             "authorized personnel only",
         ];
         for page_label in [
-            (
-                "control_plane_login",
-                control_plane_login_page(""),
-            ),
-            (
-                "web_login",
-                web_login_page(""),
-            ),
+            ("control_plane_login", control_plane_login_page("")),
+            ("web_login", web_login_page("")),
         ] {
             let (label, html) = page_label;
             let lower = html.to_lowercase();
@@ -4864,9 +4861,7 @@ mod tests {
             control_plane_root_layout(&control_plane_compliance_page()),
             control_plane_root_layout(&control_plane_alerts_page()),
             control_plane_root_layout(&control_plane_settings_page()),
-            control_plane_root_layout(&control_plane_login_page(
-                "",
-            )),
+            control_plane_root_layout(&control_plane_login_page("")),
             control_plane_root_layout(&control_plane_not_found_page()),
         ];
         for (i, html) in pages.iter().enumerate() {
@@ -4946,18 +4941,9 @@ mod tests {
             ("web_settings_webhooks_page", web_settings_webhooks_page()),
             ("web_settings_profile_page", web_settings_profile_page()),
             ("web_dedicated_ips_page", web_dedicated_ips_page()),
-            (
-                "web_login_page",
-                web_login_page(""),
-            ),
-            (
-                "web_signup_page",
-                web_signup_page(""),
-            ),
-            (
-                "web_forgot_password_page",
-                web_forgot_password_page(""),
-            ),
+            ("web_login_page", web_login_page("")),
+            ("web_signup_page", web_signup_page("")),
+            ("web_forgot_password_page", web_forgot_password_page("")),
             ("web_reset_password_page", web_reset_password_page()),
             ("web_verify_email_page", web_verify_email_page()),
             ("cp_home", control_plane_home_page()),
@@ -4983,10 +4969,7 @@ mod tests {
             ("cp_settings", control_plane_settings_page()),
             ("cp_security", control_plane_security_page()),
             ("cp_audit", control_plane_audit_page()),
-            (
-                "cp_login",
-                control_plane_login_page(""),
-            ),
+            ("cp_login", control_plane_login_page("")),
             ("mkt_home", marketing_home_page()),
             ("mkt_pricing", marketing_pricing_page()),
             ("mkt_calculator", marketing_pricing_calculator_page()),
@@ -5041,5 +5024,3 @@ mod tests {
         }
     }
 }
-
-

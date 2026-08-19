@@ -291,8 +291,7 @@ impl CalendarService {
                 | chrono::Weekday::Thu
                 | chrono::Weekday::Fri
         ) && hour >= self.working_hour_start
-            && (hour < self.working_hour_end
-                || (hour == self.working_hour_end && minute == 0))
+            && (hour < self.working_hour_end || (hour == self.working_hour_end && minute == 0))
     }
 }
 
@@ -305,8 +304,7 @@ impl CalendarService {
 fn is_exclusion_violation(err: &sqlx::Error) -> bool {
     match err {
         sqlx::Error::Database(db) => {
-            db.code().as_deref() == Some("23P01")
-                || db.message().contains("no_overlapping_events")
+            db.code().as_deref() == Some("23P01") || db.message().contains("no_overlapping_events")
         }
         _ => false,
     }
@@ -583,11 +581,16 @@ mod tests {
         let start = date(2020, 1, 6, 10, 0);
         let end = date(2020, 1, 6, 11, 0);
         let result = svc
-            .create_event("tenant-past".into(), "Past".into(), vec![], start, end, None)
+            .create_event(
+                "tenant-past".into(),
+                "Past".into(),
+                vec![],
+                start,
+                end,
+                None,
+            )
             .await;
-        assert!(
-            matches!(result, Err(SalesError::InvalidInput(ref msg)) if msg.contains("future"))
-        );
+        assert!(matches!(result, Err(SalesError::InvalidInput(ref msg)) if msg.contains("future")));
     }
 
     #[tokio::test]

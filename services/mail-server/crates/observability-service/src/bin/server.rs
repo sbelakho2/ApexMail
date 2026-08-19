@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use deadpool_redis::{Config as RedisConfig, Runtime};
 use metrics_exporter_prometheus::PrometheusBuilder;
-use observability_service::alerting::{AlertManager, ComparisonOperator, AlertRule};
+use observability_service::alerting::{AlertManager, AlertRule, ComparisonOperator};
 use observability_service::config::ObservabilityConfig;
 use observability_service::log_aggregator::LogAggregator;
 use observability_service::metrics_collector::MetricsCollector;
@@ -58,7 +58,10 @@ mod tests {
 
     #[test]
     fn keeps_credential_free_urls_untouched() {
-        assert_eq!(redact_url_credentials("redis://127.0.0.1:6379/0"), "redis://127.0.0.1:6379/0");
+        assert_eq!(
+            redact_url_credentials("redis://127.0.0.1:6379/0"),
+            "redis://127.0.0.1:6379/0"
+        );
         assert_eq!(
             redact_url_credentials("http://otel-collector:4317/path"),
             "http://otel-collector:4317/path"

@@ -462,9 +462,7 @@ impl<'a> Select<'a> {
         let name_attrs = self
             .name
             .map(|name| {
-                format!(
-                    " name=\"{name}\" data-field=\"{name}\" data-value=\"{selected_value}\""
-                )
+                format!(" name=\"{name}\" data-field=\"{name}\" data-value=\"{selected_value}\"")
             })
             .unwrap_or_default();
         let listbox_id = "select-listbox";
@@ -2616,9 +2614,9 @@ mod tests {
             error: None,
             disabled: false,
             autocomplete: None,
-        required: false,
-        name: None,
-    };
+            required: false,
+            name: None,
+        };
         let progress = Progress {
             value: 42,
             variant: "default",
@@ -2719,8 +2717,8 @@ mod tests {
             disabled: false,
             autocomplete: None,
             required: false,
-        name: None,
-    }
+            name: None,
+        }
         .render_html();
 
         assert!(html.contains("relative"));
@@ -2745,8 +2743,8 @@ mod tests {
             disabled: true,
             autocomplete: None,
             required: false,
-        name: None,
-    }
+            name: None,
+        }
         .render_html();
 
         assert!(html.contains("h-10 px-3 text-[13px] rounded-md"));
@@ -2763,8 +2761,8 @@ mod tests {
             resize: "none",
             max_length: Some(10),
             show_count: true,
-        name: None,
-    }
+            name: None,
+        }
         .render_html();
 
         assert!(html.contains("resize-none"));
@@ -2947,8 +2945,8 @@ mod tests {
                     selected: true,
                 },
             ],
-        name: None,
-    }
+            name: None,
+        }
         .render_html();
 
         assert!(html.contains("data-open=\"true\""));
@@ -3219,9 +3217,7 @@ mod tests {
         // The separator must live INSIDE the menu container, before the
         // items — not stranded after the closing </div>.
         let menu_pos = html.find("role=\"menu\"").expect("menu role");
-        let separator_pos = html
-            .find("bg-surface-200/50")
-            .expect("separator rendered");
+        let separator_pos = html.find("bg-surface-200/50").expect("separator rendered");
         let item_pos = html.find("role=\"menuitem\"").expect("menu items");
         assert!(
             menu_pos < separator_pos && separator_pos < item_pos,

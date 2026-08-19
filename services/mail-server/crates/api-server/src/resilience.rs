@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{OwnedSemaphorePermit, RwLock, Semaphore};
-use tracing::warn;
+use tracing::{error, warn};
 
 // ─── Circuit Breaker ─────────────────────────────────────────────
 
@@ -284,6 +284,14 @@ pub enum BulkheadError {
         /// Bulkhead name.
         name: &'static str,
     },
+    /// The wrapped closure failed. The inner error is not `Send`-safe to
+    /// propagate generically, so it is dropped and logged instead of
+    /// panicking the process.
+    #[error("bulkhead {name} inner operation failed")]
+    Inner {
+        /// Bulkhead name.
+        name: &'static str,
+    },
 }
 
 /// A guard that releases a bulkhead semaphore permit when dropped.
@@ -356,7 +364,17 @@ impl Bulkhead {
         Fut: std::future::Future<Output = Result<T, E>>,
     {
         let _guard = self.acquire().await?;
-        f().await.map_err(|_| unreachable!())
+        match f().await {
+            Ok(value) => Ok(value),
+            Err(_error) => {
+                error!(
+                    name = self.name,
+                    error_type = std::any::type_name::<E>(),
+                    "bulkhead inner operation failed"
+                );
+                Err(BulkheadError::Inner { name: self.name })
+            }
+        }
     }
 }
 

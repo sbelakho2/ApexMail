@@ -488,7 +488,7 @@ pub async fn get_quota_for_tenant(
 }
 
 /// Calculate overage cost in cents.
-/// `$0.40 / 1 000 emails = 0.04 cents / email`
+/// `€0.40 / 1 000 emails = 0.04 cents / email`
 pub fn calculate_overage_cost(emails_sent: i64, email_limit: i64) -> i64 {
     if email_limit < 0 {
         return 0; // unlimited

@@ -311,7 +311,8 @@ impl EmailProcessor {
                                     recipient = %job.to,
                                     "Suppression check failed — requeueing job instead of suppressing"
                                 );
-                                if let Err(e) = self.requeue_job(&job, SUPPRESSION_CHECK_FAILED).await
+                                if let Err(e) =
+                                    self.requeue_job(&job, SUPPRESSION_CHECK_FAILED).await
                                 {
                                     error!(
                                         job_id = %job.id,
@@ -412,10 +413,7 @@ impl EmailProcessor {
 
         // FIX-8: expand one queued row into one send unit PER recipient so
         // multi-recipient messages no longer drop recipients 2..N.
-        Ok(rows
-            .into_iter()
-            .flat_map(queued_row_to_jobs)
-            .collect())
+        Ok(rows.into_iter().flat_map(queued_row_to_jobs).collect())
     }
 
     /// Batch suppression check for efficiency.
@@ -627,11 +625,7 @@ impl EmailProcessor {
     /// atomic `INCR` for cross-worker correctness. The first worker to increment
     /// (return value == 1) also sets the TTL via `EXPIRE` (race-safe; extra EXPIRE
     /// calls are harmless). All workers share a single counter per domain per day.
-    async fn check_warmup_limit(
-        &self,
-        job: &EmailJob,
-        domain: &Domain,
-    ) -> ProcessorResult<bool> {
+    async fn check_warmup_limit(&self, job: &EmailJob, domain: &Domain) -> ProcessorResult<bool> {
         if !domain.warmup_enabled {
             return Ok(true);
         }
@@ -735,7 +729,9 @@ impl EmailProcessor {
             .rsplit_once('@')
             .map(|(_, domain)| domain.trim().trim_end_matches('.'))
             .filter(|domain| !domain.is_empty())
-            .ok_or_else(|| ProcessorError::Job("queued message has an invalid sender address".into()))?;
+            .ok_or_else(|| {
+                ProcessorError::Job("queued message has an invalid sender address".into())
+            })?;
         if !sender_domain.eq_ignore_ascii_case(&domain.domain) {
             return Err(ProcessorError::Job(
                 "queued sender address does not match its authorized domain".into(),
@@ -1086,7 +1082,10 @@ impl EmailProcessor {
             ON CONFLICT (tenant_id, email) DO NOTHING
             "#,
         )
-        .bind(format!("sup_{}", &uuid::Uuid::new_v4().simple().to_string()[..18]))
+        .bind(format!(
+            "sup_{}",
+            &uuid::Uuid::new_v4().simple().to_string()[..18]
+        ))
         .bind(&job.tenant_id)
         .bind(&job.to)
         .execute(&self.db)
@@ -1253,7 +1252,6 @@ impl EmailProcessor {
             }
         }
     }
-
 }
 
 fn smtp_dkim_config_for_domain(domain: &Domain) -> ProcessorResult<DkimConfig> {
@@ -1261,21 +1259,20 @@ fn smtp_dkim_config_for_domain(domain: &Domain) -> ProcessorResult<DkimConfig> {
         .dkim_selector
         .as_deref()
         .ok_or_else(|| ProcessorError::Dkim("verified domain is missing a DKIM selector".into()))?;
-    let encrypted_private_key = domain
-        .dkim_private_key
-        .as_deref()
-        .ok_or_else(|| ProcessorError::Dkim("verified domain is missing a DKIM private key".into()))?;
-    let public_key = domain
-        .dkim_public_key
-        .as_deref()
-        .ok_or_else(|| ProcessorError::Dkim("verified domain is missing a DKIM public key".into()))?;
+    let encrypted_private_key = domain.dkim_private_key.as_deref().ok_or_else(|| {
+        ProcessorError::Dkim("verified domain is missing a DKIM private key".into())
+    })?;
+    let public_key = domain.dkim_public_key.as_deref().ok_or_else(|| {
+        ProcessorError::Dkim("verified domain is missing a DKIM public key".into())
+    })?;
     let aad = dkim_private_key_aad(&domain.tenant_id, &domain.id);
     let private_key = decrypt_dkim_private_key(encrypted_private_key, &aad).map_err(|error| {
         ProcessorError::Dkim(format!("unable to decrypt the domain DKIM key: {error}"))
     })?;
-    let derived_public_key = public_key_base64_from_private_key_pem(&private_key).map_err(|error| {
-        ProcessorError::Dkim(format!("domain DKIM private key is invalid: {error}"))
-    })?;
+    let derived_public_key =
+        public_key_base64_from_private_key_pem(&private_key).map_err(|error| {
+            ProcessorError::Dkim(format!("domain DKIM private key is invalid: {error}"))
+        })?;
     if !dkim_public_keys_match(public_key, &derived_public_key) {
         return Err(ProcessorError::Dkim(
             "domain DKIM public and private key material does not match".into(),
@@ -1907,7 +1904,9 @@ mod tests {
 
         let config = smtp_dkim_config_for_domain(&domain).unwrap();
         assert_eq!(config.selector, "am-test");
-        assert!(config.private_key.starts_with("-----BEGIN PRIVATE KEY-----"));
+        assert!(config
+            .private_key
+            .starts_with("-----BEGIN PRIVATE KEY-----"));
 
         domain.dkim_public_key = Some("not-the-same-key".into());
         assert!(matches!(
@@ -1920,10 +1919,7 @@ mod tests {
     // FIX-8: multi-recipient job expansion
     // ---------------------------------------------------------------------------
 
-    fn queued_row(
-        to: &str,
-        to_addresses: Option<Vec<String>>,
-    ) -> QueuedEmailRow {
+    fn queued_row(to: &str, to_addresses: Option<Vec<String>>) -> QueuedEmailRow {
         QueuedEmailRow {
             id: "job-1".into(),
             message_id: "msg-1".into(),
@@ -1973,10 +1969,7 @@ mod tests {
     #[test]
     fn test_queued_row_single_recipient_single_job() {
         // 1-recipient message → exactly 1 send (no regression).
-        let row = queued_row(
-            "solo@example.com",
-            Some(vec!["solo@example.com".into()]),
-        );
+        let row = queued_row("solo@example.com", Some(vec!["solo@example.com".into()]));
         let jobs = queued_row_to_jobs(row);
         assert_eq!(jobs.len(), 1);
         assert_eq!(jobs[0].to, "solo@example.com");

@@ -18,8 +18,8 @@ use tracing_subscriber::EnvFilter;
 
 use worker_processors::{
     common::{
-        AnalyticsConfig, DkimConfig, EmailConfig, ProcessorConfig, ReplyHandlerConfig, SmtpConfig,
-        SesConfig, TransportType, WebhookConfig,
+        AnalyticsConfig, DkimConfig, EmailConfig, ProcessorConfig, ReplyHandlerConfig, SesConfig,
+        SmtpConfig, TransportType, WebhookConfig,
     },
     AnalyticsProcessor, EmailProcessor, ReplyHandler, WebhookProcessor,
 };

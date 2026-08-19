@@ -1,9 +1,8 @@
 +++
-title = "Precios | API de Email Transaccional y SMTP | ApexMail"
-template = "pricing.html"
-description = "Precios de ApexMail: Gratis (30.000 emails/mes), Starter ($25/mes), Pro ($65/mes), Growth ($150/mes), Scale ($350/mes), Enterprise ($3.000/mes). Opciones de implementación orientadas a la UE/EEE; la facturación anual equivale a diez pagos mensuales."
+title = "ApexMail — API de Email para Desarrolladores"
+template = "home.html"
+description = "API de email para equipos regulados con flujos orientados al RGPD, seguimiento de entregas, planes auditables y opciones Enterprise de despliegue privado."
 
 [extra]
 og_image = "/images/og-image.svg"
-pricing_as_of = "2026-07-29"
 +++

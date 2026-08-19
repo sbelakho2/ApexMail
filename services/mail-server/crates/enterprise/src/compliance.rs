@@ -317,7 +317,6 @@ impl ComplianceService {
         limit: i64,
         offset: i64,
     ) -> Result<ApiResult<Vec<AuditLogEntry>>, String> {
-
         // H-01: Use CASE WHEN / COALESCE patterns instead of dynamic SQL via format!()
         // to prevent SQL injection. All parameters remain strongly typed and bound via sqlx.
         let query = sqlx::query_as::<_, AuditLogEntryRow>(

@@ -209,8 +209,7 @@ pub fn truncate_payload(payload: &serde_json::Value, max_bytes: usize) -> serde_
                             // reply_handler::classifier).
                             let truncated: String =
                                 s.chars().take(threshold.min(s.len() / 2)).collect();
-                            let truncated =
-                                format!("{}{}", truncated, TRUNCATION_NOTICE);
+                            let truncated = format!("{}{}", truncated, TRUNCATION_NOTICE);
                             serde_json::Value::String(truncated)
                         } else {
                             val.clone()

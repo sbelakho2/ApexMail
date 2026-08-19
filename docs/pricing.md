@@ -7,7 +7,7 @@ the active `plans` records, and verified Stripe webhooks. See
 [the authority map](pricing-authority.md) for the boundary between runtime and
 presentation data.
 
-All published prices below are USD. A selected plan during registration is only
+All published prices below are EUR. A selected plan during registration is only
 an intent: new workspaces start on Free, and paid access begins only after
 Stripe confirms the subscription through a verified webhook.
 
@@ -15,12 +15,12 @@ Stripe confirms the subscription through a verified webhook.
 
 | Plan ID | Plan | Monthly | Annual | Emails/month | API calls/month | Domains | Team members | Event retention | Dedicated IPs |
 |---|---|---:|---:|---:|---:|---:|---:|---:|---|
-| `free` | Free | $0 | $0 | 30,000 | 300,000 | 1 | 1 | 7 days | — |
-| `starter` | Starter | $25 | $250/year | 50,000 | 500,000 | 5 | 5 | 30 days | — |
-| `pro` | Pro | $65 | $650/year | 150,000 | 2,000,000 | 25 | 10 | 60 days | Add-on eligible |
-| `growth` | Growth | $150 | $1,500/year | 500,000 | 5,000,000 | 100 | 25 | 90 days | 1 included |
-| `scale` | Scale | $350 | $3,500/year | 2,000,000 | 20,000,000 | Unlimited | 50 | 365 days | 3 included |
-| `enterprise` | Enterprise | $3,000 | $30,000/year | 5,000,000 | Unlimited | Unlimited | Unlimited | 730 days | 10 included |
+| `free` | Free | €0 | €0 | 30,000 | 300,000 | 1 | 1 | 7 days | — |
+| `starter` | Starter | €25 | €250/year | 50,000 | 500,000 | 5 | 5 | 30 days | — |
+| `pro` | Pro | €65 | €650/year | 150,000 | 2,000,000 | 25 | 10 | 60 days | Add-on eligible |
+| `growth` | Growth | €150 | €1,500/year | 500,000 | 5,000,000 | 100 | 25 | 90 days | 1 included |
+| `scale` | Scale | €350 | €3,500/year | 2,000,000 | 20,000,000 | Unlimited | 50 | 365 days | 3 included |
+| `enterprise` | Enterprise | €3,000 | €30,000/year | 5,000,000 | Unlimited | Unlimited | Unlimited | 730 days | 10 included |
 
 Annual billing is $10 \times$ the monthly price: two months free, or roughly a
 $17\%$ discount compared with twelve monthly payments.
@@ -54,26 +54,26 @@ confirmation and the required agreement.
 
 ## Overage and PAYG rates
 
-The billing-service subscription overage calculation is $0.40 per 1,000 extra
+The billing-service subscription overage calculation is €0.40 per 1,000 extra
 emails, rounded up to the nearest cent where overage applies. No separate
 subscription-plan API-call overage price is defined by the runtime catalog.
 
 PAYG pricing is metered independently of subscription plans:
 
-| Email volume tier | USD per email |
+| Email volume tier | EUR per email |
 |---|---:|
-| 0–10,000 | $0.0010 |
-| 10,001–100,000 | $0.0008 |
-| 100,001–1,000,000 | $0.0005 |
-| Over 1,000,000 | $0.0003 |
+| 0–10,000 | €0.0010 |
+| 10,001–100,000 | €0.0008 |
+| 100,001–1,000,000 | €0.0005 |
+| Over 1,000,000 | €0.0003 |
 
 PAYG API calls include the first 100,000 per month; subsequent API usage is
-$0.10 per 1,000 calls.
+€0.10 per 1,000 calls.
 
 ## Dedicated IPs
 
 Dedicated IPs are add-on eligible from Pro upward. The public calculator uses
-$30/month per additional IP; Growth includes one, Scale includes three, and
+€30/month per additional IP; Growth includes one, Scale includes three, and
 Enterprise includes ten. Provisioning remains subject to operational and abuse
 controls.
 

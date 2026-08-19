@@ -97,12 +97,13 @@ async fn create_campaign(
     // Verify the referenced template exists and belongs to this tenant before
     // creating the campaign (prevents cross-tenant template_id references).
     if let Some(ref tid) = template_id {
-        let exists: Option<bool> =
-            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM templates WHERE id = $1 AND tenant_id = $2)")
-                .bind(tid)
-                .bind(&auth.tenant_id)
-                .fetch_one(&state.db)
-                .await?;
+        let exists: Option<bool> = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM templates WHERE id = $1 AND tenant_id = $2)",
+        )
+        .bind(tid)
+        .bind(&auth.tenant_id)
+        .fetch_one(&state.db)
+        .await?;
         if !exists.unwrap_or(false) {
             return Err(ApiError::NotFound("template not found".into()));
         }

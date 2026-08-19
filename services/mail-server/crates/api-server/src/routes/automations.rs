@@ -131,11 +131,12 @@ async fn list_automations(
     let limit = clamp_limit(params.limit, 100);
     let offset = params.cursor.unwrap_or(params.offset).clamp(0, 100_000);
 
-    let total: i64 =
-        sqlx::query_scalar::<_, i64>("SELECT COUNT(*)::bigint FROM automations WHERE tenant_id = $1")
-            .bind(&auth.tenant_id)
-            .fetch_one(&state.db)
-            .await?;
+    let total: i64 = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*)::bigint FROM automations WHERE tenant_id = $1",
+    )
+    .bind(&auth.tenant_id)
+    .fetch_one(&state.db)
+    .await?;
 
     // Fetch limit + 1 rows so we can detect whether another page exists.
     let rows = sqlx::query_as::<_, AutomationRow>(
@@ -154,11 +155,7 @@ async fn list_automations(
         details.truncate(limit as usize);
     }
 
-    let next_cursor = if has_more {
-        Some(offset + limit)
-    } else {
-        None
-    };
+    let next_cursor = if has_more { Some(offset + limit) } else { None };
 
     // Wrap in the standard {data, error, meta} envelope with pagination meta.
     Ok(Json(serde_json::json!({

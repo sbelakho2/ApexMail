@@ -1,6 +1,9 @@
 use axum::{
     extract::{DefaultBodyLimit, Path, Query, State},
-    http::{header::{AUTHORIZATION, CONTENT_TYPE}, HeaderMap, StatusCode},
+    http::{
+        header::{AUTHORIZATION, CONTENT_TYPE},
+        HeaderMap, StatusCode,
+    },
     middleware,
     response::{Html, IntoResponse},
     routing::{delete, get, post, put},
@@ -1335,7 +1338,10 @@ async fn sso_configure(
     match state.sso.configure(body).await {
         Ok(r) => match r.data {
             Some(config) => ok_json(SSOPublicConfig::from(config)),
-            None => err_json(StatusCode::INTERNAL_SERVER_ERROR, "SSO configuration failed"),
+            None => err_json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "SSO configuration failed",
+            ),
         },
         Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, &e),
     }

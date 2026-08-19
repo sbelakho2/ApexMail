@@ -253,7 +253,8 @@ async fn resolve_batch_domain_ids(
         }
     }
 
-    let mut map: std::collections::HashMap<String, Option<String>> = std::collections::HashMap::new();
+    let mut map: std::collections::HashMap<String, Option<String>> =
+        std::collections::HashMap::new();
     if unique.is_empty() {
         return Ok(map);
     }
@@ -694,7 +695,10 @@ async fn send_batch(
         })?;
 
     for (i, msg) in body.messages.iter().enumerate() {
-        if let Err(e) = validate_send_with_domain_cache(msg, &state.db, &auth.tenant_id, Some(&domain_ids)).await {
+        if let Err(e) =
+            validate_send_with_domain_cache(msg, &state.db, &auth.tenant_id, Some(&domain_ids))
+                .await
+        {
             rejected += 1;
             results.push(BatchResult {
                 index: i,
@@ -726,7 +730,16 @@ async fn send_batch(
         // Batch items carry no idempotency key (and a NULL key can never
         // conflict), so the ON CONFLICT DO NOTHING path cannot fire here —
         // Ok(None) is handled defensively below all the same.
-        match insert_message_and_queue(&mut tx, &auth.tenant_id, msg, &msg.metadata, None, domain_id).await {
+        match insert_message_and_queue(
+            &mut tx,
+            &auth.tenant_id,
+            msg,
+            &msg.metadata,
+            None,
+            domain_id,
+        )
+        .await
+        {
             Ok(Some(persisted)) => {
                 accepted += 1;
                 committed_quota_reservations.push(quota_reservation);

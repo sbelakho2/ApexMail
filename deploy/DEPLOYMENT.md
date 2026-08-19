@@ -1,8 +1,8 @@
 # ApexMail Deployment — Canonical Path
 
 This document defines the **single supported deployment model** for ApexMail.
-There is exactly one path; alternatives live under `deploy/legacy-systemd/` and
-`deploy/legacy-k8s/` and are explicitly **superseded**.
+There is exactly one path; older bare-metal (systemd) and Kubernetes models are
+superseded and do not exist in this repository anymore.
 
 ## TL;DR
 

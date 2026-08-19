@@ -141,4 +141,3 @@ fn test_stress_pattern_rules() {
     let large_text = "clean ".repeat(10_000);
     let _ = ruleset.evaluate(&large_text);
 }
-

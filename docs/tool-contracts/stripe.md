@@ -11,16 +11,16 @@ The active ApexMail catalog is defined by
 and persisted in the `plans` table. Each active plan may have a monthly and/or
 annual Stripe price ID.
 
-All prices are USD:
+All prices are EUR:
 
 | Plan | Monthly | Annual | Public generic Checkout |
 |---|---:|---:|---|
-| Free | $0 | $0 | No — initial entitlement |
-| Starter | $25 | $250/year | Yes |
-| Pro | $65 | $650/year | Yes |
-| Growth | $150 | $1,500/year | Yes |
-| Scale | $350 | $3,500/year | Yes |
-| Enterprise | $3,000 | $30,000/year | No — sales and contract flow |
+| Free | €0 | €0 | No — initial entitlement |
+| Starter | €25 | €250/year | Yes |
+| Pro | €65 | €650/year | Yes |
+| Growth | €150 | €1,500/year | Yes |
+| Scale | €350 | €3,500/year | Yes |
+| Enterprise | €3,000 | €30,000/year | No — sales and contract flow |
 | PAYG | Usage priced | Usage priced | No — approved billing setup |
 
 The public Checkout endpoint accepts a submitted Stripe price only when it

@@ -271,7 +271,10 @@ impl ReplyHandler {
                 )
                 // suppressions.id is VARCHAR(26), so use a short random
                 // suffix ("sup_" + 18 hex chars = 22 chars).
-                .bind(format!("sup_{}", &uuid::Uuid::new_v4().simple().to_string()[..18]))
+                .bind(format!(
+                    "sup_{}",
+                    &uuid::Uuid::new_v4().simple().to_string()[..18]
+                ))
                 .bind(tenant_id)
                 .bind(&msg.from_email)
                 .bind("not_interested")
@@ -293,7 +296,10 @@ impl ReplyHandler {
                     ON CONFLICT (tenant_id, email) DO UPDATE SET reason = 'unsubscribe'
                     "#,
                 )
-                .bind(format!("sup_{}", &uuid::Uuid::new_v4().simple().to_string()[..18]))
+                .bind(format!(
+                    "sup_{}",
+                    &uuid::Uuid::new_v4().simple().to_string()[..18]
+                ))
                 .bind(tenant_id)
                 .bind(&msg.from_email)
                 .execute(&self.db)

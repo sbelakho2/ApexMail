@@ -178,7 +178,8 @@ impl BounceServer {
             } else if cmd.starts_with("RCPT TO") {
                 let addr = extract_addr(&line);
                 if !mail_from_seen {
-                    let _ = write_line(&mut stream, "503 Bad sequence (send MAIL FROM first)\r\n").await;
+                    let _ = write_line(&mut stream, "503 Bad sequence (send MAIL FROM first)\r\n")
+                        .await;
                 } else if !bounce_rcpt_ok(&addr, &self.config.verp_domain) {
                     let _ = write_line(&mut stream, "550 Invalid bounce recipient\r\n").await;
                 } else {
@@ -192,13 +193,18 @@ impl BounceServer {
                 }
                 // Per-connection and per-IP message budgets (C3/H10 hardening).
                 if msgs_this_conn >= self.config.max_messages_per_connection {
-                    let _ = write_line(&mut stream, "452 Too many messages from this connection\r\n").await;
+                    let _ = write_line(
+                        &mut stream,
+                        "452 Too many messages from this connection\r\n",
+                    )
+                    .await;
                     continue;
                 }
                 let ip_msgs = self.per_ip_msgs.get(&peer_ip).unwrap_or(0) + 1;
                 self.per_ip_msgs.insert(peer_ip, ip_msgs);
                 if ip_msgs > u64::from(self.config.max_messages_per_ip_per_hour) {
-                    let _ = write_line(&mut stream, "452 Rate limit exceeded for your IP\r\n").await;
+                    let _ =
+                        write_line(&mut stream, "452 Rate limit exceeded for your IP\r\n").await;
                     continue;
                 }
 
@@ -235,7 +241,11 @@ impl BounceServer {
                                 break;
                             }
                             if !too_large
-                                && !append_data_line(&mut message, &line, self.config.max_message_size)
+                                && !append_data_line(
+                                    &mut message,
+                                    &line,
+                                    self.config.max_message_size,
+                                )
                             {
                                 too_large = true;
                                 // Drain the remainder without buffering it.
@@ -271,7 +281,11 @@ impl BounceServer {
                     // forever (and never accept the partial payload).
                     let _ = write_line(&mut stream, "421 4.4.2 Data timeout exceeded\r\n").await;
                 } else if too_large {
-                    let _ = write_line(&mut stream, "552 5.3.4 Message size exceeds fixed limit\r\n").await;
+                    let _ = write_line(
+                        &mut stream,
+                        "552 5.3.4 Message size exceeds fixed limit\r\n",
+                    )
+                    .await;
                 } else if terminated {
                     match self.process_bounce(&rcpt_to, &message).await {
                         Ok(id) => {
@@ -405,7 +419,9 @@ impl BounceServer {
         };
 
         let suppression_recipient = match (&original_recipient, queued_recipient) {
-            (Some(verp_recip), queued_recip) if *verp_recip == queued_recip => Some(verp_recip.clone()),
+            (Some(verp_recip), queued_recip) if *verp_recip == queued_recip => {
+                Some(verp_recip.clone())
+            }
             (Some(verp_recip), queued_recip) => {
                 warn!(
                     verp_recipient = %verp_recip,
@@ -689,7 +705,10 @@ fn is_valid_email_addr(addr: &str) -> bool {
     if addr.len() > 320 || addr.is_empty() {
         return false;
     }
-    if addr.bytes().any(|b| b.is_ascii_control() || b.is_ascii_whitespace()) {
+    if addr
+        .bytes()
+        .any(|b| b.is_ascii_control() || b.is_ascii_whitespace())
+    {
         return false;
     }
     // Exactly one '@' with a non-empty local part and domain part.
@@ -706,7 +725,11 @@ fn is_valid_email_addr(addr: &str) -> bool {
 /// the message past `max_size` — the caller must then reject with `552` and
 /// drain the remainder (H10).
 pub(crate) fn append_data_line(message: &mut BytesMut, line: &str, max_size: usize) -> bool {
-    let body = if line.starts_with("..") { &line[1..] } else { line };
+    let body = if line.starts_with("..") {
+        &line[1..]
+    } else {
+        line
+    };
     if message.len().saturating_add(body.len()) > max_size {
         return false;
     }
@@ -979,13 +1002,19 @@ mod tests {
     #[test]
     fn test_extract_addr_null_sender_yields_empty() {
         assert_eq!(extract_addr("MAIL FROM:<>\r\n"), "");
-        assert_eq!(extract_addr("MAIL FROM:<user@bounces.apexmail.ee>\r\n"), "user@bounces.apexmail.ee");
+        assert_eq!(
+            extract_addr("MAIL FROM:<user@bounces.apexmail.ee>\r\n"),
+            "user@bounces.apexmail.ee"
+        );
     }
 
     #[test]
     fn test_extract_addr_closing_bracket_before_opening_does_not_panic() {
         // '>' before '<' used to slice out of bounds and panic the session.
-        assert_eq!(extract_addr("MAIL FROM:x> <user@example.com>\r\n"), "user@example.com");
+        assert_eq!(
+            extract_addr("MAIL FROM:x> <user@example.com>\r\n"),
+            "user@example.com"
+        );
         // Unterminated path: falls back to the last whitespace token
         // (trailing CRLF is split off as whitespace, the '<' stays attached).
         assert_eq!(
@@ -1028,10 +1057,7 @@ mod tests {
             "<mailer-daemon@bounces.apexmail.ee>",
             "bounces.apexmail.ee"
         ));
-        assert!(!bounce_rcpt_ok(
-            "<bounce@evil.com>",
-            "bounces.apexmail.ee"
-        ));
+        assert!(!bounce_rcpt_ok("<bounce@evil.com>", "bounces.apexmail.ee"));
         assert!(!bounce_rcpt_ok(
             "<mailer-daemon@evil.com>",
             "bounces.apexmail.ee"
@@ -1062,8 +1088,12 @@ mod tests {
         assert!(!is_valid_email_addr(""));
         assert!(!is_valid_email_addr("not-an-email"));
         assert!(!is_valid_email_addr("a b@example.com"));
-        assert!(!is_valid_email_addr("user@example.com\r\nBcc: victim@evil.com"));
-        assert!(!is_valid_email_addr("user@example.com\nBcc: victim@evil.com"));
+        assert!(!is_valid_email_addr(
+            "user@example.com\r\nBcc: victim@evil.com"
+        ));
+        assert!(!is_valid_email_addr(
+            "user@example.com\nBcc: victim@evil.com"
+        ));
         assert!(!is_valid_email_addr("@example.com"));
         assert!(!is_valid_email_addr("user@"));
     }

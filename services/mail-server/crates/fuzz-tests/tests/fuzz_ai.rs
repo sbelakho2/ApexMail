@@ -74,4 +74,3 @@ fn fuzz_subject_score_bounded() {
     assert!(optimizer.score_subject_line("") <= 100);
     assert!(optimizer.score_subject_line(&"x".repeat(10_000)) <= 100);
 }
-

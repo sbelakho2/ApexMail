@@ -99,7 +99,10 @@ pub async fn idempotency_middleware(
         ClaimOutcome::RedisUnavailable => {
             // Best-effort only: proceed without a claim, matching the
             // middleware's behaviour when Redis is down for the cache.
-            tracing::warn!(cache_key, "idempotency claim unavailable; proceeding unclaimed");
+            tracing::warn!(
+                cache_key,
+                "idempotency claim unavailable; proceeding unclaimed"
+            );
             false
         }
         ClaimOutcome::AlreadyInFlight => {
@@ -242,11 +245,7 @@ async fn store_response(
     let cached_headers: Vec<(String, String)> = parts
         .headers
         .iter()
-        .filter_map(|(k, v)| {
-            v.to_str()
-                .ok()
-                .map(|val| (k.to_string(), val.to_string()))
-        })
+        .filter_map(|(k, v)| v.to_str().ok().map(|val| (k.to_string(), val.to_string())))
         .collect();
 
     // Tee the body: forward every chunk to the client unchanged while
@@ -254,8 +253,7 @@ async fn store_response(
     // A body larger than the cache limit is streamed through UNcached —
     // a successful response must never be replaced with an error merely
     // because it is too big to cache.
-    let (mut tx, rx) =
-        futures::channel::mpsc::channel::<Result<bytes::Bytes, std::io::Error>>(16);
+    let (mut tx, rx) = futures::channel::mpsc::channel::<Result<bytes::Bytes, std::io::Error>>(16);
 
     let store_state = state.clone();
     let store_key = cache_key.to_string();
@@ -290,9 +288,7 @@ async fn store_response(
                 }
                 Err(body_error) => {
                     cacheable = false;
-                    let _ = tx
-                        .send(Err(std::io::Error::other(body_error)))
-                        .await;
+                    let _ = tx.send(Err(std::io::Error::other(body_error))).await;
                     break;
                 }
             }
@@ -307,10 +303,7 @@ async fn store_response(
             let cached = CachedResponse {
                 status: cached_status,
                 headers: cached_headers,
-                body: base64::Engine::encode(
-                    &base64::engine::general_purpose::STANDARD,
-                    &buffer,
-                ),
+                body: base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &buffer),
                 principal_id,
                 user_id: current_user.as_ref().and_then(|u| u.user_id.clone()),
             };

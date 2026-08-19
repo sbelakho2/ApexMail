@@ -1,5 +1,5 @@
-use std::sync::Arc;
 use metrics_exporter_prometheus::PrometheusBuilder;
+use std::sync::Arc;
 use tokio::signal;
 use tracing::info;
 

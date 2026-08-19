@@ -2375,7 +2375,10 @@ mod tests {
         )
         .expect("prepare deadletter");
 
-        assert_eq!(prepared.retry_at_ms, None, "truncated bodies must not replay");
+        assert_eq!(
+            prepared.retry_at_ms, None,
+            "truncated bodies must not replay"
+        );
 
         let entry: DeadletterEntry = serde_json::from_str(&prepared.payload).expect("payload json");
         let stored_body = entry.body.as_deref().expect("body stored");
@@ -2407,7 +2410,10 @@ mod tests {
         mac.update(timestamp.as_bytes());
         mac.update(b".");
         mac.update(payload);
-        let signature = format!("t={timestamp},v1={}", hex::encode(mac.finalize().into_bytes()));
+        let signature = format!(
+            "t={timestamp},v1={}",
+            hex::encode(mac.finalize().into_bytes())
+        );
 
         assert!(verify_signature_hmac(secret, payload, &signature).is_ok());
 

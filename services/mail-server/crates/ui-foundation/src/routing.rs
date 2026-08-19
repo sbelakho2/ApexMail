@@ -184,11 +184,7 @@ mod tests {
         // these — they previously rendered for anonymous visitors).
         for route in surface_routes("web") {
             if route.path.starts_with("/inbox-placement") {
-                assert!(
-                    route.auth_required,
-                    "web {} must require auth",
-                    route.path
-                );
+                assert!(route.auth_required, "web {} must require auth", route.path);
             }
         }
         assert_eq!(
@@ -209,7 +205,10 @@ mod tests {
                 .into_iter()
                 .find(|route| route.path == path)
                 .unwrap_or_else(|| panic!("control-plane {path} missing from manifest"));
-            assert!(route.auth_required, "control-plane {path} must require auth");
+            assert!(
+                route.auth_required,
+                "control-plane {path} must require auth"
+            );
         }
     }
 }

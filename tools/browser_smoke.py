@@ -193,7 +193,7 @@ ROUTE_CHECKS = (
         route_id="control-plane-billing-plans",
         group="control-plane",
         path="/billing/plans",
-        expected_fragments=("Plans", "No plan rows loaded", "$3,000"),
+        expected_fragments=("Plans", "No plan rows loaded", "€3,000"),
         host_override="localhost",
     ),
     RouteCheck(

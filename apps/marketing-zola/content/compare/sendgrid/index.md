@@ -8,11 +8,12 @@ competitor = "SendGrid"
 competitor_slug = "sendgrid"
 competitor_name = "SendGrid"
 competitor_description = "Twilio SendGrid is a popular email delivery platform owned by Twilio."
-pricing_as_of = "2026-07-30"
-verification_date = "2026-07-30"
+pricing_as_of = "2026-08-19"
+verification_date = "2026-08-19"
+currency_note = "Prices are shown in EUR. Where a provider publishes only USD, the EUR figure is converted at 1 USD = €0.92 (reference rate, 2026-08-19) and the provider's published USD price is shown in parentheses. Exclude applicable taxes."
 og_image = "/images/og-image.svg"
 # Feature comparison counts — update when capabilities change
-apexmail_wins = 0
+apexmail_wins = 5
 competitor_wins = 0
 verdict_title = "Why Choose ApexMail Over SendGrid?"
 verdict_points = [
@@ -30,7 +31,7 @@ verdict_points = [
 comparison_sections = [
   { title = "DELIVERABILITY", rows = [
     { feature = "Delivery Rate", apex = '<span class="text-brand-600 font-semibold">High</span>', comp = '<span class="text-surface-600">High</span>', winner = "none" },
-    { feature = "Dedicated IP", apex = '<span class="text-brand-600 font-semibold">Approved add-on on Pro; 1 included on Growth, 3 on Scale</span>', comp = '<span class="text-surface-600">Pro+ ($89.95/mo)</span>', winner = "none" },
+    { feature = "Dedicated IP", apex = '<span class="text-brand-600 font-semibold">Approved add-on on Pro; 1 included on Growth, 3 on Scale</span>', comp = '<span class="text-surface-600">Pro: €82.75 (US$89.95)/mo; dedicated IPs on request</span>', winner = "none" },
     { feature = "IP Warming", apex = '<span class="text-brand-600 font-semibold">Automatic</span>', comp = '<span class="text-surface-600">Automatic</span>', winner = "tie" },
     { feature = "DKIM Rotation", apex = '<span class="text-brand-600 font-semibold">Configurable automatic</span>', comp = '<span class="text-surface-600">Manual</span>', winner = "none" },
     { feature = "Reputation Circuit Breaker", apex = '<span class="text-brand-600">✓</span>', comp = '<span class="text-surface-400">✗</span>', winner = "none" },
@@ -45,14 +46,14 @@ comparison_sections = [
   ]},
   { title = "DEVELOPER EXPERIENCE", rows = [
     { feature = "Time to First Email", apex = '<span class="text-brand-600 font-semibold"><10 seconds</span>', comp = '<span class="text-surface-600">~5 minutes</span>', winner = "none" },
-    { feature = "Official SDK Coverage", apex = '<span class="text-surface-600">5 SDKs in development (not yet published)</span>', comp = '<span class="text-surface-600">Seven SDKs</span>', winner = "apexmail" },
+    { feature = "Official SDK Coverage", apex = '<span class="text-brand-600 font-semibold">Six published SDKs</span>', comp = '<span class="text-surface-600">Seven SDKs</span>', winner = "none" },
     { feature = "Idempotency Keys", apex = '<span class="text-brand-600">✓</span>', comp = '<span class="text-surface-400">✗</span>', winner = "none" },
     { feature = "Webhook Signatures", apex = '<span class="text-brand-600">✓</span>', comp = '<span class="text-brand-600">✓</span>', winner = "none" },
     { feature = "Sandbox Mode", apex = '<span class="text-brand-600">✓</span>', comp = '<span class="text-brand-600">✓</span>', winner = "none" }
   ]},
   { title = "PRICING", rows = [
     { feature = "Free Tier", apex = '<span class="text-brand-600 font-semibold">30,000 emails/mo</span>', comp = '<span class="text-surface-600">100 emails/day</span>', winner = "none" },
-    { feature = "100K emails/mo", apex = '<span class="text-brand-600 font-semibold">$65 (Pro: 150K)</span>', comp = '<span class="text-surface-600">$89.95 (Essentials from $19.95)</span>', winner = "apexmail" },
+    { feature = "100K emails/mo", apex = '<span class="text-brand-600 font-semibold">€65 (Pro: 150K)</span>', comp = '<span class="text-surface-600">€82.75 (US$89.95) — Pro; Essentials from €18.35 (US$19.95)</span>', winner = "apexmail" },
     { feature = "SSO Included", apex = '<span class="text-brand-600 font-semibold">Scale and Enterprise plans</span>', comp = '<span class="text-surface-600">Included on Pro</span>', winner = "none" },
     { feature = "Custom Deployment Review", apex = '<span class="text-brand-600 font-semibold">Enterprise review</span>', comp = '<span class="text-surface-400">✗</span>', winner = "none" }
   ]},

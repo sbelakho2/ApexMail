@@ -11,7 +11,7 @@ A. Starter domain/team limits: 3→5 domains, 3→5 team (18 lines)
 B. Pro domain/team limits: 5→25 domains, 5→10 team (14 lines)
 C. Pro email limit: 50K→150K in assistant responses (12 lines)
 D. Math/calculation rewrites: wrong arithmetic, wrong overage rates (10 lines)
-E. Miscellaneous: wrong rates ($1.50/1K), contradictions
+E. Miscellaneous: wrong rates (€1.50/1K), contradictions
 """
 
 import json
@@ -86,7 +86,7 @@ def _fix_assistant_part(part):
     in_starter_section = False
     fixed_lines = []
     for ln in lines_list:
-        if re.search(r'\bPro\b.*?\$65', ln, re.I) or re.search(r'^\*?\*?Pro', ln):
+        if re.search(r'\bPro\b.*?€65', ln, re.I) or re.search(r'^\*?\*?Pro', ln):
             in_pro_section = True
             in_starter_section = False
         elif re.search(r'\bStarter\b.*?\$25', ln, re.I) or re.search(r'^\*?\*?Starter', ln):

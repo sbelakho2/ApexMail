@@ -27,7 +27,7 @@ apps/marketing-zola/
 ├── config.toml           # Zola site configuration
 ├── content/              # Markdown content for marketing routes
 │   ├── _index.md
-│   ├── api-console/
+│   ├── api-explorer/
 │   ├── case-studies/
 │   ├── compliance/
 │   ├── features/

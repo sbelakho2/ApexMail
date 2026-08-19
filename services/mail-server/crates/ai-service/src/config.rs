@@ -154,7 +154,8 @@ impl AiConfig {
                 .or_else(|_| std::env::var("DATABASE_URL"))
                 .unwrap_or(defaults.database_url),
             aws_region: std::env::var("AWS_REGION").unwrap_or(defaults.aws_region),
-            email_transport: std::env::var("EMAIL_TRANSPORT").unwrap_or(defaults.email_transport),
+            email_transport: std::env::var("EMAIL_TRANSPORT_TYPE")
+                .unwrap_or(defaults.email_transport),
         };
         config.validate()?;
         Ok(config)
@@ -164,8 +165,9 @@ impl AiConfig {
         if self.model_enabled && self.model_endpoint.trim().is_empty() {
             return Err("AI_MODEL_ENDPOINT must not be empty".into());
         }
-        if self.model_enabled && !(self.model_endpoint.starts_with("http://")
-            || self.model_endpoint.starts_with("https://"))
+        if self.model_enabled
+            && !(self.model_endpoint.starts_with("http://")
+                || self.model_endpoint.starts_with("https://"))
         {
             return Err("AI_MODEL_ENDPOINT must be http/https".into());
         }
@@ -219,7 +221,9 @@ fn env_bool(name: &str, default: bool) -> Result<bool, String> {
     match std::env::var(name) {
         Ok(value) if value.eq_ignore_ascii_case("true") || value == "1" => Ok(true),
         Ok(value) if value.eq_ignore_ascii_case("false") || value == "0" => Ok(false),
-        Ok(value) => Err(format!("{name} must be true, false, 1, or 0; got {value:?}")),
+        Ok(value) => Err(format!(
+            "{name} must be true, false, 1, or 0; got {value:?}"
+        )),
         Err(std::env::VarError::NotPresent) => Ok(default),
         Err(error) => Err(format!("failed to read {name}: {error}")),
     }
@@ -272,7 +276,10 @@ mod tests {
 
     #[test]
     fn rejects_invalid_boolean_values() {
-        assert!(matches!(env_bool("AI_UNUSED_TEST_BOOLEAN", false), Ok(false)));
+        assert!(matches!(
+            env_bool("AI_UNUSED_TEST_BOOLEAN", false),
+            Ok(false)
+        ));
         assert!(env_bool_value("maybe").is_err());
     }
 

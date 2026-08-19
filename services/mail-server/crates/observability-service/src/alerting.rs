@@ -435,7 +435,10 @@ mod tests {
         // auto-resolved even though no new alert fires.
         let fired = mgr.evaluate_all(&[summary("error_rate", 0.01)]);
         assert!(fired.is_empty());
-        assert!(mgr.list_active_alerts().is_empty(), "recovered rule must auto-resolve");
+        assert!(
+            mgr.list_active_alerts().is_empty(),
+            "recovered rule must auto-resolve"
+        );
         assert_eq!(mgr.list_all_alerts().len(), 1);
         assert_eq!(mgr.list_all_alerts()[0].status, AlertStatus::Resolved);
         assert!(mgr.list_all_alerts()[0].resolved_at.is_some());
@@ -453,7 +456,11 @@ mod tests {
         // not the same as a healthy value.
         let fired = mgr.evaluate_all(&[]);
         assert!(fired.is_empty());
-        assert_eq!(mgr.list_active_alerts().len(), 1, "no data must not auto-resolve");
+        assert_eq!(
+            mgr.list_active_alerts().len(),
+            1,
+            "no data must not auto-resolve"
+        );
     }
 
     #[tokio::test]

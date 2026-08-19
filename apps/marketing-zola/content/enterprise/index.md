@@ -1,6 +1,6 @@
 +++
 title = "ApexMail Enterprise | Commercial and Procurement"
-description = "Enterprise transactional email: a $30,000 annual contract with 5 million included emails, dedicated support, and contractual deployment planning."
+description = "Enterprise transactional email: a €30,000 annual contract with 5 million included emails, dedicated support, and contractual deployment planning."
 template = "prose.html"
 
 [extra]
@@ -15,7 +15,7 @@ Enterprise is a contractual email-delivery offering for organizations that need 
 
 | Item | Enterprise |
 |---|---|
-| Price | $30,000/year under an annual contract |
+| Price | €30,000/year under an annual contract |
 | Included email volume | 5,000,000 emails/month |
 | API calls | Unlimited |
 | Domains and team members | Unlimited |
@@ -25,7 +25,7 @@ Enterprise is a contractual email-delivery offering for organizations that need 
 | Support level | Dedicated |
 | Private Cloud / BYOIP | Subject to contract and technical review |
 
-The annual catalog price is $30,000, or 10 times the $3,000 monthly reference price. Custom volume, deployment, and professional-service costs are negotiated and stated only in a written proposal or order form.
+The annual catalog price is €30,000, or 10 times the €3,000 monthly reference price. Custom volume, deployment, and professional-service costs are negotiated and stated only in a written proposal or order form.
 
 ## Procurement Review
 

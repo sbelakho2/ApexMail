@@ -26,7 +26,7 @@ members = [
     "crates/billing-common",
     "crates/devex-service",
     "crates/observability-service",
-        "crates/ui-foundation",
+    "crates/ui-foundation",
     "crates/sales-autopilot",
     "crates/ai-service",
     "crates/pdf-renderer",
@@ -50,8 +50,7 @@ members = [
     "crates/dlp-engine",
     "crates/threat-intel",
     "crates/email-grader",
-        "crates/inbox-placement",
-    # KiwiCaptcha — native Rust proof-of-work CAPTCHA engine
+    "crates/inbox-placement",
 ]
 
 [workspace.package]

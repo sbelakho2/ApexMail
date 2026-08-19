@@ -148,12 +148,11 @@ async fn ensure_risk_settings_table(db: &sqlx::PgPool) -> Result<(), ApiError> {
 async fn load_risk_settings(db: &sqlx::PgPool) -> Result<RiskSettings, ApiError> {
     ensure_risk_settings_table(db).await?;
 
-    let row: Option<(serde_json::Value, Option<chrono::DateTime<chrono::Utc>>)> =
-        sqlx::query_as(
-            "SELECT thresholds, last_assessed_at FROM risk_settings WHERE tenant_id = 'system'",
-        )
-        .fetch_optional(db)
-        .await?;
+    let row: Option<(serde_json::Value, Option<chrono::DateTime<chrono::Utc>>)> = sqlx::query_as(
+        "SELECT thresholds, last_assessed_at FROM risk_settings WHERE tenant_id = 'system'",
+    )
+    .fetch_optional(db)
+    .await?;
 
     Ok(match row {
         Some((thresholds_json, last_assessed_at)) => RiskSettings {

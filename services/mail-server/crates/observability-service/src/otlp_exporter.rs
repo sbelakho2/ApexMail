@@ -248,7 +248,7 @@ pub fn init_otlp_tracing(
         .with_thread_ids(true)
         .with_file(true)
         .with_line_number(true)
-        .with_span_list(true)  // Include active span context in log output
+        .with_span_list(true) // Include active span context in log output
         .with_current_span(true); // Logs include the current span's trace_id/span_id
 
     tracing_subscriber::registry()

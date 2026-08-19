@@ -41,7 +41,7 @@ impl SubAccountService {
         // Check sub-account limit
         let count: (i64,) =
             sqlx::query_as("SELECT COUNT(*) FROM ent_sub_accounts WHERE parent_id = $1")
-                 .bind(&parent_id)
+                .bind(&parent_id)
                 .fetch_one(&self.db)
                 .await
                 .map_err(|e| format!("Count sub-accounts: {e}"))?;
@@ -188,7 +188,7 @@ impl SubAccountService {
              SUM(volume_used)::bigint, SUM(volume_limit)::bigint
              FROM ent_sub_accounts WHERE parent_id = $1",
         )
-         .bind(&parent_id)
+        .bind(&parent_id)
         .fetch_one(&self.db)
         .await
         .map_err(|e| format!("Get sub-account stats: {e}"))?;

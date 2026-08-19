@@ -29,6 +29,11 @@ pub use generated::outbound_service_client::OutboundServiceClient;
 /// used for mailstore gRPC authentication.
 pub const INTERNAL_SERVICE_TOKEN_ENV: &str = "INTERNAL_SERVICE_TOKEN";
 
+/// Alternative file-based environment variable. Docker deployments mount the
+/// secret as a 0400 file and reference it here; the plain variable takes
+/// precedence when both are set.
+pub const INTERNAL_SERVICE_TOKEN_FILE_ENV: &str = "INTERNAL_SERVICE_TOKEN_FILE";
+
 /// A shared service token must be long enough to contain meaningful entropy.
 /// The production secret generator creates at least 32 random bytes.
 pub const MIN_INTERNAL_SERVICE_TOKEN_LENGTH: usize = 32;
@@ -40,6 +45,7 @@ pub enum InternalServiceTokenError {
     TooShort,
     InvalidCharacters,
     InvalidMetadata,
+    FileUnreadable,
 }
 
 impl fmt::Display for InternalServiceTokenError {
@@ -61,6 +67,10 @@ impl fmt::Display for InternalServiceTokenError {
                 formatter,
                 "{INTERNAL_SERVICE_TOKEN_ENV} cannot be encoded as gRPC authorization metadata"
             ),
+            Self::FileUnreadable => write!(
+                formatter,
+                "{INTERNAL_SERVICE_TOKEN_FILE_ENV} could not be read"
+            ),
         }
     }
 }
@@ -78,14 +88,32 @@ pub struct InternalServiceToken(Arc<str>);
 impl InternalServiceToken {
     /// Load an optional token from the environment. If the variable is set,
     /// reject weak or metadata-unsafe values instead of silently disabling
-    /// authentication on client requests.
+    /// authentication on client requests. When the plain variable is absent,
+    /// `INTERNAL_SERVICE_TOKEN_FILE` is read as a fallback so container
+    /// deployments can mount the secret as a file.
     pub fn from_env() -> Result<Option<Self>, InternalServiceTokenError> {
         match std::env::var(INTERNAL_SERVICE_TOKEN_ENV) {
             Ok(value) if value.is_empty() => Ok(None),
             Ok(value) => Self::new(value).map(Some),
-            Err(std::env::VarError::NotPresent) => Ok(None),
+            Err(std::env::VarError::NotPresent) => Self::from_env_file(),
             Err(std::env::VarError::NotUnicode(_)) => Err(InternalServiceTokenError::NotUnicode),
         }
+    }
+
+    fn from_env_file() -> Result<Option<Self>, InternalServiceTokenError> {
+        let path = match std::env::var(INTERNAL_SERVICE_TOKEN_FILE_ENV) {
+            Ok(value) if value.is_empty() => return Ok(None),
+            Ok(value) => value,
+            Err(std::env::VarError::NotPresent) => return Ok(None),
+            Err(std::env::VarError::NotUnicode(_)) => Err(InternalServiceTokenError::NotUnicode)?,
+        };
+        let value = std::fs::read_to_string(&path)
+            .map_err(|_| InternalServiceTokenError::FileUnreadable)?;
+        let value = value.trim();
+        if value.is_empty() {
+            return Ok(None);
+        }
+        Self::new(value.to_owned()).map(Some)
     }
 
     /// Validate a configured token.
@@ -226,6 +254,44 @@ mod tests {
                 .and_then(|value| value.to_str().ok()),
             Some("Bearer aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
         );
+    }
+
+    #[test]
+    fn internal_service_token_loads_from_file_fallback() {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = LOCK.lock().unwrap();
+
+        let previous_token = std::env::var(INTERNAL_SERVICE_TOKEN_ENV).ok();
+        let previous_file = std::env::var(INTERNAL_SERVICE_TOKEN_FILE_ENV).ok();
+        std::env::remove_var(INTERNAL_SERVICE_TOKEN_ENV);
+
+        let dir =
+            std::env::temp_dir().join(format!("mail-proto-token-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("internal_service_token.txt");
+        std::fs::write(
+            &path,
+            format!("{}\n", "b".repeat(MIN_INTERNAL_SERVICE_TOKEN_LENGTH)),
+        )
+        .unwrap();
+        std::env::set_var(INTERNAL_SERVICE_TOKEN_FILE_ENV, &path);
+
+        let token = InternalServiceToken::from_env().expect("file token must load");
+        assert_eq!(
+            token.as_ref().map(InternalServiceToken::as_str),
+            Some("b".repeat(MIN_INTERNAL_SERVICE_TOKEN_LENGTH).as_str())
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::env::remove_var(INTERNAL_SERVICE_TOKEN_FILE_ENV);
+        match previous_token {
+            Some(value) => std::env::set_var(INTERNAL_SERVICE_TOKEN_ENV, value),
+            None => std::env::remove_var(INTERNAL_SERVICE_TOKEN_ENV),
+        }
+        match previous_file {
+            Some(value) => std::env::set_var(INTERNAL_SERVICE_TOKEN_FILE_ENV, value),
+            None => {}
+        }
     }
 
     #[test]

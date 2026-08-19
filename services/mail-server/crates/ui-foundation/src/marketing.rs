@@ -612,7 +612,10 @@ mod tests {
 
         assert!(!console.contains("<script>"), "raw script leaked");
         assert!(!console.contains("<img src=x onerror"));
-        assert!(!console.contains("</textarea><script>"), "textarea breakout");
+        assert!(
+            !console.contains("</textarea><script>"),
+            "textarea breakout"
+        );
         assert!(console.contains("&lt;/textarea&gt;"));
         assert!(console.contains("&lt;script&gt;alert(1)&lt;/script&gt;"));
         // CSRF token stays inside its attribute (no `">` breakout).

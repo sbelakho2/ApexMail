@@ -6,16 +6,16 @@ use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
-use std::future::Future;
 use moka::sync::Cache;
-use x509_parser::prelude::FromDer;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256, Sha512};
+use std::future::Future;
 use tokio::net::TcpStream;
 use tokio::time::timeout;
 use tokio_rustls::TlsConnector;
 use tracing::warn;
+use x509_parser::prelude::FromDer;
 
 use crate::config::DnsConfig;
 
@@ -99,13 +99,9 @@ pub async fn verify_dane(
     protocol: &str,
     dns_config: &DnsConfig,
 ) -> DaneVerificationResult {
-    verify_dane_with_fetcher(
-        domain,
-        port,
-        protocol,
-        dns_config,
-        |d, p| fetch_remote_cert_chain(d, p),
-    )
+    verify_dane_with_fetcher(domain, port, protocol, dns_config, |d, p| {
+        fetch_remote_cert_chain(d, p)
+    })
     .await
 }
 
@@ -304,7 +300,11 @@ where
 /// Evaluate a set of TLSA records against a live certificate chain.
 /// Records with unknown usage/selector/matching-type are ignored and never
 /// set `supported`; `supported` requires at least one record to match.
-fn evaluate_tlsa_records(chain: &[Vec<u8>], records: &[TlsaRecord], domain: &str) -> DaneVerificationResult {
+fn evaluate_tlsa_records(
+    chain: &[Vec<u8>],
+    records: &[TlsaRecord],
+    domain: &str,
+) -> DaneVerificationResult {
     let mut result = DaneVerificationResult {
         supported: false,
         mode: DaneMode::None,
@@ -550,8 +550,8 @@ fn pkix_chain_valid(chain_der: &[Vec<u8>], domain: &str) -> bool {
     let mut root_store = rustls::RootCertStore::empty();
     root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
 
-    let Ok(verifier) = rustls::client::WebPkiServerVerifier::builder(std::sync::Arc::new(root_store))
-        .build()
+    let Ok(verifier) =
+        rustls::client::WebPkiServerVerifier::builder(std::sync::Arc::new(root_store)).build()
     else {
         return false;
     };
@@ -563,7 +563,13 @@ fn pkix_chain_valid(chain_der: &[Vec<u8>], domain: &str) -> bool {
         .collect();
 
     verifier
-        .verify_server_cert(&end_entity, &intermediates, &server_name, &[], UnixTime::now())
+        .verify_server_cert(
+            &end_entity,
+            &intermediates,
+            &server_name,
+            &[],
+            UnixTime::now(),
+        )
         .is_ok()
 }
 
@@ -772,11 +778,7 @@ mod tests {
         let expected = hex::encode(Sha256::digest(cert.public_key().raw));
 
         let result = generate_tlsa_record(&pem, "example.com", 25, "tcp", 3, 1, 1);
-        assert!(
-            result.errors.is_empty(),
-            "errors: {:?}",
-            result.errors
-        );
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
         assert_eq!(
             result.record.certificate_association_data, expected,
             "selector=1 must hash the SubjectPublicKeyInfo, not the full certificate"
@@ -812,7 +814,10 @@ mod tests {
         let mut tampered = der.clone();
         tampered[spki_offset + 8] ^= 0x01;
         assert_ne!(tampered, der);
-        assert!(!validate_certificate_against_tlsa(&tampered, &result.record));
+        assert!(!validate_certificate_against_tlsa(
+            &tampered,
+            &result.record
+        ));
     }
 
     #[test]
@@ -873,7 +878,11 @@ mod tests {
             matching_type: 1,
             certificate_association_data: hex::encode(Sha256::digest(&ca_der)),
         };
-        assert!(validate_chain_against_tlsa(&chain, &record, "mail.example.com"));
+        assert!(validate_chain_against_tlsa(
+            &chain,
+            &record,
+            "mail.example.com"
+        ));
 
         // A record matching an unrelated cert must fail.
         let other_pem = test_cert_pem("other.example.com");
@@ -884,7 +893,11 @@ mod tests {
             matching_type: 1,
             certificate_association_data: hex::encode(Sha256::digest(&other_der)),
         };
-        assert!(!validate_chain_against_tlsa(&chain, &unrelated, "mail.example.com"));
+        assert!(!validate_chain_against_tlsa(
+            &chain,
+            &unrelated,
+            "mail.example.com"
+        ));
 
         // generation from the CA PEM must produce a matching record
         let generated = generate_tlsa_record(&ca_pem, "example.com", 25, "tcp", 2, 0, 1);
@@ -997,7 +1010,10 @@ mod tests {
             },
         )
         .await;
-        assert!(result.supported, "matching live cert must still pass on cache hits");
+        assert!(
+            result.supported,
+            "matching live cert must still pass on cache hits"
+        );
         TLSA_CACHE.invalidate(name);
     }
 }

@@ -4,10 +4,10 @@
 
 use anyhow::{anyhow, bail, Result};
 use clap::Parser;
+use mail_proto::{InternalServiceToken, MailstoreServiceServer};
 use observability_service::otlp_exporter::{
     init_otlp_tracing, is_otlp_enabled, OtlpConfig, TracingGuard,
 };
-use mail_proto::{InternalServiceToken, MailstoreServiceServer};
 use std::fs::Metadata;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -24,7 +24,12 @@ struct Cli {
     /// gRPC listen address. Defaults to loopback so the service is not
     /// exposed by accident; container deployments override this with
     /// MAILSTORE_BIND_ADDR=0.0.0.0:50051 (see docker-compose).
-    #[arg(short, long, env = "MAILSTORE_BIND_ADDR", default_value = "127.0.0.1:50051")]
+    #[arg(
+        short,
+        long,
+        env = "MAILSTORE_BIND_ADDR",
+        default_value = "127.0.0.1:50051"
+    )]
     listen: String,
 
     /// Database URL
@@ -75,10 +80,7 @@ impl SharedTokenInterceptor {
 }
 
 impl tonic::service::Interceptor for SharedTokenInterceptor {
-    fn call(
-        &mut self,
-        request: tonic::Request<()>,
-    ) -> Result<tonic::Request<()>, tonic::Status> {
+    fn call(&mut self, request: tonic::Request<()>) -> Result<tonic::Request<()>, tonic::Status> {
         if !self.is_enabled() {
             return Ok(request);
         }
@@ -107,10 +109,7 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
     }
-    a.iter()
-        .zip(b)
-        .fold(0u8, |acc, (x, y)| acc | (x ^ y))
-        == 0
+    a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
 /// Only loopback binds may opt out of internal service authentication. Docker
@@ -140,8 +139,7 @@ fn init_tracing(log_level: &str) -> Option<TracingGuard> {
         }
     }
     // Fallback: structured JSON logging
-    let filter =
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(log_level));
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(log_level));
 
     tracing_subscriber::fmt()
         .with_env_filter(filter)

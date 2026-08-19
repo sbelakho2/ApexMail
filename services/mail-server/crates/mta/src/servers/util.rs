@@ -131,7 +131,10 @@ mod tests {
             extract_addr_safe("MAIL FROM:<user@example.com>"),
             Some("user@example.com")
         );
-        assert_eq!(extract_addr_safe("RCPT TO:<a@b.com> SIZE=1000"), Some("a@b.com"));
+        assert_eq!(
+            extract_addr_safe("RCPT TO:<a@b.com> SIZE=1000"),
+            Some("a@b.com")
+        );
     }
 
     #[test]

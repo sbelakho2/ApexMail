@@ -100,7 +100,9 @@ impl DomainDnsStore {
             .map_err(|error| {
                 AiError::ModelUnavailable(format!("domain-record lookup failed: {error}"))
             })?
-            .ok_or_else(|| AiError::ModelNotFound("domain not found for authenticated tenant".into()))?;
+            .ok_or_else(|| {
+                AiError::ModelNotFound("domain not found for authenticated tenant".into())
+            })?;
 
         let selector = row
             .dkim_selector
@@ -128,7 +130,13 @@ impl DomainDnsStore {
         Ok(DomainDnsRecords {
             domain: row.name.clone(),
             status: row.status,
-            records: records_for_material(&row.name, selector, public_key, &self.aws_region, self.ses_transport),
+            records: records_for_material(
+                &row.name,
+                selector,
+                public_key,
+                &self.aws_region,
+                self.ses_transport,
+            ),
             transport: if self.ses_transport { "ses" } else { "smtp" }.into(),
         })
     }
@@ -186,7 +194,9 @@ fn normalize_domain(domain: &str) -> Result<String, AiError> {
                 || label.len() > 63
                 || label.starts_with('-')
                 || label.ends_with('-')
-                || !label.chars().all(|character| character.is_ascii_alphanumeric() || character == '-')
+                || !label
+                    .chars()
+                    .all(|character| character.is_ascii_alphanumeric() || character == '-')
         })
     {
         return Err(AiError::InvalidInput("invalid domain name".into()));
@@ -197,9 +207,9 @@ fn normalize_domain(domain: &str) -> Result<String, AiError> {
 fn is_valid_selector(selector: &str) -> bool {
     !selector.is_empty()
         && selector.len() <= 63
-        && selector
-            .chars()
-            .all(|character| character.is_ascii_lowercase() || character.is_ascii_digit() || character == '-')
+        && selector.chars().all(|character| {
+            character.is_ascii_lowercase() || character.is_ascii_digit() || character == '-'
+        })
 }
 
 #[cfg(test)]
@@ -208,7 +218,13 @@ mod tests {
 
     #[test]
     fn direct_dkim_records_use_the_domain_specific_selector_and_key() {
-        let records = records_for_material("example.com", "am-customer-1", "ABC123", "eu-central-1", false);
+        let records = records_for_material(
+            "example.com",
+            "am-customer-1",
+            "ABC123",
+            "eu-central-1",
+            false,
+        );
         assert_eq!(records.len(), 2);
         assert_eq!(records[0].record_type, "TXT");
         assert_eq!(records[0].hostname, "am-customer-1._domainkey.example.com");

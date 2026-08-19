@@ -46,10 +46,32 @@ pub struct AuthUser {
 impl std::fmt::Debug for AuthUser {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AuthUser")
-            .field("tenant_id", &format!("{}..{}", &self.tenant_id[..self.tenant_id.len().min(4)], self.tenant_id.len()))
-            .field("user_id", &self.user_id.as_ref().map(|id| format!("{}..{}", &id[..id.len().min(4)], id.len())))
-            .field("api_key_id", &self.api_key_id.as_ref().map(|id| format!("{}..{}", &id[..id.len().min(4)], id.len())))
-            .field("session_id", &self.session_id.as_ref().map(|_| "[REDACTED]"))
+            .field(
+                "tenant_id",
+                &format!(
+                    "{}..{}",
+                    &self.tenant_id[..self.tenant_id.len().min(4)],
+                    self.tenant_id.len()
+                ),
+            )
+            .field(
+                "user_id",
+                &self
+                    .user_id
+                    .as_ref()
+                    .map(|id| format!("{}..{}", &id[..id.len().min(4)], id.len())),
+            )
+            .field(
+                "api_key_id",
+                &self
+                    .api_key_id
+                    .as_ref()
+                    .map(|id| format!("{}..{}", &id[..id.len().min(4)], id.len())),
+            )
+            .field(
+                "session_id",
+                &self.session_id.as_ref().map(|_| "[REDACTED]"),
+            )
             .field("scopes", &self.scopes)
             .finish()
     }
@@ -451,9 +473,7 @@ async fn authenticate_api_key_argon2_fallback(
     let _argon2_permit = match semaphore.try_acquire() {
         Ok(permit) => permit,
         Err(_) => {
-            tracing::warn!(
-                "api key argon2 fallback capacity reached; skipping memory-hash scan"
-            );
+            tracing::warn!("api key argon2 fallback capacity reached; skipping memory-hash scan");
             return Err(ApiError::Unauthorized("invalid API key".into()));
         }
     };

@@ -225,9 +225,9 @@
   function calcOverage(plan, volume) {
     if (plan.overagePer1K === null) return 0;
     var over = Math.max(0, volume - plan.includedVolume);
-    // Match billing-service `calculate_overage_cost`: 0.04 cents/email,
-    // rounded up to the nearest cent.
-    return Math.ceil(over * 4 / 100) / 100;
+    // Match billing-service `calculate_overage_cost`: overage at the plan's
+    // per-1K rate, rounded up to the nearest cent.
+    return Math.ceil(over * plan.overagePer1K / 10) / 100;
   }
 
   function calcNextPlanCrossover(planIndex, volume, isAnnual, ipCost) {

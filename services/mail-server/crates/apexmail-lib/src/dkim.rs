@@ -134,16 +134,14 @@ pub fn ses_private_key_base64_from_pem(private_key_pem: &str) -> Result<String, 
 /// The caller supplies stable associated data, normally composed from the
 /// tenant and domain IDs, so a ciphertext cannot be copied to another domain
 /// row and remain valid.
-pub fn encrypt_dkim_private_key(
-    plaintext: &str,
-    aad: &[u8],
-) -> Result<String, DkimKeyError> {
+pub fn encrypt_dkim_private_key(plaintext: &str, aad: &[u8]) -> Result<String, DkimKeyError> {
     if plaintext.trim().is_empty() {
         return Err(DkimKeyError::InvalidPrivateKey);
     }
 
     let key = Zeroizing::new(load_encryption_key()?);
-    let cipher = Aes256Gcm::new_from_slice(&*key).map_err(|_| DkimKeyError::InvalidEncryptionKey)?;
+    let cipher =
+        Aes256Gcm::new_from_slice(&*key).map_err(|_| DkimKeyError::InvalidEncryptionKey)?;
 
     let mut nonce_bytes = [0u8; AES_GCM_NONCE_SIZE];
     OsRng
@@ -165,7 +163,10 @@ pub fn encrypt_dkim_private_key(
     envelope.extend_from_slice(&nonce_bytes);
     envelope.extend_from_slice(&ciphertext);
 
-    Ok(format!("{DKIM_PRIVATE_KEY_ENVELOPE_PREFIX}{}", BASE64.encode(envelope)))
+    Ok(format!(
+        "{DKIM_PRIVATE_KEY_ENVELOPE_PREFIX}{}",
+        BASE64.encode(envelope)
+    ))
 }
 
 /// Decrypt a stored DKIM private key.
@@ -193,7 +194,8 @@ pub fn decrypt_dkim_private_key(
     }
 
     let (nonce_bytes, ciphertext) = envelope[1..].split_at(AES_GCM_NONCE_SIZE);
-    let cipher = Aes256Gcm::new_from_slice(&*key).map_err(|_| DkimKeyError::InvalidEncryptionKey)?;
+    let cipher =
+        Aes256Gcm::new_from_slice(&*key).map_err(|_| DkimKeyError::InvalidEncryptionKey)?;
     let plaintext = cipher
         .decrypt(
             Nonce::from_slice(nonce_bytes),
@@ -244,7 +246,8 @@ fn public_key_base64_from_private_key(private_key: &RsaPrivateKey) -> Result<Str
 fn load_encryption_key() -> Result<[u8; AES_256_KEY_SIZE], DkimKeyError> {
     let encoded = std::env::var(DKIM_PRIVATE_KEY_ENCRYPTION_KEY_ENV)
         .map_err(|_| DkimKeyError::EncryptionKeyMissing)?;
-    let mut decoded = hex::decode(encoded.trim()).map_err(|_| DkimKeyError::InvalidEncryptionKey)?;
+    let mut decoded =
+        hex::decode(encoded.trim()).map_err(|_| DkimKeyError::InvalidEncryptionKey)?;
     if decoded.len() != AES_256_KEY_SIZE {
         decoded.zeroize();
         return Err(DkimKeyError::InvalidEncryptionKey);
@@ -315,10 +318,7 @@ mod tests {
 
     #[test]
     fn normalizing_dns_key_ignores_quotes_and_whitespace() {
-        assert!(dkim_public_keys_match(
-            "MIIB IjAN",
-            "\"MIIB\" \nIjAN",
-        ));
+        assert!(dkim_public_keys_match("MIIB IjAN", "\"MIIB\" \nIjAN",));
     }
 
     #[test]

@@ -12,9 +12,9 @@ last_verified = "2026-07-29"
 methodology = "Public AWS SES documentation at docs.aws.amazon.com/ses reviewed on the verification date. Pricing compared at pay-as-you-go for 100,000 emails/month. Monthly billing. ApexMail is managed infrastructure; SES is raw capacity. Features, limits, and pricing may change."
 volume_assumption = "100,000 emails/month"
 billing_period = "monthly"
-currency_note = "USD for ApexMail and SES. Prices exclude applicable taxes."
+currency_note = "Prices are shown in EUR. Where a provider publishes only USD, the EUR figure is converted at 1 USD = €0.92 (reference rate, 2026-08-19) and the provider's published USD price is shown in parentheses. Exclude applicable taxes."
 # Feature comparison counts — update when capabilities change.
-apexmail_wins = 5
+apexmail_wins = 2
 competitor_wins = 4
 verdict_title = "How ApexMail differs from Amazon SES"
 verdict_points = ["Managed email infrastructure with API, events, and support included vs raw capacity billing", "Per-message delivery diagnostics dashboard vs self-assembled CloudWatch + SNS", "Idempotency keys on all plans vs not natively supported", "EU/EEA-oriented deployment configuration with active regions confirmed per deployment", "Dedicated tenancy managed service vs self-managed on AWS"]
@@ -40,7 +40,7 @@ comparison_sections = [
   ]},
   { title = "DEPLOYMENT MODELS", rows = [
     { feature = "Shared cloud", apex = 'Yes (all plans) — managed multi-tenant on Hetzner', comp = 'Yes (all accounts) — shared IP pool by default<sup><a href="#src-ses6">6</a></sup>', winner = "none" },
-    { feature = "Dedicated IP", apex = 'Approved add-on on Pro; 1 included on Growth, 3 on Scale', comp = 'Yes — $24.95/mo per dedicated IP; IP pool management available<sup><a href="#src-ses6">6</a></sup>', winner = "none" },
+    { feature = "Dedicated IP", apex = 'Approved add-on on Pro; 1 included on Growth, 3 on Scale', comp = 'Yes — €22.95 (US$24.95)/mo per dedicated IP; IP pool management available<sup><a href="#src-ses6">6</a></sup>', winner = "none" },
     { feature = "Dedicated tenancy", apex = 'Subject to architecture and contract review', comp = 'Self-managed — customer architects dedicated tenancy on AWS using SES as a service component<sup><a href="#src-ses6">6</a></sup>', winner = "none" },
     { feature = "BYOC / private deployment", apex = 'Subject to architecture and contract review', comp = 'Inherent — customer runs on own AWS account; SES is an AWS service<sup><a href="#src-ses6">6</a></sup>', winner = "none" }
   ]},
@@ -51,12 +51,12 @@ comparison_sections = [
     { feature = "HIPAA availability", apex = 'Not currently offered', comp = 'Yes — AWS BAA available; SES is an eligible HIPAA service<sup><a href="#src-ses9">9</a></sup>', winner = "competitor" }
   ]},
   { title = "PRICING AT 100K/MO (verified 2026-07-29)", rows = [
-    { feature = "Plan compared", apex = 'Pro: $65/mo (150,000 emails included, managed infrastructure)', comp = 'Pay-as-you-go: ~$10/100K emails (raw sending, no management included)<sup><a href="#src-ses10">10</a></sup>', winner = "none" },
+    { feature = "Plan compared", apex = 'Pro: €65/mo (150,000 emails included, managed infrastructure)', comp = 'Pay-as-you-go: ~€9.20 (US$10)/100K emails (raw sending, no management included)<sup><a href="#src-ses10">10</a></sup>', winner = "none" },
     { feature = "Pricing model distinction", apex = 'Managed email infrastructure: API, event storage, webhook delivery, support, analytics included', comp = 'Raw capacity billing: IaaS — pay per send, plus additional AWS costs (EC2, S3, CloudWatch, SNS, support)<sup><a href="#src-ses10">10</a></sup>', winner = "none" },
     { feature = "Free tier", apex = '30,000 emails/month (no credit card, no time limit)', comp = '62,000 emails/month when sending from EC2 (first 12 months); 3,000/month otherwise<sup><a href="#src-ses10">10</a></sup>', winner = "none" }
   ]},
   { title = "AREAS WHERE AMAZON SES IS STRONGER", rows = [
-    { feature = "Raw cost per email", apex = 'See the current public catalog and checkout for applicable usage terms', comp = '$0.10/1,000 emails — lowest per-message cost among major providers<sup><a href="#src-ses10">10</a></sup>', winner = "competitor" },
+    { feature = "Raw cost per email", apex = 'See the current public catalog and checkout for applicable usage terms', comp = '€0.09 (US$0.10)/1,000 emails — lowest per-message cost among major providers<sup><a href="#src-ses10">10</a></sup>', winner = "competitor" },
     { feature = "AWS ecosystem integration", apex = 'Standalone platform with API integration', comp = 'Deep integration with AWS services: Lambda, S3, CloudWatch, SNS, SQS, IAM, KMS, Organizations<sup><a href="#src-ses3">3</a></sup>', winner = "competitor" },
     { feature = "Maximum sending volume", apex = 'Scale supports up to 2 million emails/month; Enterprise terms are contract-scoped', comp = 'Virtually unlimited — constrained by account sending limits which auto-scale with reputation<sup><a href="#src-ses6">6</a></sup>', winner = "none" },
     { feature = "Global regions", apex = 'Germany &amp; Finland (EEA focus)', comp = '22+ AWS regions globally including US, EU, APAC, South America<sup><a href="#src-ses1">1</a></sup>', winner = "competitor" }
@@ -78,7 +78,7 @@ sources = [
   { ref = "ses9", n = 9, label = "AWS HIPAA Compliance and BAA information", url = "https://aws.amazon.com/compliance/hipaa-compliance/" },
   { ref = "ses10", n = 10, label = "AWS SES Pricing page", url = "https://aws.amazon.com/ses/pricing/" }
 ]
-sources_disclaimer = "Last verified: 2026-07-29. Volume assumption: 100,000 emails/month, monthly billing. Prices are shown in USD and exclude applicable taxes. ApexMail is priced as managed email infrastructure; Amazon SES is priced as raw email sending capacity. Reviewed by: ApexMail marketing engineering."
+sources_disclaimer = "Last verified: 2026-08-19. Volume assumption: 100,000 emails/month, monthly billing. Prices are shown in EUR. Where a provider publishes only USD, the EUR figure is converted at 1 USD = €0.92 (reference rate, 2026-08-19) and the provider's published USD price is shown in parentheses. Exclude applicable taxes. ApexMail is priced as managed email infrastructure; Amazon SES is priced as raw email sending capacity. Reviewed by: ApexMail marketing engineering."
 +++
 
 <!-- Comparison rows and footnote sources are rendered from the

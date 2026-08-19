@@ -176,7 +176,7 @@ The heart of the platform — a Cargo workspace with **57 crates**.
 | 13 | [`observability-service`](services/mail-server/crates/observability-service/) | Metrics, tracing, alerting, SLO management | `observability-server` |
 | 14 | [`ops-service`](services/mail-server/crates/ops-service/) | Operations: health, incidents, status, warmup, trust | `ops-server` |
 | 15 | [`billing-service`](services/mail-server/crates/billing-service/) | Billing: invoicing, subscriptions, metering, VAT, Stripe webhooks | `billing-server` |
-| 16 | [`ai-service`](services/mail-server/crates/ai-service/) | AI inference: send-time optimization, bandits, content analysis | `ai-server` |
+| 16 | [`ai-service`](services/mail-server/crates/ai-service/) | AI inference: send-time optimization, bandits, content analysis | `ai-service` |
 | 17 | [`ai-embeddings`](services/mail-server/crates/ai-embeddings/) | Vector embeddings service (chunking, vector store, search) | `ai-embeddings-server` |
 | 18 | [`pdf-renderer`](services/mail-server/crates/pdf-renderer/) | PDF generation via Typst (invoices, reports, DPAs) | `pdf-renderer` |
 | 19 | [`template-renderer`](services/mail-server/crates/template-renderer/) | Email template rendering (sandboxed, transpiler) | `template-renderer` |

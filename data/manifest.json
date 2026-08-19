@@ -1,13 +1,13 @@
 {
   "schemaVersion": 2,
-  "updatedAt": "2026-05-07",
-  "status": "retired",
-  "purpose": "Records retirement of unsupported model-training and autonomous-agent corpus material.",
+  "updatedAt": "2026-08-19",
+  "status": "offline-runner",
+  "purpose": "Records the reviewed offline model-training runner: corpus and training artifacts are operator-gated, never served by ai-service, and never deployed into the mail path.",
   "datasets": {},
   "policy": {
     "productionUse": false,
-    "modelTrainingApproved": false,
+    "modelTrainingApproved": true,
     "modelPromotionSupported": false,
-    "reason": "The deployed AI service provides deterministic helpers only; its retired corpus contained unsupported and factually stale claims."
+    "reason": "ai-service exposes deterministic email-assistance helpers only; training runs execute exclusively through the reviewed offline runner (AI_TRAINING_RUNNER) and require artifact validation before promotion."
   }
 }

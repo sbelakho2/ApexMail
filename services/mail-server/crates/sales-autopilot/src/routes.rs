@@ -219,10 +219,12 @@ async fn initialize_schema_inner(db: &PgPool) -> Result<(), SalesError> {
     // Send ledger for campaign recipients (see CampaignManager::get_recipients):
     // `sent_at` is stamped after a successful dispatch so that pausing and
     // re-starting a campaign does not re-dispatch the entire recipient list.
-    sqlx::query("ALTER TABLE sales_campaign_recipients ADD COLUMN IF NOT EXISTS sent_at TIMESTAMPTZ")
-        .execute(db)
-        .await
-        .map_err(|e| SalesError::Database(e.to_string()))?;
+    sqlx::query(
+        "ALTER TABLE sales_campaign_recipients ADD COLUMN IF NOT EXISTS sent_at TIMESTAMPTZ",
+    )
+    .execute(db)
+    .await
+    .map_err(|e| SalesError::Database(e.to_string()))?;
 
     // ── Calendar events ────────────────────────────────────────────────
     sqlx::query(
@@ -390,7 +392,10 @@ pub fn router(state: AppState) -> Router {
         .route("/inbox", get(list_inbox))
         .route("/inbox/:id/reply", post(reply_inbox_message))
         // Conversion tracking (SALES-03)
-        .route("/conversions", get(list_conversions).post(create_conversion))
+        .route(
+            "/conversions",
+            get(list_conversions).post(create_conversion),
+        )
         .with_state(shared.clone())
         .layer(DefaultBodyLimit::max(256 * 1024)) // 256 KB
         .layer(TraceLayer::new_for_http())
@@ -662,7 +667,8 @@ async fn create_lead(
         // score from the enrichment data. If enrichment fails (e.g. no API
         // configured), we compute a minimal default score of 10 so the
         // scoring pipeline is live and observable.
-        let score = compute_lead_score(&state.enrichment, &lead.email, &lead.company, &state.config).await;
+        let score =
+            compute_lead_score(&state.enrichment, &lead.email, &lead.company, &state.config).await;
         if let Err(e) = state.crm.set_lead_score(&lead.id, score, &tenant_id).await {
             tracing::warn!(error = %e, lead_id = %lead.id, "failed to set lead score (non-fatal)");
         }
@@ -736,7 +742,14 @@ async fn compute_lead_score(
         // engagement: if we have a known industry, assume moderate engagement
         let engagement = if c.industry != "Unknown" { 0.5 } else { 0.3 };
 
-        crate::crm::CrmService::score_lead_with_weights(engagement, company_size, recency, ew, csw, rw)
+        crate::crm::CrmService::score_lead_with_weights(
+            engagement,
+            company_size,
+            recency,
+            ew,
+            csw,
+            rw,
+        )
     } else {
         // No enrichment data available. Return a baseline score of 10
         // so the scoring pipeline is visibly live (SA-1).

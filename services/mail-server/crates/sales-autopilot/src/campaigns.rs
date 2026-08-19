@@ -47,12 +47,8 @@ pub trait CampaignEmailDispatcher: Send + Sync + std::fmt::Debug {
     ///
     /// Returns an absolute URL string such as
     /// `https://app.apexmail.ee/unsubscribe/{tenant_id}/{campaign_id}/{recipient_hash}`.
-    fn unsubscribe_link(
-        &self,
-        tenant_id: &str,
-        campaign_id: Uuid,
-        recipient_email: &str,
-    ) -> String;
+    fn unsubscribe_link(&self, tenant_id: &str, campaign_id: Uuid, recipient_email: &str)
+        -> String;
 }
 
 /// A no-op dispatcher used as the default. Logs that campaign emails
@@ -96,14 +92,21 @@ impl CampaignEmailDispatcher for NoopCampaignDispatcher {
     ) -> String {
         use std::fmt::Write;
         let mut hash_input = String::new();
-        let _ = write!(hash_input, "{}:{}:{}", tenant_id, campaign_id, recipient_email);
+        let _ = write!(
+            hash_input,
+            "{}:{}:{}",
+            tenant_id, campaign_id, recipient_email
+        );
         // Use SHA-256 to produce a deterministic, opaque hash of the recipient
         // details. The full hash is 64 hex chars; we take the first 16 for a
         // compact but sufficiently unique unsubscribe token (64-bit collision
         // space).
         let full_hash = apexmail_lib::hash_api_key(&hash_input);
         let hash_short = &full_hash[..16];
-        format!("https://sales.apexmail.ee/unsubscribe/{}/{}/{}", tenant_id, campaign_id, hash_short)
+        format!(
+            "https://sales.apexmail.ee/unsubscribe/{}/{}/{}",
+            tenant_id, campaign_id, hash_short
+        )
     }
 }
 
@@ -686,7 +689,11 @@ mod tests {
         assert_eq!(c.status, CampaignStatus::Draft);
         let list = mgr.list_campaigns("tenant-a", 100, 0).await.unwrap();
         assert!(!list.is_empty());
-        assert!(mgr.list_campaigns("tenant-b", 100, 0).await.unwrap().is_empty());
+        assert!(mgr
+            .list_campaigns("tenant-b", 100, 0)
+            .await
+            .unwrap()
+            .is_empty());
     }
 
     /// Integration test requiring local Postgres. Run with infrastructure.
@@ -870,7 +877,9 @@ mod tests {
         assert!(!is_valid_recipient_email("a lice@example.com"));
         // total length must stay under 320
         let long_local = "x".repeat(315);
-        assert!(!is_valid_recipient_email(&format!("{long_local}@example.com")));
+        assert!(!is_valid_recipient_email(&format!(
+            "{long_local}@example.com"
+        )));
     }
 
     #[tokio::test]

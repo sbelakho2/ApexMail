@@ -873,9 +873,7 @@ async fn get_payg_usage(
 #[cfg(test)]
 #[derive(Debug, Clone)]
 struct RouteSubscription {
-    plan_name: String,
     billing_interval: BillingInterval,
-    status: String,
     current_period_start: chrono::DateTime<chrono::Utc>,
     current_period_end: chrono::DateTime<chrono::Utc>,
 }
@@ -1020,17 +1018,32 @@ pub(crate) fn generate_audit_log_id() -> String {
 
 /// HMAC-SHA256 signature over the audit hash, keyed with the same
 /// `AUDIT_SIGNING_KEY` the compliance crate uses for chain verification.
-/// Falls back to a deterministic static key when unset (non-production).
+///
+/// Fail-closed: when the key is missing the signature is left empty and an
+/// error is logged every time, so an unconfigured deployment is loudly
+/// visible instead of silently signing with a deterministic public key.
 fn audit_log_signature(hash: &str) -> String {
     use hmac::{Hmac, Mac};
     use sha2::Sha256;
 
     type HmacSha256 = Hmac<Sha256>;
-    let key = std::env::var("AUDIT_SIGNING_KEY")
-        .unwrap_or_else(|_| "apexmail-billing-audit-fallback-key".to_string());
+    let key = match std::env::var("AUDIT_SIGNING_KEY") {
+        Ok(key) if !key.trim().is_empty() => key,
+        _ => {
+            tracing::error!(
+                "AUDIT_SIGNING_KEY is not configured; audit-log signature left empty (hash chain unverifiable)"
+            );
+            return String::new();
+        }
+    };
     let mut mac = match HmacSha256::new_from_slice(key.as_bytes()) {
         Ok(mac) => mac,
-        Err(_) => return String::new(),
+        Err(_) => {
+            tracing::error!(
+                "AUDIT_SIGNING_KEY could not be parsed; audit-log signature left empty"
+            );
+            return String::new();
+        }
     };
     mac.update(hash.as_bytes());
     hex::encode(mac.finalize().into_bytes())
@@ -1869,9 +1882,6 @@ enum ApiError {
     Usage(usage::UsageError),
     Invoice(invoices::InvoiceError),
     Subscription(subscriptions::SubscriptionError),
-    /// The subscription's current status does not permit the requested
-    /// operation under the subscription state machine (BS-006).
-    InvalidSubscriptionStatus(String),
 }
 
 impl From<sqlx::Error> for ApiError {
@@ -1977,9 +1987,6 @@ impl IntoResponse for ApiError {
                 ErrorCode::NotFound,
                 "active subscription not found".to_string(),
             ),
-            ApiError::InvalidSubscriptionStatus(message) => {
-                (StatusCode::CONFLICT, ErrorCode::Conflict, message.clone())
-            }
             ApiError::Subscription(_) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 ErrorCode::InternalError,
@@ -2478,9 +2485,7 @@ mod tests {
             updated_at: now,
         };
         let subscription = RouteSubscription {
-            plan_name: "starter".into(),
             billing_interval: BillingInterval::Monthly,
-            status: "active".into(),
             current_period_start: now - chrono::TimeDelta::days(15),
             current_period_end: now + chrono::TimeDelta::days(15),
         };
@@ -2547,9 +2552,7 @@ mod tests {
         // Use a 365-day period (actual calendar days per proration.rs docs),
         // not a fixed 360-day convention. 182 days elapsed + 183 remaining = 365 total.
         let subscription = RouteSubscription {
-            plan_name: "starter".into(),
             billing_interval: BillingInterval::Yearly,
-            status: "active".into(),
             current_period_start: now - chrono::TimeDelta::days(182),
             current_period_end: now + chrono::TimeDelta::days(183),
         };

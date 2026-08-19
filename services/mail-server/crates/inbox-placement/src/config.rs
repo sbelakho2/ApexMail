@@ -106,8 +106,12 @@ impl PlacementConfig {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(25),
-            smtp_user: env::var("PLACEMENT_SMTP_USER").ok().filter(|v| !v.is_empty()),
-            smtp_pass: env::var("PLACEMENT_SMTP_PASS").ok().filter(|v| !v.is_empty()),
+            smtp_user: env::var("PLACEMENT_SMTP_USER")
+                .ok()
+                .filter(|v| !v.is_empty()),
+            smtp_pass: env::var("PLACEMENT_SMTP_PASS")
+                .ok()
+                .filter(|v| !v.is_empty()),
             // Default 2h comfortably exceeds the worst-case per-account polling
             // cycle (max_polling_attempts × polling_interval_secs = 1h).
             stuck_test_timeout_secs: env::var("PLACEMENT_STUCK_TEST_TIMEOUT")

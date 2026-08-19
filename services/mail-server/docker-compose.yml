@@ -6,29 +6,42 @@
 # native Rust MTA.
 
 services:
-  # SMTP Edge Server (Inbound)
-  # Receives incoming emails on port 25
-  smtp-edge:
+  # MTA Server (unified inbound + submission)
+  # Receives email on port 25 (inbound) and authenticated sends on port 587
+  # (submission) in a single process. The legacy smtp-edge/submission split
+  # binaries and Docker targets were removed with the outbound-queue rework.
+  mta:
     build:
       context: ../..
       dockerfile: services/mail-server/Dockerfile
-      target: smtp-edge
+      target: mta
     ports:
-      - "${SMTP_EDGE_BIND:-127.0.0.1}:25:25"     # SMTP
+      - "${SMTP_EDGE_BIND:-127.0.0.1}:25:25"         # SMTP inbound
+      - "${SMTP_SUBMISSION_BIND:-127.0.0.1}:587:587" # Submission (STARTTLS)
     environment:
       - RUST_LOG=info
-      - HOSTNAME=${MAIL_SERVER_HOSTNAME:-mail.apexmail.ee}
-      - MAILSTORE_URL=http://mailstore:50051
+      - INBOUND_HOSTNAME=${MAIL_SERVER_HOSTNAME:-mail.apexmail.ee}
+      - BOUNCE_HOSTNAME=${MAIL_SERVER_HOSTNAME:-mail.apexmail.ee}
+      - FBL_HOSTNAME=${MAIL_SERVER_HOSTNAME:-mail.apexmail.ee}
+      - SUBMISSION_HOSTNAME=${MAIL_SERVER_HOSTNAME:-mail.apexmail.ee}
+      - MAILSTORE_GRPC_ADDR=http://mailstore:50051
+      - HEALTH_PORT=8081
+      - INTERNAL_SERVICE_TOKEN=${INTERNAL_SERVICE_TOKEN:-dev-internal-service-token-change-me}
+      - TLS_ENABLED=false
     entrypoint:
       - /bin/sh
       - -c
       - >
         export POSTGRES_PASSWORD="$(cat /run/secrets/postgres_password)";
         export DATABASE_URL="postgres://apexmail:${POSTGRES_PASSWORD}@postgres:5432/apexmail_mail";
-        exec /usr/bin/tini -- smtp-edge --listen 0.0.0.0:25
+        export REDIS_PASSWORD="$(cat /run/secrets/redis_password)";
+        export REDIS_URL="redis://default:${REDIS_PASSWORD}@redis:6379";
+        exec /usr/bin/tini -- mta-server
     depends_on:
       postgres:
         condition: service_healthy
+      redis:
+        condition: service_started
       mailstore:
         condition: service_started
     networks:
@@ -55,56 +68,7 @@ services:
           memory: 128M
     secrets:
       - postgres_password
-
-  # Submission Server (Authenticated SMTP)
-  # For clients to send mail via port 587
-  submission:
-    build:
-      context: ../..
-      dockerfile: services/mail-server/Dockerfile
-      target: submission
-    ports:
-      - "${SMTP_SUBMISSION_BIND:-127.0.0.1}:587:587"   # Submission
-      - "${SMTP_SUBMISSION_BIND:-127.0.0.1}:465:465"   # SMTPS (TLS)
-    environment:
-      - RUST_LOG=info
-      - HOSTNAME=${MAIL_SERVER_HOSTNAME:-mail.apexmail.ee}
-      - REQUIRE_AUTH=true
-      - ENABLE_STARTTLS=true
-    entrypoint:
-      - /bin/sh
-      - -c
-      - >
-        export POSTGRES_PASSWORD="$(cat /run/secrets/postgres_password)";
-        export DATABASE_URL="postgres://apexmail:${POSTGRES_PASSWORD}@postgres:5432/apexmail_mail";
-        exec /usr/bin/tini -- submission-server --listen 0.0.0.0:587
-    volumes:
-      - ./config/certs:/etc/apexmail/certs:ro
-    depends_on:
-      postgres:
-        condition: service_healthy
-    networks:
-      - apexmail
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "nc", "-z", "localhost", "587"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "5"
-    deploy:
-      resources:
-        limits:
-          memory: 512M
-          cpus: '0.5'
-        reservations:
-          memory: 128M
-    secrets:
-      - postgres_password
+      - redis_password
 
   # Mailstore Service
   # Message storage and retrieval
@@ -121,6 +85,7 @@ services:
       # sibling services (imap-server) can reach the mailstore over the
       # internal network. Bare-metal/dev runs keep the safe 127.0.0.1 default.
       - MAILSTORE_BIND_ADDR=0.0.0.0:50051
+      - INTERNAL_SERVICE_TOKEN=${INTERNAL_SERVICE_TOKEN:-dev-internal-service-token-change-me}
     entrypoint:
       - /bin/sh
       - -c
@@ -506,3 +471,5 @@ volumes:
 secrets:
   postgres_password:
     file: ./secrets/postgres_password
+  redis_password:
+    file: ./secrets/redis_password

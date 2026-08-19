@@ -28,7 +28,7 @@ The plan catalog and entitlement lifecycle are described in
 | POST | `/alerts` | Configure usage-alert thresholds |
 | GET | `/quota` | Check current quota state |
 
-All catalog monetary fields are integer cents. Catalog prices are USD.
+All catalog monetary fields are integer cents. Catalog prices are EUR.
 
 ## Secure paid-plan flow
 
@@ -113,7 +113,7 @@ for customer-paid subscription changes.
 | Field | Value |
 |---|---|
 | Company | Bel Consulting OÜ (trading as ApexMail) |
-| Address | Sakala 7-2, Tallinn 10141, Estonia |
+| Address | Sakala tn 7-2, 10141 Tallinn, Estonia |
 | Registry code | 16588745 |
 | VAT number | EE102951727 |
 | Billing email | billing@apexmail.ee |

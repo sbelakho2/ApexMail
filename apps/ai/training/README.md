@@ -1,21 +1,41 @@
-# Retired Model-Training Archive
+# Model Training Pipeline
 
-This directory no longer provides a model-training, evaluation, model-upload, adapter-export, or model-promotion workflow.
+This directory provides the **reviewed offline training runner** for the
+deployed `ai-service`.
 
-The deployed `ai-service` provides authenticated deterministic email-assistance helpers only. It does **not** host a language model, execute model inference, train a model, run an autonomous agent, or accept model artifacts.
+The `ai-service` itself does not host a language model or run inference for
+requests: it exposes authenticated deterministic email-assistance helpers
+(analytics, content scoring, send-time recommendations) and an optional
+agent-assisted email drafting flow. When the operator sets
+`AI_TRAINING_RUNNER` to this pipeline, the service can trigger governed
+training runs (`validate → train → test`) and record their artifacts.
 
-## Why this was retired
+## What lives here
 
-The former QLoRA/agent pipeline produced unsupported behavior and contained synthetic product, DNS, routing, and tool-execution claims. It had no governed production promotion path, tenant-isolation model, or matching runtime. Keeping runnable scripts or deploy-shaped artifacts would misrepresent the product.
+- `pipeline.sh` — the runner: `validate`, `train`, `test`, `status`, `full`.
+  Called only by `ai-service` via `AI_TRAINING_RUNNER` (an absolute
+  executable path) or manually on the training host.
+- `train.py` — QLoRA fine-tuning driver (config-driven, 4× B200 setup).
+- `config.yaml` — the QLoRA/model configuration used by `train.py`.
+- `README.md` — this file.
 
-## Future work
+## Contract with ai-service
 
-A future model program must be introduced as a separately reviewed design. Before any training code or corpus is reintroduced, it needs:
+- `AI_TRAINING_RUNNER` must be an existing absolute executable path;
+  otherwise training requests return "training unavailable".
+- The runner is invoked with `--job-id`, `--model-id`, `--epochs` and
+  `--artifact-dir` and must write a validated `metrics.json` into the
+  artifact directory.
+- Generated artifacts are gitignored; nothing here is deployed into the
+  mail path. Training is a separate, operator-gated process.
+
+## Governance
+
+Any change to the model program (new base model, new corpus, changed
+prompt/agent behavior) requires:
 
 1. a deployed, authenticated, tenant-isolated runtime;
 2. an approved data-governance and provenance process;
 3. factual sources tied to current API and delivery contracts;
 4. evaluation for security, privacy, and cross-tenant isolation;
 5. artifact signing, review, rollback, and deployment controls.
-
-Until then, model artifacts and generated training outputs are ignored by version control and must not be treated as deployable.

@@ -75,7 +75,7 @@ After running a test, compare results against baselines:
 ```bash
 # Check if current run meets baseline thresholds
 k6 run --summary-export=current.json load-tests/http/load-test.js
-python tools/compare-baselines.py load-tests/baselines/v1.0.json current.json
+./scripts/compare-baseline.sh current.json --baseline load-tests/baselines/v1.0.json
 ```
 
 Baseline files include confidence intervals (`mean`, `std`, `sample_size`) for statistical significance testing.

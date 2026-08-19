@@ -2,10 +2,10 @@ use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use chrono::{DateTime, Datelike, Timelike, Utc};
 use billing_common::cost_throttle::{
     cost_throttle_key, CostThrottleOverride, COST_THROTTLE_TTL_SECS,
 };
+use chrono::{DateTime, Datelike, Timelike, Utc};
 use redis::AsyncCommands;
 use reqwest::Client;
 use serde::de::DeserializeOwned;
@@ -1262,7 +1262,7 @@ async fn insert_metering_events(
             .push_bind(event.normalized_id)
             .push_bind(&event.tenant_id)
             .push_bind(&event.event_type)
-                        .push_bind(event.quantity)
+            .push_bind(event.quantity)
             .push_bind(event.timestamp)
             .push_bind(&event.metadata);
     });
@@ -2608,7 +2608,10 @@ struct ExpiredWalletReservationRow {
     released_count: i64,
 }
 
-pub(crate) async fn mark_payment_recovered(state: &AppState, tenant_id: &str) -> Result<(), String> {
+pub(crate) async fn mark_payment_recovered(
+    state: &AppState,
+    tenant_id: &str,
+) -> Result<(), String> {
     sqlx::query(
         r#"
         WITH update_dunning AS (

@@ -11,7 +11,7 @@ competitor_description = "Resend is a modern email API for developers with compo
 pricing_as_of = "2026-05-09"
 og_image = "/images/og-image.svg"
 # Feature comparison counts — update when capabilities change
-apexmail_wins = 0
+apexmail_wins = 6
 competitor_wins = 0
 verdict_title = "Why Choose ApexMail Over Resend?"
 verdict_points = [
@@ -21,7 +21,7 @@ verdict_points = [
   "Advanced analytics, content diagnostics, and send-time recommendations",
   "Built-in consent management, audit logs, and GDPR automation",
   "Idempotency keys, ARC signing, BIMI, and reputation circuit breaker",
-  "First-party SDKs for Python, Go, Ruby, PHP, and Java (in development); Resend SDKs for Node.js, PHP, Python, Ruby, Go, Java, Rust, .NET, and Laravel",
+  "First-party SDKs for Node.js, Python, Go, PHP, Ruby, and Java; Resend SDKs for Node.js, PHP, Python, Ruby, Go, Java, Rust, .NET, and Laravel",
 ]
 
 # Comparison data (audit 3.3): rendered by partials/compare/table.html via a

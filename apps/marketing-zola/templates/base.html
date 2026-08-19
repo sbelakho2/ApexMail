@@ -78,6 +78,8 @@
     "name": "{{ config.extra.site_name }}",
     "url": "{{ config.base_url }}",
     "logo": "{{ config.base_url }}/icon.svg",
+    "legalName": "{{ config.extra.company.legal_name }}",
+    "vatID": "{{ config.extra.company.vat_number | default(value='EE102951727') }}",
     "sameAs": [
       "{{ config.extra.github_url }}",
       "{{ config.extra.linkedin_url }}",

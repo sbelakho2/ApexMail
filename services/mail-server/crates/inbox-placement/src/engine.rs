@@ -241,13 +241,8 @@ impl PlacementEngine {
 
             // 3a. Send test email via the platform SMTP relay, from the
             // tenant's configured sender to the seed address.
-            if let Err(e) = send_test_email(
-                &self.config,
-                &test.from_email,
-                &account.email,
-                test_id,
-            )
-            .await
+            if let Err(e) =
+                send_test_email(&self.config, &test.from_email, &account.email, test_id).await
             {
                 tracing::warn!(
                     test_id = %test_id,

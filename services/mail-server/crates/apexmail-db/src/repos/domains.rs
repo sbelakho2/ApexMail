@@ -175,7 +175,7 @@ impl DomainsRepo {
         let result = sqlx::query(
             "UPDATE domains SET status = 'pending', verified = false, ses_verified = false, \
              spf_verified = $1, dkim_verified = $2, dmarc_verified = $3, updated_at = NOW() \
-             WHERE id = $4 AND tenant_id = $5"
+             WHERE id = $4 AND tenant_id = $5",
         )
         .bind(spf)
         .bind(dkim)

@@ -27,7 +27,9 @@ use tower_http::trace::TraceLayer;
 use ui_foundation::axum_router as ui_router;
 
 use crate::config::Config;
-use crate::middleware::{auth, ddos, idempotency, metrics, rate_limiter, request_logger, versioning};
+use crate::middleware::{
+    auth, ddos, idempotency, metrics, rate_limiter, request_logger, versioning,
+};
 use crate::routes;
 use crate::state::AppState;
 
@@ -722,10 +724,7 @@ fn browser_csp_header_with_analytics(nonce: &str, analytics_img_src: Option<&str
 /// The widget is fully CSP3-compliant: it sets no inline styles (progress
 /// is driven by a data-progress attribute with stylesheet rules), so
 /// `style-src` stays strict.
-fn browser_csp_header_with_sources(
-    nonce: &str,
-    analytics_img_src: Option<&str>,
-) -> HeaderValue {
+fn browser_csp_header_with_sources(nonce: &str, analytics_img_src: Option<&str>) -> HeaderValue {
     let analytics_img_src = analytics_img_src
         .map(str::trim)
         .filter(|src| !src.is_empty())
@@ -946,7 +945,6 @@ async fn browser_globals_css() -> impl IntoResponse {
     )
 }
 
-
 // ─── Content-Type validation ──────────────────────────────────────
 
 /// Reject POST/PUT/PATCH requests without a valid Content-Type header.
@@ -1132,12 +1130,7 @@ fn render_ui_response(
     let csrf_secret = Some(config.csrf_secret.as_str());
     // KiwiCaptcha widget is self-contained — it fetches its challenge from
     // /api/kcaptcha/challenge at runtime, so no SSR params are threaded here.
-    let html = ui_router::render_route_with_query(
-        surface,
-        uri.path(),
-        uri.query(),
-        csrf_secret,
-    )?;
+    let html = ui_router::render_route_with_query(surface, uri.path(), uri.query(), csrf_secret)?;
     Some(browser_html_response(html))
 }
 
@@ -1271,7 +1264,11 @@ async fn fallback_handler(
     // Serve static assets that the SSR pages reference
     if method == axum::http::Method::GET {
         // Favicon and apple-icon requests — return empty 204 to avoid JSON NOT_FOUND
-        if path.starts_with("/favicon") || path.starts_with("/apple-icon") || path.starts_with("/android-icon") || path == "/favicon.ico" {
+        if path.starts_with("/favicon")
+            || path.starts_with("/apple-icon")
+            || path.starts_with("/android-icon")
+            || path == "/favicon.ico"
+        {
             return StatusCode::NO_CONTENT.into_response();
         }
         // ms-application TileImage requests
@@ -1749,12 +1746,21 @@ mod tests {
         }
         // ...and the default-protect fallback for paths NOT in the manifest
         // (new/forgotten operator or placement routes must never fail open).
-        assert!(ui_route_requires_auth("web", "/inbox-placement/t_not-in-manifest"));
-        assert!(ui_route_requires_auth("control-plane", "/cp/some-future-page"));
+        assert!(ui_route_requires_auth(
+            "web",
+            "/inbox-placement/t_not-in-manifest"
+        ));
+        assert!(ui_route_requires_auth(
+            "control-plane",
+            "/cp/some-future-page"
+        ));
         // Unrelated unknown web routes still render anonymously (404/public).
         assert!(!ui_route_requires_auth("web", "/definitely-not-protected"));
         // The marketing-zola /inbox-placement marketing page stays public.
-        assert!(!ui_route_requires_auth("marketing-zola", "/inbox-placement"));
+        assert!(!ui_route_requires_auth(
+            "marketing-zola",
+            "/inbox-placement"
+        ));
     }
 
     #[tokio::test]
@@ -1809,9 +1815,13 @@ mod tests {
 
     #[test]
     fn inject_script_nonce_refuses_unknown_external_scripts() {
-        let html = r#"<html><body><script src="https://evil.example.com/x.js"></script></body></html>"#;
+        let html =
+            r#"<html><body><script src="https://evil.example.com/x.js"></script></body></html>"#;
         let updated = inject_script_nonce(html, "nonce-123");
-        assert!(!updated.contains("nonce="), "unknown src must not be stamped");
+        assert!(
+            !updated.contains("nonce="),
+            "unknown src must not be stamped"
+        );
         assert!(updated.contains(r#"<script src="https://evil.example.com/x.js">"#));
     }
 
@@ -1827,7 +1837,8 @@ mod tests {
 
         // Known same-origin external console script is stamped.
         let external = r#"<script src="/assets/console.js" defer></script>"#;
-        assert!(inject_script_nonce(external, "n3").contains(r#"<script src="/assets/console.js" defer nonce="n3">"#));
+        assert!(inject_script_nonce(external, "n3")
+            .contains(r#"<script src="/assets/console.js" defer nonce="n3">"#));
     }
 
     #[test]
@@ -1838,7 +1849,10 @@ mod tests {
   var root = document.querySelector('[data-api-console-root]');
 })();</script></body></html>"#;
         let stripped = strip_static_build_nonce(html);
-        assert!(!stripped.contains("static-build"), "placeholder must be stripped");
+        assert!(
+            !stripped.contains("static-build"),
+            "placeholder must be stripped"
+        );
 
         let updated = inject_script_nonce(&stripped, "real-nonce");
         assert!(updated.contains("<script nonce=\"real-nonce\">"));
@@ -1852,7 +1866,10 @@ mod tests {
 
         let unknown = "<style>body{background:url(https://evil.example.com)}</style>";
         let updated = inject_style_nonce(unknown, "n2");
-        assert!(!updated.contains("nonce="), "unknown style must not be stamped");
+        assert!(
+            !updated.contains("nonce="),
+            "unknown style must not be stamped"
+        );
     }
 
     #[tokio::test]

@@ -447,41 +447,49 @@ The visual product and commercial strategy remain strong. The website is still b
 
 ## Deployment system — FIXED 2026-07-30
 
-A single canonical deployment pipeline replaces ad-hoc rsync + Docker restarts.
+The canonical deployment path is CI/CD with Docker Compose; see `deploy/DEPLOYMENT.md` (single source of truth).
 
-### Sole deployment mechanism
+### Canonical deployment (production)
 
 ```
-make deploy-marketing    # Build Zola → stage to server → atomic swap → verify
-make deploy-auth         # Push source → rebuild on server → systemd restart → verify
-make deploy-nginx        # Push nginx config → deploy → reload → verify
-make deploy-all          # Full deployment in dependency order
-make verify              # Health checks (4 locales, content, registry, template, status API)
-make rollback-marketing  # Instant rollback to previous snapshot
+push to main
+  → .github/workflows/deploy.yml            # build + push images to GHCR (:latest + :<sha>)
+  → .github/workflows/deploy-hetzner.yml    # SSH to host → pull :latest → docker compose up -d
 ```
 
-**Do NOT use GitHub Actions, Docker Compose, Kubernetes, or manual rsync for production deployment.** The GitHub Actions workflows `deploy.yml` and `deploy-hetzner.yml` have been disabled (`.disabled` suffix) — they targeted a Docker-based model incompatible with the bare-metal production setup.
+The Hetzner workflow renders `docker-compose.prod.yml` with production secrets (`PROD_*_FILE` paths under `/opt/apexmail/secrets/`), including the DKIM private-key encryption key, and the entrypoint wrapper (`deploy/scripts/entrypoint-wrapper.sh`) exports file-backed secrets as environment variables for the services.
 
-### Server architecture (host nginx + bare-metal services)
+### Manual fallback (emergency/hotfix only — never the production path)
+
+```
+make deploy                 # full manual deploy (sync all + rebuild all)
+make deploy-service S=api-server   # partial: sync changed code dirs, rebuild only S
+make deploy-quick           # run deploy.sh without rsync
+make deploy-restart         # restart containers without rebuild
+make verify                 # check live endpoints
+```
+
+The Makefile targets rsync code to the host and run `deploy/scripts/deploy.sh`, which builds images locally (tagged GHCR-style, never pushed). Server-local state (`.env`, `secrets/`, `certs/`, `target/`, Let's Encrypt store) is never touched.
+
+### Server architecture (Docker Compose on the bare-metal host)
 
 | Service | Port | Management |
 |---------|------|------------|
-| nginx (host, not Docker) | 80, 443 | systemd |
-| auth-server | 3000 | systemd (`auth-server.service`) |
-| mta-server | 25, 465, 587 | systemd (`apexmail-mta`) |
-| imap-server | — | systemd (`apexmail-imap`) |
-| status-server | 9090 | systemd (`apexmail-status`) |
+| nginx | 80, 443 | Docker Compose |
+| marketing (Zola static) | 8080 (internal) | Docker Compose |
+| auth-server (status + auth) | 3000 | Docker Compose |
+| api-server | 3000 (internal) | Docker Compose |
+| mta-server (inbound 25 + submission 587) | 25, 587 | Docker Compose |
+| imap-server | — | Docker Compose |
 | postgres | 5432 | Docker Compose |
 | redis | 6379 | Docker Compose |
 
 ### Key fixes applied
 
-- **auth-server systemd unit**: Previously started manually (`nohup`), now managed by systemd with `EnvironmentFile=/opt/apexmail/.env` and auto-restart. Survives reboots.
-- **`.env` corrections**: `DATABASE_URL` changed from Docker hostname `postgres` to `127.0.0.1` with real password from `/opt/apexmail/secrets/`. Registry code corrected from `16942833` to `16588745`.
-- **nginx status API proxy**: `/api/status-data` proxies to `http://127.0.0.1:3000/status/api` (auth-server), not dead port 9090.
-- **Atomic deployment**: Marketing files staged to `.next`, then `mv`-swapped into place on the same filesystem. Previous version saved as `.prev` for instant rollback.
-- **Post-deploy verification**: 4-locale HTTP check, content fingerprint, registry code scan, template syntax scan, status API health — all verified before marking deploy complete.
-- **Cleanup**: Staging directories removed after success. Snapshots expired after 7 days. Orphans cleaned.
-- **Conflicting Docker container check**: Deploy aborts if `apexmail-nginx` container is running (conflicts with bare-metal nginx).
-- **SSH config**: Host alias `apexmail` added to `~/.ssh/config` for simplified commands.
-- **Protected directory preservation**: `PROTECTED_DIRS=(login admin)` — these non-marketing directories are saved before the atomic swap and restored after. Deploy aborts if restoration fails. Post-deploy verification now checks `app.apexmail.ee` and `admin.apexmail.ee` in addition to all 4 marketing locales.
+- **Auth-server no longer started manually** (`nohup`): it runs as a compose service with secrets passed via `_FILE` environment variables and file-based secrets, with auto-restart.
+- **`.env` corrections**: `DATABASE_URL` uses `127.0.0.1` with the real password from `/opt/apexmail/secrets/`. Registry code corrected from `16942833` to `16588745`.
+- **nginx status API proxy**: `/api/status-data` proxies to the auth-server status API (`http://127.0.0.1:3000/status/api`), not a dead port.
+- **DKIM key encryption**: `DKIM_PRIVATE_KEY_ENCRYPTION_KEY` is rendered from `PROD_DKIM_PRIVATE_KEY_ENCRYPTION_KEY_FILE` into every service that provisions or signs DKIM keys; provisioning fails closed without it.
+- **Atomic marketing deploys**: marketing assets build once (Zola) and ship as a built artifact; post-deploy verification checks the 4 locales, registry code, template syntax, and status API before marking the deploy complete.
+- **Conflicting Docker container check**: deploy aborts if legacy containers created by `docker run` (not compose-managed) interfere; orphaned containers are removed before the compose stack is brought up.
+- **SSH config**: host alias `apexmail` added to `~/.ssh/config` for simplified commands.

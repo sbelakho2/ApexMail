@@ -62,10 +62,10 @@ fn validate_system_sender_material(row: &SystemSenderRow) -> Result<(), ApiError
         .filter(|value| is_encrypted_dkim_private_key(value))
         .ok_or_else(not_ready_error)?;
     let aad = dkim_private_key_aad(&row.tenant_id, &row.id);
-    let private_key = decrypt_dkim_private_key(encrypted_private_key, &aad)
-        .map_err(|_| not_ready_error())?;
-    let derived_public_key = public_key_base64_from_private_key_pem(&private_key)
-        .map_err(|_| not_ready_error())?;
+    let private_key =
+        decrypt_dkim_private_key(encrypted_private_key, &aad).map_err(|_| not_ready_error())?;
+    let derived_public_key =
+        public_key_base64_from_private_key_pem(&private_key).map_err(|_| not_ready_error())?;
 
     if !dkim_public_keys_match(public_key, &derived_public_key) {
         return Err(not_ready_error());
@@ -125,15 +125,9 @@ pub(crate) async fn queue_system_email(
     tags: Vec<String>,
 ) -> Result<Uuid, ApiError> {
     let mut tx = db.begin().await?;
-    let message_id = queue_system_email_in_transaction(
-        &mut tx,
-        recipient,
-        subject,
-        html_body,
-        text_body,
-        tags,
-    )
-    .await?;
+    let message_id =
+        queue_system_email_in_transaction(&mut tx, recipient, subject, html_body, text_body, tags)
+            .await?;
     tx.commit().await?;
     Ok(message_id)
 }
@@ -203,7 +197,10 @@ mod tests {
 
     #[test]
     fn platform_sender_identity_is_consistent() {
-        assert_eq!(SYSTEM_FROM_ADDRESS.rsplit_once('@').unwrap().1, SYSTEM_DOMAIN);
+        assert_eq!(
+            SYSTEM_FROM_ADDRESS.rsplit_once('@').unwrap().1,
+            SYSTEM_DOMAIN
+        );
         assert_eq!(SYSTEM_TENANT_ID, "system_internal_tenant01");
         assert_eq!(SYSTEM_DOMAIN_ID, "00000000-0000-0000-0000-0000000000d1");
     }

@@ -10,10 +10,9 @@
 use super::helpers::{clamp_limit, default_limit};
 use apexmail_lib::cache::cache_del;
 use apexmail_lib::dkim::{
-    decrypt_dkim_private_key, dkim_private_key_aad, dkim_public_keys_match,
-    dkim_txt_record_value, encrypt_dkim_private_key, generate_dkim_keypair,
-    is_encrypted_dkim_private_key, public_key_base64_from_private_key_pem,
-    ses_private_key_base64_from_pem,
+    decrypt_dkim_private_key, dkim_private_key_aad, dkim_public_keys_match, dkim_txt_record_value,
+    encrypt_dkim_private_key, generate_dkim_keypair, is_encrypted_dkim_private_key,
+    public_key_base64_from_private_key_pem, ses_private_key_base64_from_pem,
 };
 use aws_sdk_sesv2::types::{
     BehaviorOnMxFailure, DkimSigningAttributes, DkimSigningAttributesOrigin, DkimStatus,
@@ -170,17 +169,15 @@ fn sender_dns_is_ready(
     // SMTP sends with the visible sender as its envelope sender. DKIM alignment
     // satisfies DMARC there, so an SES-only custom MAIL FROM record is neither
     // used nor required. SES requires its custom MAIL FROM SPF/MX pair.
-    dkim_verified
-        && dmarc_verified
-        && (!ses_transport || (spf_verified && return_path_verified))
+    dkim_verified && dmarc_verified && (!ses_transport || (spf_verified && return_path_verified))
 }
 
-    fn domain_name_conflict(error: &sqlx::Error) -> bool {
-        error
+fn domain_name_conflict(error: &sqlx::Error) -> bool {
+    error
         .as_database_error()
         .and_then(|database_error| database_error.code())
         .is_some_and(|code| code == "23505")
-    }
+}
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -256,11 +253,7 @@ async fn create_domain(
 ) -> Result<(StatusCode, Json<DomainResponse>), ApiError> {
     require_scopes(&auth, &["domains:write"])?;
 
-    let domain_name = body
-        .name
-        .trim()
-        .trim_end_matches('.')
-        .to_ascii_lowercase();
+    let domain_name = body.name.trim().trim_end_matches('.').to_ascii_lowercase();
 
     if !apexmail_lib::validation::is_valid_domain(&domain_name) {
         return Err(ApiError::Validation(vec![format!(
@@ -412,15 +405,16 @@ async fn delete_domain(
 
     // Lock the row and the globally scoped SES identity before touching either
     // resource. A delete cannot then race a re-create of the same domain name.
-    let domain: Option<(String, bool)> =
-        sqlx::query_as("SELECT name, ses_verified FROM domains WHERE id = $1::uuid AND tenant_id = $2 FOR UPDATE")
-            .bind(&id)
-            .bind(&auth.tenant_id)
-            .fetch_optional(&mut *tx)
-            .await?;
+    let domain: Option<(String, bool)> = sqlx::query_as(
+        "SELECT name, ses_verified FROM domains WHERE id = $1::uuid AND tenant_id = $2 FOR UPDATE",
+    )
+    .bind(&id)
+    .bind(&auth.tenant_id)
+    .fetch_optional(&mut *tx)
+    .await?;
 
-    let (domain_name, ses_verified) = domain
-        .ok_or_else(|| ApiError::NotFound("domain not found".into()))?;
+    let (domain_name, ses_verified) =
+        domain.ok_or_else(|| ApiError::NotFound("domain not found".into()))?;
     lock_domain_identity(&mut tx, &domain_name).await?;
 
     // If SES actually accepted this identity for sending, remove it before the
@@ -463,11 +457,10 @@ pub(crate) async fn verify_domain_for_tenant(
     tenant_id: &str,
     id: &str,
 ) -> Result<Json<VerifyResponse>, ApiError> {
+    let mut tx = state.db.begin().await?;
+    lock_tenant_domain_mutations(&mut tx, tenant_id).await?;
 
-        let mut tx = state.db.begin().await?;
-        lock_tenant_domain_mutations(&mut tx, tenant_id).await?;
-
-        let row = sqlx::query_as::<_, DomainFullRow>(
+    let row = sqlx::query_as::<_, DomainFullRow>(
         "SELECT id::text AS id, tenant_id::text AS tenant_id, name, dkim_selector, dkim_public_key, dkim_private_key, dkim_enabled
             FROM domains WHERE id = $1::uuid AND tenant_id = $2 FOR UPDATE",
     )
@@ -476,12 +469,12 @@ pub(crate) async fn verify_domain_for_tenant(
         .fetch_optional(&mut *tx)
     .await?
     .ok_or_else(|| ApiError::NotFound("domain not found".into()))?;
-        lock_domain_identity(&mut tx, &row.name).await?;
+    lock_domain_identity(&mut tx, &row.name).await?;
 
     // Legacy rows may predate per-domain keys. This explicit mutating endpoint
     // is the only place that provisions or repairs them; GET endpoints never
     // create key material behind the customer's back.
-        let dkim_material = ensure_domain_dkim_material(&mut tx, &row).await?;
+    let dkim_material = ensure_domain_dkim_material(&mut tx, &row).await?;
 
     // Perform real DNS lookups
     let dns = DNS_LOOKUP.as_ref().map_err(|e| {
@@ -513,7 +506,10 @@ pub(crate) async fn verify_domain_for_tenant(
                     && dns_target_matches(&record.exchange, &return_path_mx_target)
             }),
             Err(e) => {
-                warn!("MAIL FROM MX lookup failed for {}: {}", return_path_hostname, e);
+                warn!(
+                    "MAIL FROM MX lookup failed for {}: {}",
+                    return_path_hostname, e
+                );
                 false
             }
         };
@@ -690,9 +686,7 @@ struct SystemSenderStatusRow {
 /// Return the platform sender's current readiness and, after provisioning,
 /// the exact per-domain records that must be published. This function never
 /// exposes private material and never promotes readiness by itself.
-pub(crate) async fn system_sender_status(
-    state: &AppState,
-) -> Result<SystemSenderStatus, ApiError> {
+pub(crate) async fn system_sender_status(state: &AppState) -> Result<SystemSenderStatus, ApiError> {
     let row = sqlx::query_as::<_, SystemSenderStatusRow>(
         "SELECT id::text AS id, name, status, dkim_selector, dkim_public_key
          FROM domains WHERE tenant_id = $1 AND name = $2",
@@ -708,7 +702,9 @@ pub(crate) async fn system_sender_status(
     })?;
 
     let records = match (
-        row.dkim_selector.as_deref().filter(|value| is_valid_dkim_selector(value)),
+        row.dkim_selector
+            .as_deref()
+            .filter(|value| is_valid_dkim_selector(value)),
         row.dkim_public_key
             .as_deref()
             .filter(|value| !value.trim().is_empty()),
@@ -740,9 +736,7 @@ pub(crate) async fn system_sender_status(
 /// per-domain DKIM material. It is safe to invoke on every deployment: valid
 /// material is preserved, while absent, malformed, or legacy plaintext data is
 /// repaired and left pending for explicit DNS/SES verification.
-pub async fn bootstrap_system_sender(
-    state: &AppState,
-) -> Result<SystemSenderStatus, ApiError> {
+pub async fn bootstrap_system_sender(state: &AppState) -> Result<SystemSenderStatus, ApiError> {
     let mut tx = state.db.begin().await?;
     lock_tenant_domain_mutations(&mut tx, SYSTEM_TENANT_ID).await?;
     lock_domain_identity(&mut tx, SYSTEM_DOMAIN).await?;
@@ -823,12 +817,15 @@ async fn ensure_domain_dkim_material(
         let private_key_pem = decrypt_dkim_private_key(stored_private_key, &aad)
             .map_err(dkim_key_provisioning_error)?;
 
-        if let Ok(canonical_public_key) = public_key_base64_from_private_key_pem(&private_key_pem)
-        {
+        if let Ok(canonical_public_key) = public_key_base64_from_private_key_pem(&private_key_pem) {
             if dkim_public_keys_match(public_key, &canonical_public_key) {
-                let private_key_needs_encryption = !is_encrypted_dkim_private_key(stored_private_key);
+                let private_key_needs_encryption =
+                    !is_encrypted_dkim_private_key(stored_private_key);
                 let public_key_needs_normalization = public_key != canonical_public_key;
-                if private_key_needs_encryption || public_key_needs_normalization || !row.dkim_enabled {
+                if private_key_needs_encryption
+                    || public_key_needs_normalization
+                    || !row.dkim_enabled
+                {
                     let persisted_private_key = if private_key_needs_encryption {
                         encrypt_dkim_private_key(&private_key_pem, &aad)
                             .map_err(dkim_key_provisioning_error)?
@@ -912,8 +909,8 @@ async fn configure_ses_domain_identity(
         .await;
     let client = aws_sdk_sesv2::Client::new(&sdk_config);
 
-    let ses_private_key = ses_private_key_base64_from_pem(private_key_pem)
-        .map_err(dkim_key_provisioning_error)?;
+    let ses_private_key =
+        ses_private_key_base64_from_pem(private_key_pem).map_err(dkim_key_provisioning_error)?;
     let dkim_attrs = DkimSigningAttributes::builder()
         .domain_signing_selector(selector)
         .domain_signing_private_key(&ses_private_key)
@@ -983,7 +980,8 @@ async fn configure_ses_domain_identity(
         .map_err(|error| {
             warn!(domain, error = %error, "failed to configure SES custom MAIL FROM domain");
             ApiError::ServiceUnavailable(
-                "SES MAIL FROM configuration is temporarily unavailable; please retry shortly".into(),
+                "SES MAIL FROM configuration is temporarily unavailable; please retry shortly"
+                    .into(),
             )
         })?;
 
@@ -1008,7 +1006,9 @@ async fn configure_ses_domain_identity(
 fn is_ses_identity_already_present(error_message: &str) -> bool {
     error_message.contains("AlreadyExistsException")
         || error_message.contains("ConflictException")
-        || error_message.to_ascii_lowercase().contains("already exists")
+        || error_message
+            .to_ascii_lowercase()
+            .contains("already exists")
 }
 
 fn ses_identity_is_ready(
@@ -1054,13 +1054,16 @@ async fn delete_ses_domain_identity(state: &AppState, domain: &str) -> Result<()
         }
         Err(error) => {
             let message = error.to_string();
-            if message.contains("NotFoundException") || message.to_ascii_lowercase().contains("not found") {
+            if message.contains("NotFoundException")
+                || message.to_ascii_lowercase().contains("not found")
+            {
                 info!(domain = %domain, "SES email identity was already absent");
                 Ok(())
             } else {
                 warn!(domain = %domain, error = %error, "failed to delete SES email identity");
                 Err(ApiError::ServiceUnavailable(
-                    "SES identity cleanup is temporarily unavailable; retry deletion shortly".into(),
+                    "SES identity cleanup is temporarily unavailable; retry deletion shortly"
+                        .into(),
                 ))
             }
         }
@@ -1331,11 +1334,17 @@ impl AuthKind {
         match self {
             AuthKind::Spf => {
                 let record = return_path_spf_dns_record(domain);
-                Some(format!("{} {}  {}", record.record_type, record.hostname, record.value))
+                Some(format!(
+                    "{} {}  {}",
+                    record.record_type, record.hostname, record.value
+                ))
             }
             AuthKind::Dkim => public_key.map(|public_key| {
                 let record = dkim_dns_record(selector, domain, public_key);
-                format!("{} {}  {}", record.record_type, record.hostname, record.value)
+                format!(
+                    "{} {}  {}",
+                    record.record_type, record.hostname, record.value
+                )
             }),
             AuthKind::Dmarc => Some(format!("TXT _dmarc.{domain}  {DMARC_RECORD_VALUE}")),
             AuthKind::ReturnPath => {
@@ -1368,28 +1377,24 @@ impl AuthKind {
                     record.hostname, record.value
                 )
             }
-            AuthKind::Dkim => {
-                match public_key {
-                    Some(public_key) => {
-                        let record = dkim_dns_record(selector, domain, public_key);
-                        format!(
-                            "DKIM is misconfigured. Add a TXT record at host `{}` with value \
+            AuthKind::Dkim => match public_key {
+                Some(public_key) => {
+                    let record = dkim_dns_record(selector, domain, public_key);
+                    format!(
+                        "DKIM is misconfigured. Add a TXT record at host `{}` with value \
                              `{}`. Preserve the complete `p=` value, wait for DNS propagation, \
                              then re-verify.",
-                            record.hostname, record.value
-                        )
-                    }
-                    None => "DKIM key material is incomplete. Call POST /v1/domains/:id/verify \
-                             to provision a new per-domain key before publishing DNS."
-                        .into(),
+                        record.hostname, record.value
+                    )
                 }
-            }
-            AuthKind::Dmarc => {
-                "DMARC missing. Add a TXT record at host `_dmarc` with value \
+                None => "DKIM key material is incomplete. Call POST /v1/domains/:id/verify \
+                             to provision a new per-domain key before publishing DNS."
+                    .into(),
+            },
+            AuthKind::Dmarc => "DMARC missing. Add a TXT record at host `_dmarc` with value \
                  `v=DMARC1; p=quarantine; rua=mailto:dmarc@apexmail.io`. Start with \
                  `p=none` if you want monitoring before enforcement."
-                    .into()
-            }
+                .into(),
             AuthKind::ReturnPath => {
                 let record = return_path_dns_record(domain, aws_region);
                 format!(
@@ -1457,11 +1462,21 @@ mod tests_auth {
         // SPF hint must actually mention the canonical include token, which is
         // what the chatbot/mailbot training data quotes verbatim.
         assert!(AuthKind::Spf
-            .fix_hint("example.com", "customer-2026", Some("MIIBIjAN"), "eu-west-1")
+            .fix_hint(
+                "example.com",
+                "customer-2026",
+                Some("MIIBIjAN"),
+                "eu-west-1"
+            )
             .contains("include:amazonses.com"));
         // DMARC hint must reference the policy directive we recommend.
         assert!(AuthKind::Dmarc
-            .fix_hint("example.com", "customer-2026", Some("MIIBIjAN"), "eu-west-1")
+            .fix_hint(
+                "example.com",
+                "customer-2026",
+                Some("MIIBIjAN"),
+                "eu-west-1"
+            )
             .contains("p=quarantine"));
     }
 
@@ -1521,25 +1536,26 @@ mod tests_auth {
         assert!(ses_identity_is_ready(&ready, "bounce.example.com"));
         assert!(!ses_identity_is_ready(&ready, "bounce.other.example"));
 
-        let pending = aws_sdk_sesv2::operation::get_email_identity::GetEmailIdentityOutput::builder()
-            .verified_for_sending_status(false)
-            .verification_status(VerificationStatus::Success)
-            .dkim_attributes(
-                aws_sdk_sesv2::types::DkimAttributes::builder()
-                    .signing_enabled(true)
-                    .status(DkimStatus::Success)
-                    .signing_attributes_origin(DkimSigningAttributesOrigin::External)
-                    .build(),
-            )
-            .mail_from_attributes(
-                aws_sdk_sesv2::types::MailFromAttributes::builder()
-                    .mail_from_domain("bounce.example.com")
-                    .mail_from_domain_status(MailFromDomainStatus::Success)
-                    .behavior_on_mx_failure(BehaviorOnMxFailure::RejectMessage)
-                    .build()
-                    .unwrap(),
-            )
-            .build();
+        let pending =
+            aws_sdk_sesv2::operation::get_email_identity::GetEmailIdentityOutput::builder()
+                .verified_for_sending_status(false)
+                .verification_status(VerificationStatus::Success)
+                .dkim_attributes(
+                    aws_sdk_sesv2::types::DkimAttributes::builder()
+                        .signing_enabled(true)
+                        .status(DkimStatus::Success)
+                        .signing_attributes_origin(DkimSigningAttributesOrigin::External)
+                        .build(),
+                )
+                .mail_from_attributes(
+                    aws_sdk_sesv2::types::MailFromAttributes::builder()
+                        .mail_from_domain("bounce.example.com")
+                        .mail_from_domain_status(MailFromDomainStatus::Success)
+                        .behavior_on_mx_failure(BehaviorOnMxFailure::RejectMessage)
+                        .build()
+                        .unwrap(),
+                )
+                .build();
         assert!(!ses_identity_is_ready(&pending, "bounce.example.com"));
     }
 }

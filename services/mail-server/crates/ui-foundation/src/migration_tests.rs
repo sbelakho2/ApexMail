@@ -167,8 +167,7 @@ fn assert_surface_wrapper(route: &ssr::SsrRoute, html: &str) {
             assert!(
                 footer_has_class,
                 "[{}] {} missing marketing footer",
-                route.surface,
-                route.pattern
+                route.surface, route.pattern
             );
             assert!(
                 !html.contains("data-sidebar-storage-key=\"apexmail-ui\""),
@@ -227,16 +226,16 @@ fn migration_docs_define_rust_ui_and_current_stripe_boundary() {
         "migration plan no longer requires Rust-native primitive replacement"
     );
     assert!(
-        STRIPE_TOOL_CONTRACT_MD.contains("**SDK** | Raw Stripe REST requests via `reqwest` in `api-server`"),
+        STRIPE_TOOL_CONTRACT_MD.contains("ApexMail creates a Stripe Checkout Session in subscription mode"),
         "Stripe tool contract no longer documents the current server-side Stripe integration boundary"
     );
     assert!(
         STRIPE_TOOL_CONTRACT_MD
-            .contains("webhook verification is implemented manually in `billing-service`"),
+            .contains("**Verification:** Stripe signature HMAC plus timestamp tolerance"),
         "Stripe tool contract no longer documents manual webhook verification ownership"
     );
     assert!(
-        STRIPE_TOOL_CONTRACT_MD.contains("User redirected to Stripe Checkout"),
+        STRIPE_TOOL_CONTRACT_MD.contains("Stripe redirects the customer to the approved return URL"),
         "Stripe tool contract no longer documents hosted Stripe checkout"
     );
 }
@@ -369,8 +368,7 @@ fn migration_forms_have_action_attributes() {
         "reset missing action"
     );
 
-    let cp_login =
-        leptos_views::control_plane_login_page("");
+    let cp_login = leptos_views::control_plane_login_page("");
     assert!(
         cp_login.contains("action=\"/api/auth/login\""),
         "cp login missing action"
@@ -551,8 +549,7 @@ fn migration_unknown_routes_are_rejected_for_every_surface() {
 #[test]
 fn migration_web_and_cp_share_primitives() {
     let web_login = leptos_views::web_login_page("");
-    let cp_login =
-        leptos_views::control_plane_login_page("");
+    let cp_login = leptos_views::control_plane_login_page("");
 
     // Both should use the same button class pattern
     let btn_class = "py-3 rounded-md";

@@ -57,7 +57,9 @@ async fn main() -> Result<()> {
     // ── PostgreSQL ────────────────────────────────────────────────────
     // PERF-100: Statement caching enabled (capacity 100) to avoid
     // re-preparation roundtrips for repeated queries.
-    let connect_opts = cfg.database.url
+    let connect_opts = cfg
+        .database
+        .url
         .parse::<sqlx::postgres::PgConnectOptions>()
         .context("Failed to parse database URL")?
         .statement_cache_capacity(100);

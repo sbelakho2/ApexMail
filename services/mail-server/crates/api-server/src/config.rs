@@ -265,7 +265,6 @@ fn env_required_pem(key: &str) -> Result<String, ConfigError> {
     Ok(raw.replace("\\n", "\n"))
 }
 
-
 fn parse_optional_pem_list(value: Option<String>) -> Vec<String> {
     value
         .unwrap_or_default()
@@ -702,9 +701,7 @@ impl Config {
         let kiwi_argon_p = env_or("KIWI_ARGON_P", "1").parse().unwrap_or(1);
         // 20-bit difficulty = ~1M expected SHA-256 hashes = ~2-5s on a browser.
         // This matches FriendlyCaptcha (~2.5s) and Anubis difficulty-5 (~1M hashes).
-        let kiwi_difficulty_bits = env_or("KIWI_DIFFICULTY_BITS", "20")
-            .parse()
-            .unwrap_or(20);
+        let kiwi_difficulty_bits = env_or("KIWI_DIFFICULTY_BITS", "20").parse().unwrap_or(20);
         // Argon2id difficulty: far lower than SHA-256 because every hash is
         // memory-hard. Clamped to the browser-solvable ceiling.
         let kiwi_argon2_difficulty_bits = env_or("KIWI_ARGON2_DIFFICULTY_BITS", "8")
@@ -1362,7 +1359,7 @@ pub(crate) mod tests {
             kiwi_argon2_difficulty_bits: 8,
             kiwi_challenge_ttl_secs: 120,
             kiwi_min_duration_ms: None,
-kiwi_enforce_telemetry: true,
+            kiwi_enforce_telemetry: true,
             kiwi_argon2_max_concurrent: 2,
             kiwi_auto_tune: false,
             kiwi_auto_tune_min_bits: 10,
@@ -1506,7 +1503,7 @@ kiwi_enforce_telemetry: true,
             kiwi_difficulty_bits: 20,
             kiwi_challenge_ttl_secs: 120,
             kiwi_min_duration_ms: None,
-kiwi_enforce_telemetry: true,
+            kiwi_enforce_telemetry: true,
             kiwi_argon2_max_concurrent: 2,
             kiwi_auto_tune: false,
             kiwi_auto_tune_min_bits: 10,

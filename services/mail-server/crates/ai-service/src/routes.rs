@@ -168,7 +168,10 @@ impl<T: Serialize> ApiResponse<T> {
         })
     }
 
-    pub fn err_with_status(status: StatusCode, message: impl Into<String>) -> (StatusCode, Json<Self>) {
+    pub fn err_with_status(
+        status: StatusCode,
+        message: impl Into<String>,
+    ) -> (StatusCode, Json<Self>) {
         (
             status,
             Json(Self {
@@ -220,12 +223,15 @@ async fn suggest_handler(
         ));
     }
     if request.count == 0 || request.count > 5 {
-        return api_error(AiError::InvalidInput("count must be between 1 and 5".into()));
+        return api_error(AiError::InvalidInput(
+            "count must be between 1 and 5".into(),
+        ));
     }
 
-    let suggestions = state
-        .assistant
-        .suggest_subject_lines(topic, request.tone.trim(), request.count);
+    let suggestions =
+        state
+            .assistant
+            .suggest_subject_lines(topic, request.tone.trim(), request.count);
     ApiResponse::ok(serde_json::json!({
         "suggestions": suggestions,
         "method": "deterministic_template_heuristic",
@@ -323,7 +329,11 @@ async fn predict_handler(
         return api_error(AiError::InvalidInput("input must not be null".into()));
     }
 
-    match state.llm.predict(request.model_id.trim(), request.input).await {
+    match state
+        .llm
+        .predict(request.model_id.trim(), request.input)
+        .await
+    {
         Ok(prediction) => ApiResponse::ok(prediction).into_response(),
         Err(error) => api_error(error),
     }
@@ -360,7 +370,10 @@ async fn evaluation_handler(
     State(state): State<Arc<AppState>>,
     Json(request): Json<EvaluateRequest>,
 ) -> Response {
-    match state.training.evaluate(&request.predictions, &request.labels) {
+    match state
+        .training
+        .evaluate(&request.predictions, &request.labels)
+    {
         Ok(metrics) => ApiResponse::ok(metrics).into_response(),
         Err(error) => api_error(error),
     }
@@ -470,10 +483,10 @@ mod tests {
     use tower::ServiceExt;
 
     fn app() -> Router {
-        let state = Arc::new(AppState::from_config(
-            AiConfig::default(),
-            "test-key".into(),
-        ).expect("valid default configuration"));
+        let state = Arc::new(
+            AppState::from_config(AiConfig::default(), "test-key".into())
+                .expect("valid default configuration"),
+        );
         build_router(state)
     }
 
@@ -483,14 +496,21 @@ mod tests {
             .method("POST")
             .header("x-api-key", "test-key")
             .header("content-type", "application/json")
-            .body(Body::from(serde_json::to_vec(&body).expect("serialize request")))
+            .body(Body::from(
+                serde_json::to_vec(&body).expect("serialize request"),
+            ))
             .expect("build request")
     }
 
     #[tokio::test]
     async fn health_is_public_and_reports_runtime_readiness() {
         let response = app()
-            .oneshot(Request::builder().uri("/health").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
@@ -565,10 +585,7 @@ mod tests {
             "x-apexmail-tenant-id",
             "00000000-0000-0000-0000-000000000001".parse().unwrap(),
         );
-        let response = app()
-            .oneshot(request)
-            .await
-            .unwrap();
+        let response = app().oneshot(request).await.unwrap();
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 }

@@ -245,9 +245,10 @@ async fn metrics(State(state): State<AppState>) -> impl IntoResponse {
 
     (
         StatusCode::OK,
-        [(header::CONTENT_TYPE, HeaderValue::from_static(
-            "text/plain; version=0.0.4; charset=utf-8",
-        ))],
+        [(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("text/plain; version=0.0.4; charset=utf-8"),
+        )],
         body,
     )
 }
@@ -341,8 +342,10 @@ async fn check_redis(pool: &RedisPool) -> bool {
     let result = tokio::time::timeout(Duration::from_secs(2), async {
         match pool.get().await {
             Ok(mut conn) => {
-                let pong: String =
-                    redis::cmd("PING").query_async(&mut conn).await.unwrap_or_default();
+                let pong: String = redis::cmd("PING")
+                    .query_async(&mut conn)
+                    .await
+                    .unwrap_or_default();
                 pong
             }
             Err(err) => {
@@ -528,8 +531,12 @@ mod tests {
     #[tokio::test]
     async fn test_metrics_endpoint_is_public_and_text_exposition() {
         let state = test_state();
-        state.metrics.record_counter("http_total", 10.0, "HTTP total");
-        state.metrics.record_gauge("active_conns", 5.0, "Active connections");
+        state
+            .metrics
+            .record_counter("http_total", 10.0, "HTTP total");
+        state
+            .metrics
+            .record_gauge("active_conns", 5.0, "Active connections");
 
         let app = router(state);
         let req = Request::builder()

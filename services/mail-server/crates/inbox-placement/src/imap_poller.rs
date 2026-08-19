@@ -208,15 +208,15 @@ impl ImapPoller {
                                 let mut raw_headers = None;
                                 let mut response_time = None;
                                 if let Some(first) = ids.iter().min() {
-                                    match session.fetch(
-                                        first.to_string(),
-                                        "(RFC822.HEADER INTERNALDATE)",
-                                    ) {
+                                    match session
+                                        .fetch(first.to_string(), "(RFC822.HEADER INTERNALDATE)")
+                                    {
                                         Ok(fetches) => {
                                             if let Some(f) = fetches.iter().next() {
                                                 if let Some(hdr) = f.header() {
-                                                    raw_headers =
-                                                        Some(String::from_utf8_lossy(hdr).into_owned());
+                                                    raw_headers = Some(
+                                                        String::from_utf8_lossy(hdr).into_owned(),
+                                                    );
                                                 }
                                                 if let Some(date) = f.internal_date() {
                                                     let latency = chrono::Utc::now()
@@ -278,8 +278,13 @@ impl ImapPoller {
         // RS-M-03: Apply configurable timeout to prevent long-lived IMAP connections
         // from consuming file descriptors. Default is 30s.
         match tokio::time::timeout(Duration::from_secs(timeout_secs), poll_fut).await {
-            Ok(result) => result.map_err(|e| format!("IMAP poll task panicked or cancelled: {}", e))?,
-            Err(_) => Err(format!("IMAP poll timed out after {} seconds", timeout_secs)),
+            Ok(result) => {
+                result.map_err(|e| format!("IMAP poll task panicked or cancelled: {}", e))?
+            }
+            Err(_) => Err(format!(
+                "IMAP poll timed out after {} seconds",
+                timeout_secs
+            )),
         }
     }
 }
@@ -337,7 +342,9 @@ fn select_folders_from_list(listed: &[String]) -> Vec<String> {
 }
 
 /// Run LIST on the session and build the folder search list.
-fn discover_folders(session: &mut imap::Session<native_tls::TlsStream<std::net::TcpStream>>) -> Vec<String> {
+fn discover_folders(
+    session: &mut imap::Session<native_tls::TlsStream<std::net::TcpStream>>,
+) -> Vec<String> {
     match session.list(None, Some("*")) {
         Ok(names) => {
             let listed: Vec<String> = names.iter().map(|n| n.name().to_string()).collect();
@@ -399,7 +406,10 @@ impl ImapPoller {
         // RS-M-03: Apply configurable timeout for health checks as well.
         match tokio::time::timeout(Duration::from_secs(timeout_secs), health_fut).await {
             Ok(result) => result.map_err(|e| format!("IMAP health-check task panicked: {}", e))?,
-            Err(_) => Err(format!("IMAP health check timed out after {} seconds", timeout_secs)),
+            Err(_) => Err(format!(
+                "IMAP health check timed out after {} seconds",
+                timeout_secs
+            )),
         }
     }
 }
@@ -444,9 +454,9 @@ mod tests {
     fn test_folder_selection_handles_provider_variants() {
         let listed = vec![
             "Inbox".to_string(),
-            "Junk".to_string(),          // Outlook
-            "Bulk Mail".to_string(),     // Yahoo/AOL
-            "Junk E-mail".to_string(),   // Outlook alternate
+            "Junk".to_string(),        // Outlook
+            "Bulk Mail".to_string(),   // Yahoo/AOL
+            "Junk E-mail".to_string(), // Outlook alternate
             "Deleted Items".to_string(),
         ];
         let folders = select_folders_from_list(&listed);

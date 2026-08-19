@@ -92,11 +92,11 @@ def check_plan_prices(ln, assistant):
     # Match: "Starter ($25" or "Starter plan — $25" or "$25/month...Starter" etc.
     plan_price_patterns = [
         # "Plan ($XX/mo)" or "Plan ($XX)"
-        (r'\b(Free|Starter|Pro|Growth|Scale|Enterprise)\b[^.]{0,20}\(\$(\d+)(?:/mo(?:nth)?)?\)', 1, 2),
+        (r'\b(Free|Starter|Pro|Growth|Scale|Enterprise)\b[^.]{0,20}\(€(\d+)(?:/mo(?:nth)?)?\)', 1, 2),
         # "Plan plan — $XX/month" or "Plan plan at $XX/mo"
-        (r'\b(Free|Starter|Pro|Growth|Scale|Enterprise)\b[^.]{0,30}(?:—|at|is|:)\s*\$(\d+)(?:/mo(?:nth)?)?', 1, 2),
+        (r'\b(Free|Starter|Pro|Growth|Scale|Enterprise)\b[^.]{0,30}(?:—|at|is|:)\s*€(\d+)(?:/mo(?:nth)?)?', 1, 2),
         # "$XX/mo...Plan" (within 30 chars)
-        (r'\$(\d+)/mo(?:nth)?\s*(?:\(|\|)?\s*\*?\*?(Free|Starter|Pro|Growth|Scale|Enterprise)', 2, 1),
+        (r'€(\d+)/mo(?:nth)?\s*(?:\(|\|)?\s*\*?\*?(Free|Starter|Pro|Growth|Scale|Enterprise)', 2, 1),
     ]
     
     for pattern, plan_group, price_group in plan_price_patterns:

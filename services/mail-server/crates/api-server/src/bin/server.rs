@@ -112,7 +112,9 @@ async fn main() -> anyhow::Result<()> {
 
     // ── App state ───────────────────────────────────────────
     let http_client = Client::builder()
-        .timeout(std::time::Duration::from_secs(config.http_client_timeout_secs))
+        .timeout(std::time::Duration::from_secs(
+            config.http_client_timeout_secs,
+        ))
         .build()?;
     tracing::info!(
         timeout_secs = config.http_client_timeout_secs,

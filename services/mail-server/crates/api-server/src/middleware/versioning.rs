@@ -40,10 +40,7 @@ const SUPPORTED_VERSIONS: &[&str] = &["1"];
 /// The check is **opt-in**: if no version parameter is present the request
 /// proceeds as normal (backward compatible). When a version IS specified it
 /// must match one of the supported versions.
-pub async fn api_versioning_middleware(
-    req: Request,
-    next: Next,
-) -> Response {
+pub async fn api_versioning_middleware(req: Request, next: Next) -> Response {
     // Extract version from Accept header: application/json; version=1
     if let Some(requested_version) = extract_version_from_accept(req.headers()) {
         if !SUPPORTED_VERSIONS.contains(&requested_version.as_str()) {

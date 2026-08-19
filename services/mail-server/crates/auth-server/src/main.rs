@@ -10,6 +10,8 @@
 //! purpose — do NOT re-add them here. Interactive auth lives in the
 //! api-server crate; nginx additionally refuses every other path.
 
+use argon2::password_hash::{rand_core::OsRng, SaltString};
+use argon2::{Argon2, PasswordHasher, PasswordVerifier};
 use axum::{
     extract::State,
     http::{header, StatusCode},
@@ -17,8 +19,6 @@ use axum::{
     routing::get,
     Router,
 };
-use argon2::password_hash::{rand_core::OsRng, SaltString};
-use argon2::{Argon2, PasswordHasher, PasswordVerifier};
 use serde::Deserialize;
 use sqlx::postgres::PgPoolOptions;
 use std::net::SocketAddr;
@@ -48,11 +48,18 @@ const SESSION_MAX_CLOCK_SKEW_SECS: u64 = 300;
 
 #[allow(dead_code)]
 #[derive(Deserialize)]
-struct LoginForm { username_or_email: String, password: String }
+struct LoginForm {
+    username_or_email: String,
+    password: String,
+}
 
 #[allow(dead_code)]
 #[derive(Deserialize)]
-struct RegisterForm { name: Option<String>, email: String, password: String }
+struct RegisterForm {
+    name: Option<String>,
+    email: String,
+    password: String,
+}
 
 #[allow(dead_code)]
 fn extract_session_email(headers: &axum::http::HeaderMap, secret: &str) -> Option<String> {
@@ -69,7 +76,9 @@ fn extract_session_email(headers: &axum::http::HeaderMap, secret: &str) -> Optio
 
 fn verify_session_token(token: &str, secret: &str) -> Option<String> {
     let parts: Vec<&str> = token.splitn(3, ':').collect();
-    if parts.len() != 3 { return None; }
+    if parts.len() != 3 {
+        return None;
+    }
     let email = parts[0];
     let ts_raw = parts[1];
     let sig = parts[2];
@@ -80,10 +89,14 @@ fn verify_session_token(token: &str, secret: &str) -> Option<String> {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    if now.saturating_sub(ts) > SESSION_MAX_AGE_SECS { return None; }
-    if ts.saturating_sub(now) > SESSION_MAX_CLOCK_SKEW_SECS { return None; }
+    if now.saturating_sub(ts) > SESSION_MAX_AGE_SECS {
+        return None;
+    }
+    if ts.saturating_sub(now) > SESSION_MAX_CLOCK_SKEW_SECS {
+        return None;
+    }
 
-    use sha2::{Sha256, Digest};
+    use sha2::{Digest, Sha256};
     let mut h = Sha256::new();
     h.update(format!("{email}:{ts_raw}:{secret}").as_bytes());
     let expected = hex::encode(h.finalize());
@@ -97,8 +110,11 @@ fn verify_session_token(token: &str, secret: &str) -> Option<String> {
 }
 
 fn create_session_token(email: &str, secret: &str) -> String {
-    use sha2::{Sha256, Digest};
-    let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+    use sha2::{Digest, Sha256};
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
     let mut h = Sha256::new();
     h.update(format!("{email}:{ts}:{secret}").as_bytes());
     format!("{email}:{ts}:{}", hex::encode(h.finalize()))
@@ -108,7 +124,10 @@ fn create_session_token(email: &str, secret: &str) -> String {
 /// by api-server's config; dev defaults to development).
 fn is_production_env() -> bool {
     matches!(
-        std::env::var("ENVIRONMENT").unwrap_or_default().to_lowercase().as_str(),
+        std::env::var("ENVIRONMENT")
+            .unwrap_or_default()
+            .to_lowercase()
+            .as_str(),
         "production" | "prod"
     )
 }
@@ -122,62 +141,104 @@ fn session_cookie(token: &str) -> String {
 // ─── Auth endpoints (NOT routed — see crate docs) ──────────
 
 #[allow(dead_code)]
-async fn login_post(State(state): State<AppState>, headers: axum::http::HeaderMap, axum::Json(form): axum::Json<LoginForm>) -> impl IntoResponse {
+async fn login_post(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    axum::Json(form): axum::Json<LoginForm>,
+) -> impl IntoResponse {
     let identifier = form.username_or_email.trim().to_lowercase();
-    let is_cp = headers.get("x-apexmail-surface").and_then(|v| v.to_str().ok()).map(|v| v == "control-plane").unwrap_or(false);
+    let is_cp = headers
+        .get("x-apexmail-surface")
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v == "control-plane")
+        .unwrap_or(false);
     // Look up by email ONLY — the `users` table has no `username` column, so
     // the old `WHERE username = $1 OR email = $1` made every login fail with
     // a database error (column does not exist).
     let row = sqlx::query_as::<_, (sqlx::types::Uuid, String, String, String)>(
-        "SELECT id, password_hash, role, email FROM users WHERE email = $1 LIMIT 1"
-    ).bind(&identifier).fetch_optional(&state.db).await;
+        "SELECT id, password_hash, role, email FROM users WHERE email = $1 LIMIT 1",
+    )
+    .bind(&identifier)
+    .fetch_optional(&state.db)
+    .await;
 
     let (email, valid) = match row {
-        Ok(Some((_, hash, _, email))) => {
-            (email, argon2::PasswordHash::new(&hash)
+        Ok(Some((_, hash, _, email))) => (
+            email,
+            argon2::PasswordHash::new(&hash)
                 .and_then(|h| Argon2::default().verify_password(form.password.as_bytes(), &h))
-                .is_ok())
-        }
+                .is_ok(),
+        ),
         _ => (String::new(), false),
     };
 
     if valid {
         let token = create_session_token(&email, &state.session_secret);
         let cookie = session_cookie(&token);
-        let redirect = if is_cp { "/cp-admin/dashboard/" } else { "/dashboard" };
+        let redirect = if is_cp {
+            "/cp-admin/dashboard/"
+        } else {
+            "/dashboard"
+        };
         let mut resp = Json(serde_json::json!({
             "message": "Login successful",
             "redirect": redirect,
             "user": {"email": email}
-        })).into_response();
-        resp.headers_mut().insert(header::SET_COOKIE, cookie.parse().unwrap());
+        }))
+        .into_response();
+        resp.headers_mut()
+            .insert(header::SET_COOKIE, cookie.parse().unwrap());
         resp
     } else {
-        (StatusCode::UNAUTHORIZED, Json(serde_json::json!({"error": "Invalid username or password"}))).into_response()
+        (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": "Invalid username or password"})),
+        )
+            .into_response()
     }
 }
 
 #[allow(dead_code)]
-async fn register_post(State(state): State<AppState>, axum::Json(form): axum::Json<RegisterForm>) -> impl IntoResponse {
+async fn register_post(
+    State(state): State<AppState>,
+    axum::Json(form): axum::Json<RegisterForm>,
+) -> impl IntoResponse {
     let email = form.email.trim().to_lowercase();
     if !email.contains('@') || !email.contains('.') {
-        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Invalid email"}))).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "Invalid email"})),
+        )
+            .into_response();
     }
     if form.password.len() < 12 {
-        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Password must be 12+ characters"}))).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "Password must be 12+ characters"})),
+        )
+            .into_response();
     }
     if let Ok(Some(_)) = sqlx::query_scalar::<_, String>("SELECT email FROM users WHERE email = $1")
-        .bind(&email).fetch_optional(&state.db).await
+        .bind(&email)
+        .fetch_optional(&state.db)
+        .await
     {
-        return (StatusCode::CONFLICT, Json(serde_json::json!({"error": "Email already registered"}))).into_response();
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({"error": "Email already registered"})),
+        )
+            .into_response();
     }
 
     // Enforce Free plan quota: reject new free plan registrations if global free tenant
     // count exceeds the 30,000 email/month aggregate safety threshold. This is a blunt
     // gate — per-tenant usage is enforced by the billing_usage endpoint.
     let free_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM tenants WHERE plan = 'free' AND status = 'active'"
-    ).fetch_one(&state.db).await.unwrap_or(0);
+        "SELECT COUNT(*) FROM tenants WHERE plan = 'free' AND status = 'active'",
+    )
+    .fetch_one(&state.db)
+    .await
+    .unwrap_or(0);
     let free_limit: i64 = std::env::var("FREE_TENANT_LIMIT")
         .ok()
         .and_then(|v| v.parse().ok())
@@ -189,7 +250,10 @@ async fn register_post(State(state): State<AppState>, axum::Json(form): axum::Js
     }
 
     let salt = SaltString::generate(&mut OsRng);
-    let hash = Argon2::default().hash_password(form.password.as_bytes(), &salt).unwrap().to_string();
+    let hash = Argon2::default()
+        .hash_password(form.password.as_bytes(), &salt)
+        .unwrap()
+        .to_string();
     let user_id = sqlx::types::Uuid::new_v4();
     let tenant_id = &uuid::Uuid::new_v4().to_string()[..26];
 
@@ -203,8 +267,10 @@ async fn register_post(State(state): State<AppState>, axum::Json(form): axum::Js
     let mut resp = Json(serde_json::json!({
         "message": "Account created",
         "redirect": "/login"
-    })).into_response();
-    resp.headers_mut().insert(header::SET_COOKIE, cookie.parse().unwrap());
+    }))
+    .into_response();
+    resp.headers_mut()
+        .insert(header::SET_COOKIE, cookie.parse().unwrap());
     resp
 }
 
@@ -216,7 +282,9 @@ async fn register_post(State(state): State<AppState>, axum::Json(form): axum::Js
 fn url_host_port(raw: &str, default_port: u16) -> Option<(String, u16)> {
     let parsed = url::Url::parse(raw).ok()?;
     let host = parsed.host_str()?.to_string();
-    if host.is_empty() { return None; }
+    if host.is_empty() {
+        return None;
+    }
     let port = parsed.port().unwrap_or(default_port);
     Some((host, port))
 }
@@ -244,7 +312,12 @@ async fn status_page() -> impl IntoResponse {
 async function check(){try{var r=await fetch("/status/api"),d=await r.json();var ok=0,g=document.getElementById("grid"),h="";d.services.forEach(function(s){var cls=s.status==="operational"||s.status==="connected"?"ok":s.status==="degraded"?"warn":"err";if(cls==="ok"||cls==="warn")ok++;h+="<div class=card><h3>"+s.name+"</h3><div class=\"status "+cls+"\">"+s.status+"</div><div class=meta>"+d.updated+"</div></div>"});g.innerHTML=h;var pct=(ok/d.services.length*100).toFixed(0);document.getElementById("big").textContent=pct+"%";document.getElementById("bar").style.width=pct+"%";document.getElementById("big").className="big "+(pct==100?"ok":pct>=80?"warn":"err");document.getElementById("msg").textContent=pct==100?"All systems operational":pct>=80?"Minor degradation":"Service disruption";document.getElementById("updated").textContent="Updated: "+d.updated}catch(ex){document.getElementById("msg").textContent="Status data unavailable";document.getElementById("big").className="big err"}}
 check();setInterval(check,60000)
 </script></body></html>"##;
-    (StatusCode::OK, [(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8")], html).into_response()
+    (
+        StatusCode::OK,
+        [(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        html,
+    )
+        .into_response()
 }
 
 // ─── Health endpoint ─────────────────────────────────────
@@ -255,12 +328,16 @@ async fn health_check(State(state): State<AppState>) -> impl IntoResponse {
 
     // Database connectivity check
     let db_ok = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM tenants")
-        .fetch_one(&state.db).await.is_ok();
+        .fetch_one(&state.db)
+        .await
+        .is_ok();
     services.push(serde_json::json!({
         "name": "database",
         "status": if db_ok { "connected" } else { "disconnected" }
     }));
-    if !db_ok { all_operational = false; }
+    if !db_ok {
+        all_operational = false;
+    }
 
     // Redis connectivity — real TCP connect to the host:port parsed from
     // REDIS_URL. (The previous implementation shelled out to redis-cli,
@@ -276,12 +353,17 @@ async fn health_check(State(state): State<AppState>) -> impl IntoResponse {
         "name": "redis",
         "status": if redis_ok { "connected" } else if redis_url.is_some() { "disconnected" } else { "not_configured" }
     }));
-    if redis_url.is_some() && !redis_ok { all_operational = false; }
+    if redis_url.is_some() && !redis_ok {
+        all_operational = false;
+    }
 
     // Queue depth check
     let queue_depth = sqlx::query_scalar::<_, i64>(
-        "SELECT COALESCE(COUNT(*), 0) FROM email_queue WHERE status IN ('pending', 'processing')"
-    ).fetch_one(&state.db).await.unwrap_or(0);
+        "SELECT COALESCE(COUNT(*), 0) FROM email_queue WHERE status IN ('pending', 'processing')",
+    )
+    .fetch_one(&state.db)
+    .await
+    .unwrap_or(0);
 
     services.push(serde_json::json!({
         "name": "queue",
@@ -289,12 +371,16 @@ async fn health_check(State(state): State<AppState>) -> impl IntoResponse {
         "depth": queue_depth
     }));
 
-    (StatusCode::OK, Json(serde_json::json!({
-        "status": if all_operational { "healthy" } else { "degraded" },
-        "services": services,
-        "queue_depth": queue_depth,
-        "timestamp": chrono::Utc::now().to_rfc3339()
-    }))).into_response()
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "status": if all_operational { "healthy" } else { "degraded" },
+            "services": services,
+            "queue_depth": queue_depth,
+            "timestamp": chrono::Utc::now().to_rfc3339()
+        })),
+    )
+        .into_response()
 }
 
 async fn status_api(State(state): State<AppState>) -> impl IntoResponse {
@@ -305,44 +391,66 @@ async fn status_api(State(state): State<AppState>) -> impl IntoResponse {
     // `SELECT 1::bigint` (not `SELECT 1`): sqlx 0.8 type-checks scalars and
     // i64 is incompatible with the INT4 column type of a bare `SELECT 1`.
     let db_ok = sqlx::query_scalar::<_, i64>("SELECT 1::bigint")
-        .fetch_one(&state.db).await.is_ok();
+        .fetch_one(&state.db)
+        .await
+        .is_ok();
     services.push(serde_json::json!({
         "name": "Database", "status": if db_ok { "operational" } else { "degraded" }
     }));
-    if !db_ok { all_operational = false; }
+    if !db_ok {
+        all_operational = false;
+    }
 
     // Probe tenant table health
-    let tenants_ok = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM tenants WHERE status = 'active'")
-        .fetch_one(&state.db).await.is_ok();
+    let tenants_ok =
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM tenants WHERE status = 'active'")
+            .fetch_one(&state.db)
+            .await
+            .is_ok();
     services.push(serde_json::json!({
         "name": "Tenants API", "status": if tenants_ok { "operational" } else { "degraded" }
     }));
-    if !tenants_ok { all_operational = false; }
+    if !tenants_ok {
+        all_operational = false;
+    }
 
     // Probe message throughput (last 5 minutes)
     let messages_ok = sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*) FROM messages WHERE created_at > NOW() - INTERVAL '5 minutes'"
-    ).fetch_one(&state.db).await.is_ok();
+        "SELECT COUNT(*) FROM messages WHERE created_at > NOW() - INTERVAL '5 minutes'",
+    )
+    .fetch_one(&state.db)
+    .await
+    .is_ok();
     services.push(serde_json::json!({
         "name": "Message Pipeline", "status": if messages_ok { "operational" } else { "degraded" }
     }));
-    if !messages_ok { all_operational = false; }
+    if !messages_ok {
+        all_operational = false;
+    }
 
     // Probe auth functionality by checking user count
     let auth_ok = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM users")
-        .fetch_one(&state.db).await.is_ok();
+        .fetch_one(&state.db)
+        .await
+        .is_ok();
     services.push(serde_json::json!({
         "name": "Auth Server", "status": if auth_ok { "operational" } else { "degraded" }
     }));
-    if !auth_ok { all_operational = false; }
+    if !auth_ok {
+        all_operational = false;
+    }
 
     // Probe billing/subscription data
     let billing_ok = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM plans")
-        .fetch_one(&state.db).await.is_ok();
+        .fetch_one(&state.db)
+        .await
+        .is_ok();
     services.push(serde_json::json!({
         "name": "Billing API", "status": if billing_ok { "operational" } else { "degraded" }
     }));
-    if !billing_ok { all_operational = false; }
+    if !billing_ok {
+        all_operational = false;
+    }
 
     // Probe message delivery stats (analytics)
     let analytics_ok = sqlx::query_scalar::<_, i64>(
@@ -351,42 +459,63 @@ async fn status_api(State(state): State<AppState>) -> impl IntoResponse {
     services.push(serde_json::json!({
         "name": "Analytics API", "status": if analytics_ok { "operational" } else { "degraded" }
     }));
-    if !analytics_ok { all_operational = false; }
+    if !analytics_ok {
+        all_operational = false;
+    }
 
     // Real SMTP probe: attempt a TCP connection to the configured mail host
     // (MAIL_HOST env, default mail.apexmail.ee) on port 25 within 3s.
-    let smtp_host = std::env::var("MAIL_HOST").ok().filter(|s| !s.is_empty())
+    let smtp_host = std::env::var("MAIL_HOST")
+        .ok()
+        .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "mail.apexmail.ee".to_string());
     let smtp_ok = tcp_connect_ok(&smtp_host, 25, std::time::Duration::from_secs(3)).await;
     services.push(serde_json::json!({
         "name": "Mail Server (SMTP)", "status": if smtp_ok { "operational" } else { "degraded" }
     }));
-    if !smtp_ok { all_operational = false; }
+    if !smtp_ok {
+        all_operational = false;
+    }
 
-    (StatusCode::OK, Json(serde_json::json!({
-        "status": if all_operational { "operational" } else { "degraded" },
-        "services": services,
-        "updated": chrono::Utc::now().to_rfc3339()
-    }))).into_response()
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "status": if all_operational { "operational" } else { "degraded" },
+            "services": services,
+            "updated": chrono::Utc::now().to_rfc3339()
+        })),
+    )
+        .into_response()
 }
 
 async fn status_history() -> impl IntoResponse {
-    (StatusCode::OK, Json(serde_json::json!({
-        "history": [],
-        "updated": chrono::Utc::now().to_rfc3339()
-    }))).into_response()
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "history": [],
+            "updated": chrono::Utc::now().to_rfc3339()
+        })),
+    )
+        .into_response()
 }
 
 #[tokio::main]
 async fn main() {
     let db_url = std::env::var("DATABASE_URL")
         .unwrap_or_else(|_| "postgres://apexmail@127.0.0.1:5432/apexmail".into());
-    let session_secret = std::env::var("SESSION_SECRET")
-        .unwrap_or_else(|_| uuid::Uuid::new_v4().to_string());
+    let session_secret =
+        std::env::var("SESSION_SECRET").unwrap_or_else(|_| uuid::Uuid::new_v4().to_string());
 
-    let pool = PgPoolOptions::new().max_connections(5).connect(&db_url).await.unwrap();
+    let pool = PgPoolOptions::new()
+        .max_connections(5)
+        .connect(&db_url)
+        .await
+        .unwrap();
 
-    let state = AppState { db: pool, session_secret };
+    let state = AppState {
+        db: pool,
+        session_secret,
+    };
 
     // SECURITY: status-only surface. Every route added here is reachable
     // from the public internet via nginx — see the crate docs.
@@ -399,5 +528,7 @@ async fn main() {
 
     let addr = SocketAddr::from(([0, 0, 0, 0], 3000));
     println!("Status server on {addr}");
-    axum::serve(tokio::net::TcpListener::bind(addr).await.unwrap(), app).await.unwrap();
+    axum::serve(tokio::net::TcpListener::bind(addr).await.unwrap(), app)
+        .await
+        .unwrap();
 }

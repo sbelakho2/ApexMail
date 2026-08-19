@@ -75,7 +75,10 @@ async fn create_stream_token(
     // The token's `sub` must identify a concrete principal. Without this
     // check an identity carrying neither user_id nor api_key_id would
     // mint a token with an empty `sub`.
-    let sub = match (auth_user.user_id.as_deref(), auth_user.api_key_id.as_deref()) {
+    let sub = match (
+        auth_user.user_id.as_deref(),
+        auth_user.api_key_id.as_deref(),
+    ) {
         (Some(user_id), _) => user_id.to_string(),
         (None, Some(api_key_id)) => api_key_id.to_string(),
         (None, None) => {

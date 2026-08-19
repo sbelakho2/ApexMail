@@ -8,7 +8,8 @@ competitor = "Postmark"
 competitor_slug = "postmark"
 competitor_name = "Postmark"
 competitor_description = "Postmark by ActiveCampaign focuses on fast, reliable transactional email delivery."
-pricing_as_of = "2026-05-09"
+pricing_as_of = "2026-08-19"
+currency_note = "Prices are shown in EUR. Where a provider publishes only USD, the EUR figure is converted at 1 USD = €0.92 (reference rate, 2026-08-19) and the provider's published USD price is shown in parentheses. Exclude applicable taxes."
 og_image = "/images/og-image.svg"
 apexmail_wins = 0
 competitor_wins = 0
@@ -48,7 +49,7 @@ comparison_sections = [
   ]},
   { title = "PRICING", rows = [
     { feature = "Free Tier", apex = '<span class="text-brand-600 font-semibold">30,000/mo</span>', comp = '<span class="text-surface-600">100/mo</span>', winner = "none" },
-    { feature = "100K emails/mo", apex = '<span class="text-brand-600 font-semibold">$65 (Pro: 150K)</span>', comp = '<span class="text-surface-600">$115</span>', winner = "none" },
+    { feature = "100K emails/mo", apex = '<span class="text-brand-600 font-semibold">€65 (Pro: 150K)</span>', comp = '<span class="text-surface-600">€122.82 (US$133.50) — Pro: €15.18 (US$16.50)/mo + 90K overage @ €1.20 (US$1.30)/1K</span>', winner = "none" },
     { feature = "Unlimited team members", apex = '<span class="text-brand-600 font-semibold">Enterprise plan</span>', comp = '<span class="text-surface-400">✗</span>', winner = "none" },
     { feature = "Custom enterprise terms", apex = '<span class="text-brand-600 font-semibold">Annual contracts</span>', comp = '<span class="text-surface-400">✗</span>', winner = "none" }
   ]}

@@ -20,6 +20,8 @@ Each runbook should be self-contained, actionable, and usable by any on-call eng
 | [Traffic Spike / DDoS](./traffic-spike-ddos.md) | Rate limiting tuning, IP blocking, auto-scaling, emergency circuit breakers, tenant isolation |
 | [Redis Failure](./redis-failure.md) | Memory exhaustion, connection failure, data loss, AOF corruption, replication failure |
 | [MTA Degradation](./mta-degradation.md) | High bounce rate, SMTP failures, queue backlog, IP reputation damage, DKIM/SPF/DMARC failures |
+| [Crypto Incidents](./crypto-incidents.md) | Cryptographic key compromise, certificate or signing-key incidents, DKIM key rotation |
+| [System Sender Readiness](./system-sender-readiness.md) | Platform sender bootstrap, DKIM provisioning, DNS verification before enabling mail |
 
 ---
 

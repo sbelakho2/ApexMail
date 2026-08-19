@@ -73,7 +73,8 @@ fn dummy_verify_password(password: &[u8]) {
 }
 
 #[derive(Debug)]
-struct ParsedMessageMetadata {    message_id: String,
+struct ParsedMessageMetadata {
+    message_id: String,
     from_address: String,
     from_name: Option<String>,
     to_addresses: Vec<StoredEmailAddress>,

@@ -43,9 +43,12 @@ jobs:
           OBSOLETE_CODES=("16192499" "16942833")
           FAILED=0
           for code in "${OBSOLETE_CODES[@]}"; do
+            # fixes.md intentionally documents the retired codes (issue
+            # history); reports/ holds historical audit snapshots predating
+            # the legal-identity correction. Both are excluded from the scan.
             FOUND=$(grep -r --include='*.rs' --include='*.toml' --include='*.json' \
               --include='*.html' --include='*.yaml' --include='*.md' \
-              -l "$code" . 2>/dev/null || true)
+              -l "$code" . 2>/dev/null | grep -v '^\./fixes\.md$' | grep -v '^\./reports/' || true)
             if [[ -n "$FOUND" ]]; then
               echo "ERROR: Obsolete registry code $code found in:"
               echo "$FOUND"

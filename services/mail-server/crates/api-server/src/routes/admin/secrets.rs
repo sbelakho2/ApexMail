@@ -437,14 +437,26 @@ mod tests {
         let sql = build_list_secrets_sql();
 
         assert!(sql.contains("LIMIT $1 OFFSET $2"));
-        assert!(sql.contains("WHERE tenant_id = $3"), "list_secrets must scope by tenant_id");
+        assert!(
+            sql.contains("WHERE tenant_id = $3"),
+            "list_secrets must scope by tenant_id"
+        );
     }
 
     #[test]
     fn rotation_offset_matches_policies() {
-        assert_eq!(next_rotation_offset("daily"), Some(chrono::Duration::days(1)));
-        assert_eq!(next_rotation_offset("weekly"), Some(chrono::Duration::weeks(1)));
-        assert_eq!(next_rotation_offset("monthly"), Some(chrono::Duration::days(30)));
+        assert_eq!(
+            next_rotation_offset("daily"),
+            Some(chrono::Duration::days(1))
+        );
+        assert_eq!(
+            next_rotation_offset("weekly"),
+            Some(chrono::Duration::weeks(1))
+        );
+        assert_eq!(
+            next_rotation_offset("monthly"),
+            Some(chrono::Duration::days(30))
+        );
         assert_eq!(next_rotation_offset("manual"), None);
     }
 }

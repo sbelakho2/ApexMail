@@ -109,8 +109,9 @@ impl InboundServer {
             .map_err(|error| anyhow::anyhow!("invalid MAILSTORE_GRPC_ADDR: {error}"))?
             .timeout(MAILSTORE_CHANNEL_TIMEOUT)
             .connect_lazy();
-        let interceptor = InternalServiceAuthInterceptor::from_env()
-            .map_err(|error| anyhow::anyhow!("invalid internal mailstore authentication: {error}"))?;
+        let interceptor = InternalServiceAuthInterceptor::from_env().map_err(|error| {
+            anyhow::anyhow!("invalid internal mailstore authentication: {error}")
+        })?;
 
         Ok(Self {
             config,
@@ -785,32 +786,31 @@ impl InboundServer {
                 email: recipient.clone(),
             };
             // M28: bounded RPC — a hung mailstore must not stall the session.
-            let account_id = match rpc_with_deadline(client.get_account(lookup), MAILSTORE_RPC_TIMEOUT)
-                .await
-            {
-                Some(Ok(resp)) => {
-                    let r = resp.into_inner();
-                    if r.account_id.is_empty() {
+            let account_id =
+                match rpc_with_deadline(client.get_account(lookup), MAILSTORE_RPC_TIMEOUT).await {
+                    Some(Ok(resp)) => {
+                        let r = resp.into_inner();
+                        if r.account_id.is_empty() {
+                            continue;
+                        }
+                        r.account_id
+                    }
+                    Some(Err(e)) => {
+                        debug!(
+                            recipient = %mail_common::pii::redact_email(recipient),
+                            error = %e,
+                            "No mailstore account for recipient; skipping mailbox delivery"
+                        );
                         continue;
                     }
-                    r.account_id
-                }
-                Some(Err(e)) => {
-                    debug!(
-                        recipient = %mail_common::pii::redact_email(recipient),
-                        error = %e,
-                        "No mailstore account for recipient; skipping mailbox delivery"
-                    );
-                    continue;
-                }
-                None => {
-                    debug!(
-                        recipient = %mail_common::pii::redact_email(recipient),
-                        "Mailstore account lookup timed out; skipping mailbox delivery"
-                    );
-                    continue;
-                }
-            };
+                    None => {
+                        debug!(
+                            recipient = %mail_common::pii::redact_email(recipient),
+                            "Mailstore account lookup timed out; skipping mailbox delivery"
+                        );
+                        continue;
+                    }
+                };
 
             let req = StoreMessageRequest {
                 account_id,
@@ -1712,8 +1712,7 @@ mod tests {
 
         let task = tokio::spawn(async move {
             let (socket, peer) = listener.accept().await.unwrap();
-            match tls_handshake_with_timeout(acceptor.accept(socket), TLS_HANDSHAKE_TIMEOUT).await
-            {
+            match tls_handshake_with_timeout(acceptor.accept(socket), TLS_HANDSHAKE_TIMEOUT).await {
                 Ok(_tls_stream) => unreachable!("handshake cannot succeed without a client"),
                 Err(()) => {}
             }

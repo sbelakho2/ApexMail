@@ -230,8 +230,9 @@ fn contains_ascii_case_insensitive(haystack: &str, needle: &str) -> bool {
 /// small even if the caller ever passes dynamic content.
 fn marketing_normalize_cache(
 ) -> &'static std::sync::Mutex<std::collections::HashMap<(usize, String), String>> {
-    static CACHE: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<(usize, String), String>>> =
-        std::sync::OnceLock::new();
+    static CACHE: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<(usize, String), String>>,
+    > = std::sync::OnceLock::new();
     CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
 }
 
@@ -240,7 +241,10 @@ fn normalize_marketing_static_document(document: &str) -> String {
         document.len(),
         document.as_bytes()[..document.len().min(64)].to_vec(),
     );
-    let cache_key = (cache_key.0, String::from_utf8_lossy(&cache_key.1).into_owned());
+    let cache_key = (
+        cache_key.0,
+        String::from_utf8_lossy(&cache_key.1).into_owned(),
+    );
     if let Ok(cache) = marketing_normalize_cache().lock() {
         if let Some(cached) = cache.get(&cache_key) {
             return cached.clone();
@@ -314,12 +318,7 @@ pub fn render_route_with_query(
     };
     let html = match surface {
         "web" => {
-            let inner = render_inner(
-                surface,
-                path,
-                query,
-                csrf_secret,
-            )?;
+            let inner = render_inner(surface, path, query, csrf_secret)?;
             match path {
                 "/login" | "/signup" | "/forgot-password" | "/reset-password" | "/verify-email"
                 | "/" | "/not-found" => leptos_views::web_root_layout(&inner),
@@ -329,12 +328,7 @@ pub fn render_route_with_query(
             }
         }
         "control-plane" => {
-            let inner = render_inner(
-                surface,
-                path,
-                query,
-                csrf_secret,
-            )?;
+            let inner = render_inner(surface, path, query, csrf_secret)?;
             let page = match path {
                 "/login" => inner,
                 _ => {
@@ -352,12 +346,7 @@ pub fn render_route_with_query(
         "marketing" | "marketing-zola" => marketing_static_document(surface, path)
             .map(normalize_marketing_static_document)
             .or_else(|| {
-                let inner = render_inner(
-                    surface,
-                    path,
-                    query,
-                    csrf_secret,
-                )?;
+                let inner = render_inner(surface, path, query, csrf_secret)?;
                 Some(leptos_views::marketing_page(&inner))
             })?,
         _ => return None,
@@ -425,24 +414,14 @@ fn render_inner(
     csrf_secret: Option<&str>,
 ) -> Option<String> {
     match surface {
-        "web" => render_web(
-            path,
-            query,
-            csrf_secret,
-        ),
-        "control-plane" => {
-            render_control_plane(path, csrf_secret)
-        }
+        "web" => render_web(path, query, csrf_secret),
+        "control-plane" => render_control_plane(path, csrf_secret),
         "marketing" | "marketing-zola" => render_marketing(surface, path),
         _ => None,
     }
 }
 
-fn render_web(
-    path: &str,
-    query: Option<&str>,
-    csrf_secret: Option<&str>,
-) -> Option<String> {
+fn render_web(path: &str, query: Option<&str>, csrf_secret: Option<&str>) -> Option<String> {
     let params = parse_query_params(query);
 
     // Generate CSRF token for auth routes if a secret is available
@@ -467,9 +446,7 @@ fn render_web(
         }
         "/forgot-password" => {
             let token = csrf_secret.map_or_else(String::new, csrf_token);
-            leptos_views::web_forgot_password_page(
-                &token,
-            )
+            leptos_views::web_forgot_password_page(&token)
         }
         "/reset-password" => {
             let token = csrf_secret.map_or_else(String::new, csrf_token);
@@ -519,10 +496,7 @@ fn render_web(
     })
 }
 
-fn render_control_plane(
-    path: &str,
-    csrf_secret: Option<&str>,
-) -> Option<String> {
+fn render_control_plane(path: &str, csrf_secret: Option<&str>) -> Option<String> {
     let csrf_token = |secret: &str| crate::csrf::generate_csrf_token(secret);
 
     Some(match path {
@@ -535,9 +509,7 @@ fn render_control_plane(
         "/" => leptos_views::control_plane_home_page(),
         "/login" => {
             let token = csrf_secret.map_or_else(String::new, csrf_token);
-            leptos_views::control_plane_login_page(
-                &token,
-            )
+            leptos_views::control_plane_login_page(&token)
         }
         "/dashboard" => leptos_views::control_plane_dashboard_page(),
         "/tenants" => leptos_views::control_plane_tenants_page(),
@@ -840,13 +812,8 @@ mod tests {
         assert!(selected.contains("name=\"plan\" value=\"starter\""));
         assert!(selected.contains("data-signup-plan-intent=\"starter\""));
 
-        let invalid = render_route_with_query(
-            "web",
-            "/signup",
-            Some("plan=developer"),
-            None,
-        )
-        .expect("signup route should render with an invalid plan selection");
+        let invalid = render_route_with_query("web", "/signup", Some("plan=developer"), None)
+            .expect("signup route should render with an invalid plan selection");
         assert!(invalid.contains("name=\"plan\" value=\"free\""));
         assert!(!invalid.contains("data-signup-plan-intent"));
     }
@@ -994,7 +961,9 @@ mod tests {
                         assert!(
                             is_allowed_marketing_js || is_console_js,
                             "[{}] {} emitted an unexpected external script tag: <script{}>",
-                            route.surface, route.pattern, opening_tag,
+                            route.surface,
+                            route.pattern,
+                            opening_tag,
                         );
                     }
                 }
@@ -1002,6 +971,3 @@ mod tests {
         }
     }
 }
-
-
-

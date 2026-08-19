@@ -51,6 +51,13 @@ Complete developer documentation for the ApexMail email infrastructure platform.
 - [Platform Sender Readiness](operations/runbooks/system-sender-readiness.md)
 - [Development Guides](../development/contributing.md)
 
+## Pricing & Billing
+
+- [Pricing](pricing.md)
+- [Pricing Authority](pricing-authority.md)
+- [Billing API](api/endpoints/billing.md)
+- [Stripe Tool Contract](tool-contracts/stripe.md)
+
 ## Company
 
 ApexMail is a brand of **Bel Consulting OÜ**, Registry code 16588745, VAT EE102951727. Registered at Sakala tn 7-2, 10141 Tallinn, Estonia.

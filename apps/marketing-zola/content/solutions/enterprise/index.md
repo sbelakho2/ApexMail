@@ -1,6 +1,6 @@
 +++
 title = "Enterprise Email Solution"
-description = "Enterprise transactional email with a $30,000 annual contract, 5 million included emails, contractual support, security review, and managed deployment planning."
+description = "Enterprise transactional email with a €30,000 annual contract, 5 million included emails, contractual support, security review, and managed deployment planning."
 template = "prose.html"
 +++
 
@@ -12,7 +12,7 @@ ApexMail Enterprise is the contractual option for organizations that need high-v
 
 | Item | Enterprise entitlement |
 |---|---|
-| Annual contract | $30,000/year |
+| Annual contract | €30,000/year |
 | Included email volume | 5,000,000 emails/month |
 | API calls | Unlimited |
 | Sending domains and team members | Unlimited |
@@ -22,7 +22,7 @@ ApexMail Enterprise is the contractual option for organizations that need high-v
 | Deployment options | Private Cloud and BYOIP subject to contract and technical review |
 | Support | Dedicated |
 
-Annual pricing is $30,000, equal to 10 monthly payments of $3,000. Custom volume, private deployment, and professional-service pricing require a written proposal; they are not published self-service prices.
+Annual pricing is €30,000, equal to 10 monthly payments of €3,000. Custom volume, private deployment, and professional-service pricing require a written proposal; they are not published self-service prices.
 
 ## When to Contact Sales
 

@@ -51,20 +51,24 @@ pub async fn send_test_email(
     );
 
     let email = Message::builder()
-        .from(from_email
-            .parse()
-            .map_err(|e: lettre::address::AddressError| {
-                format!("invalid from address '{}': {}", from_email, e)
-            })?)
+        .from(
+            from_email
+                .parse()
+                .map_err(|e: lettre::address::AddressError| {
+                    format!("invalid from address '{}': {}", from_email, e)
+                })?,
+        )
         .to(account_email
             .parse()
             .map_err(|e: lettre::address::AddressError| {
                 format!("invalid to address '{}': {}", account_email, e)
             })?)
         .subject(&subject)
-        .multipart(lettre::message::MultiPart::alternative().singlepart(
-            lettre::message::SinglePart::plain(body_text.clone()),
-        ).singlepart(lettre::message::SinglePart::html(body_html.clone())))
+        .multipart(
+            lettre::message::MultiPart::alternative()
+                .singlepart(lettre::message::SinglePart::plain(body_text.clone()))
+                .singlepart(lettre::message::SinglePart::html(body_html.clone())),
+        )
         .map_err(|e| format!("failed to build message: {}", e))?;
 
     // Relay through the platform MTA. When credentials are configured we use
@@ -82,16 +86,12 @@ pub async fn send_test_email(
         .port(config.smtp_port)
         .timeout(Some(Duration::from_secs(30)));
 
-    transport
-        .build()
-        .send(email)
-        .await
-        .map_err(|e| {
-            format!(
-                "placement send via {}:{} failed: {}",
-                config.smtp_host, config.smtp_port, e
-            )
-        })?;
+    transport.build().send(email).await.map_err(|e| {
+        format!(
+            "placement send via {}:{} failed: {}",
+            config.smtp_host, config.smtp_port, e
+        )
+    })?;
 
     tracing::debug!(
         test_id = %test_id,

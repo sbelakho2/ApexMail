@@ -18,7 +18,10 @@ const VALID_OPERATOR_ROLES: &[&str] = &["admin", "owner"];
 
 pub fn router() -> Router<AppState> {
     Router::new()
-        .route("/", axum::routing::get(list_operators).post(create_operator))
+        .route(
+            "/",
+            axum::routing::get(list_operators).post(create_operator),
+        )
         .route("/:id", axum::routing::delete(delete_operator))
 }
 
@@ -98,10 +101,9 @@ async fn delete_operator(
     require_scopes(&auth, &["*"])?;
     require_system_tenant(&auth)?;
     // users.id is VARCHAR(26) (ULID-like), not UUID — bind as text, no ::uuid cast.
-    let result =
-        sqlx::query("DELETE FROM users WHERE id = $1 AND role IN ('admin', 'owner')")
-            .bind(&id)
-            .execute(&state.db)
+    let result = sqlx::query("DELETE FROM users WHERE id = $1 AND role IN ('admin', 'owner')")
+        .bind(&id)
+        .execute(&state.db)
         .await
         .map_err(|e| ApiError::Internal(format!("Failed to delete operator: {e}")))?;
     if result.rows_affected() == 0 {
