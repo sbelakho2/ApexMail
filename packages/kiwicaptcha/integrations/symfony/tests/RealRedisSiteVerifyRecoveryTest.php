@@ -419,7 +419,19 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
         }
     }
 
-    public function testRetryAfterSignedExpiryInsideRetainedHorizonResumesOriginalSuccess(): void
+    /**
+     * THE adversarial expiry sequence on real Redis: a valid token is
+     * consumed by an owner whose derivation CROSSES the signed expiry —
+     * the ordinary verify() then returns Expired from its post-derive
+     * final revalidation WITHOUT committing a result — and the owner
+     * CRASHES before finalizing its idempotency record. A same-UUID
+     * retry takes over and RESUMES the resultless derivation: the resume
+     * re-checks the signed expiry BEFORE deriving, so the deterministic
+     * Expired outcome is reproduced (timeout-or-duplicate) — NEVER a
+     * post-deadline Valid. Nothing is ever committed, and every further
+     * same-UUID retry reproduces the identical canonical failure.
+     */
+    public function testResultlessResumePastSignedExpiryIsDeterministicallyExpired(): void
     {
         $probe = $this->redisOrSkip();
         if ($probe === null) {
@@ -430,48 +442,107 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
         // recovery-window margin the container enforces at compile time).
         $storage = new RedisStorage($probe, 'kiwicaptcha:', 0, 100, (int) SiteVerifyController::IDEMPOTENCY_WAIT_SECS);
         [$token, , $nonce] = $this->issueSha($storage, ttlSecs: 5);
+        $record = $storage->find($nonce);
+        self::assertNotNull($record);
         $uuid = 'c0ffee00-0000-4000-8000-000000000004';
         $backendId = hash('sha256', self::SITEVERIFY_SECRET.'|login|0');
         $idemKey = '{kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuid;
         $probe->del([$idemKey]);
+        // A SHORT fixed store lease (1s) keeps the takeover instant; the
+        // waiter bound (5s) exceeds it (the construction invariant).
         $store = new RedisSiteVerifyIdempotencyStore($probe, 'kiwicaptcha', 1);
-        $lost = $this->lostConsumeReplyStorage($storage);
+
+        // The owner's derivation CROSSES the signed expiry: the verifier
+        // clock reads pre-expiry at the cheap phase and post-expiry at
+        // the POST-DERIVE final revalidation — exactly the
+        // Expired-without-commit outcome the ordinary verify() produces
+        // when the derivation crosses expiresAt.
+        $calls = 0;
+        $ownerClock = static function () use (&$calls, $record): int {
+            $calls++;
+            return $calls === 1 ? $record->expiresAt - 1 : $record->expiresAt + 100;
+        };
+        // The finalize-crash decorator: the owner's finalize never lands
+        // (process death between the Expired outcome and the claim
+        // finalization) — the entry stays PENDING for the takeover.
+        $crashingStore = new class($store) implements \BelConsulting\KiwiCaptchaBundle\SiteVerify\SiteVerifyIdempotencyStore {
+            public function __construct(private readonly \BelConsulting\KiwiCaptchaBundle\SiteVerify\SiteVerifyIdempotencyStore $inner)
+            {
+            }
+
+            public function leaseSeconds(): int
+            {
+                return $this->inner->leaseSeconds();
+            }
+
+            public function claim(string $backendId, string $idempotencyKey, string $responseHash, int $ttlSeconds, string $remoteipFingerprint, ?int $leaseSeconds = null): array
+            {
+                return $this->inner->claim($backendId, $idempotencyKey, $responseHash, $ttlSeconds, $remoteipFingerprint, $leaseSeconds);
+            }
+
+            public function takeover(string $backendId, string $idempotencyKey, string $responseHash, int $ttlSeconds, string $remoteipFingerprint, ?int $leaseSeconds = null): array
+            {
+                return $this->inner->takeover($backendId, $idempotencyKey, $responseHash, $ttlSeconds, $remoteipFingerprint, $leaseSeconds);
+            }
+
+            public function renew(string $backendId, string $idempotencyKey, string $owner): bool
+            {
+                return $this->inner->renew($backendId, $idempotencyKey, $owner);
+            }
+
+            public function finalize(string $backendId, string $idempotencyKey, string $responseHash, string $owner, array $canonicalResponse): void
+            {
+                // The owner's finalize never lands (process death).
+            }
+
+            public function stored(string $backendId, string $idempotencyKey): ?array
+            {
+                return $this->inner->stored($backendId, $idempotencyKey);
+            }
+        };
 
         try {
-            $owner = new SiteVerifyController(new Verifier($lost), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $lost, null, null, $store, null, 5.0);
+            $owner = new SiteVerifyController(new Verifier($storage, now: $ownerClock), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $storage, null, null, $crashingStore, null, 5.0);
             $ownerResponse = $owner->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
                 'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
             ]));
-            self::assertSame(503, $ownerResponse->getStatusCode());
+            $ownerBody = json_decode((string) $ownerResponse->getContent(), true);
+            self::assertSame(false, $ownerBody['success'] ?? null, 'the owner whose derivation crossed the signed expiry must get the deterministic Expired outcome');
+            self::assertSame(['timeout-or-duplicate'], $ownerBody['error-codes'] ?? null);
             $consumed = $storage->consumedState($nonce);
-            self::assertNotNull($consumed, 'the lost-reply 503 must come from the EXECUTED transition — the record must be consumed');
+            self::assertNotNull($consumed, 'the owner\'s transition EXECUTED on real Redis');
             self::assertSame(
                 hash('sha256', $backendId."\0".$uuid."\0".hash('sha256', $token)."\0"."ip:127.0.0.1"),
                 $consumed->operationIdentity,
-                'the identity lands atomically with the state flip',
+                'the operation identity lands atomically with the real-Redis state flip',
             );
-            self::assertNull($consumed->consumedResult, 'consumed_result must be null — the derivation never ran');
+            self::assertNull($consumed->consumedResult, 'the Expired outcome is NEVER committed — the record stays consumed-without-result');
+            self::assertNull($store->stored($backendId, $uuid), 'the owner crashed BEFORE finalizing the idempotency record');
 
-            // Wait past the signed expiry (5s TTL) AND the 1s lease. The
-            // read-back uses a FRESH client so a stale-connection artifact
-            // on the long-lived probe cannot masquerade as data loss.
+            // Wait past the signed expiry (5s TTL) AND the 1s lease.
             sleep(7);
-            $fresh = new \Predis\Client('tcp://127.0.0.1:6399', ['timeout' => 5.0, 'read_write_timeout' => 5.0]);
-            try {
-                $consumed = (new RedisStorage($fresh))->consumedState($nonce);
-            } finally {
-                $fresh->disconnect();
-            }
-            self::assertNotNull($consumed, 'the consumed-state record must still be readable after the signed expiry (ttl_margin_secs retention)');
-            self::assertNull($consumed->consumedResult, 'still uncommitted — the resume must work past the signed expiry');
 
+            // The same-key retry takes over and RESUMES: the resultless
+            // resume re-checks the signed expiry BEFORE deriving — the
+            // deterministic Expired outcome, NEVER a post-deadline Valid.
             $retry = new SiteVerifyController(new Verifier($storage), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $storage, null, null, $store, null, 5.0);
             $retryResponse = $retry->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
                 'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
             ]));
             $retryBody = json_decode((string) $retryResponse->getContent(), true);
-            self::assertSame(true, $retryBody['success'] ?? null, 'the resume must NOT reject the past signed expiry — the original result is reproduced: '.(string) $retryResponse->getContent());
-            self::assertSame($this->expectedCanonicalSuccess($storage, $nonce), (string) $retryResponse->getContent(), 'the ORIGINAL canonical success bytes after the signed expiry');
+            self::assertSame(false, $retryBody['success'] ?? null, 'the identity-proven retry must reproduce the deterministic Expired outcome — never success: '.(string) $retryResponse->getContent());
+            self::assertSame(['timeout-or-duplicate'], $retryBody['error-codes'] ?? null, 'the expired resultless resume maps to the duplicate vocabulary');
+            $after = $storage->consumedState($nonce);
+            self::assertNull($after?->consumedResult, 'the expired resume must NOT commit anything on real Redis');
+
+            // A same-UUID retry reproduces the identical canonical
+            // failure — the redemption can never become successful again.
+            $replay = new SiteVerifyController(new Verifier($storage), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $storage, null, null, $store, null, 5.0);
+            $replayResponse = $replay->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+                'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
+            ]));
+            self::assertSame($retryBody, json_decode((string) $replayResponse->getContent(), true), 'a same-UUID retry reproduces the identical canonical failure');
+            self::assertSame(false, $retryBody['success'] ?? null, 'the adversarial sequence must NEVER yield success after the signed deadline');
         } finally {
             $probe->del([$idemKey, 'kiwicaptcha:'.$nonce]);
         }

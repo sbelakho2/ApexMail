@@ -119,7 +119,10 @@ use Symfony\Component\HttpFoundation\Response;
  *     without a wired TTL the mint-then-admit path applies, discarding
  *     the minted record on refusal. Every minted challenge increments the
  *     atomic issuance-rate counter used by the resource-pressure
- *     provider.
+ *     provider. On the stage-2 path the effective TTL is additionally
+ *     CLIPPED to the chain's remaining lifetime (item 14), so the
+ *     admitted slot mirrors the signed challenge, which never outlives
+ *     the chain obligation.
  * 14. CHAIN-TICKET / OPEN-CHAIN GATE (stage-2 issuance, risk.chaining):
  *     the chain is a SERVER-SIDE TRANSACTION OBLIGATION — the chain
  *     record and its obligation mapping
@@ -176,7 +179,13 @@ use Symfony\Component\HttpFoundation\Response;
  *     failure returns the outstanding slot (abortedBeforeHandoff). The
  *     issued stage-2 profile is the STRONGER of the state's signed
  *     required action and the current pre-issue decision (a transient
- *     risk decay can never downgrade the promised stage), and the
+ *     risk decay can never downgrade the promised stage). The stage-2
+ *     challenge NEVER outlives the obligation that authorized it: the
+ *     minted TTL is CLIPPED to the chain's remaining lifetime (min of
+ *     the configured TTL and expiresAt - now, computed before the
+ *     outstanding admission), and a chain with less than 1 second of
+ *     life left refuses the mint with the expired-chain response — the
+ *     chain is never re-created or re-signed with a fresh expiry. The
  *     stage-2 challenge's metadata sidecar carries the server-stamped
  *     chain id/depth in the PRIVATE chainId/chainDepth fields — the
  *     application's own cdata is preserved untouched. The chain is
@@ -256,12 +265,26 @@ final class ChallengeController
     private const CHAIN_TICKET_PATTERN = '/^[A-Za-z0-9._:-]{1,256}$/D';
 
     /**
-     * The bounded trusted-edge TLS classification tag the configured
-     * header may carry (risk.trusted_tls_header). A malformed value is
-     * IGNORED (the request is assessed without a TLS tag), never
-     * rejected — the tag is probabilistic evidence, not a gate.
+     * The minimum remaining chain lifetime a stage-2 mint may consume,
+     * seconds: the core Config floor — a challenge TTL must be >= 1
+     * second (the issuer refuses anything shorter as malformed), so a
+     * chain with less than one second of life left cannot hold a valid
+     * stage-2 challenge and its ticket is refused as expired (never
+     * re-created or re-signed with a fresh expiry).
      */
-    private const TRUSTED_TLS_TAG_PATTERN = '/^[a-z0-9_+:-]{1,32}$/i';
+    private const MIN_STAGE2_REMAINING_SECS = 1;
+
+    /**
+     * The bounded trusted-edge TLS classification tag the configured
+     * header may carry (risk.trusted_tls_header): 1-64 characters of
+     * [a-z0-9_+:|:-] — the SAME bound and charset as the cross-language
+     * risk-v2 contract (the crate bounds the TLS tag at 64 characters
+     * and documents the pipe-separated shape like "tls13|http2"). A
+     * malformed value is IGNORED (the request is assessed without a TLS
+     * tag), never rejected — the tag is probabilistic evidence, not a
+     * gate.
+     */
+    private const TRUSTED_TLS_TAG_PATTERN = '/^[a-z0-9_+:|:-]{1,64}$/i';
 
     /**
      * The server-issued decoy field name in the challenge response: a
@@ -368,6 +391,12 @@ final class ChallengeController
          * closed with the retryable 503 (never clears the obligation).
          */
         private readonly ?\BelConsulting\KiwiCaptchaBundle\Risk\PostSolveDispositionStore $postSolveDispositionStore = null,
+        /**
+         * The clock for the stage-2 remaining-lifetime clip (unix
+         * seconds; null = time()). Injectable so the near-expiry
+         * adversarial tests pin the chain's remaining lifetime exactly.
+         */
+        private readonly ?\Closure $now = null,
     ) {
     }
 
@@ -879,6 +908,12 @@ final class ChallengeController
         // not burned); a durably issued issuance transitions the state to
         // issued(stage2Nonce) exactly once, and only a VERIFIED stage-2
         // completes the chain (the obligation is cleared atomically).
+        // The stage-2 MINT is additionally bounded by the chain's
+        // REMAINING lifetime: the issued TTL is clipped to
+        // min(configured TTL, expiresAt - now), and a chain with less
+        // than 1 second of life left refuses the mint with the
+        // expired-chain response — the obligation is never re-extended
+        // to fit a challenge.
         $chainId = null;
         $chainOwner = null;
         $chainRequirement = null;
@@ -1332,10 +1367,49 @@ final class ChallengeController
         // incrementing (per-source + global, EXPIRE = challenge lifetime +
         // ttl margin — the effective TTL equals the lifetime the issuer
         // signs: the global default or the per-sitekey override, profiles
-        // never change it). A refused admission never mints
+        // never change it — and on the stage-2 path it is additionally
+        // clipped to the chain's remaining lifetime below, so the slot
+        // never outlives the obligation that authorized the mint). A
+        // refused admission never mints
         // anything. A Redis failure propagates (fail closed: no challenge
         // without a checked stockpile bound).
         $ttlSecs = $sitekeyTtlSecs ?? $this->challengeTtlSecs;
+        if ($chainId !== null && $chainRequirement !== null) {
+            // STAGE-2 TTL CLIP: the chain obligation is the ABSOLUTE
+            // ceiling of the stage-2 challenge lifetime — a challenge
+            // minted with the full configured TTL could stay
+            // cryptographically valid after the chain state that
+            // authorized it has expired (findOpenRequirement then
+            // returns nothing while the private metadata still
+            // identifies the nonce as stage 2). The minted TTL is
+            // clipped to min(configured TTL, expiresAt - now) — the
+            // requirement's signed ABSOLUTE expiry — BEFORE the
+            // outstanding admission and the mint, so the signed
+            // lifetime, the admitted slot and the metadata sidecar all
+            // stay inside the chain's lifetime.
+            //
+            // INSUFFICIENT REMAINING LIFETIME: when less than the
+            // minimum challenge lifetime the issuer accepts (1 second —
+            // the core Config floor, {@see self::MIN_STAGE2_REMAINING_SECS})
+            // remains, the chain cannot hold a valid stage-2 challenge:
+            // the ticket is treated as EXPIRED — the same response as an
+            // expired/missing chain — the reservation is released, and
+            // the chain is NEVER re-created or re-signed with a fresh
+            // expiry.
+            $remaining = $chainRequirement->expiresAt - $this->now();
+            if ($remaining < self::MIN_STAGE2_REMAINING_SECS) {
+                $this->releaseChain($chainId, $chainOwner);
+
+                return $this->privateJson(
+                    ['error' => ['code' => 'INVALID_METADATA', 'message' => 'The chain ticket is invalid, expired or already consumed.']],
+                    Response::HTTP_UNPROCESSABLE_ENTITY,
+                    $request,
+                    $riskSession,
+                    $mintedCookie,
+                );
+            }
+            $ttlSecs = min($ttlSecs ?? $this->issuer->config()->ttlSecs, $remaining);
+        }
         // OUTSTANDING-ADMISSION BOOKKEEPING: the slot is HELD from the
         // moment the counters admit the challenge until the challenge is
         // successfully HANDED OFF. Every PROVEN-not-handed-out failure
@@ -1576,6 +1650,16 @@ final class ChallengeController
         $outstandingAdmissionHeld = false;
 
         return $this->privateJson($challengeData, Response::HTTP_OK, $request, $riskSession, $mintedCookie);
+    }
+
+    /**
+     * The controller clock for the stage-2 remaining-lifetime clip
+     * ({@see self::MIN_STAGE2_REMAINING_SECS}): the injected clock when
+     * provided, time() otherwise.
+     */
+    private function now(): int
+    {
+        return ($this->now) ? ($this->now)() : time();
     }
 
     /**

@@ -29,7 +29,12 @@ use PHPUnit\Framework\TestCase;
  * A caller that has PROVEN the retained consumed record's exact operation
  * identity belongs to this logical operation may RESUME the derivation,
  * revalidate every immutable security property exactly like the ordinary
- * verify path, and commit the deterministic outcome.
+ * verify path, and commit the deterministic outcome. A RESULTLESS resume
+ * re-checks the signed expiry against the current clock BEFORE deriving:
+ * past the signed deadline it fails closed with Expired and commits
+ * nothing, deterministically on every retry — only the committed-result
+ * recovery is expiry-exempt (a committed result was durably recorded only
+ * after the original final expiry check passed).
  */
 final class VerifierResumeTest extends TestCase
 {
@@ -385,13 +390,15 @@ final class VerifierResumeTest extends TestCase
         self::assertNotNull($storage->consumedState($record->nonce)?->consumedResult);
     }
 
-    public function testResumePastSignedExpirySucceeds(): void
+    public function testResultlessResumePastSignedExpiryIsDeterministicallyExpired(): void
     {
-        // The signed expiry is EXEMPT on the resume path: the operation
-        // already won atomic consumption before the response was lost. A
-        // resume with the verifier clock far past the signed expiry
-        // derives and commits the original outcome — the exact
-        // late-lifetime recovery the retained-state horizon provides.
+        // A RESULTLESS resume has no durable success marker: the original
+        // attempt's derivation crossed the signed deadline and verify()
+        // returned Expired WITHOUT committing. Re-deriving after expiry
+        // could turn that same logical redemption into a post-deadline
+        // Valid — the resume therefore re-checks the signed expiry BEFORE
+        // the derivation and fails closed: invalid(Expired), nothing
+        // derived, nothing committed, deterministically on every retry.
         [$inner, $record, $token] = $this->issueAndSolve();
         $storage = self::lostReplyStorage($inner, true);
         $farFuture = static fn (): int => self::ISSUED_AT + 10_000;
@@ -409,11 +416,34 @@ final class VerifierResumeTest extends TestCase
         self::assertSame(VerifyError::Expired, $control->error, 'precondition: the clock is past the signed expiry');
 
         $outcome = $verifier->resumeConsumedOperation($token, Vectors::SECRET, $this->identity('late'), 'login', self::CLIENT_IP);
-        self::assertTrue($outcome->isOk(), sprintf('the resume must NOT reject the past signed expiry, got %s', $outcome->code()));
-        self::assertSame($record->nonce, $outcome->nonce());
+        self::assertSame(VerifyError::Expired, $outcome->error, 'a resultless resume past the signed expiry must fail closed with Expired');
         $after = $inner->consumedState($record->nonce);
-        self::assertNotNull($after?->consumedResult);
-        self::assertTrue($after->consumedResult->valid);
+        self::assertNull($after?->consumedResult, 'the expired resultless resume must NOT commit anything');
+
+        // Deterministic: a second resume derives nothing and stays
+        // Expired — the same logical redemption can never become Valid
+        // after the signed deadline.
+        $replay = $verifier->resumeConsumedOperation($token, Vectors::SECRET, $this->identity('late'), 'login', self::CLIENT_IP);
+        self::assertSame(VerifyError::Expired, $replay->error, 'a second resume after the signed expiry must be Expired again');
+        self::assertNull($inner->consumedState($record->nonce)?->consumedResult, 'nothing is ever committed for an expired resultless resume');
+    }
+
+    public function testCommittedResultRecoveryPastSignedExpiryStillSucceeds(): void
+    {
+        // The committed-result path is the ONLY expiry-exempt recovery: a
+        // committed result was durably recorded only after the original
+        // final expiry check passed, so recovering it after the signed
+        // expiry remains correct — the exact deterministic outcome the
+        // original logical redemption received.
+        [$inner, $record, $token] = $this->issueAndSolve();
+        $inner->consumeWithOperationIdentity($record->nonce, $this->identity('committed'));
+        self::assertTrue($inner->commitResult($record->nonce, true, $record->requestBinding), 'the committed result lands');
+        $farFuture = static fn (): int => self::ISSUED_AT + 10_000;
+
+        $outcome = (new Verifier($inner, now: $farFuture))->resumeConsumedOperation($token, Vectors::SECRET, $this->identity('committed'), 'login', self::CLIENT_IP);
+        self::assertTrue($outcome->isOk(), sprintf('the committed-result recovery must stay expiry-exempt, got %s', $outcome->code()));
+        self::assertSame($record->nonce, $outcome->nonce());
+        self::assertSame(true, $inner->consumedState($record->nonce)?->consumedResult?->valid);
     }
 
     public function testWrongIdentityIsRefused(): void

@@ -900,12 +900,24 @@ final class KiwiCaptchaValidator extends ConstraintValidator
         if ($this->risk !== null && $this->chainTickets !== null) {
             try {
                 $chainEligible = !$this->verifiedChallengeCarriesChainMarker($token);
-            } catch (\Throwable) {
-                // The metadata sidecar could not be read (transient
-                // outage): the chain marker is treated as POSSIBLY present
-                // — no chain ticket is issued (a metadata-read failure
-                // must never open a third stage or a repeated-challenge
-                // loop). The verification itself still passes.
+            } catch (\Throwable $e) {
+                if ($this->bindingAuthority !== null) {
+                    // Chaining is enabled (the chain service AND the
+                    // binding authority are wired): the private stage
+                    // marker CANNOT be established — the verified
+                    // challenge may be the stage-2 challenge of an open
+                    // chain, and a third stage must never open from an
+                    // unknown stage. Fail CLOSED with the temporary_
+                    // unavailable violation — never acceptance, never
+                    // suppressing the reassessment by silently treating
+                    // the challenge as stage-1-eligible.
+                    throw new PostSolveDispositionUnavailableException('the chain marker of the verified challenge could not be established', 0, $e);
+                }
+                // Chaining cannot open without the binding authority (no
+                // stage-2 chain can exist for this deployment): the
+                // marker is irrelevant — the challenge is treated as
+                // POSSIBLY stage-2 (no chain ticket, never a third
+                // stage) and the verification itself still passes.
                 $chainEligible = false;
             }
         }
@@ -1004,7 +1016,28 @@ final class KiwiCaptchaValidator extends ConstraintValidator
     }
 
     /**
-     * Map the post-solve decision to the final disposition:
+     * Map the post-solve decision to the final disposition. An OPEN
+     * transaction obligation is AUTHORITATIVE BEFORE the fresh assessment
+     * (and before any Pass): when the open requirement of the (scope,
+     * canonical binding, policy) exists but the submitted nonce is NOT its
+     * exact stage2Nonce, the requirement state decides — the transaction
+     * already demands stage 2 or a terminal outcome, so a stage-1 token of
+     * a chained transaction can NEVER pass and the obligation's recorded
+     * requirement (requiredAction/rank floor) is never lowered by a later
+     * weaker assessment (the requirement itself is reused — the fresh
+     * decision is never substituted for it):
+     *
+     *  - available/reserved/issued  -> CHAIN_REQUIRED with the SAME chain
+     *    (the transaction still needs its stage 2 — the requirement's
+     *    recorded requiredAction is the floor, never the weaker fresh
+     *    action);
+     *  - step_up_required           -> StepUp (TERMINAL);
+     *  - denied                     -> Deny (TERMINAL);
+     *  - verified                   -> the obligation should already be
+     *    gone (anomaly) — treated as the requirement's absence.
+     *
+     * The submitted nonce == stage2Nonce keeps the existing stage-2
+     * disposition flow. Without an open obligation:
      *
      *  - Deny            -> Deny;
      *  - StepUp          -> StepUp (TERMINAL — never a chained PoW);
@@ -1030,20 +1063,14 @@ final class KiwiCaptchaValidator extends ConstraintValidator
      *
      * @throws PostSolveDispositionUnavailableException when the chain
      *                                                 requirement cannot be
-     *                                                 opened (fail closed —
+     *                                                 opened or its state
+     *                                                 read (fail closed —
      *                                                 never a silent pass
      *                                                 while the obligation
      *                                                 may be uncleared)
      */
     private function mapPostSolveDecision(string $token, VerifyOutcome $outcome, KiwiCaptcha $constraint, string $nonce, ?RiskDecision $postSolve, ?string $canonicalBinding): PostSolveDisposition
     {
-        if ($postSolve === null) {
-            // The scope is unknown and the engine declines to evaluate:
-            // nothing to enforce beyond the solved proof.
-            return new PostSolveDisposition(PostSolveDispositionKind::Pass);
-        }
-        $decisionId = $postSolve->decisionId;
-
         // DEPTH-2 DETECTION (read-only): the verified challenge may BE
         // the stage-2 challenge of an open chain requirement (its nonce
         // equals the requirement's stage2Nonce) — the chain then ends at
@@ -1051,8 +1078,42 @@ final class KiwiCaptchaValidator extends ConstraintValidator
         // (never a third stage). The transition runs AFTER the
         // disposition is durably finalized
         // ({@see self::applyStage2Disposition()}).
+        //
+        // OBLIGATION-AUTHORITATIVE: the open requirement is consulted
+        // BEFORE the fresh assessment — a partial chain-state read
+        // failure fails closed ({@see self::openRequirementFor()}) and an
+        // existing obligation can never be downgraded by a weaker fresh
+        // assessment.
         $requirement = $this->openRequirementFor($constraint, $canonicalBinding);
         $isStage2 = $requirement !== null && $requirement->stage2Nonce !== null && hash_equals($requirement->stage2Nonce, $nonce);
+
+        if ($requirement !== null && !$isStage2 && $requirement->state !== 'verified') {
+            // The submitted nonce is NOT the requirement's exact
+            // stage-2 nonce: the requirement state is the authoritative
+            // disposition of the transaction (the 'verified' state is the
+            // anomaly — its obligation should already be gone — and falls
+            // through as the requirement's absence).
+            $decisionId = $postSolve?->decisionId;
+
+            return match ($requirement->state) {
+                // The transaction is bound to its TERMINAL step-up.
+                'step_up_required' => new PostSolveDisposition(PostSolveDispositionKind::StepUp, $decisionId),
+                // The transaction is bound to its TERMINAL denial.
+                'denied' => new PostSolveDisposition(PostSolveDispositionKind::Deny, $decisionId),
+                // available/reserved/issued: the transaction still owes
+                // its stage 2 — CHAIN_REQUIRED with the SAME chain and
+                // the requirement's RECORDED required action (the floor
+                // never decays).
+                default => new PostSolveDisposition(PostSolveDispositionKind::ChainRequired, $decisionId, $requirement->chainId),
+            };
+        }
+
+        if ($postSolve === null) {
+            // The scope is unknown and the engine declines to evaluate:
+            // nothing to enforce beyond the solved proof.
+            return new PostSolveDisposition(PostSolveDispositionKind::Pass);
+        }
+        $decisionId = $postSolve->decisionId;
 
         if ($postSolve->action === RiskAction::Deny) {
             return new PostSolveDisposition(PostSolveDispositionKind::Deny, $decisionId);
@@ -1139,7 +1200,8 @@ final class KiwiCaptchaValidator extends ConstraintValidator
      *  - ChainRequired -> unreachable for a stage-2 nonce (a stage-2
      *    challenge never opens a third stage) — fail closed.
      *
-     * A transition failure or refusal is fail-closed
+     * A chain-state READ failure (the requirement lookup) and a
+     * transition failure or refusal are both fail-closed
      * {@see PostSolveDispositionUnavailableException} (temporary_
      * unavailable) — never a silent pass while the obligation may be
      * uncleared.
@@ -1214,11 +1276,23 @@ final class KiwiCaptchaValidator extends ConstraintValidator
     /**
      * The OPEN chain requirement of this request's (scope, CANONICAL
      * binding, policy epoch), or null when none exists / chaining or the
-     * authority is unavailable. Used for the stage-2 detection: a verified
-     * challenge whose nonce equals the requirement's stage2Nonce IS the
-     * stage-2 challenge — the chain ends there. The canonical binding is
-     * the value resolved ONCE before the binding comparison — it is never
-     * re-resolved here.
+     * authority is unavailable. Used for the stage-2 detection and the
+     * obligation-authoritative disposition: a verified challenge whose
+     * nonce equals the requirement's stage2Nonce IS the stage-2 challenge
+     * — the chain ends there. The canonical binding is the value resolved
+     * ONCE before the binding comparison — it is never re-resolved here.
+     * FAIL-CLOSED: only a SUCCESSFUL lookup that finds no record produces
+     * null — a chain-state read failure (backend error, decoding/
+     * corruption, asymmetric failure) throws the typed
+     * {@see PostSolveDispositionUnavailableException} the caller's
+     * existing wrap converts to the temporary_unavailable violation; a
+     * partial chain-state failure is NEVER an authoritative "no open
+     * requirement".
+     *
+     * @throws PostSolveDispositionUnavailableException when the chain
+     *                                                 requirement state
+     *                                                 cannot be read (fail
+     *                                                 closed)
      */
     private function openRequirementFor(KiwiCaptcha $constraint, ?string $canonicalBinding): ?ChainRequirement
     {
@@ -1227,8 +1301,8 @@ final class KiwiCaptchaValidator extends ConstraintValidator
         }
         try {
             return $this->chainTickets->findOpenRequirement($constraint->scope, $canonicalBinding, $this->policyVersion);
-        } catch (\Throwable) {
-            return null;
+        } catch (\Throwable $e) {
+            throw new PostSolveDispositionUnavailableException('the chain requirement state is unavailable', 0, $e);
         }
     }
 
@@ -1453,8 +1527,10 @@ final class KiwiCaptchaValidator extends ConstraintValidator
      * travels in the cdata, so client input can never forge it). A marked
      * challenge is the END of its chain: no third-stage ticket can ever be
      * issued from it. FAILS CLOSED: a metadata READ failure THROWS — the
-     * caller treats the marker as possibly present (no chain ticket; the
-     * verification itself still passes).
+     * caller answers the temporary_unavailable violation when chaining is
+     * enabled (the marker cannot be established, so the challenge is never
+     * silently treated as stage-1-eligible); only a SUCCESSFUL read
+     * without a marker legitimately keeps the challenge stage-1-eligible.
      */
     private function verifiedChallengeCarriesChainMarker(string $token): bool
     {

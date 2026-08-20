@@ -8,6 +8,7 @@ use KiwiCaptcha\ChallengeRecord;
 use KiwiCaptcha\ConsumedRecord;
 use KiwiCaptcha\AtomicStorageInterface;
 use KiwiCaptcha\ConsumedResult;
+use KiwiCaptcha\OperationIdentity;
 use KiwiCaptcha\OperationIdentityAwareStorageInterface;
 use KiwiCaptcha\StorageInterface;
 
@@ -63,6 +64,12 @@ final class ArrayStorage implements AtomicStorageInterface, \KiwiCaptcha\Consume
 
     public function consumeWithOperationIdentity(string $nonce, ?string $operationIdentity): ?ConsumedRecord
     {
+        // The identity — validated against the narrow shared alphabet
+        // ({@see OperationIdentity::validate()} — 1..128 bytes of
+        // [A-Za-z0-9_-], REJECTED with InvalidArgumentException when
+        // malformed, never silently dropped) — lands in the SAME write as
+        // the state flip.
+        $validated = OperationIdentity::validate($operationIdentity);
         $entry = $this->records[$nonce] ?? null;
         if ($entry === null) {
             return null;
@@ -70,11 +77,9 @@ final class ArrayStorage implements AtomicStorageInterface, \KiwiCaptcha\Consume
         if ($entry['consumed']) {
             return new ConsumedRecord($entry['record'], false, true, $entry['result'], $entry['operationIdentity']);
         }
-        // The identity (bounded — an over-long identity is IGNORED) lands
-        // in the SAME write as the state flip.
         $this->records[$nonce]['consumed'] = true;
-        if ($operationIdentity !== null && \strlen($operationIdentity) <= 128) {
-            $this->records[$nonce]['operationIdentity'] = $operationIdentity;
+        if ($validated !== null) {
+            $this->records[$nonce]['operationIdentity'] = $validated;
         }
 
         return new ConsumedRecord($entry['record'], true, false, null, $this->records[$nonce]['operationIdentity']);

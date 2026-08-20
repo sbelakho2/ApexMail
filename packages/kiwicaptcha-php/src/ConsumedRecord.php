@@ -22,8 +22,9 @@ namespace KiwiCaptcha;
  *                      pending→consumed transition by
  *                      {@see OperationIdentityAwareStorageInterface::consumeWithOperationIdentity()},
  *                      or null when the record carries none (a plain
- *                      consume, an identity-less storage, or an over-long
- *                      identity that was ignored).
+ *                      consume, an identity-less storage, or a malformed
+ *                      identity — rejected by {@see OperationIdentity}
+ *                      before the transition, so it never lands).
  *
  * A verifier retrying an already-consumed record with a stored result
  * returns that stored outcome directly (Valid/InsufficientWork) WITHOUT

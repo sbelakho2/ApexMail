@@ -8,6 +8,7 @@ use KiwiCaptcha\AtomicStorageInterface;
 use KiwiCaptcha\ChallengeRecord;
 use KiwiCaptcha\ConsumedRecord;
 use KiwiCaptcha\ConsumedResult;
+use KiwiCaptcha\OperationIdentity;
 use KiwiCaptcha\OperationIdentityAwareStorageInterface;
 
 /**
@@ -52,9 +53,14 @@ final class RedisStorage implements AtomicStorageInterface, \KiwiCaptcha\Consume
      * `"operation_identity":null` marker is spliced to the identity IN THE
      * SAME script — the identity lands atomically with the state flip, so
      * the stored identity is provably the ACTUAL atomic consume winner's.
-     * Returns nil for a missing record, else {json, consumed_now,
-     * consumed_before, consumed_result_json} — the result is the committed
-     * JSON ("" when absent).
+     * The identity has ALREADY passed {@see OperationIdentity::validate()}
+     * before it reaches ARGV: the 1..128-byte `[A-Za-z0-9_-]` alphabet
+     * excludes `%` and every other Lua `string.gsub` replacement-template
+     * escape BY CONSTRUCTION, so the raw replacement-string splice below
+     * can never be interpreted as a template (a replacement function is
+     * unnecessary). Returns nil for a missing record, else {json,
+     * consumed_now, consumed_before, consumed_result_json} — the result is
+     * the committed JSON ("" when absent).
      */
     private const CONSUME_SCRIPT = <<<'LUA'
 -- kiwicaptcha consume transition
@@ -67,8 +73,12 @@ final class RedisStorage implements AtomicStorageInterface, \KiwiCaptcha\Consume
 -- spliced into the `"operation_identity":null` marker in the SAME
 -- script when a non-empty identity argument is given (an old record
 -- without the marker — or a null identity — leaves it untouched). The
--- transition winner receives the UPDATED bytes, so the recorded
--- identity rides back on its own ConsumedRecord.
+-- identity has passed the shared OperationIdentity::validate() gate
+-- BEFORE the eval: 1..128 bytes of [A-Za-z0-9_-]. That alphabet is what
+-- makes the gsub REPLACEMENT splice safe — `%` is the Lua replacement-
+-- template escape and is excluded by construction, so ARGV[1] is never
+-- interpreted as a template. The transition winner receives the UPDATED
+-- bytes, so the recorded identity rides back on its own ConsumedRecord.
 local v = redis.call("GET", KEYS[1])
 if not v then
   return nil
@@ -252,12 +262,17 @@ LUA;
     public function consumeWithOperationIdentity(string $nonce, ?string $operationIdentity): ?ConsumedRecord
     {
         $key = $this->prefix.$nonce;
-        // The identity is bounded (never store unbounded blobs): an
-        // over-long identity is IGNORED — the transition still records no
-        // identity (the runtime marker stays null).
+        // The identity is validated against the narrow shared alphabet
+        // ({@see OperationIdentity::validate()} — 1..128 bytes of
+        // [A-Za-z0-9_-]) BEFORE it can reach the Lua splice: a malformed
+        // identity is REJECTED, never silently dropped, and the record is
+        // left untouched. The alphabet also makes the raw string.gsub
+        // replacement splice safe — `%` is a replacement-template escape
+        // in Lua and is excluded by construction.
         $identityArg = '';
-        if ($operationIdentity !== null && \strlen($operationIdentity) <= 128) {
-            $identityArg = json_encode($operationIdentity, JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR);
+        $validated = OperationIdentity::validate($operationIdentity);
+        if ($validated !== null) {
+            $identityArg = json_encode($validated, JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR);
         }
         $raw = $this->evalScript(self::CONSUME_SCRIPT, [$key, $identityArg], 1);
         if ($raw === false || $raw === null || !\is_array($raw)) {

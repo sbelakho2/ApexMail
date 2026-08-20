@@ -25,13 +25,15 @@ The defensible product claim is:
 > and to support accessible identification and security workflows under
 > Directive (EU) 2019/882 (European Accessibility Act).
 
-The stronger conformance statement — that KiwiCaptcha's user-facing
-widget conforms to WCAG 2.2 Level AA — is NOT published for any release
-until a release-specific manual assistive-technology (AT) qualification
-artifact is recorded (see the release-qualification artifacts below).
-No completed manual AT qualification artifact exists for any release
-yet, and automated evidence alone is not conformance evidence under
-WCAG (conformance depends on accessibility-supported technology).
+The stronger formulation — "KiwiCaptcha is designed and tested to
+satisfy the WCAG 2.2 Level AA success criteria applicable to the
+component and to support WCAG 2.2 AA conforming integrations" — is NOT
+published for any release until a release-specific manual
+assistive-technology (AT) qualification artifact is recorded (see the
+release-qualification artifacts below). No completed manual AT
+qualification artifact exists for any release yet, and automated
+evidence alone is not conformance evidence under WCAG (conformance
+depends on accessibility-supported technology).
 
 A component test scope is not whole-page conformance: KiwiCaptcha cannot
 make an entire e-commerce site EAA-compliant by itself. The consuming
@@ -59,7 +61,7 @@ manual assistive-technology qualification checklist in the release gate.
 | No pointerdown-only activation | 2.5.2 | reacquisition uses the native button with click activation only |
 | Visible focus | 2.4.7 | `:focus-visible` ring on the Retry button (its 1.4.11 contrast is computed above) |
 | Pointer targets >= 24x24 CSS px (32px height) | 2.5.8 | `min-height: 32px; min-width: 24px` on the Retry button; bounding-box asserted |
-| No content/function loss at 2x component font-scale enlargement (a component-level custom-property stress test, not browser/user text zoom; actual 200% browser zoom remains part of the manual accessibility qualification) | 1.4.4 | 320 CSS px reflow + text-spacing overrides asserted; long German strings tested |
+| No content/function loss at 2x component font-scale enlargement (a component-level custom-property stress test, not browser/user text zoom; actual 200% browser zoom is part of the manual release-gate qualification — performed at release time for each released artifact with recorded, signed evidence, never implied to have been run on any particular commit) | 1.4.4 | 320 CSS px reflow + text-spacing overrides asserted; long German strings tested |
 | Text spacing overrides (1.4.12) | 1.4.12 | letter/word spacing + line-height overrides injected and asserted |
 | Reduced motion eliminates decorative motion | 2.3.1 (A); 2.3.3 is Level AAA — the reduced-motion support satisfies 2.3.1 (A) plus above-AA 2.3.3 engineering | CSS animations + the SVG SMIL wink removed under `prefers-reduced-motion`; asserted |
 | Expiry never destroys host-form data or blocks reacquisition | 1.4.10 / 2.1.1 | expiry clears only the token field + fires the expired callback; the Retry button remains |
@@ -104,8 +106,12 @@ disposition beyond N/A.
 ## Manual assistive-technology qualification (release gate)
 
 Automated DOM checks are not sufficient conformance evidence (WCAG
-conformance depends on accessibility-supported technology). Before each
-release, the maintainers qualify the widget with:
+conformance depends on accessibility-supported technology). The manual
+qualification is a RELEASE GATE: for each released artifact, at release
+time, the maintainers qualify the widget in a real browser with actual
+200% browser/user zoom plus the assistive-technology passes below, and
+record signed evidence of the run — the qualification is never implied
+to have been run on any particular commit:
 
 - NVDA + Firefox, NVDA + Chrome (Windows)
 - VoiceOver + Safari (macOS)
@@ -120,16 +126,20 @@ Checking/verified/failed/expired, and the widget never traps focus.
 
 ### Release-qualification artifacts
 
-Each release records a qualification artifact with the template below.
-The stronger conformance statement (that the user-facing widget
-conforms to WCAG 2.2 Level AA) is published only when the artifact for
-that release is complete:
+Each release records a qualification artifact with the template below,
+as recorded, signed evidence that the qualification ran at release time
+on that release's artifact. The stronger formulation (that KiwiCaptcha
+is designed and tested to satisfy the WCAG 2.2 Level AA success
+criteria applicable to the component and to support WCAG 2.2 AA
+conforming integrations) is published only when the artifact for that
+release is complete:
 
 - release tag and commit
 - browser versions (Chromium, Firefox, Safari, Android Chrome)
 - AT versions: NVDA, VoiceOver, TalkBack, plus the speech-recognition or
   switch-access tool used
-- date and tester
+- actual 200% browser zoom verification in a real browser
+- date and tester (signed)
 - pass/fail notes and known exceptions
 
 Only the conservative claim in the Positioning section is published.
@@ -166,14 +176,16 @@ and to the applicable standards as they mature:
 
 | EAA Annex I requirement | WCAG 2.2 AA evidence above | Kiwi test | EN 301 549 / M/587 clause |
 | --- | --- | --- | --- |
-| Perceivable (information and UI presented to all users) | 1.4.3, 1.4.1, 1.4.11, 3.1.2, live region | a11y suite: contrast, forced-colors, lang/dir, announcements | EN 301 549 9.1.x (WCAG-mapped); M/587 update in progress |
-| Operable (navigation and interaction available to all users) | 2.1.1, 2.5.2, 2.5.8, 2.4.7, 2.4.11 | a11y suite: keyboard-only, pointer targets, no pointerdown | EN 301 549 9.2.x; M/587 in progress |
-| Understandable (information and operation are clear) | 3.3.8, 3.1.2 | automatic computational challenge; localized strings | EN 301 549 9.3.x; M/587 in progress |
-| Robust (compatible with assistive technology) | 4.1.2, 4.1.3 | axe semantics + role=status assertions + manual AT gate | EN 301 549 9.4.x; M/587 in progress |
+| Perceivable (information and UI presented to all users) | 1.4.3, 1.4.1, 1.4.11, 3.1.2, live region | a11y suite: contrast, forced-colors, lang/dir, announcements | EN 301 549 9.1.x (WCAG-mapped); v4.1.0 under M/587 — voting closes 2026-08-24, publication planned 2026-08-28, OJ publication projected 2026-11-30; re-checked after publication |
+| Operable (navigation and interaction available to all users) | 2.1.1, 2.5.2, 2.5.8, 2.4.7, 2.4.11 | a11y suite: keyboard-only, pointer targets, no pointerdown | EN 301 549 9.2.x; v4.1.0 under M/587 — voting closes 2026-08-24, publication planned 2026-08-28, OJ publication projected 2026-11-30; re-checked after publication |
+| Understandable (information and operation are clear) | 3.3.8, 3.1.2 | automatic computational challenge; localized strings | EN 301 549 9.3.x; v4.1.0 under M/587 — voting closes 2026-08-24, publication planned 2026-08-28, OJ publication projected 2026-11-30; re-checked after publication |
+| Robust (compatible with assistive technology) | 4.1.2, 4.1.3 | axe semantics + role=status assertions + manual AT gate | EN 301 549 9.4.x; v4.1.0 under M/587 — voting closes 2026-08-24, publication planned 2026-08-28, OJ publication projected 2026-11-30; re-checked after publication |
 
 Note: EN 301 549 v3.2.1 is currently the harmonized standard for the
-separate Web Accessibility Directive (it draws heavily from WCAG 2.1);
-the EAA standardization work (M/587) is expected to extend through
-2026–27. KiwiCaptcha therefore maintains the mapping above against WCAG
-2.2 AA now, rather than baking an obsolete standard version into the
-architecture.
+separate Web Accessibility Directive (it draws heavily from WCAG 2.1).
+The EAA standardization work (M/587) has reached its final-deliverable
+stage: the v4.1.0 vote is expected to close 2026-08-24, publication is
+planned 2026-08-28 and OJ publication is projected 2026-11-30.
+KiwiCaptcha therefore maintains the mapping above against WCAG 2.2 AA
+now, will re-check the mapping after publication, and does not bake an
+obsolete standard version into the architecture.

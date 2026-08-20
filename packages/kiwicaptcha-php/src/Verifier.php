@@ -112,7 +112,12 @@ namespace KiwiCaptcha;
  * ({@see self::resumeConsumedOperation()}): a caller that has PROVEN the
  * retained consumed record's exact operation identity belongs to this
  * logical operation may resume and commit the interrupted derivation —
- * ordinary replays of a consumed-without-result record still report
+ * a RESULTLESS resume re-checks the signed expiry against the current
+ * clock BEFORE deriving (it can never acquire success after the signed
+ * deadline — no durable success marker exists), while the committed-
+ * result recovery stays expiry-exempt (the result was durably recorded
+ * only after the original final expiry check passed). Ordinary replays
+ * of a consumed-without-result record still report
  * ConsumeIndeterminate.
  */
 final class Verifier
@@ -546,24 +551,31 @@ final class Verifier
      *
      * When the retained record already carries a committed deterministic
      * result, that result is returned unchanged (the ordinary
-     * committed-outcome semantics). Otherwise the derivation is RESUMED
-     * and committed: every immutable security property is revalidated
-     * EXACTLY like the ordinary verify path ({@see self::cheapPhaseCheck()}
-     * — record structural validity, protocol version gate, kid
-     * validity/revocation, HMAC signature, Argon2id process ceilings,
-     * expected scope, IP binding when enabled, region, policy epoch,
- *      issuer, token counter bounds), and Argon2id admission still applies
- *      to the resumed derivation — resource admission is NEVER bypassed.
- *      Before the commit the CURRENT expectations are re-checked exactly
- *      like the ordinary post-derive final revalidation (policy epoch,
- *      region, issuer — the values read at commit time, never a cheap-
- *      phase snapshot), so a rotation landing mid-derivation refuses the
- *      resume.
- *      Two timing checks are deliberately EXEMPT: the signed expiry (the
-     * operation already won atomic consumption before the response was
-     * lost — this path exists precisely to recover past the signed
-     * lifetime inside the retained-state horizon) and the
-     * minimum-duration floor (it was passed before the consume). The
+     * committed-outcome semantics). Otherwise the RESULTLESS derivation
+     * is RESUMED and committed ONLY after the signed expiry is RE-CHECKED
+     * against the current clock — the exact post-derive expiry check of
+     * the ordinary verify path, run BEFORE the resumed derivation: past
+     * the signed deadline the resume fails closed with invalid(Expired),
+     * nothing is derived and nothing is committed. Then every immutable
+     * security property is revalidated EXACTLY like the ordinary verify
+     * path ({@see self::cheapPhaseCheck()} — record structural validity,
+     * protocol version gate, kid validity/revocation, HMAC signature,
+     * Argon2id process ceilings, expected scope, IP binding when enabled,
+     * region, policy epoch, issuer, token counter bounds), and Argon2id
+     * admission still applies to the resumed derivation — resource
+     * admission is NEVER bypassed. Before the commit the CURRENT
+     * expectations are re-checked exactly like the ordinary post-derive
+     * final revalidation (policy epoch, region, issuer — the values read
+     * at commit time, never a cheap-phase snapshot), so a rotation
+     * landing mid-derivation refuses the resume.
+     * The minimum-duration floor is EXEMPT (it was passed before the
+     * consume; it is not a security deadline). The signed expiry is
+     * EXEMPT ONLY on the committed-result recovery: a committed result
+     * was durably recorded only after the original final expiry check
+     * passed, so recovering it after expiry remains correct — a
+     * RESULTLESS resume can never acquire success after the signed
+     * deadline, because no durable success marker exists (the original
+     * attempt's Expired outcome was deliberately NOT committed). The
      * commit is NOT best-effort: a failed commit reads the state back — a
      * concurrent recovery's committed result is then returned (the
      * winner's stored outcome), and only a genuinely missing result
@@ -633,6 +645,27 @@ final class Verifier
         }
         $record = $consumed->record;
 
+        // THE RESULTLESS-RESUME EXPIRY GATE. The committed-result fast
+        // path above is the ONLY expiry-exempt recovery: a committed
+        // result was durably recorded only after the original final
+        // expiry check passed ({@see self::verify()}, step 10), so
+        // recovering it after expiry remains correct. A RESULTLESS
+        // resume has NO durable success marker — the original attempt's
+        // derivation crossed the signed deadline and verify() returned
+        // Expired WITHOUT committing — so re-deriving now could turn
+        // that same logical redemption into a post-deadline Valid. Re-run
+        // the EXACT post-derive expiry check of the ordinary verify()
+        // (the record's signed expiresAt vs the current clock, read via
+        // the same now closure) BEFORE the resumed derivation: expired ->
+        // invalid(Expired), nothing derived, nothing committed —
+        // deterministic and fail closed. The minimum-duration floor
+        // stays exempt: it was passed before the consume; it is not a
+        // security deadline.
+        $now = $this->now !== null ? (int) ($this->now)() : time();
+        if ($now >= $record->expiresAt) {
+            return VerifyOutcome::invalid(VerifyError::Expired);
+        }
+
         // Revalidate every immutable security property EXACTLY like the
         // ordinary verify path (the shared cheap-phase helper; timing
         // exempted per the contract above). The retained record is NOT
@@ -685,8 +718,11 @@ final class Verifier
             // CURRENT ones, never a snapshot from the cheap phase) and
             // nothing is committed — the retained record stays
             // consumed-without-result for a later same-identity resume.
-            // The signed expiry and the minimum-duration floor remain
-            // EXEMPT: the operation already won atomic consumption.
+            // The signed expiry is NOT re-checked here: the resultless
+            // path already enforced it fail-closed BEFORE the derivation
+            // (the expiry gate above), and the minimum-duration floor
+            // remains exempt (it was passed before the consume; it is
+            // not a security deadline).
             if ($valid) {
                 if ($this->expectedPolicyVersion !== null && ($record->policyVersion ?? 1) !== $this->expectedPolicyVersion) {
                     return VerifyOutcome::invalid(VerifyError::WrongPolicyVersion);
@@ -851,10 +887,17 @@ final class Verifier
      *       the bound the floor check is skipped, the PoW check still
      *       applies).
      *
-     * The timing group (TTL and the minimum-duration floor) is EXEMPT on
-     * the resume path ($checkTiming = false): the operation already won
-     * atomic consumption before the response was lost, so the signed
-     * expiry and the floor were both passed by the original attempt.
+     * The timing group is NOT uniformly exempt on the resume path
+     * ($checkTiming = false): the TTL and the minimum-duration floor are
+     * skipped HERE, but the RESULTLESS resume re-checks the signed expiry
+     * against the current clock BEFORE the resumed derivation
+     * ({@see self::resumeConsumedOperation()}) — the signed deadline is
+     * re-enforced fail closed (a resultless resume can never acquire
+     * success after it; no durable success marker exists), while the
+     * minimum-duration floor stays exempt (it was passed before the
+     * consume; it is not a security deadline). The COMMITTED-result
+     * recovery is fully timing-exempt: its result was durably recorded
+     * only after the original final expiry check passed.
      *
      * Returns the first failing error, or null when every check passes.
      * The CALLER owns the failure policy: the ordinary verify path deletes

@@ -7,6 +7,7 @@ namespace KiwiCaptcha\Storage;
 use KiwiCaptcha\ChallengeRecord;
 use KiwiCaptcha\ConsumedRecord;
 use KiwiCaptcha\ConsumedResult;
+use KiwiCaptcha\OperationIdentity;
 use KiwiCaptcha\OperationIdentityAwareStorageInterface;
 use KiwiCaptcha\StorageInterface;
 use Psr\Cache\CacheItemPoolInterface;
@@ -141,9 +142,13 @@ final class Psr6Storage implements StorageInterface, OperationIdentityAwareStora
 
     public function consumeWithOperationIdentity(string $nonce, ?string $operationIdentity): ?ConsumedRecord
     {
-        // Same read-then-transition as consume(); the identity (bounded —
-        // an over-long identity is IGNORED) lands in the SAME array write
-        // as the state flip.
+        // Same read-then-transition as consume(); the identity — validated
+        // against the narrow shared alphabet ({@see
+        // OperationIdentity::validate()} — 1..128 bytes of
+        // [A-Za-z0-9_-], REJECTED with InvalidArgumentException when
+        // malformed, never silently dropped) — lands in the SAME array
+        // write as the state flip.
+        $validated = OperationIdentity::validate($operationIdentity);
         $item = $this->pool->getItem(self::key($nonce));
         if (!$item->isHit()) {
             return null;
@@ -158,8 +163,8 @@ final class Psr6Storage implements StorageInterface, OperationIdentityAwareStora
         $consumed = ($data['state'] ?? 'pending') === 'consumed';
         if (!$consumed) {
             $data['state'] = 'consumed';
-            if ($operationIdentity !== null && \strlen($operationIdentity) <= 128) {
-                $data['operation_identity'] = $operationIdentity;
+            if ($validated !== null) {
+                $data['operation_identity'] = $validated;
             }
             $item->set($data);
             $this->pool->save($item);

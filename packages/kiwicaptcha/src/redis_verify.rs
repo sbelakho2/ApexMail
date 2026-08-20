@@ -336,7 +336,9 @@ pub const MAX_STORED_RECORD_JSON_BYTES: usize = 128 * 1024;
 /// are stripped BEFORE the strict [`ChallengeRecord`] parse, so
 /// `deny_unknown_fields` stays effective: any other foreign key makes the
 /// whole value undecodable. A NON-NULL `operation_identity` (a PHP-written
-/// record whose identity-aware consume spliced a value in) parses and is
+/// record whose identity-aware consume spliced a value in — the PHP core
+/// rejects malformed identities before the transition, so any stored value
+/// is at most 128 bytes of `[A-Za-z0-9_-]`) parses and is
 /// stripped like any other runtime field — the canonical record never sees
 /// it. Returns `None` on any parse failure — a corrupt key must never blow
 /// up the verify path (mirrors the PHP `RedisStorage::decode()`).
@@ -611,7 +613,10 @@ impl RedisChallengeStore {
         // Runtime envelope, byte-compatible with the PHP store: the
         // `state` marker, the `consumed_result` field and the
         // `operation_identity` marker (null — the logical-operation
-        // identity a PHP identity-aware consume can splice in) are spliced
+        // identity a PHP identity-aware consume can splice in; the PHP
+        // core validates identities against the narrow `[A-Za-z0-9_-]`
+        // 1..128-byte alphabet and REJECTS malformed ones before the
+        // transition — the Rust core never writes identities) are spliced
         // into the RAW JSON (never re-encoded — large integers must stay
         // decimal), exactly as PHP writes them, so the atomic
         // pending->consumed transition works across the two

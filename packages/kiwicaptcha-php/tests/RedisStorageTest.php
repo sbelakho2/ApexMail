@@ -690,22 +690,55 @@ final class RedisStorageTest extends TestCase
         self::assertSame($identity, $state->operationIdentity, 'the consumed-state read exposes the recorded identity');
     }
 
-    public function testConsumeWithOperationIdentityIgnoresOversizedIdentities(): void
+    public function testConsumeWithOperationIdentityRejectsOversizedIdentities(): void
     {
-        // The identity is bounded (never store unbounded blobs): an
-        // over-long identity is ignored — the marker stays null and the
-        // transition itself is unchanged.
+        // The identity is bounded (never store unbounded blobs) AND
+        // validated against the narrow alphabet BEFORE the transition: a
+        // malformed identity is REJECTED, never silently dropped — a
+        // caller that believes the recovery identity was recorded while
+        // the consume stored null would violate the deterministic-
+        // recovery contract.
         $client = $this->requirePredis();
         $storage = new RedisStorage($client);
         $storage->store($this->makeRecord());
 
-        $consumed = $storage->consumeWithOperationIdentity('redis-nonce-1', str_repeat('x', 129));
-
-        self::assertNotNull($consumed);
-        self::assertTrue($consumed->consumedNow);
-        self::assertNull($consumed->operationIdentity, 'an over-long identity must be ignored');
+        try {
+            $storage->consumeWithOperationIdentity('redis-nonce-1', str_repeat('x', 129));
+            self::fail('an over-long identity must be rejected');
+        } catch (\InvalidArgumentException) {
+            // expected: the 1..128-byte bound fires before any transition
+        }
         $data = json_decode((string) $client->store['kiwicaptcha:redis-nonce-1'], true, flags: JSON_THROW_ON_ERROR);
-        self::assertNull($data['operation_identity'], 'an over-long identity must never be stored');
+        self::assertSame('pending', $data['state'], 'a rejected identity must leave the record untouched and retryable');
+        self::assertNull($data['operation_identity'], 'a rejected identity must never be stored');
+    }
+
+    public function testConsumeWithOperationIdentityRejectsGsubSpecialCharacters(): void
+    {
+        // The narrow alphabet exists because the identity is JSON-encoded
+        // and spliced into the Lua string.gsub REPLACEMENT string, where
+        // `%` is the replacement-template escape: `%` (and every other
+        // non-alphabet character) is rejected BY CONSTRUCTION, so the raw
+        // splice can never be interpreted as a template.
+        $client = $this->requirePredis();
+        $storage = new RedisStorage($client);
+        $storage->store($this->makeRecord());
+
+        try {
+            $storage->consumeWithOperationIdentity('redis-nonce-1', 'deadbeef%deadbeef');
+            self::fail('an identity containing the gsub replacement-template escape must be rejected');
+        } catch (\InvalidArgumentException) {
+            // expected
+        }
+        try {
+            $storage->consumeWithOperationIdentity('redis-nonce-1', 'deadbeef deadbeef');
+            self::fail('an identity containing a space must be rejected');
+        } catch (\InvalidArgumentException) {
+            // expected
+        }
+        $data = json_decode((string) $client->store['kiwicaptcha:redis-nonce-1'], true, flags: JSON_THROW_ON_ERROR);
+        self::assertSame('pending', $data['state'], 'a rejected identity must leave the record untouched');
+        self::assertNull($data['operation_identity'], 'a rejected identity must never be stored');
     }
 
     public function testPlainConsumeKeepsTheIdentityMarkerNull(): void
