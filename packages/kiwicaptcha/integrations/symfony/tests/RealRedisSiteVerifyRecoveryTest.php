@@ -5,7 +5,9 @@ declare(strict_types=1);
 namespace BelConsulting\KiwiCaptchaBundle\Tests;
 
 use BelConsulting\KiwiCaptchaBundle\Controller\SiteVerifyController;
+use BelConsulting\KiwiCaptchaBundle\Risk\SecurityEpochMonitor;
 use BelConsulting\KiwiCaptchaBundle\SiteVerify\RedisSiteVerifyIdempotencyStore;
+use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\FakePredisClient;
 use KiwiCaptcha\Config;
 use KiwiCaptcha\Issuer;
 use KiwiCaptcha\PoWAlgorithm;
@@ -222,6 +224,85 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
             self::assertSame((string) $retryResponse->getContent(), (string) $replayResponse->getContent(), 'a same-UUID retry reproduces the identical canonical response');
         } finally {
             $probe->del([$idemKey, 'kiwicaptcha:'.$nonce]);
+        }
+    }
+
+    public function testEpochBumpedClaimKeysDifferFromTheStaticEpochKeys(): void
+    {
+        // The monitor's effective epoch (central min_policy_epoch = 1)
+        // moves the ENTIRE idempotency namespace: the owner's claim, the
+        // consumed operation identity and the retry's takeover all live
+        // under the epoch-1 backend identity — the static epoch-0 keys
+        // are never created. The lost-reply recovery still works
+        // end-to-end under the bumped namespace.
+        $probe = $this->redisOrSkip();
+        if ($probe === null) {
+            return;
+        }
+        $storage = new RedisStorage($probe);
+        [$token, , $nonce] = $this->issueSha($storage);
+        $uuid = 'c0ffee00-0000-4000-8000-0000000000e1';
+        $staticBackendId = hash('sha256', self::SITEVERIFY_SECRET.'|login|0');
+        $effectiveBackendId = hash('sha256', self::SITEVERIFY_SECRET.'|login|1');
+        self::assertNotSame($staticBackendId, $effectiveBackendId, 'precondition: the effective epoch must differ from the static one');
+        $staticKey = '{kiwicaptcha}:siteverify-idem:'.$staticBackendId.':'.$uuid;
+        $effectiveKey = '{kiwicaptcha}:siteverify-idem:'.$effectiveBackendId.':'.$uuid;
+        $probe->del([$effectiveKey, $staticKey]);
+
+        // A SHORT fixed store lease (1s) keeps the takeover instant; the
+        // waiter bound (5s) exceeds it (the construction invariant).
+        $store = new RedisSiteVerifyIdempotencyStore($probe, 'kiwicaptcha', 1);
+        $lost = $this->lostConsumeReplyStorage($storage);
+
+        // The central security-policy state (epoch 1) feeds the real
+        // monitor; the static configured epoch stays 0, so any claim
+        // under the static key would prove the monitor is NOT wired.
+        $policyRedis = new FakePredisClient();
+        $policyRedis->hset('{kiwi:test-ns}:security-policy', SecurityEpochMonitor::MIN_POLICY_EPOCH_FIELD, '1');
+
+        try {
+            $ownerVerifier = new Verifier($lost);
+            $ownerMonitor = new SecurityEpochMonitor($ownerVerifier, $policyRedis, 'test-ns', 1);
+            $owner = new SiteVerifyController($ownerVerifier, self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $lost, null, null, $store, null, 5.0, 0, null, $ownerMonitor);
+            $ownerResponse = $owner->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+                'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
+            ]));
+            self::assertSame(503, $ownerResponse->getStatusCode(), 'the lost consume reply must map to the retryable 503 internal-error');
+            self::assertNull($store->stored($effectiveBackendId, $uuid), 'the lost reply must NOT finalize the claim');
+            $consumed = $storage->consumedState($nonce);
+            self::assertNotNull($consumed, 'the transition EXECUTED on real Redis');
+            self::assertSame(
+                hash('sha256', $effectiveBackendId."\0".$uuid."\0".hash('sha256', $token)."\0"."ip:127.0.0.1"),
+                $consumed->operationIdentity,
+                'the operation identity lands atomically with the real-Redis state flip under the EFFECTIVE-epoch backend identity',
+            );
+            self::assertNull($consumed->consumedResult, 'consumed_result stays null — the ordinary verifier would say ConsumeIndeterminate forever');
+            self::assertNotNull($probe->get($effectiveKey), 'the pending claim must live under the effective-epoch key');
+            self::assertNull($probe->get($staticKey), 'the static-epoch key must never be created');
+
+            // Wait out the 1s lease (Redis TIME is the lease clock).
+            usleep(2_500_000);
+
+            // The same-key retry (its own monitor observing the same
+            // central epoch) claims under the SAME effective-epoch key,
+            // takes over and RESUMES the derivation.
+            $retryVerifier = new Verifier($storage);
+            $retryMonitor = new SecurityEpochMonitor($retryVerifier, $policyRedis, 'test-ns', 1);
+            $retry = new SiteVerifyController($retryVerifier, self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $storage, null, null, $store, null, 5.0, 0, null, $retryMonitor);
+            $retryResponse = $retry->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+                'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
+            ]));
+            $retryBody = json_decode((string) $retryResponse->getContent(), true);
+            self::assertSame(true, $retryBody['success'] ?? null, 'the identity-proven retry must RESUME and succeed under the effective-epoch namespace: '.(string) $retryResponse->getContent());
+            self::assertSame([], $retryBody['error-codes'] ?? null);
+            self::assertSame($this->expectedCanonicalSuccess($storage, $nonce), (string) $retryResponse->getContent(), 'the retry receives the ORIGINAL canonical success bytes');
+            $after = $storage->consumedState($nonce);
+            self::assertNotNull($after?->consumedResult, 'the resumed derivation must be committed');
+            self::assertSame(true, $after->consumedResult->valid);
+            self::assertNotNull($probe->get($effectiveKey), 'the completed claim stays under the effective-epoch key');
+            self::assertNull($probe->get($staticKey), 'the static-epoch key stays untouched after the recovery');
+        } finally {
+            $probe->del([$effectiveKey, $staticKey, 'kiwicaptcha:'.$nonce]);
         }
     }
 

@@ -83,8 +83,12 @@ namespace KiwiCaptcha;
  *      is absorbed (the floor check is skipped, the PoW check still
  *      applies); a receipt time that precedes issuance beyond the tolerance
  *      is impossible and rejected as TooFast.
- *   7. Telemetry (optional, opt-in): when enforceTelemetry is set, the
- *      client-controlled telemetry is scored and bot signals rejected.
+ *   7. Telemetry (legacy opt-in hard gate): when enforceTelemetry is set,
+ *      the client-controlled telemetry is scored and bot signals rejected.
+ *      This hard rejection remains ONLY as an explicit legacy compatibility
+ *      behavior — new automation heuristics must become bounded risk
+ *      factors, never additions to this gate; the gate is deprecated in
+ *      favor of probabilistic risk scoring.
  *   8. Argon2id admission gate (optional): when a VerificationAdmissionGate
  *      is configured, it must grant capacity before the memory-hard hash
  *      runs; exhaustion yields CapacityExceeded WITHOUT burning the record.
@@ -275,9 +279,13 @@ final class Verifier
      *                                     check. Test hook.
      * @param bool        $enforceTelemetry when true, bot-signal telemetry is
      *                                     rejected with TelemetryRejected.
-     *                                     Telemetry is client-controlled, so
-     *                                     enforcement is opt-in defense-in-depth
-     *                                     only.
+     *                                     LEGACY hard gate kept only for
+     *                                     explicit compatibility — do not add
+     *                                     new heuristics here; uncertain
+     *                                     browser evidence belongs in the
+     *                                     risk-scoring layer. Telemetry is
+     *                                     client-controlled, so enforcement is
+     *                                     opt-in defense-in-depth only.
      * @param string|null $operationIdentity the logical-operation identity
      *                                     to record WITH the pending→consumed
      *                                     transition (see
@@ -544,9 +552,14 @@ final class Verifier
      * — record structural validity, protocol version gate, kid
      * validity/revocation, HMAC signature, Argon2id process ceilings,
      * expected scope, IP binding when enabled, region, policy epoch,
-     * issuer, token counter bounds), and Argon2id admission still applies
-     * to the resumed derivation — resource admission is NEVER bypassed.
-     * Two timing checks are deliberately EXEMPT: the signed expiry (the
+ *      issuer, token counter bounds), and Argon2id admission still applies
+ *      to the resumed derivation — resource admission is NEVER bypassed.
+ *      Before the commit the CURRENT expectations are re-checked exactly
+ *      like the ordinary post-derive final revalidation (policy epoch,
+ *      region, issuer — the values read at commit time, never a cheap-
+ *      phase snapshot), so a rotation landing mid-derivation refuses the
+ *      resume.
+ *      Two timing checks are deliberately EXEMPT: the signed expiry (the
      * operation already won atomic consumption before the response was
      * lost — this path exists precisely to recover past the signed
      * lifetime inside the retained-state horizon) and the
@@ -662,6 +675,29 @@ final class Verifier
                     : VerifyError::MalformedRecord);
             }
             $valid = self::leadingZeroBits($hash) >= $record->targetBits;
+
+            // POST-DERIVE FINAL REVALIDATION — the same CURRENT-
+            // expectation re-check the ordinary verify() runs after its
+            // derivation ({@see self::verify()}, step 10), mirrored for
+            // the policy epoch / region / issuer: a rotation that lands
+            // between the pre-derive revalidation and the commit refuses
+            // the resumed derivation (the values read here are the
+            // CURRENT ones, never a snapshot from the cheap phase) and
+            // nothing is committed — the retained record stays
+            // consumed-without-result for a later same-identity resume.
+            // The signed expiry and the minimum-duration floor remain
+            // EXEMPT: the operation already won atomic consumption.
+            if ($valid) {
+                if ($this->expectedPolicyVersion !== null && ($record->policyVersion ?? 1) !== $this->expectedPolicyVersion) {
+                    return VerifyOutcome::invalid(VerifyError::WrongPolicyVersion);
+                }
+                if ($this->region !== null && $record->region !== $this->region) {
+                    return VerifyOutcome::invalid(VerifyError::WrongRegion);
+                }
+                if ($this->expectedIssuer !== null && $record->issuer !== $this->expectedIssuer) {
+                    return VerifyOutcome::invalid(VerifyError::WrongIssuer);
+                }
+            }
 
             // Commit the resumed deterministic outcome — NOT best-effort:
             // the resume must persist what it derived (a retry of the

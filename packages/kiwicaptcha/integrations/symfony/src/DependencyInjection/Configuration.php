@@ -115,7 +115,7 @@ final class Configuration implements ConfigurationInterface
                     ->defaultValue('%kernel.project_dir%')
                 ->end()
                 ->booleanNode('enforce_telemetry')
-                    ->info('When true, the validator rejects tokens whose client-reported telemetry scores as bot-like (defense-in-depth; only meaningful when the widget collects telemetry). Telemetry is client-controlled, so this is never the security boundary.')
+                    ->info('When true, the validator rejects tokens whose client-reported telemetry scores as bot-like. LEGACY opt-in hard gate kept only for explicit compatibility — new automation signals must become bounded risk factors instead; telemetry is client-controlled, so this is never the security boundary.')
                     ->defaultValue(false)
                 ->end()
                 ->integerNode('min_duration_ms')

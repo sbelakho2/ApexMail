@@ -9,6 +9,10 @@ use BelConsulting\KiwiCaptchaBundle\Validator\Constraints\KiwiCaptchaValidator;
 use BelConsulting\KiwiCaptchaBundle\Risk\ArrayChainedChallengeStateStore;
 use BelConsulting\KiwiCaptchaBundle\Risk\ArrayPostSolveDispositionStore;
 use BelConsulting\KiwiCaptchaBundle\Risk\ChainedChallengeTicketService;
+use BelConsulting\KiwiCaptchaBundle\Risk\ChainIssuedResult;
+use BelConsulting\KiwiCaptchaBundle\Risk\ChainReservationResult;
+use BelConsulting\KiwiCaptchaBundle\Risk\ChainVerifiedResult;
+use BelConsulting\KiwiCaptchaBundle\Risk\MalformedPostSolveDispositionException;
 use BelConsulting\KiwiCaptchaBundle\Risk\PostSolveDisposition;
 use BelConsulting\KiwiCaptchaBundle\Risk\PostSolveDispositionKind;
 use BelConsulting\KiwiCaptchaBundle\Risk\PostSolveDispositionRecord;
@@ -16,6 +20,7 @@ use BelConsulting\KiwiCaptchaBundle\Risk\PostSolveDispositionStore;
 use BelConsulting\KiwiCaptchaBundle\Risk\RequestBindingAuthorityInterface;
 use BelConsulting\KiwiCaptchaBundle\Risk\RiskGateway;
 use BelConsulting\KiwiCaptchaBundle\Risk\RiskProfileResolver;
+use BelConsulting\KiwiCaptchaBundle\Risk\TransactionalChainedChallengeStateStore;
 use BelConsulting\KiwiCaptchaBundle\Security\OutstandingChallenges;
 use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\ConsumedStateStorage;
 use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\FakePredisClient;
@@ -56,6 +61,9 @@ final class ValidatorTest extends TestCase
 
     /** The post-solve vector that demands Argon32 (score 813). */
     private const ARGON32_VECTOR = ['source_fast' => 900, 'subnet_fast' => 1000, 'issue_debt' => 1000, 'replay' => 699, 'network_risk' => 890];
+
+    /** The post-solve vector that demands StepUp (score 933, no deny reason). */
+    private const STEP_UP_VECTOR = ['source_fast' => 900, 'subnet_fast' => 1000, 'issue_debt' => 1000, 'replay' => 699, 'network_risk' => 890, 'action_failure' => 1000];
 
     private Issuer $issuer;
     private Verifier $verifier;
@@ -102,7 +110,7 @@ final class ValidatorTest extends TestCase
      *
      * @return array{gateway: RiskGateway, store: FakeRiskStateStore}
      */
-    private function riskStack(int $scopeId, string $minimum, string $degraded, bool $postSolveCheck, ?RiskV2Weights $v2Weights = null, ?RiskProfileResolver $resolver = null): array
+    private function riskStack(int $scopeId, string $minimum, string $degraded, bool $postSolveCheck, ?RiskV2Weights $v2Weights = null, ?RiskProfileResolver $resolver = null, ?\Predis\Client $decisionRedis = null): array
     {
         $keys = RiskKeys::fromMaster(self::SECRET);
         $classifier = new CidrNetworkClassifier([]);
@@ -115,7 +123,7 @@ final class ValidatorTest extends TestCase
         ]);
         $store = new FakeRiskStateStore();
         $engine = new AdaptiveRiskEngine($store, $classifier, new RiskIdentityFactory($keys), new RiskScorer(), $policy, $keys);
-        $gateway = new RiskGateway($engine, $classifier, $resolver ?? new RiskProfileResolver(PoWAlgorithm::Sha256, 8), ['login' => $scopeId], null, null, ['login' => $postSolveCheck], 'reject', null, null, null, null, '{kiwi:validator-test}:decision:', 300, $policy, null, null, $v2Weights);
+        $gateway = new RiskGateway($engine, $classifier, $resolver ?? new RiskProfileResolver(PoWAlgorithm::Sha256, 8), ['login' => $scopeId], null, null, ['login' => $postSolveCheck], 'reject', null, null, null, $decisionRedis, '{kiwi:validator-test}:decision:', 300, $policy, null, null, $v2Weights);
 
         return ['gateway' => $gateway, 'store' => $store];
     }
@@ -411,7 +419,7 @@ final class ValidatorTest extends TestCase
     /**
      * @return array{0: \Symfony\Component\Validator\Validator\ValidatorInterface, 1: RequestStack, 2: KiwiCaptchaValidator}
      */
-    private function buildBindingEngine(?Verifier $verifier = null, string $requestBinding = 'txn-123', bool $asAttribute = true): array
+    private function buildBindingEngine(?Verifier $verifier = null, string $requestBinding = 'txn-123', bool $asAttribute = true, ?RequestBindingAuthorityInterface $authority = null): array
     {
         $stack = new RequestStack();
         $request = Request::create('/', 'POST', ['kiwi_request_binding' => $requestBinding], [], [], ['REMOTE_ADDR' => '198.51.100.7']);
@@ -422,7 +430,7 @@ final class ValidatorTest extends TestCase
         }
         $stack->push($request);
 
-        $validator = new KiwiCaptchaValidator($verifier ?? $this->verifier, $stack, self::SECRET);
+        $validator = new KiwiCaptchaValidator($verifier ?? $this->verifier, $stack, self::SECRET, enforceTelemetry: false, bindingAuthority: $authority);
         $factory = new ConstraintValidatorFactory([KiwiCaptchaValidator::class => $validator]);
         $engine = Validation::createValidatorBuilder()->setConstraintValidatorFactory($factory)->getValidator();
 
@@ -582,6 +590,140 @@ final class ValidatorTest extends TestCase
 
         self::assertCount(0, $engine->validate($dto));
         self::assertSame('txn-123', $validator->verifiedRequestBinding(), 'the record\'s SIGNED request binding must be exposed after a valid solve');
+    }
+
+// ── the authoritative transaction binding (end-to-end) ─────────────────────
+
+    public function testBindingAuthorityMapsThePresentedHintToTheCanonicalBinding(): void
+    {
+        // The challenge is issued against the CANONICAL value (the
+        // controller signs the authority's resolution), while the request
+        // presents only the client hint. The authority maps the hint to
+        // the canonical value — the validator's primary binding check must
+        // compare against THAT, so the legitimately issued challenge
+        // validates end-to-end.
+        $storage = new ArrayStorage();
+        $issuer = new Issuer(new Config(secretKey: self::SECRET, targetBits: 8), $storage);
+        $verifier = new Verifier($storage);
+        $challenge = $issuer->issue('login', '198.51.100.7', 'server-transaction');
+        usleep(($challenge->minDurationMs + 10) * 1000);
+        $token = $this->solveToken($challenge->prefix, $challenge->salt, $challenge->targetBits, $challenge->nonce);
+
+        $authority = new MappingBindingAuthority();
+        [$engine] = $this->buildBindingEngine($verifier, 'client-hint', authority: $authority);
+        $dto = new class {
+            public ?string $captcha = null;
+        };
+        $dto->captcha = $token;
+        $meta = $engine->getMetadataFor($dto::class);
+        $meta->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
+
+        self::assertCount(0, $engine->validate($dto), 'a challenge issued against the canonical binding must validate when the authority maps the presented hint to it');
+        self::assertSame(1, $authority->calls, 'the authority is consulted EXACTLY once per validation');
+    }
+
+    public function testBindingAuthorityIsCalledExactlyOnceEvenWhenTheChainOpens(): void
+    {
+        // A chain-opening validation exercises the stage-2 lookup AND the
+        // chain creation — BOTH must thread the already-resolved canonical
+        // binding, never re-consult the authority (the pre-fix flow called
+        // it twice on this path).
+        $resolver = new RiskProfileResolver(PoWAlgorithm::Sha256, 8);
+        $risk = $this->riskStack(1, 'allow', 'allow', false, null, $resolver);
+        $risk['store']->setVector(SignalVector::fromArray(self::ARGON32_VECTOR));
+        [$store] = $this->clockedDispositionStore();
+
+        $chainStore = new ArrayChainedChallengeStateStore();
+        $chainService = new ChainedChallengeTicketService($chainStore, self::SECRET, 300, 15, $this->bindingAuthority());
+        $authority = new MappingBindingAuthority();
+
+        $challenge = $this->issuer->issue('login', '198.51.100.7');
+        usleep(($challenge->minDurationMs + 10) * 1000);
+        $token = $this->solveToken($challenge->prefix, $challenge->salt, $challenge->targetBits, $challenge->nonce);
+
+        [$engine] = $this->dispositionEngine($this->verifier, $risk['gateway'], $store, chainTickets: $chainService, resolver: $resolver, bindingAuthority: $authority);
+        $dto = new class {
+            public ?string $captcha = null;
+        };
+        $dto->captcha = $token;
+        $meta = $engine->getMetadataFor($dto::class);
+        $meta->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
+
+        $violations = $engine->validate($dto);
+        self::assertSame(KiwiCaptchaValidator::CHAIN_REQUIRED_ERROR, $violations[0]->getCode());
+        self::assertSame(1, $authority->calls, 'the chain paths thread the resolved canonical binding — the authority is consulted exactly once, never again');
+    }
+
+    public function testBindingAuthorityFailureIsTemporaryUnavailableNeverAPass(): void
+    {
+        // The authority's backend is DOWN (it throws): the binding cannot
+        // be attested — the valid solve fails closed with the retryable
+        // temporary_unavailable violation, never a silent pass, never a
+        // raw exception.
+        $storage = new ArrayStorage();
+        $issuer = new Issuer(new Config(secretKey: self::SECRET, targetBits: 8), $storage);
+        $verifier = new Verifier($storage);
+        $challenge = $issuer->issue('login', '198.51.100.7', 'server-transaction');
+        usleep(($challenge->minDurationMs + 10) * 1000);
+        $token = $this->solveToken($challenge->prefix, $challenge->salt, $challenge->targetBits, $challenge->nonce);
+
+        $authority = new ThrowingBindingAuthority();
+        [$engine] = $this->buildBindingEngine($verifier, 'client-hint', authority: $authority);
+        $dto = new class {
+            public ?string $captcha = null;
+        };
+        $dto->captcha = $token;
+        $meta = $engine->getMetadataFor($dto::class);
+        $meta->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
+
+        $violations = $engine->validate($dto);
+        self::assertCount(1, $violations);
+        self::assertSame(KiwiCaptcha::TEMPORARY_UNAVAILABLE_ERROR, $violations[0]->getCode(), 'an authority outage must fail closed as temporary_unavailable — never a silent pass');
+        self::assertSame(1, $authority->calls, 'the authority is consulted exactly once before failing closed');
+    }
+
+    public function testBindingAuthorityDecliningTheTransactionIsTheInvalidBindingOutcome(): void
+    {
+        // The authority returns null (the transaction is invalid/unknown):
+        // the signed record binding can never match a null canonical
+        // binding — the NORMAL invalid-binding outcome applies.
+        $storage = new ArrayStorage();
+        $issuer = new Issuer(new Config(secretKey: self::SECRET, targetBits: 8), $storage);
+        $verifier = new Verifier($storage);
+        $challenge = $issuer->issue('login', '198.51.100.7', 'server-transaction');
+        usleep(($challenge->minDurationMs + 10) * 1000);
+        $token = $this->solveToken($challenge->prefix, $challenge->salt, $challenge->targetBits, $challenge->nonce);
+
+        $authority = new NullBindingAuthority();
+        [$engine, $stack] = $this->buildBindingEngine($verifier, 'client-hint', authority: $authority);
+        $dto = new class {
+            public ?string $captcha = null;
+        };
+        $dto->captcha = $token;
+        $meta = $engine->getMetadataFor($dto::class);
+        $meta->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
+
+        $violations = $engine->validate($dto);
+        self::assertCount(1, $violations);
+        self::assertSame(KiwiCaptcha::INVALID_OR_EXPIRED_ERROR, $violations[0]->getCode(), 'a null authority resolution is the normal invalid-binding outcome');
+        self::assertNull($stack->getMainRequest()?->attributes->get(KiwiCaptchaValidator::VERIFIED_JTI_ATTRIBUTE), 'a declined transaction must not expose a jti');
+        self::assertSame(1, $authority->calls, 'the authority is consulted exactly once');
+
+        // An UNBOUND record with a null resolution stays the unbound
+        // contract: no signed binding -> no check -> pass.
+        $unbound = $issuer->issue('login', '198.51.100.7');
+        usleep(($unbound->minDurationMs + 10) * 1000);
+        $unboundToken = $this->solveToken($unbound->prefix, $unbound->salt, $unbound->targetBits, $unbound->nonce);
+        $authority2 = new NullBindingAuthority();
+        [$engine2] = $this->buildBindingEngine($verifier, 'client-hint', authority: $authority2);
+        $dto2 = new class {
+            public ?string $captcha = null;
+        };
+        $dto2->captcha = $unboundToken;
+        $meta2 = $engine2->getMetadataFor($dto2::class);
+        $meta2->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
+        self::assertCount(0, $engine2->validate($dto2), 'a null canonical binding leaves the unbound record contract unchanged');
+        self::assertSame(1, $authority2->calls);
     }
 
 // ── security-policy epoch ──────────────────────────────────────────────────
@@ -1052,13 +1194,13 @@ final class ValidatorTest extends TestCase
             ) {
             }
 
-            public function claim(string $nonce, string $owner, int $ttlSeconds): string
+            public function claim(string $nonce, string $owner, int $ttlSeconds, ?string $decisionId = null): string
             {
                 if ($this->failClaim) {
                     throw new \RuntimeException('simulated claim outage');
                 }
 
-                return $this->inner->claim($nonce, $owner, $ttlSeconds);
+                return $this->inner->claim($nonce, $owner, $ttlSeconds, $decisionId);
             }
 
             public function read(string $nonce): ?PostSolveDispositionRecord
@@ -1082,6 +1224,92 @@ final class ValidatorTest extends TestCase
     }
 
     /**
+     * A well-formed PENDING record for the corruption seam (the lease is
+     * already expired, so the claim path exercises the strict decoder
+     * too).
+     *
+     * @return array<string, mixed>
+     */
+    private function pendingDispositionRecord(): array
+    {
+        return [
+            'ttl' => 305,
+            'created' => 1_800_000_000,
+            'v' => 1,
+            'state' => 'pending',
+            'owner' => 'owner-a',
+            'leaseUntil' => 1_799_999_999,
+            'disposition' => null,
+            'decisionId' => null,
+        ];
+    }
+
+    /**
+     * A well-formed COMPLETE record for the corruption seam.
+     *
+     * @return array<string, mixed>
+     */
+    private function completeDispositionRecord(): array
+    {
+        return [
+            'ttl' => 305,
+            'created' => 1_800_000_000,
+            'v' => 1,
+            'state' => 'complete',
+            'owner' => null,
+            'leaseUntil' => null,
+            'disposition' => new PostSolveDisposition(PostSolveDispositionKind::Pass, 'decision-1'),
+            'decisionId' => 'decision-1',
+        ];
+    }
+
+    /**
+     * Inject a raw record into the in-memory disposition store (reflection)
+     * — the corruption seam of the strict-decoder tests.
+     *
+     * @param array<string, mixed> $record
+     */
+    private function injectDispositionRecord(ArrayPostSolveDispositionStore $store, string $nonce, array $record): void
+    {
+        $prop = new \ReflectionProperty(ArrayPostSolveDispositionStore::class, 'records');
+        $records = $prop->getValue($store);
+        $records[$nonce] = $record;
+        $prop->setValue($store, $records);
+    }
+
+    /**
+     * Drive ONE corruption through the full validation pipeline: a fresh
+     * valid token whose nonce's disposition record is CORRUPT must fail
+     * closed with temporary_unavailable — never a silent pass, never a
+     * 422 (the client did not corrupt the server's record structure).
+     *
+     * @param array<string, mixed> $corruptRecord
+     *
+     * @return array{0: string, 1: ArrayPostSolveDispositionStore, 2: string} the
+     *         violation code, the store and the nonce
+     */
+    private function validateCorruptDisposition(array $corruptRecord): array
+    {
+        $risk = $this->riskStack(1, 'allow', 'allow', false);
+        [$store] = $this->clockedDispositionStore();
+        $challenge = $this->issuer->issue('login', '198.51.100.7');
+        usleep(($challenge->minDurationMs + 10) * 1000);
+        $token = $this->solveToken($challenge->prefix, $challenge->salt, $challenge->targetBits, $challenge->nonce);
+        $this->injectDispositionRecord($store, $challenge->nonce, $corruptRecord);
+
+        [$engine] = $this->dispositionEngine($this->verifier, $risk['gateway'], $store);
+        $dto = new class {
+            public ?string $captcha = null;
+        };
+        $dto->captcha = $token;
+        $meta = $engine->getMetadataFor($dto::class);
+        $meta->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
+        $violations = $engine->validate($dto);
+
+        return [$violations[0]->getCode(), $store, $challenge->nonce];
+    }
+
+    /**
      * A validator wired with the risk gateway + a durable disposition store
      * over the shared challenge storage, driving the full Symfony
      * validation pipeline for one token.
@@ -1090,7 +1318,7 @@ final class ValidatorTest extends TestCase
      *
      * @return array{0: \Symfony\Component\Validator\Validator\ValidatorInterface, 1: RequestStack, 2: KiwiCaptchaValidator}
      */
-    private function dispositionEngine(Verifier $verifier, RiskGateway $gateway, PostSolveDispositionStore $store, array $post = [], int $ttlMargin = 0, ?ChainedChallengeTicketService $chainTickets = null, ?RiskProfileResolver $resolver = null, ?RequestBindingAuthorityInterface $bindingAuthority = null, int $chainTtlSecs = 300): array
+    private function dispositionEngine(Verifier $verifier, RiskGateway $gateway, PostSolveDispositionStore $store, array $post = [], int $ttlMargin = 0, ?ChainedChallengeTicketService $chainTickets = null, ?RiskProfileResolver $resolver = null, ?RequestBindingAuthorityInterface $bindingAuthority = null, int $chainTtlSecs = 300, ?\BelConsulting\KiwiCaptchaBundle\SiteVerify\SiteVerifyMetadataStore $metadataStore = null): array
     {
         $stack = new RequestStack();
         $stack->push(Request::create('/', 'POST', $post, [], [], ['REMOTE_ADDR' => '198.51.100.7']));
@@ -1106,6 +1334,7 @@ final class ValidatorTest extends TestCase
             bindingAuthority: $bindingAuthority,
             postSolveDispositionTtlMarginSecs: $ttlMargin,
             chainTtlSecs: $chainTtlSecs,
+            metadataStore: $metadataStore,
         );
         $factory = new ConstraintValidatorFactory([KiwiCaptchaValidator::class => $validator]);
         $engine = Validation::createValidatorBuilder()->setConstraintValidatorFactory($factory)->getValidator();
@@ -1631,7 +1860,10 @@ final class ValidatorTest extends TestCase
 
         // REPLAY (the SAME token — the core replays its stored result): the
         // persisted disposition reproduces CHAIN_REQUIRED with the SAME
-        // chain id — NEVER a pass, never a second chain.
+        // chain id — NEVER a pass, never a second chain. The replay
+        // re-signs the ticket with the requirement's ORIGINAL expiry, so
+        // the deterministic ticket is BYTE-IDENTICAL (a re-signed ticket
+        // can never outlive its chain state).
         [$engine2] = $this->dispositionEngine($this->verifier, $risk['gateway'], $store, chainTickets: $chainService, resolver: $resolver, bindingAuthority: $this->bindingAuthority());
         $meta2 = $engine2->getMetadataFor($dto::class);
         $meta2->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
@@ -1641,8 +1873,183 @@ final class ValidatorTest extends TestCase
         $ticket2 = $violations[0]->getParameters()['{{ chain_ticket }}'] ?? null;
         self::assertIsString($ticket2);
         self::assertNotEmpty($ticket2);
+        self::assertSame($ticket, $ticket2, 'the replay re-signs with the requirement\'s ORIGINAL expiry — the deterministic ticket is byte-identical to the original');
         self::assertSame($chainId, $store->read($nonce)?->disposition?->chainId, 'the replay reproduces the SAME chain id');
         self::assertSame(1, \count($risk['store']->observations), 'the replay must not re-run the reassessment');
+    }
+
+    public function testChainRequiredReplayWithExpiredChainIsTemporaryUnavailable(): void
+    {
+        // A replayed CHAIN_REQUIRED disposition whose chain requirement is
+        // GONE (the chain expired with its own lifetime) must fail closed
+        // as temporary_unavailable — never a fresh ticket that outlives
+        // its chain state, never a silent pass.
+        $resolver = new RiskProfileResolver(PoWAlgorithm::Sha256, 8);
+        $risk = $this->riskStack(1, 'allow', 'allow', false, null, $resolver);
+        $risk['store']->setVector(SignalVector::fromArray(self::ARGON32_VECTOR));
+        [$store] = $this->clockedDispositionStore();
+
+        $chainClock = (float) time();
+        $chainStore = new ArrayChainedChallengeStateStore(static function () use (&$chainClock): float {
+            return $chainClock;
+        });
+        $chainService = new ChainedChallengeTicketService($chainStore, self::SECRET, 300, 15, $this->bindingAuthority());
+
+        $challenge = $this->issuer->issue('login', '198.51.100.7');
+        usleep(($challenge->minDurationMs + 10) * 1000);
+        $token = $this->solveToken($challenge->prefix, $challenge->salt, $challenge->targetBits, $challenge->nonce);
+        $dto = new class {
+            public ?string $captcha = null;
+        };
+        $dto->captcha = $token;
+
+        // FRESH: the chain opens and the disposition is persisted.
+        [$engine] = $this->dispositionEngine($this->verifier, $risk['gateway'], $store, chainTickets: $chainService, resolver: $resolver, bindingAuthority: $this->bindingAuthority());
+        $meta = $engine->getMetadataFor($dto::class);
+        $meta->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
+        $violations = $engine->validate($dto);
+        self::assertSame(KiwiCaptchaValidator::CHAIN_REQUIRED_ERROR, $violations[0]->getCode());
+        self::assertSame(PostSolveDispositionKind::ChainRequired, $store->read($challenge->nonce)?->disposition?->kind);
+
+        // The chain expires with its own lifetime (the disposition record
+        // survives): the replay cannot re-sign a ticket for a chain that
+        // no longer exists — fail closed.
+        $chainClock += 3600;
+        [$engine2] = $this->dispositionEngine($this->verifier, $risk['gateway'], $store, chainTickets: $chainService, resolver: $resolver, bindingAuthority: $this->bindingAuthority());
+        $meta2 = $engine2->getMetadataFor($dto::class);
+        $meta2->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
+        $violations = $engine2->validate($dto);
+        self::assertCount(1, $violations);
+        self::assertSame(KiwiCaptcha::TEMPORARY_UNAVAILABLE_ERROR, $violations[0]->getCode(), 'a replay whose chain requirement is gone must be temporary_unavailable — never a ticket that outlives its chain');
+        self::assertSame(PostSolveDispositionKind::ChainRequired, $store->read($challenge->nonce)?->disposition?->kind, 'the persisted disposition is untouched');
+    }
+
+// ── strict post-solve disposition decoding (ALL-OR-NOTHING) ────────────────
+
+    public function testCorruptDispositionRecordWithUnknownSchemaVersionFailsClosed(): void
+    {
+        $record = $this->pendingDispositionRecord();
+        $record['v'] = 2;
+        [$code, $store, $nonce] = $this->validateCorruptDisposition($record);
+        self::assertSame(KiwiCaptcha::TEMPORARY_UNAVAILABLE_ERROR, $code, 'an unknown disposition schema version must fail closed as temporary_unavailable — never a pass, never a 422');
+        try {
+            $store->read($nonce);
+            self::fail('the strict decoder must refuse an unknown schema version');
+        } catch (MalformedPostSolveDispositionException $e) {
+            self::assertStringContainsString('schema version', $e->getMessage());
+        }
+    }
+
+    public function testCorruptDispositionRecordWithUnknownStateFailsClosed(): void
+    {
+        $record = $this->pendingDispositionRecord();
+        $record['state'] = 'weird';
+        [$code, $store, $nonce] = $this->validateCorruptDisposition($record);
+        self::assertSame(KiwiCaptcha::TEMPORARY_UNAVAILABLE_ERROR, $code, 'an unknown disposition state must fail closed as temporary_unavailable — never a defaulted record');
+        try {
+            $store->read($nonce);
+            self::fail('the strict decoder must refuse an unknown state');
+        } catch (MalformedPostSolveDispositionException $e) {
+            self::assertStringContainsString('state', $e->getMessage());
+        }
+    }
+
+    public function testCorruptDispositionRecordWithMissingPendingOwnerFailsClosed(): void
+    {
+        $record = $this->pendingDispositionRecord();
+        $record['owner'] = null;
+        [$code, $store, $nonce] = $this->validateCorruptDisposition($record);
+        self::assertSame(KiwiCaptcha::TEMPORARY_UNAVAILABLE_ERROR, $code, 'a pending record without an owner must fail closed as temporary_unavailable — the claim never heals it');
+        try {
+            $store->read($nonce);
+            self::fail('the strict decoder must refuse a pending record without an owner');
+        } catch (MalformedPostSolveDispositionException $e) {
+            self::assertStringContainsString('owner', $e->getMessage());
+        }
+    }
+
+    public function testCorruptDispositionRecordWithMissingCompleteDispositionFailsClosed(): void
+    {
+        $record = $this->completeDispositionRecord();
+        $record['disposition'] = null;
+        [$code, $store, $nonce] = $this->validateCorruptDisposition($record);
+        self::assertSame(KiwiCaptcha::TEMPORARY_UNAVAILABLE_ERROR, $code, 'a complete record without a disposition must fail closed as temporary_unavailable — never a silent pass');
+        try {
+            $store->read($nonce);
+            self::fail('the strict decoder must refuse a complete record without a disposition');
+        } catch (MalformedPostSolveDispositionException $e) {
+            self::assertStringContainsString('disposition', $e->getMessage());
+        }
+    }
+
+    public function testCorruptDispositionRecordWithBadKindFailsClosed(): void
+    {
+        $record = $this->completeDispositionRecord();
+        $record['disposition'] = 'not-a-disposition';
+        [$code, $store, $nonce] = $this->validateCorruptDisposition($record);
+        self::assertSame(KiwiCaptcha::TEMPORARY_UNAVAILABLE_ERROR, $code, 'a corrupt disposition kind must fail closed as temporary_unavailable — never a Pass');
+        try {
+            $store->read($nonce);
+            self::fail('the strict decoder must refuse a bad disposition kind');
+        } catch (MalformedPostSolveDispositionException $e) {
+            self::assertStringContainsString('disposition', $e->getMessage());
+        }
+    }
+
+    public function testCorruptDispositionRecordWithBadChainIdShapeFailsClosed(): void
+    {
+        $record = $this->completeDispositionRecord();
+        $record['disposition'] = new PostSolveDisposition(PostSolveDispositionKind::ChainRequired, 'decision-1', 'not a chain id!');
+        [$code, $store, $nonce] = $this->validateCorruptDisposition($record);
+        self::assertSame(KiwiCaptcha::TEMPORARY_UNAVAILABLE_ERROR, $code, 'a malformed chain id in a ChainRequired disposition must fail closed as temporary_unavailable');
+        try {
+            $store->read($nonce);
+            self::fail('the strict decoder must refuse a malformed chain id');
+        } catch (MalformedPostSolveDispositionException $e) {
+            self::assertStringContainsString('chain_id', $e->getMessage());
+        }
+    }
+
+// ── the decision handle survives the disposition takeover ──────────────────
+
+    public function testTakeoverCompletingThePassKeepsTheOriginalDecisionHandle(): void
+    {
+        $decisionRedis = new FakePredisClient();
+        $risk = $this->riskStack(1, 'allow', 'allow', false, null, null, $decisionRedis);
+        [$store, $advance] = $this->clockedDispositionStore();
+
+        $challenge = $this->issuer->issue('login', '198.51.100.7');
+        usleep(($challenge->minDurationMs + 10) * 1000);
+        $token = $this->solveToken($challenge->prefix, $challenge->salt, $challenge->targetBits, $challenge->nonce);
+        $decisionRedis->strings['{kiwi:validator-test}:decision:'.$challenge->nonce] = (string) json_encode(['decision_id' => 'original-decision']);
+        $dto = new class {
+            public ?string $captcha = null;
+        };
+        $dto->captcha = $token;
+
+        // REQUEST 1: the owner CONSUMES the nonce -> decision mapping
+        // (GETDEL) and stores the handle in the pending claim, then dies
+        // before the finalize — temporary_unavailable.
+        $crashed = $this->faultedStore($store, failFinalize: true);
+        [$engine] = $this->dispositionEngine($this->verifier, $risk['gateway'], $crashed);
+        $meta = $engine->getMetadataFor($dto::class);
+        $meta->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
+        $violations = $engine->validate($dto);
+        self::assertSame(KiwiCaptcha::TEMPORARY_UNAVAILABLE_ERROR, $violations[0]->getCode(), 'a crash before the finalize is retryable temporary_unavailable');
+        self::assertSame('original-decision', $store->read($challenge->nonce)?->decisionId, 'the pending claim carries the consumed decision handle');
+
+        // REQUEST 2 (takeover after the lease): the new owner's GETDEL is
+        // EMPTY (the mapping is already consumed) — the STORED handle still
+        // completes the pass with the ORIGINAL decision id, never a fresh
+        // one.
+        $advance(16);
+        [$engine2] = $this->dispositionEngine($this->verifier, $risk['gateway'], $store);
+        $meta2 = $engine2->getMetadataFor($dto::class);
+        $meta2->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
+        self::assertCount(0, $engine2->validate($dto), 'the takeover completes the pass');
+        $record = $store->read($challenge->nonce);
+        self::assertSame('original-decision', $record?->decisionId, 'the complete record keeps the ORIGINAL decision handle');
+        self::assertSame('original-decision', $record?->disposition?->decisionId, 'the completed pass keeps the ORIGINAL decision id — not a new one');
     }
 
     public function testChainRequiredDispositionSurvivesTokenExpiryForTheRetainedMargin(): void
@@ -1711,5 +2118,409 @@ final class ValidatorTest extends TestCase
         self::assertSame('complete', $store->read($nonce)?->state, 'the disposition survives the retained core-result window');
         $advance(305);
         self::assertNull($store->read($nonce), 'the disposition expires only with its own record TTL (MAX_TTL_SECS + margin)');
+    }
+
+    // ── Stage-2 final disposition -> terminal chain transition ─────────
+
+    /**
+     * A full stage-2 chain for the validator-level disposition tests: the
+     * stage-1 CHAIN_REQUIRED solve opens the chain, then the chain is
+     * issued directly (reserve + markIssued) with the nonce of a REAL
+     * issued challenge (the strict v2 schema requires the Kiwi base64
+     * nonce shape).
+     *
+     * @return array{chainService: ChainedChallengeTicketService, chainId: string, stage2: \KiwiCaptcha\Challenge, token1: string}
+     */
+    private function stage2Chain(RiskGateway $gateway, \BelConsulting\KiwiCaptchaBundle\Risk\ArrayPostSolveDispositionStore $store, \BelConsulting\KiwiCaptchaBundle\Risk\ArrayChainedChallengeStateStore $chainStore): array
+    {
+        $chainService = new ChainedChallengeTicketService($chainStore, self::SECRET, 300, 15, $this->bindingAuthority());
+
+        // Stage 1: the reassessment (Argon32) opens the chain.
+        $challenge1 = $this->issuer->issue('login', '198.51.100.7');
+        usleep(($challenge1->minDurationMs + 10) * 1000);
+        $token1 = $this->solveToken($challenge1->prefix, $challenge1->salt, $challenge1->targetBits, $challenge1->nonce);
+        $dto1 = new class {
+            public ?string $captcha = null;
+        };
+        $dto1->captcha = $token1;
+        [$engine1] = $this->dispositionEngine($this->verifier, $gateway, $store, chainTickets: $chainService, bindingAuthority: $this->bindingAuthority());
+        $meta1 = $engine1->getMetadataFor($dto1::class);
+        $meta1->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
+        $violations = $engine1->validate($dto1);
+        self::assertCount(1, $violations);
+        self::assertSame(KiwiCaptchaValidator::CHAIN_REQUIRED_ERROR, $violations[0]->getCode());
+        $chainId = (string) $chainService->verify((string) $violations[0]->getParameters()['{{ chain_ticket }}'])['chainId'];
+
+        // Stage 2: the chain issues a REAL challenge (its nonce becomes
+        // the chain's stage2Nonce).
+        $stage2 = $this->issuer->issue('login', '198.51.100.7');
+        self::assertSame(ChainReservationResult::Available, $chainService->reserveStage2($chainId, 'owner-a'));
+        self::assertSame(ChainIssuedResult::IssuedNew, $chainService->markIssued($chainId, 'owner-a', $stage2->nonce));
+
+        return ['chainService' => $chainService, 'chainId' => $chainId, 'stage2' => $stage2, 'token1' => $token1];
+    }
+
+    public function testStage2StepUpDispositionMarksStepUpRequiredAndTheObligationSurvives(): void
+    {
+        $resolver = new RiskProfileResolver(PoWAlgorithm::Sha256, 8);
+        $risk = $this->riskStack(1, 'allow', 'allow', false, null, $resolver);
+        $risk['store']->setVector(SignalVector::fromArray(self::ARGON32_VECTOR));
+        [$store] = $this->clockedDispositionStore();
+        $chainStore = new ArrayChainedChallengeStateStore();
+        $stage2 = $this->stage2Chain($risk['gateway'], $store, $chainStore);
+
+        // The stage-2 solve with a STEP-UP post-solve decision: the FINAL
+        // disposition is STEP-UP — the chain transitions to the TERMINAL
+        // step_up_required (the obligation is KEPT) and the application
+        // sees the terminal step-up violation.
+        $risk['store']->setVector(SignalVector::fromArray(self::STEP_UP_VECTOR));
+        usleep(($stage2['stage2']->minDurationMs + 10) * 1000);
+        $token2 = $this->solveToken($stage2['stage2']->prefix, $stage2['stage2']->salt, $stage2['stage2']->targetBits, $stage2['stage2']->nonce);
+        $dto = new class {
+            public ?string $captcha = null;
+        };
+        $dto->captcha = $token2;
+        [$engine] = $this->dispositionEngine($this->verifier, $risk['gateway'], $store, chainTickets: $stage2['chainService'], bindingAuthority: $this->bindingAuthority());
+        $meta = $engine->getMetadataFor($dto::class);
+        $meta->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
+        $violations = $engine->validate($dto);
+
+        self::assertCount(1, $violations);
+        self::assertSame(KiwiCaptcha::POST_SOLVE_STEP_UP_REQUIRED, $violations[0]->getCode(), 'a stage-2 solve with a StepUp post-solve decision is terminal step-up');
+        self::assertSame(PostSolveDispositionKind::StepUp, $store->read($stage2['stage2']->nonce)?->disposition?->kind, 'the StepUp disposition is durably finalized BEFORE the chain transition');
+        $state = $stage2['chainService']->requirementFor($stage2['chainId']);
+        self::assertSame('step_up_required', $state?->state, 'the chain is TERMINAL step_up_required');
+        self::assertSame($stage2['stage2']->nonce, $state?->stage2Nonce);
+        self::assertNotNull($stage2['chainService']->findOpenRequirement('login', 'auth-txn-1', 1), 'the step-up transition KEEPS the obligation — the transaction stays bound');
+    }
+
+    public function testStage2DenyDispositionMarksDeniedAndTheObligationSurvives(): void
+    {
+        $resolver = new RiskProfileResolver(PoWAlgorithm::Sha256, 8);
+        $risk = $this->riskStack(1, 'allow', 'allow', false, null, $resolver);
+        $risk['store']->setVector(SignalVector::fromArray(self::ARGON32_VECTOR));
+        [$store] = $this->clockedDispositionStore();
+        $chainStore = new ArrayChainedChallengeStateStore();
+        $stage2 = $this->stage2Chain($risk['gateway'], $store, $chainStore);
+
+        // The stage-2 solve with a DENY post-solve decision: the FINAL
+        // disposition is DENY — the chain transitions to the TERMINAL
+        // denied (the obligation is KEPT) and the application sees the
+        // post-solve rejection.
+        $risk['store']->setVector(SignalVector::fromArray(['network_risk' => 900]));
+        usleep(($stage2['stage2']->minDurationMs + 10) * 1000);
+        $token2 = $this->solveToken($stage2['stage2']->prefix, $stage2['stage2']->salt, $stage2['stage2']->targetBits, $stage2['stage2']->nonce);
+        $dto = new class {
+            public ?string $captcha = null;
+        };
+        $dto->captcha = $token2;
+        [$engine] = $this->dispositionEngine($this->verifier, $risk['gateway'], $store, chainTickets: $stage2['chainService'], bindingAuthority: $this->bindingAuthority());
+        $meta = $engine->getMetadataFor($dto::class);
+        $meta->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
+        $violations = $engine->validate($dto);
+
+        self::assertCount(1, $violations);
+        self::assertSame(KiwiCaptcha::POST_SOLVE_REJECTED_ERROR, $violations[0]->getCode(), 'a stage-2 solve with a Deny post-solve decision is rejected');
+        self::assertSame(PostSolveDispositionKind::Deny, $store->read($stage2['stage2']->nonce)?->disposition?->kind, 'the Deny disposition is durably finalized BEFORE the chain transition');
+        $state = $stage2['chainService']->requirementFor($stage2['chainId']);
+        self::assertSame('denied', $state?->state, 'the chain is TERMINAL denied');
+        self::assertSame($stage2['stage2']->nonce, $state?->stage2Nonce);
+        self::assertNotNull($stage2['chainService']->findOpenRequirement('login', 'auth-txn-1', 1), 'the denied transition KEEPS the obligation — the transaction stays bound');
+    }
+
+    public function testStage2PassDispositionMarksVerifiedAndDeletesTheObligation(): void
+    {
+        $resolver = new RiskProfileResolver(PoWAlgorithm::Sha256, 8);
+        $risk = $this->riskStack(1, 'allow', 'allow', false, null, $resolver);
+        $risk['store']->setVector(SignalVector::fromArray(self::ARGON32_VECTOR));
+        [$store] = $this->clockedDispositionStore();
+        $chainStore = new ArrayChainedChallengeStateStore();
+        $stage2 = $this->stage2Chain($risk['gateway'], $store, $chainStore);
+
+        // The stage-2 solve with a NEUTRAL post-solve decision (a FRESH
+        // risk stack — a fresh scope-action hysteresis — so the neutral
+        // assessment is actually neutral): the FINAL disposition is PASS —
+        // the chain VERIFIES (the obligation is deleted) and the solve
+        // passes.
+        $neutral = $this->riskStack(1, 'allow', 'allow', false, null, $resolver);
+        usleep(($stage2['stage2']->minDurationMs + 10) * 1000);
+        $token2 = $this->solveToken($stage2['stage2']->prefix, $stage2['stage2']->salt, $stage2['stage2']->targetBits, $stage2['stage2']->nonce);
+        $dto = new class {
+            public ?string $captcha = null;
+        };
+        $dto->captcha = $token2;
+        [$engine] = $this->dispositionEngine($this->verifier, $neutral['gateway'], $store, chainTickets: $stage2['chainService'], bindingAuthority: $this->bindingAuthority());
+        $meta = $engine->getMetadataFor($dto::class);
+        $meta->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
+        $violations = $engine->validate($dto);
+
+        self::assertCount(0, $violations, 'a stage-2 solve with a Pass disposition passes');
+        self::assertSame(PostSolveDispositionKind::Pass, $store->read($stage2['stage2']->nonce)?->disposition?->kind, 'the Pass disposition is durably finalized BEFORE the chain transition');
+        $state = $stage2['chainService']->requirementFor($stage2['chainId']);
+        self::assertSame('verified', $state?->state, 'the chain is TERMINAL verified');
+        self::assertSame($stage2['stage2']->nonce, $state?->stage2Nonce);
+        self::assertNull($stage2['chainService']->findOpenRequirement('login', 'auth-txn-1', 1), 'the verified transition DELETED the obligation — the transaction is complete');
+    }
+
+    public function testStage2NoReassessmentPassStillEndsTheChain(): void
+    {
+        // The ASYMMETRIC path: a stage-2 challenge verified with
+        // post_solve_check=false AND no honeypot AND no chain-eligible
+        // scope (the metadata chainId marker forbids a third stage) — the
+        // Pass disposition is produced WITHOUT any reassessment, yet the
+        // recognized stage-2 nonce STILL performs the stage-2 transition
+        // (markVerified — the chain ends, the obligation is deleted).
+        $resolver = new RiskProfileResolver(PoWAlgorithm::Sha256, 8);
+        $risk = $this->riskStack(1, 'allow', 'allow', false, null, $resolver);
+        $risk['store']->setVector(SignalVector::fromArray(self::ARGON32_VECTOR));
+        [$store] = $this->clockedDispositionStore();
+        $chainStore = new ArrayChainedChallengeStateStore();
+        $chainService = new ChainedChallengeTicketService($chainStore, self::SECRET, 300, 15, $this->bindingAuthority());
+        $metaStore = new \BelConsulting\KiwiCaptchaBundle\SiteVerify\ArraySiteVerifyMetadataStore();
+
+        // Stage 1: the reassessment (Argon32) opens the chain.
+        $challenge1 = $this->issuer->issue('login', '198.51.100.7');
+        usleep(($challenge1->minDurationMs + 10) * 1000);
+        $token1 = $this->solveToken($challenge1->prefix, $challenge1->salt, $challenge1->targetBits, $challenge1->nonce);
+        $dto1 = new class {
+            public ?string $captcha = null;
+        };
+        $dto1->captcha = $token1;
+        [$engine1] = $this->dispositionEngine($this->verifier, $risk['gateway'], $store, chainTickets: $chainService, bindingAuthority: $this->bindingAuthority());
+        $meta1 = $engine1->getMetadataFor($dto1::class);
+        $meta1->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
+        $violations = $engine1->validate($dto1);
+        self::assertSame(KiwiCaptchaValidator::CHAIN_REQUIRED_ERROR, $violations[0]->getCode());
+        $chainId = (string) $chainService->verify((string) $violations[0]->getParameters()['{{ chain_ticket }}'])['chainId'];
+
+        // Stage 2: the chain issues a REAL challenge (its nonce becomes
+        // the chain's stage2Nonce), and the chain identity is stamped into
+        // the metadata sidecar exactly as the controller does — the
+        // marker ends the chain at stage 2 (no third-stage eligibility).
+        $stage2 = $this->issuer->issue('login', '198.51.100.7');
+        self::assertSame(ChainReservationResult::Available, $chainService->reserveStage2($chainId, 'owner-a'));
+        self::assertSame(ChainIssuedResult::IssuedNew, $chainService->markIssued($chainId, 'owner-a', $stage2->nonce));
+        $metaStore->store($stage2->nonce, new \BelConsulting\KiwiCaptchaBundle\SiteVerify\SiteVerifyMetadata(null, null, 'login', $chainId, 2), 300);
+
+        // The stage-2 solve: NO reassessment runs (post_solve_check=false,
+        // no honeypot, no chain-eligible scope — the marker) — the final
+        // disposition is the plain Pass, and the recognized stage-2 nonce
+        // STILL ends the chain (markVerified, obligation deleted).
+        usleep(($stage2->minDurationMs + 10) * 1000);
+        $token2 = $this->solveToken($stage2->prefix, $stage2->salt, $stage2->targetBits, $stage2->nonce);
+        $dto = new class {
+            public ?string $captcha = null;
+        };
+        $dto->captcha = $token2;
+        [$engine2] = $this->dispositionEngine($this->verifier, $risk['gateway'], $store, chainTickets: $chainService, bindingAuthority: $this->bindingAuthority(), metadataStore: $metaStore);
+        $meta2 = $engine2->getMetadataFor($dto::class);
+        $meta2->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
+        $violations2 = $engine2->validate($dto);
+
+        self::assertCount(0, $violations2, 'the no-reassessment stage-2 solve passes');
+        self::assertSame(PostSolveDispositionKind::Pass, $store->read($stage2->nonce)?->disposition?->kind, 'the Pass disposition is durably finalized');
+        $state = $chainService->requirementFor($chainId);
+        self::assertSame('verified', $state?->state, 'the no-reassessment PASS still performs the stage-2 transition — the chain ends');
+        self::assertSame($stage2->nonce, $state?->stage2Nonce);
+        self::assertNull($chainService->findOpenRequirement('login', 'auth-txn-1', 1), 'the verified transition deleted the obligation — the transaction is complete');
+    }
+
+    public function testStage2TransitionFailureIsTemporaryUnavailableNeverPass(): void
+    {
+        $resolver = new RiskProfileResolver(PoWAlgorithm::Sha256, 8);
+        $risk = $this->riskStack(1, 'allow', 'allow', false, null, $resolver);
+        $risk['store']->setVector(SignalVector::fromArray(self::ARGON32_VECTOR));
+        [$store] = $this->clockedDispositionStore();
+        $inner = new ArrayChainedChallengeStateStore();
+        $stage2 = $this->stage2Chain($risk['gateway'], $store, $inner);
+
+        // The terminal transition FAILS (a store outage on the step-up
+        // transition): the disposition is durably finalized, but the chain
+        // cannot transition — fail-closed temporary_unavailable, never a
+        // silent pass while the obligation may be uncleared.
+        $failing = new FailingTerminalChainStore($inner);
+        $failing->failStepUpRequired = true;
+        $failingService = new ChainedChallengeTicketService($failing, self::SECRET, 300, 15, $this->bindingAuthority());
+        $risk['store']->setVector(SignalVector::fromArray(self::STEP_UP_VECTOR));
+        usleep(($stage2['stage2']->minDurationMs + 10) * 1000);
+        $token2 = $this->solveToken($stage2['stage2']->prefix, $stage2['stage2']->salt, $stage2['stage2']->targetBits, $stage2['stage2']->nonce);
+        $dto = new class {
+            public ?string $captcha = null;
+        };
+        $dto->captcha = $token2;
+        [$engine] = $this->dispositionEngine($this->verifier, $risk['gateway'], $store, chainTickets: $failingService, bindingAuthority: $this->bindingAuthority());
+        $meta = $engine->getMetadataFor($dto::class);
+        $meta->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
+        $violations = $engine->validate($dto);
+
+        self::assertCount(1, $violations);
+        self::assertSame(KiwiCaptcha::TEMPORARY_UNAVAILABLE_ERROR, $violations[0]->getCode(), 'a failed stage-2 chain transition is fail-closed temporary_unavailable');
+        self::assertSame(PostSolveDispositionKind::StepUp, $store->read($stage2['stage2']->nonce)?->disposition?->kind, 'the disposition stays durably finalized');
+        self::assertSame('issued', $inner->read($stage2['chainId'])['state'], 'the chain stays issued — the obligation is never cleared without the transition');
+
+        // The transition recovers: the retry completes the terminal
+        // step-up.
+        $failing->failStepUpRequired = false;
+        [$engine2] = $this->dispositionEngine($this->verifier, $risk['gateway'], $store, chainTickets: $failingService, bindingAuthority: $this->bindingAuthority());
+        $meta2 = $engine2->getMetadataFor($dto::class);
+        $meta2->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
+        $violations2 = $engine2->validate($dto);
+        self::assertSame(KiwiCaptcha::POST_SOLVE_STEP_UP_REQUIRED, $violations2[0]->getCode(), 'after the store recovers the retry completes the terminal step-up');
+        self::assertSame('step_up_required', $inner->read($stage2['chainId'])['state']);
+    }
+}
+
+/**
+ * The authoritative transaction-binding fixture of the binding-authority
+ * tests: maps the presented client hint 'client-hint' to the CANONICAL
+ * 'server-transaction' binding (the value the challenge controller signs)
+ * and counts every resolution — the authority must be consulted EXACTLY
+ * once per validation.
+ */
+final class MappingBindingAuthority implements RequestBindingAuthorityInterface
+{
+    public int $calls = 0;
+
+    public function resolve(Request $request, string $scope, ?string $presentedBinding): ?string
+    {
+        ++$this->calls;
+        if ($presentedBinding !== null && $presentedBinding !== '' && $presentedBinding !== 'client-hint') {
+            throw new \InvalidArgumentException('presented binding does not match the authoritative transaction binding');
+        }
+
+        return 'server-transaction';
+    }
+}
+
+/**
+ * The authority fixture whose backend is DOWN: every resolution throws.
+ * The validator must fail closed with temporary_unavailable — never a
+ * silent pass, never a raw exception.
+ */
+final class ThrowingBindingAuthority implements RequestBindingAuthorityInterface
+{
+    public int $calls = 0;
+
+    public function resolve(Request $request, string $scope, ?string $presentedBinding): ?string
+    {
+        ++$this->calls;
+        throw new \RuntimeException('the authoritative binding backend is unavailable');
+    }
+}
+
+/**
+ * The authority fixture that DECLINES the transaction: the transaction is
+ * invalid/unknown (null) — the normal invalid-binding outcome applies.
+ */
+final class NullBindingAuthority implements RequestBindingAuthorityInterface
+{
+    public int $calls = 0;
+
+    public function resolve(Request $request, string $scope, ?string $presentedBinding): ?string
+    {
+        ++$this->calls;
+
+        return null;
+    }
+}
+
+/**
+ * A transactional chain-state decorator with a test seam: the TERMINAL
+ * transitions can fail on demand (a simulated store outage), so the
+ * validator's fail-closed stage-2 transition path is exercisable. All
+ * other operations delegate to the wrapped store.
+ */
+final class FailingTerminalChainStore implements TransactionalChainedChallengeStateStore
+{
+    public bool $failStepUpRequired = false;
+
+    public bool $failDenied = false;
+
+    public bool $failVerified = false;
+
+    public function __construct(private readonly ArrayChainedChallengeStateStore $inner)
+    {
+    }
+
+    public function create(string $chainId, string $stage1Nonce, string $scope, int $ttlSecs, ?string $requestBinding = null, ?string $requiredAction = null, int $policyVersion = 1): void
+    {
+        $this->inner->create($chainId, $stage1Nonce, $scope, $ttlSecs, $requestBinding, $requiredAction, $policyVersion);
+    }
+
+    public function createWithObligation(string $chainId, string $obligationId, string $stage1Nonce, string $scope, ?string $requestBinding, string $requiredAction, int $policyVersion, int $ttlSecs): void
+    {
+        $this->inner->createWithObligation($chainId, $obligationId, $stage1Nonce, $scope, $requestBinding, $requiredAction, $policyVersion, $ttlSecs);
+    }
+
+    public function createOrGetObligation(string $obligationId, string $chainId, string $stage1Nonce, string $scope, string $requestBinding, string $requiredAction, int $requiredRank, int $policyVersion, int $expiresAt, int $ttlSecs): string
+    {
+        return $this->inner->createOrGetObligation($obligationId, $chainId, $stage1Nonce, $scope, $requestBinding, $requiredAction, $requiredRank, $policyVersion, $expiresAt, $ttlSecs);
+    }
+
+    public function obligationChainId(string $obligationId): ?string
+    {
+        return $this->inner->obligationChainId($obligationId);
+    }
+
+    public function read(string $chainId): ?array
+    {
+        return $this->inner->read($chainId);
+    }
+
+    public function reserve(string $chainId, string $ownerToken, int $leaseSecs): string
+    {
+        return $this->inner->reserve($chainId, $ownerToken, $leaseSecs);
+    }
+
+    public function release(string $chainId, string $ownerToken): void
+    {
+        $this->inner->release($chainId, $ownerToken);
+    }
+
+    public function markIssued(string $chainId, string $ownerToken, string $stage2Nonce): string
+    {
+        return $this->inner->markIssued($chainId, $ownerToken, $stage2Nonce);
+    }
+
+    public function markVerified(string $chainId, string $stage2Nonce): string
+    {
+        if ($this->failVerified) {
+            throw new \RuntimeException('simulated terminal transition outage');
+        }
+
+        return $this->inner->markVerified($chainId, $stage2Nonce);
+    }
+
+    public function markStepUpRequired(string $chainId, string $stage2Nonce): string
+    {
+        if ($this->failStepUpRequired) {
+            throw new \RuntimeException('simulated terminal transition outage');
+        }
+
+        return $this->inner->markStepUpRequired($chainId, $stage2Nonce);
+    }
+
+    public function markDenied(string $chainId, string $stage2Nonce): string
+    {
+        if ($this->failDenied) {
+            throw new \RuntimeException('simulated terminal transition outage');
+        }
+
+        return $this->inner->markDenied($chainId, $stage2Nonce);
+    }
+
+    public function rearmIssued(string $chainId, string $expectedStage2Nonce): bool
+    {
+        return $this->inner->rearmIssued($chainId, $expectedStage2Nonce);
+    }
+
+    public function deleteObligation(string $chainId, string $obligationId): void
+    {
+        $this->inner->deleteObligation($chainId, $obligationId);
+    }
+
+    public function complete(string $chainId, string $ownerToken, string $stage2Nonce): ?array
+    {
+        return $this->inner->complete($chainId, $ownerToken, $stage2Nonce);
     }
 }

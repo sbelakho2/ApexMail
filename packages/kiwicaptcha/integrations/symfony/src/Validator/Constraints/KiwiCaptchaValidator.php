@@ -182,11 +182,19 @@ final class KiwiCaptchaValidator extends ConstraintValidator
         private readonly ?PostSolveDispositionStore $dispositionStore = null,
         /**
          * The authoritative transaction-binding authority (nullable
-         * service id risk.request_binding_authority): chaining opens only
-         * when the AUTHORITATIVE binding of the transaction resolves
-         * non-null — a raw client-supplied binding without an authority is
-         * never sufficient. Null = chaining unavailable (a stronger PoW
-         * demand falls back to terminal StepUp, never a silent pass).
+         * service id risk.request_binding_authority): the presented
+         * request_binding is a HINT — the authority resolves the
+         * SERVER-OWNED canonical transaction binding, and the validator
+         * enforces the signed record binding against THAT value
+         * end-to-end (the same value the challenge controller signed at
+         * issuance). An authority failure fails closed as
+         * temporary_unavailable; a null resolution is the normal
+         * invalid-binding outcome. Chaining opens only when the canonical
+         * binding resolves non-null — a raw client-supplied binding
+         * without an authority is never sufficient. Null = the raw
+         * request binding applies unchanged (chaining unavailable — a
+         * stronger PoW demand falls back to terminal StepUp, never a
+         * silent pass).
          */
         private readonly ?RequestBindingAuthorityInterface $bindingAuthority = null,
         /**
@@ -200,8 +208,9 @@ final class KiwiCaptchaValidator extends ConstraintValidator
         /**
          * The chain lifetime (risk.chaining.ttl_secs): the absolute
          * expiry the validator passes when it opens a stage-2 chain
-         * requirement (requireStage2) and when it re-signs the one-shot
-         * ticket for a persisted CHAIN_REQUIRED disposition.
+         * requirement (requireStage2) and signs the ticket of a FRESHLY
+         * computed CHAIN_REQUIRED disposition. A REPLAY re-signs with the
+         * chain requirement's ORIGINAL expiry instead.
          */
         private readonly int $chainTtlSecs = 300,
     ) {
@@ -400,19 +409,46 @@ final class KiwiCaptchaValidator extends ConstraintValidator
             return;
         }
 
-        // TRANSACTION BINDING: after a VALID verification, the
-        // consumed record's SIGNED request_binding must equal the binding
-        // the request carried (the request attribute the application
-        // controller copied from the POSTed kiwi_request_binding field — or
-        // the raw POST field). A bound record with a missing/mismatched
-        // binding is rejected with the SAME invalid_or_expired outcome
-        // (the collapsed violation code): a challenge minted for one
+        // TRANSACTION BINDING: after a VALID verification, the consumed
+        // record's SIGNED request_binding must equal the binding the
+        // request carried. With an authority configured
+        // (risk.request_binding_authority) the presented binding is only
+        // a HINT: the SERVER-OWNED canonical transaction binding is
+        // resolved EXACTLY ONCE here — the same value the challenge
+        // controller signed at issuance — and it drives EVERY binding
+        // decision of this validation (the comparison below, the stage-2
+        // transaction lookup, the obligation lookup and the chain
+        // creation — the authority is never consulted twice). An
+        // authority failure (its backend temporarily unavailable) fails
+        // closed as temporary_unavailable — a violation, never a silent
+        // pass, never a raw exception; a null resolution (the transaction
+        // is invalid/unknown) is the normal invalid-binding outcome.
+        // Without an authority the raw request binding (the request
+        // attribute the application controller copied from the POSTed
+        // kiwi_request_binding field — or the raw POST field) applies
+        // unchanged. A bound record with a missing/mismatched binding is
+        // rejected with the SAME invalid_or_expired outcome (the
+        // collapsed violation code): a challenge minted for one
         // transaction is never redeemable for another. Unbound records
         // (binding null) skip the check entirely. For a stored-result
         // retry the outcome's requestBinding() IS the stored consumed
-        // binding, so the SAME rule gives the stored-result contract: same
-        // binding -> same success, different binding -> invalid_or_expired.
-        if (!$this->requestBindingMatches($outcome, $request)) {
+        // binding, so the SAME rule gives the stored-result contract:
+        // same binding -> same success, different binding ->
+        // invalid_or_expired.
+        try {
+            $canonicalBinding = $this->resolveAuthoritativeBinding($constraint, $request);
+        } catch (PostSolveDispositionUnavailableException $e) {
+            $this->logger?->info('KiwiCaptcha: valid proof rejected — the authoritative transaction binding is unavailable', [
+                'scope' => $constraint->scope,
+                'reason' => $e->getMessage(),
+            ]);
+            $this->context->buildViolation($constraint->message)
+                ->setCode(KiwiCaptcha::TEMPORARY_UNAVAILABLE_ERROR)
+                ->addViolation();
+
+            return;
+        }
+        if (!$this->requestBindingMatches($outcome, $canonicalBinding)) {
             $this->logger?->info('KiwiCaptcha: valid proof rejected — request binding mismatch', [
                 'scope' => $constraint->scope,
             ]);
@@ -448,9 +484,36 @@ final class KiwiCaptchaValidator extends ConstraintValidator
         // the retryable temporary_unavailable violation — never a silent
         // pass.
         try {
-            $disposition = $this->resolveFinalDisposition($value, $outcome, $request, $constraint, (string) ($clientIp ?? ''));
+            [$disposition, $replayed] = $this->resolveFinalDisposition($value, $outcome, $request, $constraint, (string) ($clientIp ?? ''), $canonicalBinding);
         } catch (PostSolveDispositionUnavailableException $e) {
             $this->logger?->info('KiwiCaptcha: post-solve disposition unavailable', [
+                'scope' => $constraint->scope,
+                'reason' => $e->getMessage(),
+            ]);
+            $this->context->buildViolation($constraint->message)
+                ->setCode(KiwiCaptcha::TEMPORARY_UNAVAILABLE_ERROR)
+                ->addViolation();
+
+            return;
+        }
+
+        // ── STAGE-2 CHAIN TRANSITION BY FINAL DISPOSITION ────────────────
+        // The final disposition is DURABLY finalized (above) BEFORE the
+        // chain is touched: the chain transition runs strictly AFTER the
+        // finalize, by disposition kind — Pass -> markVerified (the
+        // obligation is cleared), StepUp -> markStepUpRequired (the
+        // obligation is KEPT — the transaction stays bound to the
+        // step-up), Deny -> markDenied (the obligation is KEPT). The
+        // detection runs on EVERY valid solve (the no-reassessment Pass
+        // path included), so a recognized stage-2 nonce can never leave
+        // its chain issued behind a Pass disposition. A transition
+        // failure or refusal is fail-closed temporary_unavailable — the
+        // obligation is never cleared by the core's consumed result
+        // alone.
+        try {
+            $this->applyStage2Disposition($value, $disposition, $constraint, $canonicalBinding);
+        } catch (PostSolveDispositionUnavailableException $e) {
+            $this->logger?->info('KiwiCaptcha: stage-2 chain transition unavailable', [
                 'scope' => $constraint->scope,
                 'reason' => $e->getMessage(),
             ]);
@@ -495,12 +558,23 @@ final class KiwiCaptchaValidator extends ConstraintValidator
                 // from the PERSISTED chain id (the same chain for a fresh
                 // verification and a replay); the violation's
                 // {{ chain_ticket }} parameter carries it in the
-                // documented machine-readable format. A ticket that cannot
-                // be produced is fail-closed temporary_unavailable — a
-                // stronger stage was demanded but cannot be chained, never
-                // a silent downgrade to an unchained pass.
+                // documented machine-readable format. A REPLAY re-signs
+                // with the chain requirement's ORIGINAL expiry — the
+                // deterministic ticket is the SAME one (a re-signed
+                // ticket can never outlive its chain state); a replay
+                // whose chain requirement is gone (the chain expired or
+                // was consumed) is fail-closed temporary_unavailable. A
+                // ticket that cannot be produced is fail-closed
+                // temporary_unavailable — a stronger stage was demanded
+                // but cannot be chained, never a silent downgrade to an
+                // unchained pass.
                 try {
-                    $ticket = $this->chainTickets?->ticketFor($disposition->chainId, $this->chainExpiresAt());
+                    $ticket = $this->chainTickets?->ticketFor(
+                        $disposition->chainId,
+                        $replayed
+                            ? $this->chainRequirementExpiresAt($constraint, $canonicalBinding)
+                            : $this->chainExpiresAt(),
+                    );
                 } catch (\Throwable $e) {
                     $this->logger?->info('KiwiCaptcha: chained challenge ticket unavailable', [
                         'scope' => $constraint->scope,
@@ -532,19 +606,20 @@ final class KiwiCaptchaValidator extends ConstraintValidator
 
     /**
      * The record's signed request_binding (VerifyOutcome::requestBinding())
-     * must equal the binding the request carried — when the record is
-     * bound. An unbound record (null binding) skips the check.
+     * must equal the CANONICAL binding of the request — the authority's
+     * server-owned resolution when an authority is configured, the raw
+     * request binding otherwise (the value the requestBindingMatches()
+     * caller resolved ONCE, before the comparison). An unbound record
+     * (null binding) skips the check.
      */
-    private function requestBindingMatches(\KiwiCaptcha\VerifyOutcome $outcome, ?Request $request): bool
+    private function requestBindingMatches(\KiwiCaptcha\VerifyOutcome $outcome, ?string $canonicalBinding): bool
     {
         $recordBinding = \method_exists($outcome, 'requestBinding') ? $outcome->requestBinding() : null;
         if ($recordBinding === null) {
             return true;
         }
 
-        $requestBinding = $this->requestBindingFromRequest($request);
-
-        return $requestBinding !== null && hash_equals($recordBinding, $requestBinding);
+        return $canonicalBinding !== null && hash_equals($recordBinding, $canonicalBinding);
     }
 
     /**
@@ -646,24 +721,36 @@ final class KiwiCaptchaValidator extends ConstraintValidator
      * verification (fresh derive and stored-result replay alike) flows
      * through:
      *
-     *  1. the canonical nonce is decoded and a fresh owner token drawn;
-     *  2. the nonce-keyed disposition record is CLAIMED:
+     *  1. the canonical nonce is decoded, a fresh owner token drawn and
+     *     the nonce -> decision handle is CONSUMED (GETDEL, at most one
+     *     winner) BEFORE the claim — the pending disposition record
+     *     persists the handle, so an owner crash can never lose the
+     *     original decision id of a no-post-solve Pass;
+     *  2. the nonce-keyed disposition record is CLAIMED with that handle:
      *       - 'complete'   -> the persisted final disposition is returned
      *         immediately (a replay of a valid proof reproduces the same
      *         PASS | DENY | STEP_UP | CHAIN_REQUIRED — never a bypass);
      *       - 'pending'    -> another owner's computation is live — the
      *         temporary_unavailable violation (never a silent pass);
      *       - 'claimed'/'taken_over' -> this owner runs the post-solve
-     *         assessment, persists the disposition and returns it;
+     *         assessment, persists the disposition and returns it; a
+     *         TAKEN-OVER computation resumes with the ORIGINAL owner's
+     *         decision handle (kept in the pending record), so the
+     *         completed disposition keeps the original decision id;
      *  3. the finalize MUST succeed before anything is returned — a store
      *     failure is the temporary_unavailable violation, never a silent
      *     pass.
+     *
+     * @return array{0: PostSolveDisposition, 1: bool} the final
+     *         disposition and whether it came from the PERSISTED record
+     *         (a replay — the ChainRequired re-signing then reproduces
+     *         the requirement's ORIGINAL expiry instead of a fresh one)
      *
      * @throws PostSolveDispositionUnavailableException fail-closed: the
      *                                                 disposition could not
      *                                                 be resolved durably
      */
-    private function resolveFinalDisposition(string $token, VerifyOutcome $outcome, ?Request $request, KiwiCaptcha $constraint, string $ip): PostSolveDisposition
+    private function resolveFinalDisposition(string $token, VerifyOutcome $outcome, ?Request $request, KiwiCaptcha $constraint, string $ip, ?string $canonicalBinding): array
     {
         $nonce = $this->verifiedNonceOf($token);
         if ($nonce === null || $nonce === '') {
@@ -675,18 +762,34 @@ final class KiwiCaptchaValidator extends ConstraintValidator
         }
         $session = $request !== null ? $this->continuityCookie?->read($request) : null;
 
+        // NONCE -> DECISION CONSUMPTION: the short-lived nonce -> decision
+        // handle is CONSUMED (GETDEL, at most one winner) BEFORE the
+        // claim, and the handle is persisted in the pending disposition
+        // record ({@see PostSolveDispositionStore::claim()}) — an owner
+        // crash after the consumption can never lose the original
+        // decision id, and a crash-taken-over computation completes the
+        // disposition with it. On scopes WITHOUT post_solve_check the
+        // ORIGINAL pre-issue decision id becomes the request's current
+        // decision id ({@see RiskGateway::setCurrentDecisionId()}), so the
+        // application can confirm this challenge's original decision. On
+        // post_solve_check scopes the superseded mapping is still consumed
+        // (cleanup — it can never be confirmed against a stale decision),
+        // and the fresh POST-SOLVE decision becomes the current
+        // confirmation target instead.
+        $decisionId = $this->consumeDecisionForToken($token);
+
         if ($this->dispositionStore === null) {
             // No store wired (manual construction / legacy seam): the
             // disposition is computed and applied WITHOUT persistence. The
             // extension always wires a store, so the durable path below is
             // the production behavior.
-            return $this->assessFinalDisposition($token, $outcome, $request, $constraint, $ip, $session, $nonce);
+            return [$this->assessFinalDisposition($token, $outcome, $request, $constraint, $ip, $session, $nonce, $canonicalBinding, $decisionId), false];
         }
 
         $owner = bin2hex(random_bytes(16));
         $ttl = Config::MAX_TTL_SECS + $this->postSolveDispositionTtlMarginSecs;
         try {
-            $claim = $this->dispositionStore->claim($nonce, $owner, $ttl);
+            $claim = $this->dispositionStore->claim($nonce, $owner, $ttl, $decisionId);
         } catch (\Throwable $e) {
             throw new PostSolveDispositionUnavailableException('the post-solve disposition store is unavailable', 0, $e);
         }
@@ -709,7 +812,7 @@ final class KiwiCaptchaValidator extends ConstraintValidator
                 $this->risk->setCurrentDecisionId($disposition->decisionId);
             }
 
-            return $disposition;
+            return [$disposition, true];
         }
 
         if ($claim !== 'claimed' && $claim !== 'taken_over') {
@@ -719,7 +822,27 @@ final class KiwiCaptchaValidator extends ConstraintValidator
             throw new PostSolveDispositionUnavailableException('the post-solve disposition claim is held by another owner');
         }
 
-        $disposition = $this->assessFinalDisposition($token, $outcome, $request, $constraint, $ip, $session, $nonce);
+        $storedDecisionId = $decisionId;
+        if ($claim === 'taken_over') {
+            // A takeover resumes the ORIGINAL owner's work: the pending
+            // record holds the decision handle the crashed owner consumed
+            // (its GETDEL is empty now) — the completed disposition keeps
+            // the ORIGINAL decision id.
+            try {
+                $record = $this->dispositionStore->read($nonce);
+            } catch (\Throwable $e) {
+                throw new PostSolveDispositionUnavailableException('the post-solve disposition record is unreadable', 0, $e);
+            }
+            if ($record === null) {
+                // The claim was taken over but the record vanished between
+                // the claim and the read (a clock/expiry boundary): fail
+                // closed — never silently pass.
+                throw new PostSolveDispositionUnavailableException('the post-solve disposition record vanished after the takeover');
+            }
+            $storedDecisionId = $record->decisionId ?? $decisionId;
+        }
+
+        $disposition = $this->assessFinalDisposition($token, $outcome, $request, $constraint, $ip, $session, $nonce, $canonicalBinding, $storedDecisionId);
 
         try {
             $finalized = $this->dispositionStore->finalize($nonce, $owner, $disposition);
@@ -730,22 +853,36 @@ final class KiwiCaptchaValidator extends ConstraintValidator
             throw new PostSolveDispositionUnavailableException('the post-solve disposition finalize was refused');
         }
 
-        return $disposition;
+        return [$disposition, false];
     }
 
     /**
-     * The post-solve assessment of a verified proof: the nonce->decision
-     * consumption, the form-submission honeypot evidence (recorded with its
-     * nonce-derived idempotency key — a crash-taken-over computation never
-     * double-books the signal), and the fresh reassessment whenever the
-     * scope opts in (post_solve_check), chaining is relevant, or the exact
-     * decoy was filled (a honeypot hit alone — even with post_solve_check
-     * false and chaining disabled — must trigger the fresh v2 assessment).
-     * The assessment ALWAYS carries the nonce-derived stable idempotency
-     * key 'postsolve:'.hash('sha256', $nonce), so a takeover re-assessment
-     * is dedupe-key-identical to the original.
+     * The post-solve assessment of a verified proof: the form-submission
+     * honeypot evidence (recorded with its nonce-derived idempotency key —
+     * a crash-taken-over computation never double-books the signal), and
+     * the fresh reassessment whenever the scope opts in (post_solve_check),
+     * chaining is relevant, or the exact decoy was filled (a honeypot hit
+     * alone — even with post_solve_check false and chaining disabled —
+     * must trigger the fresh v2 assessment). The assessment ALWAYS carries
+     * the nonce-derived stable idempotency key
+     * 'postsolve:'.hash('sha256', $nonce), so a takeover re-assessment is
+     * dedupe-key-identical to the original. The decision handle was
+     * already consumed BEFORE the claim ({@see resolveFinalDisposition()})
+     * and travels in here — the ORIGINAL handle of the first owner on a
+     * takeover — so the plain Pass carries the original pre-issue
+     * decision id even when the completing owner is not the consuming one.
+     *
+     * @param string|null $canonicalBinding the authority's server-owned
+     *                                      transaction binding (resolved
+     *                                      ONCE, before the binding
+     *                                      comparison — never re-resolved
+     *                                      here)
+     * @param string|null $originalDecisionId the STORED decision handle:
+     *                                      what the first owner consumed
+     *                                      (or the pending record's handle
+     *                                      on a takeover)
      */
-    private function assessFinalDisposition(string $token, VerifyOutcome $outcome, ?Request $request, KiwiCaptcha $constraint, string $ip, ?string $session, string $nonce): PostSolveDisposition
+    private function assessFinalDisposition(string $token, VerifyOutcome $outcome, ?Request $request, KiwiCaptcha $constraint, string $ip, ?string $session, string $nonce, ?string $canonicalBinding, ?string $originalDecisionId): PostSolveDisposition
     {
         $postSolveScope = $this->risk !== null && $this->risk->postSolveCheck($constraint->scope);
 
@@ -790,22 +927,18 @@ final class KiwiCaptchaValidator extends ConstraintValidator
             $honeypotHit = $this->formDecoyEvidence($request, self::expectedDecoyField($nonce));
         }
 
-        // NONCE -> DECISION CONSUMPTION: the short-lived nonce ->
-        // decision handle is CONSUMED (GETDEL, at most one winner). On
-        // scopes WITHOUT post_solve_check the ORIGINAL pre-issue decision
-        // id becomes the request's current decision id
+        // The ORIGINAL pre-issue decision id was consumed BEFORE the claim
+        // (GETDEL — at most one consumer) and travels in as the STORED
+        // handle: on scopes WITHOUT post_solve_check it becomes the
+        // request's current decision id
         // ({@see RiskGateway::setCurrentDecisionId()}), so the application
-        // can confirm this challenge's original decision. On post_solve_check
-        // scopes the superseded mapping is still consumed (cleanup — it can
-        // never be confirmed against a stale decision), and the fresh
-        // POST-SOLVE decision becomes the current confirmation target
-        // instead.
-        $originalDecisionId = null;
-        if ($this->risk !== null) {
-            $originalDecisionId = $this->consumeDecisionForToken($token);
-            if (!$postSolveScope && $originalDecisionId !== null) {
-                $this->risk->setCurrentDecisionId($originalDecisionId);
-            }
+        // can confirm this challenge's original decision. On
+        // post_solve_check scopes the superseded mapping is already
+        // consumed (cleanup — it can never be confirmed against a stale
+        // decision), and the fresh POST-SOLVE decision becomes the current
+        // confirmation target instead.
+        if ($this->risk !== null && !$postSolveScope && $originalDecisionId !== null) {
+            $this->risk->setCurrentDecisionId($originalDecisionId);
         }
 
         // HONEYPOT EVIDENCE: recorded with its nonce-derived idempotency
@@ -867,7 +1000,7 @@ final class KiwiCaptchaValidator extends ConstraintValidator
             $postSolve = $this->risk->degradedDecisionForScope($this->risk->scopeId($constraint->scope));
         }
 
-        return $this->mapPostSolveDecision($token, $outcome, $request, $constraint, $nonce, $postSolve);
+        return $this->mapPostSolveDecision($token, $outcome, $constraint, $nonce, $postSolve, $canonicalBinding);
     }
 
     /**
@@ -879,9 +1012,8 @@ final class KiwiCaptchaValidator extends ConstraintValidator
      *    solved challenge) -> Pass;
      *  - STRICTLY STRONGER PoW required:
      *      stage 2 (the verified challenge IS the open requirement's
-     *      stage-2 challenge — the obligation is marked verified
-     *      idempotently) -> StepUp (the chain ends at stage 2, never a
-     *      third stage);
+     *      stage-2 challenge) -> StepUp (the chain ends at stage 2,
+     *      never a third stage);
      *      stage 1 + chaining available (chaining enabled AND the
      *      authoritative transaction binding resolved non-null — a raw
      *      client-supplied binding without an authority is NEVER
@@ -889,16 +1021,21 @@ final class KiwiCaptchaValidator extends ConstraintValidator
      *      otherwise -> StepUp — a stronger-PoW requirement must NEVER
      *      silently disappear when chaining is unavailable.
      *
-     * @throws PostSolveDispositionUnavailableException when a stage-2
-     *                                                 obligation cannot be
-     *                                                 cleared or the chain
+     * The chain transition itself is NOT performed here: the disposition
+     * is finalized by the caller FIRST (the durable
+     * {@see PostSolveDispositionStore} finalize) and the stage-2 chain is
+     * transitioned AFTER, by disposition kind, in
+     * {@see self::applyStage2Disposition()} — the final disposition is
+     * authoritative for terminality, never the core's consumed result.
+     *
+     * @throws PostSolveDispositionUnavailableException when the chain
      *                                                 requirement cannot be
      *                                                 opened (fail closed —
      *                                                 never a silent pass
      *                                                 while the obligation
      *                                                 may be uncleared)
      */
-    private function mapPostSolveDecision(string $token, VerifyOutcome $outcome, ?Request $request, KiwiCaptcha $constraint, string $nonce, ?RiskDecision $postSolve): PostSolveDisposition
+    private function mapPostSolveDecision(string $token, VerifyOutcome $outcome, KiwiCaptcha $constraint, string $nonce, ?RiskDecision $postSolve, ?string $canonicalBinding): PostSolveDisposition
     {
         if ($postSolve === null) {
             // The scope is unknown and the engine declines to evaluate:
@@ -907,25 +1044,15 @@ final class KiwiCaptchaValidator extends ConstraintValidator
         }
         $decisionId = $postSolve->decisionId;
 
-        // DEPTH-2 DETECTION: the verified challenge may BE the stage-2
-        // challenge of an open chain requirement (its nonce equals the
-        // requirement's stage2Nonce). Whenever the reassessment runs for
-        // such a challenge, the obligation is marked verified
-        // (idempotent — a failure is fail-closed temporary_unavailable:
-        // never a final PASS while the obligation may be uncleared).
-        $requirement = $this->openRequirementFor($constraint, $request);
-        $isStage2 = false;
-        if ($requirement !== null && $requirement->stage2Nonce !== null && hash_equals($requirement->stage2Nonce, $nonce)) {
-            $isStage2 = true;
-            try {
-                $verified = $this->chainTickets->markVerified($requirement->chainId, $nonce);
-            } catch (\Throwable $e) {
-                throw new PostSolveDispositionUnavailableException('the chain obligation could not be marked verified', 0, $e);
-            }
-            if (!\in_array($verified, [ChainVerifiedResult::VerifiedNew, ChainVerifiedResult::VerifiedSame], true)) {
-                throw new PostSolveDispositionUnavailableException(sprintf('the chain obligation was not cleared (%s)', $verified->value));
-            }
-        }
+        // DEPTH-2 DETECTION (read-only): the verified challenge may BE
+        // the stage-2 challenge of an open chain requirement (its nonce
+        // equals the requirement's stage2Nonce) — the chain then ends at
+        // stage 2, and a still-stronger requirement is terminal StepUp
+        // (never a third stage). The transition runs AFTER the
+        // disposition is durably finalized
+        // ({@see self::applyStage2Disposition()}).
+        $requirement = $this->openRequirementFor($constraint, $canonicalBinding);
+        $isStage2 = $requirement !== null && $requirement->stage2Nonce !== null && hash_equals($requirement->stage2Nonce, $nonce);
 
         if ($postSolve->action === RiskAction::Deny) {
             return new PostSolveDisposition(PostSolveDispositionKind::Deny, $decisionId);
@@ -950,16 +1077,17 @@ final class KiwiCaptchaValidator extends ConstraintValidator
         }
 
         // Stage-1 solved challenge: the chain opens ONLY when chaining is
-        // available — enabled AND the AUTHORITATIVE transaction binding of
-        // the request resolves non-null (a raw client-supplied binding
-        // without an authority is NEVER sufficient).
-        $authoritativeBinding = $this->authoritativeBinding($constraint, $request);
-        if ($this->chainTickets !== null && $authoritativeBinding !== null) {
+        // available — enabled AND the canonical transaction binding
+        // resolved non-null (a raw client-supplied binding without an
+        // authority is NEVER sufficient). The canonical binding is the
+        // value resolved ONCE before the binding comparison — the
+        // authority is never consulted again here.
+        if ($this->chainTickets !== null && $this->bindingAuthority !== null && $canonicalBinding !== null) {
             try {
                 $chainRequirement = $this->chainTickets->requireStage2(
                     $nonce,
                     $constraint->scope,
-                    $authoritativeBinding,
+                    $canonicalBinding,
                     $this->policyVersion,
                     $postSolve->action,
                     $this->chainExpiresAt(),
@@ -982,60 +1110,167 @@ final class KiwiCaptchaValidator extends ConstraintValidator
     }
 
     /**
-     * The authoritative transaction binding of the request via the wired
-     * binding authority, or null when no authority is wired or it declines
-     * (chaining then never opens — a raw client-supplied binding without
-     * an authority is never sufficient).
+     * THE STAGE-2 CHAIN TRANSITION BY FINAL DISPOSITION — the disposition
+     * is authoritative for transaction terminality, NEVER the core's
+     * consumed result. Runs AFTER the disposition was durably finalized
+     * ({@see PostSolveDispositionStore::finalize()} MUST have succeeded —
+     * the caller's resolveFinalDisposition guarantees it), so the chain
+     * transition can never clear — or fail to clear — an obligation whose
+     * final disposition is not yet durable.
+     *
+     * Detection (the same mechanism as the mapPostSolveDecision depth-2
+     * detection): the verified challenge is a recognized stage-2 nonce
+     * when an OPEN requirement of the request's (scope, CANONICAL
+     * binding, policy epoch) holds the EXACT nonce as its stage2Nonce.
+     * The canonical binding is the value resolved ONCE before the binding
+     * comparison — the authority is never consulted again here.
+     * The detection runs on EVERY valid solve — the no-reassessment Pass
+     * path (post_solve_check=false, no honeypot, no chain-eligible
+     * scope) included — so a Pass disposition for a recognized stage-2
+     * nonce STILL ends the chain (markVerified) instead of leaving it
+     * issued for the controller to clean up.
+     *
+     * Transition BY KIND, all idempotent and nonce-pinned:
+     *  - Pass   -> markVerified (the obligation is CLEARED atomically),
+     *  - StepUp -> markStepUpRequired (the obligation is KEPT — the
+     *    transaction stays bound to the step-up requirement),
+     *  - Deny   -> markDenied (the obligation is KEPT — the transaction
+     *    stays bound to its final denial),
+     *  - ChainRequired -> unreachable for a stage-2 nonce (a stage-2
+     *    challenge never opens a third stage) — fail closed.
+     *
+     * A transition failure or refusal is fail-closed
+     * {@see PostSolveDispositionUnavailableException} (temporary_
+     * unavailable) — never a silent pass while the obligation may be
+     * uncleared.
+     *
+     * @throws PostSolveDispositionUnavailableException
      */
-    private function authoritativeBinding(KiwiCaptcha $constraint, ?Request $request): ?string
+    private function applyStage2Disposition(string $token, PostSolveDisposition $disposition, KiwiCaptcha $constraint, ?string $canonicalBinding): void
     {
-        if ($this->bindingAuthority === null || $request === null) {
-            return null;
+        $requirement = $this->openRequirementFor($constraint, $canonicalBinding);
+        if ($requirement === null || $requirement->stage2Nonce === null) {
+            return;
+        }
+        $nonce = $this->verifiedNonceOf($token);
+        if ($nonce === null || !hash_equals($requirement->stage2Nonce, $nonce)) {
+            return;
         }
         try {
-            $binding = $this->bindingAuthority->resolve($request, $constraint->scope, $this->requestBindingFromRequest($request));
-        } catch (\Throwable) {
-            // An authority failure fails toward MORE security: no
-            // authoritative binding -> no chain -> terminal StepUp.
-            return null;
+            $result = match ($disposition->kind) {
+                PostSolveDispositionKind::Pass => $this->chainTickets->markVerified($requirement->chainId, $nonce),
+                PostSolveDispositionKind::StepUp => $this->chainTickets->markStepUpRequired($requirement->chainId, $nonce),
+                PostSolveDispositionKind::Deny => $this->chainTickets->markDenied($requirement->chainId, $nonce),
+                PostSolveDispositionKind::ChainRequired => null,
+            };
+        } catch (\Throwable $e) {
+            throw new PostSolveDispositionUnavailableException('the stage-2 chain transition failed', 0, $e);
+        }
+        if ($result === null) {
+            throw new PostSolveDispositionUnavailableException('a recognized stage-2 nonce can never carry a ChainRequired disposition');
+        }
+        if ($result === ChainVerifiedResult::Conflict || $result === ChainVerifiedResult::Missing) {
+            throw new PostSolveDispositionUnavailableException(sprintf('the stage-2 chain transition was refused (%s)', $result->value));
+        }
+    }
+
+    /**
+     * THE canonical transaction binding of the request, resolved EXACTLY
+     * ONCE per validation (BEFORE the signed-record binding comparison)
+     * and threaded through every binding decision of the validation — the
+     * stage-2 transaction lookup, the obligation lookup and the chain
+     * creation — the authority is NEVER consulted twice.
+     *
+     * With an authority configured the presented request binding is only
+     * a HINT: the authority resolves the SERVER-OWNED canonical value
+     * (the same value the challenge controller signed at issuance). An
+     * authority THROW (its backend temporarily unavailable) is fail-closed
+     * {@see PostSolveDispositionUnavailableException} — the caller
+     * answers temporary_unavailable (a violation, never a silent pass,
+     * never a raw exception); a null resolution (the transaction is
+     * invalid/unknown) is the normal invalid-binding outcome. Without an
+     * authority the current behavior is unchanged: the raw request
+     * binding (the attribute the application controller copied from the
+     * POSTed kiwi_request_binding field — or the raw POST field).
+     *
+     * @throws PostSolveDispositionUnavailableException when the authority
+     *                                                 fails (fail closed)
+     */
+    private function resolveAuthoritativeBinding(KiwiCaptcha $constraint, ?Request $request): ?string
+    {
+        $presented = $this->requestBindingFromRequest($request);
+        if ($this->bindingAuthority === null || $request === null) {
+            return $presented;
+        }
+        try {
+            $binding = $this->bindingAuthority->resolve($request, $constraint->scope, $presented);
+        } catch (\Throwable $e) {
+            throw new PostSolveDispositionUnavailableException('the authoritative transaction binding could not be resolved', 0, $e);
         }
 
         return \is_string($binding) && $binding !== '' ? $binding : null;
     }
 
     /**
-     * The OPEN chain requirement of this request's (scope, authoritative
+     * The OPEN chain requirement of this request's (scope, CANONICAL
      * binding, policy epoch), or null when none exists / chaining or the
      * authority is unavailable. Used for the stage-2 detection: a verified
      * challenge whose nonce equals the requirement's stage2Nonce IS the
-     * stage-2 challenge — the chain ends there.
+     * stage-2 challenge — the chain ends there. The canonical binding is
+     * the value resolved ONCE before the binding comparison — it is never
+     * re-resolved here.
      */
-    private function openRequirementFor(KiwiCaptcha $constraint, ?Request $request): ?ChainRequirement
+    private function openRequirementFor(KiwiCaptcha $constraint, ?string $canonicalBinding): ?ChainRequirement
     {
-        if ($this->chainTickets === null) {
-            return null;
-        }
-        $binding = $this->authoritativeBinding($constraint, $request);
-        if ($binding === null) {
+        if ($this->chainTickets === null || $this->bindingAuthority === null || $canonicalBinding === null) {
             return null;
         }
         try {
-            return $this->chainTickets->findOpenRequirement($constraint->scope, $binding, $this->policyVersion);
+            return $this->chainTickets->findOpenRequirement($constraint->scope, $canonicalBinding, $this->policyVersion);
         } catch (\Throwable) {
             return null;
         }
     }
 
     /**
-     * The absolute expiry of a chain ticket: now + the configured chain
-     * lifetime (risk.chaining.ttl_secs). The SAME value opens the stage-2
-     * requirement (requireStage2) and re-signs the ticket of a persisted
-     * CHAIN_REQUIRED disposition, so a replay reproduces the same ticket
-     * shape.
+     * The absolute expiry of a chain ticket on the FRESH path: now + the
+     * configured chain lifetime (risk.chaining.ttl_secs). The SAME value
+     * opens the stage-2 requirement (requireStage2) and signs the ticket
+     * of a freshly computed CHAIN_REQUIRED disposition. A REPLAY re-signs
+     * with the requirement's ORIGINAL expiry instead
+     * ({@see chainRequirementExpiresAt()}), so a re-signed ticket can
+     * never outlive its chain state.
      */
     private function chainExpiresAt(): int
     {
         return time() + max(1, $this->chainTtlSecs);
+    }
+
+    /**
+     * The ORIGINAL expiry of the chain behind a REPLAYED CHAIN_REQUIRED
+     * disposition: the requirement's server-held expiresAt
+     * (findOpenRequirement on the SAME (scope, canonical binding, policy
+     * epoch) the chain was opened under). The replayed ticket re-signs
+     * with that value — never with a FRESH expiry — so the re-signed
+     * ticket is the deterministic SAME ticket and can never outlive its
+     * chain state.
+     *
+     * @throws PostSolveDispositionUnavailableException when the
+     *                                                 requirement is gone
+     *                                                 (the chain expired or
+     *                                                 was consumed) — fail
+     *                                                 closed, never a
+     *                                                 ticket that outlives
+     *                                                 its chain
+     */
+    private function chainRequirementExpiresAt(KiwiCaptcha $constraint, ?string $canonicalBinding): int
+    {
+        $requirement = $this->chainTickets?->findOpenRequirement($constraint->scope, (string) ($canonicalBinding ?? ''), $this->policyVersion);
+        if ($requirement === null) {
+            throw new PostSolveDispositionUnavailableException('the chain requirement of the replayed disposition is gone');
+        }
+
+        return $requirement->expiresAt;
     }
 
     /**

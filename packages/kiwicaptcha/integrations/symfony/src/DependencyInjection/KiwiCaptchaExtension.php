@@ -1008,6 +1008,15 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             null, // idempotency wait bound (default)
             $config['risk']['policy_version'] ?? 1, // security-policy epoch in the idempotency identity
         ]))
+            // The security-epoch monitor drives the identity AND the
+            // fail-closed check: the effective epoch (the monitor's
+            // per-request refresh) binds the idempotency backend
+            // identity, and a stale central policy read answers the
+            // retryable provider internal-error — mirroring the native
+            // controller's wiring (a Siteverify-only worker must observe
+            // policy revocations and the max-stale fail-closed window
+            // too).
+            ->setArgument('$epochMonitor', new Reference(SecurityEpochMonitor::class))
             // The logical-operation identity of the redemption rides IN
             // the consumed runtime state (written atomically with the
             // pending→consumed transition) — the recovery gate on the
@@ -1095,6 +1104,16 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             ]));
             $dispositionStoreRef = new Reference(ArrayPostSolveDispositionStore::class);
         }
+        // The challenge controller receives the SAME disposition store: a
+        // consumed-valid stage-2 challenge is NEVER terminal from the
+        // core's consumed result alone — the controller reads the nonce's
+        // FINAL disposition and transitions the chain by kind (Pass ->
+        // markVerified, StepUp -> markStepUpRequired, Deny ->
+        // markDenied; missing/pending -> the retryable 503). The
+        // disposition store is defined above, so the argument is attached
+        // after the controller definition.
+        $container->getDefinition(ChallengeController::class)->setArgument('$postSolveDispositionStore', $dispositionStoreRef);
+
         // The authoritative transaction-binding authority is wired by the
         // chaining region above (risk.request_binding_authority; null when
         // not configured — chaining then never opens and the validator

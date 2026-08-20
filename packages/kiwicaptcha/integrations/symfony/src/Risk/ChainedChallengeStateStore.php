@@ -4,8 +4,6 @@ declare(strict_types=1);
 
 namespace BelConsulting\KiwiCaptchaBundle\Risk;
 
-use KiwiCaptcha\Risk\RiskAction;
-
 /**
  * Server-held state of a chained-challenge chain: the stage-1 challenge
  * nonce (the verified proof that opened the chain), the scope, the
@@ -19,7 +17,9 @@ use KiwiCaptcha\Risk\RiskAction;
  *       ^                                            |
  *       +-------------release(owner)-----------------+
  *   reserved(owner) --markIssued(owner, nonce)--> issued(stage2Nonce)
- *   issued(stage2Nonce) --markVerified(nonce)--> verified(stage2Nonce)  [TERMINAL]
+ *   issued(stage2Nonce) --markVerified(nonce)--> verified(stage2Nonce)      [TERMINAL]
+ *   issued(stage2Nonce) --markStepUpRequired(nonce)--> step_up_required(nonce) [TERMINAL]
+ *   issued(stage2Nonce) --markDenied(nonce)--> denied(nonce)                [TERMINAL]
  *   issued(stage2Nonce) --rearmIssued(nonce)--> available
  *
  *  - The chain is a SERVER-SIDE TRANSACTION OBLIGATION: every chain is
@@ -37,8 +37,10 @@ use KiwiCaptcha\Risk\RiskAction;
  *    reserved by ME answers 'retry', reserved by ANOTHER owner with a
  *    LIVE lease answers 'busy', an EXPIRED other-owner lease is TAKEN
  *    OVER and answers 'taken_over', issued/verified answer 'issued' /
- *    'verified' (recover, never re-mint) and absent answers 'missing'. A
- *    chain record WITHOUT an expiry is CORRUPTED state — fail closed
+ *    'verified' (recover, never re-mint), the TERMINAL
+ *    step_up_required/denied states answer 'step_up_required'/'denied'
+ *    (the obligation stays bound) and absent answers 'missing'. A chain
+ *    record WITHOUT an expiry is CORRUPTED state — fail closed
  *    ('missing'), never manufacture a lifetime from the configured TTL.
  *  - markIssued() is the idempotent owner-scoped issuance transition
  *    (reserved(me) -> issued(stage2Nonce)): the issued record (kept with
@@ -47,10 +49,17 @@ use KiwiCaptcha\Risk\RiskAction;
  *    (except through the explicit rearm, which returns the chain to the
  *    available state for a FRESH stage-2 mint at the same-or-stronger
  *    floor — NEVER a stage-1).
- *  - markVerified() is the TERMINAL transition (issued(nonce) ->
+ *  - markVerified() is the TERMINAL PASS transition (issued(nonce) ->
  *    verified(nonce)) and ATOMICALLY deletes the obligation key ONLY if
  *    it still points at this chainId. The terminal verified record is
  *    kept until its TTL (a retry can confirm the chain ended).
+ *  - markStepUpRequired() / markDenied() are the TERMINAL
+ *    disposition transitions (issued(nonce) -> step_up_required(nonce) /
+ *    issued(nonce) -> denied(nonce)): the obligation mapping is KEPT —
+ *    the transaction stays bound to its final disposition, so a later
+ *    challenge request for the same transaction re-encounters the
+ *    terminal state (never a new stage-1). The terminal records are kept
+ *    until their TTL.
  *  - release(owner) undoes a reservation (reserved -> available) on any
  *    refused or failed issuance: the ticket stays reusable — the chain is
  *    not burned by a later failure. A release by a NON-owner is an atomic
@@ -59,12 +68,17 @@ use KiwiCaptcha\Risk\RiskAction;
  *    non-owner transition is an atomic no-op).
  *
  * The one-shot invariant is unchanged: a chain id can never gate a second
- * issuance while issued/verified, and a client cannot skip stages by
+ * issuance while issued/terminal, and a client cannot skip stages by
  * replaying a consumed chain. The state TTL equals the chain lifetime
  * (risk.chaining.ttl_secs), so an unused chain evaporates with its
  * ticket.
  *
- * @deprecated contract — the four-state transactional machine lives on
+ * The typed surface ({@see ChainRequirement} /
+ * {@see ChainReservationResult} / {@see ChainIssuedResult} /
+ * {@see ChainVerifiedResult}) lives in its own PSR-4 files, loadable
+ * standalone.
+ *
+ * @deprecated contract — the transactional machine lives on
  *              {@see TransactionalChainedChallengeStateStore}; these
  *              legacy methods are retained for source compatibility and
  *              removed in the next major. The legacy 'completed' state is
@@ -103,7 +117,7 @@ interface ChainedChallengeStateStore
      * full strictly-decoded v2 record or null when the chain is
      * absent/expired.
      *
-     * @return array{stage1Nonce: string, scope: string, requestBinding: ?string, requiredAction: string, requiredRank: int, policyVersion: int, chainDepth: int, state: 'available'|'reserved'|'issued'|'verified'|'completed', owner: ?string, leaseUntil: ?int, stage2Nonce: ?string, obligationId: string, expiresAt: int}|null
+     * @return array{stage1Nonce: string, scope: string, requestBinding: ?string, requiredAction: string, requiredRank: int, policyVersion: int, chainDepth: int, state: 'available'|'reserved'|'issued'|'verified'|'step_up_required'|'denied'|'completed', owner: ?string, leaseUntil: ?int, stage2Nonce: ?string, obligationId: string, expiresAt: int}|null
      *
      * @throws MalformedChainedChallengeStateException when the record
      *                                                 violates the strict
@@ -135,6 +149,9 @@ interface ChainedChallengeStateStore
      *                  name of the same terminal state),
      *  - 'verified'    the chain is TERMINAL — the caller recovers the
      *                  issued challenge,
+     *  - 'step_up_required' / 'denied' — the chain is TERMINAL with the
+     *                  transaction bound to its final disposition — the
+     *                  caller must NOT issue,
      *  - 'missing'     no state exists (never issued / expired / corrupt
      *                  without expiry).
      *
@@ -170,97 +187,4 @@ interface ChainedChallengeStateStore
      * @deprecated use markIssued() on the transactional contract
      */
     public function complete(string $chainId, string $ownerToken, string $stage2Nonce): ?array;
-}
-
-/**
- * The open-chain REQUIREMENT of one transaction — the typed surface the
- * stage-2 issuance and the disposition layer consume. The state is the
- * machine state of the chain: available | reserved | issued | verified.
- * (Legacy 'completed' records — the historical name of the
- * terminal-with-nonce state — are reported as 'issued': semantically
- * identical.)
- */
-final class ChainRequirement
-{
-    public function __construct(
-        public readonly string $chainId,
-        public readonly string $stage1Nonce,
-        public readonly string $scope,
-        /** The AUTHORITATIVE transaction binding ('' = the transaction is unbound). */
-        public readonly string $requestBinding,
-        public readonly int $policyVersion,
-        public readonly RiskAction $requiredAction,
-        public readonly int $requiredRank,
-        /** Always 2 — the chain is a selective extension of depth 2. */
-        public readonly int $chainDepth,
-        /** available | reserved | issued | verified. */
-        public readonly string $state,
-        /** The issued stage-2 challenge nonce (issued/verified). */
-        public readonly ?string $stage2Nonce,
-        /** The reservation owner (reserved). */
-        public readonly ?string $owner,
-        /** The reservation lease deadline, unix seconds (reserved). */
-        public readonly ?int $leaseUntil,
-        public readonly int $expiresAt,
-    ) {
-    }
-}
-
-/**
- * The typed result of the owner-scoped reservation claim
- * ({@see TransactionalChainedChallengeStateStore::reserve()}) — never
- * magic strings at the consumer surface.
- */
-enum ChainReservationResult: string
-{
-    /** This call reserved the chain (or took over an expired lease). */
-    case Available = 'available';
-    /** Already reserved by the SAME owner token. */
-    case Retry = 'retry';
-    /** Reserved by another owner with a LIVE lease — the in-progress 503. */
-    case Busy = 'busy';
-    /** Reserved by another owner with an EXPIRED lease — claimed by this call. */
-    case TakenOver = 'taken_over';
-    /** The chain already issued a stage-2 challenge — recover it. */
-    case Issued = 'issued';
-    /** The chain is TERMINAL — recover the issued challenge. */
-    case Verified = 'verified';
-    /** No state exists (never issued / expired). */
-    case Missing = 'missing';
-}
-
-/**
- * The typed result of the idempotent issuance transition
- * ({@see TransactionalChainedChallengeStateStore::markIssued()}).
- */
-enum ChainIssuedResult: string
-{
-    /** reserved(me) -> issued(stage2Nonce) — this call performed the transition. */
-    case IssuedNew = 'issued_new';
-    /** Already issued with the SAME nonce (a retry) — the issuance is confirmed. */
-    case IssuedSame = 'issued_same';
-    /** Already verified with the SAME nonce — the stage was durably issued. */
-    case VerifiedSame = 'verified_same';
-    /** Issued/verified with a DIFFERENT nonce — another issuance won the chain. */
-    case Conflict = 'conflict';
-    /** The chain is not reserved by this owner (or not reserved at all). */
-    case NotOwner = 'not_owner';
-    /** The chain state is absent/expired. */
-    case Missing = 'missing';
-}
-
-/**
- * The typed result of the TERMINAL verification transition
- * ({@see TransactionalChainedChallengeStateStore::markVerified()}).
- */
-enum ChainVerifiedResult: string
-{
-    /** issued(nonce) -> verified(nonce) — this call performed the transition. */
-    case VerifiedNew = 'verified_new';
-    /** Already verified with the SAME nonce (a retry) — the chain is confirmed terminal. */
-    case VerifiedSame = 'verified_same';
-    /** The chain holds a DIFFERENT nonce or is not in an issuable state. */
-    case Conflict = 'conflict';
-    /** The chain state is absent/expired. */
-    case Missing = 'missing';
 }

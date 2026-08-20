@@ -46,15 +46,20 @@ use KiwiCaptcha\Risk\RiskAction;
  *
  * The chain is a SELECTIVE EXTENSION of depth 2 (chainDepth is always 2):
  * the state machine (reserveStage2 / markIssued / markVerified /
- * rearmIssued) lets a FAILED stage-2 issuance release the reservation so
- * the SAME ticket retries, an ISSUED issuance is recovered on retry (the
- * exact same challenge — no re-mint), a consumed-valid stage-2 VERIFIES
- * the chain (the TERMINAL state — the obligation is cleared atomically),
- * and an expired/invalid stage-2 REARMS the chain for a FRESH stage-2
- * mint at the same-or-stronger floor — NEVER a stage-1. Every result is
- * TYPED ({@see ChainReservationResult} / {@see ChainIssuedResult} /
- * {@see ChainVerifiedResult} / bool) — never magic strings at this
- * surface.
+ * markStepUpRequired / markDenied / rearmIssued) lets a FAILED stage-2
+ * issuance release the reservation so the SAME ticket retries, an ISSUED
+ * issuance is recovered on retry (the exact same challenge — no re-mint),
+ * a consumed-valid stage-2 with a PASS final disposition VERIFIES the
+ * chain (the TERMINAL state — the obligation is cleared atomically), a
+ * consumed-valid stage-2 with a STEP_UP final disposition transitions the
+ * chain to step_up_required and with a DENY final disposition to denied
+ * (both TERMINAL — the obligation mapping is KEPT, so a later challenge
+ * request for the same transaction re-encounters the terminal state and
+ * can never restart at stage 1), and an expired/invalid stage-2 REARMS
+ * the chain for a FRESH stage-2 mint at the same-or-stronger floor —
+ * NEVER a stage-1. Every result is TYPED ({@see ChainReservationResult} /
+ * {@see ChainIssuedResult} / {@see ChainVerifiedResult} / bool) — never
+ * magic strings at this surface.
  *
  * The reservation lease is the SHORT risk.chaining.reservation_lease_secs
  * (bounded by the chain record's own remaining TTL — a crashed owner
@@ -143,7 +148,10 @@ final class ChainedChallengeTicketService
      * read the obligation -> the chain record and return the typed
      * requirement, or null when no open obligation exists (the ordinary
      * stage-1 flow). A VERIFIED chain never returns here — its obligation
-     * was cleared atomically at verification.
+     * was cleared atomically at verification. A chain in the TERMINAL
+     * step_up_required/denied state DOES return here: its obligation
+     * mapping is kept, so the controller answers the terminal response
+     * instead of issuing (never a new stage-1).
      *
      * @throws MalformedChainedChallengeStateException when the chain
      *                                                 record violates the
@@ -333,7 +341,9 @@ final class ChainedChallengeTicketService
      * with a live lease (the retryable in-progress 503 — the caller must
      * NOT enter the issuance pipeline); 'taken_over' when the other
      * owner's lease expired; 'issued'/'verified' when the chain already
-     * issued (recover, never re-mint); 'missing' when the state is
+     * issued (recover, never re-mint); the TERMINAL
+     * 'step_up_required'/'denied' when the chain already ended in its
+     * final disposition (never issue); 'missing' when the state is
      * absent/expired.
      *
      * @throws MalformedChainedChallengeStateException when the record
@@ -353,6 +363,8 @@ final class ChainedChallengeTicketService
             'taken_over' => ChainReservationResult::TakenOver,
             'issued', 'completed' => ChainReservationResult::Issued,
             'verified' => ChainReservationResult::Verified,
+            'step_up_required' => ChainReservationResult::StepUpRequired,
+            'denied' => ChainReservationResult::Denied,
             default => ChainReservationResult::Missing,
         };
     }
@@ -428,6 +440,68 @@ final class ChainedChallengeTicketService
         return match ($result) {
             'verified_new' => ChainVerifiedResult::VerifiedNew,
             'verified_same' => ChainVerifiedResult::VerifiedSame,
+            'conflict' => ChainVerifiedResult::Conflict,
+            default => ChainVerifiedResult::Missing,
+        };
+    }
+
+    /**
+     * TERMINAL step-up transition of a solved stage-2 challenge whose
+     * FINAL disposition is STEP_UP: issued(stage2Nonce) ->
+     * step_up_required(stage2Nonce) (KEEPTTL). The obligation mapping is
+     * KEPT: the transaction stays bound to the step-up requirement, so a
+     * later challenge request for the same transaction re-encounters the
+     * terminal state (never a new stage-1). Idempotent:
+     * 'step_up_required_same' on a same-nonce retry, 'conflict' on a
+     * different nonce, 'missing' when the chain is absent.
+     *
+     * A lost reply is recoverable by READING the state and confirming the
+     * exact nonce — the caller must NOT answer a final step-up while the
+     * chain may still be issued.
+     *
+     * @throws MalformedChainedChallengeStateException when the record
+     *                                                 violates the strict
+     *                                                 v2 schema
+     * @throws \Throwable on backend failure
+     */
+    public function markStepUpRequired(string $chainId, string $stage2Nonce): ChainVerifiedResult
+    {
+        $result = $this->store->markStepUpRequired($chainId, $stage2Nonce);
+
+        return match ($result) {
+            'step_up_required_new' => ChainVerifiedResult::StepUpRequiredNew,
+            'step_up_required_same' => ChainVerifiedResult::StepUpRequiredSame,
+            'conflict' => ChainVerifiedResult::Conflict,
+            default => ChainVerifiedResult::Missing,
+        };
+    }
+
+    /**
+     * TERMINAL denial transition of a solved stage-2 challenge whose
+     * FINAL disposition is DENY: issued(stage2Nonce) -> denied(
+     * stage2Nonce) (KEEPTTL). The obligation mapping is KEPT: the
+     * transaction stays bound to its final denial, so a later challenge
+     * request for the same transaction re-encounters the terminal state
+     * (never a new stage-1). Idempotent: 'denied_same' on a same-nonce
+     * retry, 'conflict' on a different nonce, 'missing' when the chain is
+     * absent.
+     *
+     * A lost reply is recoverable by READING the state and confirming the
+     * exact nonce — the caller must NOT answer a final denial while the
+     * chain may still be issued.
+     *
+     * @throws MalformedChainedChallengeStateException when the record
+     *                                                 violates the strict
+     *                                                 v2 schema
+     * @throws \Throwable on backend failure
+     */
+    public function markDenied(string $chainId, string $stage2Nonce): ChainVerifiedResult
+    {
+        $result = $this->store->markDenied($chainId, $stage2Nonce);
+
+        return match ($result) {
+            'denied_new' => ChainVerifiedResult::DeniedNew,
+            'denied_same' => ChainVerifiedResult::DeniedSame,
             'conflict' => ChainVerifiedResult::Conflict,
             default => ChainVerifiedResult::Missing,
         };
@@ -537,7 +611,7 @@ final class ChainedChallengeTicketService
      * terminal-with-nonce state — reported as 'issued' (semantically
      * identical).
      *
-     * @param array{stage1Nonce: string, scope: string, requestBinding: ?string, requiredAction: string, requiredRank: int, policyVersion: int, chainDepth: int, state: 'available'|'reserved'|'issued'|'verified'|'completed', owner: ?string, leaseUntil: ?int, stage2Nonce: ?string, obligationId: string, expiresAt: int} $record
+     * @param array{stage1Nonce: string, scope: string, requestBinding: ?string, requiredAction: string, requiredRank: int, policyVersion: int, chainDepth: int, state: 'available'|'reserved'|'issued'|'verified'|'step_up_required'|'denied'|'completed', owner: ?string, leaseUntil: ?int, stage2Nonce: ?string, obligationId: string, expiresAt: int} $record
      */
     private static function requirementFromRecord(string $chainId, array $record): ChainRequirement
     {

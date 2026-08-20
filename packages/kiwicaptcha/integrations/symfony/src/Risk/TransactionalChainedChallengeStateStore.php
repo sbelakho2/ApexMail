@@ -17,9 +17,14 @@ namespace BelConsulting\KiwiCaptchaBundle\Risk;
  *    a client can never restart the transaction at stage 1 by discarding
  *    the ticket;
  *  - the state machine is available -> reserved(owner, short lease) ->
- *    issued(stage2Nonce) -> verified(stage2Nonce) with VERIFIED as the
- *    TERMINAL state (the verified transition atomically clears the
- *    obligation mapping);
+ *    issued(stage2Nonce) with THREE disposition-aware TERMINAL
+ *    transitions: verified(stage2Nonce) — the PASS transition that
+ *    atomically clears the obligation mapping — and the
+ *    step_up_required(stage2Nonce) / denied(stage2Nonce) transitions
+ *    that KEEP the obligation mapping (the transaction stays bound to
+ *    its final disposition, so a later challenge request for the same
+ *    transaction re-encounters the terminal state — never a new
+ *    stage-1);
  *  - rearmIssued() returns an issued chain to the available state for a
  *    FRESH stage-2 mint (pinned to the exact expected nonce — never a
  *    stage-1 downgrade);
@@ -101,10 +106,10 @@ interface TransactionalChainedChallengeStateStore extends ChainedChallengeStateS
      * TTL).
      *
      * Outcome values: 'available' | 'retry' | 'busy' | 'taken_over' |
-     * 'issued' | 'verified' | 'missing' (plus the legacy 'completed' for
-     * records written by the deprecated complete() path — the historical
-     * name of the issued state). See the parent interface for the
-     * per-outcome semantics.
+     * 'issued' | 'verified' | 'step_up_required' | 'denied' | 'missing'
+     * (plus the legacy 'completed' for records written by the deprecated
+     * complete() path — the historical name of the issued state). See the
+     * parent interface for the per-outcome semantics.
      *
      * @param string $ownerToken random per-request owner token (16 bytes,
      *                           hex) — the ONLY handle that may release or
@@ -130,8 +135,9 @@ interface TransactionalChainedChallengeStateStore extends ChainedChallengeStateS
      *  - 'issued_same'   already issued with the SAME nonce — confirmed,
      *  - 'verified_same' already verified with the SAME nonce — the
      *                    issuance is durably confirmed,
-     *  - 'conflict'      issued/verified with a DIFFERENT nonce — another
-     *                    issuance won the chain,
+     *  - 'conflict'      issued/terminal with a DIFFERENT nonce — another
+     *                    issuance (or a terminal transition) won the
+     *                    chain,
      *  - 'not_owner'     not reserved by this owner (or not reserved at
      *                    all) — an atomic no-op,
      *  - 'missing'       the chain state is absent/expired.
@@ -163,6 +169,51 @@ interface TransactionalChainedChallengeStateStore extends ChainedChallengeStateS
      *                                                 closed)
      */
     public function markVerified(string $chainId, string $stage2Nonce): string;
+
+    /**
+     * ATOMIC TERMINAL step-up transition: issued(stage2Nonce) ->
+     * step_up_required(stage2Nonce) (KEEPTTL — the terminal record is
+     * kept until its TTL). The obligation mapping is KEPT: the
+     * transaction stays bound to the step-up requirement, so a later
+     * challenge request for the same transaction re-encounters the
+     * terminal state (never a new stage-1). Outcomes:
+     *
+     *  - 'step_up_required_new'  this call performed the transition,
+     *  - 'step_up_required_same' already step_up_required with the SAME
+     *                            nonce — confirmed terminal,
+     *  - 'conflict'              the chain holds a DIFFERENT nonce or is
+     *                            not in an issuable state — an atomic
+     *                            no-op,
+     *  - 'missing'               the chain state is absent/expired.
+     *
+     * @throws MalformedChainedChallengeStateException when the record
+     *                                                 violates the strict
+     *                                                 v2 schema (fail
+     *                                                 closed)
+     */
+    public function markStepUpRequired(string $chainId, string $stage2Nonce): string;
+
+    /**
+     * ATOMIC TERMINAL denial transition: issued(stage2Nonce) ->
+     * denied(stage2Nonce) (KEEPTTL — the terminal record is kept until
+     * its TTL). The obligation mapping is KEPT: the transaction stays
+     * bound to its final denial, so a later challenge request for the
+     * same transaction re-encounters the terminal state (never a new
+     * stage-1). Outcomes:
+     *
+     *  - 'denied_new'  this call performed the transition,
+     *  - 'denied_same' already denied with the SAME nonce — confirmed
+     *                  terminal,
+     *  - 'conflict'    the chain holds a DIFFERENT nonce or is not in an
+     *                  issuable state — an atomic no-op,
+     *  - 'missing'     the chain state is absent/expired.
+     *
+     * @throws MalformedChainedChallengeStateException when the record
+     *                                                 violates the strict
+     *                                                 v2 schema (fail
+     *                                                 closed)
+     */
+    public function markDenied(string $chainId, string $stage2Nonce): string;
 
     /**
      * ATOMIC rearm of an ISSUED chain: issued(expectedStage2Nonce) ->

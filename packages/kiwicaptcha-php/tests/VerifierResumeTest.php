@@ -78,6 +78,75 @@ final class VerifierResumeTest extends TestCase
         return hash('sha256', 'logical-operation-'.$suffix);
     }
 
+    /**
+     * An Argon2id record issued under the given policy epoch / region /
+     * issuer, already solved: the argon admission gate is the ONLY seam
+     * between the resume's pre-derive revalidation and its commit, so the
+     * mid-derivation rotation tests drive it.
+     *
+     * @return array{0: ArrayStorage, 1: ChallengeRecord, 2: string}
+     */
+    private function issueAndSolveArgon(int $policyVersion = 1, ?string $region = null, ?string $issuer = null): array
+    {
+        $storage = new ArrayStorage();
+        $issuer = new Issuer(
+            new Config(
+                secretKey: Vectors::SECRET,
+                algorithm: PoWAlgorithm::Argon2id,
+                mKib: 64,
+                t: 3,
+                p: 1,
+                argon2TargetBits: 4,
+                ttlSecs: 120,
+                minDurationMs: 0,
+                policyVersion: $policyVersion,
+                issuer: $issuer,
+            ),
+            $storage,
+            now: static fn (): int => self::ISSUED_AT,
+            region: $region,
+        );
+        $challenge = $issuer->issue('login', self::CLIENT_IP);
+        $record = $storage->find($challenge->nonce);
+        self::assertNotNull($record);
+
+        $saltBytes = base64_decode($challenge->salt, true);
+        $counter = 0;
+        do {
+            $hash = sodium_crypto_pwhash(32, $challenge->prefix.$counter, $saltBytes, 3, 64 * 1024, SODIUM_CRYPTO_PWHASH_ALG_ARGON2ID13);
+            $counter++;
+        } while (Verifier::leadingZeroBits($hash) < $challenge->targetBits);
+        --$counter;
+
+        return [$storage, $record, SolutionToken::create($challenge->nonce, $counter, 5000, [])->encode()];
+    }
+
+    /**
+     * An admission gate that runs $onAcquire when the resume's Argon
+     * admission happens — AFTER the pre-derive revalidation and BEFORE
+     * the commit, exactly the rotation window the post-derive re-check
+     * must observe.
+     */
+    private function rotatingGate(\Closure $onAcquire): VerificationAdmissionGate
+    {
+        return new class($onAcquire) implements VerificationAdmissionGate {
+            public function __construct(private readonly \Closure $onAcquire)
+            {
+            }
+
+            public function acquire(): ?string
+            {
+                ($this->onAcquire)();
+
+                return 'lease-rotate';
+            }
+
+            public function release(string $lease): void
+            {
+            }
+        };
+    }
+
     // ── The lost-reply storage seam ─────────────────────────────────────
 
     /**
@@ -582,6 +651,82 @@ final class VerifierResumeTest extends TestCase
 
         $resume = (new Verifier($inner))->resumeConsumedOperation($token, Vectors::SECRET, $this->identity('a'), 'login', self::CLIENT_IP);
         self::assertTrue($resume->isOk(), 'only the identity-proven resume derives');
+    }
+
+    // ── POST-DERIVE FINAL REVALIDATION (CURRENT expectations) ──────────
+
+    public function testPolicyEpochRotationBetweenPreDeriveCheckAndCommitRefusesTheResume(): void
+    {
+        // The expected policy epoch rotates BETWEEN the pre-derive
+        // revalidation (which passed with the pre-rotation expectation)
+        // and the commit: the POST-DERIVE re-check reads the CURRENT
+        // expected epoch and refuses WrongPolicyVersion — nothing is
+        // committed, so a later same-identity resume with a matching
+        // expectation can still run.
+        [$storage, $record, $token] = $this->issueAndSolveArgon(policyVersion: 2);
+        $storage->consumeWithOperationIdentity($record->nonce, $this->identity('rotate-policy'));
+
+        $verifier = null;
+        $gate = $this->rotatingGate(static function () use (&$verifier): void {
+            $verifier?->rotateDeploymentExpectations(policyVersion: 3, region: null, issuer: null);
+        });
+        $verifier = new Verifier($storage, $gate, expectedPolicyVersion: 2);
+
+        $outcome = $verifier->resumeConsumedOperation($token, Vectors::SECRET, $this->identity('rotate-policy'), 'login', self::CLIENT_IP);
+        self::assertSame(VerifyError::WrongPolicyVersion, $outcome->error, 'a policy-epoch rotation mid-resume must fail the post-derive re-check');
+        self::assertNull($storage->consumedState($record->nonce)?->consumedResult, 'the rotated resume must NOT commit anything');
+    }
+
+    public function testRegionRotationBetweenPreDeriveCheckAndCommitRefusesTheResume(): void
+    {
+        [$storage, $record, $token] = $this->issueAndSolveArgon(region: 'eu');
+        $storage->consumeWithOperationIdentity($record->nonce, $this->identity('rotate-region'));
+
+        $verifier = null;
+        $gate = $this->rotatingGate(static function () use (&$verifier): void {
+            $verifier?->rotateDeploymentExpectations(policyVersion: null, region: 'us', issuer: null);
+        });
+        $verifier = new Verifier($storage, $gate, region: 'eu');
+
+        $outcome = $verifier->resumeConsumedOperation($token, Vectors::SECRET, $this->identity('rotate-region'), 'login', self::CLIENT_IP);
+        self::assertSame(VerifyError::WrongRegion, $outcome->error, 'a region rotation mid-resume must fail the post-derive re-check');
+        self::assertNull($storage->consumedState($record->nonce)?->consumedResult, 'the rotated resume must NOT commit anything');
+    }
+
+    public function testIssuerRotationBetweenPreDeriveCheckAndCommitRefusesTheResume(): void
+    {
+        [$storage, $record, $token] = $this->issueAndSolveArgon(issuer: 'dev');
+        $storage->consumeWithOperationIdentity($record->nonce, $this->identity('rotate-issuer'));
+
+        $verifier = null;
+        $gate = $this->rotatingGate(static function () use (&$verifier): void {
+            $verifier?->rotateDeploymentExpectations(policyVersion: null, region: null, issuer: 'prod');
+        });
+        $verifier = new Verifier($storage, $gate, expectedIssuer: 'dev');
+
+        $outcome = $verifier->resumeConsumedOperation($token, Vectors::SECRET, $this->identity('rotate-issuer'), 'login', self::CLIENT_IP);
+        self::assertSame(VerifyError::WrongIssuer, $outcome->error, 'an issuer rotation mid-resume must fail the post-derive re-check');
+        self::assertNull($storage->consumedState($record->nonce)?->consumedResult, 'the rotated resume must NOT commit anything');
+    }
+
+    public function testRotationToMatchingExpectationsMidResumeStillCommits(): void
+    {
+        // Control: a rotation that lands on MATCHING values must not
+        // reject — the resumed derivation commits as today.
+        [$storage, $record, $token] = $this->issueAndSolveArgon(policyVersion: 2, issuer: 'prod');
+        $storage->consumeWithOperationIdentity($record->nonce, $this->identity('rotate-match'));
+
+        $verifier = null;
+        $gate = $this->rotatingGate(static function () use (&$verifier): void {
+            $verifier?->rotateDeploymentExpectations(policyVersion: 2, region: null, issuer: 'prod');
+        });
+        $verifier = new Verifier($storage, $gate, expectedPolicyVersion: 2, expectedIssuer: 'prod');
+
+        $outcome = $verifier->resumeConsumedOperation($token, Vectors::SECRET, $this->identity('rotate-match'), 'login', self::CLIENT_IP);
+        self::assertTrue($outcome->isOk(), sprintf('a rotation to matching expectations must still commit the resume, got %s', $outcome->code()));
+        $after = $storage->consumedState($record->nonce);
+        self::assertNotNull($after?->consumedResult, 'the matching-rotation resume must commit');
+        self::assertTrue($after->consumedResult->valid);
     }
 
     private function solveFresh(ArrayStorage $storage, \KiwiCaptcha\Challenge $challenge): string

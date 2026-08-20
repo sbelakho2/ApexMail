@@ -185,7 +185,14 @@ final class ChainingWiringTest extends TestCase
         self::assertSame(1, $controller->getArgument('$policyVersion'));
         $authority = $controller->getArgument('$bindingAuthority');
         self::assertInstanceOf(Reference::class, $authority);
-        self::assertSame(self::BINDING_AUTHORITY, (string) $authority, 'the authoritative binding resolver flows into the controller (a client-supplied string is never signed unexamined)');
+        self::assertSame(self::BINDING_AUTHORITY, (string) $authority, 'the authoritative transaction-binding resolver flows into the controller (a client-supplied string is never signed unexamined)');
+
+        // The post-solve disposition store is injected into the controller
+        // too: a consumed-valid stage-2 challenge is NEVER terminal from
+        // the core's consumed result alone — the controller reads the
+        // nonce's FINAL disposition and transitions the chain by kind.
+        $disposition = $controller->getArgument('$postSolveDispositionStore');
+        self::assertInstanceOf(Reference::class, $disposition, 'the controller receives the post-solve disposition store');
 
         $validator = $container->getDefinition(KiwiCaptchaValidator::class);
         $validatorChain = $validator->getArgument('$chainTickets');

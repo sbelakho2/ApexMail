@@ -11,15 +11,17 @@ use KiwiCaptcha\Risk\RiskAction;
  * semantics), mirroring the Redis store's transactional v2 machine EXACTLY:
  * obligation-anchored create-or-get (a transaction can never be silently
  * downgraded to stage 1), available -> reserved(owner, SHORT lease) ->
- * issued(stage2Nonce) -> verified(stage2Nonce) with VERIFIED TERMINAL (the
- * verified transition clears the obligation mapping only while it still
- * points at this chain), the idempotent owner-gated issuance transition
- * (never a delete — a retry recovers the issued challenge instead of
- * re-minting), the nonce-pinned rearm (issued -> available for a FRESH
- * stage-2 mint — never a stage-1), the owner-gated release (a non-owner
- * release is an atomic no-op), and the DEPRECATED legacy complete()
- * writing the historical 'completed' terminal state (semantically
- * identical to issued).
+ * issued(stage2Nonce) with THREE disposition-aware TERMINAL transitions —
+ * verified(stage2Nonce) (clears the obligation mapping only while it
+ * still points at this chain), step_up_required(stage2Nonce) and
+ * denied(stage2Nonce) (both KEEP the obligation mapping — the transaction
+ * stays bound to its final disposition), the idempotent owner-gated
+ * issuance transition (never a delete — a retry recovers the issued
+ * challenge instead of re-minting), the nonce-pinned rearm (issued ->
+ * available for a FRESH stage-2 mint — never a stage-1), the owner-gated
+ * release (a non-owner release is an atomic no-op), and the DEPRECATED
+ * legacy complete() writing the historical 'completed' terminal state
+ * (semantically identical to issued).
  *
  * EXPLICIT CLOCK: the store runs on a caller-provided clock (unix
  * seconds, defaulting to microtime(true)) so the record TTL and the
@@ -48,7 +50,7 @@ final class ArrayChainedChallengeStateStore implements TransactionalChainedChall
     /** The chainable PoW actions (Sha16..Argon64 — never StepUp/Deny). */
     private const CHAINABLE_ACTIONS = ['sha16', 'sha18', 'sha20', 'argon16', 'argon32', 'argon64'];
 
-    private const STATES = ['available', 'reserved', 'issued', 'verified', 'completed'];
+    private const STATES = ['available', 'reserved', 'issued', 'verified', 'completed', 'step_up_required', 'denied'];
 
     /**
      * @var array<string, array{v: int, stage1Nonce: string, scope: string, obligationId: string, requiredAction: string, requiredRank: int, policyVersion: int, chainDepth: int, state: string, owner: ?string, leaseUntil: ?int, stage2Nonce: ?string, requestBinding: ?string, expiresAt: float}>
@@ -216,6 +218,12 @@ final class ArrayChainedChallengeStateStore implements TransactionalChainedChall
         if ($record['state'] === 'completed') {
             return 'completed';
         }
+        if ($record['state'] === 'step_up_required') {
+            return 'step_up_required';
+        }
+        if ($record['state'] === 'denied') {
+            return 'denied';
+        }
         if ($record['state'] === 'reserved') {
             if ($record['owner'] === $ownerToken) {
                 return 'retry';
@@ -274,6 +282,9 @@ final class ArrayChainedChallengeStateStore implements TransactionalChainedChall
         if ($record['state'] === 'verified') {
             return $record['stage2Nonce'] === $stage2Nonce ? 'verified_same' : 'conflict';
         }
+        if ($record['state'] === 'step_up_required' || $record['state'] === 'denied') {
+            return 'conflict';
+        }
 
         return 'not_owner';
     }
@@ -299,6 +310,48 @@ final class ArrayChainedChallengeStateStore implements TransactionalChainedChall
         }
 
         return 'verified_new';
+    }
+
+    public function markStepUpRequired(string $chainId, string $stage2Nonce): string
+    {
+        $record = $this->liveRecord($chainId);
+        if ($record === null) {
+            return 'missing';
+        }
+        if ($record['state'] === 'step_up_required') {
+            return $record['stage2Nonce'] === $stage2Nonce ? 'step_up_required_same' : 'conflict';
+        }
+        if (($record['state'] !== 'issued' && $record['state'] !== 'completed') || $record['stage2Nonce'] !== $stage2Nonce) {
+            return 'conflict';
+        }
+        $this->records[$chainId]['state'] = 'step_up_required';
+        // The STEP-UP transition KEEPS the obligation mapping: the
+        // transaction stays bound to the step-up requirement, so a later
+        // challenge request for the same transaction re-encounters the
+        // terminal state (never a new stage-1).
+
+        return 'step_up_required_new';
+    }
+
+    public function markDenied(string $chainId, string $stage2Nonce): string
+    {
+        $record = $this->liveRecord($chainId);
+        if ($record === null) {
+            return 'missing';
+        }
+        if ($record['state'] === 'denied') {
+            return $record['stage2Nonce'] === $stage2Nonce ? 'denied_same' : 'conflict';
+        }
+        if (($record['state'] !== 'issued' && $record['state'] !== 'completed') || $record['stage2Nonce'] !== $stage2Nonce) {
+            return 'conflict';
+        }
+        $this->records[$chainId]['state'] = 'denied';
+        // The DENIED transition KEEPS the obligation mapping: the
+        // transaction stays bound to its final denial, so a later
+        // challenge request for the same transaction re-encounters the
+        // terminal state (never a new stage-1).
+
+        return 'denied_new';
     }
 
     public function rearmIssued(string $chainId, string $expectedStage2Nonce): bool
@@ -389,14 +442,16 @@ final class ArrayChainedChallengeStateStore implements TransactionalChainedChall
      * store's decode: a missing/malformed field or a state-invariant
      * violation throws {@see MalformedChainedChallengeStateException}
      * (NEVER defaults). Validates: schema version 2; the Kiwi base64
-     * nonce shape; the canonical scope shape; the exact
-     * 64-lowercase-hex obligation id; a chainable PoW action (Sha16..
-     * Argon64 — never StepUp/Deny); a bounded rank CONSISTENT with the
-     * action; a positive policy version; chain depth exactly 2; the exact
-     * state enum; owner/leaseUntil REQUIRED in reserved and NULL
-     * elsewhere; stage2Nonce REQUIRED in issued/verified/completed and
-     * NULL elsewhere; an integer expiry; a well-shaped nullable request
-     * binding.
+     * nonce shape for BOTH stage-1 and stage-2 nonces; the canonical
+     * scope shape; the exact 64-lowercase-hex obligation id; a chainable
+     * PoW action (Sha16..Argon64 — never StepUp/Deny); a bounded rank
+     * CONSISTENT with the action; a positive policy version; chain depth
+     * exactly 2; the exact state enum (the TERMINAL
+     * step_up_required/denied states included); owner/leaseUntil REQUIRED
+     * in reserved and NULL elsewhere; stage2Nonce REQUIRED with the Kiwi
+     * base64 nonce shape in issued/verified/step_up_required/denied (and
+     * the legacy completed) and NULL elsewhere; an integer expiry; a
+     * well-shaped nullable request binding.
      *
      * @param array<string, mixed> $rec
      *
@@ -438,7 +493,7 @@ final class ArrayChainedChallengeStateStore implements TransactionalChainedChall
         }
         $state = $rec['state'] ?? null;
         if (!\is_string($state) || !\in_array($state, self::STATES, true)) {
-            throw new MalformedChainedChallengeStateException('chain record state must be one of available|reserved|issued|verified');
+            throw new MalformedChainedChallengeStateException('chain record state must be one of available|reserved|issued|verified|step_up_required|denied');
         }
         $owner = $rec['owner'] ?? null;
         $leaseUntil = $rec['leaseUntil'] ?? null;
@@ -450,9 +505,9 @@ final class ArrayChainedChallengeStateStore implements TransactionalChainedChall
             throw new MalformedChainedChallengeStateException('chain record owner/leaseUntil must be null outside the reserved state');
         }
         $stage2Nonce = $rec['stage2Nonce'] ?? null;
-        if (($state === 'issued' || $state === 'verified' || $state === 'completed')) {
-            if (!\is_string($stage2Nonce) || $stage2Nonce === '') {
-                throw new MalformedChainedChallengeStateException('chain record stage2Nonce is required in the issued/verified states');
+        if ($state === 'issued' || $state === 'verified' || $state === 'completed' || $state === 'step_up_required' || $state === 'denied') {
+            if (!\is_string($stage2Nonce) || preg_match(self::NONCE_PATTERN, $stage2Nonce) !== 1) {
+                throw new MalformedChainedChallengeStateException('chain record stage2Nonce must be a Kiwi base64 nonce in the issued/terminal states');
             }
         } elseif ($stage2Nonce !== null) {
             throw new MalformedChainedChallengeStateException('chain record stage2Nonce must be null in the available/reserved states');
@@ -474,7 +529,7 @@ final class ArrayChainedChallengeStateStore implements TransactionalChainedChall
      *
      * @param array<string, mixed> $record
      *
-     * @return array{stage1Nonce: string, scope: string, requestBinding: ?string, requiredAction: string, requiredRank: int, policyVersion: int, chainDepth: int, state: 'available'|'reserved'|'issued'|'verified'|'completed', owner: ?string, leaseUntil: ?int, stage2Nonce: ?string, obligationId: string, expiresAt: int}
+     * @return array{stage1Nonce: string, scope: string, requestBinding: ?string, requiredAction: string, requiredRank: int, policyVersion: int, chainDepth: int, state: 'available'|'reserved'|'issued'|'verified'|'step_up_required'|'denied'|'completed', owner: ?string, leaseUntil: ?int, stage2Nonce: ?string, obligationId: string, expiresAt: int}
      */
     private static function wire(array $record): array
     {

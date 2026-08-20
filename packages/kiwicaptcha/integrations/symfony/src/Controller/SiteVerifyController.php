@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace BelConsulting\KiwiCaptchaBundle\Controller;
 
+use BelConsulting\KiwiCaptchaBundle\Risk\SecurityEpochMonitor;
 use BelConsulting\KiwiCaptchaBundle\SiteVerify\IdempotencyClaim;
 use BelConsulting\KiwiCaptchaBundle\SiteVerify\RedisEval;
 use BelConsulting\KiwiCaptchaBundle\SiteVerify\SiteVerifyIdempotencyStore;
@@ -166,6 +167,18 @@ final class SiteVerifyController
          */
         private readonly int $policyVersion = 0,
         ?\KiwiCaptcha\ConsumedOutcomeRecovery $recovery = null,
+        /**
+         * The security-epoch monitor (wired by the container, mirroring
+         * the native controller): refreshed at the START of every
+         * authenticated verification, so a worker that only serves
+         * Siteverify traffic still observes a central policy bump within
+         * the monitor's cache window, and its max-stale fail-closed check
+         * applies here too (a stale central policy state answers the
+         * retryable provider internal-error — nothing is claimed, nothing
+         * is verified). Null (fixtures, direct construction) keeps the
+         * static `$policyVersion` behavior exactly.
+         */
+        private readonly ?SecurityEpochMonitor $epochMonitor = null,
     ) {
         $this->recovery = $recovery ?? (new \KiwiCaptcha\ConsumedOutcomeRecovery($this->storage ?? new \KiwiCaptcha\Storage\ArrayStorage()));
         // The lease-ordering invariant is ENFORCED at construction: the
@@ -334,12 +347,33 @@ final class SiteVerifyController
             return new JsonResponse(['success' => false, 'error-codes' => ['invalid-input-secret']]);
         }
 
+        // The security-policy epoch is refreshed at the START of every
+        // authenticated verification — BEFORE any idempotency work: a
+        // worker that only serves Siteverify traffic never refreshes the
+        // monitor through native paths, so the endpoint itself pulls the
+        // CURRENT effective epoch (a central policy bump then revokes
+        // outstanding challenges within the monitor's cache window). The
+        // max-stale fail-closed check applies here too: past the
+        // configured window the central policy state can no longer be
+        // confirmed (an emergency revocation could have landed while this
+        // node could not read), so the endpoint answers the retryable
+        // provider internal-error — nothing is claimed, nothing is
+        // verified, and a later retry (with the documented
+        // idempotency_key) can still run once the state is confirmable
+        // again. Without a monitor the configured epoch is the effective
+        // one and the check never fires (the static-epoch behavior).
+        $effectiveEpoch = $this->epochMonitor?->refresh() ?? $this->policyVersion;
+        if ($this->epochMonitor?->isStale()) {
+            return $this->internalErrorResponse();
+        }
+
         // The idempotency backend identity binds the secret, the
-        // SERVER-RESOLVED expected scope and the security-policy epoch:
-        // a same-key request after a scope remap or policy bump is a NEW
-        // logical operation (a conflict), never a replay of the
-        // pre-change outcome.
-        $backendId = hash('sha256', $secret.'|'.$expectedScope.'|'.$this->policyVersion);
+        // SERVER-RESOLVED expected scope and the EFFECTIVE security-policy
+        // epoch (the monitor-refreshed value when wired, the static
+        // configured epoch otherwise): a same-key request after a scope
+        // remap or policy bump is a NEW logical operation (a conflict),
+        // never a replay of the pre-change outcome.
+        $backendId = hash('sha256', $secret.'|'.$expectedScope.'|'.$effectiveEpoch);
 
         // The LOGICAL-OPERATION IDENTITY of this claim: a single bounded
         // hex fingerprint of (backend identity, idempotency key, response

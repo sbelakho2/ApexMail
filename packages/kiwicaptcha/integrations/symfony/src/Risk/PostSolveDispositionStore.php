@@ -20,8 +20,8 @@ namespace BelConsulting\KiwiCaptchaBundle\Risk;
  * lives for the whole retryable lifetime of the consumed core result.
  *
  * The record JSON carries ONLY the disposition (kind / decision_id /
- * chain_id) — raw risk vectors, fingerprints and descriptors are never
- * stored.
+ * chain_id) plus the original decision handle — raw risk vectors,
+ * fingerprints and descriptors are never stored.
  */
 interface PostSolveDispositionStore
 {
@@ -34,13 +34,19 @@ interface PostSolveDispositionStore
      *         taken_over   — the caller took over an expired-lease claim (pending(me));
      *         complete     — the final disposition is already persisted.
      *
-     * @param string $nonce      the verified challenge nonce (random security state)
-     * @param string $owner      a fresh random owner token of this claim
-     * @param int    $ttlSeconds the RECORD TTL (the lease is a fixed short bound)
+     * @param string      $nonce      the verified challenge nonce (random security state)
+     * @param string      $owner      a fresh random owner token of this claim
+     * @param int         $ttlSeconds the RECORD TTL (the lease is a fixed short bound)
+     * @param string|null $decisionId the ORIGINAL pre-issue decision handle the
+     *                                caller consumed (GETDEL) — persisted in the
+     *                                pending record; a TAKEOVER keeps the
+     *                                ORIGINAL handle (never the new owner's), so
+     *                                a crash-taken-over computation completes
+     *                                with the first owner's decision id
      *
      * @throws \Throwable when the store is unavailable (fail closed)
      */
-    public function claim(string $nonce, string $owner, int $ttlSeconds): string;
+    public function claim(string $nonce, string $owner, int $ttlSeconds, ?string $decisionId = null): string;
 
     /**
      * Read the current record behind a nonce, or null when absent/expired.

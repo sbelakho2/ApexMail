@@ -5,10 +5,12 @@ declare(strict_types=1);
 namespace BelConsulting\KiwiCaptchaBundle\Tests;
 
 use BelConsulting\KiwiCaptchaBundle\Controller\SiteVerifyController;
+use BelConsulting\KiwiCaptchaBundle\Risk\SecurityEpochMonitor;
 use BelConsulting\KiwiCaptchaBundle\SiteVerify\IdempotencyClaim;
 use BelConsulting\KiwiCaptchaBundle\SiteVerify\SiteVerifyMetadata;
 use BelConsulting\KiwiCaptchaBundle\SiteVerify\ArraySiteVerifyMetadataStore;
 use BelConsulting\KiwiCaptchaBundle\SiteVerify\ArraySiteVerifyIdempotencyStore;
+use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\FakePredisClient;
 use KiwiCaptcha\Config;
 use KiwiCaptcha\Issuer;
 use KiwiCaptcha\PoWAlgorithm;
@@ -2815,6 +2817,242 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
             'success' => true,
         ], JsonResponse::DEFAULT_ENCODING_OPTIONS);
         self::assertSame($expectedCanonical, (string) $retryResponse->getContent(), 'the retry receives the ORIGINAL canonical success bytes');
+    }
+
+    // ── Security-epoch monitor wiring ──────────────────────────────────
+
+    /**
+     * A real SecurityEpochMonitor over the FakePredisClient, sharing the
+     * controller's verifier (the monitor rotates the verifier's expected
+     * epoch exactly like the container wiring).
+     *
+     * @return array{0: FakePredisClient, 1: SecurityEpochMonitor}
+     */
+    private function monitorFixture(Verifier $verifier, int $configuredEpoch, int $centralEpoch, \Closure $clockMs): array
+    {
+        $redis = new FakePredisClient();
+        $redis->hset('{kiwi:test-ns}:security-policy', SecurityEpochMonitor::MIN_POLICY_EPOCH_FIELD, (string) $centralEpoch);
+
+        return [$redis, new SecurityEpochMonitor($verifier, $redis, 'test-ns', $configuredEpoch, 1, $clockMs, null, null, 60)];
+    }
+
+    public function testMonitorRefreshMovesTheClaimToTheEffectiveEpochKey(): void
+    {
+        // A worker that only serves Siteverify traffic never refreshes
+        // the monitor through native paths — the controller must refresh
+        // it per authenticated request, so a central policy bump moves
+        // the backend identity (and with it the idempotency claim) to
+        // the EFFECTIVE epoch, never the static configured one.
+        $storage = new ArrayStorage();
+        $issuer = new Issuer(new Config(secretKey: self::SECRET, algorithm: PoWAlgorithm::Sha256, targetBits: 8, ttlSecs: 120, policyVersion: 3), $storage);
+        $challenge = $issuer->issue('login', '203.0.113.7');
+        $token = $this->solveSolution($storage->find($challenge->nonce));
+        usleep(((int) $challenge->minDurationMs + 10) * 1000);
+
+        $verifier = new Verifier($storage);
+        [, $monitor] = $this->monitorFixture($verifier, 2, 3, static fn (): float => 0.0);
+        $store = new ArraySiteVerifyIdempotencyStore();
+        $controller = new SiteVerifyController($verifier, self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $storage, null, null, $store, null, 90.0, 2, null, $monitor);
+        $uuid = 'f47ac10b-58cc-4372-a567-0e02b2c3d479';
+
+        $response = $controller->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+            'secret' => self::SITEVERIFY_SECRET,
+            'response' => $token,
+            'remoteip' => '203.0.113.7',
+            'idempotency_key' => $uuid,
+        ]));
+        self::assertSame(200, $response->getStatusCode());
+        self::assertTrue(json_decode((string) $response->getContent(), true)['success']);
+
+        $staticEpochBackendId = hash('sha256', self::SITEVERIFY_SECRET.'|login|2');
+        $effectiveEpochBackendId = hash('sha256', self::SITEVERIFY_SECRET.'|login|3');
+        self::assertNotSame($staticEpochBackendId, $effectiveEpochBackendId, 'precondition: the effective epoch must differ from the static one');
+        $stored = $store->stored($effectiveEpochBackendId, $uuid);
+        self::assertIsArray($stored, 'the claim must be finalized under the EFFECTIVE-epoch backend identity');
+        self::assertTrue($stored['success'] ?? false);
+        self::assertNull($store->stored($staticEpochBackendId, $uuid), 'the static-epoch key must never be touched');
+    }
+
+    public function testStaleMonitorRefusesVerificationWithRetryableInternalError(): void
+    {
+        // The max-stale fail-closed check applies to Siteverify too: once
+        // the central policy state has not been confirmed within the
+        // window, the endpoint answers the retryable provider
+        // internal-error — NO claim and NO verification (the token stays
+        // pending for a later retry).
+        $storage = new ArrayStorage();
+        $issuer = new Issuer(new Config(secretKey: self::SECRET, algorithm: PoWAlgorithm::Sha256, targetBits: 8, ttlSecs: 120), $storage);
+        $challenge = $issuer->issue('login', '203.0.113.7');
+        $token = $this->solveSolution($storage->find($challenge->nonce));
+        usleep(((int) $challenge->minDurationMs + 10) * 1000);
+        $nonce = $challenge->nonce;
+
+        $clockMs = 0.0;
+        $verifier = new Verifier($storage);
+        [$redis, $monitor] = $this->monitorFixture($verifier, 1, 1, static function () use (&$clockMs): float {
+            return $clockMs;
+        });
+        self::assertSame(1, $monitor->refresh(), 'precondition: the monitor observes the central state');
+        // Past the max-stale window (60 s) with the central read failing:
+        // the cached epoch can no longer be confirmed.
+        $redis->failCommand = '*';
+        $clockMs = 90_000.0;
+        self::assertTrue($monitor->isStale(), 'precondition: the monitor is stale');
+
+        $store = new ArraySiteVerifyIdempotencyStore();
+        $controller = new SiteVerifyController($verifier, self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $storage, null, null, $store, null, 90.0, 1, null, $monitor);
+        $uuid = 'f47ac10b-58cc-4372-a567-0e02b2c3d479';
+        $backendId = hash('sha256', self::SITEVERIFY_SECRET.'|login|1');
+
+        // Ordinary (non-idempotent) path.
+        $response = $controller->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+            'secret' => self::SITEVERIFY_SECRET,
+            'response' => $token,
+            'remoteip' => '203.0.113.7',
+        ]));
+        self::assertSame(503, $response->getStatusCode(), 'a stale security state must answer the retryable 503 internal-error');
+        self::assertSame(['internal-error'], json_decode((string) $response->getContent(), true)['error-codes']);
+        self::assertNull($storage->consumedState($nonce), 'no verification may run — the token stays pending');
+
+        // Idempotent path: the claim must never be created.
+        $idemResponse = $controller->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+            'secret' => self::SITEVERIFY_SECRET,
+            'response' => $token,
+            'remoteip' => '203.0.113.7',
+            'idempotency_key' => $uuid,
+        ]));
+        self::assertSame(503, $idemResponse->getStatusCode(), 'the idempotent path must fail closed identically');
+        self::assertSame(['internal-error'], json_decode((string) $idemResponse->getContent(), true)['error-codes']);
+        self::assertNull($store->stored($backendId, $uuid), 'a stale request must not claim');
+        self::assertNull($storage->consumedState($nonce), 'the idempotent stale path must not verify either');
+
+        // The token is still redeemable once the central state is
+        // confirmable again — the fail-closed 503s never burned it.
+        $redis->failCommand = null;
+        $clockMs = 0.0;
+        $recovered = $controller->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+            'secret' => self::SITEVERIFY_SECRET,
+            'response' => $token,
+            'remoteip' => '203.0.113.7',
+        ]));
+        self::assertSame(200, $recovered->getStatusCode(), 'once the central state is confirmable the token verifies: '.(string) $recovered->getContent());
+        self::assertTrue(json_decode((string) $recovered->getContent(), true)['success']);
+    }
+
+    public function testStaleMonitorOnTheRetryLeavesThePendingClaimUntouched(): void
+    {
+        // The owner's request claims and consumes, but the reply is lost
+        // (retryable 503 — the claim stays PENDING). A retry that arrives
+        // when the monitor has gone stale must fail closed BEFORE any
+        // idempotency work: the pending claim is untouched, and a later
+        // fresh retry still takes over and resumes the original outcome.
+        $storage = new ArrayStorage();
+        [$token, $nonce] = $this->issuedToken($storage);
+        $secs = 0;
+        $storeClock = static function () use (&$secs): int {
+            return $secs;
+        };
+        $monitorClock = static function () use (&$secs): float {
+            return $secs * 1000.0;
+        };
+        // A SHORT configured store lease (3s) keeps the lease-expiry step
+        // instant; the waiter bound (5s) exceeds it (the construction
+        // invariant).
+        $store = new ArraySiteVerifyIdempotencyStore($storeClock, 3);
+        $backendId = hash('sha256', self::SITEVERIFY_SECRET.'|login|1');
+        $uuid = '123e4567-e89b-42d3-a456-4266141740e1';
+
+        // The "lost reply" seam: consumeWithOperationIdentity() DELEGATES
+        // — the transition executes and the identity lands atomically with
+        // the state flip — and the response is then lost. Everything else
+        // delegates.
+        $lostReply = new class($storage) implements \BelConsulting\KiwiCaptchaBundle\SiteVerify\SiteVerifyRecoveryCapableStorageInterface {
+            public function __construct(private readonly \KiwiCaptcha\AtomicStorageInterface $inner)
+            {
+            }
+
+            public function store(\KiwiCaptcha\ChallengeRecord $record): void
+            {
+                $this->inner->store($record);
+            }
+
+            public function find(string $nonce): ?\KiwiCaptcha\ChallengeRecord
+            {
+                return $this->inner->find($nonce);
+            }
+
+            public function consumedState(string $nonce): ?\KiwiCaptcha\ConsumedRecord
+            {
+                return $this->inner->consumedState($nonce);
+            }
+
+            public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
+            {
+                return $this->inner->consume($nonce);
+            }
+
+            public function consumeWithOperationIdentity(string $nonce, ?string $operationIdentity): ?\KiwiCaptcha\ConsumedRecord
+            {
+                // The transition EXECUTES (the identity lands atomically
+                // with the state flip) — and the response is then lost.
+                $this->inner->consumeWithOperationIdentity($nonce, $operationIdentity);
+
+                throw new \RuntimeException('consume reply lost after the transition');
+            }
+
+            public function commitResult(string $nonce, bool $valid, ?string $binding): bool
+            {
+                return $this->inner->commitResult($nonce, $valid, $binding);
+            }
+
+            public function delete(string $nonce): void
+            {
+                $this->inner->delete($nonce);
+            }
+        };
+        $ownerVerifier = new Verifier($lostReply);
+        [$redis, $monitor] = $this->monitorFixture($ownerVerifier, 1, 1, $monitorClock);
+        $owner = new SiteVerifyController($ownerVerifier, self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $lostReply, null, null, $store, null, 5.0, 1, null, $monitor);
+        $ownerResponse = $owner->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+            'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
+        ]));
+        self::assertSame(503, $ownerResponse->getStatusCode(), 'the lost consume reply must map to the retryable 503 internal-error');
+        self::assertNull($store->stored($backendId, $uuid), 'the lost reply must NOT finalize the claim — the entry stays pending');
+        $consumed = $storage->consumedState($nonce);
+        self::assertNotNull($consumed, 'the transition executed — the token IS consumed');
+        self::assertSame(
+            $this->fingerprint($backendId, $uuid, $token, '127.0.0.1'),
+            $consumed->operationIdentity,
+            'the consumed record carries the operation identity of the ACTUAL atomic consume winner',
+        );
+        self::assertNull($consumed->consumedResult, 'the derivation never ran — consumed_result stays null');
+
+        // The monitor goes stale (past max-stale with the central read
+        // failing): the same-key retry fails closed BEFORE any idempotency
+        // work — the pending claim is untouched and the interrupted
+        // derivation is NOT resumed.
+        $redis->failCommand = '*';
+        $secs = 90;
+        $staleRetry = $owner->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+            'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
+        ]));
+        self::assertSame(503, $staleRetry->getStatusCode(), 'a stale monitor must fail the retry closed');
+        self::assertSame(['internal-error'], json_decode((string) $staleRetry->getContent(), true)['error-codes']);
+        self::assertNull($store->stored($backendId, $uuid), 'the stale retry must not touch the pending claim');
+        self::assertNull($storage->consumedState($nonce)?->consumedResult, 'the stale retry must not resume the derivation');
+
+        // The monitor recovers (the central read answers again): the same
+        // fresh retry takes over the untouched entry and resumes the
+        // ORIGINAL outcome.
+        $redis->failCommand = null;
+        $secs = 91;
+        $recoveredRetry = $owner->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+            'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
+        ]));
+        $recoveredBody = json_decode((string) $recoveredRetry->getContent(), true);
+        self::assertSame(true, $recoveredBody['success'] ?? null, 'the fresh retry must take over the untouched entry and resume the original success: '.(string) $recoveredRetry->getContent());
+        self::assertSame([], $recoveredBody['error-codes'] ?? null);
+        self::assertNotNull($storage->consumedState($nonce)?->consumedResult, 'the resumed derivation must be committed');
     }
 }
 

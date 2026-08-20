@@ -5,7 +5,9 @@ declare(strict_types=1);
 namespace BelConsulting\KiwiCaptchaBundle\Tests;
 
 use BelConsulting\KiwiCaptchaBundle\Controller\SiteVerifyController;
+use BelConsulting\KiwiCaptchaBundle\Risk\SecurityEpochMonitor;
 use BelConsulting\KiwiCaptchaBundle\SiteVerify\RedisSiteVerifyIdempotencyStore;
+use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\FakePredisClient;
 use KiwiCaptcha\Challenge;
 use KiwiCaptcha\Config;
 use KiwiCaptcha\Issuer;
@@ -56,6 +58,9 @@ final class SiteVerifyConcurrencyTest extends TestCase
         $challenge = $issuer->issue('login', '127.0.0.1');
         $solution = $this->solveSolution($challenge);
         $token = SolutionToken::create($challenge->nonce, $solution, 5000, [])->encode();
+        // Clear the server-measured minimum-duration floor before the
+        // race (the solve itself may not have crossed it).
+        usleep(($challenge->minDurationMs + 10) * 1000);
         $probe->disconnect();
 
         $outFile = tempnam(sys_get_temp_dir(), 'kiwi-race-');
@@ -177,6 +182,9 @@ final class SiteVerifyConcurrencyTest extends TestCase
         $challenge = $issuer->issue('login', '127.0.0.1');
         $solution = $this->solveSolution($challenge);
         $token = SolutionToken::create($challenge->nonce, $solution, 5000, [])->encode();
+        // Clear the server-measured minimum-duration floor before the
+        // race (the solve itself may not have crossed it).
+        usleep(($challenge->minDurationMs + 10) * 1000);
         $uuid = 'f47ac10b-58cc-4372-a567-0e02b2c3d479';
         // Flush any leftover idempotency entry from a previous run (the
         // UUID + backend namespace must start clean for the race).
@@ -260,6 +268,152 @@ final class SiteVerifyConcurrencyTest extends TestCase
         self::assertSame(1, $unique, 'all 100 responses must be the IDENTICAL canonical JSON: '.implode(' || ', array_slice($responses, 0, 3)));
         $first = json_decode($responses[0], true);
         self::assertSame([], $first['error-codes'] ?? null);
+    }
+
+    /**
+     * The SAME provider retry contract with a security-epoch monitor
+     * wired per worker: every worker's controller refreshes the monitor
+     * at the START of its authenticated request, so all 100 claims land
+     * on the EFFECTIVE-epoch backend identity (never the static
+     * configured epoch) and every response is the identical canonical
+     * success. A Siteverify-only worker must behave like the native
+     * paths — policy bumps move the idempotency namespace atomically
+     * with the shared verifier's expectation.
+     */
+    public function testOneHundredConcurrentSameIdempotencyKeyWithEpochMonitorLandOnTheEffectiveEpochKey(): void
+    {
+        if (!\function_exists('pcntl_fork')) {
+            self::markTestSkipped('pcntl is not installed; cannot fork concurrent verifications');
+        }
+        if (!\class_exists(\Predis\Client::class)) {
+            self::markTestSkipped('predis/predis is not installed');
+        }
+        try {
+            $probe = new \Predis\Client('tcp://127.0.0.1:6399', ['timeout' => 1.0, 'read_write_timeout' => 1.0]);
+            $probe->ping();
+        } catch (\Throwable) {
+            self::markTestSkipped('no Redis at 127.0.0.1:6399 — start one for the concurrency test');
+        }
+
+        $issuer = new Issuer(
+            new Config(secretKey: self::SECRET, algorithm: PoWAlgorithm::Sha256, targetBits: 8, ttlSecs: 120),
+            new RedisStorage($probe),
+        );
+        $challenge = $issuer->issue('login', '127.0.0.1');
+        $solution = $this->solveSolution($challenge);
+        $token = SolutionToken::create($challenge->nonce, $solution, 5000, [])->encode();
+        // Clear the server-measured minimum-duration floor before the
+        // race (the solve itself may not have crossed it).
+        usleep(($challenge->minDurationMs + 10) * 1000);
+        $uuid = '6ba7b810-9dad-11d1-80b4-00c04fd430c8';
+        // Flush any leftover idempotency entry from a previous run (both
+        // the static-epoch and the effective-epoch namespaces must start
+        // clean for the race).
+        $staticBackendId = hash('sha256', self::SITEVERIFY_SECRET.'|login|0');
+        $effectiveBackendId = hash('sha256', self::SITEVERIFY_SECRET.'|login|1');
+        $probe->del([
+            '{kiwicaptcha}:siteverify-idem:'.$staticBackendId.':'.$uuid,
+            '{kiwicaptcha}:siteverify-idem:'.$effectiveBackendId.':'.$uuid,
+        ]);
+        $probe->disconnect();
+
+        // The central security-policy state (epoch 1) is set in the
+        // parent: every forked worker inherits the copy and its monitor
+        // observes the SAME effective epoch.
+        $policyRedis = new FakePredisClient();
+        $policyRedis->hset('{kiwi:test-ns}:security-policy', SecurityEpochMonitor::MIN_POLICY_EPOCH_FIELD, '1');
+
+        $outFile = tempnam(sys_get_temp_dir(), 'kiwi-idem-epoch-');
+        $startBarrier = tempnam(sys_get_temp_dir(), 'kiwi-idem-epoch-start-');
+
+        $workers = 100;
+        $children = [];
+        for ($i = 0; $i < $workers; $i++) {
+            $pid = pcntl_fork();
+            if ($pid === -1) {
+                self::markTestSkipped('pcntl_fork failed; concurrency test not run');
+            }
+            if ($pid === 0) {
+                $fp = @fopen($startBarrier, 'r');
+                if ($fp !== false) {
+                    flock($fp, LOCK_SH);
+                    fread($fp, 1);
+                    fclose($fp);
+                }
+                $line = 'error';
+                try {
+                    $client = new \Predis\Client('tcp://127.0.0.1:6399', ['timeout' => 15.0, 'read_write_timeout' => 15.0]);
+                    $storage = new RedisStorage($client);
+                    $verifier = new Verifier($storage);
+                    $monitor = new SecurityEpochMonitor($verifier, $policyRedis, 'test-ns', 1);
+                    $controller = new SiteVerifyController(
+                        $verifier,
+                        self::SECRET,
+                        [self::SITEVERIFY_SECRET => 'login'],
+                        $storage,
+                        null,
+                        null,
+                        new RedisSiteVerifyIdempotencyStore($client),
+                        null,
+                        90.0, // waiter bound (default) > the store's fixed 60s lease
+                        0, // static epoch — the monitor's effective epoch must win
+                        null,
+                        $monitor,
+                    );
+                    $response = $controller->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+                        'secret' => self::SITEVERIFY_SECRET,
+                        'response' => $token,
+                        'remoteip' => '127.0.0.1',
+                        'idempotency_key' => $uuid,
+                    ]));
+                    $line = (string) $response->getContent();
+                    $client->disconnect();
+                } catch (\Throwable $e) {
+                    fwrite(STDERR, 'child error: '.$e->getMessage()."\n");
+                }
+                $out = fopen($outFile, 'a');
+                flock($out, LOCK_EX);
+                fwrite($out, $line."\n");
+                fclose($out);
+                exit(0);
+            }
+            $children[] = $pid;
+        }
+
+        $barrierFile = fopen($startBarrier, 'w');
+        fwrite($barrierFile, 'go');
+        fclose($barrierFile);
+
+        $crashed = false;
+        foreach ($children as $pid) {
+            pcntl_waitpid($pid, $status);
+            if (pcntl_wexitstatus($status) !== 0) {
+                $crashed = true;
+            }
+        }
+        self::assertFalse($crashed, 'every worker must exit cleanly');
+
+        $raw = (string) file_get_contents($outFile);
+        $responses = array_values(array_filter(explode("\n", $raw), static fn (string $l): bool => $l !== ''));
+        @unlink($outFile);
+        @unlink($startBarrier);
+
+        self::assertCount($workers, $responses, 'all 100 workers must report an outcome');
+        $successes = \count(array_filter($responses, static fn (string $r): bool => str_contains($r, '"success":true')));
+        self::assertSame($workers, $successes, 'with the SAME idempotency key every retry must succeed: '.implode(' || ', array_slice($responses, 0, 5)));
+        $unique = \count(array_unique($responses));
+        self::assertSame(1, $unique, 'all 100 responses must be the IDENTICAL canonical JSON: '.implode(' || ', array_slice($responses, 0, 3)));
+
+        try {
+            // The claim namespace is the EFFECTIVE epoch's, never the
+            // static configured epoch's.
+            $effectiveKey = '{kiwicaptcha}:siteverify-idem:'.$effectiveBackendId.':'.$uuid;
+            $staticKey = '{kiwicaptcha}:siteverify-idem:'.$staticBackendId.':'.$uuid;
+            self::assertNotNull($probe->get($effectiveKey), 'the completed claim must live under the effective-epoch backend identity');
+            self::assertNull($probe->get($staticKey), 'the static-epoch key must never be touched by the monitored workers');
+        } finally {
+            $probe->del(['{kiwicaptcha}:siteverify-idem:'.$effectiveBackendId.':'.$uuid, 'kiwicaptcha:'.$challenge->nonce]);
+        }
     }
 
 

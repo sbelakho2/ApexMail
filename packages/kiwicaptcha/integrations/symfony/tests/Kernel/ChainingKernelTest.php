@@ -60,5 +60,12 @@ final class ChainingKernelTest extends TestCase
         self::assertNotNull($resolver, 'the validator carries the wired risk profile resolver (the stage-strength comparison)');
         self::assertSame($this->container()->get('kiwi_captcha.risk.resolver'), $resolver, 'the resolver is the SAME service the risk gateway maps actions with');
         self::assertSame($authority, $this->property($validator, 'bindingAuthority'), 'the validator carries the SAME wired authority service');
+
+        // The controller carries the SAME post-solve disposition store the
+        // validator finalizes: a consumed-valid stage-2 challenge is never
+        // terminal from the core's consumed result alone.
+        $disposition = $this->property($controller, 'postSolveDispositionStore');
+        self::assertNotNull($disposition, 'the controller receives the wired post-solve disposition store');
+        self::assertSame($this->property($validator, 'dispositionStore'), $disposition, 'the controller and the validator share the SAME disposition store');
     }
 }

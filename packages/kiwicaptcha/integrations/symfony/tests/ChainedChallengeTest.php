@@ -6,6 +6,7 @@ namespace BelConsulting\KiwiCaptchaBundle\Tests;
 
 use BelConsulting\KiwiCaptchaBundle\Controller\ChallengeController;
 use BelConsulting\KiwiCaptchaBundle\Risk\ArrayChainedChallengeStateStore;
+use BelConsulting\KiwiCaptchaBundle\Risk\ArrayPostSolveDispositionStore;
 use BelConsulting\KiwiCaptchaBundle\Risk\ChainIssuedResult;
 use BelConsulting\KiwiCaptchaBundle\Risk\ChainReservationResult;
 use BelConsulting\KiwiCaptchaBundle\Risk\ChainVerifiedResult;
@@ -13,6 +14,7 @@ use BelConsulting\KiwiCaptchaBundle\Risk\ChainedChallengeStateStore;
 use BelConsulting\KiwiCaptchaBundle\Risk\ChainedChallengeTicketService;
 use BelConsulting\KiwiCaptchaBundle\Risk\ContinuityCookie;
 use BelConsulting\KiwiCaptchaBundle\Risk\MalformedChainedChallengeStateException;
+use BelConsulting\KiwiCaptchaBundle\Risk\PostSolveDispositionKind;
 use BelConsulting\KiwiCaptchaBundle\Risk\RequestBindingAuthorityInterface;
 use BelConsulting\KiwiCaptchaBundle\Risk\RiskGateway;
 use BelConsulting\KiwiCaptchaBundle\Risk\RiskProfileResolver;
@@ -105,6 +107,16 @@ final class ChainedChallengeTest extends TestCase
     private function nonce(): string
     {
         return base64_encode(random_bytes(32));
+    }
+
+    /**
+     * A DETERMINISTIC Kiwi-shaped stage-2 nonce for a literal seed (the
+     * strict v2 decode requires the Kiwi base64 nonce shape for
+     * stage2Nonce, so the tests never use arbitrary strings).
+     */
+    private function stageNonce(string $seed): string
+    {
+        return base64_encode(hash('sha256', 'stage2:'.$seed, true));
     }
 
     /**
@@ -285,7 +297,7 @@ final class ChainedChallengeTest extends TestCase
     /**
      * A controller wired for a bound or unbound stage-2 flow.
      */
-    private function chainController(StorageInterface $storage, ChainedChallengeTicketService $service, RiskGateway $gateway, ?OutstandingChallenges $outstanding = null, ?SiteVerifyMetadataStore $metadataStore = null, ?RequestBindingAuthorityInterface $authority = null): ChallengeController
+    private function chainController(StorageInterface $storage, ChainedChallengeTicketService $service, RiskGateway $gateway, ?OutstandingChallenges $outstanding = null, ?SiteVerifyMetadataStore $metadataStore = null, ?RequestBindingAuthorityInterface $authority = null, ?\BelConsulting\KiwiCaptchaBundle\Risk\PostSolveDispositionStore $postSolveDispositionStore = null): ChallengeController
     {
         return new ChallengeController(
             $this->issuer($storage),
@@ -300,6 +312,7 @@ final class ChainedChallengeTest extends TestCase
             metadataStore: $metadataStore,
             bindingAuthority: $authority,
             policyVersion: 1,
+            postSolveDispositionStore: $postSolveDispositionStore,
         );
     }
 
@@ -375,6 +388,125 @@ final class ChainedChallengeTest extends TestCase
         self::assertNotNull($requirement);
         self::assertSame('txn-alpha', $requirement->requestBinding, 'the server-held state records the stage-1 challenge\'s request binding');
         self::assertNull($this->chainService($chainStore)->findOpenRequirement('login', 'txn-beta', 1), 'a different binding is a different obligation');
+    }
+
+    // ── CHAIN_REQUIRED disposition replay (expiry-preserving re-sign) ───
+
+    public function testChainRequiredDispositionReplayReSignsWithTheOriginalExpiry(): void
+    {
+        $storage = new ArrayStorage();
+        $chainStore = new ArrayChainedChallengeStateStore();
+        $chainService = $this->chainService($chainStore);
+        $resolver = new RiskProfileResolver(PoWAlgorithm::Sha256, 8);
+        $risk = $this->riskStack(SignalVector::fromArray(self::ARGON32_VECTOR), $resolver);
+        $disposition = new ArrayPostSolveDispositionStore();
+
+        $stage1 = $this->solvedStage1($storage);
+        $stack = new RequestStack();
+        $stack->push(Request::create('/', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7']));
+
+        $validator = new KiwiCaptchaValidator(
+            new Verifier($storage),
+            $stack,
+            self::SECRET,
+            enforceTelemetry: false,
+            risk: $risk['gateway'],
+            continuityCookie: new ContinuityCookie(),
+            storage: $storage,
+            chainTickets: $chainService,
+            riskResolver: $resolver,
+            dispositionStore: $disposition,
+            bindingAuthority: new FixtureBindingAuthority('txn-alpha'),
+        );
+        $factory = new ConstraintValidatorFactory([KiwiCaptchaValidator::class => $validator]);
+        $engine = Validation::createValidatorBuilder()->setConstraintValidatorFactory($factory)->getValidator();
+        $dto = new class {
+            public ?string $captcha = null;
+        };
+        $dto->captcha = $stage1['token'];
+        $meta = $engine->getMetadataFor($dto::class);
+        $meta->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
+
+        // FRESH: the reassessment demands Argon32, the canonical binding
+        // resolves, the chain opens — CHAIN_REQUIRED with the signed
+        // ticket and a persisted disposition.
+        $violations = $engine->validate($dto);
+        self::assertCount(1, $violations);
+        self::assertSame(KiwiCaptchaValidator::CHAIN_REQUIRED_ERROR, $violations[0]->getCode());
+        $ticket = $violations[0]->getParameters()['{{ chain_ticket }}'];
+        self::assertIsString($ticket);
+        $payload = $this->chainService($chainStore)->verify($ticket);
+        self::assertIsArray($payload);
+        self::assertSame(PostSolveDispositionKind::ChainRequired, $disposition->read($stage1['nonce'])?->disposition?->kind, 'the CHAIN_REQUIRED disposition is persisted per nonce');
+
+        // REPLAY (the SAME token — the core replays its stored result):
+        // the persisted disposition reproduces CHAIN_REQUIRED and the
+        // ticket is re-signed with the requirement's ORIGINAL expiry —
+        // the deterministic ticket is byte-identical (a re-signed ticket
+        // can never outlive its chain state).
+        $violations2 = $engine->validate($dto);
+        self::assertCount(1, $violations2);
+        self::assertSame(KiwiCaptchaValidator::CHAIN_REQUIRED_ERROR, $violations2[0]->getCode(), 'a replay of a CHAIN_REQUIRED token must be CHAIN_REQUIRED again — never a pass');
+        $ticket2 = $violations2[0]->getParameters()['{{ chain_ticket }}'];
+        self::assertSame($ticket, $ticket2, 'the replay re-signs with the requirement\'s ORIGINAL expiry — the deterministic ticket is byte-identical');
+        $requirement = $this->chainService($chainStore)->requirementFor((string) $payload['chainId']);
+        self::assertNotNull($requirement);
+        self::assertSame((int) $payload['expiresAt'], $requirement->expiresAt, 'the replayed ticket carries the requirement\'s ORIGINAL expiry');
+        self::assertSame(1, \count($risk['store']->observations), 'the replay must not re-run the reassessment');
+    }
+
+    public function testChainRequiredReplayWithExpiredChainIsTemporaryUnavailable(): void
+    {
+        $storage = new ArrayStorage();
+        $chainClock = (float) time();
+        $chainStore = new ArrayChainedChallengeStateStore(static function () use (&$chainClock): float {
+            return $chainClock;
+        });
+        $chainService = $this->chainService($chainStore);
+        $resolver = new RiskProfileResolver(PoWAlgorithm::Sha256, 8);
+        $risk = $this->riskStack(SignalVector::fromArray(self::ARGON32_VECTOR), $resolver);
+        $disposition = new ArrayPostSolveDispositionStore();
+
+        $stage1 = $this->solvedStage1($storage);
+        $stack = new RequestStack();
+        $stack->push(Request::create('/', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7']));
+
+        $validator = new KiwiCaptchaValidator(
+            new Verifier($storage),
+            $stack,
+            self::SECRET,
+            enforceTelemetry: false,
+            risk: $risk['gateway'],
+            continuityCookie: new ContinuityCookie(),
+            storage: $storage,
+            chainTickets: $chainService,
+            riskResolver: $resolver,
+            dispositionStore: $disposition,
+            bindingAuthority: new FixtureBindingAuthority('txn-alpha'),
+        );
+        $factory = new ConstraintValidatorFactory([KiwiCaptchaValidator::class => $validator]);
+        $engine = Validation::createValidatorBuilder()->setConstraintValidatorFactory($factory)->getValidator();
+        $dto = new class {
+            public ?string $captcha = null;
+        };
+        $dto->captcha = $stage1['token'];
+        $meta = $engine->getMetadataFor($dto::class);
+        $meta->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
+
+        // FRESH: the chain opens and the disposition is persisted.
+        $violations = $engine->validate($dto);
+        self::assertSame(KiwiCaptchaValidator::CHAIN_REQUIRED_ERROR, $violations[0]->getCode());
+
+        // The chain EXPIRES with its own lifetime while the disposition
+        // record survives: the replay cannot re-sign a ticket for a chain
+        // that no longer exists — fail closed temporary_unavailable, never
+        // a fresh ticket that outlives its chain state, never a silent
+        // pass.
+        $chainClock += 3600;
+        $violations2 = $engine->validate($dto);
+        self::assertCount(1, $violations2);
+        self::assertSame(KiwiCaptcha::TEMPORARY_UNAVAILABLE_ERROR, $violations2[0]->getCode(), 'a replay whose chain requirement is gone must be temporary_unavailable — never a ticket that outlives its chain');
+        self::assertSame(PostSolveDispositionKind::ChainRequired, $disposition->read($stage1['nonce'])?->disposition?->kind, 'the persisted disposition is untouched');
     }
 
     public function testStepUpPostSolveDecisionNeverBecomesAChainTicket(): void
@@ -724,11 +856,11 @@ final class ChainedChallengeTest extends TestCase
 
         // issued: the reserve answers 'issued' (recover, never re-mint).
         self::assertSame(ChainReservationResult::Available, $service->reserveStage2($requirement->chainId, 'owner-a'));
-        self::assertSame(ChainIssuedResult::IssuedNew, $service->markIssued($requirement->chainId, 'owner-a', 'stage2-nonce'));
+        self::assertSame(ChainIssuedResult::IssuedNew, $service->markIssued($requirement->chainId, 'owner-a', $this->stageNonce('stage2-nonce')));
         self::assertSame(ChainReservationResult::Issued, $service->reserveStage2($requirement->chainId, 'owner-b'));
 
         // verified: the reserve answers 'verified' (terminal).
-        self::assertSame(ChainVerifiedResult::VerifiedNew, $service->markVerified($requirement->chainId, 'stage2-nonce'));
+        self::assertSame(ChainVerifiedResult::VerifiedNew, $service->markVerified($requirement->chainId, $this->stageNonce('stage2-nonce')));
         self::assertSame(ChainReservationResult::Verified, $service->reserveStage2($requirement->chainId, 'owner-b'));
 
         // absent.
@@ -761,13 +893,13 @@ final class ChainedChallengeTest extends TestCase
         $requirement = $service->requireStage2($this->nonce(), 'login', '', 1, RiskAction::Argon32, time() + 300);
 
         self::assertSame(ChainReservationResult::Available, $service->reserveStage2($requirement->chainId, 'owner-a'));
-        self::assertSame(ChainIssuedResult::IssuedNew, $service->markIssued($requirement->chainId, 'owner-a', 'stage2-nonce'));
+        self::assertSame(ChainIssuedResult::IssuedNew, $service->markIssued($requirement->chainId, 'owner-a', $this->stageNonce('stage2-nonce')));
         self::assertSame('issued', $service->requirementFor($requirement->chainId)?->state);
-        self::assertSame('stage2-nonce', $service->requirementFor($requirement->chainId)?->stage2Nonce);
+        self::assertSame($this->stageNonce('stage2-nonce'), $service->requirementFor($requirement->chainId)?->stage2Nonce);
 
         // The same-nonce retry is CONFIRMED, never a second mint.
-        self::assertSame(ChainIssuedResult::IssuedSame, $service->markIssued($requirement->chainId, 'owner-a', 'stage2-nonce'), 'a same-nonce retry is idempotent');
-        self::assertSame(ChainIssuedResult::IssuedSame, $service->markIssued($requirement->chainId, 'owner-b', 'stage2-nonce'), 'the idempotent confirmation does not need the owner');
+        self::assertSame(ChainIssuedResult::IssuedSame, $service->markIssued($requirement->chainId, 'owner-a', $this->stageNonce('stage2-nonce')), 'a same-nonce retry is idempotent');
+        self::assertSame(ChainIssuedResult::IssuedSame, $service->markIssued($requirement->chainId, 'owner-b', $this->stageNonce('stage2-nonce')), 'the idempotent confirmation does not need the owner');
     }
 
     public function testMarkIssuedDifferentNonceConflict(): void
@@ -777,9 +909,9 @@ final class ChainedChallengeTest extends TestCase
         $requirement = $service->requireStage2($this->nonce(), 'login', '', 1, RiskAction::Argon32, time() + 300);
 
         self::assertSame(ChainReservationResult::Available, $service->reserveStage2($requirement->chainId, 'owner-a'));
-        self::assertSame(ChainIssuedResult::IssuedNew, $service->markIssued($requirement->chainId, 'owner-a', 'stage2-nonce'));
-        self::assertSame(ChainIssuedResult::Conflict, $service->markIssued($requirement->chainId, 'owner-a', 'other-nonce'), 'a different nonce is a conflict — one issuance per chain');
-        self::assertSame('stage2-nonce', $service->requirementFor($requirement->chainId)?->stage2Nonce, 'the first issuance stays authoritative');
+        self::assertSame(ChainIssuedResult::IssuedNew, $service->markIssued($requirement->chainId, 'owner-a', $this->stageNonce('stage2-nonce')));
+        self::assertSame(ChainIssuedResult::Conflict, $service->markIssued($requirement->chainId, 'owner-a', $this->stageNonce('other-nonce')), 'a different nonce is a conflict — one issuance per chain');
+        self::assertSame($this->stageNonce('stage2-nonce'), $service->requirementFor($requirement->chainId)?->stage2Nonce, 'the first issuance stays authoritative');
     }
 
     public function testMarkIssuedLostReplyIsRecoveredByReadingTheState(): void
@@ -852,15 +984,15 @@ final class ChainedChallengeTest extends TestCase
         $requirement = $service->requireStage2($this->nonce(), 'login', '', 1, RiskAction::Argon32, time() + 300);
 
         self::assertSame(ChainReservationResult::Available, $service->reserveStage2($requirement->chainId, 'owner-a'));
-        self::assertSame(ChainIssuedResult::IssuedNew, $service->markIssued($requirement->chainId, 'owner-a', 'stage2-nonce'));
+        self::assertSame(ChainIssuedResult::IssuedNew, $service->markIssued($requirement->chainId, 'owner-a', $this->stageNonce('stage2-nonce')));
 
         // issued is NOT terminal: the chain can be REARMED for a fresh
         // stage-2 mint and VERIFIED by a solved stage-2.
-        self::assertTrue($service->rearmIssued($requirement->chainId, 'stage2-nonce'), 'an issued chain rearms for a fresh stage-2 mint');
+        self::assertTrue($service->rearmIssued($requirement->chainId, $this->stageNonce('stage2-nonce')), 'an issued chain rearms for a fresh stage-2 mint');
         self::assertSame('available', $service->requirementFor($requirement->chainId)?->state);
         self::assertSame(ChainReservationResult::Available, $service->reserveStage2($requirement->chainId, 'owner-b'));
-        self::assertSame(ChainIssuedResult::IssuedNew, $service->markIssued($requirement->chainId, 'owner-b', 'stage2-nonce-b'));
-        self::assertSame(ChainVerifiedResult::VerifiedNew, $service->markVerified($requirement->chainId, 'stage2-nonce-b'), 'the issued stage verifies — the chain ends');
+        self::assertSame(ChainIssuedResult::IssuedNew, $service->markIssued($requirement->chainId, 'owner-b', $this->stageNonce('stage2-nonce-b')));
+        self::assertSame(ChainVerifiedResult::VerifiedNew, $service->markVerified($requirement->chainId, $this->stageNonce('stage2-nonce-b')), 'the issued stage verifies — the chain ends');
     }
 
     // ── markVerified (TERMINAL, obligation cleared atomically) ─────────
@@ -872,13 +1004,13 @@ final class ChainedChallengeTest extends TestCase
         $requirement = $service->requireStage2($this->nonce(), 'login', '', 1, RiskAction::Argon32, time() + 300);
 
         self::assertSame(ChainReservationResult::Available, $service->reserveStage2($requirement->chainId, 'owner-a'));
-        self::assertSame(ChainIssuedResult::IssuedNew, $service->markIssued($requirement->chainId, 'owner-a', 'stage2-nonce'));
-        self::assertSame(ChainVerifiedResult::VerifiedNew, $service->markVerified($requirement->chainId, 'stage2-nonce'));
+        self::assertSame(ChainIssuedResult::IssuedNew, $service->markIssued($requirement->chainId, 'owner-a', $this->stageNonce('stage2-nonce')));
+        self::assertSame(ChainVerifiedResult::VerifiedNew, $service->markVerified($requirement->chainId, $this->stageNonce('stage2-nonce')));
 
         $state = $service->requirementFor($requirement->chainId);
         self::assertSame('verified', $state?->state, 'verified is the TERMINAL state');
-        self::assertSame('stage2-nonce', $state?->stage2Nonce);
-        self::assertSame(ChainVerifiedResult::VerifiedSame, $service->markVerified($requirement->chainId, 'stage2-nonce'), 'a same-nonce retry is idempotent');
+        self::assertSame($this->stageNonce('stage2-nonce'), $state?->stage2Nonce);
+        self::assertSame(ChainVerifiedResult::VerifiedSame, $service->markVerified($requirement->chainId, $this->stageNonce('stage2-nonce')), 'a same-nonce retry is idempotent');
         self::assertNull($service->findOpenRequirement('login', '', 1), 'the verified transition cleared the obligation — the transaction is complete');
     }
 
@@ -891,9 +1023,9 @@ final class ChainedChallengeTest extends TestCase
         $chainB = $service->requireStage2($this->nonce(), 'login', 'txn-b', 1, RiskAction::Argon32, $expiry);
 
         self::assertSame(ChainReservationResult::Available, $service->reserveStage2($chainA->chainId, 'owner-a'));
-        self::assertSame(ChainIssuedResult::IssuedNew, $service->markIssued($chainA->chainId, 'owner-a', 'n-a'));
+        self::assertSame(ChainIssuedResult::IssuedNew, $service->markIssued($chainA->chainId, 'owner-a', $this->stageNonce('n-a')));
         self::assertSame(ChainReservationResult::Available, $service->reserveStage2($chainB->chainId, 'owner-b'));
-        self::assertSame(ChainIssuedResult::IssuedNew, $service->markIssued($chainB->chainId, 'owner-b', 'n-b'));
+        self::assertSame(ChainIssuedResult::IssuedNew, $service->markIssued($chainB->chainId, 'owner-b', $this->stageNonce('n-b')));
 
         // The obligation id of chain A (captured BEFORE the verification
         // clears it).
@@ -902,7 +1034,7 @@ final class ChainedChallengeTest extends TestCase
         self::assertIsString($obligationA);
 
         // Verify chain A: ONLY A's obligation is cleared — B's stays.
-        self::assertSame(ChainVerifiedResult::VerifiedNew, $service->markVerified($chainA->chainId, 'n-a'));
+        self::assertSame(ChainVerifiedResult::VerifiedNew, $service->markVerified($chainA->chainId, $this->stageNonce('n-a')));
         self::assertNull($service->findOpenRequirement('login', 'txn-a', 1));
         self::assertSame($chainB->chainId, $service->findOpenRequirement('login', 'txn-b', 1)?->chainId, 'B\'s obligation is untouched');
 
@@ -923,9 +1055,72 @@ final class ChainedChallengeTest extends TestCase
         $requirement = $service->requireStage2($this->nonce(), 'login', '', 1, RiskAction::Argon32, time() + 300);
 
         self::assertSame(ChainReservationResult::Available, $service->reserveStage2($requirement->chainId, 'owner-a'));
-        self::assertSame(ChainIssuedResult::IssuedNew, $service->markIssued($requirement->chainId, 'owner-a', 'stage2-nonce'));
-        self::assertSame(ChainVerifiedResult::Conflict, $service->markVerified($requirement->chainId, 'other-nonce'), 'a different nonce is a conflict');
+        self::assertSame(ChainIssuedResult::IssuedNew, $service->markIssued($requirement->chainId, 'owner-a', $this->stageNonce('stage2-nonce')));
+        self::assertSame(ChainVerifiedResult::Conflict, $service->markVerified($requirement->chainId, $this->stageNonce('other-nonce')), 'a different nonce is a conflict');
         self::assertSame('issued', $service->requirementFor($requirement->chainId)?->state, 'the chain stays issued — nothing was verified');
+    }
+
+    // ── markStepUpRequired / markDenied (TERMINAL, obligation KEPT) ────
+
+    public function testMarkStepUpRequiredIsTerminalIdempotentAndKeepsTheObligation(): void
+    {
+        $store = new ArrayChainedChallengeStateStore();
+        $service = $this->chainService($store);
+        $requirement = $service->requireStage2($this->nonce(), 'login', '', 1, RiskAction::Argon32, time() + 300);
+
+        self::assertSame(ChainReservationResult::Available, $service->reserveStage2($requirement->chainId, 'owner-a'));
+        self::assertSame(ChainIssuedResult::IssuedNew, $service->markIssued($requirement->chainId, 'owner-a', $this->stageNonce('stage2-nonce')));
+        self::assertSame(ChainVerifiedResult::StepUpRequiredNew, $service->markStepUpRequired($requirement->chainId, $this->stageNonce('stage2-nonce')));
+
+        $state = $service->requirementFor($requirement->chainId);
+        self::assertSame('step_up_required', $state?->state, 'step_up_required is the TERMINAL state');
+        self::assertSame($this->stageNonce('stage2-nonce'), $state?->stage2Nonce);
+        self::assertSame(ChainVerifiedResult::StepUpRequiredSame, $service->markStepUpRequired($requirement->chainId, $this->stageNonce('stage2-nonce')), 'a same-nonce retry is idempotent');
+        self::assertSame(ChainVerifiedResult::Conflict, $service->markStepUpRequired($requirement->chainId, $this->stageNonce('other-nonce')), 'a different nonce on a TERMINAL state is a conflict');
+        self::assertSame(ChainVerifiedResult::Conflict, $service->markVerified($requirement->chainId, $this->stageNonce('stage2-nonce')), 'a terminal step-up chain can never verify');
+        self::assertSame(ChainVerifiedResult::Conflict, $service->markDenied($requirement->chainId, $this->stageNonce('stage2-nonce')), 'a terminal step-up chain can never be denied');
+        self::assertNotNull($service->findOpenRequirement('login', '', 1), 'the step-up transition KEEPS the obligation — the transaction stays bound');
+        self::assertSame(ChainReservationResult::StepUpRequired, $service->reserveStage2($requirement->chainId, 'owner-b'), 'the reserve answers the TERMINAL step_up_required state');
+    }
+
+    public function testMarkDeniedIsTerminalIdempotentAndKeepsTheObligation(): void
+    {
+        $store = new ArrayChainedChallengeStateStore();
+        $service = $this->chainService($store);
+        $requirement = $service->requireStage2($this->nonce(), 'login', '', 1, RiskAction::Argon32, time() + 300);
+
+        self::assertSame(ChainReservationResult::Available, $service->reserveStage2($requirement->chainId, 'owner-a'));
+        self::assertSame(ChainIssuedResult::IssuedNew, $service->markIssued($requirement->chainId, 'owner-a', $this->stageNonce('stage2-nonce')));
+        self::assertSame(ChainVerifiedResult::DeniedNew, $service->markDenied($requirement->chainId, $this->stageNonce('stage2-nonce')));
+
+        $state = $service->requirementFor($requirement->chainId);
+        self::assertSame('denied', $state?->state, 'denied is the TERMINAL state');
+        self::assertSame($this->stageNonce('stage2-nonce'), $state?->stage2Nonce);
+        self::assertSame(ChainVerifiedResult::DeniedSame, $service->markDenied($requirement->chainId, $this->stageNonce('stage2-nonce')), 'a same-nonce retry is idempotent');
+        self::assertSame(ChainVerifiedResult::Conflict, $service->markDenied($requirement->chainId, $this->stageNonce('other-nonce')), 'a different nonce on a TERMINAL state is a conflict');
+        self::assertSame(ChainVerifiedResult::Conflict, $service->markVerified($requirement->chainId, $this->stageNonce('stage2-nonce')), 'a terminal denied chain can never verify');
+        self::assertSame(ChainVerifiedResult::Conflict, $service->markStepUpRequired($requirement->chainId, $this->stageNonce('stage2-nonce')), 'a terminal denied chain can never step up');
+        self::assertSame(ChainIssuedResult::Conflict, $service->markIssued($requirement->chainId, 'owner-b', $this->stageNonce('stage2-nonce')), 'a terminal chain can never be issued again');
+        self::assertFalse($service->rearmIssued($requirement->chainId, $this->stageNonce('stage2-nonce')), 'a terminal chain can never rearm');
+        self::assertNotNull($service->findOpenRequirement('login', '', 1), 'the denied transition KEEPS the obligation — the transaction stays bound');
+        self::assertSame(ChainReservationResult::Denied, $service->reserveStage2($requirement->chainId, 'owner-b'), 'the reserve answers the TERMINAL denied state');
+    }
+
+    public function testMarkStepUpRequiredAndMarkDeniedAcceptTheLegacyCompletedState(): void
+    {
+        $store = new ArrayChainedChallengeStateStore();
+        $service = $this->chainService($store);
+        $requirement = $service->requireStage2($this->nonce(), 'login', '', 1, RiskAction::Argon32, time() + 300);
+        $nonce = $this->stageNonce('stage2-nonce');
+
+        self::assertSame(ChainReservationResult::Available, $service->reserveStage2($requirement->chainId, 'owner-a'));
+        $completed = $service->complete($requirement->chainId, 'owner-a', $nonce);
+        self::assertIsArray($completed);
+
+        // The legacy 'completed' state is semantically identical to
+        // 'issued': the disposition terminal transitions accept it.
+        self::assertSame(ChainVerifiedResult::StepUpRequiredNew, $service->markStepUpRequired($requirement->chainId, $nonce));
+        self::assertSame('step_up_required', $service->requirementFor($requirement->chainId)?->state);
     }
 
     public function testMarkVerifiedLostReplyReadConfirmsTheTransition(): void
@@ -933,28 +1128,33 @@ final class ChainedChallengeTest extends TestCase
         $storage = new ArrayStorage();
         $lostReply = new LostReplyChainStore(new ArrayChainedChallengeStateStore(), throwAfterVerified: true);
         $chainService = $this->chainService($lostReply);
+        $dispositions = new \BelConsulting\KiwiCaptchaBundle\Risk\ArrayPostSolveDispositionStore();
         $stage1 = $this->solvedStage1($storage);
         $requirement = $chainService->requireStage2($stage1['nonce'], 'login', '', 1, RiskAction::Argon32, time() + 300);
         $ticket = $chainService->ticketFor($requirement->chainId, time() + 300);
 
         $risk = $this->riskStack(SignalVector::fromArray(self::ARGON32_VECTOR));
-        $controller = $this->chainController($storage, $chainService, $risk['gateway']);
+        $controller = $this->chainController($storage, $chainService, $risk['gateway'], postSolveDispositionStore: $dispositions);
 
         // Request 1: issue the stage-2 challenge.
         $first = $controller->challenge($this->challengeRequest(json_encode(['scope' => 'login', 'chain_ticket' => $ticket], JSON_THROW_ON_ERROR)));
         self::assertSame(200, $first->getStatusCode());
         $nonce = json_decode((string) $first->getContent(), true)['nonce'];
 
-        // The client SOLVES the stage-2 challenge and the validator
-        // commits the consumed VALID result.
+        // The client SOLVES the stage-2 challenge: the validator commits
+        // the consumed VALID result AND durably finalizes the PASS
+        // disposition (the FINAL disposition — the chain transition runs
+        // only after the finalize).
         $storage->consume($nonce);
         $storage->commitResult($nonce, true, null);
+        $dispositions->claim($nonce, 'disposition-owner', 300);
+        $dispositions->finalize($nonce, 'disposition-owner', new \BelConsulting\KiwiCaptchaBundle\Risk\PostSolveDisposition(\BelConsulting\KiwiCaptchaBundle\Risk\PostSolveDispositionKind::Pass));
 
-        // Request 2: the issued stage-2 is consumed+VALID — the controller
-        // transitions to verified; the transition runs the REAL transition
-        // then throws (a lost reply): the state is read + the exact nonce
-        // confirmed — the chain ends (the obligation is cleared) and the
-        // same challenge is recovered.
+        // Request 2: the issued stage-2 is consumed+VALID with a committed
+        // PASS disposition — the controller transitions to verified; the
+        // transition runs the REAL transition then throws (a lost reply):
+        // the state is read + the exact nonce confirmed — the chain ends
+        // (the obligation is cleared) and the same challenge is recovered.
         $second = $controller->challenge($this->challengeRequest(json_encode(['scope' => 'login', 'chain_ticket' => $ticket], JSON_THROW_ON_ERROR)));
         self::assertSame(200, $second->getStatusCode(), sprintf('a lost markVerified reply must be read-confirmed: %s', (string) $second->getContent()));
         self::assertSame($nonce, json_decode((string) $second->getContent(), true)['nonce'], 'the verified stage recovers the same challenge');
@@ -1006,32 +1206,172 @@ final class ChainedChallengeTest extends TestCase
         $storage = new ArrayStorage();
         $chainStore = new ArrayChainedChallengeStateStore();
         $chainService = $this->chainService($chainStore);
+        $dispositions = new \BelConsulting\KiwiCaptchaBundle\Risk\ArrayPostSolveDispositionStore();
         $stage1 = $this->solvedStage1($storage);
         $requirement = $chainService->requireStage2($stage1['nonce'], 'login', '', 1, RiskAction::Argon32, time() + 300);
         $ticket = $chainService->ticketFor($requirement->chainId, time() + 300);
 
         $risk = $this->riskStack(SignalVector::fromArray(self::ARGON32_VECTOR));
-        $controller = $this->chainController($storage, $chainService, $risk['gateway']);
+        $controller = $this->chainController($storage, $chainService, $risk['gateway'], postSolveDispositionStore: $dispositions);
 
         // Request 1: issue the stage-2 challenge.
         $first = $controller->challenge($this->challengeRequest(json_encode(['scope' => 'login', 'chain_ticket' => $ticket], JSON_THROW_ON_ERROR)));
         self::assertSame(200, $first->getStatusCode());
         $nonce = json_decode((string) $first->getContent(), true)['nonce'];
 
-        // The client SOLVES it: consumed + committed VALID.
+        // The client SOLVES it: consumed + committed VALID, and the
+        // validator durably finalized the PASS disposition (the FINAL
+        // disposition — the chain transition runs only after the
+        // finalize).
         $storage->consume($nonce);
         $storage->commitResult($nonce, true, null);
+        $dispositions->claim($nonce, 'disposition-owner', 300);
+        $dispositions->finalize($nonce, 'disposition-owner', new \BelConsulting\KiwiCaptchaBundle\Risk\PostSolveDisposition(\BelConsulting\KiwiCaptchaBundle\Risk\PostSolveDispositionKind::Pass));
         $recordCount = $this->storageRecordCount($storage);
 
-        // Request 2: the stage was ACTUALLY SOLVED — the chain VERIFIES
-        // (no re-issue), the same challenge is recovered and the
-        // obligation is cleared.
+        // Request 2: consumed+VALID with a committed PASS disposition —
+        // the chain VERIFIES (no re-issue), the same challenge is
+        // recovered and the obligation is cleared.
         $second = $controller->challenge($this->challengeRequest(json_encode(['scope' => 'login', 'chain_ticket' => $ticket], JSON_THROW_ON_ERROR)));
         self::assertSame(200, $second->getStatusCode(), sprintf('a consumed-valid stage-2 must verify the chain: %s', (string) $second->getContent()));
         self::assertSame((string) $first->getContent(), (string) $second->getContent(), 'the verified stage recovers the exact challenge');
         self::assertSame($recordCount, $this->storageRecordCount($storage), 'no re-mint for a consumed-valid stage');
         self::assertSame('verified', $chainService->requirementFor($requirement->chainId)?->state);
         self::assertNull($chainService->findOpenRequirement('login', '', 1), 'a verified chain has no open obligation');
+    }
+
+    public function testConsumedValidStage2WithoutCommittedDispositionIs503AndObligationIntact(): void
+    {
+        $storage = new ArrayStorage();
+        $chainStore = new ArrayChainedChallengeStateStore();
+        $chainService = $this->chainService($chainStore);
+        $dispositions = new \BelConsulting\KiwiCaptchaBundle\Risk\ArrayPostSolveDispositionStore();
+        $stage1 = $this->solvedStage1($storage);
+        $requirement = $chainService->requireStage2($stage1['nonce'], 'login', '', 1, RiskAction::Argon32, time() + 300);
+        $ticket = $chainService->ticketFor($requirement->chainId, time() + 300);
+
+        $risk = $this->riskStack(SignalVector::fromArray(self::ARGON32_VECTOR));
+        $controller = $this->chainController($storage, $chainService, $risk['gateway'], postSolveDispositionStore: $dispositions);
+
+        // Request 1: issue the stage-2 challenge.
+        $first = $controller->challenge($this->challengeRequest(json_encode(['scope' => 'login', 'chain_ticket' => $ticket], JSON_THROW_ON_ERROR)));
+        self::assertSame(200, $first->getStatusCode());
+        $nonce = json_decode((string) $first->getContent(), true)['nonce'];
+
+        // The CRASH WINDOW: the validator committed the consumed VALID
+        // core result but DIED before finalizing the disposition — the
+        // core result alone can never decide transaction terminality.
+        $storage->consume($nonce);
+        $storage->commitResult($nonce, true, null);
+
+        // The retry: consumed+VALID WITHOUT a committed disposition — the
+        // retryable 503, and the obligation is NEVER cleared.
+        $second = $controller->challenge($this->challengeRequest(json_encode(['scope' => 'login', 'chain_ticket' => $ticket], JSON_THROW_ON_ERROR)));
+        self::assertSame(503, $second->getStatusCode(), 'a consumed-valid stage-2 without a committed disposition is the retryable 503');
+        self::assertSame('issued', $chainService->requirementFor($requirement->chainId)?->state, 'the chain is NOT verified without the final disposition');
+        self::assertSame($nonce, $chainService->requirementFor($requirement->chainId)?->stage2Nonce);
+        self::assertNotNull($chainService->findOpenRequirement('login', '', 1), 'the obligation SURVIVES the crash window');
+
+        // The disposition is durably finalized as PASS: the next retry
+        // ends the chain and clears the obligation.
+        $dispositions->claim($nonce, 'disposition-owner', 300);
+        $dispositions->finalize($nonce, 'disposition-owner', new \BelConsulting\KiwiCaptchaBundle\Risk\PostSolveDisposition(\BelConsulting\KiwiCaptchaBundle\Risk\PostSolveDispositionKind::Pass));
+        $third = $controller->challenge($this->challengeRequest(json_encode(['scope' => 'login', 'chain_ticket' => $ticket], JSON_THROW_ON_ERROR)));
+        self::assertSame(200, $third->getStatusCode(), sprintf('after the PASS disposition is committed the retry verifies the chain: %s', (string) $third->getContent()));
+        self::assertSame('verified', $chainService->requirementFor($requirement->chainId)?->state);
+        self::assertNull($chainService->findOpenRequirement('login', '', 1), 'the PASS disposition cleared the obligation');
+    }
+
+    public function testConsumedValidStage2StepUpDispositionTerminalStepUpResponse(): void
+    {
+        $storage = new ArrayStorage();
+        $chainStore = new ArrayChainedChallengeStateStore();
+        $chainService = $this->chainService($chainStore);
+        $dispositions = new \BelConsulting\KiwiCaptchaBundle\Risk\ArrayPostSolveDispositionStore();
+        $stage1 = $this->solvedStage1($storage);
+        $requirement = $chainService->requireStage2($stage1['nonce'], 'login', '', 1, RiskAction::Argon32, time() + 300);
+        $ticket = $chainService->ticketFor($requirement->chainId, time() + 300);
+
+        $risk = $this->riskStack(SignalVector::fromArray(self::ARGON32_VECTOR));
+        $controller = $this->chainController($storage, $chainService, $risk['gateway'], postSolveDispositionStore: $dispositions);
+
+        // Request 1: issue the stage-2 challenge.
+        $first = $controller->challenge($this->challengeRequest(json_encode(['scope' => 'login', 'chain_ticket' => $ticket], JSON_THROW_ON_ERROR)));
+        self::assertSame(200, $first->getStatusCode());
+        $nonce = json_decode((string) $first->getContent(), true)['nonce'];
+
+        // The validator committed the consumed VALID result AND durably
+        // finalized the STEP-UP disposition (the chain transition runs
+        // only after the finalize).
+        $storage->consume($nonce);
+        $storage->commitResult($nonce, true, null);
+        $dispositions->claim($nonce, 'disposition-owner', 300);
+        $dispositions->finalize($nonce, 'disposition-owner', new \BelConsulting\KiwiCaptchaBundle\Risk\PostSolveDisposition(\BelConsulting\KiwiCaptchaBundle\Risk\PostSolveDispositionKind::StepUp));
+
+        // The retry: consumed+VALID with a STEP-UP disposition — the
+        // chain transitions to the TERMINAL step_up_required and the
+        // request answers the terminal STEP_UP_REQUIRED — never a
+        // challenge.
+        $second = $controller->challenge($this->challengeRequest(json_encode(['scope' => 'login', 'chain_ticket' => $ticket], JSON_THROW_ON_ERROR)));
+        self::assertSame(403, $second->getStatusCode(), 'a consumed-valid stage-2 with a STEP-UP disposition is the terminal STEP_UP_REQUIRED');
+        self::assertStringContainsString('STEP_UP_REQUIRED', (string) $second->getContent());
+        $state = $chainService->requirementFor($requirement->chainId);
+        self::assertSame('step_up_required', $state?->state, 'the chain is TERMINAL step_up_required');
+        self::assertSame($nonce, $state?->stage2Nonce);
+        self::assertNotNull($chainService->findOpenRequirement('login', '', 1), 'the obligation SURVIVES the step-up — the transaction stays bound');
+
+        // A LATER request for the same transaction re-encounters the
+        // TERMINAL state (the obligation is kept — never a new stage-1,
+        // never a challenge).
+        $third = $controller->challenge($this->challengeRequest(json_encode(['scope' => 'login', 'chain_ticket' => $ticket], JSON_THROW_ON_ERROR)));
+        self::assertSame(403, $third->getStatusCode(), 'a later request re-encounters the terminal step-up response');
+        self::assertStringContainsString('STEP_UP_REQUIRED', (string) $third->getContent());
+        self::assertSame('step_up_required', $chainService->requirementFor($requirement->chainId)?->state);
+    }
+
+    public function testConsumedValidStage2DenyDispositionTerminalDenialResponse(): void
+    {
+        $storage = new ArrayStorage();
+        $chainStore = new ArrayChainedChallengeStateStore();
+        $chainService = $this->chainService($chainStore);
+        $dispositions = new \BelConsulting\KiwiCaptchaBundle\Risk\ArrayPostSolveDispositionStore();
+        $stage1 = $this->solvedStage1($storage);
+        $requirement = $chainService->requireStage2($stage1['nonce'], 'login', '', 1, RiskAction::Argon32, time() + 300);
+        $ticket = $chainService->ticketFor($requirement->chainId, time() + 300);
+
+        $risk = $this->riskStack(SignalVector::fromArray(self::ARGON32_VECTOR));
+        $controller = $this->chainController($storage, $chainService, $risk['gateway'], postSolveDispositionStore: $dispositions);
+
+        // Request 1: issue the stage-2 challenge.
+        $first = $controller->challenge($this->challengeRequest(json_encode(['scope' => 'login', 'chain_ticket' => $ticket], JSON_THROW_ON_ERROR)));
+        self::assertSame(200, $first->getStatusCode());
+        $nonce = json_decode((string) $first->getContent(), true)['nonce'];
+
+        // The validator committed the consumed VALID result AND durably
+        // finalized the DENY disposition.
+        $storage->consume($nonce);
+        $storage->commitResult($nonce, true, null);
+        $dispositions->claim($nonce, 'disposition-owner', 300);
+        $dispositions->finalize($nonce, 'disposition-owner', new \BelConsulting\KiwiCaptchaBundle\Risk\PostSolveDisposition(\BelConsulting\KiwiCaptchaBundle\Risk\PostSolveDispositionKind::Deny));
+
+        // The retry: consumed+VALID with a DENY disposition — the chain
+        // transitions to the TERMINAL denied and the request answers the
+        // terminal risk-denied response — never a challenge.
+        $second = $controller->challenge($this->challengeRequest(json_encode(['scope' => 'login', 'chain_ticket' => $ticket], JSON_THROW_ON_ERROR)));
+        self::assertSame(429, $second->getStatusCode(), 'a consumed-valid stage-2 with a DENY disposition is the terminal risk-denied response');
+        self::assertStringContainsString('RISK_DENIED', (string) $second->getContent());
+        $state = $chainService->requirementFor($requirement->chainId);
+        self::assertSame('denied', $state?->state, 'the chain is TERMINAL denied');
+        self::assertSame($nonce, $state?->stage2Nonce);
+        self::assertNotNull($chainService->findOpenRequirement('login', '', 1), 'the obligation SURVIVES the denial — the transaction stays bound');
+
+        // A LATER request for the same transaction re-encounters the
+        // TERMINAL state (the obligation is kept — never a new stage-1,
+        // never a challenge).
+        $third = $controller->challenge($this->challengeRequest(json_encode(['scope' => 'login', 'chain_ticket' => $ticket], JSON_THROW_ON_ERROR)));
+        self::assertSame(429, $third->getStatusCode(), 'a later request re-encounters the terminal denial response');
+        self::assertStringContainsString('RISK_DENIED', (string) $third->getContent());
+        self::assertSame('denied', $chainService->requirementFor($requirement->chainId)?->state);
     }
 
     public function testConsumedStage2WithoutCommittedResultIsTemporaryUnavailableNeverRearms(): void
@@ -1144,6 +1484,11 @@ final class ChainedChallengeTest extends TestCase
         yield 'leaseUntil missing in the reserved state' => ['leaseUntil', $unset('leaseUntil'), 'reserved'];
         yield 'stage2Nonce set in the reserved state' => ['stage2Nonce', $set('stage2Nonce', 'n'), 'reserved'];
         yield 'stage2Nonce missing in the issued state' => ['stage2Nonce', $unset('stage2Nonce'), 'issued'];
+        yield 'bad stage2Nonce shape (hex, not Kiwi base64)' => ['stage2Nonce', $set('stage2Nonce', bin2hex(random_bytes(32))), 'issued'];
+        yield 'stage2Nonce missing in the step_up_required state' => ['stage2Nonce', $unset('stage2Nonce'), 'step_up_required'];
+        yield 'owner set in the step_up_required state' => ['owner', $set('owner', 'x'), 'step_up_required'];
+        yield 'leaseUntil set in the denied state' => ['leaseUntil', $set('leaseUntil', 1234), 'denied'];
+        yield 'stage2Nonce missing in the denied state' => ['stage2Nonce', $unset('stage2Nonce'), 'denied'];
         yield 'bad expiresAt' => ['expiresAt', $set('expiresAt', 'soon'), 'available'];
         yield 'missing expiresAt' => ['expiresAt', $unset('expiresAt'), 'available'];
         yield 'bad requestBinding shape' => ['requestBinding', $set('requestBinding', 'bad binding!'), 'available'];
@@ -1159,7 +1504,15 @@ final class ChainedChallengeTest extends TestCase
             self::assertSame(ChainReservationResult::Available, $service->reserveStage2($requirement->chainId, 'owner-a'));
         } elseif ($prepare === 'issued') {
             self::assertSame(ChainReservationResult::Available, $service->reserveStage2($requirement->chainId, 'owner-a'));
-            self::assertSame(ChainIssuedResult::IssuedNew, $service->markIssued($requirement->chainId, 'owner-a', 'stage2-nonce'));
+            self::assertSame(ChainIssuedResult::IssuedNew, $service->markIssued($requirement->chainId, 'owner-a', $this->stageNonce('stage2-nonce')));
+        } elseif ($prepare === 'step_up_required') {
+            self::assertSame(ChainReservationResult::Available, $service->reserveStage2($requirement->chainId, 'owner-a'));
+            self::assertSame(ChainIssuedResult::IssuedNew, $service->markIssued($requirement->chainId, 'owner-a', $this->stageNonce('stage2-nonce')));
+            self::assertSame(ChainVerifiedResult::StepUpRequiredNew, $service->markStepUpRequired($requirement->chainId, $this->stageNonce('stage2-nonce')));
+        } elseif ($prepare === 'denied') {
+            self::assertSame(ChainReservationResult::Available, $service->reserveStage2($requirement->chainId, 'owner-a'));
+            self::assertSame(ChainIssuedResult::IssuedNew, $service->markIssued($requirement->chainId, 'owner-a', $this->stageNonce('stage2-nonce')));
+            self::assertSame(ChainVerifiedResult::DeniedNew, $service->markDenied($requirement->chainId, $this->stageNonce('stage2-nonce')));
         }
 
         $records = $this->chainRecords($store);
@@ -1634,9 +1987,12 @@ final class ChainedChallengeTest extends TestCase
 
         // Stage 2 solve: a NEUTRAL reassessment — the stage-2
         // verification detects the open requirement (its stage2Nonce IS
-        // the solved nonce), marks the chain VERIFIED (the obligation is
-        // cleared — the chain ends at stage 2, never a third stage) and
-        // passes.
+        // the solved nonce). Even WITHOUT a reassessment (post_solve_check
+        // false + no honeypot + no chain-eligible scope — the metadata
+        // chainId marker forbids a third stage), the PASS disposition of a
+        // recognized stage-2 nonce STILL transitions the chain to VERIFIED
+        // (the obligation is cleared — the chain ends at stage 2, never a
+        // third stage) and passes.
         usleep(($stage2['minDurationMs'] + 10) * 1000);
         $stage2Token = $this->solveChallenge($stage2);
         $risk['store']->setVector(SignalVector::zero());
@@ -1649,8 +2005,147 @@ final class ChainedChallengeTest extends TestCase
         self::assertCount(0, $violations2, 'a stage-2 verified challenge passes — the chain ends at stage 2 (the metadata chainId marker forbids a third stage, so no reassessment runs and no new ticket can ever be issued)');
         $records = array_values($this->chainRecords($chainStore));
         self::assertCount(1, $records, 'no third-stage chain state may ever be created');
-        self::assertSame('issued', $records[0]['state'], 'the chain stays in its single issued state — the marker ends the chain at stage 2');
+        self::assertSame('verified', $records[0]['state'], 'the chain ends TERMINAL verified — the no-reassessment PASS still performs the stage-2 transition');
         self::assertSame($stage2['nonce'], $records[0]['stage2Nonce'], 'no re-issued challenge may ever replace the stage-2 nonce');
+        self::assertNull($chainService->findOpenRequirement('login', 'txn-alpha', 1), 'the verified transition cleared the obligation — the transaction is complete');
+    }
+
+    // ── Stage-2 final disposition -> terminal transition (validator) ───
+
+    public function testStage2StepUpDispositionMarksStepUpRequiredAndTheObligationSurvives(): void
+    {
+        $storage = new ArrayStorage();
+        $chainStore = new ArrayChainedChallengeStateStore();
+        $chainService = $this->chainService($chainStore);
+        $stage1 = $this->solvedStage1($storage);
+
+        // Stage 1: the reassessment (Argon32) opens the chain.
+        $risk = $this->riskStack(SignalVector::fromArray(self::ARGON32_VECTOR));
+        $stack = new RequestStack();
+        $stack->push(Request::create('/', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7']));
+        [$violations] = $this->validateChained($stage1['token'], $stack, $risk['gateway'], $storage, $chainStore);
+        self::assertSame(KiwiCaptchaValidator::CHAIN_REQUIRED_ERROR, $violations[0]->getCode());
+        $ticket = $violations[0]->getParameters()['{{ chain_ticket }}'];
+
+        // Stage 2: issue the stronger challenge through the controller.
+        $controller = $this->chainController($storage, $chainService, $risk['gateway'], authority: new FixtureBindingAuthority('txn-alpha'));
+        $response = $controller->challenge($this->challengeRequest(json_encode(['scope' => 'login', 'chain_ticket' => $ticket, 'request_binding' => 'txn-alpha'], JSON_THROW_ON_ERROR)));
+        self::assertSame(200, $response->getStatusCode(), sprintf('the stage-2 issuance must succeed: %s', (string) $response->getContent()));
+        $stage2 = json_decode((string) $response->getContent(), true);
+
+        // Stage 2 solve with a STEP-UP post-solve decision: the FINAL
+        // disposition is STEP-UP — the chain transitions to the TERMINAL
+        // step_up_required (the obligation is KEPT) and the application
+        // sees the terminal step-up violation.
+        usleep(($stage2['minDurationMs'] + 10) * 1000);
+        $stage2Token = $this->solveChallenge($stage2);
+        $risk['store']->setVector(SignalVector::fromArray(self::STEP_UP_VECTOR));
+        $stack2 = new RequestStack();
+        $stack2->push(Request::create('/', 'POST', ['kiwi__token' => $stage2Token, 'kiwi_request_binding' => 'txn-alpha'], [], [], ['REMOTE_ADDR' => '198.51.100.7']));
+        [$violations2] = $this->validateChained($stage2Token, $stack2, $risk['gateway'], $storage, $chainStore);
+        self::assertCount(1, $violations2);
+        self::assertSame(KiwiCaptcha::POST_SOLVE_STEP_UP_REQUIRED, $violations2[0]->getCode(), 'a stage-2 solve with a StepUp post-solve decision is terminal step-up');
+
+        $state = $chainService->requirementFor((string) $chainService->verify($ticket)['chainId']);
+        self::assertSame('step_up_required', $state?->state, 'the chain is TERMINAL step_up_required');
+        self::assertSame($stage2['nonce'], $state?->stage2Nonce);
+        self::assertNotNull($chainService->findOpenRequirement('login', 'txn-alpha', 1), 'the step-up transition KEEPS the obligation — the transaction stays bound');
+
+        // A SUBSEQUENT challenge request for the same transaction returns
+        // the TERMINAL STEP_UP_REQUIRED — never a new stage-1, never a
+        // stage-2 challenge.
+        $later = $controller->challenge($this->challengeRequest(json_encode(['scope' => 'login', 'chain_ticket' => $ticket, 'request_binding' => 'txn-alpha'], JSON_THROW_ON_ERROR)));
+        self::assertSame(403, $later->getStatusCode(), 'a later request for the same transaction re-encounters the terminal step-up');
+        self::assertStringContainsString('STEP_UP_REQUIRED', (string) $later->getContent());
+        self::assertSame('step_up_required', $chainService->requirementFor((string) $chainService->verify($ticket)['chainId'])?->state, 'the terminal state survives the later request');
+    }
+
+    public function testStage2DenyDispositionMarksDeniedAndTheObligationSurvives(): void
+    {
+        $storage = new ArrayStorage();
+        $chainStore = new ArrayChainedChallengeStateStore();
+        $chainService = $this->chainService($chainStore);
+        $stage1 = $this->solvedStage1($storage);
+
+        // Stage 1: the reassessment (Argon32) opens the chain.
+        $risk = $this->riskStack(SignalVector::fromArray(self::ARGON32_VECTOR));
+        $stack = new RequestStack();
+        $stack->push(Request::create('/', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7']));
+        [$violations] = $this->validateChained($stage1['token'], $stack, $risk['gateway'], $storage, $chainStore);
+        self::assertSame(KiwiCaptchaValidator::CHAIN_REQUIRED_ERROR, $violations[0]->getCode());
+        $ticket = $violations[0]->getParameters()['{{ chain_ticket }}'];
+
+        // Stage 2: issue the stronger challenge through the controller.
+        $controller = $this->chainController($storage, $chainService, $risk['gateway'], authority: new FixtureBindingAuthority('txn-alpha'));
+        $response = $controller->challenge($this->challengeRequest(json_encode(['scope' => 'login', 'chain_ticket' => $ticket, 'request_binding' => 'txn-alpha'], JSON_THROW_ON_ERROR)));
+        self::assertSame(200, $response->getStatusCode(), sprintf('the stage-2 issuance must succeed: %s', (string) $response->getContent()));
+        $stage2 = json_decode((string) $response->getContent(), true);
+
+        // Stage 2 solve with a DENY post-solve decision: the FINAL
+        // disposition is DENY — the chain transitions to the TERMINAL
+        // denied (the obligation is KEPT) and the application sees the
+        // post-solve rejection.
+        usleep(($stage2['minDurationMs'] + 10) * 1000);
+        $stage2Token = $this->solveChallenge($stage2);
+        $risk['store']->setVector(SignalVector::fromArray(['network_risk' => 900]));
+        $stack2 = new RequestStack();
+        $stack2->push(Request::create('/', 'POST', ['kiwi__token' => $stage2Token, 'kiwi_request_binding' => 'txn-alpha'], [], [], ['REMOTE_ADDR' => '198.51.100.7']));
+        [$violations2] = $this->validateChained($stage2Token, $stack2, $risk['gateway'], $storage, $chainStore);
+        self::assertCount(1, $violations2);
+        self::assertSame(KiwiCaptcha::POST_SOLVE_REJECTED_ERROR, $violations2[0]->getCode(), 'a stage-2 solve with a Deny post-solve decision is rejected');
+
+        $state = $chainService->requirementFor((string) $chainService->verify($ticket)['chainId']);
+        self::assertSame('denied', $state?->state, 'the chain is TERMINAL denied');
+        self::assertSame($stage2['nonce'], $state?->stage2Nonce);
+        self::assertNotNull($chainService->findOpenRequirement('login', 'txn-alpha', 1), 'the denied transition KEEPS the obligation — the transaction stays bound');
+
+        // A SUBSEQUENT challenge request for the same transaction returns
+        // the TERMINAL denial — never a new stage-1, never a stage-2
+        // challenge.
+        $later = $controller->challenge($this->challengeRequest(json_encode(['scope' => 'login', 'chain_ticket' => $ticket, 'request_binding' => 'txn-alpha'], JSON_THROW_ON_ERROR)));
+        self::assertSame(429, $later->getStatusCode(), 'a later request for the same transaction re-encounters the terminal denial');
+        self::assertStringContainsString('RISK_DENIED', (string) $later->getContent());
+        self::assertSame('denied', $chainService->requirementFor((string) $chainService->verify($ticket)['chainId'])?->state, 'the terminal state survives the later request');
+    }
+
+    public function testStage2PassDispositionMarksVerifiedAndDeletesTheObligation(): void
+    {
+        $storage = new ArrayStorage();
+        $chainStore = new ArrayChainedChallengeStateStore();
+        $chainService = $this->chainService($chainStore);
+        $stage1 = $this->solvedStage1($storage);
+
+        // Stage 1: the reassessment (Argon32) opens the chain.
+        $risk = $this->riskStack(SignalVector::fromArray(self::ARGON32_VECTOR));
+        $stack = new RequestStack();
+        $stack->push(Request::create('/', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7']));
+        [$violations] = $this->validateChained($stage1['token'], $stack, $risk['gateway'], $storage, $chainStore);
+        self::assertSame(KiwiCaptchaValidator::CHAIN_REQUIRED_ERROR, $violations[0]->getCode());
+        $ticket = $violations[0]->getParameters()['{{ chain_ticket }}'];
+
+        // Stage 2: issue the stronger challenge through the controller.
+        $controller = $this->chainController($storage, $chainService, $risk['gateway'], authority: new FixtureBindingAuthority('txn-alpha'));
+        $response = $controller->challenge($this->challengeRequest(json_encode(['scope' => 'login', 'chain_ticket' => $ticket, 'request_binding' => 'txn-alpha'], JSON_THROW_ON_ERROR)));
+        self::assertSame(200, $response->getStatusCode(), sprintf('the stage-2 issuance must succeed: %s', (string) $response->getContent()));
+        $stage2 = json_decode((string) $response->getContent(), true);
+
+        // Stage 2 solve with a NEUTRAL post-solve decision: the FINAL
+        // disposition is PASS — the chain VERIFIES (the obligation is
+        // deleted) and the solve passes. A FRESH risk stack (a fresh
+        // scope-action hysteresis) so the neutral assessment is actually
+        // neutral.
+        usleep(($stage2['minDurationMs'] + 10) * 1000);
+        $stage2Token = $this->solveChallenge($stage2);
+        $neutral = $this->riskStack();
+        $stack2 = new RequestStack();
+        $stack2->push(Request::create('/', 'POST', ['kiwi__token' => $stage2Token, 'kiwi_request_binding' => 'txn-alpha'], [], [], ['REMOTE_ADDR' => '198.51.100.7']));
+        [$violations2] = $this->validateChained($stage2Token, $stack2, $neutral['gateway'], $storage, $chainStore);
+        self::assertCount(0, $violations2, 'a stage-2 solve with a Pass disposition passes');
+
+        $state = $chainService->requirementFor((string) $chainService->verify($ticket)['chainId']);
+        self::assertSame('verified', $state?->state, 'the chain is TERMINAL verified');
+        self::assertSame($stage2['nonce'], $state?->stage2Nonce);
+        self::assertNull($chainService->findOpenRequirement('login', 'txn-alpha', 1), 'the verified transition DELETED the obligation — the transaction is complete');
     }
 
     // ── Admission ordering + refusals ──────────────────────────────────
@@ -1786,10 +2281,10 @@ final class ChainedChallengeTest extends TestCase
 
         $chainId = (string) $service->verify($ticket)['chainId'];
         self::assertSame('available', $service->reserve($ticket, 'owner-a'), 'the deprecated reserve still claims the chain');
-        $completed = $service->complete($chainId, 'owner-a', 'stage2-nonce');
+        $completed = $service->complete($chainId, 'owner-a', $this->stageNonce('stage2-nonce'));
         self::assertIsArray($completed);
         self::assertSame('completed', $completed['state'], 'the legacy terminal state is retained');
-        self::assertSame('stage2-nonce', $completed['stage2Nonce']);
+        self::assertSame($this->stageNonce('stage2-nonce'), $completed['stage2Nonce']);
 
         // The legacy 'completed' record is reported as the ISSUED state by
         // the typed surface (semantically identical — recoverable), and a
@@ -1802,7 +2297,7 @@ final class ChainedChallengeTest extends TestCase
         // terminal state) and its obligation-independent mapping is
         // cleared only if it points at the chain (the legacy create()
         // wrote no obligation, so nothing is linked).
-        self::assertSame(ChainVerifiedResult::VerifiedNew, $service->markVerified($chainId, 'stage2-nonce'));
+        self::assertSame(ChainVerifiedResult::VerifiedNew, $service->markVerified($chainId, $this->stageNonce('stage2-nonce')));
         self::assertSame('verified', $service->requirementFor($chainId)?->state);
     }
 }
@@ -1957,6 +2452,16 @@ final class ChainStateStoreInterceptor implements TransactionalChainedChallengeS
         return $this->inner->markVerified($chainId, $stage2Nonce);
     }
 
+    public function markStepUpRequired(string $chainId, string $stage2Nonce): string
+    {
+        return $this->inner->markStepUpRequired($chainId, $stage2Nonce);
+    }
+
+    public function markDenied(string $chainId, string $stage2Nonce): string
+    {
+        return $this->inner->markDenied($chainId, $stage2Nonce);
+    }
+
     public function rearmIssued(string $chainId, string $expectedStage2Nonce): bool
     {
         return $this->inner->rearmIssued($chainId, $expectedStage2Nonce);
@@ -2024,8 +2529,8 @@ final class LostReplyChainStore implements TransactionalChainedChallengeStateSto
     {
         $record = $this->inner->read($chainId);
         // The INDETERMINATE seam: after the issuance transition the record
-        // is issued/verified — the recovery read of such a record fails.
-        if ($this->readThrows && $record !== null && \in_array($record['state'], ['issued', 'verified'], true)) {
+        // is issued/terminal — the recovery read of such a record fails.
+        if ($this->readThrows && $record !== null && \in_array($record['state'], ['issued', 'verified', 'step_up_required', 'denied'], true)) {
             throw new \RuntimeException('simulated chain state read outage');
         }
 
@@ -2060,6 +2565,16 @@ final class LostReplyChainStore implements TransactionalChainedChallengeStateSto
         }
 
         return $result;
+    }
+
+    public function markStepUpRequired(string $chainId, string $stage2Nonce): string
+    {
+        return $this->inner->markStepUpRequired($chainId, $stage2Nonce);
+    }
+
+    public function markDenied(string $chainId, string $stage2Nonce): string
+    {
+        return $this->inner->markDenied($chainId, $stage2Nonce);
     }
 
     public function rearmIssued(string $chainId, string $expectedStage2Nonce): bool
@@ -2129,7 +2644,7 @@ final class ConflictChainStore implements TransactionalChainedChallengeStateStor
     {
         // A DIFFERENT nonce durably wins the chain first: the caller's
         // issuance POSITIVELY cannot be established.
-        $this->inner->markIssued($chainId, $ownerToken, 'different-nonce-won');
+        $this->inner->markIssued($chainId, $ownerToken, base64_encode(hash('sha256', 'different-nonce-won', true)));
 
         return $this->inner->markIssued($chainId, $ownerToken, $stage2Nonce);
     }
@@ -2137,6 +2652,16 @@ final class ConflictChainStore implements TransactionalChainedChallengeStateStor
     public function markVerified(string $chainId, string $stage2Nonce): string
     {
         return $this->inner->markVerified($chainId, $stage2Nonce);
+    }
+
+    public function markStepUpRequired(string $chainId, string $stage2Nonce): string
+    {
+        return $this->inner->markStepUpRequired($chainId, $stage2Nonce);
+    }
+
+    public function markDenied(string $chainId, string $stage2Nonce): string
+    {
+        return $this->inner->markDenied($chainId, $stage2Nonce);
     }
 
     public function rearmIssued(string $chainId, string $expectedStage2Nonce): bool

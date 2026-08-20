@@ -16,18 +16,20 @@ use KiwiCaptcha\Risk\RiskAction;
  *   {kiwi:<ns>}:chain-obligation:<obligationId> -> chainId (SAME TTL)
  *
  * The chain lifecycle is the obligation-anchored Lua state machine
- * (available -> reserved(owner, SHORT lease) -> issued(stage2Nonce) ->
- * verified(stage2Nonce) — verified TERMINAL): the obligation mapping is
- * created ATOMICALLY with the chain (a client cannot restart the
- * transaction at stage 1 by discarding the ticket), the reservation is an
- * OWNER-SCOPED short lease (redis TIME reads the server clock; the lease
- * is min(reservation_lease_secs, the record's OWN remaining TTL) —
- * KEEPTTL — and a record WITHOUT an expiry is corrupted state that fails
- * closed: no lifetime is ever manufactured from the configured TTL), the
- * issuance is an idempotent owner-gated state TRANSITION (never a delete
- * — a retry recovers the issued challenge instead of re-minting), the
- * verification is the TERMINAL transition that ATOMICALLY deletes the
- * obligation mapping only while it still points at this chainId, and the
+ * (available -> reserved(owner, SHORT lease) -> issued(stage2Nonce) with
+ * THREE disposition-aware TERMINAL transitions: verified(stage2Nonce) —
+ * the PASS transition that ATOMICALLY deletes the obligation mapping only
+ * while it still points at this chainId — and step_up_required(nonce) /
+ * denied(nonce) — the TERMINAL transitions that KEEP the obligation
+ * mapping (the transaction stays bound to its final disposition): the
+ * reservation is an OWNER-SCOPED short lease (redis TIME reads the server
+ * clock; the lease is min(reservation_lease_secs, the record's OWN
+ * remaining TTL) — KEEPTTL — and a record WITHOUT an expiry is corrupted
+ * state that fails closed: no lifetime is ever manufactured from the
+ * configured TTL), the issuance is an idempotent owner-gated state
+ * TRANSITION (never a delete — a retry recovers the issued challenge
+ * instead of re-minting), the terminal transitions are idempotent and
+ * nonce-pinned (a different nonce is an atomic no-op), and the
  * release/rearm are owner-gated / nonce-pinned atomic no-ops otherwise.
  *
  * Every record is decoded ALL-OR-NOTHING against the strict v2 schema
@@ -56,7 +58,7 @@ final class RedisChainedChallengeStateStore implements TransactionalChainedChall
     /** The chainable PoW actions (Sha16..Argon64 — never StepUp/Deny). */
     private const CHAINABLE_ACTIONS = ['sha16', 'sha18', 'sha20', 'argon16', 'argon32', 'argon64'];
 
-    private const STATES = ['available', 'reserved', 'issued', 'verified', 'completed'];
+    private const STATES = ['available', 'reserved', 'issued', 'verified', 'completed', 'step_up_required', 'denied'];
 
     /**
      * ATOMIC create-or-get over the chain + obligation keys (same hash
@@ -124,8 +126,10 @@ LUA;
      * ticket expiry is the true bound). reserved by ME -> 'retry';
      * reserved by another owner with a live lease -> 'busy'; expired
      * lease -> takeover ('taken_over'); issued/verified/completed ->
-     * 'issued'/'verified'/'completed'. A record WITHOUT an expiry is
-     * CORRUPTED state -> 'missing' (never manufacture a lifetime).
+     * 'issued'/'verified'/'completed'; the TERMINAL step_up_required /
+     * denied states answer 'step_up_required'/'denied' (the obligation
+     * stays bound — never issue). A record WITHOUT an expiry is CORRUPTED
+     * state -> 'missing' (never manufacture a lifetime).
      */
     private const RESERVE_LUA = <<<'LUA'
 -- Chain reservation: owner-scoped SHORT lease (redis TIME + remaining TTL).
@@ -149,6 +153,12 @@ if rec['state'] == 'verified' then
 end
 if rec['state'] == 'completed' then
   return 'completed'
+end
+if rec['state'] == 'step_up_required' then
+  return 'step_up_required'
+end
+if rec['state'] == 'denied' then
+  return 'denied'
 end
 if rec['state'] == 'reserved' then
   if rec['owner'] == ARGV[1] then
@@ -183,9 +193,10 @@ LUA;
      * — a state TRANSITION, never a delete; the issued record lets a
      * retry RECOVER the issued challenge instead of re-minting). Same
      * nonce again -> 'issued_same', verified with the same nonce ->
-     * 'verified_same', any other nonce on an issued/verified/completed
-     * chain -> 'conflict', a non-owner (or an unreserved chain) ->
-     * 'not_owner', absent -> 'missing'.
+     * 'verified_same', any other nonce on an issued/completed chain, or
+     * any nonce on a TERMINAL step_up_required/denied chain -> 'conflict',
+     * a non-owner (or an unreserved chain) -> 'not_owner', absent ->
+     * 'missing'.
      */
     private const MARK_ISSUED_LUA = <<<'LUA'
 -- Chain issuance: reserved(owner) -> issued(stage2Nonce), idempotent.
@@ -215,6 +226,9 @@ if rec['state'] == 'verified' then
   if rec['stage2Nonce'] == ARGV[2] then
     return 'verified_same'
   end
+  return 'conflict'
+end
+if rec['state'] == 'step_up_required' or rec['state'] == 'denied' then
   return 'conflict'
 end
 return 'not_owner'
@@ -250,6 +264,68 @@ if redis.call('GET', KEYS[2]) == ARGV[2] then
   redis.call('DEL', KEYS[2])
 end
 return 'verified_new'
+LUA;
+
+    /**
+     * TERMINAL step-up: issued(nonce) -> step_up_required(nonce) (KEEPTTL
+     * — the terminal record is kept until its TTL). The obligation
+     * mapping is KEPT: the transaction stays bound to the step-up
+     * requirement, so a later challenge request for the same transaction
+     * re-encounters the terminal state (never a new stage-1). Same nonce
+     * again -> 'step_up_required_same'; a different nonce or a
+     * non-issuable state -> 'conflict'; absent -> 'missing'.
+     */
+    private const MARK_STEP_UP_REQUIRED_LUA = <<<'LUA'
+-- Chain step-up: issued(stage2Nonce) -> step_up_required(stage2Nonce), TERMINAL,
+-- keeping the obligation mapping (the transaction stays bound to the step-up).
+local existing = redis.call('GET', KEYS[1])
+if not existing then
+  return 'missing'
+end
+local rec = cjson.decode(existing)
+if rec['state'] == 'step_up_required' then
+  if rec['stage2Nonce'] == ARGV[1] then
+    return 'step_up_required_same'
+  end
+  return 'conflict'
+end
+if (rec['state'] ~= 'issued' and rec['state'] ~= 'completed') or rec['stage2Nonce'] ~= ARGV[1] then
+  return 'conflict'
+end
+rec['state'] = 'step_up_required'
+redis.call('SET', KEYS[1], cjson.encode(rec), 'KEEPTTL')
+return 'step_up_required_new'
+LUA;
+
+    /**
+     * TERMINAL denial: issued(nonce) -> denied(nonce) (KEEPTTL — the
+     * terminal record is kept until its TTL). The obligation mapping is
+     * KEPT: the transaction stays bound to its final denial, so a later
+     * challenge request for the same transaction re-encounters the
+     * terminal state (never a new stage-1). Same nonce again ->
+     * 'denied_same'; a different nonce or a non-issuable state ->
+     * 'conflict'; absent -> 'missing'.
+     */
+    private const MARK_DENIED_LUA = <<<'LUA'
+-- Chain denial: issued(stage2Nonce) -> denied(stage2Nonce), TERMINAL,
+-- keeping the obligation mapping (the transaction stays bound to the denial).
+local existing = redis.call('GET', KEYS[1])
+if not existing then
+  return 'missing'
+end
+local rec = cjson.decode(existing)
+if rec['state'] == 'denied' then
+  if rec['stage2Nonce'] == ARGV[1] then
+    return 'denied_same'
+  end
+  return 'conflict'
+end
+if (rec['state'] ~= 'issued' and rec['state'] ~= 'completed') or rec['stage2Nonce'] ~= ARGV[1] then
+  return 'conflict'
+end
+rec['state'] = 'denied'
+redis.call('SET', KEYS[1], cjson.encode(rec), 'KEEPTTL')
+return 'denied_new'
 LUA;
 
     /**
@@ -466,7 +542,7 @@ LUA;
         $this->assertLiveRecord($chainId);
         $status = $this->evalScript(self::RESERVE_LUA, [$this->key($chainId)], [$ownerToken, (string) max(1, $leaseSecs)]);
 
-        return \is_string($status) && \in_array($status, ['available', 'retry', 'busy', 'taken_over', 'issued', 'verified', 'completed', 'missing'], true)
+        return \is_string($status) && \in_array($status, ['available', 'retry', 'busy', 'taken_over', 'issued', 'verified', 'completed', 'step_up_required', 'denied', 'missing'], true)
             ? $status
             : 'missing';
     }
@@ -506,6 +582,26 @@ LUA;
             : 'missing';
     }
 
+    public function markStepUpRequired(string $chainId, string $stage2Nonce): string
+    {
+        $this->assertLiveRecord($chainId);
+        $result = $this->evalScript(self::MARK_STEP_UP_REQUIRED_LUA, [$this->key($chainId)], [$stage2Nonce]);
+
+        return \is_string($result) && \in_array($result, ['step_up_required_new', 'step_up_required_same', 'conflict', 'missing'], true)
+            ? $result
+            : 'missing';
+    }
+
+    public function markDenied(string $chainId, string $stage2Nonce): string
+    {
+        $this->assertLiveRecord($chainId);
+        $result = $this->evalScript(self::MARK_DENIED_LUA, [$this->key($chainId)], [$stage2Nonce]);
+
+        return \is_string($result) && \in_array($result, ['denied_new', 'denied_same', 'conflict', 'missing'], true)
+            ? $result
+            : 'missing';
+    }
+
     public function rearmIssued(string $chainId, string $expectedStage2Nonce): bool
     {
         $this->assertLiveRecord($chainId);
@@ -539,12 +635,15 @@ LUA;
      * {@see MalformedChainedChallengeStateException} (NEVER defaults: a
      * corrupt requiredAction must never become '', policyVersion never 1,
      * chainDepth never 2, state never available). Validates: schema
-     * version 2; the Kiwi base64 nonce shape; the canonical scope shape;
-     * the exact 64-lowercase-hex obligation id; a chainable PoW action
+     * version 2; the Kiwi base64 nonce shape for BOTH stage-1 and
+     * stage-2 nonces; the canonical scope shape; the exact
+     * 64-lowercase-hex obligation id; a chainable PoW action
      * (Sha16..Argon64 — never StepUp/Deny); a bounded rank CONSISTENT
      * with the action; a positive policy version; chain depth exactly 2;
-     * the exact state enum; owner/leaseUntil REQUIRED in reserved and
-     * NULL elsewhere; stage2Nonce REQUIRED in issued/verified/completed
+     * the exact state enum (the TERMINAL step_up_required/denied states
+     * included); owner/leaseUntil REQUIRED in reserved and NULL
+     * elsewhere; stage2Nonce REQUIRED with the Kiwi base64 nonce shape in
+     * issued/verified/step_up_required/denied (and the legacy completed)
      * and NULL elsewhere; an integer expiry; a well-shaped nullable
      * request binding.
      *
@@ -599,7 +698,7 @@ LUA;
         }
         $state = $rec['state'] ?? null;
         if (!\is_string($state) || !\in_array($state, self::STATES, true)) {
-            throw new MalformedChainedChallengeStateException('chain record state must be one of available|reserved|issued|verified');
+            throw new MalformedChainedChallengeStateException('chain record state must be one of available|reserved|issued|verified|step_up_required|denied');
         }
         $owner = $rec['owner'] ?? null;
         $leaseUntil = $rec['leaseUntil'] ?? null;
@@ -611,9 +710,9 @@ LUA;
             throw new MalformedChainedChallengeStateException('chain record owner/leaseUntil must be null outside the reserved state');
         }
         $stage2Nonce = $rec['stage2Nonce'] ?? null;
-        if (($state === 'issued' || $state === 'verified' || $state === 'completed')) {
-            if (!\is_string($stage2Nonce) || $stage2Nonce === '') {
-                throw new MalformedChainedChallengeStateException('chain record stage2Nonce is required in the issued/verified states');
+        if ($state === 'issued' || $state === 'verified' || $state === 'completed' || $state === 'step_up_required' || $state === 'denied') {
+            if (!\is_string($stage2Nonce) || preg_match(self::NONCE_PATTERN, $stage2Nonce) !== 1) {
+                throw new MalformedChainedChallengeStateException('chain record stage2Nonce must be a Kiwi base64 nonce in the issued/terminal states');
             }
         } elseif ($stage2Nonce !== null) {
             throw new MalformedChainedChallengeStateException('chain record stage2Nonce must be null in the available/reserved states');
@@ -636,7 +735,7 @@ LUA;
      *
      * @param array<string, mixed> $rec
      *
-     * @return array{stage1Nonce: string, scope: string, requestBinding: ?string, requiredAction: string, requiredRank: int, policyVersion: int, chainDepth: int, state: 'available'|'reserved'|'issued'|'verified'|'completed', owner: ?string, leaseUntil: ?int, stage2Nonce: ?string, obligationId: string, expiresAt: int}
+     * @return array{stage1Nonce: string, scope: string, requestBinding: ?string, requiredAction: string, requiredRank: int, policyVersion: int, chainDepth: int, state: 'available'|'reserved'|'issued'|'verified'|'step_up_required'|'denied'|'completed', owner: ?string, leaseUntil: ?int, stage2Nonce: ?string, obligationId: string, expiresAt: int}
      */
     private static function wire(array $rec): array
     {
