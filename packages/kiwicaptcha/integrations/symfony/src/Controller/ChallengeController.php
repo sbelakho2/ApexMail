@@ -26,201 +26,15 @@ use Symfony\Component\HttpFoundation\Request;
 use Symfony\Component\HttpFoundation\Response;
 
 /**
- * Issues a new captcha challenge for the widget.
- *
- * The route is NOT declared via a #[Route] attribute on this class — bundle
- * controllers are never scanned for attribute routes. It is registered by
- * {@see \BelConsulting\KiwiCaptchaBundle\Routing\KiwiCaptchaRouteLoader} with
- * the bundle's configured `route_prefix` (auto-registered by the extension,
- * or imported from the bundle's routes resource).
- *
- * The widget fetches this endpoint, solves the proof-of-work locally in the
- * browser, and submits the token in the hidden input. Challenges are issued
- * and stored locally — no external service is involved.
- *
- * Every response (success, error, 422, 429, 403) is a private JSON document:
- * Cache-Control no-store, Pragma no-cache, Referrer-Policy no-referrer and
- * X-Content-Type-Options nosniff — challenge bytes and client identity must
- * never be cached, mirrored, or sniffed (see {@see self::privateJson()}).
- *
- * Security design of the request pipeline, in order:
- *  1. PATH CANONICALITY: the RAW request target must be the canonical path
- *     (no `//`, no `/./`, no `/../`, no percent-encoded bytes, no trailing
- *     slash — the raw REQUEST_URI is compared, never a normalized route); a
- *     noncanonical target gets 404 CANONICAL_PATH_REQUIRED before any
- *     handling.
- *  2. NARROW HTTP: non-POST stays 405 — an OPTIONS preflight alone never
- *     authorizes anything. HTTP FRAMING is rejected before any body is
- *     read: a request carrying BOTH Content-Length and Transfer-Encoding,
- *     or a duplicate Content-Length, is request-smuggling ambiguity and
- *     gets 400 FRAMING_REJECTED.
- *  3. SECURITY-SINGULAR HEADERS: Origin, Forwarded, X-Forwarded-For or
- *     X-Real-IP appearing more than once is a parser-ambiguity attack and
- *     gets 400 DUPLICATE_HEADER before any header-derived identity is
- *     trusted.
- *  4. Content-Encoding other than identity and Content-Type other than
- *     application/json are rejected (415) before any body is read — no
- *     decompression bombs, no form-encoded smuggling.
- *  5. BODY CEILING: the body is consumed as a stream with a hard 8 KiB cap
- *     and a declared-Content-Length check — oversized input gets 413
- *     BODY_TOO_LARGE before the duplicate scan, the JSON decode or any
- *     admission control. Allocation-level ceilings are a deployment
- *     concern: mirror the bound in the proxy (client_max_body_size etc.)
- *     and in PHP (post_max_size) so oversized bytes never reach PHP at
- *     all.
- *  6. QUERY-PARAM HARDENING: the POST accepts ONLY scope / algorithm? /
- *     request_binding — any query string is a debug/override probe and
- *     gets 422.
- *  7. SECURITY-STATE STALENESS: a monitor whose central policy read is
- *     past the max-stale window refuses issuance with 503
- *     SERVICE_UNAVAILABLE — deliberate constrained degradation (README:
- *     availability trade-off).
- *  8. SAME-ORIGIN (CORS IS NOT AUTHORIZATION): origin enforcement runs on
- *     EVERY security response; the bundle never emits CORS headers at
- *     all, so there is no preflight path that could authorize. The
- *     optional origin allowlist (403 origin_rejected) and the Fetch
- *     Metadata check (403 CROSS_SITE_REJECTED) are the origin-laundering
- *     defenses, also before any state is written.
- *  9. DUPLICATE-JSON-KEY scan: the raw body is scanned for repeated object
- *     keys ({"scope":"a","scope":"b"} is a parser-ambiguity probe, 422
- *     DUPLICATE_FIELD, nested objects included), then the strict
- *     JSON-field check (only the documented fields, scalars only), then
- *     scope read.
- * 10. PROCESS-LOCAL EMERGENCY ADMISSION before any Redis issuance
- *     limiter: a saturated process refuses with the 429 risk-denied
- *     response without a single Redis round trip. Issuance rate limiting
- *     follows (per-client and deployment-global; a per-client 429 records
- *     SourceRateLimitHit, a global 429 records GlobalCapacityHit — the
- *     deployment-wide refusal is identity-neutral and never contaminates
- *     the visitor's source reputation).
- * 11. When the adaptive risk engine is enabled, the PRE-ISSUE risk
- *     assessment runs (a Deny decision returns 429 RISK_DENIED before any
- *     challenge is minted; the denial already scored the evidence, so no
- *     further rate-limit event is recorded; an escalated action raises
- *     the difficulty of the issued challenge, an unknown scope in
- *     'reject' mode returns 429 RISK_DENIED without issuing). The risk-v2
- *     evidence markers (decoy_field / honeypot / client_context) ride the
- *     assessment as probabilistic evidence — the markers are NEVER a
- *     security gate: a marked request is assessed like any other, and the
- *     evidence only moves the risk aggregate.
- * 12. PER-SCOPE ISSUANCE CAP: when risk.max_challenges_per_scope_per_minute
- *     is set, the atomic fixed-window counter refuses 429 SCOPE_LIMITED
- *     beyond the cap. The quota keys on the SERVER-OWNED scope identity
- *     (the configured risk.scopes id, the shared synthetic unknown-scope
- *     id, or the single reserved UNKNOWN_QUOTA_ID bucket for every
- *     unresolvable scope in ANY risk mode), so the raw scope string is
- *     NEVER a Redis key component and attacker-chosen scope names can
- *     never mint fresh quota windows.
- * 13. ANTI-STOCKPILING admission: the bounded outstanding counters are
- *     admitted BEFORE the challenge state is created when the configured
- *     challenge TTL is wired — the challenge-issuance sequence is local
- *     cap -> issuer limiter -> scope cap -> outstanding counters ->
- *     mint+store, so every quota check runs before the storage write;
- *     without a wired TTL the mint-then-admit path applies, discarding
- *     the minted record on refusal. Every minted challenge increments the
- *     atomic issuance-rate counter used by the resource-pressure
- *     provider. On the stage-2 path the effective TTL is additionally
- *     CLIPPED to the chain's remaining lifetime (item 14), so the
- *     admitted slot mirrors the signed challenge, which never outlives
- *     the chain obligation.
- * 14. CHAIN-TICKET / OPEN-CHAIN GATE (stage-2 issuance, risk.chaining):
- *     the chain is a SERVER-SIDE TRANSACTION OBLIGATION — the chain
- *     record and its obligation mapping
- *     ({kiwi:<ns>}:chain-obligation:<obligationId> -> chainId, keyed on
- *     the bounded pseudonymous obligation id of the (policy-epoch,
- *     scope, AUTHORITATIVE request-binding) triple — never a raw binding
- *     in a key) are created ATOMICALLY at the CHAIN_REQUIRED stage, so a
- *     client can never restart the transaction at stage 1 by discarding
- *     the ticket. The gate runs BEFORE any admission counter: the
- *     authoritative binding is resolved first (via
- *     risk.request_binding_authority when configured — a
- *     client-supplied request_binding is a HINT the authority accepts or
- *     refuses, never a value the server signs unexamined; without the
- *     authority the legacy static/attribute binding applies), the open
- *     chain of the current transaction is looked up
- *     (findOpenRequirement), and a PRESENTED ticket is validated —
- *     signature/expiry/structure — and REQUIRED to match the current
- *     transaction's obligation (a malicious different ticket gets 422
- *     before any state is touched); a request WITHOUT a ticket but WITH
- *     an open obligation AUTO-RESUMES the chain (never issue stage 1).
-     *     The stage-2 state is then validated and the issued stage-2
-     *     challenge inspected: pending -> RECOVER the exact already-issued
-     *     challenge (no re-mint, no re-admission), missing/expired -> REARM
-     *     for a fresh stage-2 mint (never a stage-1), consumed with a
-     *     committed VALID result -> the FINAL DISPOSITION of the nonce is
-     *     read from the post-solve disposition store (the same store the
-     *     validator finalized BEFORE the application saw the outcome —
-     *     the core's consumed result alone can never decide transaction
-     *     terminality): Pass -> markVerified (the chain ends — the
-     *     obligation is cleared atomically) + recover the challenge,
-     *     StepUp -> markStepUpRequired + the terminal STEP_UP_REQUIRED
-     *     response (the obligation is KEPT — the transaction stays bound
-     *     to the step-up), Deny -> markDenied + the terminal risk-denied
-     *     response (the obligation is KEPT), missing/pending disposition
-     *     -> the retryable 503 (the final disposition was never durably
-     *     established — never clear the obligation), consumed INVALID ->
-     *     rearm (subject to admission), consumed with NO result -> the
-     *     retryable 503 (indeterminate — never rearm). A chain in the
-     *     TERMINAL step_up_required/denied state answers its terminal
-     *     response directly — no issuance, the obligation stays bound, so
-     *     a later request for the same transaction re-encounters the
-     *     terminal state (never a new stage-1). The chain is then RESERVED
-     *     with a SHORT owner-scoped lease (reservation_lease_secs, bounded
-     *     by the record's own TTL — a crashed owner blocks retries for
-     *     seconds):
- *     'busy' gets the retryable in-progress 503 and NEVER enters the
- *     issuance pipeline; every refusal or failure after the reservation
- *     RELEASES it with the owner token (a non-owner release is an atomic
- *     no-op). A durably issued stage-2 transitions the state via the
- *     IDEMPOTENT markIssued (a lost reply is recovered by READING the
- *     state — issued/verified with the current nonce means success;
- *     indeterminate state retains the minted challenge and NEVER rolls
- *     back the outstanding slot); an ADMITTED-but-proven-not-handed-out
- *     failure returns the outstanding slot (abortedBeforeHandoff). The
- *     issued stage-2 profile is the STRONGER of the state's signed
- *     required action and the current pre-issue decision (a transient
- *     risk decay can never downgrade the promised stage). The stage-2
- *     challenge NEVER outlives the obligation that authorized it: the
- *     minted TTL is CLIPPED to the chain's remaining lifetime (min of
- *     the configured TTL and expiresAt - now, computed before the
- *     outstanding admission), and a chain with less than 1 second of
- *     life left refuses the mint with the expired-chain response — the
- *     chain is never re-created or re-signed with a fresh expiry. The
- *     stage-2 challenge's metadata sidecar carries the server-stamped
- *     chain id/depth in the PRIVATE chainId/chainDepth fields — the
- *     application's own cdata is preserved untouched. The chain is
- *     complete only when the stage-2 challenge VERIFIES (verified is
- *     TERMINAL). A ticket-bearing request is NEVER downgraded to an
- *     unchained issuance.
- *
- * Issuance policy:
- *  - SERVER-OWNED SITEKEY POLICY: when the request carries a sitekey with
- *    a configured policy, the security scope is resolved from the
- *    (sitekey, action) pair — the browser never gets to choose protected
- *    scope names; unknown actions are rejected. The global binding_mode
- *    is the only binding control (there is no per-sitekey binding
- *    dimension).
- *  - PROVIDER METADATA BINDING: action/cData are validated, bound to the
- *    nonce at issuance and persisted server-side; a token whose metadata
- *    sidecar cannot be written is never handed out (fail closed).
- *  - SINGLE-USE SEMANTICS: the minted challenge is atomically consumed on
- *    verification with deterministic consumed-result retention — replays
- *    resolve to the stored outcome, never a second success.
- *
- * A syntactically INVALID scope or request binding is rejected at 422 with
- * ZERO Redis operations: the identifier-charset check runs BEFORE the rate
- * limiter, the risk engine, the scope cap and the outstanding counters —
- * a malformed identifier never touches shared infrastructure.
- *
- * The canonical client IP comes from {@see ClientIpResolver}
- * (risk.client_ip_mode / risk.trusted_proxies /
- * risk.reject_ambiguous_forwarding): the same IP that feeds the challenge
- * binding tag, the rate-limit identity and the risk source pseudonym,
- * never a Host-header or forwarding-header free-for-all.
- *
- * The expected same-origin comes from the configured public_base_url —
- * SERVER CONFIG, never the Host header: a forged Host can never make a
- * cross-origin request look same-origin.
+ * Issues a new captcha challenge for the widget. The route is registered
+ * by {@see \BelConsulting\KiwiCaptchaBundle\Routing\KiwiCaptchaRouteLoader}
+ * with the bundle's configured `route_prefix` (bundle controllers are never
+ * scanned for attribute routes). The request pipeline is fail-closed and
+ * ordered: path canonicality, narrow HTTP, singular security headers,
+ * bounded body, duplicate-key scan, origin checks, admission and risk
+ * controls run before any challenge is minted; every response is a private
+ * JSON document ({@see self::privateJson()}). The full pipeline is
+ * documented in docs/security-hardening.md and docs/chained-challenges.md.
  */
 final class ChallengeController
 {
@@ -1955,7 +1769,7 @@ final class ChallengeController
 
     /**
      * INSPECT the already-issued stage-2 challenge of an ISSUED chain
-     * (the chain gate, step 7) and decide the recovery:
+     * (the chain gate) and decide the recovery:
      *
      *  - pending + valid record -> RECOVER the exact issuance response
      *    (the response may have been lost — the retry gets the SAME
@@ -1966,18 +1780,14 @@ final class ChallengeController
      *  - consumed + committed VALID -> the core's consumed result is
      *    NEVER terminal by itself: the nonce's FINAL disposition is read
      *    from the post-solve disposition store (the validator finalized
-     *    it BEFORE the application saw the outcome):
-     *      Pass   -> markVerified (the chain ends; the obligation is
-     *                cleared atomically) + the same challenge is
-     *                recovered,
-     *      StepUp -> markStepUpRequired (the obligation is KEPT — the
-     *                transaction stays bound to the step-up) + the
-     *                terminal STEP_UP_REQUIRED response (no issuance),
-     *      Deny   -> markDenied (the obligation is KEPT) + the terminal
-     *                risk-denied response (no issuance),
-     *      missing/pending -> the retryable 503 (the final disposition
-     *                was never durably established — never clear the
-     *                obligation),
+     *    it BEFORE the application saw the outcome) — Pass ->
+     *    markVerified (the chain ends; the obligation is cleared
+     *    atomically) + the same challenge is recovered, StepUp ->
+     *    markStepUpRequired (the obligation is KEPT) + the terminal
+     *    STEP_UP_REQUIRED response, Deny -> markDenied (the obligation is
+     *    KEPT) + the terminal risk-denied response, missing/pending ->
+     *    the retryable 503 (the final disposition was never durably
+     *    established — never clear the obligation),
      *  - consumed + committed INVALID -> rearm (subject to the
      *    rate/outstanding/admission pipeline below),
      *  - consumed + NO committed result -> INDETERMINATE — the retryable
@@ -2498,22 +2308,18 @@ final class ChallengeController
     }
 
     /**
-     * Same-origin check for the challenge endpoint.
-     *
-     * Requests WITHOUT an Origin header (same-origin navigation, curl,
-     * non-browser clients) are allowed — a browser cross-site POST always
-     * carries one. When present, the Origin must match the EXPECTED origin.
-     *
-     * The expected origin comes from SERVER CONFIG
-     * (public_base_url) when configured — a forged Host header can never
-     * shift the expected origin ("Host: evil.example" + "Origin:
-     * https://evil.example" must stay cross-origin). Comparison is the same
-     * STRUCTURED NORMALIZATION as the allowlist
-     * ({@see self::normalizeOrigin()}). Without public_base_url the
-     * expected origin is derived from the request's own scheme+host
-     * (constant-time compare; trailing slashes normalized) — fine for
-     * localhost/dev, but production deployments behind shared
-     * infrastructure should set public_base_url (README).
+     * Same-origin check for the challenge endpoint. Requests WITHOUT an
+     * Origin header (same-origin navigation, curl, non-browser clients)
+     * are allowed — a browser cross-site POST always carries one. When
+     * present, the Origin must match the EXPECTED origin, which comes
+     * from SERVER CONFIG (public_base_url) when configured — a forged
+     * Host header can never shift the expected origin ("Host:
+     * evil.example" + "Origin: https://evil.example" must stay
+     * cross-origin). Comparison uses the same STRUCTURED NORMALIZATION
+     * as the allowlist ({@see self::normalizeOrigin()}); without
+     * public_base_url the expected origin is derived from the request's
+     * own scheme+host (fine for localhost/dev; production deployments
+     * behind shared infrastructure should set public_base_url).
      */
     private function isSameOrigin(Request $request): bool
     {
@@ -2539,14 +2345,12 @@ final class ChallengeController
      * (or a Referer whose URL yields an origin) whose NORMALIZED
      * scheme+host+port matches one allowlisted origin. Comparison is
      * component-wise over the STRUCTURED normalization of both sides
-     * ({@see self::normalizeOrigin()}: scheme lowercase, host
-     * lowercased with the trailing dot stripped and IDN converted to
-     * punycode when ext-intl is available, the effective port defaulted per
-     * scheme, IPv6 literals kept bracketed), so "https://app.example.com"
-     * matches Origin "https://app.example.com", "https://APP.EXAMPLE.COM",
-     * "https://app.example.com:443" and "https://app.example.com." — but
-     * never "https://app.example.com:8443", "http://app.example.com",
-     * "https://evil-example.com" or "https://example.com.evil.com".
+     * ({@see self::normalizeOrigin()}), so "https://app.example.com"
+     * matches its default-port, punycode, and trailing-dot spellings —
+     * but never a different port, scheme, or host. With enforce_origin,
+     * a request without a usable Origin is rejected BEFORE the Referer
+     * fallback — the strict mode never trusts a Referer the browser
+     * would not attach to a cross-site fetch.
      */
     private function originIsAllowlisted(Request $request): bool
     {
@@ -2656,19 +2460,14 @@ final class ChallengeController
     }
 
     /**
-     * PATH CANONICALITY: whether the RAW request target is the
-     * canonical path. The check runs over the raw REQUEST_URI — never a
-     * normalized route — and rejects
-     *
-     *  - any EMPTY segment (`//`, and a TRAILING slash `/challenge/`),
-     *  - any DOT segment (`/.`, `/./`, `/..`, `/../`),
-     *  - any percent-encoded byte (`%` — the canonical target is a fixed
-     *    ASCII path, so `/%76hallenge`, `%2F`, `%5C`, `%2e%2e` are all
-     *    encoding probes; a percent-encoded SEPARATOR is just the worst of
-     *    them),
-     *  - any backslash (`\` — a Windows path separator on some stacks).
-     *
-     * Only the PATH component is inspected (the query string is rejected
+     * PATH CANONICALITY: whether the RAW request target is the canonical
+     * path — checked over the raw REQUEST_URI, never a normalized route.
+     * Rejects any EMPTY segment (`//`, and a TRAILING slash `/challenge/`),
+     * any DOT segment (`/.`, `/./`, `/..`, `/../`), any percent-encoded
+     * byte (`%` — the canonical target is a fixed ASCII path, so
+     * `/%76hallenge`, `%2F`, `%5C`, `%2e%2e` are all encoding probes), and
+     * any backslash (`\` — a Windows path separator on some stacks). Only
+     * the PATH component is inspected (the query string is rejected
      * separately with 422 QUERY_PARAMETERS_NOT_ALLOWED).
      */
     private function isCanonicalRequestTarget(string $rawRequestUri): bool
@@ -2696,22 +2495,6 @@ final class ChallengeController
     }
 
     /**
-     * DUPLICATE JSON KEY SCANNER: a small recursive walk over
-     * the RAW JSON document that reports the FIRST object key seen more
-     * than once at the same level — json_decode itself silently keeps the
-     * LAST occurrence, which is exactly the parser-ambiguity the endpoint
-     * must refuse ({"scope":"a","scope":"b"} parses differently across
-     * intermediaries). Nested objects are scanned recursively. Returns the
-     * duplicated key (for the error message), or null when the document is
-     * clean or cannot be walked (a malformed document is handled by the
-     * strict json_decode check that follows — 422 INVALID_JSON).
-     *
-     * The scanner is deliberately small and defensive: it only needs to be
-     * CORRECT on documents json_decode already accepts (the duplicate
-     * check runs before the decode, but a document the scanner refuses
-     * without a duplicate is never refused by it).
-     */
-    /**
      * Read the challenge request body with a hard byte cap: the input
      * stream is consumed for at most MAX+1 bytes, so an oversized chunked
      * body is refused by the caller's length check WITHOUT ever being
@@ -2731,6 +2514,19 @@ final class ChallengeController
         return (string) $request->getContent();
     }
 
+    /**
+     * DUPLICATE JSON KEY SCANNER: a small recursive walk over the RAW
+     * JSON document that reports the FIRST object key seen more than once
+     * at the same level — json_decode silently keeps the LAST occurrence,
+     * which is exactly the parser-ambiguity the endpoint must refuse
+     * ({"scope":"a","scope":"b"} parses differently across
+     * intermediaries). Nested objects are scanned recursively. Returns
+     * the duplicated key (for the error message), or null when the
+     * document is clean or cannot be walked (a malformed document is
+     * handled by the strict json_decode check that follows — 422
+     * INVALID_JSON). The scanner is deliberately small and defensive: it
+     * only needs to be CORRECT on documents json_decode already accepts.
+     */
     private function scanForDuplicateJsonKey(string $json): ?string
     {
         $offset = 0;
@@ -2917,25 +2713,20 @@ final class ChallengeController
 
     /**
      * All challenge responses share the private-document headers:
-     *   Cache-Control: no-store, private, max-age=0   (never cache, never mirror)
-     *   Pragma: no-cache                              (legacy proxies)
-     *   Referrer-Policy: no-referrer                  (no referrer leakage from
-     *                                                 an embedded widget context)
-     *   X-Content-Type-Options: nosniff               (JSON must never be
-     *                                                 re-sniffed as HTML)
-     *
-     * FRAME-ANCESTORS CSP: when risk.challenge_origin_allowlist
-     * is non-empty, EVERY challenge response carries an EXPLICIT
-     * `Content-Security-Policy: frame-ancestors <allowlisted origins,
-     * space-separated>` — never inherited from default-src, so the allowlist
-     * is exactly the framing contract of the challenge endpoint. An empty
-     * allowlist emits NO CSP header (nothing to promise). The bundle emits
-     * NO CORS headers at all (CORS is not authorization; the
-     * origin checks above are, and they run on every response regardless).
-     *
-     * When a NEW risk continuity session was minted for this request, the
-     * cookie is attached here — on every response path (success, deny, 422),
-     * so the session the assessment keyed on is what the client carries.
+     * Cache-Control no-store, Pragma no-cache, Referrer-Policy no-referrer,
+     * X-Content-Type-Options nosniff — challenge bytes and client identity
+     * must never be cached, mirrored, or sniffed. When
+     * risk.challenge_origin_allowlist is non-empty, every response also
+     * carries an EXPLICIT `Content-Security-Policy: frame-ancestors
+     * <allowlisted origins, space-separated>` — never inherited from
+     * default-src, so the allowlist is exactly the framing contract of the
+     * challenge endpoint (an empty allowlist emits no CSP header). The
+     * bundle emits NO CORS headers at all: CORS is not authorization; the
+     * origin checks are, and they run on every response regardless. When
+     * a NEW risk continuity session was minted for this request, the
+     * cookie is attached here — on every response path (success, deny,
+     * 422), so the session the assessment keyed on is what the client
+     * carries.
      *
      * @param array<string, mixed> $data
      */

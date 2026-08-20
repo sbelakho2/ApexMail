@@ -26,10 +26,15 @@
 //! (see [`challenge::PoWAlgorithm`]), so the solver and the verifier can never
 //! disagree about which computation to run.
 //!
-//! There is no third-party tracking and no third-party requests: behavioral
-//! signals (input events, hardware/screen info) are collected and stored
-//! first-party only, and are scored as a supplementary signal — they are
-//! client-controlled and forgeable.
+//! There is no third-party tracking and no third-party requests. Behavioral
+//! telemetry is off by default: the widget collects signal fields only in
+//! the mode the page opts into (`minimal`/`full` interaction telemetry,
+//! first-party only). Device-capability and screen-size signals are absent
+//! unless the separate coarse client-context opt-in is enabled, and even
+//! then the descriptor is deliberately coarse (viewport class, pointer
+//! class, language family, timezone class) — no canvas, audio, font-list,
+//! or GPU fingerprints are ever collected. Telemetry is scored only as a
+//! supplementary signal: it is client-controlled and forgeable.
 //!
 //! License: **MIT**
 

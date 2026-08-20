@@ -33,7 +33,13 @@ namespace BelConsulting\KiwiCaptchaBundle\Risk;
  *    atomically, keyed by the chain/obligation identity — with the
  *    obligation mapping KEPT; the terminal states carry an OPTIONAL
  *    stage-2 nonce (the exact nonce when one was issued, null
- *    otherwise);
+ *    otherwise). The terminalization is OBLIGATION-BOUND: it takes the
+ *    transaction's obligation id and the transition runs over BOTH keys
+ *    (the chain record + the obligation mapping, one hash tag) — the
+ *    mapping must STILL point at the chain AND the record must STILL
+ *    agree on the obligation id, or the transition is refused
+ *    ('obligation_moved' — a stale chain whose obligation moved can
+ *    never be terminalized);
  *  - rearmIssued() returns an issued chain to the available state for a
  *    FRESH stage-2 mint (pinned to the exact expected nonce — never a
  *    stage-1 downgrade);
@@ -225,52 +231,79 @@ interface TransactionalChainedChallengeStateStore extends ChainedChallengeStateS
     public function markDenied(string $chainId, string $stage2Nonce): string;
 
     /**
-     * ATOMIC NONCE-AGNOSTIC TRANSACTION terminalization: an OPEN
-     * obligation (state available|reserved|issued|completed) ->
+     * ATOMIC OBLIGATION-BOUND NONCE-AGNOSTIC TRANSACTION terminalization:
+     * an OPEN obligation (state available|reserved|issued|completed) ->
      * denied (KEEPTTL — the record keeps its OWN remaining TTL; the
      * obligation mapping is KEPT, the chainId and the original expiry
      * are preserved). The stage2Nonce field is PRESERVED: the exact
      * stage-2 nonce when one exists (issued/completed), null otherwise
      * (available/reserved) — the terminal state carries an OPTIONAL
-     * stage-2 nonce. Outcomes:
+     * stage-2 nonce. The transition is ATOMIC over BOTH keys (the chain
+     * record + the obligation mapping, one hash tag): the chain record
+     * must STILL agree on the obligation id AND the obligation mapping
+     * must STILL point at this chain — otherwise the transaction's chain
+     * moved and nothing is transitioned (fail closed). Outcomes:
      *
-     *  - 'denied_new'       this call performed the transition,
-     *  - 'denied_same'      already denied — idempotent (no state
-     *                       change),
-     *  - 'conflict'         the chain is terminal with the OTHER
-     *                       disposition (step_up_required) — a terminal
-     *                       state can never be reopened or flipped,
-     *  - 'already_verified' the chain is already verified — the
-     *                       transaction already ended via Pass (its
-     *                       obligation is gone): there is no chain left
-     *                       to terminalize (defensive — the fresh Deny
-     *                       applies to the nonce alone),
-     *  - 'missing'          the chain state is absent/expired.
+     *  - 'denied_new'        this call performed the transition,
+     *  - 'denied_same'       already denied — idempotent (no state
+     *                        change),
+     *  - 'conflict'          the chain is terminal with the OTHER
+     *                        disposition (step_up_required) — a terminal
+     *                        state can never be reopened or flipped,
+     *  - 'already_verified'  the chain is already verified — the
+     *                        transaction already ended via Pass (its
+     *                        obligation is gone): there is no chain left
+     *                        to terminalize (defensive — the fresh Deny
+     *                        applies to the nonce alone),
+     *  - 'already_completed' the obligation mapping is GONE while the
+     *                        chain record survives — the transaction
+     *                        already ended (the obligation is deleted
+     *                        atomically at verification): there is no
+     *                        chain left to terminalize,
+     *  - 'obligation_moved'  the obligation mapping points at a
+     *                        DIFFERENT chain (or the record does not
+     *                        agree on the obligation id) — the
+     *                        transaction's chain is no longer this one:
+     *                        NOTHING is transitioned (fail closed — the
+     *                        caller re-reads the requirement and
+     *                        terminalizes the CURRENT chain),
+     *  - 'missing'           the chain state is absent/expired.
      *
      * RACE SEMANTICS (the Lua script is the single writer): the
      * terminalization WINS against an in-flight reservation (a reserve
      * on the terminalized chain answers the terminal result
      * 'denied') and against an in-flight issuance (a markIssued on the
      * terminalized chain answers 'conflict'); against markVerified the
-     * FIRST writer wins (verified -> 'already_verified' with the
+     * FIRST writer wins (verified -> 'already_completed' with the
      * obligation already gone; terminal -> markVerified 'conflict').
      *
+     * @param string $obligationId the transaction's obligation id (the
+     *                             exact 64-lowercase-hex id the chain was
+     *                             created under — the obligation key the
+     *                             transition verifies)
+     *
+     * @throws \InvalidArgumentException on an invalid obligation id shape
      * @throws MalformedChainedChallengeStateException when the record
      *                                                 violates the strict
      *                                                 v2 schema (fail
      *                                                 closed)
      */
-    public function markTransactionDenied(string $chainId): string;
+    public function markTransactionDenied(string $chainId, string $obligationId): string;
 
     /**
-     * ATOMIC NONCE-AGNOSTIC TRANSACTION terminalization: an OPEN
-     * obligation (state available|reserved|issued|completed) ->
+     * ATOMIC OBLIGATION-BOUND NONCE-AGNOSTIC TRANSACTION terminalization:
+     * an OPEN obligation (state available|reserved|issued|completed) ->
      * step_up_required (KEEPTTL — the record keeps its OWN remaining
      * TTL; the obligation mapping is KEPT, the chainId and the original
      * expiry are preserved). The stage2Nonce field is PRESERVED: the
      * exact stage-2 nonce when one exists (issued/completed), null
      * otherwise (available/reserved) — the terminal state carries an
-     * OPTIONAL stage-2 nonce. Outcomes:
+     * OPTIONAL stage-2 nonce. The transition is ATOMIC over BOTH keys
+     * (the chain record + the obligation mapping, one hash tag): the
+     * chain record must STILL agree on the obligation id AND the
+     * obligation mapping must STILL point at this chain — otherwise the
+     * transaction's chain moved and nothing is transitioned (fail
+     * closed). Outcomes:
      *
      *  - 'step_up_required_new'  this call performed the transition,
      *  - 'step_up_required_same' already step_up_required — idempotent
@@ -285,6 +318,16 @@ interface TransactionalChainedChallengeStateStore extends ChainedChallengeStateS
      *                            left to terminalize (defensive — the
      *                            fresh StepUp applies to the nonce
      *                            alone),
+     *  - 'already_completed'     the obligation mapping is GONE while
+     *                            the chain record survives — the
+     *                            transaction already ended: there is no
+     *                            chain left to terminalize,
+     *  - 'obligation_moved'      the obligation mapping points at a
+     *                            DIFFERENT chain (or the record does not
+     *                            agree on the obligation id) — the
+     *                            transaction's chain is no longer this
+     *                            one: NOTHING is transitioned (fail
+     *                            closed),
      *  - 'missing'               the chain state is absent/expired.
      *
      * RACE SEMANTICS (the Lua script is the single writer): the
@@ -293,15 +336,21 @@ interface TransactionalChainedChallengeStateStore extends ChainedChallengeStateS
      * 'step_up_required') and against an in-flight issuance (a
      * markIssued on the terminalized chain answers 'conflict'); against
      * markVerified the FIRST writer wins (verified ->
-     * 'already_verified' with the obligation already gone; terminal ->
+     * 'already_completed' with the obligation already gone; terminal ->
      * markVerified 'conflict').
      *
+     * @param string $obligationId the transaction's obligation id (the
+     *                             exact 64-lowercase-hex id the chain was
+     *                             created under — the obligation key the
+     *                             transition verifies)
+     *
+     * @throws \InvalidArgumentException on an invalid obligation id shape
      * @throws MalformedChainedChallengeStateException when the record
      *                                                 violates the strict
      *                                                 v2 schema (fail
      *                                                 closed)
      */
-    public function markTransactionStepUpRequired(string $chainId): string;
+    public function markTransactionStepUpRequired(string $chainId, string $obligationId): string;
 
     /**
      * ATOMIC rearm of an ISSUED chain: issued(expectedStage2Nonce) ->

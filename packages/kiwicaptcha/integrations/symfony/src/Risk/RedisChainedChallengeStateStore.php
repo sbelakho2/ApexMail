@@ -7,45 +7,14 @@ namespace BelConsulting\KiwiCaptchaBundle\Risk;
 use KiwiCaptcha\Risk\RiskAction;
 
 /**
- * Redis-backed chained-challenge state store — the transactional v2
- * contract.
- *
- * Keys (ONE hash-tag family {kiwi:<ns>} — Cluster safe, every script can
- * touch the chain + obligation keys of a transaction atomically):
- *   {kiwi:<ns>}:chain:<chainId>                 the chain record (JSON, v2)
- *   {kiwi:<ns>}:chain-obligation:<obligationId> -> chainId (SAME TTL)
- *
- * The chain lifecycle is the obligation-anchored Lua state machine
- * (available -> reserved(owner, SHORT lease) -> issued(stage2Nonce) with
- * THREE disposition-aware TERMINAL transitions: verified(stage2Nonce) —
- * the PASS transition that ATOMICALLY deletes the obligation mapping only
- * while it still points at this chainId — and step_up_required(nonce) /
- * denied(nonce) — the TERMINAL transitions that KEEP the obligation
- * mapping (the transaction stays bound to its final disposition). TWO
- * NONCE-AGNOSTIC TRANSACTION terminalizations (markTransactionDenied() /
- * markTransactionStepUpRequired()) terminalize an OPEN obligation
- * (available|reserved|issued|completed) WITHOUT the exact stage-2 nonce —
- * a fresh Deny/StepUp from a DIFFERENT verified nonce of the obligated
- * transaction becomes DURABLE, keyed by the chain/obligation identity —
- * and the terminal states carry an OPTIONAL stage-2 nonce (the exact
- * nonce when one was issued, null otherwise). The
- * reservation is an OWNER-SCOPED short lease (redis TIME reads the server
- * clock; the lease is min(reservation_lease_secs, the record's OWN
- * remaining TTL) — KEEPTTL — and a record WITHOUT an expiry is corrupted
- * state that fails closed: no lifetime is ever manufactured from the
- * configured TTL), the issuance is an idempotent owner-gated state
- * TRANSITION (never a delete — a retry recovers the issued challenge
- * instead of re-minting), the terminal transitions are idempotent and
- * nonce-pinned (a different nonce is an atomic no-op), and the
- * release/rearm are owner-gated / nonce-pinned atomic no-ops otherwise.
- *
- * Every record is decoded ALL-OR-NOTHING against the strict v2 schema
- * ({@see self::decodeState()}): a missing/malformed field or a
- * state-invariant violation throws
- * {@see MalformedChainedChallengeStateException} — NEVER a defaulted
- * record (a corrupt requiredAction must never become '', policyVersion
- * never 1, chainDepth never 2, state never available). The same decode
- * runs on the in-memory store, so Array and Redis observe one machine.
+ * Redis-backed chained-challenge state store implementing the transactional
+ * v2 contract: the obligation-anchored Lua state machine (available ->
+ * reserved(owner, short lease) -> issued(stage2Nonce)) with terminal
+ * verified/step_up_required/denied transitions and obligation-bound
+ * nonce-agnostic transaction terminalizations, atomic over one hash-tag
+ * key family. Records decode ALL-OR-NOTHING against the strict v2 schema
+ * ({@see self::decodeState()}) — a corrupt record never becomes a defaulted
+ * one. The full state machine is documented in docs/chained-challenges.md.
  */
 final class RedisChainedChallengeStateStore implements TransactionalChainedChallengeStateStore
 {
@@ -336,37 +305,56 @@ return 'denied_new'
 LUA;
 
     /**
-     * NONCE-AGNOSTIC TRANSACTION terminalization: an OPEN obligation
-     * (available|reserved|issued|completed) -> denied (KEEPTTL — the
-     * record keeps its OWN remaining TTL). The obligation mapping is
-     * KEPT: the transaction stays bound to its final denial, so a later
-     * challenge request for the same transaction re-encounters the
-     * terminal state (never a new stage-1). The stage2Nonce field is
-     * PRESERVED (the exact stage-2 nonce when one exists, null
-     * otherwise) — the terminal state carries an OPTIONAL stage-2
-     * nonce. Already denied -> 'denied_same'; the OTHER terminal
-     * disposition -> 'conflict' (a terminal state can never be reopened
-     * or flipped); verified -> 'already_verified' (the transaction
-     * already ended via Pass — its obligation is gone); absent ->
-     * 'missing'.
+     * OBLIGATION-BOUND NONCE-AGNOSTIC transaction terminalization: an
+     * OPEN obligation (available|reserved|issued|completed) -> denied
+     * (KEEPTTL — the record keeps its OWN remaining TTL). The transition
+     * is ATOMIC over BOTH keys (the chain record + the obligation
+     * mapping, one hash tag): the chain record must STILL agree on the
+     * obligation id AND the obligation mapping must STILL point at this
+     * chain, otherwise nothing is transitioned (fail closed —
+     * 'obligation_moved' — the caller re-reads the requirement and
+     * terminalizes the CURRENT chain). The obligation mapping is KEPT
+     * (the transaction stays bound to its final denial) and the
+     * stage2Nonce field is PRESERVED (the exact stage-2 nonce when one
+     * exists, null otherwise) — the terminal state carries an OPTIONAL
+     * stage-2 nonce. Results: 'denied_same' (already denied), 'conflict'
+     * (the OTHER terminal disposition — a terminal state can never be
+     * reopened or flipped), 'already_verified' (defensive — the
+     * obligation should already be gone), 'already_completed' (the
+     * mapping is gone — the transaction already ended via Pass), absent
+     * -> 'missing'.
      */
     private const MARK_TRANSACTION_DENIED_LUA = <<<'LUA'
--- Transaction denial: NONCE-AGNOSTIC terminal transition of an OPEN obligation
--- (available|reserved|issued|completed -> denied, KEEPTTL — the record keeps
--- its OWN remaining TTL; the obligation mapping is KEPT, the chainId and the
--- original expiry are preserved). The stage2Nonce field is PRESERVED (the
--- exact stage-2 nonce when one exists, null otherwise) — the terminal state
--- carries an OPTIONAL stage-2 nonce. RACE SEMANTICS: this transition WINS
--- against an in-flight reservation (the reserve on the terminalized chain
--- answers 'denied') and against an in-flight issuance (a markIssued on the
--- terminalized chain answers 'conflict'); against markVerified the FIRST
--- writer wins (verified -> 'already_verified' — the obligation is already
+-- Transaction denial: OBLIGATION-BOUND NONCE-AGNOSTIC terminal transition of
+-- an OPEN obligation (available|reserved|issued|completed -> denied, KEEPTTL —
+-- the record keeps its OWN remaining TTL; the obligation mapping is KEPT, the
+-- chainId and the original expiry are preserved). The transition is ATOMIC
+-- over BOTH keys (one hash tag): the chain record must STILL agree on the
+-- obligation id (ARGV[2]) AND the obligation mapping (KEYS[2]) must STILL
+-- point at this chain (ARGV[1]) — otherwise the transaction's chain moved and
+-- NOTHING is transitioned (fail closed). The stage2Nonce field is PRESERVED
+-- (the exact stage-2 nonce when one exists, null otherwise) — the terminal
+-- state carries an OPTIONAL stage-2 nonce. RACE SEMANTICS: this transition
+-- WINS against an in-flight reservation (the reserve on the terminalized
+-- chain answers 'denied') and against an in-flight issuance (a markIssued on
+-- the terminalized chain answers 'conflict'); against markVerified the FIRST
+-- writer wins (verified -> 'already_completed' — the obligation is already
 -- gone; terminal -> markVerified 'conflict').
 local existing = redis.call('GET', KEYS[1])
 if not existing then
   return 'missing'
 end
 local rec = cjson.decode(existing)
+if rec['obligationId'] ~= ARGV[2] then
+  return 'obligation_moved'
+end
+local mapped = redis.call('GET', KEYS[2])
+if mapped == false then
+  return 'already_completed'
+end
+if mapped ~= ARGV[1] then
+  return 'obligation_moved'
+end
 if rec['state'] == 'denied' then
   return 'denied_same'
 end
@@ -387,37 +375,56 @@ return 'denied_new'
 LUA;
 
     /**
-     * NONCE-AGNOSTIC TRANSACTION terminalization: an OPEN obligation
-     * (available|reserved|issued|completed) -> step_up_required (KEEPTTL
-     * — the record keeps its OWN remaining TTL). The obligation mapping
-     * is KEPT: the transaction stays bound to the step-up requirement,
-     * so a later challenge request for the same transaction
-     * re-encounters the terminal state (never a new stage-1). The
-     * stage2Nonce field is PRESERVED (the exact stage-2 nonce when one
-     * exists, null otherwise) — the terminal state carries an OPTIONAL
-     * stage-2 nonce. Already step_up_required -> 'step_up_required_same';
-     * the OTHER terminal disposition -> 'conflict' (a terminal state can
-     * never be reopened or flipped); verified -> 'already_verified' (the
-     * transaction already ended via Pass — its obligation is gone);
-     * absent -> 'missing'.
+     * OBLIGATION-BOUND NONCE-AGNOSTIC transaction terminalization: an
+     * OPEN obligation (available|reserved|issued|completed) ->
+     * step_up_required (KEEPTTL — the record keeps its OWN remaining
+     * TTL). The transition is ATOMIC over BOTH keys (the chain record +
+     * the obligation mapping, one hash tag): the chain record must STILL
+     * agree on the obligation id AND the obligation mapping must STILL
+     * point at this chain, otherwise nothing is transitioned (fail
+     * closed — 'obligation_moved' — the caller re-reads the requirement
+     * and terminalizes the CURRENT chain). The obligation mapping is
+     * KEPT (the transaction stays bound to the step-up requirement) and
+     * the stage2Nonce field is PRESERVED (the exact stage-2 nonce when
+     * one exists, null otherwise) — the terminal state carries an
+     * OPTIONAL stage-2 nonce. Results: 'step_up_required_same' (already
+     * step_up_required), 'conflict' (the OTHER terminal disposition — a
+     * terminal state can never be reopened or flipped),
+     * 'already_verified' (defensive — the obligation should already be
+     * gone), 'already_completed' (the mapping is gone — the transaction
+     * already ended via Pass), absent -> 'missing'.
      */
     private const MARK_TRANSACTION_STEP_UP_REQUIRED_LUA = <<<'LUA'
--- Transaction step-up: NONCE-AGNOSTIC terminal transition of an OPEN obligation
--- (available|reserved|issued|completed -> step_up_required, KEEPTTL — the
--- record keeps its OWN remaining TTL; the obligation mapping is KEPT, the
--- chainId and the original expiry are preserved). The stage2Nonce field is
--- PRESERVED (the exact stage-2 nonce when one exists, null otherwise) — the
--- terminal state carries an OPTIONAL stage-2 nonce. RACE SEMANTICS: this
--- transition WINS against an in-flight reservation (the reserve on the
--- terminalized chain answers 'step_up_required') and against an in-flight
--- issuance (a markIssued on the terminalized chain answers 'conflict');
--- against markVerified the FIRST writer wins (verified -> 'already_verified'
--- — the obligation is already gone; terminal -> markVerified 'conflict').
+-- Transaction step-up: OBLIGATION-BOUND NONCE-AGNOSTIC terminal transition of
+-- an OPEN obligation (available|reserved|issued|completed -> step_up_required,
+-- KEEPTTL — the record keeps its OWN remaining TTL; the obligation mapping is
+-- KEPT, the chainId and the original expiry are preserved). The transition is
+-- ATOMIC over BOTH keys (one hash tag): the chain record must STILL agree on
+-- the obligation id (ARGV[2]) AND the obligation mapping (KEYS[2]) must STILL
+-- point at this chain (ARGV[1]) — otherwise the transaction's chain moved and
+-- NOTHING is transitioned (fail closed). The stage2Nonce field is PRESERVED
+-- (the exact stage-2 nonce when one exists, null otherwise) — the terminal
+-- state carries an OPTIONAL stage-2 nonce. RACE SEMANTICS: this transition
+-- WINS against an in-flight reservation (the reserve on the terminalized
+-- chain answers 'step_up_required') and against an in-flight issuance (a
+-- markIssued on the terminalized chain answers 'conflict'); against
+-- markVerified the FIRST writer wins (verified -> 'already_completed' — the
+-- obligation is already gone; terminal -> markVerified 'conflict').
 local existing = redis.call('GET', KEYS[1])
 if not existing then
   return 'missing'
 end
 local rec = cjson.decode(existing)
+if rec['obligationId'] ~= ARGV[2] then
+  return 'obligation_moved'
+end
+local mapped = redis.call('GET', KEYS[2])
+if mapped == false then
+  return 'already_completed'
+end
+if mapped ~= ARGV[1] then
+  return 'obligation_moved'
+end
 if rec['state'] == 'step_up_required' then
   return 'step_up_required_same'
 end
@@ -711,22 +718,34 @@ LUA;
             : 'missing';
     }
 
-    public function markTransactionDenied(string $chainId): string
+    public function markTransactionDenied(string $chainId, string $obligationId): string
     {
+        if (preg_match(self::OBLIGATION_PATTERN, $obligationId) !== 1) {
+            throw new \InvalidArgumentException('obligationId must be 64 lowercase hex characters');
+        }
         $this->assertLiveRecord($chainId);
-        $result = $this->evalScript(self::MARK_TRANSACTION_DENIED_LUA, [$this->key($chainId)], []);
+        $result = $this->evalScript(self::MARK_TRANSACTION_DENIED_LUA, [
+            $this->key($chainId),
+            $this->obligationKey($obligationId),
+        ], [$chainId, $obligationId]);
 
-        return \is_string($result) && \in_array($result, ['denied_new', 'denied_same', 'conflict', 'already_verified', 'missing'], true)
+        return \is_string($result) && \in_array($result, ['denied_new', 'denied_same', 'conflict', 'already_verified', 'already_completed', 'obligation_moved', 'missing'], true)
             ? $result
             : 'missing';
     }
 
-    public function markTransactionStepUpRequired(string $chainId): string
+    public function markTransactionStepUpRequired(string $chainId, string $obligationId): string
     {
+        if (preg_match(self::OBLIGATION_PATTERN, $obligationId) !== 1) {
+            throw new \InvalidArgumentException('obligationId must be 64 lowercase hex characters');
+        }
         $this->assertLiveRecord($chainId);
-        $result = $this->evalScript(self::MARK_TRANSACTION_STEP_UP_REQUIRED_LUA, [$this->key($chainId)], []);
+        $result = $this->evalScript(self::MARK_TRANSACTION_STEP_UP_REQUIRED_LUA, [
+            $this->key($chainId),
+            $this->obligationKey($obligationId),
+        ], [$chainId, $obligationId]);
 
-        return \is_string($result) && \in_array($result, ['step_up_required_new', 'step_up_required_same', 'conflict', 'already_verified', 'missing'], true)
+        return \is_string($result) && \in_array($result, ['step_up_required_new', 'step_up_required_same', 'conflict', 'already_verified', 'already_completed', 'obligation_moved', 'missing'], true)
             ? $result
             : 'missing';
     }
@@ -763,21 +782,8 @@ LUA;
      * a state-invariant violation throws
      * {@see MalformedChainedChallengeStateException} (NEVER defaults: a
      * corrupt requiredAction must never become '', policyVersion never 1,
-     * chainDepth never 2, state never available). Validates: schema
-     * version 2; the Kiwi base64 nonce shape for BOTH stage-1 and
-     * stage-2 nonces; the canonical scope shape; the exact
-     * 64-lowercase-hex obligation id; a chainable PoW action
-     * (Sha16..Argon64 — never StepUp/Deny); a bounded rank CONSISTENT
-     * with the action; a positive policy version; chain depth exactly 2;
-     * the exact state enum (the TERMINAL step_up_required/denied states
-     * included); owner/leaseUntil REQUIRED in reserved and NULL
-     * elsewhere; stage2Nonce REQUIRED with the Kiwi base64 nonce shape
-     * in issued/verified (and the legacy completed), OPTIONAL in the
-     * terminal step_up_required/denied states (a valid Kiwi nonce OR
-     * null — the transaction terminalizations
-     * markTransactionDenied()/markTransactionStepUpRequired() run
-     * WITHOUT the exact stage-2 nonce) and NULL elsewhere; an integer
-     * expiry; a well-shaped nullable request binding.
+     * chainDepth never 2, state never available). The same decode runs on
+     * the in-memory store, so Array and Redis observe one machine.
      *
      * @throws MalformedChainedChallengeStateException
      */

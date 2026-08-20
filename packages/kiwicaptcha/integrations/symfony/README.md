@@ -1,22 +1,23 @@
 # KiwiCaptcha Symfony Bundle
 
-A **self-contained**, privacy-preserving proof-of-work anti-abuse
+A self-contained, privacy-preserving proof-of-work anti-abuse
 integration for Symfony 6, 7 and 8, with first-party behavioral heuristics
-as a supplementary signal. **No third-party services. No third-party
-requests. No third-party tracking.** Challenges are issued and verified
-**locally** by the verified [`kiwicaptcha/kiwicaptcha-php`] core (HMAC-SHA256
-signing, IP binding, single-use storage, SHA-256 + Argon2id proof-of-work) —
-the widget inlines its own CSS, WASM solver, and driver, so no request ever
-leaves your application. Your secret key never leaves your server. These
-claims are stated precisely — with scopes, assumptions and the tests that
-evidence them — in [docs/claims-registry.md](docs/claims-registry.md).
+as a supplementary signal. The bundle makes no third-party requests and no
+third-party tracking: challenges are issued and verified locally by the
+[`kiwicaptcha/kiwicaptcha-php`] core (HMAC-SHA256 signing, IP binding,
+single-use storage, SHA-256 + Argon2id proof-of-work), the widget inlines
+its own CSS, WASM solver, and driver, so no request ever leaves your
+application, and the secret key never leaves your server. The precise
+scope of these claims — with their assumptions and the tests that evidence
+them — is in [docs/claims-registry.md](docs/claims-registry.md) and
+[docs/privacy.md](docs/privacy.md).
 
-This bundle is the **only** Symfony integration of KiwiCaptcha. KiwiCaptcha
-is anti-abuse protection, **not** a reliable human-vs-bot discriminator: a
-human never solves the challenge — their CPU does. The core value is
-economic: every signup/login/reset/scraping attempt carries a real, tunable
-computational cost, making mass abuse uneconomical. Browser behavioral
-telemetry is client-controlled and forgeable — a **supplement**, never the
+This bundle is the only Symfony integration of KiwiCaptcha. KiwiCaptcha is
+anti-abuse protection: a human never solves the challenge, their CPU does,
+and a bot's CPU can do the same work. The core value is economic: every
+signup/login/reset/scraping attempt carries a real, tunable computational
+cost, making mass abuse uneconomical. Browser behavioral telemetry is
+client-controlled and forgeable — a supplementary signal, never the
 security boundary ([SECURITY.md](../../../../SECURITY.md) states
 authoritatively what KiwiCaptcha does and does not protect against).
 
@@ -41,7 +42,7 @@ configuration reference is **[docs/configuration.md](docs/configuration.md)**.
 | [security-hardening.md](docs/security-hardening.md) | Endpoint and verification security properties; [SECURITY.md](../../../../SECURITY.md) is the authoritative security document |
 | [troubleshooting.md](docs/troubleshooting.md) | Public violation codes and common failure modes |
 | [glossary.md](docs/glossary.md) | One-line definitions of the protocol and policy terms |
-| [claims-registry.md](docs/claims-registry.md) | Every factual claim with its scope, assumptions and owning test |
+| [claims-registry.md](docs/claims-registry.md) | Externally visible security, privacy and compliance claims with their scope, assumptions and owning test |
 
 ## Integrations
 

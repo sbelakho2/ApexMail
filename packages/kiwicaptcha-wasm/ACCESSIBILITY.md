@@ -59,7 +59,7 @@ manual assistive-technology qualification checklist in the release gate.
 | Meaningful live region only | 4.1.3 | single polite `role=status` announcer; only Checking/verified/failed/expired/unavailable transitions |
 | Keyboard operation: every action keyboard-operable | 2.1.1 / 2.1.2 | the Retry button is a native `<button>`; the passive widget is never focusable; no keyboard trap |
 | No pointerdown-only activation | 2.5.2 | reacquisition uses the native button with click activation only |
-| Visible focus | 2.4.7 | `:focus-visible` ring on the Retry button (its 1.4.11 contrast is computed above) |
+| Visible focus | 2.4.7 | `:focus-visible` ring on the Retry button (its 1.4.11 contrast and 2.4.13 area/change evidence are computed in the suite) |
 | Pointer targets >= 24x24 CSS px (32px height) | 2.5.8 | `min-height: 32px; min-width: 24px` on the Retry button; bounding-box asserted |
 | No content/function loss at 2x component font-scale enlargement (a component-level custom-property stress test, not browser/user text zoom; actual 200% browser zoom is part of the manual release-gate qualification — performed at release time for each released artifact with recorded, signed evidence, never implied to have been run on any particular commit) | 1.4.4 | 320 CSS px reflow + text-spacing overrides asserted; long German strings tested |
 | Text spacing overrides (1.4.12) | 1.4.12 | letter/word spacing + line-height overrides injected and asserted |
@@ -81,15 +81,15 @@ criteria:
 
 | WCAG 2.2 SC | Level | Disposition |
 | --- | --- | --- |
-| 2.4.11 Focus Not Obscured (Minimum) | AA | Supported — the Retry button is the only focusable component control, and the widget renders no overlapping content above it, so the focused control cannot be entirely hidden by author-created content; asserted structurally in the suite |
-| 2.4.12 Focus Not Obscured (Enhanced) | AAA (above AA target) | Above-AA engineering — the same structural guarantee (single focusable control, no overlapping author-created content) exceeds the AAA bar by design |
-| 2.4.13 Focus Appearance | AAA (above AA target) | Above-AA engineering — the Retry button's `:focus-visible` ring is a non-decorative appearance change with a computed >= 3:1 contrast against the widget surface (1.4.11 evidence above), meeting the focus-appearance bar by design |
+| 2.4.11 Focus Not Obscured (Minimum) | AA | Supported — the Retry button is the only focusable component control and the widget renders no overlapping content above it, so KiwiCaptcha introduces no component-local obstruction that would cause the criterion to fail; asserted structurally in the suite (the host application's own overlays are outside the component's control) |
+| 2.4.12 Focus Not Obscured (Enhanced) | AAA (above AA target) | Above-AA engineering — the same component-local guarantee (single focusable control, no overlapping content within the component) supports the criterion: KiwiCaptcha introduces no component-local obstruction that would cause it to fail, and the host application's own overlays are outside the component's control |
+| 2.4.13 Focus Appearance | AAA (above AA target) | Above-AA engineering — the Retry button's `:focus-visible` ring is a non-decorative appearance change genuinely measured in the suite: indicator AREA >= the 2-CSS-px-perimeter minimum, and >= 3:1 contrast CHANGE at the same pixels between the focused and unfocused states (a 2.4.13-specific measurement, not the 1.4.11 adjacent-surface evidence) |
 | 2.5.7 Dragging Movements | AA — N/A to the widget | No drag interaction exists in the widget; every action is a single click or keyboard activation, so a pointer-drag alternative is not applicable |
 | 2.5.8 Target Size Minimum | AA | Supported — the Retry button is >= 24x24 CSS px with a 32px height (an accessibility/security control has no reason to be cramped); bounding box asserted in the suite |
 | 3.2.6 Consistent Help | A — N/A (host-page responsibility) | KiwiCaptcha provides no help mechanism of its own; consistent placement of help is the integrating page's responsibility, not the component's |
 | 3.3.7 Redundant Entry | A — N/A to the widget | The widget captures no user-entered data, so nothing is ever re-requested |
-| 3.3.8 Accessible Authentication (Minimum) | AA | Strongly satisfied structurally — the automatic computational challenge is the ONLY path, and no cognitive test is ever required. KiwiCaptcha introduces no cognitive-function test. Conformance of the complete authentication process remains the integrating application's responsibility. |
-| 3.3.9 Accessible Authentication (Enhanced) | AAA (above AA target) | Above-AA engineering — the automatic computational challenge is the ONLY path and no cognitive, visual or audio test is ever required, meeting the enhanced bar by design; conformance of the complete authentication process remains the integrating application's responsibility |
+| 3.3.8 Accessible Authentication (Minimum) | AA | Supported — the automatic computational challenge is the ONLY path and no cognitive test is ever required: KiwiCaptcha introduces no cognitive-function test, so the component adds no obstruction to this criterion. Conformance of the complete authentication process remains the integrating application's responsibility. |
+| 3.3.9 Accessible Authentication (Enhanced) | AAA (above AA target) | Above-AA engineering — the automatic computational challenge is the ONLY path and no cognitive, visual or audio test is ever required: the component introduces no test-based mechanism that would fail the criterion; conformance of the complete authentication process remains the integrating application's responsibility |
 
 The two new criteria outside the component scope (3.2.6 above is a
 host-page responsibility, not a widget capability) have no widget-level

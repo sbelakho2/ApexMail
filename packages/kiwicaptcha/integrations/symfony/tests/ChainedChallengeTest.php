@@ -3139,8 +3139,9 @@ final class ChainedChallengeTest extends TestCase
         $expiry = time() + 300;
         $requirement = $service->requireStage2($this->nonce(), 'login', 'txn-alpha', 1, RiskAction::Sha18, $expiry);
         $chainId = $requirement->chainId;
+        $obligationId = $service->obligationIdFor('login', 'txn-alpha', 1);
 
-        self::assertSame(ChainVerifiedResult::DeniedNew, $service->markTransactionDenied($chainId));
+        self::assertSame(ChainVerifiedResult::DeniedNew, $service->markTransactionDenied($chainId, $obligationId));
         $state = $service->requirementFor($chainId);
         self::assertSame('denied', $state?->state);
         self::assertNull($state?->stage2Nonce, 'a terminalized chain without a stage-2 issuance carries NO stage-2 nonce');
@@ -3164,14 +3165,14 @@ final class ChainedChallengeTest extends TestCase
 
         // Idempotency: a repeated fresh Deny is denied_same with no state
         // change; the OTHER terminal disposition can never flip it.
-        self::assertSame(ChainVerifiedResult::DeniedSame, $service->markTransactionDenied($chainId), 'a repeated fresh Deny is idempotent');
+        self::assertSame(ChainVerifiedResult::DeniedSame, $service->markTransactionDenied($chainId, $obligationId), 'a repeated fresh Deny is idempotent');
         self::assertSame('denied', $service->requirementFor($chainId)?->state, 'no state change');
-        self::assertSame(ChainVerifiedResult::Conflict, $service->markTransactionStepUpRequired($chainId), 'a fresh StepUp on a denied chain is a conflict — terminal states never flip');
+        self::assertSame(ChainVerifiedResult::Conflict, $service->markTransactionStepUpRequired($chainId, $obligationId), 'a fresh StepUp on a denied chain is a conflict — terminal states never flip');
         self::assertSame('denied', $service->requirementFor($chainId)?->state, 'the denial wins');
 
         // Absent -> missing.
-        self::assertSame(ChainVerifiedResult::Missing, $service->markTransactionDenied('no-such-chain'));
-        self::assertSame(ChainVerifiedResult::Missing, $service->markTransactionStepUpRequired('no-such-chain'));
+        self::assertSame(ChainVerifiedResult::Missing, $service->markTransactionDenied('no-such-chain', $obligationId));
+        self::assertSame(ChainVerifiedResult::Missing, $service->markTransactionStepUpRequired('no-such-chain', $obligationId));
     }
 
     public function testMarkTransactionStepUpRequiredTerminalizesAReservedChainAndClearsTheReservation(): void
@@ -3182,17 +3183,18 @@ final class ChainedChallengeTest extends TestCase
         $store = new ArrayChainedChallengeStateStore();
         $service = $this->chainService($store);
         $requirement = $service->requireStage2($this->nonce(), 'login', '', 1, RiskAction::Sha18, time() + 300);
+        $obligationId = $service->obligationIdFor('login', '', 1);
 
         self::assertSame(ChainReservationResult::Available, $service->reserveStage2($requirement->chainId, 'owner-a'));
-        self::assertSame(ChainVerifiedResult::StepUpRequiredNew, $service->markTransactionStepUpRequired($requirement->chainId));
+        self::assertSame(ChainVerifiedResult::StepUpRequiredNew, $service->markTransactionStepUpRequired($requirement->chainId, $obligationId));
         $state = $service->requirementFor($requirement->chainId);
         self::assertSame('step_up_required', $state?->state);
         self::assertNull($state?->owner, 'the reservation owner is cleared');
         self::assertNull($state?->leaseUntil, 'the reservation lease is cleared');
         self::assertNull($state?->stage2Nonce);
         self::assertSame(ChainReservationResult::StepUpRequired, $service->reserveStage2($requirement->chainId, 'owner-b'), 'the reserve answers the TERMINAL step_up_required state');
-        self::assertSame(ChainVerifiedResult::StepUpRequiredSame, $service->markTransactionStepUpRequired($requirement->chainId), 'a repeated fresh StepUp is idempotent');
-        self::assertSame(ChainVerifiedResult::Conflict, $service->markTransactionDenied($requirement->chainId), 'a fresh Deny on a step_up_required chain is a conflict — terminal states never flip');
+        self::assertSame(ChainVerifiedResult::StepUpRequiredSame, $service->markTransactionStepUpRequired($requirement->chainId, $obligationId), 'a repeated fresh StepUp is idempotent');
+        self::assertSame(ChainVerifiedResult::Conflict, $service->markTransactionDenied($requirement->chainId, $obligationId), 'a fresh Deny on a step_up_required chain is a conflict — terminal states never flip');
     }
 
     public function testMarkTransactionTerminalizationsPreserveAnExistingStage2Nonce(): void
@@ -3206,17 +3208,19 @@ final class ChainedChallengeTest extends TestCase
         $nonce = $this->stageNonce('stage2-nonce');
 
         $issued = $service->requireStage2($this->nonce(), 'login', 'txn-issued', 1, RiskAction::Sha18, time() + 300);
+        $issuedObligationId = $service->obligationIdFor('login', 'txn-issued', 1);
         self::assertSame(ChainReservationResult::Available, $service->reserveStage2($issued->chainId, 'owner-a'));
         self::assertSame(ChainIssuedResult::IssuedNew, $service->markIssued($issued->chainId, 'owner-a', $nonce));
-        self::assertSame(ChainVerifiedResult::DeniedNew, $service->markTransactionDenied($issued->chainId));
+        self::assertSame(ChainVerifiedResult::DeniedNew, $service->markTransactionDenied($issued->chainId, $issuedObligationId));
         self::assertSame('denied', $service->requirementFor($issued->chainId)?->state);
         self::assertSame($nonce, $service->requirementFor($issued->chainId)?->stage2Nonce, 'the exact stage-2 nonce is PRESERVED by the nonce-agnostic terminalization');
 
         $completed = $service->requireStage2($this->nonce(), 'login', 'txn-completed', 1, RiskAction::Sha18, time() + 300);
+        $completedObligationId = $service->obligationIdFor('login', 'txn-completed', 1);
         self::assertSame(ChainReservationResult::Available, $service->reserveStage2($completed->chainId, 'owner-a'));
         $legacy = $service->complete($completed->chainId, 'owner-a', $nonce);
         self::assertIsArray($legacy);
-        self::assertSame(ChainVerifiedResult::StepUpRequiredNew, $service->markTransactionStepUpRequired($completed->chainId));
+        self::assertSame(ChainVerifiedResult::StepUpRequiredNew, $service->markTransactionStepUpRequired($completed->chainId, $completedObligationId));
         self::assertSame('step_up_required', $service->requirementFor($completed->chainId)?->state);
         self::assertSame($nonce, $service->requirementFor($completed->chainId)?->stage2Nonce, 'the legacy completed state preserves the nonce too');
     }
@@ -3231,13 +3235,14 @@ final class ChainedChallengeTest extends TestCase
         $service = $this->chainService($store);
         $nonce = $this->stageNonce('stage2-nonce');
         $requirement = $service->requireStage2($this->nonce(), 'login', 'txn-alpha', 1, RiskAction::Sha18, time() + 300);
+        $obligationId = $service->obligationIdFor('login', 'txn-alpha', 1);
 
         self::assertSame(ChainReservationResult::Available, $service->reserveStage2($requirement->chainId, 'owner-a'));
         self::assertSame(ChainIssuedResult::IssuedNew, $service->markIssued($requirement->chainId, 'owner-a', $nonce));
         self::assertSame(ChainVerifiedResult::VerifiedNew, $service->markVerified($requirement->chainId, $nonce));
 
-        self::assertSame(ChainVerifiedResult::AlreadyVerified, $service->markTransactionDenied($requirement->chainId), 'the post-Pass terminalization answers already_verified');
-        self::assertSame(ChainVerifiedResult::AlreadyVerified, $service->markTransactionStepUpRequired($requirement->chainId));
+        self::assertSame(ChainVerifiedResult::AlreadyVerified, $service->markTransactionDenied($requirement->chainId, $obligationId), 'the post-Pass terminalization answers already_verified');
+        self::assertSame(ChainVerifiedResult::AlreadyVerified, $service->markTransactionStepUpRequired($requirement->chainId, $obligationId));
         self::assertSame('verified', $service->requirementFor($requirement->chainId)?->state, 'the terminal verified record is untouched');
         self::assertSame($nonce, $service->requirementFor($requirement->chainId)?->stage2Nonce);
         self::assertNull($service->findOpenRequirement('login', 'txn-alpha', 1), 'the obligation was cleared by the Pass');
@@ -3252,9 +3257,10 @@ final class ChainedChallengeTest extends TestCase
         $store = new ArrayChainedChallengeStateStore();
         $service = $this->chainService($store);
         $requirement = $service->requireStage2($this->nonce(), 'login', 'txn-alpha', 1, RiskAction::Sha18, time() + 300);
+        $obligationId = $service->obligationIdFor('login', 'txn-alpha', 1);
         $expiry = $requirement->expiresAt;
 
-        self::assertSame(ChainVerifiedResult::DeniedNew, $service->markTransactionDenied($requirement->chainId));
+        self::assertSame(ChainVerifiedResult::DeniedNew, $service->markTransactionDenied($requirement->chainId, $obligationId));
         $read = $store->read($requirement->chainId);
         self::assertIsArray($read, 'the terminalized record strictly decodes');
         self::assertSame('denied', $read['state']);
@@ -3266,12 +3272,74 @@ final class ChainedChallengeTest extends TestCase
         // The full machine re-reads the record: a repeated
         // terminalization, the obligation lookup and the typed
         // requirement all decode it.
-        self::assertSame(ChainVerifiedResult::DeniedSame, $service->markTransactionDenied($requirement->chainId));
+        self::assertSame(ChainVerifiedResult::DeniedSame, $service->markTransactionDenied($requirement->chainId, $obligationId));
         $requirement = $service->findOpenRequirement('login', 'txn-alpha', 1);
         self::assertNotNull($requirement);
         self::assertSame('denied', $requirement->state);
         self::assertNull($requirement->stage2Nonce);
         self::assertSame(ChainReservationResult::Denied, $service->reserveStage2($requirement->chainId, 'owner-b'));
+    }
+
+    public function testObligationBoundTerminalizationRefusesAStaleChainId(): void
+    {
+        // OBLIGATION-BOUND terminalization (atomic over BOTH keys): the
+        // store's terminalization takes the transaction's obligation id
+        // and the transition verifies the chain record STILL agrees on
+        // the obligation id AND the obligation mapping STILL points at
+        // this chain. A STALE chainId (the obligation moved to a
+        // different chain between the read and the transition) answers
+        // 'obligation_moved' at the store (Conflict at the service) and
+        // NOTHING is transitioned — the transaction's real chain is
+        // never left open behind a stale terminalization; the happy path
+        // (the mapping intact) transitions.
+        $store = new ArrayChainedChallengeStateStore();
+        $service = $this->chainService($store);
+        $expiry = time() + 300;
+
+        // The transaction's chain + its obligation mapping agree.
+        $requirement = $service->requireStage2($this->nonce(), 'login', 'txn-alpha', 1, RiskAction::Sha18, $expiry);
+        $obligationId = $service->obligationIdFor('login', 'txn-alpha', 1);
+        $chainId = $requirement->chainId;
+        self::assertSame($chainId, $store->obligationChainId($obligationId), 'the obligation maps the chain');
+
+        // The obligation MOVES to a fresh chain (a re-created chain of
+        // the same transaction) while the stale chain record survives.
+        $fresh = $service->requireStage2($this->nonce(), 'login', 'txn-beta', 1, RiskAction::Sha18, $expiry);
+        $store->deleteObligation($chainId, $obligationId);
+        $store->createWithObligation($fresh->chainId, $obligationId, $this->nonce(), 'login', 'txn-alpha', 'sha18', 1, 300);
+
+        // The stale-chainId terminalization is refused atomically:
+        // NOTHING transitioned, the mapping untouched.
+        self::assertSame('obligation_moved', $store->markTransactionDenied($chainId, $obligationId), 'a stale chainId (the obligation moved) is refused at the store');
+        self::assertSame('available', $service->requirementFor($chainId)?->state, 'the stale chain is untouched');
+        self::assertSame($fresh->chainId, $store->obligationChainId($obligationId), 'the obligation mapping is untouched');
+        self::assertSame(ChainVerifiedResult::Conflict, $service->markTransactionDenied($chainId, $obligationId), 'the service surfaces the refused terminalization as Conflict');
+        self::assertSame('available', $service->requirementFor($chainId)?->state, 'still untouched');
+
+        // The happy path (the mapping intact) transitions.
+        self::assertSame('denied_new', $store->markTransactionDenied($fresh->chainId, $obligationId), 'the happy path transitions');
+        self::assertSame('denied', $service->requirementFor($fresh->chainId)?->state);
+
+        // The RECORD-AGREES guard: an obligation id the chain record does
+        // NOT carry is refused too (the transaction's chain is not this
+        // record's chain).
+        $other = $service->requireStage2($this->nonce(), 'login', 'txn-gamma', 1, RiskAction::Sha18, $expiry);
+        $otherObligationId = $service->obligationIdFor('login', 'txn-gamma', 1);
+        self::assertSame($otherObligationId, $store->read($other->chainId)['obligationId'], 'the record carries its own obligation id');
+        self::assertSame('obligation_moved', $store->markTransactionDenied($other->chainId, $obligationId), 'a mismatched obligation id is refused — the record does not agree');
+        self::assertSame('available', $service->requirementFor($other->chainId)?->state, 'the record is untouched');
+
+        // The VERIFIED chain (the obligation was cleared atomically at
+        // verification): the gone mapping is the already-completed
+        // anomaly — there is no chain left to terminalize.
+        $verified = $service->requireStage2($this->nonce(), 'login', 'txn-verified-2', 1, RiskAction::Sha18, $expiry);
+        $verifiedObligationId = $service->obligationIdFor('login', 'txn-verified-2', 1);
+        $nonce = $this->stageNonce('stage2-nonce');
+        self::assertSame(ChainReservationResult::Available, $service->reserveStage2($verified->chainId, 'owner-a'));
+        self::assertSame(ChainIssuedResult::IssuedNew, $service->markIssued($verified->chainId, 'owner-a', $nonce));
+        self::assertSame(ChainVerifiedResult::VerifiedNew, $service->markVerified($verified->chainId, $nonce));
+        self::assertSame('already_completed', $store->markTransactionDenied($verified->chainId, $verifiedObligationId), 'a gone obligation is the already-completed anomaly at the store');
+        self::assertSame(ChainVerifiedResult::AlreadyVerified, $service->markTransactionStepUpRequired($verified->chainId, $verifiedObligationId), 'the service surfaces it as AlreadyVerified');
     }
 
     // ── The atomic races: terminalization vs reservation/issuance/verify ─
@@ -3289,8 +3357,9 @@ final class ChainedChallengeTest extends TestCase
         // reservation (the reservation is moot) and the reserve after it
         // answers the terminal result.
         $a = $service->requireStage2($this->nonce(), 'login', 'txn-race-a', 1, RiskAction::Sha18, time() + 300);
+        $aObligationId = $service->obligationIdFor('login', 'txn-race-a', 1);
         self::assertSame(ChainReservationResult::Available, $service->reserveStage2($a->chainId, 'owner-a'));
-        self::assertSame(ChainVerifiedResult::DeniedNew, $service->markTransactionDenied($a->chainId));
+        self::assertSame(ChainVerifiedResult::DeniedNew, $service->markTransactionDenied($a->chainId, $aObligationId));
         self::assertSame('denied', $service->requirementFor($a->chainId)?->state, 'the terminalization wins against the in-flight reservation');
         self::assertNull($service->requirementFor($a->chainId)?->owner, 'the reservation fields are cleared');
         self::assertSame(ChainReservationResult::Denied, $service->reserveStage2($a->chainId, 'owner-b'), 'the reserve on the terminalized chain answers the terminal result');
@@ -3299,7 +3368,8 @@ final class ChainedChallengeTest extends TestCase
         // second — the reserve answers the terminal result (never
         // available).
         $b = $service->requireStage2($this->nonce(), 'login', 'txn-race-b', 1, RiskAction::Sha18, time() + 300);
-        self::assertSame(ChainVerifiedResult::StepUpRequiredNew, $service->markTransactionStepUpRequired($b->chainId));
+        $bObligationId = $service->obligationIdFor('login', 'txn-race-b', 1);
+        self::assertSame(ChainVerifiedResult::StepUpRequiredNew, $service->markTransactionStepUpRequired($b->chainId, $bObligationId));
         self::assertSame(ChainReservationResult::StepUpRequired, $service->reserveStage2($b->chainId, 'owner-a'), 'a reserve on the terminalized chain returns the terminal result');
         self::assertSame('step_up_required', $service->requirementFor($b->chainId)?->state);
     }
@@ -3317,18 +3387,20 @@ final class ChainedChallengeTest extends TestCase
         // Order 1: markVerified lands FIRST — the terminalization answers
         // 'already_verified' and the chain stays verified.
         $a = $service->requireStage2($this->nonce(), 'login', 'txn-race-verify-a', 1, RiskAction::Sha18, time() + 300);
+        $aObligationId = $service->obligationIdFor('login', 'txn-race-verify-a', 1);
         self::assertSame(ChainReservationResult::Available, $service->reserveStage2($a->chainId, 'owner-a'));
         self::assertSame(ChainIssuedResult::IssuedNew, $service->markIssued($a->chainId, 'owner-a', $nonce));
         self::assertSame(ChainVerifiedResult::VerifiedNew, $service->markVerified($a->chainId, $nonce));
-        self::assertSame(ChainVerifiedResult::AlreadyVerified, $service->markTransactionDenied($a->chainId), 'the terminalization on a verified chain answers already_verified');
+        self::assertSame(ChainVerifiedResult::AlreadyVerified, $service->markTransactionDenied($a->chainId, $aObligationId), 'the terminalization on a verified chain answers already_verified');
         self::assertSame('verified', $service->requirementFor($a->chainId)?->state, 'the verified terminal state is untouched');
 
         // Order 2: the terminalization lands FIRST — the later
         // markVerified is a conflict (a terminal state can never verify).
         $b = $service->requireStage2($this->nonce(), 'login', 'txn-race-verify-b', 1, RiskAction::Sha18, time() + 300);
+        $bObligationId = $service->obligationIdFor('login', 'txn-race-verify-b', 1);
         self::assertSame(ChainReservationResult::Available, $service->reserveStage2($b->chainId, 'owner-a'));
         self::assertSame(ChainIssuedResult::IssuedNew, $service->markIssued($b->chainId, 'owner-a', $nonce));
-        self::assertSame(ChainVerifiedResult::DeniedNew, $service->markTransactionDenied($b->chainId));
+        self::assertSame(ChainVerifiedResult::DeniedNew, $service->markTransactionDenied($b->chainId, $bObligationId));
         self::assertSame(ChainVerifiedResult::Conflict, $service->markVerified($b->chainId, $nonce), 'a markVerified on the terminalized chain is a conflict');
         self::assertSame('denied', $service->requirementFor($b->chainId)?->state);
     }
@@ -3346,17 +3418,19 @@ final class ChainedChallengeTest extends TestCase
         // Order 1: markIssued lands FIRST — the terminalization on the
         // issued chain still terminalizes, PRESERVING the exact nonce.
         $a = $service->requireStage2($this->nonce(), 'login', 'txn-race-issue-a', 1, RiskAction::Sha18, time() + 300);
+        $aObligationId = $service->obligationIdFor('login', 'txn-race-issue-a', 1);
         self::assertSame(ChainReservationResult::Available, $service->reserveStage2($a->chainId, 'owner-a'));
         self::assertSame(ChainIssuedResult::IssuedNew, $service->markIssued($a->chainId, 'owner-a', $nonce));
-        self::assertSame(ChainVerifiedResult::DeniedNew, $service->markTransactionDenied($a->chainId));
+        self::assertSame(ChainVerifiedResult::DeniedNew, $service->markTransactionDenied($a->chainId, $aObligationId));
         self::assertSame('denied', $service->requirementFor($a->chainId)?->state);
         self::assertSame($nonce, $service->requirementFor($a->chainId)?->stage2Nonce, 'the issued nonce is preserved');
 
         // Order 2: the terminalization lands FIRST — the later markIssued
         // is a conflict.
         $b = $service->requireStage2($this->nonce(), 'login', 'txn-race-issue-b', 1, RiskAction::Sha18, time() + 300);
+        $bObligationId = $service->obligationIdFor('login', 'txn-race-issue-b', 1);
         self::assertSame(ChainReservationResult::Available, $service->reserveStage2($b->chainId, 'owner-a'));
-        self::assertSame(ChainVerifiedResult::StepUpRequiredNew, $service->markTransactionStepUpRequired($b->chainId));
+        self::assertSame(ChainVerifiedResult::StepUpRequiredNew, $service->markTransactionStepUpRequired($b->chainId, $bObligationId));
         self::assertSame(ChainIssuedResult::Conflict, $service->markIssued($b->chainId, 'owner-a', $nonce), 'a markIssued on the terminalized chain is a conflict');
         self::assertSame('step_up_required', $service->requirementFor($b->chainId)?->state);
     }
@@ -3740,14 +3814,14 @@ final class FailingObligationLookupStore implements TransactionalChainedChalleng
         return $this->inner->markDenied($chainId, $stage2Nonce);
     }
 
-    public function markTransactionDenied(string $chainId): string
+    public function markTransactionDenied(string $chainId, string $obligationId): string
     {
-        return $this->inner->markTransactionDenied($chainId);
+        return $this->inner->markTransactionDenied($chainId, $obligationId);
     }
 
-    public function markTransactionStepUpRequired(string $chainId): string
+    public function markTransactionStepUpRequired(string $chainId, string $obligationId): string
     {
-        return $this->inner->markTransactionStepUpRequired($chainId);
+        return $this->inner->markTransactionStepUpRequired($chainId, $obligationId);
     }
 
     public function rearmIssued(string $chainId, string $expectedStage2Nonce): bool
@@ -3949,14 +4023,14 @@ final class ChainStateStoreInterceptor implements TransactionalChainedChallengeS
         return $this->inner->markDenied($chainId, $stage2Nonce);
     }
 
-    public function markTransactionDenied(string $chainId): string
+    public function markTransactionDenied(string $chainId, string $obligationId): string
     {
-        return $this->inner->markTransactionDenied($chainId);
+        return $this->inner->markTransactionDenied($chainId, $obligationId);
     }
 
-    public function markTransactionStepUpRequired(string $chainId): string
+    public function markTransactionStepUpRequired(string $chainId, string $obligationId): string
     {
-        return $this->inner->markTransactionStepUpRequired($chainId);
+        return $this->inner->markTransactionStepUpRequired($chainId, $obligationId);
     }
 
     public function rearmIssued(string $chainId, string $expectedStage2Nonce): bool
@@ -4075,14 +4149,14 @@ final class LostReplyChainStore implements TransactionalChainedChallengeStateSto
         return $this->inner->markDenied($chainId, $stage2Nonce);
     }
 
-    public function markTransactionDenied(string $chainId): string
+    public function markTransactionDenied(string $chainId, string $obligationId): string
     {
-        return $this->inner->markTransactionDenied($chainId);
+        return $this->inner->markTransactionDenied($chainId, $obligationId);
     }
 
-    public function markTransactionStepUpRequired(string $chainId): string
+    public function markTransactionStepUpRequired(string $chainId, string $obligationId): string
     {
-        return $this->inner->markTransactionStepUpRequired($chainId);
+        return $this->inner->markTransactionStepUpRequired($chainId, $obligationId);
     }
 
     public function rearmIssued(string $chainId, string $expectedStage2Nonce): bool
@@ -4171,14 +4245,14 @@ final class ConflictChainStore implements TransactionalChainedChallengeStateStor
         return $this->inner->markDenied($chainId, $stage2Nonce);
     }
 
-    public function markTransactionDenied(string $chainId): string
+    public function markTransactionDenied(string $chainId, string $obligationId): string
     {
-        return $this->inner->markTransactionDenied($chainId);
+        return $this->inner->markTransactionDenied($chainId, $obligationId);
     }
 
-    public function markTransactionStepUpRequired(string $chainId): string
+    public function markTransactionStepUpRequired(string $chainId, string $obligationId): string
     {
-        return $this->inner->markTransactionStepUpRequired($chainId);
+        return $this->inner->markTransactionStepUpRequired($chainId, $obligationId);
     }
 
     public function rearmIssued(string $chainId, string $expectedStage2Nonce): bool

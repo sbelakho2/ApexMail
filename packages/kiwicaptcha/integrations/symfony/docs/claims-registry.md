@@ -1,9 +1,9 @@
 # Claims registry
 
-Every factual claim made in this documentation is listed here with its
-scope, assumptions, and the test that evidences it. A claim without an
-owning test is not made. "Last reviewed" is the date the claim was checked
-against the implementation and its tests.
+This registry tracks externally visible security, privacy and compliance
+claims that need explicit evidence. Each row states the claim's scope and
+assumptions and the test that evidences it. "Last reviewed" is the date the
+claim was checked against the implementation and its tests.
 
 | Claim | Scope | Assumptions | Evidence | Owning test/document | Last reviewed |
 |-------|-------|-------------|----------|----------------------|---------------|

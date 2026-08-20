@@ -2580,6 +2580,366 @@ final class ValidatorTest extends TestCase
         self::assertSame(KiwiCaptcha::POST_SOLVE_REJECTED_ERROR, $violationsB2[0]->getCode(), 'after the store recovers the retry completes the terminalization and the denial');
         self::assertSame('denied', $inner->read($chainId)['state'], 'the chain is TERMINAL denied after the recovery');
     }
+
+    // ── Terminal transaction state dominates the EXACT stage-2 nonce ────
+
+    public function testTerminalTransactionStateDominatesTheExactStage2NonceAcrossEveryAssessment(): void
+    {
+        // THE REGRESSION MATRIX: a chain issued(S) whose transaction is
+        // ALREADY TERMINAL (denied / step_up_required — a different token
+        // of the same transaction terminalized it, the exact stage-2
+        // nonce preserved) dominates the submission of the EXACT stage-2
+        // nonce S under EVERY assessment: no reassessment
+        // (post_solve_check=false + the chain marker), Allow, weaker PoW,
+        // stronger PoW and the OPPOSITE terminal assessment (a fresh
+        // StepUp on a denied chain / a fresh Deny on a step_up_required
+        // chain). The terminal disposition wins — NEVER Pass, NEVER the
+        // stage-2 transition conflict (503) — and S's nonce disposition
+        // is persisted AS THE TERMINAL KIND, so the REPLAY of S
+        // reproduces the same terminal result (never Pass, never 503).
+        $resolver = new RiskProfileResolver(PoWAlgorithm::Sha256, 8);
+        $rows = [
+            'denied + no reassessment' => ['denied', 'none'],
+            'denied + Allow' => ['denied', 'allow'],
+            'denied + weaker PoW' => ['denied', 'weaker'],
+            'denied + fresh StepUp' => ['denied', 'stepup'],
+            'step_up_required + no reassessment' => ['step_up_required', 'none'],
+            'step_up_required + Allow' => ['step_up_required', 'allow'],
+            'step_up_required + weaker PoW' => ['step_up_required', 'weaker'],
+            'step_up_required + stronger PoW' => ['step_up_required', 'stronger'],
+        ];
+        $vectors = [
+            'allow' => null,
+            'weaker' => ['replay' => 400],
+            'stronger' => self::ARGON32_VECTOR,
+            'stepup' => self::STEP_UP_VECTOR,
+        ];
+        foreach ($rows as $label => [$terminal, $assessment]) {
+            $risk = $this->riskStack(1, 'allow', 'allow', $assessment !== 'none', null, $resolver);
+            $risk['store']->setVector(SignalVector::fromArray(self::ARGON32_VECTOR));
+            [$store] = $this->clockedDispositionStore();
+            $chainStore = new ArrayChainedChallengeStateStore();
+            $stage2 = $this->stage2Chain($risk['gateway'], $store, $chainStore);
+            $chainService = $stage2['chainService'];
+            $chainId = $stage2['chainId'];
+            $nonceS = $stage2['stage2']->nonce;
+            $expectedCode = $terminal === 'denied' ? KiwiCaptcha::POST_SOLVE_REJECTED_ERROR : KiwiCaptcha::POST_SOLVE_STEP_UP_REQUIRED;
+            $expectedKind = $terminal === 'denied' ? PostSolveDispositionKind::Deny : PostSolveDispositionKind::StepUp;
+
+            // The transaction is ALREADY TERMINAL (a different token of
+            // the same transaction terminalized the issued chain — the
+            // exact stage-2 nonce preserved).
+            $obligationId = $chainService->obligationIdFor('login', 'auth-txn-1', 1);
+            $result = $terminal === 'denied'
+                ? $chainService->markTransactionDenied($chainId, $obligationId)
+                : $chainService->markTransactionStepUpRequired($chainId, $obligationId);
+            self::assertNotSame(ChainVerifiedResult::Conflict, $result, $label);
+            $requirement = $chainService->requirementFor($chainId);
+            self::assertSame($terminal, $requirement?->state, 'the chain is TERMINAL: '.$label);
+            self::assertSame($nonceS, $requirement?->stage2Nonce, 'the exact stage-2 nonce is preserved: '.$label);
+
+            // The browser submits the EXACT stage-2 nonce S.
+            usleep(($stage2['stage2']->minDurationMs + 10) * 1000);
+            $tokenS = $this->solveToken($stage2['stage2']->prefix, $stage2['stage2']->salt, $stage2['stage2']->targetBits, $stage2['stage2']->nonce);
+            $dto = new class {
+                public ?string $captcha = null;
+            };
+            $dto->captcha = $tokenS;
+
+            $metaStore = null;
+            if ($assessment === 'none') {
+                // post_solve_check=false AND the chain marker: NO
+                // reassessment would run at all (the defect's case (a)).
+                $metaStore = new \BelConsulting\KiwiCaptchaBundle\SiteVerify\ArraySiteVerifyMetadataStore();
+                $metaStore->store($nonceS, new \BelConsulting\KiwiCaptchaBundle\SiteVerify\SiteVerifyMetadata(null, null, 'login', $chainId, 2), 300);
+            }
+            if (($vectors[$assessment] ?? null) !== null) {
+                $risk['store']->setVector(SignalVector::fromArray($vectors[$assessment]));
+            }
+
+            [$engine] = $this->dispositionEngine($this->verifier, $risk['gateway'], $store, chainTickets: $chainService, resolver: $resolver, bindingAuthority: $this->bindingAuthority(), metadataStore: $metaStore);
+            $meta = $engine->getMetadataFor($dto::class);
+            $meta->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
+            $violations = $engine->validate($dto);
+
+            self::assertCount(1, $violations, 'the terminal state dominates the exact stage-2 nonce: '.$label);
+            self::assertSame($expectedCode, $violations[0]->getCode(), 'the terminal disposition wins — never Pass, never 503: '.$label);
+            self::assertArrayNotHasKey('{{ chain_ticket }}', $violations[0]->getParameters(), 'a terminal disposition never becomes a chain ticket: '.$label);
+            self::assertSame($expectedKind, $store->read($nonceS)?->disposition?->kind, 'S\'s nonce disposition is persisted AS THE TERMINAL KIND: '.$label);
+            self::assertSame($terminal, $chainService->requirementFor($chainId)?->state, 'the terminal state survives: '.$label);
+
+            // REPLAY of S (the stored-result retry): the SAME terminal
+            // result — never Pass, never 503 (the replay path is
+            // consistent).
+            [$engine2] = $this->dispositionEngine($this->verifier, $risk['gateway'], $store, chainTickets: $chainService, resolver: $resolver, bindingAuthority: $this->bindingAuthority(), metadataStore: $metaStore);
+            $meta2 = $engine2->getMetadataFor($dto::class);
+            $meta2->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
+            $violations2 = $engine2->validate($dto);
+
+            self::assertCount(1, $violations2, 'the replay of S must never pass: '.$label);
+            self::assertSame($expectedCode, $violations2[0]->getCode(), 'the replay reproduces the SAME terminal disposition — never Pass, never 503: '.$label);
+            self::assertSame($expectedKind, $store->read($nonceS)?->disposition?->kind, 'the replay keeps the terminal kind: '.$label);
+        }
+    }
+
+    public function testStage2TokenInheritsATerminalDenyFromAnotherTokenOfTheSameTransaction(): void
+    {
+        // THE CRITICAL SCENARIO: the chain is ISSUED(S); a DIFFERENT
+        // stage-1 token B of the same transaction gets a FRESH Deny — the
+        // chain becomes TERMINAL denied PRESERVING the exact stage-2
+        // nonce S; the browser then submits S with NO post-solve
+        // reassessment (post_solve_check=false + the chain marker): the
+        // terminal DENY — never Pass, never the stage-2 transition
+        // conflict (503) — and S's nonce disposition is persisted AS THE
+        // TERMINAL KIND, so the REPLAY of S reproduces the same terminal
+        // denial.
+        $resolver = new RiskProfileResolver(PoWAlgorithm::Sha256, 8);
+        $risk = $this->riskStack(1, 'allow', 'allow', false, null, $resolver);
+        $risk['store']->setVector(SignalVector::fromArray(self::ARGON32_VECTOR));
+        [$store] = $this->clockedDispositionStore();
+        $chainStore = new ArrayChainedChallengeStateStore();
+        $stage2 = $this->stage2Chain($risk['gateway'], $store, $chainStore);
+        $chainService = $stage2['chainService'];
+        $chainId = $stage2['chainId'];
+        $nonceS = $stage2['stage2']->nonce;
+
+        // Token B — a DIFFERENT stage-1 token of the same transaction —
+        // gets a FRESH DENY: the terminal rejection AND the durable
+        // terminalization of the OPEN (issued) chain — the exact stage-2
+        // nonce preserved.
+        $risk['store']->setVector(SignalVector::fromArray(['network_risk' => 900]));
+        $challengeB = $this->issuer->issue('login', '198.51.100.7');
+        usleep(($challengeB->minDurationMs + 10) * 1000);
+        $tokenB = $this->solveToken($challengeB->prefix, $challengeB->salt, $challengeB->targetBits, $challengeB->nonce);
+        $dtoB = new class {
+            public ?string $captcha = null;
+        };
+        $dtoB->captcha = $tokenB;
+        [$engineB] = $this->dispositionEngine($this->verifier, $risk['gateway'], $store, chainTickets: $chainService, bindingAuthority: $this->bindingAuthority());
+        $metaB = $engineB->getMetadataFor($dtoB::class);
+        $metaB->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
+        $violationsB = $engineB->validate($dtoB);
+        self::assertSame(KiwiCaptcha::POST_SOLVE_REJECTED_ERROR, $violationsB[0]->getCode(), 'B\'s fresh Deny is the terminal rejection');
+        $state = $chainService->requirementFor($chainId);
+        self::assertSame('denied', $state?->state, 'the fresh Deny TERMINALIZES the issued chain');
+        self::assertSame($nonceS, $state?->stage2Nonce, 'the exact stage-2 nonce S is PRESERVED');
+        self::assertNotNull($chainService->findOpenRequirement('login', 'auth-txn-1', 1), 'the obligation mapping is KEPT');
+
+        // The browser submits S with NO reassessment (post_solve_check=
+        // false + the chain marker): the terminal DENY — never Pass,
+        // never 503.
+        $metaStore = new \BelConsulting\KiwiCaptchaBundle\SiteVerify\ArraySiteVerifyMetadataStore();
+        $metaStore->store($nonceS, new \BelConsulting\KiwiCaptchaBundle\SiteVerify\SiteVerifyMetadata(null, null, 'login', $chainId, 2), 300);
+        usleep(($stage2['stage2']->minDurationMs + 10) * 1000);
+        $tokenS = $this->solveToken($stage2['stage2']->prefix, $stage2['stage2']->salt, $stage2['stage2']->targetBits, $stage2['stage2']->nonce);
+        $dto = new class {
+            public ?string $captcha = null;
+        };
+        $dto->captcha = $tokenS;
+        [$engine] = $this->dispositionEngine($this->verifier, $risk['gateway'], $store, chainTickets: $chainService, resolver: $resolver, bindingAuthority: $this->bindingAuthority(), metadataStore: $metaStore);
+        $meta = $engine->getMetadataFor($dto::class);
+        $meta->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
+        $violations = $engine->validate($dto);
+
+        self::assertCount(1, $violations);
+        self::assertSame(KiwiCaptcha::POST_SOLVE_REJECTED_ERROR, $violations[0]->getCode(), 'the terminal Deny wins for the EXACT stage-2 nonce — never Pass, never 503');
+        self::assertArrayNotHasKey('{{ chain_ticket }}', $violations[0]->getParameters(), 'a terminal denial never becomes a chain ticket');
+        self::assertSame(PostSolveDispositionKind::Deny, $store->read($nonceS)?->disposition?->kind, 'S\'s nonce disposition is persisted AS THE TERMINAL KIND');
+        self::assertSame('denied', $chainService->requirementFor($chainId)?->state, 'the chain stays terminal denied');
+
+        // REPLAY of S: the same terminal denial — never Pass, never 503.
+        [$engine2] = $this->dispositionEngine($this->verifier, $risk['gateway'], $store, chainTickets: $chainService, resolver: $resolver, bindingAuthority: $this->bindingAuthority(), metadataStore: $metaStore);
+        $meta2 = $engine2->getMetadataFor($dto::class);
+        $meta2->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
+        $violations2 = $engine2->validate($dto);
+        self::assertSame(KiwiCaptcha::POST_SOLVE_REJECTED_ERROR, $violations2[0]->getCode(), 'the replay of S reproduces the terminal Deny — never a stored Pass, never 503');
+        self::assertSame(PostSolveDispositionKind::Deny, $store->read($nonceS)?->disposition?->kind, 'the replay keeps the terminal kind');
+    }
+
+    public function testStage2TokenInheritsATerminalStepUpFromAnotherTokenOfTheSameTransaction(): void
+    {
+        // The StepUp mirror of the critical scenario: a DIFFERENT stage-1
+        // token B gets a FRESH STEP-UP — the issued chain becomes TERMINAL
+        // step_up_required PRESERVING the exact stage-2 nonce S; the
+        // submission of S (with a FRESH DENY assessment — the opposite
+        // terminal) still answers the terminal STEP-UP — never the
+        // conflicting stage-2 transition (503), never Pass.
+        $resolver = new RiskProfileResolver(PoWAlgorithm::Sha256, 8);
+        $risk = $this->riskStack(1, 'allow', 'allow', false, null, $resolver);
+        $risk['store']->setVector(SignalVector::fromArray(self::ARGON32_VECTOR));
+        [$store] = $this->clockedDispositionStore();
+        $chainStore = new ArrayChainedChallengeStateStore();
+        $stage2 = $this->stage2Chain($risk['gateway'], $store, $chainStore);
+        $chainService = $stage2['chainService'];
+        $chainId = $stage2['chainId'];
+        $nonceS = $stage2['stage2']->nonce;
+
+        // Token B — a DIFFERENT stage-1 token — gets a FRESH STEP-UP: the
+        // terminal step-up AND the durable terminalization of the OPEN
+        // (issued) chain — the exact stage-2 nonce preserved.
+        $risk['store']->setVector(SignalVector::fromArray(self::STEP_UP_VECTOR));
+        $challengeB = $this->issuer->issue('login', '198.51.100.7');
+        usleep(($challengeB->minDurationMs + 10) * 1000);
+        $tokenB = $this->solveToken($challengeB->prefix, $challengeB->salt, $challengeB->targetBits, $challengeB->nonce);
+        $dtoB = new class {
+            public ?string $captcha = null;
+        };
+        $dtoB->captcha = $tokenB;
+        [$engineB] = $this->dispositionEngine($this->verifier, $risk['gateway'], $store, chainTickets: $chainService, bindingAuthority: $this->bindingAuthority());
+        $metaB = $engineB->getMetadataFor($dtoB::class);
+        $metaB->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
+        $violationsB = $engineB->validate($dtoB);
+        self::assertSame(KiwiCaptcha::POST_SOLVE_STEP_UP_REQUIRED, $violationsB[0]->getCode(), 'B\'s fresh StepUp is the terminal step-up');
+        $state = $chainService->requirementFor($chainId);
+        self::assertSame('step_up_required', $state?->state, 'the fresh StepUp TERMINALIZES the issued chain');
+        self::assertSame($nonceS, $state?->stage2Nonce, 'the exact stage-2 nonce S is PRESERVED');
+        self::assertNotNull($chainService->findOpenRequirement('login', 'auth-txn-1', 1), 'the obligation mapping is KEPT');
+
+        // The browser submits S under a FRESH DENY assessment (the
+        // opposite terminal): the terminal STEP-UP wins PERMANENTLY —
+        // never the conflicting transition (503), never Pass.
+        $risk['store']->setVector(SignalVector::fromArray(['network_risk' => 900]));
+        usleep(($stage2['stage2']->minDurationMs + 10) * 1000);
+        $tokenS = $this->solveToken($stage2['stage2']->prefix, $stage2['stage2']->salt, $stage2['stage2']->targetBits, $stage2['stage2']->nonce);
+        $dto = new class {
+            public ?string $captcha = null;
+        };
+        $dto->captcha = $tokenS;
+        [$engine] = $this->dispositionEngine($this->verifier, $risk['gateway'], $store, chainTickets: $chainService, resolver: $resolver, bindingAuthority: $this->bindingAuthority());
+        $meta = $engine->getMetadataFor($dto::class);
+        $meta->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
+        $violations = $engine->validate($dto);
+
+        self::assertCount(1, $violations);
+        self::assertSame(KiwiCaptcha::POST_SOLVE_STEP_UP_REQUIRED, $violations[0]->getCode(), 'the terminal StepUp wins for the EXACT stage-2 nonce — never the conflicting transition, never 503');
+        self::assertArrayNotHasKey('{{ chain_ticket }}', $violations[0]->getParameters(), 'a terminal step-up never becomes a chain ticket');
+        self::assertSame(PostSolveDispositionKind::StepUp, $store->read($nonceS)?->disposition?->kind, 'S\'s nonce disposition is persisted AS THE TERMINAL KIND');
+        self::assertSame('step_up_required', $chainService->requirementFor($chainId)?->state, 'the chain stays terminal step_up_required');
+
+        // REPLAY of S: the same terminal step-up — never Pass, never 503.
+        [$engine2] = $this->dispositionEngine($this->verifier, $risk['gateway'], $store, chainTickets: $chainService, resolver: $resolver, bindingAuthority: $this->bindingAuthority());
+        $meta2 = $engine2->getMetadataFor($dto::class);
+        $meta2->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
+        $violations2 = $engine2->validate($dto);
+        self::assertSame(KiwiCaptcha::POST_SOLVE_STEP_UP_REQUIRED, $violations2[0]->getCode(), 'the replay of S reproduces the terminal StepUp — never 503');
+        self::assertSame(PostSolveDispositionKind::StepUp, $store->read($nonceS)?->disposition?->kind, 'the replay keeps the terminal kind');
+    }
+
+    public function testReplayOfTheStage2NonceNeverReproducesAStalePassOverATerminalTransaction(): void
+    {
+        // A stale PASS persisted for S (e.g. by a racing/buggy path
+        // before the transaction terminalized — the record that used to
+        // trap the stage-2 nonce in the persistent 503 loop) is
+        // SUPERSEDED by the requirement's TERMINAL state on every replay:
+        // the terminal Deny answers — never the stored Pass, never the
+        // stage-2 transition conflict.
+        $resolver = new RiskProfileResolver(PoWAlgorithm::Sha256, 8);
+        $risk = $this->riskStack(1, 'allow', 'allow', false, null, $resolver);
+        $risk['store']->setVector(SignalVector::fromArray(self::ARGON32_VECTOR));
+        [$store] = $this->clockedDispositionStore();
+        $chainStore = new ArrayChainedChallengeStateStore();
+        $stage2 = $this->stage2Chain($risk['gateway'], $store, $chainStore);
+        $chainService = $stage2['chainService'];
+        $chainId = $stage2['chainId'];
+        $nonceS = $stage2['stage2']->nonce;
+
+        // The transaction is TERMINAL denied — the exact stage-2 nonce
+        // preserved.
+        $obligationId = $chainService->obligationIdFor('login', 'auth-txn-1', 1);
+        self::assertSame(ChainVerifiedResult::DeniedNew, $chainService->markTransactionDenied($chainId, $obligationId));
+        self::assertSame($nonceS, $chainService->requirementFor($chainId)?->stage2Nonce, 'the exact stage-2 nonce is preserved');
+
+        // A STALE PASS is S's persisted nonce disposition (injected
+        // directly — the record the pre-fix path could leave behind).
+        $this->injectDispositionRecord($store, $nonceS, $this->completeDispositionRecord());
+
+        // The submission (and replay) of S answers the terminal Deny —
+        // never the stored Pass, never 503.
+        usleep(($stage2['stage2']->minDurationMs + 10) * 1000);
+        $tokenS = $this->solveToken($stage2['stage2']->prefix, $stage2['stage2']->salt, $stage2['stage2']->targetBits, $stage2['stage2']->nonce);
+        $dto = new class {
+            public ?string $captcha = null;
+        };
+        $dto->captcha = $tokenS;
+        [$engine] = $this->dispositionEngine($this->verifier, $risk['gateway'], $store, chainTickets: $chainService, resolver: $resolver, bindingAuthority: $this->bindingAuthority());
+        $meta = $engine->getMetadataFor($dto::class);
+        $meta->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
+        $violations = $engine->validate($dto);
+
+        self::assertCount(1, $violations);
+        self::assertSame(KiwiCaptcha::POST_SOLVE_REJECTED_ERROR, $violations[0]->getCode(), 'the terminal Deny supersedes a stale persisted Pass — never Pass, never 503');
+        self::assertSame('denied', $chainService->requirementFor($chainId)?->state, 'the terminal state survives');
+    }
+
+    public function testTerminalizationBeforeFinalizeFailureRetryReconstructsTheTerminalDisposition(): void
+    {
+        // THE CRASH TEST (TERMINALIZATION-FIRST): token B's fresh Deny
+        // TERMINALIZES the open obligation (the chain transition is
+        // applied BEFORE the nonce-disposition finalize), the finalize
+        // FAILS (decorator) -> the request answers temporary_unavailable;
+        // a retry (finalize healthy, after the claim lease) rediscovers
+        // the TERMINAL transaction (the dominance rule) and reconstructs
+        // the terminal disposition — Deny — persisted as B's nonce
+        // disposition kind. No authorization weakness: the durable
+        // terminality was established by the successful transition, the
+        // failure only delayed the nonce disposition.
+        $resolver = new RiskProfileResolver(PoWAlgorithm::Sha256, 8);
+        $risk = $this->riskStack(1, 'allow', 'allow', false, null, $resolver);
+        [$store, $advance] = $this->clockedDispositionStore();
+        $chainStore = new ArrayChainedChallengeStateStore();
+        $chainService = new ChainedChallengeTicketService($chainStore, self::SECRET, 300, 15, $this->bindingAuthority());
+
+        // Token A opens the chain (Argon32).
+        $risk['store']->setVector(SignalVector::fromArray(self::ARGON32_VECTOR));
+        $challengeA = $this->issuer->issue('login', '198.51.100.7');
+        usleep(($challengeA->minDurationMs + 10) * 1000);
+        $tokenA = $this->solveToken($challengeA->prefix, $challengeA->salt, $challengeA->targetBits, $challengeA->nonce);
+        $dtoA = new class {
+            public ?string $captcha = null;
+        };
+        $dtoA->captcha = $tokenA;
+        [$engineA] = $this->dispositionEngine($this->verifier, $risk['gateway'], $store, chainTickets: $chainService, bindingAuthority: $this->bindingAuthority());
+        $metaA = $engineA->getMetadataFor($dtoA::class);
+        $metaA->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
+        $violationsA = $engineA->validate($dtoA);
+        self::assertSame(KiwiCaptchaValidator::CHAIN_REQUIRED_ERROR, $violationsA[0]->getCode());
+        $chainId = (string) $chainService->verify((string) $violationsA[0]->getParameters()['{{ chain_ticket }}'])['chainId'];
+
+        // Token B: a fresh DENY whose TERMINALIZATION SUCCEEDS (the chain
+        // becomes TERMINAL denied) but whose nonce-disposition FINALIZE
+        // FAILS: the request answers temporary_unavailable — the durable
+        // terminality is already established, no bare Deny escapes
+        // without its nonce disposition.
+        $risk['store']->setVector(SignalVector::fromArray(['network_risk' => 900]));
+        $challengeB = $this->issuer->issue('login', '198.51.100.7');
+        usleep(($challengeB->minDurationMs + 10) * 1000);
+        $tokenB = $this->solveToken($challengeB->prefix, $challengeB->salt, $challengeB->targetBits, $challengeB->nonce);
+        $dtoB = new class {
+            public ?string $captcha = null;
+        };
+        $dtoB->captcha = $tokenB;
+        $faulted = $this->faultedStore($store, failFinalize: true);
+        [$engineB] = $this->dispositionEngine($this->verifier, $risk['gateway'], $faulted, chainTickets: $chainService, bindingAuthority: $this->bindingAuthority());
+        $metaB = $engineB->getMetadataFor($dtoB::class);
+        $metaB->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
+        $violationsB = $engineB->validate($dtoB);
+        self::assertCount(1, $violationsB);
+        self::assertSame(KiwiCaptcha::TEMPORARY_UNAVAILABLE_ERROR, $violationsB[0]->getCode(), 'a finalize failure after a successful terminalization is temporary_unavailable');
+        self::assertSame('denied', $chainService->requirementFor($chainId)?->state, 'the chain transition ran BEFORE the finalize — the terminality is durable');
+        self::assertSame('pending', $store->read($challengeB->nonce)?->state, 'the claim is left pending — the nonce disposition was never finalized');
+
+        // The retry (finalize healthy, after the claim lease): the
+        // dominance rule rediscovers the TERMINAL transaction and
+        // reconstructs the terminal disposition — persisted AS Deny.
+        $advance(16);
+        [$engineB2] = $this->dispositionEngine($this->verifier, $risk['gateway'], $store, chainTickets: $chainService, bindingAuthority: $this->bindingAuthority());
+        $metaB2 = $engineB2->getMetadataFor($dtoB::class);
+        $metaB2->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
+        $violationsB2 = $engineB2->validate($dtoB);
+        self::assertSame(KiwiCaptcha::POST_SOLVE_REJECTED_ERROR, $violationsB2[0]->getCode(), 'the retry reconstructs the terminal Deny');
+        self::assertSame(PostSolveDispositionKind::Deny, $store->read($challengeB->nonce)?->disposition?->kind, 'the retry persists the terminal kind as the nonce disposition');
+        self::assertSame('denied', $chainService->requirementFor($chainId)?->state, 'the chain stays terminal denied');
+    }
 }
 
 /**
@@ -2725,22 +3085,22 @@ final class FailingTerminalChainStore implements TransactionalChainedChallengeSt
         return $this->inner->markDenied($chainId, $stage2Nonce);
     }
 
-    public function markTransactionDenied(string $chainId): string
+    public function markTransactionDenied(string $chainId, string $obligationId): string
     {
         if ($this->failTransactionDenied) {
             throw new \RuntimeException('simulated terminal transition outage');
         }
 
-        return $this->inner->markTransactionDenied($chainId);
+        return $this->inner->markTransactionDenied($chainId, $obligationId);
     }
 
-    public function markTransactionStepUpRequired(string $chainId): string
+    public function markTransactionStepUpRequired(string $chainId, string $obligationId): string
     {
         if ($this->failTransactionStepUpRequired) {
             throw new \RuntimeException('simulated terminal transition outage');
         }
 
-        return $this->inner->markTransactionStepUpRequired($chainId);
+        return $this->inner->markTransactionStepUpRequired($chainId, $obligationId);
     }
 
     public function rearmIssued(string $chainId, string $expectedStage2Nonce): bool

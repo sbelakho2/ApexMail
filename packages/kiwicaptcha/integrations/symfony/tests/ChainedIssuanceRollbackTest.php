@@ -386,14 +386,14 @@ final class RollbackLostReplyChainStore implements TransactionalChainedChallenge
         return $this->inner->markDenied($chainId, $stage2Nonce);
     }
 
-    public function markTransactionDenied(string $chainId): string
+    public function markTransactionDenied(string $chainId, string $obligationId): string
     {
-        return $this->inner->markTransactionDenied($chainId);
+        return $this->inner->markTransactionDenied($chainId, $obligationId);
     }
 
-    public function markTransactionStepUpRequired(string $chainId): string
+    public function markTransactionStepUpRequired(string $chainId, string $obligationId): string
     {
-        return $this->inner->markTransactionStepUpRequired($chainId);
+        return $this->inner->markTransactionStepUpRequired($chainId, $obligationId);
     }
 
     public function rearmIssued(string $chainId, string $expectedStage2Nonce): bool

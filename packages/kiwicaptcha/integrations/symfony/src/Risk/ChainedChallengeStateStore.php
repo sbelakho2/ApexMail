@@ -61,13 +61,15 @@ namespace BelConsulting\KiwiCaptchaBundle\Risk;
  *    the transaction stays bound to its final disposition, so a later
  *    challenge request for the same transaction re-encounters the
  *    terminal state (never a new stage-1). The terminal records are kept
- *    until their TTL. The TRANSACTIONAL contract adds the NONCE-AGNOSTIC
- *    markTransactionDenied() / markTransactionStepUpRequired()
+ *    until their TTL. The TRANSACTIONAL contract adds the OBLIGATION-BOUND
+ *    NONCE-AGNOSTIC markTransactionDenied() / markTransactionStepUpRequired()
  *    terminalizations of an OPEN obligation (a fresh Deny/StepUp from a
  *    DIFFERENT verified nonce of the obligated transaction becomes
- *    durable, keyed by the chain/obligation identity) — the terminal
- *    states carry an OPTIONAL stage-2 nonce (the exact nonce when one
- *    was issued, null otherwise).
+ *    durable, keyed by the chain/obligation identity — the transition is
+ *    atomic over the chain record + the obligation mapping, so a stale
+ *    chain whose obligation moved can never be terminalized) — the
+ *    terminal states carry an OPTIONAL stage-2 nonce (the exact nonce
+ *    when one was issued, null otherwise).
  *  - release(owner) undoes a reservation (reserved -> available) on any
  *    refused or failed issuance: the ticket stays reusable — the chain is
  *    not burned by a later failure. A release by a NON-owner is an atomic

@@ -8,36 +8,13 @@ use KiwiCaptcha\Risk\RiskAction;
 
 /**
  * In-memory chained-challenge state store for tests/dev (single-process
- * semantics), mirroring the Redis store's transactional v2 machine EXACTLY:
- * obligation-anchored create-or-get (a transaction can never be silently
- * downgraded to stage 1), available -> reserved(owner, SHORT lease) ->
- * issued(stage2Nonce) with THREE disposition-aware TERMINAL transitions —
- * verified(stage2Nonce) (clears the obligation mapping only while it
- * still points at this chain), step_up_required(stage2Nonce) and
- * denied(stage2Nonce) (both KEEP the obligation mapping — the transaction
- * stays bound to its final disposition), TWO NONCE-AGNOSTIC TRANSACTION
- * terminalizations (markTransactionDenied() / markTransactionStepUpRequired()
- * terminalize an OPEN obligation WITHOUT the exact stage-2 nonce — the
- * terminal states carry an OPTIONAL stage-2 nonce), the idempotent
- * owner-gated issuance transition (never a delete — a retry recovers the
- * issued challenge instead of re-minting), the nonce-pinned rearm (issued ->
- * available for a FRESH stage-2 mint — never a stage-1), the owner-gated
- * release (a non-owner release is an atomic no-op), and the DEPRECATED
- * legacy complete() writing the historical 'completed' terminal state
- * (semantically identical to issued).
- *
- * EXPLICIT CLOCK: the store runs on a caller-provided clock (unix
- * seconds, defaulting to microtime(true)) so the record TTL and the
- * reservation lease expiry are enforceable — tests advance the clock to
- * exercise the expired-lease takeover, mirroring redis TIME on the
- * production store.
- *
- * EVERY record is decoded ALL-OR-NOTHING against the strict v2 schema
- * (the identical decode as the Redis store): a missing/malformed field or
- * a state-invariant violation throws
- * {@see MalformedChainedChallengeStateException} — NEVER a defaulted
- * record (a corrupt requiredAction must never become '', policyVersion
- * never 1, chainDepth never 2, state never available).
+ * semantics), mirroring the Redis store's transactional v2 machine exactly:
+ * the same obligation-anchored transitions and the same ALL-OR-NOTHING
+ * strict v2 decode ({@see MalformedChainedChallengeStateException} — a
+ * corrupt record never becomes a defaulted one). It runs on a
+ * caller-provided clock so TTL and lease expiry are enforceable (mirroring
+ * redis TIME). The full state machine is documented in
+ * docs/chained-challenges.md.
  */
 final class ArrayChainedChallengeStateStore implements TransactionalChainedChallengeStateStore
 {
@@ -357,11 +334,33 @@ final class ArrayChainedChallengeStateStore implements TransactionalChainedChall
         return 'denied_new';
     }
 
-    public function markTransactionDenied(string $chainId): string
+    public function markTransactionDenied(string $chainId, string $obligationId): string
     {
+        if (preg_match(self::OBLIGATION_PATTERN, $obligationId) !== 1) {
+            throw new \InvalidArgumentException('obligationId must be 64 lowercase hex characters');
+        }
         $record = $this->liveRecord($chainId);
         if ($record === null) {
             return 'missing';
+        }
+        // OBLIGATION-BOUND (the mirror of the Redis Lua — atomic over
+        // BOTH keys): the chain record must STILL agree on the
+        // obligation id AND the obligation mapping must STILL point at
+        // this chain — otherwise the transaction's chain moved and
+        // NOTHING is transitioned (fail closed).
+        if ($record['obligationId'] !== $obligationId) {
+            return 'obligation_moved';
+        }
+        $mapped = $this->obligations[$obligationId] ?? null;
+        if ($mapped === null) {
+            // The obligation mapping is GONE while the chain survives —
+            // the transaction already ended (the mapping is deleted
+            // atomically at verification): there is no chain left to
+            // terminalize.
+            return 'already_completed';
+        }
+        if ($mapped !== $chainId) {
+            return 'obligation_moved';
         }
         if ($record['state'] === 'denied') {
             return 'denied_same';
@@ -392,11 +391,33 @@ final class ArrayChainedChallengeStateStore implements TransactionalChainedChall
         return 'denied_new';
     }
 
-    public function markTransactionStepUpRequired(string $chainId): string
+    public function markTransactionStepUpRequired(string $chainId, string $obligationId): string
     {
+        if (preg_match(self::OBLIGATION_PATTERN, $obligationId) !== 1) {
+            throw new \InvalidArgumentException('obligationId must be 64 lowercase hex characters');
+        }
         $record = $this->liveRecord($chainId);
         if ($record === null) {
             return 'missing';
+        }
+        // OBLIGATION-BOUND (the mirror of the Redis Lua — atomic over
+        // BOTH keys): the chain record must STILL agree on the
+        // obligation id AND the obligation mapping must STILL point at
+        // this chain — otherwise the transaction's chain moved and
+        // NOTHING is transitioned (fail closed).
+        if ($record['obligationId'] !== $obligationId) {
+            return 'obligation_moved';
+        }
+        $mapped = $this->obligations[$obligationId] ?? null;
+        if ($mapped === null) {
+            // The obligation mapping is GONE while the chain survives —
+            // the transaction already ended (the mapping is deleted
+            // atomically at verification): there is no chain left to
+            // terminalize.
+            return 'already_completed';
+        }
+        if ($mapped !== $chainId) {
+            return 'obligation_moved';
         }
         if ($record['state'] === 'step_up_required') {
             return 'step_up_required_same';
@@ -514,20 +535,8 @@ final class ArrayChainedChallengeStateStore implements TransactionalChainedChall
      * The strict v2 decode — ALL-OR-NOTHING, IDENTICAL to the Redis
      * store's decode: a missing/malformed field or a state-invariant
      * violation throws {@see MalformedChainedChallengeStateException}
-     * (NEVER defaults). Validates: schema version 2; the Kiwi base64
-     * nonce shape for BOTH stage-1 and stage-2 nonces; the canonical
-     * scope shape; the exact 64-lowercase-hex obligation id; a chainable
-     * PoW action (Sha16..Argon64 — never StepUp/Deny); a bounded rank
-     * CONSISTENT with the action; a positive policy version; chain depth
-     * exactly 2; the exact state enum (the TERMINAL
-     * step_up_required/denied states included); owner/leaseUntil REQUIRED
-     * in reserved and NULL elsewhere; stage2Nonce REQUIRED with the Kiwi
-     * base64 nonce shape in issued/verified (and the legacy completed),
-     * OPTIONAL in the terminal step_up_required/denied states (a valid
-     * Kiwi nonce OR null — the transaction terminalizations
-     * markTransactionDenied()/markTransactionStepUpRequired() run
-     * WITHOUT the exact stage-2 nonce) and NULL elsewhere; an integer
-     * expiry; a well-shaped nullable request binding.
+     * (NEVER defaults: a corrupt requiredAction must never become '',
+     * policyVersion never 1, chainDepth never 2, state never available).
      *
      * @param array<string, mixed> $rec
      *
