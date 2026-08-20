@@ -93,6 +93,12 @@ final class ChainedChallengeTest extends TestCase
     /** The post-solve vector that demands Sha16 (score 228). */
     private const SHA16_VECTOR = ['replay' => 400];
 
+    /** The post-solve vector that demands Sha18 (score 327 — no deny reason). */
+    private const SHA18_VECTOR = ['source_fast' => 900, 'subnet_fast' => 700];
+
+    /** The post-solve vector that demands Sha20 (score 453 — no deny reason). */
+    private const SHA20_VECTOR = ['source_fast' => 900, 'issue_debt' => 1000, 'subnet_fast' => 400];
+
     private function issuer(StorageInterface $storage): Issuer
     {
         return new Issuer(new Config(
@@ -1865,15 +1871,111 @@ final class ChainedChallengeTest extends TestCase
         $stage2 = json_decode((string) $response->getContent(), true);
         self::assertSame(5, $stage2['ttlSecs'], 'the minted TTL is min(configured 120, remaining 5) = 5 — NEVER the full configured TTL');
 
-        // The FLOOR: exactly 1 second of chain life left (a DIFFERENT
-        // transaction — a different obligation) mints the issuer's
-        // minimum valid challenge lifetime (the core Config floor is 1).
+        // The PRACTICAL FLOOR: exactly 1 second of chain life left (a
+        // DIFFERENT transaction — a different obligation) is BELOW the
+        // practical minimum (the configured solve floor, here unset = 0,
+        // plus the solver/transport margin of 5 seconds): the mint is
+        // REFUSED as expired — a 1-second challenge cannot be solved
+        // within its own clipped lifetime, so the chain can no longer
+        // hold a usable stage-2 challenge.
         $floor = $chainService->requireStage2($stage1['nonce'], 'login', 'txn-floor', 1, RiskAction::Argon32, 1001);
         $floorTicket = $chainService->ticketFor($floor->chainId, 1001);
         $response = $controller->challenge($this->challengeRequest(json_encode(['scope' => 'login', 'chain_ticket' => $floorTicket, 'request_binding' => 'txn-floor'], JSON_THROW_ON_ERROR)));
-        self::assertSame(200, $response->getStatusCode(), sprintf('the stage-2 mint with exactly 1 second of chain life left must succeed: %s', (string) $response->getContent()));
+        self::assertSame(422, $response->getStatusCode(), sprintf('a chain with 1 second of life left must refuse the stage-2 mint (below the practical minimum): %s', (string) $response->getContent()));
+        self::assertStringContainsString('INVALID_METADATA', (string) $response->getContent());
+        self::assertStringContainsString('expired', (string) $response->getContent());
+        self::assertSame(2, $this->storageRecordCount($storage), 'no NEW challenge record may be created for a chain that cannot hold a usable stage-2 challenge (the solved stage-1 record and the earlier 5-second mint are all that exist)');
+        $floorAfter = $chainService->requirementFor($floor->chainId);
+        self::assertNotNull($floorAfter);
+        self::assertSame(1001, $floorAfter->expiresAt, 'the chain is never re-created or re-signed with a fresh expiry');
+        self::assertSame('available', $floorAfter->state, 'the refused request releases its reservation');
+        self::assertNull($floorAfter->owner);
+    }
+
+    public function testStage2ClipMintsWithTheClippedTtlEqualToTheRemainingLifetime(): void
+    {
+        $storage = new ArrayStorage();
+        $chainStore = new ArrayChainedChallengeStateStore(static fn (): float => 1000.0);
+        $chainService = new ChainedChallengeTicketService($chainStore, self::SECRET, 300, 15, now: static fn (): int => 1000);
+        $stage1 = $this->solvedStage1($storage);
+        // 6 seconds of chain lifetime left — ABOVE the practical minimum
+        // (no explicit minimum solve duration -> 0 + the 5-second
+        // solver/transport margin).
+        $requirement = $chainService->requireStage2($stage1['nonce'], 'login', 'txn-above-min', 1, RiskAction::Argon32, 1006);
+        $ticket = $chainService->ticketFor($requirement->chainId, 1006);
+
+        $risk = $this->riskStack(SignalVector::fromArray(self::ARGON32_VECTOR));
+        $controller = new ChallengeController(
+            $this->issuer($storage),
+            null,
+            true,
+            $risk['gateway'],
+            new ContinuityCookie(),
+            storage: $storage,
+            challengeTtlSecs: 120,
+            chainTickets: $chainService,
+            policyVersion: 1,
+            now: static fn (): int => 1000,
+        );
+        $response = $controller->challenge($this->challengeRequest(json_encode(['scope' => 'login', 'chain_ticket' => $ticket, 'request_binding' => 'txn-above-min'], JSON_THROW_ON_ERROR)));
+        self::assertSame(200, $response->getStatusCode(), sprintf('the stage-2 mint with 6 seconds of chain life left (>= the practical minimum) must succeed: %s', (string) $response->getContent()));
         $stage2 = json_decode((string) $response->getContent(), true);
-        self::assertSame(1, $stage2['ttlSecs'], 'with 1 second remaining the minted TTL is the clipped floor of 1 second');
+        self::assertSame(6, $stage2['ttlSecs'], 'remaining >= the practical minimum mints with the clipped TTL == the remaining lifetime');
+    }
+
+    public function testStage2ClipMinimumRemainingIncludesTheConfiguredMinDurationFloor(): void
+    {
+        $storage = new ArrayStorage();
+        $chainStore = new ArrayChainedChallengeStateStore(static fn (): float => 1000.0);
+        $chainService = new ChainedChallengeTicketService($chainStore, self::SECRET, 300, 15, now: static fn (): int => 1000);
+        $stage1 = $this->solvedStage1($storage);
+        // An explicit 1500 ms minimum solve duration: the practical
+        // minimum remaining lifetime is ceil(1500/1000) + 5 = 7 seconds.
+        // Exactly AT the boundary (7 seconds) the mint succeeds with the
+        // clipped TTL == 7; one second below (6) it is refused as
+        // expired — the configured floor participates in the boundary.
+        $issuer = new Issuer(new Config(
+            secretKey: self::SECRET,
+            algorithm: PoWAlgorithm::Sha256,
+            targetBits: 8,
+            ttlSecs: 120,
+            minDurationMs: 1500,
+        ), $storage);
+
+        $boundary = $chainService->requireStage2($stage1['nonce'], 'login', 'txn-boundary', 1, RiskAction::Argon32, 1007);
+        $boundaryTicket = $chainService->ticketFor($boundary->chainId, 1007);
+        $below = $chainService->requireStage2($stage1['nonce'], 'login', 'txn-below', 1, RiskAction::Argon32, 1006);
+        $belowTicket = $chainService->ticketFor($below->chainId, 1006);
+
+        $risk = $this->riskStack(SignalVector::fromArray(self::ARGON32_VECTOR));
+        $controller = new ChallengeController(
+            $issuer,
+            null,
+            true,
+            $risk['gateway'],
+            new ContinuityCookie(),
+            storage: $storage,
+            challengeTtlSecs: 120,
+            chainTickets: $chainService,
+            policyVersion: 1,
+            now: static fn (): int => 1000,
+        );
+
+        $response = $controller->challenge($this->challengeRequest(json_encode(['scope' => 'login', 'chain_ticket' => $boundaryTicket, 'request_binding' => 'txn-boundary'], JSON_THROW_ON_ERROR)));
+        self::assertSame(200, $response->getStatusCode(), sprintf('the stage-2 mint exactly at the practical minimum (7s with a 1500 ms floor) must succeed: %s', (string) $response->getContent()));
+        $stage2 = json_decode((string) $response->getContent(), true);
+        self::assertSame(7, $stage2['ttlSecs'], 'the minted TTL equals the remaining 7 seconds at the practical-minimum boundary');
+
+        $response = $controller->challenge($this->challengeRequest(json_encode(['scope' => 'login', 'chain_ticket' => $belowTicket, 'request_binding' => 'txn-below'], JSON_THROW_ON_ERROR)));
+        self::assertSame(422, $response->getStatusCode(), sprintf('a chain with 6 seconds of life left (below the 7s practical minimum with a 1500 ms floor) must refuse the stage-2 mint: %s', (string) $response->getContent()));
+        self::assertStringContainsString('INVALID_METADATA', (string) $response->getContent());
+        self::assertStringContainsString('expired', (string) $response->getContent());
+        self::assertSame(2, $this->storageRecordCount($storage), 'no NEW challenge record may be created below the practical minimum (the solved stage-1 record and the earlier boundary mint are all that exist)');
+        $belowAfter = $chainService->requirementFor($below->chainId);
+        self::assertNotNull($belowAfter);
+        self::assertSame(1006, $belowAfter->expiresAt, 'the chain is never re-created or re-signed with a fresh expiry');
+        self::assertSame('available', $belowAfter->state, 'the refused request releases its reservation');
+        self::assertNull($belowAfter->owner);
     }
 
     public function testStage2TicketWithInsufficientChainLifetimeIsRefusedAsExpired(): void
@@ -1891,8 +1993,9 @@ final class ChainedChallengeTest extends TestCase
         $ticket = $chainService->ticketFor($requirement->chainId, 1001);
 
         // The ticket is presented when the controller's clock has already
-        // ticked PAST the chain's absolute expiry (less than the issuer's
-        // 1-second minimum challenge lifetime remains): the mint is
+        // ticked PAST the chain's absolute expiry (less than the
+        // practical minimum challenge lifetime — the configured solve
+        // floor plus the solver/transport margin — remains): the mint is
         // refused with the expired-chain response — no challenge record,
         // no outstanding admission, no re-sign, no re-created expiry.
         $risk = $this->riskStack(SignalVector::fromArray(self::ARGON32_VECTOR));
@@ -1910,7 +2013,7 @@ final class ChainedChallengeTest extends TestCase
             now: static fn (): int => 1001,
         );
         $response = $controller->challenge($this->challengeRequest(json_encode(['scope' => 'login', 'chain_ticket' => $ticket], JSON_THROW_ON_ERROR)));
-        self::assertSame(422, $response->getStatusCode(), sprintf('a chain with less than 1 second of life left must refuse the stage-2 mint: %s', (string) $response->getContent()));
+        self::assertSame(422, $response->getStatusCode(), sprintf('a chain with no usable lifetime left must refuse the stage-2 mint (below the practical minimum): %s', (string) $response->getContent()));
         self::assertStringContainsString('INVALID_METADATA', (string) $response->getContent());
         self::assertStringContainsString('expired', (string) $response->getContent());
         self::assertSame(1, $this->storageRecordCount($storage), 'no NEW challenge record may be created for a chain that cannot hold it (only the solved stage-1 record exists)');
@@ -2669,6 +2772,362 @@ final class ChainedChallengeTest extends TestCase
         self::assertNotNull($requirement);
         self::assertSame(RiskAction::Argon32, $requirement->requiredAction, 'the recorded floor NEVER decays to a weaker action');
         self::assertSame(5, $requirement->requiredRank, 'the recorded rank NEVER decays');
+    }
+
+    // ── The open obligation ESCALATES (monotonic max security) ─────────
+
+    public function testOpenObligationRaisesToAFreshStrongerAssessment(): void
+    {
+        // An open SHA18 obligation + a fresh STRICTLY STRONGER SHA20
+        // assessment: the recorded floor RAISES ATOMICALLY (the store's
+        // raise-only create-or-get — the SAME chain id, the ORIGINAL
+        // expiry preserved) and the disposition is CHAIN_REQUIRED with
+        // that same chain — the obligation never freezes its security
+        // level.
+        $storage = new ArrayStorage();
+        $chainStore = new ArrayChainedChallengeStateStore();
+        $resolver = new RiskProfileResolver(PoWAlgorithm::Sha256, 8);
+
+        $issuer = $this->issuer($storage);
+        $c1 = $issuer->issue('login', '198.51.100.7', 'txn-alpha')->toArray();
+        $c2 = $issuer->issue('login', '198.51.100.7', 'txn-alpha')->toArray();
+        usleep(($c1['minDurationMs'] + 10) * 1000);
+        $token1 = $this->solveToken($c1);
+        usleep(($c2['minDurationMs'] + 10) * 1000);
+        $token2 = $this->solveToken($c2);
+
+        // Solve 1: the fresh assessment (Sha18) opens the chain at the
+        // SHA18 floor.
+        $risk = $this->riskStack(SignalVector::fromArray(self::SHA18_VECTOR), $resolver);
+        $stack = new RequestStack();
+        $stack->push(Request::create('/', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7']));
+        [$violations1] = $this->validateChained($token1, $stack, $risk['gateway'], $storage, $chainStore, resolver: $resolver);
+        self::assertSame(KiwiCaptchaValidator::CHAIN_REQUIRED_ERROR, $violations1[0]->getCode());
+        $chainId = (string) $this->chainService($chainStore)->verify((string) $violations1[0]->getParameters()['{{ chain_ticket }}'])['chainId'];
+        $requirement = $this->chainService($chainStore)->findOpenRequirement('login', 'txn-alpha', 1);
+        self::assertNotNull($requirement);
+        self::assertSame(RiskAction::Sha18, $requirement->requiredAction);
+        self::assertSame(2, $requirement->requiredRank);
+        $originalExpiry = $requirement->expiresAt;
+
+        // The SECOND solve lands in a LATER second (a fresh now+chainTtl
+        // would differ): the raise must still preserve the ORIGINAL
+        // expiry.
+        usleep(1_100_000);
+
+        // Solve 2: a fresh STRICTLY STRONGER SHA20 assessment — the
+        // obligation RAISES to SHA20 (the SAME chain id, the ORIGINAL
+        // expiry preserved), never a freeze at SHA18.
+        $stronger = $this->riskStack(SignalVector::fromArray(self::SHA20_VECTOR), $resolver);
+        $stack2 = new RequestStack();
+        $stack2->push(Request::create('/', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7']));
+        [$violations2] = $this->validateChained($token2, $stack2, $stronger['gateway'], $storage, $chainStore, resolver: $resolver);
+        self::assertCount(1, $violations2, 'a stage-1 token of the raised obligation still demands its stage 2');
+        self::assertSame(KiwiCaptchaValidator::CHAIN_REQUIRED_ERROR, $violations2[0]->getCode());
+        $payload2 = $this->chainService($chainStore)->verify((string) $violations2[0]->getParameters()['{{ chain_ticket }}']);
+        self::assertIsArray($payload2);
+        self::assertSame($chainId, (string) $payload2['chainId'], 'the raise returns the SAME chain id — never a replacement chain');
+        $requirement = $this->chainService($chainStore)->findOpenRequirement('login', 'txn-alpha', 1);
+        self::assertNotNull($requirement);
+        self::assertSame(RiskAction::Sha20, $requirement->requiredAction, 'the floor RAISES to the stronger fresh assessment');
+        self::assertSame(3, $requirement->requiredRank, 'the rank RAISES with the action');
+        self::assertSame($chainId, $requirement->chainId, 'the raised chain is the SAME chain');
+        self::assertSame($originalExpiry, $requirement->expiresAt, 'the raise preserves the ORIGINAL chain expiry — it never moves');
+        self::assertSame($originalExpiry, (int) $payload2['expiresAt'], 'the raised ticket is signed from the requirement\'s ACTUAL server-held expiry — never a fresh now+chainTtl');
+    }
+
+    public function testOpenObligationRaisesToAFreshArgon32Assessment(): void
+    {
+        // An open SHA18 obligation + a fresh STRICTLY STRONGER Argon32
+        // assessment: the floor RAISES to Argon32 on the SAME chain with
+        // the ORIGINAL expiry — the store's raise-only mechanism is
+        // applied, the security level never freezes at SHA18.
+        $storage = new ArrayStorage();
+        $chainStore = new ArrayChainedChallengeStateStore();
+        $resolver = new RiskProfileResolver(PoWAlgorithm::Sha256, 8);
+
+        $issuer = $this->issuer($storage);
+        $c1 = $issuer->issue('login', '198.51.100.7', 'txn-alpha')->toArray();
+        $c2 = $issuer->issue('login', '198.51.100.7', 'txn-alpha')->toArray();
+        usleep(($c1['minDurationMs'] + 10) * 1000);
+        $token1 = $this->solveToken($c1);
+        usleep(($c2['minDurationMs'] + 10) * 1000);
+        $token2 = $this->solveToken($c2);
+
+        // Solve 1: the fresh assessment (Sha18) opens the chain at the
+        // SHA18 floor.
+        $risk = $this->riskStack(SignalVector::fromArray(self::SHA18_VECTOR), $resolver);
+        $stack = new RequestStack();
+        $stack->push(Request::create('/', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7']));
+        [$violations1] = $this->validateChained($token1, $stack, $risk['gateway'], $storage, $chainStore, resolver: $resolver);
+        self::assertSame(KiwiCaptchaValidator::CHAIN_REQUIRED_ERROR, $violations1[0]->getCode());
+        $chainId = (string) $this->chainService($chainStore)->verify((string) $violations1[0]->getParameters()['{{ chain_ticket }}'])['chainId'];
+        $requirement = $this->chainService($chainStore)->findOpenRequirement('login', 'txn-alpha', 1);
+        self::assertNotNull($requirement);
+        self::assertSame(RiskAction::Sha18, $requirement->requiredAction);
+        $originalExpiry = $requirement->expiresAt;
+
+        // Solve 2: a fresh STRICTLY STRONGER Argon32 assessment raises
+        // the obligation to Argon32 (the SAME chain id, the ORIGINAL
+        // expiry preserved).
+        $stronger = $this->riskStack(SignalVector::fromArray(self::ARGON32_VECTOR), $resolver);
+        $stack2 = new RequestStack();
+        $stack2->push(Request::create('/', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7']));
+        [$violations2] = $this->validateChained($token2, $stack2, $stronger['gateway'], $storage, $chainStore, resolver: $resolver);
+        self::assertSame(KiwiCaptchaValidator::CHAIN_REQUIRED_ERROR, $violations2[0]->getCode());
+        $payload2 = $this->chainService($chainStore)->verify((string) $violations2[0]->getParameters()['{{ chain_ticket }}']);
+        self::assertIsArray($payload2);
+        self::assertSame($chainId, (string) $payload2['chainId'], 'the raise returns the SAME chain id');
+        $requirement = $this->chainService($chainStore)->findOpenRequirement('login', 'txn-alpha', 1);
+        self::assertNotNull($requirement);
+        self::assertSame(RiskAction::Argon32, $requirement->requiredAction, 'the floor RAISES to the stronger Argon32 assessment');
+        self::assertSame(5, $requirement->requiredRank, 'the rank RAISES with the action');
+        self::assertSame($chainId, $requirement->chainId, 'the raised chain is the SAME chain');
+        self::assertSame($originalExpiry, $requirement->expiresAt, 'the raise preserves the ORIGINAL chain expiry');
+    }
+
+    public function testFreshDenyBeatsAnOpenChainableObligation(): void
+    {
+        // An open SHA18 obligation + a fresh DENY assessment: the fresh
+        // terminal rejection wins over the chainable obligation — the
+        // post-solve rejection, never a CHAIN_REQUIRED ticket.
+        $storage = new ArrayStorage();
+        $chainStore = new ArrayChainedChallengeStateStore();
+        $resolver = new RiskProfileResolver(PoWAlgorithm::Sha256, 8);
+
+        $issuer = $this->issuer($storage);
+        $c1 = $issuer->issue('login', '198.51.100.7', 'txn-alpha')->toArray();
+        $c2 = $issuer->issue('login', '198.51.100.7', 'txn-alpha')->toArray();
+        usleep(($c1['minDurationMs'] + 10) * 1000);
+        $token1 = $this->solveToken($c1);
+        usleep(($c2['minDurationMs'] + 10) * 1000);
+        $token2 = $this->solveToken($c2);
+
+        // Solve 1: the fresh assessment (Sha18) opens the chain.
+        $risk = $this->riskStack(SignalVector::fromArray(self::SHA18_VECTOR), $resolver);
+        $stack = new RequestStack();
+        $stack->push(Request::create('/', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7']));
+        [$violations1] = $this->validateChained($token1, $stack, $risk['gateway'], $storage, $chainStore, resolver: $resolver);
+        self::assertSame(KiwiCaptchaValidator::CHAIN_REQUIRED_ERROR, $violations1[0]->getCode());
+        $chainId = (string) $this->chainService($chainStore)->verify((string) $violations1[0]->getParameters()['{{ chain_ticket }}'])['chainId'];
+
+        // Solve 2: a fresh DENY assessment — the terminal rejection wins
+        // (the obligation is chainable, not terminal): the post-solve
+        // rejection, never CHAIN_REQUIRED, and the chainable obligation
+        // is untouched.
+        $deny = $this->riskStack(SignalVector::fromArray(['network_risk' => 900]), $resolver);
+        $stack2 = new RequestStack();
+        $stack2->push(Request::create('/', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7']));
+        [$violations2] = $this->validateChained($token2, $stack2, $deny['gateway'], $storage, $chainStore, resolver: $resolver);
+        self::assertCount(1, $violations2);
+        self::assertSame(KiwiCaptcha::POST_SOLVE_REJECTED_ERROR, $violations2[0]->getCode(), 'a fresh Deny over a chainable obligation is the terminal rejection');
+        self::assertArrayNotHasKey('{{ chain_ticket }}', $violations2[0]->getParameters(), 'a fresh Deny never becomes a chain ticket');
+        $requirement = $this->chainService($chainStore)->findOpenRequirement('login', 'txn-alpha', 1);
+        self::assertNotNull($requirement);
+        self::assertSame($chainId, $requirement->chainId, 'the chainable obligation is untouched');
+        self::assertSame(RiskAction::Sha18, $requirement->requiredAction, 'the recorded floor is untouched');
+        self::assertSame('available', $requirement->state);
+    }
+
+    public function testFreshStepUpBeatsAnOpenChainableObligation(): void
+    {
+        // An open SHA18 obligation + a fresh STEP_UP assessment: StepUp
+        // is TERMINAL application-level step-up — it wins over the
+        // chainable obligation (the terminal step-up violation, never a
+        // chain ticket, never continuing the chain).
+        $storage = new ArrayStorage();
+        $chainStore = new ArrayChainedChallengeStateStore();
+        $resolver = new RiskProfileResolver(PoWAlgorithm::Sha256, 8);
+
+        $issuer = $this->issuer($storage);
+        $c1 = $issuer->issue('login', '198.51.100.7', 'txn-alpha')->toArray();
+        $c2 = $issuer->issue('login', '198.51.100.7', 'txn-alpha')->toArray();
+        usleep(($c1['minDurationMs'] + 10) * 1000);
+        $token1 = $this->solveToken($c1);
+        usleep(($c2['minDurationMs'] + 10) * 1000);
+        $token2 = $this->solveToken($c2);
+
+        // Solve 1: the fresh assessment (Sha18) opens the chain.
+        $risk = $this->riskStack(SignalVector::fromArray(self::SHA18_VECTOR), $resolver);
+        $stack = new RequestStack();
+        $stack->push(Request::create('/', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7']));
+        [$violations1] = $this->validateChained($token1, $stack, $risk['gateway'], $storage, $chainStore, resolver: $resolver);
+        self::assertSame(KiwiCaptchaValidator::CHAIN_REQUIRED_ERROR, $violations1[0]->getCode());
+        $chainId = (string) $this->chainService($chainStore)->verify((string) $violations1[0]->getParameters()['{{ chain_ticket }}'])['chainId'];
+
+        // Solve 2: a fresh STEP_UP assessment — the terminal
+        // application-level step-up wins (never a CHAIN_REQUIRED ticket),
+        // and the chainable obligation is untouched.
+        $stepUp = $this->riskStack(SignalVector::fromArray(self::STEP_UP_VECTOR), $resolver);
+        $stack2 = new RequestStack();
+        $stack2->push(Request::create('/', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7']));
+        [$violations2] = $this->validateChained($token2, $stack2, $stepUp['gateway'], $storage, $chainStore, resolver: $resolver);
+        self::assertCount(1, $violations2);
+        self::assertSame(KiwiCaptcha::POST_SOLVE_STEP_UP_REQUIRED, $violations2[0]->getCode(), 'a fresh StepUp over a chainable obligation is the terminal step-up');
+        self::assertArrayNotHasKey('{{ chain_ticket }}', $violations2[0]->getParameters(), 'a fresh StepUp never becomes a chain ticket');
+        $requirement = $this->chainService($chainStore)->findOpenRequirement('login', 'txn-alpha', 1);
+        self::assertNotNull($requirement);
+        self::assertSame($chainId, $requirement->chainId, 'the chainable obligation is untouched');
+        self::assertSame(RiskAction::Sha18, $requirement->requiredAction, 'the recorded floor is untouched');
+        self::assertSame('available', $requirement->state);
+    }
+
+    public function testOpenObligationSurvivesFreshWeakerAndNeutralAssessments(): void
+    {
+        // An open SHA18 obligation + fresh WEAKER (Sha16) and NEUTRAL
+        // (Allow) assessments: the obligation stays UNCHANGED (its
+        // recorded SHA18 floor, the SAME chain id, the ORIGINAL expiry)
+        // and every solve is CHAIN_REQUIRED — a stage-1 token of a
+        // chained transaction can never pass, and the floor never
+        // decays.
+        $storage = new ArrayStorage();
+        $chainStore = new ArrayChainedChallengeStateStore();
+        $resolver = new RiskProfileResolver(PoWAlgorithm::Sha256, 8);
+
+        $issuer = $this->issuer($storage);
+        $tokens = [];
+        for ($i = 0; $i < 3; ++$i) {
+            $c = $issuer->issue('login', '198.51.100.7', 'txn-alpha')->toArray();
+            usleep(($c['minDurationMs'] + 10) * 1000);
+            $tokens[] = $this->solveToken($c);
+        }
+
+        // Solve 1: the fresh assessment (Sha18) opens the chain at the
+        // SHA18 floor.
+        $risk = $this->riskStack(SignalVector::fromArray(self::SHA18_VECTOR), $resolver);
+        $stack = new RequestStack();
+        $stack->push(Request::create('/', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7']));
+        [$violations1] = $this->validateChained($tokens[0], $stack, $risk['gateway'], $storage, $chainStore, resolver: $resolver);
+        self::assertSame(KiwiCaptchaValidator::CHAIN_REQUIRED_ERROR, $violations1[0]->getCode());
+        $chainId = (string) $this->chainService($chainStore)->verify((string) $violations1[0]->getParameters()['{{ chain_ticket }}'])['chainId'];
+        $requirement = $this->chainService($chainStore)->findOpenRequirement('login', 'txn-alpha', 1);
+        self::assertNotNull($requirement);
+        $originalExpiry = $requirement->expiresAt;
+
+        // Solve 2: a fresh WEAKER-but-still-chainable Sha16 assessment —
+        // the SAME chain, the floor NEVER decays.
+        $weaker = $this->riskStack(SignalVector::fromArray(self::SHA16_VECTOR), $resolver);
+        $stack2 = new RequestStack();
+        $stack2->push(Request::create('/', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7']));
+        [$violations2] = $this->validateChained($tokens[1], $stack2, $weaker['gateway'], $storage, $chainStore, resolver: $resolver);
+        self::assertSame(KiwiCaptchaValidator::CHAIN_REQUIRED_ERROR, $violations2[0]->getCode(), 'a weaker chainable reassessment still demands the open chain');
+        $payload2 = $this->chainService($chainStore)->verify((string) $violations2[0]->getParameters()['{{ chain_ticket }}']);
+        self::assertIsArray($payload2);
+        self::assertSame($chainId, (string) $payload2['chainId'], 'the weaker reassessment returns the SAME chain');
+        self::assertSame($originalExpiry, (int) $payload2['expiresAt'], 'the ticket keeps the requirement\'s ORIGINAL expiry');
+
+        // Solve 3: a NEUTRAL assessment (would be a plain Pass) — the
+        // recorded floor is authoritative: CHAIN_REQUIRED, never a Pass,
+        // and the requirement keeps its RECORDED stronger action/rank.
+        $neutral = $this->riskStack(resolver: $resolver);
+        $stack3 = new RequestStack();
+        $stack3->push(Request::create('/', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7']));
+        [$violations3] = $this->validateChained($tokens[2], $stack3, $neutral['gateway'], $storage, $chainStore, resolver: $resolver);
+        self::assertCount(1, $violations3, 'a stage-1 token must never pass while the obligation is open');
+        self::assertSame(KiwiCaptchaValidator::CHAIN_REQUIRED_ERROR, $violations3[0]->getCode());
+        $payload3 = $this->chainService($chainStore)->verify((string) $violations3[0]->getParameters()['{{ chain_ticket }}']);
+        self::assertIsArray($payload3);
+        self::assertSame($chainId, (string) $payload3['chainId'], 'the neutral reassessment returns the SAME chain');
+        self::assertSame($originalExpiry, (int) $payload3['expiresAt'], 'the ticket keeps the requirement\'s ORIGINAL expiry');
+        $requirement = $this->chainService($chainStore)->findOpenRequirement('login', 'txn-alpha', 1);
+        self::assertNotNull($requirement);
+        self::assertSame(RiskAction::Sha18, $requirement->requiredAction, 'the recorded floor NEVER decays to a weaker action');
+        self::assertSame(2, $requirement->requiredRank, 'the recorded rank NEVER decays');
+        self::assertSame($chainId, $requirement->chainId, 'the obligation is the SAME chain');
+        self::assertSame($originalExpiry, $requirement->expiresAt, 'the obligation keeps the ORIGINAL expiry');
+    }
+
+    public function testTerminalStepUpObligationWinsOverAFreshDeny(): void
+    {
+        // The transaction is bound to its TERMINAL step-up: even a fresh
+        // DENY assessment cannot change it — the terminal state wins
+        // PERMANENTLY (the terminal step-up violation), never the fresh
+        // rejection.
+        $storage = new ArrayStorage();
+        $chainStore = new ArrayChainedChallengeStateStore();
+        $chainService = $this->chainService($chainStore);
+        $resolver = new RiskProfileResolver(PoWAlgorithm::Sha256, 8);
+
+        $stage1 = $this->solvedStage1($storage, 'txn-alpha');
+        $requirement = $chainService->requireStage2($stage1['nonce'], 'login', 'txn-alpha', 1, RiskAction::Sha18, time() + 300);
+        self::assertSame(ChainReservationResult::Available, $chainService->reserveStage2($requirement->chainId, 'owner-a'));
+        self::assertSame(ChainIssuedResult::IssuedNew, $chainService->markIssued($requirement->chainId, 'owner-a', $this->stageNonce('stage2-nonce')));
+        self::assertSame(ChainVerifiedResult::StepUpRequiredNew, $chainService->markStepUpRequired($requirement->chainId, $this->stageNonce('stage2-nonce')));
+        self::assertSame('step_up_required', $chainService->requirementFor($requirement->chainId)?->state);
+
+        // A PRE-ISSUED stage-1 token of the same transaction solved under
+        // a fresh DENY assessment: the recorded terminal step-up wins.
+        $c = $this->issuer($storage)->issue('login', '198.51.100.7', 'txn-alpha')->toArray();
+        usleep(($c['minDurationMs'] + 10) * 1000);
+        $token = $this->solveToken($c);
+        $deny = $this->riskStack(SignalVector::fromArray(['network_risk' => 900]), $resolver);
+        $stack = new RequestStack();
+        $stack->push(Request::create('/', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7']));
+        [$violations] = $this->validateChained($token, $stack, $deny['gateway'], $storage, $chainStore, resolver: $resolver);
+
+        self::assertCount(1, $violations);
+        self::assertSame(KiwiCaptcha::POST_SOLVE_STEP_UP_REQUIRED, $violations[0]->getCode(), 'the recorded terminal step-up wins PERMANENTLY over a fresh Deny');
+        self::assertArrayNotHasKey('{{ chain_ticket }}', $violations[0]->getParameters(), 'a terminal step-up never becomes a chain ticket');
+        self::assertSame('step_up_required', $chainService->requirementFor($requirement->chainId)?->state, 'the terminal state survives');
+    }
+
+    public function testSecondStage1TokenOfTheSameChainGetsTheByteIdenticalTicket(): void
+    {
+        // TWO PRE-ISSUED stage-1 tokens of one binding: the FIRST solve
+        // creates the chain and returns its ticket; the SECOND solve (the
+        // obligation-first path) returns a disposition referencing the
+        // SAME chain with a BYTE-IDENTICAL ticket — the re-sign ALWAYS
+        // uses the requirement's ACTUAL server-held expiresAt, never a
+        // fresh now+chainTtl (the deterministic-retry design: the same
+        // verified nonce + the same persisted disposition always
+        // reproduce the same ticket).
+        $storage = new ArrayStorage();
+        $chainStore = new ArrayChainedChallengeStateStore();
+        $resolver = new RiskProfileResolver(PoWAlgorithm::Sha256, 8);
+
+        $issuer = $this->issuer($storage);
+        $c1 = $issuer->issue('login', '198.51.100.7', 'txn-alpha')->toArray();
+        $c2 = $issuer->issue('login', '198.51.100.7', 'txn-alpha')->toArray();
+        usleep(($c1['minDurationMs'] + 10) * 1000);
+        $token1 = $this->solveToken($c1);
+        usleep(($c2['minDurationMs'] + 10) * 1000);
+        $token2 = $this->solveToken($c2);
+
+        // Solve 1: the reassessment (Argon32) opens the chain and the
+        // ticket is signed from the requirement's server-held expiry.
+        $risk = $this->riskStack(SignalVector::fromArray(self::ARGON32_VECTOR), $resolver);
+        $stack = new RequestStack();
+        $stack->push(Request::create('/', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7']));
+        [$violations1] = $this->validateChained($token1, $stack, $risk['gateway'], $storage, $chainStore, resolver: $resolver);
+        self::assertSame(KiwiCaptchaValidator::CHAIN_REQUIRED_ERROR, $violations1[0]->getCode());
+        $ticket1 = $violations1[0]->getParameters()['{{ chain_ticket }}'];
+        self::assertIsString($ticket1);
+        $payload1 = $this->chainService($chainStore)->verify($ticket1);
+        self::assertIsArray($payload1);
+        $requirement = $this->chainService($chainStore)->findOpenRequirement('login', 'txn-alpha', 1);
+        self::assertNotNull($requirement);
+        self::assertSame((int) $payload1['expiresAt'], $requirement->expiresAt, 'the fresh ticket carries the requirement\'s server-held expiry');
+
+        // The SECOND solve lands in a LATER second (a fresh now+chainTtl
+        // would differ): the obligation-first CHAIN_REQUIRED re-signs
+        // with the requirement's ACTUAL expiry — the byte-identical
+        // ticket.
+        usleep(1_100_000);
+        $risk2 = $this->riskStack(SignalVector::fromArray(self::ARGON32_VECTOR), $resolver);
+        $stack2 = new RequestStack();
+        $stack2->push(Request::create('/', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7']));
+        [$violations2] = $this->validateChained($token2, $stack2, $risk2['gateway'], $storage, $chainStore, resolver: $resolver);
+        self::assertCount(1, $violations2, 'the second stage-1 token of the same chain must never pass');
+        self::assertSame(KiwiCaptchaValidator::CHAIN_REQUIRED_ERROR, $violations2[0]->getCode(), 'the second stage-1 token of the same chain is CHAIN_REQUIRED');
+        $ticket2 = $violations2[0]->getParameters()['{{ chain_ticket }}'];
+        self::assertIsString($ticket2);
+        self::assertSame($ticket1, $ticket2, 'the obligation-first ticket is BYTE-IDENTICAL to the original — both sign from the requirement\'s server-held expiry, never a fresh now+chainTtl');
+        $payload2 = $this->chainService($chainStore)->verify($ticket2);
+        self::assertIsArray($payload2);
+        self::assertSame((string) $payload1['chainId'], (string) $payload2['chainId'], 'the disposition references the SAME chain');
+        $requirement = $this->chainService($chainStore)->findOpenRequirement('login', 'txn-alpha', 1);
+        self::assertNotNull($requirement);
+        self::assertSame((int) $payload2['expiresAt'], $requirement->expiresAt, 'both tickets decode to the requirement\'s server-held expiry — never now+chainTtl');
     }
 
     public function testOpenObligationInTerminalStepUpNeverPasses(): void

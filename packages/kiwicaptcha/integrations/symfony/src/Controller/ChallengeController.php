@@ -265,14 +265,28 @@ final class ChallengeController
     private const CHAIN_TICKET_PATTERN = '/^[A-Za-z0-9._:-]{1,256}$/D';
 
     /**
-     * The minimum remaining chain lifetime a stage-2 mint may consume,
-     * seconds: the core Config floor — a challenge TTL must be >= 1
-     * second (the issuer refuses anything shorter as malformed), so a
-     * chain with less than one second of life left cannot hold a valid
-     * stage-2 challenge and its ticket is refused as expired (never
-     * re-created or re-signed with a fresh expiry).
+     * The ABSOLUTE floor for a stage-2 mint, seconds: the core Config
+     * floor — a challenge TTL must be >= 1 second (the issuer refuses
+     * anything shorter as malformed), so a chain with less than one
+     * second of life left cannot hold a valid stage-2 challenge at all.
+     * The PRACTICAL minimum remaining lifetime is higher — the configured
+     * minimum solve duration plus {@see self::STAGE2_SOLVER_MARGIN_SECS}
+     * ({@see self::stage2MinimumRemaining()}) — and this constant is only
+     * the lower bound that practical minimum never drops below.
      */
     private const MIN_STAGE2_REMAINING_SECS = 1;
+
+    /**
+     * Solver + transport headroom for the practical stage-2 minimum
+     * remaining lifetime, seconds: the minted challenge must be SOLVABLE
+     * within its clipped lifetime — the browser solver takes time (a
+     * high-difficulty SHA-256 / Argon2id solve), the solve must travel
+     * back, and verification must land before the clipped TTL expires. A
+     * stage-2 chain with only the core floor (1 second) of life left
+     * would mint a challenge that is technically valid but operationally
+     * unusable, so the margin guarantees a usable solve window.
+     */
+    private const STAGE2_SOLVER_MARGIN_SECS = 5;
 
     /**
      * The bounded trusted-edge TLS classification tag the configured
@@ -1389,15 +1403,17 @@ final class ChallengeController
             // stay inside the chain's lifetime.
             //
             // INSUFFICIENT REMAINING LIFETIME: when less than the
-            // minimum challenge lifetime the issuer accepts (1 second —
-            // the core Config floor, {@see self::MIN_STAGE2_REMAINING_SECS})
-            // remains, the chain cannot hold a valid stage-2 challenge:
-            // the ticket is treated as EXPIRED — the same response as an
+            // PRACTICAL minimum challenge lifetime remains
+            // ({@see self::stage2MinimumRemaining()} — the configured
+            // minimum solve duration plus the solver/transport headroom,
+            // never below the core Config floor of 1 second), the chain
+            // cannot hold a usable stage-2 challenge: the ticket is
+            // treated as EXPIRED — the same response as an
             // expired/missing chain — the reservation is released, and
             // the chain is NEVER re-created or re-signed with a fresh
             // expiry.
             $remaining = $chainRequirement->expiresAt - $this->now();
-            if ($remaining < self::MIN_STAGE2_REMAINING_SECS) {
+            if ($remaining < $this->stage2MinimumRemaining()) {
                 $this->releaseChain($chainId, $chainOwner);
 
                 return $this->privateJson(
@@ -1654,12 +1670,40 @@ final class ChallengeController
 
     /**
      * The controller clock for the stage-2 remaining-lifetime clip
-     * ({@see self::MIN_STAGE2_REMAINING_SECS}): the injected clock when
+     * ({@see self::stage2MinimumRemaining()}): the injected clock when
      * provided, time() otherwise.
      */
     private function now(): int
     {
         return ($this->now) ? ($this->now)() : time();
+    }
+
+    /**
+     * The PRACTICAL minimum remaining chain lifetime a stage-2 mint may
+     * consume, seconds: the deployment's configured minimum solve
+     * duration (min_duration_ms — the value that applies to the stage-2
+     * challenge profile, since every issuer variant the controller mints
+     * with carries the same min_duration_ms; 0 when unset) converted to
+     * whole seconds rounded UP — a 1500 ms floor is 2 seconds — plus the
+     * solver + transport headroom ({@see self::STAGE2_SOLVER_MARGIN_SECS}).
+     * The minted challenge must be SOLVABLE within its clipped lifetime:
+     * a clipped TTL that does not cover its own minimum solve duration
+     * and the solve round-trip is operationally unusable, and the core
+     * Config also REFUSES to construct a challenge whose TTL is not
+     * strictly longer than min_duration_ms — a deployment with an
+     * explicit minimum floor would otherwise fail with a confusing late
+     * issuance error instead of the deliberate expired-ticket refusal.
+     * The core Config's absolute floor (>= 1 second,
+     * {@see self::MIN_STAGE2_REMAINING_SECS}) is the lower bound.
+     */
+    private function stage2MinimumRemaining(): int
+    {
+        $baseMinDurationMs = $this->issuer->config()->minDurationMs ?? 0;
+
+        return max(
+            self::MIN_STAGE2_REMAINING_SECS,
+            (int) ceil($baseMinDurationMs / 1000) + self::STAGE2_SOLVER_MARGIN_SECS,
+        );
     }
 
     /**

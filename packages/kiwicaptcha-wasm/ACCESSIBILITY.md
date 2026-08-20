@@ -73,8 +73,11 @@ manual assistive-technology qualification checklist in the release gate.
 
 ## WCAG 2.2 new criteria — disposition matrix
 
-WCAG 2.2 added nine success criteria. The widget's disposition for every
-new criterion that touches its component scope:
+WCAG 2.2 added nine success criteria, of which seven are new at Level AA
+(2.4.13 Focus Appearance and 3.3.9 Accessible Authentication (Enhanced)
+are Level AAA and are not required for AA conformance). The widget's
+disposition for every new WCAG 2.2 criterion applicable at Level AA that
+touches its component scope:
 
 | WCAG 2.2 SC | Level | Disposition |
 | --- | --- | --- |

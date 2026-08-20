@@ -30,11 +30,13 @@ use PHPUnit\Framework\TestCase;
  * identity belongs to this logical operation may RESUME the derivation,
  * revalidate every immutable security property exactly like the ordinary
  * verify path, and commit the deterministic outcome. A RESULTLESS resume
- * re-checks the signed expiry against the current clock BEFORE deriving:
- * past the signed deadline it fails closed with Expired and commits
- * nothing, deterministically on every retry — only the committed-result
- * recovery is expiry-exempt (a committed result was durably recorded only
- * after the original final expiry check passed).
+ * re-checks the signed expiry against the current clock BEFORE deriving
+ * and AGAIN after the derivation, before the commit — the same
+ * acceptance boundary as ordinary verification: past the signed deadline
+ * it fails closed with Expired and commits nothing, deterministically on
+ * every retry — only the committed-result recovery is expiry-exempt (a
+ * committed result was durably recorded only after the original final
+ * expiry check passed).
  */
 final class VerifierResumeTest extends TestCase
 {
@@ -85,13 +87,13 @@ final class VerifierResumeTest extends TestCase
 
     /**
      * An Argon2id record issued under the given policy epoch / region /
-     * issuer, already solved: the argon admission gate is the ONLY seam
-     * between the resume's pre-derive revalidation and its commit, so the
-     * mid-derivation rotation tests drive it.
+     * issuer with the given TTL, already solved: the argon admission gate
+     * is the ONLY seam between the resume's pre-derive revalidation and
+     * its commit, so the mid-derivation rotation / clock tests drive it.
      *
      * @return array{0: ArrayStorage, 1: ChallengeRecord, 2: string}
      */
-    private function issueAndSolveArgon(int $policyVersion = 1, ?string $region = null, ?string $issuer = null): array
+    private function issueAndSolveArgon(int $policyVersion = 1, ?string $region = null, ?string $issuer = null, int $ttlSecs = 120): array
     {
         $storage = new ArrayStorage();
         $issuer = new Issuer(
@@ -102,7 +104,7 @@ final class VerifierResumeTest extends TestCase
                 t: 3,
                 p: 1,
                 argon2TargetBits: 4,
-                ttlSecs: 120,
+                ttlSecs: $ttlSecs,
                 minDurationMs: 0,
                 policyVersion: $policyVersion,
                 issuer: $issuer,
@@ -426,6 +428,69 @@ final class VerifierResumeTest extends TestCase
         $replay = $verifier->resumeConsumedOperation($token, Vectors::SECRET, $this->identity('late'), 'login', self::CLIENT_IP);
         self::assertSame(VerifyError::Expired, $replay->error, 'a second resume after the signed expiry must be Expired again');
         self::assertNull($inner->consumedState($record->nonce)?->consumedResult, 'nothing is ever committed for an expired resultless resume');
+    }
+
+    public function testResultlessResumeExpiringDuringDerivationIsDeterministicallyExpired(): void
+    {
+        // The recovery starts BEFORE the signed deadline but finishes
+        // AFTER it — a derivation longer than the remaining lifetime. The
+        // pre-derive expiry gate passes (~1 second of lifetime left at
+        // resume start), then the admission path advances the clock past
+        // expiresAt DURING the expensive derivation (the same gate seam
+        // the mid-derivation rotation tests drive): the post-derive
+        // re-read must commit Expired — the same acceptance boundary as
+        // the ordinary verifier, never a post-deadline Valid.
+        [$storage, $record, $token] = $this->issueAndSolveArgon(ttlSecs: 1);
+        $storage->consumeWithOperationIdentity($record->nonce, $this->identity('expire-mid-derive'));
+
+        $clock = self::ISSUED_AT;
+        $now = static function () use (&$clock): int {
+            return $clock;
+        };
+        $gate = $this->rotatingGate(static function () use (&$clock): void {
+            // The admission lands between the pre-derive expiry gate and
+            // the post-derive re-read: the clock advances past the
+            // record's signed expiry (ISSUED_AT + 1).
+            $clock = self::ISSUED_AT + 10;
+        });
+        $verifier = new Verifier($storage, $gate, now: $now);
+
+        $outcome = $verifier->resumeConsumedOperation($token, Vectors::SECRET, $this->identity('expire-mid-derive'), 'login', self::CLIENT_IP);
+        self::assertSame(VerifyError::Expired, $outcome->error, 'a resultless resume whose derivation crosses the signed deadline must commit Expired');
+        $after = $storage->consumedState($record->nonce);
+        self::assertNull($after?->consumedResult, 'the mid-derivation expiry must NOT commit anything');
+
+        // Deterministic: a second resume reproduces the identical
+        // Expired (the clock is past the signed deadline now) — the same
+        // logical redemption can never become Valid.
+        $replay = $verifier->resumeConsumedOperation($token, Vectors::SECRET, $this->identity('expire-mid-derive'), 'login', self::CLIENT_IP);
+        self::assertSame(VerifyError::Expired, $replay->error, 'a second resume must reproduce the identical Expired');
+        self::assertNull($storage->consumedState($record->nonce)?->consumedResult, 'nothing is ever committed once the derivation crossed the signed deadline');
+    }
+
+    public function testResultlessResumeNearExpiryWithoutMidDeriveClockAdvanceStillCommitsValid(): void
+    {
+        // Control for the post-derive expiry re-read: the SAME setup
+        // (signed expiry ~1 second in the future at resume start, gate
+        // present) WITHOUT the mid-derive clock advance commits Valid —
+        // the clock advance inside the derivation is the only difference
+        // between the Expired outcome above and this one.
+        [$storage, $record, $token] = $this->issueAndSolveArgon(ttlSecs: 1);
+        $storage->consumeWithOperationIdentity($record->nonce, $this->identity('near-expiry-valid'));
+
+        $clock = self::ISSUED_AT;
+        $now = static function () use (&$clock): int {
+            return $clock;
+        };
+        $gate = $this->rotatingGate(static function (): void {
+        });
+        $verifier = new Verifier($storage, $gate, now: $now);
+
+        $outcome = $verifier->resumeConsumedOperation($token, Vectors::SECRET, $this->identity('near-expiry-valid'), 'login', self::CLIENT_IP);
+        self::assertTrue($outcome->isOk(), sprintf('without a mid-derive clock advance the near-expiry resume must commit Valid, got %s', $outcome->code()));
+        $after = $storage->consumedState($record->nonce);
+        self::assertNotNull($after?->consumedResult, 'the near-expiry resume must commit');
+        self::assertTrue($after->consumedResult->valid);
     }
 
     public function testCommittedResultRecoveryPastSignedExpiryStillSucceeds(): void

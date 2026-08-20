@@ -207,10 +207,13 @@ final class KiwiCaptchaValidator extends ConstraintValidator
         private readonly int $postSolveDispositionTtlMarginSecs = 0,
         /**
          * The chain lifetime (risk.chaining.ttl_secs): the absolute
-         * expiry the validator passes when it opens a stage-2 chain
-         * requirement (requireStage2) and signs the ticket of a FRESHLY
-         * computed CHAIN_REQUIRED disposition. A REPLAY re-signs with the
-         * chain requirement's ORIGINAL expiry instead.
+         * expiry the validator passes when it OPENS a stage-2 chain
+         * requirement (requireStage2). A CHAIN_REQUIRED ticket is NEVER
+         * signed with an independent fresh expiry: the signing always
+         * re-signs from the requirement's ACTUAL server-held expiresAt
+         * ({@see self::chainRequirementExpiresAt()}), so the same
+         * (nonce, disposition) reproduces the same deterministic ticket
+         * and a ticket can never outlive its chain state.
          */
         private readonly int $chainTtlSecs = 300,
     ) {
@@ -558,10 +561,15 @@ final class KiwiCaptchaValidator extends ConstraintValidator
                 // from the PERSISTED chain id (the same chain for a fresh
                 // verification and a replay); the violation's
                 // {{ chain_ticket }} parameter carries it in the
-                // documented machine-readable format. A REPLAY re-signs
-                // with the chain requirement's ORIGINAL expiry — the
-                // deterministic ticket is the SAME one (a re-signed
-                // ticket can never outlive its chain state); a replay
+                // documented machine-readable format. The ticket is
+                // ALWAYS signed from the chain requirement's ACTUAL
+                // server-held expiresAt — the just-opened requirement and
+                // an existing obligation's chain alike — so a fresh
+                // disposition, an obligation-first disposition and a
+                // replay of the same verified nonce all reproduce the
+                // SAME byte-identical ticket (a re-signed ticket can
+                // never outlive its chain state, and the deterministic
+                // retry never invents a fresh expiry). A disposition
                 // whose chain requirement is gone (the chain expired or
                 // was consumed) is fail-closed temporary_unavailable. A
                 // ticket that cannot be produced is fail-closed
@@ -571,9 +579,7 @@ final class KiwiCaptchaValidator extends ConstraintValidator
                 try {
                     $ticket = $this->chainTickets?->ticketFor(
                         $disposition->chainId,
-                        $replayed
-                            ? $this->chainRequirementExpiresAt($constraint, $canonicalBinding)
-                            : $this->chainExpiresAt(),
+                        $this->chainRequirementExpiresAt($constraint, $canonicalBinding),
                     );
                 } catch (\Throwable $e) {
                     $this->logger?->info('KiwiCaptcha: chained challenge ticket unavailable', [
@@ -743,8 +749,11 @@ final class KiwiCaptchaValidator extends ConstraintValidator
      *
      * @return array{0: PostSolveDisposition, 1: bool} the final
      *         disposition and whether it came from the PERSISTED record
-     *         (a replay — the ChainRequired re-signing then reproduces
-     *         the requirement's ORIGINAL expiry instead of a fresh one)
+     *         (a replay — informational: the ChainRequired ticket
+     *         re-signing no longer branches on it, every disposition
+     *         referencing an existing chain signs from the requirement's
+     *         ACTUAL server-held expiresAt,
+     *         {@see self::chainRequirementExpiresAt()})
      *
      * @throws PostSolveDispositionUnavailableException fail-closed: the
      *                                                 disposition could not
@@ -1017,24 +1026,30 @@ final class KiwiCaptchaValidator extends ConstraintValidator
 
     /**
      * Map the post-solve decision to the final disposition. An OPEN
-     * transaction obligation is AUTHORITATIVE BEFORE the fresh assessment
-     * (and before any Pass): when the open requirement of the (scope,
-     * canonical binding, policy) exists but the submitted nonce is NOT its
-     * exact stage2Nonce, the requirement state decides — the transaction
-     * already demands stage 2 or a terminal outcome, so a stage-1 token of
-     * a chained transaction can NEVER pass and the obligation's recorded
-     * requirement (requiredAction/rank floor) is never lowered by a later
-     * weaker assessment (the requirement itself is reused — the fresh
-     * decision is never substituted for it):
+     * transaction obligation is AUTHORITATIVE BEFORE any Pass (and a
+     * partial chain-state read failure fails closed — {@see
+     * self::openRequirementFor()}), but the fresh post-solve assessment
+     * participates FIRST in the precedence, so the final disposition is
+     * the MONOTONIC-ESCALATION MAX of the obligation and the fresh
+     * decision — security may RISE, never fall, and an existing
+     * obligation never freezes its security level:
      *
-     *  - available/reserved/issued  -> CHAIN_REQUIRED with the SAME chain
-     *    (the transaction still needs its stage 2 — the requirement's
-     *    recorded requiredAction is the floor, never the weaker fresh
-     *    action);
-     *  - step_up_required           -> StepUp (TERMINAL);
-     *  - denied                     -> Deny (TERMINAL);
-     *  - verified                   -> the obligation should already be
-     *    gone (anomaly) — treated as the requirement's absence.
+     *  - the obligation's TERMINAL state wins PERMANENTLY:
+     *      step_up_required -> StepUp, denied -> Deny (the transaction is
+     *      already bound to its final outcome — no fresh assessment can
+     *      reopen it);
+     *  - otherwise a FRESH Deny wins (terminal rejection);
+     *  - then a FRESH StepUp wins (terminal application-level step-up —
+     *    never a chained PoW);
+     *  - then a fresh STRICTLY STRONGER chainable action RAISES the
+     *    obligation ATOMICALLY (requireStage2 with the fresh action —
+     *    the store's raise-only create-or-get: the SAME chain id and the
+     *    ORIGINAL expiry preserved, only the required rank/action rise)
+     *    -> CHAIN_REQUIRED with that same chain id;
+     *  - then a fresh equal/weaker/Allow action leaves the obligation
+     *    UNCHANGED (its recorded floor intact) -> CHAIN_REQUIRED with the
+     *    requirement's chain id — a stage-1 token of a chained
+     *    transaction can NEVER pass, whatever the fresh assessment says.
      *
      * The submitted nonce == stage2Nonce keeps the existing stage-2
      * disposition flow. Without an open obligation:
@@ -1080,32 +1095,108 @@ final class KiwiCaptchaValidator extends ConstraintValidator
         // ({@see self::applyStage2Disposition()}).
         //
         // OBLIGATION-AUTHORITATIVE: the open requirement is consulted
-        // BEFORE the fresh assessment — a partial chain-state read
-        // failure fails closed ({@see self::openRequirementFor()}) and an
-        // existing obligation can never be downgraded by a weaker fresh
-        // assessment.
+        // BEFORE the fresh assessment is applied — a partial chain-state
+        // read failure fails closed ({@see self::openRequirementFor()})
+        // and an existing obligation can never be downgraded by a weaker
+        // fresh assessment. With an open obligation the final disposition
+        // is the MONOTONIC-ESCALATION MAX of the obligation's state and
+        // the fresh assessment:
+        //
+        //  1. the obligation's TERMINAL state (step_up_required ->
+        //     StepUp; denied -> Deny) wins PERMANENTLY;
+        //  2. otherwise a FRESH Deny wins (terminal rejection);
+        //  3. then a FRESH StepUp wins (terminal application-level
+        //     step-up — never a chain ticket);
+        //  4. then a fresh STRICTLY STRONGER chainable action ATOMICALLY
+        //     RAISES the obligation (requireStage2 — the store's
+        //     raise-only mechanism: the SAME chain id, the ORIGINAL
+        //     expiry preserved) and CHAIN_REQUIRED carries that same
+        //     chain id — the recorded security level never freezes;
+        //  5. then a fresh equal/weaker/Allow (or unknown-scope null)
+        //     action leaves the obligation UNCHANGED (its recorded floor
+        //     intact) — CHAIN_REQUIRED with the requirement's chain id:
+        //     a stage-1 token of a chained transaction can NEVER pass.
         $requirement = $this->openRequirementFor($constraint, $canonicalBinding);
         $isStage2 = $requirement !== null && $requirement->stage2Nonce !== null && hash_equals($requirement->stage2Nonce, $nonce);
 
         if ($requirement !== null && !$isStage2 && $requirement->state !== 'verified') {
             // The submitted nonce is NOT the requirement's exact
             // stage-2 nonce: the requirement state is the authoritative
-            // disposition of the transaction (the 'verified' state is the
+            // floor of the transaction (the 'verified' state is the
             // anomaly — its obligation should already be gone — and falls
             // through as the requirement's absence).
             $decisionId = $postSolve?->decisionId;
 
-            return match ($requirement->state) {
-                // The transaction is bound to its TERMINAL step-up.
-                'step_up_required' => new PostSolveDisposition(PostSolveDispositionKind::StepUp, $decisionId),
-                // The transaction is bound to its TERMINAL denial.
-                'denied' => new PostSolveDisposition(PostSolveDispositionKind::Deny, $decisionId),
-                // available/reserved/issued: the transaction still owes
-                // its stage 2 — CHAIN_REQUIRED with the SAME chain and
-                // the requirement's RECORDED required action (the floor
-                // never decays).
-                default => new PostSolveDisposition(PostSolveDispositionKind::ChainRequired, $decisionId, $requirement->chainId),
-            };
+            // 1. The obligation's TERMINAL state wins PERMANENTLY — the
+            //    transaction is already bound to its final outcome.
+            if ($requirement->state === 'step_up_required') {
+                return new PostSolveDisposition(PostSolveDispositionKind::StepUp, $decisionId);
+            }
+            if ($requirement->state === 'denied') {
+                return new PostSolveDisposition(PostSolveDispositionKind::Deny, $decisionId);
+            }
+
+            // available/reserved/issued: the transaction still owes its
+            // stage 2 — the FRESH assessment now participates (it can
+            // only ESCALATE the obligation, never decay it):
+            if ($postSolve !== null) {
+                // 2. A fresh Deny wins — the terminal rejection.
+                if ($postSolve->action === RiskAction::Deny) {
+                    return new PostSolveDisposition(PostSolveDispositionKind::Deny, $decisionId);
+                }
+                // 3. A fresh StepUp wins — StepUp is TERMINAL
+                //    application-level step-up (it NEVER becomes a chain
+                //    ticket: a ticket could later be spent on ordinary
+                //    PoW instead of the application's step-up).
+                if ($postSolve->action === RiskAction::StepUp) {
+                    return new PostSolveDisposition(PostSolveDispositionKind::StepUp, $decisionId);
+                }
+
+                // 4. A fresh STRICTLY STRONGER chainable demand RAISES
+                //    the recorded floor ATOMICALLY: requireStage2 with
+                //    the fresh action — the store's raise-only
+                //    create-or-get keeps the SAME chain id and the
+                //    ORIGINAL expiry, only the required rank/action rise.
+                if ($postSolve->action !== RiskAction::Allow
+                    && !$this->recordSatisfiesRequiredAction($token, $postSolve->action)
+                    && $postSolve->action->rank() > $requirement->requiredRank
+                ) {
+                    // Chaining is available (the open obligation proves
+                    // it was when the chain opened; the guard mirrors the
+                    // no-obligation path below).
+                    if ($this->chainTickets !== null && $this->bindingAuthority !== null && $canonicalBinding !== null) {
+                        try {
+                            $raised = $this->chainTickets->requireStage2(
+                                $nonce,
+                                $constraint->scope,
+                                $canonicalBinding,
+                                $this->policyVersion,
+                                $postSolve->action,
+                                $this->chainExpiresAt(),
+                            );
+                        } catch (\Throwable $e) {
+                            throw new PostSolveDispositionUnavailableException('the chain requirement could not be raised', 0, $e);
+                        }
+                        $chainId = $raised->chainId;
+                        if (!\is_string($chainId) || $chainId === '') {
+                            throw new PostSolveDispositionUnavailableException('the chain requirement carries no chain id');
+                        }
+
+                        return new PostSolveDisposition(PostSolveDispositionKind::ChainRequired, $decisionId, $chainId);
+                    }
+                    // Chaining unavailable: the stronger demand must
+                    // NEVER silently downgrade to the weaker recorded
+                    // floor — terminal StepUp (mirrors the
+                    // no-obligation path).
+                    return new PostSolveDisposition(PostSolveDispositionKind::StepUp, $decisionId);
+                }
+            }
+
+            // 5. A fresh equal/weaker/Allow/neutral action leaves the
+            //    obligation UNCHANGED (its recorded floor intact) —
+            //    CHAIN_REQUIRED with the requirement's SAME chain: a
+            //    stage-1 token of a chained transaction can never pass.
+            return new PostSolveDisposition(PostSolveDispositionKind::ChainRequired, $decisionId, $requirement->chainId);
         }
 
         if ($postSolve === null) {
@@ -1307,13 +1398,14 @@ final class KiwiCaptchaValidator extends ConstraintValidator
     }
 
     /**
-     * The absolute expiry of a chain ticket on the FRESH path: now + the
-     * configured chain lifetime (risk.chaining.ttl_secs). The SAME value
-     * opens the stage-2 requirement (requireStage2) and signs the ticket
-     * of a freshly computed CHAIN_REQUIRED disposition. A REPLAY re-signs
-     * with the requirement's ORIGINAL expiry instead
-     * ({@see chainRequirementExpiresAt()}), so a re-signed ticket can
-     * never outlive its chain state.
+     * The absolute expiry a stage-2 chain requirement is OPENED with:
+     * now + the configured chain lifetime (risk.chaining.ttl_secs). The
+     * SAME value is passed to requireStage2 (a fresh chain and an atomic
+     * RAISE alike — the store's raise-only create-or-get preserves the
+     * ORIGINAL expiry of an existing chain). A CHAIN_REQUIRED ticket is
+     * NEVER signed with this independent value: the signing always
+     * re-signs from the requirement's ACTUAL server-held expiresAt
+     * ({@see chainRequirementExpiresAt()}).
      */
     private function chainExpiresAt(): int
     {
@@ -1321,13 +1413,15 @@ final class KiwiCaptchaValidator extends ConstraintValidator
     }
 
     /**
-     * The ORIGINAL expiry of the chain behind a REPLAYED CHAIN_REQUIRED
-     * disposition: the requirement's server-held expiresAt
-     * (findOpenRequirement on the SAME (scope, canonical binding, policy
-     * epoch) the chain was opened under). The replayed ticket re-signs
-     * with that value — never with a FRESH expiry — so the re-signed
-     * ticket is the deterministic SAME ticket and can never outlive its
-     * chain state.
+     * The ACTUAL server-held expiry of the chain behind a CHAIN_REQUIRED
+     * disposition: the requirement's expiresAt (findOpenRequirement on
+     * the SAME (scope, canonical binding, policy epoch) the chain was
+     * opened under). EVERY ChainRequired ticket — the just-opened fresh
+     * chain, an existing obligation's chain and a replayed disposition
+     * alike — re-signs with this value, never with an independent fresh
+     * expiry: the same (nonce, disposition) reproduces the deterministic
+     * SAME ticket and a re-signed ticket can never outlive its chain
+     * state.
      *
      * @throws PostSolveDispositionUnavailableException when the
      *                                                 requirement is gone
@@ -1341,7 +1435,7 @@ final class KiwiCaptchaValidator extends ConstraintValidator
     {
         $requirement = $this->chainTickets?->findOpenRequirement($constraint->scope, (string) ($canonicalBinding ?? ''), $this->policyVersion);
         if ($requirement === null) {
-            throw new PostSolveDispositionUnavailableException('the chain requirement of the replayed disposition is gone');
+            throw new PostSolveDispositionUnavailableException('the chain requirement of the disposition is gone');
         }
 
         return $requirement->expiresAt;
