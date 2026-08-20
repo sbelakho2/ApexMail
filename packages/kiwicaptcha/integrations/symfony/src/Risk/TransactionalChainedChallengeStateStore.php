@@ -25,6 +25,15 @@ namespace BelConsulting\KiwiCaptchaBundle\Risk;
  *    its final disposition, so a later challenge request for the same
  *    transaction re-encounters the terminal state — never a new
  *    stage-1);
+ *  - TWO NONCE-AGNOSTIC TRANSACTION-LEVEL terminal transitions
+ *    (markTransactionDenied() / markTransactionStepUpRequired()) make
+ *    the terminality DURABLE even when the Deny/StepUp arises from a
+ *    DIFFERENT verified nonce of the obligated transaction (never the
+ *    exact stage-2 nonce): the open obligation becomes terminal —
+ *    atomically, keyed by the chain/obligation identity — with the
+ *    obligation mapping KEPT; the terminal states carry an OPTIONAL
+ *    stage-2 nonce (the exact nonce when one was issued, null
+ *    otherwise);
  *  - rearmIssued() returns an issued chain to the available state for a
  *    FRESH stage-2 mint (pinned to the exact expected nonce — never a
  *    stage-1 downgrade);
@@ -214,6 +223,85 @@ interface TransactionalChainedChallengeStateStore extends ChainedChallengeStateS
      *                                                 closed)
      */
     public function markDenied(string $chainId, string $stage2Nonce): string;
+
+    /**
+     * ATOMIC NONCE-AGNOSTIC TRANSACTION terminalization: an OPEN
+     * obligation (state available|reserved|issued|completed) ->
+     * denied (KEEPTTL — the record keeps its OWN remaining TTL; the
+     * obligation mapping is KEPT, the chainId and the original expiry
+     * are preserved). The stage2Nonce field is PRESERVED: the exact
+     * stage-2 nonce when one exists (issued/completed), null otherwise
+     * (available/reserved) — the terminal state carries an OPTIONAL
+     * stage-2 nonce. Outcomes:
+     *
+     *  - 'denied_new'       this call performed the transition,
+     *  - 'denied_same'      already denied — idempotent (no state
+     *                       change),
+     *  - 'conflict'         the chain is terminal with the OTHER
+     *                       disposition (step_up_required) — a terminal
+     *                       state can never be reopened or flipped,
+     *  - 'already_verified' the chain is already verified — the
+     *                       transaction already ended via Pass (its
+     *                       obligation is gone): there is no chain left
+     *                       to terminalize (defensive — the fresh Deny
+     *                       applies to the nonce alone),
+     *  - 'missing'          the chain state is absent/expired.
+     *
+     * RACE SEMANTICS (the Lua script is the single writer): the
+     * terminalization WINS against an in-flight reservation (a reserve
+     * on the terminalized chain answers the terminal result
+     * 'denied') and against an in-flight issuance (a markIssued on the
+     * terminalized chain answers 'conflict'); against markVerified the
+     * FIRST writer wins (verified -> 'already_verified' with the
+     * obligation already gone; terminal -> markVerified 'conflict').
+     *
+     * @throws MalformedChainedChallengeStateException when the record
+     *                                                 violates the strict
+     *                                                 v2 schema (fail
+     *                                                 closed)
+     */
+    public function markTransactionDenied(string $chainId): string;
+
+    /**
+     * ATOMIC NONCE-AGNOSTIC TRANSACTION terminalization: an OPEN
+     * obligation (state available|reserved|issued|completed) ->
+     * step_up_required (KEEPTTL — the record keeps its OWN remaining
+     * TTL; the obligation mapping is KEPT, the chainId and the original
+     * expiry are preserved). The stage2Nonce field is PRESERVED: the
+     * exact stage-2 nonce when one exists (issued/completed), null
+     * otherwise (available/reserved) — the terminal state carries an
+     * OPTIONAL stage-2 nonce. Outcomes:
+     *
+     *  - 'step_up_required_new'  this call performed the transition,
+     *  - 'step_up_required_same' already step_up_required — idempotent
+     *                            (no state change),
+     *  - 'conflict'              the chain is terminal with the OTHER
+     *                            disposition (denied) — a terminal
+     *                            state can never be reopened or
+     *                            flipped,
+     *  - 'already_verified'      the chain is already verified — the
+     *                            transaction already ended via Pass (its
+     *                            obligation is gone): there is no chain
+     *                            left to terminalize (defensive — the
+     *                            fresh StepUp applies to the nonce
+     *                            alone),
+     *  - 'missing'               the chain state is absent/expired.
+     *
+     * RACE SEMANTICS (the Lua script is the single writer): the
+     * terminalization WINS against an in-flight reservation (a reserve
+     * on the terminalized chain answers the terminal result
+     * 'step_up_required') and against an in-flight issuance (a
+     * markIssued on the terminalized chain answers 'conflict'); against
+     * markVerified the FIRST writer wins (verified ->
+     * 'already_verified' with the obligation already gone; terminal ->
+     * markVerified 'conflict').
+     *
+     * @throws MalformedChainedChallengeStateException when the record
+     *                                                 violates the strict
+     *                                                 v2 schema (fail
+     *                                                 closed)
+     */
+    public function markTransactionStepUpRequired(string $chainId): string;
 
     /**
      * ATOMIC rearm of an ISSUED chain: issued(expectedStage2Nonce) ->

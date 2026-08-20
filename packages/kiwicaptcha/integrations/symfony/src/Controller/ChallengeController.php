@@ -1429,8 +1429,10 @@ final class ChallengeController
         // OUTSTANDING-ADMISSION BOOKKEEPING: the slot is HELD from the
         // moment the counters admit the challenge until the challenge is
         // successfully HANDED OFF. Every PROVEN-not-handed-out failure
-        // after this point returns the slot
-        // (OutstandingChallenges::abortedBeforeHandoff); an INDETERMINATE
+        // after this point returns the slot AND releases the reservation
+        // through the SINGLE cleanup primitive
+        // ({@see self::rollbackIssuanceAttempt()} —
+        // OutstandingChallenges::abortedBeforeHandoff); an INDETERMINATE
         // failure (the chain state cannot be read after a thrown
         // issuance transition — the challenge may be the authoritative
         // issued stage-2) must NOT roll back.
@@ -1483,8 +1485,7 @@ final class ChallengeController
             // ticket.
             if ($chainRequirement !== null && $challenge->nonce === $chainRequirement->stage1Nonce) {
                 $this->discardChallenge($challenge);
-                $this->rollbackOutstandingAdmission($outstandingAdmissionHeld, $clientIp);
-                $this->releaseChain($chainId, $chainOwner);
+                $this->rollbackIssuanceAttempt($outstandingAdmissionHeld, $clientIp, $chainId, $chainOwner);
 
                 return $this->privateJson(
                     ['error' => ['code' => 'INVALID_METADATA', 'message' => 'The chain ticket cannot re-run the same challenge stage.']],
@@ -1495,7 +1496,13 @@ final class ChallengeController
                 );
             }
         } catch (\InvalidArgumentException $e) {
-            $this->releaseChain($chainId, $chainOwner);
+            // A mint/issuance fault classified as a client-side invalid
+            // argument: the challenge was PROVEN not handed out — the
+            // admitted outstanding slot is returned and the reservation
+            // released (the single proven-not-handed-off cleanup
+            // primitive, so the accounting never depends on which
+            // exception type fires).
+            $this->rollbackIssuanceAttempt($outstandingAdmissionHeld, $clientIp, $chainId, $chainOwner);
 
             return $this->privateJson(
                 ['error' => ['code' => 'INVALID_SCOPE', 'message' => $e->getMessage()]],
@@ -1515,8 +1522,7 @@ final class ChallengeController
             // returned and the reserved chain is released — the ticket is
             // reusable (the chain is not burned).
             error_log(sprintf('kiwicaptcha: challenge issuance failed the replica-wait barrier: %s', $e->getMessage()));
-            $this->rollbackOutstandingAdmission($outstandingAdmissionHeld, $clientIp);
-            $this->releaseChain($chainId, $chainOwner);
+            $this->rollbackIssuanceAttempt($outstandingAdmissionHeld, $clientIp, $chainId, $chainOwner);
 
             return $this->privateJson(
                 ['error' => ['code' => 'SERVICE_UNAVAILABLE', 'message' => 'Challenge issuance is temporarily unavailable. Try again later.']],
@@ -1587,8 +1593,7 @@ final class ChallengeController
             } catch (\Throwable $e) {
                 error_log(sprintf('kiwicaptcha: siteverify metadata store failed for nonce %s: %s', $challenge->nonce, $e->getMessage()));
                 $this->discardChallenge($challenge);
-                $this->rollbackOutstandingAdmission($outstandingAdmissionHeld, $clientIp);
-                $this->releaseChain($chainId, $chainOwner);
+                $this->rollbackIssuanceAttempt($outstandingAdmissionHeld, $clientIp, $chainId, $chainOwner);
 
                 return $this->privateJson(
                     ['error' => ['code' => 'SERVICE_UNAVAILABLE', 'message' => 'Challenge issuance is temporarily unavailable. Try again later.']],
@@ -1639,9 +1644,10 @@ final class ChallengeController
         } catch (\Throwable $e) {
             // Any other post-admission issuance exception: the challenge
             // was PROVEN not handed out — the admitted outstanding slot
-            // is returned, then the failure propagates (the caller maps
-            // it to the closed response).
-            $this->rollbackOutstandingAdmission($outstandingAdmissionHeld, $clientIp);
+            // is returned and the chain reservation released (the single
+            // proven-not-handed-off cleanup primitive), then the failure
+            // propagates (the caller maps it to the closed response).
+            $this->rollbackIssuanceAttempt($outstandingAdmissionHeld, $clientIp, $chainId, $chainOwner);
             throw $e;
         }
 
@@ -1764,10 +1770,11 @@ final class ChallengeController
      * never handed out (OutstandingChallenges::abortedBeforeHandoff — the
      * per-source counter is decremented best-effort, floored at 0; the
      * GLOBAL counter decays by EXPIRE: deployment-wide pressure, never a
-     * literal count). The caller must NOT roll back for an INDETERMINATE
-     * failure (the chain state cannot be read after a thrown issuance
-     * transition — the challenge may be the authoritative issued
-     * stage-2).
+     * literal count). Composed by {@see self::rollbackIssuanceAttempt()}
+     * — the single proven-not-handed-off cleanup primitive. The caller
+     * must NOT roll back for an INDETERMINATE failure (the chain state
+     * cannot be read after a thrown issuance transition — the challenge
+     * may be the authoritative issued stage-2).
      */
     private function rollbackOutstandingAdmission(bool $held, string $clientIp): void
     {
@@ -1779,6 +1786,23 @@ final class ChallengeController
         } catch (\Throwable) {
             // Best-effort; the counter decays by its EXPIRE otherwise.
         }
+    }
+
+    /**
+     * THE PROVEN-NOT-HANDED-OFF ISSUANCE CLEANUP PRIMITIVE: every exit
+     * AFTER the outstanding admission that POSITIVELY established the
+     * challenge was never handed off returns the admitted slot
+     * ({@see self::rollbackOutstandingAdmission()}) AND releases the
+     * chain reservation ({@see self::releaseChain()}) through THIS single
+     * helper — a future failure path cannot accidentally omit one half of
+     * the resource accounting. The INDETERMINATE case (the chain state
+     * cannot be read after a thrown issuance transition — the challenge
+     * may be the authoritative issued stage-2) must NOT use this helper.
+     */
+    private function rollbackIssuanceAttempt(bool $outstandingAdmissionHeld, string $clientIp, ?string $chainId, ?string $chainOwner): void
+    {
+        $this->rollbackOutstandingAdmission($outstandingAdmissionHeld, $clientIp);
+        $this->releaseChain($chainId, $chainOwner);
     }
 
     /**
@@ -2349,8 +2373,7 @@ final class ChallengeController
                 // POSITIVELY not issued by this request (rearmed, owned
                 // elsewhere, or vanished): discard + release + roll back.
                 $this->discardChallenge($challenge);
-                $this->releaseChain($chainId, $chainOwner);
-                $this->rollbackOutstandingAdmission($outstandingAdmissionHeld, $clientIp);
+                $this->rollbackIssuanceAttempt($outstandingAdmissionHeld, $clientIp, $chainId, $chainOwner);
 
                 return $this->privateJson(
                     ['error' => ['code' => 'SERVICE_UNAVAILABLE', 'message' => 'Challenge issuance is temporarily unavailable. Try again later.']],
@@ -2373,8 +2396,7 @@ final class ChallengeController
                 // RECOVERS the challenge that was durably issued), the
                 // slot is returned, the reservation is released.
                 $this->discardChallenge($challenge);
-                $this->releaseChain($chainId, $chainOwner);
-                $this->rollbackOutstandingAdmission($outstandingAdmissionHeld, $clientIp);
+                $this->rollbackIssuanceAttempt($outstandingAdmissionHeld, $clientIp, $chainId, $chainOwner);
 
                 return $this->privateJson(
                     ['error' => ['code' => 'SERVICE_UNAVAILABLE', 'message' => 'Challenge issuance is temporarily unavailable. Try again later.']],

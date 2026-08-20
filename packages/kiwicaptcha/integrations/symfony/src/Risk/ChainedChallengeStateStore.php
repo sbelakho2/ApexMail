@@ -21,6 +21,8 @@ namespace BelConsulting\KiwiCaptchaBundle\Risk;
  *   issued(stage2Nonce) --markStepUpRequired(nonce)--> step_up_required(nonce) [TERMINAL]
  *   issued(stage2Nonce) --markDenied(nonce)--> denied(nonce)                [TERMINAL]
  *   issued(stage2Nonce) --rearmIssued(nonce)--> available
+ *   available|reserved|issued --markTransactionDenied()--> denied           [TERMINAL, NONCE-AGNOSTIC]
+ *   available|reserved|issued --markTransactionStepUpRequired()--> step_up_required [TERMINAL, NONCE-AGNOSTIC]
  *
  *  - The chain is a SERVER-SIDE TRANSACTION OBLIGATION: every chain is
  *    anchored on a bounded pseudonymous obligation id
@@ -59,7 +61,13 @@ namespace BelConsulting\KiwiCaptchaBundle\Risk;
  *    the transaction stays bound to its final disposition, so a later
  *    challenge request for the same transaction re-encounters the
  *    terminal state (never a new stage-1). The terminal records are kept
- *    until their TTL.
+ *    until their TTL. The TRANSACTIONAL contract adds the NONCE-AGNOSTIC
+ *    markTransactionDenied() / markTransactionStepUpRequired()
+ *    terminalizations of an OPEN obligation (a fresh Deny/StepUp from a
+ *    DIFFERENT verified nonce of the obligated transaction becomes
+ *    durable, keyed by the chain/obligation identity) — the terminal
+ *    states carry an OPTIONAL stage-2 nonce (the exact nonce when one
+ *    was issued, null otherwise).
  *  - release(owner) undoes a reservation (reserved -> available) on any
  *    refused or failed issuance: the ticket stays reusable — the chain is
  *    not burned by a later failure. A release by a NON-owner is an atomic

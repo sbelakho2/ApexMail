@@ -46,7 +46,8 @@ use KiwiCaptcha\Risk\RiskAction;
  *
  * The chain is a SELECTIVE EXTENSION of depth 2 (chainDepth is always 2):
  * the state machine (reserveStage2 / markIssued / markVerified /
- * markStepUpRequired / markDenied / rearmIssued) lets a FAILED stage-2
+ * markStepUpRequired / markDenied / markTransactionDenied /
+ * markTransactionStepUpRequired / rearmIssued) lets a FAILED stage-2
  * issuance release the reservation so the SAME ticket retries, an ISSUED
  * issuance is recovered on retry (the exact same challenge — no re-mint),
  * a consumed-valid stage-2 with a PASS final disposition VERIFIES the
@@ -55,9 +56,14 @@ use KiwiCaptcha\Risk\RiskAction;
  * chain to step_up_required and with a DENY final disposition to denied
  * (both TERMINAL — the obligation mapping is KEPT, so a later challenge
  * request for the same transaction re-encounters the terminal state and
- * can never restart at stage 1), and an expired/invalid stage-2 REARMS
- * the chain for a FRESH stage-2 mint at the same-or-stronger floor —
- * NEVER a stage-1. Every result is TYPED ({@see ChainReservationResult} /
+ * can never restart at stage 1), a fresh Deny/StepUp of a DIFFERENT
+ * verified nonce of the obligated transaction terminalizes the OPEN
+ * obligation itself (markTransactionDenied / markTransactionStepUpRequired
+ * — NONCE-AGNOSTIC, keyed by the chain/obligation identity, so the
+ * terminality is durable and never relies on the volatile risk condition
+ * remaining present), and an expired/invalid stage-2 REARMS the chain for
+ * a FRESH stage-2 mint at the same-or-stronger floor — NEVER a stage-1.
+ * Every result is TYPED ({@see ChainReservationResult} /
  * {@see ChainIssuedResult} / {@see ChainVerifiedResult} / bool) — never
  * magic strings at this surface.
  *
@@ -254,6 +260,23 @@ final class ChainedChallengeTicketService
      * Returns the signed ticket, or null when the signed ticket would
      * exceed the accepted 256-byte wire bound.
      *
+     * THE SIGNED-EXPIRY INVARIANT: the ticket is ALWAYS signed from the
+     * server-held requirement's ACTUAL expiry ($requirement->expiresAt),
+     * never the caller-requested $expiresAt. On the FRESH path (no open
+     * chain) the requested expiry seeds the chain creation
+     * (requireStage2), so a new chain's requirement expiry equals the
+     * requested expiry; on the EXISTING path (an open chain of the same
+     * transaction) the requirement keeps its ORIGINAL expiry — the
+     * signed ticket can never outlive the chain state, and repeated
+     * calls against the same obligation produce byte-identical tickets
+     * regardless of the requested expiry.
+     *
+     * @param int|null $expiresAt the requested absolute chain expiry (unix
+     *                            seconds; defaults to now + ttl_secs) —
+     *                            SEEDS the chain creation on the fresh
+     *                            path; the signed expiry is ALWAYS the
+     *                            requirement's ACTUAL server-held expiry
+     *
      * @throws \InvalidArgumentException on a non-chainable action
      * @throws \Throwable                on backend failure — the caller
      *                                   fails closed
@@ -262,7 +285,7 @@ final class ChainedChallengeTicketService
     {
         $expiresAt ??= $this->now() + $this->ttlSecs;
         $requirement = $this->requireStage2($stage1Nonce, $scope, $requestBinding, $policyVersion, $requiredAction, $expiresAt);
-        $ticket = $this->ticketFor($requirement->chainId, $expiresAt);
+        $ticket = $this->ticketFor($requirement->chainId, $requirement->expiresAt);
         if (\strlen($ticket) > self::MAX_TICKET_BYTES) {
             return null;
         }
@@ -502,6 +525,77 @@ final class ChainedChallengeTicketService
         return match ($result) {
             'denied_new' => ChainVerifiedResult::DeniedNew,
             'denied_same' => ChainVerifiedResult::DeniedSame,
+            'conflict' => ChainVerifiedResult::Conflict,
+            default => ChainVerifiedResult::Missing,
+        };
+    }
+
+    /**
+     * NONCE-AGNOSTIC TERMINALIZATION of an OPEN obligation — the
+     * transaction-level denial: available|reserved|issued -> denied
+     * (KEEPTTL — the record keeps its OWN remaining TTL). The obligation
+     * mapping is KEPT: the transaction stays bound to its final denial
+     * for the rest of its lifetime, so a later challenge request — or a
+     * later stage-1 token of the same transaction — re-encounters the
+     * terminal state (never a new stage-1, never a chain the stage-2
+     * path could clear). The EXACT stage-2 nonce is NOT required: a
+     * fresh Deny of ANY verified nonce belonging to the obligated
+     * transaction makes the denial durable, keyed by the
+     * chain/obligation identity. Idempotent: 'denied_same' on an
+     * already-denied chain, 'conflict' on the OTHER terminal disposition
+     * (a terminal state can never be flipped), 'already_verified' when
+     * the transaction already ended via Pass (the obligation is gone),
+     * 'missing' when the chain is absent.
+     *
+     * @throws MalformedChainedChallengeStateException when the record
+     *                                                 violates the strict
+     *                                                 v2 schema
+     * @throws \Throwable on backend failure
+     */
+    public function markTransactionDenied(string $chainId): ChainVerifiedResult
+    {
+        $result = $this->store->markTransactionDenied($chainId);
+
+        return match ($result) {
+            'denied_new' => ChainVerifiedResult::DeniedNew,
+            'denied_same' => ChainVerifiedResult::DeniedSame,
+            'already_verified' => ChainVerifiedResult::AlreadyVerified,
+            'conflict' => ChainVerifiedResult::Conflict,
+            default => ChainVerifiedResult::Missing,
+        };
+    }
+
+    /**
+     * NONCE-AGNOSTIC TERMINALIZATION of an OPEN obligation — the
+     * transaction-level step-up: available|reserved|issued ->
+     * step_up_required (KEEPTTL — the record keeps its OWN remaining
+     * TTL). The obligation mapping is KEPT: the transaction stays bound
+     * to the step-up requirement for the rest of its lifetime, so a
+     * later challenge request — or a later stage-1 token of the same
+     * transaction — re-encounters the terminal state (never a new
+     * stage-1, never a chain the stage-2 path could clear). The EXACT
+     * stage-2 nonce is NOT required: a fresh StepUp of ANY verified
+     * nonce belonging to the obligated transaction makes the step-up
+     * durable, keyed by the chain/obligation identity. Idempotent:
+     * 'step_up_required_same' on an already-step_up_required chain,
+     * 'conflict' on the OTHER terminal disposition (a terminal state can
+     * never be flipped), 'already_verified' when the transaction already
+     * ended via Pass (the obligation is gone), 'missing' when the chain
+     * is absent.
+     *
+     * @throws MalformedChainedChallengeStateException when the record
+     *                                                 violates the strict
+     *                                                 v2 schema
+     * @throws \Throwable on backend failure
+     */
+    public function markTransactionStepUpRequired(string $chainId): ChainVerifiedResult
+    {
+        $result = $this->store->markTransactionStepUpRequired($chainId);
+
+        return match ($result) {
+            'step_up_required_new' => ChainVerifiedResult::StepUpRequiredNew,
+            'step_up_required_same' => ChainVerifiedResult::StepUpRequiredSame,
+            'already_verified' => ChainVerifiedResult::AlreadyVerified,
             'conflict' => ChainVerifiedResult::Conflict,
             default => ChainVerifiedResult::Missing,
         };

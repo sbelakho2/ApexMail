@@ -1038,9 +1038,15 @@ final class KiwiCaptchaValidator extends ConstraintValidator
      *      step_up_required -> StepUp, denied -> Deny (the transaction is
      *      already bound to its final outcome — no fresh assessment can
      *      reopen it);
-     *  - otherwise a FRESH Deny wins (terminal rejection);
+     *  - otherwise a FRESH Deny wins (terminal rejection) AND
+     *    TERMINALIZES the open obligation itself (markTransactionDenied
+     *    — NONCE-AGNOSTIC, keyed by the chain/obligation identity: the
+     *    denial is DURABLE for the rest of the transaction's lifetime,
+     *    so a later token of the same transaction can never re-open the
+     *    chain after the transient risk condition decayed);
      *  - then a FRESH StepUp wins (terminal application-level step-up —
-     *    never a chained PoW);
+     *    never a chained PoW) AND TERMINALIZES the open obligation
+     *    (markTransactionStepUpRequired — the same durability);
      *  - then a fresh STRICTLY STRONGER chainable action RAISES the
      *    obligation ATOMICALLY (requireStage2 with the fresh action —
      *    the store's raise-only create-or-get: the SAME chain id and the
@@ -1069,10 +1075,16 @@ final class KiwiCaptchaValidator extends ConstraintValidator
      *      otherwise -> StepUp — a stronger-PoW requirement must NEVER
      *      silently disappear when chaining is unavailable.
      *
-     * The chain transition itself is NOT performed here: the disposition
-     * is finalized by the caller FIRST (the durable
-     * {@see PostSolveDispositionStore} finalize) and the stage-2 chain is
-     * transitioned AFTER, by disposition kind, in
+     * The NONCE-AGNOSTIC obligation terminalization runs HERE, at the
+     * disposition-computation point of the fresh Deny/StepUp cases
+     * ({@see self::terminalizeOpenChain()} — the disposition is durably
+     * finalized by the caller BEFORE the violation is emitted, and the
+     * terminalization failure is fail-closed temporary_unavailable, so a
+     * bare Deny/StepUp is never returned without the durable transaction
+     * terminality). The stage-2 (nonce-pinned) chain transition itself is
+     * NOT performed here: the disposition is finalized by the caller
+     * FIRST (the durable {@see PostSolveDispositionStore} finalize) and
+     * the stage-2 chain is transitioned AFTER, by disposition kind, in
      * {@see self::applyStage2Disposition()} — the final disposition is
      * authoritative for terminality, never the core's consumed result.
      *
@@ -1104,9 +1116,12 @@ final class KiwiCaptchaValidator extends ConstraintValidator
         //
         //  1. the obligation's TERMINAL state (step_up_required ->
         //     StepUp; denied -> Deny) wins PERMANENTLY;
-        //  2. otherwise a FRESH Deny wins (terminal rejection);
+        //  2. otherwise a FRESH Deny wins (terminal rejection) AND
+        //     terminalizes the open obligation (markTransactionDenied —
+        //     the denial is DURABLE for the transaction's lifetime);
         //  3. then a FRESH StepUp wins (terminal application-level
-        //     step-up — never a chain ticket);
+        //     step-up — never a chain ticket) AND terminalizes the open
+        //     obligation (markTransactionStepUpRequired);
         //  4. then a fresh STRICTLY STRONGER chainable action ATOMICALLY
         //     RAISES the obligation (requireStage2 — the store's
         //     raise-only mechanism: the SAME chain id, the ORIGINAL
@@ -1140,15 +1155,36 @@ final class KiwiCaptchaValidator extends ConstraintValidator
             // stage 2 — the FRESH assessment now participates (it can
             // only ESCALATE the obligation, never decay it):
             if ($postSolve !== null) {
-                // 2. A fresh Deny wins — the terminal rejection.
+                // 2. A fresh Deny wins — the terminal rejection. The
+                //    fresh Deny ALSO terminalizes the OPEN obligation
+                //    itself ({@see self::terminalizeOpenChain()} — the
+                //    nonce-agnostic markTransactionDenied, keyed by the
+                //    chain/obligation identity): the denial is DURABLE
+                //    for the rest of the transaction's lifetime, so a
+                //    later token of the same transaction can never
+                //    re-open the chain after the transient risk
+                //    condition decayed. The terminalization failure is
+                //    fail-closed temporary_unavailable (never a bare
+                //    Deny without the durable transaction terminality),
+                //    except 'already_verified' — the normal post-Pass
+                //    anomaly (the transaction already ended via Pass —
+                //    its obligation is gone, the fresh disposition
+                //    applies to the nonce alone).
                 if ($postSolve->action === RiskAction::Deny) {
+                    $this->terminalizeOpenChain($requirement->chainId, PostSolveDispositionKind::Deny);
+
                     return new PostSolveDisposition(PostSolveDispositionKind::Deny, $decisionId);
                 }
                 // 3. A fresh StepUp wins — StepUp is TERMINAL
                 //    application-level step-up (it NEVER becomes a chain
                 //    ticket: a ticket could later be spent on ordinary
-                //    PoW instead of the application's step-up).
+                //    PoW instead of the application's step-up). The
+                //    fresh StepUp ALSO terminalizes the OPEN obligation
+                //    (markTransactionStepUpRequired — the same durable
+                //    terminality for the transaction's lifetime).
                 if ($postSolve->action === RiskAction::StepUp) {
+                    $this->terminalizeOpenChain($requirement->chainId, PostSolveDispositionKind::StepUp);
+
                     return new PostSolveDisposition(PostSolveDispositionKind::StepUp, $decisionId);
                 }
 
@@ -1259,6 +1295,57 @@ final class KiwiCaptchaValidator extends ConstraintValidator
         // stronger-PoW requirement must NEVER silently disappear — it
         // surfaces as terminal StepUp instead.
         return new PostSolveDisposition(PostSolveDispositionKind::StepUp, $decisionId);
+    }
+
+    /**
+     * TERMINALIZE an OPEN obligation by the fresh Deny/StepUp disposition
+     * (NONCE-AGNOSTIC — the exact stage-2 nonce is NOT required): the
+     * obligation becomes TERMINAL denied/step_up_required for the rest of
+     * its lifetime, ATOMICALLY keyed by the chain/obligation identity
+     * ({@see ChainedChallengeTicketService::markTransactionDenied()} /
+     * {@see ChainedChallengeTicketService::markTransactionStepUpRequired()}
+     * — the obligation mapping is KEPT, the chainId and the original
+     * expiry preserved), so a later token of the same transaction can
+     * never re-open the chain after the transient risk condition
+     * decayed.
+     *
+     * The disposition-first ordering is preserved: this runs at the
+     * disposition-computation point of the obligation branch, the caller
+     * durably finalizes the nonce disposition BEFORE the violation is
+     * emitted ({@see resolveFinalDisposition()}), and a terminalization
+     * failure — or a refusal ('conflict'/'missing') — is fail-closed
+     * temporary_unavailable: a bare Deny/StepUp is never returned
+     * without the durable transaction terminality. The
+     * 'already_verified' outcome is the normal post-Pass anomaly (the
+     * transaction already ended via Pass — its obligation is gone): it
+     * falls through — the fresh disposition applies to the nonce alone.
+     *
+     * @throws PostSolveDispositionUnavailableException when the chain
+     *                                                 state is absent,
+     *                                                 terminal with the
+     *                                                 OTHER disposition
+     *                                                 (conflict) or the
+     *                                                 transition failed —
+     *                                                 fail closed, never a
+     *                                                 bare disposition
+     *                                                 without durable
+     *                                                 terminality
+     */
+    private function terminalizeOpenChain(string $chainId, PostSolveDispositionKind $kind): void
+    {
+        try {
+            $result = $kind === PostSolveDispositionKind::Deny
+                ? $this->chainTickets->markTransactionDenied($chainId)
+                : $this->chainTickets->markTransactionStepUpRequired($chainId);
+        } catch (\Throwable $e) {
+            throw new PostSolveDispositionUnavailableException('the chain terminalization failed', 0, $e);
+        }
+        if ($result === ChainVerifiedResult::AlreadyVerified) {
+            return;
+        }
+        if ($result === ChainVerifiedResult::Conflict || $result === ChainVerifiedResult::Missing) {
+            throw new PostSolveDispositionUnavailableException(sprintf('the chain terminalization was refused (%s)', $result->value));
+        }
     }
 
     /**

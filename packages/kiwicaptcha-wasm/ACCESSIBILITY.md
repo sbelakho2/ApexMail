@@ -73,21 +73,23 @@ manual assistive-technology qualification checklist in the release gate.
 
 ## WCAG 2.2 new criteria — disposition matrix
 
-WCAG 2.2 added nine success criteria, of which seven are new at Level AA
-(2.4.13 Focus Appearance and 3.3.9 Accessible Authentication (Enhanced)
-are Level AAA and are not required for AA conformance). The widget's
-disposition for every new WCAG 2.2 criterion applicable at Level AA that
-touches its component scope:
+WCAG 2.2 adds nine success criteria. Six are Level A or AA and therefore
+relevant to a Level AA target. Three — 2.4.12, 2.4.13 and 3.3.9 — are
+Level AAA; they appear below clearly marked as above the AA target, and
+no AAA conformance is claimed. The widget's disposition for all nine
+criteria:
 
 | WCAG 2.2 SC | Level | Disposition |
 | --- | --- | --- |
 | 2.4.11 Focus Not Obscured (Minimum) | AA | Supported — the Retry button is the only focusable component control, and the widget renders no overlapping content above it, so the focused control cannot be entirely hidden by author-created content; asserted structurally in the suite |
-| 2.4.12 Focus Not Obscured (Enhanced) | AAA | Above-AA engineering — the same structural guarantee (single focusable control, no overlapping author-created content) exceeds the AAA bar by design |
-| 2.5.7 Dragging Movements | N/A | No drag interaction exists in the widget; every action is a single click or keyboard activation, so a pointer-drag alternative is not applicable |
+| 2.4.12 Focus Not Obscured (Enhanced) | AAA (above AA target) | Above-AA engineering — the same structural guarantee (single focusable control, no overlapping author-created content) exceeds the AAA bar by design |
+| 2.4.13 Focus Appearance | AAA (above AA target) | Above-AA engineering — the Retry button's `:focus-visible` ring is a non-decorative appearance change with a computed >= 3:1 contrast against the widget surface (1.4.11 evidence above), meeting the focus-appearance bar by design |
+| 2.5.7 Dragging Movements | AA — N/A to the widget | No drag interaction exists in the widget; every action is a single click or keyboard activation, so a pointer-drag alternative is not applicable |
 | 2.5.8 Target Size Minimum | AA | Supported — the Retry button is >= 24x24 CSS px with a 32px height (an accessibility/security control has no reason to be cramped); bounding box asserted in the suite |
-| 3.2.6 Consistent Help | N/A (host-page responsibility) | KiwiCaptcha provides no help mechanism of its own; consistent placement of help is the integrating page's responsibility, not the component's |
-| 3.3.7 Redundant Entry | N/A | The widget captures no user-entered data, so nothing is ever re-requested |
+| 3.2.6 Consistent Help | A — N/A (host-page responsibility) | KiwiCaptcha provides no help mechanism of its own; consistent placement of help is the integrating page's responsibility, not the component's |
+| 3.3.7 Redundant Entry | A — N/A to the widget | The widget captures no user-entered data, so nothing is ever re-requested |
 | 3.3.8 Accessible Authentication (Minimum) | AA | Strongly satisfied structurally — the automatic computational challenge is the ONLY path, and no cognitive test is ever required. KiwiCaptcha introduces no cognitive-function test. Conformance of the complete authentication process remains the integrating application's responsibility. |
+| 3.3.9 Accessible Authentication (Enhanced) | AAA (above AA target) | Above-AA engineering — the automatic computational challenge is the ONLY path and no cognitive, visual or audio test is ever required, meeting the enhanced bar by design; conformance of the complete authentication process remains the integrating application's responsibility |
 
 The two new criteria outside the component scope (3.2.6 above is a
 host-page responsibility, not a widget capability) have no widget-level
@@ -179,16 +181,17 @@ and to the applicable standards as they mature:
 
 | EAA Annex I requirement | WCAG 2.2 AA evidence above | Kiwi test | EN 301 549 / M/587 clause |
 | --- | --- | --- | --- |
-| Perceivable (information and UI presented to all users) | 1.4.3, 1.4.1, 1.4.11, 3.1.2, live region | a11y suite: contrast, forced-colors, lang/dir, announcements | EN 301 549 9.1.x (WCAG-mapped); v4.1.0 under M/587 — voting closes 2026-08-24, publication planned 2026-08-28, OJ publication projected 2026-11-30; re-checked after publication |
-| Operable (navigation and interaction available to all users) | 2.1.1, 2.5.2, 2.5.8, 2.4.7, 2.4.11 | a11y suite: keyboard-only, pointer targets, no pointerdown | EN 301 549 9.2.x; v4.1.0 under M/587 — voting closes 2026-08-24, publication planned 2026-08-28, OJ publication projected 2026-11-30; re-checked after publication |
-| Understandable (information and operation are clear) | 3.3.8, 3.1.2 | automatic computational challenge; localized strings | EN 301 549 9.3.x; v4.1.0 under M/587 — voting closes 2026-08-24, publication planned 2026-08-28, OJ publication projected 2026-11-30; re-checked after publication |
-| Robust (compatible with assistive technology) | 4.1.2, 4.1.3 | axe semantics + role=status assertions + manual AT gate | EN 301 549 9.4.x; v4.1.0 under M/587 — voting closes 2026-08-24, publication planned 2026-08-28, OJ publication projected 2026-11-30; re-checked after publication |
+| Perceivable (information and UI presented to all users) | 1.4.3, 1.4.1, 1.4.11, 3.1.2, live region | a11y suite: contrast, forced-colors, lang/dir, announcements | EN 301 549 9.1.x (WCAG-mapped); v4.1.0 under M/587 — see the standards-status note below |
+| Operable (navigation and interaction available to all users) | 2.1.1, 2.5.2, 2.5.8, 2.4.7, 2.4.11 | a11y suite: keyboard-only, pointer targets, no pointerdown | EN 301 549 9.2.x; v4.1.0 under M/587 — see the standards-status note below |
+| Understandable (information and operation are clear) | 3.3.8, 3.1.2 | automatic computational challenge; localized strings | EN 301 549 9.3.x; v4.1.0 under M/587 — see the standards-status note below |
+| Robust (compatible with assistive technology) | 4.1.2, 4.1.3 | axe semantics + role=status assertions + manual AT gate | EN 301 549 9.4.x; v4.1.0 under M/587 — see the standards-status note below |
 
-Note: EN 301 549 v3.2.1 is currently the harmonized standard for the
-separate Web Accessibility Directive (it draws heavily from WCAG 2.1).
-The EAA standardization work (M/587) has reached its final-deliverable
-stage: the v4.1.0 vote is expected to close 2026-08-24, publication is
-planned 2026-08-28 and OJ publication is projected 2026-11-30.
-KiwiCaptcha therefore maintains the mapping above against WCAG 2.2 AA
-now, will re-check the mapping after publication, and does not bake an
-obsolete standard version into the architecture.
+**Standards-status note (as of 2026-08-20, this document's date).** EN 301
+549 v3.2.1 is currently the harmonized standard for the separate Web
+Accessibility Directive (it draws heavily from WCAG 2.1). The EAA
+standardization work (M/587) has reached its final-deliverable stage: the
+v4.1.0 vote is expected to close 2026-08-24, publication is planned
+2026-08-28 and OJ publication is projected 2026-11-30. KiwiCaptcha
+maintains the mapping above against WCAG 2.2 AA now, re-checks this note
+after publication, and does not bake an obsolete standard version into
+the architecture.

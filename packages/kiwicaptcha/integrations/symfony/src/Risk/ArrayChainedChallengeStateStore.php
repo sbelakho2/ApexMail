@@ -15,9 +15,12 @@ use KiwiCaptcha\Risk\RiskAction;
  * verified(stage2Nonce) (clears the obligation mapping only while it
  * still points at this chain), step_up_required(stage2Nonce) and
  * denied(stage2Nonce) (both KEEP the obligation mapping — the transaction
- * stays bound to its final disposition), the idempotent owner-gated
- * issuance transition (never a delete — a retry recovers the issued
- * challenge instead of re-minting), the nonce-pinned rearm (issued ->
+ * stays bound to its final disposition), TWO NONCE-AGNOSTIC TRANSACTION
+ * terminalizations (markTransactionDenied() / markTransactionStepUpRequired()
+ * terminalize an OPEN obligation WITHOUT the exact stage-2 nonce — the
+ * terminal states carry an OPTIONAL stage-2 nonce), the idempotent
+ * owner-gated issuance transition (never a delete — a retry recovers the
+ * issued challenge instead of re-minting), the nonce-pinned rearm (issued ->
  * available for a FRESH stage-2 mint — never a stage-1), the owner-gated
  * release (a non-owner release is an atomic no-op), and the DEPRECATED
  * legacy complete() writing the historical 'completed' terminal state
@@ -354,6 +357,76 @@ final class ArrayChainedChallengeStateStore implements TransactionalChainedChall
         return 'denied_new';
     }
 
+    public function markTransactionDenied(string $chainId): string
+    {
+        $record = $this->liveRecord($chainId);
+        if ($record === null) {
+            return 'missing';
+        }
+        if ($record['state'] === 'denied') {
+            return 'denied_same';
+        }
+        if ($record['state'] === 'step_up_required') {
+            return 'conflict';
+        }
+        if ($record['state'] === 'verified') {
+            return 'already_verified';
+        }
+        if (!\in_array($record['state'], ['available', 'reserved', 'issued', 'completed'], true)) {
+            return 'conflict';
+        }
+        $this->records[$chainId]['state'] = 'denied';
+        // The reservation fields are cleared (the terminal state requires
+        // owner/leaseUntil null).
+        $this->records[$chainId]['owner'] = null;
+        $this->records[$chainId]['leaseUntil'] = null;
+        // The stage2Nonce field is PRESERVED: the exact stage-2 nonce
+        // when one exists (issued/completed), null otherwise
+        // (available/reserved) — the terminal state carries an OPTIONAL
+        // stage-2 nonce.
+        // The DENIED transition KEEPS the obligation mapping: the
+        // transaction stays bound to its final denial, so a later
+        // challenge request for the same transaction re-encounters the
+        // terminal state (never a new stage-1).
+
+        return 'denied_new';
+    }
+
+    public function markTransactionStepUpRequired(string $chainId): string
+    {
+        $record = $this->liveRecord($chainId);
+        if ($record === null) {
+            return 'missing';
+        }
+        if ($record['state'] === 'step_up_required') {
+            return 'step_up_required_same';
+        }
+        if ($record['state'] === 'denied') {
+            return 'conflict';
+        }
+        if ($record['state'] === 'verified') {
+            return 'already_verified';
+        }
+        if (!\in_array($record['state'], ['available', 'reserved', 'issued', 'completed'], true)) {
+            return 'conflict';
+        }
+        $this->records[$chainId]['state'] = 'step_up_required';
+        // The reservation fields are cleared (the terminal state requires
+        // owner/leaseUntil null).
+        $this->records[$chainId]['owner'] = null;
+        $this->records[$chainId]['leaseUntil'] = null;
+        // The stage2Nonce field is PRESERVED: the exact stage-2 nonce
+        // when one exists (issued/completed), null otherwise
+        // (available/reserved) — the terminal state carries an OPTIONAL
+        // stage-2 nonce.
+        // The STEP-UP transition KEEPS the obligation mapping: the
+        // transaction stays bound to the step-up requirement, so a later
+        // challenge request for the same transaction re-encounters the
+        // terminal state (never a new stage-1).
+
+        return 'step_up_required_new';
+    }
+
     public function rearmIssued(string $chainId, string $expectedStage2Nonce): bool
     {
         $record = $this->liveRecord($chainId);
@@ -449,9 +522,12 @@ final class ArrayChainedChallengeStateStore implements TransactionalChainedChall
      * exactly 2; the exact state enum (the TERMINAL
      * step_up_required/denied states included); owner/leaseUntil REQUIRED
      * in reserved and NULL elsewhere; stage2Nonce REQUIRED with the Kiwi
-     * base64 nonce shape in issued/verified/step_up_required/denied (and
-     * the legacy completed) and NULL elsewhere; an integer expiry; a
-     * well-shaped nullable request binding.
+     * base64 nonce shape in issued/verified (and the legacy completed),
+     * OPTIONAL in the terminal step_up_required/denied states (a valid
+     * Kiwi nonce OR null — the transaction terminalizations
+     * markTransactionDenied()/markTransactionStepUpRequired() run
+     * WITHOUT the exact stage-2 nonce) and NULL elsewhere; an integer
+     * expiry; a well-shaped nullable request binding.
      *
      * @param array<string, mixed> $rec
      *
@@ -505,9 +581,21 @@ final class ArrayChainedChallengeStateStore implements TransactionalChainedChall
             throw new MalformedChainedChallengeStateException('chain record owner/leaseUntil must be null outside the reserved state');
         }
         $stage2Nonce = $rec['stage2Nonce'] ?? null;
-        if ($state === 'issued' || $state === 'verified' || $state === 'completed' || $state === 'step_up_required' || $state === 'denied') {
+        if ($state === 'issued' || $state === 'verified' || $state === 'completed') {
             if (!\is_string($stage2Nonce) || preg_match(self::NONCE_PATTERN, $stage2Nonce) !== 1) {
-                throw new MalformedChainedChallengeStateException('chain record stage2Nonce must be a Kiwi base64 nonce in the issued/terminal states');
+                throw new MalformedChainedChallengeStateException('chain record stage2Nonce must be a Kiwi base64 nonce in the issued/verified states');
+            }
+        } elseif ($state === 'step_up_required' || $state === 'denied') {
+            // The terminal states carry an OPTIONAL stage-2 nonce: the
+            // exact stage-2 nonce when the chain was issued before the
+            // terminal transition, null when the transaction was
+            // terminalized WITHOUT the exact stage-2 nonce (the
+            // NONCE-AGNOSTIC markTransactionDenied() /
+            // markTransactionStepUpRequired() terminalizations of an
+            // open obligation). A non-null value must still be a valid
+            // Kiwi nonce.
+            if ($stage2Nonce !== null && (!\is_string($stage2Nonce) || preg_match(self::NONCE_PATTERN, $stage2Nonce) !== 1)) {
+                throw new MalformedChainedChallengeStateException('chain record stage2Nonce must be a Kiwi base64 nonce or null in the terminal step_up_required/denied states');
             }
         } elseif ($stage2Nonce !== null) {
             throw new MalformedChainedChallengeStateException('chain record stage2Nonce must be null in the available/reserved states');
