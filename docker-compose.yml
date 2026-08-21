@@ -326,6 +326,11 @@ services:
     environment:
       # ── Required ──────────────────────────────────────────────────────────
       APEXMAIL_API_KEY: ${APEXMAIL_API_KEY:-dev-api-key-change-me}
+      # Comma-separated CIDRs of reverse proxies whose X-Forwarded-For may be
+      # trusted for client-IP extraction (empty = headers never trusted, which
+      # is only correct when clients connect directly; behind the nginx edge
+      # set it to the compose networks or the proxy IPs — see deploy docs).
+      DDOS_TRUSTED_PROXIES: ${DDOS_TRUSTED_PROXIES:-}
       # ── Database ──────────────────────────────────────────────────────────
       DB_HOST: postgres
       DB_PORT: 5432
