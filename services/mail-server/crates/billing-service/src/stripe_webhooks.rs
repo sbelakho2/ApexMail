@@ -1504,6 +1504,51 @@ fn next_dunning_state(
     }
 }
 
+/// A dunning lifecycle transition worth emitting an event for
+/// (audit item 3g): entering soft/hard suspension, or recovering.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DunningTransition {
+    SoftSuspended,
+    HardSuspended,
+    Recovered,
+}
+
+impl DunningTransition {
+    /// `dunning_events.event_type` value for the transition.
+    pub fn event_type(self) -> &'static str {
+        match self {
+            Self::SoftSuspended => "soft_suspended",
+            Self::HardSuspended => "hard_suspended",
+            Self::Recovered => "payment_recovered",
+        }
+    }
+}
+
+/// Pure classifier for dunning state transitions: returns `Some` only when
+/// the status actually *changes into* a suspension state (or back to
+/// healthy), so repeated `invoice.payment_failed` webhooks for a tenant
+/// that is already suspended do not spam duplicate transition events.
+/// Unit-tested.
+pub fn dunning_transition(previous: Option<&str>, new_status: &str) -> Option<DunningTransition> {
+    let previous = previous.map(str::trim).filter(|status| !status.is_empty());
+    if previous == Some(new_status) {
+        return None; // No state change.
+    }
+
+    match new_status {
+        "soft_suspended" if !matches!(previous, Some("soft_suspended" | "hard_suspended")) => {
+            Some(DunningTransition::SoftSuspended)
+        }
+        "hard_suspended" if !matches!(previous, Some("hard_suspended")) => {
+            Some(DunningTransition::HardSuspended)
+        }
+        "healthy" if matches!(previous, Some("warning" | "soft_suspended" | "hard_suspended")) => {
+            Some(DunningTransition::Recovered)
+        }
+        _ => None,
+    }
+}
+
 async fn record_failed_payment(
     state: &AppState,
     tenant_id: &str,
@@ -1553,12 +1598,18 @@ async fn record_failed_payment(
     .await
     .map_err(|error| format!("Failed to upsert dunning counters: {error}"))?;
 
-    let computed = next_dunning_state(Some(snapshot), now, &config);
+    let computed = next_dunning_state(Some(snapshot.clone()), now, &config);
     let next_retry_at = calculate_next_retry(
         computed.first_failed_at,
         computed.failed_payment_count,
         &config,
     );
+
+    // Audit item 3g — emit a distinct event when the tenant *transitions*
+    // into soft/hard suspension (not on every repeated failure), so
+    // webhook consumers and internal automations can key off the lifecycle
+    // change instead of diffing payment_failed rows.
+    let transition = dunning_transition(Some(&snapshot.status), &computed.status);
 
     sqlx::query(
         r#"
@@ -1576,13 +1627,21 @@ async fn record_failed_payment(
             INSERT INTO dunning_events (
                 id, tenant_id, event_type, invoice_id, created_at
             )
-            VALUES (gen_random_uuid(), $1, 'payment_failed', $6, NOW())
+            VALUES (gen_random_uuid(), $1, 'payment_failed', $8, NOW())
+            RETURNING tenant_id
+        ),
+        log_transition AS (
+            INSERT INTO dunning_events (
+                id, tenant_id, event_type, invoice_id, created_at
+            )
+            SELECT gen_random_uuid(), $1, $7, $8, NOW()
+            WHERE $7 IS NOT NULL
             RETURNING tenant_id
         ),
         suspend_tenant AS (
             UPDATE tenants
             SET status = 'suspended', updated_at = NOW()
-            WHERE id = $1 AND $7 = true
+            WHERE id = $1 AND $6 = true
             RETURNING id
         )
         SELECT 1
@@ -1593,11 +1652,32 @@ async fn record_failed_payment(
     .bind(next_retry_at)
     .bind(computed.suspended_at)
     .bind(computed.grace_period_ends_at)
-    .bind(invoice_id)
     .bind(computed.status == "hard_suspended")
+    .bind(transition.map(DunningTransition::event_type))
+    .bind(invoice_id)
     .execute(&mut *tx)
     .await
     .map_err(|error| format!("Failed to upsert dunning state: {error}"))?;
+
+    if let Some(transition) = transition {
+        append_audit_log(
+            &mut tx,
+            tenant_id,
+            "billing.dunning_transition",
+            "dunning_record",
+            Some(tenant_id),
+            serde_json::json!({
+                "transition": transition.event_type(),
+                "fromStatus": snapshot.status,
+                "toStatus": computed.status,
+                "invoiceId": invoice_id,
+                "failedPaymentCount": computed.failed_payment_count,
+            }),
+            now,
+        )
+        .await
+        .map_err(|error| format!("Failed to insert dunning transition audit log: {error}"))?;
+    }
 
     append_audit_log(
         &mut tx,
@@ -1620,6 +1700,24 @@ async fn record_failed_payment(
     tx.commit()
         .await
         .map_err(|error| format!("Failed to commit payment failure transaction: {error}"))?;
+
+    // Soft/hard suspension transitions notify out-of-band AFTER the state
+    // change is durably committed: the notification queue feeds the
+    // tenant-facing email/webhook fan-out, keyed off the transition.
+    if let Some(transition) = transition {
+        send_dunning_notification(
+            state,
+            tenant_id,
+            &computed.status,
+            serde_json::json!({
+                "transition": transition.event_type(),
+                "failedCount": computed.failed_payment_count,
+                "daysSinceFirstFailure": (now - computed.first_failed_at).num_days().max(0),
+                "gracePeriodEndsAt": computed.grace_period_ends_at.map(|value| value.to_rfc3339()),
+            }),
+        )
+        .await;
+    }
 
     send_dunning_notification(
         state,
@@ -2877,6 +2975,79 @@ mod tests {
     // ------------------------------------------------------------------
     // Fix H — dunning state computed from atomically-incremented counters.
     // ------------------------------------------------------------------
+
+    // ------------------------------------------------------------------
+    // Audit item 3g — suspension transitions emit distinct events.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn dunning_transition_fires_on_entering_soft_suspension() {
+        assert_eq!(
+            dunning_transition(Some("warning"), "soft_suspended"),
+            Some(DunningTransition::SoftSuspended)
+        );
+        assert_eq!(
+            dunning_transition(None, "soft_suspended"),
+            Some(DunningTransition::SoftSuspended)
+        );
+    }
+
+    #[test]
+    fn dunning_transition_fires_on_entering_hard_suspension() {
+        assert_eq!(
+            dunning_transition(Some("warning"), "hard_suspended"),
+            Some(DunningTransition::HardSuspended)
+        );
+        // Escalation soft -> hard is also a hard-suspension transition.
+        assert_eq!(
+            dunning_transition(Some("soft_suspended"), "hard_suspended"),
+            Some(DunningTransition::HardSuspended)
+        );
+    }
+
+    #[test]
+    fn dunning_transition_fires_on_recovery() {
+        assert_eq!(
+            dunning_transition(Some("hard_suspended"), "healthy"),
+            Some(DunningTransition::Recovered)
+        );
+        assert_eq!(
+            dunning_transition(Some("soft_suspended"), "healthy"),
+            Some(DunningTransition::Recovered)
+        );
+        assert_eq!(
+            dunning_transition(Some("warning"), "healthy"),
+            Some(DunningTransition::Recovered)
+        );
+    }
+
+    #[test]
+    fn dunning_transition_does_not_fire_without_state_change() {
+        // Repeated payment failures in the same state must not spam
+        // duplicate transition events.
+        assert_eq!(dunning_transition(Some("warning"), "warning"), None);
+        assert_eq!(dunning_transition(Some("soft_suspended"), "soft_suspended"), None);
+        assert_eq!(dunning_transition(Some("hard_suspended"), "hard_suspended"), None);
+        assert_eq!(dunning_transition(None, "warning"), None);
+        assert_eq!(dunning_transition(None, "healthy"), None);
+    }
+
+    #[test]
+    fn dunning_transition_de_escalation_hard_to_soft_is_not_soft_transition() {
+        // Hard -> soft is a state change but not a new suspension entry; the
+        // soft-suspension event must not fire again for an already
+        // suspended tenant.
+        assert_eq!(dunning_transition(Some("hard_suspended"), "soft_suspended"), None);
+    }
+
+    #[test]
+    fn dunning_transition_event_types_are_snake_case_rows() {
+        // Values must match the dunning_events.event_type conventions
+        // already used by the payment_recovered path (mark_payment_recovered).
+        assert_eq!(DunningTransition::SoftSuspended.event_type(), "soft_suspended");
+        assert_eq!(DunningTransition::HardSuspended.event_type(), "hard_suspended");
+        assert_eq!(DunningTransition::Recovered.event_type(), "payment_recovered");
+    }
 
     #[test]
     fn dunning_state_first_failure_is_warning() {

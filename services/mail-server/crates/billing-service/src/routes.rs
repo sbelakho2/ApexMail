@@ -5,6 +5,9 @@
 //! GET /plans/:name – get plan by name
 //! GET /usage – usage summary for current period
 //! POST /usage/record – record a metering event
+//! POST /usage/ingest – batch metering ingest (edge/worker, service auth)
+//! GET /usage/reconciliation – reserved-vs-delivered reports
+//! GET /proration/preview/:planName – proration preview (deployed config)
 //! GET /invoices – list invoices (paginated)
 //! GET /invoices/:id – get invoice by ID
 //! GET /subscription – get active subscription
@@ -26,7 +29,6 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-#[cfg(test)]
 use billing_common::proration;
 use chrono::Datelike;
 use serde::{Deserialize, Serialize};
@@ -35,14 +37,11 @@ use tower_http::timeout::TimeoutLayer;
 use uuid::Uuid;
 
 use crate::{
-    config::{PaygCalculationError, PaygPricing},
+    config::{BillingConfig, PaygCalculationError, PaygPricing},
     invoices, plans, subscriptions,
     types::{BillingInterval, MeterEventType, Plan, PlanFeatures, SupportLevel},
-    usage, AppState,
+    usage, usage_ingest, AppState,
 };
-
-#[cfg(test)]
-use crate::config::BillingConfig;
 
 /// Build the full Axum router for billing.
 pub fn router(state: Arc<AppState>) -> Router {
@@ -64,6 +63,10 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/overage/estimate", post(estimate_overage_cost))
         .route("/switch-plan", post(switch_plan))
         .route("/cancel", post(cancel_subscription_request))
+        .route(
+            "/proration/preview/:planName",
+            get(preview_proration_for_tenant),
+        )
         .route("/reports/revenue", get(get_revenue_report))
         .route("/reports/mrr", get(get_mrr_report))
         .route("/reports/churn", get(get_churn_report))
@@ -74,6 +77,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/usage", get(get_usage))
         .route("/usage/record", post(record_usage))
         .route("/usage/record-checked", post(record_usage_checked))
+        .route("/usage/ingest", post(ingest_usage))
+        .route("/usage/reconciliation", get(get_reconciliation_reports))
         // Invoices
         .route("/invoices", get(list_invoices))
         .route("/invoices/:id", get(get_invoice))
@@ -708,7 +713,9 @@ struct LegacyOverageEstimateBody {
     tenant_id: Option<String>,
 }
 
-fn cents_to_usd_string(cents: i64) -> String {
+/// Money display formatting — the only float-tolerated line in the crate's
+/// money surface (see the money_invariants gate, audit item 4).
+pub(crate) fn cents_to_usd_string(cents: i64) -> String {
     format!("${:.2}", cents as f64 / 100.0)
 }
 
@@ -824,6 +831,16 @@ async fn estimate_payg_cost(
     .into_response())
 }
 
+/// Fix I13 companion (pure, unit-tested) — the effective email limit for an
+/// overage estimate. A server-resolved plan limit (including `-1` =
+/// unlimited) always overrides the client-supplied value; without a plan
+/// row (legacy callers that send no tenant) the validated client value
+/// stands. The client value must already be non-negative — enforced by
+/// `validate_non_negative` before this runs.
+fn resolve_overage_email_limit(client_limit: i64, server_limit: Option<i64>) -> i64 {
+    server_limit.unwrap_or(client_limit)
+}
+
 async fn estimate_overage_cost(
     State(state): State<Arc<AppState>>,
     Extension(scope): Extension<TenantAuthScope>,
@@ -837,30 +854,31 @@ async fn estimate_overage_cost(
     // Fix I13 — a negative client-supplied limit used to be passed straight
     // into calculate_overage_cost, where negative means "unlimited". Reject
     // it, and recompute the limit server-side when a tenant is named.
-    let email_limit = match validate_non_negative(body.email_limit, "emailLimit") {
+    let client_email_limit = match validate_non_negative(body.email_limit, "emailLimit") {
         Ok(value) => value as i64,
         Err(response) => return Ok(response),
     };
 
     let mut tenant_access_denied: Option<Response> = None;
-    let email_limit = match body.tenant_id.as_deref() {
+    let server_limit = match body.tenant_id.as_deref() {
         Some(tenant_id) => {
             if let Err(response) = check_tenant_access(&scope, tenant_id) {
                 tenant_access_denied = Some(response);
-                email_limit
+                None
             } else {
-                match plans::get_plan_for_tenant(&state.db, tenant_id).await? {
-                    Some(plan) => plan.email_limit,
-                    None => email_limit,
-                }
+                plans::get_plan_for_tenant(&state.db, tenant_id)
+                    .await?
+                    .map(|plan| plan.email_limit)
             }
         }
-        None => email_limit,
+        None => None,
     };
 
     if let Some(response) = tenant_access_denied {
         return Ok(response);
     }
+
+    let email_limit = resolve_overage_email_limit(client_email_limit, server_limit);
 
     // Fix I10 — overage pricing comes from BillingConfig instead of the
     // hardcoded 4/100 in plans.rs (default stays 40 millicents/email).
@@ -918,7 +936,6 @@ async fn get_payg_usage(
     .into_response())
 }
 
-#[cfg(test)]
 #[derive(Debug, Clone)]
 struct RouteSubscription {
     billing_interval: BillingInterval,
@@ -926,7 +943,6 @@ struct RouteSubscription {
     current_period_end: chrono::DateTime<chrono::Utc>,
 }
 
-#[cfg(test)]
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct LegacyProrationDto {
@@ -964,7 +980,10 @@ fn default_billing_interval() -> BillingInterval {
 
 // Replaced by billing_common::proration::{prorated_amount, ceil_day_count}
 
-#[cfg(test)]
+/// Compute a proration preview against an explicit config. The api-server
+/// legacy route used to run this with `BillingConfig::default()` (audit
+/// item 3a); the billing-service route below forwards the *deployed*
+/// config it already holds in `AppState`.
 fn preview_plan_proration(
     config: &BillingConfig,
     current_plan: &Plan,
@@ -1052,6 +1071,128 @@ fn preview_plan_proration(
 }
 
 // Replaced by billing_common::proration::build_proration_explanation
+
+// ---------------------------------------------------------------------------
+// Proration preview (deployed-config aware — audit item 3a)
+// ---------------------------------------------------------------------------
+
+/// Subscription shape loaded from `stripe_subscriptions` (migration 071
+/// columns) for the proration preview.
+#[derive(sqlx::FromRow)]
+struct ProrationSubscriptionRow {
+    billing_interval: Option<String>,
+    billing_cycle_start: Option<chrono::DateTime<chrono::Utc>>,
+    billing_cycle_end: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProrationPreviewQuery {
+    tenant_id: String,
+    /// Overrides the subscription's stored interval (defaults to monthly
+    /// when neither is available).
+    #[serde(default)]
+    billing_interval: Option<BillingInterval>,
+}
+
+/// GET/POST /proration/preview/:planName?tenant_id=...
+///
+/// Unlike the legacy api-server route that computed the preview with
+/// `BillingConfig::default()`, this handler uses the deployed
+/// configuration the billing service already holds (`state.config`), so
+/// the proration charge/credit/warn thresholds match production limits.
+async fn preview_proration_for_tenant(
+    State(state): State<Arc<AppState>>,
+    Extension(scope): Extension<TenantAuthScope>,
+    Path(plan_name): Path<String>,
+    Query(q): Query<ProrationPreviewQuery>,
+) -> Result<Response, ApiError> {
+    if let Err(response) = check_tenant_access(&scope, &q.tenant_id) {
+        return Ok(response);
+    }
+
+    let subscription = sqlx::query_as::<_, ProrationSubscriptionRow>(
+        r#"
+        SELECT billing_interval, billing_cycle_start, billing_cycle_end
+        FROM stripe_subscriptions
+        WHERE tenant_id = $1
+          AND status IN ('active', 'trialing', 'past_due')
+        ORDER BY created_at DESC
+        LIMIT 1
+        "#,
+    )
+    .bind(&q.tenant_id)
+    .fetch_optional(&state.db)
+    .await?;
+
+    let Some(subscription) = subscription else {
+        return Ok(error_response(
+            StatusCode::BAD_REQUEST,
+            ErrorCode::ValidationError,
+            "Cannot change plans: subscription status is unknown, must be 'active'",
+        ));
+    };
+
+    let Some(period_start) = subscription.billing_cycle_start else {
+        return Ok(error_response(
+            StatusCode::CONFLICT,
+            ErrorCode::ValidationError,
+            "Subscription billing cycle is unknown; cannot preview proration",
+        ));
+    };
+    let period_end = subscription
+        .billing_cycle_end
+        .unwrap_or_else(|| period_start + chrono::Months::new(1));
+
+    let interval = q.billing_interval.unwrap_or(match subscription.billing_interval.as_deref() {
+        Some("yearly") => BillingInterval::Yearly,
+        _ => BillingInterval::Monthly,
+    });
+
+    let current_plan = match plans::get_plan_for_tenant(&state.db, &q.tenant_id).await? {
+        Some(plan) => Some(plan),
+        // No tenant-plan row (e.g. pre-migration tenant): fall back to the
+        // free plan so the preview can still compute.
+        None => plans::get_plan_by_name(&state.db, "free").await.unwrap_or(None),
+    };
+    let Some(current_plan) = current_plan else {
+        return Ok(error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            ErrorCode::InternalError,
+            "Current plan could not be resolved",
+        ));
+    };
+
+    let Some(new_plan) = plans::get_plan_by_name(&state.db, &plan_name).await? else {
+        return Ok(error_response(
+            StatusCode::NOT_FOUND,
+            ErrorCode::NotFound,
+            "New plan not found",
+        ));
+    };
+
+    let route_subscription = RouteSubscription {
+        billing_interval: interval,
+        current_period_start: period_start,
+        current_period_end: period_end,
+    };
+
+    match preview_plan_proration(&state.config, &current_plan, &new_plan, &route_subscription) {
+        Ok(preview) => {
+            let body = serde_json::to_value(preview).map_err(|error| {
+                ApiError::Plans(sqlx::Error::Protocol(format!(
+                    "proration preview serialization failed: {error}"
+                )))
+            })?;
+            Ok(Json(body).into_response())
+        }
+        Err(error) => Ok(error_response(
+            StatusCode::BAD_REQUEST,
+            ErrorCode::ValidationError,
+            error,
+        )),
+    }
+}
 
 /// Generate a 26-character identifier matching the VARCHAR(26) primary-key
 /// convention used by tenants/audit/dunning tables (migration 064/087/093).
@@ -1861,6 +2002,120 @@ async fn record_usage_checked(
         .into_response())
 }
 
+/// POST /usage/ingest — batch metering ingest for the edge/worker.
+///
+/// Service-authenticated (like every route on this router). Intended for
+/// event types with no derivable platform source table — notably
+/// `api_calls`: the api-server request middleware should POST one event
+/// (or a micro-batch) per request with a deterministic `eventId` for
+/// idempotency.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct IngestUsageBody {
+    events: Vec<usage_ingest::IngestEvent>,
+}
+
+async fn ingest_usage(
+    State(state): State<Arc<AppState>>,
+    Extension(scope): Extension<TenantAuthScope>,
+    Json(body): Json<IngestUsageBody>,
+) -> Result<Response, ApiError> {
+    if body.events.len() > usage_ingest::INGEST_BATCH_LIMIT {
+        return Ok(error_response(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            ErrorCode::ValidationError,
+            format!(
+                "batch exceeds {} events; split into smaller batches",
+                usage_ingest::INGEST_BATCH_LIMIT
+            ),
+        ));
+    }
+
+    // Tenant scoping: a non-service caller may only ingest for tenants it
+    // can access; service tokens (scope = service) pass through.
+    for event in &body.events {
+        if let Err(response) = check_tenant_access(&scope, &event.tenant_id) {
+            return Ok(response);
+        }
+    }
+
+    let result = usage_ingest::ingest_usage_batch(&state.db, &state.redis, &body.events).await;
+    let status = if result.rejected == 0 {
+        StatusCode::OK
+    } else if result.accepted == 0 && result.duplicates == 0 {
+        StatusCode::UNPROCESSABLE_ENTITY
+    } else {
+        StatusCode::MULTI_STATUS
+    };
+    let body = serde_json::to_value(&result).map_err(|error| {
+        ApiError::Plans(sqlx::Error::Protocol(format!(
+            "ingest result serialization failed: {error}"
+        )))
+    })?;
+    Ok((status, Json(body)).into_response())
+}
+
+/// GET /usage/reconciliation?tenant_id=...&limit=...
+/// Lists the daily reserved-vs-delivered reconciliation reports
+/// (migration 104) for manual review of overage candidates.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReconciliationQuery {
+    tenant_id: String,
+    #[serde(default = "default_limit")]
+    limit: i64,
+    #[serde(default)]
+    only_candidates: bool,
+}
+
+async fn get_reconciliation_reports(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<ReconciliationQuery>,
+    Extension(scope): Extension<TenantAuthScope>,
+) -> Result<Response, ApiError> {
+    if let Err(response) = check_tenant_access(&scope, &q.tenant_id) {
+        return Ok(response);
+    }
+
+    #[derive(sqlx::FromRow, serde::Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct ReconciliationReportRow {
+        id: Uuid,
+        tenant_id: String,
+        period_start: chrono::NaiveDate,
+        period_end: chrono::NaiveDate,
+        reserved_emails: i64,
+        delivered_emails: i64,
+        bounced_emails: i64,
+        complained_emails: i64,
+        unaccounted_emails: i64,
+        overage_candidate: bool,
+        status: String,
+        details: serde_json::Value,
+        created_at: chrono::DateTime<chrono::Utc>,
+    }
+
+    let reports: Vec<ReconciliationReportRow> = sqlx::query_as(
+        r#"
+        SELECT id, tenant_id, period_start, period_end,
+               reserved_emails, delivered_emails, bounced_emails, complained_emails,
+               unaccounted_emails, overage_candidate, status, details, created_at
+        FROM billing_reconciliation_reports
+        WHERE tenant_id = $1
+          AND ($3 = false OR overage_candidate = true)
+        ORDER BY period_start DESC
+        LIMIT $2
+        "#,
+    )
+    .bind(&q.tenant_id)
+    .bind(clamp_limit(q.limit, 200))
+    .bind(q.only_candidates)
+    .fetch_all(&state.db)
+    .await?;
+
+    Ok(Json(serde_json::json!({ "reports": reports })).into_response())
+}
+
 /// Query params for invoice listing.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -2505,18 +2760,21 @@ mod tests {
 
     #[test]
     fn legacy_payg_cost_matches_ts_contract() {
+        // Audit item 3b: millicents now round HALF-UP to cents (the legacy
+        // TS/Node implementation truncated). 5 emails = 500 millicents =
+        // exactly half a cent → 1 cent.
         let payload = serde_json::to_value(
             legacy_payg_cost(&PaygPricing::default(), 5, 101_000)
                 .expect("PAYG cost contract input should calculate"),
         )
         .expect("PAYG cost payload should serialize");
 
-        assert_eq!(payload["emailCostCents"], serde_json::json!(0));
+        assert_eq!(payload["emailCostCents"], serde_json::json!(1));
         assert_eq!(payload["apiCostCents"], serde_json::json!(10));
-        assert_eq!(payload["totalCostCents"], serde_json::json!(10));
-        assert_eq!(payload["emailCostUsd"], serde_json::json!("$0.00"));
+        assert_eq!(payload["totalCostCents"], serde_json::json!(11));
+        assert_eq!(payload["emailCostUsd"], serde_json::json!("$0.01"));
         assert_eq!(payload["apiCostUsd"], serde_json::json!("$0.10"));
-        assert_eq!(payload["totalCostUsd"], serde_json::json!("$0.10"));
+        assert_eq!(payload["totalCostUsd"], serde_json::json!("$0.11"));
     }
 
     #[test]
@@ -2755,5 +3013,155 @@ mod tests {
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert_eq!(json["error"]["code"], "VALIDATION_ERROR");
         assert_eq!(json["error"]["message"], "emailLimit must be non-negative");
+    }
+
+    #[tokio::test]
+    async fn overage_estimate_rejects_negative_emails_sent() {
+        let response =
+            validate_non_negative(-5, "emailsSent").expect_err("negative sent must fail");
+        let (status, json) = response_json(response).await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(json["error"]["message"], "emailsSent must be non-negative");
+    }
+
+    // ------------------------------------------------------------------
+    // Audit item 3c — server-side limit recomputation.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn overage_limit_server_side_recompute_overrides_client() {
+        // Client claims a 30 000 limit; the tenant's resolved plan says
+        // 250 000 — the server value must win so overage is not overstated.
+        let limit = resolve_overage_email_limit(30_000, Some(250_000));
+        assert_eq!(limit, 250_000);
+
+        let cost = plans::calculate_overage_cost_with_rate(40_000, limit, 40);
+        assert_eq!(cost, 0, "40k sent under a 250k plan limit has no overage");
+
+        // …while trusting the client-supplied limit would have charged for
+        // 10k phantom overage emails:
+        let client_cost = plans::calculate_overage_cost_with_rate(40_000, 30_000, 40);
+        assert_eq!(client_cost, 400);
+    }
+
+    #[test]
+    fn overage_limit_falls_back_to_client_without_plan_row() {
+        // Legacy caller with no tenant_id (and no plan row): the validated
+        // client value stands.
+        assert_eq!(resolve_overage_email_limit(30_000, None), 30_000);
+    }
+
+    #[test]
+    fn overage_limit_server_side_unlimited_plan_means_zero_overage() {
+        // A server-resolved unlimited plan (-1) must zero the overage even
+        // when the client claimed a small limit.
+        let limit = resolve_overage_email_limit(30_000, Some(-1));
+        assert_eq!(plans::calculate_overage_cost_with_rate(1_000_000, limit, 40), 0);
+    }
+
+    #[test]
+    fn overage_limit_server_side_recompute_uses_configured_rate() {
+        // The recomputed-limit path charges with the DEPLOYED rate, not the
+        // hardcoded default: 1 000 overage emails at 80 millicents = 80 cents.
+        let limit = resolve_overage_email_limit(10_000, Some(30_000));
+        let cost = plans::calculate_overage_cost_with_rate(31_000, limit, 80);
+        assert_eq!(cost, 80);
+    }
+
+    // ------------------------------------------------------------------
+    // Audit item 3a — proration preview must honor the deployed config.
+    // ------------------------------------------------------------------
+
+    fn sample_proration_inputs() -> (Plan, Plan, RouteSubscription) {
+        let now = chrono::Utc::now();
+        let current_plan = Plan {
+            id: Uuid::new_v4(),
+            name: "starter".into(),
+            display_name: "Starter".into(),
+            description: String::new(),
+            price_monthly: 1_000,
+            price_yearly: 10_000,
+            email_limit: 30_000,
+            api_call_limit: 300_000,
+            features: PlanFeatures::default(),
+            stripe_price_id_monthly: None,
+            stripe_price_id_yearly: None,
+            is_active: true,
+            sort_order: 0,
+            created_at: now,
+            updated_at: now,
+        };
+        let mut expensive_plan = current_plan.clone();
+        expensive_plan.name = "enterprise".into();
+        expensive_plan.display_name = "Enterprise".into();
+        expensive_plan.price_monthly = 100_000;
+
+        // Mid-period monthly subscription: 15 of 30 days remaining.
+        let subscription = RouteSubscription {
+            billing_interval: BillingInterval::Monthly,
+            current_period_start: now - chrono::Duration::days(15),
+            current_period_end: now + chrono::Duration::days(15),
+        };
+        (current_plan, expensive_plan, subscription)
+    }
+
+    #[test]
+    fn proration_preview_uses_deployed_config_thresholds() {
+        let (current_plan, new_plan, subscription) = sample_proration_inputs();
+
+        // A deployed config with a tiny charge cap must reject what the
+        // default config would happily preview — proving the config is
+        // forwarded, not defaulted (audit item 3a).
+        let tight_config = BillingConfig {
+            max_proration_charge_cents: 1_000,
+            ..BillingConfig::default()
+        };
+        let error = preview_plan_proration(&tight_config, &current_plan, &new_plan, &subscription)
+            .expect_err("49 500-cent net charge exceeds the 1 000-cent deployed cap");
+        assert!(error.contains("exceeds maximum allowed"));
+
+        // The default cap (100 000) accepts the same preview.
+        let preview =
+            preview_plan_proration(&BillingConfig::default(), &current_plan, &new_plan, &subscription)
+                .expect("default caps accept the preview");
+        assert_eq!(preview.net_amount, 49_500);
+    }
+
+    #[test]
+    fn proration_preview_deployed_warn_threshold_emits_warning() {
+        let (current_plan, new_plan, subscription) = sample_proration_inputs();
+
+        let config = BillingConfig {
+            warn_proration_charge_cents: 10_000,
+            ..BillingConfig::default()
+        };
+        let preview = preview_plan_proration(&config, &current_plan, &new_plan, &subscription)
+            .expect("preview must calculate");
+        let warnings = preview.warnings.expect("49 500 > 10 000 warn threshold");
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("$495.00"));
+
+        // Default warn threshold (25 000) also fires for this size.
+        let preview =
+            preview_plan_proration(&BillingConfig::default(), &current_plan, &new_plan, &subscription)
+                .expect("preview must calculate");
+        assert!(preview.warnings.is_some());
+    }
+
+    #[test]
+    fn proration_preview_deployed_credit_cap_rejects_large_downgrades() {
+        let (current_plan, _new_plan, subscription) = sample_proration_inputs();
+        let mut cheap_plan = current_plan.clone();
+        cheap_plan.name = "free".into();
+        cheap_plan.price_monthly = 0;
+
+        let config = BillingConfig {
+            max_proration_credit_cents: 100,
+            ..BillingConfig::default()
+        };
+        let error = preview_plan_proration(&config, &current_plan, &cheap_plan, &subscription)
+            .expect_err("500-cent credit exceeds the 100-cent deployed cap");
+        assert!(error.contains("credit exceeds maximum allowed"));
     }
 }

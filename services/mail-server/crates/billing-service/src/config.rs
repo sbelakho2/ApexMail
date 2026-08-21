@@ -186,7 +186,11 @@ impl PaygPricing {
             .checked_mul(api_unit_price)
             .ok_or(PaygCalculationError::CostOverflow)?;
 
-        let email_cost_cents = email_cost_millicents / 1000;
+        // Money invariant: millicents → cents rounds half-up, consistent
+        // with every other money decision (VAT `round_vat`, proration,
+        // overage). The old truncating `/ 1000` systematically undercharged
+        // by up to 0.9 cents per invoice.
+        let email_cost_cents = (email_cost_millicents + 500) / 1000;
         let total = email_cost_cents
             .checked_add(api_cost_cents)
             .ok_or(PaygCalculationError::CostOverflow)?;
@@ -258,6 +262,10 @@ mod tests {
     fn payg_legacy_monthly_rounding_contract() {
         let pricing = PaygPricing::default();
 
+        // Audit item 3b — millicents now round HALF-UP to cents (the old
+        // contract truncated). 1 email = 100 millicents → 0.1 cents → 0;
+        // 4 emails = 400 → 0; 5 emails = 500 millicents = exactly half a
+        // cent → rounds UP to 1 cent.
         let (email, api, total) = pricing
             .calculate(1, 0)
             .expect("single email must calculate");
@@ -272,14 +280,71 @@ mod tests {
         let (email, _, total) = pricing
             .calculate(5, 0)
             .expect("threshold usage must calculate");
-        assert_eq!(email, 0);
-        assert_eq!(total, 0);
+        assert_eq!(email, 1, "exactly half a cent must round up");
+        assert_eq!(total, 1);
 
+        // 10 001 emails: 10 000×100 + 1×80 = 1 000 080 millicents →
+        // 1000.08 cents → 1000 cents (fractional part < half).
         let (email, _, total) = pricing
             .calculate(10_001, 0)
             .expect("cross-tier usage must calculate");
         assert_eq!(email, 1000);
         assert_eq!(total, 1000);
+    }
+
+    #[test]
+    fn payg_millicents_round_half_up_exact_halves() {
+        let pricing = PaygPricing {
+            email_tiers: vec![PaygEmailTier {
+                up_to: u64::MAX,
+                price_per_email_millicents: 500,
+            }],
+            free_api_calls_per_month: 0,
+            price_per_thousand_api_calls: 0,
+        };
+
+        // Exactly half a cent rounds up…
+        let (email, _, _) = pricing.calculate(1, 0).expect("calculate");
+        assert_eq!(email, 1);
+        // …and just below half rounds down.
+        let pricing = PaygPricing {
+            email_tiers: vec![PaygEmailTier {
+                up_to: u64::MAX,
+                price_per_email_millicents: 499,
+            }],
+            free_api_calls_per_month: 0,
+            price_per_thousand_api_calls: 0,
+        };
+        let (email, _, _) = pricing.calculate(1, 0).expect("calculate");
+        assert_eq!(email, 0);
+    }
+
+    #[test]
+    fn payg_email_cost_never_differs_from_reference_by_more_than_half_cent() {
+        // Reference: exact rational total in millicents; the cents result
+        // must be within one half-up rounding step of it.
+        let pricing = PaygPricing::default();
+        for emails in [0_u64, 1, 2, 3, 7, 999, 10_000, 10_001, 123_457, 999_999] {
+            let (email_cost_cents, _, _) = pricing.calculate(emails, 0).expect("calculate");
+            let exact_millicents: i128 = match emails {
+                0..=10_000 => i128::from(emails) * 100,
+                _ => {
+                    let first = 10_000_i128 * 100;
+                    let second_tier = (i128::from(emails) - 10_000).min(90_000) * 80;
+                    let third_tier =
+                        ((i128::from(emails) - 100_000).max(0)).min(900_000) * 50;
+                    let fourth_tier = (i128::from(emails) - 1_000_000).max(0) * 30;
+                    first + second_tier + third_tier + fourth_tier
+                }
+            };
+            let exact_cents_times_1000 = exact_millicents;
+            let actual_times_1000 = i128::from(email_cost_cents) * 1000;
+            let diff = (actual_times_1000 - exact_cents_times_1000).abs();
+            assert!(
+                diff < 1000,
+                "emails={emails}: cents={email_cost_cents} differs from exact millicents {exact_millicents}"
+            );
+        }
     }
 
     #[test]

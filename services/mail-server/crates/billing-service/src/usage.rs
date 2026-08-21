@@ -881,6 +881,12 @@ pub struct QuotaRecordResult {
 }
 
 fn event_type_to_str(et: MeterEventType) -> &'static str {
+    meter_event_type_str(et)
+}
+
+/// Public re-export of the wire string for a metering event type (used by
+/// the ingest API error paths and external callers).
+pub fn meter_event_type_str(et: MeterEventType) -> &'static str {
     match et {
         MeterEventType::EmailsSent => "emails_sent",
         MeterEventType::EmailsDelivered => "emails_delivered",

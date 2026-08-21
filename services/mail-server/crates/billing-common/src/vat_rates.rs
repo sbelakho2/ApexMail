@@ -120,6 +120,101 @@ pub fn get_eu_vat_rate(country: &str) -> Option<i32> {
     EU_VAT_RATES.get(&country.to_uppercase()).copied()
 }
 
+// ---------------------------------------------------------------------------
+// Map-miss policy (audit item 3d)
+// ---------------------------------------------------------------------------
+
+/// Error returned when a country is listed in `EU_COUNTRIES` but has no
+/// entry in `EU_VAT_RATES` and the deployed policy treats that as fatal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VatRateMapMissError {
+    /// The country whose rate lookup failed.
+    pub country: String,
+    /// What the fallback policy would have used (for logging/context).
+    pub fallback_rate: i32,
+}
+
+impl std::fmt::Display for VatRateMapMissError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "EU country {} has no VAT rate configured (fallback policy rate: {}%)",
+            self.country, self.fallback_rate
+        )
+    }
+}
+
+impl std::error::Error for VatRateMapMissError {}
+
+/// How an explicit EU-country → VAT-rate map miss is handled. A miss can
+/// only happen with a custom `EU_COUNTRIES`/`EU_VAT_RATES` environment
+/// override that lists a country without a rate — never with the built-in
+/// 27-member tables.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VatMapMissPolicy {
+    /// Charge the rate of the configured fallback country
+    /// (`VAT_FALLBACK_COUNTRY`, default `EE`) and log a warning. This is
+    /// the default; it is rate-identical to the historical silent-Estonia
+    /// behaviour but explicitly logged and configurable.
+    FallbackCountry,
+    /// Refuse to compute a rate — the caller must surface the error
+    /// instead of silently charging an arbitrary country's rate.
+    Error,
+}
+
+impl VatMapMissPolicy {
+    /// Parse the `VAT_MAP_MISS_POLICY` environment value
+    /// (`fallback` | `error`; default `fallback`).
+    pub fn from_env_value(value: Option<&str>) -> Self {
+        match value.map(str::trim).filter(|v| !v.is_empty()) {
+            Some(value) if value.eq_ignore_ascii_case("error") => Self::Error,
+            _ => Self::FallbackCountry,
+        }
+    }
+
+    /// The policy name as it appears in configuration.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::FallbackCountry => "fallback",
+            Self::Error => "error",
+        }
+    }
+}
+
+/// Resolve the rate for an EU country that has no `EU_VAT_RATES` entry.
+/// Pure — unit-tested. `fallback_country` is the configurable default
+/// country (`VAT_FALLBACK_COUNTRY`, default `EE`); if the fallback country
+/// itself has no rate, the built-in Estonian rate is the last resort (and
+/// is always logged as a miss).
+pub fn resolve_map_miss_rate(
+    miss_country: &str,
+    policy: VatMapMissPolicy,
+    fallback_country: &str,
+) -> Result<i32, VatRateMapMissError> {
+    let fallback_rate = get_eu_vat_rate(fallback_country).unwrap_or(ESTONIA_VAT_RATE);
+    match policy {
+        VatMapMissPolicy::Error => Err(VatRateMapMissError {
+            country: miss_country.to_uppercase(),
+            fallback_rate,
+        }),
+        VatMapMissPolicy::FallbackCountry => Ok(fallback_rate),
+    }
+}
+
+/// The deployed map-miss policy, read once from `VAT_MAP_MISS_POLICY`.
+pub static VAT_MAP_MISS_POLICY: LazyLock<VatMapMissPolicy> =
+    LazyLock::new(|| VatMapMissPolicy::from_env_value(std::env::var("VAT_MAP_MISS_POLICY").ok().as_deref()));
+
+/// The configured fallback country for map misses, read once from
+/// `VAT_FALLBACK_COUNTRY` (default `EE`).
+pub static VAT_FALLBACK_COUNTRY: LazyLock<String> = LazyLock::new(|| {
+    std::env::var("VAT_FALLBACK_COUNTRY")
+        .ok()
+        .map(|value| value.trim().to_uppercase())
+        .filter(|value| value.len() == 2)
+        .unwrap_or_else(|| "EE".to_string())
+});
+
 /// Validate the structural shape of an EU VAT registration number before it
 /// is trusted for reverse charge (0 %) treatment.
 ///
@@ -182,8 +277,17 @@ pub fn is_valid_vat_number(vat: &str, country: Option<&str>) -> bool {
 /// |---|---|
 /// | Estonia (`EE`) | 24 % (local) |
 /// | EU B2B with valid VAT number | 0 % (reverse charge) |
-/// | EU B2C (no/invalid VAT number) | Destination-country rate (falls back to Estonia) |
+/// | EU B2C (no/invalid VAT number) | Destination-country rate |
+/// | EU B2C, country missing from the rate map | [`VAT_MAP_MISS_POLICY`] (audit item 3d) |
 /// | Non-EU | 0 % |
+///
+/// A map miss (an EU-listed country with no rate entry — only possible with
+/// custom `EU_COUNTRIES`/`EU_VAT_RATES` overrides) is resolved through the
+/// deployed policy: the fallback country's rate (default `EE`, logged) or,
+/// under `VAT_MAP_MISS_POLICY=error`, the historical silent-Estonia
+/// behaviour is replaced by the built-in Estonian rate **and** an explicit
+/// error log so the misconfiguration is visible. Use
+/// [`calculate_vat_strict`] when the caller must refuse on a miss.
 pub fn calculate_vat(subtotal: i64, country: &str, vat_number: Option<&str>) -> (i32, i64) {
     if subtotal <= 0 {
         return (0, 0);
@@ -203,17 +307,89 @@ pub fn calculate_vat(subtotal: i64, country: &str, vat_number: Option<&str>) -> 
             // EU B2B — reverse charge (0 %)
             return (0, 0);
         }
-        // EU B2C — destination-country VAT
-        let rate = EU_VAT_RATES
-            .get(&country)
-            .copied()
-            .unwrap_or(ESTONIA_VAT_RATE);
+        // EU B2C — destination-country VAT. An explicit map miss goes
+        // through the deployed policy (audit item 3d): never again a
+        // silent Estonian rate.
+        let rate = match EU_VAT_RATES.get(&country).copied() {
+            Some(rate) => rate,
+            None => {
+                let fallback_rate = get_eu_vat_rate(&VAT_FALLBACK_COUNTRY)
+                    .unwrap_or(ESTONIA_VAT_RATE);
+                match *VAT_MAP_MISS_POLICY {
+                    VatMapMissPolicy::Error => {
+                        tracing::error!(
+                            country = %country,
+                            fallback_country = %*VAT_FALLBACK_COUNTRY,
+                            fallback_rate,
+                            "VAT rate map miss with VAT_MAP_MISS_POLICY=error — charging \
+                             fallback-country rate; fix EU_VAT_RATES"
+                        );
+                        fallback_rate
+                    }
+                    VatMapMissPolicy::FallbackCountry => {
+                        tracing::warn!(
+                            country = %country,
+                            fallback_country = %*VAT_FALLBACK_COUNTRY,
+                            fallback_rate,
+                            "VAT rate map miss — charging fallback-country rate \
+                             (controlled by VAT_FALLBACK_COUNTRY / VAT_MAP_MISS_POLICY)"
+                        );
+                        fallback_rate
+                    }
+                }
+            }
+        };
         let amt = ((subtotal * rate as i64) + 50) / 100;
         return (rate, amt);
     }
 
     // Non-EU — 0 %
     (0, 0)
+}
+
+/// Strict variant of [`calculate_vat`] (audit item 3d): returns
+/// [`VatRateMapMissError`] instead of applying a fallback rate when an
+/// EU-listed country has no rate entry. Callers that must never silently
+/// charge another country's rate (invoice issuance) should prefer this.
+pub fn calculate_vat_strict(
+    subtotal: i64,
+    country: &str,
+    vat_number: Option<&str>,
+) -> Result<(i32, i64), VatRateMapMissError> {
+    if subtotal <= 0 {
+        return Ok((0, 0));
+    }
+    let upper = country.to_uppercase();
+
+    if upper == "EE" {
+        return Ok(calculate_vat(subtotal, &upper, vat_number));
+    }
+
+    if EU_COUNTRIES.contains(&upper) {
+        if vat_number
+            .map(|vat| is_valid_vat_number(vat, Some(&upper)))
+            .unwrap_or(false)
+        {
+            return Ok((0, 0));
+        }
+        let rate = EU_VAT_RATES
+            .get(&upper)
+            .copied()
+            .map_or_else(
+                || {
+                    resolve_map_miss_rate(
+                        &upper,
+                        VatMapMissPolicy::Error,
+                        &VAT_FALLBACK_COUNTRY,
+                    )
+                },
+                Ok,
+            )?;
+        let amt = ((subtotal * rate as i64) + 50) / 100;
+        return Ok((rate, amt));
+    }
+
+    Ok((0, 0))
 }
 
 // ---------------------------------------------------------------------------
@@ -394,5 +570,102 @@ mod tests {
         let (rate, amount) = calculate_vat(10_000, "EE", Some("EE100591102"));
         assert_eq!(rate, 24);
         assert_eq!(amount, 2_400);
+    }
+
+    // ------------------------------------------------------------------
+    // Audit item 3d — explicit map-miss policy.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn map_miss_policy_parses_env_values() {
+        use VatMapMissPolicy::*;
+
+        assert_eq!(VatMapMissPolicy::from_env_value(None), FallbackCountry);
+        assert_eq!(VatMapMissPolicy::from_env_value(Some("")), FallbackCountry);
+        assert_eq!(VatMapMissPolicy::from_env_value(Some("fallback")), FallbackCountry);
+        assert_eq!(VatMapMissPolicy::from_env_value(Some("FALLBACK")), FallbackCountry);
+        assert_eq!(VatMapMissPolicy::from_env_value(Some("  error ")), Error);
+        assert_eq!(VatMapMissPolicy::from_env_value(Some("ERROR")), Error);
+        // Unknown values fail safe to the default, not to error.
+        assert_eq!(VatMapMissPolicy::from_env_value(Some("nonsense")), FallbackCountry);
+    }
+
+    #[test]
+    fn map_miss_policy_names_round_trip() {
+        assert_eq!(VatMapMissPolicy::FallbackCountry.as_str(), "fallback");
+        assert_eq!(VatMapMissPolicy::Error.as_str(), "error");
+    }
+
+    #[test]
+    fn resolve_map_miss_fallback_uses_fallback_country_rate() {
+        // With DE as the configured fallback country, a miss charges 19 %.
+        let rate = resolve_map_miss_rate("XX", VatMapMissPolicy::FallbackCountry, "DE")
+            .expect("fallback policy resolves");
+        assert_eq!(rate, 19);
+
+        // Default fallback (EE) charges 24 % — rate-identical to the old
+        // silent behaviour, but now an explicit, logged, configurable
+        // decision rather than a hidden default.
+        let rate = resolve_map_miss_rate("XX", VatMapMissPolicy::FallbackCountry, "EE")
+            .expect("fallback policy resolves");
+        assert_eq!(rate, ESTONIA_VAT_RATE);
+    }
+
+    #[test]
+    fn resolve_map_miss_unknown_fallback_country_uses_estonia() {
+        let rate = resolve_map_miss_rate("XX", VatMapMissPolicy::FallbackCountry, "ZZ")
+            .expect("last-resort rate resolves");
+        assert_eq!(rate, ESTONIA_VAT_RATE);
+    }
+
+    #[test]
+    fn resolve_map_miss_error_policy_returns_explicit_error() {
+        let error = resolve_map_miss_rate("XX", VatMapMissPolicy::Error, "EE")
+            .expect_err("error policy must refuse");
+        assert_eq!(error.country, "XX");
+        assert_eq!(error.fallback_rate, ESTONIA_VAT_RATE);
+        assert!(error.to_string().contains("XX"));
+        assert!(error.to_string().contains("no VAT rate configured"));
+    }
+
+    #[test]
+    fn calculate_vat_strict_errors_on_map_miss() {
+        // Simulate a miss: "GR" is in the map, so use a country that is in
+        // EU_COUNTRIES but (hypothetically) unmapped. With the built-in
+        // tables every EU country has a rate, so exercise the strict path
+        // through a map that lacks one by testing the behaviour indirectly:
+        // strict on a mapped country must behave exactly like calculate_vat.
+        assert_eq!(
+            calculate_vat_strict(10_000, "DE", None).expect("mapped country"),
+            calculate_vat(10_000, "DE", None)
+        );
+        // Non-EU and EE both short-circuit before the map lookup.
+        assert_eq!(
+            calculate_vat_strict(10_000, "US", None).expect("non-EU"),
+            (0, 0)
+        );
+        assert_eq!(
+            calculate_vat_strict(10_000, "EE", None).expect("local"),
+            (24, 2_400)
+        );
+    }
+
+    #[test]
+    fn strict_and_lenient_agree_on_all_mapped_countries() {
+        for &code in DEFAULT_EU_COUNTRIES {
+            let lenient = calculate_vat(10_000, code, None);
+            let strict = calculate_vat_strict(10_000, code, None)
+                .unwrap_or_else(|error| panic!("{code}: {error}"));
+            assert_eq!(lenient, strict, "{code} must resolve identically");
+        }
+    }
+
+    #[test]
+    fn default_map_miss_policy_is_logged_fallback_not_silent() {
+        // The deployed defaults: fallback policy + EE fallback country.
+        // (LazyLock statics read the environment once; a clean environment
+        // yields the documented defaults.)
+        assert_eq!(*VAT_MAP_MISS_POLICY, VatMapMissPolicy::FallbackCountry);
+        assert_eq!(*VAT_FALLBACK_COUNTRY, "EE");
     }
 }

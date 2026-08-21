@@ -211,14 +211,14 @@ pub async fn create_credit_note(
                 r#"
                 WITH credit_wallet AS (
                     UPDATE wallets
-                    SET balance = balance + $2::int4,
+                    SET balance = balance + $2::int8,
                         updated_at = NOW()
                     WHERE tenant_id = $1
                     RETURNING id, balance
                 )
                 INSERT INTO wallet_transactions
                     (wallet_id, tenant_id, type, amount, balance_after, description, reference, created_at)
-                SELECT id, $1, 'credit', $2::int4, balance, $3, $4, $5
+                SELECT id, $1, 'credit', $2::int8, balance, $3, $4, $5
                 FROM credit_wallet
                 "#,
             )

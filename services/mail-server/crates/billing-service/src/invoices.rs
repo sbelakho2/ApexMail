@@ -142,7 +142,7 @@ pub struct NewLineItem {
 }
 
 /// Round-half-up VAT for a single base amount (integer cents).
-fn round_vat(amount: i64, rate: i32) -> i64 {
+pub(crate) fn round_vat(amount: i64, rate: i32) -> i64 {
     ((amount * rate as i64) + 50) / 100
 }
 
@@ -153,7 +153,7 @@ fn round_vat(amount: i64, rate: i32) -> i64 {
 /// from the headline `vat_total`, breaking KMD returns and PDF totals.
 ///
 /// Returns the VAT amount (cents) per line, aligned with `amounts`.
-fn allocate_vat_across_lines(amounts: &[i64], rate: i32) -> Vec<i64> {
+pub(crate) fn allocate_vat_across_lines(amounts: &[i64], rate: i32) -> Vec<i64> {
     let mut allocated: Vec<i64> = amounts.iter().map(|&a| round_vat(a, rate)).collect();
     let total: i64 = amounts.iter().sum();
     let target = round_vat(total, rate);

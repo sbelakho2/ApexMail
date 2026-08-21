@@ -38,6 +38,10 @@ const COST_MARGIN_CRITICAL_THRESHOLD: f64 = 10.0;
 const SLA_AVAILABILITY_TARGET: f64 = 99.9;
 const KMD_GENERATION_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60); // Every 6 hours
 const INVOICE_ARCHIVE_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60); // Daily
+/// Derived-usage sweep starts 90 minutes past the hour after startup: late
+/// enough for the day to be firmly closed and other daily jobs to settle,
+/// soon enough to land before the reconciliation report is read.
+const DERIVED_USAGE_SWEEP_INITIAL_DELAY: Duration = Duration::from_secs(90 * 60);
 
 static DEDICATED_IP_TABLE_MISSING_LOGGED: AtomicBool = AtomicBool::new(false);
 
@@ -452,6 +456,73 @@ pub fn start_periodic_jobs(state: std::sync::Arc<AppState>) {
                 Ok(true) => info!("Month-end closing completed"),
                 Ok(false) => {} // Not yet due or already closed
                 Err(e) => error!(error = %e, "Month-end closing failed"),
+            }
+        }
+    });
+
+    // ── Derived usage sweep + reconciliation (daily, audit items 1a–2) ──
+    // Derives emails_delivered / webhooks_delivered / dedicated_ip_hours /
+    // storage_gb_hours / bandwidth_gb for the last closed day from the
+    // platform's own tables (idempotent via metering_daily_markers), then
+    // writes the reserved-vs-delivered reconciliation report.
+    let derived_state = state.clone();
+    tokio::spawn(async move {
+        let mut interval = interval_at(
+            Instant::now() + DERIVED_USAGE_SWEEP_INITIAL_DELAY,
+            DAILY_TASK_INTERVAL,
+        );
+        interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+
+        loop {
+            interval.tick().await;
+
+            match crate::usage_ingest::sweep_derived_usage(&derived_state.db, Utc::now()).await {
+                Ok(result) if result.emails_delivered > 0
+                    || result.webhooks_delivered > 0
+                    || result.dedicated_ip_hours > 0
+                    || result.storage_gb_hours > 0
+                    || result.bandwidth_gb > 0 =>
+                {
+                    info!(
+                        day = %result.day,
+                        emails_delivered = result.emails_delivered,
+                        webhooks_delivered = result.webhooks_delivered,
+                        dedicated_ip_hours = result.dedicated_ip_hours,
+                        storage_gb_hours = result.storage_gb_hours,
+                        bandwidth_gb = result.bandwidth_gb,
+                        skipped = ?result.skipped_sources,
+                        "recorded derived usage aggregates"
+                    );
+                }
+                Ok(result) if !result.skipped_sources.is_empty() => {
+                    warn!(
+                        day = %result.day,
+                        skipped = ?result.skipped_sources,
+                        "derived usage sweep skipped missing source tables"
+                    );
+                }
+                Ok(_) => {}
+                Err(error_message) => {
+                    error!(error = %error_message, "failed to sweep derived usage aggregates");
+                }
+            }
+
+            match crate::usage_ingest::reconcile_daily_deliveries(&derived_state.db, Utc::now())
+                .await
+            {
+                Ok(result) if result.reports_written > 0 || result.overage_candidates > 0 => {
+                    info!(
+                        day = %result.day,
+                        tenants_compared = result.tenants_compared,
+                        reports_written = result.reports_written,
+                        overage_candidates = result.overage_candidates,
+                        "wrote delivery reconciliation reports"
+                    );
+                }
+                Ok(_) => {}
+                Err(error_message) => {
+                    error!(error = %error_message, "failed to reconcile delivered usage");
+                }
             }
         }
     });
@@ -1909,8 +1980,10 @@ async fn process_monthly_sla_credits(state: &AppState) -> Result<SlaCreditSweepR
             )
         })?;
 
-        let credit_amount =
-            ((invoice_amount_cents as f64) * (credit_percent as f64 / 100.0)).round() as i64;
+        // Money invariant: integer cents, half-up rounding — no f64 in the
+        // computation path (the previous `(cents as f64) * pct/100` drifted
+        // for large cent values).
+        let credit_amount = percent_of_cents_half_up(invoice_amount_cents, i64::from(credit_percent));
         if credit_amount <= 0 {
             continue;
         }
@@ -1931,8 +2004,7 @@ async fn process_monthly_sla_credits(state: &AppState) -> Result<SlaCreditSweepR
             .unwrap_or(100); // default: no cap below 100 %
 
         let credit_amount = if cap_percent < 100 {
-            let max_credit =
-                ((invoice_amount_cents as f64) * (cap_percent as f64 / 100.0)).round() as i64;
+            let max_credit = percent_of_cents_half_up(invoice_amount_cents, cap_percent);
             credit_amount.min(max_credit)
         } else {
             credit_amount
@@ -1995,6 +2067,17 @@ async fn process_monthly_sla_credits(state: &AppState) -> Result<SlaCreditSweepR
 fn feature_flag_enabled(features: &Value, keys: &[&str]) -> bool {
     keys.iter()
         .any(|key| features.get(*key).and_then(Value::as_bool).unwrap_or(false))
+}
+
+/// `percent` of `cents`, rounded half-up, computed in integer arithmetic
+/// (i128 intermediate so cent×percent cannot overflow). Used by the SLA
+/// credit path — money computation must never route through f64.
+pub(crate) fn percent_of_cents_half_up(cents: i64, percent: i64) -> i64 {
+    if cents <= 0 || percent <= 0 {
+        return 0;
+    }
+    let numerator = i128::from(cents) * i128::from(percent) + 50;
+    i64::try_from(numerator.div_euclid(100)).unwrap_or(i64::MAX)
 }
 
 fn sla_credit_percentage_for_breach(breach_percent: f64) -> i32 {
