@@ -36,14 +36,19 @@ fn variable_substitution_nested_props() {
     assert_eq!(html, "Hi Alice!");
 }
 
-// ── Missing variables keep placeholder ─────────────────────────
+// ── Missing variables use the fallback and are reported ────────
+// Updated with the round of renderer fixes: a missing merge field
+// must never ship the raw `{{ name }}` placeholder to a recipient;
+// it renders the configured fallback (empty by default) and the
+// render result carries a warning naming the missing field.
 
 #[test]
-fn missing_variable_keeps_placeholder() {
+fn missing_variable_uses_fallback_not_placeholder() {
     let html = transpiler::resolve_placeholders("Hello {{ missing_var }}!", &serde_json::json!({}));
+    assert_eq!(html, "Hello !");
     assert!(
-        html.contains("{{ missing_var }}"),
-        "missing vars should be preserved, got: {}",
+        !html.contains("{{"),
+        "missing vars must not ship the raw placeholder, got: {}",
         html
     );
 }
@@ -101,6 +106,7 @@ fn sandbox_renders_template_with_props() {
         generate_plaintext: true,
         minify: false,
         subject: None,
+        missing_field_fallback: None,
     };
     let result = sandbox.execute(source, &opts).unwrap();
     assert_eq!(result.html, "<h1>Test</h1><p>Hello User</p>");
@@ -120,6 +126,7 @@ fn sandbox_rejects_source_too_large() {
         generate_plaintext: false,
         minify: false,
         subject: None,
+        missing_field_fallback: None,
     };
     let err = sandbox.execute(&source, &opts);
     assert!(err.is_err(), "oversized source should be rejected");

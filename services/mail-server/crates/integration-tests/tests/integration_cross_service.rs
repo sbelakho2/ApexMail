@@ -91,6 +91,7 @@ fn template_types_compose_with_api_types() {
             plaintext_size_bytes: Some(14),
             cached: false,
         },
+        warnings: Vec::new(),
     };
 
     let json = serde_json::to_value(&result).unwrap();

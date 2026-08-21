@@ -43,6 +43,7 @@ mod ui_xss {
                 unread_count: 0,
                 avatar_fallback: "AM",
                 mobile_menu_open: false,
+                user_context: None,
             }
             .render_html();
             must_not_contain_raw(&html, payload);
@@ -97,6 +98,7 @@ mod ui_xss {
                 unread_count: 0,
                 avatar_fallback: "X",
                 mobile_menu_open: false,
+                user_context: None,
             },
             impersonation_banner: None,
             toast_surface: None,
