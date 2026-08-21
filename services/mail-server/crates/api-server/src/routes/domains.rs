@@ -39,6 +39,44 @@ static DNS_LOOKUP: LazyLock<Result<DnsLookup, String>> = LazyLock::new(|| {
     DnsLookup::new().map_err(|e| format!("DNS resolver initialization failed: {e}"))
 });
 
+// ─── Shared SES client (audit M-5) ──────────────────────────────
+
+/// A single process talks to exactly one AWS account/region, so the SES SDK
+/// client (and its connection pool) is process-wide state, keyed by region.
+type SharedSesClient = std::sync::Arc<aws_sdk_sesv2::Client>;
+
+/// M-5(1): `configure_ses_domain_identity`/`delete_ses_domain_identity`
+/// previously built a fresh `aws_config` SDK stack (credential chain,
+/// HTTP/TLS pool) on every call. The map makes construction a one-off per
+/// region; the `Arc` handle returned per call is a cheap clone.
+static SES_CLIENTS: LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, SharedSesClient>>,
+> = LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+/// Return the process-wide SES client for `region`, constructing it at most
+/// once. Concurrent first callers may both build a client; the loser's entry
+/// is simply replaced — clients are interchangeable and lazily connected, so
+/// this is harmless and avoids holding a std lock across an await.
+async fn shared_ses_client(region: &str) -> SharedSesClient {
+    if let Some(client) = SES_CLIENTS
+        .lock()
+        .expect("SES client cache lock poisoned")
+        .get(region)
+    {
+        return client.clone();
+    }
+    let sdk_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
+        .region(aws_sdk_sesv2::config::Region::new(region.to_string()))
+        .load()
+        .await;
+    let client = std::sync::Arc::new(aws_sdk_sesv2::Client::new(&sdk_config));
+    SES_CLIENTS
+        .lock()
+        .expect("SES client cache lock poisoned")
+        .insert(region.to_string(), client.clone());
+    client
+}
+
 const DEFAULT_DKIM_SELECTOR: &str = "apexmail2026";
 const RETURN_PATH_LABEL: &str = "bounce";
 const SES_RETURN_PATH_MX_PRIORITY: u16 = 10;
@@ -452,11 +490,71 @@ async fn verify_domain(
 /// Verify a domain using the same locked DNS, DKIM, and SES readiness path as
 /// the customer endpoint. Internal platform-sender operations call this after
 /// their separate administrative authorization check.
+///
+/// M-5(2): this used to hold the domain row lock, the tenant advisory lock,
+/// and the SES-identity advisory lock across every DNS lookup and every SES
+/// HTTPS round-trip — a multi-second external-IO window that serialised all
+/// domain mutations for the tenant (and platform-wide for a shared domain
+/// name). The flow is now phased so external IO happens with NO database
+/// locks held:
+///
+/// 1. short locked tx — read the row, take the advisory locks, provision or
+///    repair DKIM material (DB-only work), commit;
+/// 2. DNS lookups and the SES HTTPS calls against that material, lock-free;
+/// 3. short locked tx — re-read the row under the SAME locks, verify the DKIM
+///    material the observations were made against is still current, and only
+///    then persist the verification outcome.
+///
+/// If a concurrent verify/delete rotated the keys between phases 1 and 3 the
+/// observations are stale for the new material; the whole flow is retried
+/// once and otherwise the currently stored state is returned.
 pub(crate) async fn verify_domain_for_tenant(
     state: &AppState,
     tenant_id: &str,
     id: &str,
 ) -> Result<Json<VerifyResponse>, ApiError> {
+    for _attempt in 0..2 {
+        // Phase 1 — locked, DB-only: locks + DKIM material provisioning.
+        let (row, dkim_material) = lock_and_provision_dkim(state, tenant_id, id).await?;
+
+        // Phase 2 — external IO with no database locks held.
+        let observations = observe_dns_and_ses(state, &row, &dkim_material).await?;
+
+        // Phase 3 — locked, DB-only: re-check currency under the same locks
+        // and persist. `None` means the DKIM material rotated concurrently;
+        // the loop retries once with fresh material.
+        if let Some(response) =
+            persist_verification(state, tenant_id, id, &row.name, &dkim_material, &observations)
+                .await?
+        {
+            // SCALE-M-05: Invalidate cached domain data on verification
+            // status change.
+            let cache_key = format!("apexmail:cache:domain:{}", id);
+            if let Err(e) = cache_del(&state.redis, &cache_key).await {
+                warn!(
+                    error = %e,
+                    domain_id = %id,
+                    "failed to invalidate domain cache after verification"
+                );
+            }
+            return Ok(Json(response));
+        }
+    }
+
+    // Both attempts observed a concurrent DKIM rotation: never persist
+    // observations made against stale keys — return the row's current state.
+    current_verification_state(state, tenant_id, id).await
+}
+
+/// Phase 1 of verification: take the tenant + SES-identity advisory locks and
+/// the domain row lock, then ensure the row has complete, coherent per-domain
+/// DKIM material. This transaction performs database work only — it must
+/// never wait on DNS or SES, so the locks are released immediately.
+async fn lock_and_provision_dkim(
+    state: &AppState,
+    tenant_id: &str,
+    id: &str,
+) -> Result<(DomainFullRow, DomainDkimMaterial), ApiError> {
     let mut tx = state.db.begin().await?;
     lock_tenant_domain_mutations(&mut tx, tenant_id).await?;
 
@@ -464,7 +562,7 @@ pub(crate) async fn verify_domain_for_tenant(
         "SELECT id::text AS id, tenant_id::text AS tenant_id, name, dkim_selector, dkim_public_key, dkim_private_key, dkim_enabled
             FROM domains WHERE id = $1::uuid AND tenant_id = $2 FOR UPDATE",
     )
-    .bind(&id)
+    .bind(id)
     .bind(tenant_id)
         .fetch_optional(&mut *tx)
     .await?
@@ -475,8 +573,63 @@ pub(crate) async fn verify_domain_for_tenant(
     // is the only place that provisions or repairs them; GET endpoints never
     // create key material behind the customer's back.
     let dkim_material = ensure_domain_dkim_material(&mut tx, &row).await?;
+    tx.commit().await?;
 
-    // Perform real DNS lookups
+    Ok((row, dkim_material))
+}
+
+/// Everything verification observed about the outside world, gathered while
+/// holding no database locks (phase 2).
+#[derive(Debug, Clone, Copy)]
+struct VerificationObservations {
+    spf_verified: bool,
+    dkim_verified: bool,
+    dmarc_verified: bool,
+    return_path_verified: bool,
+    /// SES identity readiness (only resolved when local DNS is ready and the
+    /// SES transport is enabled).
+    ses_verified: bool,
+    ses_transport: bool,
+}
+
+impl VerificationObservations {
+    fn local_ready(&self) -> bool {
+        sender_dns_is_ready(
+            self.spf_verified,
+            self.dkim_verified,
+            self.dmarc_verified,
+            self.return_path_verified,
+            self.ses_transport,
+        )
+    }
+
+    /// `(status, verified)` for the persisted row and the API response.
+    fn outcome(&self) -> (&'static str, bool) {
+        verification_outcome(self.local_ready(), self.ses_verified, self.ses_transport)
+    }
+}
+
+/// Pure decision extracted from the verification flow (M-5): SES verification
+/// is asynchronous. Treat a successful API request as pending and use
+/// GetEmailIdentity's actual state before authorizing SES delivery. SMTP
+/// deployments use the same DNS/key pair but do not require an SES identity.
+fn verification_outcome(
+    local_ready: bool,
+    ses_verified: bool,
+    ses_transport: bool,
+) -> (&'static str, bool) {
+    let verified = local_ready && (!ses_transport || ses_verified);
+    (if verified { "verified" } else { "pending" }, verified)
+}
+
+/// Phase 2 of verification: perform the real DNS lookups and (when locally
+/// ready) the SES identity HTTPS calls against the provisioned DKIM material.
+/// No database transaction is open while this runs.
+async fn observe_dns_and_ses(
+    state: &AppState,
+    row: &DomainFullRow,
+    dkim_material: &DomainDkimMaterial,
+) -> Result<VerificationObservations, ApiError> {
     let dns = DNS_LOOKUP.as_ref().map_err(|e| {
         tracing::error!(error = %e, "DNS resolver initialization failed");
         ApiError::ServiceUnavailable("DNS verification is temporarily unavailable".into())
@@ -543,15 +696,18 @@ pub(crate) async fn verify_domain_for_tenant(
         }
     };
 
-    let local_ready = sender_dns_is_ready(spf, dkim, dmarc, return_path, ses_transport);
+    let mut observations = VerificationObservations {
+        spf_verified: spf,
+        dkim_verified: dkim,
+        dmarc_verified: dmarc,
+        return_path_verified: return_path,
+        ses_verified: false,
+        ses_transport,
+    };
 
-    // SES verification is asynchronous. Treat a successful API request as
-    // pending and use GetEmailIdentity's actual state before authorizing SES
-    // delivery. SMTP deployments use the same DNS/key pair but do not require
-    // an SES identity.
-    let ses_verified = if local_ready && ses_transport {
-        match configure_ses_domain_identity(
-            &state,
+    if observations.local_ready() && ses_transport {
+        observations.ses_verified = match configure_ses_domain_identity(
+            state,
             &row.name,
             &dkim_material.selector,
             &dkim_material.private_key_pem,
@@ -564,48 +720,119 @@ pub(crate) async fn verify_domain_for_tenant(
                 false
             }
         }
-    } else {
-        false
-    };
+    }
 
-    let status = if local_ready && (!ses_transport || ses_verified) {
-        "verified"
-    } else {
-        "pending"
-    };
+    Ok(observations)
+}
 
+/// Pure staleness check for phase 3: the observations are only valid to
+/// persist if the row still carries exactly the DKIM material they were made
+/// against. A concurrent verify (key repair) or delete+re-create rotates the
+/// selector/public key, which must invalidate them.
+fn dkim_material_is_current(
+    row_selector: Option<&str>,
+    row_public_key: Option<&str>,
+    material: &DomainDkimMaterial,
+) -> bool {
+    row_selector.is_some_and(|selector| selector == material.selector)
+        && row_public_key.is_some_and(|key| key.trim() == material.public_key)
+}
+
+/// Phase 3 of verification: under the same locks as phase 1, re-read the row
+/// and persist the observed outcome — but only if the DKIM material is
+/// unchanged since the observations were made. Returns `None` when the
+/// material rotated concurrently (caller retries or returns current state).
+async fn persist_verification(
+    state: &AppState,
+    tenant_id: &str,
+    id: &str,
+    domain_name: &str,
+    dkim_material: &DomainDkimMaterial,
+    observations: &VerificationObservations,
+) -> Result<Option<VerifyResponse>, ApiError> {
+    let mut tx = state.db.begin().await?;
+    lock_tenant_domain_mutations(&mut tx, tenant_id).await?;
+
+    let row = sqlx::query_as::<_, DomainFullRow>(
+        "SELECT id::text AS id, tenant_id::text AS tenant_id, name, dkim_selector, dkim_public_key, dkim_private_key, dkim_enabled
+            FROM domains WHERE id = $1::uuid AND tenant_id = $2 FOR UPDATE",
+    )
+    .bind(id)
+    .bind(tenant_id)
+        .fetch_optional(&mut *tx)
+    .await?
+    .ok_or_else(|| ApiError::NotFound("domain not found".into()))?;
+    lock_domain_identity(&mut tx, &row.name).await?;
+
+    if !dkim_material_is_current(
+        row.dkim_selector.as_deref(),
+        row.dkim_public_key.as_deref(),
+        dkim_material,
+    ) {
+        // Stale observations — do NOT write them. Rolling back releases the
+        // locks so the retry (or the concurrent writer) can proceed.
+        tx.rollback().await?;
+        warn!(
+            domain = %row.name,
+            "DKIM material rotated during verification; observations discarded"
+        );
+        return Ok(None);
+    }
+
+    let (status, verified) = observations.outcome();
     sqlx::query(
         "UPDATE domains SET spf_verified=$1, dkim_verified=$2, dmarc_verified=$3,
          return_path_verified=$4, status=$5, ses_verified=$6, verified=$7, dkim_enabled=true,
          updated_at=NOW() WHERE id=$8::uuid AND tenant_id=$9",
     )
-    .bind(spf)
-    .bind(dkim)
-    .bind(dmarc)
-    .bind(return_path)
+    .bind(observations.spf_verified)
+    .bind(observations.dkim_verified)
+    .bind(observations.dmarc_verified)
+    .bind(observations.return_path_verified)
     .bind(status)
-    .bind(ses_verified)
-    .bind(status == "verified")
-    .bind(&id)
+    .bind(observations.ses_verified)
+    .bind(verified)
+    .bind(id)
     .bind(tenant_id)
     .execute(&mut *tx)
     .await?;
 
     tx.commit().await?;
 
-    // SCALE-M-05: Invalidate cached domain data on verification status change
-    let cache_key = format!("apexmail:cache:domain:{}", id);
-    if let Err(e) = cache_del(&state.redis, &cache_key).await {
-        warn!(error = %e, domain_id = %id, "failed to invalidate domain cache after verification");
-    }
+    Ok(Some(VerifyResponse {
+        domain: domain_name.to_string(),
+        spf_verified: observations.spf_verified,
+        dkim_verified: observations.dkim_verified,
+        dmarc_verified: observations.dmarc_verified,
+        return_path_verified: observations.return_path_verified,
+        status: status.into(),
+    }))
+}
+
+/// Fall back to reporting the row's currently stored verification state
+/// (used when concurrent rotations invalidated two observation rounds).
+async fn current_verification_state(
+    state: &AppState,
+    tenant_id: &str,
+    id: &str,
+) -> Result<Json<VerifyResponse>, ApiError> {
+    let row = sqlx::query_as::<_, DomainRow>(
+        "SELECT id::text AS id, name, status, ses_verified, spf_verified, dkim_verified, dmarc_verified, return_path_verified, created_at
+         FROM domains WHERE id = $1::uuid AND tenant_id = $2",
+    )
+    .bind(id)
+    .bind(tenant_id)
+    .fetch_optional(&state.db)
+    .await?
+    .ok_or_else(|| ApiError::NotFound("domain not found".into()))?;
 
     Ok(Json(VerifyResponse {
         domain: row.name,
-        spf_verified: spf,
-        dkim_verified: dkim,
-        dmarc_verified: dmarc,
-        return_path_verified: return_path,
-        status: status.into(),
+        spf_verified: row.spf_verified,
+        dkim_verified: row.dkim_verified,
+        dmarc_verified: row.dmarc_verified,
+        return_path_verified: row.return_path_verified,
+        status: row.status,
     }))
 }
 
@@ -902,12 +1129,9 @@ async fn configure_ses_domain_identity(
     selector: &str,
     private_key_pem: &str,
 ) -> Result<bool, ApiError> {
-    let region = aws_sdk_sesv2::config::Region::new(state.config.aws_region.clone());
-    let sdk_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
-        .region(region)
-        .load()
-        .await;
-    let client = aws_sdk_sesv2::Client::new(&sdk_config);
+    // M-5(1): reuse the process-wide SES client instead of rebuilding the
+    // SDK stack per verification request.
+    let client = shared_ses_client(&state.config.aws_region).await;
 
     let ses_private_key =
         ses_private_key_base64_from_pem(private_key_pem).map_err(dkim_key_provisioning_error)?;
@@ -1035,12 +1259,9 @@ fn ses_identity_is_ready(
 
 /// Delete a domain identity from SES before releasing the local domain name.
 async fn delete_ses_domain_identity(state: &AppState, domain: &str) -> Result<(), ApiError> {
-    let region = aws_sdk_sesv2::config::Region::new(state.config.aws_region.clone());
-    let sdk_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
-        .region(region)
-        .load()
-        .await;
-    let client = aws_sdk_sesv2::Client::new(&sdk_config);
+    // M-5(1): reuse the process-wide SES client instead of rebuilding the
+    // SDK stack per deletion request.
+    let client = shared_ses_client(&state.config.aws_region).await;
 
     match client
         .delete_email_identity()
@@ -1164,6 +1385,80 @@ mod tests {
     #[test]
     fn generated_selector_is_a_valid_dns_label() {
         assert!(is_valid_dkim_selector(&new_dkim_selector()));
+    }
+
+    // ── M-5: reordered verification flow + cached SES client ──────
+
+    #[test]
+    fn verification_outcome_requires_local_readiness_and_ses_when_transported() {
+        // Pure decision function for the phased verification flow: status is
+        // only "verified" when local DNS is ready AND (on the SES transport)
+        // SES itself reports the identity usable.
+        assert_eq!(
+            verification_outcome(true, true, true),
+            ("verified", true),
+            "SES transport: ready DNS + ready SES identity verifies"
+        );
+        assert_eq!(
+            verification_outcome(true, false, true),
+            ("pending", false),
+            "SES transport: SES still pending keeps the domain pending"
+        );
+        assert_eq!(
+            verification_outcome(false, true, true),
+            ("pending", false),
+            "SES cannot rescue incomplete DNS"
+        );
+        assert_eq!(
+            verification_outcome(true, false, false),
+            ("verified", true),
+            "SMTP transport: DKIM+DMARC alone suffice (no SES identity required)"
+        );
+        assert_eq!(
+            verification_outcome(false, false, false),
+            ("pending", false)
+        );
+    }
+
+    #[test]
+    fn dkim_material_currency_detects_concurrent_rotation() {
+        let material = DomainDkimMaterial {
+            selector: "am-current".into(),
+            public_key: "MIIBIjAN".into(),
+            private_key_pem: zeroize::Zeroizing::new(String::new()),
+        };
+
+        assert!(dkim_material_is_current(
+            Some("am-current"),
+            Some("MIIBIjAN"),
+            &material
+        ));
+        // Selector rotated by a concurrent verify → observations are stale.
+        assert!(!dkim_material_is_current(
+            Some("am-rotated"),
+            Some("MIIBIjAN"),
+            &material
+        ));
+        // Public key replaced (key repair) → stale.
+        assert!(!dkim_material_is_current(
+            Some("am-current"),
+            Some("MIIBIjANother"),
+            &material
+        ));
+        // Material cleared (delete/re-create) → stale.
+        assert!(!dkim_material_is_current(None, None, &material));
+    }
+
+    /// M-5(1): the SES client must be constructed once per region and reused,
+    /// never rebuilt per verification/deletion request.
+    #[tokio::test]
+    async fn ses_client_is_shared_across_calls_per_region() {
+        let first = shared_ses_client("eu-north-1").await;
+        let second = shared_ses_client("eu-north-1").await;
+        assert!(
+            std::sync::Arc::ptr_eq(&first, &second),
+            "same region must yield the same cached SES client"
+        );
     }
 }
 

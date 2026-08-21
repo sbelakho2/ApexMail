@@ -16,7 +16,8 @@ use chrono::{Datelike, Months, NaiveTime, Utc};
 use deadpool_redis::redis::AsyncCommands;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-#[cfg(test)]
+// Unconditional: `invoice_style_nonce` (H-6 CSP nonces) hashes in production
+// code, not only under cfg(test).
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
@@ -1604,7 +1605,49 @@ fn invoice_vat_label(invoice: &LegacyInvoiceDto) -> String {
     }
 }
 
-fn render_invoice_html(invoice: &LegacyInvoiceDto) -> String {
+/// Per-response CSP nonce for the invoice document's single `<style>` element
+/// (audit H-6). 128 bits of OS randomness via UUIDv4, flattened to hex —
+/// characters that need no escaping inside a CSP header or an attribute.
+fn invoice_style_nonce() -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(Uuid::new_v4().as_u128().to_le_bytes());
+    let digest = hasher.finalize();
+    digest[..16].iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+/// Build the print-to-PDF invoice response (audit H-6).
+///
+/// The global security-headers middleware injects
+/// `Content-Security-Policy: default-src 'none'; frame-ancestors 'none'`
+/// into every response that does not carry its own CSP — which blocked the
+/// document's inline `<style>` and left the browser print dialog rendering
+/// an unstyled invoice. Instead of loosening the global policy, the route
+/// emits its own COMPLETE document-scoped CSP: everything stays `default-src
+/// 'none'` except the single nonce-stamped stylesheet, and the middleware
+/// respects the pre-set header (it only fills in a default when absent).
+///
+/// Escaping was audited before allowing an inline style element: every
+/// interpolated customer-controlled field (company, address, PO, notes,
+/// invoice number, IBAN, e-mail) goes through `escape_html`; all other
+/// interpolations are compile-time constants, formatted dates, or numeric
+/// currency/percentage renderings.
+fn invoice_html_response(invoice: &LegacyInvoiceDto) -> Response {
+    let nonce = invoice_style_nonce();
+    let html = render_invoice_html(invoice, &nonce);
+    let csp = format!(
+        "default-src 'none'; style-src 'nonce-{nonce}'; base-uri 'none'; \
+         form-action 'none'; frame-ancestors 'none'"
+    );
+    let mut response = Html(html).into_response();
+    response.headers_mut().insert(
+        header::CONTENT_SECURITY_POLICY,
+        HeaderValue::from_str(&csp)
+            .expect("invoice CSP contains only header-safe characters"),
+    );
+    response
+}
+
+fn render_invoice_html(invoice: &LegacyInvoiceDto, style_nonce: &str) -> String {
     let purchase_order = invoice
         .purchase_order_number
         .as_ref()
@@ -1664,7 +1707,7 @@ fn render_invoice_html(invoice: &LegacyInvoiceDto) -> String {
 <head>
   <meta charset="utf-8">
   <title>Invoice {invoice_number}</title>
-  <style>
+  <style nonce="{style_nonce}">
     body {{ font-family:ui-monospace, 'JetBrains Mono', monospace; font-size: 12px; color: #18181b; margin: 40px; }}
     .header {{ display: flex; justify-content: space-between; margin-bottom: 40px; }}
     .logo {{ font-size: 24px; font-weight: bold; color: #09090b; }}
@@ -3052,7 +3095,7 @@ async fn get_invoice_pdf_html(
     Path(id): Path<String>,
 ) -> Result<Response, ApiError> {
     match load_legacy_invoice_detail(&state.db, &id, &auth.tenant_id).await? {
-        Some(invoice) => Ok(Html(render_invoice_html(&invoice)).into_response()),
+        Some(invoice) => Ok(invoice_html_response(&invoice)),
         None => Ok((
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({ "error": "Invoice not found" })),
@@ -4571,7 +4614,7 @@ mod tests {
     fn billing_routes_invoice_html_renderer_escapes_values_and_keeps_reverse_charge_note() {
         initialize_billing_test_env();
 
-        let html = render_invoice_html(&sample_invoice());
+        let html = render_invoice_html(&sample_invoice(), "testnonce0123456789");
 
         assert!(html.contains("Invoice 2026-TEST-001"));
         assert!(html.contains("Bel Consulting OÜ"));
@@ -4581,6 +4624,99 @@ mod tests {
         assert!(html.contains("Reverse charge: VAT to be paid by the recipient"));
         assert!(html.contains("€122.00"));
         assert!(html.contains("IBAN: EE381010220123456789"));
+        assert!(
+            html.contains("<style nonce=\"testnonce0123456789\">"),
+            "the style nonce must be stamped on the single <style> element"
+        );
+    }
+
+    // ── H-6: document-scoped CSP for the print-to-PDF invoice ─────
+
+    #[test]
+    fn billing_routes_invoice_nonce_is_random_and_header_safe() {
+        let a = invoice_style_nonce();
+        let b = invoice_style_nonce();
+        assert_ne!(a, b, "every response must carry a fresh nonce");
+        for nonce in [a, b] {
+            assert_eq!(nonce.len(), 32, "128 bits as hex");
+            assert!(
+                nonce.chars().all(|c| c.is_ascii_hexdigit()),
+                "CSP-source-safe characters only"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn billing_routes_invoice_response_csp_permits_exactly_the_nonce_stamped_style() {
+        initialize_billing_test_env();
+
+        let response = invoice_html_response(&sample_invoice());
+        let csp_owned = response
+            .headers()
+            .get(header::CONTENT_SECURITY_POLICY)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string)
+            .expect("invoice response must carry its own CSP");
+        let csp = csp_owned.as_str();
+
+        // The global default (`default-src 'none'` with no style-src) blocked
+        // the inline <style>; this document-scoped policy must allow exactly
+        // the one nonce-stamped stylesheet and nothing else.
+        assert!(csp.starts_with("default-src 'none'"));
+        let style_src = csp
+            .split(';')
+            .map(str::trim)
+            .find(|directive| directive.starts_with("style-src"))
+            .expect("style-src directive present");
+        let nonce = style_src
+            .strip_prefix("style-src 'nonce-")
+            .and_then(|rest| rest.strip_suffix('\''))
+            .expect("nonce-only style-src");
+        assert_eq!(nonce.len(), 32);
+        assert!(!csp.contains("'unsafe-inline'"), "no blanket inline permit");
+        assert!(csp.contains("frame-ancestors 'none'"));
+
+        // The stamped nonce in the document must be the one the CSP allows.
+        let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .expect("body readable");
+        let html = String::from_utf8_lossy(&body);
+        assert!(html.contains(&format!("style nonce=\"{nonce}\"")));
+        assert_eq!(
+            html.matches("<style").count(),
+            1,
+            "exactly one style element"
+        );
+        assert!(!html.contains("<script"), "no scripts in the invoice document");
+    }
+
+    #[test]
+    fn billing_routes_invoice_html_escapes_env_configured_iban() {
+        // The IBAN comes from BILLING_COMPANY_IBAN (deployment configuration):
+        // a stray HTML metacharacter must never break out of the footer text.
+        // (Checked via the escaping primitive plus a template pin — mutating
+        // the env var here races with parallel tests calling
+        // `initialize_billing_test_env`.)
+        assert_eq!(
+            escape_html("EE38<>&'\"1010"),
+            "EE38&lt;&gt;&amp;&#39;&quot;1010"
+        );
+        let source = include_str!("billing.rs");
+        assert!(
+            source.contains("company_iban = escape_html(&billing_company_iban())"),
+            "the IBAN interpolation must stay escaped"
+        );
+        for field in [
+            "invoice_number = escape_html(",
+            "bill_to_company = escape_html(",
+            "bill_to_line1 = escape_html(",
+            "bill_to_email = escape_html(",
+        ] {
+            assert!(
+                source.contains(field),
+                "customer-controlled field must stay escaped: {field}"
+            );
+        }
     }
 
     #[test]

@@ -1177,16 +1177,16 @@ async fn insert_auth_audit_log(
     hasher.update(timestamp.to_rfc3339().as_bytes());
     let hash = hex::encode(hasher.finalize());
 
-    // Chain the audit entry: link it to the most recent prior entry's hash
-    // (by timestamp, then id) so tampering, deletion, or reordering breaks
-    // the chain instead of passing silently. Chosen in the same transaction
-    // as the insert to close the concurrent-writer race.
+    // Chain the audit entry through the platform-wide hash-chain head
+    // (audit item M-10): the old `SELECT ... ORDER BY timestamp DESC LIMIT 1
+    // FOR UPDATE` on audit_logs serialised every login/MFA/recovery event
+    // platform-wide. The single head row advanced by
+    // `crate::audit_log::advance_chain_head` in this same transaction is the
+    // only serialization point, so concurrent auth events no longer queue
+    // behind each other's transactions while chain integrity is preserved.
     let mut tx = state.db.begin().await?;
-    let previous_hash: Option<String> = sqlx::query_scalar(
-        "SELECT hash FROM audit_logs ORDER BY timestamp DESC, id DESC LIMIT 1 FOR UPDATE",
-    )
-    .fetch_optional(&mut *tx)
-    .await?;
+    let previous_hash: Option<String> =
+        crate::audit_log::advance_chain_head(&mut *tx, &hash).await?;
     let signature = audit_log_signature(&hash, previous_hash.as_deref().unwrap_or_default())?;
 
     sqlx::query(
@@ -3819,6 +3819,133 @@ mod tests {
         // `clear_login_failures` uses `?` on Redis operations
         fn assert_propagates_error<T>() {}
         assert_propagates_error::<Result<(), ApiError>>();
+    }
+
+    /// L-24 + migration 106 (DB-gated): the login lookup
+    /// `WHERE LOWER(email) = LOWER($1) OR LOWER(username) = LOWER($2)` must
+    /// (a) run against an existing `username` column — no migration had ever
+    /// created it before 106, so the query failed with 42703 — and (b) be
+    /// driven by the functional indexes instead of a sequential scan.
+    #[tokio::test]
+    async fn login_lookup_becomes_index_driven_after_migration_106() {
+        use sqlx::postgres::PgPoolOptions;
+        use std::time::Duration;
+
+        let database_url = std::env::var("TEST_DATABASE_URL")
+            .ok()
+            .filter(|value| !value.trim().is_empty());
+        let Some(database_url) = database_url else {
+            eprintln!("skipping: set TEST_DATABASE_URL to run DB-backed test");
+            return;
+        };
+        let Some((server_part, db_part)) = database_url.rsplit_once('/') else {
+            eprintln!("skipping: TEST_DATABASE_URL has no database segment");
+            return;
+        };
+        let db_only = db_part.split('?').next().unwrap_or(db_part);
+        let isolated_db = format!("{db_only}_api_login_idx");
+        let isolated_url = format!("{server_part}/{isolated_db}");
+        let admin_url = format!("{server_part}/postgres");
+
+        let admin = match PgPoolOptions::new()
+            .max_connections(1)
+            .acquire_timeout(Duration::from_secs(3))
+            .connect(&admin_url)
+            .await
+        {
+            Ok(pool) => pool,
+            Err(_) => {
+                eprintln!("skipping: cannot reach Postgres admin database");
+                return;
+            }
+        };
+        let _ = sqlx::query(&format!(
+            r#"DROP DATABASE IF EXISTS "{isolated_db}" WITH (FORCE)"#
+        ))
+        .execute(&admin)
+        .await;
+        let created = sqlx::query(&format!(r#"CREATE DATABASE "{isolated_db}""#))
+            .execute(&admin)
+            .await;
+        admin.close().await;
+        assert!(created.is_ok(), "isolated login-index test DB must be creatable");
+
+        let pool = PgPoolOptions::new()
+            .max_connections(2)
+            .acquire_timeout(Duration::from_secs(5))
+            .connect(&isolated_url)
+            .await
+            .expect("connect to isolated login-index test DB");
+
+        // Minimal users table in the pre-106 shape (migrations 052/056/076):
+        // email unique, NO username column yet.
+        sqlx::query(
+            r#"CREATE TABLE users (
+                   id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                   tenant_id       UUID,
+                   email           VARCHAR(255) UNIQUE NOT NULL,
+                   password_hash   TEXT,
+                   role            VARCHAR(50),
+                   status          VARCHAR(20) NOT NULL DEFAULT 'active',
+                   mfa_enabled     BOOLEAN NOT NULL DEFAULT false,
+                   created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+               )"#,
+        )
+        .execute(&pool)
+        .await
+        .expect("users table created");
+
+        // The login query must FAIL before the migration (missing column).
+        let login_sql = "SELECT id FROM users WHERE LOWER(email) = LOWER($1) OR LOWER(username) = LOWER($2)";
+        let pre_migration = sqlx::query(login_sql)
+            .bind("a@b.com")
+            .bind("a@b.com")
+            .fetch_all(&pool)
+            .await;
+        assert!(
+            pre_migration.is_err(),
+            "pre-106 schema has no username column — the login query must fail, not scan"
+        );
+
+        // Apply the actual migration file (not a copy).
+        let migration_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../migrations/106_users_login_functional_indexes.sql");
+        let migration_sql =
+            std::fs::read_to_string(&migration_path).expect("migration 106 file must exist");
+        sqlx::raw_sql(&migration_sql)
+            .execute(&pool)
+            .await
+            .expect("migration 106 applies cleanly");
+
+        // Seed a row and prove the functional indexes drive the lookup.
+        // (seq scans are disabled per-SESSION, so the SET and the EXPLAIN run
+        // on the same acquired connection.)
+        sqlx::query("INSERT INTO users (email) VALUES ('User@Example.com')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let mut conn = pool.acquire().await.expect("acquire planner connection");
+        sqlx::query("SET enable_seqscan = off")
+            .execute(&mut *conn)
+            .await
+            .unwrap();
+        let plan: Vec<String> = sqlx::query_scalar(
+            "EXPLAIN (FORMAT text) SELECT id FROM users \
+             WHERE LOWER(email) = LOWER($1) OR LOWER(username) = LOWER($2)",
+        )
+        .bind("user@example.com")
+        .bind("user@example.com")
+        .fetch_all(&mut *conn)
+        .await
+        .expect("post-migration the login query must be plannable");
+        let plan = plan.join("\n");
+
+        assert!(
+            plan.contains("idx_users_email_lower") || plan.contains("idx_users_username_lower"),
+            "login lookup must use the functional indexes, plan: {plan}"
+        );
+        drop(conn);
+        pool.close().await;
     }
 }
 

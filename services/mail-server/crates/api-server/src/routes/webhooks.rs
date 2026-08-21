@@ -82,6 +82,71 @@ pub struct ListWebhooksQuery {
 
 // ─── Validation ────────────────────────────────────────────────
 
+/// Event types a webhook may subscribe to (audit L-2).
+///
+/// The set is the union of everything the platform's emitters actually
+/// enqueue (SES notifications: `email.*`; the MTA bounce/FBL/inbound
+/// pipelines; tracking-service unsubscribes; inbox-placement completions),
+/// the names documented in `docs/api/openapi.yaml` (`message.*`), and the
+/// `*` wildcard every consumer's selector honours
+/// (`events @> '"*"'::jsonb`). Unknown names previously validated as
+/// non-empty only — a typo like `delivred` registered silently and the
+/// webhook never fired.
+pub(crate) const KNOWN_WEBHOOK_EVENTS: &[&str] = &[
+    // SES notification pipeline (ses_notifications.rs)
+    "email.delivered",
+    "email.bounced",
+    "email.complained",
+    // Documented API contract (docs/api/openapi.yaml)
+    "message.sent",
+    "message.delivered",
+    "message.bounced",
+    "message.complained",
+    "message.opened",
+    "message.clicked",
+    // tracking-service
+    "recipient.unsubscribed",
+    // inbox-placement
+    "placement_test.completed",
+    // MTA pipelines (bounce/complaint/inbound payloads)
+    "bounce",
+    "complaint",
+    "inbound",
+    // Wildcard honoured by every webhook selector
+    "*",
+];
+
+/// Validate a webhook's event subscription list (audit L-2): non-empty, no
+/// blank entries, and every name must be a known event type. The error
+/// message lists the valid names so a typo is immediately fixable.
+fn validate_webhook_events(events: &[String]) -> Result<(), String> {
+    if events.is_empty() {
+        return Err(format!(
+            "at least one event is required; valid events: {}",
+            KNOWN_WEBHOOK_EVENTS.join(", ")
+        ));
+    }
+    let invalid: Vec<&str> = events
+        .iter()
+        .filter_map(|event| {
+            let trimmed = event.trim();
+            if trimmed.is_empty() || !KNOWN_WEBHOOK_EVENTS.contains(&trimmed) {
+                Some(trimmed)
+            } else {
+                None
+            }
+        })
+        .collect();
+    if !invalid.is_empty() {
+        return Err(format!(
+            "unknown event type(s): {}; valid events: {}",
+            invalid.join(", "),
+            KNOWN_WEBHOOK_EVENTS.join(", ")
+        ));
+    }
+    Ok(())
+}
+
 /// Env var that explicitly re-enables plain-HTTP loopback webhook targets for
 /// local development (audit F). Defaults to OFF — the previous unconditional
 /// localhost/127.0.0.1/::1 HTTP exemption let any authenticated tenant
@@ -200,8 +265,8 @@ async fn create_webhook(
         errors.push(e);
     }
 
-    if body.events.is_empty() {
-        errors.push("events are required".into());
+    if let Err(e) = validate_webhook_events(&body.events) {
+        errors.push(e);
     }
 
     if !errors.is_empty() {
@@ -296,6 +361,15 @@ async fn update_webhook(
     // Validate new URL if provided
     if let Some(ref new_url) = body.url {
         if let Err(e) = validate_webhook_url(new_url) {
+            return Err(ApiError::Validation(vec![e]));
+        }
+    }
+
+    // L-2: an events update must pass the same validation as creation —
+    // `events: []` or unknown names previously persisted silently, leaving a
+    // webhook that can never fire.
+    if let Some(ref new_events) = body.events {
+        if let Err(e) = validate_webhook_events(new_events) {
             return Err(ApiError::Validation(vec![e]));
         }
     }
@@ -550,6 +624,92 @@ mod tests {
         let json = r#"{"url":"https://example.com/hook","events":["delivered","bounced"]}"#;
         let req: CreateWebhookRequest = serde_json::from_str(json).unwrap();
         assert_eq!(req.events.len(), 2);
+    }
+
+    // ── L-2: event-type validation ───────────────────────────────
+
+    fn events(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn webhook_events_must_be_non_empty() {
+        let error = validate_webhook_events(&events(&[])).unwrap_err();
+        assert!(
+            error.contains("at least one event is required"),
+            "unexpected error: {error}"
+        );
+        // The message must list the valid names so the fix is obvious.
+        assert!(error.contains("email.delivered"));
+        assert!(error.contains("recipient.unsubscribed"));
+    }
+
+    #[test]
+    fn webhook_events_reject_unknown_names_with_a_helpful_message() {
+        // `delivered`/`bounced` (the bare names the old tests used) are NOT
+        // emitted by anything — they must now be rejected with the valid
+        // alternatives listed.
+        for bad in ["delivered", "delivred", "email.delivere", "message.bounce"] {
+            let error = validate_webhook_events(&events(&[bad])).unwrap_err();
+            assert!(
+                error.contains(&format!("unknown event type(s): {bad}")),
+                "unexpected error for {bad}: {error}"
+            );
+            assert!(error.contains("valid events:"), "must list valid events");
+        }
+        // Blank entries are invalid too.
+        assert!(validate_webhook_events(&events(&["   "])).is_err());
+        // A single bad name poisons the whole list, valid ones notwithstanding.
+        assert!(validate_webhook_events(&events(&["email.delivered", "nope"])).is_err());
+    }
+
+    #[test]
+    fn webhook_events_accept_every_emitted_and_documented_name() {
+        for known in KNOWN_WEBHOOK_EVENTS {
+            assert!(
+                validate_webhook_events(&events(&[known])).is_ok(),
+                "{known} must be accepted"
+            );
+        }
+        // Mixed valid lists and the wildcard pass; surrounding whitespace on
+        // a valid name is tolerated (trimmed).
+        assert!(validate_webhook_events(&events(&[
+            "email.delivered",
+            "recipient.unsubscribed",
+            "*"
+        ]))
+        .is_ok());
+        assert!(validate_webhook_events(&events(&["  email.bounced  "])).is_ok());
+    }
+
+    #[test]
+    fn known_webhook_events_match_the_documented_and_emitted_set() {
+        // Documented API contract names must all be present.
+        for documented in [
+            "message.sent",
+            "message.delivered",
+            "message.bounced",
+            "message.complained",
+            "message.opened",
+            "message.clicked",
+            "recipient.unsubscribed",
+        ] {
+            assert!(KNOWN_WEBHOOK_EVENTS.contains(&documented));
+        }
+        // Emitted names (ses_notifications, tracking, inbox-placement, mta)
+        // and the selector wildcard must all be present.
+        for emitted in [
+            "email.delivered",
+            "email.bounced",
+            "email.complained",
+            "placement_test.completed",
+            "bounce",
+            "complaint",
+            "inbound",
+            "*",
+        ] {
+            assert!(KNOWN_WEBHOOK_EVENTS.contains(&emitted));
+        }
     }
 
     #[test]
