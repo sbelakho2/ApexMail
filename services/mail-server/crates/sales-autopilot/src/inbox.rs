@@ -236,6 +236,44 @@ mod tests {
         InboxManager::new(db)
     }
 
+    /// Fix I-5: unsubscribe/opt-out subjects must classify as Unsubscribe
+    /// (handled with priority), NOT Spam. Pure test — no database required.
+    #[test]
+    fn unsubscribe_subjects_classify_as_unsubscribe_not_spam() {
+        for subject in [
+            "Please unsubscribe me from your list",
+            "Unsubscribe",
+            "Remove me from this newsletter",
+            "Take me off your mailing list",
+            "Stop emailing me",
+            "I want to opt out of marketing emails",
+        ] {
+            let msg = InboxManager::classify_message("t".into(), "user@corp.example".into(), subject.into());
+            assert_eq!(
+                msg.category,
+                MessageCategory::Unsubscribe,
+                "subject {subject:?} must classify as Unsubscribe, got {:?}",
+                msg.category
+            );
+        }
+    }
+
+    #[test]
+    fn spam_classification_unchanged_for_real_spam() {
+        let msg = InboxManager::classify_message(
+            "t".into(),
+            "noreply@spam.biz".into(),
+            "You won the lottery!".into(),
+        );
+        assert_eq!(msg.category, MessageCategory::Spam);
+    }
+
+    #[test]
+    fn unsubscribe_category_serializes_and_parses() {
+        assert_eq!(MessageCategory::Unsubscribe.to_string(), "unsubscribe");
+        assert_eq!(MessageCategory::from_str("unsubscribe"), MessageCategory::Unsubscribe);
+    }
+
     /// Integration test requiring local Postgres. Run with infrastructure.
     #[ignore]
     #[tokio::test]

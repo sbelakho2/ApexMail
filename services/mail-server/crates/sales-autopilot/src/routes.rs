@@ -1650,6 +1650,152 @@ mod tests {
         router(state)
     }
 
+
+    // ── Fix I tests: honest failures + tenant scoping ────────────────────
+
+    /// Async-test-safe app builder: a LAZY pool (never connects) so the
+    /// router can be driven inside `#[tokio::test]` without nesting
+    /// runtimes. Handlers that reach the database fail; the tests below
+    /// assert on the pre-database behavior (auth, scoping, 501/503).
+    fn lazy_test_app_with_config(
+        config: crate::config::SalesConfig,
+    ) -> Router {
+        let db = PgPoolOptions::new()
+            .max_connections(1)
+            .acquire_timeout(Duration::from_millis(100))
+            .connect_lazy("postgres://localhost/unused")
+            .expect("lazy pool");
+        let redis = deadpool_redis::Config::from_url("redis://127.0.0.1:6379")
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .expect("failed to create lazy test redis pool");
+        let state = AppState {
+            db: db.clone(),
+            redis,
+            config,
+            crm: CrmBackend::postgres(db.clone()),
+            enrichment: EnrichmentService::mock(),
+            campaigns: CampaignManager::new(10, db.clone()),
+            calendar: CalendarService::new(db.clone()),
+            inbox: InboxManager::new(db),
+            service_token: "test-key".into(),
+            rate_limit_fallback: Arc::new(Mutex::new(HashMap::new())),
+        };
+        router(state)
+    }
+
+    fn lazy_test_app() -> Router {
+        lazy_test_app_with_config(crate::config::SalesConfig::default())
+    }
+
+    /// Fix I-1: without a dispatcher wired, campaign start must fail loudly
+    /// with 503 instead of returning 200 'active' while sending nothing.
+    #[tokio::test]
+    async fn test_campaign_start_returns_503_without_dispatcher() {
+        let app = lazy_test_app();
+        let resp = app
+            .oneshot(
+                Request::post(format!("/campaigns/{}/start", Uuid::new_v4()))
+                    .header("x-api-key", "test-key")
+                    .header("x-tenant-id", "tenant-a")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(
+            body["error"].as_str().unwrap().contains("dispatcher"),
+            "error must name the missing dispatcher: {body}"
+        );
+    }
+
+    /// Fix I-4: inbox reply has no delivery path — 501, not {replied:true}.
+    #[tokio::test]
+    async fn test_inbox_reply_returns_501_not_implemented() {
+        let app = lazy_test_app();
+        let resp = app
+            .oneshot(
+                Request::post(format!("/inbox/{}/reply", Uuid::new_v4()))
+                    .header("x-api-key", "test-key")
+                    .header("x-tenant-id", "tenant-a")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
+    }
+
+    /// Fix I-3: header/payload tenant consistency is enforced on
+    /// create_conversion (the previously-missed mutation).
+    #[tokio::test]
+    async fn test_create_conversion_rejects_tenant_mismatch() {
+        let app = lazy_test_app();
+        let body = serde_json::json!({
+            "campaign_id": Uuid::new_v4(),
+            "lead_id": Uuid::new_v4(),
+            "tenant_id": "tenant-b"
+        });
+        let resp = app
+            .oneshot(
+                Request::post("/conversions")
+                    .header("x-api-key", "test-key")
+                    .header("x-tenant-id", "tenant-a")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "header/payload tenant mismatch must be rejected"
+        );
+    }
+
+    /// Fix I-3: SALES_ALLOWED_TENANTS scopes the shared-token blast radius.
+    #[tokio::test]
+    async fn test_allowed_tenants_scoping() {
+        let mut config = crate::config::SalesConfig::default();
+        config.allowed_tenants = Some(vec!["tenant-a".into()]);
+        let app = lazy_test_app_with_config(config);
+
+        // Allowed tenant passes the middleware (then fails on the dead DB
+        // with 500 — proving it got PAST the scope check).
+        let allowed = app
+            .clone()
+            .oneshot(
+                Request::post(format!("/campaigns/{}/start", Uuid::new_v4()))
+                    .header("x-api-key", "test-key")
+                    .header("x-tenant-id", "tenant-a")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_ne!(allowed.status(), StatusCode::FORBIDDEN);
+
+        // Tenant outside the allowlist is rejected outright.
+        let denied = app
+            .oneshot(
+                Request::post(format!("/campaigns/{}/start", Uuid::new_v4()))
+                    .header("x-api-key", "test-key")
+                    .header("x-tenant-id", "tenant-b")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(denied.status(), StatusCode::FORBIDDEN);
+    }
+
     /// Integration test requiring local Postgres and Redis. Run with infrastructure.
     #[ignore]
     #[tokio::test]
@@ -1794,6 +1940,11 @@ mod tests {
             .unwrap();
         assert_eq!(recipients_resp.status(), StatusCode::OK);
 
+        // Fix I-1 note: this test harness wires no CampaignEmailDispatcher,
+        // so start must now fail loudly with 503 (previously it returned
+        // 200 'active' while sending nothing). Updated from the old
+        // `assert_eq!(start_resp.status(), StatusCode::OK)` which asserted
+        // the vulnerable silent-no-send behavior.
         let start_resp = app
             .clone()
             .oneshot(
@@ -1805,15 +1956,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(start_resp.status(), StatusCode::OK);
-
-        let started: serde_json::Value = serde_json::from_slice(
-            &axum::body::to_bytes(start_resp.into_body(), usize::MAX)
-                .await
-                .unwrap(),
-        )
-        .unwrap();
-        assert_eq!(started["status"], "active");
+        assert_eq!(start_resp.status(), StatusCode::SERVICE_UNAVAILABLE);
 
         let pause_resp = app
             .oneshot(

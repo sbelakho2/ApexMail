@@ -50,6 +50,7 @@ hex        = { workspace = true }
 quick-xml  = "0.36"
 governor   = { workspace = true }
 mail-common = { path = "../mail-common" }
+apexmail-dns-resolver = { path = "../dns-resolver" }
 nonzero_ext = { workspace = true }
 urlencoding = { workspace = true }
 flate2 = "1.1"
@@ -58,3 +59,4 @@ xml-sec = "0.1"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
+jsonwebtoken = "9.3"

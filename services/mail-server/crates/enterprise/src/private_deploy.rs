@@ -13,7 +13,8 @@ pub struct PrivateDeployService {
 #[derive(Debug, Clone, sqlx::FromRow)]
 struct PrivateDeploymentDbRow {
     id: Uuid,
-    tenant_id: String,
+    // Schema note: the tenant_id column is UUID in this table.
+    tenant_id: Uuid,
     name: String,
     deployment_type: String,
     status: String,
@@ -36,7 +37,7 @@ impl From<PrivateDeploymentDbRow> for PrivateDeployment {
     fn from(row: PrivateDeploymentDbRow) -> Self {
         Self {
             id: row.id,
-            tenant_id: row.tenant_id,
+            tenant_id: row.tenant_id.to_string(),
             name: row.name,
             deployment_type: row.deployment_type,
             status: row.status,
@@ -60,7 +61,10 @@ impl From<PrivateDeploymentDbRow> for PrivateDeployment {
 #[derive(Debug, Clone, sqlx::FromRow)]
 struct DedicatedIPDbRow {
     id: Uuid,
-    tenant_id: String,
+    // Schema note: the tenant_id column is UUID; ip_address is decoded via
+    // an explicit ::text cast in the queries below (INET has no direct
+    // String decode in sqlx).
+    tenant_id: Uuid,
     deployment_id: Option<Uuid>,
     ip_address: String,
     ptr_record: Option<String>,
@@ -83,7 +87,7 @@ impl From<DedicatedIPDbRow> for DedicatedIP {
     fn from(row: DedicatedIPDbRow) -> Self {
         Self {
             id: row.id,
-            tenant_id: row.tenant_id,
+            tenant_id: row.tenant_id.to_string(),
             deployment_id: row.deployment_id,
             ip_address: row.ip_address,
             ptr_record: row.ptr_record,
@@ -107,7 +111,8 @@ impl From<DedicatedIPDbRow> for DedicatedIP {
 #[derive(Debug, Clone, sqlx::FromRow)]
 struct BYOIPRangeDbRow {
     id: Uuid,
-    tenant_id: String,
+    // Schema note: the tenant_id column is UUID in this table.
+    tenant_id: Uuid,
     cidr_block: String,
     status: String,
     verification_token: Option<String>,
@@ -120,7 +125,7 @@ impl From<BYOIPRangeDbRow> for BYOIPRange {
     fn from(row: BYOIPRangeDbRow) -> Self {
         Self {
             id: row.id,
-            tenant_id: row.tenant_id,
+            tenant_id: row.tenant_id.to_string(),
             cidr_block: row.cidr_block,
             status: row.status,
             verification_token: row.verification_token,
@@ -148,7 +153,7 @@ impl PrivateDeployService {
         let id = Uuid::new_v4();
         let row = sqlx::query_as::<_, PrivateDeploymentDbRow>(
             "INSERT INTO ent_private_deployments (id, tenant_id, name, deployment_type, status, region, config, created_at, updated_at)
-             VALUES ($1,$2,$3,$4,'pending',$5,$6,NOW(),NOW())
+             VALUES ($1,$2::uuid,$3,$4,'pending',$5,$6,NOW(),NOW())
              RETURNING *"
         )
         .bind(id).bind(&tenant_id).bind(name).bind(deployment_type)
@@ -183,7 +188,7 @@ impl PrivateDeployService {
         tenant_id: String,
     ) -> Result<ApiResult<Vec<PrivateDeployment>>, String> {
         let rows = sqlx::query_as::<_, PrivateDeploymentDbRow>(
-            "SELECT * FROM ent_private_deployments WHERE tenant_id = $1 ORDER BY created_at DESC",
+            "SELECT * FROM ent_private_deployments WHERE tenant_id = $1::uuid ORDER BY created_at DESC",
         )
         .bind(&tenant_id)
         .fetch_all(&self.db)
@@ -334,8 +339,8 @@ impl PrivateDeployService {
         let id = Uuid::new_v4();
         let row = sqlx::query_as::<_, DedicatedIPDbRow>(
             "INSERT INTO ent_dedicated_ips (id, tenant_id, deployment_id, ip_address, status, emails_sent_total, bounces_total, complaints_total, blocklisted, created_at)
-             VALUES ($1,$2,$3,$4::inet,'pending',0,0,0,false,NOW())
-             RETURNING *"
+             VALUES ($1,$2::uuid,$3,$4::inet,'pending',0,0,0,false,NOW())
+             RETURNING id, tenant_id, deployment_id, ip_address::text AS ip_address, region, ptr_record, status, warming_started_at, warming_progress_percent, warming_plan, current_daily_limit, reputation_score, reputation_history, emails_sent_total, bounces_total, complaints_total, blocklisted, blocklist_details, created_at"
         )
         .bind(id).bind(&tenant_id).bind(deployment_id).bind(ip_address)
         .fetch_one(&self.db)
@@ -444,8 +449,8 @@ impl PrivateDeployService {
                 emails_sent_total, bounces_total, complaints_total,
                 blocklisted, reputation_score, region, ptr_record, created_at
              )
-             VALUES ($1, $2, $3, $4::inet, 'active', 0, 0, 0, false, $5, $6, $7, NOW())
-             RETURNING *",
+             VALUES ($1, $2::uuid, $3, $4::inet, 'active', 0, 0, 0, false, $5, $6, $7, NOW())
+             RETURNING id, tenant_id, deployment_id, ip_address::text AS ip_address, region, ptr_record, status, warming_started_at, warming_progress_percent, warming_plan, current_daily_limit, reputation_score, reputation_history, emails_sent_total, bounces_total, complaints_total, blocklisted, blocklist_details, created_at",
         )
         .bind(id)
         .bind(&tenant_id)
@@ -556,7 +561,7 @@ impl PrivateDeployService {
     /// Get dedicated IP by ID
     pub async fn get_dedicated_ip(&self, id: Uuid) -> Result<ApiResult<DedicatedIP>, String> {
         let row =
-            sqlx::query_as::<_, DedicatedIPDbRow>("SELECT * FROM ent_dedicated_ips WHERE id = $1")
+            sqlx::query_as::<_, DedicatedIPDbRow>("SELECT id, tenant_id, deployment_id, ip_address::text AS ip_address, region, ptr_record, status, warming_started_at, warming_progress_percent, warming_plan, current_daily_limit, reputation_score, reputation_history, emails_sent_total, bounces_total, complaints_total, blocklisted, blocklist_details, created_at FROM ent_dedicated_ips WHERE id = $1")
                 .bind(id)
                 .fetch_optional(&self.db)
                 .await
@@ -576,7 +581,7 @@ impl PrivateDeployService {
         offset: i64,
     ) -> Result<ApiResult<Vec<DedicatedIP>>, String> {
         let rows = sqlx::query_as::<_, DedicatedIPDbRow>(
-            "SELECT * FROM ent_dedicated_ips WHERE tenant_id = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3"
+            "SELECT id, tenant_id, deployment_id, ip_address::text AS ip_address, region, ptr_record, status, warming_started_at, warming_progress_percent, warming_plan, current_daily_limit, reputation_score, reputation_history, emails_sent_total, bounces_total, complaints_total, blocklisted, blocklist_details, created_at FROM ent_dedicated_ips WHERE tenant_id = $1::uuid ORDER BY created_at DESC LIMIT $2 OFFSET $3"
         )
         .bind(&tenant_id)
         .bind(limit)
@@ -642,8 +647,8 @@ impl PrivateDeployService {
 
         let row = sqlx::query_as::<_, BYOIPRangeDbRow>(
             "INSERT INTO ent_byoip_ranges (id, tenant_id, cidr_block, status, verification_token, created_at)
-             VALUES ($1,$2,$3::cidr,'pending_verification',$4,NOW())
-             RETURNING *"
+             VALUES ($1,$2::uuid,$3::cidr,'pending_verification',$4,NOW())
+             RETURNING id, tenant_id, cidr_block::text AS cidr_block, status, verification_token, verification_method, verified_at, created_at"
         )
         .bind(id).bind(&tenant_id).bind(cidr_block).bind(&verification_token)
         .fetch_one(&self.db)
@@ -657,7 +662,7 @@ impl PrivateDeployService {
     /// Get a BYOIP range by ID (used for tenant ownership checks).
     pub async fn get_byoip(&self, id: Uuid) -> Result<ApiResult<BYOIPRange>, String> {
         let row = sqlx::query_as::<_, BYOIPRangeDbRow>(
-            "SELECT * FROM ent_byoip_ranges WHERE id = $1",
+            "SELECT id, tenant_id, cidr_block::text AS cidr_block, status, verification_token, verification_method, verified_at, created_at FROM ent_byoip_ranges WHERE id = $1",
         )
         .bind(id)
         .fetch_optional(&self.db)
@@ -679,7 +684,8 @@ impl PrivateDeployService {
     ) -> Result<ApiResult<BYOIPRange>, String> {
         let row = sqlx::query_as::<_, BYOIPRangeDbRow>(
             "UPDATE ent_byoip_ranges SET status = 'verified', verified_at = NOW()
-             WHERE id = $1 AND status = 'pending_verification' AND verification_token = $2 RETURNING *"
+             WHERE id = $1 AND status = 'pending_verification' AND verification_token = $2
+             RETURNING id, tenant_id, cidr_block::text AS cidr_block, status, verification_token, verification_method, verified_at, created_at"
         )
         .bind(id)
         .bind(verification_token)

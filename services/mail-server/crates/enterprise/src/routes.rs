@@ -153,12 +153,19 @@ async fn auth_middleware(
     validation.validate_exp = true;
     validation.validate_nbf = true;
     // J-1: when the deployment pins an audience/issuer, tokens that do not
-    // match are rejected instead of being accepted on signature alone.
+    // match — or omit the pinned claim entirely — are rejected instead of
+    // being accepted on signature alone. When nothing is pinned, tokens are
+    // not rejected merely for carrying an `aud` claim (jsonwebtoken's
+    // default `validate_aud` would otherwise do so).
     if let Some(aud) = state.config.jwt_audience.as_deref() {
         validation.set_audience(&[aud]);
+        validation.required_spec_claims.insert("aud".to_string());
+    } else {
+        validation.validate_aud = false;
     }
     if let Some(iss) = state.config.jwt_issuer.as_deref() {
         validation.set_issuer(&[iss]);
+        validation.required_spec_claims.insert("iss".to_string());
     }
 
     let decoding_key = match DecodingKey::from_rsa_pem(state.config.jwt_public_key_pem.as_bytes()) {
@@ -3415,6 +3422,16 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(legacy.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[test]
+    fn overage_rate_from_per_thousand_rounds_instead_of_truncating() {
+        // Fix J-8: 5/10 previously truncated to 0 (free overage).
+        assert_eq!(overage_rate_from_per_thousand(5), 1);
+        assert_eq!(overage_rate_from_per_thousand(15), 2); // 1.5 -> 2, was 1
+        assert_eq!(overage_rate_from_per_thousand(14), 1); // 1.4 -> 1
+        assert_eq!(overage_rate_from_per_thousand(0), 0);
+        assert_eq!(overage_rate_from_per_thousand(100), 10);
     }
 
     #[test]

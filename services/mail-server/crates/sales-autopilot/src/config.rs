@@ -260,6 +260,7 @@ mod tests {
             max_campaigns: 10,
             port: 9090,
             scraper_rpm: 60,
+            allowed_tenants: None,
             redis_url: "redis://127.0.0.1:6379".into(),
             lead_scoring: LeadScoringWeights {
                 engagement_weight: 50,

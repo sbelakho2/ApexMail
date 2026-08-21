@@ -739,6 +739,42 @@ mod tests {
     use super::*;
 
     #[test]
+    fn txt_verification_host_and_value() {
+        assert_eq!(
+            txt_verification_host("mail.example.com"),
+            "_apexmail-verify.mail.example.com"
+        );
+        assert_eq!(
+            txt_verification_value("tok123"),
+            "apexmail-verification=tok123"
+        );
+    }
+
+    #[test]
+    fn txt_records_contain_token_matches_exact_or_embedded() {
+        let token = "abc123";
+        assert!(txt_records_contain_token(
+            &["apexmail-verification=abc123".to_string()],
+            token
+        ));
+        assert!(txt_records_contain_token(
+            &["v=spf1 include:x ~all apexmail-verification=abc123".to_string()],
+            token
+        ));
+        // Wrong / missing token must NOT verify (fix E: resolvability or an
+        // unrelated TXT record is not proof of control).
+        assert!(!txt_records_contain_token(
+            &["v=spf1 include:spf.apexmail.io ~all".to_string()],
+            token
+        ));
+        assert!(!txt_records_contain_token(&[], token));
+        assert!(!txt_records_contain_token(
+            &["apexmail-verification=other".to_string()],
+            token
+        ));
+    }
+
+    #[test]
     fn test_generate_tracking_dns() {
         let records = generate_dns_records("example.com", "tracking");
         assert_eq!(records.len(), 1);

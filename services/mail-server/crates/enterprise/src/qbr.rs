@@ -599,6 +599,26 @@ mod tests {
     use super::*;
 
     #[test]
+    fn percentile_is_clamped_to_0_100() {
+        // value double the p90 anchor previously extrapolated past 100.
+        let p = estimate_percentile(200.0, 25.0, 50.0, 75.0, 90.0);
+        assert!((0.0..=100.0).contains(&p), "percentile must be within 0..=100, got {p}");
+        assert!(p > 90.0);
+        let low = estimate_percentile(-10.0, 25.0, 50.0, 75.0, 90.0);
+        assert!((0.0..=100.0).contains(&low));
+    }
+
+    #[test]
+    fn percentile_midpoints_unchanged() {
+        assert_eq!(estimate_percentile(25.0, 25.0, 50.0, 75.0, 90.0), 25.0);
+        assert_eq!(estimate_percentile(50.0, 25.0, 50.0, 75.0, 90.0), 50.0);
+        assert_eq!(estimate_percentile(75.0, 25.0, 50.0, 75.0, 90.0), 75.0);
+    }
+
+
+    use super::*;
+
+    #[test]
     fn test_goal_progress_midway() {
         let progress = calculate_goal_progress(100.0, 200.0, 150.0);
         assert!((progress - 50.0).abs() < 0.01);

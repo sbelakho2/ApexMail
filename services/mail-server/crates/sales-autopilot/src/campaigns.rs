@@ -985,8 +985,16 @@ mod tests {
         // which previously made `start_campaign` look successful while no
         // email was ever dispatched.
         let dispatcher = NoopCampaignDispatcher;
+        let recipients = [DispatchRecipient {
+            email: "a@x.com".into(),
+            unsubscribe_link: dispatcher.unsubscribe_link(
+                "tenant-a",
+                Uuid::new_v4(),
+                "a@x.com",
+            ),
+        }];
         let result = dispatcher
-            .dispatch("tenant-a", Uuid::new_v4(), "tmpl_1", &["a@x.com".into()])
+            .dispatch("tenant-a", Uuid::new_v4(), "tmpl_1", &recipients)
             .await;
         assert!(result.is_err());
     }

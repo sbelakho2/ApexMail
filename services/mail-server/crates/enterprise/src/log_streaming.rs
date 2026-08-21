@@ -231,14 +231,14 @@ impl LogStreamingService {
              RETURNING *"
         )
         .bind(id).bind(&tenant_id).bind(name).bind(description)
-        .bind(destination_config).bind(&log_categories)
+        .bind(destination_type).bind(destination_config).bind(&log_categories)
         .bind(batch_size).bind(batch_interval_seconds).bind(compression_enabled)
         .fetch_one(&self.db)
         .await
         .map_err(|e| format!("Create log stream: {e}"))?;
 
         info!(tenant_id = %tenant_id, name = name, dest = destination_type, "Log stream created");
-        Ok(ApiResult::ok(mask_stream(row.into())))
+        Ok(ApiResult::ok(self.masked_for_response(row.into())))
     }
 
     /// Get a log stream by ID
@@ -251,7 +251,7 @@ impl LogStreamingService {
                 .map_err(|e| format!("Get log stream: {e}"))?;
 
         match row {
-            Some(r) => Ok(ApiResult::ok(mask_stream(r.into()))),
+            Some(r) => Ok(ApiResult::ok(self.masked_for_response(r.into()))),
             None => Ok(ApiResult::err("Log stream not found", "NOT_FOUND")),
         }
     }
@@ -267,8 +267,22 @@ impl LogStreamingService {
         .map_err(|e| format!("List log streams: {e}"))?;
 
         Ok(ApiResult::ok(
-            rows.into_iter().map(|r| mask_stream(r.into())).collect(),
+            rows.into_iter()
+                .map(|r| self.masked_for_response(r.into()))
+                .collect(),
         ))
+    }
+
+    /// Prepare a stored stream for a client response (fix H-2): decrypt the
+    /// at-rest secrets with the tenant binding, then mask them so only the
+    /// last 4 characters of the REAL secret are revealed.
+    fn masked_for_response(&self, mut stream: LogStream) -> LogStream {
+        if let Some(config) = stream.destination_config.as_mut() {
+            let tenant_id = stream.tenant_id.clone();
+            // Best effort: on decrypt failure we still mask the ciphertext.
+            let _ = self.decrypt_config_secrets(&tenant_id, config);
+        }
+        mask_stream(stream)
     }
 
     /// Update a log stream
@@ -315,7 +329,7 @@ impl LogStreamingService {
         .map_err(|e| format!("Update log stream: {e}"))?;
 
         match row {
-            Some(r) => Ok(ApiResult::ok(mask_stream(r.into()))),
+            Some(r) => Ok(ApiResult::ok(self.masked_for_response(r.into()))),
             None => Ok(ApiResult::err("Log stream not found", "NOT_FOUND")),
         }
     }
@@ -757,6 +771,7 @@ pub fn pinned_client(host: &str, addr: std::net::SocketAddr) -> Result<reqwest::
 }
 
 /// A destination URL that passed the resolving SSRF guard.
+#[derive(Debug)]
 pub struct GuardedDestination {
     /// Original URL string (post-parse).
     pub url: reqwest::Url,
@@ -942,6 +957,141 @@ pub fn hmac_sign(key: &[u8], data: &[u8]) -> Result<String, String> {
 mod tests {
     use super::*;
     use chrono::Utc;
+
+
+    // ── SSRF guard unit tests (fix F) ─────────────────────────────────
+
+    fn ip(s: &str) -> std::net::IpAddr {
+        s.parse().unwrap()
+    }
+
+    #[test]
+    fn ssrf_guard_blocks_private_and_reserved_ranges() {
+        for blocked in [
+            "10.0.0.1",
+            "10.255.255.255",
+            "172.16.0.1",
+            "172.31.255.255",
+            "192.168.1.1",
+            "169.254.169.254", // cloud metadata
+            "127.0.0.1",
+            "0.0.0.0",
+            "255.255.255.255",
+            "100.64.0.1",   // CGNAT
+            "198.18.0.1",   // benchmarking
+            "240.0.0.1",    // reserved
+            "::1",
+            "fe80::1",      // IPv6 link-local
+            "fc00::1",      // IPv6 ULA
+            "::ffff:10.0.0.1", // IPv4-mapped private
+        ] {
+            assert!(
+                is_private_or_reserved_ip(ip(blocked)),
+                "{blocked} must be classified private/reserved"
+            );
+        }
+    }
+
+    #[test]
+    fn ssrf_guard_allows_public_addresses() {
+        for allowed in ["8.8.8.8", "1.1.1.1", "93.184.216.34", "2606:4700:4700::1111"] {
+            assert!(
+                !is_private_or_reserved_ip(ip(allowed)),
+                "{allowed} must be classified public"
+            );
+        }
+    }
+
+    #[test]
+    fn ssrf_guard_rejects_non_https() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let err = rt
+            .block_on(ssrf_guard_url("http://example.com/hook"))
+            .unwrap_err();
+        assert!(err.contains("HTTPS"), "plain HTTP must be rejected: {err}");
+    }
+
+    #[test]
+    fn ssrf_guard_rejects_literal_private_ip_host() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        for url in [
+            "https://10.0.0.5/hook",
+            "https://169.254.169.254/latest/meta-data",
+            "https://127.0.0.1:9090/hook",
+        ] {
+            let err = rt.block_on(ssrf_guard_url(url)).unwrap_err();
+            assert!(
+                err.contains("blocked"),
+                "{url} must be blocked by the resolving guard: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn ssrf_guard_rejects_unresolvable_host() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let host = format!("nonexistent-{}.invalid", uuid::Uuid::new_v4().simple());
+        let result = rt.block_on(ssrf_guard_url(&format!("https://{host}/hook")));
+        assert!(result.is_err(), "unresolvable host must be rejected");
+    }
+
+    // ── Secret masking / at-rest encryption (fix H-2) ────────────────
+
+    #[test]
+    fn mask_destination_config_keeps_last_four_only() {
+        let config = serde_json::json!({
+            "url": "https://input.example.com:8088",
+            "token": "super-secret-hec-token-1234",
+            "api_key": "ddog-abcdef9988"
+        });
+        let masked = mask_destination_config(&config);
+        assert_eq!(masked["url"], "https://input.example.com:8088", "non-secret fields pass through");
+        assert_eq!(masked["token"], "****1234");
+        assert_eq!(masked["api_key"], "****9988");
+        assert!(!masked.to_string().contains("super-secret"));
+    }
+
+    #[test]
+    fn secret_codec_roundtrip_and_tenant_binding() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let db = rt.block_on(async {
+            sqlx::postgres::PgPoolOptions::new()
+                .connect_lazy("postgres://localhost/unused")
+                .unwrap()
+        });
+        let service = LogStreamingService::with_secret_key(db, "unit-test-secret");
+
+        let mut config = serde_json::json!({"token": "plain-secret-value"});
+        rt.block_on(async {
+            service
+                .encrypt_config_secrets("tenant-a", &mut config)
+                .unwrap();
+        });
+        let stored = config["token"].as_str().unwrap();
+        assert!(stored.starts_with("ENC:v1:"), "secret must be encrypted at rest");
+
+        // Roundtrip with the right tenant.
+        rt.block_on(async {
+            service.decrypt_config_secrets("tenant-a", &mut config).unwrap();
+        });
+        assert_eq!(config["token"], "plain-secret-value");
+
+        // A ciphertext bound to tenant A must not decrypt for tenant B.
+        let mut config = serde_json::json!({"token": "plain-secret-value"});
+        rt.block_on(async {
+            service.encrypt_config_secrets("tenant-a", &mut config).unwrap();
+        });
+        let result = rt.block_on(async {
+            service.decrypt_config_secrets("tenant-b", &mut config)
+        });
+        assert!(result.is_err(), "cross-tenant secret decryption must fail");
+    }
+
+    #[test]
+    fn hmac_sign_available_for_delivery_signing() {
+        let sig = hmac_sign(b"secret", b"payload").unwrap();
+        assert_eq!(sig.len(), 64);
+    }
 
     #[test]
     fn test_gzip_compress_decompress() {
