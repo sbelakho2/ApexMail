@@ -223,7 +223,13 @@ function check_para(  t, s, k, ns, wc, n, i, tok, core, after, lw, m) {
       n_long++
     }
   }
-  s = t
+  # Link targets and bare URLs are not prose: strip them before the
+  # all-caps scan so a path like (.../README.md) is never flagged.
+  t2 = t
+  gsub(/https?:\/\/[^ )\t]+/, "", t2)
+  gsub(/\([^()]*\.[A-Za-z0-9]+[^()]*\)/, "", t2)
+  gsub(/\([A-Z][A-Z0-9_.-]{2,}\)/, "", t2)
+  s = t2
   while (match(s, /[A-Z][A-Z0-9-]{3,}/)) {
     tok = substr(s, RSTART, RLENGTH)
     after = substr(s, RSTART + RLENGTH, 1)

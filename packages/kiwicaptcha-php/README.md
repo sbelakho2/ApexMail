@@ -26,14 +26,13 @@ Byte-for-byte compatible with the reference implementation in
   grace.
 - challenge = `base64(canonical_payload) + "." + hex(hmac_sha256(secret, canonical_payload))`.
   Every record field that shapes verification is covered by the HMAC, so
-  a tampered record can never pass.
+  a tampered record cannot pass.
 - prefix = `challenge + "|" + salt + "|"`, with salt = base64 of 16 random bytes.
 - nonce-bound IP binding: the record's `binding_tag` is an HMAC-SHA256 of
   the canonical IP form (4-byte IPv4 / 16-byte IPv6, IPv4-mapped IPv6
   normalized to IPv4) keyed by the secret and bound to the challenge nonce
-  (`Issuer::bindingTag($nonce, $ip, $secret)`). It is unique per challenge
-  and never a stable IP-derived identifier that could follow the client
-  across requests. Binding modes: `none` (verification without a client
+  (`Issuer::bindingTag($nonce, $ip, $secret)`). It is unique per challenge,
+  so it cannot follow the client across requests as a stable identifier. Binding modes: `none` (verification without a client
   IP) or `nonce_ip_hmac` (the default issuance mode); an empty binding tag
   means binding is disabled for that record.
 - SHA-256 mode: verify `leading_zero_bits(sha256(prefix || counter || salt)) >= target_bits`.
@@ -52,7 +51,7 @@ Byte-for-byte compatible with the reference implementation in
 - counter bound: the browser/WASM solver caps at 5,000,000 hashes, so
   `SolutionToken::decode()` rejects any counter longer than 7 digits or
   above 5,000,000 (`counter exceeds solver maximum`). A huge counter is an
-  abuse probe, not a solution.
+  abuse probe rather than a solution.
 - record validation: every field is validated on the verify path,
   including scope, TTL, binding, the algorithm-specific parameter profile
   (Argon2id `t >= 3 && p == 1`, `m_kib >= 8`, the verifier's structural
@@ -282,11 +281,11 @@ nonce-bound binding tags over the canonical IP form incl. IPv4-mapped IPv6
 normalization, `binding_tag`/`protocol_version` record schema evolution,
 and counter bounds), token codec edge cases, replay, tampering, expiry,
 IP binding, minimum duration, and clock-skew tolerance. They also cover
-the one-shot consume-on-verify model, kid-keyed secrets with compromise
-revocation, allocation/length and recursion hardening (the 659-accepted
-differential fuzz corpus, 1 MB token and 10 MB body caps, 100k-level
-nesting), and the storage adapters (Array, PSR-6, Redis, including the
-language-neutral JSON record format).
+the one-shot consume-on-verify model and kid-keyed secrets with
+compromise revocation, plus allocation/length and recursion hardening
+(the 659-accepted differential fuzz corpus, 1 MB token and 10 MB body
+caps, 100k-level nesting). The storage adapters (Array, PSR-6, Redis)
+are covered too, including the language-neutral JSON record format.
 
 The Symfony integration is tested in the `bel-consulting/kiwicaptcha-symfony`
 package.
@@ -301,26 +300,24 @@ package.
    verification) for high-value operations. Do not add fingerprinting to
    "prove" humanity; it is forgeable and sacrifices privacy.
 2. Telemetry is client-controlled and forgeable. Whatever the widget
-   reports, a custom client can omit or fake. Treat telemetry as a
-   supplementary signal, never the security boundary, and rely on
-   server-side abuse signals (per-account/IP-HMAC/network velocity, PoW
-   success ratios, concurrent unsolved challenges). Keep telemetry off by
-   default.
+   reports, a custom client can omit or fake. Telemetry is a
+   supplementary signal; rely on server-side abuse signals
+   (per-account/IP-HMAC/network velocity, PoW success ratios, concurrent
+   unsolved challenges) and keep telemetry off by default.
 3. IP binding is best-effort and mode-dependent. `none` disables it
    (purest privacy); `bound` uses a nonce-bound HMAC (no stable
    identifier, breaks under IP churn). IPs legitimately change behind
    NAT/proxies, so a strict binding would reject real users. It is a
-   relay mitigation, not a guarantee, and operators can disable the check
-   entirely.
+   relay mitigation; operators can disable the check entirely.
 4. Server-side timing needs a trusted clock, and is only a heuristic.
    The minimum-duration floor is measured by your server. A fast bot can
    always wait before submitting (it still pays the full PoW cost per
    attempt), and a valid solution can occur at counter 0. The server
    clock must be correct: timing uses wall-clock epoch microseconds
-   (persisted in the challenge record), so all hosts involved must be
-   NTP-synced. A 5s skew tolerance (`Verifier::SKEW_TOLERANCE_US`) keeps
-   slightly unsynced hosts passing verification while the proof-of-work
-   check still applies.
+   (persisted in the challenge record), so all hosts involved must keep
+   synchronized clocks. A 5s skew tolerance
+   (`Verifier::SKEW_TOLERANCE_US`) keeps slightly unsynced hosts passing
+   verification while the proof-of-work check still applies.
 5. The WASM solver and its JS fallback are open source. An attacker can
    always write their own solver (or reuse the source). The value is the
    cost per attempt, not the impossibility of solving: they still cannot
