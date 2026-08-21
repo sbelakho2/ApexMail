@@ -615,9 +615,6 @@ mod tests {
         assert_eq!(estimate_percentile(75.0, 25.0, 50.0, 75.0, 90.0), 75.0);
     }
 
-
-    use super::*;
-
     #[test]
     fn test_goal_progress_midway() {
         let progress = calculate_goal_progress(100.0, 200.0, 150.0);

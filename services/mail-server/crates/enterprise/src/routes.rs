@@ -211,6 +211,20 @@ pub struct StatusFilterParams {
     pub limit: Option<i64>,
     pub offset: Option<i64>,
 }
+
+/// Ticket list query: supports keyset pagination via `cursor`
+/// (`<rfc3339-created-at>,<ticket-uuid>` of the last row seen) in addition
+/// to the classic limit/offset pair, plus a bounded subject search (`q`).
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TicketListParams {
+    pub status: Option<String>,
+    pub priority: Option<String>,
+    pub limit: Option<i64>,
+    pub offset: Option<i64>,
+    pub cursor: Option<String>,
+    pub q: Option<String>,
+}
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AuditFilterParams {
@@ -1002,6 +1016,35 @@ fn service_result<T: serde::Serialize>(
             Json(serde_json::json!({"error": e})),
         ),
     }
+}
+
+/// Support-surface variant of [`service_result`]: the SupportService returns
+/// structured error codes (VALIDATION, INVALID_TRANSITION, ALREADY_SUBMITTED,
+/// NOT_FOUND) that must surface as real HTTP status codes instead of a 200
+/// with `success:false`. The response body still carries the ApiResult JSON,
+/// so the client keeps the human-readable error message.
+fn support_result<T: serde::Serialize>(
+    result: Result<crate::types::ApiResult<T>, String>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    if let Ok(ref r) = result {
+        if !r.success {
+            let status = match r.code.as_deref() {
+                Some("VALIDATION") => StatusCode::BAD_REQUEST,
+                Some("INVALID_TRANSITION") | Some("ALREADY_SUBMITTED") => {
+                    StatusCode::CONFLICT
+                }
+                Some("NOT_FOUND") => StatusCode::NOT_FOUND,
+                _ => StatusCode::OK,
+            };
+            if status != StatusCode::OK {
+                let body = serde_json::to_value(r).unwrap_or_else(|_| {
+                    serde_json::json!({"success": false, "error": "invalid request"})
+                });
+                return (status, Json(body));
+            }
+        }
+    }
+    service_result(result)
 }
 
 // ── Health ─────────────────────────────────────────────────────────────
@@ -2576,7 +2619,7 @@ async fn ticket_create(
     if let Err(e) = verify_tenant_access(&auth, &body.tenant_id) {
         return e;
     }
-    service_result(
+    support_result(
         state
             .support
             .create_ticket(
@@ -2600,7 +2643,7 @@ async fn ticket_get(
     if let Some(e) = guard_resource_tenant(&auth, &result).await {
         return e;
     }
-    service_result(result)
+    support_result(result)
 }
 
 async fn ticket_update(
@@ -2613,7 +2656,7 @@ async fn ticket_update(
     if let Some(e) = guard_resource_tenant(&auth, &existing).await {
         return e;
     }
-    service_result(
+    support_result(
         state
             .support
             .update_ticket(
@@ -2630,22 +2673,34 @@ async fn ticket_list(
     State(state): State<S>,
     Extension(auth): Extension<AuthContext>,
     Path(tenant_id): Path<String>,
-    Query(q): Query<StatusFilterParams>,
+    Query(q): Query<TicketListParams>,
 ) -> impl IntoResponse {
     if let Err(e) = verify_tenant_access(&auth, &tenant_id) {
         return e;
     }
+    // Cursor format errors are client errors → 400 with a message.
+    let cursor = match q.cursor.as_deref() {
+        None => None,
+        Some(raw) => match crate::support::TicketCursor::parse(raw) {
+            Ok(c) => Some(c),
+            Err(message) => {
+                return err_json(StatusCode::BAD_REQUEST, &message);
+            }
+        },
+    };
     let limit = clamp_limit(q.limit.unwrap_or(50), 200);
     let offset = clamp_offset(q.offset.unwrap_or(0));
-    service_result(
+    support_result(
         state
             .support
-            .list_tickets(
+            .list_tickets_search(
                 &tenant_id,
                 q.status.as_deref(),
                 q.priority.as_deref(),
                 limit,
                 offset,
+                cursor,
+                q.q.as_deref(),
             )
             .await,
     )
@@ -2661,7 +2716,7 @@ async fn comment_add(
     if let Some(e) = guard_resource_tenant(&auth, &existing).await {
         return e;
     }
-    service_result(
+    support_result(
         state
             .support
             .add_comment(
@@ -2686,7 +2741,7 @@ async fn comment_list(
     if let Some(e) = guard_resource_tenant(&auth, &existing).await {
         return e;
     }
-    service_result(
+    support_result(
         state
             .support
             .get_comments(ticket_id, q.include_internal.unwrap_or(false))
@@ -2704,7 +2759,7 @@ async fn ticket_escalate(
     if let Some(e) = guard_resource_tenant(&auth, &existing).await {
         return e;
     }
-    service_result(
+    support_result(
         state
             .support
             .escalate(id, &body.reason, body.escalated_by)
@@ -2722,7 +2777,7 @@ async fn ticket_satisfaction(
     if let Some(e) = guard_resource_tenant(&auth, &existing).await {
         return e;
     }
-    service_result(
+    support_result(
         state
             .support
             .submit_satisfaction(id, body.rating, body.feedback.as_deref())
@@ -2738,7 +2793,7 @@ async fn support_metrics(
     if let Err(e) = verify_tenant_access(&auth, &tenant_id) {
         return e;
     }
-    service_result(state.support.get_metrics(&tenant_id).await)
+    support_result(state.support.get_metrics(&tenant_id).await)
 }
 
 // ── Template Handlers ──────────────────────────────────────────────────
