@@ -8,7 +8,7 @@ use axum::{
     extract::{DefaultBodyLimit, FromRequestParts, Path, Query, State},
     http::{header::AUTHORIZATION, StatusCode},
     middleware::{self, Next},
-    response::Response,
+    response::{IntoResponse, Redirect, Response},
     routing::{delete, get, post},
     Json, Router,
 };
@@ -26,6 +26,7 @@ use crate::{
     campaigns::CampaignManager,
     config::SalesConfig,
     crm::CrmBackend,
+    dispatcher::ProductionCampaignDispatcher,
     enrichment::EnrichmentService,
     inbox::InboxManager,
     types::{CreateConversionBody, LeadStatus, SalesError},
@@ -42,6 +43,10 @@ pub struct AppState {
     pub crm: CrmBackend,
     pub enrichment: EnrichmentService,
     pub campaigns: CampaignManager,
+    /// The production campaign dispatcher, when configured
+    /// (SALES_CAMPAIGN_FROM_EMAIL + SALES_UNSUBSCRIBE_SECRET). `None` ⇒
+    /// campaign start refuses with 503 (fix I-1 semantics preserved).
+    pub dispatcher: Option<Arc<ProductionCampaignDispatcher>>,
     pub calendar: CalendarService,
     pub inbox: InboxManager,
     pub service_token: String,
@@ -226,6 +231,23 @@ async fn initialize_schema_inner(db: &PgPool) -> Result<(), SalesError> {
     .await
     .map_err(|e| SalesError::Database(e.to_string()))?;
 
+    // Links each dispatched recipient to its platform `messages` row — used
+    // by the campaign stats reconciliation (opens/clicks are maintained on
+    // `messages` by the platform tracking service).
+    sqlx::query(
+        "ALTER TABLE sales_campaign_recipients ADD COLUMN IF NOT EXISTS message_id UUID",
+    )
+    .execute(db)
+    .await
+    .map_err(|e| SalesError::Database(e.to_string()))?;
+
+    // Error state for paused campaigns (e.g. "email quota exhausted") — a
+    // stalled campaign must never be a silent partial send.
+    sqlx::query("ALTER TABLE sales_campaigns ADD COLUMN IF NOT EXISTS last_error TEXT")
+        .execute(db)
+        .await
+        .map_err(|e| SalesError::Database(e.to_string()))?;
+
     // ── Suppression list (fix I-2, CAN-SPAM) ──────────────────────────
     // Recipients on this list are excluded from every campaign send; the
     // dispatch path also enforces a per-recipient frequency cap (see
@@ -291,6 +313,12 @@ async fn initialize_schema_inner(db: &PgPool) -> Result<(), SalesError> {
     // btree_gist provides the `=` operator for the scalar tenant_id column
     // inside a GiST index. The DO block drops any existing constraint first
     // so re-running this migration is idempotent.
+    //
+    // NOTE: the range constructor must be `tstzrange` — the columns are
+    // TIMESTAMPTZ and `tsrange(timestamptz, timestamptz)` does not exist,
+    // which made this DO block (and therefore ALL of initialize_schema)
+    // fail on every fresh database; the service could not bootstrap and the
+    // integration tests silently soft-skipped.
     sqlx::query("CREATE EXTENSION IF NOT EXISTS btree_gist")
         .execute(db)
         .await
@@ -302,7 +330,7 @@ async fn initialize_schema_inner(db: &PgPool) -> Result<(), SalesError> {
             BEGIN
                 ALTER TABLE sales_calendar_events DROP CONSTRAINT IF EXISTS no_overlapping_events;
                 ALTER TABLE sales_calendar_events ADD CONSTRAINT no_overlapping_events
-                    EXCLUDE USING gist (tenant_id WITH =, tsrange(start_at, end_at) WITH &&);
+                    EXCLUDE USING gist (tenant_id WITH =, tstzrange(start_at, end_at) WITH &&);
             END $$;
         "#,
     )
@@ -410,6 +438,11 @@ pub fn router(state: AppState) -> Router {
         .route("/campaigns/:id/recipients", post(add_campaign_recipients))
         .route("/campaigns/:id/start", post(start_campaign))
         .route("/campaigns/:id/pause", post(pause_campaign))
+        .route("/campaigns/:id/dry-run", post(dry_run_campaign))
+        // Public unsubscribe endpoints (CAN-SPAM / RFC 8058). Auth is by
+        // HMAC-signed token, not the shared service token — see
+        // `require_service_token`'s path exemption and the handlers below.
+        .route("/u/:token", get(unsubscribe_get).post(unsubscribe_post))
         .route("/calendar", get(list_calendar))
         .route("/calendar/events", post(create_calendar_event))
         .route("/calendar/events/:id", delete(cancel_calendar_event))
@@ -462,8 +495,11 @@ async fn require_service_token(
     req: axum::http::Request<axum::body::Body>,
     next: Next,
 ) -> Result<Response, StatusCode> {
-    // Skip auth for health checks
-    if req.uri().path() == "/health" {
+    // Skip auth for health checks and the PUBLIC unsubscribe endpoints
+    // (`/u/:token`) — recipient clicks arrive from mail clients with no
+    // service token; authenticity comes from the HMAC token signature.
+    let path = req.uri().path();
+    if path == "/health" || path.starts_with("/u/") {
         return Ok(next.run(req).await);
     }
     if state.service_token.is_empty() {
@@ -1347,6 +1383,147 @@ async fn pause_campaign(
     .await
 }
 
+/// Dry-run a campaign: render templates and evaluate every dispatch filter
+/// (suppression, frequency cap, sender-domain readiness) WITHOUT enqueueing
+/// anything or stamping the send ledger. Operator safety net + test seam.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DryRunQuery {
+    /// How many due recipients to render in the preview (default 3, max 25).
+    #[serde(default)]
+    sample: Option<usize>,
+}
+
+async fn dry_run_campaign(
+    State(state): State<Arc<AppState>>,
+    tenant_id: TenantId,
+    Path(id): Path<Uuid>,
+    Query(q): Query<DryRunQuery>,
+) -> Result<Json<serde_json::Value>, SalesError> {
+    let tenant_id = tenant_id.0;
+    let span = tracing::info_span!(
+        "dry_run_campaign",
+        tenant_id = %tenant_id,
+        campaign_id = %id,
+        operation = "dry_run_campaign"
+    );
+    async move {
+        let sample = q.sample.unwrap_or(3).clamp(1, 25);
+        let report = state
+            .campaigns
+            .dry_run(&tenant_id, id, sample, state.dispatcher.as_deref())
+            .await?;
+        Ok(Json(report))
+    }
+    .instrument(span)
+    .await
+}
+
+// -- Public unsubscribe endpoints (CAN-SPAM / RFC 8058) ----------------------
+
+/// Shared suppression logic for GET and POST. Idempotent by construction
+/// (`ON CONFLICT DO NOTHING` in both suppression stores) — a second click
+/// succeeds without duplicating rows.
+async fn apply_unsubscribe(
+    state: &AppState,
+    token: &str,
+) -> Result<crate::dispatcher::UnsubscribeTokenData, SalesError> {
+    let secret = &state.config.dispatch.unsubscribe_secret;
+    if secret.trim().is_empty() {
+        // No secret configured ⇒ tokens cannot be validated ⇒ refuse.
+        return Err(SalesError::ServiceUnavailable(
+            "unsubscribe tokens are not configured".into(),
+        ));
+    }
+    let data = crate::dispatcher::verify_unsubscribe_token(secret, token).ok_or_else(|| {
+        tracing::warn!("unsubscribe request with invalid or expired token");
+        SalesError::InvalidInput("invalid or expired unsubscribe token".into())
+    })?;
+
+    ProductionCampaignDispatcher::suppress(&state.db, &data.tenant_id, &data.email, "unsubscribe-link")
+        .await?;
+
+    metrics::counter!("sales_campaign_unsubscribes_total").increment(1);
+    tracing::info!(
+        tenant_id = %data.tenant_id,
+        "recipient unsubscribed from sales campaigns"
+    );
+    Ok(data)
+}
+
+/// Branded confirmation page shown after a GET unsubscribe when no explicit
+/// redirect URL is configured.
+fn unsubscribed_page() -> axum::response::Html<&'static str> {
+    axum::response::Html(
+        r#"<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Unsubscribed — ApexMail</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>body{font-family:system-ui,sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;background:#f7f7f9;color:#222}.card{background:#fff;border-radius:12px;box-shadow:0 2px 12px rgba(0,0,0,.08);padding:48px;text-align:center;max-width:420px}h1{font-size:20px;margin:0 0 12px}p{color:#666;font-size:14px;line-height:1.6;margin:0}</style>
+</head>
+<body><div class="card"><h1>You're unsubscribed</h1>
+<p>You will not receive any further campaign emails from us. Sorry to see you go!</p>
+</div></body></html>"#,
+    )
+}
+
+/// GET /u/:token — manual (link click) unsubscribe: suppress + redirect to a
+/// branded page.
+async fn unsubscribe_get(
+    State(state): State<Arc<AppState>>,
+    Path(token): Path<String>,
+) -> Response {
+    match apply_unsubscribe(&state, &token).await {
+        Ok(_) => match &state.config.dispatch.unsubscribe_redirect_url {
+            Some(url) => Redirect::to(url).into_response(),
+            None => unsubscribed_page().into_response(),
+        },
+        Err(SalesError::InvalidInput(msg)) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": msg })),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+/// POST /u/:token — RFC 8058 one-click unsubscribe (mail clients). The body
+/// MUST be exactly `List-Unsubscribe=One-Click` (CRLF-tolerant).
+async fn unsubscribe_post(
+    State(state): State<Arc<AppState>>,
+    Path(token): Path<String>,
+    body: String,
+) -> Response {
+    if body.trim() != "List-Unsubscribe=One-Click" {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "Invalid request body" })),
+        )
+            .into_response();
+    }
+    match apply_unsubscribe(&state, &token).await {
+        Ok(_) => (
+            StatusCode::OK,
+            Json(serde_json::json!({ "success": true })),
+        )
+            .into_response(),
+        Err(SalesError::InvalidInput(msg)) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": msg })),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
 // -- Calendar ---------------------------------------------------------------
 
 #[derive(Deserialize)]
@@ -1534,12 +1711,45 @@ async fn find_calendar_slots(
     .await
 }
 
+/// Request body for replying to an inbox message.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReplyBody {
+    /// The reply text (plain text; the HTML part is composed with escaping).
+    body: String,
+    #[serde(default)]
+    tenant_id: Option<String>,
+}
+
+/// Maximum accepted reply length in characters (the router-level body limit
+/// is 256 KB; this keeps individual replies civil).
+const REPLY_BODY_MAX_CHARS: usize = 100_000;
+
+/// POST /inbox/:id/reply — compose a reply to an inbound message and enqueue
+/// it through the platform pipeline (`messages` + `email_queue`), exactly
+/// like the REST send path.
+///
+/// # Fix I-4 history / decision
+///
+/// The handler previously flipped the `replied` flag and answered
+/// `{replied: true}` without sending anything (honest 501 followed). Now
+/// that the crate owns a real enqueue pipeline, the sender identity IS
+/// resolvable whenever the production dispatcher is configured
+/// (`SALES_CAMPAIGN_FROM_EMAIL` + verified/DKIM-ready sender domain): the
+/// reply is composed ("Re: {subject}", HTML-escaped body) and enqueued with
+/// quota reservation, platform-suppression check and a deterministic
+/// idempotency key (`sareply:{inbox_message_id}` — one enqueued reply per
+/// message; the `replied` flag commits atomically with the enqueue).
+///
+/// When NO sender identity is resolvable (dispatcher unconfigured) the
+/// endpoint keeps failing honestly with 501 BEFORE mutating anything.
 async fn reply_inbox_message(
     State(state): State<Arc<AppState>>,
     tenant_id: TenantId,
     Path(id): Path<Uuid>,
-) -> Result<Json<serde_json::Value>, SalesError> {
-    let tenant_id = tenant_id.0;
+    Json(body): Json<ReplyBody>,
+) -> Result<(StatusCode, Json<serde_json::Value>), SalesError> {
+    let tenant_id = required_tenant_id(&tenant_id.0, body.tenant_id.as_deref())?;
     let span = tracing::info_span!(
         "reply_inbox_message",
         tenant_id = %tenant_id,
@@ -1547,15 +1757,79 @@ async fn reply_inbox_message(
         operation = "reply_inbox_message"
     );
     async move {
-        // Fix I-4: there is no email delivery path for inbox replies in this
-        // crate — the handler previously flipped the `replied` flag and
-        // answered `{replied: true}` without sending anything. Fail honestly
-        // with 501 (before mutating anything) until compose+queue is wired.
-        let _ = &state;
-        Err(SalesError::NotImplemented(
-            "reply delivery not implemented — no outbound email path is wired for inbox replies"
-                .into(),
-        ))
+        let text = body.body.trim();
+        if text.is_empty() {
+            return Err(SalesError::InvalidInput(
+                "reply body must not be empty".into(),
+            ));
+        }
+        if text.chars().count() > REPLY_BODY_MAX_CHARS {
+            return Err(SalesError::InvalidInput(format!(
+                "reply body exceeds the maximum of {REPLY_BODY_MAX_CHARS} characters"
+            )));
+        }
+
+        // Sender identity resolution: the production dispatcher carries the
+        // configured From address and resolves the verified sender domain
+        // per tenant at enqueue time. Without it there is no honest email
+        // path — 501 before mutating anything.
+        let Some(dispatcher) = state.dispatcher.clone() else {
+            return Err(SalesError::NotImplemented(
+                "reply delivery not available: no sender identity is configured \
+                 (set SALES_CAMPAIGN_FROM_EMAIL and SALES_UNSUBSCRIBE_SECRET to enable replies)"
+                    .into(),
+            ));
+        };
+
+        // The message being replied to (tenant-scoped).
+        let row: Option<(String, String)> = sqlx::query_as(
+            "SELECT sender, subject FROM sales_inbox_messages \
+             WHERE id = $1 AND tenant_id = $2",
+        )
+        .bind(id)
+        .bind(&tenant_id)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(|e| SalesError::Database(e.to_string()))?;
+        let (sender, original_subject) =
+            row.ok_or(SalesError::MessageNotFound(id))?;
+
+        // The correspondent's address is the reply recipient — validate it
+        // syntactically before spending a quota reservation.
+        if !apexmail_lib::validation::is_valid_email(sender.trim()) {
+            return Err(SalesError::InvalidInput(format!(
+                "inbox message sender is not a valid email address: {sender}"
+            )));
+        }
+
+        let subject = crate::dispatcher::compose_reply_subject(&original_subject);
+        let html = crate::dispatcher::compose_reply_html(text);
+
+        let outcome = dispatcher
+            .enqueue_reply(&tenant_id, id, sender.trim(), &subject, Some(&html), text)
+            .await?;
+
+        Ok(match outcome {
+            crate::dispatcher::ReplyOutcome::Enqueued { message_id } => (
+                StatusCode::ACCEPTED,
+                Json(serde_json::json!({
+                    "messageId": message_id,
+                    "queued": true,
+                    "replied": true,
+                    "to": sender.trim(),
+                })),
+            ),
+            crate::dispatcher::ReplyOutcome::AlreadyReplied { message_id } => (
+                StatusCode::ACCEPTED,
+                Json(serde_json::json!({
+                    "messageId": message_id,
+                    "queued": false,
+                    "duplicate": true,
+                    "replied": true,
+                    "to": sender.trim(),
+                })),
+            ),
+        })
     }
     .instrument(span)
     .await
@@ -1610,6 +1884,7 @@ mod tests {
             crm: CrmBackend::postgres(db.clone()),
             enrichment: EnrichmentService::mock(),
             campaigns: CampaignManager::new(10, db.clone()),
+            dispatcher: None,
             calendar: CalendarService::new(db.clone()),
             inbox: InboxManager::new(db),
             service_token: "test-key".into(),
@@ -1642,6 +1917,7 @@ mod tests {
             crm: CrmBackend::postgres(db.clone()),
             enrichment: EnrichmentService::mock(),
             campaigns: CampaignManager::new(10, db.clone()),
+            dispatcher: None,
             calendar: CalendarService::new(db.clone()),
             inbox: InboxManager::new(db),
             service_token: service_token.into(),
@@ -1675,6 +1951,7 @@ mod tests {
             crm: CrmBackend::postgres(db.clone()),
             enrichment: EnrichmentService::mock(),
             campaigns: CampaignManager::new(10, db.clone()),
+            dispatcher: None,
             calendar: CalendarService::new(db.clone()),
             inbox: InboxManager::new(db),
             service_token: "test-key".into(),
@@ -1715,21 +1992,60 @@ mod tests {
         );
     }
 
-    /// Fix I-4: inbox reply has no delivery path — 501, not {replied:true}.
+    /// Fix I-4: inbox reply without a resolvable sender identity (dispatcher
+    /// unconfigured) must stay an HONEST 501 — never `{replied:true}` with
+    /// nothing sent, and not a silent fallback either.
     #[tokio::test]
-    async fn test_inbox_reply_returns_501_not_implemented() {
+    async fn test_inbox_reply_returns_501_when_sender_identity_unresolvable() {
+        let app = lazy_test_app(); // dispatcher: None in this harness
+        let resp = app
+            .oneshot(
+                Request::post(format!("/inbox/{}/reply", Uuid::new_v4()))
+                    .header("x-api-key", "test-key")
+                    .header("x-tenant-id", "tenant-a")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&serde_json::json!({
+                        "body": "Thanks for reaching out!"
+                    })).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
+        let body: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(
+            body["error"]
+                .as_str()
+                .unwrap()
+                .contains("no sender identity is configured"),
+            "501 message must explain WHY replies are unavailable: {body}"
+        );
+    }
+
+    /// Reply validation: an empty body is rejected with 400 before any
+    /// sender-identity lookup or quota reservation.
+    #[tokio::test]
+    async fn test_inbox_reply_rejects_empty_body() {
         let app = lazy_test_app();
         let resp = app
             .oneshot(
                 Request::post(format!("/inbox/{}/reply", Uuid::new_v4()))
                     .header("x-api-key", "test-key")
                     .header("x-tenant-id", "tenant-a")
-                    .body(Body::empty())
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&serde_json::json!({
+                        "body": "   "
+                    })).unwrap()))
                     .unwrap(),
             )
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 
     /// Fix I-3: header/payload tenant consistency is enforced on

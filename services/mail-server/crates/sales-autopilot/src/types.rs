@@ -285,6 +285,12 @@ pub enum SalesError {
     #[error("service unavailable: {0}")]
     ServiceUnavailable(String),
 
+    /// The tenant's email quota is exhausted (billing quota reservation
+    /// denied). Campaign dispatch pauses the campaign with an error state
+    /// when this surfaces — never a silent partial send.
+    #[error("email quota exhausted: {0}")]
+    QuotaExhausted(String),
+
     #[error("not implemented: {0}")]
     NotImplemented(String),
 
@@ -309,6 +315,8 @@ impl axum::response::IntoResponse for SalesError {
             SalesError::EnrichmentFailed(_) => (StatusCode::BAD_GATEWAY, self.to_string()),
             SalesError::RateLimited(_) => (StatusCode::TOO_MANY_REQUESTS, self.to_string()),
             SalesError::Unauthorized(_) => (StatusCode::FORBIDDEN, self.to_string()),
+            // Mirrors api-server messages.rs: quota denial is 403 Forbidden.
+            SalesError::QuotaExhausted(_) => (StatusCode::FORBIDDEN, self.to_string()),
             SalesError::ServiceUnavailable(_) => {
                 (StatusCode::SERVICE_UNAVAILABLE, self.to_string())
             }

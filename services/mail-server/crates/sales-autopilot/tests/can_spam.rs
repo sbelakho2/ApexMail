@@ -4,6 +4,12 @@
 //! a real Postgres instance when one is available (`SALES_TEST_DATABASE_URL`,
 //! default `postgres://127.0.0.1:5432/apexmail_test`). Without Postgres the
 //! tests soft-skip so `cargo test` stays green everywhere.
+//!
+//! `mod common` also applies the PLATFORM schema (tools/migrations) — the
+//! due-recipient query reads the platform `suppressions` table, exactly like
+//! the REST send path does.
+
+mod common;
 
 use std::sync::Arc;
 
@@ -44,26 +50,7 @@ impl CampaignEmailDispatcher for RecordingDispatcher {
 }
 
 async fn setup() -> Option<(CampaignManager, Arc<RecordingDispatcher>, sqlx::PgPool)> {
-    let url = std::env::var("SALES_TEST_DATABASE_URL")
-        .unwrap_or_else(|_| "postgres://127.0.0.1:5432/apexmail_test".to_string());
-
-    let db = match tokio::time::timeout(
-        std::time::Duration::from_secs(3),
-        sqlx::postgres::PgPoolOptions::new().max_connections(5).connect(&url),
-    )
-    .await
-    {
-        Ok(Ok(pool)) => pool,
-        _ => {
-            eprintln!("SKIP: sales test database unavailable at {url}");
-            return None;
-        }
-    };
-
-    if let Err(e) = sales_autopilot::routes::initialize_schema(&db).await {
-        eprintln!("SKIP: schema init failed: {e}");
-        return None;
-    }
+    let db = common::test_pool("can_spam").await?;
 
     let dispatcher = Arc::new(RecordingDispatcher::default());
     let manager = CampaignManager::new(50, db.clone())

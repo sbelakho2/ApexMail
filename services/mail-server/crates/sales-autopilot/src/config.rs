@@ -46,6 +46,105 @@ pub struct SalesConfig {
     /// allowed (a warning is logged in that case).
     #[serde(default)]
     pub allowed_tenants: Option<Vec<String>>,
+
+    /// Campaign dispatch configuration (production dispatcher).
+    #[serde(default)]
+    pub dispatch: DispatchConfig,
+}
+
+/// Production campaign dispatcher settings (all env-driven).
+///
+/// `from_email` and `unsubscribe_secret` are REQUIRED for the production
+/// dispatcher: when either is missing the dispatcher is not constructed and
+/// campaign start keeps failing loudly with 503 ("genuinely unconfigured"
+/// deployments stay honest).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DispatchConfig {
+    /// Envelope sender for campaign mail, e.g. `sales@apexmail.ee`. The
+    /// domain must be verified + DKIM-ready for the sending tenant
+    /// (mirrors api-server's `resolve_sender_domain_id`).
+    #[serde(default)]
+    pub from_email: String,
+
+    /// Display name recorded in message metadata (`SALES_CAMPAIGN_FROM_NAME`).
+    #[serde(default = "default_from_name")]
+    pub from_name: String,
+
+    /// HMAC-SHA256 key for unsubscribe tokens (`SALES_UNSUBSCRIBE_SECRET`,
+    /// >= 32 chars). Required for the production dispatcher.
+    #[serde(default)]
+    pub unsubscribe_secret: String,
+
+    /// Public base URL used to build unsubscribe links
+    /// (`SALES_PUBLIC_BASE_URL`), no trailing slash.
+    #[serde(default = "default_public_base_url")]
+    pub public_base_url: String,
+
+    /// Optional branded redirect target after a GET unsubscribe
+    /// (`SALES_UNSUBSCRIBE_REDIRECT_URL`). Unset ⇒ built-in confirmation page.
+    #[serde(default)]
+    pub unsubscribe_redirect_url: Option<String>,
+
+    /// Dispatch tick cadence in seconds (`SALES_DISPATCH_INTERVAL_SECS`).
+    #[serde(default = "default_dispatch_interval_secs")]
+    pub dispatch_interval_secs: u64,
+
+    /// Maximum recipients dispatched per campaign per tick
+    /// (`SALES_DISPATCH_BATCH_SIZE`).
+    #[serde(default = "default_dispatch_batch_size")]
+    pub dispatch_batch_size: usize,
+
+    /// Maximum campaigns dispatched concurrently per tick
+    /// (`SALES_DISPATCH_CONCURRENCY`).
+    #[serde(default = "default_dispatch_concurrency")]
+    pub dispatch_concurrency: usize,
+}
+
+fn default_from_name() -> String {
+    "ApexMail".into()
+}
+
+fn default_public_base_url() -> String {
+    "http://localhost:3010".into()
+}
+
+fn default_dispatch_interval_secs() -> u64 {
+    30
+}
+
+fn default_dispatch_batch_size() -> usize {
+    100
+}
+
+fn default_dispatch_concurrency() -> usize {
+    4
+}
+
+impl Default for DispatchConfig {
+    fn default() -> Self {
+        Self {
+            from_email: String::new(),
+            from_name: default_from_name(),
+            unsubscribe_secret: String::new(),
+            public_base_url: default_public_base_url(),
+            unsubscribe_redirect_url: None,
+            dispatch_interval_secs: default_dispatch_interval_secs(),
+            dispatch_batch_size: default_dispatch_batch_size(),
+            dispatch_concurrency: default_dispatch_concurrency(),
+        }
+    }
+}
+
+impl DispatchConfig {
+    /// Are the mandatory production-dispatcher inputs present and minimally
+    /// valid? (A more complete validation — verified sender domain — happens
+    /// per tenant at dispatch time.)
+    pub fn is_configured(&self) -> bool {
+        !self.from_email.trim().is_empty()
+            && self.unsubscribe_secret.trim().len() >= 32
+            && apexmail_lib::validation::is_valid_email(self.from_email.trim())
+    }
 }
 
 /// Configurable weights for the lead scoring formula (SALES-01).
@@ -89,6 +188,7 @@ impl Default for SalesConfig {
             redis_url: "redis://127.0.0.1:6379".into(),
             lead_scoring: LeadScoringWeights::default(),
             allowed_tenants: None,
+            dispatch: DispatchConfig::default(),
         }
     }
 }
@@ -122,6 +222,32 @@ impl SalesConfig {
             )?,
             scraper_rpm: parse_env_num(&["SCRAPER_RPM"], 30, "a positive integer")?,
             redis_url: read_env(&["REDIS_URL"])?.unwrap_or_else(|| "redis://127.0.0.1:6379".into()),
+            dispatch: DispatchConfig {
+                from_email: read_env(&["SALES_CAMPAIGN_FROM_EMAIL"])?.unwrap_or_default(),
+                from_name: read_env(&["SALES_CAMPAIGN_FROM_NAME"])?
+                    .unwrap_or_else(default_from_name),
+                unsubscribe_secret: read_env(&["SALES_UNSUBSCRIBE_SECRET"])?.unwrap_or_default(),
+                public_base_url: read_env(&["SALES_PUBLIC_BASE_URL"])?
+                    .map(|url| url.trim_end_matches('/').to_string())
+                    .unwrap_or_else(default_public_base_url),
+                unsubscribe_redirect_url: read_env(&["SALES_UNSUBSCRIBE_REDIRECT_URL"])?
+                    .map(|url| url.trim_end_matches('/').to_string()),
+                dispatch_interval_secs: parse_env_num(
+                    &["SALES_DISPATCH_INTERVAL_SECS"],
+                    default_dispatch_interval_secs(),
+                    "a positive number of seconds",
+                )?,
+                dispatch_batch_size: parse_env_num(
+                    &["SALES_DISPATCH_BATCH_SIZE"],
+                    default_dispatch_batch_size() as u64,
+                    "a positive integer",
+                )? as usize,
+                dispatch_concurrency: parse_env_num(
+                    &["SALES_DISPATCH_CONCURRENCY"],
+                    default_dispatch_concurrency() as u64,
+                    "a positive integer",
+                )? as usize,
+            },
             lead_scoring: LeadScoringWeights {
                 engagement_weight: parse_env_num(
                     &["LEAD_SCORE_ENGAGEMENT_WEIGHT"],
@@ -180,6 +306,28 @@ impl SalesConfig {
             + self.lead_scoring.recency_weight as u16;
         if weight_sum == 0 {
             return Err("LEAD_SCORE_*_WEIGHT sum must be > 0".into());
+        }
+        // Dispatch settings: when a partial configuration IS provided it must
+        // be internally valid — a malformed from address or a too-short HMAC
+        // secret is a configuration error, not a silent fallback.
+        let d = &self.dispatch;
+        if !d.from_email.is_empty() && !apexmail_lib::validation::is_valid_email(&d.from_email) {
+            return Err(format!(
+                "SALES_CAMPAIGN_FROM_EMAIL is not a valid email address: {}",
+                d.from_email
+            ));
+        }
+        if !d.unsubscribe_secret.is_empty() && d.unsubscribe_secret.trim().len() < 32 {
+            return Err("SALES_UNSUBSCRIBE_SECRET must be at least 32 characters".into());
+        }
+        if d.dispatch_interval_secs == 0 {
+            return Err("SALES_DISPATCH_INTERVAL_SECS must be > 0".into());
+        }
+        if d.dispatch_batch_size == 0 {
+            return Err("SALES_DISPATCH_BATCH_SIZE must be > 0".into());
+        }
+        if d.dispatch_concurrency == 0 {
+            return Err("SALES_DISPATCH_CONCURRENCY must be > 0".into());
         }
         Ok(())
     }
@@ -262,6 +410,7 @@ mod tests {
             scraper_rpm: 60,
             allowed_tenants: None,
             redis_url: "redis://127.0.0.1:6379".into(),
+            dispatch: DispatchConfig::default(),
             lead_scoring: LeadScoringWeights {
                 engagement_weight: 50,
                 company_size_weight: 25,
@@ -313,5 +462,77 @@ mod tests {
             ..SalesConfig::default()
         };
         assert!(cfg.validate().is_ok());
+    }
+
+    // ── Dispatch configuration ─────────────────────────────────────────
+
+    #[test]
+    fn test_default_dispatch_config_is_unconfigured() {
+        // No from email / secret ⇒ not configured ⇒ production dispatcher is
+        // not wired and campaign start keeps failing with 503.
+        let d = DispatchConfig::default();
+        assert!(!d.is_configured());
+        assert!(SalesConfig::default().validate().is_ok());
+    }
+
+    #[test]
+    fn test_dispatch_config_configured_requires_all_inputs() {
+        let mut d = DispatchConfig {
+            from_email: "sales@apexmail.ee".into(),
+            unsubscribe_secret: "s".repeat(32),
+            ..DispatchConfig::default()
+        };
+        assert!(d.is_configured());
+
+        // Invalid from address fails BOTH is_configured and validate().
+        d.from_email = "not-an-email".into();
+        assert!(!d.is_configured());
+        let mut cfg = SalesConfig {
+            dispatch: d.clone(),
+            ..SalesConfig::default()
+        };
+        assert!(cfg.validate().is_err());
+
+        // Short secret is a config error when present.
+        cfg.dispatch.from_email = "sales@apexmail.ee".into();
+        cfg.dispatch.unsubscribe_secret = "short".into();
+        assert!(cfg.validate().is_err());
+        assert!(!cfg.dispatch.is_configured());
+
+        // Zero cadence/batch/concurrency are config errors.
+        cfg.dispatch.unsubscribe_secret = "s".repeat(32);
+        assert!(cfg.validate().is_ok());
+        cfg.dispatch.dispatch_interval_secs = 0;
+        assert!(cfg.validate().is_err());
+        cfg.dispatch.dispatch_interval_secs = 30;
+        cfg.dispatch.dispatch_batch_size = 0;
+        assert!(cfg.validate().is_err());
+        cfg.dispatch.dispatch_batch_size = 100;
+        cfg.dispatch.dispatch_concurrency = 0;
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn test_dispatch_config_serialization_roundtrip() {
+        let cfg = SalesConfig {
+            dispatch: DispatchConfig {
+                from_email: "sales@apexmail.ee".into(),
+                from_name: "ApexMail Sales".into(),
+                unsubscribe_secret: "k".repeat(48),
+                public_base_url: "https://sales.apexmail.ee/".into(),
+                unsubscribe_redirect_url: Some("https://apexmail.ee/unsubscribed".into()),
+                dispatch_interval_secs: 15,
+                dispatch_batch_size: 50,
+                dispatch_concurrency: 2,
+            },
+            ..SalesConfig::default()
+        };
+        let json = serde_json::to_string(&cfg).unwrap();
+        let parsed: SalesConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.dispatch.from_email, "sales@apexmail.ee");
+        assert_eq!(parsed.dispatch.dispatch_batch_size, 50);
+        // Trailing slash is trimmed when loading from env; serialization
+        // keeps the stored value verbatim.
+        assert_eq!(parsed.dispatch.public_base_url, "https://sales.apexmail.ee/");
     }
 }

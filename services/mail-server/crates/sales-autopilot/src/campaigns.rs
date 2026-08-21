@@ -3,6 +3,7 @@ use sqlx::PgPool;
 use std::time::Duration;
 use uuid::Uuid;
 
+use crate::dispatcher::LeadProfile;
 use crate::types::{Campaign, CampaignStatus, SalesError};
 
 // ---------------------------------------------------------------------------
@@ -15,6 +16,20 @@ use crate::types::{Campaign, CampaignStatus, SalesError};
 pub struct DispatchRecipient {
     pub email: String,
     pub unsubscribe_link: String,
+    /// Optional CRM lead profile used for template personalization
+    /// (`{{first_name}}`, `{{company}}, …). Values are HTML-escaped by the
+    /// renderer before interpolation.
+    pub lead: Option<LeadProfile>,
+}
+
+impl DispatchRecipient {
+    pub fn new(email: impl Into<String>, unsubscribe_link: impl Into<String>) -> Self {
+        Self {
+            email: email.into(),
+            unsubscribe_link: unsubscribe_link.into(),
+            lead: None,
+        }
+    }
 }
 
 /// Maximum number of campaign emails a single recipient may receive within a
@@ -134,6 +149,9 @@ pub struct CampaignManager {
     /// When `Some`, campaign start will enqueue emails for delivery.
     /// When `None` (default), a warning is logged and no emails are sent.
     email_dispatcher: Option<std::sync::Arc<dyn CampaignEmailDispatcher>>,
+    /// Maximum recipients dispatched per start/tick (bounded blast radius;
+    /// the background scheduler loop continues beyond the first batch).
+    dispatch_batch_size: usize,
 }
 
 impl CampaignManager {
@@ -142,6 +160,7 @@ impl CampaignManager {
             db,
             max_campaigns,
             email_dispatcher: None,
+            dispatch_batch_size: 100,
         }
     }
 
@@ -154,11 +173,22 @@ impl CampaignManager {
         self
     }
 
+    /// Override the per-tick dispatch batch size (default 100).
+    pub fn with_dispatch_batch_size(mut self, batch_size: usize) -> Self {
+        self.dispatch_batch_size = batch_size.max(1);
+        self
+    }
+
     /// Fix I-1: does this manager have a real dispatcher wired? Production
     /// wiring failures must be loud — the start route refuses with 503 when
     /// this is false instead of returning 200 'active' while sending nothing.
     pub fn has_email_dispatcher(&self) -> bool {
         self.email_dispatcher.is_some()
+    }
+
+    /// The underlying pool (used by the scheduler to list active campaigns).
+    pub fn db(&self) -> &PgPool {
+        &self.db
     }
 
     /// Create a campaign in Draft status.
@@ -272,6 +302,16 @@ impl CampaignManager {
             .and_then(|r| r.into_campaign().ok())
             .ok_or(SalesError::CampaignNotFound(id))?;
 
+        // Fix I-1 (manager level): without a dispatcher the campaign would
+        // flip to 'active' and silently send nothing. Refuse BEFORE any
+        // state transition; the route layer maps this to 503.
+        if self.email_dispatcher.is_none() {
+            return Err(SalesError::ServiceUnavailable(
+                "email dispatcher not configured — campaign start refused (no emails would be sent)"
+                    .into(),
+            ));
+        }
+
         let template_id = campaign.template_id.clone();
 
         match campaign.status {
@@ -334,52 +374,80 @@ impl CampaignManager {
                     .map_err(|e| SalesError::Database(e.to_string()))?;
 
                 // SA-5: Dispatch campaign emails to the outbound queue.
-                // Fetch the recipients that have NOT been sent to yet (see
-                // `get_recipients`), attach the CAN-SPAM unsubscribe footer
-                // link for each, and call the email dispatcher (if
-                // configured). Dispatching happens after the status commit;
-                // if it fails we surface the error instead of pretending the
-                // start succeeded silently.
+                // Fetch the FIRST dispatchable batch (bounded — the
+                // background scheduler loop continues the campaign), attach
+                // the CAN-SPAM unsubscribe footer link for each, and call
+                // the email dispatcher (if configured). Dispatching happens
+                // after the status commit; if it fails we surface the error
+                // instead of pretending the start succeeded silently.
                 if let Some(ref dispatcher) = self.email_dispatcher {
-                    match self.get_recipients(tenant_id, id).await {
+                    match self
+                        .due_recipients(tenant_id, id, self.dispatch_batch_size as i64)
+                        .await
+                    {
                         Ok(recipients) if !recipients.is_empty() => {
-                            let enqueued = dispatcher
+                            match dispatcher
                                 .dispatch(tenant_id, id, &template_id, &recipients)
-                                .await?;
-                            tracing::info!(
-                                tenant_id = %tenant_id,
-                                campaign_id = %id,
-                                enqueued = enqueued,
-                                total_recipients = recipients.len(),
-                                "Campaign emails dispatched to outbound queue"
-                            );
-                            // Advance the send ledger only when the dispatcher
-                            // accepted every recipient; partial enqueues are
-                            // ambiguous (the dispatcher reports only a count),
-                            // so we retry the full batch on the next start
-                            // rather than risk skipping recipients.
-                            if enqueued == recipients.len() {
-                                let emails: Vec<String> = recipients
-                                    .iter()
-                                    .map(|r| r.email.clone())
-                                    .collect();
-                                if let Err(mark_err) = self.mark_recipients_sent(id, &emails).await
-                                {
-                                    tracing::warn!(
-                                        error = %mark_err,
+                                .await
+                            {
+                                Ok(enqueued) => {
+                                    tracing::info!(
                                         tenant_id = %tenant_id,
                                         campaign_id = %id,
-                                        "failed to record sent_at send ledger — dispatched recipients may be re-dispatched on the next start"
+                                        enqueued = enqueued,
+                                        total_recipients = recipients.len(),
+                                        "Campaign emails dispatched to outbound queue"
                                     );
+                                    // Test/legacy dispatchers report only a
+                                    // count; stamp the send ledger for them.
+                                    // (The production dispatcher stamps each
+                                    // recipient inside its own transaction, so
+                                    // this UPDATE is a no-op there.)
+                                    if enqueued == recipients.len() {
+                                        let emails: Vec<String> = recipients
+                                            .iter()
+                                            .map(|r| r.email.clone())
+                                            .collect();
+                                        if let Err(mark_err) =
+                                            self.mark_recipients_sent(id, &emails).await
+                                        {
+                                            tracing::warn!(
+                                                error = %mark_err,
+                                                tenant_id = %tenant_id,
+                                                campaign_id = %id,
+                                                "failed to record sent_at send ledger — dispatched recipients may be re-dispatched on the next start"
+                                            );
+                                        }
+                                    } else {
+                                        tracing::warn!(
+                                            tenant_id = %tenant_id,
+                                            campaign_id = %id,
+                                            enqueued = enqueued,
+                                            requested = recipients.len(),
+                                            "dispatcher enqueued fewer emails than requested — send ledger not advanced"
+                                        );
+                                    }
                                 }
-                            } else {
-                                tracing::warn!(
-                                    tenant_id = %tenant_id,
-                                    campaign_id = %id,
-                                    enqueued = enqueued,
-                                    requested = recipients.len(),
-                                    "dispatcher enqueued fewer emails than requested — send ledger not advanced"
-                                );
+                                Err(SalesError::QuotaExhausted(_)) => {
+                                    // Quota exhausted mid-batch: everything
+                                    // dispatched so far is ledger-stamped; the
+                                    // campaign PAUSES WITH AN ERROR STATE —
+                                    // never a silent partial send.
+                                    let reason = "email quota exhausted";
+                                    if let Err(pause_err) =
+                                        self.pause_with_error(id, reason).await
+                                    {
+                                        tracing::error!(
+                                            error = %pause_err,
+                                            campaign_id = %id,
+                                            "failed to pause campaign after quota exhaustion"
+                                        );
+                                    }
+                                    return Err(SalesError::ServiceUnavailable(
+                                        "campaign paused: email quota exhausted".into(),
+                                    ));
+                                }
+                                Err(e) => return Err(e),
                             }
                         }
                         Ok(_) => {
@@ -419,68 +487,312 @@ impl CampaignManager {
         }
     }
 
-    /// Fetch the dispatchable recipients for a campaign: not yet sent,
-    /// scoped to tenant, NOT suppressed, and within the per-recipient
-    /// frequency cap.
+    /// Fetch dispatchable ("due") recipients for a campaign: not yet sent,
+    /// scoped to tenant, NOT suppressed (in the crate's `sales_unsubscribes`
+    /// **or** the platform-wide `suppressions` table, exactly like the REST
+    /// send path reads it), and within the per-recipient frequency cap.
+    /// Bounded by `limit` (the dispatch batch size) and enriched with the
+    /// CRM lead profile for template personalization.
     ///
-    /// Send-ledger semantics: `sales_campaign_recipients.sent_at` (added in
-    /// `initialize_schema`) records which recipients have already been sent
-    /// to. Filtering on `sent_at IS NULL` means that pausing a campaign and
-    /// re-starting it only dispatches the recipients that were never sent —
-    /// previously every (re-)start re-dispatched the entire list, spamming
-    /// everyone on each pause/start cycle. `mark_recipients_sent` stamps the
-    /// ledger after a successful dispatch.
+    /// Send-ledger semantics: `sales_campaign_recipients.sent_at` records
+    /// which recipients have already been sent to. Filtering on
+    /// `sent_at IS NULL` means that pausing a campaign and re-starting it
+    /// only dispatches the recipients that were never sent.
     ///
-    /// Fix I-2 (CAN-SPAM): two additional filters run before any send:
-    ///   * suppression — recipients on the tenant's unsubscribe list are
-    ///     excluded entirely;
-    ///   * frequency cap — recipients already sent ≥
-    ///     `RECIPIENT_FREQUENCY_CAP_WEEKLY` campaigns in the last 7 days are
-    ///     excluded until the window rolls.
+    /// Fix I-2 (CAN-SPAM): suppression + frequency cap run before any send.
     /// Each returned recipient carries the unsubscribe footer link that the
     /// dispatcher MUST append to the outgoing message.
-    async fn get_recipients(
+    pub async fn due_recipients(
         &self,
         tenant_id: &str,
         campaign_id: Uuid,
+        limit: i64,
     ) -> Result<Vec<DispatchRecipient>, SalesError> {
-        let dispatcher = self
-            .email_dispatcher
-            .clone()
-            .ok_or_else(|| SalesError::ServiceUnavailable("email dispatcher not configured".into()))?;
+        let dispatcher = self.email_dispatcher.clone().ok_or_else(|| {
+            SalesError::ServiceUnavailable("email dispatcher not configured".into())
+        })?;
 
-        let rows = sqlx::query_as::<_, (String,)>(
-            "SELECT r.email FROM sales_campaign_recipients r \
-             JOIN sales_campaigns c ON r.campaign_id = c.id \
-             WHERE r.campaign_id = $1 AND c.tenant_id = $2 AND r.sent_at IS NULL \
-             AND NOT EXISTS (\
-                 SELECT 1 FROM sales_unsubscribes u \
-                 WHERE u.tenant_id = c.tenant_id AND u.email = r.email\
-             ) \
-             AND (\
-                 SELECT COUNT(*) FROM sales_campaign_recipients r2 \
-                 JOIN sales_campaigns c2 ON r2.campaign_id = c2.id \
-                 WHERE r2.email = r.email AND c2.tenant_id = $2 \
-                   AND r2.sent_at > NOW() - INTERVAL '7 days'\
-             ) < $3",
-        )
-        .bind(campaign_id)
-        .bind(tenant_id)
-        .bind(RECIPIENT_FREQUENCY_CAP_WEEKLY)
-        .fetch_all(&self.db)
-        .await
-        .map_err(|e| SalesError::Database(e.to_string()))?;
+        #[allow(clippy::type_complexity)]
+        let rows: Vec<(String, Option<String>, Option<String>, Option<String>)> =
+            sqlx::query_as(
+                "SELECT r.email, l.contact_name, l.company_name, l.title \
+                 FROM sales_campaign_recipients r \
+                 JOIN sales_campaigns c ON r.campaign_id = c.id \
+                 LEFT JOIN sales_leads l \
+                   ON l.tenant_id = c.tenant_id AND LOWER(l.contact_email) = LOWER(r.email) \
+                 WHERE r.campaign_id = $1 AND c.tenant_id = $2 AND r.sent_at IS NULL \
+                 AND NOT EXISTS (\
+                     SELECT 1 FROM sales_unsubscribes u \
+                     WHERE u.tenant_id = c.tenant_id AND u.email = r.email\
+                 ) \
+                 AND NOT EXISTS (\
+                     SELECT 1 FROM suppressions s \
+                     WHERE s.tenant_id = c.tenant_id AND LOWER(s.email) = LOWER(r.email)\
+                 ) \
+                 AND (\
+                     SELECT COUNT(*) FROM sales_campaign_recipients r2 \
+                     JOIN sales_campaigns c2 ON r2.campaign_id = c2.id \
+                     WHERE r2.email = r.email AND c2.tenant_id = $2 \
+                       AND r2.sent_at > NOW() - INTERVAL '7 days'\
+                 ) < $3 \
+                 ORDER BY r.email \
+                 LIMIT $4",
+            )
+            .bind(campaign_id)
+            .bind(tenant_id)
+            .bind(RECIPIENT_FREQUENCY_CAP_WEEKLY)
+            .bind(limit)
+            .fetch_all(&self.db)
+            .await
+            .map_err(|e| SalesError::Database(e.to_string()))?;
 
         Ok(rows
             .into_iter()
-            .map(|(email,)| {
+            .map(|(email, name, company, title)| {
                 let link = dispatcher.unsubscribe_link(tenant_id, campaign_id, &email);
                 DispatchRecipient {
                     email,
                     unsubscribe_link: link,
+                    lead: Some(LeadProfile {
+                        name: name.unwrap_or_default(),
+                        company: company.unwrap_or_default(),
+                        title: title.unwrap_or_default(),
+                    }),
                 }
             })
             .collect())
+    }
+
+    /// Pause an active campaign, recording WHY it was paused in
+    /// `sales_campaigns.last_error` (e.g. "email quota exhausted"). Used by
+    /// the dispatch paths so a stalled campaign is never a silent partial
+    /// send — operators see the paused state plus the reason.
+    pub async fn pause_with_error(
+        &self,
+        campaign_id: Uuid,
+        reason: &str,
+    ) -> Result<(), SalesError> {
+        sqlx::query(
+            "UPDATE sales_campaigns SET status = 'paused', last_error = $2 \
+             WHERE id = $1 AND status = 'active'",
+        )
+        .bind(campaign_id)
+        .bind(reason)
+        .execute(&self.db)
+        .await
+        .map_err(|e| SalesError::Database(e.to_string()))?;
+        Ok(())
+    }
+
+    /// Transition an active campaign to completed (no due recipients left).
+    pub async fn complete_campaign(&self, campaign_id: Uuid) -> Result<(), SalesError> {
+        sqlx::query(
+            "UPDATE sales_campaigns SET status = 'completed', last_error = NULL \
+             WHERE id = $1 AND status = 'active'",
+        )
+        .bind(campaign_id)
+        .execute(&self.db)
+        .await
+        .map_err(|e| SalesError::Database(e.to_string()))?;
+        Ok(())
+    }
+
+    /// Reconcile campaign engagement stats: `opened` / `clicked` count the
+    /// recipients whose dispatched message has been opened/clicked. The
+    /// per-message counters (`messages.open_count` / `click_count`) are
+    /// maintained by the platform tracking service; this folds them back
+    /// into the campaign columns.
+    pub async fn reconcile_campaign_stats(&self, campaign_id: Uuid) -> Result<(), SalesError> {
+        sqlx::query(
+            "UPDATE sales_campaigns c SET \
+               opened = (\
+                 SELECT COUNT(*) FROM sales_campaign_recipients r \
+                 JOIN messages m ON m.id = r.message_id \
+                 WHERE r.campaign_id = c.id AND m.open_count > 0\
+               ), \
+               clicked = (\
+                 SELECT COUNT(*) FROM sales_campaign_recipients r \
+                 JOIN messages m ON m.id = r.message_id \
+                 WHERE r.campaign_id = c.id AND m.click_count > 0\
+               ) \
+             WHERE c.id = $1",
+        )
+        .bind(campaign_id)
+        .execute(&self.db)
+        .await
+        .map_err(|e| SalesError::Database(e.to_string()))?;
+        Ok(())
+    }
+
+    /// Dry-run a campaign: render templates and evaluate every dispatch
+    /// filter (suppression, frequency cap, sender-domain readiness) WITHOUT
+    /// enqueueing anything or stamping the send ledger. Operator safety net
+    /// and test seam.
+    ///
+    /// `prod` is the production dispatcher when wired — it provides sender
+    /// config and real unsubscribe links for the preview. Without it the
+    /// report still contains the recipient funnel counts.
+    pub async fn dry_run(
+        &self,
+        tenant_id: &str,
+        campaign_id: Uuid,
+        sample_limit: usize,
+        prod: Option<&crate::dispatcher::ProductionCampaignDispatcher>,
+    ) -> Result<serde_json::Value, SalesError> {
+        let row: Option<CampaignRow> = sqlx::query_as(
+            "SELECT id, tenant_id, name, template_id, audience, status, sent, opened, clicked, created_at FROM sales_campaigns WHERE id = $1 AND tenant_id = $2",
+        )
+        .bind(campaign_id)
+        .bind(tenant_id)
+        .fetch_optional(&self.db)
+        .await
+        .map_err(|e| SalesError::Database(e.to_string()))?;
+        let campaign = row
+            .and_then(|r| r.into_campaign().ok())
+            .ok_or(SalesError::CampaignNotFound(campaign_id))?;
+
+        // Recipient funnel counts (one query, FILTERed aggregates).
+        let funnel: (i64, i64, i64, i64, i64, i64) = sqlx::query_as(
+            "SELECT \
+                COUNT(*), \
+                COUNT(*) FILTER (WHERE r.sent_at IS NOT NULL), \
+                COUNT(*) FILTER (WHERE r.sent_at IS NULL AND EXISTS (\
+                    SELECT 1 FROM sales_unsubscribes u \
+                    WHERE u.tenant_id = c.tenant_id AND u.email = r.email)), \
+                COUNT(*) FILTER (WHERE r.sent_at IS NULL AND NOT EXISTS (\
+                    SELECT 1 FROM sales_unsubscribes u \
+                    WHERE u.tenant_id = c.tenant_id AND u.email = r.email) AND EXISTS (\
+                    SELECT 1 FROM suppressions s \
+                    WHERE s.tenant_id = c.tenant_id AND LOWER(s.email) = LOWER(r.email))), \
+                COUNT(*) FILTER (WHERE r.sent_at IS NULL AND NOT EXISTS (\
+                    SELECT 1 FROM sales_unsubscribes u \
+                    WHERE u.tenant_id = c.tenant_id AND u.email = r.email) AND NOT EXISTS (\
+                    SELECT 1 FROM suppressions s \
+                    WHERE s.tenant_id = c.tenant_id AND LOWER(s.email) = LOWER(r.email)) \
+                    AND (\
+                        SELECT COUNT(*) FROM sales_campaign_recipients r2 \
+                        JOIN sales_campaigns c2 ON r2.campaign_id = c2.id \
+                        WHERE r2.email = r.email AND c2.tenant_id = $2 \
+                          AND r2.sent_at > NOW() - INTERVAL '7 days'\
+                    ) >= $3), \
+                COUNT(*) FILTER (WHERE r.sent_at IS NULL AND NOT EXISTS (\
+                    SELECT 1 FROM sales_unsubscribes u \
+                    WHERE u.tenant_id = c.tenant_id AND u.email = r.email) AND NOT EXISTS (\
+                    SELECT 1 FROM suppressions s \
+                    WHERE s.tenant_id = c.tenant_id AND LOWER(s.email) = LOWER(r.email)) \
+                    AND (\
+                        SELECT COUNT(*) FROM sales_campaign_recipients r2 \
+                        JOIN sales_campaigns c2 ON r2.campaign_id = c2.id \
+                        WHERE r2.email = r.email AND c2.tenant_id = $2 \
+                          AND r2.sent_at > NOW() - INTERVAL '7 days'\
+                    ) < $3) \
+             FROM sales_campaign_recipients r \
+             JOIN sales_campaigns c ON r.campaign_id = c.id \
+             WHERE r.campaign_id = $1 AND c.tenant_id = $2",
+        )
+        .bind(campaign_id)
+        .bind(tenant_id)
+        .bind(RECIPIENT_FREQUENCY_CAP_WEEKLY)
+        .fetch_one(&self.db)
+        .await
+        .map_err(|e| SalesError::Database(e.to_string()))?;
+        let (total, already_sent, suppressed_local, suppressed_platform, capped, due) = funnel;
+
+        let mut warnings: Vec<String> = Vec::new();
+
+        // Sender readiness + template resolution + rendered previews when
+        // the production dispatcher is wired.
+        let sender = match prod {
+            Some(p) => {
+                let domain_ok = crate::dispatcher::sender_domain_ready(
+                    &self.db,
+                    tenant_id,
+                    &p.config().from_email,
+                )
+                .await
+                .unwrap_or(false);
+                if !domain_ok {
+                    warnings.push(format!(
+                        "sender domain of '{}' is not verified/DKIM-ready for this tenant — start would refuse",
+                        p.config().from_email
+                    ));
+                }
+                Some(serde_json::json!({
+                    "from": p.config().from_email,
+                    "from_name": p.config().from_name,
+                    "domain_verified": domain_ok,
+                }))
+            }
+            None => {
+                warnings.push(
+                    "production dispatcher not configured — sender readiness and message previews skipped"
+                        .into(),
+                );
+                None
+            }
+        };
+
+        let template = match crate::dispatcher::fetch_template(
+            &self.db,
+            tenant_id,
+            &campaign.template_id,
+        )
+        .await
+        {
+            Ok(t) => Some(serde_json::json!({
+                "id": campaign.template_id,
+                "subject": t.subject,
+                "has_html": t.html_body.is_some(),
+                "has_text": t.text_body.is_some(),
+            })),
+            Err(e) => {
+                warnings.push(format!("template not renderable: {e}"));
+                None
+            }
+        };
+
+        // Render previews for up to `sample_limit` due recipients.
+        let mut preview = Vec::new();
+        if let Some(p) = prod {
+            if let Ok(template_content) =
+                crate::dispatcher::fetch_template(&self.db, tenant_id, &campaign.template_id).await
+            {
+                let sample = self
+                    .due_recipients(tenant_id, campaign_id, sample_limit as i64)
+                    .await
+                    .unwrap_or_default();
+                for recipient in sample {
+                    let rendered = crate::dispatcher::render_for_recipient(
+                        &template_content,
+                        &recipient,
+                        &p.config().from_name,
+                    )?;
+                    preview.push(serde_json::json!({
+                        "email": recipient.email,
+                        "subject": rendered.subject,
+                        "unsubscribe_link": recipient.unsubscribe_link,
+                    }));
+                }
+            }
+        }
+
+        Ok(serde_json::json!({
+            "campaign_id": campaign_id.to_string(),
+            "status": campaign.status.to_string(),
+            "dry_run": true,
+            "sender": sender,
+            "template": template,
+            "recipients": {
+                "total": total,
+                "already_sent": already_sent,
+                "suppressed_local": suppressed_local,
+                "suppressed_platform": suppressed_platform,
+                "frequency_capped": capped,
+                "due": due,
+            },
+            "preview": preview,
+            "warnings": warnings,
+        }))
     }
 
     /// Record an unsubscribe (suppression) for a tenant (fix I-2).
@@ -992,6 +1304,7 @@ mod tests {
                 Uuid::new_v4(),
                 "a@x.com",
             ),
+            lead: None,
         }];
         let result = dispatcher
             .dispatch("tenant-a", Uuid::new_v4(), "tmpl_1", &recipients)
