@@ -53,7 +53,7 @@ use Symfony\Component\Validator\Validation;
 
 /**
  * Validator constraint test: the KiwiCaptcha constraint verifies tokens
- * locally (never via an external HTTP call). Tested through the full
+ * locally (never via an external http call). Tested through the full
  * Symfony validation pipeline, exactly as a form submission would be.
  */
 final class ValidatorTest extends TestCase
@@ -133,7 +133,7 @@ final class ValidatorTest extends TestCase
      * Solve a challenge issued with BindingMode::None and validate it
      * against a request carrying NO usable client IP (bogus/missing), so the
      * post-solve assessment throws InvalidArgumentException and the
-     * validator must fall back to the scope's DEGRADED decision.
+     * validator must fall back to the scope's degraded decision.
      */
     private function validateUnboundSolveWithoutIp(int $scopeId, string $minimum, string $degraded, ?string $badIp, KiwiCaptcha $constraint): ConstraintViolationListInterface
     {
@@ -145,7 +145,7 @@ final class ValidatorTest extends TestCase
         $token = $this->solveToken($challenge->prefix, $challenge->salt, $challenge->targetBits, $challenge->nonce);
 
         $stack = new RequestStack();
-        // Request::create defaults REMOTE_ADDR to 127.0.0.1 — null it
+        // Request::create defaults remote_addr to 127.0.0.1 — null it
         // explicitly to simulate a request with NO client IP at all.
         $server = $badIp !== null ? ['REMOTE_ADDR' => $badIp] : ['REMOTE_ADDR' => null];
         $stack->push(Request::create('/', 'POST', [], [], [], $server));
@@ -167,10 +167,10 @@ final class ValidatorTest extends TestCase
 
     /**
      * A post-solve assessment with no usable risk signal (bogus or
-     * MISSING client IP — e.g. BindingMode::None deployments) must NOT
-     * silently skip the adaptive re-check. The scope's DEGRADED decision
+     * missing client IP — e.g. BindingMode::None deployments) must NOT
+     * silently skip the adaptive re-check. The scope's degraded decision
      * applies exactly like on the pre-issue path: degraded=deny fails the
-     * valid solve with POST_SOLVE_REJECTED_ERROR instead of passing with
+     * valid solve with post_solve_rejected_error instead of passing with
      * zero adaptive friction.
      */
     public function testPostSolveNoIpEnforcesDegradedDeny(): void
@@ -188,8 +188,8 @@ final class ValidatorTest extends TestCase
 
     /**
      * With a degraded=sha20 scope the degraded fallback applies a PoW
-     * action the solved SHA-8 challenge does NOT satisfy under the
-     * configured ladders: a STRONGER PoW requirement must never silently
+     * action the solved sha-8 challenge does NOT satisfy under the
+     * configured ladders: a stronger PoW requirement must never silently
      * disappear — with chaining unavailable (no binding authority) it is
      * terminal StepUp, never a silent pass with zero adaptive friction.
      */
@@ -310,7 +310,7 @@ final class ValidatorTest extends TestCase
             $violations = $engine->validate($dto);
 
             self::assertCount(1, $violations);
-            // Capacity exhaustion keeps its DISTINCT public code
+            // Capacity exhaustion keeps its distinct public code
             // (rate_limited — a retryable refusal, not a burned token).
             self::assertSame(KiwiCaptcha::RATE_LIMITED_ERROR, $violations[0]->getCode());
         } finally {
@@ -381,7 +381,7 @@ final class ValidatorTest extends TestCase
         $sourceKey = $outstanding->sourceKey('198.51.100.7');
         self::assertSame(2, $client->counters[$sourceKey]);
 
-        // A VALID solve decrements the per-source counter (best-effort).
+        // A valid solve decrements the per-source counter (best-effort).
         $challenge = $this->issuer->issue('login', '198.51.100.7');
         usleep(($challenge->minDurationMs + 10) * 1000);
         $token = $this->solveToken($challenge->prefix, $challenge->salt, $challenge->targetBits, $challenge->nonce);
@@ -401,7 +401,7 @@ final class ValidatorTest extends TestCase
         self::assertCount(0, $engine->validate($dto));
         self::assertSame(1, $client->counters[$sourceKey], 'a valid solve must decrement the source\'s outstanding counter');
 
-        // A FAILED solve must NOT decrement (the challenge stays outstanding).
+        // A failed solve must NOT decrement (the challenge stays outstanding).
         $challenge2 = $this->issuer->issue('login', '198.51.100.7');
         usleep(($challenge2->minDurationMs + 10) * 1000);
         $token2 = $this->solveToken($challenge2->prefix, $challenge2->salt, $challenge2->targetBits, $challenge2->nonce);
@@ -597,11 +597,11 @@ final class ValidatorTest extends TestCase
 
     public function testBindingAuthorityMapsThePresentedHintToTheCanonicalBinding(): void
     {
-        // The challenge is issued against the CANONICAL value (the
+        // The challenge is issued against the canonical value (the
         // controller signs the authority's resolution), while the request
         // presents only the client hint. The authority maps the hint to
         // the canonical value — the validator's primary binding check must
-        // compare against THAT, so the legitimately issued challenge
+        // compare against that, so the legitimately issued challenge
         // validates end-to-end.
         $storage = new ArrayStorage();
         $issuer = new Issuer(new Config(secretKey: self::SECRET, targetBits: 8), $storage);
@@ -626,7 +626,7 @@ final class ValidatorTest extends TestCase
     public function testBindingAuthorityIsCalledExactlyOnceEvenWhenTheChainOpens(): void
     {
         // A chain-opening validation exercises the stage-2 lookup AND the
-        // chain creation — BOTH must thread the already-resolved canonical
+        // chain creation — both must thread the already-resolved canonical
         // binding, never re-consult the authority (the pre-fix flow called
         // it twice on this path).
         $resolver = new RiskProfileResolver(PoWAlgorithm::Sha256, 8);
@@ -657,7 +657,7 @@ final class ValidatorTest extends TestCase
 
     public function testBindingAuthorityFailureIsTemporaryUnavailableNeverAPass(): void
     {
-        // The authority's backend is DOWN (it throws): the binding cannot
+        // The authority's backend is down (it throws): the binding cannot
         // be attested — the valid solve fails closed with the retryable
         // temporary_unavailable violation, never a silent pass, never a
         // raw exception.
@@ -687,7 +687,7 @@ final class ValidatorTest extends TestCase
     {
         // The authority returns null (the transaction is invalid/unknown):
         // the signed record binding can never match a null canonical
-        // binding — the NORMAL invalid-binding outcome applies.
+        // binding — the normal invalid-binding outcome applies.
         $storage = new ArrayStorage();
         $issuer = new Issuer(new Config(secretKey: self::SECRET, targetBits: 8), $storage);
         $verifier = new Verifier($storage);
@@ -710,7 +710,7 @@ final class ValidatorTest extends TestCase
         self::assertNull($stack->getMainRequest()?->attributes->get(KiwiCaptchaValidator::VERIFIED_JTI_ATTRIBUTE), 'a declined transaction must not expose a jti');
         self::assertSame(1, $authority->calls, 'the authority is consulted exactly once');
 
-        // An UNBOUND record with a null resolution stays the unbound
+        // An unbound record with a null resolution stays the unbound
         // contract: no signed binding -> no check -> pass.
         $unbound = $issuer->issue('login', '198.51.100.7');
         usleep(($unbound->minDurationMs + 10) * 1000);
@@ -788,7 +788,7 @@ final class ValidatorTest extends TestCase
     public function testTokenLevelFailuresCollapseToInvalidOrExpired(): void
     {
         // WrongScope (a token-level failure) must surface as
-        // invalid_or_expired — the client gets no oracle for WHICH check
+        // invalid_or_expired — the client gets no oracle for which check
         // failed.
         $challenge = $this->issuer->issue('login', '198.51.100.7');
         usleep(($challenge->minDurationMs + 10) * 1000);
@@ -842,7 +842,7 @@ final class ValidatorTest extends TestCase
     /**
      * Whether the vendored core already carries the consumed-state
      * fields (ChallengeRecord::$consumed / $consumedResult / $consumedBinding
-     * and the WIRE_KEYS entries). The parallel core work adds them; until
+     * and the wire_keys entries). The parallel core work adds them; until
      * then the full stored-result scenarios cannot be constructed.
      */
     private function coreSupportsConsumedState(): bool
@@ -873,11 +873,11 @@ final class ValidatorTest extends TestCase
     }
 
     /**
-     * Retryable contract (runs on the CURRENT core): a
-     * ConsumeIndeterminate (lost consume response) NEVER burns the token and
-     * NEVER re-derives — the first attempt surfaces as temporary_unavailable
+     * Retryable contract (runs on the current core): a
+     * ConsumeIndeterminate (lost consume response) never burns the token and
+     * never re-derives — the first attempt surfaces as temporary_unavailable
      * (the record is still pending), and a retry consumes + derives exactly
-     * ONCE.
+     * once.
      */
     public function testConsumeIndeterminateIsRetryableAndNeverBurnsTheToken(): void
     {
@@ -937,10 +937,10 @@ final class ValidatorTest extends TestCase
     }
 
     /**
-     * (a) the FULL stored-result retry — first verification
+     * (a) the full stored-result retry — first verification
      * succeeds (consume transition + derive + committed result); a lost
-     * response makes the client re-submit the SAME token with the SAME
-     * binding: the retry resolves from the STORED RESULT — the SAME success
+     * response makes the client re-submit the same token with the same
+     * binding: the retry resolves from the stored result — the same success
      * (jti + binding exposed) with NO second consume, NO second derive.
      *
      * Requires the current core (consumed-state record fields + the
@@ -958,7 +958,7 @@ final class ValidatorTest extends TestCase
         usleep(($challenge->minDurationMs + 10) * 1000);
         $token = $this->solveToken($challenge->prefix, $challenge->salt, $challenge->targetBits, $challenge->nonce);
 
-        // FIRST verification: real derive — consume transition + committed
+        // first verification: real derive — consume transition + committed
         // result (the verifier commits after deriving).
         [$engine, $stack, $validator] = $this->buildRetryEngine($verifier, $storage, binding: 'txn-123');
         $dto = new class {
@@ -972,7 +972,7 @@ final class ValidatorTest extends TestCase
         self::assertSame(1, $storage->consumes);
         self::assertSame(1, $storage->commits, 'the verifier must commit the derivation result');
 
-        // LOST RESPONSE: the client never saw the reply and re-submits the
+        // lost response: the client never saw the reply and re-submits the
         // same token with the same binding.
         [$engine2, $stack2, $validator2] = $this->buildRetryEngine($verifier, $storage, binding: 'txn-123');
         $dto2 = new class {
@@ -991,7 +991,7 @@ final class ValidatorTest extends TestCase
     }
 
     /**
-     * (b) the retry with a DIFFERENT request binding is refused
+     * (b) the retry with a different request binding is refused
      * with invalid_or_expired — a challenge bound to one transaction is
      * never redeemable for another, retries included.
      */
@@ -1017,7 +1017,7 @@ final class ValidatorTest extends TestCase
         $meta->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
         self::assertCount(0, $engine->validate($dto));
 
-        // Retry with a DIFFERENT binding: the stored-result outcome carries
+        // Retry with a different binding: the stored-result outcome carries
         // the stored binding, the binding check rejects the mismatch.
         [$engine2, $stack2] = $this->buildRetryEngine($verifier, $storage, binding: 'txn-OTHER');
         $dto2 = new class {
@@ -1034,7 +1034,7 @@ final class ValidatorTest extends TestCase
     }
 
     /**
-     * A consumed record whose committed result is INVALID (the original
+     * A consumed record whose committed result is invalid (the original
      * derivation failed, response lost) resolves the retry to
      * invalid_or_expired — the failed outcome is authoritative.
      */
@@ -1050,7 +1050,7 @@ final class ValidatorTest extends TestCase
         usleep(($challenge->minDurationMs + 10) * 1000);
         $token = $this->solveToken($challenge->prefix, $challenge->salt, $challenge->targetBits, $challenge->nonce);
 
-        // Simulate the original attempt: consumed, derivation FAILED,
+        // Simulate the original attempt: consumed, derivation failed,
         // committed result invalid, response lost.
         $storage->transitionConsumed($challenge->nonce);
         $storage->commitResult($challenge->nonce, false, null);
@@ -1071,7 +1071,7 @@ final class ValidatorTest extends TestCase
     }
 
     /**
-     * A consumed record WITHOUT a committed result (the original attempt
+     * A consumed record without a committed result (the original attempt
      * died mid-proof) stays genuinely indeterminate — the retry collapses
      * to temporary_unavailable, never to a guessed success.
      */
@@ -1103,17 +1103,17 @@ final class ValidatorTest extends TestCase
         self::assertSame(KiwiCaptcha::TEMPORARY_UNAVAILABLE_ERROR, $violations[0]->getCode(), 'consumed-without-result must stay indeterminate (temporary_unavailable)');
     }
 
-// ── QUIC IP-migration policy ───────────────────────────────────────────────
+// ── quic IP-migration policy ───────────────────────────────────────────────
 
     /**
-     * Documentation test: the STRICT binding stays — a challenge
+     * Documentation test: the strict binding stays — a challenge
      * bound to IP A verified from IP B fails closed with IpMismatch at the
      * core level (the collapsed invalid_or_expired through the validator).
-     * The documented migration policy (README): exact IP -> normal; same
+     * The documented migration policy (readme): exact IP -> normal; same
      * network -> acceptable with a risk penalty (the engine's subnet
      * dimension); different network -> fresh challenge or stronger
      * request_binding/session check; mobile clients prefer request_binding
-     * over IP. The IP binding itself is a nonce-bound HMAC tag, never a
+     * over IP. The IP binding itself is a nonce-bound hmac tag, never a
      * stable identifier.
      */
     public function testIpMismatchFailsClosedDocumentingTheQuicMigrationPolicy(): void
@@ -1134,7 +1134,7 @@ final class ValidatorTest extends TestCase
         self::assertSame(\KiwiCaptcha\VerifyError::IpMismatch, $outcome->error, 'the strict IP binding must fail closed on a different source');
 
         // Through the validator: the same mismatch collapses to
-        // invalid_or_expired — the client never learns WHICH
+        // invalid_or_expired — the client never learns which
         // check failed (no oracle).
         $challenge2 = $issuer->issue('login', '198.51.100.7');
         usleep(((int) $challenge2->minDurationMs + 10) * 1000);
@@ -1162,7 +1162,7 @@ final class ValidatorTest extends TestCase
 
     /**
      * A fixed clock for the in-memory disposition store: the closure
-     * captures the variable BY REFERENCE, so tests advance the store's time
+     * captures the variable BY reference, so tests advance the store's time
      * to exercise lease expiry.
      *
      * @return array{0: ArrayPostSolveDispositionStore, 1: \Closure}
@@ -1185,9 +1185,9 @@ final class ValidatorTest extends TestCase
     }
 
     /**
-     * The SHARED nonce -> decision map of the in-memory disposition store:
+     * The shared nonce -> decision map of the in-memory disposition store:
      * an ArrayAccess mirror of the FakePredisClient's decision strings (the
-     * same keys, the same JSON shape) — the fixture wiring of the Array
+     * same keys, the same json shape) — the fixture wiring of the Array
      * store's atomic claim transfer.
      */
     private function decisionMap(FakePredisClient $decisionRedis): \ArrayAccess
@@ -1264,7 +1264,7 @@ final class ValidatorTest extends TestCase
     }
 
     /**
-     * A well-formed PENDING record for the corruption seam (the lease is
+     * A well-formed pending record for the corruption seam (the lease is
      * already expired, so the claim path exercises the strict decoder
      * too).
      *
@@ -1285,7 +1285,7 @@ final class ValidatorTest extends TestCase
     }
 
     /**
-     * A well-formed COMPLETE record for the corruption seam.
+     * A well-formed complete record for the corruption seam.
      *
      * @return array<string, mixed>
      */
@@ -1319,7 +1319,7 @@ final class ValidatorTest extends TestCase
 
     /**
      * Drive ONE corruption through the full validation pipeline: a fresh
-     * valid token whose nonce's disposition record is CORRUPT must fail
+     * valid token whose nonce's disposition record is corrupt must fail
      * closed with temporary_unavailable — never a silent pass, never a
      * 422 (the client did not corrupt the server's record structure).
      *
@@ -1354,7 +1354,7 @@ final class ValidatorTest extends TestCase
      * over the shared challenge storage, driving the full Symfony
      * validation pipeline for one token.
      *
-     * @param array<string, string> $post the POST body (decoy fields, ...)
+     * @param array<string, string> $post the post body (decoy fields, ...)
      *
      * @return array{0: \Symfony\Component\Validator\Validator\ValidatorInterface, 1: RequestStack, 2: KiwiCaptchaValidator}
      */
@@ -1399,9 +1399,9 @@ final class ValidatorTest extends TestCase
 
     /**
      * The normalized event id the engine derives from a caller idempotency
-     * key (HMAC-SHA256 of the domain-separated message, keyed by the
+     * key (hmac-sha256 of the domain-separated message, keyed by the
      * master-derived event key) — the dedupe identity a crash-taken-over
-     * re-assessment MUST reproduce.
+     * re-assessment must reproduce.
      */
     private function expectedEventId(RiskEventKind $event, int $scope, string $key): string
     {
@@ -1440,7 +1440,7 @@ final class ValidatorTest extends TestCase
         self::assertSame(PostSolveDispositionKind::Deny, $record->disposition->kind);
         self::assertSame('decision-1', $record->disposition->decisionId);
 
-        // finalize on a COMPLETE record is refused (never overwritten).
+        // finalize on a complete record is refused (never overwritten).
         self::assertFalse($store->finalize('nonce-a', 'owner-3', new PostSolveDisposition(PostSolveDispositionKind::Pass)));
         self::assertSame(PostSolveDispositionKind::Deny, $store->read('nonce-a')?->disposition?->kind, 'a completed disposition is terminal');
     }
@@ -1465,12 +1465,12 @@ final class ValidatorTest extends TestCase
 
         self::assertSame('claimed', $store->claim('nonce-c', 'owner-1', 300));
         $advance(20);
-        // The lease (15 s) expired -> takeover, while the RECORD TTL (300 s) is still live.
+        // The lease (15 s) expired -> takeover, while the record TTL (300 s) is still live.
         self::assertSame('taken_over', $store->claim('nonce-c', 'owner-2', 300));
         self::assertTrue($store->finalize('nonce-c', 'owner-2', new PostSolveDisposition(PostSolveDispositionKind::Pass)));
 
-        // The record TTL is INDEPENDENT of the lease: it expires with its
-        // own configured lifetime (Config::MAX_TTL_SECS + margin via the
+        // The record TTL is independent of the lease: it expires with its
+        // own configured lifetime (Config::MAX_TTL_secs + margin via the
         // validator's claim TTL), never with the 15 s lease.
         $advance(301);
         self::assertNull($store->read('nonce-c'), 'the record expires with its own TTL, not with the lease');
@@ -1512,7 +1512,7 @@ final class ValidatorTest extends TestCase
         $meta = $engine->getMetadataFor($dto::class);
         $meta->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
 
-        // FRESH: the post-solve assessment denies the valid solve.
+        // fresh: the post-solve assessment denies the valid solve.
         $violations = $engine->validate($dto);
         self::assertCount(1, $violations);
         self::assertSame(KiwiCaptcha::POST_SOLVE_REJECTED_ERROR, $violations[0]->getCode());
@@ -1522,8 +1522,8 @@ final class ValidatorTest extends TestCase
         $firstDecision = $record->disposition?->decisionId;
         self::assertNotNull($firstDecision);
 
-        // REPLAY (the SAME token — the core replays its stored result): the
-        // persisted disposition reproduces the SAME deny — never a pass.
+        // replay (the same token — the core replays its stored result): the
+        // persisted disposition reproduces the same deny — never a pass.
         [$engine2] = $this->dispositionEngine($this->verifier, $risk['gateway'], $store);
         $meta2 = $engine2->getMetadataFor($dto::class);
         $meta2->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
@@ -1609,8 +1609,8 @@ final class ValidatorTest extends TestCase
         usleep(($challenge->minDurationMs + 10) * 1000);
         $token = $this->solveToken($challenge->prefix, $challenge->salt, $challenge->targetBits, $challenge->nonce);
 
-        // REQUEST 1: the core commits the VALID result, then the process
-        // dies BEFORE the post-solve claim (the store is unreachable) — the
+        // request 1: the core commits the valid result, then the process
+        // dies before the post-solve claim (the store is unreachable) — the
         // client sees temporary_unavailable, the token is NOT burned.
         $failing = $this->faultedStore($inner, failClaim: true);
         [$engine] = $this->dispositionEngine($this->verifier, $risk['gateway'], $failing);
@@ -1626,7 +1626,7 @@ final class ValidatorTest extends TestCase
         self::assertSame(0, \count($risk['store']->observations), 'no assessment ran before the crash');
         self::assertNull($inner->read($challenge->nonce), 'no disposition state exists before the claim');
 
-        // REQUEST 2 (retry, store recovered): the retry CLAIMS the nonce
+        // request 2 (retry, store recovered): the retry claims the nonce
         // fresh, computes the disposition (deny) and persists it — the
         // post-solve policy runs exactly once.
         [$engine2] = $this->dispositionEngine($this->verifier, $risk['gateway'], $inner);
@@ -1653,8 +1653,8 @@ final class ValidatorTest extends TestCase
         };
         $dto->captcha = $token;
 
-        // REQUEST 1: the claim is won, the post-solve assessment RUNS, then
-        // the process dies BEFORE the finalize — temporary_unavailable.
+        // request 1: the claim is won, the post-solve assessment runs, then
+        // the process dies before the finalize — temporary_unavailable.
         $crashed = $this->faultedStore($inner, failFinalize: true);
         [$engine] = $this->dispositionEngine($this->verifier, $risk['gateway'], $crashed);
         $meta = $engine->getMetadataFor($dto::class);
@@ -1664,8 +1664,8 @@ final class ValidatorTest extends TestCase
         self::assertSame(1, \count($risk['store']->observations));
         self::assertSame('pending', $inner->read($challenge->nonce)?->state, 'the claim is left pending with its lease');
 
-        // REQUEST 2 (retry AFTER the 15 s lease expires): the retry TAKES
-        // OVER the claim and re-runs the assessment — with the SAME
+        // request 2 (retry after the 15 s lease expires): the retry takes
+        // over the claim and re-runs the assessment — with the same
         // nonce-derived idempotency key, so the risk signal is NOT doubled
         // (the dedupe identity is identical; a deduping backend applies it
         // exactly once).
@@ -1706,7 +1706,7 @@ final class ValidatorTest extends TestCase
         };
         $dto->captcha = $token;
 
-        // REQUEST 1 wins the claim, runs the assessment, dies before the
+        // request 1 wins the claim, runs the assessment, dies before the
         // finalize (lease left live).
         $crashed = $this->faultedStore($inner, failFinalize: true);
         [$engine] = $this->dispositionEngine($this->verifier, $risk['gateway'], $crashed);
@@ -1715,8 +1715,8 @@ final class ValidatorTest extends TestCase
         self::assertSame(KiwiCaptcha::TEMPORARY_UNAVAILABLE_ERROR, $engine->validate($dto)[0]->getCode());
         self::assertSame(1, \count($risk['store']->observations));
 
-        // REQUEST 2 (CONCURRENT, same token, claim still live): the busy
-        // claim is temporary_unavailable — NEVER a second assessment, never
+        // request 2 (concurrent, same token, claim still live): the busy
+        // claim is temporary_unavailable — never a second assessment, never
         // a silent pass.
         [$engine2] = $this->dispositionEngine($this->verifier, $risk['gateway'], $inner);
         $meta2 = $engine2->getMetadataFor($dto::class);
@@ -1726,7 +1726,7 @@ final class ValidatorTest extends TestCase
         self::assertSame(KiwiCaptcha::TEMPORARY_UNAVAILABLE_ERROR, $violations[0]->getCode(), 'a concurrent same-token request must never pass while the claim is live');
         self::assertSame(1, \count($risk['store']->observations), 'exactly ONE owner computes — the concurrent request never assessed');
 
-        // The OWNER still completes after its lease expires: exactly one
+        // The owner still completes after its lease expires: exactly one
         // more assessment, then the final disposition.
         $advance(16);
         [$engine3] = $this->dispositionEngine($this->verifier, $risk['gateway'], $inner);
@@ -1749,7 +1749,7 @@ final class ValidatorTest extends TestCase
         usleep(($challenge->minDurationMs + 10) * 1000);
         $token = $this->solveToken($challenge->prefix, $challenge->salt, $challenge->targetBits, $challenge->nonce);
 
-        // The store is unavailable for EVERY operation: the valid solve
+        // The store is unavailable for every operation: the valid solve
         // must fail closed with temporary_unavailable — never a silent pass.
         $down = $this->faultedStore($inner, failClaim: true, failRead: true, failFinalize: true);
         [$engine] = $this->dispositionEngine($this->verifier, $risk['gateway'], $down);
@@ -1768,7 +1768,7 @@ final class ValidatorTest extends TestCase
 
     public function testHoneypotOnlyReassessmentAndDecoyExactness(): void
     {
-        // post_solve_check=false AND chaining disabled: only a filled EXACT
+        // post_solve_check=false AND chaining disabled: only a filled exact
         // decoy triggers the fresh v2 assessment. The tuned honeypot weight
         // keeps the v2 score inside the Argon32 band (813 + 10), so the
         // stronger-PoW demand must surface as terminal StepUp — never a
@@ -1787,7 +1787,7 @@ final class ValidatorTest extends TestCase
         };
         $dto->captcha = $token;
 
-        // FILLED EXACT DECOY: reassesses through the risk-v2 path; the
+        // filled exact decoy: reassesses through the risk-v2 path; the
         // stronger-PoW demand with chaining disabled is terminal StepUp.
         [$engine] = $this->dispositionEngine($this->verifier, $risk['gateway'], $store, [$decoy => 'filled']);
         $meta = $engine->getMetadataFor($dto::class);
@@ -1797,7 +1797,7 @@ final class ValidatorTest extends TestCase
         self::assertSame(KiwiCaptcha::POST_SOLVE_STEP_UP_REQUIRED, $violations[0]->getCode(), 'a filled exact decoy must reassess — a stronger-PoW demand is terminal StepUp, never a silent pass');
         self::assertSame(PostSolveDispositionKind::StepUp, $store->read($nonce)?->disposition?->kind);
 
-        // The honeypot evidence carries the NONCE-DERIVED
+        // The honeypot evidence carries the nonce-derived
         // honeypot:<sha256(nonce)> idempotency key.
         $decoyEvents = array_values(array_filter(
             $risk['store']->observations,
@@ -1820,7 +1820,7 @@ final class ValidatorTest extends TestCase
             'the honeypot-triggered reassessment must carry the postsolve:<sha256(nonce)> idempotency key',
         );
 
-        // REPLAY of the same token: the persisted StepUp disposition
+        // replay of the same token: the persisted StepUp disposition
         // reproduces — the honeypot is never re-scored.
         [$engine2] = $this->dispositionEngine($this->verifier, $risk['gateway'], $store, [$decoy => 'filled']);
         $meta2 = $engine2->getMetadataFor($dto::class);
@@ -1830,7 +1830,7 @@ final class ValidatorTest extends TestCase
         self::assertSame(KiwiCaptcha::POST_SOLVE_STEP_UP_REQUIRED, $violations[0]->getCode(), 'a replay of the honeypot-hit token is StepUp again — never a pass');
         self::assertSame(2, \count($risk['store']->observations), 'the replay must not re-record evidence or reassess');
 
-        // MISMATCHED decoy name: NOT this challenge's decoy — ignored, no
+        // mismatched decoy name: NOT this challenge's decoy — ignored, no
         // reassessment, plain pass.
         $other = $this->issuer->issue('login', '198.51.100.7');
         usleep(($other->minDurationMs + 10) * 1000);
@@ -1845,7 +1845,7 @@ final class ValidatorTest extends TestCase
         self::assertCount(0, $engine3->validate($dto2), 'a mismatched decoy name is not this challenge\'s decoy — no reassessment');
         self::assertSame(PostSolveDispositionKind::Pass, $store->read($other->nonce)?->disposition?->kind);
 
-        // EMPTY exact decoy: no evidence, no reassessment, plain pass.
+        // empty exact decoy: no evidence, no reassessment, plain pass.
         $third = $this->issuer->issue('login', '198.51.100.7');
         usleep(($third->minDurationMs + 10) * 1000);
         $thirdToken = $this->solveToken($third->prefix, $third->salt, $third->targetBits, $third->nonce);
@@ -1879,9 +1879,9 @@ final class ValidatorTest extends TestCase
         };
         $dto->captcha = $token;
 
-        // FRESH: the reassessment demands Argon32 — the solved SHA-8 does
+        // fresh: the reassessment demands Argon32 — the solved sha-8 does
         // not satisfy it, the authoritative binding resolves, the chain
-        // opens: CHAIN_REQUIRED with the PERSISTED chain id.
+        // opens: chain_required with the persisted chain id.
         [$engine] = $this->dispositionEngine($this->verifier, $risk['gateway'], $store, chainTickets: $chainService, resolver: $resolver, bindingAuthority: $this->bindingAuthority());
         $meta = $engine->getMetadataFor($dto::class);
         $meta->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
@@ -1898,11 +1898,11 @@ final class ValidatorTest extends TestCase
         self::assertIsString($ticket);
         self::assertNotEmpty($ticket);
 
-        // REPLAY (the SAME token — the core replays its stored result): the
-        // persisted disposition reproduces CHAIN_REQUIRED with the SAME
-        // chain id — NEVER a pass, never a second chain. The replay
-        // re-signs the ticket with the requirement's ORIGINAL expiry, so
-        // the deterministic ticket is BYTE-IDENTICAL (a re-signed ticket
+        // replay (the same token — the core replays its stored result): the
+        // persisted disposition reproduces chain_required with the same
+        // chain id — never a pass, never a second chain. The replay
+        // re-signs the ticket with the requirement's original expiry, so
+        // the deterministic ticket is byte-identical (a re-signed ticket
         // can never outlive its chain state).
         [$engine2] = $this->dispositionEngine($this->verifier, $risk['gateway'], $store, chainTickets: $chainService, resolver: $resolver, bindingAuthority: $this->bindingAuthority());
         $meta2 = $engine2->getMetadataFor($dto::class);
@@ -1920,8 +1920,8 @@ final class ValidatorTest extends TestCase
 
     public function testChainRequiredReplayWithExpiredChainIsTemporaryUnavailable(): void
     {
-        // A replayed CHAIN_REQUIRED disposition whose chain requirement is
-        // GONE (the chain expired with its own lifetime) must fail closed
+        // A replayed chain_required disposition whose chain requirement is
+        // gone (the chain expired with its own lifetime) must fail closed
         // as temporary_unavailable — never a fresh ticket that outlives
         // its chain state, never a silent pass.
         $resolver = new RiskProfileResolver(PoWAlgorithm::Sha256, 8);
@@ -1943,7 +1943,7 @@ final class ValidatorTest extends TestCase
         };
         $dto->captcha = $token;
 
-        // FRESH: the chain opens and the disposition is persisted.
+        // fresh: the chain opens and the disposition is persisted.
         [$engine] = $this->dispositionEngine($this->verifier, $risk['gateway'], $store, chainTickets: $chainService, resolver: $resolver, bindingAuthority: $this->bindingAuthority());
         $meta = $engine->getMetadataFor($dto::class);
         $meta->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
@@ -1964,7 +1964,7 @@ final class ValidatorTest extends TestCase
         self::assertSame(PostSolveDispositionKind::ChainRequired, $store->read($challenge->nonce)?->disposition?->kind, 'the persisted disposition is untouched');
     }
 
-// ── strict post-solve disposition decoding (ALL-OR-NOTHING) ────────────────
+// ── strict post-solve disposition decoding (all-or-nothing) ────────────────
 
     public function testCorruptDispositionRecordWithUnknownSchemaVersionFailsClosed(): void
     {
@@ -2057,8 +2057,8 @@ final class ValidatorTest extends TestCase
         $decisionRedis = new FakePredisClient();
         $risk = $this->riskStack(1, 'allow', 'allow', false, null, null, $decisionRedis);
         // The Array disposition store's claim consumes the mapping through
-        // the SHARED decision map (the mirror of the gateway's decision
-        // Redis, keyed by the FULL decision key).
+        // the shared decision map (the mirror of the gateway's decision
+        // Redis, keyed by the full decision key).
         [$store, $advance] = $this->clockedDispositionStore($this->decisionMap($decisionRedis));
 
         $challenge = $this->issuer->issue('login', '198.51.100.7');
@@ -2070,8 +2070,8 @@ final class ValidatorTest extends TestCase
         };
         $dto->captcha = $token;
 
-        // REQUEST 1: the claim ATOMICALLY consumes the nonce -> decision
-        // mapping (GETDEL inside the same operation) and stores the handle
+        // request 1: the claim atomically consumes the nonce -> decision
+        // mapping (getdel inside the same operation) and stores the handle
         // in the pending claim, then dies before the finalize —
         // temporary_unavailable.
         $crashed = $this->faultedStore($store, failFinalize: true);
@@ -2083,9 +2083,9 @@ final class ValidatorTest extends TestCase
         self::assertSame('original-decision', $store->read($challenge->nonce)?->decisionId, 'the pending claim carries the consumed decision handle');
         self::assertArrayNotHasKey('{kiwi:validator-test}:decision:'.$challenge->nonce, $decisionRedis->strings, 'the mapping is consumed in the SAME atomic operation as the claim');
 
-        // REQUEST 2 (takeover after the lease): the new owner's GETDEL is
-        // EMPTY (the mapping is already consumed) — the STORED handle still
-        // completes the pass with the ORIGINAL decision id, never a fresh
+        // request 2 (takeover after the lease): the new owner's getdel is
+        // empty (the mapping is already consumed) — the stored handle still
+        // completes the pass with the original decision id, never a fresh
         // one.
         $advance(16);
         [$engine2] = $this->dispositionEngine($this->verifier, $risk['gateway'], $store);
@@ -2099,11 +2099,11 @@ final class ValidatorTest extends TestCase
 
     public function testChainRequirementReadFailureNeverConsumesTheDecisionMapping(): void
     {
-        // THE REORDER (the fallible chain requirement lookup runs BEFORE
+        // THE reorder (the fallible chain requirement lookup runs before
         // the nonce -> decision consumption): a chain-backend failure must
-        // NEVER consume the decision handle — the retry re-runs the lookup
+        // never consume the decision handle — the retry re-runs the lookup
         // with the mapping intact and the final disposition completes with
-        // the ORIGINAL decision id (never a null handle).
+        // the original decision id (never a null handle).
         $decisionRedis = new FakePredisClient();
         $stack = new RequestStack();
         $risk = $this->riskStack(1, 'allow', 'allow', false, null, null, $decisionRedis, $stack);
@@ -2123,15 +2123,15 @@ final class ValidatorTest extends TestCase
 
         // The verified challenge carries the server-stamped chain marker
         // (a stage-2 challenge): with chaining wired the no-reassessment
-        // pass path applies — the ORIGINAL pre-issue decision id becomes
+        // pass path applies — the original pre-issue decision id becomes
         // the request's current confirmation target (the contract the
         // decision handle protects).
         $metaStore = new \BelConsulting\KiwiCaptchaBundle\SiteVerify\ArraySiteVerifyMetadataStore();
         $metaStore->store(\KiwiCaptcha\SolutionToken::decode($token)->nonce, new \BelConsulting\KiwiCaptchaBundle\SiteVerify\SiteVerifyMetadata(null, null, 'login', 'marker-chain', 2), 300);
 
-        // The chain-state READ throws (a backend outage): the valid solve
+        // The chain-state read throws (a backend outage): the valid solve
         // fails closed temporary_unavailable — and the decision mapping is
-        // NOT consumed (the requirement lookup ran BEFORE the atomic
+        // NOT consumed (the requirement lookup ran before the atomic
         // claim-with-decision).
         $failing->failObligationChainId = true;
         [$engine] = $this->dispositionEngine($this->verifier, $risk['gateway'], $store, chainTickets: $chainService, bindingAuthority: $this->bindingAuthority(), metadataStore: $metaStore, requestStack: $stack);
@@ -2145,7 +2145,7 @@ final class ValidatorTest extends TestCase
         self::assertNull($risk['gateway']->currentDecisionId(), 'no decision was confirmed for the failed attempt');
 
         // The backend recovers: the retry consumes the mapping atomically
-        // with the claim and the final disposition confirms the ORIGINAL
+        // with the claim and the final disposition confirms the original
         // decision id — never a null handle.
         $failing->failObligationChainId = false;
         [$engine2] = $this->dispositionEngine($this->verifier, $risk['gateway'], $store, chainTickets: $chainService, bindingAuthority: $this->bindingAuthority(), metadataStore: $metaStore, requestStack: $stack);
@@ -2159,9 +2159,9 @@ final class ValidatorTest extends TestCase
 
     public function testArrayClaimConsumesTheDecisionMappingAtomically(): void
     {
-        // THE ARRAY MIRROR of the atomic claim: the claim GETDELs the
+        // THE array mirror of the atomic claim: the claim GETDELs the
         // shared decision mapping (at most one winner) and persists the
-        // paired decision id in the pending record in the SAME operation —
+        // paired decision id in the pending record in the same operation —
         // exactly like the Redis claim Lua.
         $decisionRedis = new FakePredisClient();
         [$store] = $this->clockedDispositionStore($this->decisionMap($decisionRedis));
@@ -2171,8 +2171,8 @@ final class ValidatorTest extends TestCase
         self::assertArrayNotHasKey('{kiwi:validator-test}:decision:nonce-atomic', $decisionRedis->strings, 'the winning claim consumed the mapping');
         self::assertSame('decision-atomic', $store->read('nonce-atomic')?->decisionId, 'the pending record carries the decision id from the SAME atomic transition');
 
-        // A second mapping for a CONCURRENT claim: the loser is 'pending'
-        // (busy) — its claim NEVER touches the decision key, so the
+        // A second mapping for a concurrent claim: the loser is 'pending'
+        // (busy) — its claim never touches the decision key, so the
         // mapping stays resolvable for the caller who will win the next
         // claim.
         $decisionRedis->strings['{kiwi:validator-test}:decision:nonce-race'] = (string) json_encode(['decision_id' => 'decision-first']);
@@ -2184,7 +2184,7 @@ final class ValidatorTest extends TestCase
         self::assertIsArray($loserMapping);
         self::assertSame('decision-second', $loserMapping['decision_id'] ?? null, 'the pending-live claim NEVER consumed the mapping — it stays resolvable');
 
-        // A COMPLETE record: a replay claim returns 'complete' and never
+        // A complete record: a replay claim returns 'complete' and never
         // touches the decision key — the mapping inserted after the
         // finalize stays resolvable.
         $decisionRedis->strings['{kiwi:validator-test}:decision:nonce-complete'] = (string) json_encode(['decision_id' => 'decision-final']);
@@ -2204,7 +2204,7 @@ final class ValidatorTest extends TestCase
 
     public function testCorruptDispositionRecordWithChainRequiredMissingExpiryFailsClosed(): void
     {
-        // A v2 ChainRequired disposition WITHOUT its chain expiry bound is
+        // A v2 ChainRequired disposition without its chain expiry bound is
         // malformed state — the strict v2 decoder refuses it (fail
         // closed), never a ticket.
         $record = $this->completeDispositionRecord();
@@ -2222,10 +2222,10 @@ final class ValidatorTest extends TestCase
 
     public function testLegacyV1ChainRequiredRecordSignsFromTheExactChain(): void
     {
-        // A LEGACY v1 ChainRequired record (the shape written by the
-        // earlier store generation — a NULL carried expiry) is NOT
+        // A legacy v1 ChainRequired record (the shape written by the
+        // earlier store generation — a null carried expiry) is NOT
         // corrupt: the reader accepts it and the signing falls back to
-        // the EXACT chain X record's server-held expiresAt — never the
+        // the exact chain X record's server-held expiresAt — never the
         // current obligation Y.
         $resolver = new RiskProfileResolver(PoWAlgorithm::Sha256, 8);
         $risk = $this->riskStack(1, 'allow', 'allow', false, null, $resolver);
@@ -2244,20 +2244,20 @@ final class ValidatorTest extends TestCase
         };
         $dto->captcha = $token;
 
-        // Seed the LEGACY v1 record (no carried expiry).
+        // Seed the legacy v1 record (no carried expiry).
         $record = $this->completeDispositionRecord();
         $record['v'] = 1;
         $record['decisionId'] = 'decision-legacy';
         $record['disposition'] = new PostSolveDisposition(PostSolveDispositionKind::ChainRequired, 'decision-legacy', $chainX->chainId);
         $this->injectDispositionRecord($store, $nonce, $record);
 
-        // The reader ACCEPTS it with a null carried expiry.
+        // The reader accepts it with a null carried expiry.
         $read = $store->read($nonce);
         self::assertNotNull($read);
         self::assertSame($chainX->chainId, $read->disposition?->chainId);
         self::assertNull($read->disposition?->chainExpiresAt, 'a legacy v1 record carries no expiry bound — not corrupt');
 
-        // The signing takes the expiry from the EXACT chain X's record
+        // The signing takes the expiry from the exact chain X's record
         // (requirementFor(X)).
         [$engine] = $this->dispositionEngine($this->verifier, $risk['gateway'], $store, chainTickets: $chainService, resolver: $resolver, bindingAuthority: $this->bindingAuthority());
         $meta = $engine->getMetadataFor($dto::class);
@@ -2272,9 +2272,9 @@ final class ValidatorTest extends TestCase
         self::assertSame($chainX->chainId, (string) $payload['chainId'], 'the legacy record signs the EXACT chain X');
         self::assertSame($chainX->expiresAt, (int) $payload['expiresAt'], 'the legacy record signs X\'s server-held expiry (requirementFor(X))');
 
-        // NEVER consults the current obligation Y: X's stage-2 challenge
-        // VERIFIES (the obligation is cleared, the chain RECORD retained)
-        // and a FRESH chain Y opens for the same transaction — the ticket
+        // never consults the current obligation Y: X's stage-2 challenge
+        // verifies (the obligation is cleared, the chain record retained)
+        // and a fresh chain Y opens for the same transaction — the ticket
         // stays byte-identical (X, X.expiresAt).
         $stage2Nonce = base64_encode(hash('sha256', 'stage2-legacy', true));
         self::assertSame(ChainReservationResult::Available, $chainService->reserveStage2($chainX->chainId, 'owner-a'));
@@ -2303,7 +2303,7 @@ final class ValidatorTest extends TestCase
 
     public function testChainRequiredSigningWithMismatchedCarriedExpiryFailsClosed(): void
     {
-        // A shape-valid chain_expires_at that DIFFERS from the exact
+        // A shape-valid chain_expires_at that differs from the exact
         // chain record's server-held expiresAt is corrupt state — the
         // signing fails closed temporary_unavailable, never a ticket that
         // outlives (or expires early vs) its chain. The matching value
@@ -2339,7 +2339,7 @@ final class ValidatorTest extends TestCase
         self::assertSame(KiwiCaptcha::TEMPORARY_UNAVAILABLE_ERROR, $violations[0]->getCode(), 'a mismatched carried expiry must fail closed — never a ticket');
         self::assertArrayNotHasKey('{{ chain_ticket }}', $violations[0]->getParameters(), 'no ticket is produced for the mismatched bound');
 
-        // The MATCHING value signs normally with the exact chain's bound.
+        // The matching value signs normally with the exact chain's bound.
         $record['disposition'] = new PostSolveDisposition(PostSolveDispositionKind::ChainRequired, 'decision-1', $chainX->chainId, $chainX->expiresAt);
         $this->injectDispositionRecord($store, $nonce, $record);
         [$engine2] = $this->dispositionEngine($this->verifier, $risk['gateway'], $store, chainTickets: $chainService, resolver: $resolver, bindingAuthority: $this->bindingAuthority());
@@ -2358,8 +2358,8 @@ final class ValidatorTest extends TestCase
 
     public function testChainRequiredDispositionSurvivesTokenExpiryForTheRetainedMargin(): void
     {
-        // SHORT token lifetime (2 s) + the retained margin (5 s): the
-        // disposition record (TTL = Config::MAX_TTL_SECS + margin = 305 s)
+        // short token lifetime (2 s) + the retained margin (5 s): the
+        // disposition record (TTL = Config::MAX_TTL_secs + margin = 305 s)
         // must outlive the token AND the retained consumed core result
         // (token lifetime + the same margin = 7 s) — the disposition never
         // dies while the core result could still be replayed.
@@ -2392,18 +2392,18 @@ final class ValidatorTest extends TestCase
         $chainId = $store->read($nonce)?->disposition?->chainId;
         self::assertIsString($chainId);
 
-        // The token EXPIRES (2 s TTL) while the retained consumed result
+        // The token expires (2 s TTL) while the retained consumed result
         // and the disposition stay alive (token lifetime + margin).
         sleep(3);
 
-        // The DISPOSITION survives the normal token expiry: the record is
-        // still complete with the SAME chain id.
+        // The disposition survives the normal token expiry: the record is
+        // still complete with the same chain id.
         $record = $store->read($nonce);
         self::assertNotNull($record, 'the disposition must survive the token expiry');
         self::assertSame('complete', $record->state);
         self::assertSame($chainId, $record->disposition?->chainId, 'the survived disposition keeps the SAME chain id');
 
-        // The expired token itself is refused by the CORE (the stored
+        // The expired token itself is refused by the core (the stored
         // result's retryable window is the token validity) — never a pass,
         // never a fresh assessment, and the disposition is untouched.
         [$engine2] = $this->dispositionEngine($verifier, $risk['gateway'], $store, ttlMargin: 5, chainTickets: $chainService, resolver: $resolver, bindingAuthority: $this->bindingAuthority());
@@ -2417,7 +2417,7 @@ final class ValidatorTest extends TestCase
 
         // The disposition outlives the retained core-result window (token
         // lifetime + margin = 7 s): still complete past it, expiring only
-        // with its own TTL (MAX_TTL_SECS + margin = 305 s).
+        // with its own TTL (MAX_TTL_secs + margin = 305 s).
         $advance(8);
         self::assertSame('complete', $store->read($nonce)?->state, 'the disposition survives the retained core-result window');
         $advance(305);
@@ -2428,8 +2428,8 @@ final class ValidatorTest extends TestCase
 
     /**
      * A full stage-2 chain for the validator-level disposition tests: the
-     * stage-1 CHAIN_REQUIRED solve opens the chain, then the chain is
-     * issued directly (reserve + markIssued) with the nonce of a REAL
+     * stage-1 chain_required solve opens the chain, then the chain is
+     * issued directly (reserve + markIssued) with the nonce of a real
      * issued challenge (the strict v2 schema requires the Kiwi base64
      * nonce shape).
      *
@@ -2455,7 +2455,7 @@ final class ValidatorTest extends TestCase
         self::assertSame(KiwiCaptchaValidator::CHAIN_REQUIRED_ERROR, $violations[0]->getCode());
         $chainId = (string) $chainService->verify((string) $violations[0]->getParameters()['{{ chain_ticket }}'])['chainId'];
 
-        // Stage 2: the chain issues a REAL challenge (its nonce becomes
+        // Stage 2: the chain issues a real challenge (its nonce becomes
         // the chain's stage2Nonce).
         $stage2 = $this->issuer->issue('login', '198.51.100.7');
         self::assertSame(ChainReservationResult::Available, $chainService->reserveStage2($chainId, 'owner-a'));
@@ -2473,9 +2473,9 @@ final class ValidatorTest extends TestCase
         $chainStore = new ArrayChainedChallengeStateStore();
         $stage2 = $this->stage2Chain($risk['gateway'], $store, $chainStore);
 
-        // The stage-2 solve with a STEP-UP post-solve decision: the FINAL
-        // disposition is STEP-UP — the chain transitions to the TERMINAL
-        // step_up_required (the obligation is KEPT) and the application
+        // The stage-2 solve with a step-up post-solve decision: the final
+        // disposition is step-up — the chain transitions to the terminal
+        // step_up_required (the obligation is kept) and the application
         // sees the terminal step-up violation.
         $risk['store']->setVector(SignalVector::fromArray(self::STEP_UP_VECTOR));
         usleep(($stage2['stage2']->minDurationMs + 10) * 1000);
@@ -2507,9 +2507,9 @@ final class ValidatorTest extends TestCase
         $chainStore = new ArrayChainedChallengeStateStore();
         $stage2 = $this->stage2Chain($risk['gateway'], $store, $chainStore);
 
-        // The stage-2 solve with a DENY post-solve decision: the FINAL
-        // disposition is DENY — the chain transitions to the TERMINAL
-        // denied (the obligation is KEPT) and the application sees the
+        // The stage-2 solve with a deny post-solve decision: the final
+        // disposition is deny — the chain transitions to the terminal
+        // denied (the obligation is kept) and the application sees the
         // post-solve rejection.
         $risk['store']->setVector(SignalVector::fromArray(['network_risk' => 900]));
         usleep(($stage2['stage2']->minDurationMs + 10) * 1000);
@@ -2541,10 +2541,10 @@ final class ValidatorTest extends TestCase
         $chainStore = new ArrayChainedChallengeStateStore();
         $stage2 = $this->stage2Chain($risk['gateway'], $store, $chainStore);
 
-        // The stage-2 solve with a NEUTRAL post-solve decision (a FRESH
+        // The stage-2 solve with a neutral post-solve decision (a fresh
         // risk stack — a fresh scope-action hysteresis — so the neutral
-        // assessment is actually neutral): the FINAL disposition is PASS —
-        // the chain VERIFIES (the obligation is deleted) and the solve
+        // assessment is actually neutral): the final disposition is pass —
+        // the chain verifies (the obligation is deleted) and the solve
         // passes.
         $neutral = $this->riskStack(1, 'allow', 'allow', false, null, $resolver);
         usleep(($stage2['stage2']->minDurationMs + 10) * 1000);
@@ -2568,11 +2568,11 @@ final class ValidatorTest extends TestCase
 
     public function testStage2NoReassessmentPassStillEndsTheChain(): void
     {
-        // The ASYMMETRIC path: a stage-2 challenge verified with
+        // The asymmetric path: a stage-2 challenge verified with
         // post_solve_check=false AND no honeypot AND no chain-eligible
         // scope (the metadata chainId marker forbids a third stage) — the
-        // Pass disposition is produced WITHOUT any reassessment, yet the
-        // recognized stage-2 nonce STILL performs the stage-2 transition
+        // Pass disposition is produced without any reassessment, yet the
+        // recognized stage-2 nonce still performs the stage-2 transition
         // (markVerified — the chain ends, the obligation is deleted).
         $resolver = new RiskProfileResolver(PoWAlgorithm::Sha256, 8);
         $risk = $this->riskStack(1, 'allow', 'allow', false, null, $resolver);
@@ -2597,7 +2597,7 @@ final class ValidatorTest extends TestCase
         self::assertSame(KiwiCaptchaValidator::CHAIN_REQUIRED_ERROR, $violations[0]->getCode());
         $chainId = (string) $chainService->verify((string) $violations[0]->getParameters()['{{ chain_ticket }}'])['chainId'];
 
-        // Stage 2: the chain issues a REAL challenge (its nonce becomes
+        // Stage 2: the chain issues a real challenge (its nonce becomes
         // the chain's stage2Nonce), and the chain identity is stamped into
         // the metadata sidecar exactly as the controller does — the
         // marker ends the chain at stage 2 (no third-stage eligibility).
@@ -2609,7 +2609,7 @@ final class ValidatorTest extends TestCase
         // The stage-2 solve: NO reassessment runs (post_solve_check=false,
         // no honeypot, no chain-eligible scope — the marker) — the final
         // disposition is the plain Pass, and the recognized stage-2 nonce
-        // STILL ends the chain (markVerified, obligation deleted).
+        // still ends the chain (markVerified, obligation deleted).
         usleep(($stage2->minDurationMs + 10) * 1000);
         $token2 = $this->solveToken($stage2->prefix, $stage2->salt, $stage2->targetBits, $stage2->nonce);
         $dto = new class {
@@ -2638,7 +2638,7 @@ final class ValidatorTest extends TestCase
         $inner = new ArrayChainedChallengeStateStore();
         $stage2 = $this->stage2Chain($risk['gateway'], $store, $inner);
 
-        // The terminal transition FAILS (a store outage on the step-up
+        // The terminal transition fails (a store outage on the step-up
         // transition): the disposition is durably finalized, but the chain
         // cannot transition — fail-closed temporary_unavailable, never a
         // silent pass while the obligation may be uncleared.
@@ -2675,14 +2675,14 @@ final class ValidatorTest extends TestCase
 
     public function testFreshDenyOnAnOpenObligationTerminalizesTheChain(): void
     {
-        // The DURABILITY invariant at the validator level: token A opens
-        // the chain (Argon32); token B — a DIFFERENT stage-1 token of the
-        // same transaction — gets a fresh DENY: the solve is denied AND
-        // the open obligation is TERMINALIZED (the chain becomes
-        // TERMINAL denied with NO stage-2 nonce, the obligation mapping
-        // KEPT — the denial is durable, keyed by the chain identity); a
-        // later NEUTRAL token of the same transaction STILL receives the
-        // terminal denial — never CHAIN_REQUIRED, never Pass.
+        // The durability invariant at the validator level: token A opens
+        // the chain (Argon32); token B — a different stage-1 token of the
+        // same transaction — gets a fresh deny: the solve is denied AND
+        // the open obligation is terminalized (the chain becomes
+        // terminal denied with NO stage-2 nonce, the obligation mapping
+        // kept — the denial is durable, keyed by the chain identity); a
+        // later neutral token of the same transaction still receives the
+        // terminal denial — never chain_required, never Pass.
         $resolver = new RiskProfileResolver(PoWAlgorithm::Sha256, 8);
         $risk = $this->riskStack(1, 'allow', 'allow', false, null, $resolver);
         [$store] = $this->clockedDispositionStore();
@@ -2705,7 +2705,7 @@ final class ValidatorTest extends TestCase
         self::assertSame(KiwiCaptchaValidator::CHAIN_REQUIRED_ERROR, $violationsA[0]->getCode());
         $chainId = (string) $chainService->verify((string) $violationsA[0]->getParameters()['{{ chain_ticket }}'])['chainId'];
 
-        // Token B: a fresh DENY — the terminal rejection AND the durable
+        // Token B: a fresh deny — the terminal rejection AND the durable
         // terminalization of the open obligation (the disposition is
         // durably finalized first).
         $risk['store']->setVector(SignalVector::fromArray(['network_risk' => 900]));
@@ -2728,8 +2728,8 @@ final class ValidatorTest extends TestCase
         self::assertNull($state?->stage2Nonce, 'no stage-2 nonce exists — the terminality is keyed by the chain identity alone');
         self::assertNotNull($chainService->findOpenRequirement('login', 'auth-txn-1', 1), 'the denied transition KEEPS the obligation — the transaction stays bound');
 
-        // Token C: a NEUTRAL assessment — STILL the terminal denial
-        // (never CHAIN_REQUIRED, never Pass); the chain stays denied.
+        // Token C: a neutral assessment — still the terminal denial
+        // (never chain_required, never Pass); the chain stays denied.
         $neutral = $this->riskStack(1, 'allow', 'allow', false, null, $resolver);
         $challengeC = $this->issuer->issue('login', '198.51.100.7');
         usleep(($challengeC->minDurationMs + 10) * 1000);
@@ -2751,10 +2751,10 @@ final class ValidatorTest extends TestCase
     public function testFreshStepUpOnAnOpenObligationTerminalizesTheChain(): void
     {
         // The StepUp mirror: token A opens the chain; token B — a
-        // DIFFERENT stage-1 token — gets a fresh STEP-UP: the terminal
+        // different stage-1 token — gets a fresh step-up: the terminal
         // step-up violation AND the durable terminalization of the open
-        // obligation (step_up_required, obligation mapping KEPT); a
-        // later NEUTRAL token STILL receives the terminal step-up.
+        // obligation (step_up_required, obligation mapping kept); a
+        // later neutral token still receives the terminal step-up.
         $resolver = new RiskProfileResolver(PoWAlgorithm::Sha256, 8);
         $risk = $this->riskStack(1, 'allow', 'allow', false, null, $resolver);
         [$store] = $this->clockedDispositionStore();
@@ -2777,7 +2777,7 @@ final class ValidatorTest extends TestCase
         self::assertSame(KiwiCaptchaValidator::CHAIN_REQUIRED_ERROR, $violationsA[0]->getCode());
         $chainId = (string) $chainService->verify((string) $violationsA[0]->getParameters()['{{ chain_ticket }}'])['chainId'];
 
-        // Token B: a fresh STEP-UP — the terminal step-up AND the durable
+        // Token B: a fresh step-up — the terminal step-up AND the durable
         // terminalization of the open obligation.
         $risk['store']->setVector(SignalVector::fromArray(self::STEP_UP_VECTOR));
         $challengeB = $this->issuer->issue('login', '198.51.100.7');
@@ -2799,8 +2799,8 @@ final class ValidatorTest extends TestCase
         self::assertNull($state?->stage2Nonce, 'no stage-2 nonce exists — the terminality is keyed by the chain identity alone');
         self::assertNotNull($chainService->findOpenRequirement('login', 'auth-txn-1', 1), 'the step-up transition KEEPS the obligation — the transaction stays bound');
 
-        // Token C: a NEUTRAL assessment — STILL the terminal step-up
-        // (never CHAIN_REQUIRED, never Pass); the chain stays
+        // Token C: a neutral assessment — still the terminal step-up
+        // (never chain_required, never Pass); the chain stays
         // step_up_required.
         $neutral = $this->riskStack(1, 'allow', 'allow', false, null, $resolver);
         $challengeC = $this->issuer->issue('login', '198.51.100.7');
@@ -2822,7 +2822,7 @@ final class ValidatorTest extends TestCase
 
     public function testFreshDenyTerminalizationFailureIsTemporaryUnavailable(): void
     {
-        // The terminalization of the open obligation FAILS (a store
+        // The terminalization of the open obligation fails (a store
         // outage): the solve must NOT get the bare denial — fail closed
         // with the temporary_unavailable violation (never a Deny without
         // the durable transaction terminality), the disposition is never
@@ -2852,7 +2852,7 @@ final class ValidatorTest extends TestCase
         self::assertSame(KiwiCaptchaValidator::CHAIN_REQUIRED_ERROR, $violationsA[0]->getCode());
         $chainId = (string) $chainService->verify((string) $violationsA[0]->getParameters()['{{ chain_ticket }}'])['chainId'];
 
-        // Token B: a fresh DENY whose terminalization FAILS — fail
+        // Token B: a fresh deny whose terminalization fails — fail
         // closed temporary_unavailable; the chain stays available and
         // the disposition is never finalized.
         $risk['store']->setVector(SignalVector::fromArray(['network_risk' => 900]));
@@ -2885,21 +2885,21 @@ final class ValidatorTest extends TestCase
         self::assertSame('denied', $inner->read($chainId)['state'], 'the chain is TERMINAL denied after the recovery');
     }
 
-    // ── Terminal transaction state dominates the EXACT stage-2 nonce ────
+    // ── Terminal transaction state dominates the exact stage-2 nonce ────
 
     public function testTerminalTransactionStateDominatesTheExactStage2NonceAcrossEveryAssessment(): void
     {
-        // THE REGRESSION MATRIX: a chain issued(S) whose transaction is
-        // ALREADY TERMINAL (denied / step_up_required — a different token
+        // THE regression matrix: a chain issued(S) whose transaction is
+        // already terminal (denied / step_up_required — a different token
         // of the same transaction terminalized it, the exact stage-2
-        // nonce preserved) dominates the submission of the EXACT stage-2
-        // nonce S under EVERY assessment: no reassessment
+        // nonce preserved) dominates the submission of the exact stage-2
+        // nonce S under every assessment: no reassessment
         // (post_solve_check=false + the chain marker), Allow, weaker PoW,
-        // stronger PoW and the OPPOSITE terminal assessment (a fresh
+        // stronger PoW and the opposite terminal assessment (a fresh
         // StepUp on a denied chain / a fresh Deny on a step_up_required
-        // chain). The terminal disposition wins — NEVER Pass, NEVER the
+        // chain). The terminal disposition wins — never Pass, never the
         // stage-2 transition conflict (503) — and S's nonce disposition
-        // is persisted AS THE TERMINAL KIND, so the REPLAY of S
+        // is persisted AS THE terminal kind, so the replay of S
         // reproduces the same terminal result (never Pass, never 503).
         $resolver = new RiskProfileResolver(PoWAlgorithm::Sha256, 8);
         $rows = [
@@ -2930,7 +2930,7 @@ final class ValidatorTest extends TestCase
             $expectedCode = $terminal === 'denied' ? KiwiCaptcha::POST_SOLVE_REJECTED_ERROR : KiwiCaptcha::POST_SOLVE_STEP_UP_REQUIRED;
             $expectedKind = $terminal === 'denied' ? PostSolveDispositionKind::Deny : PostSolveDispositionKind::StepUp;
 
-            // The transaction is ALREADY TERMINAL (a different token of
+            // The transaction is already terminal (a different token of
             // the same transaction terminalized the issued chain — the
             // exact stage-2 nonce preserved).
             $obligationId = $chainService->obligationIdFor('login', 'auth-txn-1', 1);
@@ -2942,7 +2942,7 @@ final class ValidatorTest extends TestCase
             self::assertSame($terminal, $requirement?->state, 'the chain is TERMINAL: '.$label);
             self::assertSame($nonceS, $requirement?->stage2Nonce, 'the exact stage-2 nonce is preserved: '.$label);
 
-            // The browser submits the EXACT stage-2 nonce S.
+            // The browser submits the exact stage-2 nonce S.
             usleep(($stage2['stage2']->minDurationMs + 10) * 1000);
             $tokenS = $this->solveToken($stage2['stage2']->prefix, $stage2['stage2']->salt, $stage2['stage2']->targetBits, $stage2['stage2']->nonce);
             $dto = new class {
@@ -2972,7 +2972,7 @@ final class ValidatorTest extends TestCase
             self::assertSame($expectedKind, $store->read($nonceS)?->disposition?->kind, 'S\'s nonce disposition is persisted AS THE TERMINAL KIND: '.$label);
             self::assertSame($terminal, $chainService->requirementFor($chainId)?->state, 'the terminal state survives: '.$label);
 
-            // REPLAY of S (the stored-result retry): the SAME terminal
+            // replay of S (the stored-result retry): the same terminal
             // result — never Pass, never 503 (the replay path is
             // consistent).
             [$engine2] = $this->dispositionEngine($this->verifier, $risk['gateway'], $store, chainTickets: $chainService, resolver: $resolver, bindingAuthority: $this->bindingAuthority(), metadataStore: $metaStore);
@@ -2988,14 +2988,14 @@ final class ValidatorTest extends TestCase
 
     public function testStage2TokenInheritsATerminalDenyFromAnotherTokenOfTheSameTransaction(): void
     {
-        // THE CRITICAL SCENARIO: the chain is ISSUED(S); a DIFFERENT
-        // stage-1 token B of the same transaction gets a FRESH Deny — the
-        // chain becomes TERMINAL denied PRESERVING the exact stage-2
+        // THE critical scenario: the chain is issued(S); a different
+        // stage-1 token B of the same transaction gets a fresh Deny — the
+        // chain becomes terminal denied preserving the exact stage-2
         // nonce S; the browser then submits S with NO post-solve
         // reassessment (post_solve_check=false + the chain marker): the
-        // terminal DENY — never Pass, never the stage-2 transition
+        // terminal deny — never Pass, never the stage-2 transition
         // conflict (503) — and S's nonce disposition is persisted AS THE
-        // TERMINAL KIND, so the REPLAY of S reproduces the same terminal
+        // terminal kind, so the replay of S reproduces the same terminal
         // denial.
         $resolver = new RiskProfileResolver(PoWAlgorithm::Sha256, 8);
         $risk = $this->riskStack(1, 'allow', 'allow', false, null, $resolver);
@@ -3007,9 +3007,9 @@ final class ValidatorTest extends TestCase
         $chainId = $stage2['chainId'];
         $nonceS = $stage2['stage2']->nonce;
 
-        // Token B — a DIFFERENT stage-1 token of the same transaction —
-        // gets a FRESH DENY: the terminal rejection AND the durable
-        // terminalization of the OPEN (issued) chain — the exact stage-2
+        // Token B — a different stage-1 token of the same transaction —
+        // gets a fresh deny: the terminal rejection AND the durable
+        // terminalization of the open (issued) chain — the exact stage-2
         // nonce preserved.
         $risk['store']->setVector(SignalVector::fromArray(['network_risk' => 900]));
         $challengeB = $this->issuer->issue('login', '198.51.100.7');
@@ -3030,7 +3030,7 @@ final class ValidatorTest extends TestCase
         self::assertNotNull($chainService->findOpenRequirement('login', 'auth-txn-1', 1), 'the obligation mapping is KEPT');
 
         // The browser submits S with NO reassessment (post_solve_check=
-        // false + the chain marker): the terminal DENY — never Pass,
+        // false + the chain marker): the terminal deny — never Pass,
         // never 503.
         $metaStore = new \BelConsulting\KiwiCaptchaBundle\SiteVerify\ArraySiteVerifyMetadataStore();
         $metaStore->store($nonceS, new \BelConsulting\KiwiCaptchaBundle\SiteVerify\SiteVerifyMetadata(null, null, 'login', $chainId, 2), 300);
@@ -3051,7 +3051,7 @@ final class ValidatorTest extends TestCase
         self::assertSame(PostSolveDispositionKind::Deny, $store->read($nonceS)?->disposition?->kind, 'S\'s nonce disposition is persisted AS THE TERMINAL KIND');
         self::assertSame('denied', $chainService->requirementFor($chainId)?->state, 'the chain stays terminal denied');
 
-        // REPLAY of S: the same terminal denial — never Pass, never 503.
+        // replay of S: the same terminal denial — never Pass, never 503.
         [$engine2] = $this->dispositionEngine($this->verifier, $risk['gateway'], $store, chainTickets: $chainService, resolver: $resolver, bindingAuthority: $this->bindingAuthority(), metadataStore: $metaStore);
         $meta2 = $engine2->getMetadataFor($dto::class);
         $meta2->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
@@ -3062,11 +3062,11 @@ final class ValidatorTest extends TestCase
 
     public function testStage2TokenInheritsATerminalStepUpFromAnotherTokenOfTheSameTransaction(): void
     {
-        // The StepUp mirror of the critical scenario: a DIFFERENT stage-1
-        // token B gets a FRESH STEP-UP — the issued chain becomes TERMINAL
-        // step_up_required PRESERVING the exact stage-2 nonce S; the
-        // submission of S (with a FRESH DENY assessment — the opposite
-        // terminal) still answers the terminal STEP-UP — never the
+        // The StepUp mirror of the critical scenario: a different stage-1
+        // token B gets a fresh step-up — the issued chain becomes terminal
+        // step_up_required preserving the exact stage-2 nonce S; the
+        // submission of S (with a fresh deny assessment — the opposite
+        // terminal) still answers the terminal step-up — never the
         // conflicting stage-2 transition (503), never Pass.
         $resolver = new RiskProfileResolver(PoWAlgorithm::Sha256, 8);
         $risk = $this->riskStack(1, 'allow', 'allow', false, null, $resolver);
@@ -3078,8 +3078,8 @@ final class ValidatorTest extends TestCase
         $chainId = $stage2['chainId'];
         $nonceS = $stage2['stage2']->nonce;
 
-        // Token B — a DIFFERENT stage-1 token — gets a FRESH STEP-UP: the
-        // terminal step-up AND the durable terminalization of the OPEN
+        // Token B — a different stage-1 token — gets a fresh step-up: the
+        // terminal step-up AND the durable terminalization of the open
         // (issued) chain — the exact stage-2 nonce preserved.
         $risk['store']->setVector(SignalVector::fromArray(self::STEP_UP_VECTOR));
         $challengeB = $this->issuer->issue('login', '198.51.100.7');
@@ -3099,8 +3099,8 @@ final class ValidatorTest extends TestCase
         self::assertSame($nonceS, $state?->stage2Nonce, 'the exact stage-2 nonce S is PRESERVED');
         self::assertNotNull($chainService->findOpenRequirement('login', 'auth-txn-1', 1), 'the obligation mapping is KEPT');
 
-        // The browser submits S under a FRESH DENY assessment (the
-        // opposite terminal): the terminal STEP-UP wins PERMANENTLY —
+        // The browser submits S under a fresh deny assessment (the
+        // opposite terminal): the terminal step-up wins permanently —
         // never the conflicting transition (503), never Pass.
         $risk['store']->setVector(SignalVector::fromArray(['network_risk' => 900]));
         usleep(($stage2['stage2']->minDurationMs + 10) * 1000);
@@ -3120,7 +3120,7 @@ final class ValidatorTest extends TestCase
         self::assertSame(PostSolveDispositionKind::StepUp, $store->read($nonceS)?->disposition?->kind, 'S\'s nonce disposition is persisted AS THE TERMINAL KIND');
         self::assertSame('step_up_required', $chainService->requirementFor($chainId)?->state, 'the chain stays terminal step_up_required');
 
-        // REPLAY of S: the same terminal step-up — never Pass, never 503.
+        // replay of S: the same terminal step-up — never Pass, never 503.
         [$engine2] = $this->dispositionEngine($this->verifier, $risk['gateway'], $store, chainTickets: $chainService, resolver: $resolver, bindingAuthority: $this->bindingAuthority());
         $meta2 = $engine2->getMetadataFor($dto::class);
         $meta2->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
@@ -3131,10 +3131,10 @@ final class ValidatorTest extends TestCase
 
     public function testReplayOfTheStage2NonceNeverReproducesAStalePassOverATerminalTransaction(): void
     {
-        // A stale PASS persisted for S (e.g. by a racing/buggy path
+        // A stale pass persisted for S (e.g. by a racing/buggy path
         // before the transaction terminalized — the record that used to
         // trap the stage-2 nonce in the persistent 503 loop) is
-        // SUPERSEDED by the requirement's TERMINAL state on every replay:
+        // superseded by the requirement's terminal state on every replay:
         // the terminal Deny answers — never the stored Pass, never the
         // stage-2 transition conflict.
         $resolver = new RiskProfileResolver(PoWAlgorithm::Sha256, 8);
@@ -3147,13 +3147,13 @@ final class ValidatorTest extends TestCase
         $chainId = $stage2['chainId'];
         $nonceS = $stage2['stage2']->nonce;
 
-        // The transaction is TERMINAL denied — the exact stage-2 nonce
+        // The transaction is terminal denied — the exact stage-2 nonce
         // preserved.
         $obligationId = $chainService->obligationIdFor('login', 'auth-txn-1', 1);
         self::assertSame(ChainVerifiedResult::DeniedNew, $chainService->markTransactionDenied($chainId, $obligationId));
         self::assertSame($nonceS, $chainService->requirementFor($chainId)?->stage2Nonce, 'the exact stage-2 nonce is preserved');
 
-        // A STALE PASS is S's persisted nonce disposition (injected
+        // A stale pass is S's persisted nonce disposition (injected
         // directly — the record the pre-fix path could leave behind).
         $this->injectDispositionRecord($store, $nonceS, $this->completeDispositionRecord());
 
@@ -3177,12 +3177,12 @@ final class ValidatorTest extends TestCase
 
     public function testTerminalizationBeforeFinalizeFailureRetryReconstructsTheTerminalDisposition(): void
     {
-        // THE CRASH TEST (TERMINALIZATION-FIRST): token B's fresh Deny
-        // TERMINALIZES the open obligation (the chain transition is
-        // applied BEFORE the nonce-disposition finalize), the finalize
-        // FAILS (decorator) -> the request answers temporary_unavailable;
+        // THE crash test (terminalization-first): token B's fresh Deny
+        // terminalizes the open obligation (the chain transition is
+        // applied before the nonce-disposition finalize), the finalize
+        // fails (decorator) -> the request answers temporary_unavailable;
         // a retry (finalize healthy, after the claim lease) rediscovers
-        // the TERMINAL transaction (the dominance rule) and reconstructs
+        // the terminal transaction (the dominance rule) and reconstructs
         // the terminal disposition — Deny — persisted as B's nonce
         // disposition kind. No authorization weakness: the durable
         // terminality was established by the successful transition, the
@@ -3209,9 +3209,9 @@ final class ValidatorTest extends TestCase
         self::assertSame(KiwiCaptchaValidator::CHAIN_REQUIRED_ERROR, $violationsA[0]->getCode());
         $chainId = (string) $chainService->verify((string) $violationsA[0]->getParameters()['{{ chain_ticket }}'])['chainId'];
 
-        // Token B: a fresh DENY whose TERMINALIZATION SUCCEEDS (the chain
-        // becomes TERMINAL denied) but whose nonce-disposition FINALIZE
-        // FAILS: the request answers temporary_unavailable — the durable
+        // Token B: a fresh deny whose terminalization succeeds (the chain
+        // becomes terminal denied) but whose nonce-disposition finalize
+        // fails: the request answers temporary_unavailable — the durable
         // terminality is already established, no bare Deny escapes
         // without its nonce disposition.
         $risk['store']->setVector(SignalVector::fromArray(['network_risk' => 900]));
@@ -3233,7 +3233,7 @@ final class ValidatorTest extends TestCase
         self::assertSame('pending', $store->read($challengeB->nonce)?->state, 'the claim is left pending — the nonce disposition was never finalized');
 
         // The retry (finalize healthy, after the claim lease): the
-        // dominance rule rediscovers the TERMINAL transaction and
+        // dominance rule rediscovers the terminal transaction and
         // reconstructs the terminal disposition — persisted AS Deny.
         $advance(16);
         [$engineB2] = $this->dispositionEngine($this->verifier, $risk['gateway'], $store, chainTickets: $chainService, bindingAuthority: $this->bindingAuthority());
@@ -3248,9 +3248,9 @@ final class ValidatorTest extends TestCase
 
 /**
  * The authoritative transaction-binding fixture of the binding-authority
- * tests: maps the presented client hint 'client-hint' to the CANONICAL
+ * tests: maps the presented client hint 'client-hint' to the canonical
  * 'server-transaction' binding (the value the challenge controller signs)
- * and counts every resolution — the authority must be consulted EXACTLY
+ * and counts every resolution — the authority must be consulted exactly
  * once per validation.
  */
 final class MappingBindingAuthority implements RequestBindingAuthorityInterface
@@ -3269,7 +3269,7 @@ final class MappingBindingAuthority implements RequestBindingAuthorityInterface
 }
 
 /**
- * The authority fixture whose backend is DOWN: every resolution throws.
+ * The authority fixture whose backend is down: every resolution throws.
  * The validator must fail closed with temporary_unavailable — never a
  * silent pass, never a raw exception.
  */
@@ -3285,7 +3285,7 @@ final class ThrowingBindingAuthority implements RequestBindingAuthorityInterface
 }
 
 /**
- * The authority fixture that DECLINES the transaction: the transaction is
+ * The authority fixture that declines the transaction: the transaction is
  * invalid/unknown (null) — the normal invalid-binding outcome applies.
  */
 final class NullBindingAuthority implements RequestBindingAuthorityInterface
@@ -3301,7 +3301,7 @@ final class NullBindingAuthority implements RequestBindingAuthorityInterface
 }
 
 /**
- * A transactional chain-state decorator with a test seam: the TERMINAL
+ * A transactional chain-state decorator with a test seam: the terminal
  * transitions can fail on demand (a simulated store outage), so the
  * validator's fail-closed stage-2 transition path is exercisable. All
  * other operations delegate to the wrapped store.
@@ -3318,7 +3318,7 @@ final class FailingTerminalChainStore implements TransactionalChainedChallengeSt
 
     public bool $failTransactionStepUpRequired = false;
 
-    /** When true, the OBLIGATION read throws — the validator's chain-state read seam. */
+    /** When true, the obligation read throws — the validator's chain-state read seam. */
     public bool $failObligationChainId = false;
 
     public function __construct(private readonly ArrayChainedChallengeStateStore $inner)

@@ -1,0 +1,27 @@
+# Adoption manifest for the docs-lint prose baseline.
+#
+# A path brought under the ratchet by a broadened scan (present in the
+# committed baseline but absent from the base baseline of the parent
+# commit) is allowed exactly once, by being listed here. Once adopted
+# the path is a tracked allowance: its row may only decrease in later
+# regenerations. Nothing is added here to absorb an increase of an
+# already-tracked path; that requires a rewrite.
+#
+# The paths below are the files first scanned when the browser test
+# suite (tests/browser), the design docs (protocol) and the workflow
+# prose (.github/workflows) came under the ratchet.
+.github/workflows/ci.yml
+.github/workflows/regenerate-assets.yml
+.github/workflows/release.yml
+.github/workflows/sync-assets.yml
+protocol/risk-v1/README.md
+tests/browser/playwright.a11y.config.mjs
+tests/browser/playwright.config.mjs
+tests/browser/router.php
+tests/browser/specs/a11y.spec.mjs
+tests/browser/specs/chaining.spec.mjs
+tests/browser/specs/crossbrowser.spec.mjs
+tests/browser/specs/migration.spec.mjs
+tests/browser/specs/risk-v2.spec.mjs
+tests/browser/specs/security.spec.mjs
+tests/browser/specs/widget.spec.mjs

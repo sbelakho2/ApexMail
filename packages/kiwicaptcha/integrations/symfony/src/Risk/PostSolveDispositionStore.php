@@ -5,21 +5,20 @@ declare(strict_types=1);
 namespace BelConsulting\KiwiCaptchaBundle\Risk;
 
 /**
- * Durable, NONCE-KEYED final disposition of a verified proof.
+ * Durable, nonce-keyed final disposition of a verified proof.
  *
- * The validator resolves ONE final disposition (PASS | DENY | STEP_UP |
- * CHAIN_REQUIRED) per verification and persists it BEFORE the application
- * sees the outcome, so a replay of the same token reproduces the same
- * disposition — a stored core result can never bypass the post-solve
- * policy (it only answers "was the PoW cryptographically valid?").
+ * The validator resolves one final disposition (pass | deny | step-up |
+ * chain-required) per verification and persists it before the
+ * application sees the outcome, so a replay of the same token
+ * reproduces the same disposition and can never bypass the post-solve
+ * policy.
  *
- * Claim model (single-writer): exactly one owner computes the disposition
- * for a nonce. The SHORT FIXED lease (15 s — the post-solve computation is
- * cheap, the lease is a contention bound, NEVER the record TTL) lets a
- * crash-taken-over computation be redone after expiry; the record itself
- * lives for the whole retryable lifetime of the consumed core result.
+ * Claim model (single-writer): exactly one owner computes the
+ * disposition for a nonce. The short fixed lease (15 s) is a
+ * contention bound, never the record TTL; the record lives for the
+ * whole retryable lifetime of the consumed core result.
  *
- * The record JSON carries ONLY the disposition (kind / decision_id /
+ * The record JSON carries only the disposition (kind / decision_id /
  * chain_id) plus the original decision handle — raw risk vectors,
  * fingerprints and descriptors are never stored.
  */
@@ -36,23 +35,23 @@ interface PostSolveDispositionStore
      *
      * @param string      $nonce       the verified challenge nonce (random security state)
      * @param string      $owner       a fresh random owner token of this claim
-     * @param int         $ttlSeconds  the RECORD TTL (the lease is a fixed short bound)
-     * @param string|null $decisionKey the FULL nonce -> decision mapping key
+     * @param int         $ttlSeconds  the record TTL (the lease is a fixed short bound)
+     * @param string|null $decisionKey the full nonce -> decision mapping key
      *                                 ({kiwi:<ns>}:decision:<nonce> — the same
      *                                 hash-tagged key the gateway pairs the
-     *                                 handle under). The mapping is CONSUMED
-     *                                 (GETDEL, at most one winner) ONLY when
-     *                                 the claim CREATES the missing pending
-     *                                 record, and the paired decision id is
-     *                                 persisted in that record in the same
-     *                                 transition; a complete claim, a busy
-     *                                 (pending) claim and a TAKEOVER never
-     *                                 touch the mapping key. A TAKEOVER keeps
-     *                                 the ORIGINAL handle (never the new
-     *                                 owner's), so a crash-taken-over
-     *                                 computation completes with the first
-     *                                 owner's decision id. null = no decision
-     *                                 mapping (the records carry null)
+     *                                 handle under). The mapping is consumed
+     *                                 atomically (delete-on-read, at most one
+     *                                 winner) only when the claim creates the
+     *                                 missing pending record, and the paired
+     *                                 decision id is persisted in that record
+     *                                 in the same transition; a complete, busy
+     *                                 or takeover claim never touches the
+     *                                 mapping key, and a takeover keeps the
+     *                                 original handle, so a
+     *                                 crash-taken-over computation completes
+     *                                 with the first owner's decision id.
+     *                                 null = no decision mapping (the
+     *                                 records carry null)
      *
      * @throws \Throwable when the store is unavailable (fail closed)
      */

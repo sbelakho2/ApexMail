@@ -10,16 +10,16 @@ use KiwiCaptcha\Risk\RiskAction;
 use PHPUnit\Framework\TestCase;
 
 /**
- * The ticket() convenience API's SIGNED-EXPIRY INVARIANT: the ticket is
- * ALWAYS signed from the server-held requirement's ACTUAL expiry
+ * The ticket() convenience API's signed-expiry invariant: the ticket is
+ * always signed from the server-held requirement's actual expiry
  * ($requirement->expiresAt), never the caller-requested $expiresAt. On
- * the FRESH path (no open chain) the requested expiry seeds the chain
+ * the fresh path (no open chain) the requested expiry seeds the chain
  * creation, so a new chain's requirement expiry equals the requested
- * expiry; on the EXISTING path (an open chain of the same transaction)
- * the requirement keeps its ORIGINAL expiry — the signed ticket can
+ * expiry; on the existing path (an open chain of the same transaction)
+ * the requirement keeps its original expiry — the signed ticket can
  * never outlive the chain state, and repeated ticket() calls against the
- * same obligation return BYTE-IDENTICAL tickets regardless of the
- * requested expiry (the state store retains the ORIGINAL expiry, so the
+ * same obligation return byte-identical tickets regardless of the
+ * requested expiry (the state store retains the original expiry, so the
  * re-signed ticket must reproduce it exactly).
  */
 final class ChainedTicketDeterminismTest extends TestCase
@@ -33,7 +33,7 @@ final class ChainedTicketDeterminismTest extends TestCase
     }
 
     /**
-     * A service + store on a PINNED clock (the determinism the test
+     * A service + store on a pinned clock (the determinism the test
      * asserts is about the signed expiry, so the wall clock must not move
      * between calls).
      */
@@ -79,10 +79,10 @@ final class ChainedTicketDeterminismTest extends TestCase
         self::assertIsArray($payload1);
         self::assertSame($expiryX, (int) $payload1['expiresAt'], 'the first call signs the requested expiry (the fresh path)');
 
-        // The SAME obligation with a LATER requested expiry: the chain
-        // already exists with its ORIGINAL expiry — the convenience API
-        // must sign the requirement's ACTUAL expiry, so the ticket is
-        // byte-identical (the state store retains the ORIGINAL expiry,
+        // The same obligation with a later requested expiry: the chain
+        // already exists with its original expiry — the convenience API
+        // must sign the requirement's actual expiry, so the ticket is
+        // byte-identical (the state store retains the original expiry,
         // and a signed ticket can never outlive the chain state).
         $later = $clock + 900;
         $second = $service->ticket($this->nonce(), 'login', 'txn-alpha', 1, RiskAction::Argon32, $later);
@@ -94,14 +94,14 @@ final class ChainedTicketDeterminismTest extends TestCase
         self::assertSame($expiryX, (int) $payload2['expiresAt'], 'the signed expiry is the requirement\'s ORIGINAL expiry — never the later requested one');
         self::assertNotSame($later, (int) $payload2['expiresAt'], 'the later requested expiry must never leak into the signed ticket');
 
-        // A THIRD call with yet another requested expiry: still
+        // A third call with yet another requested expiry: still
         // byte-identical.
         $third = $service->ticket($this->nonce(), 'login', 'txn-alpha', 1, RiskAction::Argon32, $clock + 1500);
         self::assertIsString($third);
         self::assertSame($first, $third, 'every repeated call against the same obligation returns the byte-identical ticket');
 
         // The server-held requirement never moved: the chain state keeps
-        // the ORIGINAL expiry, and exactly ONE chain record exists.
+        // the original expiry, and exactly ONE chain record exists.
         $requirement = $service->requirementFor((string) $payload1['chainId']);
         self::assertNotNull($requirement);
         self::assertSame($expiryX, $requirement->expiresAt, 'the chain state retains the ORIGINAL expiry');
@@ -126,9 +126,9 @@ final class ChainedTicketDeterminismTest extends TestCase
 
     public function testRequirementForRetainsTheOriginalExpiryAfterVerification(): void
     {
-        // THE VERIFIED-CHAIN LIVENESS READ the validator's CHAIN_REQUIRED
-        // signing relies on: after the chain VERIFIES (its obligation is
-        // cleared) the chain RECORD is retained with its ORIGINAL expiry —
+        // THE verified-chain liveness read the validator's chain_required
+        // signing relies on: after the chain verifies (its obligation is
+        // cleared) the chain record is retained with its original expiry —
         // requirementFor (the by-chain-id read, never the obligation
         // lookup) still resolves it, so a completed chain keeps re-signing
         // the deterministic ticket from the disposition-carried bound.
@@ -141,7 +141,7 @@ final class ChainedTicketDeterminismTest extends TestCase
         $ticket = $service->ticketFor($requirement->chainId, $requirement->expiresAt);
         self::assertIsString($ticket);
 
-        // The chain issues and VERIFIES (the obligation is deleted — the
+        // The chain issues and verifies (the obligation is deleted — the
         // findOpenRequirement lookup now finds nothing).
         $stage2Nonce = base64_encode(hash('sha256', 'stage2', true));
         self::assertSame(\BelConsulting\KiwiCaptchaBundle\Risk\ChainReservationResult::Available, $service->reserveStage2($requirement->chainId, 'owner-a'));
@@ -149,7 +149,7 @@ final class ChainedTicketDeterminismTest extends TestCase
         self::assertSame(\BelConsulting\KiwiCaptchaBundle\Risk\ChainVerifiedResult::VerifiedNew, $service->markVerified($requirement->chainId, $stage2Nonce));
         self::assertNull($service->findOpenRequirement('login', 'txn-alpha', 1), 'the verified transition cleared the obligation');
 
-        // The chain RECORD survives with the ORIGINAL expiry: the
+        // The chain record survives with the original expiry: the
         // by-chain-id read resolves the requirement and the deterministic
         // ticket is byte-identical.
         $retained = $service->requirementFor($requirement->chainId);

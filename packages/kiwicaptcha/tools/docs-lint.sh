@@ -6,8 +6,14 @@
 # file that exceeds its row (a scanned file without a row counts as a
 # new file with baseline 0) or a total that exceeds the baseline total
 # fails with exit 1; --update-baseline FILE regenerates the per-file set
-# after deliberate rewrites. The committed baseline ratchets toward
-# zero, then advisory mode is removed.
+# after deliberate rewrites. --integrity with an earlier baseline file
+# adds the committed-baseline integrity check: the committed baseline
+# (the file next to this script) is compared with that earlier baseline
+# (typically the parent commit's) — every tracked path's row may only
+# stay equal or decrease, a path new in the committed baseline is
+# allowed only when listed in the adoption manifest (docs-lint-adopted.txt
+# next to this script), and the total may only stay equal or decrease.
+# The committed baseline ratchets toward zero, then advisory mode is removed.
 # Scan scope: the five kiwicaptcha package families under packages/
 # (kiwicaptcha, kiwicaptcha-php, kiwicaptcha-risk, kiwicaptcha-risk-php,
 # kiwicaptcha-wasm) plus the repository's human-facing root text: the
@@ -34,6 +40,7 @@ ALLOWLIST="WCAG HTTP HTTPS WASM HTML JSON HMAC NVDA SMIL POUR SLSA CORS QUIC OID
 WITH_SOURCE=0
 BASELINE=""
 UPDATE_BASELINE=""
+INTEGRITY=""
 ROOT=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -48,13 +55,23 @@ while [ "$#" -gt 0 ]; do
       if [ "$#" -eq 0 ]; then echo "docs-lint.sh: --update-baseline requires a file" >&2; exit 0; fi
       UPDATE_BASELINE="$1"
       ;;
+    --integrity)
+      shift
+      if [ "$#" -eq 0 ]; then echo "docs-lint.sh: --integrity requires a file" >&2; exit 0; fi
+      INTEGRITY="$1"
+      ;;
     -h|--help)
-      echo "usage: docs-lint.sh [--source] [--baseline FILE] [--update-baseline FILE] [ROOT_DIR]"
+      echo "usage: docs-lint.sh [--source] [--baseline FILE] [--update-baseline FILE] [--integrity FILE] [ROOT_DIR]"
       echo "prose lint over the kiwicaptcha package families and the repository's human-facing text; advisory"
       echo "(exit 0) unless --baseline FILE is given, which fails (exit 1)"
       echo "when any scanned file exceeds its per-file row or the total"
       echo "exceeds the tracked baseline; --update-baseline FILE writes"
-      echo "per-file counts + total"
+      echo "per-file counts + total; --integrity FILE adds the"
+      echo "committed-baseline integrity check against FILE (an earlier"
+      echo "baseline, e.g. the parent commit's): tracked rows may only"
+      echo "stay equal or decrease, new paths must be adopted in"
+      echo "docs-lint-adopted.txt, and the total may only stay equal or"
+      echo "decrease"
       exit 0
       ;;
     -*) echo "docs-lint.sh: unknown option: $1" >&2; exit 0 ;;
@@ -65,6 +82,14 @@ done
 
 if [ -n "$UPDATE_BASELINE" ] && [ -n "$BASELINE" ]; then
   echo "docs-lint.sh: --baseline and --update-baseline are mutually exclusive" >&2
+  exit 0
+fi
+if [ -n "$INTEGRITY" ] && [ -n "$BASELINE" ]; then
+  echo "docs-lint.sh: --integrity and --baseline are mutually exclusive" >&2
+  exit 0
+fi
+if [ -n "$INTEGRITY" ] && [ -n "$UPDATE_BASELINE" ]; then
+  echo "docs-lint.sh: --integrity and --update-baseline are mutually exclusive" >&2
   exit 0
 fi
 
@@ -506,16 +531,18 @@ if [ -n "$UPDATE_BASELINE" ]; then
   exit 0
 fi
 
-if [ -n "$BASELINE" ]; then
-  if [ ! -f "$BASELINE" ]; then
-    echo "docs-lint.sh: baseline file not found: $BASELINE (generate with --update-baseline)" >&2
-    exit 1
+# ratchet_check: the per-file rows and the total of the scan vs a
+# baseline file; prints the failures and returns 1 when either is exceeded
+ratchet_check() {
+  bfile=$1
+  if [ ! -f "$bfile" ]; then
+    echo "docs-lint.sh: baseline file not found: $bfile (generate with --update-baseline)" >&2
+    return 1
   fi
-  base_tot=$(awk '/^TOTAL[ \t]/ { t = $2 + 0 } END { print t + 0 }' "$BASELINE")
+  base_tot=$(awk '/^TOTAL[ \t]/ { t = $2 + 0 } END { print t + 0 }' "$bfile")
   base_tot=${base_tot:-0}
-  fail=0
   overages=$(
-    awk -F '\t' -v bfile="$BASELINE" '
+    awk -F '\t' -v bfile="$bfile" '
       BEGIN {
         while ((getline bl < bfile) > 0) {
           if (bl ~ /^TOTAL[ \t]/) continue
@@ -530,17 +557,121 @@ if [ -n "$BASELINE" ]; then
       }
     ' "$agg_tmp"
   )
+  fail=0
   if [ -n "$overages" ]; then
     echo "docs-lint.sh: FAIL: per-file baseline rows exceeded:" >&2
     printf '%s\n' "$overages" | sed 's/^/  /' >&2
     fail=1
   fi
   if [ "$tot" -gt "$base_tot" ]; then
-    echo "docs-lint.sh: FAIL: total $tot exceeds baseline $base_tot ($BASELINE); regenerate with --update-baseline only after deliberate rewrites" >&2
+    echo "docs-lint.sh: FAIL: total $tot exceeds baseline $base_tot ($bfile); regenerate with --update-baseline only after deliberate rewrites" >&2
     fail=1
   fi
-  if [ "$fail" -eq 1 ]; then exit 1; fi
+  return $fail
+}
+
+# integrity_check: the committed baseline vs the base baseline and the
+# adoption manifest — every tracked path's row may only stay equal or
+# decrease (a path missing in the committed baseline is a deletion and
+# is fine), a path new in the committed baseline is allowed only when
+# listed in the adoption manifest, and the total may only stay equal or
+# decrease; prints the failures and returns 1 when any of the three
+# holds
+integrity_check() {
+  basefile=$1
+  curfile=$2
+  manifest=$3
+  base_tot=$(awk '/^TOTAL[ \t]/ { t = $2 + 0 } END { print t + 0 }' "$basefile")
+  cur_tot=$(awk '/^TOTAL[ \t]/ { t = $2 + 0 } END { print t + 0 }' "$curfile")
+  base_tot=${base_tot:-0}
+  cur_tot=${cur_tot:-0}
+  fail=0
+  increases=$(
+    awk -v basefile="$basefile" -v curfile="$curfile" '
+      BEGIN {
+        while ((getline bl < basefile) > 0) {
+          if (bl ~ /^TOTAL[ \t]/) continue
+          split(bl, a, " ")
+          base[a[2]] = a[1] + 0
+        }
+        while ((getline cl < curfile) > 0) {
+          if (cl ~ /^TOTAL[ \t]/) continue
+          split(cl, b, " ")
+          if ((b[2] in base) && b[1] + 0 > base[b[2]]) {
+            printf "%s: %d (increase %d)\n", b[2], b[1] + 0, b[1] + 0 - base[b[2]]
+          }
+        }
+      }
+    '
+  )
+  if [ -n "$increases" ]; then
+    echo "docs-lint.sh: FAIL: baseline rows increased vs the base baseline:" >&2
+    printf '%s\n' "$increases" | sed 's/^/  /' >&2
+    fail=1
+  fi
+  newpaths=$(
+    awk -v basefile="$basefile" -v curfile="$curfile" -v manifest="$manifest" '
+      BEGIN {
+        while ((getline bl < basefile) > 0) {
+          if (bl ~ /^TOTAL[ \t]/) continue
+          split(bl, a, " ")
+          base[a[2]] = 1
+        }
+        while ((getline ml < manifest) > 0) {
+          sub(/^[ \t]*/, "", ml)
+          sub(/[ \t]*#.*/, "", ml)
+          sub(/[ \t]+$/, "", ml)
+          if (ml == "") continue
+          adopted[ml] = 1
+        }
+        while ((getline cl < curfile) > 0) {
+          if (cl ~ /^TOTAL[ \t]/) continue
+          split(cl, b, " ")
+          if (!(b[2] in base) && !(b[2] in adopted)) {
+            printf "%s (not adopted)\n", b[2]
+          }
+        }
+      }
+    '
+  )
+  if [ -n "$newpaths" ]; then
+    echo "docs-lint.sh: FAIL: baseline paths not in the base baseline and not adopted:" >&2
+    printf '%s\n' "$newpaths" | sed 's/^/  /' >&2
+    fail=1
+  fi
+  if [ "$cur_tot" -gt "$base_tot" ]; then
+    echo "docs-lint.sh: FAIL: total $cur_tot exceeds the base baseline total $base_tot" >&2
+    fail=1
+  fi
+  return $fail
+}
+
+if [ -n "$BASELINE" ]; then
+  if ! ratchet_check "$BASELINE"; then exit 1; fi
   echo "docs-lint.sh: OK: total $tot at or below baseline $base_tot; every scanned file at or below its per-file row"
+  exit 0
+fi
+
+if [ -n "$INTEGRITY" ]; then
+  if [ ! -f "$INTEGRITY" ]; then
+    echo "docs-lint.sh: base baseline file not found: $INTEGRITY" >&2
+    exit 1
+  fi
+  cur_baseline="$SCRIPT_DIR/docs-lint-baseline.txt"
+  manifest="$SCRIPT_DIR/docs-lint-adopted.txt"
+  if [ ! -f "$cur_baseline" ]; then
+    echo "docs-lint.sh: committed baseline not found: $cur_baseline" >&2
+    exit 1
+  fi
+  if [ ! -f "$manifest" ]; then
+    echo "docs-lint.sh: adoption manifest not found: $manifest" >&2
+    exit 1
+  fi
+  fail=0
+  if ! ratchet_check "$cur_baseline"; then fail=1; fi
+  if ! integrity_check "$INTEGRITY" "$cur_baseline" "$manifest"; then fail=1; fi
+  if [ "$fail" -eq 1 ]; then exit 1; fi
+  echo "docs-lint.sh: OK: total $tot at or below the committed baseline; every scanned file at or below its per-file row; committed baseline monotonic vs the base baseline (no tracked-path increase, no un-adopted new path, total at or below the base total)"
   exit 0
 fi
 

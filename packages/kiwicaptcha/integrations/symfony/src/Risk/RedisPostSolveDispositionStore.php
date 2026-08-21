@@ -10,13 +10,13 @@ use BelConsulting\KiwiCaptchaBundle\SiteVerify\RedisEval;
  * Redis-backed durable post-solve disposition store.
  *
  * Key: `{kiwi:<namespace>}:postsolve:<nonce>` (the nonce is random
- * security state — no HMAC). Value: JSON
- *   pending:  {"v":2,"state":"pending","owner":...,"lease_until":...,"disposition":null,"decision_id":...}
- *   complete: {"v":2,"state":"complete","owner":null,"lease_until":null,
+ * security state — no hmac). Value: json
+ *   pending:  {"v":1,"state":"pending","owner":...,"lease_until":...,"disposition":null,"decision_id":...}
+ *   complete: {"v":1,"state":"complete","owner":null,"lease_until":null,
  *              "disposition":{"kind":"chain_required","decision_id":...,"chain_id":...,"chain_expires_at":...},
  *              "decision_id":...}
  * Record TTL: the constructor's configured TTL (the extension wires
- * Config::MAX_TTL_SECS + risk.redis.ttl_margin_secs) — the disposition
+ * Config::MAX_TTL_secs + risk.redis.ttl_margin_secs) — the disposition
  * survives at least as long as the consumed core result can be replayed;
  * the per-call claim TTL applies when no configured TTL is given.
  *
@@ -24,43 +24,45 @@ use BelConsulting\KiwiCaptchaBundle\SiteVerify\RedisEval;
  * lease); pending+me -> 'pending'; pending+other+live -> 'pending' (busy);
  * pending+other+expired -> takeover -> 'taken_over'; complete ->
  * 'complete'): at most one owner computes a nonce's disposition. The
- * machine reads the EXISTING state BEFORE touching anything else — a
- * complete claim, a busy claim and a takeover NEVER touch the nonce ->
- * decision mapping key; only the MISSING path consumes it (GETDEL inside
+ * machine reads the existing state before touching anything else — a
+ * complete claim, a busy claim and a takeover never touch the nonce ->
+ * decision mapping key; only the missing path consumes it (getdel inside
  * the script — at most one winner) and persists the paired decision id
- * in the pending record in the SAME transition: a fallible read before
+ * in the pending record in the same transition: a fallible read before
  * the claim can never lose the original handle, a caller that does not
  * become owner never consumes the mapping, and an owner crash after the
- * claim can never lose it either. The SHORT FIXED lease (15 s) bounds
+ * claim can never lose it either. The short fixed lease (15 s) bounds
  * the in-flight window — never the record TTL. The finalize is atomic
  * too: pending(me) -> complete, refused for a non-owner or a non-pending
  * record, so a crash-taken-over computation can never overwrite a
  * completed disposition and a replayed proof reproduces the persisted
- * final disposition. The pending record carries the ORIGINAL decision
- * handle the first owner's claim consumed; a TAKEOVER keeps it — a
+ * final disposition. The pending record carries the original decision
+ * handle the first owner's claim consumed; a takeover keeps it — a
  * completed disposition survives the crash of its first owner with the
  * original decision id.
  *
- * Every record is decoded ALL-OR-NOTHING against the strict schema
+ * Every record is decoded all-or-nothing against the strict schema
  * ({@see self::decodeRecord()}): a missing/malformed field or a
  * state-invariant violation throws
- * {@see MalformedPostSolveDispositionException} — NEVER a defaulted
+ * {@see MalformedPostSolveDispositionException} — never a defaulted
  * record (an unknown state never becomes pending, a corrupt kind never
  * Pass, a missing disposition never a silent pass, a ChainRequired
  * record without its chain_expires_at bound never a ticket). The decoder
- * accepts BOTH schema versions 1 and 2 during the compatibility window:
- * new writes are v2 (chain_required REQUIRES a positive chain_expires_at
- * under v2), while a v1 chain_required record WITHOUT chain_expires_at
- * is a LEGACY record — its carried expiry is null and the signing falls
- * back to the exact chain record's server-held bound (never corrupt);
- * any other v1 violation stays corrupt. The same decode runs on the
- * in-memory store, so Array and Redis observe one machine.
+ * accepts both schema versions 1 and 2: new writes are v1 (chain_required
+ * carries chain_expires_at — a shape an earlier release already reads),
+ * while a v1 chain_required record without chain_expires_at is a legacy
+ * record — its carried expiry is null and the signing falls back to the
+ * exact chain record's server-held bound (never corrupt); any other v1
+ * violation stays corrupt, and a v2 chain_required record requires a
+ * positive chain_expires_at (the forward-looking v2 acceptance). The
+ * same decode runs on the in-memory store, so Array and Redis observe
+ * one machine.
  */
 final class RedisPostSolveDispositionStore implements PostSolveDispositionStore
 {
     private const PREFIX = 'postsolve:';
 
-    /** The SHORT FIXED computation lease — a contention bound, never the record TTL. */
+    /** The short fixed computation lease — a contention bound, never the record TTL. */
     private const LEASE_SECS = 15;
 
     /** The chain id shape (base64url of 16 random bytes — the ticket service's alphabet). */
@@ -68,18 +70,18 @@ final class RedisPostSolveDispositionStore implements PostSolveDispositionStore
 
     /**
      * Single-Lua claim: one atomic transition per nonce.
-     *   KEYS[1] = {kiwi:<ns>}:postsolve:<nonce>
-     *   KEYS[2] = the nonce -> decision mapping key ({kiwi:<ns>}:decision:<nonce>),
+     *   keys[1] = {kiwi:<ns>}:postsolve:<nonce>
+     *   keys[2] = the nonce -> decision mapping key ({kiwi:<ns>}:decision:<nonce>),
      *             '' = none (no decision transfer)
-     *   ARGV[1] = owner token, ARGV[2] = lease seconds, ARGV[3] = record TTL
+     *   argv[1] = owner token, argv[2] = lease seconds, argv[3] = record TTL
      * Returns 'claimed' | 'pending' | 'taken_over' | 'complete'.
-     * The EXISTING state is read FIRST and answered WITHOUT touching the
+     * The existing state is read first and answered without touching the
      * decision key: complete -> 'complete'; pending+live other owner ->
      * 'pending'; an expired-lease takeover -> 'taken_over' (the existing
-     * record's decision_id is PRESERVED — a takeover NEVER GETDELs a
-     * fresh mapping). ONLY the missing path consumes the mapping (GETDEL,
+     * record's decision_id is preserved — a takeover never GETDELs a
+     * fresh mapping). only the missing path consumes the mapping (getdel,
      * atomic with the creation — at most one winner) and persists the
-     * paired decision id in the pending record in the SAME transition: a
+     * paired decision id in the pending record in the same transition: a
      * fallible read before the claim can never lose the original handle,
      * a caller that does not become owner never consumes the mapping,
      * and an owner crash after the claim can never lose it either.
@@ -122,7 +124,7 @@ if KEYS[2] ~= '' then
   end
 end
 local rec = {}
-rec['v'] = 2
+rec['v'] = 1
 rec['state'] = 'pending'
 rec['owner'] = ARGV[1]
 rec['lease_until'] = now + tonumber(ARGV[2])
@@ -134,12 +136,12 @@ LUA;
 
     /**
      * Atomic finalize: pending(me) -> complete(disposition), keeping the
-     * record TTL (KEEPTTL, Redis 6.0+). Refused (false) for a non-owner or
+     * record TTL (keepttl, Redis 6.0+). Refused (false) for a non-owner or
      * a non-pending record — never overwrites another owner's work. The
-     * record's decision_id is PRESERVED (the original handle survives in
+     * record's decision_id is preserved (the original handle survives in
      * the complete record).
-     *   KEYS[1] = the record key
-     *   ARGV[1] = owner token, ARGV[2] = disposition JSON
+     *   keys[1] = the record key
+     *   argv[1] = owner token, argv[2] = disposition json
      */
     private const FINALIZE_LUA = <<<'LUA'
 -- Post-solve disposition finalize: pending(owner) -> complete.
@@ -170,8 +172,8 @@ LUA;
      *                                          the risk state
      * @param string                $namespace  the risk namespace (the
      *                                          hash-tag discriminator)
-     * @param int                   $ttlSecs    the RECORD TTL (the extension
-     *                                          wires Config::MAX_TTL_SECS +
+     * @param int                   $ttlSecs    the record TTL (the extension
+     *                                          wires Config::MAX_TTL_secs +
      *                                          ttl margin); 0 = use the
      *                                          per-call claim TTL
      */
@@ -184,9 +186,9 @@ LUA;
 
     public function claim(string $nonce, string $owner, int $ttlSeconds, ?string $decisionKey = null): string
     {
-        // STRICT PRE-READ: an existing record must strictly decode BEFORE
+        // strict pre-read: an existing record must strictly decode before
         // the Lua machine may transition it — a corrupt server record
-        // throws (fail closed), it is NEVER healed into valid state by a
+        // throws (fail closed), it is never healed into valid state by a
         // takeover and never answered as a valid disposition.
         $existing = $this->redis->get($this->key($nonce));
         if (\is_string($existing) && $existing !== '') {
@@ -269,23 +271,23 @@ LUA;
     }
 
     /**
-     * The strict decode — ALL-OR-NOTHING: a missing/malformed field or a
+     * The strict decode — all-or-nothing: a missing/malformed field or a
      * state-invariant violation throws
-     * {@see MalformedPostSolveDispositionException} (NEVER defaults: an
+     * {@see MalformedPostSolveDispositionException} (never defaults: an
      * unknown state never becomes pending, a corrupt kind never Pass, a
      * missing disposition never a silent pass, a ChainRequired record
      * without its chain_expires_at bound never a ticket). Validates:
      * schema version 1 or 2 (the compatibility window — v2 carries the
      * strict chain_expires_at requirement, v1 additionally accepts a
-     * LEGACY chain_required record WITHOUT chain_expires_at, whose
+     * legacy chain_required record without chain_expires_at, whose
      * carried expiry is null; every other rule is identical for both
      * versions); the exact state enum (pending|complete — nothing
      * else); a non-empty string owner and an integer lease_until
-     * REQUIRED in pending and NULL in complete; the disposition field
-     * REQUIRED (with a valid kind enum and well-shaped
-     * decision_id/chain_id, plus the chain_expires_at integer REQUIRED
-     * on the ChainRequired kind — v1 legacy excepted — and NULL outside
-     * it) in complete and NULL in pending; a non-empty string-or-null
+     * required in pending and null in complete; the disposition field
+     * required (with a valid kind enum and well-shaped
+     * decision_id/chain_id, plus the chain_expires_at integer required
+     * on the ChainRequired kind — v1 legacy excepted — and null outside
+     * it) in complete and null in pending; a non-empty string-or-null
      * decision handle in both states.
      *
      * @return array<string, mixed> the validated record
@@ -348,15 +350,15 @@ LUA;
             if ($kind !== PostSolveDispositionKind::ChainRequired->value && $chainId !== null) {
                 throw new MalformedPostSolveDispositionException('post-solve disposition record chain_id must be null outside the ChainRequired kind');
             }
-            // The ChainRequired record carries its chain's ORIGINAL expiry
-            // bound (the signing NEVER re-consults the obligation): under
-            // v2 the field is REQUIRED on the kind and NULL outside it — a
+            // The ChainRequired record carries its chain's original expiry
+            // bound (the signing never re-consults the obligation): under
+            // v2 the field is required on the kind and null outside it — a
             // chain_required v2 record without it is malformed state,
-            // never a ticket. A v1 chain_required record WITHOUT
-            // chain_expires_at is a LEGACY record (the shape of the
+            // never a ticket. A v1 chain_required record without
+            // chain_expires_at is a legacy record (the shape of the
             // earlier store generation): its carried expiry is null and
             // the signing falls back to the exact chain record's
-            // server-held bound — never corrupt. A v1 record that DOES
+            // server-held bound — never corrupt. A v1 record that does
             // carry the field must carry a valid positive integer (the
             // shape checks are version-independent).
             $chainExpiresAt = $disposition['chain_expires_at'] ?? null;
@@ -378,7 +380,7 @@ LUA;
 
     /**
      * The persisted disposition shape — kind / decision_id / chain_id /
-     * chain_expires_at ONLY. Raw risk vectors, fingerprints and
+     * chain_expires_at only. Raw risk vectors, fingerprints and
      * descriptors are never stored.
      *
      * @return array{kind: string, decision_id: ?string, chain_id: ?string, chain_expires_at: ?int}

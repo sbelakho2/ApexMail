@@ -5,28 +5,28 @@ declare(strict_types=1);
 namespace BelConsulting\KiwiCaptchaBundle\Risk;
 
 /**
- * THE FINAL DISPOSITION of a verified proof.
+ * The final disposition of a verified proof.
  *
- * The core's retained verification result answers ONLY "was the PoW
+ * The core's retained verification result answers only "was the PoW
  * cryptographically valid?" — it never answers "should the application
  * accept this protected action?". The latter is decided by the Symfony
  * layer's post-solve policy (fresh risk assessment, chaining, honeypot)
- * and persisted PER NONCE in a {@see PostSolveDispositionStore}, so a
- * replay of a valid proof reproduces the SAME final disposition instead
- * of bypassing the post-solve policy.
+ * and persisted per nonce in a {@see PostSolveDispositionStore}, so a
+ * replay of a valid proof reproduces the same final disposition
+ * instead of bypassing the post-solve policy.
  *
- * The disposition carries ONLY the final disposition itself — kind,
+ * The disposition carries only the final disposition itself — kind,
  * optional decision id (the post-solve assessment's decision handle, or
- * the consumed original pre-issue decision id on the plain pass path) and
- * the optional chain binding of a CHAIN_REQUIRED disposition: the exact
- * chain id AND the chain's ORIGINAL server-held expiry
+ * the consumed original pre-issue decision id on the plain pass path)
+ * and the optional chain binding of a chain-required disposition: the
+ * exact chain id and the chain's original server-held expiry
  * (chainExpiresAt — persisted as chain_expires_at). The expiry is bound
  * to the disposition's exact chain at finalize time, so the ticket
- * signing NEVER consults the current obligation again: a concurrently
+ * signing never consults the current obligation again: a concurrently
  * opened chain of the same transaction can never leak its expiry into
  * this disposition's ticket, and a completed chain (record retained)
  * keeps re-signing its deterministic ticket. Raw risk vectors,
- * fingerprints and descriptors are NEVER persisted.
+ * fingerprints and descriptors are never persisted.
  */
 final readonly class PostSolveDisposition
 {
@@ -57,12 +57,12 @@ enum PostSolveDispositionKind: string
     /** The protected action is accepted (the solve passes). */
     case Pass = 'pass';
 
-    /** The post-solve assessment rejects the submission (POST_SOLVE_REJECTED). */
+    /** The post-solve assessment rejects the submission. */
     case Deny = 'deny';
 
-    /** Application-level step-up is required (POST_SOLVE_STEP_UP_REQUIRED). */
+    /** Application-level step-up is required. */
     case StepUp = 'step_up';
 
-    /** A stronger PoW stage is required via a one-shot chain ticket (CHAIN_REQUIRED). */
+    /** A stronger PoW stage is required via a one-shot chain ticket. */
     case ChainRequired = 'chain_required';
 }

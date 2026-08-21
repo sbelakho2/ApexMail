@@ -190,7 +190,7 @@
 1 packages/kiwicaptcha/integrations/symfony/src/Resources/views/form_div_layout.html.twig
 5 packages/kiwicaptcha/integrations/symfony/src/Risk/AmbiguousForwardingException.php
 40 packages/kiwicaptcha/integrations/symfony/src/Risk/ArrayChainedChallengeStateStore.php
-72 packages/kiwicaptcha/integrations/symfony/src/Risk/ArrayPostSolveDispositionStore.php
+10 packages/kiwicaptcha/integrations/symfony/src/Risk/ArrayPostSolveDispositionStore.php
 4 packages/kiwicaptcha/integrations/symfony/src/Risk/ChainIssuedResult.php
 3 packages/kiwicaptcha/integrations/symfony/src/Risk/ChainRequirement.php
 7 packages/kiwicaptcha/integrations/symfony/src/Risk/ChainReservationResult.php
@@ -202,13 +202,13 @@
 2 packages/kiwicaptcha/integrations/symfony/src/Risk/ContinuityCookie.php
 3 packages/kiwicaptcha/integrations/symfony/src/Risk/MalformedChainedChallengeStateException.php
 4 packages/kiwicaptcha/integrations/symfony/src/Risk/MalformedPostSolveDispositionException.php
-22 packages/kiwicaptcha/integrations/symfony/src/Risk/PostSolveDisposition.php
+4 packages/kiwicaptcha/integrations/symfony/src/Risk/PostSolveDisposition.php
 2 packages/kiwicaptcha/integrations/symfony/src/Risk/PostSolveDispositionRecord.php
-29 packages/kiwicaptcha/integrations/symfony/src/Risk/PostSolveDispositionStore.php
+7 packages/kiwicaptcha/integrations/symfony/src/Risk/PostSolveDispositionStore.php
 0 packages/kiwicaptcha/integrations/symfony/src/Risk/PostSolveDispositionUnavailableException.php
 1 packages/kiwicaptcha/integrations/symfony/src/Risk/PrincipalResolverInterface.php
 69 packages/kiwicaptcha/integrations/symfony/src/Risk/RedisChainedChallengeStateStore.php
-72 packages/kiwicaptcha/integrations/symfony/src/Risk/RedisPostSolveDispositionStore.php
+11 packages/kiwicaptcha/integrations/symfony/src/Risk/RedisPostSolveDispositionStore.php
 15 packages/kiwicaptcha/integrations/symfony/src/Risk/RedisRiskHealthProvider.php
 20 packages/kiwicaptcha/integrations/symfony/src/Risk/RequestBindingAuthorityInterface.php
 0 packages/kiwicaptcha/integrations/symfony/src/Risk/ResourcePressureProviderInterface.php
@@ -240,10 +240,10 @@
 3 packages/kiwicaptcha/integrations/symfony/src/Twig/KiwiCaptchaExtension.php
 6 packages/kiwicaptcha/integrations/symfony/src/Twig/KiwiCaptchaRuntime.php
 26 packages/kiwicaptcha/integrations/symfony/src/Validator/Constraints/KiwiCaptcha.php
-544 packages/kiwicaptcha/integrations/symfony/src/Validator/Constraints/KiwiCaptchaValidator.php
+117 packages/kiwicaptcha/integrations/symfony/src/Validator/Constraints/KiwiCaptchaValidator.php
 456 packages/kiwicaptcha/integrations/symfony/tests/ChainedChallengeTest.php
 41 packages/kiwicaptcha/integrations/symfony/tests/ChainedIssuanceRollbackTest.php
-29 packages/kiwicaptcha/integrations/symfony/tests/ChainedTicketDeterminismTest.php
+1 packages/kiwicaptcha/integrations/symfony/tests/ChainedTicketDeterminismTest.php
 16 packages/kiwicaptcha/integrations/symfony/tests/ChainingWiringTest.php
 107 packages/kiwicaptcha/integrations/symfony/tests/ChallengeFlowTest.php
 3 packages/kiwicaptcha/integrations/symfony/tests/ClientContextTagTest.php
@@ -290,7 +290,7 @@
 15 packages/kiwicaptcha/integrations/symfony/tests/RateLimiterTest.php
 69 packages/kiwicaptcha/integrations/symfony/tests/RealRedisChainedChallengeTest.php
 13 packages/kiwicaptcha/integrations/symfony/tests/RealRedisIntegrationTest.php
-68 packages/kiwicaptcha/integrations/symfony/tests/RealRedisPostSolveDispositionTest.php
+3 packages/kiwicaptcha/integrations/symfony/tests/RealRedisPostSolveDispositionTest.php
 46 packages/kiwicaptcha/integrations/symfony/tests/RealRedisSiteVerifyRecoveryTest.php
 11 packages/kiwicaptcha/integrations/symfony/tests/RedisAdmissionSemaphoreTest.php
 22 packages/kiwicaptcha/integrations/symfony/tests/RedisChainedChallengeStateStoreTest.php
@@ -305,7 +305,7 @@
 169 packages/kiwicaptcha/integrations/symfony/tests/SiteVerifyConcurrencyTest.php
 210 packages/kiwicaptcha/integrations/symfony/tests/SiteVerifyTest.php
 5 packages/kiwicaptcha/integrations/symfony/tests/TwigRuntimeTest.php
-279 packages/kiwicaptcha/integrations/symfony/tests/ValidatorTest.php
+5 packages/kiwicaptcha/integrations/symfony/tests/ValidatorTest.php
 106 packages/kiwicaptcha/src/challenge.rs
 10 packages/kiwicaptcha/src/keys.rs
 0 packages/kiwicaptcha/src/lib.rs
@@ -332,4 +332,4 @@
 3 tests/browser/specs/risk-v2.spec.mjs
 15 tests/browser/specs/security.spec.mjs
 1 tests/browser/specs/widget.spec.mjs
-TOTAL 8695
+TOTAL 7738

@@ -216,6 +216,15 @@ the fields) only after every node runs a compatible binary. When the key is
 absent, every binary's own configuration is authoritative (the default
 behavior).
 
+The post-solve disposition record schema migrates in two phases: this
+release writes schema version 1 (chain_required records carry their
+chain_expires_at bound, a shape an earlier release already accepts) and
+reads both versions 1 and 2. A future release switches the writer to
+version 2 once the compatibility horizon has passed, and the version-1
+schema is retired later still. During a rolling upgrade, records written
+by either generation stay readable by every node, so this schema never
+needs the policy-hash drain.
+
 ## Transport-level guidance
 
 ### TLS 1.3 0-RTT (early data) must be off for the verification surface
