@@ -23,10 +23,10 @@ use trust_dns_resolver::config::{ResolverConfig, ResolverOpts};
 use trust_dns_resolver::TokioAsyncResolver;
 use uuid::Uuid;
 
-use super::bounce::{append_data_line, connection_allowed, ConnGuard};
+use super::bounce::{append_data_line, connection_allowed, ConnGuard, MAX_RCPT_PER_TRANSACTION};
 use super::util::{
-    is_strict_end_of_data, line_content, read_line_capped, LineRead, MAX_COMMAND_LINE,
-    MAX_DATA_LINE,
+    is_strict_end_of_data, line_content_bytes, line_lossy, log_session_summary, log_smtp_reject,
+    read_line_capped, write_reply, LineRead, MAX_COMMAND_LINE, MAX_DATA_LINE,
 };
 use crate::config::FeedbackConfig;
 
@@ -160,11 +160,30 @@ impl FeedbackLoopServer {
 
     async fn handle_session(self: Arc<Self>, socket: TcpStream, peer: SocketAddr) {
         let ip = peer.ip();
+        let session_id = Uuid::new_v4().to_string();
+        let started = std::time::Instant::now();
 
         // Verify source via rDNS
         if !self.verify_fbl_source(ip).await {
             let mut s = BufStream::new(socket);
-            let _ = write_line(&mut s, "554 Unverified FBL source\r\n").await;
+            log_smtp_reject(
+                "fbl",
+                ip,
+                &session_id,
+                "554 5.7.1 Unverified FBL source",
+            );
+            let _ = write_reply(&mut s, "fbl", ip, &session_id, "554 5.7.1 Unverified FBL source\r\n")
+                .await;
+            log_session_summary(
+                "fbl",
+                ip,
+                &session_id,
+                false,
+                false,
+                0,
+                started.elapsed().as_millis(),
+                "unverified_source",
+            );
             return;
         }
 
@@ -172,7 +191,30 @@ impl FeedbackLoopServer {
         let active = self.connections.get(&ip).map(|e| *e).unwrap_or(0);
         if !connection_allowed(active, self.config.max_connections_per_ip) {
             let mut s = BufStream::new(socket);
-            let _ = write_line(&mut s, "421 Too many connections from your IP\r\n").await;
+            log_smtp_reject(
+                "fbl",
+                ip,
+                &session_id,
+                "421 4.7.0 Too many connections, try again later",
+            );
+            let _ = write_reply(
+                &mut s,
+                "fbl",
+                ip,
+                &session_id,
+                "421 4.7.0 Too many connections, try again later\r\n",
+            )
+            .await;
+            log_session_summary(
+                "fbl",
+                ip,
+                &session_id,
+                false,
+                false,
+                0,
+                started.elapsed().as_millis(),
+                "conn_limit",
+            );
             return;
         }
         *self.connections.entry(ip).or_insert(0) += 1;
@@ -191,6 +233,7 @@ impl FeedbackLoopServer {
         let mut mail_from_seen = false;
         let mut msgs_this_conn: u32 = 0;
         let mut line = String::new();
+        let mut close_reason = "closed";
 
         loop {
             line.clear();
@@ -200,18 +243,60 @@ impl FeedbackLoopServer {
             )
             .await
             {
-                Ok(Ok(LineRead::Eof)) | Err(_) | Ok(Err(_)) => break,
+                Ok(Ok(LineRead::Eof)) | Ok(Err(_)) => break,
+                Err(_) => {
+                    // Command-phase idle timeout: tell the client why the
+                    // connection is going away (421, RFC 5321 §4.2.1).
+                    close_reason = "idle_timeout";
+                    let _ = write_reply(
+                        &mut stream,
+                        "fbl",
+                        ip,
+                        &session_id,
+                        "421 4.4.2 Idle timeout, closing connection\r\n",
+                    )
+                    .await;
+                    break;
+                }
                 Ok(Ok(LineRead::TooLong)) => {
-                    let _ = write_line(&mut stream, "500 5.5.2 Line too long\r\n").await;
+                    // Remainder drained through its newline: synchronised.
+                    let _ = write_reply(
+                        &mut stream,
+                        "fbl",
+                        ip,
+                        &session_id,
+                        "500 5.5.2 Line too long\r\n",
+                    )
+                    .await;
                     continue;
                 }
-                Ok(Ok(LineRead::Line(l, _))) => line = l,
+                Ok(Ok(LineRead::Overflow)) => {
+                    // Resynchronisation impossible: reply and close so the
+                    // leftover bytes can never be parsed as commands.
+                    close_reason = "overflow";
+                    let _ = write_reply(
+                        &mut stream,
+                        "fbl",
+                        ip,
+                        &session_id,
+                        "500 5.5.2 Line too long\r\n",
+                    )
+                    .await;
+                    break;
+                }
+                Ok(Ok(LineRead::Line(l, _))) => line = line_lossy(&l),
             }
 
             let cmd = line.trim().to_uppercase();
 
             if cmd.starts_with("EHLO") || cmd.starts_with("HELO") {
-                let _ = write_line(&mut stream, &format!("250 {}\r\n", self.hostname)).await;
+                // SIZE advertisement equals the enforced cap (RFC 1870): the
+                // 552 enforcement below uses exactly max_arf_size.
+                let caps = format!(
+                    "250-{}\r\n250-SIZE {}\r\n250 8BITMIME\r\n",
+                    self.hostname, self.config.max_arf_size
+                );
+                let _ = write_line(&mut stream, &caps).await;
             } else if cmd.starts_with("MAIL FROM") {
                 // ARF reports from ISP FBL sources are regular mail with a
                 // real envelope sender — the rDNS/FCrDNS verification is the
@@ -219,12 +304,43 @@ impl FeedbackLoopServer {
                 // the MAIL → RCPT ordering.
                 mail_from_seen = true;
                 rcpt_to.clear();
-                let _ = write_line(&mut stream, "250 OK\r\n").await;
+                let _ = write_line(&mut stream, "250 2.0.0 Ok\r\n").await;
             } else if cmd.starts_with("RCPT TO") {
                 let addr = extract_addr(&line);
                 if !mail_from_seen {
-                    let _ = write_line(&mut stream, "503 Bad sequence (send MAIL FROM first)\r\n")
-                        .await;
+                    let _ = write_reply(
+                        &mut stream,
+                        "fbl",
+                        ip,
+                        &session_id,
+                        "503 5.5.1 Error: need MAIL command first\r\n",
+                    )
+                    .await;
+                    continue;
+                }
+                if rcpt_to.len() >= MAX_RCPT_PER_TRANSACTION {
+                    let _ = write_reply(
+                        &mut stream,
+                        "fbl",
+                        ip,
+                        &session_id,
+                        "452 4.5.3 Too many recipients\r\n",
+                    )
+                    .await;
+                    continue;
+                }
+                if addr.len() > super::submission::MAX_ENVELOPE_ADDR_LEN {
+                    // RFC 5321 §4.5.3.1.1: bound the forward-path length so
+                    // an over-long command line cannot be parked in the
+                    // envelope (the per-line cap alone still allows ~4 KB).
+                    let _ = write_reply(
+                        &mut stream,
+                        "fbl",
+                        ip,
+                        &session_id,
+                        "501 5.1.3 Bad recipient address syntax\r\n",
+                    )
+                    .await;
                     continue;
                 }
                 // Accept abuse@, complaints@, fbl@, feedback@, postmaster@
@@ -236,19 +352,36 @@ impl FeedbackLoopServer {
                     || local == "postmaster";
                 if accepted {
                     rcpt_to.push(addr);
-                    let _ = write_line(&mut stream, "250 OK\r\n").await;
+                    let _ = write_line(&mut stream, "250 2.0.0 Ok\r\n").await;
                 } else {
-                    let _ = write_line(&mut stream, "550 Invalid FBL recipient\r\n").await;
+                    let _ = write_reply(
+                        &mut stream,
+                        "fbl",
+                        ip,
+                        &session_id,
+                        "550 5.1.1 Invalid FBL recipient\r\n",
+                    )
+                    .await;
                 }
             } else if cmd.starts_with("DATA") {
                 if !mail_from_seen || rcpt_to.is_empty() {
-                    let _ = write_line(&mut stream, "503 Bad sequence\r\n").await;
+                    let _ = write_reply(
+                        &mut stream,
+                        "fbl",
+                        ip,
+                        &session_id,
+                        "503 5.5.1 Bad sequence of commands\r\n",
+                    )
+                    .await;
                     continue;
                 }
                 if msgs_this_conn >= self.config.max_messages_per_connection {
-                    let _ = write_line(
+                    let _ = write_reply(
                         &mut stream,
-                        "452 Too many messages from this connection\r\n",
+                        "fbl",
+                        ip,
+                        &session_id,
+                        "452 4.5.3 Too many messages from this connection\r\n",
                     )
                     .await;
                     continue;
@@ -261,6 +394,7 @@ impl FeedbackLoopServer {
                 // truncated payload that must never be processed.
                 let mut terminated = false;
                 let mut timed_out = false;
+                let mut overflowed = false;
                 // E-9:total DATA deadline so a slow client cannot drip-feed
                 // lines forever.
                 let deadline = std::time::Instant::now() + DATA_TOTAL_TIMEOUT;
@@ -290,15 +424,20 @@ impl FeedbackLoopServer {
                             // part of a payload we are willing to store.
                             too_large = true;
                         }
+                        Ok(Ok(LineRead::Overflow)) => {
+                            // Resynchronisation impossible: drop the payload
+                            // and close (see below).
+                            overflowed = true;
+                            break;
+                        }
                         Ok(Ok(LineRead::Line(l, term))) => {
-                            line = l;
                             // RFC 5321 strict: end-of-data is exactly "." with
                             // a CRLF terminator (bare-LF "." is body data).
-                            if is_strict_end_of_data(&line, term) {
+                            if is_strict_end_of_data(&l, term) {
                                 terminated = true;
                                 break;
                             }
-                            let content = line_content(&line, term);
+                            let content = line_content_bytes(&l, term);
                             // M57: enforce max_arf_size *while* reading so the
                             // payload is never fully buffered before rejection.
                             if !too_large
@@ -330,6 +469,7 @@ impl FeedbackLoopServer {
                                         }
                                         Ok(Ok(LineRead::Eof)) | Ok(Err(_)) => break,
                                         Ok(Ok(LineRead::TooLong)) => {}
+                                        Ok(Ok(LineRead::Overflow)) => break,
                                         Ok(Ok(LineRead::Line(dl, dterm))) => {
                                             if is_strict_end_of_data(&dl, dterm) {
                                                 break;
@@ -346,54 +486,110 @@ impl FeedbackLoopServer {
                 if timed_out {
                     // Slow/stalled client mid-DATA: refuse rather than wait
                     // forever (and never accept the partial payload).
-                    let _ = write_line(&mut stream, "421 4.4.2 Data timeout exceeded\r\n").await;
-                } else if too_large {
-                    let _ = write_line(
+                    let _ = write_reply(
                         &mut stream,
-                        "552 5.3.4 Message size exceeds fixed limit\r\n",
+                        "fbl",
+                        ip,
+                        &session_id,
+                        "421 4.4.2 Data timeout exceeded\r\n",
+                    )
+                    .await;
+                } else if overflowed {
+                    // Unresynchronisable stream: reply and close.
+                    close_reason = "overflow";
+                    let _ = write_reply(
+                        &mut stream,
+                        "fbl",
+                        ip,
+                        &session_id,
+                        "500 5.5.2 Line too long\r\n",
+                    )
+                    .await;
+                    break;
+                } else if too_large {
+                    let _ = write_reply(
+                        &mut stream,
+                        "fbl",
+                        ip,
+                        &session_id,
+                        "552 5.3.4 Message size exceeds fixed maximum message size\r\n",
                     )
                     .await;
                 } else if terminated {
                     match self.process_complaint(ip, &message).await {
                         Ok(id) => {
-                            let _ = write_line(&mut stream, &format!("250 OK id={id}\r\n")).await;
+                            let _ =
+                                write_line(&mut stream, &format!("250 2.0.0 Ok id={id}\r\n")).await;
                         }
                         Err(e) => {
                             warn!(error = %e, "Complaint processing failed");
-                            let _ = write_line(&mut stream, "451 Temporary failure\r\n").await;
+                            let _ = write_reply(
+                                &mut stream,
+                                "fbl",
+                                ip,
+                                &session_id,
+                                "451 4.3.0 Temporary failure\r\n",
+                            )
+                            .await;
                         }
                     }
                 }
                 msgs_this_conn += 1;
                 rcpt_to.clear();
             } else if cmd.starts_with("QUIT") {
-                let _ = write_line(&mut stream, "221 Bye\r\n").await;
+                let _ = write_line(&mut stream, "221 2.0.0 Bye\r\n").await;
+                close_reason = "quit";
                 break;
             } else if cmd.starts_with("RSET") || cmd.starts_with("NOOP") {
                 if cmd.starts_with("RSET") {
                     rcpt_to.clear();
                     mail_from_seen = false;
                 }
-                let _ = write_line(&mut stream, "250 OK\r\n").await;
+                let _ = write_line(&mut stream, "250 2.0.0 Ok\r\n").await;
             } else if cmd.starts_with("VRFY") || cmd.starts_with("EXPN") {
                 // Avoid leaking recipient validity.
                 let _ = write_line(
                     &mut stream,
-                    "252 Cannot VRFY user, but will accept message and attempt delivery\r\n",
+                    "252 2.5.2 Cannot VRFY user, but will accept message and attempt delivery\r\n",
                 )
                 .await;
             } else if cmd.starts_with("HELP") {
                 let _ = write_line(
                     &mut stream,
-                    "214 Supported: EHLO HELO MAIL RCPT DATA RSET NOOP QUIT\r\n",
+                    "214 2.0.0 Commands: EHLO HELO MAIL RCPT DATA RSET NOOP QUIT; see RFC 5321\r\n",
                 )
                 .await;
             } else if cmd.starts_with("STARTTLS") {
-                let _ = write_line(&mut stream, "454 TLS not available on this endpoint\r\n").await;
+                let _ = write_reply(
+                    &mut stream,
+                    "fbl",
+                    ip,
+                    &session_id,
+                    "454 4.7.0 TLS not available on this endpoint\r\n",
+                )
+                .await;
             } else {
-                let _ = write_line(&mut stream, "500 Syntax error, command unrecognized\r\n").await;
+                let _ = write_reply(
+                    &mut stream,
+                    "fbl",
+                    ip,
+                    &session_id,
+                    "502 5.5.1 Command not recognised\r\n",
+                )
+                .await;
             }
         }
+
+        log_session_summary(
+            "fbl",
+            ip,
+            &session_id,
+            false,
+            false,
+            msgs_this_conn,
+            started.elapsed().as_millis(),
+            close_reason,
+        );
     }
 
     // ── rDNS verification ──────────────────────────────────────────────────────
@@ -1069,5 +1265,309 @@ Original-Message-ID: <original@example.com>\r\n";
         // Without a verifiable original message id we cannot dedupe —
         // the event is recorded but never counted toward reputation.
         assert!(complaint_dedup_key(&info, std::net::IpAddr::from([192, 168, 1, 1])).is_none());
+    }
+
+    // ── full-session tests (rDNS bypassed via a cached verdict) ────────────
+
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+    use tokio::net::{TcpListener, TcpStream};
+
+    const LOOPBACK: std::net::IpAddr = std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1));
+
+    /// Test server whose rDNS verdict for loopback is seeded in the cache, so
+    /// full sessions run deterministically without touching real DNS.
+    fn test_fbl_server(rdns_ok: bool) -> std::sync::Arc<FeedbackLoopServer> {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .acquire_timeout(Duration::from_secs(1))
+            .connect_lazy("postgres://127.0.0.1:1/mta_test")
+            .expect("lazy pool construction");
+        let redis = deadpool_redis::Config::from_url("redis://127.0.0.1:1")
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .expect("lazy redis pool construction");
+        let config = FeedbackConfig {
+            enabled: true,
+            host: "127.0.0.1".into(),
+            port: 0,
+            hostname: "fbl.test".into(),
+            max_arf_size: 1024 * 1024,
+            max_connections_per_ip: 10,
+            max_messages_per_connection: 100,
+        };
+        let server = std::sync::Arc::new(FeedbackLoopServer::new(
+            config,
+            pool,
+            redis,
+            "fbl.test".into(),
+            &[],
+        ));
+        server.rdns_cache.insert(LOOPBACK, rdns_ok);
+        server
+    }
+
+    async fn fbl_read_reply(
+        reader: &mut tokio::io::BufReader<tokio::net::tcp::OwnedReadHalf>,
+    ) -> String {
+        let mut line = String::new();
+        tokio::time::timeout(Duration::from_secs(5), reader.read_line(&mut line))
+            .await
+            .expect("reply must arrive within 5s")
+            .expect("read must not fail");
+        line
+    }
+
+    /// Read a complete (possibly multi-line) SMTP reply.
+    async fn fbl_read_full_reply(
+        reader: &mut tokio::io::BufReader<tokio::net::tcp::OwnedReadHalf>,
+    ) -> String {
+        let mut full = String::new();
+        loop {
+            let line = fbl_read_reply(reader).await;
+            let more = line.len() >= 4 && line.as_bytes()[3] == b'-';
+            full.push_str(&line);
+            if !more {
+                return full;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn fbl_unverified_source_replies_554_5_7_1() {
+        // Cached rDNS verdict = false: the greeting rejection is immediate
+        // and deterministic (no live DNS in unit tests).
+        let server = test_fbl_server(false);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let srv = server.clone();
+        let task = tokio::spawn(async move {
+            let (socket, peer) = listener.accept().await.unwrap();
+            srv.handle_session(socket, peer).await;
+        });
+
+        let tcp = TcpStream::connect(addr).await.unwrap();
+        let (reader, _writer) = tcp.into_split();
+        let mut reader = tokio::io::BufReader::new(reader);
+        assert_eq!(
+            fbl_read_reply(&mut reader).await,
+            "554 5.7.1 Unverified FBL source\r\n"
+        );
+        tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .expect("session task must finish")
+            .expect("session task must not panic");
+    }
+
+    #[tokio::test]
+    async fn fbl_rejection_suite_uses_exact_enhanced_status_codes() {
+        let server = test_fbl_server(true);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let srv = server.clone();
+        let task = tokio::spawn(async move {
+            let (socket, peer) = listener.accept().await.unwrap();
+            srv.handle_session(socket, peer).await;
+        });
+
+        let tcp = TcpStream::connect(addr).await.unwrap();
+        let (reader, mut writer) = tcp.into_split();
+        let mut reader = tokio::io::BufReader::new(reader);
+
+        let _ = fbl_read_reply(&mut reader).await; // greeting
+
+        // RCPT before MAIL → 503 5.5.1.
+        writer.write_all(b"RCPT TO:<abuse@fbl.test>\r\n").await.unwrap();
+        assert_eq!(
+            fbl_read_reply(&mut reader).await,
+            "503 5.5.1 Error: need MAIL command first\r\n"
+        );
+
+        // ARF senders are real senders: MAIL FROM with an address is fine.
+        writer
+            .write_all(b"MAIL FROM:<fbl@google.com>\r\n")
+            .await
+            .unwrap();
+        assert_eq!(fbl_read_reply(&mut reader).await, "250 2.0.0 Ok\r\n");
+
+        // Not an FBL role mailbox → 550 5.1.1.
+        writer.write_all(b"RCPT TO:<nobody@fbl.test>\r\n").await.unwrap();
+        assert_eq!(
+            fbl_read_reply(&mut reader).await,
+            "550 5.1.1 Invalid FBL recipient\r\n"
+        );
+
+        // Over-long forward-path (RFC 5321 §4.5.3.1.1) → 501 5.1.3.
+        let huge = format!("abuse@{}.com", "d".repeat(400));
+        writer
+            .write_all(format!("RCPT TO:<{huge}>\r\n").as_bytes())
+            .await
+            .unwrap();
+        assert_eq!(
+            fbl_read_reply(&mut reader).await,
+            "501 5.1.3 Bad recipient address syntax\r\n"
+        );
+
+        // Unknown command → 502 5.5.1 (consistent with inbound/submission).
+        writer.write_all(b"FROBNICATE\r\n").await.unwrap();
+        assert_eq!(
+            fbl_read_reply(&mut reader).await,
+            "502 5.5.1 Command not recognised\r\n"
+        );
+
+        // STARTTLS is not offered here → 454 4.7.0.
+        writer.write_all(b"STARTTLS\r\n").await.unwrap();
+        assert_eq!(
+            fbl_read_reply(&mut reader).await,
+            "454 4.7.0 TLS not available on this endpoint\r\n"
+        );
+
+        // RSET clears the transaction; DATA without one → 503 5.5.1.
+        writer.write_all(b"RSET\r\n").await.unwrap();
+        assert_eq!(fbl_read_reply(&mut reader).await, "250 2.0.0 Ok\r\n");
+        writer.write_all(b"DATA\r\n").await.unwrap();
+        assert_eq!(
+            fbl_read_reply(&mut reader).await,
+            "503 5.5.1 Bad sequence of commands\r\n"
+        );
+
+        writer.write_all(b"QUIT\r\n").await.unwrap();
+        assert_eq!(fbl_read_reply(&mut reader).await, "221 2.0.0 Bye\r\n");
+
+        tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .expect("session task must finish")
+            .expect("session task must not panic");
+    }
+
+    #[tokio::test]
+    async fn fbl_ehlo_advertises_exactly_the_enforced_size_cap() {
+        // RFC 1870: the SIZE advertisement must equal the value the 552
+        // enforcement actually uses (config.max_arf_size).
+        let server = test_fbl_server(true);
+        let advertised = server.config.max_arf_size;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let srv = server.clone();
+        let task = tokio::spawn(async move {
+            let (socket, peer) = listener.accept().await.unwrap();
+            srv.handle_session(socket, peer).await;
+        });
+
+        let tcp = TcpStream::connect(addr).await.unwrap();
+        let (reader, mut writer) = tcp.into_split();
+        let mut reader = tokio::io::BufReader::new(reader);
+        let _ = fbl_read_reply(&mut reader).await; // greeting
+
+        writer.write_all(b"EHLO client.example\r\n").await.unwrap();
+        let ehlo = fbl_read_full_reply(&mut reader).await;
+        assert!(
+            ehlo.contains(&format!("250-SIZE {advertised}\r\n")),
+            "SIZE advertisement must match enforcement: {ehlo:?}"
+        );
+
+        writer.write_all(b"QUIT\r\n").await.unwrap();
+        let _ = fbl_read_reply(&mut reader).await;
+        tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .expect("session task must finish")
+            .expect("session task must not panic");
+    }
+
+    #[tokio::test]
+    async fn fbl_recipient_cap_enforced_with_452_4_5_3() {
+        let server = test_fbl_server(true);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let srv = server.clone();
+        let task = tokio::spawn(async move {
+            let (socket, peer) = listener.accept().await.unwrap();
+            srv.handle_session(socket, peer).await;
+        });
+
+        let tcp = TcpStream::connect(addr).await.unwrap();
+        let (reader, mut writer) = tcp.into_split();
+        let mut reader = tokio::io::BufReader::new(reader);
+        let _ = fbl_read_reply(&mut reader).await; // greeting
+        writer.write_all(b"EHLO c\r\n").await.unwrap();
+        let _ = fbl_read_full_reply(&mut reader).await;
+        writer.write_all(b"MAIL FROM:<fbl@google.com>\r\n").await.unwrap();
+        assert!(fbl_read_reply(&mut reader).await.starts_with("250"));
+
+        for _ in 0..MAX_RCPT_PER_TRANSACTION {
+            writer.write_all(b"RCPT TO:<abuse@fbl.test>\r\n").await.unwrap();
+            assert!(fbl_read_reply(&mut reader).await.starts_with("250"));
+        }
+        writer.write_all(b"RCPT TO:<abuse@fbl.test>\r\n").await.unwrap();
+        assert_eq!(
+            fbl_read_reply(&mut reader).await,
+            "452 4.5.3 Too many recipients\r\n"
+        );
+
+        writer.write_all(b"QUIT\r\n").await.unwrap();
+        let _ = fbl_read_reply(&mut reader).await;
+        tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .expect("session task must finish")
+            .expect("session task must not panic");
+    }
+
+    #[tokio::test]
+    async fn fbl_oversize_payload_rejected_with_exact_552_5_3_4() {
+        // Custom server with a tiny enforced cap: the 552 reply and the
+        // advertised SIZE both derive from max_arf_size.
+        let server = test_fbl_server(true);
+        let mut config = server.config.clone();
+        config.max_arf_size = 64;
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .acquire_timeout(Duration::from_secs(1))
+            .connect_lazy("postgres://127.0.0.1:1/mta_test")
+            .unwrap();
+        let redis = deadpool_redis::Config::from_url("redis://127.0.0.1:1")
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .unwrap();
+        let small = std::sync::Arc::new(FeedbackLoopServer::new(
+            config,
+            pool,
+            redis,
+            "fbl.test".into(),
+            &[],
+        ));
+        small.rdns_cache.insert(LOOPBACK, true);
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let srv = small.clone();
+        let task = tokio::spawn(async move {
+            let (socket, peer) = listener.accept().await.unwrap();
+            srv.handle_session(socket, peer).await;
+        });
+
+        let tcp = TcpStream::connect(addr).await.unwrap();
+        let (reader, mut writer) = tcp.into_split();
+        let mut reader = tokio::io::BufReader::new(reader);
+        let _ = fbl_read_reply(&mut reader).await; // greeting
+        writer.write_all(b"EHLO c\r\n").await.unwrap();
+        let _ = fbl_read_full_reply(&mut reader).await;
+        writer.write_all(b"MAIL FROM:<fbl@google.com>\r\n").await.unwrap();
+        let _ = fbl_read_reply(&mut reader).await;
+        writer.write_all(b"RCPT TO:<abuse@fbl.test>\r\n").await.unwrap();
+        let _ = fbl_read_reply(&mut reader).await;
+        writer.write_all(b"DATA\r\n").await.unwrap();
+        assert!(fbl_read_reply(&mut reader).await.starts_with("354"));
+
+        writer
+            .write_all(format!("{}\r\n.\r\n", "x".repeat(200)).as_bytes())
+            .await
+            .unwrap();
+        assert_eq!(
+            fbl_read_reply(&mut reader).await,
+            "552 5.3.4 Message size exceeds fixed maximum message size\r\n"
+        );
+
+        // The session stays synchronised after the refusal.
+        writer.write_all(b"QUIT\r\n").await.unwrap();
+        assert!(fbl_read_reply(&mut reader).await.starts_with("221"));
+        tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .expect("session task must finish")
+            .expect("session task must not panic");
     }
 }

@@ -20,8 +20,8 @@ use uuid::Uuid;
 use crate::config::BounceConfig;
 
 use super::util::{
-    is_strict_end_of_data, line_content, read_line_capped, LineRead, MAX_COMMAND_LINE,
-    MAX_DATA_LINE,
+    is_strict_end_of_data, line_content_bytes, line_lossy, log_session_summary, log_smtp_reject,
+    read_line_capped, write_reply, LineRead, MAX_COMMAND_LINE, MAX_DATA_LINE,
 };
 
 /// Per-line timeout while receiving bounce DATA.
@@ -30,6 +30,11 @@ const DATA_LINE_TIMEOUT: Duration = Duration::from_secs(300);
 /// Total deadline for receiving one bounce DATA payload (slow-loris
 /// protection, mirrors the inbound server's 10-minute cap).
 const DATA_TOTAL_TIMEOUT: Duration = Duration::from_secs(600);
+
+/// Maximum accepted `RCPT TO` addresses per bounce transaction. Bounces are
+/// one-DSN-per-message; a handful of recipients is generous, and the bound
+/// keeps a hostile client from growing `rcpt_to` without limit.
+pub(crate) const MAX_RCPT_PER_TRANSACTION: usize = 100;
 
 // #142:Pre-compiled regex for RFC 3463 enhanced status codes
 static BOUNCE_STATUS_RE: LazyLock<Option<regex::Regex>> =
@@ -122,12 +127,37 @@ impl BounceServer {
 
     async fn handle_session(self: Arc<Self>, socket: TcpStream, peer: SocketAddr) {
         let peer_ip = peer.ip();
+        let session_id = Uuid::new_v4().to_string();
+        let started = std::time::Instant::now();
 
         // Enforce the per-IP connection cap (C3/H10 hardening).
         let active = self.connections.get(&peer_ip).map(|e| *e).unwrap_or(0);
         if !connection_allowed(active, self.config.max_connections_per_ip) {
             let mut s = BufStream::new(socket);
-            let _ = write_line(&mut s, "421 Too many connections from your IP\r\n").await;
+            log_smtp_reject(
+                "bounce",
+                peer_ip,
+                &session_id,
+                "421 4.7.0 Too many connections, try again later",
+            );
+            let _ = write_reply(
+                &mut s,
+                "bounce",
+                peer_ip,
+                &session_id,
+                "421 4.7.0 Too many connections, try again later\r\n",
+            )
+            .await;
+            log_session_summary(
+                "bounce",
+                peer_ip,
+                &session_id,
+                false,
+                false,
+                0,
+                started.elapsed().as_millis(),
+                "conn_limit",
+            );
             return;
         }
         *self.connections.entry(peer_ip).or_insert(0) += 1;
@@ -146,6 +176,7 @@ impl BounceServer {
         let mut mail_from_seen = false;
         let mut msgs_this_conn: u32 = 0;
         let mut line = String::new();
+        let mut close_reason = "closed";
 
         loop {
             line.clear();
@@ -155,19 +186,62 @@ impl BounceServer {
             )
             .await
             {
-                Ok(Ok(LineRead::Eof)) | Err(_) | Ok(Err(_)) => break,
+                Ok(Ok(LineRead::Eof)) | Ok(Err(_)) => break,
+                Err(_) => {
+                    // Command-phase idle timeout: tell the client why the
+                    // connection is going away (421, RFC 5321 §4.2.1).
+                    close_reason = "idle_timeout";
+                    let _ = write_reply(
+                        &mut stream,
+                        "bounce",
+                        peer_ip,
+                        &session_id,
+                        "421 4.4.2 Idle timeout, closing connection\r\n",
+                    )
+                    .await;
+                    break;
+                }
                 Ok(Ok(LineRead::TooLong)) => {
-                    let _ = write_line(&mut stream, "500 5.5.2 Line too long\r\n").await;
+                    // Remainder drained through its newline: synchronised.
+                    let _ = write_reply(
+                        &mut stream,
+                        "bounce",
+                        peer_ip,
+                        &session_id,
+                        "500 5.5.2 Line too long\r\n",
+                    )
+                    .await;
                     continue;
                 }
-                Ok(Ok(LineRead::Line(l, _))) => line = l,
+                Ok(Ok(LineRead::Overflow)) => {
+                    // Resynchronisation impossible: reply and close so the
+                    // leftover bytes can never be parsed as commands.
+                    close_reason = "overflow";
+                    let _ = write_reply(
+                        &mut stream,
+                        "bounce",
+                        peer_ip,
+                        &session_id,
+                        "500 5.5.2 Line too long\r\n",
+                    )
+                    .await;
+                    break;
+                }
+                Ok(Ok(LineRead::Line(l, _))) => line = line_lossy(&l),
             }
 
             let cmd = line.trim().to_uppercase();
 
             if cmd.starts_with("EHLO") || cmd.starts_with("HELO") {
                 let _host = line.split_whitespace().nth(1).unwrap_or("");
-                let _ = write_line(&mut stream, &format!("250 {} Hello\r\n", self.hostname)).await;
+                // SIZE advertisement equals the enforced cap (RFC 1870): the
+                // 552 reply below uses exactly max_message_size, so a client
+                // that honours SIZE= never wastes a transfer.
+                let caps = format!(
+                    "250-{} Hello\r\n250-SIZE {}\r\n250 8BITMIME\r\n",
+                    self.hostname, self.config.max_message_size
+                );
+                let _ = write_line(&mut stream, &caps).await;
             } else if cmd.starts_with("MAIL FROM") {
                 let addr = extract_addr(&line);
                 // RFC 5321:bounces (DSNs) must have exactly the null sender.
@@ -175,34 +249,72 @@ impl BounceServer {
                 // angle brackets are stripped), so the null sender check must
                 // accept "" — anything non-empty is a real sender and rejected.
                 if !null_sender_ok(&addr) {
-                    let _ =
-                        write_line(&mut stream, "550 Bounce MAIL FROM must be null (<>)\r\n").await;
+                    let _ = write_reply(
+                        &mut stream,
+                        "bounce",
+                        peer_ip,
+                        &session_id,
+                        "550 5.7.1 Bounce MAIL FROM must be null (<>)\r\n",
+                    )
+                    .await;
                 } else {
                     mail_from_seen = true;
                     rcpt_to.clear();
-                    let _ = write_line(&mut stream, "250 OK\r\n").await;
+                    let _ = write_line(&mut stream, "250 2.0.0 Ok\r\n").await;
                 }
             } else if cmd.starts_with("RCPT TO") {
                 let addr = extract_addr(&line);
                 if !mail_from_seen {
-                    let _ = write_line(&mut stream, "503 Bad sequence (send MAIL FROM first)\r\n")
-                        .await;
+                    let _ = write_reply(
+                        &mut stream,
+                        "bounce",
+                        peer_ip,
+                        &session_id,
+                        "503 5.5.1 Error: need MAIL command first\r\n",
+                    )
+                    .await;
+                } else if rcpt_to.len() >= MAX_RCPT_PER_TRANSACTION {
+                    let _ = write_reply(
+                        &mut stream,
+                        "bounce",
+                        peer_ip,
+                        &session_id,
+                        "452 4.5.3 Too many recipients\r\n",
+                    )
+                    .await;
                 } else if !bounce_rcpt_ok(&addr, &self.config.verp_domain) {
-                    let _ = write_line(&mut stream, "550 Invalid bounce recipient\r\n").await;
+                    let _ = write_reply(
+                        &mut stream,
+                        "bounce",
+                        peer_ip,
+                        &session_id,
+                        "550 5.1.1 Invalid bounce recipient\r\n",
+                    )
+                    .await;
                 } else {
                     rcpt_to.push(addr);
-                    let _ = write_line(&mut stream, "250 OK\r\n").await;
+                    let _ = write_line(&mut stream, "250 2.0.0 Ok\r\n").await;
                 }
             } else if cmd.starts_with("DATA") {
                 if !mail_from_seen || rcpt_to.is_empty() {
-                    let _ = write_line(&mut stream, "503 Bad sequence\r\n").await;
+                    let _ = write_reply(
+                        &mut stream,
+                        "bounce",
+                        peer_ip,
+                        &session_id,
+                        "503 5.5.1 Bad sequence of commands\r\n",
+                    )
+                    .await;
                     continue;
                 }
                 // Per-connection and per-IP message budgets (C3/H10 hardening).
                 if msgs_this_conn >= self.config.max_messages_per_connection {
-                    let _ = write_line(
+                    let _ = write_reply(
                         &mut stream,
-                        "452 Too many messages from this connection\r\n",
+                        "bounce",
+                        peer_ip,
+                        &session_id,
+                        "452 4.5.3 Too many messages from this connection\r\n",
                     )
                     .await;
                     continue;
@@ -210,8 +322,14 @@ impl BounceServer {
                 let ip_msgs = self.per_ip_msgs.get(&peer_ip).unwrap_or(0) + 1;
                 self.per_ip_msgs.insert(peer_ip, ip_msgs);
                 if ip_msgs > u64::from(self.config.max_messages_per_ip_per_hour) {
-                    let _ =
-                        write_line(&mut stream, "452 Rate limit exceeded for your IP\r\n").await;
+                    let _ = write_reply(
+                        &mut stream,
+                        "bounce",
+                        peer_ip,
+                        &session_id,
+                        "452 4.3.2 Rate limit exceeded for your IP\r\n",
+                    )
+                    .await;
                     continue;
                 }
 
@@ -223,6 +341,7 @@ impl BounceServer {
                 // truncated payload that must never be processed.
                 let mut terminated = false;
                 let mut timed_out = false;
+                let mut overflowed = false;
                 // E-9:total DATA deadline so a slow client cannot drip-feed
                 // lines forever (each line gets at most DATA_LINE_TIMEOUT but
                 // the whole payload at most DATA_TOTAL_TIMEOUT).
@@ -253,15 +372,20 @@ impl BounceServer {
                             // part of a payload we are willing to store.
                             too_large = true;
                         }
+                        Ok(Ok(LineRead::Overflow)) => {
+                            // Resynchronisation impossible: drop the payload
+                            // and close (see below).
+                            overflowed = true;
+                            break;
+                        }
                         Ok(Ok(LineRead::Line(l, term))) => {
-                            line = l;
                             // RFC 5321 strict: end-of-data is exactly "." with
                             // a CRLF terminator (bare-LF "." is body data).
-                            if is_strict_end_of_data(&line, term) {
+                            if is_strict_end_of_data(&l, term) {
                                 terminated = true;
                                 break;
                             }
-                            let content = line_content(&line, term);
+                            let content = line_content_bytes(&l, term);
                             if !too_large
                                 && !append_data_line(
                                     &mut message,
@@ -292,6 +416,7 @@ impl BounceServer {
                                         }
                                         Ok(Ok(LineRead::Eof)) | Ok(Err(_)) => break,
                                         Ok(Ok(LineRead::TooLong)) => {}
+                                        Ok(Ok(LineRead::Overflow)) => break,
                                         Ok(Ok(LineRead::Line(dl, dterm))) => {
                                             if is_strict_end_of_data(&dl, dterm) {
                                                 break;
@@ -308,21 +433,51 @@ impl BounceServer {
                 if timed_out {
                     // Slow/stalled client mid-DATA: refuse rather than wait
                     // forever (and never accept the partial payload).
-                    let _ = write_line(&mut stream, "421 4.4.2 Data timeout exceeded\r\n").await;
-                } else if too_large {
-                    let _ = write_line(
+                    let _ = write_reply(
                         &mut stream,
-                        "552 5.3.4 Message size exceeds fixed limit\r\n",
+                        "bounce",
+                        peer_ip,
+                        &session_id,
+                        "421 4.4.2 Data timeout exceeded\r\n",
+                    )
+                    .await;
+                } else if overflowed {
+                    // Unresynchronisable stream: reply and close.
+                    close_reason = "overflow";
+                    let _ = write_reply(
+                        &mut stream,
+                        "bounce",
+                        peer_ip,
+                        &session_id,
+                        "500 5.5.2 Line too long\r\n",
+                    )
+                    .await;
+                    break;
+                } else if too_large {
+                    let _ = write_reply(
+                        &mut stream,
+                        "bounce",
+                        peer_ip,
+                        &session_id,
+                        "552 5.3.4 Message size exceeds fixed maximum message size\r\n",
                     )
                     .await;
                 } else if terminated {
                     match self.process_bounce(&rcpt_to, &message).await {
                         Ok(id) => {
-                            let _ = write_line(&mut stream, &format!("250 OK id={id}\r\n")).await;
+                            let _ =
+                                write_line(&mut stream, &format!("250 2.0.0 Ok id={id}\r\n")).await;
                         }
                         Err(e) => {
                             warn!(error = %e, "Bounce processing failed");
-                            let _ = write_line(&mut stream, "451 Temporary failure\r\n").await;
+                            let _ = write_reply(
+                                &mut stream,
+                                "bounce",
+                                peer_ip,
+                                &session_id,
+                                "451 4.3.0 Temporary failure\r\n",
+                            )
+                            .await;
                         }
                     }
                 }
@@ -331,31 +486,57 @@ impl BounceServer {
             } else if cmd.starts_with("RSET") {
                 rcpt_to.clear();
                 mail_from_seen = false;
-                let _ = write_line(&mut stream, "250 OK\r\n").await;
+                let _ = write_line(&mut stream, "250 2.0.0 Ok\r\n").await;
             } else if cmd.starts_with("QUIT") {
-                let _ = write_line(&mut stream, "221 Bye\r\n").await;
+                let _ = write_line(&mut stream, "221 2.0.0 Bye\r\n").await;
+                close_reason = "quit";
                 break;
             } else if cmd.starts_with("NOOP") {
-                let _ = write_line(&mut stream, "250 OK\r\n").await;
+                let _ = write_line(&mut stream, "250 2.0.0 Ok\r\n").await;
             } else if cmd.starts_with("VRFY") || cmd.starts_with("EXPN") {
                 // We intentionally do not reveal recipient validity to avoid directory harvests.
                 let _ = write_line(
                     &mut stream,
-                    "252 Cannot VRFY user, but will accept message and attempt delivery\r\n",
+                    "252 2.5.2 Cannot VRFY user, but will accept message and attempt delivery\r\n",
                 )
                 .await;
             } else if cmd.starts_with("HELP") {
                 let _ = write_line(
                     &mut stream,
-                    "214 Supported: EHLO HELO MAIL RCPT DATA RSET NOOP QUIT\r\n",
+                    "214 2.0.0 Commands: EHLO HELO MAIL RCPT DATA RSET NOOP QUIT; see RFC 5321\r\n",
                 )
                 .await;
             } else if cmd.starts_with("STARTTLS") {
-                let _ = write_line(&mut stream, "454 TLS not available on this endpoint\r\n").await;
+                let _ = write_reply(
+                    &mut stream,
+                    "bounce",
+                    peer_ip,
+                    &session_id,
+                    "454 4.7.0 TLS not available on this endpoint\r\n",
+                )
+                .await;
             } else {
-                let _ = write_line(&mut stream, "500 Syntax error, command unrecognized\r\n").await;
+                let _ = write_reply(
+                    &mut stream,
+                    "bounce",
+                    peer_ip,
+                    &session_id,
+                    "502 5.5.1 Command not recognised\r\n",
+                )
+                .await;
             }
         }
+
+        log_session_summary(
+            "bounce",
+            peer_ip,
+            &session_id,
+            false,
+            false,
+            msgs_this_conn,
+            started.elapsed().as_millis(),
+            close_reason,
+        );
     }
 
     // ── bounce processing ──────────────────────────────────────────────────────
@@ -756,8 +937,8 @@ fn is_valid_email_addr(addr: &str) -> bool {
 /// Returns `false` (leaving the buffer untouched) when the line would push
 /// the message past `max_size` — the caller must then reject with `552` and
 /// drain the remainder (H10).
-pub(crate) fn append_data_line(message: &mut BytesMut, content: &str, max_size: usize) -> bool {
-    let body = super::util::unstuff_dot_line(content);
+pub(crate) fn append_data_line(message: &mut BytesMut, content: &[u8], max_size: usize) -> bool {
+    let body = super::util::unstuff_dot_line_bytes(content);
     // +2 for the normalized CRLF terminator.
     if message
         .len()
@@ -767,7 +948,7 @@ pub(crate) fn append_data_line(message: &mut BytesMut, content: &str, max_size: 
     {
         return false;
     }
-    message.extend_from_slice(body.as_bytes());
+    message.extend_from_slice(body);
     message.extend_from_slice(b"\r\n");
     true
 }
@@ -971,6 +1152,35 @@ mod tests {
     }
 
     #[test]
+    fn test_verp_round_trip_matches_documented_format() {
+        // The VERP return-path format generated by the outbound pipeline is
+        // `bounces+{message_id}={recipient_domain}={recipient_local}@{verp_domain}`;
+        // the bounce parser must round-trip exactly that shape, and the
+        // inbound server's VERP-reply detection (local part starts with
+        // "bounces+") must be a superset of the parseable addresses.
+        let verp_domain = "bounces.apexmail.ee";
+        let message_id = "0192f0a4-abc";
+        let recip_local = "user+tag";
+        let recip_domain = "example.com";
+        let addr = format!("bounces+{message_id}={recip_domain}={recip_local}@{verp_domain}");
+
+        assert!(addr.starts_with("bounces+"), "inbound is_verp prefix matches");
+        assert_eq!(
+            parse_verp_address(&addr, verp_domain),
+            Some((message_id.to_string(), format!("{recip_local}@{recip_domain}")))
+        );
+
+        // Tricky locals (embedded '=' allowed after the second field) still
+        // round-trip; the message id itself must not contain '='.
+        let tricky = format!("bounces+{message_id}={recip_domain}=a=b=c@{verp_domain}");
+        assert_eq!(
+            parse_verp_address(&tricky, verp_domain)
+                .map(|(_, recip)| recip),
+            Some("a=b=c@example.com".to_string())
+        );
+    }
+
+    #[test]
     fn test_parse_verp_address() {
         let result = parse_verp_address(
             "bounces+msg123=example.com=user@bounces.apexmail.ee",
@@ -1139,17 +1349,17 @@ mod tests {
         // the line CONTENT (terminator stripped), unstuffs exactly ONE
         // leading dot, and always appends a normalized CRLF terminator.
         let mut message = BytesMut::new();
-        assert!(append_data_line(&mut message, "line one", 23));
-        assert!(append_data_line(&mut message, "..unstuff me", 23));
+        assert!(append_data_line(&mut message, b"line one", 23));
+        assert!(append_data_line(&mut message, b"..unstuff me", 23));
         assert_eq!(message.as_ref(), b"line one\r\n.unstuff me\r\n");
         // Appending exactly up to the cap is allowed (23 = 10 + 13, CRLFs included).
         assert_eq!(message.len(), 23);
         // A line that would exceed the cap is rejected wholesale (message unchanged).
-        assert!(!append_data_line(&mut message, "x", 23));
+        assert!(!append_data_line(&mut message, b"x", 23));
         assert_eq!(message.as_ref(), b"line one\r\n.unstuff me\r\n");
         // A single line larger than the whole budget is rejected too.
         let mut m2 = BytesMut::new();
-        assert!(!append_data_line(&mut m2, "y".repeat(25).as_str(), 23));
+        assert!(!append_data_line(&mut m2, &"y".repeat(25).into_bytes(), 23));
         assert!(m2.is_empty());
     }
 
@@ -1157,9 +1367,9 @@ mod tests {
     fn test_append_data_line_unstuffs_exactly_one_dot() {
         // RFC 5321 §4.5.2 round-trips: the sender doubles a leading dot.
         let mut message = BytesMut::new();
-        assert!(append_data_line(&mut message, "..foo", 1024)); // stuffed ".foo"
-        assert!(append_data_line(&mut message, "..", 1024)); // stuffed "."
-        assert!(append_data_line(&mut message, "plain", 1024));
+        assert!(append_data_line(&mut message, b"..foo", 1024)); // stuffed ".foo"
+        assert!(append_data_line(&mut message, b"..", 1024)); // stuffed "."
+        assert!(append_data_line(&mut message, b"plain", 1024));
         assert_eq!(message.as_ref(), b".foo\r\n.\r\nplain\r\n");
     }
 
@@ -1265,6 +1475,22 @@ mod tests {
         line
     }
 
+    /// Read a complete (possibly multi-line) SMTP reply: continuation lines
+    /// are `NNN-…`, the final line is `NNN …`.
+    async fn read_full_reply(
+        reader: &mut tokio::io::BufReader<tokio::net::tcp::OwnedReadHalf>,
+    ) -> String {
+        let mut full = String::new();
+        loop {
+            let line = read_reply(reader).await;
+            let more = line.len() >= 4 && line.as_bytes()[3] == b'-';
+            full.push_str(&line);
+            if !more {
+                return full;
+            }
+        }
+    }
+
     #[tokio::test]
     async fn bounce_data_is_terminated_only_by_a_crlf_dot() {
         let server = std::sync::Arc::new(test_bounce_server());
@@ -1283,7 +1509,7 @@ mod tests {
         assert!(read_reply(&mut reader).await.starts_with("220"));
 
         writer.write_all(b"EHLO client.example\r\n").await.unwrap();
-        assert!(read_reply(&mut reader).await.starts_with("250"));
+        assert!(read_full_reply(&mut reader).await.starts_with("250"));
 
         writer.write_all(b"MAIL FROM:<>\r\n").await.unwrap();
         assert!(read_reply(&mut reader).await.starts_with("250"));
@@ -1344,7 +1570,7 @@ mod tests {
         let _ = read_reply(&mut reader).await; // greeting
 
         writer.write_all(b"EHLO client.example\r\n").await.unwrap();
-        let _ = read_reply(&mut reader).await;
+        let _ = read_full_reply(&mut reader).await;
         writer.write_all(b"MAIL FROM:<>\r\n").await.unwrap();
         let _ = read_reply(&mut reader).await;
         writer
@@ -1368,6 +1594,257 @@ mod tests {
         let resp = read_reply(&mut reader).await;
         assert!(resp.starts_with("221"), "session still synchronized: {resp:?}");
 
+        tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .expect("session task must finish")
+            .expect("session task must not panic");
+    }
+
+    // ── exact enhanced status codes for the rejection suite ────────────────
+
+    #[tokio::test]
+    async fn bounce_rejection_suite_uses_exact_enhanced_status_codes() {
+        let server = std::sync::Arc::new(test_bounce_server());
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let srv = server.clone();
+        let task = tokio::spawn(async move {
+            let (socket, peer) = listener.accept().await.unwrap();
+            srv.handle_session(socket, peer).await;
+        });
+
+        let tcp = TcpStream::connect(addr).await.unwrap();
+        let (reader, mut writer) = tcp.into_split();
+        let mut reader = tokio::io::BufReader::new(reader);
+
+        let _ = read_reply(&mut reader).await; // greeting
+
+        // Non-null sender on the DSN endpoint → 550 5.7.1 (policy refusal).
+        writer.write_all(b"MAIL FROM:<attacker@evil.com>\r\n").await.unwrap();
+        assert_eq!(
+            read_reply(&mut reader).await,
+            "550 5.7.1 Bounce MAIL FROM must be null (<>)\r\n"
+        );
+
+        // RCPT before MAIL → 503 5.5.1.
+        writer
+            .write_all(b"RCPT TO:<bounces+msg=example.com=user@bounces.apexmail.ee>\r\n")
+            .await
+            .unwrap();
+        assert_eq!(
+            read_reply(&mut reader).await,
+            "503 5.5.1 Error: need MAIL command first\r\n"
+        );
+
+        writer.write_all(b"MAIL FROM:<>\r\n").await.unwrap();
+        assert_eq!(read_reply(&mut reader).await, "250 2.0.0 Ok\r\n");
+
+        // Non-VERP, non-legacy recipient → 550 5.1.1.
+        writer.write_all(b"RCPT TO:<user@other.com>\r\n").await.unwrap();
+        assert_eq!(
+            read_reply(&mut reader).await,
+            "550 5.1.1 Invalid bounce recipient\r\n"
+        );
+
+        // Unknown command → 502 5.5.1 (consistent with inbound/submission).
+        writer.write_all(b"FROBNICATE\r\n").await.unwrap();
+        assert_eq!(
+            read_reply(&mut reader).await,
+            "502 5.5.1 Command not recognised\r\n"
+        );
+
+        // STARTTLS is not offered here → 454 4.7.0.
+        writer.write_all(b"STARTTLS\r\n").await.unwrap();
+        assert_eq!(
+            read_reply(&mut reader).await,
+            "454 4.7.0 TLS not available on this endpoint\r\n"
+        );
+
+        // RSET clears the transaction; DATA without one → 503 5.5.1.
+        writer.write_all(b"RSET\r\n").await.unwrap();
+        assert_eq!(read_reply(&mut reader).await, "250 2.0.0 Ok\r\n");
+        writer.write_all(b"DATA\r\n").await.unwrap();
+        assert_eq!(
+            read_reply(&mut reader).await,
+            "503 5.5.1 Bad sequence of commands\r\n"
+        );
+
+        writer.write_all(b"QUIT\r\n").await.unwrap();
+        assert_eq!(read_reply(&mut reader).await, "221 2.0.0 Bye\r\n");
+
+        tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .expect("session task must finish")
+            .expect("session task must not panic");
+    }
+
+    #[tokio::test]
+    async fn bounce_ehlo_advertises_exactly_the_enforced_size_cap() {
+        // RFC 1870: the SIZE advertisement must equal the value the 552
+        // enforcement actually uses (config.max_message_size).
+        let server = std::sync::Arc::new(test_bounce_server());
+        let advertised = server.config.max_message_size;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let srv = server.clone();
+        let task = tokio::spawn(async move {
+            let (socket, peer) = listener.accept().await.unwrap();
+            srv.handle_session(socket, peer).await;
+        });
+
+        let tcp = TcpStream::connect(addr).await.unwrap();
+        let (reader, mut writer) = tcp.into_split();
+        let mut reader = tokio::io::BufReader::new(reader);
+        let _ = read_reply(&mut reader).await; // greeting
+
+        writer.write_all(b"EHLO client.example\r\n").await.unwrap();
+        let ehlo = read_full_reply(&mut reader).await;
+        assert!(
+            ehlo.contains(&format!("250-SIZE {advertised}\r\n")),
+            "SIZE advertisement must match enforcement: {ehlo:?}"
+        );
+
+        writer.write_all(b"QUIT\r\n").await.unwrap();
+        let _ = read_reply(&mut reader).await;
+        tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .expect("session task must finish")
+            .expect("session task must not panic");
+    }
+
+    #[tokio::test]
+    async fn bounce_recipient_cap_enforced_with_452_4_5_3() {
+        let server = std::sync::Arc::new(test_bounce_server());
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let srv = server.clone();
+        let task = tokio::spawn(async move {
+            let (socket, peer) = listener.accept().await.unwrap();
+            srv.handle_session(socket, peer).await;
+        });
+
+        let tcp = TcpStream::connect(addr).await.unwrap();
+        let (reader, mut writer) = tcp.into_split();
+        let mut reader = tokio::io::BufReader::new(reader);
+        let _ = read_reply(&mut reader).await; // greeting
+        writer.write_all(b"EHLO c\r\n").await.unwrap();
+        let _ = read_full_reply(&mut reader).await;
+        writer.write_all(b"MAIL FROM:<>\r\n").await.unwrap();
+        assert!(read_reply(&mut reader).await.starts_with("250"));
+
+        // Fill the recipient budget with legacy addresses.
+        for _ in 0..MAX_RCPT_PER_TRANSACTION {
+            writer
+                .write_all(b"RCPT TO:<bounce@bounces.apexmail.ee>\r\n")
+                .await
+                .unwrap();
+            assert!(read_reply(&mut reader).await.starts_with("250"));
+        }
+        // One more recipient is over the cap.
+        writer
+            .write_all(b"RCPT TO:<bounce@bounces.apexmail.ee>\r\n")
+            .await
+            .unwrap();
+        assert_eq!(
+            read_reply(&mut reader).await,
+            "452 4.5.3 Too many recipients\r\n"
+        );
+
+        writer.write_all(b"QUIT\r\n").await.unwrap();
+        let _ = read_reply(&mut reader).await;
+        tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .expect("session task must finish")
+            .expect("session task must not panic");
+    }
+
+    #[tokio::test]
+    async fn bounce_oversize_payload_rejected_with_exact_552_5_3_4() {
+        // Custom server with a tiny enforced cap: the 552 reply and the
+        // advertised SIZE both derive from max_message_size.
+        let mut config = test_bounce_server().config;
+        config.max_message_size = 64;
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .acquire_timeout(Duration::from_secs(1))
+            .connect_lazy("postgres://127.0.0.1:1/mta_test")
+            .unwrap();
+        let redis = deadpool_redis::Config::from_url("redis://127.0.0.1:1")
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .unwrap();
+        let server = std::sync::Arc::new(BounceServer::new(
+            config,
+            pool,
+            redis,
+            "bounce.test".into(),
+        ));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let srv = server.clone();
+        let task = tokio::spawn(async move {
+            let (socket, peer) = listener.accept().await.unwrap();
+            srv.handle_session(socket, peer).await;
+        });
+
+        let tcp = TcpStream::connect(addr).await.unwrap();
+        let (reader, mut writer) = tcp.into_split();
+        let mut reader = tokio::io::BufReader::new(reader);
+        let _ = read_reply(&mut reader).await; // greeting
+        writer.write_all(b"EHLO c\r\n").await.unwrap();
+        let _ = read_full_reply(&mut reader).await;
+        writer.write_all(b"MAIL FROM:<>\r\n").await.unwrap();
+        let _ = read_reply(&mut reader).await;
+        writer
+            .write_all(b"RCPT TO:<bounce@bounces.apexmail.ee>\r\n")
+            .await
+            .unwrap();
+        let _ = read_reply(&mut reader).await;
+        writer.write_all(b"DATA\r\n").await.unwrap();
+        assert!(read_reply(&mut reader).await.starts_with("354"));
+
+        // A body line far past the 64-byte cap, then the terminator.
+        writer
+            .write_all(format!("{}\r\n.\r\n", "x".repeat(200)).as_bytes())
+            .await
+            .unwrap();
+        assert_eq!(
+            read_reply(&mut reader).await,
+            "552 5.3.4 Message size exceeds fixed maximum message size\r\n"
+        );
+
+        // The session stays synchronised after the refusal.
+        writer.write_all(b"QUIT\r\n").await.unwrap();
+        assert!(read_reply(&mut reader).await.starts_with("221"));
+        tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .expect("session task must finish")
+            .expect("session task must not panic");
+    }
+
+    #[tokio::test]
+    async fn bounce_connection_cap_replies_421_4_7_0() {
+        let server = std::sync::Arc::new(test_bounce_server());
+        let cap = server.config.max_connections_per_ip;
+        // Pre-fill the per-IP connection table to the cap for loopback.
+        *server
+            .connections
+            .entry(std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1)))
+            .or_insert(0) += cap;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let srv = server.clone();
+        let task = tokio::spawn(async move {
+            let (socket, peer) = listener.accept().await.unwrap();
+            srv.handle_session(socket, peer).await;
+        });
+
+        let tcp = TcpStream::connect(addr).await.unwrap();
+        let (reader, _writer) = tcp.into_split();
+        let mut reader = tokio::io::BufReader::new(reader);
+        assert_eq!(
+            read_reply(&mut reader).await,
+            "421 4.7.0 Too many connections, try again later\r\n"
+        );
         tokio::time::timeout(Duration::from_secs(5), task)
             .await
             .expect("session task must finish")

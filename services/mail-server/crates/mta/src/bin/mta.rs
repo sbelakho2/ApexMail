@@ -63,8 +63,16 @@ async fn main() -> anyhow::Result<()> {
         .connect(&config.database.connection_string)
         .await?;
 
-    // Redis pool
-    let redis_cfg = deadpool_redis::Config::from_url(&config.redis.url);
+    // Redis pool. Bounded create/wait timeouts: the durable auth-lockout
+    // layer falls back to in-memory counters when Redis is slow/down, so a
+    // hung TCP connect must not stall SMTP AUTH replies for the OS-level
+    // timeout (~minutes); it fails over within seconds instead.
+    let mut redis_cfg = deadpool_redis::Config::from_url(&config.redis.url);
+    let mut pool_cfg = deadpool_redis::PoolConfig::default();
+    pool_cfg.timeouts.create = Some(std::time::Duration::from_secs(3));
+    pool_cfg.timeouts.wait = Some(std::time::Duration::from_secs(3));
+    pool_cfg.timeouts.recycle = Some(std::time::Duration::from_secs(3));
+    redis_cfg.pool = Some(pool_cfg);
     let redis_pool = redis_cfg.create_pool(Some(deadpool_redis::Runtime::Tokio1))?;
 
     // TLS acceptor (optional)
@@ -202,6 +210,7 @@ async fn main() -> anyhow::Result<()> {
             config.submission.clone(),
             config.rate_limit.clone(),
             pool.clone(),
+            redis_pool.clone(),
             tls_acceptor,
         ));
         let s = srv.clone();

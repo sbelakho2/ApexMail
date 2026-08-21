@@ -79,6 +79,16 @@ pub struct InboundConfig {
     pub max_recipients: usize,
     #[serde(default)]
     pub auth_required: bool,
+    /// Whether the internet-facing port-25 listener advertises/accepts AUTH.
+    ///
+    /// DEFAULT FALSE: port 25 faces the whole internet and AUTH there is a
+    /// pure brute-force surface — real mail clients submit on port 587
+    /// (STARTTLS) or 465 (implicit TLS), which keep AUTH enabled
+    /// unconditionally. Operators with a legacy authenticated-relay-on-25
+    /// deployment can restore the old behaviour with
+    /// `SMTP_ADVERTISE_AUTH_PORT25=true`.
+    #[serde(default)]
+    pub advertise_auth_port25: bool,
     #[serde(default)]
     pub tls: TlsConfig,
 }
@@ -284,6 +294,7 @@ impl_default!(
         max_message_size: default_max_message_size(),
         max_recipients: default_max_recipients(),
         auth_required: false,
+        advertise_auth_port25: false,
         tls: TlsConfig::default(),
     }
 );
@@ -510,6 +521,7 @@ impl MtaConfig {
                 max_message_size: parse_usize_env("MAX_MESSAGE_SIZE", default_max_message_size()),
                 max_recipients: parse_usize_env("MAX_RECIPIENTS", default_max_recipients()),
                 auth_required: parse_bool_env("AUTH_REQUIRED", false),
+                advertise_auth_port25: parse_bool_env("SMTP_ADVERTISE_AUTH_PORT25", false),
                 tls: TlsConfig {
                     enabled: parse_bool_env("TLS_ENABLED", false),
                     key_path: std::env::var("TLS_KEY_PATH").ok(),
@@ -837,5 +849,19 @@ mod tests {
     #[test]
     fn mta_config_default_carries_enforced_dmarc() {
         assert!(MtaConfig::default().email_auth.enforce_dmarc);
+    }
+
+    #[test]
+    fn inbound_advertise_auth_port25_defaults_to_false() {
+        // The internet-facing port-25 listener must not advertise/accept
+        // AUTH unless the operator explicitly opts in via
+        // SMTP_ADVERTISE_AUTH_PORT25 (serde default must agree).
+        assert!(!InboundConfig::default().advertise_auth_port25);
+        let from_json: InboundConfig = serde_json::from_str("{}").unwrap();
+        assert!(!from_json.advertise_auth_port25);
+        // Explicit opt-in is honoured.
+        let opted_in: InboundConfig =
+            serde_json::from_str("{\"advertise_auth_port25\": true}").unwrap();
+        assert!(opted_in.advertise_auth_port25);
     }
 }

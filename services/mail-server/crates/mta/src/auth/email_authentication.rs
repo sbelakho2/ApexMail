@@ -1478,4 +1478,50 @@ mod tests {
         assert!(header.contains("dkim=pass"));
         assert!(header.contains("dmarc=pass"));
     }
+
+    #[test]
+    fn auth_results_header_uses_crlf_exclusively_and_needs_one_final_crlf() {
+        // The inbound server prepends this header to the stored raw message
+        // with exactly one CRLF separator. If the header itself contained a
+        // bare LF (or already ended with CRLF), the stored MIME would mix
+        // line endings and downstream parsers could resync mid-header.
+        let config = EmailAuthConfig::default();
+        let Some(auth) = test_authenticator(config, "mx.apexmail.ee") else {
+            return;
+        };
+        let spf = SpfOutcome {
+            result: SpfVerdict::SoftFail,
+            domain: "example.com".into(),
+            explanation: None,
+            status: SpfStatus::Fresh,
+        };
+        let dkim = vec![DkimOutcome {
+            result: DkimVerdict::Fail,
+            domain: "other.com".into(),
+            selector: "s".into(),
+            explanation: None,
+        }];
+        let dmarc = DmarcOutcome {
+            result: DmarcVerdict::Fail,
+            domain: "example.com".into(),
+            policy: DmarcPolicy::Quarantine,
+            alignment: DmarcAlignment { spf: false, dkim: false },
+        };
+
+        let header = auth.build_auth_results_header(&spf, &dkim, &dmarc);
+        let bytes = header.as_bytes();
+        for (i, &b) in bytes.iter().enumerate() {
+            if b == b'\n' {
+                assert!(
+                    i > 0 && bytes[i - 1] == b'\r',
+                    "bare LF at offset {i} in A-R header: {header:?}"
+                );
+            }
+        }
+        assert!(
+            !header.ends_with("\r\n") && !header.ends_with('\n'),
+            "header must NOT carry its own trailing terminator: {header:?}"
+        );
+        assert!(header.starts_with("Authentication-Results: mx.apexmail.ee;"));
+    }
 }

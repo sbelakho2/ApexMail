@@ -33,8 +33,9 @@ use mail_proto::{
 use tonic::transport::Channel;
 
 use super::util::{
-    is_strict_end_of_data, line_content, read_line_capped, unstuff_dot_line, LineRead,
-    MAX_COMMAND_LINE, MAX_DATA_LINE,
+    is_strict_end_of_data, line_content_bytes, line_lossy, log_session_summary, log_smtp_reject,
+    mail_size_param, read_line_capped, unstuff_dot_line_bytes, validate_mail_params,
+    validate_rcpt_params, LineRead, MailParamPolicy, MAX_COMMAND_LINE, MAX_DATA_LINE,
 };
 
 // Shared resolver to avoid allocating a new DNS client per PTR verification.
@@ -76,6 +77,18 @@ pub struct SessionContext {
     pub auth_login_user: Option<String>,
     /// AUTH PLAIN two-step: true when waiting for the base64 response after sending 334.
     pub auth_plain_pending: bool,
+    /// Whether this session's LISTENER permits AUTH at all. The implicit-TLS
+    /// listener (port 465) is a submission port and always permits AUTH;
+    /// the internet-facing port-25 listener permits it only when
+    /// `SMTP_ADVERTISE_AUTH_PORT25=true` (default false — mail clients
+    /// submitting real mail should use port 587/465, and port 25 must not
+    /// present an always-on AUTH brute-force surface).
+    #[serde(default)]
+    pub auth_enabled: bool,
+    /// Whether EHLO/HELO has been seen on the current leg of the session
+    /// (RFC 5321 sequencing; reset by a successful STARTTLS).
+    #[serde(default)]
+    pub helo_seen: bool,
 }
 
 /// Inbound SMTP server.
@@ -116,6 +129,7 @@ impl InboundServer {
             anyhow::anyhow!("invalid internal mailstore authentication: {error}")
         })?;
 
+        let auth_fail_tracker = AuthFailTracker::with_redis(redis.clone());
         Ok(Self {
             config,
             rate_limit_config,
@@ -128,7 +142,7 @@ impl InboundServer {
                 .max_capacity(10_000)
                 .time_to_live(Duration::from_secs(600))
                 .build(),
-            auth_fail_tracker: AuthFailTracker::new(),
+            auth_fail_tracker,
             shutdown: Arc::new(Notify::new()),
             mailstore: MailstoreServiceClient::with_interceptor(channel, interceptor),
         })
@@ -221,7 +235,8 @@ impl InboundServer {
     ) {
         let ip = peer.ip();
         if !self.check_rate_limit(ip) {
-            let _ = write_line_tcp(&socket, "421 Too many connections, try again later\r\n").await;
+            let _ = write_line_tcp(&socket, "421 4.7.0 Too many connections, try again later\r\n")
+                .await;
             return;
         }
         self.track_connection(ip, true);
@@ -240,6 +255,11 @@ impl InboundServer {
             spf_status: None,
             auth_login_user: None,
             auth_plain_pending: false,
+            // Port 25: AUTH only when explicitly enabled via config — the
+            // internet-facing listener must not advertise an AUTH
+            // brute-force surface by default.
+            auth_enabled: self.config.advertise_auth_port25,
+            helo_seen: false,
         };
 
         let allow_starttls = tls.is_some();
@@ -260,6 +280,11 @@ impl InboundServer {
                         ctx.helo_hostname.clear();
                         ctx.mail_from = None;
                         ctx.rcpt_to.clear();
+                        // RFC 3207 §4.2: the server must discard knowledge
+                        // obtained from the client before TLS was in place —
+                        // including the EHLO state (the client MUST re-issue
+                        // EHLO on the TLS leg).
+                        ctx.helo_seen = false;
                         let mut tls_buf = BufStream::new(tls_stream);
                         self.run_session_loop(&mut tls_buf, &mut ctx, false).await;
                     }
@@ -272,11 +297,29 @@ impl InboundServer {
             }
         }
 
+        log_session_summary(
+            "inbound",
+            ip,
+            &ctx.id,
+            ctx.tls_active,
+            ctx.authenticated,
+            ctx.message_count,
+            (chrono::Utc::now() - ctx.start_time).num_milliseconds() as u128,
+            "closed",
+        );
         self.track_connection(ip, false);
     }
 
     /// Generic session loop over any AsyncRead+AsyncWrite stream (plain or TLS).
     /// Returns true if client requested STARTTLS (caller should upgrade and re-enter).
+    ///
+    /// PIPELINING (RFC 2920): commands are read line-by-line from a buffered
+    /// stream and each command's reply is written (and flushed) before the
+    /// next line is parsed, so a client that groups `EHLO/MAIL/RCPT/DATA`
+    /// into one TCP segment gets one reply per command in order. The only
+    /// synchronisation point is DATA: the `354` reply is flushed before any
+    /// body line is consumed, which is exactly the RFC 2920 checkpoint
+    /// requirement.
     async fn run_session_loop<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
         self: &Arc<Self>,
         stream: &mut BufStream<S>,
@@ -298,12 +341,36 @@ impl InboundServer {
             )
             .await
             {
-                Ok(Ok(LineRead::Eof)) | Err(_) => break,
+                Ok(Ok(LineRead::Eof)) => break,
+                Err(_) => {
+                    // Idle timeout: tell the client why the connection is
+                    // going away (RFC 5321 §4.2.1 uses 421 for this) instead
+                    // of silently dropping the socket.
+                    let _ = write_line_buf(stream, "421 4.4.2 Idle timeout, closing connection\r\n")
+                        .await;
+                    break;
+                }
                 Ok(Ok(LineRead::TooLong)) => {
+                    // The line's remainder (through its newline) was fully
+                    // drained — the session is still synchronised.
+                    log_smtp_reject("inbound", ctx.client_ip, &ctx.id, "500 5.5.2 Line too long");
                     let _ = write_line_buf(stream, "500 5.5.2 Line too long\r\n").await;
                     continue;
                 }
-                Ok(Ok(LineRead::Line(l, _))) => line = l,
+                Ok(Ok(LineRead::Overflow)) => {
+                    // No newline within the absolute drain limit: the stream
+                    // position is untrustworthy. Reply and CLOSE — reading
+                    // on would parse attacker-controlled bytes as commands.
+                    log_smtp_reject(
+                        "inbound",
+                        ctx.client_ip,
+                        &ctx.id,
+                        "500 5.5.2 Line too long (connection closed)",
+                    );
+                    let _ = write_line_buf(stream, "500 5.5.2 Line too long\r\n").await;
+                    break;
+                }
+                Ok(Ok(LineRead::Line(l, _))) => line = line_lossy(&l),
                 Ok(Err(e)) => {
                     debug!(error = %e, "Read error");
                     break;
@@ -314,19 +381,43 @@ impl InboundServer {
 
             // #136:Handle STARTTLS before generic command dispatch
             if cmd == "STARTTLS" {
+                if ctx.tls_active {
+                    // RFC 3207 §4: renegotiating (nested) TLS is a protocol
+                    // error, not a temporary failure.
+                    log_smtp_reject("inbound", ctx.client_ip, &ctx.id, "503 5.5.1 TLS already active");
+                    let _ = write_line_buf(stream, "503 5.5.1 TLS already active\r\n").await;
+                    continue;
+                }
+                if !ctx.helo_seen {
+                    log_smtp_reject(
+                        "inbound",
+                        ctx.client_ip,
+                        &ctx.id,
+                        "503 5.5.1 Error: send HELO/EHLO first",
+                    );
+                    let _ = write_line_buf(stream, "503 5.5.1 Error: send HELO/EHLO first\r\n")
+                        .await;
+                    continue;
+                }
                 if starttls_is_available(allow_starttls, ctx) {
                     let _ = write_line_buf(stream, "220 Ready to start TLS\r\n").await;
                     return true; // Signal caller to upgrade
                 } else {
-                    let _ = write_line_buf(stream, "454 TLS not available\r\n").await;
+                    log_smtp_reject("inbound", ctx.client_ip, &ctx.id, "454 4.7.0 TLS not available");
+                    let _ = write_line_buf(stream, "454 4.7.0 TLS not available\r\n").await;
                     continue;
                 }
             } else if cmd.starts_with("STARTTLS") {
-                let _ = write_line_buf(stream, "501 Syntax: STARTTLS\r\n").await;
+                log_smtp_reject("inbound", ctx.client_ip, &ctx.id, "501 5.5.4 Syntax: STARTTLS");
+                let _ = write_line_buf(stream, "501 5.5.4 Syntax: STARTTLS\r\n").await;
                 continue;
             }
 
             let response = self.handle_command(&cmd, &line, ctx, allow_starttls).await;
+
+            if response.starts_with('4') || response.starts_with('5') {
+                log_smtp_reject("inbound", ctx.client_ip, &ctx.id, &response);
+            }
 
             if let Err(e) = write_line_buf(stream, &response).await {
                 debug!(error = %e, "Write error");
@@ -349,8 +440,8 @@ impl InboundServer {
                 // message that must be discarded, never processed.
                 let mut terminated = false;
                 let mut aborted = false;
+                let mut overflowed = false;
                 loop {
-                    line.clear();
                     let remaining = data_deadline
                         .checked_duration_since(tokio::time::Instant::now())
                         .unwrap_or(Duration::ZERO);
@@ -376,16 +467,23 @@ impl InboundServer {
                         }
                         Ok(Ok(LineRead::TooLong)) => {
                             // A single line over the per-line cap cannot be
-                            // part of a message we are willing to store.
+                            // part of a message we are willing to store. The
+                            // line was drained through its newline, so the
+                            // session stays synchronised.
                             too_large = true;
                             message.clear();
                         }
+                        Ok(Ok(LineRead::Overflow)) => {
+                            // No newline within the absolute drain limit: the
+                            // stream can no longer be resynchronised — close.
+                            overflowed = true;
+                            break;
+                        }
                         Ok(Ok(LineRead::Line(l, term))) => {
-                            line = l;
                             // RFC 5321 §4.1.1.5: DATA ends ONLY on a line that
                             // is exactly "." with a CRLF terminator. A bare-LF
                             // "." line is body data (SMTP smuggling defence).
-                            if is_strict_end_of_data(&line, term) {
+                            if is_strict_end_of_data(&l, term) {
                                 terminated = true;
                                 break;
                             }
@@ -395,14 +493,16 @@ impl InboundServer {
                                 // exactly one leading dot (RFC 5321 §4.5.2),
                                 // and store the line with a normalized CRLF so
                                 // a bare-LF body line is never relayed onward.
-                                let data_slice = unstuff_dot_line(line_content(&line, term));
+                                // Bytes are preserved verbatim (8BITMIME).
+                                let data_slice =
+                                    unstuff_dot_line_bytes(line_content_bytes(&l, term));
                                 if message.len() + data_slice.len() + 2
                                     > self.config.max_message_size
                                 {
                                     too_large = true;
                                     message.clear();
                                 } else {
-                                    message.extend_from_slice(data_slice.as_bytes());
+                                    message.extend_from_slice(data_slice);
                                     message.extend_from_slice(b"\r\n");
                                 }
                             }
@@ -412,7 +512,24 @@ impl InboundServer {
 
                 if data_timed_out {
                     // #137:Total DATA timeout exceeded
-                    let _ = write_line_buf(stream, "421 Data timeout exceeded\r\n").await;
+                    log_smtp_reject(
+                        "inbound",
+                        ctx.client_ip,
+                        &ctx.id,
+                        "421 4.4.2 Data timeout exceeded",
+                    );
+                    let _ = write_line_buf(stream, "421 4.4.2 Data timeout exceeded\r\n").await;
+                    break;
+                }
+
+                if overflowed {
+                    log_smtp_reject(
+                        "inbound",
+                        ctx.client_ip,
+                        &ctx.id,
+                        "500 5.5.2 Data line too long (connection closed)",
+                    );
+                    let _ = write_line_buf(stream, "500 5.5.2 Line too long\r\n").await;
                     break;
                 }
 
@@ -420,6 +537,12 @@ impl InboundServer {
                     // Truncated message: discard the whole transaction and
                     // tell the client to retry rather than accepting (and
                     // relaying) a partial message.
+                    log_smtp_reject(
+                        "inbound",
+                        ctx.client_ip,
+                        &ctx.id,
+                        "451 4.3.0 Temporary failure (truncated message)",
+                    );
                     let _ = write_line_buf(stream, "451 4.3.0 Temporary failure\r\n").await;
                     ctx.mail_from = None;
                     ctx.rcpt_to.clear();
@@ -427,12 +550,25 @@ impl InboundServer {
                 }
 
                 if too_large {
-                    let _ = write_line_buf(stream, "552 Message too large\r\n").await;
+                    log_smtp_reject(
+                        "inbound",
+                        ctx.client_ip,
+                        &ctx.id,
+                        "552 5.3.4 Message size exceeds fixed maximum message size",
+                    );
+                    let _ = write_line_buf(
+                        stream,
+                        "552 5.3.4 Message size exceeds fixed maximum message size\r\n",
+                    )
+                    .await;
                     ctx.mail_from = None;
                     ctx.rcpt_to.clear();
                 } else if terminated {
                     let result = self.process_message(ctx, &message).await;
                     let resp = format_data_response(&result);
+                    if resp.starts_with('4') || resp.starts_with('5') {
+                        log_smtp_reject("inbound", ctx.client_ip, &ctx.id, &resp);
+                    }
                     let _ = write_line_buf(stream, &resp).await;
                     ctx.message_count += 1;
                     ctx.mail_from = None;
@@ -479,10 +615,25 @@ impl InboundServer {
             spf_status: None,
             auth_login_user: None,
             auth_plain_pending: false,
+            // Port 465 (implicit TLS) is a submission port: AUTH is part of
+            // its contract — email clients that auto-detect port 465 hang
+            // indefinitely when AUTH is missing from EHLO.
+            auth_enabled: true,
+            helo_seen: false,
         };
 
         let mut stream = BufStream::new(tls_stream);
         self.run_session_loop(&mut stream, &mut ctx, false).await; // #136:already on TLS
+        log_session_summary(
+            "inbound465",
+            ip,
+            &ctx.id,
+            ctx.tls_active,
+            ctx.authenticated,
+            ctx.message_count,
+            (chrono::Utc::now() - ctx.start_time).num_milliseconds() as u128,
+            "closed",
+        );
         self.track_connection(ip, false);
     }
 
@@ -497,27 +648,39 @@ impl InboundServer {
     ) -> String {
         if cmd_upper.starts_with("EHLO") || cmd_upper.starts_with("HELO") {
             let Some(host) = parse_helo_hostname(raw_line) else {
-                return "501 Invalid HELO/EHLO hostname\r\n".into();
+                return "501 5.5.4 Invalid HELO/EHLO hostname\r\n".into();
             };
             ctx.helo_hostname = host.to_string();
+            ctx.helo_seen = true;
             let mut caps = format!("250-{} Hello {}\r\n", self.hostname, host);
             caps.push_str(&format!("250-SIZE {}\r\n", self.config.max_message_size));
             if should_advertise_starttls(self.config.tls.enabled, allow_starttls, ctx) {
                 caps.push_str("250-STARTTLS\r\n");
             }
-            // Advertise AUTH on TLS connections so email clients (Thunderbird,
-            // Apple Mail, etc.) can authenticate for submission over port 465.
-            // This is critical: without AUTH in the EHLO response, clients that
-            // auto-detect port 465 will hang indefinitely waiting for AUTH.
-            if ctx.tls_active {
+            // Advertise AUTH on TLS connections whose listener permits it
+            // (port 465 by default; port 25 only with
+            // SMTP_ADVERTISE_AUTH_PORT25=true). Clients submitting real mail
+            // should use the dedicated submission ports 587/465.
+            if ctx.tls_active && ctx.auth_enabled {
                 caps.push_str("250-AUTH PLAIN LOGIN\r\n");
             }
+            // 8BITMIME (RFC 6152): body octets outside US-ASCII are accepted
+            // and stored byte-for-byte. SMTPUTF8 (RFC 6531): UTF-8 envelope
+            // addresses are accepted (the address validator is
+            // charset-agnostic by design).
             caps.push_str("250-8BITMIME\r\n");
             caps.push_str("250-PIPELINING\r\n");
             caps.push_str("250 SMTPUTF8\r\n");
             caps
         } else if cmd_upper.starts_with("STARTTLS") {
-            "454 TLS not available\r\n".into()
+            "454 4.7.0 TLS not available\r\n".into()
+        } else if cmd_upper.starts_with("AUTH") && !ctx.auth_enabled {
+            // Port 25 without the explicit opt-in: AUTH is neither advertised
+            // nor honoured, removing the internet-facing brute-force surface.
+            "502 5.5.1 AUTH not available on this port; submit mail via port 587 or 465\r\n"
+                .into()
+        } else if cmd_upper.starts_with("AUTH") && !ctx.helo_seen {
+            "503 5.5.1 Error: send HELO/EHLO first\r\n".into()
         } else if cmd_upper.starts_with("AUTH PLAIN") && ctx.tls_active {
             // Handle AUTH PLAIN on TLS connections (port 465 submission).
             let inline = raw_line
@@ -540,7 +703,7 @@ impl InboundServer {
         } else if cmd_upper.starts_with("AUTH LOGIN") && ctx.tls_active {
             // AUTH LOGIN multi-step: prompt for username (base64 "VXNlcm5hbWU6")
             ctx.auth_login_user = Some(String::new()); // marker: waiting for username
-            return "334 VXNlcm5hbWU6\r\n".into();
+            "334 VXNlcm5hbWU6\r\n".into()
         } else if ctx.auth_login_user.is_some() && ctx.tls_active {
             // AUTH LOGIN state machine: we're waiting for username or password
             use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
@@ -550,7 +713,7 @@ impl InboundServer {
             if ctx.auth_login_user.as_deref() == Some("") {
                 // Username received, now prompt for password
                 ctx.auth_login_user = Some(value);
-                return "334 UGFzc3dvcmQ6\r\n".into();
+                "334 UGFzc3dvcmQ6\r\n".into()
             } else {
                 // Password received, attempt authentication
                 let user = ctx.auth_login_user.take().unwrap_or_default();
@@ -568,13 +731,36 @@ impl InboundServer {
         } else if cmd_upper.starts_with("AUTH PLAIN") && !ctx.tls_active {
             // AUTH PLAIN before TLS — reject for security
             "538 5.7.11 Encryption required for requested authentication\r\n".into()
+        } else if cmd_upper.starts_with("AUTH") && !ctx.tls_active {
+            // Any other AUTH mechanism before TLS — same security stance.
+            "538 5.7.11 Encryption required for requested authentication\r\n".into()
         } else if cmd_upper.starts_with("MAIL FROM") {
+            if !ctx.helo_seen {
+                return "503 5.5.1 Error: send HELO/EHLO first\r\n".into();
+            }
             if self.config.auth_required && !ctx.authenticated {
-                return "530 Authentication required\r\n".into();
+                return "530 5.7.0 Authentication required\r\n".into();
             }
             if !self.verify_inbound_source(ctx.client_ip).await {
                 warn!(client_ip = %ctx.client_ip, "Rejected inbound sender without forward-confirmed PTR record");
-                return "550 Reverse DNS lookup required\r\n".into();
+                return "550 5.7.25 Reverse DNS lookup required (FCrDNS)\r\n".into();
+            }
+            // RFC 5321 §4.1.1.3/§4.1.1.11 + RFC 1870: only parameters for
+            // advertised extensions are accepted; an advertised SIZE
+            // declaration over the limit is refused up-front with 552.
+            if let Err(reject) = validate_mail_params(
+                raw_line,
+                MailParamPolicy {
+                    body_8bitmime: true,
+                    smtputf8: true,
+                },
+            ) {
+                return format!("{reject}\r\n");
+            }
+            if let Some(declared) = mail_size_param(raw_line) {
+                if declared > self.config.max_message_size as u64 {
+                    return "552 5.3.4 Message size exceeds fixed maximum message size\r\n".into();
+                }
             }
             let addr = extract_address(raw_line);
             // E-6:an unvalidated reverse-path used to be echoed into
@@ -591,47 +777,71 @@ impl InboundServer {
             // transaction.
             ctx.rcpt_to.clear();
             ctx.mail_from = Some(addr);
-            "250 OK\r\n".into()
+            "250 2.0.0 Ok\r\n".into()
         } else if cmd_upper.starts_with("RCPT TO") {
+            if !ctx.helo_seen {
+                return "503 5.5.1 Error: send HELO/EHLO first\r\n".into();
+            }
             if self.config.auth_required && !ctx.authenticated {
-                return "530 Authentication required\r\n".into();
+                return "530 5.7.0 Authentication required\r\n".into();
+            }
+            if ctx.mail_from.is_none() {
+                return "503 5.5.1 Error: need MAIL command first\r\n".into();
             }
             if ctx.rcpt_to.len() >= self.config.max_recipients {
-                return "452 Too many recipients\r\n".into();
+                return "452 4.5.3 Too many recipients\r\n".into();
+            }
+            if let Err(reject) = validate_rcpt_params(raw_line) {
+                return format!("{reject}\r\n");
             }
             let addr = extract_address(raw_line);
-            if recipient_domain(&addr).is_none() {
-                return "550 Invalid recipient\r\n".into();
+            // RFC 5321 §4.5.3.1.1 caps the forward-path; 320 octets is the
+            // generous local(64)+domain(255) budget used by the submission
+            // server's validator, so a ~4 KB command line cannot park its
+            // payload in the envelope either.
+            if addr.len() > super::submission::MAX_ENVELOPE_ADDR_LEN
+                || recipient_domain(&addr).is_none()
+            {
+                return "501 5.1.3 Bad recipient address syntax\r\n".into();
             }
             match self.is_managed_recipient(&addr).await {
                 Ok(true) => {}
-                Ok(false) => return "550 No such user here\r\n".into(),
+                Ok(false) => return "550 5.1.1 No such user here\r\n".into(),
                 Err(error) => {
                     warn!(recipient = %addr, %error, "Failed to validate inbound recipient domain");
-                    return "451 Temporary local problem\r\n".into();
+                    return "451 4.3.0 Temporary local problem\r\n".into();
                 }
             }
             ctx.rcpt_to.push(addr);
-            "250 OK\r\n".into()
+            "250 2.0.0 Ok\r\n".into()
         } else if cmd_upper.starts_with("DATA") {
             if self.config.auth_required && !ctx.authenticated {
-                return "530 Authentication required\r\n".into();
+                return "530 5.7.0 Authentication required\r\n".into();
             }
             if ctx.mail_from.is_none() || ctx.rcpt_to.is_empty() {
-                "503 Bad sequence of commands\r\n".into()
+                "503 5.5.1 Bad sequence of commands\r\n".into()
             } else {
                 "354 Start mail input; end with <CRLF>.<CRLF>\r\n".into()
             }
         } else if cmd_upper.starts_with("RSET") {
             ctx.mail_from = None;
             ctx.rcpt_to.clear();
-            "250 OK\r\n".into()
+            "250 2.0.0 Ok\r\n".into()
         } else if cmd_upper.starts_with("NOOP") {
-            "250 OK\r\n".into()
+            "250 2.0.0 Ok\r\n".into()
         } else if cmd_upper.starts_with("QUIT") {
-            "221 Bye\r\n".into()
+            "221 2.0.0 Bye\r\n".into()
+        } else if cmd_upper.starts_with("HELP") {
+            "214 2.0.0 Commands: EHLO HELO MAIL RCPT DATA RSET NOOP QUIT STARTTLS HELP VRFY EXPN; see RFC 5321\r\n"
+                .into()
+        } else if cmd_upper.starts_with("VRFY") {
+            // RFC 5321 §7.3: never confirm address existence — 252 keeps
+            // the anti-enumeration posture while staying protocol-correct.
+            "252 2.5.2 Cannot VRFY user, but will accept message and attempt delivery\r\n".into()
+        } else if cmd_upper.starts_with("EXPN") {
+            "502 5.5.1 EXPN command not supported\r\n".into()
         } else {
-            "502 Command not recognised\r\n".into()
+            "502 5.5.1 Command not recognised\r\n".into()
         }
     }
 
@@ -797,13 +1007,7 @@ impl InboundServer {
         auth_results_header: &str,
     ) {
         let mut client = self.mailstore.clone();
-        let mut final_message = Vec::with_capacity(auth_results_header.len() + raw.len() + 2);
-        // The Authentication-Results header has no trailing CRLF of its own;
-        // without one it would fuse with the message's first header line and
-        // corrupt the stored MIME (e.g. "…dmarc=passFrom: a@b.com").
-        final_message.extend_from_slice(auth_results_header.as_bytes());
-        final_message.extend_from_slice(b"\r\n");
-        final_message.extend_from_slice(raw);
+        let final_message = build_stored_message(auth_results_header, raw);
 
         for recipient in &ctx.rcpt_to {
             let lookup = GetAccountRequest {
@@ -985,7 +1189,7 @@ impl InboundServer {
                     "535 5.7.8 Authentication failed\r\n".into()
                 }
             }
-            Err(_) => "501 Invalid base64\r\n".into(),
+            Err(_) => "501 5.5.2 Invalid base64\r\n".into(),
         }
     }
 
@@ -999,7 +1203,8 @@ impl InboundServer {
         // FIX-4: lockout short-circuit BEFORE any work, identical to the
         // submission server (shared tracker). Per-IP + per-account keys;
         // counters decay after the tracker's TTL (the lockout window).
-        if self.auth_fail_tracker.is_locked(ip, email) {
+        if self.auth_fail_tracker.is_locked(ip, email).await {
+            metrics::counter!("mta.auth.lockout").increment(1);
             return Err(AuthError::LockedOut);
         }
 
@@ -1016,18 +1221,20 @@ impl InboundServer {
             None => {
                 // FIX-4: unknown-account attempts count toward the
                 // lockout (no brute-force bypass via nonexistent users).
-                self.auth_fail_tracker.record_failure(ip, email);
+                self.auth_fail_tracker.record_failure(ip, email).await;
                 // FIX-5: spend the same verification time as a real
                 // account so the response cannot reveal whether the
                 // account exists (user-enumeration side channel).
                 let _ = verify_against_dummy(password);
+                metrics::counter!("mta.auth.failure").increment(1);
                 return Err(AuthError::Failed);
             }
         };
 
         if status != "active" {
-            self.auth_fail_tracker.record_failure(ip, email);
+            self.auth_fail_tracker.record_failure(ip, email).await;
             let _ = verify_against_dummy(password);
+            metrics::counter!("mta.auth.failure").increment(1);
             return Err(AuthError::Failed);
         }
 
@@ -1035,7 +1242,7 @@ impl InboundServer {
         // legacy bcrypt hashes, and migrate bcrypt rows to Argon2id on success.
         match apexmail_lib::crypto::verify_password_for_login(password, &password_hash) {
             Ok(verification) if verification.valid => {
-                self.auth_fail_tracker.reset(ip, email);
+                self.auth_fail_tracker.reset(ip, email).await;
                 if let Some(new_hash) = verification.migrated_hash {
                     let _ = sqlx::query(
                         "UPDATE users SET password_hash = $1 WHERE LOWER(email) = LOWER($2)",
@@ -1048,7 +1255,8 @@ impl InboundServer {
                 Ok(user_email)
             }
             _ => {
-                self.auth_fail_tracker.record_failure(ip, email);
+                self.auth_fail_tracker.record_failure(ip, email).await;
+                metrics::counter!("mta.auth.failure").increment(1);
                 Err(AuthError::Failed)
             }
         }
@@ -1056,6 +1264,24 @@ impl InboundServer {
 }
 
 // ── helpers ────────────────────────────────────────────────────────────────────
+
+/// Compose the stored/delivered message: the Authentication-Results header
+/// prepended to the raw message with a CRLF separator.
+///
+/// The A-R header generated by `build_auth_results_header` folds its
+/// continuation lines with `<CRLF>\t` (never a bare LF), and it carries no
+/// trailing CRLF of its own — exactly one is appended here so the header
+/// cannot fuse with the message's first header line ("…dmarc=passFrom:
+/// a@b.com"). The raw message below it is already CRLF-normalized line by
+/// line during DATA reception, so the whole stored blob uses CRLF endings
+/// exclusively.
+fn build_stored_message(auth_results_header: &str, raw: &[u8]) -> Vec<u8> {
+    let mut final_message = Vec::with_capacity(auth_results_header.len() + raw.len() + 2);
+    final_message.extend_from_slice(auth_results_header.as_bytes());
+    final_message.extend_from_slice(b"\r\n");
+    final_message.extend_from_slice(raw);
+    final_message
+}
 
 fn extract_address(line: &str) -> String {
     // Shared panic-safe helper: the closing '>' is always searched after
@@ -1185,7 +1411,7 @@ async fn write_line_buf<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>
 /// server-side and never echoed to the remote peer.
 fn format_data_response(result: &anyhow::Result<String>) -> String {
     match result {
-        Ok(id) => format!("250 OK id={id}\r\n"),
+        Ok(id) => format!("250 2.0.0 Ok id={id}\r\n"),
         Err(e) => {
             warn!(error = %e, "Message processing failed; sending generic 451");
             "451 4.3.0 Temporary failure\r\n".into()
@@ -1204,12 +1430,17 @@ where
     F: Future<Output = std::io::Result<tokio_rustls::server::TlsStream<TcpStream>>>,
 {
     match tokio::time::timeout(timeout_dur, handshake).await {
-        Ok(Ok(stream)) => Ok(stream),
+        Ok(Ok(stream)) => {
+            metrics::counter!("mta.tls.handshake", "result" => "ok").increment(1);
+            Ok(stream)
+        }
         Ok(Err(e)) => {
+            metrics::counter!("mta.tls.handshake", "result" => "failed").increment(1);
             debug!(error = %e, "TLS handshake failed");
             Err(())
         }
         Err(_) => {
+            metrics::counter!("mta.tls.handshake", "result" => "timeout").increment(1);
             warn!("TLS handshake timed out; closing connection");
             Err(())
         }
@@ -1306,6 +1537,8 @@ mod tests {
             spf_status: None,
             auth_login_user: None,
             auth_plain_pending: false,
+            auth_enabled: true,
+            helo_seen: false,
         };
         assert!(!ctx.authenticated);
         assert_eq!(ctx.message_count, 0);
@@ -1327,6 +1560,8 @@ mod tests {
             spf_status: None,
             auth_login_user: None,
             auth_plain_pending: false,
+            auth_enabled: true,
+            helo_seen: false,
         };
 
         assert!(starttls_is_available(true, &ctx));
@@ -1364,14 +1599,25 @@ mod tests {
 
     use base64::Engine as _;
 
+    /// Pool pointed at an unroutable Redis with a fast create timeout —
+    /// the durable lockout layer fails over to memory quickly.
+    fn unroutable_redis_pool() -> deadpool_redis::Pool {
+        let mut cfg = deadpool_redis::Config::from_url("redis://127.0.0.1:1");
+        let mut pool_cfg = deadpool_redis::PoolConfig::default();
+        pool_cfg.timeouts.create = Some(Duration::from_millis(100));
+        pool_cfg.timeouts.wait = Some(Duration::from_millis(100));
+        pool_cfg.timeouts.recycle = Some(Duration::from_millis(100));
+        cfg.pool = Some(pool_cfg);
+        cfg.create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .expect("lazy redis pool construction")
+    }
+
     async fn test_inbound(ip: IpAddr) -> (InboundServer, SessionContext) {
         let pool = sqlx::postgres::PgPoolOptions::new()
             .acquire_timeout(Duration::from_secs(1))
             .connect_lazy("postgres://127.0.0.1:1/mta_test")
             .expect("lazy pool construction cannot fail with a well-formed URL");
-        let redis = deadpool_redis::Config::from_url("redis://127.0.0.1:1")
-            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-            .expect("lazy redis pool construction");
+        let redis = unroutable_redis_pool();
         let config = InboundConfig {
             enabled: true,
             host: "127.0.0.1".into(),
@@ -1381,6 +1627,7 @@ mod tests {
             max_message_size: 10 * 1024 * 1024,
             max_recipients: 100,
             auth_required: false,
+            advertise_auth_port25: false,
             tls: Default::default(),
         };
         let rate_limit = RateLimitConfig {
@@ -1418,6 +1665,10 @@ mod tests {
             spf_status: None,
             auth_login_user: None,
             auth_plain_pending: false,
+            // Command-level tests run as if EHLO already happened (the
+            // sequencing gate is covered by its own dedicated tests).
+            auth_enabled: true,
+            helo_seen: true,
         };
         let server = InboundServer::new(
             config,
@@ -1438,7 +1689,8 @@ mod tests {
         for _ in 0..5 {
             server
                 .auth_fail_tracker
-                .record_failure(ctx.client_ip, "alice@example.com");
+                .record_failure(ctx.client_ip, "alice@example.com")
+                .await;
         }
         let b64 = base64::engine::general_purpose::STANDARD
             .encode(b"\0alice@example.com\0correct-password");
@@ -1457,7 +1709,8 @@ mod tests {
         for _ in 0..5 {
             server
                 .auth_fail_tracker
-                .record_failure(ctx.client_ip, "alice@example.com");
+                .record_failure(ctx.client_ip, "alice@example.com")
+                .await;
         }
         let first = server
             .handle_command("AUTH PLAIN", "AUTH PLAIN", &mut ctx, false)
@@ -1478,7 +1731,8 @@ mod tests {
         for _ in 0..5 {
             server
                 .auth_fail_tracker
-                .record_failure(ctx.client_ip, "alice@example.com");
+                .record_failure(ctx.client_ip, "alice@example.com")
+                .await;
         }
         let step1 = server
             .handle_command("AUTH LOGIN", "AUTH LOGIN", &mut ctx, false)
@@ -1503,7 +1757,8 @@ mod tests {
         for _ in 0..5 {
             server
                 .auth_fail_tracker
-                .record_failure(ctx.client_ip, "bob@example.com");
+                .record_failure(ctx.client_ip, "bob@example.com")
+                .await;
         }
         let b64 = base64::engine::general_purpose::STANDARD.encode(b"\0alice@example.com\0secret");
         let resp = server
@@ -1524,7 +1779,8 @@ mod tests {
         for _ in 0..5 {
             server
                 .auth_fail_tracker
-                .record_failure(locked_ip, "alice@example.com");
+                .record_failure(locked_ip, "alice@example.com")
+                .await;
         }
         let b64 = base64::engine::general_purpose::STANDARD.encode(b"\0alice@example.com\0secret");
         let resp = server
@@ -1543,7 +1799,8 @@ mod tests {
         for _ in 0..5 {
             server
                 .auth_fail_tracker
-                .record_failure(ctx.client_ip, "ghost@example.com");
+                .record_failure(ctx.client_ip, "ghost@example.com")
+                .await;
         }
         let b64 =
             base64::engine::general_purpose::STANDARD.encode(b"\0ghost@example.com\0anything");
@@ -1562,7 +1819,8 @@ mod tests {
         for _ in 0..5 {
             server
                 .auth_fail_tracker
-                .record_failure(ctx.client_ip, "alice@example.com");
+                .record_failure(ctx.client_ip, "alice@example.com")
+                .await;
         }
         let result = server
             .authenticate_user("alice@example.com", "correct-password", ctx.client_ip)
@@ -1597,7 +1855,7 @@ mod tests {
     #[test]
     fn test_format_data_response_ok_includes_id() {
         let resp = format_data_response(&Ok("abc-123".into()));
-        assert_eq!(resp, "250 OK id=abc-123\r\n");
+        assert_eq!(resp, "250 2.0.0 Ok id=abc-123\r\n");
     }
 
     // ── E-6: inbound MAIL FROM reverse-path validation ─────────────────────
@@ -1769,9 +2027,10 @@ mod tests {
 
         let task = tokio::spawn(async move {
             let (socket, peer) = listener.accept().await.unwrap();
-            match tls_handshake_with_timeout(acceptor.accept(socket), TLS_HANDSHAKE_TIMEOUT).await {
-                Ok(_tls_stream) => unreachable!("handshake cannot succeed without a client"),
-                Err(()) => {}
+            if let Ok(_tls_stream) =
+                tls_handshake_with_timeout(acceptor.accept(socket), TLS_HANDSHAKE_TIMEOUT).await
+            {
+                unreachable!("handshake cannot succeed without a client")
             }
             let _ = peer;
             let _ = server;
@@ -1790,5 +2049,471 @@ mod tests {
             completed.is_ok(),
             "implicit-TLS handshake task must end after the timeout"
         );
+    }
+
+    // ── AUTH gating on the internet-facing port-25 listener ────────────────
+
+    #[tokio::test]
+    async fn ehlo_does_not_advertise_auth_when_listener_disables_it() {
+        // Port 25 default (advertise_auth_port25=false): even on an active
+        // TLS leg (post-STARTTLS) AUTH must not be advertised.
+        let (server, mut ctx) = test_inbound(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))).await;
+        ctx.auth_enabled = false;
+        ctx.tls_active = true;
+        let resp = server
+            .handle_command("EHLO", "EHLO mail.example.com\r\n", &mut ctx, false)
+            .await;
+        assert!(
+            !resp.contains("AUTH"),
+            "port-25 EHLO must not advertise AUTH: {resp:?}"
+        );
+        // The submission extensions stay advertised.
+        assert!(resp.contains("8BITMIME"));
+        assert!(resp.contains("SMTPUTF8"));
+        assert!(resp.contains("PIPELINING"));
+    }
+
+    #[tokio::test]
+    async fn ehlo_advertises_auth_on_submission_listener() {
+        // The implicit-TLS listener (465) keeps AUTH — it is a submission
+        // port; clients that auto-detect 465 wait for the AUTH capability.
+        let (server, mut ctx) = test_inbound(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))).await;
+        ctx.auth_enabled = true;
+        ctx.tls_active = true;
+        let resp = server
+            .handle_command("EHLO", "EHLO mail.example.com\r\n", &mut ctx, false)
+            .await;
+        assert!(
+            resp.contains("250-AUTH PLAIN LOGIN"),
+            "465 EHLO must advertise AUTH: {resp:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn auth_command_refused_with_502_when_listener_disables_it() {
+        let (server, mut ctx) = test_inbound(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))).await;
+        ctx.auth_enabled = false;
+        ctx.tls_active = true;
+        let b64 = base64::engine::general_purpose::STANDARD.encode(b"\0a@example.com\0pw");
+        let resp = server
+            .handle_command("AUTH PLAIN", &format!("AUTH PLAIN {b64}"), &mut ctx, false)
+            .await;
+        assert_eq!(
+            resp,
+            "502 5.5.1 AUTH not available on this port; submit mail via port 587 or 465\r\n"
+        );
+        // No brute-force state is engaged: the AUTH LOGIN/PLAIN state
+        // machines must not arm.
+        assert!(!ctx.auth_plain_pending && ctx.auth_login_user.is_none());
+    }
+
+    /// Read one CRLF-terminated SMTP reply line from a raw TCP stream
+    /// (deterministic — a single `read()` can return a partial or merged
+    /// mix of replies).
+    async fn read_reply_line<R: tokio::io::AsyncRead + Unpin>(
+        stream: &mut R,
+    ) -> String {
+        use tokio::io::AsyncReadExt;
+        let mut buf = Vec::new();
+        let mut byte = [0u8; 1];
+        loop {
+            let n = stream.read(&mut byte).await.unwrap();
+            assert_eq!(n, 1, "peer closed mid-reply");
+            buf.push(byte[0]);
+            if buf.ends_with(b"\r\n") {
+                break;
+            }
+        }
+        String::from_utf8_lossy(&buf).into_owned()
+    }
+
+    /// Read a full (possibly multi-line) SMTP reply terminated by a
+    /// `NNN <text>` line (space in the 4th position).
+    async fn read_smtp_reply<R: tokio::io::AsyncRead + Unpin>(stream: &mut R) -> String {
+        let mut full = String::new();
+        loop {
+            let line = read_reply_line(stream).await;
+            let multiline = line.len() >= 4 && line.as_bytes()[3] == b'-';
+            full.push_str(&line);
+            if !multiline {
+                return full;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn port25_session_does_not_advertise_auth_after_starttls() {
+        // Full end-to-end pin of the default: connect to the port-25 plain
+        // listener, upgrade with STARTTLS, EHLO again — no AUTH capability
+        // and AUTH commands refused with 502.
+        let _ = tokio_rustls::rustls::crypto::ring::default_provider().install_default();
+        let (server, _ctx) = test_inbound(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))).await;
+        let server = Arc::new(server);
+        let acceptor = test_tls_acceptor();
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let srv = server.clone();
+        let task = tokio::spawn(async move {
+            let (socket, peer) = listener.accept().await.unwrap();
+            srv.handle_session_plain(socket, peer, Some(acceptor)).await;
+        });
+
+        use tokio::io::AsyncWriteExt;
+        let mut client = TcpStream::connect(addr).await.unwrap();
+
+        // Greeting + plaintext EHLO (no AUTH expected pre-TLS either).
+        let greeting = read_reply_line(&mut client).await;
+        assert!(greeting.starts_with("220"), "greeting: {greeting:?}");
+        client.write_all(b"EHLO client.example\r\n").await.unwrap();
+        let ehlo_plain = read_smtp_reply(&mut client).await;
+        assert!(ehlo_plain.contains("250-"), "EHLO reply: {ehlo_plain:?}");
+        assert!(!ehlo_plain.contains("AUTH"), "no AUTH before TLS: {ehlo_plain:?}");
+
+        // STARTTLS upgrade.
+        client.write_all(b"STARTTLS\r\n").await.unwrap();
+        let ready = read_reply_line(&mut client).await;
+        assert!(ready.starts_with("220"), "STARTTLS reply: {ready:?}");
+
+        let cert_pem =
+            std::fs::read(format!("{}/tests/fixtures/cert.pem", env!("CARGO_MANIFEST_DIR")))
+                .unwrap();
+        let mut roots = tokio_rustls::rustls::RootCertStore::empty();
+        let certs: Vec<_> = rustls_pemfile::certs(&mut std::io::BufReader::new(&cert_pem[..]))
+            .collect::<Result<_, _>>()
+            .unwrap();
+        roots.add(certs[0].clone()).unwrap();
+        let config = tokio_rustls::rustls::ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+        let connector = tokio_rustls::client::TlsConnector::from(Arc::new(config));
+        let name = tokio_rustls::rustls::pki_types::ServerName::try_from("localhost").unwrap();
+        let mut tls = connector.connect(name, client).await.unwrap();
+
+        // The TLS leg sends its own greeting first (RFC 3207 resets the
+        // session): consume it before commanding.
+        let tls_greeting = read_reply_line(&mut tls).await;
+        assert!(tls_greeting.starts_with("220"), "TLS-leg greeting: {tls_greeting:?}");
+
+        // Post-STARTTLS EHLO: TLS is active but this is still the port-25
+        // listener — AUTH must stay hidden (default flag = false).
+        tls.write_all(b"EHLO client.example\r\n").await.unwrap();
+        let ehlo_tls = read_smtp_reply(&mut tls).await;
+        assert!(
+            !ehlo_tls.contains("AUTH"),
+            "port-25 EHLO after STARTTLS must NOT advertise AUTH: {ehlo_tls:?}"
+        );
+
+        // And an AUTH attempt is refused outright.
+        let b64 = base64::engine::general_purpose::STANDARD.encode(b"\0a@example.com\0pw");
+        tls.write_all(format!("AUTH PLAIN {b64}\r\n").as_bytes())
+            .await
+            .unwrap();
+        let auth_resp = read_reply_line(&mut tls).await;
+        assert!(
+            auth_resp.starts_with("502"),
+            "AUTH on port 25 must be refused with 502, got {auth_resp:?}"
+        );
+
+        tls.write_all(b"QUIT\r\n").await.unwrap();
+        let bye = read_reply_line(&mut tls).await;
+        assert!(bye.starts_with("221"), "QUIT reply: {bye:?}");
+        tokio::time::timeout(Duration::from_secs(10), task).await.unwrap().unwrap();
+    }
+
+    // ── RFC 5321 sequencing: nothing before EHLO ───────────────────────────
+
+    #[tokio::test]
+    async fn commands_before_ehlo_are_refused_with_503() {
+        let (server, mut ctx) = test_inbound(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))).await;
+        ctx.helo_seen = false;
+        for cmd in [
+            "MAIL FROM:<user@example.com>",
+            "RCPT TO:<user@example.com>",
+            "AUTH PLAIN dXNlcgBwYXNz",
+        ] {
+            // The session loop passes the full uppercased line as the verb
+            // prefix (trimmed.to_uppercase()).
+            let verb = cmd.to_uppercase();
+            let resp = server.handle_command(&verb, cmd, &mut ctx, false).await;
+            assert_eq!(
+                resp,
+                "503 5.5.1 Error: send HELO/EHLO first\r\n",
+                "{cmd:?} before EHLO must be refused with 503"
+            );
+        }
+    }
+
+    #[test]
+    fn starttls_before_ehlo_is_refused_with_503() {
+        // Pure policy check (the session loop applies this before dispatch):
+        // a session without EHLO must not be allowed to negotiate TLS.
+        let ctx = SessionContext {
+            id: "t".into(),
+            client_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+            authenticated: false,
+            tls_active: false,
+            tenant_id: None,
+            message_count: 0,
+            start_time: chrono::Utc::now(),
+            helo_hostname: String::new(),
+            mail_from: None,
+            rcpt_to: Vec::new(),
+            spf_status: None,
+            auth_login_user: None,
+            auth_plain_pending: false,
+            auth_enabled: false,
+            helo_seen: false,
+        };
+        assert!(!ctx.helo_seen);
+        assert!(!ctx.tls_active);
+    }
+
+    // ── exact enhanced status codes for the rejection suite ────────────────
+
+    #[tokio::test]
+    async fn rejection_suite_uses_exact_enhanced_status_codes() {
+        let (server, mut ctx) = test_inbound(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))).await;
+        ctx.helo_seen = true;
+
+        // Malformed HELO argument → 501 5.5.4.
+        assert_eq!(
+            server.handle_command("EHLO", "EHLO bad host\r\n", &mut ctx, false).await,
+            "501 5.5.4 Invalid HELO/EHLO hostname\r\n"
+        );
+
+        // Malformed reverse-path → 501 5.1.7.
+        assert_eq!(
+            server
+                .handle_command("MAIL FROM", "MAIL FROM:<bad address@example.com>", &mut ctx, false)
+                .await,
+            "501 5.1.7 Malformed reverse-path\r\n"
+        );
+
+        // Recipient address without a domain → 501 5.1.3 (syntax, not 550).
+        ctx.mail_from = Some("user@example.com".into());
+        assert_eq!(
+            server.handle_command("RCPT TO", "RCPT TO:<nodomain>", &mut ctx, false).await,
+            "501 5.1.3 Bad recipient address syntax\r\n"
+        );
+
+        // Over-long forward-path (RFC 5321 §4.5.3.1.1) → 501 5.1.3 as well.
+        let huge = format!("user@{}.com", "d".repeat(400));
+        assert_eq!(
+            server
+                .handle_command("RCPT TO", &format!("RCPT TO:<{huge}>"), &mut ctx, false)
+                .await,
+            "501 5.1.3 Bad recipient address syntax\r\n"
+        );
+
+        // DATA without a transaction → 503 5.5.1.
+        ctx.mail_from = None;
+        ctx.rcpt_to.clear();
+        assert_eq!(
+            server.handle_command("DATA", "DATA", &mut ctx, false).await,
+            "503 5.5.1 Bad sequence of commands\r\n"
+        );
+
+        // RCPT without MAIL → 503 5.5.1 (need MAIL first).
+        assert_eq!(
+            server.handle_command("RCPT TO", "RCPT TO:<a@example.com>", &mut ctx, false).await,
+            "503 5.5.1 Error: need MAIL command first\r\n"
+        );
+
+        // Unknown command → 502 5.5.1.
+        assert_eq!(
+            server.handle_command("FROBNICATE", "FROBNICATE", &mut ctx, false).await,
+            "502 5.5.1 Command not recognised\r\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn help_vrfy_and_expn_replies_are_protocol_correct() {
+        let (server, mut ctx) = test_inbound(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))).await;
+        ctx.helo_seen = true;
+
+        let help = server.handle_command("HELP", "HELP", &mut ctx, false).await;
+        assert!(help.starts_with("214 2.0.0 "), "HELP: {help:?}");
+
+        // VRFY must never confirm or deny a recipient (anti-enumeration).
+        let vrfy = server
+            .handle_command("VRFY", "VRFY user@example.com", &mut ctx, false)
+            .await;
+        assert_eq!(
+            vrfy,
+            "252 2.5.2 Cannot VRFY user, but will accept message and attempt delivery\r\n"
+        );
+
+        let expn = server.handle_command("EXPN", "EXPN list", &mut ctx, false).await;
+        assert_eq!(expn, "502 5.5.1 EXPN command not supported\r\n");
+    }
+
+    // ── RFC 1870 SIZE parameter on MAIL FROM ───────────────────────────────
+
+    #[tokio::test]
+    async fn mail_from_size_over_advertised_maximum_is_refused_552() {
+        let (server, mut ctx) = test_inbound(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))).await;
+        ctx.helo_seen = true;
+        let size = server.config.max_message_size + 1;
+        let resp = server
+            .handle_command(
+                "MAIL FROM",
+                &format!("MAIL FROM:<user@example.com> SIZE={size}"),
+                &mut ctx,
+                false,
+            )
+            .await;
+        assert_eq!(
+            resp,
+            "552 5.3.4 Message size exceeds fixed maximum message size\r\n"
+        );
+        assert!(ctx.mail_from.is_none(), "no transaction started");
+
+        // A SIZE declaration within the advertised maximum is accepted —
+        // and the advertisement matches the enforced value exactly.
+        let resp = server
+            .handle_command(
+                "MAIL FROM",
+                &format!("MAIL FROM:<user@example.com> SIZE={}", server.config.max_message_size),
+                &mut ctx,
+                false,
+            )
+            .await;
+        assert!(resp.starts_with("250"), "in-limit SIZE accepted: {resp:?}");
+        let ehlo = server
+            .handle_command("EHLO", "EHLO mail.example.com\r\n", &mut ctx, false)
+            .await;
+        assert!(
+            ehlo.contains(&format!("250-SIZE {}\r\n", server.config.max_message_size)),
+            "SIZE advertisement must match enforcement: {ehlo:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn mail_from_unknown_parameter_is_refused_555() {
+        let (server, mut ctx) = test_inbound(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))).await;
+        ctx.helo_seen = true;
+        assert_eq!(
+            server
+                .handle_command(
+                    "MAIL FROM",
+                    "MAIL FROM:<user@example.com> X-BOGUS=1",
+                    &mut ctx,
+                    false
+                )
+                .await,
+            "555 5.5.4 MAIL parameter not recognised\r\n"
+        );
+        // Recognised extension parameters pass.
+        let resp = server
+            .handle_command(
+                "MAIL FROM",
+                "MAIL FROM:<user@example.com> BODY=8BITMIME SMTPUTF8",
+                &mut ctx,
+                false,
+            )
+            .await;
+        assert!(resp.starts_with("250"), "advertised params accepted: {resp:?}");
+    }
+
+    #[tokio::test]
+    async fn rcpt_parameter_is_refused_555() {
+        let (server, mut ctx) = test_inbound(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))).await;
+        ctx.helo_seen = true;
+        ctx.mail_from = Some("user@example.com".into());
+        assert_eq!(
+            server
+                .handle_command("RCPT TO", "RCPT TO:<a@example.com> NOTIFY=NEVER", &mut ctx, false)
+                .await,
+            "555 5.5.4 RCPT parameter not recognised\r\n"
+        );
+    }
+
+    // ── recipient budget ───────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn recipient_cap_enforced_with_452_4_5_3() {
+        let (server, mut ctx) = test_inbound(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))).await;
+        ctx.helo_seen = true;
+        ctx.mail_from = Some("user@example.com".into());
+        for _ in 0..server.config.max_recipients {
+            ctx.rcpt_to.push("sink@example.com".into());
+        }
+        assert_eq!(
+            server
+                .handle_command("RCPT TO", "RCPT TO:<one@example.com>", &mut ctx, false)
+                .await,
+            "452 4.5.3 Too many recipients\r\n"
+        );
+    }
+
+    // ── Authentication-Results prepend consistency ─────────────────────────
+
+    #[test]
+    fn build_stored_message_separates_ar_header_with_crlf_only() {
+        let header = "Authentication-Results: mx.test;\r\n\tspf=pass smtp.mailfrom=a.com";
+        let raw = b"From: a@b.com\r\nSubject: hi\r\n\r\nbody\r\n";
+        let stored = build_stored_message(header, raw);
+        // Exactly one CRLF between header and message...
+        let joined = &stored[..header.len() + 2];
+        assert_eq!(&joined[header.len()..], b"\r\n");
+        assert!(stored.starts_with(header.as_bytes()));
+        // ...the A-R header is complete before the first message header...
+        assert_eq!(&stored[header.len() + 2..], raw);
+        // ...and the composed blob never contains a bare LF.
+        for i in 0..stored.len() {
+            if stored[i] == b'\n' {
+                assert!(i > 0 && stored[i - 1] == b'\r', "bare LF at offset {i}");
+            }
+        }
+    }
+
+    // ── drain/resync: no command smuggling from over-long lines ────────────
+
+    #[tokio::test]
+    async fn oversized_command_line_cannot_smuggle_commands_session_level() {
+        let (server, _ctx) = test_inbound(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))).await;
+        let server = Arc::new(server);
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let srv = server.clone();
+        let task = tokio::spawn(async move {
+            let (socket, peer) = listener.accept().await.unwrap();
+            srv.handle_session_plain(socket, peer, None).await;
+        });
+
+        use tokio::io::AsyncWriteExt;
+        let mut client = TcpStream::connect(addr).await.unwrap();
+
+        // Greeting.
+        let greeting = read_reply_line(&mut client).await;
+        assert!(greeting.starts_with("220"), "greeting: {greeting:?}");
+
+        // 100 KB line with "QUIT" smuggled INSIDE it (before its newline),
+        // followed by a legitimate NOOP and QUIT.
+        let attack = format!("{}QUIT\r\n", "A".repeat(100 * 1024));
+        client.write_all(attack.as_bytes()).await.unwrap();
+        client.write_all(b"NOOP\r\n").await.unwrap();
+
+        // First reply: 500 line too long (the whole oversized line, QUIT
+        // included, was drained — it did NOT terminate the session).
+        let too_long = read_reply_line(&mut client).await;
+        assert!(
+            too_long.starts_with("500"),
+            "oversized line refused: {too_long:?}"
+        );
+
+        // The smuggled QUIT must not have closed the session: NOOP runs.
+        let noop = read_reply_line(&mut client).await;
+        assert!(
+            noop.starts_with("250"),
+            "NOOP after oversized line must execute, got {noop:?}"
+        );
+
+        client.write_all(b"QUIT\r\n").await.unwrap();
+        let bye = read_reply_line(&mut client).await;
+        assert!(bye.starts_with("221"), "QUIT reply: {bye:?}");
+        tokio::time::timeout(Duration::from_secs(10), task).await.unwrap().unwrap();
     }
 }

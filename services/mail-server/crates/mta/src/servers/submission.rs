@@ -21,8 +21,9 @@ use crate::auth::{verify_against_dummy, AuthError, AuthFailTracker};
 use crate::config::{RateLimitConfig, SubmissionConfig};
 
 use super::util::{
-    is_strict_end_of_data, line_content, read_line_capped, unstuff_dot_line, LineRead,
-    MAX_COMMAND_LINE, MAX_DATA_LINE,
+    is_strict_end_of_data, line_content_bytes, line_lossy, log_session_summary, log_smtp_reject,
+    mail_size_param, read_line_capped, unstuff_dot_line_bytes, validate_mail_params,
+    validate_rcpt_params, LineRead, MailParamPolicy, MAX_COMMAND_LINE, MAX_DATA_LINE,
 };
 
 /// Per-read timeout for AUTH challenge/response lines (a silent client must
@@ -45,6 +46,9 @@ enum ReadDataOutcome {
     Message(Vec<u8>),
     /// A line exceeded the per-line cap or the message exceeded the size cap.
     TooLarge,
+    /// The absolute line-drain limit was exceeded without a newline: the
+    /// stream cannot be resynchronised — the connection must close.
+    Overflow,
     /// Total or per-line deadline exceeded.
     TimedOut,
     /// Client disconnected / stream failed mid-DATA: partial payload discarded.
@@ -73,6 +77,9 @@ pub struct SubmissionServer {
     pool: PgPool,
     shutdown: Arc<Notify>,
     connections: Arc<DashMap<std::net::IpAddr, u32>>,
+    /// Failed-AUTH lockout tracking. Backed by Redis when a pool is
+    /// supplied (`with_redis`) so lockouts survive restarts and are shared
+    /// across replicas; otherwise in-memory only.
     auth_fail_tracker: AuthFailTracker,
     tls_acceptor: Option<TlsAcceptor>,
 }
@@ -82,6 +89,7 @@ impl SubmissionServer {
         config: SubmissionConfig,
         rate_limit: RateLimitConfig,
         pool: PgPool,
+        redis: deadpool_redis::Pool,
         tls_acceptor: Option<TlsAcceptor>,
     ) -> Self {
         Self {
@@ -90,7 +98,7 @@ impl SubmissionServer {
             pool,
             shutdown: Arc::new(Notify::new()),
             connections: Arc::new(DashMap::new()),
-            auth_fail_tracker: AuthFailTracker::new(),
+            auth_fail_tracker: AuthFailTracker::with_redis(redis),
             tls_acceptor,
         }
     }
@@ -187,6 +195,11 @@ impl SubmissionServer {
     // ── Generic session loop (works over TCP or TLS) ─────────────────────
     // Returns (starttls_requested, message_count).
 
+    ///
+    /// PIPELINING (RFC 2920): commands are read line-by-line from a buffered
+    /// stream and each command's reply is flushed before the next line is
+    /// parsed, so grouped commands get one reply each in order; the DATA
+    /// `354` reply is flushed before body lines are consumed.
     async fn run_session_loop<S: AsyncRead + AsyncWrite + Unpin>(
         self: &Arc<Self>,
         stream: &mut BufStream<S>,
@@ -202,18 +215,46 @@ impl SubmissionServer {
         let mut message_count: u32 = 0;
         let mut line = String::new();
         let ip = peer.ip();
+        let session_id = Uuid::new_v4().to_string();
+        let started = Instant::now();
 
         loop {
             line.clear();
             let read = async { read_line_capped(stream, MAX_COMMAND_LINE).await };
             match tokio::time::timeout(Duration::from_secs(300), read).await {
-                Err(_) => break,
+                Err(_) => {
+                    // Idle timeout: 421 with the reason instead of a bare drop.
+                    log_smtp_reject(
+                        "submission",
+                        ip,
+                        &session_id,
+                        "421 4.4.2 Idle timeout, closing connection",
+                    );
+                    let _ = write_line(stream, "421 4.4.2 Idle timeout, closing connection\r\n")
+                        .await;
+                    break;
+                }
                 Ok(Ok(LineRead::Eof)) => break,
                 Ok(Ok(LineRead::TooLong)) => {
+                    // Remainder drained through its newline: session stays
+                    // synchronised.
+                    log_smtp_reject("submission", ip, &session_id, "500 5.5.2 Line too long");
                     let _ = write_line(stream, "500 5.5.2 Line too long\r\n").await;
                     continue;
                 }
-                Ok(Ok(LineRead::Line(l, _))) => line = l,
+                Ok(Ok(LineRead::Overflow)) => {
+                    // No newline within the absolute drain limit: close —
+                    // reading on would parse attacker bytes as commands.
+                    log_smtp_reject(
+                        "submission",
+                        ip,
+                        &session_id,
+                        "500 5.5.2 Line too long (connection closed)",
+                    );
+                    let _ = write_line(stream, "500 5.5.2 Line too long\r\n").await;
+                    break;
+                }
+                Ok(Ok(LineRead::Line(l, _))) => line = line_lossy(&l),
                 Ok(Err(e)) => {
                     debug!(error = %e, peer = %peer, "Read error");
                     break;
@@ -253,9 +294,24 @@ impl SubmissionServer {
                 caps.push_str("250 SMTPUTF8\r\n");
                 let _ = write_line(stream, &caps).await;
             } else if cmd == "STARTTLS" && allow_starttls && !already_tls {
-                return (true, message_count);
-            } else if cmd == "STARTTLS" {
-                let _ = write_line(stream, "454 TLS not available\r\n").await;
+                if !helo_seen {
+                    log_smtp_reject(
+                        "submission",
+                        ip,
+                        &session_id,
+                        "503 5.5.1 Error: send HELO/EHLO first",
+                    );
+                    let _ = write_line(stream, "503 5.5.1 Error: send HELO/EHLO first\r\n").await;
+                } else {
+                    return (true, message_count);
+                }
+            } else if cmd == "STARTTLS" && already_tls {
+                // RFC 3207 §4: nested STARTTLS is a sequencing error.
+                log_smtp_reject("submission", ip, &session_id, "503 5.5.1 TLS already active");
+                let _ = write_line(stream, "503 5.5.1 TLS already active\r\n").await;
+            } else if cmd.starts_with("STARTTLS") {
+                log_smtp_reject("submission", ip, &session_id, "454 4.7.0 TLS not available");
+                let _ = write_line(stream, "454 4.7.0 TLS not available\r\n").await;
             } else if cmd.starts_with("AUTH LOGIN") || cmd.starts_with("AUTH PLAIN") {
                 if !helo_seen {
                     // RFC 4954 §4: AUTH must not be used before EHLO.
@@ -284,6 +340,32 @@ impl SubmissionServer {
                     let _ = write_line(stream, "503 5.5.1 Send EHLO first\r\n").await;
                 } else if !authenticated {
                     let _ = write_line(stream, "530 5.7.0 Authentication required\r\n").await;
+                } else if let Err(reject) = validate_mail_params(
+                    trimmed,
+                    MailParamPolicy {
+                        body_8bitmime: true,
+                        smtputf8: true,
+                    },
+                ) {
+                    log_smtp_reject("submission", ip, &session_id, reject);
+                    let _ = write_line(stream, &format!("{reject}\r\n")).await;
+                } else if mail_size_param(trimmed)
+                    .is_some_and(|size| size > self.config.max_message_size as u64)
+                {
+                    // RFC 1870 §6.2: a SIZE declaration above the advertised
+                    // maximum is refused immediately (552), before any DATA
+                    // is transferred.
+                    log_smtp_reject(
+                        "submission",
+                        ip,
+                        &session_id,
+                        "552 5.3.4 Message size exceeds fixed maximum message size",
+                    );
+                    let _ = write_line(
+                        stream,
+                        "552 5.3.4 Message size exceeds fixed maximum message size\r\n",
+                    )
+                    .await;
                 } else {
                     // Store only the envelope address, not the full command line.
                     let addr = extract_address(trimmed);
@@ -294,7 +376,7 @@ impl SubmissionServer {
                         let _ = write_line(stream, "553 5.1.7 Sender address required\r\n").await;
                     } else {
                         mail_from = Some(addr);
-                        let _ = write_line(stream, "250 OK\r\n").await;
+                        let _ = write_line(stream, "250 2.0.0 Ok\r\n").await;
                     }
                 }
             } else if cmd.starts_with("RCPT TO") {
@@ -304,6 +386,9 @@ impl SubmissionServer {
                     let _ = write_line(stream, "530 5.7.0 Authentication required\r\n").await;
                 } else if rcpt_to.len() >= self.config.max_recipients {
                     let _ = write_line(stream, "452 4.5.3 Too many recipients\r\n").await;
+                } else if let Err(reject) = validate_rcpt_params(trimmed) {
+                    log_smtp_reject("submission", ip, &session_id, reject);
+                    let _ = write_line(stream, &format!("{reject}\r\n")).await;
                 } else {
                     // Store only the recipient address, not the full command line.
                     let addr = extract_address(trimmed);
@@ -312,7 +397,7 @@ impl SubmissionServer {
                             write_line(stream, "501 5.1.3 Bad recipient address syntax\r\n").await;
                     } else {
                         rcpt_to.push(addr);
-                        let _ = write_line(stream, "250 OK\r\n").await;
+                        let _ = write_line(stream, "250 2.0.0 Ok\r\n").await;
                     }
                 }
             } else if cmd.starts_with("DATA") {
@@ -328,8 +413,24 @@ impl SubmissionServer {
 
                     match self.read_data_message(stream).await {
                         ReadDataOutcome::TimedOut => {
+                            log_smtp_reject(
+                                "submission",
+                                ip,
+                                &session_id,
+                                "421 4.4.2 Data timeout exceeded",
+                            );
                             let _ =
                                 write_line(stream, "421 4.4.2 Data timeout exceeded\r\n").await;
+                            break;
+                        }
+                        ReadDataOutcome::Overflow => {
+                            log_smtp_reject(
+                                "submission",
+                                ip,
+                                &session_id,
+                                "500 5.5.2 Data line too long (connection closed)",
+                            );
+                            let _ = write_line(stream, "500 5.5.2 Line too long\r\n").await;
                             break;
                         }
                         ReadDataOutcome::Aborted => {
@@ -339,7 +440,17 @@ impl SubmissionServer {
                         }
                         ReadDataOutcome::TooLarge => {
                             // RFC 5321 §4.5.3.2: message exceeds the SIZE limit.
-                            let _ = write_line(stream, "552 5.3.4 Message too large\r\n").await;
+                            log_smtp_reject(
+                                "submission",
+                                ip,
+                                &session_id,
+                                "552 5.3.4 Message size exceeds fixed maximum message size",
+                            );
+                            let _ = write_line(
+                                stream,
+                                "552 5.3.4 Message size exceeds fixed maximum message size\r\n",
+                            )
+                            .await;
                             mail_from = None;
                             rcpt_to.clear();
                             continue;
@@ -361,7 +472,7 @@ impl SubmissionServer {
                                     message_count += 1;
                                     let _ = write_line(
                                         stream,
-                                        &format!("250 OK id={}\r\n", msg_id),
+                                        &format!("250 2.0.0 Ok id={}\r\n", msg_id),
                                     )
                                     .await;
                                     if message_count
@@ -412,28 +523,41 @@ impl SubmissionServer {
             } else if cmd.starts_with("RSET") {
                 mail_from = None;
                 rcpt_to.clear();
-                let _ = write_line(stream, "250 OK\r\n").await;
+                let _ = write_line(stream, "250 2.0.0 Ok\r\n").await;
             } else if cmd.starts_with("NOOP") {
-                let _ = write_line(stream, "250 OK\r\n").await;
+                let _ = write_line(stream, "250 2.0.0 Ok\r\n").await;
             } else if cmd.starts_with("QUIT") {
-                let _ = write_line(stream, "221 Bye\r\n").await;
+                let _ = write_line(stream, "221 2.0.0 Bye\r\n").await;
                 break;
             } else if cmd.starts_with("HELP") {
                 let _ = write_line(
                     stream,
-                    "214 Supported: EHLO HELO AUTH MAIL RCPT DATA RSET NOOP QUIT\r\n",
+                    "214 2.0.0 Commands: EHLO HELO AUTH MAIL RCPT DATA RSET NOOP QUIT STARTTLS HELP VRFY EXPN; see RFC 5321\r\n",
                 )
                 .await;
+            } else if cmd.starts_with("VRFY") {
+                // RFC 5321 §7.3: never confirm address existence.
+                let _ = write_line(
+                    stream,
+                    "252 2.5.2 Cannot VRFY user, but will accept message and attempt delivery\r\n",
+                )
+                .await;
+            } else if cmd.starts_with("EXPN") {
+                let _ = write_line(stream, "502 5.5.1 EXPN command not supported\r\n").await;
             } else {
                 let _ = write_line(stream, "502 5.5.1 Command not recognised\r\n").await;
             }
         }
 
-        debug!(
-            peer = %peer,
-            authenticated = authenticated,
-            messages = message_count,
-            "Submission session ended"
+        log_session_summary(
+            "submission",
+            ip,
+            &session_id,
+            already_tls,
+            authenticated,
+            message_count,
+            started.elapsed().as_millis(),
+            "closed",
         );
         (false, message_count)
     }
@@ -455,11 +579,9 @@ impl SubmissionServer {
         stream: &mut BufStream<S>,
     ) -> ReadDataOutcome {
         let mut data = Vec::new();
-        let mut line = String::new();
         let mut too_large = false;
         let deadline = Instant::now() + DATA_TOTAL_TIMEOUT;
         loop {
-            line.clear();
             let remaining = deadline
                 .checked_duration_since(Instant::now())
                 .unwrap_or(Duration::ZERO);
@@ -473,15 +595,20 @@ impl SubmissionServer {
                 Ok(Ok(LineRead::TooLong)) => {
                     // A single line over the per-line cap cannot be part of a
                     // message we are willing to store; the line itself was
-                    // drained, keep reading (without buffering) until the
-                    // terminator so the session stays synchronised and can be
-                    // refused with 552.
+                    // drained through its newline, keep reading (without
+                    // buffering) until the terminator so the session stays
+                    // synchronised and can be refused with 552.
                     too_large = true;
                     data.clear();
                 }
+                Ok(Ok(LineRead::Overflow)) => {
+                    // No newline within the absolute drain limit: the stream
+                    // cannot be resynchronised — treat as fatal for the DATA
+                    // transfer (the caller closes after the 552/500 reply).
+                    return ReadDataOutcome::Overflow;
+                }
                 Ok(Ok(LineRead::Line(l, term))) => {
-                    line = l;
-                    if is_strict_end_of_data(&line, term) {
+                    if is_strict_end_of_data(&l, term) {
                         if too_large {
                             return ReadDataOutcome::TooLarge;
                         }
@@ -499,12 +626,16 @@ impl SubmissionServer {
                         // Drain the rest without buffering.
                         continue;
                     }
-                    let data_slice = unstuff_dot_line(line_content(&line, term));
+                    // Bytes preserved verbatim (8BITMIME): strip the line's
+                    // actual terminator, un-stuff exactly one leading dot
+                    // (RFC 5321 §4.5.2), and normalize the stored line to
+                    // CRLF so a bare-LF body line is never relayed.
+                    let data_slice = unstuff_dot_line_bytes(line_content_bytes(&l, term));
                     if data.len() + data_slice.len() + 2 > self.config.max_message_size {
                         too_large = true;
                         data.clear();
                     } else {
-                        data.extend_from_slice(data_slice.as_bytes());
+                        data.extend_from_slice(data_slice);
                         data.extend_from_slice(b"\r\n");
                     }
                 }
@@ -641,7 +772,7 @@ impl SubmissionServer {
         )
         .await
         {
-            Ok(Ok(LineRead::Line(l, _))) => Some(l),
+            Ok(Ok(LineRead::Line(l, _))) => Some(line_lossy(&l)),
             Ok(Ok(LineRead::TooLong)) => {
                 let _ = write_line(stream, "500 5.5.2 Line too long\r\n").await;
                 None
@@ -664,7 +795,8 @@ impl SubmissionServer {
         // touching the database or verifying the presented password.
         // Counters decay after the tracker's TTL, which is the lockout
         // window after which legitimate users can authenticate again.
-        if self.auth_fail_tracker.is_locked(ip, email) {
+        if self.auth_fail_tracker.is_locked(ip, email).await {
+            metrics::counter!("mta.auth.lockout").increment(1);
             return Err(AuthError::LockedOut);
         }
 
@@ -684,18 +816,20 @@ impl SubmissionServer {
             None => {
                 // FIX-3: unknown-account attempts count toward the
                 // lockout (no brute-force bypass via nonexistent users).
-                self.auth_fail_tracker.record_failure(ip, email);
+                self.auth_fail_tracker.record_failure(ip, email).await;
                 // FIX-5: spend the same verification time as a real
                 // account so the response cannot reveal whether the
                 // account exists (user-enumeration side channel).
                 let _ = verify_against_dummy(password);
+                metrics::counter!("mta.auth.failure").increment(1);
                 return Err(AuthError::Failed);
             }
         };
 
         if status != "active" {
-            self.auth_fail_tracker.record_failure(ip, email);
+            self.auth_fail_tracker.record_failure(ip, email).await;
             let _ = verify_against_dummy(password);
+            metrics::counter!("mta.auth.failure").increment(1);
             return Err(AuthError::Failed);
         }
 
@@ -705,7 +839,7 @@ impl SubmissionServer {
         // Argon2id replacement hash, which we persist so the row migrates.
         match apexmail_lib::crypto::verify_password_for_login(password, &password_hash) {
             Ok(verification) if verification.valid => {
-                self.auth_fail_tracker.reset(ip, email);
+                self.auth_fail_tracker.reset(ip, email).await;
                 if let Some(new_hash) = verification.migrated_hash {
                     let _ = sqlx::query(
                         "UPDATE users SET password_hash = $1 WHERE LOWER(email) = LOWER($2)",
@@ -718,7 +852,8 @@ impl SubmissionServer {
                 Ok((user_email, user_id))
             }
             _ => {
-                self.auth_fail_tracker.record_failure(ip, email);
+                self.auth_fail_tracker.record_failure(ip, email).await;
+                metrics::counter!("mta.auth.failure").increment(1);
                 Err(AuthError::Failed)
             }
         }
@@ -776,6 +911,17 @@ impl SubmissionServer {
         };
 
         let mut tx = self.pool.begin().await.map_err(|_| ())?;
+
+        // Queue-insert durability: a submission must not be acknowledged
+        // before its queue row is recoverable. PostgreSQL defaults to
+        // synchronous_commit=on, but that is a session/server-level default
+        // that a pool configuration or operator could relax; SET LOCAL pins
+        // the WAL-flush-before-commit guarantee for exactly this
+        // transaction, so the 250 implies the row survived a crash.
+        sqlx::query("SET LOCAL synchronous_commit = on")
+            .execute(&mut *tx)
+            .await
+            .map_err(|_| ())?;
 
         // tenant_id is VARCHAR(26) referencing tenants(id) — never the user's
         // account UUID. Look up the authenticated user's actual tenant (by
@@ -968,11 +1114,17 @@ fn extract_address(line: &str) -> String {
         .to_string()
 }
 
+/// Hard cap on envelope address length. RFC 5321 §4.5.3.1.1 caps the
+/// reverse/forward path; 320 octets is the generous local(64)+domain(255)
+/// budget also used by the bounce server's validator, and bounds how much
+/// of an over-long command line can end up stored in the envelope.
+pub(crate) const MAX_ENVELOPE_ADDR_LEN: usize = 320;
+
 /// Validate an envelope address against the same rules `email_queue` enforces
 /// (`chk_email_queue_from_address`): no whitespace, one `@`, a non-empty local
 /// part, and a non-empty domain containing at least one dot.
 pub(crate) fn is_valid_envelope_address(addr: &str) -> bool {
-    if addr.is_empty() || addr.chars().any(char::is_whitespace) {
+    if addr.is_empty() || addr.len() > MAX_ENVELOPE_ADDR_LEN || addr.chars().any(char::is_whitespace) {
         return false;
     }
     match addr.rsplit_once('@') {
@@ -1069,6 +1221,19 @@ mod tests {
         format!("{}/tests/fixtures", env!("CARGO_MANIFEST_DIR"))
     }
 
+    /// Pool pointed at an unroutable Redis with a fast create timeout —
+    /// the durable lockout layer fails over to memory quickly.
+    fn unroutable_redis_pool() -> deadpool_redis::Pool {
+        let mut cfg = deadpool_redis::Config::from_url("redis://127.0.0.1:1");
+        let mut pool_cfg = deadpool_redis::PoolConfig::default();
+        pool_cfg.timeouts.create = Some(Duration::from_millis(100));
+        pool_cfg.timeouts.wait = Some(Duration::from_millis(100));
+        pool_cfg.timeouts.recycle = Some(Duration::from_millis(100));
+        cfg.pool = Some(pool_cfg);
+        cfg.create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .expect("lazy redis pool construction")
+    }
+
     fn test_peer(octet: u8) -> SocketAddr {
         format!("10.0.0.{octet}:2525").parse().unwrap()
     }
@@ -1081,6 +1246,11 @@ mod tests {
             .acquire_timeout(Duration::from_secs(1))
             .connect_lazy("postgres://127.0.0.1:1/mta_test")
             .expect("lazy pool construction cannot fail with a well-formed URL");
+        // Unroutable Redis: the durable lockout store degrades to the
+        // in-memory fallback, which is what the lockout tests exercise.
+        // A short create timeout keeps the failure fast (an OS-level TCP
+        // timeout would otherwise stall every auth attempt by minutes).
+        let redis = unroutable_redis_pool();
         let config = SubmissionConfig {
             enabled: true,
             host: "127.0.0.1".into(),
@@ -1096,7 +1266,7 @@ mod tests {
             max_messages_per_connection: 100,
             max_recipients_per_message: 100,
         };
-        SubmissionServer::new(config, rate_limit, pool, tls_acceptor)
+        SubmissionServer::new(config, rate_limit, pool, redis, tls_acceptor)
     }
 
     fn fixture_acceptor() -> TlsAcceptor {
@@ -1418,7 +1588,8 @@ mod tests {
         for _ in 0..5 {
             server
                 .auth_fail_tracker
-                .record_failure(ip, "alice@example.com");
+                .record_failure(ip, "alice@example.com")
+                .await;
         }
         let b64 = auth_plain_b64("alice@example.com", "correct-password");
         run_session(
@@ -1441,7 +1612,8 @@ mod tests {
         for _ in 0..5 {
             server
                 .auth_fail_tracker
-                .record_failure(ip, "bob@example.com");
+                .record_failure(ip, "bob@example.com")
+                .await;
         }
         let b64 = auth_plain_b64("alice@example.com", "secret");
         run_session(
@@ -1464,7 +1636,8 @@ mod tests {
         for _ in 0..5 {
             server
                 .auth_fail_tracker
-                .record_failure(locked_ip, "alice@example.com");
+                .record_failure(locked_ip, "alice@example.com")
+                .await;
         }
         // The same account authenticating from a different IP is not locked.
         let b64 = auth_plain_b64("alice@example.com", "secret");
@@ -1490,7 +1663,8 @@ mod tests {
         for _ in 0..5 {
             server
                 .auth_fail_tracker
-                .record_failure(ip, "ghost@example.com");
+                .record_failure(ip, "ghost@example.com")
+                .await;
         }
         let b64 = auth_plain_b64("ghost@example.com", "anything");
         run_session(
@@ -1513,7 +1687,8 @@ mod tests {
         for _ in 0..5 {
             server
                 .auth_fail_tracker
-                .record_failure(ip, "alice@example.com");
+                .record_failure(ip, "alice@example.com")
+                .await;
         }
         let user = BASE64.encode("alice@example.com");
         let pass = BASE64.encode("correct-password");
@@ -1668,7 +1843,8 @@ mod tests {
             max_messages_per_connection: 100,
             max_recipients_per_message: 100,
         };
-        let small = SubmissionServer::new(config, rate_limit, pool, None);
+        let redis = unroutable_redis_pool();
+        let small = SubmissionServer::new(config, rate_limit, pool, redis, None);
         let big_line = "x".repeat(80);
         let payload = format!("{big_line}\r\n.\r\n").into_bytes();
         let outcome = drive_data(&small, &payload).await;
@@ -1761,5 +1937,189 @@ mod tests {
         assert!(all.is_empty());
         // Empty suppression list keeps everything.
         assert_eq!(filter_suppressed_recipients(&rcpt, &[]), rcpt);
+    }
+
+    // ── RFC 2920 pipelining ────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn pipelined_commands_receive_ordered_replies() {
+        // PIPELINING is advertised: a client that groups EHLO+NOOP+QUIT in
+        // one TCP segment must get one reply per command, in order.
+        let server = Arc::new(test_server(None));
+        let (client, server_side) = tokio::io::duplex(32 * 1024);
+        let task = tokio::spawn(async move {
+            let mut server_buf = BufStream::new(server_side);
+            server
+                .run_session_loop(&mut server_buf, test_peer(5), false, true)
+                .await
+        });
+        let mut client_buf = BufStream::new(client);
+        client_buf
+            .write_all(b"EHLO client.example\r\nNOOP\r\nQUIT\r\n")
+            .await
+            .unwrap();
+        client_buf.flush().await.unwrap();
+
+        let ehlo = read_smtp_response(&mut client_buf).await;
+        assert!(ehlo.contains("250-"), "EHLO reply: {ehlo:?}");
+        assert!(ehlo.ends_with("250 SMTPUTF8\r\n"), "last capability line: {ehlo:?}");
+
+        let noop = read_smtp_response(&mut client_buf).await;
+        assert_eq!(noop, "250 2.0.0 Ok\r\n", "NOOP reply must come second");
+
+        let quit = read_smtp_response(&mut client_buf).await;
+        assert_eq!(quit, "221 2.0.0 Bye\r\n", "QUIT reply must come third");
+
+        tokio::time::timeout(Duration::from_secs(10), task)
+            .await
+            .expect("session must finish")
+            .expect("session must not panic");
+    }
+
+    #[tokio::test]
+    async fn starttls_before_ehlo_is_refused_with_503() {
+        let server = Arc::new(test_server(Some(fixture_acceptor())));
+        run_session(
+            server,
+            test_peer(6),
+            true,
+            false,
+            &[("STARTTLS", "503 5.5.1 Error: send HELO/EHLO first")],
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn oversized_command_line_cannot_smuggle_commands() {
+        // A 100 KB line with QUIT smuggled inside it, then a valid NOOP +
+        // QUIT: the drain must consume through the oversized line's newline
+        // so the session survives and executes exactly the real commands.
+        let server = Arc::new(test_server(None));
+        let (client, server_side) = tokio::io::duplex(256 * 1024);
+        let task = tokio::spawn(async move {
+            let mut server_buf = BufStream::new(server_side);
+            server
+                .run_session_loop(&mut server_buf, test_peer(7), false, true)
+                .await
+        });
+        let mut client_buf = BufStream::new(client);
+        let attack = format!("{}QUIT\r\n", "A".repeat(100 * 1024));
+        client_buf.write_all(attack.as_bytes()).await.unwrap();
+        client_buf.write_all(b"NOOP\r\n").await.unwrap();
+        client_buf.flush().await.unwrap();
+
+        let too_long = read_smtp_response(&mut client_buf).await;
+        assert!(
+            too_long.starts_with("500"),
+            "oversized line refused: {too_long:?}"
+        );
+        let noop = read_smtp_response(&mut client_buf).await;
+        assert!(
+            noop.starts_with("250"),
+            "NOOP after the oversized line must execute: {noop:?}"
+        );
+
+        client_buf.write_all(b"QUIT\r\n").await.unwrap();
+        client_buf.flush().await.unwrap();
+        let _ = read_smtp_response(&mut client_buf).await;
+        tokio::time::timeout(Duration::from_secs(10), task)
+            .await
+            .expect("session must finish")
+            .expect("session must not panic");
+    }
+
+    // ── 8BITMIME / SMTPUTF8 advertisement-vs-enforcement consistency ──────
+
+    #[tokio::test]
+    async fn eight_bit_body_bytes_are_preserved_verbatim() {
+        // DECISION (pinned): 8BITMIME stays advertised and is honoured —
+        // body octets outside US-ASCII are stored byte-for-byte, never
+        // mangled through a lossy UTF-8 decode.
+        let server = test_server(None);
+        let payload = b"Subject: 8bit\r\ncaf\xe9 na\xefve \xf6\r\n.\r\n";
+        match drive_data(&server, payload).await {
+            ReadDataOutcome::Message(data) => {
+                assert_eq!(
+                    &data[..],
+                    b"Subject: 8bit\r\ncaf\xe9 na\xefve \xf6".as_slice(),
+                    "8-bit body bytes must round-trip unchanged"
+                );
+            }
+            other => panic!("expected Message, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn smtputf8_envelope_addresses_are_accepted() {
+        // DECISION (pinned): SMTPUTF8 stays advertised and is honoured —
+        // the envelope validator is charset-agnostic, so UTF-8 addresses
+        // (RFC 6531) are accepted end-to-end.
+        assert!(is_valid_envelope_address("p\u{f8}\u{fc}ser@example.com"));
+        assert!(is_valid_envelope_address("user@\u{e4}example.com"));
+        // ASCII addresses keep working, and structurally broken ones are
+        // still refused regardless of charset.
+        assert!(is_valid_envelope_address("plain@example.com"));
+        assert!(!is_valid_envelope_address("p\u{f8}@nodot"));
+        assert!(!is_valid_envelope_address("spaces in@example.com"));
+    }
+
+    #[test]
+    fn envelope_addresses_over_320_octets_are_refused() {
+        // RFC 5321 §4.5.3.1.1 caps the path; 320 octets is the generous
+        // local(64)+domain(255) budget used across the codebase.
+        let local = "a".repeat(320);
+        assert!(!is_valid_envelope_address(&format!("{local}@example.com")));
+        let fits = "a".repeat(300);
+        assert!(is_valid_envelope_address(&format!("{fits}@example.com")));
+    }
+
+    // ── header/body split tolerance ────────────────────────────────────────
+
+    #[test]
+    fn split_headers_body_tolerates_double_blank_lines() {
+        // Some clients emit an extra CRLF before the body; the split must
+        // still find the header block and not treat headers as body.
+        let raw = "Subject: t\r\nFrom: a@b.com\r\n\r\n\r\nbody";
+        let (headers, body) = split_headers_body(raw);
+        assert!(headers.contains("Subject: t"));
+        assert_eq!(body, "\r\nbody");
+        // LF-only variant is tolerated identically.
+        let (headers, body) = split_headers_body("Subject: t\n\nbody");
+        assert!(headers.contains("Subject: t"));
+        assert_eq!(body, "body");
+        // No blank line at all: everything is headers, body empty.
+        let (headers, body) = split_headers_body("Subject: only-headers");
+        assert!(headers.contains("Subject:"));
+        assert_eq!(body, "");
+    }
+
+    // ── queue-insert durability (item h) ───────────────────────────────────
+
+    #[test]
+    fn queue_insert_tx_pins_synchronous_commit_before_the_email_queue_insert() {
+        // The 250 acknowledgement for a submitted message must not precede
+        // the WAL flush of its email_queue row. The queue transaction pins
+        // `SET LOCAL synchronous_commit = on` — immune to a relaxed
+        // session/pool/server default — and does so BEFORE the
+        // INSERT INTO email_queue. The unit suite has no live Postgres, so
+        // the invariant is pinned against the compiled-in source itself.
+        let source = include_str!("submission.rs");
+        let begin_pos = source
+            .find("self.pool.begin()")
+            .expect("the queue path must run inside an explicit transaction");
+        let set_pos = source
+            .find("SET LOCAL synchronous_commit = on")
+            .expect("the queue tx must pin synchronous_commit for the insert");
+        let insert_pos = source
+            .find("INSERT INTO email_queue (")
+            .expect("the queue tx must insert into email_queue");
+        assert!(
+            begin_pos < set_pos,
+            "SET LOCAL only applies inside a transaction — it must follow BEGIN"
+        );
+        assert!(
+            set_pos < insert_pos,
+            "synchronous_commit must be pinned before the email_queue insert"
+        );
     }
 }

@@ -1,11 +1,19 @@
 //! Shared utilities for the SMTP servers: panic-safe address extraction,
-//! line-length caps, and capped line reads.
+//! line-length caps, capped line reads, ESMTP parameter validation, and
+//! structured reject logging/metrics.
 //!
 //! Every server (inbound, bounce, feedback loop, submission) reads commands
 //! and DATA with the same primitives so that a hostile or buggy client can
 //! neither panic a session task (`extract_addr_safe`) nor exhaust memory
 //! with an unbounded line (`read_line_capped`).
+//!
+//! DATA lines are kept as raw BYTES end-to-end: the server advertises
+//! 8BITMIME, so a body containing octets outside US-ASCII (e.g. a UTF-8 or
+//! Latin-1 encoded message) must be stored and relayed byte-for-byte.
+//! Command lines are decoded lossily to `String` for parsing — SMTP verbs
+//! and parameters are 7-bit ASCII per RFC 5321.
 
+use std::net::IpAddr;
 use tokio::io::{AsyncRead, AsyncWrite, BufStream};
 
 /// Maximum length of a single SMTP command line (RFC 5321 §4.5.3.1.4 limits
@@ -19,9 +27,16 @@ pub(crate) const MAX_COMMAND_LINE: usize = 4096;
 /// each server as the body is assembled.
 pub(crate) const MAX_DATA_LINE: usize = 1024 * 1024;
 
-/// After an over-long line, keep draining this many bytes looking for the
-/// terminator so the session can resynchronise instead of closing.
-pub(crate) const MAX_LINE_DRAIN: usize = 64 * 1024;
+/// Absolute byte budget for discarding the remainder of an over-long line.
+///
+/// When a line exceeds its per-line cap, the reader keeps discarding bytes
+/// until the terminating newline so the session stays synchronised and the
+/// line's tail can never be interpreted as fresh commands (command
+/// smuggling through over-long lines). A hostile client that streams more
+/// than this many bytes WITHOUT any newline makes resynchronisation
+/// impossible; [`LineRead::Overflow`] is then returned and the caller must
+/// close the connection.
+pub(crate) const ABSOLUTE_LINE_DRAIN_LIMIT: usize = 64 * 1024 * 1024;
 
 /// Extract the bare address from an SMTP command line such as
 /// `RCPT TO:<user@example.com>` or `MAIL FROM: user@example.com`.
@@ -43,9 +58,16 @@ pub(crate) enum LineRead {
     /// terminator: a line terminated by a bare LF is body data, not a
     /// `<CRLF>.<CRLF>` end-of-data marker (RFC 5321 strict mode; prevents
     /// SMTP smuggling).
-    Line(String, LineTerminator),
-    /// The line exceeded the cap; the terminator was still drained.
+    Line(Vec<u8>, LineTerminator),
+    /// The line exceeded the cap; its full remainder (up to and including
+    /// the terminating newline) was drained, so the stream is still
+    /// synchronised and the session can continue.
     TooLong,
+    /// The line exceeded the absolute drain limit without any newline: the
+    /// stream position can no longer be trusted. The caller MUST close the
+    /// connection — replying and reading on would let the attacker's bytes
+    /// be parsed as commands.
+    Overflow,
     /// End of stream.
     Eof,
 }
@@ -62,52 +84,75 @@ pub(crate) enum LineTerminator {
     Unterminated,
 }
 
-/// Strip the line's actual terminator, returning `(content, terminator)`.
-pub(crate) fn split_line_terminator(line: &str) -> (&str, LineTerminator) {
-    if let Some(content) = line.strip_suffix("\r\n") {
-        (content, LineTerminator::CrLf)
-    } else if let Some(content) = line.strip_suffix('\n') {
-        (content, LineTerminator::BareLf)
+/// Classify a raw line's terminator from its bytes.
+pub(crate) fn split_terminator_bytes(line: &[u8]) -> LineTerminator {
+    if line.ends_with(b"\r\n") {
+        LineTerminator::CrLf
+    } else if line.ends_with(b"\n") {
+        LineTerminator::BareLf
     } else {
-        (line, LineTerminator::Unterminated)
+        LineTerminator::Unterminated
     }
 }
 
 /// Strip the terminator reported by `read_line_capped` (the authoritative
 /// tag observed while reading — no re-derivation from the bytes).
-pub(crate) fn line_content(line: &str, terminator: LineTerminator) -> &str {
+pub(crate) fn line_content_bytes(line: &[u8], terminator: LineTerminator) -> &[u8] {
     match terminator {
-        LineTerminator::CrLf => line.strip_suffix("\r\n").unwrap_or(line),
-        LineTerminator::BareLf => line.strip_suffix('\n').unwrap_or(line),
+        LineTerminator::CrLf => line.strip_suffix(b"\r\n").unwrap_or(line),
+        LineTerminator::BareLf => line.strip_suffix(b"\n").unwrap_or(line),
         LineTerminator::Unterminated => line,
     }
+}
+
+/// Decode a raw command line for text command parsing. SMTP commands are
+/// 7-bit ASCII; any stray high bytes collapse to U+FFFD, which no command
+/// verb matches — safe for parsing, and DATA lines never go through this.
+pub(crate) fn line_lossy(line: &[u8]) -> String {
+    String::from_utf8_lossy(line).into_owned()
 }
 
 /// RFC 5321 §4.1.1.5 strict end-of-data: the line must be exactly
 /// `".\r\n"` — a single dot terminated by CRLF. A bare-LF `".\n"`, a
 /// space-padded `" ."`/`". "` line, or any other content is ordinary body
 /// data and must NOT terminate DATA (SMTP smuggling defence).
-pub(crate) fn is_strict_end_of_data(line: &str, terminator: LineTerminator) -> bool {
-    terminator == LineTerminator::CrLf && line == ".\r\n"
+pub(crate) fn is_strict_end_of_data(line: &[u8], terminator: LineTerminator) -> bool {
+    terminator == LineTerminator::CrLf && line == b".\r\n"
 }
 
 /// RFC 5321 §4.5.2 dot-unstuffing: a compliant sender doubles the leading dot
 /// of every body line that starts with one; the receiver therefore removes
 /// exactly ONE leading dot from any body line starting with `.`. (Stripping
 /// two dots — or only unstuffing `".."` — corrupts `".foo"` round-trips.)
-pub(crate) fn unstuff_dot_line(content: &str) -> &str {
-    content.strip_prefix('.').unwrap_or(content)
+pub(crate) fn unstuff_dot_line_bytes(content: &[u8]) -> &[u8] {
+    content.strip_prefix(b".").unwrap_or(content)
 }
 
-/// Read one line with a hard cap on its length. When the cap is exceeded,
-/// the remainder of the line is drained (up to `MAX_LINE_DRAIN` bytes) so
-/// the session can stay synchronised, then `LineRead::TooLong` is returned.
+/// Read one line with a hard cap on its length.
+///
+/// When the cap is exceeded the remainder of the line is DRAINED until its
+/// terminating newline (bounded only by [`ABSOLUTE_LINE_DRAIN_LIMIT``]) so
+/// the session stays synchronised — an over-long line can never leave its
+/// tail behind to be parsed as the next command. Only when no newline
+/// arrives within the absolute limit does the read give up with
+/// [`LineRead::Overflow`], which callers must treat as fatal for the
+/// connection.
 pub(crate) async fn read_line_capped<S: AsyncRead + AsyncWrite + Unpin>(
     stream: &mut BufStream<S>,
     cap: usize,
 ) -> std::io::Result<LineRead> {
+    read_line_capped_with_drain_limit(stream, cap, ABSOLUTE_LINE_DRAIN_LIMIT).await
+}
+
+/// Configurable-drain variant of [`read_line_capped`] used by tests to
+/// exercise the give-up path without pushing gigabytes through a duplex.
+pub(crate) async fn read_line_capped_with_drain_limit<S: AsyncRead + AsyncWrite + Unpin>(
+    stream: &mut BufStream<S>,
+    cap: usize,
+    drain_limit: usize,
+) -> std::io::Result<LineRead> {
     use tokio::io::AsyncBufReadExt;
-    let mut line = Vec::with_capacity(128);
+    let mut line: Vec<u8> = Vec::with_capacity(128);
     let mut too_long = false;
     let mut drained = 0usize;
     loop {
@@ -134,8 +179,11 @@ pub(crate) async fn read_line_capped<S: AsyncRead + AsyncWrite + Unpin>(
                 // the session while the client waits for a reply.)
                 Action::Return(take)
             } else if too_long {
+                // Over-long line, terminator not seen yet: keep discarding.
+                // The drain is complete — it only stops at a newline (sync
+                // restored) or at the absolute byte limit (Overflow).
                 drained += buf.len();
-                if drained > MAX_LINE_DRAIN {
+                if drained > drain_limit {
                     Action::GiveUp
                 } else {
                     Action::Consume(buf.len())
@@ -155,16 +203,15 @@ pub(crate) async fn read_line_capped<S: AsyncRead + AsyncWrite + Unpin>(
                 stream.consume(n);
                 break;
             }
-            Action::GiveUp => return Ok(LineRead::TooLong),
+            Action::GiveUp => return Ok(LineRead::Overflow),
             Action::Consume(n) => stream.consume(n),
         }
     }
     if too_long {
         Ok(LineRead::TooLong)
     } else {
-        let text = String::from_utf8_lossy(&line).into_owned();
-        let (_, terminator) = split_line_terminator(&text);
-        Ok(LineRead::Line(text, terminator))
+        let terminator = split_terminator_bytes(&line);
+        Ok(LineRead::Line(line, terminator))
     }
 }
 
@@ -173,6 +220,198 @@ enum Action {
     Return(usize),
     Consume(usize),
     GiveUp,
+}
+
+/// Write one (single- or multi-line) SMTP reply, flushing it before the
+/// session reads on.
+///
+/// Every 4xx/5xx reply additionally goes through structured reject logging
+/// ([`log_smtp_reject`]), so rejects are uniformly observable across ALL
+/// four servers — routing every reject reply through this one helper makes
+/// the "no reject is silent" invariant structural rather than per-call-site.
+pub(crate) async fn write_reply<S: AsyncRead + AsyncWrite + Unpin>(
+    stream: &mut BufStream<S>,
+    server: &str,
+    ip: IpAddr,
+    session: &str,
+    response: &str,
+) -> std::io::Result<()> {
+    use tokio::io::AsyncWriteExt;
+    if response.starts_with('4') || response.starts_with('5') {
+        log_smtp_reject(server, ip, session, response);
+    }
+    stream.write_all(response.as_bytes()).await?;
+    stream.flush().await
+}
+
+// ── ESMTP parameter validation (RFC 5321 §4.1.1.3 / RFC 1870 / 6152 / 6531) ────
+
+/// Which optional ESMTP extensions the server advertised on the current
+/// session — parameters for extensions that were NOT advertised must be
+/// refused with `555 5.5.4` rather than silently ignored.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct MailParamPolicy {
+    /// `BODY=8BITMIME` accepted (the 8BITMIME extension is advertised).
+    pub body_8bitmime: bool,
+    /// The `SMTPUTF8` parameter accepted (the SMTPUTF8 extension is advertised).
+    pub smtputf8: bool,
+}
+
+/// Skip the address path tokens at the start of `MAIL FROM:` / `RCPT TO:`
+/// arguments, returning the remaining (parameter) tokens.
+///
+/// Handles both the bracketed `<path>` form — which may span several
+/// whitespace tokens when the address itself is malformed — and the bare
+/// address form. Nothing after the path is interpreted as part of it.
+fn params_after_address(line: &str) -> Vec<&str> {
+    let rest = match line.find(':') {
+        Some(pos) => &line[pos + 1..],
+        None => line,
+    };
+    let mut params = Vec::new();
+    let mut in_bracketed_path = false;
+    let mut path_done = false;
+    for token in rest.split_whitespace() {
+        if path_done {
+            params.push(token);
+            continue;
+        }
+        if in_bracketed_path {
+            // Consume tokens until the path's closing '>'.
+            if token.contains('>') {
+                in_bracketed_path = false;
+                path_done = true;
+            }
+            continue;
+        }
+        if token.starts_with('<') {
+            if token.contains('>') {
+                path_done = true;
+            } else {
+                in_bracketed_path = true;
+            }
+            continue;
+        }
+        // Bare (unbracketed) address: a single token.
+        path_done = true;
+    }
+    params
+}
+
+/// Validate the ESMTP parameters of a `MAIL FROM` command line.
+///
+/// Recognised: `SIZE=<digits>` (RFC 1870), `BODY=7BIT|8BITMIME` (RFC 6152),
+/// `SMTPUTF8` (RFC 6531). Anything else — including parameters for
+/// extensions not advertised on this session — is a `555 5.5.4` (or `501`
+/// for syntactically broken values) rejection, per RFC 5321 §4.1.1.11.
+pub(crate) fn validate_mail_params(
+    line: &str,
+    policy: MailParamPolicy,
+) -> Result<(), &'static str> {
+    let params = params_after_address(line);
+    for param in params {
+        let upper = param.to_ascii_uppercase();
+        if let Some(value) = upper.strip_prefix("SIZE=") {
+            if value.is_empty() || !value.bytes().all(|b| b.is_ascii_digit()) {
+                return Err("501 5.5.4 Malformed SIZE parameter");
+            }
+        } else if let Some(value) = upper.strip_prefix("BODY=") {
+            if value != "7BIT" && value != "8BITMIME" {
+                return Err("501 5.5.4 Malformed BODY parameter");
+            }
+            if value == "8BITMIME" && !policy.body_8bitmime {
+                return Err("555 5.5.4 BODY=8BITMIME not advertised");
+            }
+        } else if upper == "SMTPUTF8" {
+            if !policy.smtputf8 {
+                return Err("555 5.5.4 SMTPUTF8 not advertised");
+            }
+        } else {
+            return Err("555 5.5.4 MAIL parameter not recognised");
+        }
+    }
+    Ok(())
+}
+
+/// Validate the ESMTP parameters of an `RCPT TO` command line. No optional
+/// RCPT parameters are implemented (DSN's `NOTIFY=`/`ORCPT=` belong to an
+/// extension this server does not advertise), so ANY parameter is refused
+/// with `555 5.5.4`.
+pub(crate) fn validate_rcpt_params(line: &str) -> Result<(), &'static str> {
+    let params = params_after_address(line);
+    if params.is_empty() {
+        Ok(())
+    } else {
+        Err("555 5.5.4 RCPT parameter not recognised")
+    }
+}
+
+/// Extract the declared message size from a `MAIL FROM ... SIZE=<n>`
+/// parameter, if present (RFC 1870). Returns `None` for absent or malformed
+/// values; malformed values are separately rejected by
+/// [`validate_mail_params`].
+pub(crate) fn mail_size_param(line: &str) -> Option<u64> {
+    let params = params_after_address(line);
+    for param in params {
+        if let Some(value) = param.to_ascii_uppercase().strip_prefix("SIZE=") {
+            return value.parse::<u64>().ok();
+        }
+    }
+    None
+}
+
+// ── observability helpers ──────────────────────────────────────────────────────
+
+/// Structured log + metric for one SMTP rejection.
+///
+/// Every 4xx/5xx reply a session emits goes through here so that rejects are
+/// uniformly observable: the reply code, the human-readable reason, the
+/// (IP-only, non-PII) peer, and the session id are logged, and the
+/// `mta.smtp.reject` counter is incremented partitioned by server and code.
+pub(crate) fn log_smtp_reject(server: &str, ip: IpAddr, session: &str, response: &str) {
+    let code = response.get(..3).unwrap_or("???");
+    let reason = response.get(3..).unwrap_or("").trim().trim_end_matches('\r').trim_end_matches('\n');
+    tracing::info!(
+        server,
+        code,
+        reason,
+        peer_ip = %ip,
+        session = %session,
+        "SMTP rejection"
+    );
+    metrics::counter!(
+        "mta.smtp.reject",
+        "server" => server.to_string(),
+        "code" => code.to_string()
+    )
+    .increment(1);
+}
+
+/// Log the per-connection summary line emitted exactly once when an SMTP
+/// session ends (any close reason).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn log_session_summary(
+    server: &str,
+    ip: IpAddr,
+    session: &str,
+    tls: bool,
+    authenticated: bool,
+    messages: u32,
+    duration_ms: u128,
+    close_reason: &str,
+) {
+    tracing::info!(
+        server,
+        peer_ip = %ip,
+        session = %session,
+        tls,
+        authenticated,
+        messages,
+        duration_ms,
+        close_reason,
+        "SMTP session summary"
+    );
+    metrics::counter!("mta.smtp.session", "server" => server.to_string()).increment(1);
 }
 
 // ── tests ──────────────────────────────────────────────────────────────────────
@@ -217,14 +456,14 @@ mod tests {
     fn strict_end_of_data_requires_exactly_dot_crlf() {
         use LineTerminator::*;
         assert!(
-            is_strict_end_of_data(".\r\n", CrLf),
+            is_strict_end_of_data(b".\r\n", CrLf),
             "CRLF dot terminates DATA"
         );
-        assert!(!is_strict_end_of_data(".\n", BareLf), "bare-LF dot is body data");
-        assert!(!is_strict_end_of_data(".\r", Unterminated), "lone CR is not a terminator");
-        assert!(!is_strict_end_of_data(".", Unterminated), "unterminated dot is body data");
+        assert!(!is_strict_end_of_data(b".\n", BareLf), "bare-LF dot is body data");
+        assert!(!is_strict_end_of_data(b".\r", Unterminated), "lone CR is not a terminator");
+        assert!(!is_strict_end_of_data(b".", Unterminated), "unterminated dot is body data");
         // A CRLF-terminated tag with non-dot content is body data.
-        assert!(!is_strict_end_of_data(".\n", CrLf), "tag and bytes disagree → body");
+        assert!(!is_strict_end_of_data(b".\n", CrLf), "tag and bytes disagree → body");
     }
 
     #[test]
@@ -232,58 +471,46 @@ mod tests {
         use LineTerminator::*;
         // " ." / ". " / " . " must remain ordinary body lines — a trim()-based
         // check used to terminate DATA on them (smuggling vector).
-        assert!(!is_strict_end_of_data(" .\r\n", CrLf));
-        assert!(!is_strict_end_of_data(". \r\n", CrLf));
-        assert!(!is_strict_end_of_data(" . \r\n", CrLf));
-        assert!(!is_strict_end_of_data("..\r\n", CrLf), "stuffed dot is body data");
-        assert!(!is_strict_end_of_data("x.\r\n", CrLf));
-        assert!(!is_strict_end_of_data(".x\r\n", CrLf));
-        assert!(!is_strict_end_of_data("\r\n", CrLf), "empty line is body data");
+        assert!(!is_strict_end_of_data(b" .\r\n", CrLf));
+        assert!(!is_strict_end_of_data(b". \r\n", CrLf));
+        assert!(!is_strict_end_of_data(b" . \r\n", CrLf));
+        assert!(!is_strict_end_of_data(b"..\r\n", CrLf), "stuffed dot is body data");
+        assert!(!is_strict_end_of_data(b"x.\r\n", CrLf));
+        assert!(!is_strict_end_of_data(b".x\r\n", CrLf));
+        assert!(!is_strict_end_of_data(b"\r\n", CrLf), "empty line is body data");
     }
 
     #[test]
-    fn split_line_terminator_classifies_actual_terminators() {
-        assert_eq!(
-            split_line_terminator("DATA\r\n"),
-            ("DATA", LineTerminator::CrLf)
-        );
-        assert_eq!(
-            split_line_terminator("DATA\n"),
-            ("DATA", LineTerminator::BareLf)
-        );
-        assert_eq!(
-            split_line_terminator("DATA"),
-            ("DATA", LineTerminator::Unterminated)
-        );
+    fn split_terminator_classifies_actual_terminators() {
+        assert_eq!(split_terminator_bytes(b"DATA\r\n"), LineTerminator::CrLf);
+        assert_eq!(split_terminator_bytes(b"DATA\n"), LineTerminator::BareLf);
+        assert_eq!(split_terminator_bytes(b"DATA"), LineTerminator::Unterminated);
         // A bare LF preceded by a CR that belongs to the content is not CRLF.
-        assert_eq!(
-            split_line_terminator("DATA\r\r\n"),
-            ("DATA\r", LineTerminator::CrLf)
-        );
+        assert_eq!(split_terminator_bytes(b"DATA\r\r\n"), LineTerminator::CrLf);
     }
 
     #[test]
-    fn line_content_uses_the_reported_tag() {
+    fn line_content_bytes_uses_the_reported_tag() {
         use LineTerminator::*;
-        assert_eq!(line_content("dot\r\n", CrLf), "dot");
-        assert_eq!(line_content("dot\n", BareLf), "dot");
-        assert_eq!(line_content("partial", Unterminated), "partial");
+        assert_eq!(line_content_bytes(b"dot\r\n", CrLf), b"dot");
+        assert_eq!(line_content_bytes(b"dot\n", BareLf), b"dot");
+        assert_eq!(line_content_bytes(b"partial", Unterminated), b"partial");
     }
 
     #[test]
-    fn unstuff_dot_line_strips_exactly_one_leading_dot() {
+    fn unstuff_dot_line_bytes_strips_exactly_one_leading_dot() {
         // RFC 5321 §4.5.2 round-trip: "..foo" (stuffed) → ".foo".
-        assert_eq!(unstuff_dot_line("..foo"), ".foo");
+        assert_eq!(unstuff_dot_line_bytes(b"..foo"), b".foo");
         // ".." (stuffed single dot) → ".".
-        assert_eq!(unstuff_dot_line(".."), ".");
+        assert_eq!(unstuff_dot_line_bytes(b".."), b".");
         // A single unstuffed leading dot is stripped too — the receiver
         // cannot distinguish, and stripping two dots would corrupt ".foo".
-        assert_eq!(unstuff_dot_line(".foo"), "foo");
-        assert_eq!(unstuff_dot_line("foo"), "foo");
-        assert_eq!(unstuff_dot_line(""), "");
-        // Multibyte safety: '.' is one-byte ASCII, so [1..] stays on a char
-        // boundary.
-        assert_eq!(unstuff_dot_line(".ö-umlaut"), "ö-umlaut");
+        assert_eq!(unstuff_dot_line_bytes(b".foo"), b"foo");
+        assert_eq!(unstuff_dot_line_bytes(b"foo"), b"foo");
+        assert_eq!(unstuff_dot_line_bytes(b""), b"");
+        // 8-bit bodies: the unstuffing is byte-oriented, so high octets pass
+        // through untouched (8BITMIME byte-cleanliness).
+        assert_eq!(unstuff_dot_line_bytes(b".caf\xc3\xa9"), b"caf\xc3\xa9");
     }
 
     #[tokio::test]
@@ -297,14 +524,14 @@ mod tests {
 
         match read_line_capped(&mut stream, 128).await.unwrap() {
             LineRead::Line(l, t) => {
-                assert_eq!(l, "one\r\n");
+                assert_eq!(l, b"one\r\n");
                 assert_eq!(t, LineTerminator::CrLf);
             }
             other => panic!("expected Line, got {other:?}"),
         }
         match read_line_capped(&mut stream, 128).await.unwrap() {
             LineRead::Line(l, t) => {
-                assert_eq!(l, "two\n");
+                assert_eq!(l, b"two\n");
                 assert_eq!(t, LineTerminator::BareLf);
             }
             other => panic!("expected Line, got {other:?}"),
@@ -313,10 +540,276 @@ mod tests {
         drop(writer); // close so the read observes EOF after "three"
         match read_line_capped(&mut stream, 128).await.unwrap() {
             LineRead::Line(l, t) => {
-                assert_eq!(l, "three");
+                assert_eq!(l, b"three");
                 assert_eq!(t, LineTerminator::Unterminated);
             }
             other => panic!("expected Line, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn read_line_capped_preserves_8bit_body_bytes() {
+        // 8BITMIME: high octets in a DATA line must round-trip exactly —
+        // never replaced by U+FFFD as a lossy UTF-8 decode would.
+        let (client, server) = tokio::io::duplex(256);
+        let mut writer = client;
+        let mut stream = BufStream::new(server);
+        tokio::io::AsyncWriteExt::write_all(&mut writer, b"caf\xe9 latte\r\n.\r\n")
+            .await
+            .unwrap();
+        match read_line_capped(&mut stream, MAX_DATA_LINE).await.unwrap() {
+            LineRead::Line(l, t) => {
+                assert_eq!(l, b"caf\xe9 latte\r\n");
+                assert_eq!(t, LineTerminator::CrLf);
+            }
+            other => panic!("expected Line, got {other:?}"),
+        }
+    }
+
+    // ── complete drain: no command smuggling from over-long lines ──────────
+
+    #[tokio::test]
+    async fn oversized_line_is_drained_to_its_newline_and_next_line_survives() {
+        // A 100 KB line (far past the old 64 KB drain cap) followed by a
+        // valid command: the drain must consume THROUGH the oversized line's
+        // newline so "NOOP" is read as the NEXT command, not as the tail of
+        // the oversized one.
+        let (client, server) = tokio::io::duplex(256 * 1024);
+        let mut writer = client;
+        let mut stream = BufStream::new(server);
+        let oversized = format!("{}QUIT\r\n", "A".repeat(100 * 1024));
+        tokio::io::AsyncWriteExt::write_all(&mut writer, oversized.as_bytes())
+            .await
+            .unwrap();
+        tokio::io::AsyncWriteExt::write_all(&mut writer, b"NOOP\r\n")
+            .await
+            .unwrap();
+
+        match read_line_capped(&mut stream, MAX_COMMAND_LINE).await.unwrap() {
+            LineRead::TooLong => {}
+            other => panic!("expected TooLong, got {other:?}"),
+        }
+        // The "QUIT" embedded in the oversized line was drained together
+        // with it; the next read starts clean at "NOOP".
+        match read_line_capped(&mut stream, MAX_COMMAND_LINE).await.unwrap() {
+            LineRead::Line(l, t) => {
+                assert_eq!(l, b"NOOP\r\n");
+                assert_eq!(t, LineTerminator::CrLf);
+            }
+            other => panic!("expected Line, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn oversized_line_smuggled_command_tail_is_never_returned() {
+        // The smuggling attempt: an over-long line whose tail spells a full
+        // command WITH its own earlier newline. The drain must stop at the
+        // FIRST newline (end of the oversized line); the command after it
+        // executes exactly once.
+        let (client, server) = tokio::io::duplex(256 * 1024);
+        let mut writer = client;
+        let mut stream = BufStream::new(server);
+        let attack = format!(
+            "{}\r\nRSET\r\nQUIT\r\n",
+            "X".repeat(80 * 1024)
+        );
+        tokio::io::AsyncWriteExt::write_all(&mut writer, attack.as_bytes())
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            read_line_capped(&mut stream, MAX_COMMAND_LINE).await.unwrap(),
+            LineRead::TooLong
+        ));
+        match read_line_capped(&mut stream, MAX_COMMAND_LINE).await.unwrap() {
+            LineRead::Line(l, _) => assert_eq!(l, b"RSET\r\n"),
+            other => panic!("expected Line, got {other:?}"),
+        }
+        match read_line_capped(&mut stream, MAX_COMMAND_LINE).await.unwrap() {
+            LineRead::Line(l, _) => assert_eq!(l, b"QUIT\r\n"),
+            other => panic!("expected Line, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn oversized_line_drained_across_multiple_fill_buf_chunks() {
+        // The drain must survive the terminator arriving in a later buffer
+        // than the one that tripped the cap (duplex delivers in chunks).
+        // The reader runs as its own task so writes larger than the duplex
+        // buffer cannot deadlock.
+        let (client, server) = tokio::io::duplex(8 * 1024);
+        let mut writer = client;
+        let mut stream = BufStream::new(server);
+        let reader = tokio::spawn(async move {
+            let first = read_line_capped(&mut stream, 4096).await.unwrap();
+            let second = read_line_capped(&mut stream, 4096).await.unwrap();
+            (first, second)
+        });
+        let head = "B".repeat(8 * 1024 + 100);
+        tokio::io::AsyncWriteExt::write_all(&mut writer, head.as_bytes())
+            .await
+            .unwrap();
+        // Give the reader time to consume this chunk before the rest arrives.
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        tokio::io::AsyncWriteExt::write_all(&mut writer, b"tail\r\nEHLO x\r\n")
+            .await
+            .unwrap();
+        drop(writer);
+
+        let (first, second) = reader.await.unwrap();
+        assert!(matches!(first, LineRead::TooLong), "got {first:?}");
+        match second {
+            LineRead::Line(l, _) => assert_eq!(l, b"EHLO x\r\n"),
+            other => panic!("expected Line, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn newline_less_flood_beyond_drain_limit_returns_overflow() {
+        // No newline within the absolute drain limit: resynchronisation is
+        // impossible; the caller must see Overflow (and close), never a
+        // Line whose bytes came from mid-line. The reader runs as its own
+        // task so the duplex never deadlocks on a full write buffer.
+        let (client, server) = tokio::io::duplex(8 * 1024);
+        let mut writer = client;
+        let mut stream = BufStream::new(server);
+        let reader = tokio::spawn(async move {
+            read_line_capped_with_drain_limit(&mut stream, 64, 8 * 1024).await
+        });
+        let chunk = "C".repeat(4 * 1024);
+        for _ in 0..6 {
+            tokio::io::AsyncWriteExt::write_all(&mut writer, chunk.as_bytes())
+                .await
+                .unwrap();
+        }
+        drop(writer);
+        match reader.await.unwrap().unwrap() {
+            LineRead::Overflow => {}
+            other => panic!("expected Overflow, got {other:?}"),
+        }
+    }
+
+    // ── ESMTP parameter validation ──────────────────────────────────────────
+
+    #[test]
+    fn mail_params_accept_size_body_and_smtputf8() {
+        let policy = MailParamPolicy {
+            body_8bitmime: true,
+            smtputf8: true,
+        };
+        assert_eq!(
+            validate_mail_params("MAIL FROM:<a@b.com> SIZE=1234", policy),
+            Ok(())
+        );
+        assert_eq!(
+            validate_mail_params("MAIL FROM:<a@b.com> BODY=8BITMIME", policy),
+            Ok(())
+        );
+        assert_eq!(
+            validate_mail_params("MAIL FROM:<a@b.com> BODY=7BIT", policy),
+            Ok(())
+        );
+        assert_eq!(
+            validate_mail_params("MAIL FROM:<a@b.com> SMTPUTF8", policy),
+            Ok(())
+        );
+        assert_eq!(
+            validate_mail_params(
+                "MAIL FROM:<a@b.com> SIZE=5 BODY=8BITMIME SMTPUTF8",
+                policy
+            ),
+            Ok(())
+        );
+        // Lowercase parameter names are still recognised.
+        assert_eq!(
+            validate_mail_params("mail from:<a@b.com> size=99 body=7bit", policy),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn mail_params_reject_unknown_and_unadvertised() {
+        let policy = MailParamPolicy {
+            body_8bitmime: true,
+            smtputf8: true,
+        };
+        assert_eq!(
+            validate_mail_params("MAIL FROM:<a@b.com> FOO=BAR", policy),
+            Err("555 5.5.4 MAIL parameter not recognised")
+        );
+        assert_eq!(
+            validate_mail_params("MAIL FROM:<a@b.com> NOTIFY=NEVER", policy),
+            Err("555 5.5.4 MAIL parameter not recognised")
+        );
+        assert_eq!(
+            validate_mail_params("MAIL FROM:<a@b.com> SIZE=", policy),
+            Err("501 5.5.4 Malformed SIZE parameter")
+        );
+        assert_eq!(
+            validate_mail_params("MAIL FROM:<a@b.com> SIZE=12ab", policy),
+            Err("501 5.5.4 Malformed SIZE parameter")
+        );
+        assert_eq!(
+            validate_mail_params("MAIL FROM:<a@b.com> BODY=BINARYMIME", policy),
+            Err("501 5.5.4 Malformed BODY parameter")
+        );
+        // Extensions NOT advertised on the session must be refused.
+        let restricted = MailParamPolicy {
+            body_8bitmime: false,
+            smtputf8: false,
+        };
+        assert_eq!(
+            validate_mail_params("MAIL FROM:<a@b.com> BODY=8BITMIME", restricted),
+            Err("555 5.5.4 BODY=8BITMIME not advertised")
+        );
+        assert_eq!(
+            validate_mail_params("MAIL FROM:<a@b.com> SMTPUTF8", restricted),
+            Err("555 5.5.4 SMTPUTF8 not advertised")
+        );
+        // BODY=7BIT stays acceptable even without the 8BITMIME extension.
+        assert_eq!(
+            validate_mail_params("MAIL FROM:<a@b.com> BODY=7BIT", restricted),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn mail_params_after_malformed_multi_token_path() {
+        let policy = MailParamPolicy {
+            body_8bitmime: true,
+            smtputf8: true,
+        };
+        // A path with interior whitespace is a malformed address (rejected
+        // by address validation later); the param scanner must not choke or
+        // treat the closing bracket's tail as a parameter.
+        assert_eq!(
+            validate_mail_params("MAIL FROM:<bad address@x> SIZE=5", policy),
+            Ok(())
+        );
+        assert_eq!(
+            validate_mail_params("MAIL FROM:<bad address@x> FOO", policy),
+            Err("555 5.5.4 MAIL parameter not recognised")
+        );
+    }
+
+    #[test]
+    fn rcpt_params_must_be_absent() {
+        assert_eq!(validate_rcpt_params("RCPT TO:<a@b.com>"), Ok(()));
+        assert_eq!(
+            validate_rcpt_params("RCPT TO:<a@b.com> NOTIFY=SUCCESS"),
+            Err("555 5.5.4 RCPT parameter not recognised")
+        );
+    }
+
+    #[test]
+    fn mail_size_param_extracts_declared_size() {
+        assert_eq!(mail_size_param("MAIL FROM:<a@b.com> SIZE=1024"), Some(1024));
+        assert_eq!(
+            mail_size_param("MAIL FROM:<a@b.com> size=999 BODY=7BIT"),
+            Some(999)
+        );
+        assert_eq!(mail_size_param("MAIL FROM:<a@b.com>"), None);
+        // Malformed values surface as None; validate_mail_params rejects them.
+        assert_eq!(mail_size_param("MAIL FROM:<a@b.com> SIZE=1e5"), None);
     }
 }
