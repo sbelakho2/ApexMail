@@ -331,6 +331,44 @@ pub enum VerifyError {
 }
 
 impl VerifyError {
+    /// The stable machine-readable wire code for this failure, matching
+    /// the PHP SDK's `VerifyError::value` vocabulary case-for-case
+    /// (`bad_signature`, `expired`, ...). Metrics, alerting and retry
+    /// branching must key on these codes — never on the human `Display`
+    /// prose. Variants with no PHP twin (this core rejects oversized
+    /// counters and bot telemetry outright where the PHP core maps them
+    /// differently) use the same snake_case register.
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::BadSignature => "bad_signature",
+            Self::Expired => "expired",
+            Self::TooFast => "too_fast",
+            Self::IpMismatch => "ip_mismatch",
+            Self::MissingClientIp => "missing_client_ip",
+            Self::CounterTooLarge => "counter_too_large",
+            Self::WrongScope => "wrong_scope",
+            Self::RequestBindingMismatch => "request_binding_mismatch",
+            Self::WrongRegion => "wrong_region",
+            Self::WrongIssuer => "wrong_issuer",
+            Self::WrongPolicyVersion => "wrong_policy_version",
+            Self::UnknownKid => "unknown_kid",
+            Self::TooManyAttempts => "too_many_attempts",
+            Self::InsufficientWork => "insufficient_work",
+            Self::MalformedRecord => "malformed_record",
+            // PHP's `telemetry_rejected` — the same failure class: the
+            // client-side telemetry evidence rejected this client. The
+            // variant name is Rust-idiomatic; the wire code is shared.
+            Self::BotDetected => "telemetry_rejected",
+            Self::MalformedToken => "malformed_token",
+            Self::RecordNotFound => "record_not_found",
+            Self::StorageUnavailable => "storage_unavailable",
+            Self::ConsumeIndeterminate => "consume_indeterminate",
+            Self::AlreadyConsumed => "already_consumed",
+            Self::CapacityExceeded => "capacity_exceeded",
+            Self::AdmissionUnavailable => "admission_unavailable",
+        }
+    }
+
     /// Whether this failure is exempt from the one-shot policy on a
     /// consumed record: the failure describes the original redemption's
     /// circumstances (the signed expiry, the network binding, the
@@ -1014,6 +1052,83 @@ mod tests {
         binding_tag, hash_ip, issue_challenge, BindingMode, ChallengeConfig, PoWAlgorithm,
         SignError,
     };
+
+    #[test]
+    fn error_codes_match_the_php_wire_vocabulary() {
+        // The PHP SDK's VerifyError case values, verbatim — the shared
+        // machine-readable wire vocabulary. Every Rust variant with a
+        // PHP twin must carry the identical code; the two Rust-only
+        // variants stay in the same snake_case register.
+        let php_codes = [
+            "bad_signature",
+            "expired",
+            "wrong_scope",
+            "ip_mismatch",
+            "missing_client_ip",
+            "wrong_region",
+            "wrong_issuer",
+            "wrong_policy_version",
+            "unknown_kid",
+            "too_fast",
+            "insufficient_work",
+            "malformed_record",
+            "record_not_found",
+            "malformed_token",
+            "too_many_attempts",
+            "telemetry_rejected",
+            "capacity_exceeded",
+            "admission_unavailable",
+            "storage_unavailable",
+            "consume_indeterminate",
+            "already_consumed",
+            "request_binding_mismatch",
+        ];
+        let variants = [
+            VerifyError::BadSignature,
+            VerifyError::Expired,
+            VerifyError::TooFast,
+            VerifyError::IpMismatch,
+            VerifyError::MissingClientIp,
+            VerifyError::CounterTooLarge,
+            VerifyError::WrongScope,
+            VerifyError::RequestBindingMismatch,
+            VerifyError::WrongRegion,
+            VerifyError::WrongIssuer,
+            VerifyError::WrongPolicyVersion,
+            VerifyError::UnknownKid,
+            VerifyError::TooManyAttempts,
+            VerifyError::InsufficientWork,
+            VerifyError::MalformedRecord,
+            VerifyError::BotDetected,
+            VerifyError::MalformedToken,
+            VerifyError::RecordNotFound,
+            VerifyError::StorageUnavailable,
+            VerifyError::ConsumeIndeterminate,
+            VerifyError::AlreadyConsumed,
+            VerifyError::CapacityExceeded,
+            VerifyError::AdmissionUnavailable,
+        ];
+        let codes: Vec<&str> = variants.iter().map(|v| v.code()).collect();
+        for code in &codes {
+            assert!(
+                !code.is_empty()
+                    && code
+                        .chars()
+                        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_'),
+                "code {code} is not machine-readable snake_case"
+            );
+        }
+        let mut unique = codes.clone();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(unique.len(), codes.len(), "codes must be unique");
+        for php in php_codes {
+            assert!(
+                codes.contains(&php),
+                "PHP wire code {php} has no Rust twin — the vocabularies drifted"
+            );
+        }
+    }
 
     const NOW_UNIX: u64 = 1_000_000;
     // Epoch microseconds (1_700_000_000_000_000 µs ≈ 2023-11-14 UTC) — the
