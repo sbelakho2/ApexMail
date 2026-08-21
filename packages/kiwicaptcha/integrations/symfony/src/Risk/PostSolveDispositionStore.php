@@ -41,15 +41,18 @@ interface PostSolveDispositionStore
      *                                 ({kiwi:<ns>}:decision:<nonce> — the same
      *                                 hash-tagged key the gateway pairs the
      *                                 handle under). The mapping is CONSUMED
-     *                                 (GETDEL, at most one winner) inside the
-     *                                 same atomic transition as the claim and
-     *                                 the paired decision id is persisted in
-     *                                 the pending record; a TAKEOVER keeps the
-     *                                 ORIGINAL handle (never the new owner's),
-     *                                 so a crash-taken-over computation
-     *                                 completes with the first owner's decision
-     *                                 id. null = no decision mapping (the
-     *                                 records carry null)
+     *                                 (GETDEL, at most one winner) ONLY when
+     *                                 the claim CREATES the missing pending
+     *                                 record, and the paired decision id is
+     *                                 persisted in that record in the same
+     *                                 transition; a complete claim, a busy
+     *                                 (pending) claim and a TAKEOVER never
+     *                                 touch the mapping key. A TAKEOVER keeps
+     *                                 the ORIGINAL handle (never the new
+     *                                 owner's), so a crash-taken-over
+     *                                 computation completes with the first
+     *                                 owner's decision id. null = no decision
+     *                                 mapping (the records carry null)
      *
      * @throws \Throwable when the store is unavailable (fail closed)
      */

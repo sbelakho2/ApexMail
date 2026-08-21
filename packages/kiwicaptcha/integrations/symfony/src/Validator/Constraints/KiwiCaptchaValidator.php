@@ -583,14 +583,15 @@ final class KiwiCaptchaValidator extends ConstraintValidator
                 // obligation gone) keeps re-signing its deterministic
                 // ticket, and a fresh disposition, an obligation-first
                 // disposition and a replay of the same verified nonce all
-                // reproduce the SAME byte-identical ticket. The chain
-                // RECORD is read by id ({@see self::chainRequirementExpiresAt()})
-                // only as the LIVENESS check — a disposition whose chain
-                // is gone (expired or consumed) is fail-closed
-                // temporary_unavailable. A ticket that cannot be produced
-                // is fail-closed temporary_unavailable — a stronger stage
-                // was demanded but cannot be chained, never a silent
-                // downgrade to an unchained pass.
+                 // reproduce the SAME byte-identical ticket. The chain
+                 // RECORD is read by id ({@see self::chainRequirementExpiresAt()})
+                 // as the LIVENESS + EXACT-BOUND check — a disposition
+                 // whose chain is gone (expired or consumed) or whose
+                 // carried expiry differs from the exact chain record is
+                 // fail-closed temporary_unavailable. A ticket that cannot
+                 // be produced is fail-closed temporary_unavailable — a
+                 // stronger stage was demanded but cannot be chained,
+                 // never a silent downgrade to an unchained pass.
                 try {
                     $ticket = $this->chainTickets?->ticketFor(
                         $disposition->chainId,
@@ -753,17 +754,20 @@ final class KiwiCaptchaValidator extends ConstraintValidator
      *     ORIGINAL decision id is preserved for the final disposition;
      *  1. the canonical nonce is decoded, a fresh owner token drawn and
      *     the nonce -> decision handle is CONSUMED ATOMICALLY WITH THE
-     *     CLAIM (the store's claim GETDELs the mapping inside the same
+     *     CLAIM — but ONLY when the claim CREATES the missing pending
+     *     record (the store's claim GETDELs the mapping inside that same
      *     transition — at most one winner — and persists the paired
      *     handle in the pending disposition record, so an owner crash can
-     *     never lose the original decision id of a no-post-solve Pass);
+     *     never lose the original decision id of a no-post-solve Pass; a
+     *     complete, busy or takeover claim NEVER touches the mapping key);
      *  2. the nonce-keyed disposition record is CLAIMED with the decision
      *     mapping key: 'complete' -> the persisted final disposition is
      *     returned immediately (a replay of a valid proof reproduces the
      *     same PASS | DENY | STEP_UP | CHAIN_REQUIRED — never a bypass; a
      *     TERMINAL requirement supersedes even a persisted disposition);
      *     'pending' -> another owner's computation is live — the
-     *     temporary_unavailable violation (never a silent pass);
+     *     temporary_unavailable violation (never a silent pass; the
+     *     decision mapping is never consumed by the busy claim);
      *     'claimed'/'taken_over' -> this owner runs the post-solve
      *     assessment, persists the disposition and returns it; a
      *     TAKEN-OVER computation resumes with the ORIGINAL owner's
@@ -1023,7 +1027,8 @@ final class KiwiCaptchaValidator extends ConstraintValidator
 
         // The ORIGINAL pre-issue decision id was consumed ATOMICALLY WITH
         // THE CLAIM (the store's claim GETDELs the nonce -> decision
-        // mapping inside the same transition — at most one consumer) and
+        // mapping inside the same transition — at most one consumer —
+        // whenever the claim CREATES the missing pending record) and
         // travels in as the STORED handle: on scopes WITHOUT
         // post_solve_check it becomes the request's current decision id
         // ({@see RiskGateway::setCurrentDecisionId()}), so the application
@@ -1596,15 +1601,21 @@ final class KiwiCaptchaValidator extends ConstraintValidator
      * deterministic ticket. The chain RECORD is read by id
      * ({@see ChainedChallengeTicketService::requirementFor()} — the
      * by-chain-id read, NEVER the obligation lookup) as the LIVENESS
-     * check: a dead chain (expired / record gone) is fail-closed
-     * temporary_unavailable — never a ticket for a chain that no longer
-     * exists. Legacy/edge records whose carried bound is null fall back
-     * to the requirement's server-held expiresAt.
+     * check AND the EXACT-BOUND comparison: a dead chain (expired /
+     * record gone) is fail-closed temporary_unavailable, and a
+     * shape-valid carried bound that DIFFERS from the exact chain
+     * record's server-held expiresAt is corrupt state — fail-closed
+     * temporary_unavailable, never a ticket that outlives its chain or
+     * expires early. A legacy record whose carried bound is null falls
+     * back to the exact chain record's server-held expiresAt.
      *
      * @throws PostSolveDispositionUnavailableException when the
      *                                                 chain is gone (the
      *                                                 chain expired or was
-     *                                                 consumed) — fail
+     *                                                 consumed) or the
+     *                                                 carried bound does
+     *                                                 not match the exact
+     *                                                 chain record — fail
      *                                                 closed, never a
      *                                                 ticket that outlives
      *                                                 its chain
@@ -1615,8 +1626,17 @@ final class KiwiCaptchaValidator extends ConstraintValidator
         if ($requirement === null) {
             throw new PostSolveDispositionUnavailableException('the chain of the disposition is gone');
         }
+        // The EXACT-ORIGINAL-EXPIRY INVARIANT: a shape-valid carried
+        // bound must reproduce the exact chain record's server-held
+        // expiresAt — a differing value is corrupt state (a ticket would
+        // outlive the chain or expire early) and fails closed. A legacy
+        // record without a carried bound (null) falls back to the exact
+        // chain record's own bound.
+        if ($disposition->chainExpiresAt !== null && $disposition->chainExpiresAt !== $requirement->expiresAt) {
+            throw new PostSolveDispositionUnavailableException('the disposition-carried chain expiry does not match the exact chain record');
+        }
 
-        return $disposition->chainExpiresAt ?? $requirement->expiresAt;
+        return $requirement->expiresAt;
     }
 
     /**

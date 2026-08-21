@@ -35,6 +35,7 @@ use KiwiCaptcha\Risk\Network\CidrNetworkClassifier;
 use KiwiCaptcha\Risk\RiskEventKind;
 use KiwiCaptcha\Risk\RiskIdentityFactory;
 use KiwiCaptcha\Risk\RiskKeys;
+use KiwiCaptcha\Risk\RiskAction;
 use KiwiCaptcha\Risk\RiskPolicy;
 use KiwiCaptcha\Risk\RiskScorer;
 use KiwiCaptcha\Risk\RiskV2Weights;
@@ -1968,7 +1969,7 @@ final class ValidatorTest extends TestCase
     public function testCorruptDispositionRecordWithUnknownSchemaVersionFailsClosed(): void
     {
         $record = $this->pendingDispositionRecord();
-        $record['v'] = 2;
+        $record['v'] = 3;
         [$code, $store, $nonce] = $this->validateCorruptDisposition($record);
         self::assertSame(KiwiCaptcha::TEMPORARY_UNAVAILABLE_ERROR, $code, 'an unknown disposition schema version must fail closed as temporary_unavailable — never a pass, never a 422');
         try {
@@ -2171,13 +2172,29 @@ final class ValidatorTest extends TestCase
         self::assertSame('decision-atomic', $store->read('nonce-atomic')?->decisionId, 'the pending record carries the decision id from the SAME atomic transition');
 
         // A second mapping for a CONCURRENT claim: the loser is 'pending'
-        // (busy) and its GETDEL comes up empty — exactly one winner.
+        // (busy) — its claim NEVER touches the decision key, so the
+        // mapping stays resolvable for the caller who will win the next
+        // claim.
         $decisionRedis->strings['{kiwi:validator-test}:decision:nonce-race'] = (string) json_encode(['decision_id' => 'decision-first']);
         self::assertSame('claimed', $store->claim('nonce-race', 'owner-a', 305, '{kiwi:validator-test}:decision:nonce-race'));
         $decisionRedis->strings['{kiwi:validator-test}:decision:nonce-race'] = (string) json_encode(['decision_id' => 'decision-second']);
         self::assertSame('pending', $store->claim('nonce-race', 'owner-b', 305, '{kiwi:validator-test}:decision:nonce-race'), 'the concurrent second claim is busy');
-        self::assertSame('decision-first', $store->read('nonce-race')?->decisionId, 'exactly ONE claim won the GETDEL — the record keeps the first winner\'s handle');
-        self::assertArrayNotHasKey('{kiwi:validator-test}:decision:nonce-race', $decisionRedis->strings, 'the concurrent loser consumed nothing — the mapping is already gone');
+        self::assertSame('decision-first', $store->read('nonce-race')?->decisionId, 'the record keeps the first winner\'s handle');
+        $loserMapping = json_decode($decisionRedis->strings['{kiwi:validator-test}:decision:nonce-race'] ?? '', true);
+        self::assertIsArray($loserMapping);
+        self::assertSame('decision-second', $loserMapping['decision_id'] ?? null, 'the pending-live claim NEVER consumed the mapping — it stays resolvable');
+
+        // A COMPLETE record: a replay claim returns 'complete' and never
+        // touches the decision key — the mapping inserted after the
+        // finalize stays resolvable.
+        $decisionRedis->strings['{kiwi:validator-test}:decision:nonce-complete'] = (string) json_encode(['decision_id' => 'decision-final']);
+        self::assertSame('claimed', $store->claim('nonce-complete', 'owner-a', 305, '{kiwi:validator-test}:decision:nonce-complete'));
+        self::assertTrue($store->finalize('nonce-complete', 'owner-a', new PostSolveDisposition(PostSolveDispositionKind::Pass, 'decision-final')));
+        $decisionRedis->strings['{kiwi:validator-test}:decision:nonce-complete'] = (string) json_encode(['decision_id' => 'decision-after-complete']);
+        self::assertSame('complete', $store->claim('nonce-complete', 'owner-b', 305, '{kiwi:validator-test}:decision:nonce-complete'));
+        $completeMapping = json_decode($decisionRedis->strings['{kiwi:validator-test}:decision:nonce-complete'] ?? '', true);
+        self::assertIsArray($completeMapping);
+        self::assertSame('decision-after-complete', $completeMapping['decision_id'] ?? null, 'a complete claim NEVER consumes the decision mapping');
 
         // No decision map wired: the claim with a key behaves as before.
         [$plain] = $this->clockedDispositionStore();
@@ -2187,19 +2204,156 @@ final class ValidatorTest extends TestCase
 
     public function testCorruptDispositionRecordWithChainRequiredMissingExpiryFailsClosed(): void
     {
-        // A ChainRequired disposition WITHOUT its chain expiry bound is
-        // malformed state — the strict decoder refuses it (fail closed),
-        // never a ticket.
+        // A v2 ChainRequired disposition WITHOUT its chain expiry bound is
+        // malformed state — the strict v2 decoder refuses it (fail
+        // closed), never a ticket.
         $record = $this->completeDispositionRecord();
+        $record['v'] = 2;
         $record['disposition'] = new PostSolveDisposition(PostSolveDispositionKind::ChainRequired, 'decision-1', 'chain-xyz');
         [$code, $store, $nonce] = $this->validateCorruptDisposition($record);
-        self::assertSame(KiwiCaptcha::TEMPORARY_UNAVAILABLE_ERROR, $code, 'a ChainRequired record without its expiry bound must fail closed as temporary_unavailable — never a ticket');
+        self::assertSame(KiwiCaptcha::TEMPORARY_UNAVAILABLE_ERROR, $code, 'a v2 ChainRequired record without its expiry bound must fail closed as temporary_unavailable — never a ticket');
         try {
             $store->read($nonce);
-            self::fail('the strict decoder must refuse a ChainRequired record without its expiry bound');
+            self::fail('the strict decoder must refuse a v2 ChainRequired record without its expiry bound');
         } catch (MalformedPostSolveDispositionException $e) {
             self::assertStringContainsString('chain expiry', $e->getMessage());
         }
+    }
+
+    public function testLegacyV1ChainRequiredRecordSignsFromTheExactChain(): void
+    {
+        // A LEGACY v1 ChainRequired record (the shape written by the
+        // earlier store generation — a NULL carried expiry) is NOT
+        // corrupt: the reader accepts it and the signing falls back to
+        // the EXACT chain X record's server-held expiresAt — never the
+        // current obligation Y.
+        $resolver = new RiskProfileResolver(PoWAlgorithm::Sha256, 8);
+        $risk = $this->riskStack(1, 'allow', 'allow', false, null, $resolver);
+        [$store] = $this->clockedDispositionStore();
+
+        $chainStore = new ArrayChainedChallengeStateStore();
+        $chainService = new ChainedChallengeTicketService($chainStore, self::SECRET, 300, 15, $this->bindingAuthority());
+        $chainX = $chainService->requireStage2(base64_encode(random_bytes(32)), 'login', 'auth-txn-1', 1, RiskAction::Argon32, time() + 300);
+
+        $challenge = $this->issuer->issue('login', '198.51.100.7');
+        usleep(($challenge->minDurationMs + 10) * 1000);
+        $token = $this->solveToken($challenge->prefix, $challenge->salt, $challenge->targetBits, $challenge->nonce);
+        $nonce = \KiwiCaptcha\SolutionToken::decode($token)->nonce;
+        $dto = new class {
+            public ?string $captcha = null;
+        };
+        $dto->captcha = $token;
+
+        // Seed the LEGACY v1 record (no carried expiry).
+        $record = $this->completeDispositionRecord();
+        $record['v'] = 1;
+        $record['decisionId'] = 'decision-legacy';
+        $record['disposition'] = new PostSolveDisposition(PostSolveDispositionKind::ChainRequired, 'decision-legacy', $chainX->chainId);
+        $this->injectDispositionRecord($store, $nonce, $record);
+
+        // The reader ACCEPTS it with a null carried expiry.
+        $read = $store->read($nonce);
+        self::assertNotNull($read);
+        self::assertSame($chainX->chainId, $read->disposition?->chainId);
+        self::assertNull($read->disposition?->chainExpiresAt, 'a legacy v1 record carries no expiry bound — not corrupt');
+
+        // The signing takes the expiry from the EXACT chain X's record
+        // (requirementFor(X)).
+        [$engine] = $this->dispositionEngine($this->verifier, $risk['gateway'], $store, chainTickets: $chainService, resolver: $resolver, bindingAuthority: $this->bindingAuthority());
+        $meta = $engine->getMetadataFor($dto::class);
+        $meta->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
+        $violations = $engine->validate($dto);
+        self::assertCount(1, $violations);
+        self::assertSame(KiwiCaptchaValidator::CHAIN_REQUIRED_ERROR, $violations[0]->getCode(), 'a legacy v1 ChainRequired record is accepted — never temporary_unavailable');
+        $ticket = $violations[0]->getParameters()['{{ chain_ticket }}'] ?? null;
+        self::assertIsString($ticket);
+        $payload = $chainService->verify($ticket);
+        self::assertIsArray($payload);
+        self::assertSame($chainX->chainId, (string) $payload['chainId'], 'the legacy record signs the EXACT chain X');
+        self::assertSame($chainX->expiresAt, (int) $payload['expiresAt'], 'the legacy record signs X\'s server-held expiry (requirementFor(X))');
+
+        // NEVER consults the current obligation Y: X's stage-2 challenge
+        // VERIFIES (the obligation is cleared, the chain RECORD retained)
+        // and a FRESH chain Y opens for the same transaction — the ticket
+        // stays byte-identical (X, X.expiresAt).
+        $stage2Nonce = base64_encode(hash('sha256', 'stage2-legacy', true));
+        self::assertSame(ChainReservationResult::Available, $chainService->reserveStage2($chainX->chainId, 'owner-a'));
+        self::assertSame(ChainIssuedResult::IssuedNew, $chainService->markIssued($chainX->chainId, 'owner-a', $stage2Nonce));
+        self::assertSame(ChainVerifiedResult::VerifiedNew, $chainService->markVerified($chainX->chainId, $stage2Nonce));
+        self::assertNull($chainService->findOpenRequirement('login', 'auth-txn-1', 1), 'X\'s obligation is cleared');
+        $chainY = $chainService->requireStage2(base64_encode(random_bytes(32)), 'login', 'auth-txn-1', 1, RiskAction::Argon64, time() + 600);
+        self::assertNotSame($chainX->chainId, $chainY->chainId, 'the cleared obligation opens a FRESH chain');
+        self::assertSame($chainY->chainId, $chainService->findOpenRequirement('login', 'auth-txn-1', 1)?->chainId, 'Y now owns the transaction obligation');
+
+        [$engine2] = $this->dispositionEngine($this->verifier, $risk['gateway'], $store, chainTickets: $chainService, resolver: $resolver, bindingAuthority: $this->bindingAuthority());
+        $meta2 = $engine2->getMetadataFor($dto::class);
+        $meta2->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
+        $violations = $engine2->validate($dto);
+        self::assertCount(1, $violations);
+        self::assertSame(KiwiCaptchaValidator::CHAIN_REQUIRED_ERROR, $violations[0]->getCode());
+        $ticket2 = $violations[0]->getParameters()['{{ chain_ticket }}'] ?? null;
+        self::assertIsString($ticket2);
+        self::assertSame($ticket, $ticket2, 'the legacy-record ticket stays byte-identical with a concurrent chain Y open');
+        $payload2 = $chainService->verify($ticket2);
+        self::assertIsArray($payload2);
+        self::assertSame($chainX->chainId, (string) $payload2['chainId'], 'the signing stays bound to the disposition\'s exact chain — never Y');
+        self::assertSame($chainX->expiresAt, (int) $payload2['expiresAt'], 'the signed expiry is X\'s server-held bound — never Y\'s');
+        self::assertNotSame($chainY->expiresAt, (int) $payload2['expiresAt'], 'Y\'s expiry must never leak into X\'s ticket');
+    }
+
+    public function testChainRequiredSigningWithMismatchedCarriedExpiryFailsClosed(): void
+    {
+        // A shape-valid chain_expires_at that DIFFERS from the exact
+        // chain record's server-held expiresAt is corrupt state — the
+        // signing fails closed temporary_unavailable, never a ticket that
+        // outlives (or expires early vs) its chain. The matching value
+        // signs normally.
+        $resolver = new RiskProfileResolver(PoWAlgorithm::Sha256, 8);
+        $risk = $this->riskStack(1, 'allow', 'allow', false, null, $resolver);
+        [$store] = $this->clockedDispositionStore();
+
+        $chainStore = new ArrayChainedChallengeStateStore();
+        $chainService = new ChainedChallengeTicketService($chainStore, self::SECRET, 300, 15, $this->bindingAuthority());
+        $chainX = $chainService->requireStage2(base64_encode(random_bytes(32)), 'login', 'auth-txn-1', 1, RiskAction::Argon32, time() + 300);
+
+        $challenge = $this->issuer->issue('login', '198.51.100.7');
+        usleep(($challenge->minDurationMs + 10) * 1000);
+        $token = $this->solveToken($challenge->prefix, $challenge->salt, $challenge->targetBits, $challenge->nonce);
+        $nonce = \KiwiCaptcha\SolutionToken::decode($token)->nonce;
+        $dto = new class {
+            public ?string $captcha = null;
+        };
+        $dto->captcha = $token;
+
+        $record = $this->completeDispositionRecord();
+        $record['v'] = 2;
+        $record['decisionId'] = 'decision-1';
+        $record['disposition'] = new PostSolveDisposition(PostSolveDispositionKind::ChainRequired, 'decision-1', $chainX->chainId, $chainX->expiresAt + 1000);
+        $this->injectDispositionRecord($store, $nonce, $record);
+
+        [$engine] = $this->dispositionEngine($this->verifier, $risk['gateway'], $store, chainTickets: $chainService, resolver: $resolver, bindingAuthority: $this->bindingAuthority());
+        $meta = $engine->getMetadataFor($dto::class);
+        $meta->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
+        $violations = $engine->validate($dto);
+        self::assertCount(1, $violations);
+        self::assertSame(KiwiCaptcha::TEMPORARY_UNAVAILABLE_ERROR, $violations[0]->getCode(), 'a mismatched carried expiry must fail closed — never a ticket');
+        self::assertArrayNotHasKey('{{ chain_ticket }}', $violations[0]->getParameters(), 'no ticket is produced for the mismatched bound');
+
+        // The MATCHING value signs normally with the exact chain's bound.
+        $record['disposition'] = new PostSolveDisposition(PostSolveDispositionKind::ChainRequired, 'decision-1', $chainX->chainId, $chainX->expiresAt);
+        $this->injectDispositionRecord($store, $nonce, $record);
+        [$engine2] = $this->dispositionEngine($this->verifier, $risk['gateway'], $store, chainTickets: $chainService, resolver: $resolver, bindingAuthority: $this->bindingAuthority());
+        $meta2 = $engine2->getMetadataFor($dto::class);
+        $meta2->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
+        $violations = $engine2->validate($dto);
+        self::assertCount(1, $violations);
+        self::assertSame(KiwiCaptchaValidator::CHAIN_REQUIRED_ERROR, $violations[0]->getCode(), 'the matching carried expiry signs normally');
+        $ticket = $violations[0]->getParameters()['{{ chain_ticket }}'] ?? null;
+        self::assertIsString($ticket);
+        $payload = $chainService->verify($ticket);
+        self::assertIsArray($payload);
+        self::assertSame($chainX->chainId, (string) $payload['chainId']);
+        self::assertSame($chainX->expiresAt, (int) $payload['expiresAt'], 'the ticket signs the exact chain record\'s bound');
     }
 
     public function testChainRequiredDispositionSurvivesTokenExpiryForTheRetainedMargin(): void

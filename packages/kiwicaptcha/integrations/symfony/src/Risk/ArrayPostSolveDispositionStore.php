@@ -16,25 +16,31 @@ namespace BelConsulting\KiwiCaptchaBundle\Risk;
  * 'complete'), finalize is the atomic pending(me) -> complete transition
  * (never overwrites another owner's work), and every record expires with
  * its TTL (the SHORT FIXED lease is a contention bound, never the record
- * TTL). The claim ATOMICALLY consumes the nonce -> decision mapping when
- * a shared decision map is wired and the caller passes the mapping's
- * FULL key (GETDEL semantics, at most one winner) and persists the
- * paired decision id in the pending record in the SAME transition — the
- * exact mirror of the Redis claim Lua's KEYS[2] transfer. The pending
- * record carries the ORIGINAL decision handle the first owner's claim
- * consumed; a TAKEOVER keeps it — a completed disposition survives the
- * crash of its first owner with the original decision id.
+ * TTL). The machine reads the EXISTING state BEFORE touching anything
+ * else — a complete claim, a busy claim and a takeover NEVER consume the
+ * nonce -> decision mapping; only the MISSING path consumes it (GETDEL
+ * semantics, at most one winner) and persists the paired decision id in
+ * the pending record in the SAME transition — the exact mirror of the
+ * Redis claim Lua's KEYS[2] transfer. The pending record carries the
+ * ORIGINAL decision handle the first owner's claim consumed; a TAKEOVER
+ * keeps it — a completed disposition survives the crash of its first
+ * owner with the original decision id.
  *
- * EVERY record is decoded ALL-OR-NOTHING against the strict v1 schema
- * (the identical decode as the Redis store): a missing/malformed field
- * or a state-invariant violation throws
+ * EVERY record is decoded ALL-OR-NOTHING against the strict schema (the
+ * identical decode as the Redis store): a missing/malformed field or a
+ * state-invariant violation throws
  * {@see MalformedPostSolveDispositionException} — NEVER a defaulted
  * record (an unknown state never becomes pending, a corrupt kind never
  * Pass, a missing disposition never a silent pass, a ChainRequired
- * record without its chain expiry bound never a ticket). The strict
- * decode runs on the READ path AND before every claim transition: a
- * corrupt server record throws (fail closed), it is NEVER healed into
- * valid state by a takeover.
+ * record without its chain expiry bound never a ticket). The decoder
+ * accepts BOTH schema versions 1 and 2 during the compatibility window:
+ * new writes are v2 (chain_required REQUIRES a positive chain expiry
+ * under v2), while a v1 chain_required record with a NULL carried expiry
+ * is a LEGACY record — the signing falls back to the exact chain
+ * record's server-held bound (never corrupt); any other v1 violation
+ * stays corrupt. The strict decode runs on the READ path AND before
+ * every claim transition: a corrupt server record throws (fail closed),
+ * it is NEVER healed into valid state by a takeover.
  */
 final class ArrayPostSolveDispositionStore implements PostSolveDispositionStore
 {
@@ -78,49 +84,53 @@ final class ArrayPostSolveDispositionStore implements PostSolveDispositionStore
         if ($this->expired($nonce, $now)) {
             unset($this->records[$nonce]);
         }
-        // ATOMIC decision transfer (the mirror of the Redis claim Lua's
-        // KEYS[2] GETDEL): the nonce -> decision mapping is consumed in the
-        // SAME operation as the claim — at most one winner — and the paired
-        // decision id is persisted in the pending record below.
-        $decisionId = $this->consumeDecision($decisionKey);
         $existing = $this->records[$nonce] ?? null;
         if ($existing !== null) {
             // STRICT PRE-READ: a corrupt record throws (fail closed) — it
             // is NEVER healed into valid state by a takeover.
             self::validateRecord($existing);
-        }
-        if ($existing === null) {
-            $this->records[$nonce] = [
-                'v' => 1,
-                'ttl' => max(1, $this->ttlSecs > 0 ? $this->ttlSecs : $ttlSeconds),
-                'created' => $now,
-                'state' => 'pending',
-                'owner' => $owner,
-                'leaseUntil' => $now + self::LEASE_SECS,
-                'disposition' => null,
-                'decisionId' => $decisionId,
-            ];
+            if ($existing['state'] === 'complete') {
+                // A completed disposition is terminal: the replay claim
+                // answers 'complete' and NEVER touches the decision key.
+                return 'complete';
+            }
+            if ($existing['owner'] === $owner) {
+                return 'pending';
+            }
+            if ($existing['leaseUntil'] !== null && $existing['leaseUntil'] > $now) {
+                // Another owner's claim is live: busy — the decision key
+                // is NEVER touched (the mapping stays resolvable for the
+                // caller who will win the next claim).
+                return 'pending';
+            }
+            // Expired lease: takeover. The ORIGINAL decision handle is
+            // PRESERVED — a takeover NEVER consumes the decision mapping
+            // (the fresh mapping belongs to the caller who will win the
+            // next claim): a completed disposition survives the crash of
+            // its first owner with the original decision id.
+            $this->records[$nonce]['owner'] = $owner;
+            $this->records[$nonce]['leaseUntil'] = $now + self::LEASE_SECS;
+            $this->records[$nonce]['disposition'] = null;
 
-            return 'claimed';
+            return 'taken_over';
         }
-        if ($existing['state'] === 'complete') {
-            return 'complete';
-        }
-        if ($existing['owner'] === $owner) {
-            return 'pending';
-        }
-        if ($existing['leaseUntil'] !== null && $existing['leaseUntil'] > $now) {
-            return 'pending';
-        }
-        // Expired lease: takeover. The ORIGINAL decision handle is
-        // PRESERVED (the new owner's GETDEL is empty after the first
-        // owner consumed the mapping) — a completed disposition survives
-        // the crash of its first owner with the original decision id.
-        $this->records[$nonce]['owner'] = $owner;
-        $this->records[$nonce]['leaseUntil'] = $now + self::LEASE_SECS;
-        $this->records[$nonce]['disposition'] = null;
+        // MISSING: the ONLY path that consumes the decision mapping
+        // (GETDEL semantics, at most one winner) — the paired decision id
+        // is persisted in the pending record in the SAME operation (the
+        // mirror of the Redis claim Lua's KEYS[2] transfer).
+        $decisionId = $this->consumeDecision($decisionKey);
+        $this->records[$nonce] = [
+            'v' => 2,
+            'ttl' => max(1, $this->ttlSecs > 0 ? $this->ttlSecs : $ttlSeconds),
+            'created' => $now,
+            'state' => 'pending',
+            'owner' => $owner,
+            'leaseUntil' => $now + self::LEASE_SECS,
+            'disposition' => null,
+            'decisionId' => $decisionId,
+        ];
 
-        return 'taken_over';
+        return 'claimed';
     }
 
     /**
@@ -205,17 +215,20 @@ final class ArrayPostSolveDispositionStore implements PostSolveDispositionStore
     }
 
     /**
-     * The strict v1 decode — ALL-OR-NOTHING, IDENTICAL to the Redis
-     * store's decode: a missing/malformed field or a state-invariant
-     * violation throws {@see MalformedPostSolveDispositionException}
-     * (NEVER defaults). Validates: schema version 1; the exact state enum
-     * (pending|complete — nothing else); a non-empty string owner and an
-     * integer lease deadline REQUIRED in pending and NULL in complete;
-     * the disposition REQUIRED (a valid typed disposition with a
-     * well-shaped decision id / chain id, plus the chain expiry integer
-     * REQUIRED on the ChainRequired kind and NULL outside it) in complete
-     * and NULL in pending; a non-empty string-or-null decision handle in
-     * both states.
+     * The strict decode — ALL-OR-NOTHING, IDENTICAL to the Redis store's
+     * decode: a missing/malformed field or a state-invariant violation
+     * throws {@see MalformedPostSolveDispositionException} (NEVER
+     * defaults). Validates: schema version 1 or 2 (the compatibility
+     * window — v2 carries the strict chain-expiry requirement, v1
+     * additionally accepts a LEGACY chain_required record with a NULL
+     * carried expiry; every other rule is identical for both versions);
+     * the exact state enum (pending|complete — nothing else); a
+     * non-empty string owner and an integer lease deadline REQUIRED in
+     * pending and NULL in complete; the disposition REQUIRED (a valid
+     * typed disposition with a well-shaped decision id / chain id, plus
+     * the chain expiry integer REQUIRED on the ChainRequired kind — v1
+     * legacy excepted — and NULL outside it) in complete and NULL in
+     * pending; a non-empty string-or-null decision handle in both states.
      *
      * @param array<string, mixed> $record
      *
@@ -225,8 +238,9 @@ final class ArrayPostSolveDispositionStore implements PostSolveDispositionStore
      */
     private static function validateRecord(array $record): array
     {
-        if (($record['v'] ?? null) !== 1) {
-            throw new MalformedPostSolveDispositionException('post-solve disposition record schema version must be 1');
+        $version = $record['v'] ?? null;
+        if ($version !== 1 && $version !== 2) {
+            throw new MalformedPostSolveDispositionException('post-solve disposition record schema version must be 1 or 2');
         }
         $state = $record['state'] ?? null;
         if (!\is_string($state) || !\in_array($state, ['pending', 'complete'], true)) {
@@ -265,12 +279,15 @@ final class ArrayPostSolveDispositionStore implements PostSolveDispositionStore
                 throw new MalformedPostSolveDispositionException('post-solve disposition record chain_id must be null outside the ChainRequired kind');
             }
             // The ChainRequired record carries its chain's ORIGINAL expiry
-            // bound (the signing NEVER re-consults the obligation): the
-            // bound is REQUIRED on the kind and NULL outside it — a
-            // ChainRequired record without it is malformed state, never a
-            // ticket.
+            // bound (the signing NEVER re-consults the obligation): under
+            // v2 the bound is REQUIRED on the kind and NULL outside it —
+            // a ChainRequired v2 record without it is malformed state,
+            // never a ticket. A v1 chain_required record with a NULL
+            // carried expiry is a LEGACY record (the shape of the earlier
+            // store generation): the signing falls back to the exact
+            // chain record's server-held bound — never corrupt.
             if ($disposition->kind === PostSolveDispositionKind::ChainRequired) {
-                if (!\is_int($disposition->chainExpiresAt) || $disposition->chainExpiresAt <= 0) {
+                if (!($version === 1 && $disposition->chainExpiresAt === null) && (!\is_int($disposition->chainExpiresAt) || $disposition->chainExpiresAt <= 0)) {
                     throw new MalformedPostSolveDispositionException('a ChainRequired disposition record must carry a positive integer chain expiry');
                 }
             } elseif ($disposition->chainExpiresAt !== null) {

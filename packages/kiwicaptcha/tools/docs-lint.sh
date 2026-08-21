@@ -10,11 +10,15 @@
 # zero, then advisory mode is removed.
 # Scan scope: the five kiwicaptcha package families under packages/
 # (kiwicaptcha, kiwicaptcha-php, kiwicaptcha-risk, kiwicaptcha-risk-php,
-# kiwicaptcha-wasm) plus the product root files README.md and
-# SECURITY.md. The product root files exist only in the product
-# repository — they are scanned only when present and identifiable as
-# the product's (the README's first line is the "# KiwiCaptcha"
-# identity marker); unrelated repository root files are never scanned.
+# kiwicaptcha-wasm) plus the repository's human-facing root text: the
+# browser test suite under tests/browser (the Playwright specs and the
+# fixture router), the design docs under protocol/, the workflow prose
+# under .github/workflows/, and the product root files README.md and
+# SECURITY.md. The root-level roots are scanned only when present (the
+# browser suite and the design docs are product-repository trees); the
+# product root files are scanned only when identifiable as the
+# product's (the README's first line is the "# KiwiCaptcha" identity
+# marker); unrelated repository root files are never scanned.
 # Checks: em-dash density, sentence length, ALL-CAPS prose, filler
 # vocabulary, 'never/not' contrast saturation, bold-emphasis density,
 # nested parentheses, and duplicate sentences across the scanned files.
@@ -46,7 +50,7 @@ while [ "$#" -gt 0 ]; do
       ;;
     -h|--help)
       echo "usage: docs-lint.sh [--source] [--baseline FILE] [--update-baseline FILE] [ROOT_DIR]"
-      echo "prose lint over the five kiwicaptcha package families; advisory"
+      echo "prose lint over the kiwicaptcha package families and the repository's human-facing text; advisory"
       echo "(exit 0) unless --baseline FILE is given, which fails (exit 1)"
       echo "when any scanned file exceeds its per-file row or the total"
       echo "exceeds the tracked baseline; --update-baseline FILE writes"
@@ -73,10 +77,18 @@ if [ ! -d "$ROOT/packages" ]; then
   exit 0
 fi
 
-# The scan covers ONLY the five kiwicaptcha package families; other
-# packages/ entries (the sdk families, the packages index) are never
-# scanned. The product root files (README.md, SECURITY.md) exist only
-# in the product repository — they are scanned only when present and
+# The scan covers ONLY the five kiwicaptcha package families and the
+# repository's human-facing root text; other packages/ entries (the
+# sdk families, the packages index) are never scanned. The root-level
+# roots are presence-gated: tests/browser (the Playwright specs and
+# the fixture router) and protocol/ (the design docs) are
+# product-repository trees, and .github/workflows/ carries the CI
+# workflow prose; each is scanned only when present (find over a
+# missing root yields nothing), and the workflow prose is additionally
+# gated on the product identity marker like the product root files:
+# an unrelated repository's own workflows are never scanned. The
+# product root files (README.md, SECURITY.md) exist only in the
+# product repository — they are scanned only when present and
 # carrying the product identity marker (first line "# KiwiCaptcha",
 # the marker the product CI's repo-sanity job enforces), so an
 # unrelated repository root README is never picked up.
@@ -84,7 +96,10 @@ SCAN_ROOTS="packages/kiwicaptcha
 packages/kiwicaptcha-php
 packages/kiwicaptcha-risk
 packages/kiwicaptcha-risk-php
-packages/kiwicaptcha-wasm"
+packages/kiwicaptcha-wasm
+tests/browser
+protocol
+.github/workflows"
 
 product_root_readme() {
   [ -f "$ROOT/README.md" ] || return 1
@@ -364,6 +379,9 @@ excluded() {
 
 scan_md() {
   for r in $SCAN_ROOTS; do
+    if [ "$r" = ".github/workflows" ]; then
+      product_root_readme || continue
+    fi
     find "$ROOT/$r" -type f -name '*.md' -print 2>/dev/null
   done
   if product_root_readme; then
@@ -374,6 +392,9 @@ scan_md() {
 
 scan_src() {
   for r in $SCAN_ROOTS; do
+    if [ "$r" = ".github/workflows" ]; then
+      product_root_readme || continue
+    fi
     for ext in rs php js mjs yaml yml sh twig; do
       find "$ROOT/$r" -type f -name "*.$ext" -print 2>/dev/null
     done
