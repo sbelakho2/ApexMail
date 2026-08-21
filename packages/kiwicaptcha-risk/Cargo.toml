@@ -16,6 +16,6 @@ rand = "0.8"
 thiserror = "2"
 redis = "0.27"
 hex = "0.4"
-kiwicaptcha = { version = "1.1.0", path = "../kiwicaptcha" }
+kiwicaptcha = { version = "1.7.0", path = "../kiwicaptcha" }
 
 [dev-dependencies]
