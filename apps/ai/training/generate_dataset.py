@@ -5,20 +5,42 @@ ApexMail AI — Dataset Splitter
 Splits data/train_agent.jsonl into train / val / test JSONL files
 for use by train.py and evaluation scripts.
 
+Splits are STABLE PER ROW: each row's bucket is derived from a hash of its
+canonical JSON content, so re-running the splitter (or appending new rows)
+never moves an existing row between train/val/test. The previous
+shuffle+seed approach re-shuffled the whole corpus whenever rows were
+appended (for example by generate_recovered_training.py), which leaked old
+val/test rows into train.
+
 Usage:
     python generate_dataset.py                    # 80/10/10 split (default)
     python generate_dataset.py --val 0.15 --test 0.05
-    python generate_dataset.py --seed 123
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
-import random
 from pathlib import Path
 
 from common_paths import TRAIN_JSONL, DATA_DIR
+
+
+def row_bucket(row: dict, val_frac: float, test_frac: float) -> str:
+    """Deterministically assign a row to train/val/test from its content.
+
+    The bucket depends only on the row's canonical JSON and the split
+    fractions — not on row order or on the presence of other rows.
+    """
+    payload = json.dumps(row, sort_keys=True, ensure_ascii=False)
+    digest = hashlib.sha256(payload.encode("utf-8")).digest()
+    roll = int.from_bytes(digest[:8], "big") / 2**64
+    if roll < val_frac:
+        return "val"
+    if roll < val_frac + test_frac:
+        return "test"
+    return "train"
 
 
 def main() -> None:
@@ -27,7 +49,6 @@ def main() -> None:
     parser.add_argument("--output-dir", default=str(DATA_DIR), help="Output directory for splits")
     parser.add_argument("--val", type=float, default=0.10, help="Validation set fraction (default: 0.10)")
     parser.add_argument("--test", type=float, default=0.10, help="Test set fraction (default: 0.10)")
-    parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
     parser.add_argument("--dry-run", action="store_true", help="Print counts without writing files")
     args = parser.parse_args()
 
@@ -46,18 +67,16 @@ def main() -> None:
     total = len(examples)
     print(f"Loaded {total} examples from {input_path}")
 
-    # Shuffle deterministically
-    random.seed(args.seed)
-    random.shuffle(examples)
-
-    # Compute split indices
-    n_val = int(total * args.val)
-    n_test = int(total * args.test)
-    n_train = total - n_val - n_test
-
-    train_set = examples[:n_train]
-    val_set = examples[n_train : n_train + n_val]
-    test_set = examples[n_train + n_val :]
+    # Stable per-row assignment (content hash → bucket)
+    train_set, val_set, test_set = [], [], []
+    for example in examples:
+        bucket = row_bucket(example, args.val, args.test)
+        if bucket == "val":
+            val_set.append(example)
+        elif bucket == "test":
+            test_set.append(example)
+        else:
+            train_set.append(example)
 
     print(f"Split: train={len(train_set)}, val={len(val_set)}, test={len(test_set)}")
 
@@ -71,7 +90,7 @@ def main() -> None:
 
     for name, data in [("train", train_set), ("val", val_set), ("test", test_set)]:
         out_path = out_dir / f"{name}.jsonl"
-        with open(out_path, "w") as f:
+        with open(out_path, "w", encoding="utf-8") as f:
             for item in data:
                 f.write(json.dumps(item, ensure_ascii=False) + "\n")
         print(f"  Wrote {len(data)} examples to {out_path}")

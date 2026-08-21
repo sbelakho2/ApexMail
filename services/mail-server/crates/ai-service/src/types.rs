@@ -21,6 +21,8 @@ pub enum AiError {
     TrainingUnavailable(String),
     #[error("invalid input: {0}")]
     InvalidInput(String),
+    #[error("rate limit exceeded: {0}")]
+    RateLimited(String),
     #[error("arm not found: {0}")]
     ArmNotFound(String),
     #[error("job not found: {0}")]
@@ -39,6 +41,7 @@ impl AiError {
             AiError::ModelNotFound(_) | AiError::ArmNotFound(_) | AiError::JobNotFound(_) => 404,
             AiError::InvalidInput(_) => 400,
             AiError::ModelUnavailable(_) | AiError::TrainingUnavailable(_) => 503,
+            AiError::RateLimited(_) => 429,
             _ => 500,
         }
     }

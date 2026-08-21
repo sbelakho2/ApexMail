@@ -272,6 +272,7 @@ Available tools — emit tool_call for exact computation:
 // Canonical data
 // ═══════════════════════════════════════════════════════════════════════════
 
+#[allow(dead_code)] // kept for callers rendering canonical volume numbers
 fn fmt_number(n: i64) -> String {
     let s = n.to_string();
     let mut r = String::new();
@@ -315,22 +316,26 @@ fn calculate_overage(params: &serde_json::Value) -> serde_json::Value {
 
 fn calculate_payg(params: &serde_json::Value) -> serde_json::Value {
     let emails = params.get("emails").and_then(|v| v.as_i64()).unwrap_or(0);
-    let tiers = [
-        (0, 10_000, 0.001),
-        (10_001, 100_000, 0.0008),
-        (100_001, 1_000_000, 0.0005),
-        (1_000_001, i64::MAX, 0.0003),
+    // Tier capacities per docs/pricing.md: the first band is 0-10,000
+    // (10,000 emails), then 10,001-100,000 (90,000), 100,001-1,000,000
+    // (900,000), and everything above. The previous bounds computation
+    // (`h - l + 1`) made tier 1 cover 10,001 emails.
+    let tiers: [(&str, i64, f64); 4] = [
+        ("0-10,000", 10_000, 0.001),
+        ("10,001-100,000", 90_000, 0.0008),
+        ("100,001-1,000,000", 900_000, 0.0005),
+        ("1,000,001+", i64::MAX, 0.0003),
     ];
     let mut r = emails;
     let mut total = 0.0;
     let mut breakdown = Vec::new();
-    for (l, h, rate) in tiers {
+    for (range, capacity, rate) in tiers {
         if r <= 0 {
             break;
         }
-        let t = r.min(h - l + 1);
+        let t = r.min(capacity);
         let c = ((t as f64) * rate * 100.0).round() / 100.0;
-        breakdown.push(serde_json::json!({"range":format!("{}-{}",fmt_number(l),if h==i64::MAX{"∞".into()}else{fmt_number(h)}),"emails_in_tier":t,"rate":rate,"cost":c}));
+        breakdown.push(serde_json::json!({"range":range,"emails_in_tier":t,"rate":rate,"cost":c}));
         total += c;
         r -= t;
     }
@@ -358,7 +363,7 @@ fn compare_plans(params: &serde_json::Value) -> serde_json::Value {
     serde_json::json!({
         "plan_a":{"name":a,"price":pa_price},"plan_b":{"name":b,"price":pb_price},
         "price_diff":diff,
-        "label":if diff>0{format!("${diff} more")}else if diff<0{format!("${} less", (diff as i32).abs())}else{"Same price".into()}
+        "label":if diff>0{format!("\u{20ac}{diff} more")}else if diff<0{format!("\u{20ac}{} less", (diff as i32).abs())}else{"Same price".into()}
     })
 }
 
@@ -384,7 +389,7 @@ fn get_plan_details(params: &serde_json::Value) -> serde_json::Value {
             "webhooks":50,"dedicated_ips":3,"sso":true,"hipaa":false,"soc2":false,"byoip":false,
             "white_label":false,"sto":true,"ab_testing":true,"audit_logs":true,"sla_credit":10,"support":"priority_async","contacts":500000},
         "enterprise": {"price":3000,"emails":5000000,"api_calls":"Unlimited","team":"Unlimited","domains":"Unlimited","retention":730,
-            "webhooks":"Unlimited","dedicated_ips":10,"sso":true,"hipaa":true,"soc2":true,"byoip":true,
+            "webhooks":"Unlimited","dedicated_ips":10,"sso":true,"hipaa":false,"soc2":false,"byoip":true,
             "white_label":true,"sto":true,"ab_testing":true,"audit_logs":true,"sla_credit":25,"support":"dedicated","contacts":"Unlimited"},
     });
     details
@@ -408,7 +413,7 @@ fn get_price_diff(params: &serde_json::Value) -> serde_json::Value {
     match (get(a), get(b)) {
         (Some(pa), Some(pb)) => {
             let d = pb - pa;
-            serde_json::json!({"plan_a":a,"plan_a_price":pa,"plan_b":b,"plan_b_price":pb,"diff":d,"label":if d>0{format!("${d} more")}else if d<0{format!("${} less", (d as i32).abs())}else{"Same price".into()}})
+            serde_json::json!({"plan_a":a,"plan_a_price":pa,"plan_b":b,"plan_b_price":pb,"diff":d,"label":if d>0{format!("\u{20ac}{d} more")}else if d<0{format!("\u{20ac}{} less", (d as i32).abs())}else{"Same price".into()}})
         }
         _ => serde_json::json!({"error":format!("unknown plan: {a} or {b}")}),
     }
@@ -521,7 +526,7 @@ fn generate_incident_timeline(params: &serde_json::Value) -> serde_json::Value {
             {"step":7,"action":"Root cause analysis","who":"Engineering + Security","timeframe":"< 7 days"},
             {"step":8,"action":"Remediation","who":"Implement git-secrets, Gitleaks, pre-commit hooks","timeframe":"< 30 days"},
         ],
-        "apexmail_audit_log_query": format!("SELECT * FROM audit_logs WHERE api_key_id = '{key_id}' AND created_at > NOW() - INTERVAL '48 hours' ORDER BY created_at"),
+        "apexmail_audit_log_query": "SELECT * FROM audit_logs WHERE api_key_id = $1 AND created_at > NOW() - INTERVAL '48 hours' ORDER BY created_at",
         "apexmail_incident_contact": "security@apexmail.ee"
     })
 }
@@ -743,6 +748,57 @@ mod tests {
     fn test_payg_50k() {
         let r = calculate_payg(&serde_json::json!({"emails":50000}));
         assert_eq!(r["total_cost"], 42.0);
+    }
+
+    #[test]
+    fn payg_tier_one_covers_exactly_ten_thousand_emails() {
+        // Regression: tier 1 used to absorb 10,001 emails.
+        let r = calculate_payg(&serde_json::json!({"emails":10001}));
+        let tiers = r["tiers"].as_array().unwrap();
+        assert_eq!(tiers[0]["emails_in_tier"], 10_000);
+        assert_eq!(tiers[1]["emails_in_tier"], 1);
+        // 10,000 × €0.001 + 1 × €0.0008
+        assert_eq!(tiers[0]["cost"], 10.0);
+    }
+
+    #[test]
+    fn payg_tier_two_caps_at_ninety_thousand_emails() {
+        let r = calculate_payg(&serde_json::json!({"emails":150_000}));
+        let tiers = r["tiers"].as_array().unwrap();
+        assert_eq!(tiers[0]["emails_in_tier"], 10_000);
+        assert_eq!(tiers[1]["emails_in_tier"], 90_000);
+        assert_eq!(tiers[2]["emails_in_tier"], 50_000);
+    }
+
+    #[test]
+    fn payg_at_exact_tier_boundaries_has_no_negative_volumes() {
+        for n in [0, 1, 5_000, 10_000, 10_001, 100_000, 100_001, 1_000_000, 1_000_001] {
+            let r = calculate_payg(&serde_json::json!({"emails": n}));
+            for tier in r["tiers"].as_array().unwrap() {
+                let count = tier["emails_in_tier"].as_i64().unwrap();
+                assert!(count >= 0, "negative tier volume {count} for n={n}");
+            }
+        }
+    }
+
+    #[test]
+    fn price_diff_labels_use_euro_not_dollar() {
+        let r = compare_plans(&serde_json::json!({"plan_a":"starter","plan_b":"pro"}));
+        assert_eq!(r["label"], "\u{20ac}40 more");
+        let r = get_price_diff(&serde_json::json!({"plan_a":"scale","plan_b":"pro"}));
+        assert_eq!(r["label"], "\u{20ac}285 less");
+        let rendered = serde_json::to_string(&r).unwrap();
+        assert!(!rendered.contains('$'), "euro outputs must not use $ labels");
+    }
+
+    #[test]
+    fn incident_timeline_query_is_parameterized() {
+        let r = generate_incident_timeline(
+            &serde_json::json!({"key_id":"key' OR '1'='1","exposure_hours":4}),
+        );
+        let query = r["apexmail_audit_log_query"].as_str().unwrap();
+        assert!(query.contains("$1"), "query must use a $1 placeholder");
+        assert!(!query.contains("key'"), "key_id must never be interpolated into SQL");
     }
     #[test]
     fn dns_tool_refuses_to_invent_static_records() {

@@ -412,19 +412,29 @@ fn detect_markdown_injection(input: &str) -> Vec<InjectionFinding> {
 }
 
 fn is_apexmail_domain(url: &str) -> bool {
-    let lower = url.to_lowercase();
     let domains = [
         "apexmail.ee",
         "api.apexmail.ee",
         "app.apexmail.ee",
         "track.apexmail.ee",
     ];
-    for d in &domains {
-        if lower.contains(d) {
-            return true;
-        }
-    }
-    false
+    // Extract the host (strip scheme, userinfo, path, query, fragment) so
+    // that "https://evil.com/steal?apexmail.ee" or
+    // "https://apexmail.ee.evil.com/" cannot pass via substring matching.
+    let trimmed = url.trim().trim_end_matches('.').to_lowercase();
+    let without_scheme = trimmed
+        .strip_prefix("https://")
+        .or_else(|| trimmed.strip_prefix("http://"))
+        .unwrap_or(&trimmed);
+    let without_path = without_scheme
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or(without_scheme);
+    let host = without_path.rsplit('@').next().unwrap_or(without_path);
+    let host = host.split(':').next().unwrap_or(host);
+    domains
+        .iter()
+        .any(|d| host == *d || host.ends_with(&format!(".{d}")))
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1086,6 +1096,24 @@ mod tests {
     #[test]
     fn test_threat_level_clean() {
         assert_eq!(classify_threat_level(&[], ""), ThreatLevel::Clean);
+    }
+
+    // ── ApexMail domain allowlist (suffix matching) ──
+
+    #[test]
+    fn apexmail_subdomains_are_allowed() {
+        assert!(is_apexmail_domain("https://app.apexmail.ee/billing"));
+        assert!(is_apexmail_domain("https://apexmail.ee/docs"));
+        assert!(is_apexmail_domain("https://track.apexmail.ee/c/123"));
+    }
+
+    #[test]
+    fn attacker_urls_embedding_the_domain_are_rejected() {
+        // Regression: lower.contains(domain) used to accept these.
+        assert!(!is_apexmail_domain("https://evil.com/steal?apexmail.ee"));
+        assert!(!is_apexmail_domain("https://apexmail.ee.evil.com/"));
+        assert!(!is_apexmail_domain("https://user@apexmail.ee.evil.com/x"));
+        assert!(!is_apexmail_domain("https://evil.com/apexmail.ee.png"));
     }
 
     #[test]

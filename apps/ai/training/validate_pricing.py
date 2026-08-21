@@ -24,14 +24,16 @@ from typing import Any
 
 
 # ── Canonical pricing table (source of truth) ──────────────────────────
+# Matches services/mail-server/crates/billing-service/src/plans.rs and
+# docs/pricing.md exactly. All published prices are EUR.
 CANONICAL_PRICING = {
     "plans": [
-        {"name": "Free",       "price": "$0",     "emails": 30_000,   "api_calls": 300_000,    "team": 1,    "domains": 1},
-        {"name": "Starter",    "price": "$15",    "emails": 50_000,   "api_calls": 500_000,    "team": 5,    "domains": 5},
-        {"name": "Pro",        "price": "$79",    "emails": 150_000,  "api_calls": 2_000_000,  "team": 10,   "domains": 25},
-        {"name": "Growth",     "price": "$150",   "emails": 500_000,  "api_calls": 5_000_000,  "team": 25,   "domains": 100},
-        {"name": "Scale",      "price": "$350",   "emails": 2_000_000,"api_calls": 20_000_000, "team": 50,   "domains": -1},   # -1 = unlimited
-        {"name": "Enterprise", "price": "custom", "emails": 5_000_000,"api_calls": -1,         "team": -1,   "domains": -1},
+        {"name": "Free",       "price": "€0",     "emails": 30_000,   "api_calls": 300_000,    "team": 1,    "domains": 1},
+        {"name": "Starter",    "price": "€25",    "emails": 50_000,   "api_calls": 500_000,    "team": 5,    "domains": 5},
+        {"name": "Pro",        "price": "€65",    "emails": 150_000,  "api_calls": 2_000_000,  "team": 10,   "domains": 25},
+        {"name": "Growth",     "price": "€150",   "emails": 500_000,  "api_calls": 5_000_000,  "team": 25,   "domains": 100},
+        {"name": "Scale",      "price": "€350",   "emails": 2_000_000,"api_calls": 20_000_000, "team": 50,   "domains": -1},   # -1 = unlimited
+        {"name": "Enterprise", "price": "€3,000", "emails": 5_000_000,"api_calls": -1,         "team": -1,   "domains": -1},
     ],
     "payg": {
         "tiers": [
@@ -40,7 +42,7 @@ CANONICAL_PRICING = {
             {"min": 100_001,"max": 1_000_000,  "rate": 0.0005},
             {"min": 1_000_001,"max": None,     "rate": 0.0003},
         ],
-        "base_price": "$0",
+        "base_price": "€0",
     },
     "overage": {
         "email_rate": 0.40,    # per 1,000 extra emails
@@ -48,7 +50,7 @@ CANONICAL_PRICING = {
         "api_rate": 0.10,      # per 1,000 API calls above free tier
     },
     "addons": {
-        "dedicated_ip": "$30/mo",
+        "dedicated_ip": "€30/mo",
     },
 }
 
@@ -56,20 +58,27 @@ CANONICAL_PRICING = {
 PLAN_BY_NAME = {p["name"].lower(): p for p in CANONICAL_PRICING["plans"]}
 PRICE_BY_PLAN = {p["name"].lower(): p["price"] for p in CANONICAL_PRICING["plans"]}
 VALID_PRICES = set(p["price"] for p in CANONICAL_PRICING["plans"])
-VALID_PRICES.add("$30")  # Dedicated IP add-on
+VALID_PRICES.add("€30")  # Dedicated IP add-on
+# Numeric canonical price values (validated regardless of currency symbol)
+CANONICAL_PRICE_NUMBERS = {0, 25, 65, 150, 350, 3000, 30}
 
 
 # ── Regex patterns ─────────────────────────────────────────────────────
 
-# Plan price references: "Starter ($15/month)", "Pro plan at $79/mo"
+# Plan price references: "Starter (€25/month)", "Pro plan at €65/mo",
+# "Starter costs €15/month", "Growth $150/month". A bounded amount of
+# connecting text ("costs", "is", "at", ...) may sit between the plan name
+# and the price. Both € and $ symbols are accepted — the NUMBERS are
+# validated against the canonical table, and a '$' is itself reported as a
+# violation because all published prices are EUR.
 PLAN_PRICE_PATTERN = re.compile(
     r"(?P<plan>Free|Starter|Pro|Growth|Scale|Enterprise)"
-    r"(?:\s+plan)?\s*[(-]?\s*\$?(?P<price>[\d,]+)\s*(?:/mo|/month|\))?",
+    r"(?:\s+plan)?[^\n€$0-9]{0,24}?[€$]\s?(?P<price>[\d,]+)\s*(?:/mo|/month|\)?)?",
     re.IGNORECASE,
 )
 
-# Dollar amount pattern (skip known non-plan prices)
-DOLLAR_AMOUNT = re.compile(r"\$\d[\d,]*(?:\.\d+)?(?:/mo|/month|/email|/1,000)?")
+# Euro/dollar amount pattern (skip known non-plan prices)
+DOLLAR_AMOUNT = re.compile(r"[€$]\d[\d,]*(?:\.\d+)?(?:/mo|/month|/email|/1,000)?")
 
 # Competitor/3rd-party price patterns to ignore
 COMPETITOR_PATTERNS = [
@@ -102,43 +111,45 @@ def validate_pricing_in_text(
     for match in PLAN_PRICE_PATTERN.finditer(text):
         plan_name = match.group("plan").lower()
         price_str = match.group("price").replace(",", "")
-        
+
         if plan_name not in PLAN_BY_NAME:
             continue
-        
+
         expected_price = PRICE_BY_PLAN[plan_name]
-        
-        # Enterprise has "custom" pricing - any specific number is wrong
-        if plan_name == "enterprise":
-            if price_str.isdigit() and int(price_str) > 0:
-                findings.append({
-                    "type": "error",
-                    "source": source,
-                    "message": (
-                        f"Enterprise plan should use 'custom pricing', "
-                        f"not ${int(price_str):,}/mo"
-                    ),
-                    "span": match.span(),
-                    "matched": match.group(),
-                    "expected": "custom",
-                })
+        expected_number = int(expected_price.replace("€", "").replace(",", ""))
+
+        try:
+            found_number = int(price_str)
+        except ValueError:
             continue
-        
-        # Check if price matches canonical
-        expected_dollars = expected_price.replace("$", "")
-        if price_str != expected_dollars:
+
+        # The NUMBERS must match plans.rs; a '$' symbol is also a violation
+        # because every published ApexMail price is EUR.
+        if found_number != expected_number:
             findings.append({
                 "type": "error",
                 "source": source,
                 "message": (
                     f"{plan_name.title()} plan price should be "
-                    f"${expected_dollars}/mo, not ${price_str}/mo"
+                    f"€{expected_number:,}/mo, not {match.group()}"
                 ),
                 "span": match.span(),
                 "matched": match.group(),
-                "expected": f"${expected_dollars}",
+                "expected": expected_price,
             })
-    
+        elif "$" in match.group():
+            findings.append({
+                "type": "error",
+                "source": source,
+                "message": (
+                    f"{plan_name.title()} price must be stated in EUR "
+                    f"({expected_price}), not dollars: {match.group()}"
+                ),
+                "span": match.span(),
+                "matched": match.group(),
+                "expected": expected_price,
+            })
+
     return findings
 
 
@@ -222,12 +233,14 @@ def main():
     if args.file:
         files = [Path(args.file)]
     else:
-        data_dir = Path(__file__).resolve().parents[1] / "data"
+        data_dir = Path(__file__).resolve().parents[2] / "data"
         files = [
             data_dir / "golden_qa.jsonl",
             data_dir / "train.jsonl",
             data_dir / "val.jsonl",
             data_dir / "test.jsonl",
+            data_dir / "train_agent.jsonl",
+            data_dir / "recovered_training.jsonl",
         ]
     
     all_findings = []

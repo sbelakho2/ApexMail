@@ -63,14 +63,14 @@ STRESS_CASES = [
     {
         "name": "starter_price_and_limits",
         "input": "Summarize Starter pricing and limits in one short paragraph.",
-        "must_include": ["$25", "50000", "500000 api"],
-        "must_not_include": ["$29", "250000 api"],
+        "must_include": ["€25", "50000", "500000 api"],
+        "must_not_include": ["€29", "250000 api"],
     },
     {
         "name": "pro_price_and_limits",
         "input": "Summarize Pro pricing and limits in one short paragraph.",
-        "must_include": ["$65", "150000", "2000000 api"],
-        "must_not_include": ["$59", "500000 api"],
+        "must_include": ["€65", "150000", "2000000 api"],
+        "must_not_include": ["€59", "500000 api"],
     },
     {
         "name": "enterprise_compliance",
@@ -81,8 +81,8 @@ STRESS_CASES = [
     {
         "name": "overage_rates",
         "input": "What are ApexMail overage rates for emails and API calls?",
-        "must_include": ["$0.40", "1000 emails", "$0.10", "1000 api"],
-        "must_not_include": ["$0.90", "$1.00"],
+        "must_include": ["€0.40", "1000 emails", "€0.10", "1000 api"],
+        "must_not_include": ["€0.90", "€1.00"],
     },
 ]
 

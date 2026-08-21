@@ -14,6 +14,7 @@ pub mod content;
 pub mod defense;
 pub mod domain_dns;
 pub mod email_agent;
+pub mod governor;
 pub mod inference;
 pub mod pipeline;
 pub mod routes;

@@ -132,10 +132,13 @@ impl AiAssistant {
             improvement = ImprovementType::Personalization;
             confidence = 0.8;
         } else if text.len() > 80 {
-            // Trim to a punchier version
+            // Trim to a punchier version. `half.max(5)` used to panic on
+            // inputs with fewer than 5 whitespace-separated words; clamp to
+            // the available words instead.
             let words: Vec<&str> = text.split_whitespace().collect();
-            let half = words.len() / 2;
-            suggested = words[..half.max(5)].join(" ") + "...";
+            let keep = words.len() / 2;
+            let keep = keep.clamp(1, 5).min(words.len());
+            suggested = words[..keep].join(" ") + "...";
             improvement = ImprovementType::SubjectLine;
             confidence = 0.65;
         }
@@ -247,6 +250,22 @@ mod tests {
         let neg = a.analyze_sentiment("This is terrible and awful, I hate spam");
         assert!(pos > 0.0, "positive sentiment {pos} should be > 0");
         assert!(neg < 0.0, "negative sentiment {neg} should be < 0");
+    }
+
+    #[test]
+    fn improve_content_does_not_panic_on_long_text_with_few_words() {
+        // Regression: 80+ chars with fewer than 5 words used to panic on
+        // `words[..half.max(5)]`. The personalization branch is skipped by
+        // embedding an existing {{name}} placeholder.
+        let a = AiAssistant::new();
+        let one_word = "{{name}}, Supercalifragilisticexpialidocious-and-even-more-letters-here!!!";
+        let s = a.improve_content(one_word);
+        assert!(!s.suggested.is_empty());
+
+        let two_words =
+            "{{name}} Extremelylongunbrokenfirstword extremelylongunbrokensecondword-padded";
+        let s = a.improve_content(two_words);
+        assert!(!s.suggested.is_empty());
     }
 
     #[test]

@@ -104,12 +104,38 @@ fn default_top_k() -> usize {
     10
 }
 
+/// Maximum number of texts accepted per /embed batch. Unbounded batches let
+/// a single request monopolize the inference sidecar.
+const MAX_EMBED_BATCH: usize = 256;
+
+/// Maximum characters per embedded text. Longer inputs are rejected rather
+/// than silently truncated so callers notice.
+const MAX_EMBED_TEXT_CHARS: usize = 8_192;
+
 // ─── Handlers ──────────────────────────────────────────────────
 
 async fn embed_handler(
     State(state): State<Arc<AppState>>,
     Json(req): Json<EmbedRequest>,
 ) -> (StatusCode, Json<serde_json::Value>) {
+    if req.texts.len() > MAX_EMBED_BATCH {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": format!("texts batch of {} exceeds the maximum of {} entries", req.texts.len(), MAX_EMBED_BATCH)
+            })),
+        );
+    }
+    if let Some(len) = req.texts.iter().map(|t| t.chars().count()).max() {
+        if len > MAX_EMBED_TEXT_CHARS {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": format!("text of {len} chars exceeds the maximum of {MAX_EMBED_TEXT_CHARS} chars per entry")
+                })),
+            );
+        }
+    }
     match state.embedding_service.embed_batch(&req.texts).await {
         Ok(vectors) => (
             StatusCode::OK,
@@ -228,5 +254,83 @@ mod tests {
         assert_eq!(req.top_k, 10);
         assert!(req.min_score.is_none());
         assert_eq!(req.tenant_id, "tenant-a");
+    }
+
+    fn test_state() -> Arc<AppState> {
+        let config = EmbeddingsConfig {
+            server: ServerConfig {
+                host: "127.0.0.1".into(),
+                port: 9090,
+            },
+            inference: InferenceConfig {
+                url: "http://localhost:8080".into(),
+                model: "test".into(),
+                dimension: 384,
+                max_concurrency: 4,
+                timeout_ms: 5000,
+                pooling: PoolingStrategy::Mean,
+                sidecar_tls_enabled: false,
+                sidecar_tls_ca_path: String::new(),
+            },
+            store: StoreConfig {
+                max_vectors: 1000,
+                eviction_threshold: 900,
+                persistence_hmac_key: String::new(),
+            },
+        };
+        Arc::new(AppState {
+            embedding_service: EmbeddingService::new(config.inference.clone()).unwrap(),
+            vector_store: VectorStore::new(384, 1000, 900, vec![]),
+            config,
+            service_token: "test-key".into(),
+        })
+    }
+
+    async fn embed_response(body: serde_json::Value) -> (StatusCode, serde_json::Value) {
+        use tower::ServiceExt;
+        let router = router(test_state());
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .uri("/embed")
+                    .method("POST")
+                    .header("x-api-key", "test-key")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (status, serde_json::from_slice(&bytes).unwrap())
+    }
+
+    #[tokio::test]
+    async fn embed_rejects_oversized_batches() {
+        let texts: Vec<String> = (0..257).map(|i| format!("text {i}")).collect();
+        let (status, body) = embed_response(serde_json::json!({"texts": texts})).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(body["error"].as_str().unwrap().contains("exceeds the maximum"));
+    }
+
+    #[tokio::test]
+    async fn embed_rejects_oversized_single_text() {
+        let long = "x".repeat(8_193);
+        let (status, body) = embed_response(serde_json::json!({"texts": [long]})).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(body["error"].as_str().unwrap().contains("chars"));
+    }
+
+    #[tokio::test]
+    async fn embed_accepts_batch_at_the_cap() {
+        // A batch exactly at the cap passes validation and only fails later
+        // when the (unreachable) inference sidecar is contacted.
+        let texts: Vec<String> = (0..256).map(|i| format!("text {i}")).collect();
+        let (status, body) = embed_response(serde_json::json!({"texts": texts})).await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(body["error"].as_str().is_some());
     }
 }

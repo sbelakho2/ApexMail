@@ -23,6 +23,7 @@ use crate::{
     config::AiConfig,
     content::ContentOptimizer,
     domain_dns::DomainDnsStore,
+    governor::RateGovernor,
     inference::{InferenceConfig, LlmClient},
     sto::SendTimeOptimizer,
     training::TrainingManager,
@@ -44,6 +45,9 @@ pub struct AppState {
     pub training_enabled: bool,
     pub request_timeout: Duration,
     pub service_token: String,
+    /// Enforces `inference_rate_limit` per `inference_rate_limit_window_secs`
+    /// for model-inference routes, keyed by the authenticated tenant identity.
+    pub rate_governor: RateGovernor,
 }
 
 impl AppState {
@@ -75,6 +79,10 @@ impl AppState {
             training_enabled,
             request_timeout,
             service_token,
+            rate_governor: RateGovernor::new(
+                config.inference_rate_limit,
+                Duration::from_secs(config.inference_rate_limit_window_secs),
+            ),
         })
     }
 
@@ -320,6 +328,7 @@ async fn list_models_handler(State(state): State<Arc<AppState>>) -> Response {
 
 async fn predict_handler(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Json(request): Json<PredictRequest>,
 ) -> Response {
     if request.model_id.trim().is_empty() || request.model_id.len() > 128 {
@@ -327,6 +336,24 @@ async fn predict_handler(
     }
     if request.input.is_null() {
         return api_error(AiError::InvalidInput("input must not be null".into()));
+    }
+
+    // Enforce the configured inference rate limit per tenant. The upstream
+    // control plane is authenticated by the service-token middleware; the
+    // tenant header carries the end-customer identity when present.
+    let rate_key = headers
+        .get("x-apexmail-tenant-id")
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("_control-plane")
+        .to_string();
+    if !state.rate_governor.allow(&rate_key) {
+        return api_error(AiError::RateLimited(format!(
+            "inference rate limit of {} requests per {}s exceeded; retry later",
+            state.rate_governor.limit(),
+            state.rate_governor.window().as_secs()
+        )));
     }
 
     match state
@@ -573,6 +600,33 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn predict_enforces_the_configured_inference_rate_limit() {
+        // Default config: 60 requests / 60s window. Requests 1..=60 hit the
+        // (disabled) runtime and fail closed with 503; request 61 is the
+        // N+1 rapid call and must be rejected with 429 before inference.
+        let app = app();
+        for _ in 0..60 {
+            let response = app
+                .clone()
+                .oneshot(authenticated_json_request(
+                    "/predict",
+                    serde_json::json!({"model_id":"apexmail-assistant", "input":{"prompt":"Hello"}}),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        }
+        let response = app
+            .oneshot(authenticated_json_request(
+                "/predict",
+                serde_json::json!({"model_id":"apexmail-assistant", "input":{"prompt":"Hello"}}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
     }
 
     #[tokio::test]

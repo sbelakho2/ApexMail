@@ -5,8 +5,10 @@
 //! authorized control-plane approval before any outbound queueing occurs.
 
 use crate::defense::{self, ThreatLevel};
+use crate::governor::RateGovernor;
 use crate::inference::{InferenceConfig, LlmClient};
 use chrono::Utc;
+use dashmap::DashMap;
 use sqlx::PgPool;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -22,6 +24,53 @@ const MAX_TOTAL_TOKENS_HARD: usize = 4096;
 /// Enforce a hard character ceiling on the LLM response before draft storage.
 /// Approximating 1 token ≈ 2.5 English characters gives us ~10,240 chars max.
 const MAX_RESPONSE_CHARS_HARD: usize = MAX_TOTAL_TOKENS_HARD * 5 / 2;
+
+/// Maximum times a single inbound message is retried after a processing
+/// failure before it is quarantined (marked processed with an error note).
+pub(crate) const MAX_PROCESS_ATTEMPTS: u32 = 5;
+
+/// Claim up to 10 unprocessed inbound messages atomically.
+///
+/// Unprocessed rows stay eligible regardless of age: the previous
+/// `received_at > NOW() - INTERVAL '5 minutes'` filter permanently stranded
+/// every message whose processing had been interrupted (processing reset to
+/// false, processed_at still NULL) once five minutes had passed.
+const CLAIM_UNPROCESSED_SQL: &str = r#"
+                        WITH candidates AS (
+                                SELECT id
+                                FROM inbound_messages
+                                WHERE processed_at IS NULL
+                                    AND processing = false
+                                ORDER BY received_at ASC
+                                LIMIT 10
+                                FOR UPDATE SKIP LOCKED
+                        )
+                        UPDATE inbound_messages AS inbound
+                        SET processing = true
+                        FROM candidates
+                        WHERE inbound.id = candidates.id
+                        RETURNING inbound.id, inbound.from_email, inbound.to_email, inbound.subject,
+                                  inbound.body_text, inbound.body_html
+            "#;
+
+/// What to do with a message whose processing just failed for the
+/// `attempts_so_far`-th time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FailureAction {
+    /// Reset `processing` so a later poll retries the message.
+    Retry,
+    /// Give up: mark the message processed with an error note so it cannot
+    /// poison the queue forever.
+    Quarantine,
+}
+
+pub(crate) fn failure_action(attempts_so_far: u32) -> FailureAction {
+    if attempts_so_far >= MAX_PROCESS_ATTEMPTS {
+        FailureAction::Quarantine
+    } else {
+        FailureAction::Retry
+    }
+}
 
 // ── Configuration ──────────────────────────────────────────────────────────────
 
@@ -104,6 +153,10 @@ pub struct EmailAnswerer {
     llm: Arc<LlmClient>,
     pool: PgPool,
     running: AtomicBool,
+    /// Per-message failure counters for the retry/quarantine decision.
+    attempts: DashMap<String, u32>,
+    /// Enforces the configured inference rate limit for agent LLM calls.
+    governor: RateGovernor,
 }
 
 impl EmailAnswerer {
@@ -114,12 +167,18 @@ impl EmailAnswerer {
         let inference_config = InferenceConfig::default();
         let pool = sqlx::PgPool::connect_lazy(&config.database_url)
             .map_err(|error| format!("invalid email-answering database URL: {error}"))?;
+        let ai_config = crate::config::AiConfig::from_env().unwrap_or_default();
 
         Ok(Self {
             config,
             llm: Arc::new(LlmClient::new(inference_config)),
             pool,
             running: AtomicBool::new(false),
+            attempts: DashMap::new(),
+            governor: RateGovernor::new(
+                ai_config.inference_rate_limit,
+                Duration::from_secs(ai_config.inference_rate_limit_window_secs),
+            ),
         })
     }
 
@@ -182,39 +241,73 @@ impl EmailAnswerer {
         // Atomically claim rows. A bare `SELECT ... FOR UPDATE` outside a
         // transaction releases its lock before processing and lets another
         // worker generate a duplicate draft.
-        let rows: Vec<InboundRow> = sqlx::query_as::<_, InboundRow>(
-            r#"
-                        WITH candidates AS (
-                                SELECT id
-                                FROM inbound_messages
-                                WHERE processed_at IS NULL
-                                    AND processing = false
-                                    AND received_at > NOW() - INTERVAL '5 minutes'
-                                ORDER BY received_at ASC
-                                LIMIT 10
-                                FOR UPDATE SKIP LOCKED
-                        )
-                        UPDATE inbound_messages AS inbound
-                        SET processing = true
-                        FROM candidates
-                        WHERE inbound.id = candidates.id
-                        RETURNING inbound.id, inbound.from_email, inbound.to_email, inbound.subject,
-                                  inbound.body_text, inbound.body_html
-            "#,
-        )
-        .fetch_all(&self.pool)
-        .await?;
+        let rows: Vec<InboundRow> = sqlx::query_as::<_, InboundRow>(CLAIM_UNPROCESSED_SQL)
+            .fetch_all(&self.pool)
+            .await?;
 
         let count = rows.len();
         for row in &rows {
-            if let Err(e) = self.process_message(row).await {
-                tracing::error!(msg_id = %row.id, error = %e, "Failed to process inbound message");
+            // Rate-limit deferrals must not consume a retry attempt: peek
+            // first and simply re-queue the message for a later poll.
+            if !self.governor.would_allow("email-agent") {
+                tracing::debug!(
+                    msg_id = %row.id,
+                    "Inference rate limit reached — deferring inbound message"
+                );
                 let _ = sqlx::query(
                     "UPDATE inbound_messages SET processing = false WHERE id = $1 AND processed_at IS NULL",
                 )
                 .bind(&row.id)
                 .execute(&self.pool)
                 .await;
+                continue;
+            }
+            if let Err(e) = self.process_message(row).await {
+                let mut attempt = self
+                    .attempts
+                    .entry(row.id.clone())
+                    .or_insert(0);
+                *attempt.value_mut() += 1;
+                let attempt_no = *attempt.value();
+                match failure_action(attempt_no) {
+                    FailureAction::Retry => {
+                        tracing::warn!(
+                            msg_id = %row.id,
+                            error = %e,
+                            attempt = attempt_no,
+                            max_attempts = MAX_PROCESS_ATTEMPTS,
+                            "Failed to process inbound message — will retry on a later poll"
+                        );
+                        let _ = sqlx::query(
+                            "UPDATE inbound_messages SET processing = false WHERE id = $1 AND processed_at IS NULL",
+                        )
+                        .bind(&row.id)
+                        .execute(&self.pool)
+                        .await;
+                    }
+                    FailureAction::Quarantine => {
+                        tracing::error!(
+                            msg_id = %row.id,
+                            attempt = attempt_no,
+                            "Inbound message exceeded max processing attempts — quarantining"
+                        );
+                        self.attempts.remove(&row.id);
+                        let _ = sqlx::query(
+                            r#"
+                            UPDATE inbound_messages
+                            SET processed_at = NOW(), processing = false, processed = true,
+                                ai_response = $2, ai_tokens_used = 0
+                            WHERE id = $1
+                            "#,
+                        )
+                        .bind(&row.id)
+                        .bind("This email could not be processed after repeated failures. Please contact support@apexmail.ee directly.")
+                        .execute(&self.pool)
+                        .await;
+                    }
+                }
+            } else {
+                self.attempts.remove(&row.id);
             }
         }
 
@@ -232,7 +325,7 @@ impl EmailAnswerer {
         if prompt_check.threat_level >= ThreatLevel::Malicious {
             tracing::warn!(
                 msg_id = %row.id,
-                from = %row.from_email,
+                from = %redact_for_log(&row.from_email),
                 threat_level = ?prompt_check.threat_level,
                 findings = ?prompt_check.findings,
                 "Blocked malicious prompt — refusing to send to LLM"
@@ -253,10 +346,19 @@ impl EmailAnswerer {
 
         tracing::info!(
             msg_id = %row.id,
-            from = %row.from_email,
-            subject = %row.subject,
+            from = %redact_for_log(&row.from_email),
+            subject = %redact_for_log(&row.subject),
             "Generating AI reply"
         );
+
+        // Enforce the configured inference rate limit before calling the model.
+        if !self.governor.allow("email-agent") {
+            tracing::warn!(
+                msg_id = %row.id,
+                "Inference rate limit reached — deferring inbound message"
+            );
+            anyhow::bail!("inference rate limit reached; message deferred");
+        }
 
         let response = self
             .llm
@@ -289,7 +391,7 @@ impl EmailAnswerer {
 
         tracing::info!(
             msg_id = %row.id,
-            to = %row.to_email,
+            to = %redact_for_log(&row.to_email),
             "AI reply stored as pending draft — requires human approval"
         );
         // The approval control plane must revalidate tenant ownership and the
@@ -379,6 +481,65 @@ fn strip_html_tags(html: &str) -> String {
         .replace('\u{00A0}', " ") // NBSP
 }
 
+/// Redact obvious PII before writing customer-controlled values to info-level
+/// logs: email local parts are masked (domain kept for support value) and
+/// long digit runs (card/phone-like) are collapsed.
+pub(crate) fn redact_for_log(value: &str) -> String {
+    let mask_token = |token: &str| -> String {
+        // Email addresses: keep the first local-part character and the domain.
+        if let Some(at) = token.find('@') {
+            let (local, domain) = token.split_at(at);
+            let mut masked = String::new();
+            if let Some(first) = local.chars().next() {
+                masked.push(first);
+            }
+            masked.push_str("***");
+            masked.push_str(domain);
+            return masked;
+        }
+        // Digit runs of 4+ (card/phone-like): keep the first digit only.
+        let chars: Vec<char> = token.chars().collect();
+        let mut out = String::with_capacity(token.len());
+        let mut i = 0usize;
+        while i < chars.len() {
+            if chars[i].is_ascii_digit() {
+                let start = i;
+                while i < chars.len() && chars[i].is_ascii_digit() {
+                    i += 1;
+                }
+                if i - start >= 4 {
+                    out.push(chars[start]);
+                    out.push_str("***");
+                } else {
+                    out.extend(&chars[start..i]);
+                }
+            } else {
+                out.push(chars[i]);
+                i += 1;
+            }
+        }
+        out
+    };
+    value
+        .split_whitespace()
+        .map(mask_token)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Sanitize an LLM reply for the manual `/agent/process-email` endpoint the
+/// same way the poll path sanitizes drafts: XSS/injection stripping followed
+/// by the hard truncation ceiling.
+pub(crate) fn sanitize_reply_for_api(raw: &str) -> String {
+    let checked = defense::sanitize_llm_output(raw);
+    let base = if checked.was_modified {
+        checked.sanitized
+    } else {
+        raw.to_string()
+    };
+    truncate_response(&base)
+}
+
 /// Build the user prompt for the LLM.
 /// All user-controlled fields (from, subject, body) are sanitized through the
 /// defense pipeline to strip prompt injection payloads before reaching the LLM.
@@ -437,6 +598,10 @@ pub struct ProcessEmailResult {
 
 /// Generate a reply for an email without polling the database.
 /// Used by the HTTP endpoint for manual testing and integration.
+///
+/// The raw LLM output is routed through the same sanitization pipeline as
+/// the poll path (LLM-output XSS stripping + hard truncation) before it is
+/// returned, so the manual endpoint cannot bypass the defense layer.
 pub async fn generate_email_reply(
     llm: &LlmClient,
     system_prompt: &str,
@@ -462,8 +627,12 @@ pub async fn generate_email_reply(
             )
         }
     };
+    let sanitized = sanitize_reply_for_api(&response);
+    if sanitized != response {
+        tracing::warn!("Manual process-email response contained unsafe content — sanitized");
+    }
     ProcessEmailResult {
-        response,
+        response: sanitized,
         tokens_used: tokens,
     }
 }
@@ -542,5 +711,50 @@ mod tests {
         let result = limit_body(&long, 4_000);
         assert!(result.len() <= 4100); // 4000 chars + truncation message
         assert!(result.contains("[Message truncated]"));
+    }
+
+    #[test]
+    fn claim_query_has_no_age_window_and_targets_unprocessed_rows() {
+        // Regression: the "received_at > NOW() - INTERVAL '5 minutes'" filter
+        // stranded interrupted messages forever.
+        assert!(CLAIM_UNPROCESSED_SQL.contains("processed_at IS NULL"));
+        assert!(CLAIM_UNPROCESSED_SQL.contains("processing = false"));
+        assert!(
+            !CLAIM_UNPROCESSED_SQL.contains("INTERVAL '5 minutes'"),
+            "candidate query must not filter by message age"
+        );
+        assert!(CLAIM_UNPROCESSED_SQL.contains("SKIP LOCKED"));
+    }
+
+    #[test]
+    fn failures_retry_until_max_attempts_then_quarantine() {
+        for attempt in 1..MAX_PROCESS_ATTEMPTS {
+            assert_eq!(failure_action(attempt), FailureAction::Retry);
+        }
+        assert_eq!(failure_action(MAX_PROCESS_ATTEMPTS), FailureAction::Quarantine);
+        assert_eq!(failure_action(MAX_PROCESS_ATTEMPTS + 3), FailureAction::Quarantine);
+    }
+
+    #[test]
+    fn redact_for_log_masks_emails_and_long_digit_runs() {
+        assert_eq!(
+            redact_for_log("john.doe@example.com"),
+            "j***@example.com"
+        );
+        assert_eq!(redact_for_log("card 4532015118513702 end"), "card 4*** end");
+        assert_eq!(redact_for_log("order 123 arrived"), "order 123 arrived");
+        assert_eq!(redact_for_log("plain subject"), "plain subject");
+    }
+
+    #[test]
+    fn manual_reply_output_is_sanitized() {
+        let raw = "Thanks! <script>alert('xss')</script> Contact support@apexmail.ee.";
+        let sanitized = sanitize_reply_for_api(raw);
+        assert!(!sanitized.contains("<script"), "XSS must be stripped");
+        assert!(sanitized.contains("Thanks!"));
+
+        let oversized = "x".repeat(MAX_RESPONSE_CHARS_HARD + 5_000);
+        let truncated = sanitize_reply_for_api(&oversized);
+        assert!(truncated.contains("[Response truncated — length limit reached]"));
     }
 }

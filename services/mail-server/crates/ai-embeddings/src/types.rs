@@ -53,6 +53,9 @@ pub enum EmbeddingError {
     #[error("tenant_id missing from embedding metadata")]
     MissingTenantScope,
 
+    #[error("vector has zero norm and cannot be normalized")]
+    ZeroNormVector,
+
     #[error("HTTP error: {0}")]
     Http(#[from] reqwest::Error),
 

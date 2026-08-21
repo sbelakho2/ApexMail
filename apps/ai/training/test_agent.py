@@ -23,16 +23,16 @@ SYSTEM_PROMPT = """You are ApexMail Agent — the AI support agent for the ApexM
 You have access to the customer's account context and can help with billing, technical issues, and general questions.
 
 ApexMail Pricing (effective May 2026):
-- Free: $0, 30,000 emails/mo, 300,000 API calls/mo, 1 domain, 1 team, 7 days retention
-- Starter: $25/mo, 50,000 emails/mo, 500,000 API calls/mo, 5 domains, 5 team, 30 days retention
-- Pro: $65/mo, 150,000 emails/mo, 2,000,000 API calls/mo, 25 domains, 10 team, 60 days retention, send-time optimization, no A/B testing
-- Growth: $150/mo, 500,000 emails/mo, 5,000,000 API calls/mo, 100 domains, 25 team, 90 days retention, 1 dedicated IP included
-- Scale: $350/mo, 2,000,000 emails/mo, 20,000,000 API calls/mo, unlimited domains, 50 team, 365 days retention, 3 dedicated IPs included, SSO/SAML
-- Enterprise: $3,000/mo, 5,000,000 emails/mo, unlimited API calls, unlimited domains and team, 730 days retention, 10 dedicated IPs included, HIPAA/SOC2/white-label
+- Free: €0, 30,000 emails/mo, 300,000 API calls/mo, 1 domain, 1 team, 7 days retention
+- Starter: €25/mo, 50,000 emails/mo, 500,000 API calls/mo, 5 domains, 5 team, 30 days retention
+- Pro: €65/mo, 150,000 emails/mo, 2,000,000 API calls/mo, 25 domains, 10 team, 60 days retention, send-time optimization, no A/B testing
+- Growth: €150/mo, 500,000 emails/mo, 5,000,000 API calls/mo, 100 domains, 25 team, 90 days retention, 1 dedicated IP included
+- Scale: €350/mo, 2,000,000 emails/mo, 20,000,000 API calls/mo, unlimited domains, 50 team, 365 days retention, 3 dedicated IPs included, SSO/SAML
+- Enterprise: €3,000/mo, 5,000,000 emails/mo, unlimited API calls, unlimited domains and team, 730 days retention, 10 dedicated IPs included, white-label (HIPAA/SOC2 are not currently offered)
 
-Overages: $0.40 per 1,000 emails; $0.10 per 1,000 API calls (first 100,000 API calls free on all plans)
-Dedicated IP add-on: $30/mo on Pro+ (Growth includes 1, Scale 3, Enterprise 10)
-Annual billing: 2 months free (~17% discount) — annual prices: Starter $250, Pro $650, Growth $1,500, Scale $3,500, Enterprise $30,000
+Overages: €0.40 per 1,000 emails; €0.10 per 1,000 API calls (first 100,000 API calls free on all plans)
+Dedicated IP add-on: €30/mo on Pro+ (Growth includes 1, Scale 3, Enterprise 10)
+Annual billing: 2 months free (~17% discount) — annual prices: Starter €250, Pro €650, Growth €1,500, Scale €3,500, Enterprise €30,000
 
 Be helpful, accurate, and concise. For account-specific actions, use tool calls."""
 
@@ -94,25 +94,25 @@ TEST_CASES = [
     {
         "name": "pricing_pro_plan",
         "input": "How much does the Pro plan cost?",
-        "required": ["$65", "150,000", "2,000,000 API"],
-        "forbidden": ["$49", "$99", "500,000 API"],
+        "required": ["€65", "150,000", "2,000,000 API"],
+        "forbidden": ["€49", "€99", "500,000 API"],
     },
     {
         "name": "pricing_starter",
         "input": "What's the Starter plan price?",
-        "required": ["$25", "50,000 emails", "500,000 API"],
-        "forbidden": ["$20", "$15", "250,000 API"],
+        "required": ["€25", "50,000 emails", "500,000 API"],
+        "forbidden": ["€20", "€15", "250,000 API"],
     },
     {
         "name": "pricing_scale",
         "input": "Tell me about the Scale plan",
-        "required": ["$350", "2,000,000 emails", "20,000,000 API", "SSO", "3 dedicated IP"],
-        "forbidden": ["5,000,000 API", "$250"],
+        "required": ["€350", "2,000,000 emails", "20,000,000 API", "SSO", "3 dedicated IP"],
+        "forbidden": ["5,000,000 API", "€250"],
     },
     {
         "name": "pricing_enterprise",
         "input": "What's included in Enterprise?",
-        "required": ["$3,000", "5,000,000 emails", "unlimited API", "10 dedicated IP"],
+        "required": ["€3,000", "5,000,000 emails", "unlimited API", "10 dedicated IP"],
         "forbidden": ["2,000,000 emails", "20,000,000 API"],
     },
     {
@@ -124,20 +124,20 @@ TEST_CASES = [
     {
         "name": "overage_rate_emails",
         "input": "What are the email overage charges?",
-        "required": ["$0.40", "1,000 emails"],
-        "forbidden": ["$0.90", "$1.00"],
+        "required": ["€0.40", "1,000 emails"],
+        "forbidden": ["€0.90", "€1.00"],
     },
     {
         "name": "overage_rate_api",
         "input": "What are API overage charges?",
-        "required": ["$0.10", "1,000 API", "100,000 free"],
-        "forbidden": ["$0.40", "10,000 free"],
+        "required": ["€0.10", "1,000 API", "100,000 free"],
+        "forbidden": ["€0.40", "10,000 free"],
     },
     {
         "name": "dedicated_ip_addon",
         "input": "How much is a dedicated IP add-on?",
-        "required": ["$30", "Pro"],
-        "forbidden": ["$50", "$20"],
+        "required": ["€30", "Pro"],
+        "forbidden": ["€50", "€20"],
     },
     {
         "name": "dedicated_ip_included",

@@ -1,13 +1,16 @@
 #!/bin/bash
 # ============================================================================
-# Upload training files to Vast.ai instance
+# Upload training files to a remote training instance
 # ============================================================================
-# Usage: ./upload.sh <host> <port> [ssh_key] [train_script]
+# Usage: ./upload.sh <host> <port> <ssh_key> [train_script]
+#
+# host, port, and ssh_key are REQUIRED — no host, key path, or other
+# deployment details are defaulted or stored in this script.
 #
 # Examples:
-#   ./upload.sh 54.233.120.77 44968 ~/.ssh/vastai_new          # train_4gpu.py
-#   ./upload.sh 54.233.120.77 44968 ~/.ssh/vastai_new train_8gpu.py
-#   ./upload.sh 54.233.120.77 44968 "" train_8gpu.py            # default ssh key
+#   ./upload.sh <host> <port> ~/.ssh/<key>                    # train_4gpu.py
+#   ./upload.sh <host> <port> ~/.ssh/<key> train_8gpu.py
+#   HOST=user@remote WORKSPACE_DIR=/opt/train ./upload.sh <host> <port> ~/.ssh/<key>
 # ============================================================================
 
 set -e
@@ -15,9 +18,9 @@ set -e
 # Use WORKSPACE_DIR env var (fallback to /workspace)
 WORKSPACE_DIR="${WORKSPACE_DIR:-/workspace}"
 
-HOST="${1:?Usage: $0 <host> <port> [ssh_key] [train_script]}"
-PORT="${2:?Usage: $0 <host> <port> [ssh_key] [train_script]}"
-SSH_KEY="${3:-~/.ssh/vastai_new}"
+HOST="${1:?Usage: $0 <host> <port> <ssh_key> [train_script]}"
+PORT="${2:?Usage: $0 <host> <port> <ssh_key> [train_script]}"
+SSH_KEY="${3:?Usage: $0 <host> <port> <ssh_key> [train_script] — no default key path is assumed}"
 TRAIN_SCRIPT="${4:-train_4gpu.py}"
 
 LOCAL_DIR="$(cd "$(dirname "$0")" && pwd)"

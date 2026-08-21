@@ -30,23 +30,36 @@ import sys
 from pathlib import Path
 
 # ── Canonical pricing data ───────────────────────────────────────────────
-# These MUST match docs/pricing.md and prompts_v2.py PRICING_TABLE exactly.
-# Any drift between training data and docs will cause incorrect price recall.
+# These MUST match services/mail-server/crates/billing-service/src/plans.rs
+# (mirrored in docs/pricing.md) exactly. Any drift between training data and
+# the canonical catalog will cause incorrect price recall.
+# Limits marked -1 are unlimited in plans.rs and render as "Unlimited".
 
 PLANS = {
     "free":      {"price": 0,     "emails": 30_000,   "api_calls": 300_000,   "team": 1,   "domains": 1},
     "starter":   {"price": 25,    "emails": 50_000,   "api_calls": 500_000,   "team": 5,   "domains": 5},
     "pro":       {"price": 65,    "emails": 150_000,  "api_calls": 2_000_000, "team": 10,  "domains": 25},
     "growth":    {"price": 150,   "emails": 500_000,  "api_calls": 5_000_000, "team": 25,  "domains": 100},
-    "scale":     {"price": 350,   "emails": 2_000_000,"api_calls": 20_000_000,"team": 50,  "domains": 1_000_000},
-    "enterprise":{"price": 3_000, "emails": 5_000_000,"api_calls": 1_000_000_000,"team": 1_000_000,"domains": 1_000_000},
+    "scale":     {"price": 350,   "emails": 2_000_000,"api_calls": 20_000_000,"team": 50,  "domains": -1},
+    "enterprise":{"price": 3_000, "emails": 5_000_000,"api_calls": -1,        "team": -1,  "domains": -1},
 }
 
+
+def _fmt_limit(value: int) -> str:
+    """Render a plan limit; -1 means unlimited in plans.rs."""
+    if value == -1:
+        return "Unlimited"
+    return f"{value:,}"
+
+
+# PAYG tier capacities (emails per band) per docs/pricing.md:
+# 0–10,000 → 10,000 emails; 10,001–100,000 → 90,000; 100,001–1,000,000 →
+# 900,000; above that unlimited.
 PAYG_TIERS = [
-    (0, 10_000, 0.001),
-    (10_001, 100_000, 0.0008),
-    (100_001, 1_000_000, 0.0005),
-    (1_000_001, float("inf"), 0.0003),
+    ("0-10,000", 10_000, 0.001),
+    ("10,001-100,000", 90_000, 0.0008),
+    ("100,001-1,000,000", 900_000, 0.0005),
+    ("1,000,001+", None, 0.0003),  # None = the remaining volume
 ]
 
 OVERRIDE_RATE = 0.40  # per 1,000 extra emails
@@ -57,14 +70,20 @@ FEATURES_BY_PLAN = {
     "pro":        "25 domains, 10 team members, send-time optimization, custom tracking domain, 60-day retention, 50K contacts",
     "growth":     "100 domains, 25 team members, 1 dedicated IP, A/B testing, audit logs, priority support, 90-day retention, 200K contacts",
     "scale":      "unlimited domains, 50 team members, 3 dedicated IPs, SSO/SAML, subaccounts (10), inbound receiving, SLA 99.9% (10% credit), 365-day retention, 500K contacts",
-    "enterprise": "unlimited domains, unlimited team members, 10 dedicated IPs, BYOIP, HIPAA/SOC2, white-label, dedicated CSM, SLA 99.9% (25% credit), 730-day retention, unlimited contacts",
+    "enterprise": "unlimited domains, unlimited team members, 10 dedicated IPs, BYOIP, white-label, dedicated CSM, SLA 99.9% (25% credit), 730-day retention, unlimited contacts (HIPAA/SOC2 are NOT currently offered)",
 }
 
+# Sender-DNS records are per-domain and issued dynamically by the dashboard
+# Domains page (see domain_dns.rs / verifier.rs: static record values are
+# obsolete and unsafe to quote). Training data must teach the dynamic lookup,
+# never a fixed record set.
 DNS_RECORDS = {
-    "spf":   "v=spf1 include:_spf.apexmail.ee ~all",
-    "dkim":  "CNAME apexmail._domainkey.{domain} → {domain}.dkim.apexmail.ee",
-    "dmarc": "v=DMARC1; p=none; rua=mailto:dmarc@yourdomain.com",
-    "return_path": "bounce.apexmail.ee",
+    "guidance": (
+        "DNS records (SPF, DKIM, DMARC, return-path) are per-domain and issued "
+        "dynamically by the ApexMail dashboard (Domains page). Never quote static "
+        "record values, selectors, or CNAME targets — direct the customer to "
+        "Dashboard → Domains for their exact records."
+    ),
 }
 
 SYSTEM_PROMPT_IDS = [
@@ -83,13 +102,21 @@ SYSTEM_PROMPT_IDS = [
 # ═══════════════════════════════════════════════════════════════════════════
 
 def _payg_cost(emails: int) -> float:
-    """Compute exact PAYG cost with tiered pricing."""
+    """Compute exact PAYG cost with tiered pricing.
+
+    The first band covers exactly 10,000 emails (0–10,000), the second
+    clamps to 90,000 (10,001–100,000), and so on. The previous bounds
+    arithmetic (high - low + 1) made tier 1 absorb 10,001 emails.
+    """
     remaining = emails
     cost = 0.0
-    for low, high, rate in PAYG_TIERS:
+    for _range, capacity, rate in PAYG_TIERS:
         if remaining <= 0:
             break
-        tier_emails = min(remaining, high - low + 1)
+        if capacity is None:
+            tier_emails = remaining
+        else:
+            tier_emails = min(remaining, capacity)
         cost += tier_emails * rate
         remaining -= tier_emails
     return round(cost, 2)
@@ -153,17 +180,25 @@ def generate_pricing_examples() -> list[dict]:
             if key in seen:
                 continue
             seen.add(key)
+            # Tier volumes are clamped per band: tier 1 = min(n, 10_000),
+            # tier 2 = clamp(n - 10_000, 0, 90_000), etc. Bands with a zero
+            # volume are omitted (the old code rendered "-5,000" rows).
+            tier_1 = min(n, 10_000)
+            tier_2 = max(0, min(n - 10_000, 90_000))
+            tier_3 = max(0, min(n - 100_000, 900_000))
+            tier_4 = max(0, n - 1_000_000)
             a = (
                 f"For {n:,} emails on Pay-As-You-Go, here's the tiered breakdown:\n\n"
                 f"| Tier | Volume | Rate | Cost |\n"
                 f"|------|--------|------|------|\n"
-                f"| 0–10K | 10,000 | €0.001/email | €10.00 |\n"
-                f"| 10K–100K | {min(n-10_000, 90_000):,} | €0.0008/email | €{(min(n-10_000, 90_000)*0.0008):.2f} |\n"
+                f"| 0–10K | {tier_1:,} | €0.001/email | €{tier_1 * 0.001:.2f} |\n"
             )
-            if n > 100_000:
-                a += f"| 100K–1M | {min(n-100_000, 900_000):,} | €0.0005/email | €{(min(n-100_000, 900_000)*0.0005):.2f} |\n"
-            if n > 1_000_000:
-                a += f"| 1M+ | {n-1_000_000:,} | €0.0003/email | €{((n-1_000_000)*0.0003):.2f} |\n"
+            if tier_2 > 0:
+                a += f"| 10K–100K | {tier_2:,} | €0.0008/email | €{tier_2 * 0.0008:.2f} |\n"
+            if tier_3 > 0:
+                a += f"| 100K–1M | {tier_3:,} | €0.0005/email | €{tier_3 * 0.0005:.2f} |\n"
+            if tier_4 > 0:
+                a += f"| 1M+ | {tier_4:,} | €0.0003/email | €{tier_4 * 0.0003:.2f} |\n"
             a += f"| **Total** | **{n:,}** | | **€{cost:,.2f}** |"
             examples.append({
                 "system_prompt_id": "apexmail_agent_1d5e4e76ab2d",
@@ -217,9 +252,9 @@ def generate_pricing_examples() -> list[dict]:
             f"|---------|---------|---------|\n"
             f"| **Price** | €{lp['price']:,}/mo | €{hp['price']:,}/mo |\n"
             f"| **Emails** | {lp['emails']:,}/mo | {hp['emails']:,}/mo |\n"
-            f"| **API calls** | {lp['api_calls']:,}/mo | {hp['api_calls']:,}/mo |\n"
-            f"| **Team members** | {lp['team']} | {hp['team']} |\n"
-            f"| **Domains** | {lp['domains']} | {hp['domains']} |\n"
+            f"| **API calls** | {_fmt_limit(lp['api_calls'])}/mo | {_fmt_limit(hp['api_calls'])}/mo |\n"
+            f"| **Team members** | {_fmt_limit(lp['team'])} | {_fmt_limit(hp['team'])} |\n"
+            f"| **Domains** | {_fmt_limit(lp['domains'])} | {_fmt_limit(hp['domains'])} |\n"
         )
         price_diff = hp["price"] - lp["price"]
         if price_diff > 0:
@@ -241,8 +276,8 @@ MULTI_TURN_SCENARIOS = [
     {
         "turns": [
             ("My emails are bouncing a lot lately", "Let me check your deliverability.\n\n```tool_call\n{\"tool\": \"get_deliverability_report\"}\n```<|im_end|>\n<|im_start|>tool\n{\"delivery_rate\": 88.5, \"bounce_rate\": 8.2, \"complaint_rate\": 0.12, \"inbox_placement\": {\"gmail\": 68, \"outlook\": 82, \"yahoo\": 55}}<|im_end|>\n<|im_start|>assistant\nYour bounce rate is 8.2% — significantly above the 5% threshold. Gmail inbox placement is only 68%. Can you tell me which domain you're sending from?"),
-            ("It's newsletter.mycompany.com", "Let me check that domain's DNS setup.\n\n```tool_call\n{\"tool\": \"get_domain_status\", \"params\": {\"domain\": \"newsletter.mycompany.com\"}}\n```<|im_end|>\n<|im_start|>tool\n{\"domain\": \"newsletter.mycompany.com\", \"verified\": true, \"spf\": \"pass\", \"dkim\": \"fail\", \"dmarc\": \"none\"}<|im_end|>\n<|im_start|>assistant\nFound it — your **DKIM is failing** and DMARC isn't configured. Without DKIM, Gmail and Yahoo will reject or spam-folder your emails.\n\nTo fix: add this CNAME record at your DNS provider:\n- **Host:** `apexmail._domainkey.newsletter.mycompany.com`\n- **Points to:** `newsletter.mycompany.com.dkim.apexmail.ee`\n\nWant help setting up DMARC too?"),
-            ("Yes, add DMARC as well", "Add this TXT record:\n- **Host:** `_dmarc.newsletter.mycompany.com`\n- **Value:** `v=DMARC1; p=none; rua=mailto:dmarc@mycompany.com`\n\nStart with `p=none` (monitor only) for a week, then switch to `p=quarantine`, then `p=reject`. This prevents accidentally blocking legitimate mail."),
+            ("It's newsletter.mycompany.com", "Let me check that domain's DNS setup.\n\n```tool_call\n{\"tool\": \"get_domain_status\", \"params\": {\"domain\": \"newsletter.mycompany.com\"}}\n```<|im_end|>\n<|im_start|>tool\n{\"domain\": \"newsletter.mycompany.com\", \"verified\": true, \"spf\": \"pass\", \"dkim\": \"fail\", \"dmarc\": \"none\"}<|im_end|>\n<|im_start|>assistant\nFound it — your **DKIM is failing** and DMARC isn't configured. Without DKIM, Gmail and Yahoo will reject or spam-folder your emails.\n\nTo fix: open **Dashboard → Domains → newsletter.mycompany.com** and publish the exact DKIM record shown there. Every domain gets its own unique direct-DKIM record — don't reuse a record from another domain or a generic template.\n\nWant help setting up DMARC too?"),
+            ("Yes, add DMARC as well", "DMARC is also issued per-domain: open **Dashboard → Domains → newsletter.mycompany.com** for the exact TXT record to publish at `_dmarc.newsletter.mycompany.com`.\n\nStart with a monitor-only policy, then switch to `p=quarantine`, then `p=reject`. This prevents accidentally blocking legitimate mail."),
         ]
     },
     {
@@ -298,7 +333,7 @@ ADVERSARIAL_EXAMPLES = [
 
     # Confusing multi-intent
     ("I want to send emails and also check my DNS and maybe upgrade and what's my bill", "Those are several different requests! Let me tackle them one at a time. Let's start with the most actionable one:\n\n**Sending emails**: What type of email are you sending? A campaign, transactional notification, or test? I can help you set up the API call or create a campaign.\n\nOnce we handle sending, I can check your DNS records, review plan options, and calculate your bill. Sound good?"),
-    ("how do I set up spf dkim dmarc and also what's payg pricing and do you have a python sdk", "Great questions — let me cover all three:\n\n**1. DNS Records (SPF/DKIM/DMARC):**\n- SPF: `v=spf1 include:_spf.apexmail.ee ~all`\n- DKIM: CNAME `apexmail._domainkey.yourdomain.com` → `yourdomain.com.dkim.apexmail.ee`\n- DMARC: `v=DMARC1; p=none; rua=mailto:dmarc@yourdomain.com`\n\n**2. PAYG Pricing:**\nTiered: €0.001 (0-10K) → €0.0008 (10K-100K) → €0.0005 (100K-1M) → €0.0003 (1M+).\n\n**3. Python SDK:**\n```bash\npip install apexmail\n```\n```python\nfrom apexmail import ApexMail\nclient = ApexMail(api_key=\"am_live_xxx\")\nclient.emails.send(from_=\"you@domain.com\", to=\"user@example.com\", subject=\"Hello\")\n```\n\nWhich of these would you like to dive deeper into?"),
+    ("how do I set up spf dkim dmarc and also what's payg pricing and do you have a python sdk", "Great questions — let me cover all three:\n\n**1. DNS Records (SPF/DKIM/DMARC):**\nEach domain gets its own unique records, issued dynamically by the dashboard. Open **Dashboard → Domains → your domain** to see the exact SPF, DKIM, and DMARC values to publish — never reuse another domain's records or a generic template.\n\n**2. PAYG Pricing:**\nTiered: €0.001 (0-10K) → €0.0008 (10K-100K) → €0.0005 (100K-1M) → €0.0003 (1M+).\n\n**3. Python SDK:**\n```bash\npip install apexmail\n```\n```python\nfrom apexmail import ApexMail\nclient = ApexMail(api_key=\"am_live_xxx\")\nclient.emails.send(from_=\"you@domain.com\", to=\"user@example.com\", subject=\"Hello\")\n```\n\nWhich of these would you like to dive deeper into?"),
 ]
 
 
@@ -388,7 +423,10 @@ def main() -> None:
         # Write category-specific files
         slug = name.lower().replace(" ", "_").replace("/", "_")
         path = out_dir / f"augmented_{slug}.jsonl"
-        with open(path, "w") as f:
+        # Explicit UTF-8: the euro sign and en dashes must not be written
+        # through a platform-dependent default codec (the previously
+        # committed files contained double-encoded mojibake).
+        with open(path, "w", encoding="utf-8") as f:
             for ex in clipped:
                 f.write(json.dumps(ex, ensure_ascii=False) + "\n")
 
@@ -398,10 +436,10 @@ def main() -> None:
         n_train = int(len(clipped) * args.split)
         train_path = out_dir / f"augmented_{slug}_train.jsonl"
         val_path = out_dir / f"augmented_{slug}_val.jsonl"
-        with open(train_path, "w") as f:
+        with open(train_path, "w", encoding="utf-8") as f:
             for ex in clipped[:n_train]:
                 f.write(json.dumps(ex, ensure_ascii=False) + "\n")
-        with open(val_path, "w") as f:
+        with open(val_path, "w", encoding="utf-8") as f:
             for ex in clipped[n_train:]:
                 f.write(json.dumps(ex, ensure_ascii=False) + "\n")
 

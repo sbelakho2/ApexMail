@@ -47,6 +47,13 @@ fn metadata_tenant_id(metadata: &serde_json::Value) -> Option<&str> {
         .filter(|value| !value.trim().is_empty())
 }
 
+/// True when the vector's L2 norm is meaningfully greater than zero.
+/// Zero-norm vectors cannot be normalized and are rejected at write/search.
+fn has_nonzero_norm(vector: &[f32]) -> bool {
+    let norm: f32 = vector.iter().map(|x| x * x).sum::<f32>().sqrt();
+    norm > f32::EPSILON && norm.is_finite()
+}
+
 impl VectorStore {
     pub fn new(
         dimension: usize,
@@ -64,6 +71,10 @@ impl VectorStore {
     }
 
     /// Add a vector to the store, evicting LRU entries if needed.
+    ///
+    /// The vector is L2-normalized on write so cosine similarity in
+    /// [`VectorStore::search`] operates on unit vectors even when a caller
+    /// supplies an unnormalized one.
     pub fn add(
         &self,
         text: String,
@@ -80,6 +91,11 @@ impl VectorStore {
                 expected: self.dimension,
             });
         }
+
+        if !has_nonzero_norm(&vector) {
+            return Err(EmbeddingError::ZeroNormVector);
+        }
+        let vector = crate::embeddings::l2_normalize(vector);
 
         // Evict if at threshold (check approximate size via len(), which is O(1) for DashMap)
         if self.inner.len() >= self.eviction_threshold {
@@ -137,10 +153,18 @@ impl VectorStore {
 
     /// Search for the top-K most similar vectors using a min-heap.
     /// Uses DashMap's iterator which acquires per-shard locks.
+    ///
+    /// The query vector is L2-normalized on entry (zero-norm queries are
+    /// rejected) so cosine similarity stays within [-1, 1] even when the
+    /// caller submits a raw, unnormalized embedding.
     pub fn search(&self, query_vector: &[f32], top_k: usize, tenant_id: &str) -> Vec<SearchResult> {
         if query_vector.len() != self.dimension || tenant_id.trim().is_empty() {
             return vec![];
         }
+        if !has_nonzero_norm(query_vector) {
+            return vec![];
+        }
+        let normalized_query = crate::embeddings::l2_normalize(query_vector.to_vec());
 
         let start = Instant::now();
         let mut heap: BinaryHeap<MinScoreEntry> = BinaryHeap::new();
@@ -150,7 +174,7 @@ impl VectorStore {
                 continue;
             }
 
-            let score = cosine_similarity(query_vector, &entry.vector);
+            let score = cosine_similarity(&normalized_query, &entry.vector);
 
             if heap.len() < top_k {
                 heap.push(MinScoreEntry {
@@ -315,16 +339,25 @@ impl VectorStore {
             );
         }
 
-        // Parse and import all vectors
+        // Parse and import all vectors. Imported rows go through the same
+        // validation and normalization as `add()`: tenant-scoped metadata is
+        // required and vectors are L2-normalized (zero-norm rows rejected).
         let mut parsed = Vec::new();
         for line in &lines {
-            let v: EmbeddingVector = serde_json::from_str(line)?;
+            let mut v: EmbeddingVector = serde_json::from_str(line)?;
             if v.vector.len() != self.dimension {
                 return Err(EmbeddingError::DimensionMismatch {
                     got: v.vector.len(),
                     expected: self.dimension,
                 });
             }
+            if metadata_tenant_id(&v.metadata).is_none() {
+                return Err(EmbeddingError::MissingTenantScope);
+            }
+            if !has_nonzero_norm(&v.vector) {
+                return Err(EmbeddingError::ZeroNormVector);
+            }
+            v.vector = crate::embeddings::l2_normalize(v.vector);
             parsed.push(v);
         }
 
@@ -785,5 +818,93 @@ mod tests {
         assert!(!constant_time_eq("abc", "abd"));
         assert!(!constant_time_eq("abc", "abcd"));
         assert!(constant_time_eq("", ""));
+    }
+
+    #[test]
+    fn add_normalizes_stored_vectors() {
+        let store = make_store();
+        let id = store
+            .add("big".into(), vec![3.0, 0.0, 0.0], tenant_metadata("tenant-a"))
+            .unwrap();
+        let stored = store.get(id).unwrap();
+        let norm: f32 = stored.vector.iter().map(|x| x * x).sum::<f32>().sqrt();
+        assert!((norm - 1.0).abs() < 1e-5, "stored vectors must be unit norm");
+    }
+
+    #[test]
+    fn add_rejects_zero_norm_vectors() {
+        let store = make_store();
+        let err = store
+            .add("zero".into(), vec![0.0, 0.0, 0.0], tenant_metadata("tenant-a"))
+            .unwrap_err();
+        assert!(matches!(err, EmbeddingError::ZeroNormVector));
+    }
+
+    #[test]
+    fn unnormalized_query_scores_stay_within_unit_range() {
+        let store = make_store();
+        store
+            .add("a".into(), vec![9.0, 0.0, 0.0], tenant_metadata("tenant-a"))
+            .unwrap();
+        store
+            .add("b".into(), vec![0.0, 25.0, 0.0], tenant_metadata("tenant-a"))
+            .unwrap();
+        store
+            .add("opposite".into(), vec![-40.0, 0.0, 0.0], tenant_metadata("tenant-a"))
+            .unwrap();
+
+        // Deliberately unnormalized query with a large magnitude.
+        let results = store.search(&[500.0, 0.0, 0.0], 3, "tenant-a");
+        assert!(!results.is_empty());
+        for r in &results {
+            assert!(
+                (-1.0..=1.0).contains(&r.score),
+                "cosine score {} outside [-1, 1] — query was not normalized",
+                r.score
+            );
+        }
+        // Zero-norm queries are rejected outright.
+        assert!(store.search(&[0.0, 0.0, 0.0], 3, "tenant-a").is_empty());
+    }
+
+    #[test]
+    fn import_ndjson_validates_tenant_scope_and_normalizes() {
+        let store = make_store();
+        // Hand-crafted NDJSON with an unnormalized vector and a tenant scope.
+        let id = Uuid::new_v4();
+        let line = serde_json::json!({
+            "id": id,
+            "text": "imported",
+            "vector": [5.0, 0.0, 0.0],
+            "metadata": {"tenant_id": "tenant-a"},
+            "created_at": Utc::now(),
+            "last_accessed": Utc::now(),
+        });
+        let mut buf = Vec::new();
+        writeln!(buf, "{}", line).unwrap();
+        let imported = store
+            .import_ndjson(std::io::BufReader::new(buf.as_slice()))
+            .unwrap();
+        assert_eq!(imported, 1);
+        let stored = store.get(id).unwrap();
+        let norm: f32 = stored.vector.iter().map(|x| x * x).sum::<f32>().sqrt();
+        assert!((norm - 1.0).abs() < 1e-5, "imported vector must be normalized");
+
+        // Rows without tenant scope must be refused.
+        let bad = serde_json::json!({
+            "id": Uuid::new_v4(),
+            "text": "orphan",
+            "vector": [1.0, 0.0, 0.0],
+            "metadata": {},
+            "created_at": Utc::now(),
+            "last_accessed": Utc::now(),
+        });
+        let mut buf2 = Vec::new();
+        writeln!(buf2, "{}", bad).unwrap();
+        let result = store.import_ndjson(std::io::BufReader::new(buf2.as_slice()));
+        assert!(matches!(
+            result,
+            Err(EmbeddingError::MissingTenantScope)
+        ));
     }
 }

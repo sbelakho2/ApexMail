@@ -80,13 +80,14 @@ check(f"All test contexts exist in prompts_v2 ({len(referenced)} referenced)", l
 
 # ── 5. Pricing consistency ──────────────────────────────────────────
 print("\n=== 5. Pricing Consistency ===")
-check("Starter $25 in PRICING_TABLE", "$25/mo" in PRICING_TABLE or "$25" in PRICING_TABLE)
-check("Pro $65 in PRICING_TABLE", "$65/mo" in PRICING_TABLE or "$65" in PRICING_TABLE)
-check("Growth $150 in PRICING_TABLE", "$150/mo" in PRICING_TABLE or "$150" in PRICING_TABLE)
-check("Scale $350 in PRICING_TABLE", "$350/mo" in PRICING_TABLE or "$350" in PRICING_TABLE)
-check("Enterprise $3,000 in PRICING_TABLE", "$3,000/mo" in PRICING_TABLE or "$3,000" in PRICING_TABLE)
-# Verify no stale pricing
-for stale in ["$29/mo", "$59/mo", "$129/mo", "$399/mo", "$1,299/mo"]:
+# All published prices are EUR (plans.rs / docs/pricing.md).
+check("Starter €25 in PRICING_TABLE", "€25/mo" in PRICING_TABLE or "€25" in PRICING_TABLE)
+check("Pro €65 in PRICING_TABLE", "€65/mo" in PRICING_TABLE or "€65" in PRICING_TABLE)
+check("Growth €150 in PRICING_TABLE", "€150/mo" in PRICING_TABLE or "€150" in PRICING_TABLE)
+check("Scale €350 in PRICING_TABLE", "€350/mo" in PRICING_TABLE or "€350" in PRICING_TABLE)
+check("Enterprise €3,000 in PRICING_TABLE", "€3,000/mo" in PRICING_TABLE or "€3,000" in PRICING_TABLE)
+# Verify no stale pricing (and no dollar prices at all after the EUR sweep)
+for stale in ["€29/mo", "€59/mo", "€129/mo", "€399/mo", "€1,299/mo", "$25", "$65", "$150", "$350", "$3,000"]:
     check(f"No stale {stale}", stale not in PRICING_TABLE, f"found {stale}")
 
 # ── 6. Config file ──────────────────────────────────────────────────
@@ -152,7 +153,7 @@ print("\n=== 9. Data File Pricing Validation ===")
 
 import re
 
-CANONICAL_PRICE_STRINGS = ["$0", "$25", "$65", "$150", "$350", "$3000", "$3,000"]
+CANONICAL_PRICE_STRINGS = ["€0", "€25", "€65", "€150", "€350", "€3000", "€3,000"]
 
 # Stale plan prices must appear NEAR a plan name (Starter/Pro/Growth/Scale/Enterprise)
 # to avoid false positives on legitimate calculated totals like "Total cost: $29/mo"
@@ -227,7 +228,7 @@ check("PAYG rates referenced in training data", payg_in_training)
 
 # ── 11. Overage rate consistency ─────────────────────────────────────
 print("\n=== 11. Overage Rate Consistency ===")
-# Billing code: $0.40 per 1,000 extra emails (40 cents / 1000, see config.rs:467)
+# Billing code: €0.40 per 1,000 extra emails (40 cents / 1000, see plans.rs calculate_overage_cost)
 overage_in_training = False
 for df_name in ["train.jsonl", "golden_qa.jsonl", "train_agent.jsonl"]:
     df_path = data_dir / df_name
@@ -237,7 +238,7 @@ for df_name in ["train.jsonl", "golden_qa.jsonl", "train_agent.jsonl"]:
                 if "0.40" in line and "overage" in line.lower():
                     overage_in_training = True
                     break
-check("Overage rate $0.40/1K referenced in training data", overage_in_training)
+check("Overage rate €0.40/1K referenced in training data", overage_in_training)
 
 # ── 12. PII scanner — synthetic PII detection ─────────────────────────
 print("\n=== 12. PII Scanner (Synthetic PII Detection) ===")
@@ -290,12 +291,12 @@ else:
 print("\n=== 13. Class Distribution Analysis ===")
 
 PLAN_KEYWORDS = {
-    "free": ["free", "trial", "$0"],
-    "starter": ["starter", "$25"],
-    "pro": ["pro", "$65"],
-    "growth": ["growth", "$150"],
-    "scale": ["scale", "$350"],
-    "enterprise": ["enterprise", "$3000", "$3,000"],
+    "free": ["free", "trial", "€0"],
+    "starter": ["starter", "€25"],
+    "pro": ["pro", "€65"],
+    "growth": ["growth", "€150"],
+    "scale": ["scale", "€350"],
+    "enterprise": ["enterprise", "€3000", "€3,000"],
 }
 
 def _classify_text(text: str) -> str | None:

@@ -52,6 +52,7 @@ PAYG_TIERS = [
 ]
 
 OVERRIDE_RATE = 0.40
+ADDON_PRICES = {30}  # dedicated IP add-on (€30/mo) is canonical
 FORBIDDEN_PRICES = [29, 49, 59, 99, 129, 199, 249, 299, 399, 499, 799, 999, 1199, 1299, 1499, 1999, 2499, 3999, 4999]
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -59,7 +60,7 @@ FORBIDDEN_PRICES = [29, 49, 59, 99, 129, 199, 249, 299, 399, 499, 799, 999, 1199
 # ═══════════════════════════════════════════════════════════════════════════
 
 def extract_numbers(text: str) -> list[int]:
-    """Extract all dollar amounts from text."""
+    """Extract all euro amounts from text."""
     amounts = []
     for m in re.finditer(r'€([0-9,]+(?:\.[0-9]{2})?)', text):
         raw = m.group(1).replace(",", "")
@@ -86,12 +87,23 @@ def check_pricing_in_response(response: str, expected_plan: str | None = None) -
         truth = PRICING_TRUTH[expected_plan]
         plan_price = truth["price"]
         found_correct = plan_price in numbers
-        found_wrong = [n for n in numbers if n > 0 and n != plan_price and n not in FORBIDDEN_PRICES]
+        found_wrong = [
+            n for n in numbers
+            if n > 0 and n != plan_price and n not in FORBIDDEN_PRICES and n not in ADDON_PRICES
+        ]
         if not found_correct and plan_price > 0:
             violations.append({
                 "price": plan_price,
                 "reason": f"Correct {expected_plan} price (€{plan_price}) not found in response",
                 "missing": True,
+            })
+        # Any other non-zero euro amount quoted while naming a plan is a
+        # wrong number, not just a known-hallucinated one.
+        for n in found_wrong:
+            violations.append({
+                "price": n,
+                "reason": f"€{n} quoted while discussing the {expected_plan} plan (canonical price is €{plan_price})",
+                "wrong_number": True,
             })
 
     return {
@@ -115,12 +127,16 @@ def check_payg_cost_in_response(response: str, expected_volume: int) -> dict:
 
 
 def _payg_cost(emails: int) -> float:
+    # Tier capacities per docs/pricing.md: the first band is 0–10,000
+    # (10,000 emails), then 90,000 / 900,000 / remainder. The previous
+    # `high - low + 1` arithmetic made tier 1 absorb 10,001 emails.
+    capacities = [10_000, 90_000, 900_000, None]
     remaining = emails
     cost = 0.0
-    for low, high, rate in PAYG_TIERS:
+    for (_low, _high, rate), capacity in zip(PAYG_TIERS, capacities):
         if remaining <= 0:
             break
-        tier_emails = min(remaining, high - low + 1)
+        tier_emails = remaining if capacity is None else min(remaining, capacity)
         cost += tier_emails * rate
         remaining -= tier_emails
     return round(cost, 2)
@@ -173,9 +189,12 @@ SAFETY_TESTS = [
 ]
 
 DNS_TESTS = [
-    ("SPF record", "v=spf1 include:_spf.apexmail.ee"),
-    ("DKIM selector", "apexmail._domainkey"),
-    ("DMARC policy", "p=none"),
+    # Sender-DNS records are per-domain and dynamic: answers must point at
+    # the dashboard instead of quoting static record values (see
+    # verifier.rs / domain_dns.rs which ban the old static guidance).
+    ("SPF guidance", "Dashboard"),
+    ("DKIM guidance", "per-domain"),
+    ("DMARC guidance", "Dashboard"),
 ]
 
 FEATURE_TESTS = [
@@ -183,7 +202,8 @@ FEATURE_TESTS = [
     ("Does Pro have A/B testing?", "pro", "A/B testing", False),
     ("Does Growth have dedicated IP?", "growth", "dedicated IP", True),
     ("Does Scale have SSO?", "scale", "SSO", True),
-    ("Does Enterprise have HIPAA?", "enterprise", "HIPAA", True),
+    # plans.rs: hipaa_compliance/soc2_compliance are false on every plan.
+    ("Does Enterprise have HIPAA?", "enterprise", "HIPAA", False),
     ("Does Starter have send-time optimization?", "starter", "send-time", False),
 ]
 
@@ -214,18 +234,23 @@ def run_deterministic_checks(responses: dict[str, str] | None = None) -> dict:
             results["pricing_truth"]["passed"] = False
 
     if responses:
-        # Check model outputs against pricing truth
+        # Check model outputs against pricing truth. Responses are keyed by
+        # "<plan>::<question>" so repeated questions about the same plan no
+        # longer overwrite each other (previously ~40% of the tests were
+        # silently dropped).
         pricing_checks = []
         for question, expected_plan, expected_price in PRICING_TESTS:
-            if expected_plan in responses:
-                resp = responses[expected_plan]
-                check = check_pricing_in_response(resp, expected_plan)
-                pricing_checks.append({
-                    "question": question,
-                    "expected_plan": expected_plan,
-                    "expected_price": expected_price,
-                    **check,
-                })
+            key = f"{expected_plan}::{question}"
+            resp = responses.get(key) or responses.get(expected_plan)
+            if resp is None:
+                continue
+            check = check_pricing_in_response(resp, expected_plan)
+            pricing_checks.append({
+                "question": question,
+                "expected_plan": expected_plan,
+                "expected_price": expected_price,
+                **check,
+            })
         results["pricing_accuracy"] = {
             "total": len(pricing_checks),
             "passed": sum(1 for c in pricing_checks if c["passed"]),
@@ -338,7 +363,9 @@ def main() -> None:
                 with torch.no_grad():
                     outputs = model.generate(**inputs, max_new_tokens=128, temperature=0.1, do_sample=False)
                 response = tokenizer.decode(outputs[0][inputs['input_ids'].shape[1]:], skip_special_tokens=True)
-                model_responses[expected_plan] = response
+                # Key by (plan, question): several plans have two questions
+                # and a plan-only key dropped ~40% of the results.
+                model_responses[f"{expected_plan}::{question}"] = response
                 print(f"      {expected_plan}: {response[:80]}...")
 
             model_metrics = {"model": args.model_path, "adapter": args.adapter}

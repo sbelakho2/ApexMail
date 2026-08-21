@@ -7,7 +7,11 @@
 model:
   base: "/workspace/models/Qwen3-Next-80B-A3B-Instruct"
   revision: "main"
-  trust_remote_code: true
+  # Remote code execution is disabled by default. The Qwen3-Next architecture
+  # is supported natively by the installed transformers release, so a local
+  # model path needs no custom code. Override to true only for a reviewed,
+  # pinned custom-architecture checkpoint.
+  trust_remote_code: false
   torch_dtype: "bfloat16"
   attn_implementation: "eager"          # MoE model — use eager attention
 

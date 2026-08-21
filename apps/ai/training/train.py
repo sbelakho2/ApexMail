@@ -99,7 +99,7 @@ def create_tokenizer(cfg: dict) -> AutoTokenizer:
     tokenizer = AutoTokenizer.from_pretrained(
         model_cfg["base"],
         revision=model_cfg.get("revision", "main"),
-        trust_remote_code=model_cfg.get("trust_remote_code", True),
+        trust_remote_code=model_cfg.get("trust_remote_code", False),
         padding_side="right",
     )
     # Qwen3 uses <|endoftext|> as EOS and <|im_end|> as chat turn end.
@@ -133,7 +133,7 @@ def create_model(cfg: dict) -> AutoModelForCausalLM:
         torch_dtype=getattr(torch, model_cfg["torch_dtype"]),
         attn_implementation=model_cfg.get("attn_implementation", "sdpa"),
         device_map=device_map,
-        trust_remote_code=model_cfg.get("trust_remote_code", True),
+        trust_remote_code=model_cfg.get("trust_remote_code", False),
     )
 
     model = prepare_model_for_kbit_training(
