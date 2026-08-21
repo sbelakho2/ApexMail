@@ -77,8 +77,8 @@ pub fn siteverify_response(
 ///   `CounterTooLarge`, `WrongScope`, `RequestBindingMismatch`,
 ///   `WrongRegion`, `WrongIssuer`, `WrongPolicyVersion`, `UnknownKid`,
 ///   `TooManyAttempts`, `InsufficientWork`, `MalformedRecord`,
-///   `BotDetected`, `MalformedToken`, `RecordNotFound`):
-///   `invalid-input-response`.
+///   `UnsupportedArgon2Params`, `BotDetected`, `MalformedToken`,
+///   `RecordNotFound`): `invalid-input-response`.
 fn map_error(reason: &VerifyError) -> String {
     match reason {
         VerifyError::Expired | VerifyError::AlreadyConsumed => "timeout-or-duplicate".into(),
@@ -100,6 +100,7 @@ fn map_error(reason: &VerifyError) -> String {
         | VerifyError::TooManyAttempts
         | VerifyError::InsufficientWork
         | VerifyError::MalformedRecord
+        | VerifyError::UnsupportedArgon2Params
         | VerifyError::BotDetected
         | VerifyError::MalformedToken
         | VerifyError::RecordNotFound => "invalid-input-response".into(),

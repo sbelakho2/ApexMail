@@ -44,20 +44,23 @@ pub(crate) fn derive_hash(record: &ChallengeRecord, counter: u64) -> Result<[u8;
             // run a memory-hard computation with impossible parameters — the
             // hard ceilings plus the Argon2 minimum
             // `m_kib >= 8 * p`. The minimum (m_kib >= 8 * p) is enforced at
-            // issuance too.
+            // issuance too. A parameter violation is
+            // UnsupportedArgon2Params, the PHP core's twin: the record may
+            // be properly signed, but this verifier refuses to represent
+            // the computation.
             if record.m_kib < 8 * record.p || check_argon2_ceilings(record).is_err() {
-                return Err(VerifyError::MalformedRecord);
+                return Err(VerifyError::UnsupportedArgon2Params);
             }
             // Protocol unit: m_kib is in kibibytes (65536 = 64 MiB); the
             // argon2 crate's Params::new takes the same 1 KiB blocks.
             let params = Params::new(record.m_kib, record.t, record.p, Some(32))
-                .map_err(|_| VerifyError::MalformedRecord)?;
+                .map_err(|_| VerifyError::UnsupportedArgon2Params)?;
             let hasher = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
             let password = format!("{}{}", record.prefix, counter);
             let mut output = [0u8; 32];
             hasher
                 .hash_password_into(password.as_bytes(), &salt, &mut output)
-                .map_err(|_| VerifyError::InsufficientWork)?;
+                .map_err(|_| VerifyError::UnsupportedArgon2Params)?;
             Ok(output)
         }
         PoWAlgorithm::Sha256 => {
@@ -294,6 +297,15 @@ pub enum VerifyError {
     InsufficientWork,
     #[error("stored challenge record is malformed")]
     MalformedRecord,
+    /// The record is authentic (its signature verifies) but its signed
+    /// Argon2id parameters violate the hard process ceilings — the
+    /// memory-hard computation must never run, let alone allocate, for
+    /// parameters outside these bounds. The PHP core's exact twin
+    /// (`unsupported_argon2_params`): a signed record violating the
+    /// ceilings came from a foreign or corrupt issuer holding a key, so
+    /// it is distinguished from a malformed record.
+    #[error("Argon2id parameters exceed the supported process ceilings")]
+    UnsupportedArgon2Params,
     #[error("automated or headless client detected via telemetry")]
     BotDetected,
     #[error("solution token is malformed or undecodable")]
@@ -333,11 +345,18 @@ pub enum VerifyError {
 impl VerifyError {
     /// The stable machine-readable wire code for this failure, matching
     /// the PHP SDK's `VerifyError::value` vocabulary case-for-case
-    /// (`bad_signature`, `expired`, ...). Metrics, alerting and retry
+    /// (`bad_signature`, `expired`, ...): every PHP code has a Rust twin
+    /// carrying the identical wire code. Metrics, alerting and retry
     /// branching must key on these codes — never on the human `Display`
-    /// prose. Variants with no PHP twin (this core rejects oversized
-    /// counters and bot telemetry outright where the PHP core maps them
-    /// differently) use the same snake_case register.
+    /// prose. The one documented name-mapping divergence: the Rust
+    /// variant `BotDetected` carries PHP's `telemetry_rejected` code
+    /// (the same failure class — the variant name is Rust-idiomatic,
+    /// the wire code is shared). The one Rust-only code is
+    /// `counter_too_large` (this core rejects oversized counters
+    /// outright; the PHP decoder maps them to `malformed_token`). The
+    /// cross-language drift gate lives in
+    /// `tools/verify-error-code-parity.sh`, which parses the PHP enum
+    /// and this mapping directly.
     pub fn code(&self) -> &'static str {
         match self {
             Self::BadSignature => "bad_signature",
@@ -355,6 +374,7 @@ impl VerifyError {
             Self::TooManyAttempts => "too_many_attempts",
             Self::InsufficientWork => "insufficient_work",
             Self::MalformedRecord => "malformed_record",
+            Self::UnsupportedArgon2Params => "unsupported_argon2_params",
             // PHP's `telemetry_rejected` — the same failure class: the
             // client-side telemetry evidence rejected this client. The
             // variant name is Rust-idiomatic; the wire code is shared.
@@ -413,9 +433,17 @@ impl VerifyError {
 /// - `prefix` is exactly `challenge|salt|`;
 /// - `target_bits` within the explicit difficulty bounds for both algorithms
 ///   (the Argon2id issuance ceiling stays stricter at the solver's argon2
-///   target-bits cap, exactly like the t=7..=16 verifier-vs-issuer split);
-/// - Argon2id: the hard parameter ceilings: `m_kib` 8..=65536,
-///   `t` 3..=16, `p` 1..=4.
+///   target-bits cap, exactly like the t=7..=16 verifier-vs-issuer split).
+///
+/// Argon2id memory/time/parallelism are deliberately NOT bounded here —
+/// the absolute process ceilings apply to the signed parameters after
+/// signature authentication (see [`check_argon2_ceilings`]), exactly like
+/// the PHP core's structural validator: a validly signed out-of-range
+/// record is [`VerifyError::UnsupportedArgon2Params`] rather than
+/// [`VerifyError::MalformedRecord`], while an unsigned foreign record
+/// fails the signature check instead. The allocation safety is unchanged:
+/// the ceilings are re-enforced at every computation site
+/// ([`derive_hash`] re-checks before any `Params::new`).
 ///
 /// Returns [`VerifyError::MalformedRecord`] on any violation.
 pub fn validate_record(record: &ChallengeRecord) -> Result<(), VerifyError> {
@@ -489,12 +517,6 @@ pub fn validate_record(record: &ChallengeRecord) -> Result<(), VerifyError> {
     if record.target_bits < MIN_DIFFICULTY || record.target_bits > MAX_DIFFICULTY {
         return Err(VerifyError::MalformedRecord);
     }
-    match record.algorithm {
-        PoWAlgorithm::Sha256 => {}
-        PoWAlgorithm::Argon2id => {
-            check_argon2_ceilings(record)?;
-        }
-    }
     Ok(())
 }
 
@@ -505,11 +527,13 @@ pub fn validate_record(record: &ChallengeRecord) -> Result<(), VerifyError> {
 /// with parameters outside these bounds, even when the record is properly
 /// signed.
 ///
-/// Returns [`VerifyError::MalformedRecord`] when any parameter is out of
-/// range. Called by [`validate_record`] (the cheap pre-signature gate) and
-/// explicitly after signature authentication in [`verify_solution`] and the
-/// production verifier, so a signed record is validated against the ceilings
-/// again immediately before any allocation happens.
+/// Returns [`VerifyError::UnsupportedArgon2Params`] when any parameter is
+/// out of range — the PHP core's twin code for the same condition (a
+/// signed record violating the process ceilings is authentic but
+/// unsupported, not malformed). Called after signature authentication in
+/// [`verify_solution`] and the production verifier, and re-checked at the
+/// computation site in [`derive_hash`], so no allocation can happen for
+/// an out-of-bounds parameter set.
 pub(crate) fn check_argon2_ceilings(record: &ChallengeRecord) -> Result<(), VerifyError> {
     use crate::challenge::{
         MAX_ARGON_MEMORY_KIB, MAX_ARGON_TIME, MAX_PARALLELISM, MIN_ARGON_MEMORY_KIB,
@@ -522,7 +546,7 @@ pub(crate) fn check_argon2_ceilings(record: &ChallengeRecord) -> Result<(), Veri
         || record.p < MIN_PARALLELISM
         || record.p > MAX_PARALLELISM
     {
-        return Err(VerifyError::MalformedRecord);
+        return Err(VerifyError::UnsupportedArgon2Params);
     }
     Ok(())
 }
@@ -1054,35 +1078,14 @@ mod tests {
     };
 
     #[test]
-    fn error_codes_match_the_php_wire_vocabulary() {
-        // The PHP SDK's VerifyError case values, verbatim — the shared
-        // machine-readable wire vocabulary. Every Rust variant with a
-        // PHP twin must carry the identical code; the two Rust-only
-        // variants stay in the same snake_case register.
-        let php_codes = [
-            "bad_signature",
-            "expired",
-            "wrong_scope",
-            "ip_mismatch",
-            "missing_client_ip",
-            "wrong_region",
-            "wrong_issuer",
-            "wrong_policy_version",
-            "unknown_kid",
-            "too_fast",
-            "insufficient_work",
-            "malformed_record",
-            "record_not_found",
-            "malformed_token",
-            "too_many_attempts",
-            "telemetry_rejected",
-            "capacity_exceeded",
-            "admission_unavailable",
-            "storage_unavailable",
-            "consume_indeterminate",
-            "already_consumed",
-            "request_binding_mismatch",
-        ];
+    fn error_codes_are_unique_machine_readable_snake_case() {
+        // The wire-code register hygiene: every variant's code() is
+        // non-empty snake_case and unique across the enum. The
+        // cross-language drift gate — every PHP VerifyError code has a
+        // Rust twin — is NOT a handwritten list here (a stale list
+        // passes vacuously); it is enforced by
+        // tools/verify-error-code-parity.sh, which parses the PHP enum's
+        // case values and this code() mapping directly in CI.
         let variants = [
             VerifyError::BadSignature,
             VerifyError::Expired,
@@ -1099,6 +1102,7 @@ mod tests {
             VerifyError::TooManyAttempts,
             VerifyError::InsufficientWork,
             VerifyError::MalformedRecord,
+            VerifyError::UnsupportedArgon2Params,
             VerifyError::BotDetected,
             VerifyError::MalformedToken,
             VerifyError::RecordNotFound,
@@ -1122,12 +1126,16 @@ mod tests {
         unique.sort_unstable();
         unique.dedup();
         assert_eq!(unique.len(), codes.len(), "codes must be unique");
-        for php in php_codes {
-            assert!(
-                codes.contains(&php),
-                "PHP wire code {php} has no Rust twin — the vocabularies drifted"
-            );
-        }
+        // The harmonized Argon2 divergence: a signed record violating the
+        // process ceilings reports the PHP twin wire code, not
+        // malformed_record.
+        assert_eq!(
+            VerifyError::UnsupportedArgon2Params.code(),
+            "unsupported_argon2_params"
+        );
+        // The documented name-mapping divergence: the Rust-idiomatic
+        // BotDetected variant carries PHP's telemetry_rejected wire code.
+        assert_eq!(VerifyError::BotDetected.code(), "telemetry_rejected");
     }
 
     const NOW_UNIX: u64 = 1_000_000;
@@ -1252,6 +1260,7 @@ mod tests {
             VerifyError::TooManyAttempts,
             VerifyError::InsufficientWork,
             VerifyError::MalformedRecord,
+            VerifyError::UnsupportedArgon2Params,
             VerifyError::BotDetected,
             VerifyError::MalformedToken,
             VerifyError::RecordNotFound,
@@ -2692,14 +2701,17 @@ mod tests {
         // m_kib above the browser-solvable ceiling must be rejected up front,
         // not run (a memory-hard hash with 4 TiB would OOM the server).
         // Solve with sane params first (fast), then verify against the
-        // absurd-params record: MalformedRecord must fire before hashing.
+        // absurd-params record — properly signed, so the ceiling check is
+        // what fires: UnsupportedArgon2Params, the PHP core's twin code,
+        // before any hashing.
         let sane = make_argon2_record(4, 128);
         let counter = solve_for_test(&sane).unwrap();
         let mut absurd = sane.clone();
         absurd.m_kib = crate::challenge::SOLVER_MAX_ARGON2_M_KIB + 1;
+        resign_v2(&mut absurd, "test-key-16-bytes!");
         assert_eq!(
             verify(&mut absurd, counter, 5000),
-            VerifyOutcome::Invalid(VerifyError::MalformedRecord)
+            VerifyOutcome::Invalid(VerifyError::UnsupportedArgon2Params)
         );
     }
 
@@ -2841,44 +2853,57 @@ mod tests {
             Err(VerifyError::MalformedRecord)
         );
 
+        // Argon2id parameters are deliberately NOT structurally bounded —
+        // the hard ceilings apply to the signed parameters after
+        // signature authentication (the PHP core's structural validator
+        // has the same split), so an out-of-range value passes structural
+        // validation and is rejected later as UnsupportedArgon2Params by
+        // check_argon2_ceilings at the post-signature and computation
+        // sites.
         let mut argon_bad_t = make_argon2_record(4, 128);
         argon_bad_t.t = 32; // above the t ceiling (16)
+        assert_eq!(validate_record(&argon_bad_t), Ok(()));
         assert_eq!(
-            validate_record(&argon_bad_t),
-            Err(VerifyError::MalformedRecord)
+            check_argon2_ceilings(&argon_bad_t),
+            Err(VerifyError::UnsupportedArgon2Params)
         );
 
         let mut argon_bad_m = make_argon2_record(4, 128);
         argon_bad_m.m_kib = 65_537; // above the 64 MiB ceiling
+        assert_eq!(validate_record(&argon_bad_m), Ok(()));
         assert_eq!(
-            validate_record(&argon_bad_m),
-            Err(VerifyError::MalformedRecord)
+            check_argon2_ceilings(&argon_bad_m),
+            Err(VerifyError::UnsupportedArgon2Params)
         );
 
         let mut argon_low_m = make_argon2_record(4, 128);
         argon_low_m.m_kib = 1; // below the 8 KiB hard floor
+        assert_eq!(validate_record(&argon_low_m), Ok(()));
         assert_eq!(
-            validate_record(&argon_low_m),
-            Err(VerifyError::MalformedRecord)
+            check_argon2_ceilings(&argon_low_m),
+            Err(VerifyError::UnsupportedArgon2Params)
         );
 
         let mut argon_low_t = make_argon2_record(4, 128);
         argon_low_t.t = 2; // below the t minimum (3)
+        assert_eq!(validate_record(&argon_low_t), Ok(()));
         assert_eq!(
-            validate_record(&argon_low_t),
-            Err(VerifyError::MalformedRecord)
+            check_argon2_ceilings(&argon_low_t),
+            Err(VerifyError::UnsupportedArgon2Params)
         );
 
         let mut argon_bad_p = make_argon2_record(4, 128);
         argon_bad_p.p = 5; // above the parallelism ceiling (4)
+        assert_eq!(validate_record(&argon_bad_p), Ok(()));
         assert_eq!(
-            validate_record(&argon_bad_p),
-            Err(VerifyError::MalformedRecord)
+            check_argon2_ceilings(&argon_bad_p),
+            Err(VerifyError::UnsupportedArgon2Params)
         );
 
         // A well-formed record passes.
         assert_eq!(validate_record(&make_record(8)), Ok(()));
         assert_eq!(validate_record(&make_argon2_record(4, 128)), Ok(()));
+        assert_eq!(check_argon2_ceilings(&make_argon2_record(4, 128)), Ok(()));
     }
 
     #[test]
@@ -4146,8 +4171,10 @@ mod tests {
     #[test]
     fn signed_argon2_records_outside_hard_ceilings_are_rejected() {
         // Signed records (valid v2 signatures over the mutated
-        // parameters) with out-of-range m_kib/t must be rejected with
-        // MalformedRecord before any Params::new/allocation.
+        // parameters) with out-of-range m_kib/t are rejected with
+        // UnsupportedArgon2Params — the PHP core's twin code for an
+        // authentic record whose signed parameters violate the hard
+        // process ceilings — before any Params::new/allocation.
         use crate::challenge::{MAX_ARGON_MEMORY_KIB, MAX_ARGON_TIME};
         for (field, value) in [
             ("m_kib", 1u32),                     // below the memory minimum
@@ -4164,7 +4191,7 @@ mod tests {
             resign_v2(&mut record, "test-key-16-bytes!");
             assert_eq!(
                 verify(&mut record, 0, 5000),
-                VerifyOutcome::Invalid(VerifyError::MalformedRecord),
+                VerifyOutcome::Invalid(VerifyError::UnsupportedArgon2Params),
                 "{field}={value} must be rejected by the hard ceilings"
             );
         }
@@ -4197,7 +4224,7 @@ mod tests {
         resign_v2(&mut record, "test-key-16-bytes!");
         assert_eq!(
             verify(&mut record, 0, 5000),
-            VerifyOutcome::Invalid(VerifyError::MalformedRecord)
+            VerifyOutcome::Invalid(VerifyError::UnsupportedArgon2Params)
         );
     }
 

@@ -2986,3 +2986,328 @@ fn delete_if_pending_race_never_erases_committed_evidence() {
         let _: () = redis::cmd("DEL").arg(&key).query(&mut conn).unwrap();
     }
 }
+
+/// Deterministic verifier clock for the compositional replay-precedence
+/// tests: a fixed mutable second, so the expiry cases never race the
+/// wall clock.
+static FAKE_REPLAY_NOW: AtomicU64 = AtomicU64::new(0);
+
+fn fake_replay_now() -> u64 {
+    FAKE_REPLAY_NOW.load(Ordering::SeqCst)
+}
+
+/// One consumed record with a committed valid outcome and a recorded
+/// operation identity — the retained evidence a replay resolves against.
+/// Returns (nonce, token, issued_at_ns).
+fn consumed_committed_record(
+    url: &str,
+    prefix: &str,
+    min_duration_ms: u64,
+) -> (String, String, u64) {
+    let mut config = sha_config(4);
+    if min_duration_ms > 0 {
+        config.min_duration_ms = Some(min_duration_ms);
+    }
+    let issued = issue_challenge(
+        &config,
+        "login",
+        IP,
+        now_unix(),
+        now_micros(),
+        0,
+        Some("txn-123"),
+    )
+    .unwrap();
+    let counter = solve_for_test(&issued.record).expect("4-bit sha solves");
+    let token = encode_token(&issued.record.nonce, counter);
+    let issued_at_ns = issued.record.issued_at_ns;
+
+    let store = store_for(url, prefix);
+    store.store(&issued.record).unwrap();
+    let consumed = store
+        .consume_with_operation_identity(&issued.record.nonce, Some("op-replay"))
+        .unwrap()
+        .expect("pending record consumes");
+    assert!(consumed.first);
+    store
+        .commit_result(&issued.record.nonce, true, None)
+        .unwrap();
+
+    (issued.record.nonce.clone(), token, issued_at_ns)
+}
+
+/// Asserts the retained-evidence contract after a hard-wins replay: the
+/// record still exists, is consumed, its committed valid result and its
+/// recorded operation identity are intact.
+fn assert_replay_evidence_intact(url: &str, prefix: &str, nonce: &str) {
+    let key = format!("{prefix}{nonce}");
+    let mut conn = redis::Client::open(url.to_string())
+        .unwrap()
+        .get_connection()
+        .unwrap();
+    let raw: Option<String> = redis::cmd("GET").arg(&key).query(&mut conn).unwrap();
+    let raw = raw.expect("the consumed record is NEVER deleted by the hard verdict");
+    let stored: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    assert_eq!(stored["state"], "consumed", "the record is still consumed");
+    assert_eq!(
+        stored["consumed_result"]["valid"], true,
+        "the committed valid result survives intact"
+    );
+    assert_eq!(
+        stored["operation_identity"], "op-replay",
+        "the recorded operation identity survives intact"
+    );
+}
+
+#[test]
+fn exempt_cheap_failure_never_masks_a_hard_verdict_on_a_consumed_replay() {
+    // Compositional replay precedence: a replay of a consumed record that
+    // fails an exempt circumstance (the expiry, the IP binding) may never
+    // replay the stored success around a hard verdict that also applies
+    // to the same request. The cheap phase returns the first failing
+    // check only and the expiry sits early in the order, so every
+    // hard invariant below it must be re-evaluated before the exempt
+    // failure may route into the identity-gated consumed branch. The
+    // IP binding sits before the minimum-duration floor, so the floor is
+    // re-evaluated too. (The production verifier takes a required
+    // client IP, so the missing-IP exemption has no Rust matrix entry;
+    // telemetry is not gated in this verifier either.)
+    let Some(url) = redis_url() else { return };
+
+    struct Case {
+        label: &'static str,
+        // (scope, client_ip, expected_request_binding) for the replay call
+        scope: &'static str,
+        client_ip: &'static str,
+        expected_request_binding: Option<&'static str>,
+        // now offset for the replay receipt: None = +1s, Some(s) = +s
+        receipt_offset_s: u64,
+        expiry_clock: bool,
+        region: Option<&'static str>,
+        policy_version: Option<u32>,
+        issuer: Option<&'static str>,
+        min_duration_ms: u64,
+        expected: VerifyError,
+    }
+
+    let cases = [
+        // The expiry masks every hard invariant below it in check order.
+        Case {
+            label: "expired + wrong scope",
+            scope: "signup",
+            client_ip: IP,
+            expected_request_binding: None,
+            receipt_offset_s: 1,
+            expiry_clock: true,
+            region: None,
+            policy_version: None,
+            issuer: None,
+            min_duration_ms: 0,
+            expected: VerifyError::WrongScope,
+        },
+        Case {
+            label: "expired + request binding mismatch",
+            scope: "login",
+            client_ip: IP,
+            expected_request_binding: Some("txn-OTHER"),
+            receipt_offset_s: 1,
+            expiry_clock: true,
+            region: None,
+            policy_version: None,
+            issuer: None,
+            min_duration_ms: 0,
+            expected: VerifyError::RequestBindingMismatch,
+        },
+        Case {
+            label: "expired + wrong region",
+            scope: "login",
+            client_ip: IP,
+            expected_request_binding: Some("txn-123"),
+            receipt_offset_s: 1,
+            expiry_clock: true,
+            region: Some("eu"),
+            policy_version: None,
+            issuer: None,
+            min_duration_ms: 0,
+            expected: VerifyError::WrongRegion,
+        },
+        Case {
+            label: "expired + wrong policy epoch",
+            scope: "login",
+            client_ip: IP,
+            expected_request_binding: Some("txn-123"),
+            receipt_offset_s: 1,
+            expiry_clock: true,
+            region: None,
+            policy_version: Some(2),
+            issuer: None,
+            min_duration_ms: 0,
+            expected: VerifyError::WrongPolicyVersion,
+        },
+        Case {
+            label: "expired + wrong issuer",
+            scope: "login",
+            client_ip: IP,
+            expected_request_binding: Some("txn-123"),
+            receipt_offset_s: 1,
+            expiry_clock: true,
+            region: None,
+            policy_version: None,
+            issuer: Some("prod"),
+            min_duration_ms: 0,
+            expected: VerifyError::WrongIssuer,
+        },
+        // The IP binding masks the minimum-duration floor (checked after it).
+        Case {
+            label: "ip mismatch + minimum-duration floor",
+            scope: "login",
+            client_ip: "203.0.113.9",
+            expected_request_binding: Some("txn-123"),
+            receipt_offset_s: 1,
+            expiry_clock: false,
+            region: None,
+            policy_version: None,
+            issuer: None,
+            min_duration_ms: 110_000,
+            expected: VerifyError::TooFast,
+        },
+        // Region precedes the IP binding in check order: the pin that the
+        // hard verdict earlier in the order keeps winning outright.
+        Case {
+            label: "ip mismatch behind wrong region (order pin)",
+            scope: "login",
+            client_ip: "203.0.113.9",
+            expected_request_binding: Some("txn-123"),
+            receipt_offset_s: 1,
+            expiry_clock: false,
+            region: Some("eu"),
+            policy_version: None,
+            issuer: None,
+            min_duration_ms: 0,
+            expected: VerifyError::WrongRegion,
+        },
+    ];
+
+    for case in cases {
+        let prefix = prefix("replay-precedence");
+        let (nonce, token, issued_at_ns) =
+            consumed_committed_record(&url, &prefix, case.min_duration_ms);
+
+        let receipt_ns = issued_at_ns + case.receipt_offset_s * 1_000_000;
+        let verifier = if case.expiry_clock {
+            FAKE_REPLAY_NOW.store(now_unix() + 300, Ordering::SeqCst);
+            verifier_for(&url, &prefix).with_now_fn(fake_replay_now)
+        } else {
+            verifier_for(&url, &prefix)
+        };
+        let verifier = match case.region {
+            Some(region) => verifier.with_expected_region(region),
+            None => verifier,
+        };
+        let verifier = match case.policy_version {
+            Some(version) => verifier.with_expected_policy_version(version),
+            None => verifier,
+        };
+        let verifier = match case.issuer {
+            Some(issuer) => verifier.with_expected_issuer(issuer),
+            None => verifier,
+        };
+
+        let outcome = verifier.verify(
+            &token,
+            case.scope,
+            case.client_ip,
+            receipt_ns,
+            Some("op-replay"),
+            case.expected_request_binding,
+        );
+        assert_eq!(
+            outcome,
+            VerifyOutcome::Invalid(case.expected),
+            "{}: the hard verdict must win over the exempt circumstance",
+            case.label
+        );
+        assert_replay_evidence_intact(&url, &prefix, &nonce);
+    }
+}
+
+#[test]
+fn exempt_circumstance_alone_still_replays_the_stored_success() {
+    // The balance: a retry failing only the exempt circumstance, with the
+    // exact matching operation identity, still replays the committed
+    // success — the idempotent-retry contract must not regress.
+    let Some(url) = redis_url() else { return };
+
+    for (label, client_ip) in [("expired alone", IP), ("ip mismatch alone", "203.0.113.9")] {
+        let expired = label.starts_with("expired");
+        let prefix = prefix("replay-exempt-alone");
+        let (nonce, token, issued_at_ns) = consumed_committed_record(&url, &prefix, 0);
+
+        let verifier = if expired {
+            FAKE_REPLAY_NOW.store(now_unix() + 300, Ordering::SeqCst);
+            verifier_for(&url, &prefix).with_now_fn(fake_replay_now)
+        } else {
+            verifier_for(&url, &prefix)
+        };
+        assert_eq!(
+            verifier.verify(
+                &token,
+                "login",
+                client_ip,
+                issued_at_ns + 1_000_000,
+                Some("op-replay"),
+                Some("txn-123"),
+            ),
+            VerifyOutcome::Valid {
+                nonce: nonce.clone(),
+                request_binding: None,
+                from_stored_result: true,
+            },
+            "{label}: the identity-proven retry replays the stored success"
+        );
+        assert_replay_evidence_intact(&url, &prefix, &nonce);
+    }
+}
+
+#[test]
+fn fresh_challenges_keep_the_first_error_precedence() {
+    // The replay-security re-evaluation exists only on the consumed
+    // branch: a fresh (pending) challenge keeps the documented first-error
+    // order — an expired token still reports Expired even when a hard
+    // invariant would also fail.
+    let Some(url) = redis_url() else { return };
+    let prefix = prefix("fresh-precedence");
+    let issued = issue_challenge(
+        &sha_config(4),
+        "login",
+        IP,
+        now_unix(),
+        now_micros(),
+        0,
+        Some("txn-123"),
+    )
+    .unwrap();
+    let counter = solve_for_test(&issued.record).expect("4-bit sha solves");
+    let token = encode_token(&issued.record.nonce, counter);
+    let issued_at_ns = issued.record.issued_at_ns;
+    store_for(&url, &prefix).store(&issued.record).unwrap();
+
+    FAKE_REPLAY_NOW.store(now_unix() + 300, Ordering::SeqCst);
+    let verifier = verifier_for(&url, &prefix)
+        .with_now_fn(fake_replay_now)
+        .with_expected_region("eu")
+        .with_expected_policy_version(2)
+        .with_expected_issuer("prod");
+    assert_eq!(
+        verifier.verify(
+            &token,
+            "signup",
+            IP,
+            issued_at_ns + 1_000_000,
+            Some("op-replay"),
+            Some("txn-OTHER"),
+        ),
+        VerifyOutcome::Invalid(VerifyError::Expired),
+        "the fresh path keeps the first-error precedence: Expired wins"
+    );
+}

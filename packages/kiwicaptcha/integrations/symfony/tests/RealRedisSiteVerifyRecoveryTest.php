@@ -104,6 +104,11 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
             {
                 $this->inner->delete($nonce);
             }
+
+            public function deleteIfPending(string $nonce): \KiwiCaptcha\DeleteIfPendingResult
+            {
+                return $this->inner->deleteIfPending($nonce);
+            }
         };
     }
 
@@ -752,6 +757,11 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
             {
                 $this->inner->delete($nonce);
             }
+
+            public function deleteIfPending(string $nonce): \KiwiCaptcha\DeleteIfPendingResult
+            {
+                return $this->inner->deleteIfPending($nonce);
+            }
         };
 
         try {
@@ -916,6 +926,11 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
                 public function delete(string $nonce): void
                 {
                     $this->inner->delete($nonce);
+                }
+
+                public function deleteIfPending(string $nonce): \KiwiCaptcha\DeleteIfPendingResult
+                {
+                    return $this->inner->deleteIfPending($nonce);
                 }
             };
             usleep(2_500_000);

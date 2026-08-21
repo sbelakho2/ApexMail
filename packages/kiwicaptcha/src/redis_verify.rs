@@ -1408,6 +1408,17 @@ impl ProductionVerifier {
             // it, the record is kept intact, and the failure is
             // returned. A pending (or missing) record keeps the one-shot
             // cheap-failure delete for both classes.
+            //
+            // The compositional replay gate: a first-error routing lets
+            // an exempt failure that sits early in the cheap-phase order
+            // (the expiry before scope/region/policy/issuer/binding, the
+            // IP binding before the minimum-duration floor) shadow every
+            // later hard verdict and replay the stored success around
+            // it. Before an exempt failure may route into the consumed
+            // branch, replay_security_check re-evaluates every hard
+            // invariant on the same peeked record; any failure wins with
+            // the evidence preserved by the fused transition below.
+            //
             // The cleanup runs through the fused atomic transition: the
             // delete decision and the delete itself are one script, so a
             // record a concurrent redeemer consumes (and commits)
@@ -1418,6 +1429,17 @@ impl ProductionVerifier {
             match self.store.delete_if_pending(&token.nonce) {
                 Ok(DeleteIfPending::Consumed(state)) => {
                     if e.is_replay_exempt() {
+                        if let Err(hard) = self.replay_security_check(
+                            &peek,
+                            scope,
+                            now_ns,
+                            expected_request_binding,
+                        ) {
+                            // A hard verdict masked by the exempt
+                            // circumstance: the evidence stays preserved
+                            // and the hard failure is the outcome.
+                            return VerifyOutcome::Invalid(hard);
+                        }
                         return self.resolve_consumed(*state, operation_identity);
                     }
                     // A hard security verdict on a consumed record: the
@@ -1604,6 +1626,9 @@ impl ProductionVerifier {
     /// server-measured minimum duration — the checks PHP runs against the
     /// peeked record before the Argon admission gate. Run against the
     /// peeked record and re-run against the consumed record (race guard).
+    /// Each invariant lives in its own check method, shared verbatim with
+    /// [`Self::replay_security_check`] so the two paths can never diverge
+    /// on what an invariant means.
     fn check_cheap(
         &self,
         record: &ChallengeRecord,
@@ -1612,6 +1637,57 @@ impl ProductionVerifier {
         now_ns: u64,
         expected_request_binding: Option<&str>,
     ) -> Result<(), VerifyError> {
+        self.check_authenticated_shape(record)?;
+        self.check_ttl(record)?;
+        self.check_scope(record, scope)?;
+        self.check_deployment_expectations(record)?;
+        self.check_request_binding(record, expected_request_binding)?;
+        self.check_ip_binding(record, client_ip)?;
+        self.check_min_duration(record, now_ns)?;
+        Ok(())
+    }
+
+    /// The compositional replay gate: every non-exempt hard invariant,
+    /// evaluated with the exempt circumstances (the TTL and the IP
+    /// binding) left out. Those circumstances may have caused the cheap
+    /// phase's first failure on a consumed record.
+    ///
+    /// A first-error routing lets an exempt failure that sits early in
+    /// the cheap-phase order shadow every later hard verdict. The expiry
+    /// sits before scope, the deployment expectations and the request
+    /// binding; the IP binding sits before the minimum-duration floor.
+    /// The shadowed verdict would never run, and the retry would route
+    /// into the identity-gated consumed branch, replaying the stored
+    /// success around a security failure. This gate closes that: when
+    /// the cheap phase fails with a replay-exempt error on a consumed
+    /// record, this check re-evaluates the full hard set on the same
+    /// record. Any failure wins outright with the consumed evidence
+    /// preserved; only a clean pass lets the exempt circumstance route
+    /// into the consumed branch. The check methods are the same ones
+    /// [`Self::check_cheap`] composes. The fresh-challenge path never
+    /// calls this: the public first-error precedence for pending records
+    /// is unchanged.
+    fn replay_security_check(
+        &self,
+        record: &ChallengeRecord,
+        scope: &str,
+        now_ns: u64,
+        expected_request_binding: Option<&str>,
+    ) -> Result<(), VerifyError> {
+        self.check_authenticated_shape(record)?;
+        self.check_scope(record, scope)?;
+        self.check_deployment_expectations(record)?;
+        self.check_request_binding(record, expected_request_binding)?;
+        self.check_min_duration(record, now_ns)?;
+        Ok(())
+    }
+
+    /// The authenticated hard core of the cheap phase: structural
+    /// validation, the protocol-v1 gate, kid revocation and resolution,
+    /// the signature re-check, and the Argon2id parameter ceilings —
+    /// every invariant that authenticates the record before any
+    /// circumstance is evaluated.
+    fn check_authenticated_shape(&self, record: &ChallengeRecord) -> Result<(), VerifyError> {
         // 3a. Cheap structural validation before any crypto or timing work.
         validate_record(record)?;
 
@@ -1640,19 +1716,7 @@ impl ProductionVerifier {
         //      known) — is rejected with UnknownKid before any signature
         //      work, and never consumes the record (a retry after rolling
         //      the key set forward is legitimate).
-        let secret: &str = match &self.secrets_by_kid {
-            Some(secrets) => {
-                let max_kid = secrets.keys().max().copied().unwrap_or(0);
-                if record.kid > max_kid {
-                    return Err(VerifyError::UnknownKid);
-                }
-                match secrets.get(&record.kid) {
-                    Some(secret) => secret.as_str(),
-                    None => return Err(VerifyError::UnknownKid),
-                }
-            }
-            None => &self.secret_key,
-        };
+        let secret = self.resolve_signing_secret(record)?;
 
         // 3c. Signature re-check over the protocol-appropriate canonical
         //     input.
@@ -1672,12 +1736,39 @@ impl ProductionVerifier {
             crate::verify::check_argon2_ceilings(record)?;
         }
 
-        // 3d. TTL on the server clock, like the PHP `time()`. The challenge
-        //     is invalid outside its validity window [issued_at, expires_at):
-        //     expired once now reaches expires_at, and a
-        //     future-issued challenge is a time-domain anomaly when its
-        //     issued_at is more than the clock-skew bound ahead of the
-        //     verifier clock.
+        Ok(())
+    }
+
+    /// Resolve the record's signing secret: the single-key path uses the
+    /// configured secret; the `secrets_by_kid` path selects per the
+    /// record's kid with the forward/rollback guard.
+    fn resolve_signing_secret<'a>(
+        &'a self,
+        record: &ChallengeRecord,
+    ) -> Result<&'a str, VerifyError> {
+        match &self.secrets_by_kid {
+            Some(secrets) => {
+                let max_kid = secrets.keys().max().copied().unwrap_or(0);
+                if record.kid > max_kid {
+                    return Err(VerifyError::UnknownKid);
+                }
+                match secrets.get(&record.kid) {
+                    Some(secret) => Ok(secret.as_str()),
+                    None => Err(VerifyError::UnknownKid),
+                }
+            }
+            None => Ok(&self.secret_key),
+        }
+    }
+
+    /// The TTL on the server clock, like the PHP `time()`. The challenge
+    /// is invalid outside its validity window [issued_at, expires_at):
+    /// expired once now reaches expires_at, and a future-issued challenge
+    /// is a time-domain anomaly when its issued_at is more than the
+    /// clock-skew bound ahead of the verifier clock. The exempt expiry
+    /// circumstance — deliberately excluded from the compositional
+    /// replay gate.
+    fn check_ttl(&self, record: &ChallengeRecord) -> Result<(), VerifyError> {
         let now_unix = (self.now_unix)();
         if now_unix >= record.expires_at {
             return Err(VerifyError::Expired);
@@ -1685,57 +1776,81 @@ impl ProductionVerifier {
         if record.issued_at > now_unix.saturating_add(crate::challenge::MAX_CLOCK_SKEW_SECS) {
             return Err(VerifyError::Expired);
         }
+        Ok(())
+    }
 
-        // 3e. Scope: prevent cross-scope replay.
+    /// Scope: prevent cross-scope replay.
+    fn check_scope(&self, record: &ChallengeRecord, scope: &str) -> Result<(), VerifyError> {
         if record.scope != scope {
             return Err(VerifyError::WrongScope);
         }
+        Ok(())
+    }
 
-        // 3e2. Region: a region-expecting deployment fails
-        //      closed on challenges issued for another region — or for no
-        //      region at all.
+    /// The deployment expectations — region, security-policy epoch and
+    /// issuer — hard invariants in cheap-phase order.
+    fn check_deployment_expectations(&self, record: &ChallengeRecord) -> Result<(), VerifyError> {
+        // Region: a region-expecting deployment fails
+        // closed on challenges issued for another region — or for no
+        // region at all.
         if let Some(expected) = self.expected_region.as_deref() {
             if record.region.as_deref() != Some(expected) {
                 return Err(VerifyError::WrongRegion);
             }
         }
 
-        // 3e3. Security-policy epoch: the policy that authorized
-        //      this challenge must still be in force.
+        // Security-policy epoch: the policy that authorized
+        // this challenge must still be in force.
         if let Some(expected) = self.expected_policy_version {
             if record.policy_version != expected {
                 return Err(VerifyError::WrongPolicyVersion);
             }
         }
 
-        // 3e4. Issuer identity: an issuer-expecting deployment
-        //      rejects challenges issued by another issuer — or by no
-        //      issuer at all (fail closed).
+        // Issuer identity: an issuer-expecting deployment
+        // rejects challenges issued by another issuer — or by no
+        // issuer at all (fail closed).
         if let Some(expected) = self.expected_issuer.as_deref() {
             if record.issuer.as_deref() != Some(expected) {
                 return Err(VerifyError::WrongIssuer);
             }
         }
+        Ok(())
+    }
 
-        // 3e5. Expected request binding: a caller that pins the
-        //      challenge to its application transaction requires the
-        //      record's signed request_binding to match exactly
-        //      (constant-time); a record without a binding fails closed —
-        //      an unbound challenge satisfies no binding-pinned
-        //      redemption. `None` (the default) leaves the binding
-        //      unenforced (merely returned on a valid outcome).
+    /// The expected request binding: a caller that pins the
+    /// challenge to its application transaction requires the
+    /// record's signed request_binding to match exactly
+    /// (constant-time); a record without a binding fails closed —
+    /// an unbound challenge satisfies no binding-pinned
+    /// redemption. `None` (the default) leaves the binding
+    /// unenforced (merely returned on a valid outcome).
+    fn check_request_binding(
+        &self,
+        record: &ChallengeRecord,
+        expected_request_binding: Option<&str>,
+    ) -> Result<(), VerifyError> {
         if let Some(expected) = expected_request_binding {
             match record.request_binding.as_deref() {
                 Some(actual) if ct_eq(actual.as_bytes(), expected.as_bytes()) => {}
                 _ => return Err(VerifyError::RequestBindingMismatch),
             }
         }
+        Ok(())
+    }
 
-        // 3f. IP binding. The stored record is authoritative: an empty
-        //     binding tag means binding is disabled; a non-empty tag means
-        //     the challenge is bound, so a mismatch fails closed
-        //     (IpMismatch).
+    /// IP binding. The stored record is authoritative: an empty
+    ///     binding tag means binding is disabled; a non-empty tag means
+    ///     the challenge is bound, so a mismatch fails closed
+    ///     (IpMismatch). The exempt network circumstance — deliberately
+    ///     excluded from the compositional replay gate.
+    fn check_ip_binding(
+        &self,
+        record: &ChallengeRecord,
+        client_ip: &str,
+    ) -> Result<(), VerifyError> {
         if !record.binding_tag.is_empty() {
+            let secret = self.resolve_signing_secret(record)?;
             let expected = match record.protocol_version {
                 1 => hash_ip(client_ip, secret),
                 _ => match binding_tag(&record.nonce, client_ip, secret) {
@@ -1747,11 +1862,14 @@ impl ProductionVerifier {
                 return Err(VerifyError::IpMismatch);
             }
         }
+        Ok(())
+    }
 
-        // 3g. Minimum duration, SERVER-measured: the floor is `now_ns` vs
-        //     the record's `issued_at_ns` (both epoch microseconds), never
-        //     the forgeable client-reported duration. A record without
-        //     `issued_at_ns` is malformed (no legacy fallback).
+    /// Minimum duration, SERVER-measured: the floor is `now_ns` vs
+    /// the record's `issued_at_ns` (both epoch microseconds), never
+    /// the forgeable client-reported duration. A record without
+    /// `issued_at_ns` is malformed (no legacy fallback).
+    fn check_min_duration(&self, record: &ChallengeRecord, now_ns: u64) -> Result<(), VerifyError> {
         if record.issued_at_ns == 0 {
             return Err(VerifyError::MalformedRecord);
         }
@@ -1764,7 +1882,6 @@ impl ProductionVerifier {
                 return Err(VerifyError::TooFast);
             }
         }
-
         Ok(())
     }
 }

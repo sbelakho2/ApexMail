@@ -4,7 +4,9 @@ declare(strict_types=1);
 
 namespace BelConsulting\KiwiCaptchaBundle\SiteVerify;
 
+use KiwiCaptcha\AtomicDeleteIfPendingInterface;
 use KiwiCaptcha\AtomicStorageInterface;
+use KiwiCaptcha\ConsumedStateReadableInterface;
 use KiwiCaptcha\OperationIdentityAwareStorageInterface;
 
 /**
@@ -23,10 +25,32 @@ use KiwiCaptcha\OperationIdentityAwareStorageInterface;
  * where {@see \KiwiCaptcha\ConsumedOutcomeRecovery} returns null —
  * ordinary verification remains compatible with any StorageInterface.
  *
+ * The full capability set is four interfaces, and the marker extends
+ * every one of them. A class cannot claim the marker while implementing
+ * only a subset, and the boot guard checks the same four.
+ *
+ *  - {@see AtomicStorageInterface}: the one-success consume transition;
+ *  - {@see ConsumedStateReadableInterface}: the retained-state read;
+ *  - {@see OperationIdentityAwareStorageInterface}: the identity-bearing
+ *    consume;
+ *  - {@see AtomicDeleteIfPendingInterface}: the fused cheap-failure
+ *    cleanup. A custom store lacking it keeps the read-then-delete race
+ *    on the cleanup path. A concurrent redeemer can consume (and
+ *    commit) between the retained-state read and the best-effort delete,
+ *    and the delete then erases the committed recovery evidence the
+ *    whole reconstruction depends on. A store implementing only the
+ *    first three passes the capability check as a recovery-capable
+ *    backend while still destroying evidence under concurrency, so the
+ *    fourth capability is required exactly like the others.
+ *
  * The bundled KiwiCaptcha\Storage\ArrayStorage and
- * KiwiCaptcha\Storage\RedisStorage satisfy all base capabilities
+ * KiwiCaptcha\Storage\RedisStorage satisfy all four capabilities
  * directly.
  */
-interface SiteVerifyRecoveryCapableStorageInterface extends AtomicStorageInterface, OperationIdentityAwareStorageInterface
+interface SiteVerifyRecoveryCapableStorageInterface extends
+    AtomicStorageInterface,
+    ConsumedStateReadableInterface,
+    OperationIdentityAwareStorageInterface,
+    AtomicDeleteIfPendingInterface
 {
 }

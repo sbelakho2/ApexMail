@@ -59,6 +59,7 @@ use KiwiCaptcha\Risk\Storage\RedisRiskStateStore;
 use KiwiCaptcha\Storage\ArrayStorage;
 use KiwiCaptcha\Storage\RedisStorage;
 use KiwiCaptcha\AtomicStorageInterface;
+use KiwiCaptcha\AtomicDeleteIfPendingInterface;
 use KiwiCaptcha\ConsumedStateReadableInterface;
 use KiwiCaptcha\OperationIdentityAwareStorageInterface;
 use KiwiCaptcha\StorageInterface;
@@ -1287,12 +1288,15 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
      * Siteverify recovery-capable (SiteVerifyRecoveryCapableStorageInterface;
      * the bundled core storages qualify through AtomicStorageInterface +
      * ConsumedStateReadableInterface + the identity-aware consume
-     * capability). Siteverify idempotency crash recovery reads the
-     * retained consumed state and compares the consumed record's own
-     * operation identity against the claiming fingerprint. A custom
-     * atomic storage without the identity-aware consume capability is
-     * refused, since the recovery gate would silently refuse everything
-     * when no record could ever carry an identity. Ordinary verification
+     * capability + the fused delete-if-pending cleanup). Siteverify
+     * idempotency crash recovery reads the retained consumed state and
+     * compares the consumed record's own operation identity against the
+     * claiming fingerprint. A custom atomic storage without the
+     * identity-aware consume capability is refused, since the recovery
+     * gate would silently refuse everything when no record could ever
+     * carry an identity; one without the atomic cleanup capability is
+     * refused too, since its read-then-delete cleanup can erase the
+     * committed evidence under concurrency. Ordinary verification
      * remains compatible with any StorageInterface.
      * Fails closed at container compile time (a LogicException names the
      * exact misconfiguration).
@@ -1325,7 +1329,7 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
         $isIdentityAware = $class !== null && \is_string($class) && \is_a($class, OperationIdentityAwareStorageInterface::class, true);
         $isRecoveryCapable = $class !== null && \is_string($class) && (
             \is_a($class, SiteVerifyRecoveryCapableStorageInterface::class, true)
-            || (\is_a($class, AtomicStorageInterface::class, true) && \is_a($class, ConsumedStateReadableInterface::class, true) && $isIdentityAware)
+            || (\is_a($class, AtomicStorageInterface::class, true) && \is_a($class, ConsumedStateReadableInterface::class, true) && $isIdentityAware && \is_a($class, AtomicDeleteIfPendingInterface::class, true))
         );
         if ($siteverifyEnabled) {
             if (!$isAtomic) {
@@ -1336,7 +1340,7 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             }
             if (!$isRecoveryCapable) {
                 throw new \LogicException(sprintf(
-                    'KiwiCaptcha: siteverify_secrets requires a Siteverify recovery-capable storage backend — the class must implement KiwiCaptcha\OperationIdentityAwareStorageInterface (which requires KiwiCaptcha\ConsumedStateReadableInterface) in addition to KiwiCaptcha\AtomicStorageInterface (or BelConsulting\KiwiCaptchaBundle\SiteVerify\SiteVerifyRecoveryCapableStorageInterface; the bundled RedisStorage/ArrayStorage qualify). The resolved class %s lacks the identity-aware consume capability: Siteverify idempotency crash recovery reads the retained consumed state AND compares the consumed record\'s own operation identity against the claiming fingerprint — the identity is written atomically with the pending→consumed transition, and without it the takeover path could never prove that a claim is the nonce\'s original logical operation (reconstruction would silently refuse everything).',
+                    'KiwiCaptcha: siteverify_secrets requires a Siteverify recovery-capable storage backend — the class must implement all four capabilities: KiwiCaptcha\OperationIdentityAwareStorageInterface (which requires KiwiCaptcha\ConsumedStateReadableInterface), KiwiCaptcha\AtomicStorageInterface, AND KiwiCaptcha\AtomicDeleteIfPendingInterface (or BelConsulting\KiwiCaptchaBundle\SiteVerify\SiteVerifyRecoveryCapableStorageInterface, which extends all four; the bundled RedisStorage/ArrayStorage qualify). The resolved class %s lacks one of them: Siteverify idempotency crash recovery reads the retained consumed state, compares the consumed record\'s own operation identity against the claiming fingerprint, and preserves the committed evidence through the cheap-failure cleanup — the identity is written atomically with the pending→consumed transition, and without the fused delete-if-pending transition a concurrent redemption between the retained-state read and the cleanup delete erases the committed recovery evidence (the read-then-delete race).',
                     $class === null ? '(unresolvable)' : $class,
                 ));
             }

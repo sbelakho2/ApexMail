@@ -10,6 +10,7 @@ use KiwiCaptcha\ConsumedRecord;
 use PHPUnit\Framework\TestCase;
 use Symfony\Component\DependencyInjection\ContainerBuilder;
 use Symfony\Component\DependencyInjection\Definition;
+use Symfony\Component\DependencyInjection\Reference;
 
 /**
  * Siteverify crash-recovery ordering invariant (enforced at container
@@ -28,11 +29,14 @@ use Symfony\Component\DependencyInjection\Definition;
  * recovery-capable storage
  * (SiteVerifyRecoveryCapableStorageInterface — the bundled
  * AtomicStorageInterface + ConsumedStateReadableInterface +
- * OperationIdentityAwareStorageInterface combination). Custom atomic
- * storages without the identity-aware consume capability are refused:
- * the takeover path could never prove that a claim is the nonce's
- * original logical operation. Without siteverify_secrets the native
- * behavior stays unrestricted.
+ * OperationIdentityAwareStorageInterface + AtomicDeleteIfPendingInterface
+ * combination). Custom atomic storages lacking the identity-aware
+ * consume capability are refused: the takeover path could never prove
+ * that a claim is the nonce's original logical operation. Stores
+ * lacking the fused atomic cleanup are refused too, because their
+ * read-then-delete cleanup can erase the committed recovery evidence
+ * under concurrency. Without siteverify_secrets the native behavior
+ * stays unrestricted.
  */
 final class SiteVerifyRecoveryInvariantTest extends TestCase
 {
@@ -181,6 +185,49 @@ final class SiteVerifyRecoveryInvariantTest extends TestCase
         ]], $container);
     }
 
+    public function testSiteverifyEnabledWithOldThreeCapabilitiesMissingAtomicCleanupIsRefused(): void
+    {
+        // A custom storage implementing the historical three capabilities
+        // (atomic, consumed-state readable, identity-aware consume) but
+        // NOT the fused delete-if-pending cleanup is refused: its
+        // read-then-delete cheap-failure cleanup can erase the committed
+        // recovery evidence under concurrency (a concurrent redemption
+        // lands between the retained-state read and the best-effort
+        // delete), so the capability cannot be advertised for Siteverify
+        // idempotency. The refusal names the missing interface.
+        $this->expectException(\LogicException::class);
+        $this->expectExceptionMessage('AtomicDeleteIfPendingInterface');
+        $container = new ContainerBuilder();
+        $container->setParameter('kernel.environment', 'test');
+        $container->setDefinition('my.no.cleanup.storage', new Definition($this->atomicIdentityAwareWithoutCleanupClass(), []));
+        (new KiwiCaptchaExtension())->load([[
+            'secret_key' => str_repeat('a', 32),
+            'storage' => 'my.no.cleanup.storage',
+            'risk' => ['redis' => ['ttl_margin_secs' => 90], 'enabled' => false, 'siteverify_secrets' => [self::SITEVERIFY_SECRET => 'login']],
+        ]], $container);
+    }
+
+    public function testSiteverifyEnabledWithTheBundledRedisStorageIsAccepted(): void
+    {
+        // The bundled Redis storage implements all four capabilities
+        // (atomic transition, retained-state read, identity-aware
+        // consume, fused delete-if-pending Lua cleanup) and passes the
+        // boot guard — no Redis connection is needed at compile time,
+        // only the class resolution (the client argument is referenced,
+        // never instantiated).
+        $container = new ContainerBuilder();
+        $container->setParameter('kernel.environment', 'test');
+        $container->setDefinition('my.redis.client', new Definition(\Predis\Client::class));
+        $container->setDefinition('my.redis.storage', new Definition(\KiwiCaptcha\Storage\RedisStorage::class, [new Reference('my.redis.client')]));
+        (new KiwiCaptchaExtension())->load([[
+            'secret_key' => str_repeat('a', 32),
+            'storage' => 'my.redis.storage',
+            'risk' => ['redis' => ['ttl_margin_secs' => 90], 'enabled' => false, 'siteverify_secrets' => [self::SITEVERIFY_SECRET => 'login']],
+        ]], $container);
+
+        self::assertTrue($container->hasDefinition('kiwi_captcha.config'));
+    }
+
     public function testSiteverifyEnabledWithRecoveryCapableCustomStorageIsAccepted(): void
     {
         // A custom storage implementing the bundle's
@@ -261,7 +308,50 @@ final class SiteVerifyRecoveryInvariantTest extends TestCase
         });
     }
 
-    /** A custom storage implementing the bundle's recovery-capable contract. */
+    /**
+     * A custom storage with the historical three capabilities (atomic,
+     * consumed-state readable, identity-aware) but lacking the fused
+     * delete-if-pending cleanup.
+     */
+    private function atomicIdentityAwareWithoutCleanupClass(): string
+    {
+        return get_class(new class implements \KiwiCaptcha\AtomicStorageInterface, \KiwiCaptcha\ConsumedStateReadableInterface, \KiwiCaptcha\OperationIdentityAwareStorageInterface {
+            public function store(ChallengeRecord $record): void
+            {
+            }
+
+            public function find(string $nonce): ?ChallengeRecord
+            {
+                return null;
+            }
+
+            public function consumedState(string $nonce): ?ConsumedRecord
+            {
+                return null;
+            }
+
+            public function consume(string $nonce): ?ConsumedRecord
+            {
+                return null;
+            }
+
+            public function consumeWithOperationIdentity(string $nonce, ?string $operationIdentity): ?ConsumedRecord
+            {
+                return null;
+            }
+
+            public function commitResult(string $nonce, bool $valid, ?string $binding): bool
+            {
+                return true;
+            }
+
+            public function delete(string $nonce): void
+            {
+            }
+        });
+    }
+
+    /** A custom storage implementing the bundle's recovery-capable contract (all four capabilities). */
     private function recoveryCapableClass(): string
     {
         return get_class(new class implements \BelConsulting\KiwiCaptchaBundle\SiteVerify\SiteVerifyRecoveryCapableStorageInterface {
@@ -296,6 +386,11 @@ final class SiteVerifyRecoveryInvariantTest extends TestCase
 
             public function delete(string $nonce): void
             {
+            }
+
+            public function deleteIfPending(string $nonce): \KiwiCaptcha\DeleteIfPendingResult
+            {
+                return new \KiwiCaptcha\DeleteIfPendingResult('missing');
             }
         });
     }

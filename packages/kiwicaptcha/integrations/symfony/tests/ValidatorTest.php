@@ -878,6 +878,126 @@ final class ValidatorTest extends TestCase
         self::assertContains(KiwiCaptcha::INVALID_OR_EXPIRED_ERROR, $validate(), 'the expired same-id replay after the epoch bump is refused — the epoch-bound identity no longer matches');
     }
 
+    public function testExpiredReplayWithRotatedRegionAndSameOperationIdFailsWrongRegion(): void
+    {
+        // Region is NOT part of the Symfony operation identity (the
+        // identity is scope + binding + epoch + operation id), so a
+        // region rotation cannot change the derived identity the way an
+        // epoch bump can: the matching-identity replay still unlocks the
+        // consumed branch. The boundary therefore relies on the core's
+        // compositional replay gate: an expired retry (the exempt
+        // circumstance, first in the cheap-phase order) with a rotated
+        // verifier region must fail the hard verdict — the stored success
+        // never replays around the region check.
+        $storage = new ArrayStorage();
+        $now = 1_800_000_000;
+        $nowFn = static function () use (&$now): int {
+            return $now;
+        };
+        $issuer = new Issuer(new Config(secretKey: self::SECRET, targetBits: 8, ttlSecs: 120), $storage, now: $nowFn);
+        $verifier = new Verifier($storage, now: $nowFn);
+        $challenge = $issuer->issue('login', '198.51.100.7', 'txn-123');
+        usleep(($challenge->minDurationMs + 10) * 1000);
+        $token = $this->solveToken($challenge->prefix, $challenge->salt, $challenge->targetBits, $challenge->nonce);
+
+        $validate = function () use ($verifier, $token): array {
+            $stack = new RequestStack();
+            $request = Request::create('/', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7']);
+            $request->attributes->set(KiwiCaptchaValidator::REQUEST_BINDING_ATTRIBUTE, 'txn-123');
+            $request->attributes->set(KiwiCaptchaValidator::OPERATION_ID_ATTRIBUTE, 'op-123');
+            $stack->push($request);
+            $validator = new KiwiCaptchaValidator($verifier, $stack, self::SECRET, policyVersion: 1);
+            $factory = new ConstraintValidatorFactory([KiwiCaptchaValidator::class => $validator]);
+            $engine = Validation::createValidatorBuilder()->setConstraintValidatorFactory($factory)->getValidator();
+            $dto = new class {
+                public ?string $captcha = null;
+            };
+            $dto->captcha = $token;
+            $meta = $engine->getMetadataFor($dto::class);
+            $meta->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
+            $violations = $engine->validate($dto);
+            $codes = [];
+            foreach ($violations as $violation) {
+                $codes[] = (string) $violation->getCode();
+            }
+
+            return $codes;
+        };
+
+        self::assertSame([], $validate(), 'the solve passes under the explicit operation id');
+
+        // The verifier's region expectation rotates (the epoch stays 1, so
+        // the derived identity is unchanged) and the token expires: the
+        // exempt expiry sits before the region check in the cheap-phase
+        // order, but the hard verdict must still win.
+        $verifier->rotateDeploymentExpectations(1, 'eu', null);
+        $now = 1_800_000_130;
+
+        self::assertContains(KiwiCaptcha::INVALID_OR_EXPIRED_ERROR, $validate(), 'the expired same-id replay after the region rotation never replays the stored success');
+
+        // The collapsed code hides the core reason, so the verdict is
+        // asserted directly on the rotated verifier: WrongRegion, not
+        // Expired and not a stored-success replay.
+        $outcome = $verifier->verify($token, self::SECRET, 'login', '198.51.100.7', operationIdentity: hash('sha256', 'login'."\0".'txn-123'."\0".'epoch:1'."\0".'opid:op-123'), expectedRequestBinding: 'txn-123');
+        self::assertSame(\KiwiCaptcha\VerifyError::WrongRegion, $outcome->error, 'the refusal is specifically the WrongRegion verdict, never the exempt expiry');
+        self::assertNotNull($storage->consumedState($challenge->nonce)?->consumedResult, 'the committed evidence survives the refusal');
+    }
+
+    public function testExpiredReplayWithRotatedIssuerAndSameOperationIdFailsWrongIssuer(): void
+    {
+        // The issuer twin of the region test: issuer is not part of the
+        // Symfony identity either, so the matching-identity expired retry
+        // after an issuer rotation must fail the hard WrongIssuer verdict
+        // through the core's compositional replay gate, never replay the
+        // stored success.
+        $storage = new ArrayStorage();
+        $now = 1_800_000_000;
+        $nowFn = static function () use (&$now): int {
+            return $now;
+        };
+        $issuer = new Issuer(new Config(secretKey: self::SECRET, targetBits: 8, ttlSecs: 120), $storage, now: $nowFn);
+        $verifier = new Verifier($storage, now: $nowFn);
+        $challenge = $issuer->issue('login', '198.51.100.7', 'txn-123');
+        usleep(($challenge->minDurationMs + 10) * 1000);
+        $token = $this->solveToken($challenge->prefix, $challenge->salt, $challenge->targetBits, $challenge->nonce);
+
+        $validate = function () use ($verifier, $token): array {
+            $stack = new RequestStack();
+            $request = Request::create('/', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7']);
+            $request->attributes->set(KiwiCaptchaValidator::REQUEST_BINDING_ATTRIBUTE, 'txn-123');
+            $request->attributes->set(KiwiCaptchaValidator::OPERATION_ID_ATTRIBUTE, 'op-123');
+            $stack->push($request);
+            $validator = new KiwiCaptchaValidator($verifier, $stack, self::SECRET, policyVersion: 1);
+            $factory = new ConstraintValidatorFactory([KiwiCaptchaValidator::class => $validator]);
+            $engine = Validation::createValidatorBuilder()->setConstraintValidatorFactory($factory)->getValidator();
+            $dto = new class {
+                public ?string $captcha = null;
+            };
+            $dto->captcha = $token;
+            $meta = $engine->getMetadataFor($dto::class);
+            $meta->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
+            $violations = $engine->validate($dto);
+            $codes = [];
+            foreach ($violations as $violation) {
+                $codes[] = (string) $violation->getCode();
+            }
+
+            return $codes;
+        };
+
+        self::assertSame([], $validate(), 'the solve passes under the explicit operation id');
+
+        // The verifier's issuer expectation rotates; the token expires.
+        $verifier->rotateDeploymentExpectations(1, null, 'prod');
+        $now = 1_800_000_130;
+
+        self::assertContains(KiwiCaptcha::INVALID_OR_EXPIRED_ERROR, $validate(), 'the expired same-id replay after the issuer rotation never replays the stored success');
+
+        $outcome = $verifier->verify($token, self::SECRET, 'login', '198.51.100.7', operationIdentity: hash('sha256', 'login'."\0".'txn-123'."\0".'epoch:1'."\0".'opid:op-123'), expectedRequestBinding: 'txn-123');
+        self::assertSame(\KiwiCaptcha\VerifyError::WrongIssuer, $outcome->error, 'the refusal is specifically the WrongIssuer verdict, never the exempt expiry');
+        self::assertNotNull($storage->consumedState($challenge->nonce)?->consumedResult, 'the committed evidence survives the refusal');
+    }
+
     public function testBindingAuthorityDecliningTheTransactionIsTheInvalidBindingOutcome(): void
     {
         // The authority returns null (the transaction is invalid/unknown):

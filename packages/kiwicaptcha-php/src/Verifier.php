@@ -354,7 +354,9 @@ final class Verifier
         //    must survive to its retention TTL, and it falls through to
         //    the consume transition below, where the consumed branch
         //    decides between identity-gated replay, AlreadyConsumed and
-        //    ConsumeIndeterminate with the record preserved. A pending
+        //    ConsumeIndeterminate with the record preserved — but only
+        //    after the compositional replay gate below has confirmed
+        //    that no hard invariant fails on the same request. A pending
         //    or capability-absent record keeps the one-shot
         //    cheap-failure delete, except the missing-client-IP failure:
         //    a bound challenge without a client IP is rejected but the
@@ -409,7 +411,19 @@ final class Verifier
                     // stands — the identity-gated replay never overrides it.
                     return VerifyOutcome::invalid($failure);
                 }
-                // Consumed + exempt: fall through to the consume branch.
+                // Consumed + exempt: the exempt circumstance may not mask
+                // a hard verdict that also applies to this request. The
+                // compositional replay gate re-evaluates every hard
+                // invariant on the same peeked record; any failure wins,
+                // the evidence stays preserved by the fused transition,
+                // and only a clean pass falls through to the consumed
+                // branch.
+                $hard = $this->replaySecurityCheck($peek, $secretKey, $expectedScope, $expectedRequestBinding);
+                if ($hard !== null) {
+                    return VerifyOutcome::invalid($hard);
+                }
+                // Consumed + exempt with every hard invariant intact:
+                // fall through to the consume branch.
             } else {
                 $retained = $this->retainedConsumedState($token->nonce);
                 if ($retained === 'unreadable') {
@@ -425,7 +439,17 @@ final class Verifier
                     // identity-gated replay never overrides it.
                     return VerifyOutcome::invalid($failure);
                 }
-                if ($retained !== 'consumed') {
+                if ($retained === 'consumed') {
+                    // Consumed + exempt: the compositional replay gate —
+                    // the exempt circumstance may not mask a hard verdict
+                    // that also applies to this request. Any hard failure
+                    // wins with the evidence preserved; only a clean pass
+                    // falls through to the consume branch below.
+                    $hard = $this->replaySecurityCheck($peek, $secretKey, $expectedScope, $expectedRequestBinding);
+                    if ($hard !== null) {
+                        return VerifyOutcome::invalid($hard);
+                    }
+                } else {
                     if ($failure !== VerifyError::MissingClientIp) {
                         $this->bestEffortDelete($token->nonce);
                     }
@@ -790,9 +814,17 @@ final class Verifier
         // exempted per the contract above). The retained record is not
         // deleted on a failure: it is the recovery evidence and must
         // survive for a later retry (it is already consumed; deletion
-        // buys nothing).
+        // buys nothing). An exempt failure runs the compositional replay
+        // gate first — the same rule as the ordinary path: the exempt
+        // circumstance may not mask a hard verdict that also applies.
         $failure = $this->cheapPhaseCheck($record, $secretKey, $expectedScope, $clientIp, false);
         if ($failure !== null) {
+            if ($failure->isReplayExempt()
+                && ($hard = $this->replaySecurityCheck($record, $secretKey, $expectedScope)) !== null
+            ) {
+                return VerifyOutcome::invalid($hard);
+            }
+
             return VerifyOutcome::invalid($failure);
         }
 
@@ -1050,6 +1082,105 @@ final class Verifier
         ?int $nowNs = null,
         ?string $expectedRequestBinding = null,
     ): ?VerifyError {
+        // 1-2b. The authenticated hard core: structure, protocol gate,
+        //       kid revocation/resolution, signature, Argon ceilings.
+        if (($e = $this->checkAuthenticatedShape($record, $secretKey)) !== null) {
+            return $e;
+        }
+        // The signing secret for the IP-binding re-derivation; the shape
+        // group above has already established it resolves.
+        $signingSecret = $this->secretForKey($record, $secretKey);
+
+        // 3. TTL (the exempt expiry circumstance).
+        if ($checkTiming && ($e = $this->checkTtl($record)) !== null) {
+            return $e;
+        }
+
+        // 4-4b. Scope and the expected request binding (hard).
+        if (($e = $this->checkScopeAndBinding($record, $expectedScope, $expectedRequestBinding)) !== null) {
+            return $e;
+        }
+
+        // 5. IP binding (the exempt network circumstances).
+        if (($e = $this->checkIpBinding($record, $clientIp, $signingSecret ?? '')) !== null) {
+            return $e;
+        }
+
+        // 5b-5d. Region, policy epoch, issuer (hard expectations).
+        if (($e = $this->checkDeploymentExpectations($record)) !== null) {
+            return $e;
+        }
+
+        // 6. Server-measured minimum duration (timing).
+        if ($checkTiming && ($e = $this->checkMinDuration($record, $nowNs)) !== null) {
+            return $e;
+        }
+
+        return null;
+    }
+
+    /**
+     * The compositional replay gate: every non-exempt hard invariant,
+     * evaluated with the exempt circumstances (the TTL and the IP
+     * binding) left out. Those circumstances may have caused the cheap
+     * phase's first failure on a consumed record.
+     *
+     * A first-error routing lets an exempt failure that sits early in
+     * the cheap-phase order shadow every later hard verdict. The expiry
+     * sits before scope, binding, region, policy and issuer; the IP
+     * binding sits before region, policy and issuer. The shadowed
+     * verdict would then never run, and the retry would route into the
+     * identity-gated consumed branch, replaying the stored success
+     * around a security failure.
+     *
+     * This gate closes that. When the cheap phase fails with a
+     * replay-exempt error on a consumed record, this check re-evaluates
+     * the full hard set on the same record. The set covers the
+     * authenticated shape core (structure, protocol, kid, signature,
+     * ceilings), scope, the expected request binding, the deployment
+     * expectations and the receipt-timing floor. Any failure wins
+     * outright with the consumed evidence preserved. Only a clean pass
+     * lets the exempt circumstance route into the consumed branch. The
+     * check functions are the same ones {@see self::cheapPhaseCheck()}
+     * composes, so the two paths can never diverge on what an
+     * invariant means.
+     *
+     * Returns the failing hard error, or null when every hard replay
+     * invariant passes. The fresh-challenge path never calls this: the
+     * public first-error precedence for pending records is unchanged.
+     */
+    private function replaySecurityCheck(
+        ChallengeRecord $record,
+        string $secretKey,
+        ?string $expectedScope,
+        ?string $expectedRequestBinding = null,
+    ): ?VerifyError {
+        if (($e = $this->checkAuthenticatedShape($record, $secretKey)) !== null) {
+            return $e;
+        }
+        if (($e = $this->checkScopeAndBinding($record, $expectedScope, $expectedRequestBinding)) !== null) {
+            return $e;
+        }
+        if (($e = $this->checkDeploymentExpectations($record)) !== null) {
+            return $e;
+        }
+        if (($e = $this->checkMinDuration($record, null)) !== null) {
+            return $e;
+        }
+
+        return null;
+    }
+
+    /**
+     * The authenticated hard core of the cheap phase: structural
+     * validation, the protocol version gate, kid revocation and
+     * resolution, the HMAC signature re-check, and the Argon2id process
+     * ceilings — every invariant that authenticates the record before
+     * any circumstance is evaluated. Shared by the cheap phase and the
+     * compositional replay gate.
+     */
+    private function checkAuthenticatedShape(ChallengeRecord $record, string $legacySecret): ?VerifyError
+    {
         // 1. Structural validation of the stored record.
         if (!$this->validateRecord($record)) {
             return VerifyError::MalformedRecord;
@@ -1081,7 +1212,7 @@ final class Verifier
         //    signature work. An empty set keeps the legacy single-secret
         //    path: the verify() $secretKey parameter is used for every
         //    record (kid is then metadata only).
-        $signingSecret = $this->secretForKey($record, $secretKey);
+        $signingSecret = $this->secretForKey($record, $legacySecret);
         if ($signingSecret === null) {
             return VerifyError::UnknownKid;
         }
@@ -1105,21 +1236,35 @@ final class Verifier
             return VerifyError::UnsupportedArgon2Params;
         }
 
-        // 3. TTL. Both bounds use the verifier's clock: a challenge expired
-        //    before the check (now >= expires_at) or claiming to have been
-        //    issued more than the future-skew bound ahead (a signed record
-        //    cannot legitimately come from a host clock that far ahead) is
-        //    rejected.
-        if ($checkTiming) {
-            $now = $this->now !== null ? (int) ($this->now)() : time();
-            if ($now >= $record->expiresAt) {
-                return VerifyError::Expired;
-            }
-            if ($record->issuedAt > $now + self::MAX_CLOCK_SKEW) {
-                return VerifyError::Expired;
-            }
+        return null;
+    }
+
+    /**
+     * The TTL window on the verifier's clock: expired, or an issuance
+     * more than the future-skew bound ahead, is Expired. The exempt
+     * expiry circumstance — deliberately excluded from the compositional
+     * replay gate.
+     */
+    private function checkTtl(ChallengeRecord $record): ?VerifyError
+    {
+        $now = $this->now !== null ? (int) ($this->now)() : time();
+        if ($now >= $record->expiresAt) {
+            return VerifyError::Expired;
+        }
+        if ($record->issuedAt > $now + self::MAX_CLOCK_SKEW) {
+            return VerifyError::Expired;
         }
 
+        return null;
+    }
+
+    /**
+     * Scope validation and the expected request binding — hard
+     * authorization invariants, in cheap-phase order. Shared by the
+     * cheap phase and the compositional replay gate.
+     */
+    private function checkScopeAndBinding(ChallengeRecord $record, ?string $expectedScope, ?string $expectedRequestBinding): ?VerifyError
+    {
         // 4. Scope validation.
         if ($expectedScope !== null && $record->scope !== $expectedScope) {
             return VerifyError::WrongScope;
@@ -1140,16 +1285,24 @@ final class Verifier
             }
         }
 
-        // 5. IP binding. The stored record is authoritative: an empty
-        //    binding tag means binding is disabled (BindingMode::None);
-        //    a nonempty tag means the challenge is bound, so a missing
-        //    client IP fails closed (MissingClientIp) instead of silently
-        //    skipping the check; the caller must provide the IP it would
-        //    have passed to issuance. Protocol v2 records carry a nonce-bound
-        //    binding tag (recomputed here); v1 records carry the legacy
-        //    stable IP hash. Both are keyed by the kid-selected secret
-        //    (K_ip_bind is derived from the same master secret
-        //    that signed the challenge).
+        return null;
+    }
+
+    /**
+     * IP binding. The stored record is authoritative. An empty
+     * binding tag means binding is disabled (BindingMode::None). A
+     * nonempty tag means the challenge is bound, so a missing
+     * client IP fails closed (MissingClientIp) instead of silently
+     * skipping the check. The caller must provide the IP it would
+     * have passed to issuance. Protocol v2 records carry a nonce-bound
+     * binding tag (recomputed here); v1 records carry the legacy
+     * stable IP hash. Both are keyed by the kid-selected secret
+     * (K_ip_bind is derived from the same master secret
+     * that signed the challenge). The exempt network circumstances —
+     * deliberately excluded from the compositional replay gate.
+     */
+    private function checkIpBinding(ChallengeRecord $record, ?string $clientIp, string $signingSecret): ?VerifyError
+    {
         if ($record->bindingTag !== '') {
             if ($clientIp === null) {
                 return VerifyError::MissingClientIp;
@@ -1162,6 +1315,16 @@ final class Verifier
             }
         }
 
+        return null;
+    }
+
+    /**
+     * The deployment expectations — region, security-policy epoch and
+     * issuer — hard invariants in cheap-phase order. Shared by the
+     * cheap phase and the compositional replay gate.
+     */
+    private function checkDeploymentExpectations(ChallengeRecord $record): ?VerifyError
+    {
         // 5b. Region binding: a verifier configured
         //     with an expected region rejects any record whose region does
         //     not match exactly; an unbound (null) record region fails
@@ -1187,32 +1350,37 @@ final class Verifier
             return VerifyError::WrongIssuer;
         }
 
-        // 6. Minimum duration, measured on the server: elapsed_us is the gap
-        //    between the record's high-resolution issuance timestamp (epoch
-        //    microseconds) and the verification receipt time. The
-        //    client-reported durationMs is forgeable, so it no longer drives
-        //    the TooFast check and there is no legacy fallback; a record
-        //    without issued_at_ns cannot be timed and is malformed.
-        if ($checkTiming) {
-            if ($record->issuedAtNs <= 0) {
-                return VerifyError::MalformedRecord;
-            }
-            $floor = max(0, $record->minDurationMs);
-            if ($floor > 0) {
-                $receiptNs = $nowNs ?? (int) (microtime(true) * 1_000_000);
-                if ($receiptNs >= $record->issuedAtNs) {
-                    if ($receiptNs - $record->issuedAtNs < $floor * 1_000) {
-                        return VerifyError::TooFast;
-                    }
-                } elseif ($record->issuedAtNs - $receiptNs > self::SKEW_TOLERANCE_US) {
-                    // Receipt before issuance by more than the skew bound is
-                    // physically impossible: reject as TooFast. Within the
-                    // bound the two hosts' clocks are unsynced, so the
-                    // elapsed time cannot be measured reliably and the floor
-                    // check is skipped for this verification; the
-                    // proof-of-work check still applies.
+        return null;
+    }
+
+    /**
+     * Server-measured minimum duration: elapsed_us is the gap between
+     * the record's high-resolution issuance timestamp (epoch
+     * microseconds) and the verification receipt time. The
+     * client-reported durationMs is forgeable, so it never drives the
+     * TooFast check and there is no legacy fallback; a record without
+     * issued_at_ns cannot be timed and is malformed.
+     */
+    private function checkMinDuration(ChallengeRecord $record, ?int $nowNs): ?VerifyError
+    {
+        if ($record->issuedAtNs <= 0) {
+            return VerifyError::MalformedRecord;
+        }
+        $floor = max(0, $record->minDurationMs);
+        if ($floor > 0) {
+            $receiptNs = $nowNs ?? (int) (microtime(true) * 1_000_000);
+            if ($receiptNs >= $record->issuedAtNs) {
+                if ($receiptNs - $record->issuedAtNs < $floor * 1_000) {
                     return VerifyError::TooFast;
                 }
+            } elseif ($record->issuedAtNs - $receiptNs > self::SKEW_TOLERANCE_US) {
+                // Receipt before issuance by more than the skew bound is
+                // physically impossible: reject as TooFast. Within the
+                // bound the two hosts' clocks are unsynced, so the
+                // elapsed time cannot be measured reliably and the floor
+                // check is skipped for this verification; the
+                // proof-of-work check still applies.
+                return VerifyError::TooFast;
             }
         }
 
@@ -1257,8 +1425,8 @@ final class Verifier
     /**
      * The retained consumed-state tri-state, best-effort read. The
      * storage seam is the retained consumed-state read
-     * ({@see ConsumedStateReadableInterface}, implemented by the Redis,
-     * array and PSR-6 backends; the plain {@see StorageInterface::find()}
+     * ({@see ConsumedStateReadableInterface}, implemented by the Redis
+     * and array backends; the plain {@see StorageInterface::find()}
      * record carries no runtime state).
      *
      * @return 'consumed'    readable and present. Consumed evidence,

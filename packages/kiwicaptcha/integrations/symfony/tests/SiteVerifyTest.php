@@ -1925,6 +1925,11 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
             {
                 $this->inner->delete($nonce);
             }
+
+            public function deleteIfPending(string $nonce): \KiwiCaptcha\DeleteIfPendingResult
+            {
+                return $this->inner->deleteIfPending($nonce);
+            }
         };
         $owner = new SiteVerifyController(new Verifier($lostReply), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $lostReply, null, null, $store, null, 5.0);
         $ownerResponse = $owner->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
@@ -2041,6 +2046,11 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
             {
                 $this->inner->delete($nonce);
             }
+
+            public function deleteIfPending(string $nonce): \KiwiCaptcha\DeleteIfPendingResult
+            {
+                return $this->inner->deleteIfPending($nonce);
+            }
         };
         $owner = new SiteVerifyController(new Verifier($lostReply), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $lostReply, null, null, $store, null, 5.0);
         $ownerResponse = $owner->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
@@ -2136,6 +2146,11 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
             public function delete(string $nonce): void
             {
                 $this->inner->delete($nonce);
+            }
+
+            public function deleteIfPending(string $nonce): \KiwiCaptcha\DeleteIfPendingResult
+            {
+                return $this->inner->deleteIfPending($nonce);
             }
         };
         $owner = new SiteVerifyController(new Verifier($lostReply), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $lostReply, null, null, $store, null, 5.0);
@@ -2243,6 +2258,11 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
             {
                 $this->inner->delete($nonce);
             }
+
+            public function deleteIfPending(string $nonce): \KiwiCaptcha\DeleteIfPendingResult
+            {
+                return $this->inner->deleteIfPending($nonce);
+            }
         };
         $owner = new SiteVerifyController(new Verifier($lostReply), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $lostReply, null, null, $store, null, 5.0);
         $ownerResponse = $owner->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
@@ -2322,6 +2342,11 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
             {
                 $this->inner->delete($nonce);
             }
+
+            public function deleteIfPending(string $nonce): \KiwiCaptcha\DeleteIfPendingResult
+            {
+                return $this->inner->deleteIfPending($nonce);
+            }
         };
         $owner = new SiteVerifyController(new Verifier($lostConsume), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $lostConsume, null, null, $store, null, 5.0);
         $ownerResponse = $owner->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
@@ -2374,6 +2399,11 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
             public function delete(string $nonce): void
             {
                 $this->inner->delete($nonce);
+            }
+
+            public function deleteIfPending(string $nonce): \KiwiCaptcha\DeleteIfPendingResult
+            {
+                return $this->inner->deleteIfPending($nonce);
             }
         };
         $now += 4;
@@ -2454,6 +2484,11 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
             public function delete(string $nonce): void
             {
                 $this->inner->delete($nonce);
+            }
+
+            public function deleteIfPending(string $nonce): \KiwiCaptcha\DeleteIfPendingResult
+            {
+                return $this->inner->deleteIfPending($nonce);
             }
         };
         $owner = new SiteVerifyController(new Verifier($lostReply), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $lostReply, null, null, $store, null, 5.0);
@@ -2553,6 +2588,10 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
                 public function delete(string $nonce): void
                 {
                     $this->inner->delete($nonce);
+                }
+                public function deleteIfPending(string $nonce): \KiwiCaptcha\DeleteIfPendingResult
+                {
+                    return $this->inner->deleteIfPending($nonce);
                 }
             };
             $owner = new SiteVerifyController(new Verifier($lostReply), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $lostReply, null, null, $store, null, 5.0);
@@ -2671,6 +2710,11 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
             public function delete(string $nonce): void
             {
                 $this->inner->delete($nonce);
+            }
+
+            public function deleteIfPending(string $nonce): \KiwiCaptcha\DeleteIfPendingResult
+            {
+                return $this->inner->deleteIfPending($nonce);
             }
         };
         $owner = new SiteVerifyController(new Verifier($lostBeforeTransition), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $lostBeforeTransition, null, null, $store, null, 5.0);
@@ -2791,6 +2835,11 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
             public function delete(string $nonce): void
             {
                 $this->inner->delete($nonce);
+            }
+
+            public function deleteIfPending(string $nonce): \KiwiCaptcha\DeleteIfPendingResult
+            {
+                return $this->inner->deleteIfPending($nonce);
             }
         };
         $owner = new SiteVerifyController(new Verifier($lostAfterTransition), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $lostAfterTransition, null, null, $store, null, 5.0);
@@ -3025,6 +3074,11 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
             public function delete(string $nonce): void
             {
                 $this->inner->delete($nonce);
+            }
+
+            public function deleteIfPending(string $nonce): \KiwiCaptcha\DeleteIfPendingResult
+            {
+                return $this->inner->deleteIfPending($nonce);
             }
         };
         $ownerVerifier = new Verifier($lostReply);

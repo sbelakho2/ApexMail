@@ -1918,6 +1918,11 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
             {
                 $this->inner->delete($nonce);
             }
+
+            public function deleteIfPending(string $nonce): \KiwiCaptcha\DeleteIfPendingResult
+            {
+                return $this->inner->deleteIfPending($nonce);
+            }
         };
 
         try {
@@ -2055,6 +2060,11 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
             public function delete(string $nonce): void
             {
                 $this->inner->delete($nonce);
+            }
+
+            public function deleteIfPending(string $nonce): \KiwiCaptcha\DeleteIfPendingResult
+            {
+                return $this->inner->deleteIfPending($nonce);
             }
         };
 

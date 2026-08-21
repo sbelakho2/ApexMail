@@ -36,7 +36,7 @@ use KiwiCaptcha\StorageInterface;
  * {@see OperationIdentityAwareStorageInterface::consumeWithOperationIdentity()}),
  * exposed on the consumed read.
  */
-final class ArrayStorage implements AtomicStorageInterface, \KiwiCaptcha\ConsumedStateReadableInterface, OperationIdentityAwareStorageInterface
+final class ArrayStorage implements AtomicStorageInterface, \KiwiCaptcha\ConsumedStateReadableInterface, OperationIdentityAwareStorageInterface, \KiwiCaptcha\AtomicDeleteIfPendingInterface
 {
     /** @var array<string, array{record: ChallengeRecord, consumed: bool, result: ConsumedResult|null, operationIdentity: string|null}> */
     private array $records = [];
@@ -112,5 +112,30 @@ final class ArrayStorage implements AtomicStorageInterface, \KiwiCaptcha\Consume
     public function delete(string $nonce): void
     {
         unset($this->records[$nonce]);
+    }
+
+    /**
+     * The fused cleanup transition. The state is a plain in-process
+     * array no other process can observe, so the read-decide-delete
+     * sequence is de-facto atomic here. A missing record reports
+     * missing, a pending record is deleted, and a consumed record is
+     * kept untouched with its retained state riding back on the answer —
+     * the same tri-state contract as the Redis backend's Lua script.
+     */
+    public function deleteIfPending(string $nonce): \KiwiCaptcha\DeleteIfPendingResult
+    {
+        $entry = $this->records[$nonce] ?? null;
+        if ($entry === null) {
+            return new \KiwiCaptcha\DeleteIfPendingResult('missing');
+        }
+        if ($entry['consumed']) {
+            return new \KiwiCaptcha\DeleteIfPendingResult(
+                'consumed',
+                new ConsumedRecord($entry['record'], false, true, $entry['result'], $entry['operationIdentity']),
+            );
+        }
+        unset($this->records[$nonce]);
+
+        return new \KiwiCaptcha\DeleteIfPendingResult('deleted-pending');
     }
 }
