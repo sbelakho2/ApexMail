@@ -1,10 +1,20 @@
 #!/bin/sh
-# docs-lint.sh — prose linter for the repository's documentation and
-# (with --source) source comments; prints per-file violation counts and a
-# total. Advisory (always exits 0) unless a baseline is given: --baseline
-# FILE fails when the current total exceeds the tracked baseline;
-# --update-baseline FILE regenerates it after deliberate rewrites. The
-# committed baseline ratchets toward zero, then advisory mode is removed.
+# docs-lint.sh — prose linter for the KiwiCaptcha packages' documentation
+# and (with --source) source comments; prints per-file violation counts
+# and a total. Advisory (always exits 0) unless a baseline is given:
+# --baseline FILE enforces the per-file rows AND the total — any scanned
+# file that exceeds its row (a scanned file without a row counts as a
+# new file with baseline 0) or a total that exceeds the baseline total
+# fails with exit 1; --update-baseline FILE regenerates the per-file set
+# after deliberate rewrites. The committed baseline ratchets toward
+# zero, then advisory mode is removed.
+# Scan scope: the five kiwicaptcha package families under packages/
+# (kiwicaptcha, kiwicaptcha-php, kiwicaptcha-risk, kiwicaptcha-risk-php,
+# kiwicaptcha-wasm) plus the product root files README.md and
+# SECURITY.md. The product root files exist only in the product
+# repository — they are scanned only when present and identifiable as
+# the product's (the README's first line is the "# KiwiCaptcha"
+# identity marker); unrelated repository root files are never scanned.
 # Checks: em-dash density, sentence length, ALL-CAPS prose, filler
 # vocabulary, 'never/not' contrast saturation, bold-emphasis density,
 # nested parentheses, and duplicate sentences across the scanned files.
@@ -36,9 +46,11 @@ while [ "$#" -gt 0 ]; do
       ;;
     -h|--help)
       echo "usage: docs-lint.sh [--source] [--baseline FILE] [--update-baseline FILE] [ROOT_DIR]"
-      echo "prose lint; advisory (exit 0) unless --baseline FILE is given,"
-      echo "which fails (exit 1) when the current total exceeds the tracked"
-      echo "baseline; --update-baseline FILE writes per-file counts + total"
+      echo "prose lint over the five kiwicaptcha package families; advisory"
+      echo "(exit 0) unless --baseline FILE is given, which fails (exit 1)"
+      echo "when any scanned file exceeds its per-file row or the total"
+      echo "exceeds the tracked baseline; --update-baseline FILE writes"
+      echo "per-file counts + total"
       exit 0
       ;;
     -*) echo "docs-lint.sh: unknown option: $1" >&2; exit 0 ;;
@@ -60,6 +72,24 @@ if [ ! -d "$ROOT/packages" ]; then
   echo "docs-lint.sh: not a repository root (no packages/ under $ROOT)" >&2
   exit 0
 fi
+
+# The scan covers ONLY the five kiwicaptcha package families; other
+# packages/ entries (the sdk families, the packages index) are never
+# scanned. The product root files (README.md, SECURITY.md) exist only
+# in the product repository — they are scanned only when present and
+# carrying the product identity marker (first line "# KiwiCaptcha",
+# the marker the product CI's repo-sanity job enforces), so an
+# unrelated repository root README is never picked up.
+SCAN_ROOTS="packages/kiwicaptcha
+packages/kiwicaptcha-php
+packages/kiwicaptcha-risk
+packages/kiwicaptcha-risk-php
+packages/kiwicaptcha-wasm"
+
+product_root_readme() {
+  [ -f "$ROOT/README.md" ] || return 1
+  awk 'NR == 1 { exit !($0 == "# KiwiCaptcha") }' "$ROOT/README.md"
+}
 
 tmpd=$(mktemp -d "${TMPDIR:-/tmp}/docs-lint.XXXXXX") || exit 0
 trap 'rm -rf "$tmpd"' EXIT HUP INT TERM
@@ -225,8 +255,9 @@ END {
 CHECKSEOF
 
 cat > "$tmpd/comments.awk" <<'CMTEOF'
-# comments.awk — emit comment text from source (lang=rs|js|php); a block
-# comment is one paragraph, each line comment is one paragraph
+# comments.awk — emit comment text from source (lang=rs|js|php|hash);
+# a block comment is one paragraph, each line comment is one paragraph;
+# lang=hash (yaml, yml, sh, twig) extracts '#' line comments only
 function emit(s) {
   gsub(/^[ \t]+/, "", s)
   gsub(/[ \t]+$/, "", s)
@@ -234,12 +265,15 @@ function emit(s) {
 }
 function pick(lang, line,  a, b, c, f, k) {
   a = index(line, "//")
-  b = (lang == "php" ? index(line, "#") : 0)
+  b = (lang == "php" || lang == "hash" ? index(line, "#") : 0)
   c = index(line, "/*")
   f = 0; k = ""
-  if (c > 0) { f = c; k = "B" }
-  if (a > 0 && (f == 0 || a < f)) { f = a; k = "L" }
-  if (b > 0 && (f == 0 || b < f)) { f = b; k = "L" }
+  if (lang == "hash") { f = b; k = "L" }
+  else {
+    if (c > 0) { f = c; k = "B" }
+    if (a > 0 && (f == 0 || a < f)) { f = a; k = "L" }
+    if (b > 0 && (f == 0 || b < f)) { f = b; k = "L" }
+  }
   if (f == 0) return ""
   return k ":" f
 }
@@ -329,14 +363,20 @@ excluded() {
 }
 
 scan_md() {
-  find "$ROOT/packages" -type f -name '*.md' -print 2>/dev/null
-  if [ -f "$ROOT/README.md" ]; then printf '%s\n' "$ROOT/README.md"; fi
-  if [ -f "$ROOT/SECURITY.md" ]; then printf '%s\n' "$ROOT/SECURITY.md"; fi
+  for r in $SCAN_ROOTS; do
+    find "$ROOT/$r" -type f -name '*.md' -print 2>/dev/null
+  done
+  if product_root_readme; then
+    printf '%s\n' "$ROOT/README.md"
+    if [ -f "$ROOT/SECURITY.md" ]; then printf '%s\n' "$ROOT/SECURITY.md"; fi
+  fi
 }
 
 scan_src() {
-  for ext in rs php js; do
-    find "$ROOT/packages" -type f -name "*.$ext" -print 2>/dev/null
+  for r in $SCAN_ROOTS; do
+    for ext in rs php js mjs yaml yml sh twig; do
+      find "$ROOT/$r" -type f -name "*.$ext" -print 2>/dev/null
+    done
   done
 }
 
@@ -373,6 +413,8 @@ agg_tmp="$tmpd/agg"
     for f in $src_files; do
       case "$f" in
         *.php) lang=php ;;
+        *.js|*.mjs) lang=js ;;
+        *.yaml|*.yml|*.sh|*.twig) lang=hash ;;
         *) lang=rs ;;
       esac
       awk -f "$tmpd/comments.awk" -v lang="$lang" "$f" |
@@ -450,11 +492,34 @@ if [ -n "$BASELINE" ]; then
   fi
   base_tot=$(awk '/^TOTAL[ \t]/ { t = $2 + 0 } END { print t + 0 }' "$BASELINE")
   base_tot=${base_tot:-0}
+  fail=0
+  overages=$(
+    awk -F '\t' -v bfile="$BASELINE" '
+      BEGIN {
+        while ((getline bl < bfile) > 0) {
+          if (bl ~ /^TOTAL[ \t]/) continue
+          split(bl, a, " ")
+          base[a[2]] = a[1] + 0
+        }
+      }
+      /^COUNT\t/ {
+        c = $3 + 0
+        b = (($2 in base) ? base[$2] : 0)
+        if (c > b) printf "%s: %d (overage %d)\n", $2, c, c - b
+      }
+    ' "$agg_tmp"
+  )
+  if [ -n "$overages" ]; then
+    echo "docs-lint.sh: FAIL: per-file baseline rows exceeded:" >&2
+    printf '%s\n' "$overages" | sed 's/^/  /' >&2
+    fail=1
+  fi
   if [ "$tot" -gt "$base_tot" ]; then
     echo "docs-lint.sh: FAIL: total $tot exceeds baseline $base_tot ($BASELINE); regenerate with --update-baseline only after deliberate rewrites" >&2
-    exit 1
+    fail=1
   fi
-  echo "docs-lint.sh: OK: total $tot at or below baseline $base_tot"
+  if [ "$fail" -eq 1 ]; then exit 1; fi
+  echo "docs-lint.sh: OK: total $tot at or below baseline $base_tot; every scanned file at or below its per-file row"
   exit 0
 fi
 

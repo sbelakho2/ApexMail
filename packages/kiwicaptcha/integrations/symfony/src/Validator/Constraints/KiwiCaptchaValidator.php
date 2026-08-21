@@ -217,11 +217,14 @@ final class KiwiCaptchaValidator extends ConstraintValidator
          * The chain lifetime (risk.chaining.ttl_secs): the absolute
          * expiry the validator passes when it OPENS a stage-2 chain
          * requirement (requireStage2). A CHAIN_REQUIRED ticket is NEVER
-         * signed with an independent fresh expiry: the signing always
-         * re-signs from the requirement's ACTUAL server-held expiresAt
-         * ({@see self::chainRequirementExpiresAt()}), so the same
-         * (nonce, disposition) reproduces the same deterministic ticket
-         * and a ticket can never outlive its chain state.
+         * signed with an independent fresh expiry: the signing re-signs
+         * from the DISPOSITION-CARRIED bound (the chain's ORIGINAL
+         * server-held expiresAt, persisted with the disposition as
+         * chain_expires_at — {@see self::chainRequirementExpiresAt()}), so
+         * the same (nonce, disposition) reproduces the same deterministic
+         * ticket, a concurrently opened chain of the same transaction can
+         * never leak its expiry into this disposition's ticket, and a
+         * ticket can never outlive its chain state.
          */
         private readonly int $chainTtlSecs = 300,
     ) {
@@ -571,24 +574,27 @@ final class KiwiCaptchaValidator extends ConstraintValidator
                 // verification and a replay); the violation's
                 // {{ chain_ticket }} parameter carries it in the
                 // documented machine-readable format. The ticket is
-                // ALWAYS signed from the chain requirement's ACTUAL
-                // server-held expiresAt — the just-opened requirement and
-                // an existing obligation's chain alike — so a fresh
-                // disposition, an obligation-first disposition and a
-                // replay of the same verified nonce all reproduce the
-                // SAME byte-identical ticket (a re-signed ticket can
-                // never outlive its chain state, and the deterministic
-                // retry never invents a fresh expiry). A disposition
-                // whose chain requirement is gone (the chain expired or
-                // was consumed) is fail-closed temporary_unavailable. A
-                // ticket that cannot be produced is fail-closed
-                // temporary_unavailable — a stronger stage was demanded
-                // but cannot be chained, never a silent downgrade to an
-                // unchained pass.
+                // ALWAYS signed from the disposition's EXACT chain — the
+                // persisted chain id AND its ORIGINAL server-held expiry
+                // (chain_expires_at, bound at finalize time) — NEVER a
+                // fresh current-obligation lookup: a concurrently opened
+                // chain of the same transaction can never leak its expiry
+                // into this ticket, a completed chain (record retained,
+                // obligation gone) keeps re-signing its deterministic
+                // ticket, and a fresh disposition, an obligation-first
+                // disposition and a replay of the same verified nonce all
+                // reproduce the SAME byte-identical ticket. The chain
+                // RECORD is read by id ({@see self::chainRequirementExpiresAt()})
+                // only as the LIVENESS check — a disposition whose chain
+                // is gone (expired or consumed) is fail-closed
+                // temporary_unavailable. A ticket that cannot be produced
+                // is fail-closed temporary_unavailable — a stronger stage
+                // was demanded but cannot be chained, never a silent
+                // downgrade to an unchained pass.
                 try {
                     $ticket = $this->chainTickets?->ticketFor(
                         $disposition->chainId,
-                        $this->chainRequirementExpiresAt($constraint, $canonicalBinding),
+                        $this->chainRequirementExpiresAt($disposition),
                     );
                 } catch (\Throwable $e) {
                     $this->logger?->info('KiwiCaptcha: chained challenge ticket unavailable', [
@@ -740,16 +746,21 @@ final class KiwiCaptchaValidator extends ConstraintValidator
      *     TERMINAL requirement (denied / step_up_required) DOMINATES
      *     EVERY nonce — the exact stage-2 nonce and replays included:
      *     the terminal disposition answers BEFORE any assessment, and a
-     *     terminal transaction never persists a Pass for ANY nonce;
+     *     terminal transaction never persists a Pass for ANY nonce. The
+     *     lookup runs BEFORE the nonce -> decision handle is touched: a
+     *     chain-state read failure must NEVER consume the handle — the
+     *     retry re-runs the lookup with the mapping intact and the
+     *     ORIGINAL decision id is preserved for the final disposition;
      *  1. the canonical nonce is decoded, a fresh owner token drawn and
-     *     the nonce -> decision handle is CONSUMED (GETDEL, at most one
-     *     winner) BEFORE the claim — the pending disposition record
-     *     persists the handle, so an owner crash can never lose the
-     *     original decision id of a no-post-solve Pass;
-     *  2. the nonce-keyed disposition record is CLAIMED with that handle:
-     *     'complete' -> the persisted final disposition is returned
-     *     immediately (a replay of a valid proof reproduces the same
-     *     PASS | DENY | STEP_UP | CHAIN_REQUIRED — never a bypass; a
+     *     the nonce -> decision handle is CONSUMED ATOMICALLY WITH THE
+     *     CLAIM (the store's claim GETDELs the mapping inside the same
+     *     transition — at most one winner — and persists the paired
+     *     handle in the pending disposition record, so an owner crash can
+     *     never lose the original decision id of a no-post-solve Pass);
+     *  2. the nonce-keyed disposition record is CLAIMED with the decision
+     *     mapping key: 'complete' -> the persisted final disposition is
+     *     returned immediately (a replay of a valid proof reproduces the
+     *     same PASS | DENY | STEP_UP | CHAIN_REQUIRED — never a bypass; a
      *     TERMINAL requirement supersedes even a persisted disposition);
      *     'pending' -> another owner's computation is live — the
      *     temporary_unavailable violation (never a silent pass);
@@ -782,28 +793,16 @@ final class KiwiCaptchaValidator extends ConstraintValidator
         }
         $session = $request !== null ? $this->continuityCookie?->read($request) : null;
 
-        // NONCE -> DECISION CONSUMPTION: the short-lived nonce -> decision
-        // handle is CONSUMED (GETDEL, at most one winner) BEFORE the
-        // claim, and the handle is persisted in the pending disposition
-        // record ({@see PostSolveDispositionStore::claim()}) — an owner
-        // crash after the consumption can never lose the original
-        // decision id, and a crash-taken-over computation completes the
-        // disposition with it. On scopes WITHOUT post_solve_check the
-        // ORIGINAL pre-issue decision id becomes the request's current
-        // decision id ({@see RiskGateway::setCurrentDecisionId()}), so the
-        // application can confirm this challenge's original decision. On
-        // post_solve_check scopes the superseded mapping is still consumed
-        // (cleanup — it can never be confirmed against a stale decision),
-        // and the fresh POST-SOLVE decision becomes the current
-        // confirmation target instead.
-        $decisionId = $this->consumeDecisionForToken($token);
-
         // THE AUTHORITATIVE REQUIREMENT LOOKUP — resolved EXACTLY ONCE per
         // validation and threaded through the assessment, the stage-2
         // detection and the chain transitions ({@see
         // self::assessFinalDisposition()} / {@see self::applyStage2Disposition()}),
         // so the requirement can never diverge between the terminal-state
         // dominance, the disposition and the transition that follows it.
+        // Runs BEFORE the nonce -> decision handle is consumed: a
+        // chain-state read failure must NEVER consume the handle — the
+        // retry re-runs the lookup with the mapping intact and the
+        // ORIGINAL decision id is preserved for the final disposition.
         // Fail-closed as before: only a SUCCESSFUL lookup that finds no
         // record produces null.
         $requirement = $this->openRequirementFor($constraint, $canonicalBinding);
@@ -812,14 +811,33 @@ final class KiwiCaptchaValidator extends ConstraintValidator
             // No store wired (manual construction / legacy seam): the
             // disposition is computed and applied WITHOUT persistence. The
             // extension always wires a store, so the durable path below is
-            // the production behavior.
+            // the production behavior. The decision handle is consumed
+            // directly (the atomic claim transfer is the store's job —
+            // {@see PostSolveDispositionStore::claim()}).
+            $decisionId = $this->consumeDecisionForToken($token);
+
             return [$this->assessFinalDisposition($token, $outcome, $request, $constraint, $ip, $session, $nonce, $canonicalBinding, $decisionId, $requirement), false, $requirement];
         }
 
         $owner = bin2hex(random_bytes(16));
         $ttl = Config::MAX_TTL_SECS + $this->postSolveDispositionTtlMarginSecs;
         try {
-            $claim = $this->dispositionStore->claim($nonce, $owner, $ttl, $decisionId);
+            // NONCE -> DECISION CONSUMPTION, ATOMIC WITH THE CLAIM: the
+            // short-lived nonce -> decision mapping is CONSUMED (GETDEL,
+            // at most one winner) INSIDE the store's claim transition and
+            // the paired handle is persisted in the pending disposition
+            // record ({@see PostSolveDispositionStore::claim()}) — an
+            // owner crash after the claim can never lose the original
+            // decision id, and a crash-taken-over computation completes
+            // the disposition with it. On scopes WITHOUT post_solve_check
+            // the ORIGINAL pre-issue decision id becomes the request's
+            // current decision id ({@see RiskGateway::setCurrentDecisionId()}),
+            // so the application can confirm this challenge's original
+            // decision. On post_solve_check scopes the superseded mapping
+            // is still consumed (cleanup — it can never be confirmed
+            // against a stale decision), and the fresh POST-SOLVE decision
+            // becomes the current confirmation target instead.
+            $claim = $this->dispositionStore->claim($nonce, $owner, $ttl, $this->risk?->decisionKeyFor($nonce));
         } catch (\Throwable $e) {
             throw new PostSolveDispositionUnavailableException('the post-solve disposition store is unavailable', 0, $e);
         }
@@ -863,25 +881,23 @@ final class KiwiCaptchaValidator extends ConstraintValidator
             throw new PostSolveDispositionUnavailableException('the post-solve disposition claim is held by another owner');
         }
 
-        $storedDecisionId = $decisionId;
-        if ($claim === 'taken_over') {
-            // A takeover resumes the ORIGINAL owner's work: the pending
-            // record holds the decision handle the crashed owner consumed
-            // (its GETDEL is empty now) — the completed disposition keeps
-            // the ORIGINAL decision id.
-            try {
-                $record = $this->dispositionStore->read($nonce);
-            } catch (\Throwable $e) {
-                throw new PostSolveDispositionUnavailableException('the post-solve disposition record is unreadable', 0, $e);
-            }
-            if ($record === null) {
-                // The claim was taken over but the record vanished between
-                // the claim and the read (a clock/expiry boundary): fail
-                // closed — never silently pass.
-                throw new PostSolveDispositionUnavailableException('the post-solve disposition record vanished after the takeover');
-            }
-            $storedDecisionId = $record->decisionId ?? $decisionId;
+        // The STORED decision handle: the claim's atomic GETDEL wrote the
+        // paired handle into the pending record (a takeover resumes the
+        // ORIGINAL owner's handle — the crashed owner's mapping is already
+        // consumed), so the completed disposition keeps the ORIGINAL
+        // decision id.
+        try {
+            $record = $this->dispositionStore->read($nonce);
+        } catch (\Throwable $e) {
+            throw new PostSolveDispositionUnavailableException('the post-solve disposition record is unreadable', 0, $e);
         }
+        if ($record === null) {
+            // The claim was won but the record vanished between the claim
+            // and the read (a clock/expiry boundary): fail closed — never
+            // silently pass.
+            throw new PostSolveDispositionUnavailableException('the post-solve disposition record vanished after the claim');
+        }
+        $storedDecisionId = $record->decisionId;
 
         $disposition = $this->assessFinalDisposition($token, $outcome, $request, $constraint, $ip, $session, $nonce, $canonicalBinding, $storedDecisionId, $requirement);
 
@@ -1005,10 +1021,11 @@ final class KiwiCaptchaValidator extends ConstraintValidator
             $honeypotHit = $this->formDecoyEvidence($request, self::expectedDecoyField($nonce));
         }
 
-        // The ORIGINAL pre-issue decision id was consumed BEFORE the claim
-        // (GETDEL — at most one consumer) and travels in as the STORED
-        // handle: on scopes WITHOUT post_solve_check it becomes the
-        // request's current decision id
+        // The ORIGINAL pre-issue decision id was consumed ATOMICALLY WITH
+        // THE CLAIM (the store's claim GETDELs the nonce -> decision
+        // mapping inside the same transition — at most one consumer) and
+        // travels in as the STORED handle: on scopes WITHOUT
+        // post_solve_check it becomes the request's current decision id
         // ({@see RiskGateway::setCurrentDecisionId()}), so the application
         // can confirm this challenge's original decision. On
         // post_solve_check scopes the superseded mapping is already
@@ -1266,7 +1283,12 @@ final class KiwiCaptchaValidator extends ConstraintValidator
                             throw new PostSolveDispositionUnavailableException('the chain requirement carries no chain id');
                         }
 
-                        return new PostSolveDisposition(PostSolveDispositionKind::ChainRequired, $decisionId, $chainId);
+                        // The disposition carries the requirement's ORIGINAL
+                        // expiry bound (the raise preserves it — the
+                        // store's raise-only create-or-get): the ticket
+                        // signing re-signs from THIS carried bound, never a
+                        // fresh obligation lookup.
+                        return new PostSolveDisposition(PostSolveDispositionKind::ChainRequired, $decisionId, $chainId, $raised->expiresAt);
                     }
                     // Chaining unavailable: the stronger demand must
                     // NEVER silently downgrade to the weaker recorded
@@ -1278,9 +1300,11 @@ final class KiwiCaptchaValidator extends ConstraintValidator
 
             // 4. A fresh equal/weaker/Allow/neutral action leaves the
             //    obligation UNCHANGED (its recorded floor intact) —
-            //    CHAIN_REQUIRED with the requirement's SAME chain: a
+            //    CHAIN_REQUIRED with the requirement's SAME chain and its
+            //    ORIGINAL expiry bound (the disposition carries both, so
+            //    the signing never re-consults the obligation): a
             //    stage-1 token of a chained transaction can never pass.
-            return new PostSolveDisposition(PostSolveDispositionKind::ChainRequired, $decisionId, $requirement->chainId);
+            return new PostSolveDisposition(PostSolveDispositionKind::ChainRequired, $decisionId, $requirement->chainId, $requirement->expiresAt);
         }
 
         if ($postSolve === null) {
@@ -1336,7 +1360,11 @@ final class KiwiCaptchaValidator extends ConstraintValidator
                 throw new PostSolveDispositionUnavailableException('the chain requirement carries no chain id');
             }
 
-            return new PostSolveDisposition(PostSolveDispositionKind::ChainRequired, $decisionId, $chainId);
+            // The disposition carries the freshly opened requirement's
+            // expiry bound (the SAME value the ticket will be signed
+            // from — persisted as chain_expires_at, so a replay re-signs
+            // the deterministic ticket without any obligation lookup).
+            return new PostSolveDisposition(PostSolveDispositionKind::ChainRequired, $decisionId, $chainId, $chainRequirement->expiresAt);
         }
 
         // Chaining unavailable (disabled or no authoritative binding): the
@@ -1547,8 +1575,9 @@ final class KiwiCaptchaValidator extends ConstraintValidator
      * SAME value is passed to requireStage2 (a fresh chain and an atomic
      * RAISE alike — the store's raise-only create-or-get preserves the
      * ORIGINAL expiry of an existing chain). A CHAIN_REQUIRED ticket is
-     * NEVER signed with this independent value: the signing always
-     * re-signs from the requirement's ACTUAL server-held expiresAt
+     * NEVER signed with this independent value: the signing re-signs from
+     * the DISPOSITION-CARRIED bound — the requirement's ACTUAL
+     * server-held expiresAt, persisted with the disposition
      * ({@see chainRequirementExpiresAt()}).
      */
     private function chainExpiresAt(): int
@@ -1557,32 +1586,37 @@ final class KiwiCaptchaValidator extends ConstraintValidator
     }
 
     /**
-     * The ACTUAL server-held expiry of the chain behind a CHAIN_REQUIRED
-     * disposition: the requirement's expiresAt (findOpenRequirement on
-     * the SAME (scope, canonical binding, policy epoch) the chain was
-     * opened under). EVERY ChainRequired ticket — the just-opened fresh
-     * chain, an existing obligation's chain and a replayed disposition
-     * alike — re-signs with this value, never with an independent fresh
-     * expiry: the same (nonce, disposition) reproduces the deterministic
-     * SAME ticket and a re-signed ticket can never outlive its chain
-     * state.
+     * The absolute expiry a CHAIN_REQUIRED ticket is signed with: the
+     * DISPOSITION-CARRIED bound — the exact chain's ORIGINAL server-held
+     * expiresAt, persisted with the disposition as chain_expires_at at
+     * finalize time — NEVER a fresh current-obligation lookup: a
+     * concurrently opened chain Y of the same transaction can never leak
+     * its expiry into this disposition's ticket, and a completed chain
+     * (record retained, obligation gone) keeps re-signing its
+     * deterministic ticket. The chain RECORD is read by id
+     * ({@see ChainedChallengeTicketService::requirementFor()} — the
+     * by-chain-id read, NEVER the obligation lookup) as the LIVENESS
+     * check: a dead chain (expired / record gone) is fail-closed
+     * temporary_unavailable — never a ticket for a chain that no longer
+     * exists. Legacy/edge records whose carried bound is null fall back
+     * to the requirement's server-held expiresAt.
      *
      * @throws PostSolveDispositionUnavailableException when the
-     *                                                 requirement is gone
-     *                                                 (the chain expired or
-     *                                                 was consumed) — fail
+     *                                                 chain is gone (the
+     *                                                 chain expired or was
+     *                                                 consumed) — fail
      *                                                 closed, never a
      *                                                 ticket that outlives
      *                                                 its chain
      */
-    private function chainRequirementExpiresAt(KiwiCaptcha $constraint, ?string $canonicalBinding): int
+    private function chainRequirementExpiresAt(PostSolveDisposition $disposition): int
     {
-        $requirement = $this->chainTickets?->findOpenRequirement($constraint->scope, (string) ($canonicalBinding ?? ''), $this->policyVersion);
+        $requirement = $this->chainTickets?->requirementFor($disposition->chainId);
         if ($requirement === null) {
-            throw new PostSolveDispositionUnavailableException('the chain requirement of the disposition is gone');
+            throw new PostSolveDispositionUnavailableException('the chain of the disposition is gone');
         }
 
-        return $requirement->expiresAt;
+        return $disposition->chainExpiresAt ?? $requirement->expiresAt;
     }
 
     /**
@@ -1910,6 +1944,15 @@ final class KiwiCaptchaValidator extends ConstraintValidator
      * Returns the paired ORIGINAL pre-issue decision id, or null when the
      * token cannot be decoded or no handle exists. Never throws: a valid
      * verification implies a decodable token (defense in depth).
+     *
+     * SUPERSEDED on the durable path: with a disposition store wired the
+     * consumption happens ATOMICALLY inside the store's claim transition
+     * ({@see PostSolveDispositionStore::claim()} — the claim GETDELs the
+     * mapping by its full key and persists the paired handle in the
+     * pending record, so a fallible chain-state read before the claim can
+     * never lose it). This method remains only for the no-store seam
+     * (manual construction — the disposition is computed without
+     * persistence).
      */
     private function consumeDecisionForToken(string $token): ?string
     {

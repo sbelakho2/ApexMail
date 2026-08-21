@@ -226,8 +226,11 @@ final class ChainedChallengeTicketService
      * PLAIN read of the chain state behind a chain id: the typed
      * requirement, or null when the chain is absent/expired. Used for the
      * direct verification of a ticket whose obligation is already cleared
-     * (a TERMINAL verified chain) and for the lost-reply confirmation of
-     * the issuance/verification transitions.
+     * (a TERMINAL verified chain), for the lost-reply confirmation of the
+     * issuance/verification transitions, and as the validator's
+     * by-chain-id LIVENESS check when it re-signs a CHAIN_REQUIRED
+     * ticket (the signing expiry comes from the disposition-carried
+     * bound — never the obligation lookup).
      *
      * @throws MalformedChainedChallengeStateException when the record
      *                                                 violates the strict

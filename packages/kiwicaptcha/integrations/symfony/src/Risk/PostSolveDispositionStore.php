@@ -34,19 +34,26 @@ interface PostSolveDispositionStore
      *         taken_over   — the caller took over an expired-lease claim (pending(me));
      *         complete     — the final disposition is already persisted.
      *
-     * @param string      $nonce      the verified challenge nonce (random security state)
-     * @param string      $owner      a fresh random owner token of this claim
-     * @param int         $ttlSeconds the RECORD TTL (the lease is a fixed short bound)
-     * @param string|null $decisionId the ORIGINAL pre-issue decision handle the
-     *                                caller consumed (GETDEL) — persisted in the
-     *                                pending record; a TAKEOVER keeps the
-     *                                ORIGINAL handle (never the new owner's), so
-     *                                a crash-taken-over computation completes
-     *                                with the first owner's decision id
+     * @param string      $nonce       the verified challenge nonce (random security state)
+     * @param string      $owner       a fresh random owner token of this claim
+     * @param int         $ttlSeconds  the RECORD TTL (the lease is a fixed short bound)
+     * @param string|null $decisionKey the FULL nonce -> decision mapping key
+     *                                 ({kiwi:<ns>}:decision:<nonce> — the same
+     *                                 hash-tagged key the gateway pairs the
+     *                                 handle under). The mapping is CONSUMED
+     *                                 (GETDEL, at most one winner) inside the
+     *                                 same atomic transition as the claim and
+     *                                 the paired decision id is persisted in
+     *                                 the pending record; a TAKEOVER keeps the
+     *                                 ORIGINAL handle (never the new owner's),
+     *                                 so a crash-taken-over computation
+     *                                 completes with the first owner's decision
+     *                                 id. null = no decision mapping (the
+     *                                 records carry null)
      *
      * @throws \Throwable when the store is unavailable (fail closed)
      */
-    public function claim(string $nonce, string $owner, int $ttlSeconds, ?string $decisionId = null): string;
+    public function claim(string $nonce, string $owner, int $ttlSeconds, ?string $decisionKey = null): string;
 
     /**
      * Read the current record behind a nonce, or null when absent/expired.

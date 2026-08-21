@@ -110,7 +110,7 @@ final class ValidatorTest extends TestCase
      *
      * @return array{gateway: RiskGateway, store: FakeRiskStateStore}
      */
-    private function riskStack(int $scopeId, string $minimum, string $degraded, bool $postSolveCheck, ?RiskV2Weights $v2Weights = null, ?RiskProfileResolver $resolver = null, ?\Predis\Client $decisionRedis = null): array
+    private function riskStack(int $scopeId, string $minimum, string $degraded, bool $postSolveCheck, ?RiskV2Weights $v2Weights = null, ?RiskProfileResolver $resolver = null, ?\Predis\Client $decisionRedis = null, ?RequestStack $requestStack = null): array
     {
         $keys = RiskKeys::fromMaster(self::SECRET);
         $classifier = new CidrNetworkClassifier([]);
@@ -123,7 +123,7 @@ final class ValidatorTest extends TestCase
         ]);
         $store = new FakeRiskStateStore();
         $engine = new AdaptiveRiskEngine($store, $classifier, new RiskIdentityFactory($keys), new RiskScorer(), $policy, $keys);
-        $gateway = new RiskGateway($engine, $classifier, $resolver ?? new RiskProfileResolver(PoWAlgorithm::Sha256, 8), ['login' => $scopeId], null, null, ['login' => $postSolveCheck], 'reject', null, null, null, $decisionRedis, '{kiwi:validator-test}:decision:', 300, $policy, null, null, $v2Weights);
+        $gateway = new RiskGateway($engine, $classifier, $resolver ?? new RiskProfileResolver(PoWAlgorithm::Sha256, 8), ['login' => $scopeId], null, null, ['login' => $postSolveCheck], 'reject', null, null, $requestStack, $decisionRedis, '{kiwi:validator-test}:decision:', 300, $policy, null, null, $v2Weights);
 
         return ['gateway' => $gateway, 'store' => $store];
     }
@@ -1166,17 +1166,56 @@ final class ValidatorTest extends TestCase
      *
      * @return array{0: ArrayPostSolveDispositionStore, 1: \Closure}
      */
-    private function clockedDispositionStore(): array
+    private function clockedDispositionStore(?\ArrayAccess $decisionMap = null): array
     {
         $clock = 1_800_000_000;
-        $store = new ArrayPostSolveDispositionStore(static function () use (&$clock): int {
-            return $clock;
-        });
+        $store = new ArrayPostSolveDispositionStore(
+            static function () use (&$clock): int {
+                return $clock;
+            },
+            0,
+            $decisionMap,
+        );
         $advance = static function (int $seconds) use (&$clock): void {
             $clock += $seconds;
         };
 
         return [$store, $advance];
+    }
+
+    /**
+     * The SHARED nonce -> decision map of the in-memory disposition store:
+     * an ArrayAccess mirror of the FakePredisClient's decision strings (the
+     * same keys, the same JSON shape) — the fixture wiring of the Array
+     * store's atomic claim transfer.
+     */
+    private function decisionMap(FakePredisClient $decisionRedis): \ArrayAccess
+    {
+        return new class($decisionRedis) implements \ArrayAccess {
+            public function __construct(private readonly FakePredisClient $redis)
+            {
+            }
+
+            public function offsetExists(mixed $offset): bool
+            {
+                return isset($this->redis->strings[$offset]);
+            }
+
+            public function offsetGet(mixed $offset): mixed
+            {
+                return $this->redis->strings[$offset] ?? null;
+            }
+
+            public function offsetSet(mixed $offset, mixed $value): void
+            {
+                $this->redis->strings[$offset] = (string) $value;
+            }
+
+            public function offsetUnset(mixed $offset): void
+            {
+                unset($this->redis->strings[$offset]);
+            }
+        };
     }
 
     /**
@@ -1194,13 +1233,13 @@ final class ValidatorTest extends TestCase
             ) {
             }
 
-            public function claim(string $nonce, string $owner, int $ttlSeconds, ?string $decisionId = null): string
+            public function claim(string $nonce, string $owner, int $ttlSeconds, ?string $decisionKey = null): string
             {
                 if ($this->failClaim) {
                     throw new \RuntimeException('simulated claim outage');
                 }
 
-                return $this->inner->claim($nonce, $owner, $ttlSeconds, $decisionId);
+                return $this->inner->claim($nonce, $owner, $ttlSeconds, $decisionKey);
             }
 
             public function read(string $nonce): ?PostSolveDispositionRecord
@@ -1318,9 +1357,9 @@ final class ValidatorTest extends TestCase
      *
      * @return array{0: \Symfony\Component\Validator\Validator\ValidatorInterface, 1: RequestStack, 2: KiwiCaptchaValidator}
      */
-    private function dispositionEngine(Verifier $verifier, RiskGateway $gateway, PostSolveDispositionStore $store, array $post = [], int $ttlMargin = 0, ?ChainedChallengeTicketService $chainTickets = null, ?RiskProfileResolver $resolver = null, ?RequestBindingAuthorityInterface $bindingAuthority = null, int $chainTtlSecs = 300, ?\BelConsulting\KiwiCaptchaBundle\SiteVerify\SiteVerifyMetadataStore $metadataStore = null): array
+    private function dispositionEngine(Verifier $verifier, RiskGateway $gateway, PostSolveDispositionStore $store, array $post = [], int $ttlMargin = 0, ?ChainedChallengeTicketService $chainTickets = null, ?RiskProfileResolver $resolver = null, ?RequestBindingAuthorityInterface $bindingAuthority = null, int $chainTtlSecs = 300, ?\BelConsulting\KiwiCaptchaBundle\SiteVerify\SiteVerifyMetadataStore $metadataStore = null, ?RequestStack $requestStack = null): array
     {
-        $stack = new RequestStack();
+        $stack = $requestStack ?? new RequestStack();
         $stack->push(Request::create('/', 'POST', $post, [], [], ['REMOTE_ADDR' => '198.51.100.7']));
         $validator = new KiwiCaptchaValidator(
             $verifier,
@@ -2016,7 +2055,10 @@ final class ValidatorTest extends TestCase
     {
         $decisionRedis = new FakePredisClient();
         $risk = $this->riskStack(1, 'allow', 'allow', false, null, null, $decisionRedis);
-        [$store, $advance] = $this->clockedDispositionStore();
+        // The Array disposition store's claim consumes the mapping through
+        // the SHARED decision map (the mirror of the gateway's decision
+        // Redis, keyed by the FULL decision key).
+        [$store, $advance] = $this->clockedDispositionStore($this->decisionMap($decisionRedis));
 
         $challenge = $this->issuer->issue('login', '198.51.100.7');
         usleep(($challenge->minDurationMs + 10) * 1000);
@@ -2027,9 +2069,10 @@ final class ValidatorTest extends TestCase
         };
         $dto->captcha = $token;
 
-        // REQUEST 1: the owner CONSUMES the nonce -> decision mapping
-        // (GETDEL) and stores the handle in the pending claim, then dies
-        // before the finalize — temporary_unavailable.
+        // REQUEST 1: the claim ATOMICALLY consumes the nonce -> decision
+        // mapping (GETDEL inside the same operation) and stores the handle
+        // in the pending claim, then dies before the finalize —
+        // temporary_unavailable.
         $crashed = $this->faultedStore($store, failFinalize: true);
         [$engine] = $this->dispositionEngine($this->verifier, $risk['gateway'], $crashed);
         $meta = $engine->getMetadataFor($dto::class);
@@ -2037,6 +2080,7 @@ final class ValidatorTest extends TestCase
         $violations = $engine->validate($dto);
         self::assertSame(KiwiCaptcha::TEMPORARY_UNAVAILABLE_ERROR, $violations[0]->getCode(), 'a crash before the finalize is retryable temporary_unavailable');
         self::assertSame('original-decision', $store->read($challenge->nonce)?->decisionId, 'the pending claim carries the consumed decision handle');
+        self::assertArrayNotHasKey('{kiwi:validator-test}:decision:'.$challenge->nonce, $decisionRedis->strings, 'the mapping is consumed in the SAME atomic operation as the claim');
 
         // REQUEST 2 (takeover after the lease): the new owner's GETDEL is
         // EMPTY (the mapping is already consumed) — the STORED handle still
@@ -2050,6 +2094,112 @@ final class ValidatorTest extends TestCase
         $record = $store->read($challenge->nonce);
         self::assertSame('original-decision', $record?->decisionId, 'the complete record keeps the ORIGINAL decision handle');
         self::assertSame('original-decision', $record?->disposition?->decisionId, 'the completed pass keeps the ORIGINAL decision id — not a new one');
+    }
+
+    public function testChainRequirementReadFailureNeverConsumesTheDecisionMapping(): void
+    {
+        // THE REORDER (the fallible chain requirement lookup runs BEFORE
+        // the nonce -> decision consumption): a chain-backend failure must
+        // NEVER consume the decision handle — the retry re-runs the lookup
+        // with the mapping intact and the final disposition completes with
+        // the ORIGINAL decision id (never a null handle).
+        $decisionRedis = new FakePredisClient();
+        $stack = new RequestStack();
+        $risk = $this->riskStack(1, 'allow', 'allow', false, null, null, $decisionRedis, $stack);
+        [$store] = $this->clockedDispositionStore($this->decisionMap($decisionRedis));
+        $inner = new ArrayChainedChallengeStateStore();
+        $failing = new FailingTerminalChainStore($inner);
+        $chainService = new ChainedChallengeTicketService($failing, self::SECRET, 300, 15, $this->bindingAuthority());
+
+        $challenge = $this->issuer->issue('login', '198.51.100.7');
+        usleep(($challenge->minDurationMs + 10) * 1000);
+        $token = $this->solveToken($challenge->prefix, $challenge->salt, $challenge->targetBits, $challenge->nonce);
+        $decisionRedis->strings['{kiwi:validator-test}:decision:'.$challenge->nonce] = (string) json_encode(['decision_id' => 'decision-D']);
+        $dto = new class {
+            public ?string $captcha = null;
+        };
+        $dto->captcha = $token;
+
+        // The verified challenge carries the server-stamped chain marker
+        // (a stage-2 challenge): with chaining wired the no-reassessment
+        // pass path applies — the ORIGINAL pre-issue decision id becomes
+        // the request's current confirmation target (the contract the
+        // decision handle protects).
+        $metaStore = new \BelConsulting\KiwiCaptchaBundle\SiteVerify\ArraySiteVerifyMetadataStore();
+        $metaStore->store(\KiwiCaptcha\SolutionToken::decode($token)->nonce, new \BelConsulting\KiwiCaptchaBundle\SiteVerify\SiteVerifyMetadata(null, null, 'login', 'marker-chain', 2), 300);
+
+        // The chain-state READ throws (a backend outage): the valid solve
+        // fails closed temporary_unavailable — and the decision mapping is
+        // NOT consumed (the requirement lookup ran BEFORE the atomic
+        // claim-with-decision).
+        $failing->failObligationChainId = true;
+        [$engine] = $this->dispositionEngine($this->verifier, $risk['gateway'], $store, chainTickets: $chainService, bindingAuthority: $this->bindingAuthority(), metadataStore: $metaStore, requestStack: $stack);
+        $meta = $engine->getMetadataFor($dto::class);
+        $meta->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
+        $violations = $engine->validate($dto);
+        self::assertCount(1, $violations);
+        self::assertSame(KiwiCaptcha::TEMPORARY_UNAVAILABLE_ERROR, $violations[0]->getCode(), 'a chain-state read failure is fail-closed temporary_unavailable');
+        self::assertArrayHasKey('{kiwi:validator-test}:decision:'.$challenge->nonce, $decisionRedis->strings, 'the decision mapping is NOT consumed by the failed attempt');
+        self::assertNull($store->read($challenge->nonce), 'no disposition state exists before the claim');
+        self::assertNull($risk['gateway']->currentDecisionId(), 'no decision was confirmed for the failed attempt');
+
+        // The backend recovers: the retry consumes the mapping atomically
+        // with the claim and the final disposition confirms the ORIGINAL
+        // decision id — never a null handle.
+        $failing->failObligationChainId = false;
+        [$engine2] = $this->dispositionEngine($this->verifier, $risk['gateway'], $store, chainTickets: $chainService, bindingAuthority: $this->bindingAuthority(), metadataStore: $metaStore, requestStack: $stack);
+        $meta2 = $engine2->getMetadataFor($dto::class);
+        $meta2->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
+        self::assertCount(0, $engine2->validate($dto), 'the retry passes after the backend recovers');
+        self::assertSame('decision-D', $risk['gateway']->currentDecisionId(), 'the final disposition confirms the ORIGINAL decision id — the mapping survived the outage');
+        self::assertSame('decision-D', $store->read($challenge->nonce)?->decisionId, 'the pending record carries the ORIGINAL decision id');
+        self::assertArrayNotHasKey('{kiwi:validator-test}:decision:'.$challenge->nonce, $decisionRedis->strings, 'the retry consumed the mapping exactly once');
+    }
+
+    public function testArrayClaimConsumesTheDecisionMappingAtomically(): void
+    {
+        // THE ARRAY MIRROR of the atomic claim: the claim GETDELs the
+        // shared decision mapping (at most one winner) and persists the
+        // paired decision id in the pending record in the SAME operation —
+        // exactly like the Redis claim Lua.
+        $decisionRedis = new FakePredisClient();
+        [$store] = $this->clockedDispositionStore($this->decisionMap($decisionRedis));
+
+        $decisionRedis->strings['{kiwi:validator-test}:decision:nonce-atomic'] = (string) json_encode(['decision_id' => 'decision-atomic']);
+        self::assertSame('claimed', $store->claim('nonce-atomic', 'owner-a', 305, '{kiwi:validator-test}:decision:nonce-atomic'));
+        self::assertArrayNotHasKey('{kiwi:validator-test}:decision:nonce-atomic', $decisionRedis->strings, 'the winning claim consumed the mapping');
+        self::assertSame('decision-atomic', $store->read('nonce-atomic')?->decisionId, 'the pending record carries the decision id from the SAME atomic transition');
+
+        // A second mapping for a CONCURRENT claim: the loser is 'pending'
+        // (busy) and its GETDEL comes up empty — exactly one winner.
+        $decisionRedis->strings['{kiwi:validator-test}:decision:nonce-race'] = (string) json_encode(['decision_id' => 'decision-first']);
+        self::assertSame('claimed', $store->claim('nonce-race', 'owner-a', 305, '{kiwi:validator-test}:decision:nonce-race'));
+        $decisionRedis->strings['{kiwi:validator-test}:decision:nonce-race'] = (string) json_encode(['decision_id' => 'decision-second']);
+        self::assertSame('pending', $store->claim('nonce-race', 'owner-b', 305, '{kiwi:validator-test}:decision:nonce-race'), 'the concurrent second claim is busy');
+        self::assertSame('decision-first', $store->read('nonce-race')?->decisionId, 'exactly ONE claim won the GETDEL — the record keeps the first winner\'s handle');
+        self::assertArrayNotHasKey('{kiwi:validator-test}:decision:nonce-race', $decisionRedis->strings, 'the concurrent loser consumed nothing — the mapping is already gone');
+
+        // No decision map wired: the claim with a key behaves as before.
+        [$plain] = $this->clockedDispositionStore();
+        self::assertSame('claimed', $plain->claim('nonce-plain', 'owner-a', 305, '{kiwi:validator-test}:decision:nonce-plain'));
+        self::assertNull($plain->read('nonce-plain')?->decisionId);
+    }
+
+    public function testCorruptDispositionRecordWithChainRequiredMissingExpiryFailsClosed(): void
+    {
+        // A ChainRequired disposition WITHOUT its chain expiry bound is
+        // malformed state — the strict decoder refuses it (fail closed),
+        // never a ticket.
+        $record = $this->completeDispositionRecord();
+        $record['disposition'] = new PostSolveDisposition(PostSolveDispositionKind::ChainRequired, 'decision-1', 'chain-xyz');
+        [$code, $store, $nonce] = $this->validateCorruptDisposition($record);
+        self::assertSame(KiwiCaptcha::TEMPORARY_UNAVAILABLE_ERROR, $code, 'a ChainRequired record without its expiry bound must fail closed as temporary_unavailable — never a ticket');
+        try {
+            $store->read($nonce);
+            self::fail('the strict decoder must refuse a ChainRequired record without its expiry bound');
+        } catch (MalformedPostSolveDispositionException $e) {
+            self::assertStringContainsString('chain expiry', $e->getMessage());
+        }
     }
 
     public function testChainRequiredDispositionSurvivesTokenExpiryForTheRetainedMargin(): void
@@ -3014,6 +3164,9 @@ final class FailingTerminalChainStore implements TransactionalChainedChallengeSt
 
     public bool $failTransactionStepUpRequired = false;
 
+    /** When true, the OBLIGATION read throws — the validator's chain-state read seam. */
+    public bool $failObligationChainId = false;
+
     public function __construct(private readonly ArrayChainedChallengeStateStore $inner)
     {
     }
@@ -3035,6 +3188,10 @@ final class FailingTerminalChainStore implements TransactionalChainedChallengeSt
 
     public function obligationChainId(string $obligationId): ?string
     {
+        if ($this->failObligationChainId) {
+            throw new \RuntimeException('simulated chain-state read outage');
+        }
+
         return $this->inner->obligationChainId($obligationId);
     }
 

@@ -16,20 +16,25 @@ namespace BelConsulting\KiwiCaptchaBundle\Risk;
  * 'complete'), finalize is the atomic pending(me) -> complete transition
  * (never overwrites another owner's work), and every record expires with
  * its TTL (the SHORT FIXED lease is a contention bound, never the record
- * TTL). The pending record carries the ORIGINAL decision handle the
- * first owner consumed (claim's decision_id); a TAKEOVER keeps it — a
- * completed disposition survives the crash of its first owner with the
- * original decision id.
+ * TTL). The claim ATOMICALLY consumes the nonce -> decision mapping when
+ * a shared decision map is wired and the caller passes the mapping's
+ * FULL key (GETDEL semantics, at most one winner) and persists the
+ * paired decision id in the pending record in the SAME transition — the
+ * exact mirror of the Redis claim Lua's KEYS[2] transfer. The pending
+ * record carries the ORIGINAL decision handle the first owner's claim
+ * consumed; a TAKEOVER keeps it — a completed disposition survives the
+ * crash of its first owner with the original decision id.
  *
  * EVERY record is decoded ALL-OR-NOTHING against the strict v1 schema
  * (the identical decode as the Redis store): a missing/malformed field
  * or a state-invariant violation throws
  * {@see MalformedPostSolveDispositionException} — NEVER a defaulted
  * record (an unknown state never becomes pending, a corrupt kind never
- * Pass, a missing disposition never a silent pass). The strict decode
- * runs on the READ path AND before every claim transition: a corrupt
- * server record throws (fail closed), it is NEVER healed into valid
- * state by a takeover.
+ * Pass, a missing disposition never a silent pass, a ChainRequired
+ * record without its chain expiry bound never a ticket). The strict
+ * decode runs on the READ path AND before every claim transition: a
+ * corrupt server record throws (fail closed), it is NEVER healed into
+ * valid state by a takeover.
  */
 final class ArrayPostSolveDispositionStore implements PostSolveDispositionStore
 {
@@ -45,24 +50,39 @@ final class ArrayPostSolveDispositionStore implements PostSolveDispositionStore
     private array $records = [];
 
     /**
-     * @param \Closure|null $now     test seam: returns the current Unix
-     *                               seconds (defaults to time())
-     * @param int           $ttlSecs the RECORD TTL (the extension wires
-     *                               Config::MAX_TTL_SECS + ttl margin);
-     *                               0 = use the per-call claim TTL
+     * @param \Closure|null $now         test seam: returns the current Unix
+     *                                   seconds (defaults to time())
+     * @param int           $ttlSecs     the RECORD TTL (the extension wires
+     *                                   Config::MAX_TTL_SECS + ttl margin);
+     *                                   0 = use the per-call claim TTL
+     * @param \ArrayAccess|null $decisionMap the SHARED nonce -> decision
+     *                                   mapping, keyed by the FULL decision
+     *                                   key ({kiwi:<ns>}:decision:<nonce>) —
+     *                                   the test/dev mirror of the gateway's
+     *                                   decision Redis: the claim CONSUMES
+     *                                   the mapping (GETDEL semantics) inside
+     *                                   the same operation as the claim.
+     *                                   null = no decision transfer (the
+     *                                   records carry null)
      */
     public function __construct(
         private readonly ?\Closure $now = null,
         private readonly int $ttlSecs = 0,
+        private readonly ?\ArrayAccess $decisionMap = null,
     ) {
     }
 
-    public function claim(string $nonce, string $owner, int $ttlSeconds, ?string $decisionId = null): string
+    public function claim(string $nonce, string $owner, int $ttlSeconds, ?string $decisionKey = null): string
     {
         $now = $this->now();
         if ($this->expired($nonce, $now)) {
             unset($this->records[$nonce]);
         }
+        // ATOMIC decision transfer (the mirror of the Redis claim Lua's
+        // KEYS[2] GETDEL): the nonce -> decision mapping is consumed in the
+        // SAME operation as the claim — at most one winner — and the paired
+        // decision id is persisted in the pending record below.
+        $decisionId = $this->consumeDecision($decisionKey);
         $existing = $this->records[$nonce] ?? null;
         if ($existing !== null) {
             // STRICT PRE-READ: a corrupt record throws (fail closed) — it
@@ -101,6 +121,27 @@ final class ArrayPostSolveDispositionStore implements PostSolveDispositionStore
         $this->records[$nonce]['disposition'] = null;
 
         return 'taken_over';
+    }
+
+    /**
+     * GETDEL the nonce -> decision mapping (mirror of the Redis claim
+     * Lua): returns the paired decision id, or null when no mapping is
+     * wired/keyed/decodable. The mapping is REMOVED on consumption — at
+     * most one claim wins, exactly like the gateway's GETDEL.
+     */
+    private function consumeDecision(?string $decisionKey): ?string
+    {
+        if ($decisionKey === null || $this->decisionMap === null || !$this->decisionMap->offsetExists($decisionKey)) {
+            return null;
+        }
+        $raw = $this->decisionMap[$decisionKey];
+        $this->decisionMap->offsetUnset($decisionKey);
+        if (!\is_string($raw) || $raw === '') {
+            return null;
+        }
+        $data = json_decode($raw, true);
+
+        return \is_array($data) && \is_string($data['decision_id'] ?? null) ? $data['decision_id'] : null;
     }
 
     public function read(string $nonce): ?PostSolveDispositionRecord
@@ -171,8 +212,10 @@ final class ArrayPostSolveDispositionStore implements PostSolveDispositionStore
      * (pending|complete — nothing else); a non-empty string owner and an
      * integer lease deadline REQUIRED in pending and NULL in complete;
      * the disposition REQUIRED (a valid typed disposition with a
-     * well-shaped decision id / chain id) in complete and NULL in
-     * pending; a non-empty string-or-null decision handle in both states.
+     * well-shaped decision id / chain id, plus the chain expiry integer
+     * REQUIRED on the ChainRequired kind and NULL outside it) in complete
+     * and NULL in pending; a non-empty string-or-null decision handle in
+     * both states.
      *
      * @param array<string, mixed> $record
      *
@@ -220,6 +263,18 @@ final class ArrayPostSolveDispositionStore implements PostSolveDispositionStore
             }
             if ($disposition->kind !== PostSolveDispositionKind::ChainRequired && $disposition->chainId !== null) {
                 throw new MalformedPostSolveDispositionException('post-solve disposition record chain_id must be null outside the ChainRequired kind');
+            }
+            // The ChainRequired record carries its chain's ORIGINAL expiry
+            // bound (the signing NEVER re-consults the obligation): the
+            // bound is REQUIRED on the kind and NULL outside it — a
+            // ChainRequired record without it is malformed state, never a
+            // ticket.
+            if ($disposition->kind === PostSolveDispositionKind::ChainRequired) {
+                if (!\is_int($disposition->chainExpiresAt) || $disposition->chainExpiresAt <= 0) {
+                    throw new MalformedPostSolveDispositionException('a ChainRequired disposition record must carry a positive integer chain expiry');
+                }
+            } elseif ($disposition->chainExpiresAt !== null) {
+                throw new MalformedPostSolveDispositionException('post-solve disposition record chain expiry must be null outside the ChainRequired kind');
             }
         }
         $decisionId = $record['decisionId'] ?? null;

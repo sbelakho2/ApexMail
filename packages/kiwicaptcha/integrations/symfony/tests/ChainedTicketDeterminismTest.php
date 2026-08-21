@@ -123,4 +123,39 @@ final class ChainedTicketDeterminismTest extends TestCase
         // (chainId, expiresAt) reproduces the convenience ticket exactly.
         self::assertSame($ticket, $service->ticketFor((string) $payload['chainId'], (int) $payload['expiresAt']), 'the convenience ticket is the deterministic ticket of the requirement\'s (chainId, expiry) pair');
     }
+
+    public function testRequirementForRetainsTheOriginalExpiryAfterVerification(): void
+    {
+        // THE VERIFIED-CHAIN LIVENESS READ the validator's CHAIN_REQUIRED
+        // signing relies on: after the chain VERIFIES (its obligation is
+        // cleared) the chain RECORD is retained with its ORIGINAL expiry —
+        // requirementFor (the by-chain-id read, never the obligation
+        // lookup) still resolves it, so a completed chain keeps re-signing
+        // the deterministic ticket from the disposition-carried bound.
+        $clock = 1000;
+        ['store' => $store, 'service' => $service] = $this->pinnedService($clock);
+        $expiryX = $clock + 300;
+        $nonce = $this->nonce();
+
+        $requirement = $service->requireStage2($nonce, 'login', 'txn-alpha', 1, RiskAction::Argon32, $expiryX);
+        $ticket = $service->ticketFor($requirement->chainId, $requirement->expiresAt);
+        self::assertIsString($ticket);
+
+        // The chain issues and VERIFIES (the obligation is deleted — the
+        // findOpenRequirement lookup now finds nothing).
+        $stage2Nonce = base64_encode(hash('sha256', 'stage2', true));
+        self::assertSame(\BelConsulting\KiwiCaptchaBundle\Risk\ChainReservationResult::Available, $service->reserveStage2($requirement->chainId, 'owner-a'));
+        self::assertSame(\BelConsulting\KiwiCaptchaBundle\Risk\ChainIssuedResult::IssuedNew, $service->markIssued($requirement->chainId, 'owner-a', $stage2Nonce));
+        self::assertSame(\BelConsulting\KiwiCaptchaBundle\Risk\ChainVerifiedResult::VerifiedNew, $service->markVerified($requirement->chainId, $stage2Nonce));
+        self::assertNull($service->findOpenRequirement('login', 'txn-alpha', 1), 'the verified transition cleared the obligation');
+
+        // The chain RECORD survives with the ORIGINAL expiry: the
+        // by-chain-id read resolves the requirement and the deterministic
+        // ticket is byte-identical.
+        $retained = $service->requirementFor($requirement->chainId);
+        self::assertNotNull($retained, 'the verified chain record is retained');
+        self::assertSame('verified', $retained->state);
+        self::assertSame($expiryX, $retained->expiresAt, 'the retained record keeps the ORIGINAL expiry');
+        self::assertSame($ticket, $service->ticketFor($requirement->chainId, $retained->expiresAt), 'the completed chain re-signs the byte-identical ticket from its ORIGINAL expiry');
+    }
 }

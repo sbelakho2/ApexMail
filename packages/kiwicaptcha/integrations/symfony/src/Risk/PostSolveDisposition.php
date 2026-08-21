@@ -18,8 +18,15 @@ namespace BelConsulting\KiwiCaptchaBundle\Risk;
  * The disposition carries ONLY the final disposition itself — kind,
  * optional decision id (the post-solve assessment's decision handle, or
  * the consumed original pre-issue decision id on the plain pass path) and
- * optional chain id (CHAIN_REQUIRED). Raw risk vectors, fingerprints and
- * descriptors are NEVER persisted.
+ * the optional chain binding of a CHAIN_REQUIRED disposition: the exact
+ * chain id AND the chain's ORIGINAL server-held expiry
+ * (chainExpiresAt — persisted as chain_expires_at). The expiry is bound
+ * to the disposition's exact chain at finalize time, so the ticket
+ * signing NEVER consults the current obligation again: a concurrently
+ * opened chain of the same transaction can never leak its expiry into
+ * this disposition's ticket, and a completed chain (record retained)
+ * keeps re-signing its deterministic ticket. Raw risk vectors,
+ * fingerprints and descriptors are NEVER persisted.
  */
 final readonly class PostSolveDisposition
 {
@@ -27,9 +34,16 @@ final readonly class PostSolveDisposition
         public PostSolveDispositionKind $kind,
         public ?string $decisionId = null,
         public ?string $chainId = null,
+        public ?int $chainExpiresAt = null,
     ) {
         if ($kind === PostSolveDispositionKind::ChainRequired && ($chainId === null || $chainId === '')) {
             throw new \InvalidArgumentException('a ChainRequired disposition must carry a chain id');
+        }
+        if ($kind === PostSolveDispositionKind::ChainRequired && $chainExpiresAt !== null && $chainExpiresAt <= 0) {
+            throw new \InvalidArgumentException('a ChainRequired disposition chain expiry must be a positive unix bound');
+        }
+        if ($kind !== PostSolveDispositionKind::ChainRequired && $chainExpiresAt !== null) {
+            throw new \InvalidArgumentException('a chain expiry is only meaningful on the ChainRequired kind');
         }
     }
 }

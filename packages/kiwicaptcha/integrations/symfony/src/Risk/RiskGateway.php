@@ -879,6 +879,19 @@ final class RiskGateway
     }
 
     /**
+     * The FULL nonce -> decision mapping key ({kiwi:<ns>}:decision:<nonce>)
+     * — the same hash-tagged key the gateway's decision handle lives
+     * under. READ-ONLY accessor: the disposition store's claim consumes
+     * the mapping ATOMICALLY with the pending record write (GETDEL inside
+     * the claim's Lua), so a fallible chain-state read before the claim
+     * can never lose the original handle.
+     */
+    public function decisionKeyFor(string $nonce): string
+    {
+        return $this->decisionKeyPrefix.$nonce;
+    }
+
+    /**
      * Pair a challenge nonce to its decision id in the risk Redis:
      * {kiwi:<ns>}:decision:<nonce> holds the JSON string {"decision_id": ...}
      * with the risk.nonce_to_decision_ttl_secs TTL (default 300 s) —
