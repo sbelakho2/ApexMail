@@ -8,7 +8,9 @@ use ddos_protection::{
     bot_detection::SessionBehavior,
     config::ProtectorConfig,
     decision::ProtectionDecision,
-    middleware::{evaluate_request, extract_client_ip, RequestContextBuilder},
+    middleware::{
+        evaluate_request, extract_client_ip_trusted, RequestContextBuilder, TrustedProxyList,
+    },
     reputation::ReputationScore,
     smtp_protection::*,
     DdosProtector, RequestContext,
@@ -108,8 +110,17 @@ async fn test_suspicious_fingerprint_degrades_reputation() {
         let decision = protector.evaluate(&ctx).await;
 
         if idx < 4 {
+            // NOTE: updated for the challenge-system fix. The reputation
+            // challenge path was previously dead code (the ChallengeManager
+            // was never initialized), so mid-sequence requests were always
+            // Allow. With the manager wired up, requests below the
+            // challenge threshold now legitimately receive a challenge —
+            // Allow OR Challenge are both acceptable pre-block outcomes.
             assert!(
-                matches!(decision, ProtectionDecision::Allow),
+                matches!(
+                    decision,
+                    ProtectionDecision::Allow | ProtectionDecision::Challenge(_)
+                ),
                 "Request #{} should still be pre-block threshold, got: {:?}",
                 idx + 1,
                 decision
@@ -369,12 +380,16 @@ async fn test_ip_extraction_feeds_into_ddos_pipeline() {
     let config = ProtectorConfig::default();
     let protector = DdosProtector::new(config).await.unwrap();
 
-    // Simulate proxy setup:real IP in XFF
-    let real_ip = extract_client_ip(
+    // Simulate proxy setup:our peer 10.0.0.1 is a configured trusted proxy
+    // and appended the client's IP to XFF. Extraction must select the
+    // rightmost UNTRUSTED entry (the client), never a spoofed leftmost one.
+    let trusted = TrustedProxyList::parse(["10.0.0.0/8"]);
+    let real_ip = extract_client_ip_trusted(
         None,
         Some("203.0.113.50, 10.0.0.1"),
         None,
         "10.0.0.1".parse().unwrap(),
+        &trusted,
     );
 
     assert_eq!(real_ip, "203.0.113.50".parse::<IpAddr>().unwrap());

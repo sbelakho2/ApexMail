@@ -224,6 +224,11 @@ pub struct KeyedConfig {
     pub max_keys: usize,
     /// Cleanup interval for expired entries.
     pub cleanup_interval_secs: u64,
+    /// Cooldown during which a key that was LRU-evicted re-enters with an
+    /// EMPTY burst budget (prevents budget-reset abuse via key rotation).
+    /// Zero uses the crate default (60s).
+    #[serde(default)]
+    pub eviction_tombstone_ttl_secs: u64,
 }
 
 impl Default for KeyedConfig {
@@ -232,6 +237,18 @@ impl Default for KeyedConfig {
             per_key: RateLimitConfig::new(100),
             max_keys: 10_000,
             cleanup_interval_secs: 60,
+            eviction_tombstone_ttl_secs: 60,
+        }
+    }
+}
+
+impl KeyedConfig {
+    /// Effective tombstone cooldown (default 60s when unset/zero).
+    pub fn effective_tombstone_ttl(&self) -> std::time::Duration {
+        if self.eviction_tombstone_ttl_secs == 0 {
+            std::time::Duration::from_secs(60)
+        } else {
+            std::time::Duration::from_secs(self.eviction_tombstone_ttl_secs)
         }
     }
 }
@@ -244,6 +261,7 @@ impl KeyedConfig {
     /// |----------|---------|
     /// | `RATE_LIMITER_MAX_KEYS` | `10000` |
     /// | `RATE_LIMITER_CLEANUP_SECS` | `60` |
+    /// | `RATE_LIMITER_TOMBSTONE_TTL_SECS` | `60` |
     pub fn from_env() -> Self {
         let max_keys = env::var("RATE_LIMITER_MAX_KEYS")
             .ok()
@@ -255,10 +273,16 @@ impl KeyedConfig {
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(60);
 
+        let eviction_tombstone_ttl_secs = env::var("RATE_LIMITER_TOMBSTONE_TTL_SECS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(60);
+
         Self {
             per_key: RateLimitConfig::from_env(),
             max_keys,
             cleanup_interval_secs,
+            eviction_tombstone_ttl_secs,
         }
     }
 }

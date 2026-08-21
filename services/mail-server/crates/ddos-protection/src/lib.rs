@@ -78,7 +78,8 @@ pub use config::ProtectorConfig;
 pub use cost_based::{CostBasedLimiter, RequestCost};
 pub use decision::ProtectionDecision;
 pub use middleware::{
-    evaluate_request, extract_client_ip, MiddlewareAction, RequestContextBuilder,
+    evaluate_request, extract_client_ip, extract_client_ip_trusted, MiddlewareAction,
+    RequestContextBuilder, TrustedProxyList,
 };
 pub use reputation::ReputationScore;
 pub use session::SessionTracker;
@@ -192,7 +193,13 @@ impl DdosProtector {
             #[cfg(feature = "ml")]
             anomaly_detector: None,
             #[cfg(feature = "challenges")]
-            challenge_manager: None,
+            // Fix I: initialize the ChallengeManager (random per-process
+            // secret) so challenges are issued with fresh random data and
+            // verified through the replay-cached implementation. It was
+            // previously always `None`, making the manager dead code.
+            challenge_manager: Some(Arc::new(challenges::ChallengeManager::new(
+                generate_challenge_secret(),
+            ))),
             #[cfg(feature = "coordinator")]
             threat_intel: None,
         };
@@ -318,8 +325,11 @@ impl DdosProtector {
             let anomaly_score = detector.anomaly_score(&features);
 
             if let Some(metric) = metrics::ANOMALY_SCORE.as_ref() {
+                // Fix H: normalize the path into a bounded route class —
+                // raw paths with attacker-controlled IDs/UUIDs created a
+                // Prometheus cardinality bomb.
                 metric
-                    .with_label_values(&[&ctx.path])
+                    .with_label_values(&[&metrics::endpoint_label(&ctx.path)])
                     .observe(anomaly_score);
             }
 
@@ -332,34 +342,42 @@ impl DdosProtector {
                 // configured baseline difficulty.
                 #[cfg(feature = "challenges")]
                 if let Some(ref cm) = self.challenge_manager {
-                    let challenge = cm.select_challenge(anomaly_score);
-                    // Adaptive PoW:scale difficulty based on anomaly severity.
-                    // Base difficulty from config (e.g. 16 bits). Under heavy
-                    // attack (anomaly_score near 1.0), add up to 8 extra bits.
-                    let attack_multiplier = ((anomaly_score - self.config.anomaly_threshold)
-                        / (1.0 - self.config.anomaly_threshold))
-                        .clamp(0.0, 1.0);
-                    let extra_bits = (attack_multiplier * 8.0) as u8;
-                    let adaptive_difficulty = self
-                        .config
-                        .pow_difficulty
-                        .saturating_add(extra_bits)
-                        .min(32); // Cap at 32 bits
-                    let expected_time = 1000_u64
-                        .saturating_mul(1u64.checked_shl(extra_bits.min(10) as u32).unwrap_or(1024))
-                        .min(u32::MAX as u64) as u32;
-                    return ProtectionDecision::Challenge(crate::decision::Challenge::Pow(
-                        crate::decision::PowChallenge {
-                            id: uuid::Uuid::new_v4().to_string(),
-                            data: "challenge".to_string(),
-                            difficulty: adaptive_difficulty,
-                            expires_at: std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .map(|d| d.as_secs() + 300)
-                                .unwrap_or(0),
-                            expected_time_ms: expected_time,
-                        },
-                    ));
+                    // Fix I: issue through the ChallengeManager so the
+                    // challenge data is random per issuance (the previous
+                    // constant prefix `"challenge"` made solved nonces
+                    // replayable forever) and so verification goes through
+                    // the manager's replay cache.
+                    if let challenges::ChallengeType::ProofOfWork(pow) = cm.issue_pow_challenge() {
+                        // Adaptive PoW:scale difficulty based on anomaly severity.
+                        // Base difficulty from config (e.g. 16 bits). Under heavy
+                        // attack (anomaly_score near 1.0), add up to 8 extra bits.
+                        let attack_multiplier = ((anomaly_score - self.config.anomaly_threshold)
+                            / (1.0 - self.config.anomaly_threshold))
+                            .clamp(0.0, 1.0);
+                        let extra_bits = (attack_multiplier * 8.0) as u8;
+                        let adaptive_difficulty = self
+                            .config
+                            .pow_difficulty
+                            .saturating_add(extra_bits)
+                            .min(32); // Cap at 32 bits
+                        let expected_time = 1000_u64
+                            .saturating_mul(
+                                1u64.checked_shl(extra_bits.min(10) as u32).unwrap_or(1024),
+                            )
+                            .min(u32::MAX as u64) as u32;
+                        return ProtectionDecision::Challenge(crate::decision::Challenge::Pow(
+                            crate::decision::PowChallenge {
+                                id: pow.challenge_id,
+                                data: pow.prefix,
+                                difficulty: adaptive_difficulty,
+                                expires_at: std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .map(|d| d.as_secs() + 300)
+                                    .unwrap_or(0),
+                                expected_time_ms: expected_time,
+                            },
+                        ));
+                    }
                 }
             }
         }
@@ -379,7 +397,7 @@ impl DdosProtector {
 
         #[cfg(feature = "challenges")]
         if reputation.score < self.config.challenge_threshold {
-            if let Some(ref _cm) = self.challenge_manager {
+            if let Some(ref cm) = self.challenge_manager {
                 // Convert reputation to risk score (lower reputation = higher risk)
                 let risk_score = 1.0 - (reputation.score as f64 / 100.0);
                 if risk_score > 0.3 {
@@ -388,18 +406,24 @@ impl DdosProtector {
                             .with_label_values(&["challenged", "reputation"])
                             .inc();
                     }
-                    return ProtectionDecision::Challenge(crate::decision::Challenge::Pow(
-                        crate::decision::PowChallenge {
-                            id: uuid::Uuid::new_v4().to_string(),
-                            data: format!("rep_challenge:{}", ctx.ip),
-                            difficulty: self.config.pow_difficulty,
-                            expires_at: std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .map(|d| d.as_secs() + 300)
-                                .unwrap_or(0),
-                            expected_time_ms: 1000,
-                        },
-                    ));
+                    // Fix I: issue through the ChallengeManager (random
+                    // per-issuance data). The previous per-IP constant
+                    // prefix `rep_challenge:<ip>` allowed one solved nonce
+                    // to be replayed for every future request from that IP.
+                    if let challenges::ChallengeType::ProofOfWork(pow) = cm.issue_pow_challenge() {
+                        return ProtectionDecision::Challenge(crate::decision::Challenge::Pow(
+                            crate::decision::PowChallenge {
+                                id: pow.challenge_id,
+                                data: pow.prefix,
+                                difficulty: self.config.pow_difficulty,
+                                expires_at: std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .map(|d| d.as_secs() + 300)
+                                    .unwrap_or(0),
+                                expected_time_ms: 1000,
+                            },
+                        ));
+                    }
                 }
             }
         }
@@ -506,14 +530,69 @@ impl DdosProtector {
 
     /// Get or create reputation for an IP
     fn get_or_create_reputation(&self, ip: &IpAddr) -> ReputationScore {
-        self.reputation_db.entry(*ip).or_default().clone()
+        if !self.reputation_db.contains_key(ip) {
+            self.enforce_reputation_capacity();
+        }
+        let mut entry = self.reputation_db.entry(*ip).or_default();
+        entry.last_seen = std::time::Instant::now();
+        entry.clone()
     }
 
     /// Decrease reputation score for an IP
     fn decrease_reputation(&self, ip: &IpAddr, amount: u8) {
+        if !self.reputation_db.contains_key(ip) {
+            self.enforce_reputation_capacity();
+        }
         let mut entry = self.reputation_db.entry(*ip).or_default();
+        entry.last_seen = std::time::Instant::now();
         entry.score = entry.score.saturating_sub(amount);
         debug!(%ip, new_score = entry.score, "Reputation decreased");
+    }
+
+    /// Number of tracked reputation entries (observability / tests).
+    pub fn reputation_entry_count(&self) -> usize {
+        self.reputation_db.len()
+    }
+
+    /// Enforce the hard capacity cap on the reputation table (fix G).
+    ///
+    /// The table previously grew without bound: entries with a non-neutral
+    /// score were NEVER evicted, so a spoofed-IP flood (or a large botnet)
+    /// allocated memory forever. When the cap is reached, the least valuable
+    /// entries (non-trusted, oldest first) are evicted before a new insert;
+    /// if everything is protected, arbitrary entries are dropped so the cap
+    /// always holds.
+    fn enforce_reputation_capacity(&self) {
+        let cap = self.config.max_reputation_entries;
+        if cap == 0 || self.reputation_db.len() < cap {
+            return;
+        }
+        // Evict a 10% batch so the scan is amortized under floods.
+        let target = cap.saturating_sub(cap / 10).max(1);
+        let mut candidates: Vec<(IpAddr, std::time::Instant)> = self
+            .reputation_db
+            .iter()
+            .filter(|entry| !entry.value().is_trusted)
+            .map(|entry| (*entry.key(), entry.value().first_seen))
+            .collect();
+        candidates.sort_by_key(|(_, first_seen)| *first_seen);
+        let excess = self.reputation_db.len().saturating_sub(target);
+        for (ip, _) in candidates.into_iter().take(excess) {
+            self.reputation_db.remove(&ip);
+        }
+        // Hard guarantee: even if every remaining entry is trusted, the
+        // table must not exceed the cap.
+        if self.reputation_db.len() > cap {
+            let overflow: Vec<IpAddr> = self
+                .reputation_db
+                .iter()
+                .take(self.reputation_db.len() - cap)
+                .map(|entry| *entry.key())
+                .collect();
+            for ip in overflow {
+                self.reputation_db.remove(&ip);
+            }
+        }
     }
 
     /// Check if a TLS fingerprint is suspicious.
@@ -549,9 +628,30 @@ impl DdosProtector {
         self.attack_state.read().clone()
     }
 
+    /// Verify a proof-of-work challenge response with replay protection.
+    ///
+    /// Fix I: routes through the [`challenges::ChallengeManager`] so a
+    /// solved nonce is rejected on replay (UsedResponseCache) and the
+    /// verification is audited.
+    #[cfg(feature = "challenges")]
+    pub fn verify_pow(
+        &self,
+        challenge: &crate::decision::PowChallenge,
+        nonce: u64,
+        client_fingerprint: Option<&str>,
+    ) -> challenges::ChallengeVerifyResult {
+        match &self.challenge_manager {
+            Some(cm) => cm.verify_decision_pow(challenge, nonce, client_fingerprint),
+            None => challenges::ChallengeVerifyResult {
+                valid: false,
+                replayed: false,
+                expired: true,
+            },
+        }
+    }
+
     /// Background cleanup task
-    pub async fn run_cleanup_loop(&self, interval: Duration) {
-        let mut ticker = tokio::time::interval(interval);
+    pub async fn run_cleanup_loop(&self, interval: Duration) {        let mut ticker = tokio::time::interval(interval);
 
         loop {
             ticker.tick().await;
@@ -575,10 +675,15 @@ impl DdosProtector {
             // Cleanup old sessions
             self.session_tracker.cleanup(now);
 
-            // Decay reputation scores toward neutral and evict stale entries
-            // Bug E-104 fix:Evict entries that have been at neutral for >1 hour
-            // to prevent unbounded memory growth from ephemeral IPs
-            let eviction_threshold = Duration::from_secs(3600);
+            // Decay reputation scores toward neutral and evict stale entries.
+            // Fix G: entries are ALSO evicted by last-seen regardless of
+            // score — previously any IP with a non-neutral score was pinned
+            // in the table forever (unbounded memory under IP floods).
+            let eviction_threshold = if self.config.reputation_stale_after.is_zero() {
+                Duration::from_secs(3600)
+            } else {
+                self.config.reputation_stale_after
+            };
             self.reputation_db.retain(|_ip, entry| {
                 // Decay toward neutral
                 if entry.score < 50 {
@@ -587,7 +692,10 @@ impl DdosProtector {
                     entry.score = (entry.score - 1).max(50);
                 }
 
-                // Evict if:neutral score AND no significant activity AND old enough
+                // Evict if:not seen within the stale window (regardless of
+                // score) OR neutral+inactive+old (previous policy).
+                let is_stale = entry.last_seen.elapsed() > eviction_threshold;
+
                 let is_neutral = entry.score == 50;
                 let is_inactive = entry.total_requests < 10
                     && entry.challenges_passed == 0
@@ -598,9 +706,11 @@ impl DdosProtector {
                     && !entry.is_flagged;
                 let is_old = entry.first_seen.elapsed() > eviction_threshold;
 
-                // Keep entry if it's NOT evictable
-                !(is_neutral && is_inactive && is_old)
+                !is_stale && !(is_neutral && is_inactive && is_old)
             });
+
+            // Periodic enforcement of the hard capacity cap as well.
+            self.enforce_reputation_capacity();
 
             info!(
                 blocked_ips = self.blocklist.len(),
@@ -612,10 +722,28 @@ impl DdosProtector {
     }
 }
 
+/// Generate a random per-process challenge signing secret (fix I).
+#[cfg(feature = "challenges")]
+fn generate_challenge_secret() -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(uuid::Uuid::new_v4().as_bytes());
+    hasher.update(uuid::Uuid::new_v4().as_bytes());
+    hasher.update(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos().to_le_bytes())
+            .unwrap_or_default(),
+    );
+    let digest = hasher.finalize();
+    let mut secret = [0u8; 32];
+    secret.copy_from_slice(&digest);
+    secret
+}
+
 /// DDoS protection errors
 #[derive(Debug, thiserror::Error)]
-pub enum DdosError {
-    /// Configuration error
+pub enum DdosError {    /// Configuration error
     #[error("Configuration error: {0}")]
     Config(String),
 
@@ -768,5 +896,160 @@ mod tests {
         tokio::task::yield_now().await;
 
         assert!(!protector.blocklist.contains_key(&ip));
+    }
+
+    // ── Fix G:bounded tracking tables ─────────────────────────────
+
+    #[tokio::test]
+    async fn test_reputation_table_bounded_under_spoofed_ip_flood() {
+        // Insert 2× cap distinct IPs through evaluate(); the reputation
+        // table must never exceed the configured cap.
+        let config = ProtectorConfig {
+            max_reputation_entries: 100,
+            max_sessions: 100,
+            ..ProtectorConfig::default()
+        };
+        let protector = DdosProtector::new(config)
+            .await
+            .expect("test should succeed");
+
+        for i in 0..250u32 {
+            let ip: IpAddr = format!("198.18.{}.{}", (i >> 8) & 0xFF, i & 0xFF)
+                .parse()
+                .expect("valid IPv4");
+            let ctx = RequestContext {
+                ip,
+                path: "/flood".to_string(),
+                method: "GET".to_string(),
+                tls_fingerprint: None,
+                h2_fingerprint: None,
+                user_agent: None,
+                body_size: 0,
+                tenant_id: None,
+                api_key_id: None,
+            };
+            let _ = protector.evaluate(&ctx).await;
+            assert!(
+                protector.reputation_entry_count() <= 100,
+                "reputation table exceeded cap at iteration {i}: {}",
+                protector.reputation_entry_count()
+            );
+        }
+        assert!(protector.reputation_entry_count() <= 100);
+        assert!(protector.session_tracker.active_count() <= 100);
+    }
+
+    #[tokio::test]
+    async fn test_reputation_capacity_keeps_trusted_entries_longest() {
+        // Trusted entries are evicted last when the cap is enforced.
+        let config = ProtectorConfig {
+            max_reputation_entries: 10,
+            ..ProtectorConfig::default()
+        };
+        let protector = DdosProtector::new(config)
+            .await
+            .expect("test should succeed");
+
+        let trusted_ip: IpAddr = "203.0.113.1".parse().expect("hardcoded test IP");
+        {
+            let mut entry = protector.reputation_db.entry(trusted_ip).or_default();
+            entry.is_trusted = true;
+            entry.score = 90;
+        }
+
+        for i in 0..50u32 {
+            let ip: IpAddr = format!("198.19.0.{i}").parse().expect("valid IPv4");
+            let ctx = RequestContext {
+                ip,
+                path: "/flood".to_string(),
+                method: "GET".to_string(),
+                tls_fingerprint: None,
+                h2_fingerprint: None,
+                user_agent: None,
+                body_size: 0,
+                tenant_id: None,
+                api_key_id: None,
+            };
+            let _ = protector.evaluate(&ctx).await;
+        }
+
+        assert!(
+            protector.reputation_db.contains_key(&trusted_ip),
+            "trusted entry must survive capacity eviction"
+        );
+        assert!(protector.reputation_entry_count() <= 10);
+    }
+
+    // ── Fix I:challenge issuance/verification hardening ────────────
+
+    #[cfg(feature = "challenges")]
+    #[tokio::test]
+    async fn test_verify_pow_replay_rejected_through_protector() {
+        let protector = DdosProtector::new(ProtectorConfig::default())
+            .await
+            .expect("test should succeed");
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0)
+            + 300;
+        let challenge = crate::decision::PowChallenge {
+            id: "test-pow".to_string(),
+            data: "random-prefix".to_string(),
+            difficulty: 0,
+            expires_at: now,
+            expected_time_ms: 1,
+        };
+
+        let first = protector.verify_pow(&challenge, 7, Some("203.0.113.4"));
+        assert!(first.valid, "first submission must pass");
+        let replay = protector.verify_pow(&challenge, 7, Some("203.0.113.4"));
+        assert!(
+            !replay.valid && replay.replayed,
+            "replayed nonce must be rejected via the replay cache"
+        );
+    }
+
+    #[cfg(feature = "challenges")]
+    #[tokio::test]
+    async fn test_pow_challenges_differ_between_issuances() {
+        use crate::decision::Challenge;
+
+        // Force the reputation-challenge path (score 50 < threshold 90).
+        let config = ProtectorConfig {
+            challenge_threshold: 90,
+            ..ProtectorConfig::default()
+        };
+        let protector = DdosProtector::new(config)
+            .await
+            .expect("test should succeed");
+
+        let ctx = RequestContext {
+            ip: "203.0.113.8".parse().expect("hardcoded test IP"),
+            path: "/".to_string(),
+            method: "GET".to_string(),
+            tls_fingerprint: None,
+            h2_fingerprint: None,
+            user_agent: None,
+            body_size: 0,
+            tenant_id: None,
+            api_key_id: None,
+        };
+
+        let c1 = match protector.evaluate(&ctx).await {
+            ProtectionDecision::Challenge(Challenge::Pow(c)) => c,
+            other => panic!("expected PoW challenge, got {other:?}"),
+        };
+        let c2 = match protector.evaluate(&ctx).await {
+            ProtectionDecision::Challenge(Challenge::Pow(c)) => c,
+            other => panic!("expected PoW challenge, got {other:?}"),
+        };
+        assert_ne!(c1.data, c2.data, "each issuance must use fresh random data");
+        assert_ne!(c1.id, c2.id);
+        assert!(
+            !c1.data.starts_with("rep_challenge:"),
+            "per-IP constant prefixes are replayable and must not be used"
+        );
     }
 }

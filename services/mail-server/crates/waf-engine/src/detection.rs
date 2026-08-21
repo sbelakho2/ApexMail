@@ -79,6 +79,11 @@ pub fn analyze_command_injection(input: &str, location: MatchLocation) -> Vec<Ru
     let lower = input.to_lowercase();
     let normalized_shell = lower
         .replace(['\'', '"'], "")
+        // Backslash obfuscation: shells treat `\c` as `c`, so `c\at` runs
+        // `cat`. Stripping backslashes before matching closes the
+        // `;c\at /etc/passwd` bypass (they carry no meaning as separators
+        // in shell command position at this layer).
+        .replace('\\', "")
         .replace("${ifs}", " ")
         .replace("$ifs", " ")
         .replace("<>", " ")
@@ -741,6 +746,22 @@ mod tests {
     fn test_command_injection() {
         let r = analyze_command_injection("; cat /etc/passwd", MatchLocation::Body);
         assert!(r.iter().any(|m| m.rule_id == 932100));
+    }
+
+    #[test]
+    fn test_command_injection_backslash_obfuscation() {
+        // `c\at` is `cat` to the shell; backslashes are stripped before
+        // command matching.
+        let r = analyze_command_injection(";c\\at /etc/passwd", MatchLocation::Body);
+        assert!(
+            r.iter().any(|m| m.rule_id == 932100),
+            "`;c\\at /etc/passwd` must fire 932100"
+        );
+        let r2 = analyze_command_injection("|w\\hoami", MatchLocation::Body);
+        assert!(
+            r2.iter().any(|m| m.rule_id == 932100),
+            "`|w\\hoami` must fire 932100"
+        );
     }
 
     #[test]

@@ -195,6 +195,13 @@ impl SessionTracker {
             api_key_id: ctx.api_key_id.clone(),
         };
 
+        // Capacity guard BEFORE inserting a new key: previously inserts were
+        // unchecked between cleanup ticks, so a spoofed-IP flood could grow
+        // the table (4 × 100-entry deques per (IP, key)) without bound.
+        if !self.sessions.contains_key(&key) {
+            self.enforce_capacity();
+        }
+
         let endpoint_hash = hash_endpoint(&ctx.path);
 
         let session = self
@@ -276,25 +283,34 @@ impl SessionTracker {
             s.idle_time() < self.window
         });
 
-        // Evict if over capacity
-        if self.sessions.len() > self.max_sessions {
-            // Remove oldest sessions
-            let mut to_remove: Vec<SessionKey> = Vec::new();
-            let target = self.max_sessions * 9 / 10; // Remove 10%
+        // Enforce the hard capacity cap after idle removal.
+        self.enforce_capacity();
+    }
 
-            for entry in self.sessions.iter() {
-                if self.sessions.len() <= target {
-                    break;
-                }
+    /// Enforce the session-table capacity cap (fix G).
+    ///
+    /// Evicts a 10% batch of the least-recently-active sessions down to the
+    /// target size. Eviction no longer requires sessions to be idle for 60s
+    /// — an active flood at capacity previously removed nothing and let the
+    /// table grow without bound between cleanup ticks.
+    fn enforce_capacity(&self) {
+        if self.max_sessions == 0 || self.sessions.len() < self.max_sessions {
+            return;
+        }
+        let target = (self.max_sessions * 9 / 10).max(1);
+        // Collect (key, last_activity) and evict the oldest activity first.
+        let mut candidates: Vec<(SessionKey, Instant)> = self
+            .sessions
+            .iter()
+            .map(|entry| {
                 let session = entry.value().read();
-                if session.idle_time() > Duration::from_secs(60) {
-                    to_remove.push(entry.key().clone());
-                }
-            }
-
-            for key in to_remove {
-                self.sessions.remove(&key);
-            }
+                (entry.key().clone(), session.last_activity)
+            })
+            .collect();
+        candidates.sort_by_key(|(_, last_activity)| *last_activity);
+        let excess = self.sessions.len().saturating_sub(target);
+        for (key, _) in candidates.into_iter().take(excess) {
+            self.sessions.remove(&key);
         }
     }
 }
@@ -372,5 +388,65 @@ mod tests {
         let unique: std::collections::HashSet<&u64> = session.recent_endpoints.iter().collect();
         assert_eq!(unique.len(), 10);
         assert!(session.inter_arrival_times.len() >= 9);
+    }
+
+    #[test]
+    fn test_session_table_bounded_under_spoofed_ip_flood() {
+        // Fix G: inserting 2× cap distinct (IP, key) entries must never
+        // grow the table beyond the cap.
+        let cap = 100;
+        let tracker = SessionTracker::new(Duration::from_secs(300), cap);
+
+        for i in 0..(cap * 2) {
+            let ctx = RequestContext {
+                ip: format!("10.{}.{}.{}", (i >> 16) & 0xFF, (i >> 8) & 0xFF, i & 0xFF)
+                    .parse()
+                    .expect("valid IPv4"),
+                path: "/flood".to_string(),
+                method: "GET".to_string(),
+                tls_fingerprint: None,
+                h2_fingerprint: None,
+                user_agent: None,
+                body_size: 0,
+                tenant_id: None,
+                api_key_id: None,
+            };
+            tracker.track(&ctx);
+            // Hard invariant at every step
+            assert!(
+                tracker.active_count() <= cap,
+                "session table exceeded cap at iteration {i}: {}",
+                tracker.active_count()
+            );
+        }
+        assert!(tracker.active_count() <= cap);
+    }
+
+    #[test]
+    fn test_session_cleanup_enforces_cap_for_active_sessions() {
+        // Cleanup over capacity previously only removed sessions idle >60s;
+        // fully-active floods removed nothing. It must now enforce the cap.
+        let cap = 50;
+        let tracker = SessionTracker::new(Duration::from_secs(300), cap);
+        for i in 0..(cap * 3) {
+            let ctx = RequestContext {
+                ip: format!("192.0.2.{}", i & 0xFF).parse().expect("valid IPv4"),
+                path: format!("/active/{i}"),
+                method: "GET".to_string(),
+                tls_fingerprint: None,
+                h2_fingerprint: None,
+                user_agent: None,
+                body_size: 0,
+                tenant_id: None,
+                api_key_id: None,
+            };
+            tracker.track(&ctx);
+        }
+        tracker.cleanup(Instant::now());
+        assert!(
+            tracker.active_count() <= cap,
+            "cleanup must enforce cap, got {}",
+            tracker.active_count()
+        );
     }
 }

@@ -95,14 +95,22 @@ pub struct PowChallenge {
 }
 
 /// Cookie challenge - verify cookie support
+///
+/// SECURITY (fix I): the cookie value is HMAC-SHA256 signed with a
+/// server-side secret. Verification recomputes the signature and rejects
+/// any value that was not issued by this server — previously the value was
+/// a plain string compared for equality, so any client that ever observed
+/// a valid value (or guessed it) could forge a passed challenge.
 #[derive(Debug, Clone)]
 pub struct CookieChallenge {
     /// Cookie name
     pub name: String,
-    /// Cookie value
+    /// Cookie value — `"<challenge_id>:<expires_at>.<hmac_hex>"`
     pub value: String,
     /// Challenge expiration (Unix timestamp)
     pub expires_at: u64,
+    /// Server-side signing secret (never sent to the client).
+    pub signing_secret: [u8; 32],
 }
 
 /// CAPTCHA challenge - human verification
@@ -171,15 +179,99 @@ impl PowChallenge {
 }
 
 impl CookieChallenge {
-    /// Verify a cookie challenge response
+    /// Issue an HMAC-signed cookie challenge.
+    ///
+    /// The value embeds a random challenge id and expiry, signed with the
+    /// server secret; clients cannot forge or extend it.
+    pub fn issue(secret: [u8; 32]) -> Self {
+        let challenge_id = uuid::Uuid::new_v4().to_string();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let expires_at = now.saturating_add(3600); // 1 hour
+        let token = format!("{}:{}", challenge_id, expires_at);
+        let signature = hmac_sign(&secret, token.as_bytes());
+        Self {
+            name: "__apexmail_verify".to_string(),
+            value: format!("{}.{}", token, signature),
+            expires_at,
+            signing_secret: secret,
+        }
+    }
+
+    /// Verify a presented cookie value against this challenge.
+    ///
+    /// Accepts only values carrying a valid HMAC signature under this
+    /// server's secret and an unexpired token; a bare value copied from the
+    /// challenge is rejected unless the signature matches (which it does
+    /// for the value we issued, but not for anything mutated).
     pub fn verify(&self, cookie_value: &str) -> bool {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
 
-        now <= self.expires_at && constant_time_eq(cookie_value, &self.value)
+        if now > self.expires_at {
+            return false;
+        }
+
+        // Presented value must be "<token>.<signature>"
+        let Some((token, signature)) = cookie_value.rsplit_once('.') else {
+            return false;
+        };
+        let expected = hmac_sign(&self.signing_secret, token.as_bytes());
+        if !constant_time_eq(signature, &expected) {
+            return false;
+        }
+
+        // Token must be "<challenge_id>:<expires_at>" and unexpired.
+        let Some((_id, expires_str)) = token.rsplit_once(':') else {
+            return false;
+        };
+        match expires_str.parse::<u64>() {
+            Ok(expiry) => now <= expiry,
+            Err(_) => false,
+        }
     }
+}
+
+/// HMAC-SHA256 of `data` under `secret`, hex encoded.
+fn hmac_sign(secret: &[u8; 32], data: &[u8]) -> String {
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+
+    type HmacSha256 = Hmac<Sha256>;
+    let mut mac = HmacSha256::new_from_slice(secret)
+        .expect("HMAC-SHA256 accepts any key length");
+    mac.update(data);
+    hex_encode(&mac.finalize().into_bytes())
+}
+
+/// Lowercase hex encoding without an external hex dependency (decision.rs
+/// is compiled in core builds where `hex` is feature-gated).
+fn hex_encode(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        out.push(HEX[(b >> 4) as usize] as char);
+        out.push(HEX[(b & 0x0F) as usize] as char);
+    }
+    out
+}
+
+/// Generate fresh, unpredictable challenge data for a PoW challenge.
+///
+/// SECURITY (fix I): challenges previously used a constant prefix
+/// (`"challenge"`) or a per-IP constant (`"rep_challenge:<ip>"`), so one
+/// solved nonce could be replayed forever (and across requests from the
+/// same IP). Each issuance now gets 128 bits of randomness from the OS.
+pub fn fresh_pow_challenge_data() -> String {
+    format!(
+        "pow:{}:{}",
+        uuid::Uuid::new_v4(),
+        uuid::Uuid::new_v4()
+    )
 }
 
 #[cfg(test)]
@@ -199,16 +291,56 @@ mod tests {
         assert!(!challenge.verify("420"));
     }
 
+    // NOTE: `cookie_challenge_uses_exact_constant_time_value_match` was
+    // replaced — it asserted the pre-fix plain-comparison behavior that let
+    // any client that observed a valid value forge a passed challenge.
+
     #[test]
-    fn cookie_challenge_uses_exact_constant_time_value_match() {
-        let challenge = CookieChallenge {
-            name: "__apexmail_verify".into(),
-            value: "signed-cookie".into(),
-            expires_at: current_time_secs() + 60,
-        };
-        assert!(challenge.verify("signed-cookie"));
-        assert!(!challenge.verify("signed-cookif"));
-        assert!(!challenge.verify("signed-cookie-extra"));
+    fn cookie_challenge_accepts_own_issued_value() {
+        let secret = [7u8; 32];
+        let challenge = CookieChallenge::issue(secret);
+        assert!(
+            challenge.verify(&challenge.value),
+            "issued signed value must verify"
+        );
+    }
+
+    #[test]
+    fn cookie_challenge_rejects_forged_and_mutated_values() {
+        let secret = [7u8; 32];
+        let challenge = CookieChallenge::issue(secret);
+
+        // Unsigned value (old format) rejected
+        assert!(!challenge.verify("signed-cookie"));
+        // Tampered token with stale signature rejected
+        let mutated = format!("0{}", challenge.value);
+        assert!(!challenge.verify(&mutated));
+        // Value signed with a DIFFERENT secret rejected
+        let other = CookieChallenge::issue([8u8; 32]);
+        assert!(!challenge.verify(&other.value), "cross-secret forgery");
+        // Truncated / malformed rejected
+        assert!(!challenge.verify("nonsense"));
+        assert!(!challenge.verify(""));
+        // Right format, wrong signature content
+        assert!(!challenge.verify("id:99999999999.deadbeef"));
+    }
+
+    #[test]
+    fn cookie_challenge_expired_value_rejected() {
+        let secret = [7u8; 32];
+        let mut challenge = CookieChallenge::issue(secret);
+        challenge.expires_at = current_time_secs().saturating_sub(1);
+        assert!(!challenge.verify(&challenge.value));
+    }
+
+    #[test]
+    fn fresh_pow_challenge_data_is_unique_per_issuance() {
+        // Fix I: two issuances must never share challenge data (replayable
+        // prefix bug).
+        let a = fresh_pow_challenge_data();
+        let b = fresh_pow_challenge_data();
+        assert_ne!(a, b);
+        assert!(a.starts_with("pow:"));
     }
 
     fn current_time_secs() -> u64 {

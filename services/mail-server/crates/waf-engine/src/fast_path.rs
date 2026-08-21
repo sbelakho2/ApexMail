@@ -92,7 +92,9 @@ fn xss_matcher() -> Option<&'static AhoCorasick> {
                 "<script",
                 "</script",
                 "javascript:",
-                // Event handlers
+                // Event handlers (specific names + family prefixes for the
+                // long tail: onpointerover/onpointerdown…, onanimationstart…,
+                // ontransitionend/…)
                 "onerror",
                 "onload",
                 "onclick",
@@ -107,6 +109,14 @@ fn xss_matcher() -> Option<&'static AhoCorasick> {
                 "onmouseenter",
                 "onmouseleave",
                 "ondblclick",
+                "onpointer",
+                "onanimation",
+                "ontransition",
+                "ontouch",
+                "ondrag",
+                "onbefore",
+                "onafter",
+                "oncontextmenu",
                 // Other dangerous tags/attrs
                 "<svg",
                 "<img",
@@ -256,11 +266,59 @@ impl FastPathResult {
     }
 }
 
+/// Detect digit-adjacent comparison operators (`1>1`, `2>=2`, `1 <= 1`,
+/// `'a'='b'`, `0x1<0x2`).
+///
+/// The fast path must be an INCLUSION signal: boolean-blind injections like
+/// `1 and 2>1` contain no SQL keyword, quote or comment, so a purely
+/// keyword-based gate never reached the AST analyzer. A digit (or quote, or
+/// hex-digit in a `0x` literal) immediately adjacent to a comparison
+/// operator is a strong enough signal to run the analyzer — worst case it
+/// costs one cheap parse of a short value.
+fn has_digit_adjacent_comparison(input: &str) -> bool {
+    let bytes = input.as_bytes();
+    let len = bytes.len();
+    if len < 3 {
+        return false;
+    }
+    let is_operand = |b: u8| b.is_ascii_alphanumeric() || b == b'\'' || b == b'"';
+    let is_op = |b: u8| b == b'<' || b == b'>' || b == b'=';
+    for i in 0..len {
+        if !is_op(bytes[i]) {
+            continue;
+        }
+        // Left operand: nearest non-whitespace char before the operator.
+        let mut left = i;
+        while left > 0 && bytes[left - 1].is_ascii_whitespace() {
+            left -= 1;
+        }
+        // Right operand: skip optional '=' (for <=, >=, !=) then whitespace.
+        let mut right = i + 1;
+        while right < len && bytes[right] == b'=' {
+            right += 1;
+        }
+        while right < len && bytes[right].is_ascii_whitespace() {
+            right += 1;
+        }
+        if left == 0 || right >= len {
+            continue;
+        }
+        if is_operand(bytes[left - 1]) && bytes[left - 1].is_ascii_digit() {
+            // Require a digit-ish right operand too, so prose like "a = b"
+            // (key=value pairs) does not open the gate for every request.
+            if bytes[right].is_ascii_digit() || bytes[right] == b'\'' || bytes[right] == b'"' {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 /// Perform a fast pre-scan of the input to check for suspicious patterns.
 /// Returns false if none of the attack-indicative keywords are found.
 pub fn fast_path_check(input: &str) -> FastPathResult {
     FastPathResult {
-        has_sqli_patterns: sqli_matcher().map(|m| m.is_match(input)).unwrap_or(false),
+        has_sqli_patterns: fast_path_sqli(input),
         has_xss_patterns: xss_matcher().map(|m| m.is_match(input)).unwrap_or(false),
         has_cmdi_patterns: cmdi_matcher().map(|m| m.is_match(input)).unwrap_or(false),
     }
@@ -269,6 +327,7 @@ pub fn fast_path_check(input: &str) -> FastPathResult {
 /// Quick check for SQLi patterns only
 pub fn fast_path_sqli(input: &str) -> bool {
     sqli_matcher().map(|m| m.is_match(input)).unwrap_or(false)
+        || has_digit_adjacent_comparison(input)
 }
 
 /// Quick check for XSS patterns only
@@ -344,5 +403,33 @@ mod tests {
         );
         assert!(result.has_xss_patterns);
         assert!(result.needs_deep_inspection());
+    }
+
+    #[test]
+    fn test_sqli_gate_opens_for_digit_comparisons() {
+        // Boolean-blind payloads without keywords/quotes must still reach
+        // the AST analyzer (inclusion signal, not exclusion-only).
+        assert!(fast_path_sqli("1 and 2>1"));
+        assert!(fast_path_sqli("1 or 1>=1"));
+        assert!(fast_path_sqli("1>=1"));
+        assert!(fast_path_sqli("2>=2"));
+        assert!(fast_path_sqli("1 <= 1"));
+        assert!(fast_path_sqli("2>1"));
+        assert!(fast_path_sqli("0x31<0x32"));
+    }
+
+    #[test]
+    fn test_sqli_gate_stays_closed_for_benign_text() {
+        assert!(!fast_path_sqli("coffee and tea"));
+        assert!(!fast_path_sqli("hello world"));
+        assert!(!fast_path_sqli("page=1&limit=20&sort=name"));
+        assert!(!fast_path_sqli("user@example.com"));
+    }
+
+    #[test]
+    fn test_xss_gate_covers_modern_event_handlers() {
+        assert!(fast_path_xss("<div onpointerover=\talert(1)>x</div>"));
+        assert!(fast_path_xss("<div onanimationstart=alert(1)>x</div>"));
+        assert!(fast_path_xss("<div ontransitionend=alert(1)>x</div>"));
     }
 }

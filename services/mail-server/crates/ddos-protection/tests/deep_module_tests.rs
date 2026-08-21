@@ -493,21 +493,23 @@ mod decision_tests {
         assert!(!challenge.verify(""));
     }
 
+    // NOTE: updated for the cookie-challenge HMAC hardening — the previous
+    // version asserted the vulnerable plain string-compare behavior
+    // (any client that observed `secret_value_123` could forge a pass).
     #[test]
     fn cookie_challenge_verification() {
-        let challenge = CookieChallenge {
-            name: "__test".to_string(),
-            value: "secret_value_123".to_string(),
-            expires_at: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs()
-                + 300,
-        };
+        let secret = [9u8; 32];
+        let challenge = CookieChallenge::issue(secret);
 
-        assert!(challenge.verify("secret_value_123"));
+        // The issued signed value verifies
+        assert!(challenge.verify(&challenge.value));
+        // Forged / wrong values are rejected
+        assert!(!challenge.verify("secret_value_123"));
         assert!(!challenge.verify("wrong_value"));
         assert!(!challenge.verify(""));
+        // Value signed under a different secret is rejected
+        let other = CookieChallenge::issue([10u8; 32]);
+        assert!(!challenge.verify(&other.value));
     }
 }
 

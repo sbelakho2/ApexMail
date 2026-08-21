@@ -15,6 +15,11 @@ pub struct ReputationScore {
     /// When this IP was first seen
     pub first_seen: Instant,
 
+    /// When this IP was last seen (updated on every evaluation).
+    /// Used by the periodic cleanup to evict stale entries regardless of
+    /// score so the table stays bounded.
+    pub last_seen: Instant,
+
     /// Total requests from this IP
     pub total_requests: u64,
 
@@ -42,6 +47,7 @@ impl Default for ReputationScore {
         Self {
             score: 50, // Neutral starting point
             first_seen: Instant::now(),
+            last_seen: Instant::now(),
             total_requests: 0,
             challenges_passed: 0,
             challenges_failed: 0,

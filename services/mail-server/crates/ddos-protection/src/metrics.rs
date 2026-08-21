@@ -180,3 +180,156 @@ pub static ACTIVE_SESSIONS: Lazy<Option<GaugeVec>> = Lazy::new(|| {
         &[],
     )
 });
+
+// ─── Endpoint label normalization (cardinality bound) ──────────────────
+
+/// Maximum number of distinct endpoint labels retained for the
+/// `ddos_anomaly_score` histogram. Every additional label multiplies the
+/// stored time-series count by the bucket count, so raw paths (which can
+/// contain attacker-controlled UUIDs/IDs) must never become labels.
+pub const MAX_ENDPOINT_LABELS: usize = 500;
+
+/// Maximum length of an endpoint label.
+const MAX_LABEL_LEN: usize = 64;
+
+/// Fallback label once the distinct-label budget is exhausted.
+pub const OTHER_ENDPOINT_LABEL: &str = "other";
+
+static KNOWN_ENDPOINT_LABELS: Lazy<parking_lot::Mutex<std::collections::HashSet<String>>> =
+    Lazy::new(|| parking_lot::Mutex::new(std::collections::HashSet::new()));
+
+/// Normalize a raw request path into a bounded-cardinality route class.
+///
+/// * Query strings are dropped.
+/// * UUID-like segments → `{uuid}`
+/// * Purely numeric segments → `{id}`
+/// * Long hex segments (≥8 chars) → `{hex}`
+/// * Any other segment longer than 24 chars → `{long}`
+/// * Label truncated to [`MAX_LABEL_LEN`] chars on a char boundary.
+pub fn normalize_endpoint_label(path: &str) -> String {
+    let path_only = path.split('?').next().unwrap_or(path);
+    let mut out = String::with_capacity(path_only.len().min(MAX_LABEL_LEN + 8));
+    for (idx, seg) in path_only.split('/').enumerate() {
+        if idx > 0 {
+            out.push('/');
+        }
+        out.push_str(&normalize_segment(seg));
+    }
+    truncate_label(&out)
+}
+
+/// Convert a normalized label into a Prometheus label value, bounding the
+/// number of DISTINCT labels: once [`MAX_ENDPOINT_LABELS`] distinct route
+/// classes have been seen, everything else collapses to `other`.
+///
+/// Without this bound an attacker probing random paths creates unbounded
+/// time-series (one per label × histogram buckets), exhausting Prometheus
+/// memory — a metrics-cardinality DoS.
+pub fn endpoint_label(path: &str) -> String {
+    let normalized = normalize_endpoint_label(path);
+    let mut known = KNOWN_ENDPOINT_LABELS.lock();
+    if known.contains(&normalized) {
+        return normalized;
+    }
+    if known.len() >= MAX_ENDPOINT_LABELS {
+        return OTHER_ENDPOINT_LABEL.to_string();
+    }
+    known.insert(normalized.clone());
+    normalized
+}
+
+fn normalize_segment(seg: &str) -> &str {
+    if seg.is_empty() {
+        return seg;
+    }
+    if is_uuid_like(seg) {
+        return "{uuid}";
+    }
+    if seg.len() >= 8 && seg.chars().all(|c| c.is_ascii_hexdigit()) {
+        return "{hex}";
+    }
+    if seg.chars().all(|c| c.is_ascii_digit()) {
+        return "{id}";
+    }
+    if seg.len() > 24 {
+        return "{long}";
+    }
+    seg
+}
+
+fn is_uuid_like(seg: &str) -> bool {
+    // 8-4-4-4-12 hex pattern with dashes or a bare 32-hex-char UUID.
+    let compact: String = seg.chars().filter(|c| *c != '-').collect();
+    seg.len() == 36
+        && seg.as_bytes()[8] == b'-'
+        && compact.len() == 32
+        && compact.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+fn truncate_label(label: &str) -> String {
+    if label.len() <= MAX_LABEL_LEN {
+        return label.to_string();
+    }
+    let mut end = MAX_LABEL_LEN;
+    while end > 0 && !label.is_char_boundary(end) {
+        end -= 1;
+    }
+    label[..end].to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalize_strips_ids_uuids_and_params() {
+        assert_eq!(
+            normalize_endpoint_label("/users/123e4567-e89b-12d3-a456-426614174000"),
+            "/users/{uuid}"
+        );
+        assert_eq!(normalize_endpoint_label("/api/v1/users/42"), "/api/v1/users/{id}");
+        assert_eq!(normalize_endpoint_label("/files/deadbeef12345678"), "/files/{hex}");
+        assert_eq!(
+            normalize_endpoint_label("/search?query=attacker-controlled"),
+            "/search"
+        );
+        assert_eq!(normalize_endpoint_label("/health"), "/health");
+    }
+
+    #[test]
+    fn normalize_caps_label_length() {
+        let long = format!("/very-long-route/{}", "a".repeat(200));
+        let label = normalize_endpoint_label(&long);
+        // long segment → {long}; overall label bounded at 64 chars
+        assert!(label.len() <= MAX_LABEL_LEN, "got {} ({})", label.len(), label);
+    }
+
+    #[test]
+    fn random_paths_produce_bounded_distinct_labels() {
+        // Fix H: a cardinality bomb (thousands of distinct random paths)
+        // must collapse into at most MAX_ENDPOINT_LABELS distinct labels
+        // plus the `other` fallback.
+        let mut seen = std::collections::HashSet::new();
+        for i in 0..(MAX_ENDPOINT_LABELS * 3) as u32 {
+            // Literal (non-hex, non-numeric) segments stay distinct after
+            // normalization, so this mimics an attacker probing unlimited
+            // unique routes.
+            let path = format!("/attack/route-{i:06}-zz");
+            seen.insert(endpoint_label(&path));
+        }
+        assert!(
+            seen.len() <= MAX_ENDPOINT_LABELS,
+            "distinct labels must stay bounded, got {}",
+            seen.len()
+        );
+        assert!(
+            seen.contains(OTHER_ENDPOINT_LABEL),
+            "overflow must collapse to `other`"
+        );
+    }
+
+    #[test]
+    fn same_path_yields_same_label() {
+        assert_eq!(endpoint_label("/api/v1/x/1"), endpoint_label("/api/v1/x/1"));
+    }
+}

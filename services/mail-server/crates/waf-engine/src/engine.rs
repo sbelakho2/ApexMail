@@ -82,14 +82,104 @@ impl WafEngine {
             };
         }
 
-        // Path allowlist:trusted paths skip PATH TRAVERSAL on the path itself,
+        // Path allowlist:trusted paths skip the PATH analyzers,
         // but query params, headers and body are STILL inspected to prevent
         // allowlist exploitation (e.g. GET /health?id=1+OR+1=1).
-        let is_path_allowlisted = self
-            .config
-            .allowlist_paths
+        // Matching is exact-or-segment-prefix so `/staticX/...` cannot ride
+        // on an entry named `/static`.
+        let is_path_allowlisted = is_allowlisted_path(req.path, &self.config.allowlist_paths);
+
+        // 0. Enforce configured request size/shape limits (fail-closed).
+        // These were previously dead configuration; oversized requests are
+        // rejected with HTTP 400 (see `block_status_for`).
+        let url_len = req.path.len() + req.query_string.map(|q| q.len() + 1).unwrap_or(0);
+        if url_len > self.config.max_url_length {
+            all_matches.push(RuleMatch {
+                rule_id: 920160,
+                category: AttackCategory::RequestAnomaly,
+                score: 5,
+                message: format!(
+                    "URL length {} exceeds configured maximum {}",
+                    url_len, self.config.max_url_length
+                ),
+                location: MatchLocation::Path,
+                matched_data: truncate_str(req.path, 80),
+            });
+        }
+        if let Some(qs) = req.query_string {
+            let param_count = qs.split('&').filter(|p| !p.is_empty()).count();
+            if param_count > self.config.max_query_params {
+                all_matches.push(RuleMatch {
+                    rule_id: 920170,
+                    category: AttackCategory::RequestAnomaly,
+                    score: 5,
+                    message: format!(
+                        "Query parameter count {} exceeds configured maximum {}",
+                        param_count, self.config.max_query_params
+                    ),
+                    location: MatchLocation::Path,
+                    matched_data: format!("param_count={param_count}"),
+                });
+            }
+        }
+        if req.headers.len() > self.config.max_headers {
+            all_matches.push(RuleMatch {
+                rule_id: 920180,
+                category: AttackCategory::RequestAnomaly,
+                score: 5,
+                message: format!(
+                    "Header count {} exceeds configured maximum {}",
+                    req.headers.len(),
+                    self.config.max_headers
+                ),
+                location: MatchLocation::Path,
+                matched_data: format!("header_count={}", req.headers.len()),
+            });
+        }
+        if let Some((name, _)) = req
+            .headers
             .iter()
-            .any(|p| req.path.starts_with(p.as_str()));
+            .find(|(_, v)| v.len() > self.config.max_header_value_length)
+        {
+            all_matches.push(RuleMatch {
+                rule_id: 920190,
+                category: AttackCategory::RequestAnomaly,
+                score: 5,
+                message: format!(
+                    "Header '{}' value exceeds configured maximum length {}",
+                    name, self.config.max_header_value_length
+                ),
+                location: MatchLocation::Header(name.clone()),
+                matched_data: truncate_str(name, 80),
+            });
+        }
+
+        // Null bytes anywhere in the raw request are rejected (rule 920400).
+        // NUL bytes are canonicalized away before the analyzers run, so the
+        // raw surfaces are checked here explicitly (query/body/headers).
+        if let Some(qs) = req.query_string {
+            if qs.contains('\0') || qs.contains("%00") {
+                all_matches.push(null_byte_match(
+                    MatchLocation::QueryParam("query-string".to_string()),
+                    qs,
+                ));
+            }
+        }
+        if let Some(body) = req.body {
+            if body.contains('\0') || body.contains("%00") {
+                all_matches.push(null_byte_match(MatchLocation::Body, body));
+            }
+        }
+        if let Some((name, value)) = req
+            .headers
+            .iter()
+            .find(|(_, v)| v.contains('\0') || v.contains("%00"))
+        {
+            all_matches.push(null_byte_match(
+                MatchLocation::Header(name.clone()),
+                value,
+            ));
+        }
 
         // 1. Decode and inspect URL path
         let decoded_path = decoder::canonicalize_input(
@@ -101,24 +191,32 @@ impl WafEngine {
         // Fast-path pre-filter:only run expensive parsers if suspicious keywords found
         let path_fast_check = fast_path::fast_path_check(&decoded_path);
 
-        // Path traversal:skip for allowlisted paths (e.g. /static/) but still inspect params
-        if !is_path_allowlisted {
+        // Path traversal is checked ALWAYS — even on allowlisted paths.
+        // Skipping it for a prefix like `/static` let `/static/../../etc`
+        // escape the allowlist intent, and `..` after decoding is a jail
+        // break regardless of which route serves the path.
+        if self.config.enable_path_traversal {
             all_matches.extend(detection::analyze_path_traversal(
                 &decoded_path,
                 MatchLocation::Path,
             ));
         }
-        if self.config.enable_sqli && path_fast_check.has_sqli_patterns {
-            all_matches.extend(sql_analyzer::analyze_sqli(
-                &decoded_path,
-                MatchLocation::Path,
-            ));
-        }
-        if self.config.enable_xss && path_fast_check.has_xss_patterns {
-            all_matches.extend(xss_analyzer::analyze_xss(
-                &decoded_path,
-                MatchLocation::Path,
-            ));
+        // Allowlisted paths skip the full SQL/XSS inspection of the path
+        // itself (query params, headers and body are still fully inspected
+        // below).
+        if !is_path_allowlisted {
+            if self.config.enable_sqli && path_fast_check.has_sqli_patterns {
+                all_matches.extend(sql_analyzer::analyze_sqli(
+                    &decoded_path,
+                    MatchLocation::Path,
+                ));
+            }
+            if self.config.enable_xss && path_fast_check.has_xss_patterns {
+                all_matches.extend(xss_analyzer::analyze_xss(
+                    &decoded_path,
+                    MatchLocation::Path,
+                ));
+            }
         }
 
         // 2. Decode and inspect query parameters
@@ -214,7 +312,9 @@ impl WafEngine {
         // 4. Inspect body (truncated to max_body_size)
         if let Some(body) = req.body {
             let truncated = if body.len() > self.config.max_body_size {
-                &body[..self.config.max_body_size]
+                // Truncate on a UTF-8 char boundary: slicing into the middle
+                // of a multi-byte character panics (`&body[..n]`).
+                &body[floor_char_boundary(body, self.config.max_body_size)..]
             } else {
                 body
             };
@@ -431,7 +531,7 @@ impl WafEngine {
                 path = req.path,
                 "WAF: Request blocked"
             );
-            WafDecision::Block(403)
+            WafDecision::Block(block_status_for(&all_matches))
         } else if total_score >= self.config.detection_threshold {
             debug!(
                 score = total_score,
@@ -505,6 +605,72 @@ impl WafEngine {
         }
 
         (info, event)
+    }
+}
+
+/// Rule IDs that represent malformed request structure (oversized URL,
+/// parameter/header floods, oversized headers). These are client errors and
+/// are rejected with HTTP 400 instead of 403.
+const REQUEST_SHAPE_RULES: [u32; 4] = [920160, 920170, 920180, 920190];
+
+/// Pick the block status code for a set of matches: malformed/oversized
+/// requests are a 400 (bad request), behavioral detections a 403.
+fn block_status_for(matches: &[RuleMatch]) -> u16 {
+    if matches
+        .iter()
+        .any(|m| REQUEST_SHAPE_RULES.contains(&m.rule_id))
+    {
+        400
+    } else {
+        403
+    }
+}
+
+/// Build a rule 920400 match for a raw NUL byte (`\0` or `%00`).
+fn null_byte_match(location: MatchLocation, raw: &str) -> RuleMatch {
+    RuleMatch {
+        rule_id: 920400,
+        category: AttackCategory::RequestAnomaly,
+        score: 5,
+        message: "Null byte in request".to_string(),
+        location,
+        matched_data: truncate_str(raw, 80),
+    }
+}
+
+/// Check whether `path` is allowlisted by `entries`.
+///
+/// An entry matches only the exact path or a full path-segment prefix:
+/// `/static` matches `/static` and `/static/css/app.css` but NOT
+/// `/staticX/admin` (which would otherwise inherit the allowlist through a
+/// naive `starts_with`).
+fn is_allowlisted_path(path: &str, entries: &[String]) -> bool {
+    entries
+        .iter()
+        .any(|entry| path == entry.as_str() || path.starts_with(&format!("{entry}/")))
+}
+
+/// Largest index `<= index` that is a UTF-8 character boundary of `s`.
+///
+/// Manual implementation of the (still unstable) `str::floor_char_boundary`.
+/// Used to truncate request bodies without panicking when the cut point
+/// lands inside a multi-byte character.
+fn floor_char_boundary(s: &str, index: usize) -> usize {
+    if index >= s.len() {
+        return s.len();
+    }
+    let mut i = index;
+    while i > 0 && !s.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
+}
+
+/// Truncate a string to at most `max_chars` characters for match payloads.
+fn truncate_str(s: &str, max_chars: usize) -> String {
+    match s.char_indices().nth(max_chars) {
+        Some((byte_idx, _)) => format!("{}...", &s[..byte_idx]),
+        None => s.to_string(),
     }
 }
 
@@ -725,5 +891,35 @@ mod tests {
             "Command injection in header must be detected, score={}",
             info.total_score
         );
+    }
+
+    #[test]
+    fn test_floor_char_boundary_helpers() {
+        // ASCII: any index is a boundary
+        assert_eq!(floor_char_boundary("abcdef", 3), 3);
+        assert_eq!(floor_char_boundary("abcdef", 100), 6);
+        // 3-byte chars: boundary at 3 lands mid-char → floors to 0
+        assert_eq!(floor_char_boundary("日本語", 1), 0);
+        assert_eq!(floor_char_boundary("日本語", 2), 0);
+        assert_eq!(floor_char_boundary("日本語", 3), 3);
+        assert_eq!(floor_char_boundary("日本語", 4), 3);
+        assert_eq!(floor_char_boundary("日本語", 5), 3);
+        assert_eq!(floor_char_boundary("日本語", 6), 6);
+        // Empty and zero
+        assert_eq!(floor_char_boundary("", 0), 0);
+        assert_eq!(floor_char_boundary("日本", 0), 0);
+    }
+
+    #[test]
+    fn test_is_allowlisted_path_segment_prefix_only() {
+        let entries = vec!["/static".to_string(), "/health".to_string()];
+        assert!(is_allowlisted_path("/static", &entries));
+        assert!(is_allowlisted_path("/static/", &entries));
+        assert!(is_allowlisted_path("/static/css/app.css", &entries));
+        assert!(is_allowlisted_path("/health", &entries));
+        assert!(!is_allowlisted_path("/staticX/admin", &entries));
+        assert!(!is_allowlisted_path("/staticsecret", &entries));
+        assert!(!is_allowlisted_path("/", &entries));
+        assert!(!is_allowlisted_path("/api", &entries));
     }
 }

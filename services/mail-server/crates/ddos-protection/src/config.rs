@@ -49,6 +49,16 @@ pub struct ProtectorConfig {
     /// Initial reputation score for new IPs
     pub initial_reputation: u8,
 
+    /// Hard cap on tracked reputation entries (memory bound against
+    /// spoofed-IP floods). When the table reaches this size, the least
+    /// valuable entries are evicted before new ones are inserted.
+    /// 0 disables the cap (not recommended).
+    pub max_reputation_entries: usize,
+
+    /// Entries not seen for this long are evicted by the periodic cleanup
+    /// regardless of their score. 0 uses the default (1 hour).
+    pub reputation_stale_after: Duration,
+
     // ─── Session Tracking ─────────────────────────────────────
     /// Session tracking window
     pub session_window: Duration,
@@ -109,6 +119,8 @@ impl Default for ProtectorConfig {
             block_threshold: 10,
             challenge_threshold: 30,
             initial_reputation: 50,
+            max_reputation_entries: 250_000,
+            reputation_stale_after: Duration::from_secs(3600),
 
             // Session tracking
             session_window: Duration::from_secs(300),

@@ -981,25 +981,52 @@ mod middleware_unit_tests {
         assert_eq!(ctx.api_key_id.as_deref(), Some("key-xyz"));
     }
 
+    // NOTE: the IP-extraction tests below were updated for the spoofing
+    // fix. They previously asserted that X-Real-IP / leftmost XFF /
+    // CF-Connecting-IP were honored from ANY client — letting any caller
+    // pick an arbitrary identity. Headers are now only honored behind a
+    // configured trusted proxy (TrustedProxyList), and XFF selects the
+    // rightmost untrusted entry.
+
     #[test]
     fn test_ip_extraction_priority() {
         let direct: IpAddr = "127.0.0.1".parse().unwrap();
 
-        // X-Real-IP first
+        // Untrusted peer: headers are ignored entirely
         assert_eq!(
             extract_client_ip(Some("10.0.0.1"), Some("10.0.0.2"), Some("10.0.0.3"), direct),
-            "10.0.0.1".parse::<IpAddr>().unwrap()
+            direct
         );
-
-        // XFF second
         assert_eq!(
             extract_client_ip(None, Some("10.0.0.2, 10.0.0.3"), Some("10.0.0.4"), direct),
-            "10.0.0.2".parse::<IpAddr>().unwrap()
+            direct
         );
-
-        // CF-Connecting-IP third
         assert_eq!(
             extract_client_ip(None, None, Some("10.0.0.4"), direct),
+            direct
+        );
+
+        // Behind a trusted proxy: XFF (rightmost untrusted) takes priority
+        // over X-Real-IP, which takes priority over CF-Connecting-IP.
+        let trusted = TrustedProxyList::parse(["127.0.0.1"]);
+        assert_eq!(
+            extract_client_ip_trusted(
+                Some("10.0.0.1"),
+                Some("203.0.113.5, 127.0.0.1"),
+                Some("10.0.0.3"),
+                direct,
+                &trusted
+            ),
+            "203.0.113.5".parse::<IpAddr>().unwrap()
+        );
+        // No XFF → X-Real-IP
+        assert_eq!(
+            extract_client_ip_trusted(Some("10.0.0.1"), None, Some("10.0.0.3"), direct, &trusted),
+            "10.0.0.1".parse::<IpAddr>().unwrap()
+        );
+        // No XFF/X-Real-IP → CF-Connecting-IP
+        assert_eq!(
+            extract_client_ip_trusted(None, None, Some("10.0.0.4"), direct, &trusted),
             "10.0.0.4".parse::<IpAddr>().unwrap()
         );
 
@@ -1011,15 +1038,22 @@ mod middleware_unit_tests {
     fn test_ip_extraction_invalid_headers_fallthrough() {
         let direct: IpAddr = "192.168.1.1".parse().unwrap();
 
-        // Invalid X-Real-IP falls through to XFF
+        // Untrusted peer: invalid or not, headers never override the peer
         assert_eq!(
             extract_client_ip(Some("not-an-ip"), Some("10.0.0.2"), None, direct),
-            "10.0.0.2".parse::<IpAddr>().unwrap()
+            direct
         );
 
-        // All invalid falls to direct
+        // Trusted proxy with all-invalid headers falls back to the proxy IP
+        let trusted = TrustedProxyList::parse(["192.168.1.0/24"]);
         assert_eq!(
-            extract_client_ip(Some("garbage"), Some("also,garbage"), Some("nope"), direct),
+            extract_client_ip_trusted(
+                Some("garbage"),
+                Some("also,garbage"),
+                Some("nope"),
+                direct,
+                &trusted
+            ),
             direct
         );
     }
@@ -1027,15 +1061,27 @@ mod middleware_unit_tests {
     #[test]
     fn test_ip_extraction_ipv6() {
         let direct: IpAddr = "127.0.0.1".parse().unwrap();
-        let result = extract_client_ip(Some("::1"), None, None, direct);
+        // Untrusted peer cannot claim an IPv6 identity
+        assert_eq!(extract_client_ip(Some("::1"), None, None, direct), direct);
+
+        let trusted = TrustedProxyList::parse(["127.0.0.1"]);
+        let result = extract_client_ip_trusted(Some("::1"), None, None, direct, &trusted);
         assert_eq!(result, "::1".parse::<IpAddr>().unwrap());
     }
 
     #[test]
     fn test_ip_extraction_xff_whitespace() {
         let direct: IpAddr = "127.0.0.1".parse().unwrap();
-        let result = extract_client_ip(None, Some("  10.0.0.5 , 10.0.0.6"), None, direct);
-        assert_eq!(result, "10.0.0.5".parse::<IpAddr>().unwrap());
+        let trusted = TrustedProxyList::parse(["127.0.0.1"]);
+        // Whitespace around XFF entries is trimmed before parsing
+        let result = extract_client_ip_trusted(
+            None,
+            Some("  203.0.113.5 , 127.0.0.1"),
+            None,
+            direct,
+            &trusted,
+        );
+        assert_eq!(result, "203.0.113.5".parse::<IpAddr>().unwrap());
     }
 }
 

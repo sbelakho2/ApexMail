@@ -222,4 +222,56 @@ mod tests {
         let counter = SlidingWindowCounter::new(&cfg);
         assert_eq!(counter.limit(), 100);
     }
+
+    // ── Fix K4 verification:weighted sliding window prevents the
+    // 2× boundary burst of a plain fixed-window counter. ────────────
+
+    #[test]
+    fn test_sliding_window_no_boundary_double_burst() {
+        // Adversarial timing: exhaust the limit at the very end of a
+        // window and immediately hammer the boundary. With a fixed-window
+        // counter the attacker gets a full second burst (2× limit); the
+        // weighted previous-window count must deny it.
+        let window = Duration::from_millis(200);
+        let counter = SlidingWindowCounter::from_params(window, 3);
+
+        // Exhaust the limit inside window 1
+        for _ in 0..3 {
+            assert!(counter.check_and_increment().is_allowed());
+        }
+        assert!(counter.check_and_increment().is_denied());
+
+        // Cross the window boundary
+        std::thread::sleep(window + Duration::from_millis(15));
+
+        // The previous window's count is still weighted at ~93% — at most
+        // a single extra event may slip in before denial.
+        let mut allowed_after_boundary = 0;
+        for _ in 0..3 {
+            if counter.check_and_increment().is_allowed() {
+                allowed_after_boundary += 1;
+            }
+        }
+        assert!(
+            allowed_after_boundary <= 1,
+            "boundary must not grant a second full burst, got {allowed_after_boundary} extra events"
+        );
+    }
+
+    #[test]
+    fn test_sliding_window_old_events_age_out() {
+        // Legitimate recovery: after a full window idle, the budget resets.
+        let window = Duration::from_millis(80);
+        let counter = SlidingWindowCounter::from_params(window, 2);
+        assert!(counter.check_and_increment().is_allowed());
+        assert!(counter.check_and_increment().is_allowed());
+        assert!(counter.check_and_increment().is_denied());
+
+        // Idle for 2+ windows (full reset in maybe_rotate)
+        std::thread::sleep(window * 2 + Duration::from_millis(30));
+        assert!(
+            counter.check_and_increment().is_allowed(),
+            "after 2 idle windows the budget must fully reset"
+        );
+    }
 }

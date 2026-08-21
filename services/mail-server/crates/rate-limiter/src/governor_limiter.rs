@@ -20,6 +20,9 @@ use crate::types::Decision;
 pub struct GovernorLimiter {
     limiter: Arc<RateLimiter<NotKeyed, InMemoryState, DefaultClock>>,
     burst: NonZeroU32,
+    /// Steady refill rate (requests per second), used to compute the
+    /// retry-after for batch requests that can never fit in the burst.
+    rps: u32,
     jitter: Option<Duration>,
 }
 
@@ -33,6 +36,7 @@ impl GovernorLimiter {
         Self {
             limiter,
             burst,
+            rps: config.requests_per_second.get(),
             jitter: config.jitter_duration(),
         }
     }
@@ -76,6 +80,7 @@ impl GovernorLimiter {
                 remaining: self.burst.get() as u64,
             },
             Some(n) => {
+                let rps = self.rps;
                 match self.limiter.check_n(n) {
                     Ok(Ok(())) => {
                         metrics::counter!("rate_limiter_requests_total", "strategy" => "governor_batch", "decision" => "allowed").increment(n.get() as u64);
@@ -83,19 +88,28 @@ impl GovernorLimiter {
                             remaining: self.burst.get() as u64,
                         }
                     }
-                    Ok(Err(_insufficient)) => {
+                    Err(_insufficient) => {
+                        // `n` exceeds the burst capacity permanently — the
+                        // wait is the time to accumulate `n` tokens at the
+                        // steady rate (fix K5: previously a hardcoded 100ms
+                        // regardless of state).
                         metrics::counter!("rate_limiter_requests_total", "strategy" => "governor_batch", "decision" => "denied").increment(n.get() as u64);
                         metrics::counter!("rate_limiter_blocked_total", "strategy" => "governor_batch").increment(1);
                         Decision::Denied {
-                            retry_after: Duration::from_millis(100),
+                            retry_after: tokens_wait_time(n.get(), rps),
                         }
                     }
-                    Err(_insufficient) => {
+                    Ok(Err(not_until)) => {
+                        // Not enough tokens RIGHT NOW — compute the real
+                        // wait from the limiter state instead of a constant.
                         metrics::counter!("rate_limiter_requests_total", "strategy" => "governor_batch", "decision" => "denied").increment(n.get() as u64);
                         metrics::counter!("rate_limiter_blocked_total", "strategy" => "governor_batch").increment(1);
-                        Decision::Denied {
-                            retry_after: Duration::from_millis(100),
+                        let mut wait =
+                            not_until.wait_time_from(DefaultClock::default().now());
+                        if let Some(jitter) = self.jitter {
+                            wait += jitter;
                         }
+                        Decision::Denied { retry_after: wait }
                     }
                 }
             }
@@ -115,6 +129,13 @@ impl GovernorLimiter {
 
 // Need this for governor::clock
 use governor::clock::Clock;
+
+/// Time to accumulate `n` tokens at `rps` requests/second (rounded up,
+/// minimum 1ms so callers never see a zero retry-after).
+fn tokens_wait_time(n: u32, rps: u32) -> Duration {
+    let nanos = (u64::from(n) * 1_000_000_000) / u64::from(rps.max(1));
+    Duration::from_nanos(nanos.max(1_000_000))
+}
 
 #[cfg(test)]
 mod tests {
@@ -184,5 +205,44 @@ mod tests {
                          // should complete quickly at 1000 rps
         let result = tokio::time::timeout(Duration::from_millis(50), limiter.until_ready()).await;
         assert!(result.is_ok(), "Should complete within 50ms");
+    }
+
+    // ── Fix K5:check_n retry_after computed from state ─────────────
+
+    #[test]
+    fn test_check_n_insufficient_capacity_retry_after_scaled() {
+        // Requesting more than the burst can EVER hold: retry-after must
+        // reflect the time to accumulate n tokens (10 tokens at 2 rps ≈ 5s),
+        // not the previous hardcoded 100ms.
+        let limiter = GovernorLimiter::from_params(2, 5);
+        let decision = limiter.check_n(10);
+        match decision {
+            Decision::Denied { retry_after } => {
+                assert!(
+                    retry_after >= Duration::from_secs(4),
+                    "10 tokens at 2rps needs ~5s, got {retry_after:?}"
+                );
+                assert!(retry_after <= Duration::from_secs(6));
+            }
+            other => panic!("expected denied, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_check_n_not_enough_tokens_retry_after_from_state() {
+        // n fits in burst capacity but tokens are exhausted: retry-after
+        // comes from the limiter's state (≈ refill time), not a constant.
+        let limiter = GovernorLimiter::from_params(1, 2);
+        assert!(limiter.check_n(2).is_allowed()); // drain burst
+        let decision = limiter.check_n(2);
+        match decision {
+            Decision::Denied { retry_after } => {
+                assert!(
+                    retry_after > Duration::from_millis(500),
+                    "2 tokens at 1rps needs ~2s, got {retry_after:?}"
+                );
+            }
+            other => panic!("expected denied, got {other:?}"),
+        }
     }
 }

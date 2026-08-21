@@ -925,12 +925,34 @@ mod reputation_attacks {
 mod middleware_tests {
     use super::*;
 
-    /// X-Forwarded-For spoofing:attacker sends fake IP in XFF
+    /// X-Forwarded-For spoofing:attacker-controlled leftmost entries must be
+    /// IGNORED. Behind a trusted proxy the rightmost untrusted entry is the
+    /// client; from an untrusted peer the peer address itself is the identity.
+    /// (Previously this test asserted the vulnerable leftmost-extraction.)
     #[test]
-    fn xff_spoofing_takes_first_entry() {
+    fn xff_spoofing_leftmost_entries_ignored() {
+        let trusted = TrustedProxyList::parse(["192.168.1.0/24"]);
+        let proxy: IpAddr = "192.168.1.1".parse().unwrap();
+        // Attacker sends fake leftmost IPs; our trusted proxy appended the
+        // real client address next to itself.
+        let result = extract_client_ip_trusted(
+            None,
+            Some("6.6.6.6, 203.0.113.10, 192.168.1.1"),
+            None,
+            proxy,
+            &trusted,
+        );
+        assert_eq!(
+            result,
+            "203.0.113.10".parse::<IpAddr>().unwrap(),
+            "rightmost untrusted XFF entry must be selected"
+        );
+    }
+
+    /// Untrusted peer sending XFF is identified by its own address
+    #[test]
+    fn xff_from_untrusted_peer_uses_peer_address() {
         let direct: IpAddr = "192.168.1.1".parse().unwrap();
-        // Attacker's real IP is in the rightmost position (appended by proxy)
-        // but we take the left-most (client-reported). This is a known design choice.
         let result = extract_client_ip(
             None,
             Some("10.0.0.1, 172.16.0.1, 192.168.1.1"),
@@ -938,9 +960,8 @@ mod middleware_tests {
             direct,
         );
         assert_eq!(
-            result,
-            "10.0.0.1".parse::<IpAddr>().unwrap(),
-            "XFF should extract first (leftmost) IP"
+            result, direct,
+            "untrusted peer's XFF headers must be ignored entirely"
         );
     }
 

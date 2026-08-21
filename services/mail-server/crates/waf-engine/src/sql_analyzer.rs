@@ -106,6 +106,15 @@ pub fn analyze_sqli(input: &str, location: MatchLocation) -> Vec<RuleMatch> {
 
     // Detection 1:Tautology (e.g., 1=1, 'a'='a')
     if let Some(score) = detect_tautology(&tokens) {
+        // Boolean-blind injections chain a comparison with AND/OR/XOR
+        // (`1 and 2>1`). The comparison alone is only a monitoring signal
+        // (score 4); combined with a boolean connector it is an active
+        // injection attempt and reaches blocking severity (5).
+        let score = if score < 5 && has_boolean_connector(&tokens) {
+            5
+        } else {
+            score
+        };
         results.push(RuleMatch {
             rule_id: 942100,
             category: AttackCategory::SqlInjection,
@@ -505,6 +514,26 @@ fn detect_tautology(tokens: &[SqlToken]) -> Option<u32> {
                     return Some(4);
                 }
             }
+            // Number >= Number (always true like 1>=1, 2>=2)
+            (
+                SqlToken::NumberLiteral(a),
+                SqlToken::Operator(SqlOp::GtEq),
+                SqlToken::NumberLiteral(b),
+            ) => {
+                if *a >= *b {
+                    return Some(5);
+                }
+            }
+            // Number <= Number (always true like 1<=1)
+            (
+                SqlToken::NumberLiteral(a),
+                SqlToken::Operator(SqlOp::LtEq),
+                SqlToken::NumberLiteral(b),
+            ) => {
+                if *a <= *b {
+                    return Some(5);
+                }
+            }
             // Greedy pairing around quote-broken injections like `1' OR '1'='1`
             // can tokenize the comparison operator as a string literal fragment.
             (left, SqlToken::StringLiteral(op), right)
@@ -532,6 +561,18 @@ fn detect_tautology(tokens: &[SqlToken]) -> Option<u32> {
     }
 
     None
+}
+
+/// Whether the token stream contains a boolean connector keyword
+/// (AND / OR / XOR / NOT) — used to upgrade always-true comparisons that
+/// are actively chained in boolean-blind injections.
+fn has_boolean_connector(tokens: &[SqlToken]) -> bool {
+    tokens.iter().any(|t| {
+        matches!(
+            t,
+            SqlToken::Keyword(SqlKeyword::And | SqlKeyword::Or | SqlKeyword::Xor | SqlKeyword::Not)
+        )
+    })
 }
 
 /// Detect UNION [ALL] SELECT injection
@@ -1016,5 +1057,37 @@ mod tests {
     fn test_double_dash_comment_evasion_detected() {
         let results = analyze_sqli("UN --x\nION SE--y\nLECT 1,2,3", MatchLocation::Body);
         assert!(results.iter().any(|r| r.rule_id == 942400));
+    }
+
+    #[test]
+    fn test_gteq_lteq_tautologies_detected() {
+        // Previously GtEq/LtEq arms were missing: `1>=1` scored 0.
+        for payload in ["1>=1", "2>=2", "1<=1", "0x31>=0x31"] {
+            let results = analyze_sqli(payload, MatchLocation::QueryParam("id".into()));
+            assert!(
+                results.iter().any(|r| r.rule_id == 942100),
+                "`{payload}` must fire 942100"
+            );
+        }
+    }
+
+    #[test]
+    fn test_boolean_blind_comparison_upgraded_to_blocking() {
+        // `1 and 2>1` — no quote/keyword pattern; comparison + connector
+        // must reach blocking severity.
+        let results = analyze_sqli("1 and 2>1", MatchLocation::QueryParam("id".into()));
+        let taut = results
+            .iter()
+            .find(|r| r.rule_id == 942100)
+            .expect("boolean-blind tautology must be detected");
+        assert!(taut.score >= 5, "connector-chained comparison must score >= 5");
+
+        // Same comparison without a connector stays at monitoring severity.
+        let results = analyze_sqli("2>1", MatchLocation::QueryParam("id".into()));
+        let taut = results
+            .iter()
+            .find(|r| r.rule_id == 942100)
+            .expect("`2>1` must be detected");
+        assert_eq!(taut.score, 4);
     }
 }

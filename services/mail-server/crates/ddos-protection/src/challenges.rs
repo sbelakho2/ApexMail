@@ -579,6 +579,84 @@ impl ChallengeManager {
         }
     }
 
+    /// Verify a `decision::PowChallenge` response (the challenge type the
+    /// middleware hands to clients) with replay protection and audit
+    /// logging.
+    ///
+    /// Fix I: `DdosProtector::evaluate` previously issued challenges with a
+    /// constant prefix and no replay cache — a single solved nonce could be
+    /// replayed forever. This routes verification through the same
+    /// UsedResponseCache as the managed challenges.
+    pub fn verify_decision_pow(
+        &self,
+        challenge: &crate::decision::PowChallenge,
+        nonce: u64,
+        client_fingerprint: Option<&str>,
+    ) -> ChallengeVerifyResult {
+        let nonce_str = nonce.to_string();
+        let response_key = format!("pow:{}:{}", challenge.id, hash_result(&nonce_str));
+        let now = current_timestamp();
+        {
+            let mut used = self.used_responses.write();
+            if used.contains(&response_key, now) {
+                self.record_audit(ChallengeAuditRecord {
+                    challenge_id: challenge.id.clone(),
+                    challenge_type: "pow".into(),
+                    outcome: "replay".into(),
+                    client_fingerprint: client_fingerprint.map(ToString::to_string),
+                    timestamp: now,
+                });
+                return ChallengeVerifyResult {
+                    valid: false,
+                    replayed: true,
+                    expired: false,
+                };
+            }
+        }
+
+        let expired = now > challenge.expires_at;
+        // Hash format matches `decision::PowChallenge::verify`:
+        // sha256("<data>:<nonce>") with `difficulty` leading zero bits.
+        let valid = !expired
+            && decision_pow_hash_valid(&challenge.data, challenge.difficulty, &nonce_str);
+
+        let replayed = valid && !self.used_responses.write().insert(response_key, now);
+        if replayed {
+            self.record_audit(ChallengeAuditRecord {
+                challenge_id: challenge.id.clone(),
+                challenge_type: "pow".into(),
+                outcome: "replay".into(),
+                client_fingerprint: client_fingerprint.map(ToString::to_string),
+                timestamp: now,
+            });
+            return ChallengeVerifyResult {
+                valid: false,
+                replayed: true,
+                expired,
+            };
+        }
+
+        self.record_audit(ChallengeAuditRecord {
+            challenge_id: challenge.id.clone(),
+            challenge_type: "pow".into(),
+            outcome: if expired {
+                "expired".into()
+            } else if valid {
+                "passed".into()
+            } else {
+                "failed".into()
+            },
+            client_fingerprint: client_fingerprint.map(ToString::to_string),
+            timestamp: now,
+        });
+
+        ChallengeVerifyResult {
+            valid,
+            replayed: false,
+            expired,
+        }
+    }
+
     /// Verify JS challenge with replay protection and audit logging.
     pub fn verify_js_response(
         &self,
@@ -697,6 +775,30 @@ fn current_timestamp() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+/// Leading-zero-bits check for `decision::PowChallenge` solutions:
+/// sha256("<data>:<nonce>") must start with `difficulty` zero bits.
+fn decision_pow_hash_valid(data: &str, difficulty: u8, nonce: &str) -> bool {
+    let input = format!("{}:{}", data, nonce);
+    let mut hasher = Sha256::new();
+    hasher.update(input.as_bytes());
+    let hash = hasher.finalize();
+
+    let required_bytes = (difficulty / 8) as usize;
+    let remaining_bits = difficulty % 8;
+    for byte in &hash[..required_bytes] {
+        if *byte != 0 {
+            return false;
+        }
+    }
+    if remaining_bits > 0 && required_bytes < 32 {
+        let mask = 0xFF << (8 - remaining_bits);
+        if hash[required_bytes] & mask != 0 {
+            return false;
+        }
+    }
+    true
 }
 
 fn hash_result(s: &str) -> String {
@@ -823,5 +925,57 @@ mod tests {
         let mut cache = UsedResponseCache::default();
         assert!(cache.insert("response".to_string(), 10));
         assert!(!cache.contains("response", 10 + USED_RESPONSE_TTL_SECS + 1));
+    }
+
+    // ── Fix I:decision::PowChallenge replay protection ──────────────
+
+    fn easy_decision_pow() -> crate::decision::PowChallenge {
+        crate::decision::PowChallenge {
+            id: "challenge-fixed".to_string(),
+            data: "random-prefix-0123456789abcdef".to_string(),
+            difficulty: 0, // trivially solvable for test speed
+            expires_at: current_timestamp() + 300,
+            expected_time_ms: 1,
+        }
+    }
+
+    #[test]
+    fn decision_pow_solved_nonce_rejected_on_replay() {
+        let manager = ChallengeManager::new([3u8; 32]);
+        let challenge = easy_decision_pow();
+
+        let first = manager.verify_decision_pow(&challenge, 42, Some("10.0.0.1"));
+        assert!(first.valid, "first submission must pass");
+        assert!(!first.replayed);
+
+        let second = manager.verify_decision_pow(&challenge, 42, Some("10.0.0.1"));
+        assert!(
+            !second.valid && second.replayed,
+            "replayed nonce must be rejected"
+        );
+
+        // A different nonce for the same challenge is still fine.
+        let third = manager.verify_decision_pow(&challenge, 43, Some("10.0.0.1"));
+        assert!(third.valid);
+    }
+
+    #[test]
+    fn decision_pow_wrong_nonce_fails() {
+        let manager = ChallengeManager::new([4u8; 32]);
+        let mut challenge = easy_decision_pow();
+        challenge.difficulty = 20; // infeasible to hit by luck
+        let result = manager.verify_decision_pow(&challenge, 1, None);
+        assert!(!result.valid);
+        assert!(!result.replayed);
+    }
+
+    #[test]
+    fn decision_pow_expired_challenge_rejected() {
+        let manager = ChallengeManager::new([5u8; 32]);
+        let mut challenge = easy_decision_pow();
+        challenge.expires_at = current_timestamp().saturating_sub(1);
+        let result = manager.verify_decision_pow(&challenge, 42, None);
+        assert!(!result.valid);
+        assert!(result.expired);
     }
 }

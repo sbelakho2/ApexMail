@@ -98,77 +98,152 @@ fn detect_script_tags(input: &str) -> bool {
     false
 }
 
-/// Detect HTML event handler attributes
+/// HTML event handler attribute names used for XSS injection.
+///
+/// Includes the modern pointer/animation/transition/media families —
+/// attacks like `onpointerover=\talert(1)` or `onanimationstart=alert(1)`
+/// previously slipped past a short hardcoded list.
+const EVENT_HANDLER_NAMES: &[&str] = &[
+    // Classic mouse/keyboard
+    "onerror",
+    "onload",
+    "onclick",
+    "ondblclick",
+    "onmousedown",
+    "onmouseup",
+    "onmousemove",
+    "onmouseout",
+    "onmouseover",
+    "onmouseenter",
+    "onmouseleave",
+    "oncontextmenu",
+    "onauxclick",
+    // Forms / focus
+    "onfocus",
+    "onfocusin",
+    "onfocusout",
+    "onblur",
+    "oninput",
+    "onbeforeinput",
+    "onchange",
+    "onsubmit",
+    "oninvalid",
+    "onreset",
+    "onsearch",
+    "onselect",
+    // Keys
+    "onkeydown",
+    "onkeyup",
+    "onkeypress",
+    // Drag & drop
+    "ondrag",
+    "ondragend",
+    "ondragenter",
+    "ondragleave",
+    "ondragover",
+    "ondragstart",
+    "ondrop",
+    // Pointer events
+    "onpointerdown",
+    "onpointerup",
+    "onpointermove",
+    "onpointerover",
+    "onpointerout",
+    "onpointerenter",
+    "onpointerleave",
+    "onpointercancel",
+    "ongotpointercapture",
+    "onlostpointercapture",
+    // Touch
+    "ontouchstart",
+    "ontouchend",
+    "ontouchmove",
+    "ontouchcancel",
+    // Animation / transition
+    "onanimationstart",
+    "onanimationiteration",
+    "onanimationend",
+    "ontransitionstart",
+    "ontransitionrun",
+    "ontransitionend",
+    "ontransitioncancel",
+    // Scroll / wheel / clipboard
+    "onscroll",
+    "onscrollend",
+    "onwheel",
+    "oncopy",
+    "oncut",
+    "onpaste",
+    // Navigation / history / storage
+    "onbeforeunload",
+    "onunload",
+    "onhashchange",
+    "onpopstate",
+    "onstorage",
+    "onpagehide",
+    "onpageshow",
+    // Media
+    "onplay",
+    "onplaying",
+    "onpause",
+    "oncanplay",
+    "oncanplaythrough",
+    "onwaiting",
+    "ondurationchange",
+    "ontimeupdate",
+    "onended",
+    "onratechange",
+    "onvolumechange",
+    "onreadystatechange",
+    "onloadstart",
+    "onprogress",
+    "onabort",
+    "onemptied",
+    "onstalled",
+    "onsuspend",
+    "oncuechange",
+    // Misc / newer
+    "ontoggle",
+    "onbeforetoggle",
+    "onslotchange",
+    "onbeforeprint",
+    "onafterprint",
+    "onlanguagechange",
+    "onoffline",
+    "ononline",
+    "onmessage",
+    "onmessageerror",
+    "onrejectionhandled",
+    "onunhandledrejection",
+    "onsecuritypolicyviolation",
+    "oncontextlost",
+    "oncontextrestored",
+];
+
+/// Detect HTML event handler attributes.
+///
+/// Matches `<handler>=` and the whitespace-obfuscated `<handler>\s+=`
+/// (tabs/newlines/spaces before the `=`) for EVERY known handler name.
 fn detect_event_handlers(input: &str) -> bool {
-    let handlers = [
-        "onerror=",
-        "onload=",
-        "onclick=",
-        "onmouseover=",
-        "onfocus=",
-        "onblur=",
-        "oninput=",
-        "onchange=",
-        "onsubmit=",
-        "onkeydown=",
-        "onkeyup=",
-        "onkeypress=",
-        "ondblclick=",
-        "onmousedown=",
-        "onmouseup=",
-        "onmousemove=",
-        "onmouseout=",
-        "oncontextmenu=",
-        "ondrag=",
-        "ondragend=",
-        "ondragenter=",
-        "ondragleave=",
-        "ondragover=",
-        "ondragstart=",
-        "ondrop=",
-        "onscroll=",
-        "onwheel=",
-        "oncopy=",
-        "oncut=",
-        "onpaste=",
-        "onbeforeunload=",
-        "onhashchange=",
-        "onpopstate=",
-        "onstorage=",
-        "onanimationend=",
-        "ontransitionend=",
-        "onpointerdown=",
-        "onpointerup=",
-        "ontouchstart=",
-        "ontouchend=",
-        "ontouchmove=",
-    ];
-    for handler in &handlers {
-        if input.contains(handler) {
+    for handler in EVENT_HANDLER_NAMES {
+        if handler_followed_by_equals(input, handler) {
             return true;
         }
     }
-    // Also detect with whitespace before =
-    // e.g., onerror = "..."
-    let handler_names = [
-        "onerror",
-        "onload",
-        "onclick",
-        "onmouseover",
-        "onfocus",
-        "onblur",
-        "onsubmit",
-        "onkeydown",
-        "onkeyup",
-    ];
-    for h in &handler_names {
-        if let Some(pos) = input.find(h) {
-            let rest = &input[pos + h.len()..];
-            let trimmed = rest.trim_start();
-            if trimmed.starts_with('=') {
-                return true;
-            }
+    false
+}
+
+/// True when every/any occurrence of `handler` is immediately followed by
+/// `=` (optionally separated by whitespace).
+fn handler_followed_by_equals(input: &str, handler: &str) -> bool {
+    let mut from = 0;
+    while let Some(pos) = input[from..].find(handler) {
+        let abs = from + pos;
+        let rest = &input[abs + handler.len()..];
+        if rest.trim_start().starts_with('=') {
+            return true;
         }
+        from = abs + 1;
     }
     false
 }
@@ -303,5 +378,49 @@ mod tests {
     fn test_css_expression() {
         let r = analyze_xss("background: expression(alert(1))", MatchLocation::Body);
         assert!(r.iter().any(|m| m.rule_id == 941500));
+    }
+
+    #[test]
+    fn test_modern_event_handlers() {
+        // Previously missing from the hardcoded list entirely.
+        for payload in [
+            "<div onpointerover=alert(1)>x</div>",
+            "<div onanimationstart=alert(1)>x</div>",
+            "<div ontransitionstart=alert(1)>x</div>",
+            "<div ontoggle=alert(1)>x</div>",
+        ] {
+            let r = analyze_xss(payload, MatchLocation::Body);
+            assert!(
+                r.iter().any(|m| m.rule_id == 941200),
+                "`{payload}` must fire the event-handler rule"
+            );
+        }
+    }
+
+    #[test]
+    fn test_whitespace_before_equals_all_handlers() {
+        // `name<ws>=` obfuscation must work for every handler, not a subset.
+        for payload in [
+            "<div onpointerover\t=\talert(1)>x</div>",
+            "<div onanimationstart =alert(1)>x</div>",
+            "<div ontransitionend\n=\nalert(1)>x</div>",
+            "<img src=x onerror\n=\nalert(1)>",
+        ] {
+            let r = analyze_xss(payload, MatchLocation::Body);
+            assert!(
+                r.iter().any(|m| m.rule_id == 941200),
+                "whitespace-obfuscated handler must be detected: {payload}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_handler_without_equals_not_flagged() {
+        // Bare handler word without an assignment must not fire.
+        let r = analyze_xss("<p>onload your dreams</p>", MatchLocation::Body);
+        assert!(
+            !r.iter().any(|m| m.rule_id == 941200),
+            "prose containing a handler name without '=' must not be flagged"
+        );
     }
 }
