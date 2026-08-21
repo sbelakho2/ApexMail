@@ -39,6 +39,31 @@ enum VerifyError: string
     case RequestBindingMismatch = 'request_binding_mismatch';
 
     /**
+     * Whether this failure is exempt from the one-shot policy on a
+     * consumed record. The failure describes the original redemption's
+     * circumstances (the signed expiry, the network binding, the
+     * missing client IP, the client-side telemetry evidence) rather
+     * than this request's authorization. A consumed record whose
+     * retained committed success is replayed by the proven operation
+     * may therefore resolve through the consumed branch despite it.
+     *
+     * The exemption is deliberately narrow. Every security verdict —
+     * wrong scope, request-binding mismatch, policy epoch, region,
+     * issuer, kid revocation and resolution, signature, record shape,
+     * the unsupported protocol/profile, and the receipt-timing floor —
+     * stands even when the operation identity matches. The stored
+     * success never replays around it; the record is kept intact and
+     * the failure is returned.
+     */
+    public function isReplayExempt(): bool
+    {
+        return match ($this) {
+            self::Expired, self::IpMismatch, self::MissingClientIp, self::TelemetryRejected => true,
+            default => false,
+        };
+    }
+
+    /**
      * The human-readable explanation of the failure (operator-facing
      * prose; never a value to switch on — use the case or ->value for
      * that).

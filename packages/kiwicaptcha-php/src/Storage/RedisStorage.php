@@ -46,7 +46,7 @@ use KiwiCaptcha\OperationIdentityAwareStorageInterface;
  * Implements {@see \KiwiCaptcha\AtomicStorageInterface}: the fused
  * read-transition makes consume() strict single-use under concurrency.
  */
-final class RedisStorage implements AtomicStorageInterface, \KiwiCaptcha\ConsumedStateReadableInterface, OperationIdentityAwareStorageInterface
+final class RedisStorage implements AtomicStorageInterface, \KiwiCaptcha\ConsumedStateReadableInterface, OperationIdentityAwareStorageInterface, \KiwiCaptcha\AtomicDeleteIfPendingInterface
 {
     /**
      * Atomic consume transition: GET the record; if present and not yet
@@ -128,6 +128,34 @@ LUA;
      * Returns 1 on success, 0 otherwise. ARGV = {valid "1"|"0", binding,
      * has_binding "1"|"0"}.
      */
+    /**
+     * Atomic delete-if-pending cleanup: ONE script decides missing /
+     * deleted-pending / consumed, closing the check-then-delete TOCTOU —
+     * a record a concurrent redeemer consumes between the caller's
+     * decision and this cleanup is observed in its consumed state here
+     * and NEVER deleted (the committed recovery evidence survives).
+     * Returns {'missing'}, {'deleted-pending'}, or {'consumed', json}
+     * with the retained envelope (the caller decodes the consumed state
+     * from the same bytes; no second lookup).
+     */
+    private const DELETE_IF_PENDING_SCRIPT = <<<'LUA'
+-- kiwicaptcha delete-if-pending (atomic cleanup)
+--
+-- Same raw-splice rules as CONSUME_SCRIPT: the stored JSON is never
+-- re-encoded through cjson (large integers would switch to scientific
+-- notation). A consumed record is returned verbatim and kept; only a
+-- pending record is deleted.
+local v = redis.call("GET", KEYS[1])
+if not v then
+  return {'missing'}
+end
+if string.find(v, '"state":"consumed"', 1, true) then
+  return {'consumed', v}
+end
+redis.call("DEL", KEYS[1])
+return {'deleted-pending'}
+LUA;
+
     private const COMMIT_SCRIPT = <<<'LUA'
 -- kiwicaptcha commit result
 --
@@ -378,6 +406,35 @@ LUA;
         }
 
         return null;
+    }
+
+    public function deleteIfPending(string $nonce): \KiwiCaptcha\DeleteIfPendingResult
+    {
+        $key = $this->prefix.$nonce;
+        $raw = $this->evalScript(self::DELETE_IF_PENDING_SCRIPT, [$key], 1);
+        if (!\is_array($raw)) {
+            throw new \RuntimeException('delete-if-pending: unexpected storage reply');
+        }
+        $parts = array_values($raw);
+        $state = (string) ($parts[0] ?? '');
+        if ($state === 'missing' || $state === 'deleted-pending') {
+            return new \KiwiCaptcha\DeleteIfPendingResult($state);
+        }
+        // consumed: decode the retained envelope from the returned bytes
+        // (the committed result and the recorded operation identity ride
+        // along — no second lookup).
+        $json = (string) ($parts[1] ?? '');
+        $record = $this->decode($json);
+        if ($record === null) {
+            throw new \RuntimeException('delete-if-pending: undecodable consumed envelope');
+        }
+        $result = null;
+        $resultJson = self::extractConsumedResultJson($json);
+        if ($resultJson !== null) {
+            $result = $this->decodeResult($resultJson);
+        }
+
+        return new \KiwiCaptcha\DeleteIfPendingResult('consumed', new ConsumedRecord($record, false, true, $result, $this->decodeIdentity($json)));
     }
 
     public function commitResult(string $nonce, bool $valid, ?string $binding): bool

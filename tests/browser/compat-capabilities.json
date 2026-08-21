@@ -1,0 +1,43 @@
+{
+  "recaptcha_v2": {
+    "implicit_render": true,
+    "explicit_render": true,
+    "onload": true,
+    "hl": true,
+    "reset": true,
+    "getResponse": true,
+    "execute": true,
+    "invisible": true,
+    "omitted_id_first_widget": true
+  },
+  "recaptcha_v3": {
+    "execute_action": true,
+    "score_semantics": false
+  },
+  "turnstile": {
+    "ready": true,
+    "isExpired": true,
+    "action": true,
+    "cData": true,
+    "responseField": true,
+    "responseFieldName": true,
+    "execution": true,
+    "language": true,
+    "idempotencyKey": true
+  },
+  "hcaptcha": {
+    "render": true,
+    "reset": true,
+    "getResponse": true,
+    "execute": true,
+    "async_execute": true,
+    "remove": true
+  },
+  "siteverify": {
+    "missing_vs_invalid_secret": true,
+    "remoteip_required_when_ip_bound": true,
+    "idempotency_key": true,
+    "action_cdata_server_bound": true,
+    "legacy_get": false
+  }
+}

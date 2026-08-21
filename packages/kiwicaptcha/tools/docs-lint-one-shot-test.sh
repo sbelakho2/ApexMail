@@ -8,7 +8,7 @@
 #
 #  1. adoption applies once:      a new baseline path listed in the
 #                                 manifest passes the integrity check.
-#  2. no adoption, no pass:       the same new path WITHOUT an entry
+#  2. no adoption, no pass:       the same new path without an entry
 #                                 fails ("not adopted").
 #  3. consumed entry removed:     once the path has a row in the
 #                                 current baseline, the integrity run
@@ -25,7 +25,7 @@
 #                                 consumed entry survives for a later
 #                                 writable run).
 #
-# Exits 0 when every scenario holds, 1 otherwise. POSIX sh; the lint
+# Exits 0 when every scenario holds, 1 otherwise. posix sh; the lint
 # itself runs under the tool's own pinned C locale and awk selection.
 set -u
 
@@ -39,15 +39,15 @@ bad() { echo "FAIL: $1" >&2; fail=1; }
 work=$(mktemp -d "${TMPDIR:-/tmp}/docs-lint-oneshot.XXXXXX") || exit 1
 trap 'rm -rf "$work"' EXIT HUP INT TERM
 
-# A minimal scan root: the tool requires ROOT/packages, and the scan
+# A minimal scan root: the tool requires root/packages, and the scan
 # covers packages/kiwicaptcha — one clean markdown file yields one
 # zero-violation row and cannot perturb the baseline comparisons.
 root="$work/root"
 mkdir -p "$root/packages/kiwicaptcha"
-printf '# KiwiCaptcha\n\nA clean file with no lint violations.\n' > "$root/packages/kiwicaptcha/README.md"
+printf '# KiwiCaptcha\n\nA clean file with no lint violations.\n' > "$root/packages/kiwicaptcha/probe.md"
 
-P='packages/kiwicaptcha/README.md'
-N='packages/kiwicaptcha/NEW.md'
+P='packages/kiwicaptcha/probe.md'
+N='packages/kiwicaptcha/new.md'
 
 run_integrity() {
   # run_integrity <base-baseline> <cur-baseline> <manifest> [--no-write-adopted]

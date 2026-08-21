@@ -11,11 +11,12 @@ namespace KiwiCaptcha;
  * Verification is one-shot: any attempt burns the challenge record. The
  * cheap checks (record structure, signature, TTL, scope, binding, server
  * timing, telemetry) run against a peeked record and delete it on
- * failure. A consumed record is an exception: the retained consumed
- * state (the deterministic result and the operation identity) is
- * crash-recovery evidence that survives to its retention TTL, so a
- * consumed record that fails a cheap check (an expired, wrong-scope or
- * wrong-IP replay) resolves through the consumed branch instead. The
+ * failure. A consumed record is an exception: its retained consumed
+ * state — the deterministic result and the operation identity — is
+ * crash-recovery evidence that survives to its retention TTL. A
+ * consumed record that fails a cheap check resolves through the
+ * consumed branch instead, but only for the narrow exempt set of the
+ * replay-exemption split below. The
  * proof phase consumes the record before re-deriving the hash, so a
  * wrong candidate costs at most one Argon2id (or SHA-256) hash. Replay
  * protection is the consumed marker: the record survives until its TTL
@@ -241,7 +242,7 @@ final class Verifier
         // silent, without spamming every verification.
         if ($storage instanceof NonAtomicStorageInterface && !self::$nonAtomicStorageWarned) {
             self::$nonAtomicStorageWarned = true;
-            @trigger_error(
+            trigger_error(
                 'KiwiCaptcha: the Verifier was constructed with a non-atomic storage ('
                 .$storage::class
                 .'); single-use is best-effort under concurrency — use an AtomicStorageInterface backend (e.g. RedisStorage) when replay protection matters',
@@ -341,44 +342,96 @@ final class Verifier
         // server-measured minimum duration — run in the order of the
         // original path inside one shared helper
         // {@see self::cheapPhaseCheck()}. The first failing check decides
-        // the outcome, and every cheap failure deletes the peeked record
-        // except the missing-client-IP failure (a bound challenge without
-        // a client IP is rejected but the record is kept, so the caller
-        // can retry with the IP). An already-consumed retained record is
-        // never deleted by a cheap failure: its consumed state (the
-        // deterministic result and the operation identity) is
-        // crash-recovery evidence that must survive to its retention
-        // TTL, so a consumed record that fails a cheap check — an
-        // expired replay, a wrong-scope replay, an IP-mismatch replay —
-        // falls through to the consume transition below, where the
-        // consumed branch decides (identity-gated replay /
-        // AlreadyConsumed / ConsumeIndeterminate) with the record
-        // preserved. A retained-state READ failure is fail-closed the
-        // same way: the consumed marker cannot be established, so the
-        // record may be consumed evidence and is never deleted — the
-        // outcome is the retryable StorageUnavailable, never the cheap
-        // failure (mirrors the Rust core's evidence preservation; only a
-        // storage without the consumed-state capability keeps the legacy
+        // the outcome through the replay-exemption split of
+        // {@see VerifyError::isReplayExempt()}:
+        //
+        //  - the narrow exempt set (Expired, IpMismatch, MissingClientIp,
+        //    later the telemetry gate) describes the original
+        //    redemption's circumstances rather than this request's
+        //    authorization. A consumed record failing one of them is
+        //    never deleted: its consumed state — the deterministic result
+        //    and the operation identity — is crash-recovery evidence that
+        //    must survive to its retention TTL, and it falls through to
+        //    the consume transition below, where the consumed branch
+        //    decides between identity-gated replay, AlreadyConsumed and
+        //    ConsumeIndeterminate with the record preserved. A pending
+        //    or capability-absent record keeps the one-shot
+        //    cheap-failure delete, except the missing-client-IP failure:
+        //    a bound challenge without a client IP is rejected but the
+        //    record is kept, so the caller can retry with the IP.
+        //
+        //  - every other failure is a security verdict (wrong scope,
+        //    request-binding mismatch, policy epoch, region, issuer, kid
+        //    revocation/resolution, signature, record shape, the
+        //    unsupported protocol/profile, the receipt-timing floor): it
+        //    stands even when the operation identity matches a consumed
+        //    record's committed success. The stored success never
+        //    replays around it — the record is kept intact and the
+        //    failure is returned; only a pending record is deleted.
+        //
+        // A retained-state read failure is fail-closed for both classes:
+        // the consumed marker cannot be established, so the record may
+        // be consumed evidence and is never deleted — the outcome is the
+        // retryable StorageUnavailable, never the cheap failure
+        // (mirrors the Rust core's evidence preservation; only a storage
+        // without the consumed-state capability keeps the legacy
         // one-shot delete, since such backends carry no retained state
-        // to preserve). The same helper revalidates the retained consumed
-        // record on the consumed-operation resume path
+        // to preserve). The same helper revalidates the retained
+        // consumed record on the consumed-operation resume path
         // {@see self::resumeConsumedOperation()}.
         $failure = $this->cheapPhaseCheck($peek, $secretKey, $expectedScope, $clientIp, true, $nowNs, $expectedRequestBinding);
         if ($failure !== null) {
-            $retained = $this->retainedConsumedState($token->nonce);
-            if ($retained === 'unreadable') {
-                // The consumed marker cannot be established: the record
-                // may be retained consumed evidence, so it is never
-                // deleted and the caller gets the retryable storage
-                // failure instead of a possibly-wrong cheap verdict.
-                return VerifyOutcome::invalid(VerifyError::StorageUnavailable);
-            }
-            if ($retained !== 'consumed') {
-                if ($failure !== VerifyError::MissingClientIp) {
-                    $this->bestEffortDelete($token->nonce);
+            // The cleanup runs through the fused atomic transition when
+            // the storage offers it ({@see AtomicDeleteIfPendingInterface}):
+            // the delete decision and the delete itself are one script,
+            // so a record a concurrent redeemer consumes (and commits)
+            // between this failure and the cleanup is observed in its
+            // consumed state and never erased. The missing-client-IP
+            // retry path is the exception — it never deletes, so the
+            // fused transition must not run at all.
+            if ($this->storage instanceof AtomicDeleteIfPendingInterface && $failure !== VerifyError::MissingClientIp) {
+                try {
+                    $cleanup = $this->storage->deleteIfPending($token->nonce);
+                } catch (\Throwable) {
+                    // The fused read+delete failed: the record may be
+                    // consumed evidence, so the fail-closed retryable
+                    // storage outcome answers instead.
+                    return VerifyOutcome::invalid(VerifyError::StorageUnavailable);
                 }
+                if (!$cleanup->wasConsumed()) {
+                    // Missing, or the pending record was atomically
+                    // deleted: the one-shot verdict stands.
+                    return VerifyOutcome::invalid($failure);
+                }
+                if (!$failure->isReplayExempt()) {
+                    // A hard security verdict on a consumed record: the
+                    // fused transition kept the evidence and the failure
+                    // stands — the identity-gated replay never overrides it.
+                    return VerifyOutcome::invalid($failure);
+                }
+                // Consumed + exempt: fall through to the consume branch.
+            } else {
+                $retained = $this->retainedConsumedState($token->nonce);
+                if ($retained === 'unreadable') {
+                    // The consumed marker cannot be established: the record
+                    // may be retained consumed evidence, so it is never
+                    // deleted and the caller gets the retryable storage
+                    // failure instead of a possibly-wrong cheap verdict.
+                    return VerifyOutcome::invalid(VerifyError::StorageUnavailable);
+                }
+                if ($retained === 'consumed' && !$failure->isReplayExempt()) {
+                    // A hard security verdict on a consumed record: the
+                    // evidence is preserved and the failure stands — the
+                    // identity-gated replay never overrides it.
+                    return VerifyOutcome::invalid($failure);
+                }
+                if ($retained !== 'consumed') {
+                    if ($failure !== VerifyError::MissingClientIp) {
+                        $this->bestEffortDelete($token->nonce);
+                    }
 
-                return VerifyOutcome::invalid($failure);
+                    return VerifyOutcome::invalid($failure);
+                }
             }
         }
 
@@ -386,21 +439,36 @@ final class Verifier
         //    so this is a defense-in-depth signal, not a hard gate: it only
         //    runs when the caller explicitly opts in. An empty telemetry
         //    payload ({} or []) is itself a bot signal (a real widget always
-        //    reports fields) and must not bypass strict mode. Like every
-        //    cheap failure, the deletion applies only to a not-yet-consumed
-        //    record: a consumed record with failing telemetry falls through
-        //    to the consumed branch with its retained state preserved, and
-        //    an unreadable retained state is the fail-closed
-        //    StorageUnavailable with the record kept.
+        //    reports fields) and must not bypass strict mode. The gate is
+        //    replay-exempt per {@see VerifyError::isReplayExempt()} — it
+        //    is client-side evidence about the original solve — so the
+        //    deletion applies only to a not-yet-consumed record. A consumed
+        //    record with failing telemetry falls through to the consumed
+        //    branch with its retained state preserved, and an unreadable
+        //    retained state is the fail-closed StorageUnavailable with the
+        //    record kept.
         if ($enforceTelemetry && (empty($token->telemetry) || Telemetry::score($token->telemetry, $token->durationMs))) {
-            $retained = $this->retainedConsumedState($token->nonce);
-            if ($retained === 'unreadable') {
-                return VerifyOutcome::invalid(VerifyError::StorageUnavailable);
-            }
-            if ($retained !== 'consumed') {
-                $this->bestEffortDelete($token->nonce);
+            if ($this->storage instanceof AtomicDeleteIfPendingInterface) {
+                try {
+                    $cleanup = $this->storage->deleteIfPending($token->nonce);
+                } catch (\Throwable) {
+                    return VerifyOutcome::invalid(VerifyError::StorageUnavailable);
+                }
+                if (!$cleanup->wasConsumed()) {
+                    return VerifyOutcome::invalid(VerifyError::TelemetryRejected);
+                }
+                // Consumed: fall through to the consumed branch (the
+                // gate is exempt — client-side solve evidence).
+            } else {
+                $retained = $this->retainedConsumedState($token->nonce);
+                if ($retained === 'unreadable') {
+                    return VerifyOutcome::invalid(VerifyError::StorageUnavailable);
+                }
+                if ($retained !== 'consumed') {
+                    $this->bestEffortDelete($token->nonce);
 
-                return VerifyOutcome::invalid(VerifyError::TelemetryRejected);
+                    return VerifyOutcome::invalid(VerifyError::TelemetryRejected);
+                }
             }
         }
 
@@ -633,10 +701,10 @@ final class Verifier
      * StorageUnavailable.
      *
      * Native replay security is aligned: {@see self::verify()} gates a
-     * stored success on the exact operation identity the same way and
-     * still returns ConsumeIndeterminate for a consumed record without
-     * a committed result, so the identity gate here cannot be satisfied
-     * by a different logical operation.
+     * stored success on the exact operation identity the same way, and
+     * it still returns ConsumeIndeterminate for a consumed record
+     * without a committed result. The identity gate here therefore
+     * cannot be satisfied by a different logical operation.
      *
      * @param string      $rawToken          base64 solution token from the widget.
      * @param string      $secretKey         HMAC secret key.
@@ -1193,24 +1261,22 @@ final class Verifier
      * array and PSR-6 backends; the plain {@see StorageInterface::find()}
      * record carries no runtime state).
      *
-     * @return 'consumed'    the retained state is readable and present:
-     *                       the record is consumed evidence and is never
-     *                       deleted by a cheap failure (the consumed
-     *                       branch decides instead)
-     * @return 'pending'     the retained state is readable and absent:
-     *                       the record is not yet consumed, so the
-     *                       one-shot cheap-failure delete policy applies
-     * @return 'unknown'     the storage has no consumed-state
-     *                       capability: such backends carry no retained
+     * @return 'consumed'    readable and present. Consumed evidence,
+     *                       never deleted by a cheap failure; the
+     *                       consumed branch decides instead.
+     * @return 'pending'     readable and absent. Not yet consumed, so
+     *                       the one-shot cheap-failure delete applies.
+     * @return 'unknown'     no consumed-state capability. No retained
      *                       state to preserve, so the legacy one-shot
-     *                       delete policy stays
+     *                       delete policy stays.
      * @return 'unreadable'  the retained-state read itself failed: the
      *                       consumed marker cannot be established, so the
      *                       record may be consumed evidence — it is never
-     *                       deleted and the caller gets the retryable
-     *                       StorageUnavailable instead of a possibly-
-     *                       wrong cheap verdict (the same fail-closed
-     *                       evidence preservation as the Rust core)
+     *                       deleted, and the caller gets the retryable
+     *                       StorageUnavailable instead of a possibly
+     *                       wrong cheap verdict. This is the same
+     *                       fail-closed evidence preservation as the
+     *                       Rust core.
      */
     private function retainedConsumedState(string $nonce): string
     {

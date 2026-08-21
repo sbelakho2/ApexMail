@@ -1,0 +1,19 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>hCaptcha migration fixture</title>
+  <script src="/kiwi-captcha/api.js?compat=hcaptcha" async defer></script>
+</head>
+<body>
+  <form id="contact" action="/submit" method="post">
+    <div class="h-captcha" data-sitekey="10000000-aaaa-bbbb-cccc-000000000001" data-callback="onHCaptcha" data-expired-callback="onHExpired"></div>
+    <button type="submit">Submit</button>
+  </form>
+  <p id="out"></p>
+  <script>
+    function onHCaptcha(token) { document.getElementById('out').textContent = 'cb:' + String(token).slice(0, 8); }
+    function onHExpired() { document.getElementById('out').textContent = 'expired-cb'; }
+  </script>
+</body>
+</html>

@@ -600,9 +600,9 @@ final class ValidatorTest extends TestCase
      * operation — a different transaction binding or a different scope —
      * derives a different identity, and the core refuses the stored
      * success as AlreadyConsumed. The validator surfaces that refusal
-     * through its core-failure path as invalid_or_expired, NEVER a Pass,
-     * so `if ($outcome->isOk()) { performProtectedAction(); }` can never
-     * fund a second protected action from one solve.
+     * through its core-failure path as invalid_or_expired, never a Pass,
+     * so an isOk()-gated branch can never fund a second protected
+     * action from one solve.
      */
     public function testSameSolvedTokenForTwoDifferentOperationsSecondIsRejectedNeverPass(): void
     {
@@ -623,7 +623,7 @@ final class ValidatorTest extends TestCase
         $meta1->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
         self::assertCount(0, $engine1->validate($dto), 'the first operation passes');
 
-        // Operation 2: the SAME token under a DIFFERENT authoritative
+        // Operation 2: the same token under a different authoritative
         // binding (a different transaction): a different logical operation
         // — the second submission MUST be rejected, never Pass.
         [$engine2] = $this->buildBindingEngine($verifier, 'txn-OTHER');
@@ -633,7 +633,7 @@ final class ValidatorTest extends TestCase
         self::assertCount(1, $violations2);
         self::assertSame(KiwiCaptcha::INVALID_OR_EXPIRED_ERROR, $violations2[0]->getCode(), 'a different transaction presenting the same token is rejected (AlreadyConsumed), never Pass');
 
-        // Operation 3: the SAME token under a DIFFERENT scope — also a
+        // Operation 3: the same token under a different scope — also a
         // different logical operation, refused the same way.
         [$engine3] = $this->buildBindingEngine($verifier, 'txn-123');
         $meta3 = $engine3->getMetadataFor($dto::class);
@@ -736,6 +736,146 @@ final class ValidatorTest extends TestCase
         self::assertCount(1, $violations);
         self::assertSame(KiwiCaptcha::TEMPORARY_UNAVAILABLE_ERROR, $violations[0]->getCode(), 'an authority outage must fail closed as temporary_unavailable — never a silent pass');
         self::assertSame(1, $authority->calls, 'the authority is consulted exactly once before failing closed');
+    }
+
+    public function testEpochBumpedReplayOfTheSameOperationFailsWrongPolicyVersion(): void
+    {
+        // Epoch 1: a valid solve under an explicit operation id and
+        // binding commits the stored success (the identity is derived
+        // under epoch 1). The central policy then bumps the epoch to 2;
+        // the monitor observes it and rotates the shared verifier's
+        // expectation. The same token + kiwi_operation_id + binding must
+        // NOT replay the stored success: the epoch rotation is a
+        // security verdict about this request (the challenge died with
+        // the policy that authorized it), so with the replay-exemption
+        // split it fails WrongPolicyVersion — the hard failure wins over
+        // the matching identity.
+        $storage = new ArrayStorage();
+        $issuer = new Issuer(new Config(secretKey: self::SECRET, targetBits: 8), $storage);
+        $verifier = new Verifier($storage);
+        $challenge = $issuer->issue('login', '198.51.100.7', 'txn-123');
+        usleep(($challenge->minDurationMs + 10) * 1000);
+        $token = $this->solveToken($challenge->prefix, $challenge->salt, $challenge->targetBits, $challenge->nonce);
+
+        $redis = new FakePredisClient();
+        $nowMs = microtime(true) * 1000.0;
+        $monitor = new \BelConsulting\KiwiCaptchaBundle\Risk\SecurityEpochMonitor(
+            $verifier,
+            $redis,
+            'test-ns',
+            1,
+            1,
+            static function () use (&$nowMs): float {
+                return $nowMs;
+            },
+        );
+        $validate = function () use ($verifier, $monitor, $token): array {
+            $stack = new RequestStack();
+            $request = Request::create('/', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7']);
+            $request->attributes->set(KiwiCaptchaValidator::REQUEST_BINDING_ATTRIBUTE, 'txn-123');
+            $request->attributes->set(KiwiCaptchaValidator::OPERATION_ID_ATTRIBUTE, 'op-123');
+            $stack->push($request);
+            $validator = new KiwiCaptchaValidator($verifier, $stack, self::SECRET, policyVersion: 1, epochMonitor: $monitor);
+            $factory = new ConstraintValidatorFactory([KiwiCaptchaValidator::class => $validator]);
+            $engine = Validation::createValidatorBuilder()->setConstraintValidatorFactory($factory)->getValidator();
+            $dto = new class {
+                public ?string $captcha = null;
+            };
+            $dto->captcha = $token;
+            $meta = $engine->getMetadataFor($dto::class);
+            $meta->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
+            $violations = $engine->validate($dto);
+            $codes = [];
+            foreach ($violations as $violation) {
+                $codes[] = (string) $violation->getCode();
+            }
+
+            return $codes;
+        };
+
+        self::assertSame([], $validate(), 'the epoch-1 solve passes under the explicit operation id');
+
+        // The central epoch bumps to 2 and the monitor's cache window
+        // (1 s) elapses: the next validation's refresh observes the bump.
+        $redis->hset('{kiwi:test-ns}:security-policy', \BelConsulting\KiwiCaptchaBundle\Risk\SecurityEpochMonitor::MIN_POLICY_EPOCH_FIELD, '2');
+        $nowMs += 2000.0;
+
+        self::assertSame([KiwiCaptcha::INVALID_OR_EXPIRED_ERROR], $validate(), 'the same operation after the epoch bump never replays the stored success');
+
+        // The collapsed code hides the core reason, so the verdict is
+        // asserted directly on the rotated verifier: the same inputs
+        // fail the policy epoch check specifically — the hard security
+        // verdict wins over the matching operation identity.
+        $outcome = $verifier->verify($token, self::SECRET, 'login', '198.51.100.7', operationIdentity: 'op-123', expectedRequestBinding: 'txn-123');
+        self::assertSame(\KiwiCaptcha\VerifyError::WrongPolicyVersion, $outcome->error, 'the refusal is specifically the WrongPolicyVersion verdict');
+        self::assertNotNull($storage->consumedState($challenge->nonce)?->consumedResult, 'the committed evidence survives the refusal');
+    }
+
+    public function testOperationIdentityBindsTheEffectiveEpoch(): void
+    {
+        // The identity hash itself carries the effective epoch (exactly
+        // like Siteverify's idempotency fingerprint), so even an
+        // exempt-failure replay (expiry below) with the same operation id
+        // and binding must not resolve through the consumed branch after
+        // an epoch bump: the derived identity no longer matches the one
+        // the consume recorded, and the replay is refused.
+        $storage = new ArrayStorage();
+        $now = 1_800_000_000;
+        $nowFn = static function () use (&$now): int {
+            return $now;
+        };
+        $issuer = new Issuer(new Config(secretKey: self::SECRET, targetBits: 8, ttlSecs: 120), $storage, now: $nowFn);
+        $verifier = new Verifier($storage, now: $nowFn);
+        $challenge = $issuer->issue('login', '198.51.100.7', 'txn-123');
+        usleep(($challenge->minDurationMs + 10) * 1000);
+        $token = $this->solveToken($challenge->prefix, $challenge->salt, $challenge->targetBits, $challenge->nonce);
+
+        $redis = new FakePredisClient();
+        $nowMs = microtime(true) * 1000.0;
+        $monitor = new \BelConsulting\KiwiCaptchaBundle\Risk\SecurityEpochMonitor(
+            $verifier,
+            $redis,
+            'test-ns',
+            1,
+            1,
+            static function () use (&$nowMs): float {
+                return $nowMs;
+            },
+        );
+
+        $validate = function () use ($verifier, $monitor, $token): array {
+            $stack = new RequestStack();
+            $request = Request::create('/', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7']);
+            $request->attributes->set(KiwiCaptchaValidator::REQUEST_BINDING_ATTRIBUTE, 'txn-123');
+            $request->attributes->set(KiwiCaptchaValidator::OPERATION_ID_ATTRIBUTE, 'op-123');
+            $stack->push($request);
+            $validator = new KiwiCaptchaValidator($verifier, $stack, self::SECRET, policyVersion: 1, epochMonitor: $monitor);
+            $factory = new ConstraintValidatorFactory([KiwiCaptchaValidator::class => $validator]);
+            $engine = Validation::createValidatorBuilder()->setConstraintValidatorFactory($factory)->getValidator();
+            $dto = new class {
+                public ?string $captcha = null;
+            };
+            $dto->captcha = $token;
+            $meta = $engine->getMetadataFor($dto::class);
+            $meta->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
+            $violations = $engine->validate($dto);
+            $codes = [];
+            foreach ($violations as $violation) {
+                $codes[] = (string) $violation->getCode();
+            }
+
+            return $codes;
+        };
+
+        self::assertSame([], $validate(), 'the epoch-1 solve passes');
+
+        // The epoch bumps; the token expires (an exempt failure, which
+        // would otherwise route to the identity-gated replay branch).
+        $redis->hset('{kiwi:test-ns}:security-policy', \BelConsulting\KiwiCaptchaBundle\Risk\SecurityEpochMonitor::MIN_POLICY_EPOCH_FIELD, '2');
+        $nowMs += 2000.0;
+        $now = 1_800_000_130;
+
+        self::assertContains(KiwiCaptcha::INVALID_OR_EXPIRED_ERROR, $validate(), 'the expired same-id replay after the epoch bump is refused — the epoch-bound identity no longer matches');
     }
 
     public function testBindingAuthorityDecliningTheTransactionIsTheInvalidBindingOutcome(): void
@@ -995,7 +1135,7 @@ final class ValidatorTest extends TestCase
         self::assertSame(1, $storage->commits, 'the verifier must commit the derivation result');
 
         // lost response: the client never saw the reply and re-submits the
-        // same token with the same binding and the SAME operation id.
+        // same token with the same binding and the same operation id.
         [$engine2, $stack2, $validator2] = $this->buildRetryEngine($verifier, $storage, binding: 'txn-123', operationId: 'op-123');
         $dto2 = new class {
             public ?string $captcha = null;
@@ -1011,7 +1151,7 @@ final class ValidatorTest extends TestCase
         self::assertSame(1, $storage->commits, 'the retry must NOT commit again — the outcome came from the STORED RESULT, no second derive');
         self::assertSame(0, $storage->deletes);
 
-        // The same retry WITHOUT the operation id: the derived identity no
+        // The same retry without the operation id: the derived identity no
         // longer matches the stored one (which carries the opid component),
         // so the core refuses the stored success as AlreadyConsumed —
         // invalid_or_expired, never a pass. (The pure binding-only replay
@@ -1133,11 +1273,11 @@ final class ValidatorTest extends TestCase
     }
 
     /**
-     * The ambiguous-consume stored-valid normalization is identity-gated:
-     * a ConsumeIndeterminate outcome resolves to the stored success only
+     * The ambiguous-consume stored-valid normalization is identity-gated.
+     * A ConsumeIndeterminate outcome resolves to the stored success only
      * when the retained operation identity equals this validation's
-     * derived identity; a different operation's identity (or a plain
-     * consume that recorded none) is refused as invalid_or_expired —
+     * derived identity. A different operation's identity, or a plain
+     * consume that recorded none, is refused as invalid_or_expired —
      * never a replayed success for a different operation.
      */
     public function testAmbiguousConsumeNormalizationIsIdentityGated(): void
@@ -1148,7 +1288,7 @@ final class ValidatorTest extends TestCase
         usleep(($challenge->minDurationMs + 10) * 1000);
         $token = $this->solveToken($challenge->prefix, $challenge->salt, $challenge->targetBits, $challenge->nonce);
 
-        // The original attempt consumed, derived, committed a VALID
+        // The original attempt consumed, derived, committed a valid
         // result... but its response was lost after the commit. Model the
         // lost response on the retry: the first validation succeeds here,
         // then a later attempt throws on consume while the record already
@@ -1163,7 +1303,7 @@ final class ValidatorTest extends TestCase
         self::assertCount(0, $engine->validate($dto));
         self::assertNotNull($storage->consumedState($challenge->nonce)?->consumedResult);
 
-        // The SAME logical operation retries, and this time the consume
+        // The same logical operation retries, and this time the consume
         // response is lost: ConsumeIndeterminate, normalized from the
         // stored record — the retained identity matches the derived one,
         // so the stored success resolves (and the replay gate accepts it:
@@ -1179,7 +1319,7 @@ final class ValidatorTest extends TestCase
         self::assertCount(0, $engine2->validate($dto2), 'the identity-matching stored success resolves the ambiguous retry');
         self::assertSame($challenge->nonce, $stack2->getMainRequest()?->attributes->get(KiwiCaptchaValidator::VERIFIED_JTI_ATTRIBUTE));
 
-        // A DIFFERENT operation's retry under the same lost-response
+        // A different operation's retry under the same lost-response
         // conditions (a different binding derives a different identity):
         // refused, never the stored success.
         [$engine3, $stack3] = $this->buildRetryEngine($verifier, $storage, binding: 'txn-OTHER', operationId: 'op-123');
@@ -2504,7 +2644,7 @@ final class ValidatorTest extends TestCase
         self::assertSame('complete', $record->state);
         self::assertSame($chainId, $record->disposition?->chainId, 'the survived disposition keeps the SAME chain id');
 
-        // The expired token replayed by the EXACT same logical operation
+        // The expired token replayed by the exact same logical operation
         // (the validator derives the operation identity from the scope,
         // the authoritative transaction binding and the explicit
         // kiwi_operation_id, so the retry carries the same identity as the

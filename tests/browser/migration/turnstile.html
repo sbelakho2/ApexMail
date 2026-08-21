@@ -1,0 +1,19 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Cloudflare Turnstile migration fixture</title>
+  <script src="/kiwi-captcha/api.js?compat=turnstile" async defer></script>
+</head>
+<body>
+  <form id="reg" action="/register" method="post">
+    <div class="cf-turnstile" data-sitekey="0x4AAAAAAABC" data-callback="onTurnstile" data-expired-callback="onTExpired"></div>
+    <button type="submit">Submit</button>
+  </form>
+  <p id="out"></p>
+  <script>
+    function onTurnstile(token) { document.getElementById('out').textContent = 'cb:' + String(token).slice(0, 8); }
+    function onTExpired() { document.getElementById('out').textContent = 'expired-cb'; }
+  </script>
+</body>
+</html>

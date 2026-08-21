@@ -241,7 +241,7 @@ impl r2d2::ManageConnection for StoreConnectionManager {
 ///
 /// ARGV[1] is the JSON-encoded logical-operation identity ('' = none):
 /// when non-empty, the `"operation_identity":null` marker is spliced to
-/// the identity IN THE SAME atomic write as the state flip, exactly like
+/// the identity IN THE same atomic write as the state flip, exactly like
 /// the PHP identity-aware consume (the identity has passed the narrow
 /// `[A-Za-z0-9_-]` gate before the eval, so the raw replacement splice can
 /// never be interpreted as a Lua `string.gsub` template — `%` is the
@@ -250,7 +250,7 @@ impl r2d2::ManageConnection for StoreConnectionManager {
 /// Returns (as a Redis array reply):
 /// - missing key → `false` (Lua nil → Redis null → [`VerifyError::RecordNotFound`]);
 /// - `[record_json, 1]` — this caller won the transition (first; the JSON
-///   is the UPDATED value, so the recorded identity rides back);
+///   is the updated value, so the recorded identity rides back);
 /// - `[record_json, 0]` — already consumed by a concurrent caller (the
 ///   record_json carries `state` and, once committed, `consumed_result`).
 ///
@@ -288,6 +288,25 @@ return {updated, 1}
 "#;
 
 /// One Lua script for the best-effort outcome commit: stores
+/// One atomic delete-if-pending cleanup: GET decides — a missing record
+/// reports missing, a consumed record is returned verbatim and never
+/// deleted (the committed recovery evidence survives a racing redeem),
+/// and only a pending record is deleted (the one-shot cheap-failure
+/// policy). Closes the check-then-delete toctou of a separate
+/// `consumed_state` read followed by `DEL`.
+const DELETE_IF_PENDING_LUA: &str = r#"
+-- kiwicaptcha delete-if-pending (atomic cleanup)
+local v = redis.call("GET", KEYS[1])
+if not v then
+  return {'missing'}
+end
+if string.find(v, '"state":"consumed"', 1, true) then
+  return {'consumed', v}
+end
+redis.call("DEL", KEYS[1])
+return {'deleted-pending'}
+"#;
+
 /// `consumed_result = {valid, binding}` exactly once, only when the record
 /// is already `consumed` and carries no result yet. Returns 1 when stored,
 /// 0 otherwise. Like the consume-transition script, the record's JSON bytes
@@ -315,6 +334,21 @@ if ttl < 1 then ttl = 1 end
 redis.call('SET', KEYS[1], updated, 'EX', ttl)
 return 1
 "#;
+
+/// The outcome of the atomic delete-if-pending cleanup.
+#[derive(Debug)]
+pub enum DeleteIfPending {
+    /// No record exists under the key.
+    Missing,
+    /// The record was pending and has been deleted (one-shot policy).
+    DeletedPending,
+    /// The record was already consumed and is never deleted; the
+    /// retained consumed state (committed result + operation identity)
+    /// is returned so the caller needs no second lookup. Boxed: the
+    /// consumed state dominates the enum's size, and the common paths
+    /// (missing / deleted-pending) stay pointer-sized.
+    Consumed(Box<ConsumedState>),
+}
 
 /// The result of the consumed-state transition.
 #[derive(Debug, Clone)]
@@ -460,6 +494,42 @@ fn parse_consume(value: redis::Value) -> Option<ConsumeResult> {
         operation_identity: stored.operation_identity,
     })
 }
+/// Decode the delete-if-pending Lua reply: `['missing']`,
+/// `['deleted-pending']`, or `['consumed', <json>]`. Anything else is a
+/// storage-protocol failure.
+fn parse_delete_if_pending(value: redis::Value) -> DeleteIfPending {
+    let redis::Value::Array(items) = value else {
+        return DeleteIfPending::Missing;
+    };
+    let state = match items.first() {
+        Some(redis::Value::BulkString(bytes)) => String::from_utf8_lossy(bytes).into_owned(),
+        Some(redis::Value::SimpleString(s)) => s.clone(),
+        _ => return DeleteIfPending::Missing,
+    };
+    match state.as_str() {
+        "consumed" => {
+            let raw = match items.get(1) {
+                Some(redis::Value::BulkString(bytes)) => {
+                    String::from_utf8_lossy(bytes).into_owned()
+                }
+                _ => return DeleteIfPending::Missing,
+            };
+            // A consumed envelope that cannot decode reads as absent,
+            // matching the lenient corrupt-key rule of consumed_state.
+            let Some(stored) = decode_stored(&raw) else {
+                return DeleteIfPending::Missing;
+            };
+            DeleteIfPending::Consumed(Box::new(ConsumedState {
+                record: stored.record,
+                stored_result: stored.consumed_result,
+                operation_identity: stored.operation_identity,
+            }))
+        }
+        "deleted-pending" => DeleteIfPending::DeletedPending,
+        _ => DeleteIfPending::Missing,
+    }
+}
+
 /// JSON-encode a caller-supplied logical-operation identity for the
 /// consume Lua splice, validating it against the shared `OperationIdentity`
 /// contract first: 1..128 bytes of `[A-Za-z0-9_-]` (the PHP core's
@@ -714,12 +784,12 @@ impl RedisChallengeStore {
         })?;
         // Runtime envelope, byte-compatible with the PHP store: the
         // `state` marker, the `consumed_result` field and the
-        // `operation_identity` marker (null — the logical-operation
-        // identity a PHP identity-aware consume can splice in; the PHP
-        // core validates identities against the narrow `[A-Za-z0-9_-]`
-        // 1..128-byte alphabet and rejects malformed ones before the
-        // transition — the Rust core never writes identities) are spliced
-        // into the RAW JSON (never re-encoded — large integers must stay
+        // `operation_identity` marker (null here; the identity-aware
+        // consume splices the logical-operation identity into it in the
+        // same atomic transition — both cores validate identities
+        // against the narrow `[A-Za-z0-9_-]` 1..128-byte alphabet and
+        // reject malformed ones before the transition) are spliced into
+        // the RAW JSON (never re-encoded — large integers must stay
         // decimal), exactly as PHP writes them, so the atomic
         // pending->consumed transition works across the two
         // implementations. The canonical record fields are untouched.
@@ -810,7 +880,7 @@ impl RedisChallengeStore {
     /// 1..128 bytes of `[A-Za-z0-9_-]` (the shared `OperationIdentity`
     /// contract — the alphabet is what makes the Lua splice safe, see
     /// [`CONSUME_TRANSITION_LUA`]); a malformed identity is rejected with
-    /// an `Err` BEFORE the transition, the record is left untouched, and
+    /// an `Err` before the transition, the record is left untouched, and
     /// the verify flow maps that to
     /// [`VerifyError::ConsumeIndeterminate`], exactly like the PHP
     /// verifier catches the identity `\InvalidArgumentException`.
@@ -855,7 +925,7 @@ impl RedisChallengeStore {
     /// Read a record's retained consumed state without any transition —
     /// the PHP `ConsumedStateReadableInterface::consumedState()` mirror.
     ///
-    /// Returns `Ok(Some(ConsumedState))` only when the stored value exists
+    /// Returns `Ok` carrying `Some(ConsumedState)` only when the stored value exists
     /// and its runtime envelope carries the `"state":"consumed"` marker;
     /// `Ok(None)` when the key is missing, the value is not consumed
     /// (pending), or the value is corrupt (undecodable — like the PHP
@@ -884,6 +954,27 @@ impl RedisChallengeStore {
                 None
             }
         }))
+    }
+
+    /// The atomic delete-if-pending cleanup — ONE Lua script decides
+    /// missing / deleted-pending / consumed and performs the delete,
+    /// closing the check-then-delete toctou: a record a concurrent
+    /// redeemer consumes (and commits) between the caller's decision and
+    /// this cleanup is observed in its consumed state here and never
+    /// erased. A consumed record's retained state is returned with the
+    /// answer (no second lookup). `Err` is a genuine storage failure.
+    pub fn delete_if_pending(&self, nonce: &str) -> redis::RedisResult<DeleteIfPending> {
+        let key = format!("{}{}", self.prefix, nonce);
+        let mut conn = self.checkout()?;
+        let value = Self::run_command(&mut conn, |c| {
+            Self::invoke_script::<redis::Value>(
+                c,
+                &redis::Script::new(DELETE_IF_PENDING_LUA),
+                &key,
+                &[],
+            )
+        })?;
+        Ok(parse_delete_if_pending(value))
     }
 
     /// Best-effort persistence of the proof outcome for an already-consumed
@@ -1213,7 +1304,7 @@ impl ProductionVerifier {
     ///   [`VerifyError::ConsumeIndeterminate`] before the transition, like
     ///   the PHP verifier). It also authorizes the retained-state replay:
     ///   an already-consumed record with a committed valid outcome is
-    ///   replayed idempotently ONLY for the identity that matches the
+    ///   replayed idempotently only for the identity that matches the
     ///   recorded one (constant-time compare) — `None` (the default for
     ///   every native caller) never receives a stored success, and any
     ///   other caller sees [`VerifyError::AlreadyConsumed`]. The
@@ -1305,14 +1396,40 @@ impl ProductionVerifier {
         //    the one-shot cheap-failure delete.
         if let Err(e) = self.check_cheap(&peek, scope, client_ip, now_ns, expected_request_binding)
         {
-            match self.store.consumed_state(&token.nonce) {
-                Ok(Some(state)) => return self.resolve_consumed(state, operation_identity),
-                Ok(None) => {
-                    self.store.best_effort_delete(&token.nonce);
+            // The replay-exemption split (VerifyError::is_replay_exempt):
+            // only the narrow set of failures that describe the original
+            // redemption's circumstances — expiry, the IP binding, the
+            // missing client IP (and the telemetry gate, an exempt
+            // failure by classification) — may resolve through the
+            // identity-gated consumed branch. Every other failure is a
+            // security verdict about this request and stands even when
+            // the operation identity matches a consumed record's
+            // committed success: the stored success never replays around
+            // it, the record is kept intact, and the failure is
+            // returned. A pending (or missing) record keeps the one-shot
+            // cheap-failure delete for both classes.
+            // The cleanup runs through the fused atomic transition: the
+            // delete decision and the delete itself are one script, so a
+            // record a concurrent redeemer consumes (and commits)
+            // between this failure and the cleanup is observed in its
+            // consumed state and never erased (the committed recovery
+            // evidence survives), and the retained state rides back on
+            // the answer — no second lookup.
+            match self.store.delete_if_pending(&token.nonce) {
+                Ok(DeleteIfPending::Consumed(state)) => {
+                    if e.is_replay_exempt() {
+                        return self.resolve_consumed(*state, operation_identity);
+                    }
+                    // A hard security verdict on a consumed record: the
+                    // fused transition kept the evidence and the failure
+                    // stands — the identity-gated replay never overrides it.
+                    return VerifyOutcome::Invalid(e);
+                }
+                Ok(DeleteIfPending::DeletedPending) | Ok(DeleteIfPending::Missing) => {
                     return VerifyOutcome::Invalid(e);
                 }
                 Err(_) => {
-                    // The retained-state read failed: the record may be
+                    // The fused read+delete failed: the record may be
                     // the consumed evidence, so it is never deleted; the
                     // typed retryable result lets the caller retry once
                     // the store recovers.
@@ -1447,7 +1564,7 @@ impl ProductionVerifier {
     ///   [`VerifyError::InsufficientWork`] — an invalid replay needs no
     ///   identity (it grants nothing);
     /// - a committed valid outcome: the idempotent retained success
-    ///   (marked `from_stored_result`) ONLY when the supplied operation
+    ///   (marked `from_stored_result`) only when the supplied operation
     ///   identity is non-null AND the recorded identity is non-null AND
     ///   they match (constant-time compare — the PHP `hash_equals` mirror).
     ///   Every other caller — no identity, a record consumed without one,

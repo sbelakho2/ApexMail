@@ -1,7 +1,16 @@
 [package]
 name = "kiwicaptcha"
 description = "KiwiCaptcha: a privacy-first, self-contained proof-of-work CAPTCHA engine (SHA-256 + Argon2id)"
-version = "1.1.0"
+# 1.7.0 aligns the crate version with the repository's release tag
+# series (v1.0.0 .. v1.6.31) ahead of the first crates.io publication.
+# The previous 1.1.0 field was stale through the whole v1.x tag series;
+# the crate has never been published to crates.io (verified — the
+# registry reports the name unknown), so no semver continuity is owed:
+# 1.7.0 freezes the CURRENT public API (the identity-bearing verify
+# signature, the replay-gated VerifyOutcome::Valid fields, the fused
+# Redis store) as the pre-publication baseline, with no compatibility
+# wrappers for the earlier unpublished shapes.
+version = "1.7.0"
 edition = "2021"
 authors = ["Bel Consulting OÜ <hello@bel.ee>"]
 license = "MIT"

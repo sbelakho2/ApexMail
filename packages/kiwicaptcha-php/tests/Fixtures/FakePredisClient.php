@@ -146,6 +146,29 @@ final class FakePredisClient extends \Predis\Client
             return [$this->store[$key], 1, 0, ''];
         }
 
+        // Delete-if-pending (atomic cleanup): missing reports missing;
+        // a consumed record is returned verbatim and kept; only a
+        // pending record is deleted — mirroring the real Lua tristate.
+        if (str_contains($script, 'delete-if-pending (atomic cleanup)')) {
+            $key = (string) $keys[0];
+            if (!isset($this->store[$key])) {
+                return ['missing'];
+            }
+            $raw = $this->store[$key];
+            try {
+                $obj = json_decode($raw, true, flags: JSON_THROW_ON_ERROR);
+            } catch (\JsonException) {
+                // Corrupt values degrade to "missing" like the real Lua.
+                return ['missing'];
+            }
+            if (($obj['state'] ?? 'pending') === 'consumed') {
+                return ['consumed', $raw];
+            }
+            unset($this->store[$key]);
+
+            return ['deleted-pending'];
+        }
+
         // Commit result: only on a consumed record without a
         // result yet. ARGV = [valid, binding, has_binding].
         if (str_contains($script, 'commit result')) {

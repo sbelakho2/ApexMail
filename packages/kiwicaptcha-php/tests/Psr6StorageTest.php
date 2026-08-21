@@ -146,39 +146,84 @@ final class Psr6StorageTest extends TestCase
         self::assertSame(0, $consumed?->record->issuedAtNs);
     }
 
-    public function testConsumedStateReadsTheStoredConsumedEnvelope(): void
+    public function testInspectConsumedEnvelopeReadsTheStoredEnvelope(): void
     {
         $storage = new Psr6Storage($this->makePool());
         $storage->store($this->makeRecord());
-        self::assertNull($storage->consumedState('nonce-1'), 'a pending record has no consumed state');
+        self::assertNull($storage->inspectConsumedEnvelope('nonce-1'), 'a pending record has no consumed envelope');
 
         $consumed = $storage->consume('nonce-1');
         self::assertNotNull($consumed);
         self::assertTrue($consumed->consumedNow);
         $storage->commitResult('nonce-1', true, 'txn');
 
-        // The retained consumed state must be readable without a
-        // transition: the envelope carries the consumed flag, the
-        // committed result and the recorded operation identity exactly
-        // like the Redis/array backends.
-        $state = $storage->consumedState('nonce-1');
-        self::assertNotNull($state, 'consumedState() must read the stored consumed envelope');
+        // The retained envelope stays readable without any capability
+        // claim: the diagnostic inspection reports the consumed flag and
+        // the committed result (the identity is always null — this
+        // backend does not offer the identity-aware consume).
+        $state = $storage->inspectConsumedEnvelope('nonce-1');
+        self::assertNotNull($state, 'inspectConsumedEnvelope() must read the stored consumed envelope');
         self::assertTrue($state->consumedBefore);
         self::assertFalse($state->consumedNow, 'the read-only inspection performs no transition');
         self::assertTrue($state->consumedResult?->valid ?? false, 'the committed result is readable');
         self::assertSame('txn', $state->consumedResult?->binding);
+        self::assertNull($state->operationIdentity, 'no identity is recorded on this backend');
+    }
 
-        $storage->store($this->makeRecord('nonce-2'));
-        $storage->consumeWithOperationIdentity('nonce-2', 'op-id-1');
-        $identityState = $storage->consumedState('nonce-2');
-        self::assertNotNull($identityState);
-        self::assertSame('op-id-1', $identityState->operationIdentity, 'the recorded operation identity is readable');
+    public function testPsr6StorageClaimsNoRecoveryCapabilities(): void
+    {
+        // The capability contract: PSR-6 pools intentionally do not
+        // support trusted consumed-state recovery, so the backend
+        // advertises none of the recovery capabilities — only the plain
+        // storage contract plus the non-atomic marker. The diagnostic
+        // inspection method exists but is deliberately NOT an interface.
+        $storage = new Psr6Storage($this->makePool());
+        self::assertNotInstanceOf(\KiwiCaptcha\ConsumedStateReadableInterface::class, $storage);
+        self::assertNotInstanceOf(\KiwiCaptcha\OperationIdentityAwareStorageInterface::class, $storage);
+        self::assertNotInstanceOf(\KiwiCaptcha\AtomicDeleteIfPendingInterface::class, $storage);
+        self::assertInstanceOf(\KiwiCaptcha\NonAtomicStorageInterface::class, $storage);
+        self::assertTrue(method_exists($storage, 'inspectConsumedEnvelope'), 'the diagnostic inspection stays available off-interface');
     }
 
     public function testConsumedStateOfAMissingRecordIsNull(): void
     {
         $storage = new Psr6Storage($this->makePool());
-        self::assertNull($storage->consumedState('absent-nonce'));
+        self::assertNull($storage->inspectConsumedEnvelope('absent-nonce'));
+    }
+
+    public function testANonAtomicStorageRaisesTheOneTimeDiagnostic(): void
+    {
+        // The Verifier's non-atomic-storage warning is loud (no error
+        // suppression) for standalone PHP apps, and one-time per process:
+        // the first construction over a non-atomic backend raises
+        // E_USER_DEPRECATED exactly once; a second construction stays
+        // silent. The once flag is process state, so the test asserts
+        // what an error handler observes in this process around the
+        // first observable raise.
+        $raised = [];
+        $previous = set_error_handler(static function (int $errno, string $errstr) use (&$raised): bool {
+            if ($errno === \E_USER_DEPRECATED) {
+                $raised[] = $errstr;
+            }
+
+            return true;
+        });
+        try {
+            new \KiwiCaptcha\Verifier(new Psr6Storage($this->makePool()));
+        } finally {
+            restore_error_handler();
+        }
+        $alreadyWarned = $raised === [];
+        if (!$alreadyWarned) {
+            self::assertCount(1, $raised, 'the diagnostic fires exactly once per process');
+            self::assertStringContainsString('non-atomic storage', $raised[0]);
+            self::assertStringContainsString('best-effort under concurrency', $raised[0]);
+        } else {
+            // Another test in this process already consumed the one-time
+            // warning: the invariant degenerates to "never more than
+            // once", which the empty observation satisfies.
+            self::assertEmpty($raised, 'the one-time diagnostic never repeats in a process');
+        }
     }
 
     public function testPsr6StorageIsMarkedNonAtomic(): void

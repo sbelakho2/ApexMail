@@ -11,17 +11,17 @@ namespace KiwiCaptcha;
  * This is not a verification retry API. It performs no signature,
  * expiry, scope, IP, region, issuer or policy checks and no fresh
  * derivation. It only reads the retained consumed record and its
- * committed deterministic result — and the stored VALID outcome is an
- * authorization grant, so it is returned only when the caller proves
- * the exact logical operation: the $operationIdentity parameter must
- * equal (constant-time) the operation identity the pending→consumed
- * transition recorded atomically with the state flip. A mismatched or
- * absent identity (including a record consumed by a plain consume that
- * recorded none) yields the {@see VerifyError::AlreadyConsumed} error
- * outcome instead — possession of the raw token alone is never a
- * sufficient proof, so the API is not a replay oracle. A stored INVALID
- * outcome replays deterministically to any caller exactly like the
- * core's replay path (it grants nothing).
+ * committed deterministic result. The stored valid outcome is an
+ * authorization grant: it is returned only when the caller proves the
+ * exact logical operation, with $operationIdentity equal in constant
+ * time to the identity the pending-to-consumed transition recorded
+ * atomically with the state flip. A mismatched or absent identity —
+ * including a record consumed by a plain consume that recorded none —
+ * yields the {@see VerifyError::AlreadyConsumed} error outcome
+ * instead. Possession of the raw token alone is never a sufficient
+ * proof, so the API is not a replay oracle. A stored invalid outcome
+ * replays deterministically to any caller exactly like the core's
+ * replay path; it grants nothing.
  *
  * Null (nothing recoverable, retryable through the ordinary paths) is
  * returned for a non-capable storage, an undecodable token, a missing
@@ -49,9 +49,9 @@ final class ConsumedOutcomeRecovery
      * @param string $rawToken          the base64 solution token whose
      *                                  consumed record holds the outcome
      * @param string $operationIdentity the expected logical-operation
-     *                                  identity; must match the stored one
-     *                                  (constant-time) before a stored
-     *                                  valid outcome is returned
+     *                                  identity. It must match the stored
+     *                                  one in constant time before a
+     *                                  stored valid outcome is returned.
      *
      * @return VerifyOutcome|null the stored outcome when the identity is
      *                            proven ({@see VerifyError::AlreadyConsumed}
@@ -79,13 +79,13 @@ final class ConsumedOutcomeRecovery
             return null;
         }
 
-        // The stored INVALID outcome is deterministic and grants nothing:
+        // The stored invalid outcome is deterministic and grants nothing:
         // it replays to any caller exactly like the core's replay path.
         if (!$consumed->consumedResult->valid) {
             return VerifyOutcome::invalid(VerifyError::InsufficientWork);
         }
 
-        // The identity gate: the stored VALID outcome is an authorization
+        // The identity gate: the stored valid outcome is an authorization
         // grant, released only to the logical operation that consumed the
         // record. A null stored identity (a plain consume) is unprovable
         // by construction; anything not exactly equal is refused.

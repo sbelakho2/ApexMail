@@ -345,7 +345,7 @@ final class RealRedisIntegrationTest extends TestCase
         // response was lost) resolves through the validator's
         // consumed-state normalization: the retained record, its committed
         // result and its operation identity are read back via
-        // consumedState() from the REAL Redis backend, and the matching
+        // consumedState() from the real Redis backend, and the matching
         // identity yields the stored success; a different operation's
         // identity never does.
         $inner = new RedisStorage($this->client, 'ci:indeterminate:');

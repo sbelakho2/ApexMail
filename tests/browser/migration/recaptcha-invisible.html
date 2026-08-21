@@ -1,0 +1,17 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Invisible reCAPTCHA migration fixture</title>
+  <script src="/kiwi-captcha/api.js?compat=recaptcha" async defer></script>
+</head>
+<body>
+  <form id="login" action="/login" method="post">
+    <button class="g-recaptcha" data-sitekey="6Lc_invisible_login" data-callback="onInvisibleCaptcha">Sign in</button>
+  </form>
+  <p id="out"></p>
+  <script>
+    function onInvisibleCaptcha(token) { document.getElementById('out').textContent = 'cb:' + String(token).slice(0, 8); }
+  </script>
+</body>
+</html>

@@ -317,8 +317,12 @@ final class KiwiCaptchaValidator extends ConstraintValidator
         // expected policy version rotates to the current monotonic max —
         // a central policy bump revokes outstanding challenges within one
         // cache window, a regressed or unavailable central value can
-        // never weaken the epoch.
-        $this->epochMonitor?->refresh();
+        // never weaken the epoch. The refreshed value is also captured as
+        // the effective epoch: it binds the operation identity below
+        // (exactly like Siteverify's idempotency fingerprint), so a
+        // policy bump splits the retry's identity from the one the
+        // consume recorded even for the exempt replay failures.
+        $effectiveEpoch = $this->epochMonitor?->refresh() ?? $this->policyVersion;
 
         // Once now exceeds the last successful central read by
         // risk.security_epoch_max_stale_secs, the cached epoch may be
@@ -383,15 +387,16 @@ final class KiwiCaptchaValidator extends ConstraintValidator
         // identity and the core's expected-request-binding enforcement are
         // both derived from it, so the same value that was signed at
         // issuance is enforced atomically with the consume, not only
-        // compared after the fact. An authority failure (its backend
-        // temporarily unavailable) fails closed as temporary_unavailable
-        // It runs before any token is consumed; a violation is a silent pass,
-        // never a raw exception; a null resolution (the transaction is
-        // invalid/unknown) is the normal invalid-binding outcome via the
-        // post-verify comparison below. Without an authority the raw
-        // request binding (the request attribute the application
-        // controller copied from the POSTed kiwi_request_binding field —
-        // or the raw POST field) applies unchanged.
+        // compared after the fact. The resolution runs before any token
+        // is consumed. An authority failure (its backend temporarily
+        // unavailable) fails closed as the temporary_unavailable
+        // violation — never a silent pass, never a raw exception — and a
+        // null resolution (the transaction is invalid/unknown) is the
+        // normal invalid-binding outcome via the post-verify comparison
+        // below. Without an authority the raw request binding (the
+        // request attribute the application controller copied from the
+        // POSTed kiwi_request_binding field — or the raw POST field)
+        // applies unchanged.
         try {
             $canonicalBinding = $this->resolveAuthoritativeBinding($constraint, $request);
         } catch (PostSolveDispositionUnavailableException $e) {
@@ -407,7 +412,10 @@ final class KiwiCaptchaValidator extends ConstraintValidator
         }
 
         // The operation identity: the logical operation redeeming the
-        // nonce, bound to the operation context in order of availability:
+        // nonce, bound to the effective security-policy epoch (a same-id
+        // retry after a central policy bump derives a different identity
+        // — the Siteverify fingerprint composition) and to the operation
+        // context in order of availability:
         //
         //  1. the explicit per-operation id the application supplies
         //     (kiwi_operation_id — the request attribute, the POSTed field,
@@ -437,7 +445,7 @@ final class KiwiCaptchaValidator extends ConstraintValidator
             // it as MalformedToken before the identity matters.
             $operationContext = 'token:'.($this->verifiedNonceOf($value) ?? '');
         }
-        $operationIdentity = hash('sha256', $constraint->scope."\0".($canonicalBinding ?? '')."\0".$operationContext);
+        $operationIdentity = hash('sha256', $constraint->scope."\0".($canonicalBinding ?? '')."\0".'epoch:'.$effectiveEpoch."\0".$operationContext);
 
         // The core's expected-request-binding enforcement mirrors the
         // post-verify comparison below: it applies only to a bound record

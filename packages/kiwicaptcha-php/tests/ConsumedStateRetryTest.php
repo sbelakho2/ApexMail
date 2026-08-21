@@ -22,10 +22,14 @@ use PHPUnit\Framework\TestCase;
  * Consumed-state retry: consume() is a one-shot transition that keeps
  * the record until its TTL; replay protection is the consumed marker,
  * not absence. The deterministic verification result (consumed_result)
- * is committed best-effort, so a retry on an already-consumed record
- * returns the same outcome (Valid/InsufficientWork) without
- * re-deriving. A consumed record without a committed result (crash
- * between consume and commit) is reported as ConsumeIndeterminate.
+ * is committed best-effort. A retry on an already-consumed record
+ * returns the stored valid outcome without re-deriving only when the
+ * caller supplies the exact operation identity recorded with the
+ * transition (identity-gated replay); without the matching identity
+ * the stored success is refused as AlreadyConsumed. The stored invalid
+ * outcome (InsufficientWork) replays deterministically to any caller.
+ * A consumed record without a committed result (crash between consume
+ * and commit) is reported as ConsumeIndeterminate.
  */
 final class ConsumedStateRetryTest extends TestCase
 {

@@ -330,6 +330,33 @@ pub enum VerifyError {
     AdmissionUnavailable,
 }
 
+impl VerifyError {
+    /// Whether this failure is exempt from the one-shot policy on a
+    /// consumed record: the failure describes the original redemption's
+    /// circumstances (the signed expiry, the network binding, the
+    /// missing client IP, the client-side telemetry evidence) rather
+    /// than this request's authorization, so a consumed record whose
+    /// retained committed success is replayed by the proven operation
+    /// may resolve through the consumed branch despite it.
+    ///
+    /// The exemption is deliberately narrow. Every security verdict —
+    /// wrong scope, request-binding mismatch, policy epoch, region,
+    /// issuer, kid revocation/resolution, signature, record shape, the
+    /// unsupported protocol/profile, and the receipt-timing floor —
+    /// stands even when the operation identity matches: the stored
+    /// success never replays around it (the record is kept intact and
+    /// the failure is returned).
+    pub fn is_replay_exempt(&self) -> bool {
+        matches!(
+            self,
+            VerifyError::Expired
+                | VerifyError::IpMismatch
+                | VerifyError::MissingClientIp
+                | VerifyError::BotDetected
+        )
+    }
+}
+
 /// Structural validation of a stored [`ChallengeRecord`].
 ///
 /// Runs as the first check of [`verify_solution`] (after attempt accounting),
@@ -1078,6 +1105,54 @@ mod tests {
         let challenge = format!("{}.{}", B64.encode(canonical.as_bytes()), sig);
         record.challenge = challenge.clone();
         record.prefix = format!("{challenge}|{}|", record.salt);
+    }
+
+    #[test]
+    fn exactly_the_timing_failures_are_replay_exempt() {
+        // The exemption is the narrow set of failures that describe the
+        // original redemption's circumstances rather than this request's
+        // authorization (expiry, the IP binding, the missing client IP,
+        // the client-side telemetry evidence). Everything else is a
+        // security verdict that must stand even when the operation
+        // identity matches a consumed record's committed success.
+        let exempt = [
+            VerifyError::Expired,
+            VerifyError::IpMismatch,
+            VerifyError::MissingClientIp,
+            VerifyError::BotDetected,
+        ];
+        let all = [
+            VerifyError::BadSignature,
+            VerifyError::Expired,
+            VerifyError::TooFast,
+            VerifyError::IpMismatch,
+            VerifyError::MissingClientIp,
+            VerifyError::CounterTooLarge,
+            VerifyError::WrongScope,
+            VerifyError::RequestBindingMismatch,
+            VerifyError::WrongRegion,
+            VerifyError::WrongIssuer,
+            VerifyError::WrongPolicyVersion,
+            VerifyError::UnknownKid,
+            VerifyError::TooManyAttempts,
+            VerifyError::InsufficientWork,
+            VerifyError::MalformedRecord,
+            VerifyError::BotDetected,
+            VerifyError::MalformedToken,
+            VerifyError::RecordNotFound,
+            VerifyError::StorageUnavailable,
+            VerifyError::ConsumeIndeterminate,
+            VerifyError::AlreadyConsumed,
+            VerifyError::CapacityExceeded,
+            VerifyError::AdmissionUnavailable,
+        ];
+        for e in all {
+            assert_eq!(
+                exempt.contains(&e),
+                e.is_replay_exempt(),
+                "{e:?} replay-exempt classification must match the exempt set"
+            );
+        }
     }
 
     #[test]

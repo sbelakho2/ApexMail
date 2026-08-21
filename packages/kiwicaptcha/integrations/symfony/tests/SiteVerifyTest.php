@@ -280,18 +280,17 @@ final class SiteVerifyTest extends TestCase
         $ok = $controller->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', ['response' => $solution, 'secret' => 'secret-login', 'remoteip' => '203.0.113.7']));
         self::assertTrue(json_decode((string) $ok->getContent(), true)['success']);
 
-        // The same login token against the admin secret: the cheap phase
-        // would fail WrongScope, but the record is already consumed — its
-        // retained consumed state is recovery evidence and is never
-        // deleted by a cheap failure. The replay resolves through the
-        // consumed branch: without an operation identity (a
-        // non-idempotent request) the stored success is refused as
-        // AlreadyConsumed, the duplicate vocabulary. The escalation is
-        // refused either way — never success.
+        // The same login token against the admin secret: the wrong
+        // scope is a security verdict about this request, so it stands
+        // even though the record is already consumed — the identity-gated
+        // replay exemption never overrides it, and the consumed evidence
+        // is preserved (never deleted by the hard failure). The provider
+        // vocabulary surfaces the scope refusal as invalid-input-response
+        // — the escalation is refused, never success.
         $rejected = $controller->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', ['response' => $solution, 'secret' => 'secret-admin', 'remoteip' => '203.0.113.7']));
         $json = json_decode((string) $rejected->getContent(), true);
         self::assertFalse($json['success']);
-        self::assertSame(['timeout-or-duplicate'], $json['error-codes']);
+        self::assertSame(['invalid-input-response'], $json['error-codes']);
         self::assertNotNull($storage->find($challenge->nonce), 'the consumed recovery evidence survives the cross-secret replay');
 
         // The admin secret itself is sound: a challenge minted for the

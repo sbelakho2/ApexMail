@@ -4,25 +4,26 @@ declare(strict_types=1);
 
 namespace KiwiCaptcha\Tests\Fixtures;
 
+use KiwiCaptcha\AtomicDeleteIfPendingInterface;
 use KiwiCaptcha\ChallengeRecord;
 use KiwiCaptcha\ConsumedRecord;
-use KiwiCaptcha\ConsumedStateReadableInterface;
+use KiwiCaptcha\DeleteIfPendingResult;
 use KiwiCaptcha\OperationIdentityAwareStorageInterface;
 use KiwiCaptcha\Storage\ArrayStorage;
 use KiwiCaptcha\StorageInterface;
 
 /**
- * An ArrayStorage whose retained consumed-state read can be told to fail.
- * Everything delegates to the inner array backend (the real transition,
- * commit and identity-aware consume); `throwOnConsumedState` makes
- * {@see consumedState()} throw — the wire failure that models a storage
- * whose retained-state read is down while the record itself is intact. Used to prove the verifier's
- * evidence preservation: an unreadable consumed marker never deletes the
- * record and surfaces the retryable StorageUnavailable instead.
+ * An ArrayStorage wrapper advertising the atomic cleanup capability,
+ * with call counters. The verifier-level wiring tests assert that the
+ * cheap-failure cleanup goes through the single fused transition, with
+ * no separate consumedState read plus delete pair, and that the
+ * no-delete exception (MissingClientIp on a pending record) bypasses it.
  */
-final class FlakyConsumedStateStorage implements StorageInterface, ConsumedStateReadableInterface, OperationIdentityAwareStorageInterface
+final class AtomicCleanupStorage implements StorageInterface, AtomicDeleteIfPendingInterface, OperationIdentityAwareStorageInterface
 {
-    public bool $throwOnConsumedState = false;
+    public int $deleteIfPendingCalls = 0;
+    public int $consumedStateCalls = 0;
+    public int $deleteCalls = 0;
 
     public function __construct(private readonly ArrayStorage $inner = new ArrayStorage())
     {
@@ -40,9 +41,7 @@ final class FlakyConsumedStateStorage implements StorageInterface, ConsumedState
 
     public function consumedState(string $nonce): ?ConsumedRecord
     {
-        if ($this->throwOnConsumedState) {
-            throw new \RuntimeException('simulated consumed-state read failure');
-        }
+        $this->consumedStateCalls++;
 
         return $this->inner->consumedState($nonce);
     }
@@ -64,6 +63,23 @@ final class FlakyConsumedStateStorage implements StorageInterface, ConsumedState
 
     public function delete(string $nonce): void
     {
+        $this->deleteCalls++;
         $this->inner->delete($nonce);
+    }
+
+    public function deleteIfPending(string $nonce): DeleteIfPendingResult
+    {
+        $this->deleteIfPendingCalls++;
+        if ($this->inner->find($nonce) === null) {
+            return new DeleteIfPendingResult('missing');
+        }
+        $consumed = $this->inner->consumedState($nonce);
+        if ($consumed === null) {
+            $this->inner->delete($nonce);
+
+            return new DeleteIfPendingResult('deleted-pending');
+        }
+
+        return new DeleteIfPendingResult('consumed', $consumed);
     }
 }

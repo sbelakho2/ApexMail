@@ -738,7 +738,7 @@ if [ -n "$INTEGRITY" ]; then
   if ! ratchet_check "$cur_baseline"; then fail=1; fi
   if ! integrity_check "$INTEGRITY" "$cur_baseline" "$manifest"; then fail=1; fi
 
-  # One-shot adoption: an entry whose path has LANDED — a row in the
+  # One-shot adoption: an entry whose path has landed — a row in the
   # current committed baseline (the adoption took effect there), or a row
   # already in the comparison base baseline (it landed in an ancestor) —
   # is consumed. Consumed entries are removed from the manifest (atomic
@@ -746,7 +746,7 @@ if [ -n "$INTEGRITY" ]; then
   # baseline and later reintroduced is never re-adopted by a stale entry:
   # it needs a fresh adoption, and until then its implicit baseline row
   # is zero. --no-write-adopted keeps the manifest read-only (CI): the
-  # entry still counts as adopted for THIS run; a later writable run
+  # entry still counts as adopted for this run; a later writable run
   # consumes it.
   consumed=$(
     "$AWK_BIN" -v basefile="$INTEGRITY" -v curfile="$cur_baseline" -v manifest="$manifest" '

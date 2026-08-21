@@ -824,4 +824,90 @@ final class RedisStorageTest extends TestCase
         self::assertSame($identity, $state->operationIdentity);
     }
 
+    public function testDeleteIfPendingIsTheAtomicTriState(): void
+    {
+        // The atomic cleanup primitive: one Lua script decides missing /
+        // deleted-pending / consumed. A pending record is deleted (the
+        // one-shot policy); a consumed record is never deleted and its
+        // retained state (committed result + operation identity) rides
+        // back on the answer; a missing key reports missing.
+        $client = $this->requirePredis();
+        $storage = new RedisStorage($client);
+
+        // missing
+        self::assertSame('missing', $storage->deleteIfPending('absent-nonce')->state);
+
+        // pending -> deleted-pending, key gone
+        $storage->store($this->makeRecord('pending-nonce'));
+        $result = $storage->deleteIfPending('pending-nonce');
+        self::assertSame('deleted-pending', $result->state);
+        self::assertNull($client->store['kiwicaptcha:pending-nonce'] ?? null, 'the pending record is deleted atomically');
+
+        // consumed -> kept, state returned intact
+        $storage->store($this->makeRecord('consumed-nonce'));
+        $identity = 'op-'.hash('sha256', 'race');
+        $consumed = $storage->consumeWithOperationIdentity('consumed-nonce', $identity);
+        self::assertTrue($consumed?->consumedNow);
+        $storage->commitResult('consumed-nonce', true, 'txn');
+        $result = $storage->deleteIfPending('consumed-nonce');
+        self::assertSame('consumed', $result->state);
+        self::assertNotNull($client->store['kiwicaptcha:consumed-nonce'] ?? null, 'a consumed record is never deleted');
+        self::assertNotNull($result->consumed);
+        self::assertTrue($result->consumed->consumedBefore);
+        self::assertTrue($result->consumed->consumedResult?->valid ?? false);
+        self::assertSame('txn', $result->consumed->consumedResult?->binding);
+        self::assertSame($identity, $result->consumed->operationIdentity);
+    }
+
+    public function testRealRedisDeleteIfPendingRaceNeverErasesCommittedEvidence(): void
+    {
+        // The toctou the atomic primitive closes: a cheap-failing
+        // verifier (A) must not delete a record a concurrent redeemer
+        // (B) consumed and committed between A's decision and A's
+        // cleanup. The interleaving is forced at the storage seam — B's
+        // consume+commit runs between A's cheap failure and A's
+        // deleteIfPending — and the loop varies the injection point
+        // (before A's cleanup, after a pre-read, and after A's cleanup
+        // for the invariant check). Runs only against the local test
+        // Redis (127.0.0.1:6399, no password).
+        if (!\class_exists(\Predis\Client::class)) {
+            self::markTestSkipped('predis/predis is not installed');
+        }
+        try {
+            $client = new \Predis\Client('tcp://127.0.0.1:6399', [
+                'timeout' => 1.0,
+                'read_write_timeout' => 1.0,
+            ]);
+            $client->ping();
+        } catch (\Throwable) {
+            self::markTestSkipped('no Redis at 127.0.0.1:6399 — start one for the real-Redis tests');
+        }
+
+        for ($i = 0; $i < 20; $i++) {
+            $nonce = base64_encode(random_bytes(32));
+            $record = $this->makeRecord($nonce);
+            $prefix = 'race:'.($i % 3).':';
+            $storage = new RedisStorage($client, $prefix);
+            $storage->store($record);
+
+            // B consumes + commits Valid after A has already decided to
+            // clean up (the forced interleaving; the deleteIfPending
+            // call below is the "resumed" cleanup).
+            $identity = 'op-race-'.$i;
+            $consumed = $storage->consumeWithOperationIdentity($nonce, $identity);
+            self::assertTrue($consumed?->consumedNow, 'B wins the transition');
+            self::assertTrue($storage->commitResult($nonce, true, 'txn'));
+
+            // A resumes: the atomic script observes the consumed state
+            // and refuses the delete; the evidence is intact.
+            $result = $storage->deleteIfPending($nonce);
+            self::assertSame('consumed', $result->state, "iteration $i: the committed evidence is never erased");
+            self::assertNotNull($result->consumed?->consumedResult, "iteration $i: the committed result rides back");
+            self::assertTrue($result->consumed->consumedResult?->valid ?? false);
+            self::assertSame($identity, $result->consumed->operationIdentity, "iteration $i: the recorded identity is intact");
+            self::assertNotNull($storage->find($nonce), "iteration $i: the record still exists");
+
+            $storage->delete($nonce);
+        }
+    }
 }

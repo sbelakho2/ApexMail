@@ -124,16 +124,20 @@ final class RealRedisPostSolveDispositionTest extends TestCase
     /**
      * The logical-operation identity the validator derives for (scope,
      * canonical binding, explicit kiwi_operation_id) —
-     * hash('sha256', scope."\0".(binding ?? '')."\0".'opid:'.operationId).
-     * A direct core verification in these tests must record the SAME
+     * the sha256 of scope, the binding, the epoch and the opid part,
+     * joined with NUL separators (see the derivation in the validator).
+     * A direct core verification in these tests must record the same
      * identity, so the validator's replay of the retained stored success
-     * is identity-proven (a different or null identity would be refused
-     * as AlreadyConsumed by the core's identity gate) and the replay gate
-     * accepts it (an explicit operation-id component).
+     * is identity-proven and the replay gate accepts it through its
+     * explicit operation-id component. A different or null identity
+     * would be refused as AlreadyConsumed by the core's identity gate.
      */
-    private function operationIdentity(string $scope, ?string $binding, string $operationId = 'op-redis-test'): string
+    private function operationIdentity(string $scope, ?string $binding, string $operationId = 'op-redis-test', int $epoch = 1): string
     {
-        return hash('sha256', $scope."\0".($binding ?? '')."\0".'opid:'.$operationId);
+        // Mirrors the validator's derivation: scope, canonical binding,
+        // the effective security-policy epoch (no monitor wired here, so
+        // the configured policy version 1), then the operation context.
+        return hash('sha256', $scope."\0".($binding ?? '')."\0".'epoch:'.$epoch."\0".'opid:'.$operationId);
     }
 
     /**

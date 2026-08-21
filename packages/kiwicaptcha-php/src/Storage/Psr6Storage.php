@@ -8,8 +8,6 @@ use KiwiCaptcha\ChallengeRecord;
 use KiwiCaptcha\ConsumedRecord;
 use KiwiCaptcha\ConsumedResult;
 use KiwiCaptcha\NonAtomicStorageInterface;
-use KiwiCaptcha\OperationIdentity;
-use KiwiCaptcha\OperationIdentityAwareStorageInterface;
 use KiwiCaptcha\StorageInterface;
 use Psr\Cache\CacheItemPoolInterface;
 
@@ -18,14 +16,20 @@ use Psr\Cache\CacheItemPoolInterface;
  *
  * consume() is the one-shot transition: the record is marked consumed
  * and kept until its own expiration; replay protection is the consumed
- * marker, not absence. The runtime envelope carries the
- * `operation_identity` marker (null | a bounded <= 128-byte
- * logical-operation identity) exactly like the Redis backend; the
- * identity-aware consume writes the identity in the same array write as
- * the state flip. consumedState() is the read-only retained-state read:
- * it decodes the stored envelope (the same array consume() wrote) and
- * reports the consumed record, its committed result and its recorded
- * operation identity without any transition.
+ * marker, not absence.
+ *
+ * Capability contract: this backend intentionally leaves
+ * {@see \KiwiCaptcha\ConsumedStateReadableInterface} (and the
+ * identity-aware consume that extends it, and the atomic cleanup)
+ * unimplemented. A PSR-6 pool cannot fuse the retained-state read with
+ * a transition, so its consumed-state view stays a diagnostic rather
+ * than trusted recovery storage. Authorization-grade recovery
+ * (identity-gated replay, Siteverify crash recovery) needs a backend
+ * whose retained state is authoritative. Production Symfony refuses
+ * non-atomic storage for verification and Siteverify refuses it
+ * unconditionally. The retained envelope stays readable for diagnostics
+ * through {@see self::inspectConsumedEnvelope()}, a clearly-named
+ * inspection method kept off the capability interfaces.
  *
  * Important limitation: PSR-6 cannot express an atomic get-and-transition,
  * so `consume()` is not atomic under concurrency. Two racing requests can
@@ -38,7 +42,7 @@ use Psr\Cache\CacheItemPoolInterface;
  * deprecation warning when constructed with a non-atomic backend;
  * consumers that need strict single-use must refuse it outright.
  */
-final class Psr6Storage implements StorageInterface, OperationIdentityAwareStorageInterface, NonAtomicStorageInterface
+final class Psr6Storage implements StorageInterface, NonAtomicStorageInterface
 {
     /**
      * PSR-6 reserves the characters `{}()/\@:` in cache keys, so the
@@ -99,7 +103,16 @@ final class Psr6Storage implements StorageInterface, OperationIdentityAwareStora
         }
     }
 
-    public function consumedState(string $nonce): ?ConsumedRecord
+    /**
+     * Diagnostic read-only inspection of the stored consumed envelope —
+     * deliberately NOT the
+     * {@see \KiwiCaptcha\ConsumedStateReadableInterface} contract: a
+     * PSR-6 pool cannot make the retained state authoritative for
+     * recovery, so this backend does not advertise the capability. The
+     * method exists for operators and tests inspecting what the pool
+     * retains; verification and recovery paths never call it.
+     */
+    public function inspectConsumedEnvelope(string $nonce): ?ConsumedRecord
     {
         // Read-only inspection of the stored envelope (the same array
         // consume()/commitResult() write): no transition, no save. A
@@ -158,48 +171,6 @@ final class Psr6Storage implements StorageInterface, OperationIdentityAwareStora
             $record = ChallengeRecord::fromArray(self::stripRuntimeFields($data));
         } catch (\Throwable) {
             // Corrupt data: delete and never propagate.
-            $this->pool->deleteItem(self::key($nonce));
-
-            return null;
-        }
-
-        return new ConsumedRecord($record, !$consumed, $consumed, $result, self::parseIdentity($data['operation_identity'] ?? null));
-    }
-
-    public function consumeWithOperationIdentity(string $nonce, ?string $operationIdentity): ?ConsumedRecord
-    {
-        // Same read-then-transition as consume(); the identity, validated
-        // against the narrow shared alphabet via {@see
-        // OperationIdentity::validate()} (1..128 bytes of
-        // [A-Za-z0-9_-]), lands in the same array write as the state
-        // flip. A malformed identity is rejected with
-        // InvalidArgumentException, never silently dropped.
-        $validated = OperationIdentity::validate($operationIdentity);
-        $item = $this->pool->getItem(self::key($nonce));
-        if (!$item->isHit()) {
-            return null;
-        }
-        $data = $item->get();
-        if (!\is_array($data)) {
-            $this->pool->deleteItem(self::key($nonce));
-
-            return null;
-        }
-
-        $consumed = ($data['state'] ?? 'pending') === 'consumed';
-        if (!$consumed) {
-            $data['state'] = 'consumed';
-            if ($validated !== null) {
-                $data['operation_identity'] = $validated;
-            }
-            $item->set($data);
-            $this->pool->save($item);
-        }
-        $result = self::parseResult($data['consumed_result'] ?? null);
-
-        try {
-            $record = ChallengeRecord::fromArray(self::stripRuntimeFields($data));
-        } catch (\Throwable) {
             $this->pool->deleteItem(self::key($nonce));
 
             return null;

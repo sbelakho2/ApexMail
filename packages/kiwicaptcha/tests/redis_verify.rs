@@ -19,8 +19,8 @@ use kiwicaptcha::challenge::{
     issue_challenge, BindingMode, ChallengeConfig, ChallengeRecord, PoWAlgorithm,
 };
 use kiwicaptcha::redis_verify::{
-    AdmissionError, ArgonAdmissionGate, ArgonLease, ProductionVerifier, RedisChallengeStore,
-    StoredConsumedResult, DEFAULT_POOL_SIZE,
+    AdmissionError, ArgonAdmissionGate, ArgonLease, DeleteIfPending, ProductionVerifier,
+    RedisChallengeStore, StoredConsumedResult, DEFAULT_POOL_SIZE,
 };
 use kiwicaptcha::token::SolutionToken;
 use kiwicaptcha::verify::{solve_for_test, VerifyError, VerifyOutcome};
@@ -2583,4 +2583,406 @@ fn script_flush_is_recovered_deterministically() {
         "the transition ran — the record is kept, not burned"
     );
     assert_eq!(stored["consumed_result"]["valid"], true);
+}
+
+#[test]
+fn security_failures_win_on_matching_identity_replay_and_keep_the_evidence() {
+    // The parallel security-failure replay matrix: every hard security
+    // verdict — wrong scope, a changed expected request binding, a wrong
+    // region, a wrong issuer, a revoked kid — wins on a matching-identity
+    // replay of a consumed record (the identity-gated replay exemption
+    // never overrides it), and the consumed record survives with its
+    // committed valid result and the recorded operation identity intact.
+    let Some(url) = redis_url() else { return };
+
+    // (label, replay-verifier factory, replay call) — each scenario gets
+    // a freshly issued + solved challenge consumed under op-x, then the
+    // replay presents the same identity with a failing expectation.
+    type MakeVerifier = fn(&str, &str) -> ProductionVerifier;
+    type ReplayCall = fn(&ProductionVerifier, &str, u64) -> VerifyOutcome;
+    let scenarios: [(&str, MakeVerifier, ReplayCall); 5] = [
+        (
+            "wrong scope",
+            |url, prefix| verifier_for(url, prefix),
+            |v, token, issued_at_ns| {
+                v.verify(
+                    token,
+                    "signup",
+                    IP,
+                    issued_at_ns + 1_000_000,
+                    Some("op-x"),
+                    None,
+                )
+            },
+        ),
+        (
+            "changed expected request binding",
+            |url, prefix| verifier_for(url, prefix),
+            |v, token, issued_at_ns| {
+                v.verify(
+                    token,
+                    "login",
+                    IP,
+                    issued_at_ns + 1_000_000,
+                    Some("op-x"),
+                    Some("txn-OTHER"),
+                )
+            },
+        ),
+        (
+            "wrong region",
+            |url, prefix| verifier_for(url, prefix).with_expected_region("eu"),
+            |v, token, issued_at_ns| {
+                v.verify(
+                    token,
+                    "login",
+                    IP,
+                    issued_at_ns + 1_000_000,
+                    Some("op-x"),
+                    None,
+                )
+            },
+        ),
+        (
+            "wrong issuer",
+            |url, prefix| verifier_for(url, prefix).with_expected_issuer("prod"),
+            |v, token, issued_at_ns| {
+                v.verify(
+                    token,
+                    "login",
+                    IP,
+                    issued_at_ns + 1_000_000,
+                    Some("op-x"),
+                    None,
+                )
+            },
+        ),
+        (
+            "revoked kid",
+            |url, prefix| verifier_for(url, prefix).with_revoked_kids([1]),
+            |v, token, issued_at_ns| {
+                v.verify(
+                    token,
+                    "login",
+                    IP,
+                    issued_at_ns + 1_000_000,
+                    Some("op-x"),
+                    None,
+                )
+            },
+        ),
+    ];
+
+    for (label, make_verifier, replay_call) in scenarios {
+        let prefix = prefix("secfail");
+        let issued = issue_challenge(
+            &sha_config(4),
+            "login",
+            IP,
+            now_unix(),
+            now_micros(),
+            0,
+            Some("txn-123"),
+        )
+        .unwrap();
+        let counter = solve_for_test(&issued.record).expect("4-bit sha solves");
+        let token = encode_token(&issued.record.nonce, counter);
+        let issued_at_ns = issued.record.issued_at_ns;
+
+        let verifier = verifier_for(&url, &prefix);
+        verifier.store().store(&issued.record).unwrap();
+        assert!(
+            matches!(
+                verify_with(
+                    &verifier,
+                    &token,
+                    issued_at_ns,
+                    Some("op-x"),
+                    Some("txn-123")
+                ),
+                VerifyOutcome::Valid { .. }
+            ),
+            "{label}: setup — the bound fresh verification succeeds"
+        );
+
+        let replay_verifier = make_verifier(&url, &prefix);
+        let outcome = replay_call(&replay_verifier, &token, issued_at_ns);
+        let expected = match label {
+            "wrong scope" => VerifyError::WrongScope,
+            "changed expected request binding" => VerifyError::RequestBindingMismatch,
+            "wrong region" => VerifyError::WrongRegion,
+            "wrong issuer" => VerifyError::WrongIssuer,
+            _ => VerifyError::UnknownKid,
+        };
+        assert_eq!(
+            outcome,
+            VerifyOutcome::Invalid(expected),
+            "{label}: the security failure wins over the matching-identity replay"
+        );
+
+        // The consumed evidence survives the refusal: the record is kept
+        // (never deleted), still consumed, with the committed valid
+        // result and the recorded operation identity intact.
+        let key = format!("{prefix}{}", issued.record.nonce);
+        let mut conn = redis::Client::open(url.clone())
+            .unwrap()
+            .get_connection()
+            .unwrap();
+        let raw: Option<String> = redis::cmd("GET").arg(&key).query(&mut conn).unwrap();
+        let stored: serde_json::Value = serde_json::from_str(
+            &raw.expect("the consumed record is never deleted by a hard security failure"),
+        )
+        .unwrap();
+        assert_eq!(
+            stored["state"], "consumed",
+            "{label}: the record stays consumed"
+        );
+        assert_eq!(
+            stored["consumed_result"]["valid"], true,
+            "{label}: the committed valid result survives"
+        );
+        assert_eq!(
+            stored["operation_identity"], "op-x",
+            "{label}: the recorded operation identity survives"
+        );
+    }
+}
+
+#[test]
+fn exempt_timing_failures_still_resolve_through_the_identity_gate() {
+    // The exempt counterparts: expiry and the IP mismatch describe the
+    // original redemption's circumstances, so a matching-identity replay
+    // resolves through the consumed branch despite them (the stored
+    // success replays), and the record survives.
+    let Some(url) = redis_url() else { return };
+
+    for (label, changed_ip, advance_secs) in [("expiry", false, 600u64), ("ip mismatch", true, 0)] {
+        let prefix = prefix("exempt");
+        let issued = issue_challenge(
+            &sha_config(4),
+            "login",
+            IP,
+            now_unix(),
+            now_micros(),
+            0,
+            None,
+        )
+        .unwrap();
+        let counter = solve_for_test(&issued.record).expect("4-bit sha solves");
+        let token = encode_token(&issued.record.nonce, counter);
+        let issued_at_ns = issued.record.issued_at_ns;
+
+        let verifier = verifier_for(&url, &prefix);
+        verifier.store().store(&issued.record).unwrap();
+        assert!(
+            matches!(
+                verify_with(&verifier, &token, issued_at_ns, Some("op-e"), None),
+                VerifyOutcome::Valid { .. }
+            ),
+            "{label}: setup — the fresh verification succeeds"
+        );
+
+        // Expiry: the TTL window (120 s) has passed at the replay
+        // receipt. IP mismatch: the same receipt, another address.
+        let receipt = issued_at_ns + advance_secs * 1_000_000_000 + 1_000_000;
+        let replay_ip = if changed_ip { "203.0.113.9" } else { IP };
+        assert!(
+            matches!(
+                verifier.verify(&token, "login", replay_ip, receipt, Some("op-e"), None),
+                VerifyOutcome::Valid {
+                    from_stored_result: true,
+                    ..
+                }
+            ),
+            "{label}: the identity-proven replay resolves through the consumed branch"
+        );
+
+        let key = format!("{prefix}{}", issued.record.nonce);
+        let mut conn = redis::Client::open(url.clone())
+            .unwrap()
+            .get_connection()
+            .unwrap();
+        let raw: String = redis::cmd("GET").arg(&key).query(&mut conn).unwrap();
+        let stored: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(stored["state"], "consumed", "{label}: the record survives");
+        assert_eq!(stored["consumed_result"]["valid"], true);
+    }
+}
+
+#[test]
+fn delete_if_pending_is_the_atomic_tri_state() {
+    // The fused cleanup transition: a pending record is deleted
+    // atomically, a consumed record is kept untouched and its retained
+    // state rides back, a missing key reports missing.
+    let Some(url) = redis_url() else { return };
+    let prefix = prefix("delpend");
+    let store = store_for(&url, &prefix);
+    let mut conn = redis::Client::open(url.clone())
+        .unwrap()
+        .get_connection()
+        .unwrap();
+
+    // missing (a nonce that was never stored)
+    assert!(matches!(
+        store.delete_if_pending("never-stored-nonce").unwrap(),
+        DeleteIfPending::Missing
+    ));
+
+    // pending -> deleted, key gone
+    let issued = issue_challenge(
+        &sha_config(4),
+        "login",
+        IP,
+        now_unix(),
+        now_micros(),
+        0,
+        None,
+    )
+    .unwrap();
+    store.store(&issued.record).unwrap();
+    let key = format!("{prefix}{}", issued.record.nonce);
+    assert!(matches!(
+        store.delete_if_pending(&issued.record.nonce).unwrap(),
+        DeleteIfPending::DeletedPending
+    ));
+    let raw: Option<String> = redis::cmd("GET").arg(&key).query(&mut conn).unwrap();
+    assert!(raw.is_none(), "the pending record is deleted");
+
+    // consumed -> kept, retained state returned
+    let issued = issue_challenge(
+        &sha_config(4),
+        "login",
+        IP,
+        now_unix(),
+        now_micros(),
+        0,
+        None,
+    )
+    .unwrap();
+    store.store(&issued.record).unwrap();
+    let key = format!("{prefix}{}", issued.record.nonce);
+    let consumed = store
+        .consume_with_operation_identity(&issued.record.nonce, Some("op-d"))
+        .unwrap()
+        .expect("the transition wins");
+    assert!(consumed.first);
+    store
+        .commit_result(&issued.record.nonce, true, Some("txn"))
+        .unwrap();
+    match store.delete_if_pending(&issued.record.nonce).unwrap() {
+        DeleteIfPending::Consumed(state) => {
+            assert!(state.stored_result.expect("committed").valid);
+            assert_eq!(state.operation_identity.as_deref(), Some("op-d"));
+        }
+        other => panic!("consumed record must be kept, got {other:?}"),
+    }
+    let raw: String = redis::cmd("GET").arg(&key).query(&mut conn).unwrap();
+    let stored: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    assert_eq!(stored["state"], "consumed", "the consumed record survives");
+}
+
+#[test]
+fn delete_if_pending_race_never_erases_committed_evidence() {
+    // The check-then-delete window the fused transition closes, run as a real barrier
+    // race in the audit's shape: thread A (the cheap-failing verifier)
+    // pauses right before its cleanup while thread B consumes + commits
+    // Valid; A then resumes. The barrier enforces B's ordering, and the
+    // stagger after B's completion varies the gap (0..400 µs) so the
+    // cleanup races the commit's visibility at different distances.
+    // Whatever the gap, A must observe the consumed state and refuse
+    // the delete — the committed evidence is never erased.
+    let Some(url) = redis_url() else { return };
+
+    let staggers = [0u64, 1, 50, 400];
+    for run in 0..20u32 {
+        let i = run % staggers.len() as u32;
+        let stagger = staggers[i as usize];
+        let prefix = prefix("delpend-race");
+        let issued = issue_challenge(
+            &sha_config(4),
+            "login",
+            IP,
+            now_unix(),
+            now_micros(),
+            0,
+            None,
+        )
+        .unwrap();
+        let nonce = issued.record.nonce.clone();
+        let key = format!("{prefix}{nonce}");
+        let store = store_for(&url, &prefix);
+        store.store(&issued.record).unwrap();
+        drop(store);
+
+        let barrier = Arc::new(Barrier::new(2));
+        let b_done = Arc::new(AtomicU64::new(0));
+        let b = {
+            let url = url.clone();
+            let prefix = prefix.clone();
+            let barrier = Arc::clone(&barrier);
+            let done = Arc::clone(&b_done);
+            let nonce = nonce.clone();
+            thread::spawn(move || {
+                barrier.wait();
+                let store = store_for(&url, &prefix);
+                let consumed = store
+                    .consume_with_operation_identity(&nonce, Some("op-race"))
+                    .unwrap()
+                    .expect("B wins the transition (it completes before A resumes)");
+                assert!(consumed.first);
+                assert!(store.commit_result(&nonce, true, Some("txn")).unwrap());
+                done.store(1, Ordering::SeqCst);
+            })
+        };
+        let a = {
+            let url = url.clone();
+            let prefix = prefix.clone();
+            let barrier = Arc::clone(&barrier);
+            let done = Arc::clone(&b_done);
+            let nonce = nonce.clone();
+            thread::spawn(move || {
+                // A has cheap-failed and pauses at the barrier; it
+                // resumes only once B's consume + commit landed, with a
+                // varied stagger shrinking the gap to the commit.
+                barrier.wait();
+                while done.load(Ordering::SeqCst) == 0 {
+                    thread::yield_now();
+                }
+                if stagger > 0 {
+                    thread::sleep(std::time::Duration::from_micros(stagger));
+                }
+                let store = store_for(&url, &prefix);
+                store.delete_if_pending(&nonce).unwrap()
+            })
+        };
+
+        b.join().unwrap();
+        match a.join().unwrap() {
+            DeleteIfPending::Consumed(state) => {
+                if let Some(result) = state.stored_result {
+                    assert!(
+                        result.valid,
+                        "run {run}: an observed committed result is the valid outcome"
+                    );
+                }
+                assert_eq!(
+                    state.operation_identity.as_deref(),
+                    Some("op-race"),
+                    "run {run}: the recorded identity is intact"
+                );
+            }
+            other => panic!("run {run}: committed evidence erased, got {other:?}"),
+        }
+
+        let mut conn = redis::Client::open(url.clone())
+            .unwrap()
+            .get_connection()
+            .unwrap();
+        let raw: String = redis::cmd("GET").arg(&key).query(&mut conn).unwrap();
+        let stored: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(stored["state"], "consumed", "run {run}: the record is kept");
+        assert_eq!(stored["consumed_result"]["valid"], true);
+        assert_eq!(stored["operation_identity"], "op-race");
+        let _: () = redis::cmd("DEL").arg(&key).query(&mut conn).unwrap();
+    }
 }

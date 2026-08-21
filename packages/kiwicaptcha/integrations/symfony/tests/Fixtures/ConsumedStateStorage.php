@@ -13,8 +13,8 @@ use KiwiCaptcha\StorageInterface;
 
 /**
  * Emulates the consumed-state storage contract on top of an
- * ArrayStorage: consume() is a state transition (pending -> consumed)
- * rather than a delete, commitResult() records the derivation outcome,
+ * ArrayStorage. consume() is a state transition, pending to consumed,
+ * rather than a delete; commitResult() records the derivation outcome,
  * and consumedState() is the read-only retained-state read the core and
  * the validator's ambiguous-consume normalization use. The identity-
  * aware consume records the logical-operation identity atomically with

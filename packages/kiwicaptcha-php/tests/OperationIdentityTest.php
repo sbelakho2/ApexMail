@@ -7,7 +7,6 @@ namespace KiwiCaptcha\Tests;
 use KiwiCaptcha\ChallengeRecord;
 use KiwiCaptcha\PoWAlgorithm;
 use KiwiCaptcha\Storage\ArrayStorage;
-use KiwiCaptcha\Storage\Psr6Storage;
 use KiwiCaptcha\Storage\RedisStorage;
 use KiwiCaptcha\Tests\Fixtures\ArrayPool;
 use KiwiCaptcha\Tests\Fixtures\FakePredisClient;
@@ -59,13 +58,15 @@ final class OperationIdentityTest extends TestCase
         $redis = new RedisStorage(new FakePredisClient());
         $redis->store($this->makeRecord('redis-nonce-1'));
 
-        $psr6 = new Psr6Storage(new ArrayPool());
-        $psr6->store($this->makeRecord('psr6-nonce-1'));
+        // Psr6Storage deliberately does not offer the identity-aware
+        // consume (a PSR-6 pool cannot make the retained state
+        // authoritative recovery evidence), so it is absent from this
+        // capability matrix by contract.
 
         $array = new ArrayStorage();
         $array->store($this->makeRecord('array-nonce-1'));
 
-        return ['redis' => $redis, 'psr6' => $psr6, 'array' => $array];
+        return ['redis' => $redis, 'array' => $array];
     }
 
     /** @param \KiwiCaptcha\OperationIdentityAwareStorageInterface $storage */
@@ -79,19 +80,19 @@ final class OperationIdentityTest extends TestCase
     {
         foreach ($this->storages() as $name => $storage) {
             try {
-                $storage->consumeWithOperationIdentity(str_contains($name, 'redis') ? 'redis-nonce-1' : ($name === 'psr6' ? 'psr6-nonce-1' : 'array-nonce-1'), str_repeat('x', 129));
+                $storage->consumeWithOperationIdentity(str_contains($name, 'redis') ? 'redis-nonce-1' : 'array-nonce-1', str_repeat('x', 129));
                 self::fail("an over-long identity must be rejected on $name");
             } catch (\InvalidArgumentException) {
                 // expected: the 1..128-byte bound fires before the transition
             }
-            $this->assertUntouched($storage, $name === 'redis' ? 'redis-nonce-1' : ($name === 'psr6' ? 'psr6-nonce-1' : 'array-nonce-1'));
+            $this->assertUntouched($storage, $name === 'redis' ? 'redis-nonce-1' : 'array-nonce-1');
         }
     }
 
     public function testGsubSpecialAndNonAlphabetIdentitiesAreRejectedOnEveryStorage(): void
     {
         foreach ($this->storages() as $name => $storage) {
-            $nonce = $name === 'redis' ? 'redis-nonce-1' : ($name === 'psr6' ? 'psr6-nonce-1' : 'array-nonce-1');
+            $nonce = $name === 'redis' ? 'redis-nonce-1' : 'array-nonce-1';
             foreach (['deadbeef%deadbeef', 'deadbeef deadbeef', 'deadbeef=deadbeef', 'deadbeef/feed'] as $malformed) {
                 try {
                     $storage->consumeWithOperationIdentity($nonce, $malformed);
@@ -107,18 +108,11 @@ final class OperationIdentityTest extends TestCase
     public function testValidHexIdentityIsRecordedOnEveryStorage(): void
     {
         foreach ($this->storages() as $name => $storage) {
-            $nonce = $name === 'redis' ? 'redis-nonce-1' : ($name === 'psr6' ? 'psr6-nonce-1' : 'array-nonce-1');
+            $nonce = $name === 'redis' ? 'redis-nonce-1' : 'array-nonce-1';
             $consumed = $storage->consumeWithOperationIdentity($nonce, self::VALID_HEX);
             self::assertNotNull($consumed, "the identity-bearing consume must win the transition on $name");
             self::assertTrue($consumed->consumedNow);
             self::assertSame(self::VALID_HEX, $consumed->operationIdentity, "the winner exposes the identity it recorded on $name");
-            if ($storage instanceof Psr6Storage) {
-                // Psr6Storage::consumedState() is unavailable by design
-                // (PSR-6 pools expose no atomic read-only inspection);
-                // the identity read-back is asserted through the consumed
-                // transition response instead.
-                continue;
-            }
             $state = $storage->consumedState($nonce);
             self::assertNotNull($state);
             self::assertSame(self::VALID_HEX, $state->operationIdentity, "the recorded identity reads back on $name");
@@ -142,7 +136,7 @@ final class OperationIdentityTest extends TestCase
     public function testNullIdentityPathIsUnchanged(): void
     {
         foreach ($this->storages() as $name => $storage) {
-            $nonce = $name === 'redis' ? 'redis-nonce-1' : ($name === 'psr6' ? 'psr6-nonce-1' : 'array-nonce-1');
+            $nonce = $name === 'redis' ? 'redis-nonce-1' : 'array-nonce-1';
             $consumed = $storage->consumeWithOperationIdentity($nonce, null);
             self::assertNotNull($consumed, "the null identity must take the plain-consume path on $name");
             self::assertTrue($consumed->consumedNow);
