@@ -203,9 +203,29 @@ jobs:
             chmod 644 "$path"
           }
 
+          # render_secret_optional <value-var> <file-var>
+          #   Same contract, but an EMPTY value is allowed: the secret file is
+          #   still created (empty) so the compose :? guards on PROD_*_FILE
+          #   stay satisfied for deployment modes that do not use the secret
+          #   (e.g. SMTP credentials while running the SES transport).
+          render_secret_optional() {
+            local val="${!1:-}"
+            local path="${!2:-}"
+            if [[ -z "$path" ]]; then
+              echo "::error::$2 missing from APEXMAIL_PROD_ENV (required by docker-compose.prod.yml)" >&2
+              exit 1
+            fi
+            install -d -m 700 "$(dirname "$path")"
+            umask 177
+            printf '%s' "$val" > "$path"
+            chmod 644 "$path"
+          }
+
           render_secret POSTGRES_PASSWORD      PROD_POSTGRES_PASSWORD_FILE
           render_secret REDIS_PASSWORD         PROD_REDIS_PASSWORD_FILE
           render_secret CLICKHOUSE_PASSWORD    PROD_CLICKHOUSE_PASSWORD_FILE
+          # Audit I — dedicated ClickHouse admin credential.
+          render_secret CLICKHOUSE_ADMIN_PASSWORD PROD_CLICKHOUSE_ADMIN_PASSWORD_FILE
           render_secret API_KEY_HASH_SECRET    PROD_API_KEY_HASH_SECRET_FILE
           render_secret WEBHOOK_SIGNING_SECRET PROD_WEBHOOK_SIGNING_SECRET_FILE
           render_secret TRACKING_SECRET_KEY    PROD_TRACKING_SECRET_KEY_FILE
@@ -218,6 +238,13 @@ jobs:
           render_secret CSRF_SECRET            PROD_CSRF_SECRET_FILE
           render_secret DKIM_PRIVATE_KEY_ENCRYPTION_KEY PROD_DKIM_PRIVATE_KEY_ENCRYPTION_KEY_FILE
           render_secret KIWI_SECRET_KEY        PROD_KIWI_SECRET_KEY_FILE
+          # Audit G — AWS SES + direct-SMTP credentials as secret FILES.
+          render_secret_optional AWS_ACCESS_KEY_ID     PROD_AWS_ACCESS_KEY_ID_FILE
+          render_secret_optional AWS_SECRET_ACCESS_KEY PROD_AWS_SECRET_ACCESS_KEY_FILE
+          render_secret_optional SMTP_USERNAME         PROD_SMTP_USERNAME_FILE
+          render_secret_optional SMTP_PASSWORD         PROD_SMTP_PASSWORD_FILE
+          # Audit E — backup encryption key.
+          render_secret BACKUP_ENCRYPTION_KEY PROD_BACKUP_ENCRYPTION_KEY_FILE
           ls -l secrets/
           REMOTE_SH
 
@@ -227,10 +254,18 @@ jobs:
           ssh hetzner "DEPLOY_DIR='${DEPLOY_DIR}' bash -s" <<'REMOTE_SH'
           set -euo pipefail
           cd "${DEPLOY_DIR}/deploy/nginx"
-          install -d -m 755 ssl
+          # Audit N — the ssl directory holds the live private key: 750, not 755.
+          install -d -m 750 ssl
           cd ssl
           # dhparam (2048-bit, generated once; ~30s).
-          if [[ ! -s dhparam.pem ]]; then
+          # Audit N/F — the committed dhparam.pem is a ~206-byte PLACEHOLDER.
+          # The old `[[ ! -s ]]` guard saw it as non-empty and never
+          # regenerated it. Any file smaller than 1024 bytes cannot be real
+          # 2048-bit DH parameters — regenerate it.
+          dh_size=0
+          [[ -f dhparam.pem ]] && dh_size=$(wc -c < dhparam.pem || echo 0)
+          if (( dh_size < 1024 )); then
+            echo "[tls] dhparam.pem missing or placeholder (${dh_size} bytes) — regenerating"
             openssl dhparam -out dhparam.pem 2048
           fi
           # Generate a self-signed cert ONLY if no real cert is present.
@@ -243,9 +278,12 @@ jobs:
             # ssl_trusted_certificate (used for OCSP stapling) — same file for self-signed.
             cp fullchain.pem ca-chain.pem
             chmod 644 fullchain.pem ca-chain.pem dhparam.pem
-            # nginx runs as uid 101; allow it to read the key. Self-signed cert
-            # is replaced by Let's Encrypt via deploy/scripts/issue-letsencrypt.sh.
-            chmod 644 privkey.pem
+            # Audit N — the private key must NOT be world-readable (was 644).
+            # Owned by uid 101 (the nginx container user) with mode 640 —
+            # same ownership model the certbot deploy-hook applies to the
+            # renewed LE keys (owner-only read, no world access).
+            chown 101:101 privkey.pem 2>/dev/null || true
+            chmod 640 privkey.pem
             echo "[tls] self-signed cert generated; replace with Let's Encrypt via deploy/scripts/issue-letsencrypt.sh"
           else
             echo "[tls] existing cert kept: $(openssl x509 -in fullchain.pem -noout -subject -enddate)"
@@ -254,9 +292,15 @@ jobs:
           REMOTE_SH
 
       - name: Authenticate host to GHCR
+        # Audit N — the token never appears in a command line (local or
+        # remote `ps` output): it is mapped to an env var, piped on stdin
+        # through ssh and consumed by `docker login --password-stdin`.
+        env:
+          GHCR_DEPLOY_TOKEN: ${{ secrets.GHCR_DEPLOY_TOKEN }}
         run: |
-          ssh hetzner "echo '${{ secrets.GHCR_DEPLOY_TOKEN }}' | \
-            docker login ghcr.io -u '${{ github.repository_owner }}' --password-stdin"
+          set -euo pipefail
+          printf '%s' "${GHCR_DEPLOY_TOKEN}" | \
+            ssh hetzner "docker login ghcr.io -u '${{ github.repository_owner }}' --password-stdin"
 
       - name: Remove non-compose-managed legacy containers
         run: |

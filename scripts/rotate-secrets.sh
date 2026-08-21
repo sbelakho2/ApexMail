@@ -6,6 +6,16 @@
 # and dual-key overlap pattern documented in:
 #   docs/operations/secret-rotation.md
 #
+# DEPLOYMENT NOTE (audit M): production ApexMail runs on Docker Compose on a
+# single Hetzner host — NOT Kubernetes. The kubectl paths below are legacy
+# scaffolding kept for a possible k8s future and are UNUSED for the current
+# compose deployment. The compose equivalent of each step:
+#   - "kubectl get/patch secret"  -> edit /opt/apexmail/.env + re-run the
+#     render step of .github/workflows/deploy-hetzner.yml
+#     ("Render docker secret files from .env"), then
+#   - "kubectl rollout restart"   -> docker compose ... up -d --force-recreate
+#     <service> (see deploy/DEPLOYMENT.md)
+#
 # Rotation Schedule:
 #   - JWT signing keys:           Every 90 days
 #   - API key hash secret:        Every 90 days
@@ -26,9 +36,14 @@
 #   ./scripts/rotate-secrets.sh --rollback                # Roll back last rotation
 #
 # Requirements:
-#   - kubectl configured with cluster access
+#   - kubectl configured with cluster access (k8s deployments only — see note)
 #   - openssl, jq
 #   - Access to Kubernetes secrets in apexmail namespace
+#
+# SECURITY (audit M): this script never prints secret VALUES — only key
+# names, ages and rotation status. The plaintext backup it takes before
+# rotating lives in a 0700 directory with 0600 files and is removed as soon
+# as a rollback restores it (rotate manually with `shred -u` if you abort).
 # ==============================================================================
 
 set -euo pipefail
@@ -88,16 +103,22 @@ EOF
 backup_current_secrets() {
     log_step "Backing up current secrets..."
 
-    mkdir -p "$BACKUP_DIR/$TIMESTAMP"
+    # Audit M: 0700 dir + 0600 files — /tmp is otherwise world-listable.
+    # Remove this backup (shred -u) once the rotation is verified.
+    install -d -m 700 "$BACKUP_DIR/$TIMESTAMP"
+    umask 177
 
     kubectl get secret "$SECRET_NAME" -n "$NAMESPACE" \
         -o json > "$BACKUP_DIR/$TIMESTAMP/secrets-backup.json" 2>/dev/null || {
         log_error "Failed to backup secrets from $SECRET_NAME"
         return 1
     }
+    chmod 600 "$BACKUP_DIR/$TIMESTAMP/secrets-backup.json"
 
-    log_info "Secrets backed up to: $BACKUP_DIR/$TIMESTAMP/secrets-backup.json"
+    log_info "Secrets backed up to: $BACKUP_DIR/$TIMESTAMP/secrets-backup.json (mode 0600)"
     log_info "Backup timestamp: $TIMESTAMP"
+    log_warn "Plaintext backup present — shred it once the rotation is verified:"
+    log_warn "  shred -u $BACKUP_DIR/$TIMESTAMP/secrets-backup.json"
 }
 
 # ── List Secret Ages ───────────────────────────────────────────────────────────
@@ -132,10 +153,10 @@ list_secrets() {
 
     while IFS= read -r key; do
         [[ -z "$key" ]] && continue
-        local value
-        value=$(echo "$secrets" | jq -r ".data[\"$key\"]" 2>/dev/null || echo "unknown")
-        local decoded
-        decoded=$(echo "$value" | base64 -d 2>/dev/null | head -c 40 || echo "<binary>")
+        # Audit M: NEVER print the decoded secret value — key name, size and
+        # rotation status only (values were previously echoed to stdout/logs).
+        local value_size
+        value_size=$(echo "$secrets" | jq -r ".data[\"$key\"]" 2>/dev/null | wc -c | tr -d ' ')
 
         # Determine rotation status
         local status="⚠ unknown"
@@ -177,7 +198,7 @@ list_secrets() {
                 ;;
         esac
 
-        echo -e "  ${key}: ${decoded:0:30}...  $status"
+        echo -e "  ${key} (${value_size} bytes): $status"
     done <<< "$keys"
     echo ""
 }
@@ -370,12 +391,15 @@ rotate_db_credentials() {
         -o jsonpath="{.data.DATABASE_PASSWORD}" 2>/dev/null | base64 -d || echo "")
 
     # Update the password in PostgreSQL first
+    # Audit M: the password is passed as a psql VARIABLE over stdin
+    # (`:'pw'` quotes it safely) — never interpolated into the SQL text,
+    # where it would be visible in `ps` output and the server log.
     log_info "Updating password in PostgreSQL..."
-    kubectl exec -n "$NAMESPACE" deploy/postgres -- \
-        psql -U postgres -c \
-        "ALTER USER apexmail WITH PASSWORD '$new_password';" 2>/dev/null || {
-        log_warn "Could not update PostgreSQL password directly — ensure manual update"
-    }
+    printf "ALTER USER apexmail WITH PASSWORD :'pw';\n" | \
+        kubectl exec -i -n "$NAMESPACE" deploy/postgres -- \
+            psql -U postgres -v pw="$new_password" 2>/dev/null || {
+            log_warn "Could not update PostgreSQL password directly — ensure manual update"
+        }
 
     # Update Kubernetes secret
     kubectl patch secret "$SECRET_NAME" -n "$NAMESPACE" \
@@ -454,7 +478,12 @@ rollback() {
     # Restart pods to pick up old secrets
     kubectl rollout restart deployment -n "$NAMESPACE" 2>/dev/null || true
 
-    log_info "Secrets rolled back to: $(basename "$latest_backup")"
+    # Audit M: immediate cleanup — the plaintext backup has served its
+    # purpose and must not linger in /tmp.
+    shred -u "$latest_backup/secrets-backup.json" 2>/dev/null || rm -f "$latest_backup/secrets-backup.json"
+    rmdir "$latest_backup" 2>/dev/null || true
+
+    log_info "Secrets rolled back to: $(basename "$latest_backup") (backup removed)"
     log_warn "After rollback, validate all services are healthy."
 }
 

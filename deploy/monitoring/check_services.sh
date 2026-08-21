@@ -11,11 +11,11 @@ set -euo pipefail
 # Outputs JSON health report. Non-zero exit on any critical failure.
 #
 # Environment:
-#   BASE_URL      — API base URL (default: https://api.apexmail.com)
-#   DASHBOARD_URL — Dashboard URL (default: https://app.apexmail.com)
-#   SUPPORT_URL   — Support portal URL (default: https://support.apexmail.com)
-#   STATUS_URL    — Public status page URL (default: https://status.apexmail.com)
-#   SMTP_HOST     — SMTP relay host (default: smtp.apexmail.com)
+#   BASE_URL      — API base URL (default: https://api.apexmail.ee)
+#   DASHBOARD_URL — Dashboard URL (default: https://app.apexmail.ee)
+#   SUPPORT_URL   — Support portal URL (default: https://status.apexmail.ee)
+#   STATUS_URL    — Public status page URL (default: https://status.apexmail.ee)
+#   SMTP_HOST     — SMTP relay host (default: mail.apexmail.ee)
 #   SMTP_PORT     — SMTP relay port (default: 587)
 #   TIMEOUT       — Per-probe timeout in seconds (default: 10)
 # =============================================================================
@@ -24,11 +24,13 @@ readonly TIMESTAMP="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly HISTORY_FILE="${SCRIPT_DIR}/.check_history.json"
 
-: "${BASE_URL:=https://api.apexmail.com}"
-: "${DASHBOARD_URL:=https://app.apexmail.com}"
-: "${SUPPORT_URL:=https://support.apexmail.com}"
-: "${STATUS_URL:=https://status.apexmail.com}"
-: "${SMTP_HOST:=smtp.apexmail.com}"
+# Audit P — apexmail.com is NOT this deployment's domain; every default now
+# points at the real apexmail.ee hostnames.
+: "${BASE_URL:=https://api.apexmail.ee}"
+: "${DASHBOARD_URL:=https://app.apexmail.ee}"
+: "${SUPPORT_URL:=https://status.apexmail.ee}"
+: "${STATUS_URL:=https://status.apexmail.ee}"
+: "${SMTP_HOST:=mail.apexmail.ee}"
 : "${SMTP_PORT:=587}"
 : "${TIMEOUT:=10}"
 

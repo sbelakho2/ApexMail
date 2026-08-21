@@ -78,6 +78,12 @@ export_from_file STRIPE_WEBHOOK_SECRET    || true
 export_from_file DB_PASSWORD              || true
 export_from_file REDIS_PASSWORD           || true
 export_from_file CLICKHOUSE_PASSWORD      || true
+# Audit G: AWS SES + direct-SMTP credentials also follow the _FILE pattern so
+# they never appear in `docker inspect` output on production hosts.
+export_from_file AWS_ACCESS_KEY_ID        || true
+export_from_file AWS_SECRET_ACCESS_KEY    || true
+export_from_file SMTP_USERNAME            || true
+export_from_file SMTP_PASSWORD            || true
 
 # Percent-encode a value used in a URI user-info component. Docker secret
 # values are arbitrary and commonly contain characters such as `@` or `:`;
@@ -103,6 +109,8 @@ if [ -z "${CLICKHOUSE_PASSWORD:-}" ] && [ -n "${CLICKHOUSE_PASSWORD_FILE:-}" ] &
 fi
 
 # ── Construct DATABASE_URL from DB_* parts if not already set ──────────────
+# Audit H: sslmode=prefer (not disable) — TLS is used when the server offers
+# it, while non-TLS local development keeps working.
 if [ -z "${DATABASE_URL:-}" ] && [ -n "${DB_HOST:-}" ]; then
   DB_PORT_VAL="${DB_PORT:-5432}"
   DB_NAME_VAL="${DB_NAME:-apexmail}"
@@ -110,10 +118,10 @@ if [ -z "${DATABASE_URL:-}" ] && [ -n "${DB_HOST:-}" ]; then
   DB_USER_ENCODED="$(urlencode_userinfo "${DB_USER_VAL}")"
   if [ -n "${DB_PASSWORD:-}" ]; then
     DB_PASSWORD_ENCODED="$(urlencode_userinfo "${DB_PASSWORD}")"
-    export DATABASE_URL="postgresql://${DB_USER_ENCODED}:${DB_PASSWORD_ENCODED}@${DB_HOST}:${DB_PORT_VAL}/${DB_NAME_VAL}?sslmode=disable"
+    export DATABASE_URL="postgresql://${DB_USER_ENCODED}:${DB_PASSWORD_ENCODED}@${DB_HOST}:${DB_PORT_VAL}/${DB_NAME_VAL}?sslmode=prefer"
     unset DB_PASSWORD_ENCODED
   else
-    export DATABASE_URL="postgresql://${DB_USER_ENCODED}@${DB_HOST}:${DB_PORT_VAL}/${DB_NAME_VAL}?sslmode=disable"
+    export DATABASE_URL="postgresql://${DB_USER_ENCODED}@${DB_HOST}:${DB_PORT_VAL}/${DB_NAME_VAL}?sslmode=prefer"
   fi
   unset DB_USER_ENCODED
 fi
@@ -131,7 +139,9 @@ if [ -z "${REDIS_URL:-}" ] && [ -n "${REDIS_HOST:-}" ]; then
 fi
 
 echo "[entrypoint-wrapper] Export complete. Starting binary: ${BINARY}"
-echo "[entrypoint-wrapper] DB_PASSWORD is ${DB_PASSWORD:+set} (${#DB_PASSWORD} chars), DB_HOST=${DB_HOST:-unset}, DATABASE_URL is ${DATABASE_URL:+set}"
+# Audit H: log only whether credentials are present — never their length
+# (length is a meaningful oracle for brute-forcing the secret value).
+echo "[entrypoint-wrapper] DB_PASSWORD is ${DB_PASSWORD:+set}, DB_HOST=${DB_HOST:-unset}, DATABASE_URL is ${DATABASE_URL:+set}"
 
 # Execute the binary
 exec /usr/bin/tini -- "${BINARY}" "$@"

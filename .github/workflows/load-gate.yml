@@ -57,7 +57,12 @@ on:
 
 env:
   K6_API_BASE: ${{ github.event.inputs.api_base_url || 'http://localhost:3000' }}
-  K6_API_KEY: ${{ secrets.LOAD_TEST_API_KEY }}
+  # Audit N — the API key secret is NEVER exported into pull_request runs:
+  # those runs execute PR-controlled code (k6 scripts, Dockerfile), and a
+  # malicious PR could exfiltrate it. Trusted triggers (workflow_dispatch,
+  # push) get the real key; PR runs get an empty one and run the k6 suites
+  # from the PR's BASE commit (trusted main code) — see the checkout step.
+  K6_API_KEY: ${{ github.event_name == 'pull_request' && '' || secrets.LOAD_TEST_API_KEY }}
   K6_INSECURE: 'true'
   LOAD_GATE_COMPOSE: deploy/load-test-infra/docker-compose.ci.yml
 
@@ -74,8 +79,25 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
+      # ── Step 1a: PR runs use trusted (base-branch) k6 scripts ─────────────
+      # The merge checkout contains the PR's own load-tests/ code. The k6
+      # steps below run with workflow secrets in the environment (on trusted
+      # triggers), so on pull_request events the load-tests tree is replaced
+      # with the PR base (main) version — PR-authored JavaScript must not
+      # execute in a secret-bearing job. Server code (built in later steps)
+      # is still the PR's — that is the point of the gate.
+      - name: Pin k6 scripts to the PR base branch
+        if: github.event_name == 'pull_request'
+        run: |
+          git fetch --no-tags --depth=1 origin "${{ github.event.pull_request.base.sha }}"
+          git checkout "${{ github.event.pull_request.base.sha }}" -- load-tests
+
       # ── Step 1b: Fail fast when the API key secret is not configured ───────
+      # Only enforced for trusted (non-PR) triggers; PR runs intentionally
+      # run WITHOUT the key (see env above) and auth-dependent checks will
+      # 401 — re-run via workflow_dispatch for a full secret-bearing pass.
       - name: Verify LOAD_TEST_API_KEY secret is configured
+        if: github.event_name != 'pull_request'
         run: |
           if [ -z "${K6_API_KEY}" ]; then
             echo "::error::Secret LOAD_TEST_API_KEY is not set. Configure it before running the load gate — no fallback key is used."

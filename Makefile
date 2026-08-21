@@ -27,11 +27,31 @@
 #   and deploy/nginx/ssl/ (the Let's Encrypt store — excluded from the rsync
 #   of deploy/ with --exclude='ssl'; deleting it would kill live TLS certs).
 #
+# USAGE (audit C — no hardcoded host):
+#   make deploy DEPLOY_HOST=root@203.0.113.10          — full manual deploy
+#   make deploy-service S=api-server DEPLOY_HOST=root@203.0.113.10
+#   DEPLOY_HOST is REQUIRED and has NO default: passing it explicitly every
+#   time prevents an emergency hotfix from silently going to a stale IP.
+#   (The canonical CI/CD path takes the host from the HETZNER_SSH_HOST
+#   secret — see deploy/DEPLOYMENT.md.)
+#
+# SSH options: `accept-new` records the host key on first connection and
+# then ENFORCES it (TOFU). The previous `StrictHostKeyChecking=no` accepted
+# ANY key on every connection, which defeats MITM protection entirely.
 
-SERVER_HOST := root@95.216.226.51
-SSH         := ssh -o StrictHostKeyChecking=no $(SERVER_HOST)
+DEPLOY_HOST ?=
+SERVER_HOST := $(DEPLOY_HOST)
+# Recipe-time guard (a parse-time $(error) would break non-deploy targets
+# like `make verify` or `make marketing-check-kiwi`).
+define require_deploy_host
+	if [ -z "$(SERVER_HOST)" ]; then \
+		echo "ERROR: DEPLOY_HOST is required, e.g. make $@ DEPLOY_HOST=root@203.0.113.10 (no default on purpose)" >&2; \
+		exit 1; \
+	fi
+endef
+SSH         := ssh -o StrictHostKeyChecking=accept-new $(SERVER_HOST)
 RSYNC       := rsync -avz
-RSYNC_SSH   := -e "ssh -o StrictHostKeyChecking=no"
+RSYNC_SSH   := -e "ssh -o StrictHostKeyChecking=accept-new"
 
 # Code directories that get synced. Each rsync uses --delete so the server
 # has EXACTLY the current repo state — no stale files, no old binaries.
@@ -55,19 +75,21 @@ SERVICE_DEPS_status-server := services/mail-server/crates/auth-server services/m
 
 ## deploy: Full deploy — sync all code + rebuild all images + restart
 deploy:
+	@$(require_deploy_host)
 	@# Hard pre-flight: KiwiCaptcha must never ship in the marketing build
 	@# (audit §6). Fails fast before any sync.
 	@bash tools/check-kiwi-marketing-isolation.sh
 	@echo "==> Syncing ALL code to server (clean — stale files removed)..."
 	@# NOTE: do NOT --exclude 'public' — apps/marketing-zola/public is a
 	@# COMMITTED build input (the api-server Docker stage COPYs it); the only
-	@# other sync excludes are build outputs (target/, node_modules/, vendor/)
-	@# and the live LE cert store (deploy/nginx/ssl).
+	@# other sync excludes are build outputs (target/, node_modules/, vendor/),
+	@# the live LE cert store (deploy/nginx/ssl) and SECRET MATERIAL
+	@# (secrets/ — server-side secrets are rendered by CI, never synced).
 	@for dir in $(SYNC_DIRS); do \
 		echo "  $$dir/"; \
 		$(RSYNC) --delete \
 			--exclude='target' --exclude='node_modules' --exclude='vendor' \
-			--exclude='ssl' \
+			--exclude='ssl' --exclude='secrets' \
 			$(RSYNC_SSH) ./$$dir/ $(SERVER_HOST):/opt/apexmail/$$dir/; \
 	done
 	@for file in $(SYNC_FILES); do \
@@ -79,14 +101,19 @@ deploy:
 
 ## deploy-service S=name: Partial deploy — sync only changed code + rebuild one service
 deploy-service:
+	@$(require_deploy_host)
 	@if [ -z "$(S)" ]; then echo "Usage: make deploy-service S=api-server"; exit 1; fi
 	@# Hard pre-flight: KiwiCaptcha must never ship in the marketing build.
 	@# Runs for every partial deploy (cheap) and explicitly for marketing.
 	@bash tools/check-kiwi-marketing-isolation.sh
 	@echo "==> Partial deploy: $(S)"
 	@echo "==> Syncing only changed code directories..."
+	@# Audit C: --exclude='secrets' matches the deploy/ rsync below — local
+	@# secret files (services/mail-server/secrets/) must never be copied to
+	@# the server; CI renders them there from the secret store.
 	@$(RSYNC) --delete \
 		--exclude='target' --exclude='node_modules' --exclude='vendor' \
+		--exclude='secrets' \
 		$(RSYNC_SSH) \
 		./services/mail-server/ \
 		$(SERVER_HOST):/opt/apexmail/services/mail-server/
@@ -101,7 +128,7 @@ deploy-service:
 		./apps/marketing-zola/ \
 		$(SERVER_HOST):/opt/apexmail/apps/marketing-zola/
 	@$(RSYNC) --delete \
-		--exclude='ssl' \
+		--exclude='ssl' --exclude='secrets' \
 		$(RSYNC_SSH) \
 		./deploy/ \
 		$(SERVER_HOST):/opt/apexmail/deploy/
@@ -113,10 +140,12 @@ deploy-service:
 
 ## deploy-quick: Rebuild + deploy whatever code is already on the server
 deploy-quick:
+	@$(require_deploy_host)
 	$(SSH) 'cd /opt/apexmail && bash deploy/scripts/deploy.sh'
 
 ## deploy-restart: Just restart containers (no rebuild, no sync)
 deploy-restart:
+	@$(require_deploy_host)
 	$(SSH) 'cd /opt/apexmail && bash deploy/scripts/deploy.sh --no-build'
 
 ## verify: Check that all live endpoints respond correctly

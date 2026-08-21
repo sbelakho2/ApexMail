@@ -45,7 +45,7 @@ services:
       timeout: 5s
       retries: 5
     networks:
-      - apexmail_data
+      - apexmail_data_internal
     # SECURITY: Resource limits
     deploy:
       resources:
@@ -94,7 +94,7 @@ services:
       timeout: 5s
       retries: 5
     networks:
-      - apexmail_data
+      - apexmail_data_internal
     deploy:
       resources:
         limits:
@@ -142,7 +142,7 @@ services:
     networks:
       - apexmail_monitoring
       - apexmail_backend
-      - apexmail_data
+      - apexmail_data_internal
     profiles:
       - monitoring
     deploy:
@@ -289,7 +289,7 @@ services:
       start_period: 30s
     networks:
       - apexmail_backend
-      - apexmail_data
+      - apexmail_data_internal
     deploy:
       resources:
         limits:
@@ -349,8 +349,9 @@ services:
       # Opt-in provisioning only; it never marks the platform sender verified.
       SYSTEM_SENDER_BOOTSTRAP_ON_STARTUP: ${SYSTEM_SENDER_BOOTSTRAP_ON_STARTUP:-false}
       # ── Inbox placement tests (runs in-process; sends via platform MTA) ───
-      # The api-server shares the apexmail_data network with the mta service,
-      # so unauthenticated submission on mta:25 measures real reputation.
+      # The api-server shares the apexmail_data_internal network with the mta
+      # service, so unauthenticated submission on mta:25 measures real
+      # reputation.
       PLACEMENT_SMTP_HOST: ${PLACEMENT_SMTP_HOST:-mta}
       PLACEMENT_SMTP_PORT: ${PLACEMENT_SMTP_PORT:-25}
       # ── Observability ─────────────────────────────────────────────────────
@@ -386,7 +387,7 @@ services:
     networks:
       - apexmail_frontend
       - apexmail_backend
-      - apexmail_data
+      - apexmail_data_internal
     deploy:
       resources:
         limits:
@@ -450,7 +451,7 @@ services:
       start_period: 30s
     networks:
       - apexmail_backend
-      - apexmail_data
+      - apexmail_data_internal
     deploy:
       resources:
         limits:
@@ -505,7 +506,7 @@ services:
       start_period: 20s
     networks:
       - apexmail_backend
-      - apexmail_data
+      - apexmail_data_internal
     deploy:
       resources:
         limits:
@@ -612,7 +613,7 @@ services:
       start_period: 20s
     networks:
       - apexmail_backend
-      - apexmail_data
+      - apexmail_data_internal
     deploy:
       resources:
         limits:
@@ -662,12 +663,18 @@ services:
   clickhouse:
     image: clickhouse/clickhouse-server:24.8-alpine
     container_name: apexmail-clickhouse
-    entrypoint: ["/bin/sh", "/usr/local/bin/load-secret-env.sh", "CLICKHOUSE_PASSWORD", "CLICKHOUSE_PASSWORD_FILE", "/entrypoint.sh"]
+    # CLICKHOUSE_ADMIN_PASSWORD is loaded from its Docker secret (prod) or
+    # env (dev) and consumed by deploy/clickhouse/users.xml via from_env to
+    # keep the admin user's password SEPARATE from the app password (audit I).
+    entrypoint: ["/bin/sh", "/usr/local/bin/load-secret-env.sh", "CLICKHOUSE_PASSWORD", "CLICKHOUSE_PASSWORD_FILE", "CLICKHOUSE_ADMIN_PASSWORD", "CLICKHOUSE_ADMIN_PASSWORD_FILE", "/entrypoint.sh"]
     restart: unless-stopped
     environment:
       CLICKHOUSE_DB: ${CLICKHOUSE_DATABASE:-apexmail}
       CLICKHOUSE_USER: ${CLICKHOUSE_USER:-apexmail}
       CLICKHOUSE_PASSWORD_FILE: /run/secrets/clickhouse_password
+      # Dev default only — the production overlay blanks this and mounts the
+      # clickhouse_admin_password Docker secret instead.
+      CLICKHOUSE_ADMIN_PASSWORD: ${CLICKHOUSE_ADMIN_PASSWORD:-dev-clickhouse-admin-change-me}
       CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 0
     volumes:
       - clickhouse_data:/var/lib/clickhouse
@@ -686,7 +693,7 @@ services:
       timeout: 5s
       retries: 5
     networks:
-      - apexmail_data
+      - apexmail_data_internal
     deploy:
       resources:
         limits:
@@ -720,9 +727,15 @@ services:
     volumes:
       - ./deploy/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - ./deploy/alerting-rules.yml:/etc/prometheus/alerting-rules.yml:ro
+      # Audit P: the web config is now LIVE (previously a dead file). It is
+      # a commented template today — enable basic_auth_users by generating a
+      # bcrypt hash (see deploy/prometheus-web.yml header) and updating the
+      # Grafana datasource credentials accordingly.
+      - ./deploy/prometheus-web.yml:/etc/prometheus/web.yml:ro
       - prometheus_data:/prometheus
     command:
       - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--web.config.file=/etc/prometheus/web.yml'
       - '--storage.tsdb.path=/prometheus'
       - '--storage.tsdb.retention.time=${PROMETHEUS_RETENTION:-15d}'
       - '--storage.tsdb.retention.size=${PROMETHEUS_RETENTION_SIZE:-20GB}'
@@ -842,12 +855,31 @@ services:
     depends_on:
       observability:
         condition: service_healthy
+    # Audit K: alertmanager does not expand ${VAR} placeholders, so the config
+    # template (deploy/alertmanager.yml.tmpl) is rendered at start by
+    # deploy/scripts/render-alertmanager-config.sh (busybox sed — the image
+    # ships no envsubst) into /tmp/alertmanager.yml before exec'ing the
+    # binary. The render fails fast when required vars are missing.
+    entrypoint: ["/bin/sh", "/usr/local/bin/render-alertmanager-config.sh"]
+    command: []
     environment:
-      # Used by deploy/alertmanager.yml webhook receivers to authenticate
+      # Used by the alertmanager template webhook receivers to authenticate
       # against the observability service's /alerts ingestion endpoint.
       INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:-dev-internal-service-token-change-me}
+      # ── Variables substituted into alertmanager.yml.tmpl ─────────────────
+      SMTP_HOST: ${SMTP_HOST:-127.0.0.1}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USERNAME: ${SMTP_USERNAME:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      OPSGENIE_API_KEY: ${OPSGENIE_API_KEY:-}
+      PAGERDUTY_ROUTING_KEY: ${PAGERDUTY_ROUTING_KEY:-}
+      SLACK_WEBHOOK_PATH: ${SLACK_WEBHOOK_PATH:-}
+      SLACK_WEBHOOK_PATH_LOW: ${SLACK_WEBHOOK_PATH_LOW:-}
+      ALERT_EMAIL_CRITICAL: ${ALERT_EMAIL_CRITICAL:-}
+      ALERT_EMAIL_WARNING: ${ALERT_EMAIL_WARNING:-}
     volumes:
-      - ./deploy/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - ./deploy/alertmanager.yml.tmpl:/etc/alertmanager/alertmanager.yml.tmpl:ro
+      - ./deploy/scripts/render-alertmanager-config.sh:/usr/local/bin/render-alertmanager-config.sh:ro
       - alertmanager_data:/alertmanager
     ports:
       - "127.0.0.1:${ALERTMANAGER_PORT:-9093}:9093"
@@ -883,7 +915,7 @@ services:
       - ./deploy/load-secret-env.sh:/usr/local/bin/load-secret-env.sh:ro
     networks:
       - apexmail_monitoring
-      - apexmail_data
+      - apexmail_data_internal
     profiles:
       - monitoring
     secrets:
@@ -909,7 +941,7 @@ services:
       - ./deploy/load-secret-env.sh:/usr/local/bin/load-secret-env.sh:ro
     networks:
       - apexmail_monitoring
-      - apexmail_data
+      - apexmail_data_internal
     profiles:
       - monitoring
     secrets:
@@ -947,7 +979,7 @@ services:
       - ./deploy/load-secret-env.sh:/usr/local/bin/load-secret-env.sh:ro
     networks:
       - apexmail_monitoring
-      - apexmail_data
+      - apexmail_data_internal
     profiles:
       - monitoring
     secrets:
@@ -1067,12 +1099,32 @@ secrets:
 # ===========================================================================
 # NETWORKS
 # ===========================================================================
+# Audit J — network segmentation:
+#   apexmail_data_internal carries ALL datastore traffic (postgres, redis,
+#   clickhouse, mailstore) plus every service that talks to them. The base
+#   (development) file keeps it a normal bridge so dev behaviour (published
+#   loopback ports, egress) is unchanged; the PRODUCTION overlay
+#   (docker-compose.prod.yml) marks it `internal: true`, which removes the
+#   egress path from the network itself.
+#
+#   Outbound-needs audit for the attached services (why each keeps another
+#   non-internal network when it needs egress):
+#     postgres, redis, clickhouse, mailstore, postgres-backup — no egress.
+#     api-server   — SES (AWS) egress      → frontend/backend kept.
+#     worker       — SES + outbound SMTP   → backend kept.
+#     mta          — inbound/outbound mail → frontend/backend kept.
+#     tracking     — none today, but serves public traffic → backend kept.
+#     enterprise   — SSO callback egress   → backend kept.
+#     billing      — Stripe API egress     → backend kept.
+#     observability, exporters — scrape/metrics only, monitoring kept.
 networks:
   apexmail_frontend:
     driver: bridge
   apexmail_backend:
     driver: bridge
   apexmail_data:
+    driver: bridge
+  apexmail_data_internal:
     driver: bridge
   apexmail_monitoring:
     driver: bridge

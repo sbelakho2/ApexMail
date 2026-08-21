@@ -10,6 +10,22 @@ SMOKE_DIR="${SMOKE_DIR:-$PROJECT_ROOT/target/apexmail-smoke}"
 SMOKE_SSL_DIR="$SMOKE_DIR/ssl"
 SMOKE_ALERT_NAME="smoke_alertmanager_delivery"
 
+# Audit P — rm -rf guard: SMOKE_DIR must be an absolute path nested under
+# /tmp or the repository root (never "/", never an arbitrary absolute path
+# that a stray env var could point at).
+validate_smoke_dir() {
+  if [[ -z "$SMOKE_DIR" || "$SMOKE_DIR" == "/" ]]; then
+    error "SMOKE_DIR must be a non-root directory (got '${SMOKE_DIR}')"
+  fi
+  case "$SMOKE_DIR" in
+    "$PROJECT_ROOT"/*|/tmp/*)
+      ;;
+    *)
+      error "SMOKE_DIR must be absolute and located under /tmp or ${PROJECT_ROOT} (got '${SMOKE_DIR}')"
+      ;;
+  esac
+}
+
 log() {
   echo "[compose-smoke] $*"
 }
@@ -135,7 +151,21 @@ ensure_smoke_assets() {
       -subj '/CN=localhost' >/dev/null 2>&1
   fi
 
-  chmod 0644 "$SMOKE_SSL_DIR/fullchain.pem" "$SMOKE_SSL_DIR/privkey.pem"
+  # nginx.conf references ca-chain.pem for OCSP stapling
+  # (ssl_trusted_certificate) — a self-signed chain equals the cert itself.
+  if [[ ! -f "$SMOKE_SSL_DIR/ca-chain.pem" ]]; then
+    cp "$SMOKE_SSL_DIR/fullchain.pem" "$SMOKE_SSL_DIR/ca-chain.pem"
+  fi
+
+  # Audit P deviation: the throwaway privkey stays 0644 ON PURPOSE. The prod
+  # overlay runs nginx as uid 101, and Docker Desktop bind mounts do not map
+  # host ownership into the container (verified: uid 101 gets EACCES on a
+  # 0600 host file), so 0600 would prevent the smoke nginx from loading its
+  # TLS key. Production perms are enforced by deploy-hetzner.yml (privkey
+  # 0640 root-owned-by-101); this file is an ephemeral 1-day localhost cert
+  # inside a throwaway smoke directory.
+  chmod 0644 "$SMOKE_SSL_DIR/privkey.pem"
+  chmod 0644 "$SMOKE_SSL_DIR/fullchain.pem" "$SMOKE_SSL_DIR/ca-chain.pem"
 }
 
 export_smoke_env() {
@@ -170,8 +200,58 @@ export_smoke_env() {
   export TLS_CERT_DIR="${TLS_CERT_DIR:-$SMOKE_SSL_DIR}"
   export JWT_PRIVATE_KEY_PEM="$(<"$SMOKE_DIR/jwt-private.pem")"
   export JWT_PUBLIC_KEY_PEM="$(<"$SMOKE_DIR/jwt-public.pem")"
+  # Audit B — the production overlay requires APEXMAIL_API_KEY (:? guard).
+  export APEXMAIL_API_KEY="$(resolve_env_or_generate_secret APEXMAIL_API_KEY 32)"
+  export KIWI_SECRET_KEY="$(resolve_env_or_generate_secret KIWI_SECRET_KEY 32)"
+  export DKIM_PRIVATE_KEY_ENCRYPTION_KEY="$(resolve_env_or_seed_secret DKIM_PRIVATE_KEY_ENCRYPTION_KEY "$PROJECT_ROOT/secrets/dkim_private_key_encryption_key.txt" 32)"
   export DOCKER_BUILDKIT="${DOCKER_BUILDKIT:-0}"
   export COMPOSE_DOCKER_CLI_BUILD="${COMPOSE_DOCKER_CLI_BUILD:-0}"
+  seed_prod_secret_files
+}
+
+# Audit B/G/I/E — the production overlay declares every secret with a
+# ${PROD_*_FILE:?} guard, so `docker compose config` (and `up`) requires an
+# env var AND an existing file for each. Seed local throwaway files and
+# export the matching PROD_*_FILE variables so the smoke stack renders.
+seed_prod_secret_files() {
+  seed_prod_secret_file POSTGRES_PASSWORD        postgres_password.txt      "$(resolved_postgres_password)"
+  seed_prod_secret_file REDIS_PASSWORD           redis_password.txt         "$REDIS_PASSWORD"
+  seed_prod_secret_file CLICKHOUSE_PASSWORD      clickhouse_password.txt    "$CLICKHOUSE_PASSWORD"
+  seed_prod_secret_file CLICKHOUSE_ADMIN_PASSWORD clickhouse_admin_password.txt "$(resolve_env_or_generate_secret CLICKHOUSE_ADMIN_PASSWORD 32)"
+  seed_prod_secret_file API_KEY_HASH_SECRET      api_key_hash_secret.txt    "$API_KEY_HASH_SECRET"
+  seed_prod_secret_file WEBHOOK_SIGNING_SECRET   webhook_signing_secret.txt "$WEBHOOK_SIGNING_SECRET"
+  seed_prod_secret_file TRACKING_SECRET_KEY      tracking_secret_key.txt    "$TRACKING_SECRET_KEY"
+  seed_prod_secret_file INTERNAL_SERVICE_TOKEN   internal_service_token.txt "$INTERNAL_SERVICE_TOKEN"
+  seed_prod_secret_file JWT_SECRET               jwt_secret.txt             "$JWT_SECRET"
+  seed_prod_secret_file SESSION_SECRET           session_secret.txt         "$SESSION_SECRET"
+  seed_prod_secret_file IMPERSONATION_SECRET     impersonation_secret.txt   "$IMPERSONATION_SECRET"
+  seed_prod_secret_file CSRF_SECRET              csrf_secret.txt            "$CSRF_SECRET"
+  seed_prod_secret_file DKIM_PRIVATE_KEY_ENCRYPTION_KEY dkim_private_key_encryption_key.txt "$DKIM_PRIVATE_KEY_ENCRYPTION_KEY"
+  seed_prod_secret_file KIWI_SECRET_KEY          kiwi_secret_key.txt        "$KIWI_SECRET_KEY"
+  seed_prod_secret_file STRIPE_SECRET_KEY        stripe_secret_key.txt      "$(resolve_env_or_generate_secret STRIPE_SECRET_KEY 32)"
+  seed_prod_secret_file STRIPE_WEBHOOK_SECRET    stripe_webhook_secret.txt  "$(resolve_env_or_generate_secret STRIPE_WEBHOOK_SECRET 32)"
+  seed_prod_secret_file AWS_ACCESS_KEY_ID        aws_access_key_id.txt      "${AWS_ACCESS_KEY_ID:-}"
+  seed_prod_secret_file AWS_SECRET_ACCESS_KEY    aws_secret_access_key.txt  "${AWS_SECRET_ACCESS_KEY:-}"
+  seed_prod_secret_file SMTP_USERNAME            smtp_username.txt          "${SMTP_USERNAME:-}"
+  seed_prod_secret_file SMTP_PASSWORD            smtp_password.txt          "${SMTP_PASSWORD:-}"
+  seed_prod_secret_file BACKUP_ENCRYPTION_KEY    backup_encryption_key.txt  "$(resolve_env_or_generate_secret BACKUP_ENCRYPTION_KEY 32)"
+  # JWT key material is PEM — point straight at the generated key files.
+  export PROD_JWT_PRIVATE_KEY_FILE="$SMOKE_DIR/jwt-private.pem"
+  export PROD_JWT_PUBLIC_KEY_FILE="$SMOKE_DIR/jwt-public.pem"
+}
+
+seed_prod_secret_file() {
+  local value_name="$1"
+  local file_name="$2"
+  local value="$3"
+  local target="$PROJECT_ROOT/secrets/$file_name"
+
+  mkdir -p "$PROJECT_ROOT/secrets"
+  if [[ ! -s "$target" ]]; then
+    printf '%s' "$value" > "$target"
+    chmod 600 "$target"
+  fi
+  export "PROD_${value_name}_FILE=$target"
 }
 
 wait_for_container_health() {
@@ -341,6 +421,7 @@ tear_down_stack() {
 main() {
   local command="${1:-full}"
 
+  validate_smoke_dir
   require_command docker
   require_command openssl
   require_command curl

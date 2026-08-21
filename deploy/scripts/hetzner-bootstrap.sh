@@ -2,14 +2,17 @@
 # =============================================================================
 # ApexMail — Hetzner host bootstrap (one-time, idempotent)
 # =============================================================================
-# Run this ONCE on the production Hetzner host (95.216.226.51 — matches the
-# Makefile SERVER_HOST and the DNS A records in ARCHITECTURE.md; the CI
-# workflow takes the host from the HETZNER_SSH_HOST secret) as root after
-# the hetzner-db-mac.pub SSH key has been installed in /root/.ssh/authorized_keys.
+# Run this ONCE on the production Hetzner host as root after the
+# hetzner-db-mac.pub SSH key has been installed in /root/.ssh/authorized_keys.
 #
-# Local usage:
-#   scp deploy/scripts/hetzner-bootstrap.sh root@95.216.226.51:/root/
-#   ssh root@95.216.226.51 'bash /root/hetzner-bootstrap.sh'
+# Audit P — no host IP is hardcoded here. The deploy host comes from
+# DEPLOY_HOST at call time (the CI workflow uses the HETZNER_SSH_HOST
+# secret; the Makefile requires DEPLOY_HOST explicitly — see Makefile).
+#
+# Local usage (replace <deploy-host>, e.g. root@203.0.113.10):
+#   DEPLOY_HOST=<deploy-host>
+#   scp deploy/scripts/hetzner-bootstrap.sh "$DEPLOY_HOST":/root/
+#   ssh "$DEPLOY_HOST" 'bash /root/hetzner-bootstrap.sh'
 #
 # Idempotent: safe to re-run.
 # =============================================================================

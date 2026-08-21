@@ -20,15 +20,11 @@ jobs:
         with:
           github-token: "${{ secrets.GITHUB_TOKEN }}"
 
-      - name: Enable auto-merge for patch updates
+      - name: Enable auto-merge for patch updates only
+        # Audit N — minor (and major) version bumps are NO longer auto-merged:
+        # minor releases can carry behavioural changes that must pass review.
+        # Only semver-patch updates are auto-merged.
         if: steps.metadata.outputs.update-type == 'version-update:semver-patch'
-        run: gh pr merge --auto --squash "$PR_URL"
-        env:
-          PR_URL: ${{ github.event.pull_request.html_url }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Enable auto-merge for minor dependency updates
-        if: steps.metadata.outputs.update-type == 'version-update:semver-minor'
         run: gh pr merge --auto --squash "$PR_URL"
         env:
           PR_URL: ${{ github.event.pull_request.html_url }}

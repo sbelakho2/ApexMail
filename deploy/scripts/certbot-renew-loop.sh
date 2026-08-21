@@ -51,7 +51,11 @@ has_docker() {
 # --- Reload nginx + restart the mail containers after a renewal --------------
 reload_services() {
   if ! has_docker; then
-    echo "[certbot] WARN: docker unavailable — reload nginx and restart ${MAIL_CONTAINERS} manually"
+    echo "[certbot] WARN: docker socket/CLI unavailable — reload nginx and restart ${MAIL_CONTAINERS} manually"
+    # Audit D — leave a marker so a host-side watcher/cron (or an operator
+    # running `ls`) notices that a renewed cert is waiting to be loaded,
+    # instead of the renewal being silently forgotten.
+    touch "${TLS_RELOAD_FLAG:-/etc/letsencrypt/renewal-reload-flag}" 2>/dev/null || true
     return 0
   fi
   if docker exec "$NGINX_CONTAINER" nginx -s reload; then
@@ -64,6 +68,7 @@ reload_services() {
     echo "[certbot] restarted: ${MAIL_CONTAINERS}"
   else
     echo "[certbot] WARN: failed to restart ${MAIL_CONTAINERS} — TLS certs reload only after a manual restart"
+    touch "${TLS_RELOAD_FLAG:-/etc/letsencrypt/renewal-reload-flag}" 2>/dev/null || true
   fi
 }
 

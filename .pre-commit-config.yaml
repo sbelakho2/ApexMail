@@ -1,7 +1,8 @@
 minimum_pre_commit_version: "3.6.0"
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
-    rev: v5.0.0
+    # Audit P — pinned to the full commit SHA (tags are mutable).
+    rev: cef0300fd0fc4d2a87a85fa2093c6b283ea36f4b  # v5.0.0
     hooks:
       - id: check-merge-conflict
       - id: end-of-file-fixer
@@ -14,7 +15,8 @@ repos:
         args: [--fix=lf]
 
   - repo: https://github.com/gitleaks/gitleaks
-    rev: v8.18.2
+    # Audit P — pinned to the full commit SHA (tags are mutable).
+    rev: ac4b5146b0f112df989b4374abb2b12799e37cba  # v8.18.2
     hooks:
       - id: gitleaks
         name: Gitleaks secret scanning

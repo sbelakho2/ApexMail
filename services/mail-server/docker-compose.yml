@@ -157,8 +157,14 @@ services:
   redis:
     image: redis:7-alpine
     restart: unless-stopped
+    # SECURITY (audit A): the password is read from the Docker secret FILE
+    # inside the container shell ($$ escapes compose interpolation, so sh
+    # evaluates $(cat ...) at runtime). Only REDIS_PASSWORD_FILE is set in
+    # `environment`, so referencing $${REDIS_PASSWORD} would expand to an
+    # empty string and silently DISABLE auth (--requirepass "") on a port
+    # published to 127.0.0.1:6379.
     command: >
-      sh -c "redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru --requirepass \"$${REDIS_PASSWORD}\""
+      sh -c "redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru --requirepass \"$$(cat /run/secrets/redis_password)\""
     environment:
       - REDIS_PASSWORD_FILE=/run/secrets/redis_password
     ports:
@@ -428,12 +434,28 @@ services:
     container_name: apexmail-alertmanager
     ports:
       - "127.0.0.1:9093:9093"
+    # Audit K: alertmanager does not expand ${VAR} placeholders — the template
+    # (deploy/alertmanager.yml.tmpl) is rendered at start into
+    # /tmp/alertmanager.yml by deploy/scripts/render-alertmanager-config.sh
+    # (busybox sed; the image ships no envsubst) before exec'ing the binary.
+    entrypoint: ["/bin/sh", "/usr/local/bin/render-alertmanager-config.sh"]
+    command: []
+    environment:
+      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:-dev-internal-service-token-change-me}
+      SMTP_HOST: ${SMTP_HOST:-127.0.0.1}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USERNAME: ${SMTP_USERNAME:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      OPSGENIE_API_KEY: ${OPSGENIE_API_KEY:-}
+      PAGERDUTY_ROUTING_KEY: ${PAGERDUTY_ROUTING_KEY:-}
+      SLACK_WEBHOOK_PATH: ${SLACK_WEBHOOK_PATH:-}
+      SLACK_WEBHOOK_PATH_LOW: ${SLACK_WEBHOOK_PATH_LOW:-}
+      ALERT_EMAIL_CRITICAL: ${ALERT_EMAIL_CRITICAL:-}
+      ALERT_EMAIL_WARNING: ${ALERT_EMAIL_WARNING:-}
     volumes:
-      - ../../deploy/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - ../../deploy/alertmanager.yml.tmpl:/etc/alertmanager/alertmanager.yml.tmpl:ro
+      - ../../deploy/scripts/render-alertmanager-config.sh:/usr/local/bin/render-alertmanager-config.sh:ro
       - alertmanager_data:/alertmanager
-    command:
-      - '--config.file=/etc/alertmanager/alertmanager.yml'
-      - '--storage.path=/alertmanager'
     networks:
       - apexmail
     restart: unless-stopped

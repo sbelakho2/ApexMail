@@ -52,6 +52,10 @@ test-results/
 # ─── Logs ─────────────────────────────────────────────────────────────────────
 *.log
 lerna-debug.log*
+# Stray root-level test capture files (audit P — were tracked/regenerated junk)
+test_output.txt
+test_results.log
+dump.rdb
 
 # ─── Env / secrets ────────────────────────────────────────────────────────────
 .env
@@ -61,11 +65,13 @@ lerna-debug.log*
 !.env.production.example
 .vast_api_key
 vast_instance_id.txt
-# NOTE: dhparam.pem is a placeholder checked in for developer convenience.
-# The real DH parameters must be generated per-deployment using:
+# NOTE (audit P): dhparam.pem is a PLACEHOLDER that was previously tracked.
+# It is untracked now — generate real DH parameters per-deployment using:
 #   deploy/nginx/ssl/generate-dhparams.sh
+# (deploy-hetzner.yml also regenerates any dhparam smaller than 1024 bytes.)
 # All .pem files (including dhparam.pem with real values) are excluded below.
 *.pem
+deploy/nginx/ssl/dhparam.pem
 *.key
 secrets/
 **/secrets/
@@ -125,4 +131,3 @@ cargo_output.txt
 # ─── Misc ─────────────────────────────────────────────────────────────────────
 .vercel/
 .zcode/
-dump.rdb

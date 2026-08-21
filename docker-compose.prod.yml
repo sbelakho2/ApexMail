@@ -8,7 +8,15 @@
 # - Stricter resource limits
 # - Required secrets validation
 # - Replicas for stateless services
-# =============================================================================
+#
+# Audit O — shared log rotation anchor: attach `logging: *default-logging` to
+# every service defined in this overlay so no container can grow an
+# unbounded json-file log on the host.
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
 
 services:
   # ===========================================================================
@@ -83,6 +91,7 @@ services:
       - "443:443"
     volumes:
       - ./deploy/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./deploy/nginx/proxy-headers.conf:/etc/nginx/proxy-headers.conf:ro
       - ${TLS_CERT_DIR:-./deploy/nginx/ssl}:/etc/nginx/ssl:ro
       - certbot_webroot:/var/www/certbot:ro
     logging:
@@ -118,9 +127,17 @@ services:
       - certbot_webroot:/var/www/certbot
       - ${TLS_CERT_DIR:-./deploy/nginx/ssl}:/etc/letsencrypt:rw
       - ./deploy/scripts/certbot-renew-loop.sh:/usr/local/bin/certbot-renew-loop.sh:ro
+      # Audit D — the renewal loop reloads nginx and restarts mta/imap-server
+      # after a successful renewal; without the docker socket mounted that
+      # logic could never run and renewed certs sat unused until the next
+      # deploy. Read-only socket: the container can talk to the engine but
+      # cannot modify it. (The script still degrades to a WARN + reload-flag
+      # when the socket is unavailable.)
+      - /var/run/docker.sock:/var/run/docker.sock:ro
     entrypoint: ["/bin/sh", "/usr/local/bin/certbot-renew-loop.sh"]
     networks:
       - apexmail_frontend
+    logging: *default-logging
 
   observability:
     image: ghcr.io/sbelakho2/apexmail/observability:latest
@@ -246,6 +263,9 @@ services:
       PORT: 3000
       BASE_URL: ${BASE_URL:?BASE_URL is required in production}
       OAUTH_REDIRECT_BASE_URL: ${OAUTH_REDIRECT_BASE_URL:?OAUTH_REDIRECT_BASE_URL is required in production}
+      # Audit B — the dev default (`dev-api-key-change-me` in the base file)
+      # must NEVER reach production: fail the deployment instead.
+      APEXMAIL_API_KEY: ${APEXMAIL_API_KEY:?APEXMAIL_API_KEY must be set in production}
       # Docker bridge subnets (frontend/backend/data). nginx is the TLS
       # terminator and its X-Forwarded-For must be trusted so per-client
       # rate limiting keys on the real client IP instead of the nginx
@@ -277,8 +297,13 @@ services:
       # and configuration set when SES transport is selected.
       EMAIL_TRANSPORT_TYPE: ${EMAIL_TRANSPORT_TYPE:-ses}
       AWS_REGION: ${AWS_REGION:-eu-west-1}
-      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
-      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+      # Audit G — AWS credentials via Docker secrets (bridged to env by the
+      # entrypoint wrapper) instead of plain environment values that leak
+      # through `docker inspect` / ps output.
+      AWS_ACCESS_KEY_ID: ""
+      AWS_ACCESS_KEY_ID_FILE: /run/secrets/aws_access_key_id
+      AWS_SECRET_ACCESS_KEY: ""
+      AWS_SECRET_ACCESS_KEY_FILE: /run/secrets/aws_secret_access_key
       SES_CONFIGURATION_SET: ${SES_CONFIGURATION_SET:-}
       PLACEMENT_ENCRYPTION_SECRET: ${PLACEMENT_ENCRYPTION_SECRET:?PLACEMENT_ENCRYPTION_SECRET is required in production}
       BILLING_COMPANY_IBAN: ${BILLING_COMPANY_IBAN:?BILLING_COMPANY_IBAN is required in production}
@@ -305,7 +330,7 @@ services:
     ports: !override []  # force-clear dev compose ports (empty list is ignored by merge)
     networks:
       - apexmail_backend
-      - apexmail_data
+      - apexmail_data_internal
     healthcheck:
       # Use /dev/tcp bash built-in instead of nc — distroless/minimal images may not ship netcat
       test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/3000' 2>/dev/null || exit 1"]
@@ -338,6 +363,8 @@ services:
       - csrf_secret
       - dkim_private_key_encryption_key
       - kiwi_secret_key
+      - aws_access_key_id
+      - aws_secret_access_key
 
   # ===========================================================================
   # STATUS SERVER (public status page + status API)
@@ -367,7 +394,8 @@ services:
         condition: service_healthy
     networks:
       - apexmail_backend
-      - apexmail_data
+      - apexmail_data_internal
+    logging: *default-logging
     healthcheck:
       test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/3000' 2>/dev/null || exit 1"]
       interval: 15s
@@ -462,9 +490,14 @@ services:
       retries: 3
       start_period: 20s
     networks:
+      # Audit J — the MTA needs postgres/redis (via apexmail_data_internal)
+      # plus real egress for inbound/outbound mail, so it stays on the
+      # frontend and backend networks (the old apexmail_data membership was
+      # redundant with backend and offered an extra bridge into the data
+      # plane).
       - apexmail_frontend
       - apexmail_backend
-      - apexmail_data
+      - apexmail_data_internal
     deploy:
       replicas: 1
       resources:
@@ -525,7 +558,8 @@ services:
       start_period: 20s
     networks:
       - apexmail_frontend
-      - apexmail_data
+      - apexmail_data_internal
+    logging: *default-logging
     deploy:
       replicas: 1
       resources:
@@ -559,7 +593,7 @@ services:
       DB_USER: ${POSTGRES_USER:-apexmail}
       DB_PASSWORD_FILE: /run/secrets/postgres_password
       # Bind all interfaces inside the container; the service is only reachable
-      # on the internal apexmail_data network. A shared bearer token is
+      # on the internal apexmail_data_internal network. A shared bearer token is
       # mandatory for this non-loopback bind and supplied via Docker secret.
       MAILSTORE_BIND_ADDR: 0.0.0.0:50051
       INTERNAL_SERVICE_TOKEN_FILE: /run/secrets/internal_service_token
@@ -576,7 +610,9 @@ services:
       retries: 3
       start_period: 20s
     networks:
-      - apexmail_data
+      # Audit J — mailstore never needs egress: data-plane only.
+      - apexmail_data_internal
+    logging: *default-logging
     deploy:
       replicas: 1
       resources:
@@ -601,6 +637,12 @@ services:
       PORT: 3008
       NODE_ENV: production
       CORS_ORIGINS: ${ENTERPRISE_CORS_ORIGINS:-https://app.apexmail.ee,https://admin.apexmail.ee,https://enterprise.apexmail.ee,https://api.apexmail.ee}
+      # Audit B — the enterprise service still validates its internal HS256
+      # tokens with JWT_SECRET. The base file falls back to
+      # `dev-enterprise-jwt-secret-change-me`, which must never reach
+      # production: fail the deployment instead. (The jwt_secret Docker
+      # secret stays declared for deployments that prefer mounting it.)
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be set in production}
       JWT_PUBLIC_KEY_PEM_FILE: /run/secrets/jwt_public_key_pem
     secrets:
       - postgres_password
@@ -658,14 +700,21 @@ services:
       # identity provisioning. SMTP remains an explicit deployment choice.
       EMAIL_TRANSPORT_TYPE: ${EMAIL_TRANSPORT_TYPE:-ses}
       AWS_REGION: ${AWS_REGION:-eu-west-1}
-      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
-      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+      # Audit G — AWS + SMTP credentials via Docker secrets, bridged to env
+      # vars by the entrypoint wrapper (no plain-text secrets in
+      # `docker inspect` output).
+      AWS_ACCESS_KEY_ID: ""
+      AWS_ACCESS_KEY_ID_FILE: /run/secrets/aws_access_key_id
+      AWS_SECRET_ACCESS_KEY: ""
+      AWS_SECRET_ACCESS_KEY_FILE: /run/secrets/aws_secret_access_key
       SES_CONFIGURATION_SET: ${SES_CONFIGURATION_SET:-}
       SMTP_HOST: ${SMTP_HOST:-mta}
       SMTP_PORT: ${SMTP_PORT:-25}
       SMTP_TLS: ${SMTP_TLS:-false}
-      SMTP_USERNAME: ${SMTP_USERNAME:-}
-      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_USERNAME: ""
+      SMTP_USERNAME_FILE: /run/secrets/smtp_username
+      SMTP_PASSWORD: ""
+      SMTP_PASSWORD_FILE: /run/secrets/smtp_password
       # Direct SMTP signs with each verified domain's encrypted database key.
       # There is deliberately no global customer-domain key fallback.
       DKIM_ENABLED: ${DKIM_ENABLED:-true}
@@ -675,6 +724,10 @@ services:
       - redis_password
       - internal_service_token
       - dkim_private_key_encryption_key
+      - aws_access_key_id
+      - aws_secret_access_key
+      - smtp_username
+      - smtp_password
     ports: !override []  # force-clear dev compose ports (empty list is ignored by merge)
     healthcheck:
       test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/9093' 2>/dev/null || exit 1"]
@@ -684,7 +737,8 @@ services:
       start_period: 30s
     networks:
       - apexmail_backend
-      - apexmail_data
+      - apexmail_data_internal
+    logging: *default-logging
     deploy:
       replicas: 1
       resources:
@@ -776,6 +830,17 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+    # Audit E — run deploy/hardening/scripts/postgres-backup-encrypt.sh
+    # instead of the stock image entrypoint: AES-256-CBC + PBKDF2
+    # encryption (the old `openssl enc -aes-256-gcm` invocation was
+    # unsupported and silently produced unusable output), restorability
+    # verification (decrypt + pg_restore --list) BEFORE deleting the
+    # plaintext, a bounded backup count, and an optional offsite copy
+    # (BACKUP_TARGET, rsync over ssh).
+    entrypoint: ["/bin/sh", "/usr/local/bin/postgres-backup-encrypt.sh"]
+    volumes:
+      - ./deploy/hardening/scripts/postgres-backup-encrypt.sh:/usr/local/bin/postgres-backup-encrypt.sh:ro
+      - postgres_backups:/backups
     environment:
       POSTGRES_HOST: postgres
       POSTGRES_DB: ${POSTGRES_DB:-apexmail}
@@ -786,12 +851,21 @@ services:
       BACKUP_KEEP_DAYS: ${BACKUP_KEEP_DAYS:-14}
       BACKUP_KEEP_WEEKS: ${BACKUP_KEEP_WEEKS:-8}
       BACKUP_KEEP_MONTHS: ${BACKUP_KEEP_MONTHS:-6}
-    volumes:
-      - postgres_backups:/backups
+      # Count-based retention (newest N kept) on top of the day/week/month
+      # pruning done by the script.
+      BACKUP_KEEP_COUNT: ${BACKUP_KEEP_COUNT:-30}
+      # Encryption key from a Docker secret (preferred over the env var).
+      BACKUP_ENCRYPTION_KEY_FILE: /run/secrets/backup_encryption_key
+      # Optional offsite mirror, e.g. "backup-user@offsite::apexmail" or
+      # "backup-user@offsite:/srv/apexmail-backups" (rsync over ssh; the
+      # container needs the matching key mounted to /root/.ssh when set).
+      BACKUP_TARGET: ${BACKUP_TARGET:-}
     networks:
-      - apexmail_data
+      - apexmail_data_internal
     secrets:
       - postgres_password
+      - backup_encryption_key
+    logging: *default-logging
     deploy:
       resources:
         limits:
@@ -807,6 +881,16 @@ services:
       CLICKHOUSE_USER: ${CLICKHOUSE_USER:-apexmail}
       CLICKHOUSE_PASSWORD_FILE: /run/secrets/clickhouse_password
       CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 0
+      # Audit I — separate ADMIN password (blank the dev default; the secret
+      # file is bridged to the env var by the load-secret-env.sh entrypoint
+      # chain and consumed by deploy/clickhouse/users.xml via from_env).
+      CLICKHOUSE_ADMIN_PASSWORD: ""
+      CLICKHOUSE_ADMIN_PASSWORD_FILE: /run/secrets/clickhouse_admin_password
+    secrets:
+      - clickhouse_password
+      - clickhouse_admin_password
+    networks:
+      - apexmail_data_internal
     logging:
       driver: json-file
       options:
@@ -824,6 +908,17 @@ volumes:
   certbot_webroot:
   postgres_backups:
 
+# Audit J — apexmail_data_internal is a plain bridge in the base (dev) file;
+# in production it has no egress path (no gateway/NAT), so the data plane
+# (postgres, redis, clickhouse, mailstore, postgres-backup) can only be
+# reached by containers explicitly attached to it. Services that need
+# outbound connectivity (api-server/worker → SES, mta → mail, billing →
+# Stripe, certbot → ACME) keep their frontend/backend memberships.
+networks:
+  apexmail_data_internal:
+    driver: bridge
+    internal: true
+
 secrets:
   postgres_password:
     file: ${PROD_POSTGRES_PASSWORD_FILE:?PROD_POSTGRES_PASSWORD_FILE is required in production}
@@ -831,6 +926,10 @@ secrets:
     file: ${PROD_REDIS_PASSWORD_FILE:?PROD_REDIS_PASSWORD_FILE is required in production}
   clickhouse_password:
     file: ${PROD_CLICKHOUSE_PASSWORD_FILE:?PROD_CLICKHOUSE_PASSWORD_FILE is required in production}
+  # Audit I — dedicated ClickHouse admin credential (access_management) kept
+  # separate from the application password.
+  clickhouse_admin_password:
+    file: ${PROD_CLICKHOUSE_ADMIN_PASSWORD_FILE:?PROD_CLICKHOUSE_ADMIN_PASSWORD_FILE is required in production}
   api_key_hash_secret:
     file: ${PROD_API_KEY_HASH_SECRET_FILE:?PROD_API_KEY_HASH_SECRET_FILE is required in production}
   webhook_signing_secret:
@@ -859,3 +958,17 @@ secrets:
     file: ${PROD_STRIPE_SECRET_KEY_FILE:?PROD_STRIPE_SECRET_KEY_FILE is required in production}
   stripe_webhook_secret:
     file: ${PROD_STRIPE_WEBHOOK_SECRET_FILE:?PROD_STRIPE_WEBHOOK_SECRET_FILE is required in production}
+  # Audit G — AWS SES credentials for api-server + worker.
+  aws_access_key_id:
+    file: ${PROD_AWS_ACCESS_KEY_ID_FILE:?PROD_AWS_ACCESS_KEY_ID_FILE is required in production}
+  aws_secret_access_key:
+    file: ${PROD_AWS_SECRET_ACCESS_KEY_FILE:?PROD_AWS_SECRET_ACCESS_KEY_FILE is required in production}
+  # Audit G — direct-SMTP credentials for the worker (may be empty files
+  # when the deployment runs the SES transport).
+  smtp_username:
+    file: ${PROD_SMTP_USERNAME_FILE:?PROD_SMTP_USERNAME_FILE is required in production}
+  smtp_password:
+    file: ${PROD_SMTP_PASSWORD_FILE:?PROD_SMTP_PASSWORD_FILE is required in production}
+  # Audit E — backup encryption key for postgres-backup-encrypt.sh.
+  backup_encryption_key:
+    file: ${PROD_BACKUP_ENCRYPTION_KEY_FILE:?PROD_BACKUP_ENCRYPTION_KEY_FILE is required in production}

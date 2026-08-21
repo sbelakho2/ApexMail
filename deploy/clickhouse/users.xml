@@ -1,31 +1,43 @@
 <clickhouse>
     <!-- =========================================================================
-         ApexMail ClickHouse User Configuration
+         ApexMail ClickHouse User Configuration (audit I)
          =========================================================================
-         Enforces password-based authentication for the default user.
-         The password is read from the CLICKHOUSE_PASSWORD environment variable.
+         Three-user model — the app password and the admin password are
+         SEPARATE secrets:
+
+           default         no password, loopback only, NO access_management.
+                           Exists only for local `clickhouse-client` on the
+                           host/container itself; it can never manage users.
+           apexmail        application password (from_env CLICKHOUSE_PASSWORD),
+                           readwrite profile, internal networks only,
+                           no access_management.
+           apexmail_admin  admin password (from_env CLICKHOUSE_ADMIN_PASSWORD),
+                           internal networks only (loopback + Docker ranges —
+                           there is no dedicated admin network in compose),
+                           access_management=1 for schema/user administration.
+
+         Both passwords are injected as env vars by the entrypoint chain
+         (deploy/load-secret-env.sh reads the *_FILE Docker secrets first).
+         CLICKHOUSE_ADMIN_PASSWORD has a development default in the base
+         compose and a required Docker secret in the production overlay.
          ========================================================================= -->
 
-    <!-- Default user - requires password from environment variable -->
     <users>
+        <!-- Local-only, passwordless default user: no remote access, no
+             access_management. Safe default for `clickhouse-client` on the
+             box itself. -->
         <default>
-            <!-- Password is loaded from CLICKHOUSE_PASSWORD env var -->
-            <password from_env="CLICKHOUSE_PASSWORD"></password>
-            <!-- SECURITY: Restricted to internal Docker/container networks only.
-                 Do NOT open to ::/0 — the default user has access_management enabled. -->
+            <password></password>
             <networks>
                 <ip>::1</ip>
                 <ip>127.0.0.1</ip>
-                <ip>172.16.0.0/12</ip>
-                <ip>10.0.0.0/8</ip>
-                <ip>192.168.0.0/16</ip>
             </networks>
             <profile>default</profile>
             <quota>default</quota>
-            <access_management>1</access_management>
+            <access_management>0</access_management>
         </default>
 
-        <!-- Application user for ApexMail services -->
+        <!-- Application user for ApexMail services (tracking, exporters). -->
         <apexmail>
             <!-- Password is loaded from CLICKHOUSE_PASSWORD env var -->
             <password from_env="CLICKHOUSE_PASSWORD"></password>
@@ -39,7 +51,26 @@
             </networks>
             <profile>readwrite</profile>
             <quota>default</quota>
+            <access_management>0</access_management>
         </apexmail>
+
+        <!-- Administrator user: separate password, schema/user management
+             allowed. Restrict further (e.g. loopback + a management host)
+             when a dedicated admin network exists. -->
+        <apexmail_admin>
+            <!-- Password is loaded from CLICKHOUSE_ADMIN_PASSWORD env var -->
+            <password from_env="CLICKHOUSE_ADMIN_PASSWORD"></password>
+            <networks>
+                <ip>::1</ip>
+                <ip>127.0.0.1</ip>
+                <ip>172.16.0.0/12</ip>
+                <ip>10.0.0.0/8</ip>
+                <ip>192.168.0.0/16</ip>
+            </networks>
+            <profile>default</profile>
+            <quota>default</quota>
+            <access_management>1</access_management>
+        </apexmail_admin>
     </users>
 
     <!-- Quotas -->

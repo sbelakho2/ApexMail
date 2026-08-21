@@ -3,6 +3,18 @@
 # =============================================================================
 # This file configures Gitleaks secret scanning behaviour.
 # Reference: https://github.com/gitleaks/gitleaks
+#
+# Audit L — the previous allowlist matched SUBSTRINGS anywhere in the path
+# (`(?i)test` also allowlisted "latest", "attest", "*test-output*"…), and a
+# regex allowlist whitelisted EVERY eyJ... JWT. Both are gone:
+#   * paths are anchored to directory boundaries ((^|/)dir/) and limited to
+#     where fixture data genuinely lives (*/tests/fixtures/, benches/,
+#     migrations/, generated/). Files outside those directories — including
+#     files that merely contain "test"/"sample"/"example" in their name —
+#     are scanned with ALL rules (entropy included) again.
+#   * the JWT regex allow is removed entirely: no test fixtures in this
+#     repository contain eyJ tokens. If one is ever added deliberately,
+#     allowlist that exact file path here rather than all JWTs.
 
 title = "ApexMail Gitleaks Configuration"
 
@@ -14,20 +26,18 @@ useDefault = true
 [allowlist]
 description = "Global allowlist for ApexMail"
 
-# Test fixtures and mock data containing fake credentials
+# Directory-boundary-anchored paths for deliberately fake credentials.
+# `(^|/)tests/fixtures/` matches <anything>/tests/fixtures/<file> at any
+# depth but never a file merely named "*test*" or "*fixture*".
 paths = [
-    # Test fixture directories with deliberately embedded test secrets
-    "(?i)test",
-    "(?i)sample",
-    "(?i)fixture",
-    "(?i)mock",
-    "(?i)example",
-    # Migration directories might contain example connection strings
-    "migrations/",
-    # Benchmark data
-    "benches/",
+    # Rust test fixture directories (e.g. crates/mta/tests/fixtures TLS material)
+    "(^|/)tests/fixtures/",
+    # Benchmark corpora
+    "(^|/)benches/",
+    # SQL migrations may contain documented example connection strings
+    "(^|/)migrations/",
     # Generated code
-    "generated",
+    "(^|/)generated(/|$)",
 ]
 
 # Regex allowlist for specific false-positive patterns
@@ -39,6 +49,4 @@ regexes = [
     # Allow placeholder values in config maps
     "CHANGEME",
     "changethis",
-    # Allow JWT example or test tokens
-    "eyJ[0-9a-zA-Z_-]+\\.[0-9a-zA-Z_-]+\\.[0-9a-zA-Z_-]+",
 ]

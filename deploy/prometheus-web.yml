@@ -1,25 +1,29 @@
 # =============================================================================
-# Prometheus Web Configuration
+# Prometheus Web Configuration (audit P — now LIVE, previously dead)
 # =============================================================================
 # Provides HTTP basic authentication for the Prometheus web interface and API.
-# The password hash is generated using:
-#   htpasswd -nbBC 10 admin <your-password>  | cut -d: -f2
+# This file is mounted into the prometheus service and passed via
+# --web.config.file in docker-compose.yml — the snippet below is ACTIVE
+# configuration read by Prometheus at startup (comments are ignored).
 #
-# Usage in docker-compose.yml:
-#   prometheus:
-#     command:
-#       - '--web.config.file=/etc/prometheus/web.yml'
-#     volumes:
-#       - ./deploy/prometheus-web.yml:/etc/prometheus/web.yml:ro
+# ENABLING AUTH (three coordinated steps — do not just uncomment):
+#   1. Generate a bcrypt hash for your password:
+#        htpasswd -nbBC 10 admin <your-password> | cut -d: -f2
+#      and fill it into basic_auth_users below.
+#   2. Update the Grafana datasource credentials
+#      (deploy/grafana/provisioning/datasources/prometheus.yml — add
+#      basicAuth/user/password) or dashboards stop collecting.
+#   3. Update anything probing http://localhost:9090 (healthchecks in
+#      docker-compose.yml use --web.config-unaffected /-/ready paths, but
+#      external scrapers of the UI/API need the credentials).
+#
+# TLS configuration (optional) for the Prometheus web interface:
+#   tls_server_config:
+#     cert_file: /etc/prometheus/certs/tls.crt
+#     key_file: /etc/prometheus/certs/tls.key
 # =============================================================================
 
-# Basic authentication for Prometheus web UI and API
-# Uncomment and configure with your own credentials:
+# Basic authentication for Prometheus web UI and API — disabled by default.
+# See the steps above before enabling.
 # basic_auth_users:
 #   admin: $2y$10$...  # bcrypt hash of your password
-
-# TLS configuration for Prometheus web interface
-# Uncomment and configure with proper certificates:
-# tls_server_config:
-#   cert_file: /etc/prometheus/certs/tls.crt
-#   key_file: /etc/prometheus/certs/tls.key
