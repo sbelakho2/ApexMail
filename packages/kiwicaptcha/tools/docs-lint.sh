@@ -128,8 +128,14 @@ protocol
 
 product_root_readme() {
   [ -f "$ROOT/README.md" ] || return 1
-  awk 'NR == 1 { exit !($0 == "# KiwiCaptcha") }' "$ROOT/README.md"
+  "$AWK_BIN" 'NR == 1 { exit !($0 == "# KiwiCaptcha") }' "$ROOT/README.md"
 }
+
+# The checks must behave identically everywhere the gate runs. BSD awk,
+# GNU awk and mawk disagree on a few regex/normalization details, so the
+# script prefers gawk when present and falls back to awk otherwise; the
+# CI installs gawk so enforcement is deterministic.
+AWK_BIN="$(command -v gawk 2>/dev/null || command -v awk)"
 
 tmpd=$(mktemp -d "${TMPDIR:-/tmp}/docs-lint.XXXXXX") || exit 0
 trap 'rm -rf "$tmpd"' EXIT HUP INT TERM
@@ -402,7 +408,7 @@ END {
 DUPAWK
 
 excluded() {
-  awk '
+  "$AWK_BIN" '
     /\/vendor\// || /\/node_modules\// || /\/target\// || /\/pkg\// || /\/assets\// || /\/resources\// || /\/\.venv\// || /\/\.pytest_cache\// || /\/\.git\// { next }
     { print }
   '
@@ -455,8 +461,8 @@ agg_tmp="$tmpd/agg"
 
 {
   for f in $md_files; do
-    awk -f "$tmpd/mdprose.awk" "$f" |
-      awk -f "$tmpd/checks.awk" -v mode=check -v file="$f" \
+    "$AWK_BIN" -f "$tmpd/mdprose.awk" "$f" |
+      "$AWK_BIN" -f "$tmpd/checks.awk" -v mode=check -v file="$f" \
           -v max_em="$MAX_EM" -v max_words="$MAX_WORDS" \
           -v max_contrast="$MAX_CONTRAST" -v max_bold="$MAX_BOLD" \
           -v allowlist="$ALLOWLIST"
@@ -469,8 +475,8 @@ agg_tmp="$tmpd/agg"
         *.yaml|*.yml|*.sh|*.twig) lang=hash ;;
         *) lang=rs ;;
       esac
-      awk -f "$tmpd/comments.awk" -v lang="$lang" "$f" |
-        awk -f "$tmpd/checks.awk" -v mode=check -v file="$f" \
+      "$AWK_BIN" -f "$tmpd/comments.awk" -v lang="$lang" "$f" |
+        "$AWK_BIN" -f "$tmpd/checks.awk" -v mode=check -v file="$f" \
             -v max_em="$MAX_EM" -v max_words="$MAX_WORDS" \
             -v max_contrast="$MAX_CONTRAST" -v max_bold="$MAX_BOLD" \
             -v allowlist="$ALLOWLIST"
@@ -481,19 +487,19 @@ grep '^SUMMARY' "$out_tmp" > "$summary_tmp"
 grep -v '^SUMMARY' "$out_tmp"
 
 for f in $md_files; do
-  awk -f "$tmpd/mdprose.awk" "$f" |
-    awk -f "$tmpd/checks.awk" -v mode=dup |
-    awk -v f="$f" '{ printf "%s\t%s\n", $0, f }'
+  "$AWK_BIN" -f "$tmpd/mdprose.awk" "$f" |
+    "$AWK_BIN" -f "$tmpd/checks.awk" -v mode=dup |
+    "$AWK_BIN" -v f="$f" '{ printf "%s\t%s\n", $0, f }'
 done > "$dup_tmp"
 
 echo ""
 echo "== duplicate sentences (markdown, normalized) =="
-sort "$dup_tmp" | awk -f "$tmpd/dupagg.awk" > "$dupout_tmp"
+sort "$dup_tmp" | "$AWK_BIN" -f "$tmpd/dupagg.awk" > "$dupout_tmp"
 grep -v '^DUPSUMMARY' "$dupout_tmp" | grep -v '^DUPTOTAL'
 grep -E '^(DUPSUMMARY|DUPTOTAL)' "$dupout_tmp" > "$dupsum_tmp"
 
 echo ""
-cat "$summary_tmp" "$dupsum_tmp" | awk -F '\t' -v root="$ROOT" '
+cat "$summary_tmp" "$dupsum_tmp" | "$AWK_BIN" -F '\t' -v root="$ROOT" '
 function rel(p) {
   if (root != "" && index(p, root "/") == 1) return substr(p, length(root) + 2)
   return p
@@ -521,13 +527,13 @@ END {
 }
 ' > "$agg_tmp"
 
-tot=$(awk -F '\t' '/^TOTALV\t/ { print $2 }' "$agg_tmp")
+tot=$("$AWK_BIN" -F '\t' '/^TOTALV\t/ { print $2 }' "$agg_tmp")
 tot=${tot:-0}
 
 grep -v '^COUNT' "$agg_tmp" | grep -v '^TOTALV' | sort | sed -e 's/^0\t/  /' -e 's/^1\t/  /'
 
 if [ -n "$UPDATE_BASELINE" ]; then
-  awk -F '\t' '/^COUNT\t/ { printf "%s %s\n", $3, $2 }' "$agg_tmp" | LC_ALL=C sort -k2 > "$tmpd/baseline"
+  "$AWK_BIN" -F '\t' '/^COUNT\t/ { printf "%s %s\n", $3, $2 }' "$agg_tmp" | LC_ALL=C sort -k2 > "$tmpd/baseline"
   printf 'TOTAL %s\n' "$tot" >> "$tmpd/baseline"
   if ! cat "$tmpd/baseline" > "$UPDATE_BASELINE"; then
     echo "docs-lint.sh: cannot write baseline: $UPDATE_BASELINE" >&2
@@ -545,10 +551,10 @@ ratchet_check() {
     echo "docs-lint.sh: baseline file not found: $bfile (generate with --update-baseline)" >&2
     return 1
   fi
-  base_tot=$(awk '/^TOTAL[ \t]/ { t = $2 + 0 } END { print t + 0 }' "$bfile")
+  base_tot=$("$AWK_BIN" '/^TOTAL[ \t]/ { t = $2 + 0 } END { print t + 0 }' "$bfile")
   base_tot=${base_tot:-0}
   overages=$(
-    awk -F '\t' -v bfile="$bfile" '
+    "$AWK_BIN" -F '\t' -v bfile="$bfile" '
       BEGIN {
         while ((getline bl < bfile) > 0) {
           if (bl ~ /^TOTAL[ \t]/) continue
@@ -587,13 +593,13 @@ integrity_check() {
   basefile=$1
   curfile=$2
   manifest=$3
-  base_tot=$(awk '/^TOTAL[ \t]/ { t = $2 + 0 } END { print t + 0 }' "$basefile")
-  cur_tot=$(awk '/^TOTAL[ \t]/ { t = $2 + 0 } END { print t + 0 }' "$curfile")
+  base_tot=$("$AWK_BIN" '/^TOTAL[ \t]/ { t = $2 + 0 } END { print t + 0 }' "$basefile")
+  cur_tot=$("$AWK_BIN" '/^TOTAL[ \t]/ { t = $2 + 0 } END { print t + 0 }' "$curfile")
   base_tot=${base_tot:-0}
   cur_tot=${cur_tot:-0}
   fail=0
   increases=$(
-    awk -v basefile="$basefile" -v curfile="$curfile" '
+    "$AWK_BIN" -v basefile="$basefile" -v curfile="$curfile" '
       BEGIN {
         while ((getline bl < basefile) > 0) {
           if (bl ~ /^TOTAL[ \t]/) continue
@@ -616,7 +622,7 @@ integrity_check() {
     fail=1
   fi
   newpaths=$(
-    awk -v basefile="$basefile" -v curfile="$curfile" -v manifest="$manifest" '
+    "$AWK_BIN" -v basefile="$basefile" -v curfile="$curfile" -v manifest="$manifest" '
       BEGIN {
         while ((getline bl < basefile) > 0) {
           if (bl ~ /^TOTAL[ \t]/) continue
