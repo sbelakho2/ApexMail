@@ -127,6 +127,110 @@ fn extract_user_id(headers: &HeaderMap) -> Result<String, (StatusCode, &'static 
         .ok_or((StatusCode::UNAUTHORIZED, "Missing x-user-id header"))
 }
 
+// ─── Tenant Claim Authorization ─────────────────────────────────
+//
+// This service authenticates callers with a shared internal API token, so
+// the bearer token alone proves "some trusted internal service" — never
+// *which* tenant the call is for. The trusted edge/gateway is expected to
+// strip any client-supplied `x-org-id` header and set its own, derived from
+// the authenticated session. When that claim header is present, every
+// organization/workspace in the request path MUST belong to the claimed
+// organization; a mismatch is a cross-tenant access attempt and gets 403.
+// When absent (direct internal service-to-service traffic), the request is
+// allowed but logged — deployments that need strict enforcement must front
+// this service with the edge.
+
+const ORG_CLAIM_HEADER: &str = "x-org-id";
+
+/// Verify the edge-supplied org claim matches the organization in the path.
+fn verify_org_claim(
+    headers: &HeaderMap,
+    path_org_id: &str,
+) -> Result<(), (StatusCode, &'static str)> {
+    match headers
+        .get(ORG_CLAIM_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+    {
+        Some(claim) if claim.eq_ignore_ascii_case(path_org_id) => Ok(()),
+        Some(claim) => {
+            tracing::warn!(
+                claimed_org = %claim,
+                path_org = %path_org_id,
+                "SECURITY: org claim does not match path — refusing request"
+            );
+            Err((
+                StatusCode::FORBIDDEN,
+                "Organization claim does not match requested resource",
+            ))
+        }
+        None => {
+            tracing::debug!("No x-org-id claim header on internal call");
+            Ok(())
+        }
+    }
+}
+
+/// Verify a workspace-scoped request belongs to the claimed organization.
+async fn verify_workspace_org_claim(
+    headers: &HeaderMap,
+    state: &AppState,
+    workspace_id: &str,
+) -> Result<(), (StatusCode, &'static str)> {
+    let Some(claim) = headers
+        .get(ORG_CLAIM_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+    else {
+        return Ok(());
+    };
+    match state.tenant.get_workspace(workspace_id).await {
+        Ok(ws) if ws.organization_id.eq_ignore_ascii_case(claim) => Ok(()),
+        Ok(ws) => {
+            tracing::warn!(
+                claimed_org = %claim,
+                workspace_org = %ws.organization_id,
+                workspace = %workspace_id,
+                "SECURITY: workspace belongs to a different org than claimed"
+            );
+            Err((
+                StatusCode::FORBIDDEN,
+                "Workspace does not belong to claimed organization",
+            ))
+        }
+        Err(_) => Err((StatusCode::NOT_FOUND, "Workspace not found")),
+    }
+}
+
+/// The rate-limit key owned by a workspace (used by status/reset handlers).
+fn workspace_rate_limit_key(workspace_id: &str) -> String {
+    format!("workspace:{workspace_id}:api")
+}
+
+/// Restrict rate-limit resets to keys under the path workspace's prefix.
+/// Raw caller-supplied keys (e.g. `workspace:other-ws:api`) are rejected.
+fn resettable_rate_limit_key(
+    workspace_id: &str,
+    requested: Option<&str>,
+) -> Result<String, (StatusCode, &'static str)> {
+    let prefix = format!("workspace:{workspace_id}:");
+    match requested.map(str::trim) {
+        None => Ok(workspace_rate_limit_key(workspace_id)),
+        Some(key) if key.starts_with(&prefix) => Ok(key.to_string()),
+        Some(key) => {
+            tracing::warn!(
+                key = %key,
+                workspace = %workspace_id,
+                "SECURITY: refused rate-limit reset for key outside the workspace scope"
+            );
+            Err((
+                StatusCode::FORBIDDEN,
+                "Rate-limit key is outside this workspace's scope",
+            ))
+        }
+    }
+}
+
 fn err_json(msg: &str) -> Json<serde_json::Value> {
     Json(serde_json::json!({ "error": msg }))
 }
@@ -219,6 +323,10 @@ async fn org_get(
     if let Err(e) = verify_bearer(&headers, &state.config) {
         return (e.0, err_json(e.1));
     }
+
+    if let Err(e) = verify_org_claim(&headers, &org_id) {
+        return (e.0, err_json(e.1));
+    }
     match state.tenant.get_organization(&org_id).await {
         Ok(org) => match serialize_json(org) {
             Ok(json) => ok_json(json),
@@ -244,6 +352,10 @@ async fn org_update(
     Json(body): Json<UpdateOrgRequest>,
 ) -> impl IntoResponse {
     if let Err(e) = verify_bearer(&headers, &state.config) {
+        return (e.0, err_json(e.1));
+    }
+
+    if let Err(e) = verify_org_claim(&headers, &org_id) {
         return (e.0, err_json(e.1));
     }
     match state
@@ -278,6 +390,10 @@ async fn org_suspend(
     Json(body): Json<SuspendRequest>,
 ) -> impl IntoResponse {
     if let Err(e) = verify_bearer(&headers, &state.config) {
+        return (e.0, err_json(e.1));
+    }
+
+    if let Err(e) = verify_org_claim(&headers, &org_id) {
         return (e.0, err_json(e.1));
     }
     let user_id = match extract_user_id(&headers) {
@@ -316,6 +432,10 @@ async fn workspace_create(
     if let Err(e) = verify_bearer(&headers, &state.config) {
         return (e.0, err_json(e.1));
     }
+
+    if let Err(e) = verify_org_claim(&headers, &org_id) {
+        return (e.0, err_json(e.1));
+    }
     let user_id = match extract_user_id(&headers) {
         Ok(uid) => uid,
         Err(e) => return (e.0, err_json(e.1)),
@@ -341,6 +461,10 @@ async fn workspace_list(
     if let Err(e) = verify_bearer(&headers, &state.config) {
         return (e.0, err_json(e.1));
     }
+
+    if let Err(e) = verify_org_claim(&headers, &org_id) {
+        return (e.0, err_json(e.1));
+    }
     match state.tenant.list_workspaces(&org_id).await {
         Ok(workspaces) => match serialize_json(workspaces) {
             Ok(json) => ok_json(json),
@@ -356,6 +480,9 @@ async fn workspace_get(
     Path(workspace_id): Path<String>,
 ) -> impl IntoResponse {
     if let Err(e) = verify_bearer(&headers, &state.config) {
+        return (e.0, err_json(e.1));
+    }
+    if let Err(e) = verify_workspace_org_claim(&headers, &state, &workspace_id).await {
         return (e.0, err_json(e.1));
     }
     match state.tenant.get_workspace(&workspace_id).await {
@@ -383,6 +510,9 @@ async fn workspace_update(
     if let Err(e) = verify_bearer(&headers, &state.config) {
         return (e.0, err_json(e.1));
     }
+    if let Err(e) = verify_workspace_org_claim(&headers, &state, &workspace_id).await {
+        return (e.0, err_json(e.1));
+    }
     match state
         .tenant
         .update_workspace(&workspace_id, body.name.as_deref(), body.settings)
@@ -402,6 +532,9 @@ async fn workspace_delete(
     Path(workspace_id): Path<String>,
 ) -> impl IntoResponse {
     if let Err(e) = verify_bearer(&headers, &state.config) {
+        return (e.0, err_json(e.1));
+    }
+    if let Err(e) = verify_workspace_org_claim(&headers, &state, &workspace_id).await {
         return (e.0, err_json(e.1));
     }
     let user_id = match extract_user_id(&headers) {
@@ -432,6 +565,9 @@ async fn member_add(
     if let Err(e) = verify_bearer(&headers, &state.config) {
         return (e.0, err_json(e.1));
     }
+    if let Err(e) = verify_workspace_org_claim(&headers, &state, &workspace_id).await {
+        return (e.0, err_json(e.1));
+    }
     let user_id = match extract_user_id(&headers) {
         Ok(uid) => uid,
         Err(e) => return (e.0, err_json(e.1)),
@@ -458,6 +594,9 @@ async fn member_remove(
     if let Err(e) = verify_bearer(&headers, &state.config) {
         return (e.0, err_json(e.1));
     }
+    if let Err(e) = verify_workspace_org_claim(&headers, &state, &workspace_id).await {
+        return (e.0, err_json(e.1));
+    }
     match state
         .tenant
         .remove_workspace_member(&workspace_id, &user_id)
@@ -474,6 +613,9 @@ async fn member_access(
     Path((workspace_id, user_id)): Path<(String, String)>,
 ) -> impl IntoResponse {
     if let Err(e) = verify_bearer(&headers, &state.config) {
+        return (e.0, err_json(e.1));
+    }
+    if let Err(e) = verify_workspace_org_claim(&headers, &state, &workspace_id).await {
         return (e.0, err_json(e.1));
     }
     match state
@@ -497,6 +639,9 @@ async fn quota_check(
     Path(workspace_id): Path<String>,
 ) -> impl IntoResponse {
     if let Err(e) = verify_bearer(&headers, &state.config) {
+        return (e.0, err_json(e.1));
+    }
+    if let Err(e) = verify_workspace_org_claim(&headers, &state, &workspace_id).await {
         return (e.0, err_json(e.1));
     }
     // Check all quota metrics
@@ -543,6 +688,9 @@ async fn quota_update(
     if let Err(e) = verify_bearer(&headers, &state.config) {
         return (e.0, err_json(e.1));
     }
+    if let Err(e) = verify_workspace_org_claim(&headers, &state, &workspace_id).await {
+        return (e.0, err_json(e.1));
+    }
     let quota = crate::config::QuotaConfig {
         emails_per_month: body.emails_per_month.unwrap_or(50_000),
         storage_bytes: body.storage_bytes.unwrap_or(1_073_741_824),
@@ -566,6 +714,9 @@ async fn rate_limit_status(
     Path(workspace_id): Path<String>,
 ) -> impl IntoResponse {
     if let Err(e) = verify_bearer(&headers, &state.config) {
+        return (e.0, err_json(e.1));
+    }
+    if let Err(e) = verify_workspace_org_claim(&headers, &state, &workspace_id).await {
         return (e.0, err_json(e.1));
     }
     let key = format!("workspace:{}:api", workspace_id);
@@ -593,13 +744,22 @@ struct ResetRateLimitRequest {
 async fn rate_limit_reset(
     State(state): State<S>,
     headers: HeaderMap,
-    Path(_workspace_id): Path<String>,
+    Path(workspace_id): Path<String>,
     Json(body): Json<ResetRateLimitRequest>,
 ) -> impl IntoResponse {
     if let Err(e) = verify_bearer(&headers, &state.config) {
         return (e.0, err_json(e.1));
     }
-    match state.rate_limit.reset_rate_limit(&body.key, None).await {
+    if let Err(e) = verify_workspace_org_claim(&headers, &state, &workspace_id).await {
+        return (e.0, err_json(e.1));
+    }
+    // The deletable key is restricted to this workspace's own prefix (built
+    // from the path param); arbitrary caller-supplied keys are rejected.
+    let key = match resettable_rate_limit_key(&workspace_id, Some(&body.key)) {
+        Ok(k) => k,
+        Err(e) => return (e.0, err_json(e.1)),
+    };
+    match state.rate_limit.reset_rate_limit(&key, None).await {
         Ok(()) => ok_json(serde_json::json!({ "status": "reset" })),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, err_json(&e.to_string())),
     }
@@ -613,6 +773,9 @@ async fn encryption_rotate(
     Path(org_id): Path<String>,
 ) -> impl IntoResponse {
     if let Err(e) = verify_bearer(&headers, &state.config) {
+        return (e.0, err_json(e.1));
+    }
+    if let Err(e) = verify_org_claim(&headers, &org_id) {
         return (e.0, err_json(e.1));
     }
     match state.encryption.rotate_key(&org_id).await {
@@ -639,6 +802,9 @@ async fn encryption_create_policy(
     Json(body): Json<CreatePolicyRequest>,
 ) -> impl IntoResponse {
     if let Err(e) = verify_bearer(&headers, &state.config) {
+        return (e.0, err_json(e.1));
+    }
+    if let Err(e) = verify_org_claim(&headers, &body.organization_id) {
         return (e.0, err_json(e.1));
     }
     if let Err(e) = state.tenant.get_organization(&body.organization_id).await {
@@ -685,6 +851,9 @@ async fn isolation_check_access(
     Json(body): Json<CheckAccessRequest>,
 ) -> impl IntoResponse {
     if let Err(e) = verify_bearer(&headers, &state.config) {
+        return (e.0, err_json(e.1));
+    }
+    if let Err(e) = verify_org_claim(&headers, &body.organization_id) {
         return (e.0, err_json(e.1));
     }
     let org = match state.tenant.get_organization(&body.organization_id).await {
@@ -734,6 +903,9 @@ async fn isolation_migrate(
     if let Err(e) = verify_bearer(&headers, &state.config) {
         return (e.0, err_json(e.1));
     }
+    if let Err(e) = verify_org_claim(&headers, &org_id) {
+        return (e.0, err_json(e.1));
+    }
     let target =
         IsolationLevel::parse(&body.target_level).unwrap_or(IsolationLevel::DedicatedSchema);
 
@@ -758,6 +930,9 @@ async fn isolation_setup_rls(
     Path(workspace_id): Path<String>,
 ) -> impl IntoResponse {
     if let Err(e) = verify_bearer(&headers, &state.config) {
+        return (e.0, err_json(e.1));
+    }
+    if let Err(e) = verify_workspace_org_claim(&headers, &state, &workspace_id).await {
         return (e.0, err_json(e.1));
     }
     let workspace = match state.tenant.get_workspace(&workspace_id).await {
@@ -837,6 +1012,9 @@ async fn audit_stats(
     if let Err(e) = verify_bearer(&headers, &state.config) {
         return (e.0, err_json(e.1));
     }
+    if let Err(e) = verify_org_claim(&headers, &org_id) {
+        return (e.0, err_json(e.1));
+    }
     let days = params.days.unwrap_or(30);
     match state.audit.get_stats(&org_id, days).await {
         Ok(stats) => match serialize_json(stats) {
@@ -862,6 +1040,9 @@ async fn audit_export(
     Query(params): Query<AuditExportParams>,
 ) -> axum::response::Response {
     if let Err(e) = verify_bearer(&headers, &state.config) {
+        return (e.0, err_json(e.1)).into_response();
+    }
+    if let Err(e) = verify_org_claim(&headers, &org_id) {
         return (e.0, err_json(e.1)).into_response();
     }
     let q = AuditQuery {
@@ -898,6 +1079,62 @@ mod tests {
         assert!(!timing_safe_compare("abc", "abcd"));
         assert!(!timing_safe_compare("", "a"));
         assert!(timing_safe_compare("", ""));
+    }
+
+    // ── Tenant claim authorization tests ──
+
+    fn claim_headers(claim: Option<&str>) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        if let Some(c) = claim {
+            h.insert(ORG_CLAIM_HEADER, c.parse().unwrap());
+        }
+        h
+    }
+
+    #[test]
+    fn test_verify_org_claim_matching() {
+        assert!(verify_org_claim(&claim_headers(Some("org-1")), "org-1").is_ok());
+        // Case-insensitive comparison.
+        assert!(verify_org_claim(&claim_headers(Some("ORG-1")), "org-1").is_ok());
+    }
+
+    #[test]
+    fn test_verify_org_claim_mismatch_rejected() {
+        let err = verify_org_claim(&claim_headers(Some("org-attacker")), "org-victim")
+            .expect_err("claim mismatch must be rejected");
+        assert_eq!(err.0, StatusCode::FORBIDDEN);
+    }
+
+    #[test]
+    fn test_verify_org_claim_absent_allows_internal() {
+        // No claim header → internal service-to-service traffic is allowed
+        // (documented deployment requirement:edge must set/strip the header).
+        assert!(verify_org_claim(&claim_headers(None), "org-1").is_ok());
+    }
+
+    #[test]
+    fn test_resettable_rate_limit_key_rejects_foreign_keys() {
+        // Arbitrary caller keys must be rejected…
+        let err = resettable_rate_limit_key(
+            "ws-1",
+            Some("workspace:ws-other:api"),
+        )
+        .expect_err("foreign workspace key must be rejected");
+        assert_eq!(err.0, StatusCode::FORBIDDEN);
+
+        let err =
+            resettable_rate_limit_key("ws-1", Some("global:admin")).expect_err("raw key rejected");
+        assert_eq!(err.0, StatusCode::FORBIDDEN);
+    }
+
+    #[test]
+    fn test_resettable_rate_limit_key_allows_own_prefix() {
+        let key = resettable_rate_limit_key("ws-1", Some("workspace:ws-1:api"))
+            .expect("own workspace key allowed");
+        assert_eq!(key, "workspace:ws-1:api");
+        // Prefix must be exact — `ws-1-evil` shares a string prefix but not
+        // the scope prefix.
+        assert!(resettable_rate_limit_key("ws-1", Some("workspace:ws-1-evil:api")).is_err());
     }
 
     #[test]

@@ -15,17 +15,17 @@ use Symfony\Component\HttpFoundation\Request;
  * authority is configured, the challenge controller resolves the
  * transaction binding only through it: the client's presented
  * request_binding field is a hint, never a value the server signs
- * unexamined, and the authority decides the binding of the transaction
- * from its own trusted inputs (session, cookies, authenticated headers,
+ * unexamined. The authority decides the binding of the transaction from
+ * its own trusted inputs (session, cookies, authenticated headers,
  * server state).
  *
  * The resolution must be stable across the lifetime of one transaction:
- * the stage-1 issuance, the CHAIN_REQUIRED re-render and the stage-2
- * resumption must resolve to the same authoritative binding, because the
- * chain obligation index is keyed on the (policy-epoch, scope, binding)
+ * the stage-1 issuance, the `CHAIN_REQUIRED` re-render and the stage-2
+ * resumption must resolve to the same authoritative binding. The chain
+ * obligation index is keyed on the (policy-epoch, scope, binding)
  * triple. A binding the authority cannot confirm for this transaction
  * throws \InvalidArgumentException (the controller refuses with 422
- * INVALID_REQUEST_BINDING before any state is touched); null means the
+ * `INVALID_REQUEST_BINDING` before any state is touched); null means the
  * transaction is unbound.
  *
  * The returned binding (when non-null) must match the bundle's identifier
@@ -55,7 +55,7 @@ interface RequestBindingAuthorityInterface
      *                                   this transaction's authoritative
      *                                   binding: the controller refuses
      *                                   the issuance with 422
-     *                                   INVALID_REQUEST_BINDING.
+     *                                   `INVALID_REQUEST_BINDING`.
      */
     public function resolve(Request $request, string $scope, ?string $presentedBinding): ?string;
 }

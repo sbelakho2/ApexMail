@@ -79,7 +79,15 @@ fn sanitize_log_string(value: Option<&str>, fallback: &str, max_len: usize) -> S
             if cleaned.is_empty() {
                 fallback.into()
             } else if cleaned.len() > max_len {
-                cleaned[..max_len].to_string()
+                // `cleaned[..max_len]` panics when max_len lands inside a
+                // multibyte UTF-8 character — an unauthenticated remote crash
+                // via a long CJK/emoji reason string. Cut back to the nearest
+                // char boundary instead.
+                let mut end = max_len;
+                while end > 0 && !cleaned.is_char_boundary(end) {
+                    end -= 1;
+                }
+                cleaned[..end].to_string()
             } else {
                 cleaned
             }
@@ -119,6 +127,31 @@ mod tests {
         assert_eq!(sanitize_log_string(None, "default", 64), "default");
         assert_eq!(sanitize_log_string(Some(""), "default", 64), "default");
         assert_eq!(sanitize_log_string(Some("abcdefgh"), "default", 5), "abcde");
+    }
+
+    #[test]
+    fn test_sanitize_log_string_multibyte_boundary_does_not_panic() {
+        // '中' is 3 bytes: byte offset 64 lands mid-character inside a long
+        // CJK string, which previously panicked the telemetry handler with
+        // 'byte index 64 is not a char boundary'.
+        let long_cjk = "中".repeat(100);
+        let sanitized = sanitize_log_string(Some(&long_cjk), "default", 64);
+        assert!(sanitized.chars().all(|c| c == '中'));
+        assert!(sanitized.len() <= 64);
+
+        // 2-byte characters at odd limits (é = 2 bytes).
+        let long_accented = "é".repeat(100);
+        for max_len in [31usize, 32, 33] {
+            let sanitized = sanitize_log_string(Some(&long_accented), "default", max_len);
+            assert!(sanitized.chars().all(|c| c == 'é'));
+            assert!(sanitized.len() <= max_len);
+        }
+
+        // 4-byte emoji.
+        let long_emoji = "😀".repeat(100);
+        let sanitized = sanitize_log_string(Some(&long_emoji), "default", 30);
+        assert!(sanitized.chars().all(|c| c == '😀'));
+        assert!(sanitized.len() <= 30);
     }
 
     #[test]

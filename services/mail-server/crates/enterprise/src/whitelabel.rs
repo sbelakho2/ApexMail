@@ -427,6 +427,10 @@ impl WhiteLabelService {
     }
 
     /// Add a custom domain for white-labeling
+    ///
+    /// Fix E: every domain gets a cryptographically random verification
+    /// token (crypto RNG via `sso::generate_random_token`). The TXT record
+    /// the tenant must publish is included in the returned `dns_records`.
     pub async fn add_domain(
         &self,
         tenant_id: String,
@@ -434,16 +438,24 @@ impl WhiteLabelService {
         domain_type: &str,
     ) -> Result<ApiResult<WhiteLabelDomain>, String> {
         let id = Uuid::new_v4();
-        let dns_records = generate_dns_records(domain, domain_type);
+        let verification_token = crate::sso::generate_random_token(32);
+        let mut dns_records = generate_dns_records(domain, domain_type);
+        dns_records.push(DNSRecord {
+            record_type: "TXT".into(),
+            host: txt_verification_host(domain),
+            value: txt_verification_value(&verification_token),
+            ttl: 3600,
+        });
         let dns_json = serde_json::to_value(&dns_records)
             .map_err(|e| format!("Serialize DNS records: {e}"))?;
 
         let row = sqlx::query_as::<_, WhiteLabelDomainDbRow>(
-            "INSERT INTO ent_whitelabel_domains (id, tenant_id, domain, domain_type, verification_status, dns_records, created_at)
-             VALUES ($1,$2,$3,$4,'pending',$5,NOW())
+            "INSERT INTO ent_whitelabel_domains (id, tenant_id, domain, domain_type, verification_status, verification_token, dns_records, created_at)
+             VALUES ($1,$2,$3,$4,'pending',$5,$6,NOW())
              RETURNING *"
         )
-        .bind(id).bind(&tenant_id).bind(domain).bind(domain_type).bind(&dns_json)
+        .bind(id).bind(&tenant_id).bind(domain).bind(domain_type)
+        .bind(&verification_token).bind(&dns_json)
         .fetch_one(&self.db)
         .await
         .map_err(|e| format!("Add domain: {e}"))?;
@@ -452,8 +464,43 @@ impl WhiteLabelService {
         Ok(ApiResult::ok(row.into()))
     }
 
-    /// Verify a domain (check DNS records)
+    /// Get a domain by ID (used for tenant ownership checks).
+    pub async fn get_domain(&self, id: Uuid) -> Result<ApiResult<WhiteLabelDomain>, String> {
+        let row = sqlx::query_as::<_, WhiteLabelDomainDbRow>(
+            "SELECT * FROM ent_whitelabel_domains WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_optional(&self.db)
+        .await
+        .map_err(|e| format!("Get domain: {e}"))?;
+
+        match row {
+            Some(r) => Ok(ApiResult::ok(r.into())),
+            None => Ok(ApiResult::err("Domain not found", "NOT_FOUND")),
+        }
+    }
+
+    /// Verify a domain (real DNS TXT token check).
+    ///
+    /// Fix E ("verification theater"): a domain is marked verified ONLY when
+    /// the `_apexmail-verify.<domain>` TXT record contains the per-domain
+    /// random token issued at `add_domain` time. Plain DNS resolvability no
+    /// longer counts as verification. Legacy rows without a token get one
+    /// generated and are left unverified until the TXT record appears.
     pub async fn verify_domain(&self, id: Uuid) -> Result<ApiResult<WhiteLabelDomain>, String> {
+        self.verify_domain_with_lookup(id, default_txt_lookup).await
+    }
+
+    /// Injectable-lookup variant of `verify_domain` (used by tests).
+    pub async fn verify_domain_with_lookup<F, Fut>(
+        &self,
+        id: Uuid,
+        txt_lookup: F,
+    ) -> Result<ApiResult<WhiteLabelDomain>, String>
+    where
+        F: FnOnce(String) -> Fut,
+        Fut: std::future::Future<Output = Result<Vec<String>, String>>,
+    {
         let domain_row = sqlx::query_as::<_, WhiteLabelDomainDbRow>(
             "SELECT * FROM ent_whitelabel_domains WHERE id = $1",
         )
@@ -462,13 +509,34 @@ impl WhiteLabelService {
         .await
         .map_err(|e| format!("Get domain: {e}"))?;
 
-        let domain = match domain_row {
+        let mut domain = match domain_row {
             Some(d) => d,
             None => return Ok(ApiResult::err("Domain not found", "NOT_FOUND")),
         };
 
-        // Perform DNS verification (simplified — in production uses trust-dns-resolver)
-        let verified = check_dns_records(&domain.domain).await;
+        // Legacy rows never received a token: issue one now and require the
+        // TXT record before verifying.
+        if domain.verification_token.as_deref().unwrap_or("").is_empty() {
+            let token = crate::sso::generate_random_token(32);
+            sqlx::query("UPDATE ent_whitelabel_domains SET verification_token = $2 WHERE id = $1")
+                .bind(id)
+                .bind(&token)
+                .execute(&self.db)
+                .await
+                .map_err(|e| format!("Issue verification token: {e}"))?;
+            domain.verification_token = Some(token);
+        }
+
+        let expected_token = domain.verification_token.clone().unwrap_or_default();
+        let host = txt_verification_host(&domain.domain);
+
+        let verified = match txt_lookup(host.clone()).await {
+            Ok(records) => txt_records_contain_token(&records, &expected_token),
+            Err(e) => {
+                tracing::warn!(domain = %domain.domain, host = %host, error = %e, "TXT verification lookup failed");
+                false
+            }
+        };
         let status = if verified { "verified" } else { "failed" };
 
         let updated = sqlx::query_as::<_, WhiteLabelDomainDbRow>(
@@ -633,20 +701,35 @@ pub fn generate_dns_records(domain: &str, domain_type: &str) -> Vec<DNSRecord> {
     }
 }
 
-/// Check DNS records for a domain
-/// #259:Uses TCP resolvability via `lookup_host` as baseline DNS verification.
-/// For strict record-by-record checking, extend using trust-dns-resolver.
-async fn check_dns_records(domain: &str) -> bool {
-    // #259:Perform a real network DNS resolution instead of always returning false.
-    // This checks resolvability as a baseline verification step.
-    // For stricter verification, each DNS record should be checked via trust-dns-resolver.
-    match tokio::net::lookup_host((domain, 80)).await {
-        Ok(mut addrs) => addrs.next().is_some(),
-        Err(e) => {
-            tracing::warn!(domain = domain, error = %e, "DNS verification lookup failed");
-            false
-        }
-    }
+/// The TXT host a tenant must publish for domain verification (fix E).
+pub fn txt_verification_host(domain: &str) -> String {
+    format!("_apexmail-verify.{domain}")
+}
+
+/// The TXT value expected for a verification token.
+pub fn txt_verification_value(token: &str) -> String {
+    format!("apexmail-verification={token}")
+}
+
+/// Pure check: do any of the published TXT records contain our token?
+/// Exported for unit testing.
+pub fn txt_records_contain_token(records: &[String], token: &str) -> bool {
+    let expected = txt_verification_value(token);
+    records.iter().any(|record| {
+        // TXT records may be chunked/quoted; match either the exact value or
+        // the token appearing inside a multi-part record.
+        record.trim() == expected || record.contains(&expected)
+    })
+}
+
+/// Production TXT lookup using the workspace dns-resolver crate
+/// (trust-dns/hickory under the hood).
+async fn default_txt_lookup(host: String) -> Result<Vec<String>, String> {
+    let lookup = apexmail_dns_resolver::DnsLookup::new().map_err(|e| format!("DNS resolver: {e}"))?;
+    lookup
+        .lookup_txt(&host)
+        .await
+        .map_err(|e| format!("TXT lookup: {e}"))
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────

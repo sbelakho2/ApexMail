@@ -135,17 +135,26 @@ pub enum DriftDirection {
 pub struct SpamEngine {
     config: SpamConfig,
     bayesian: BayesianClassifier,
-    /// Per-tenant Bayesian classifiers (key:tenant_id)
+    /// Per-tenant Bayesian classifiers (key:tenant_id), LRU-bounded
     tenant_classifiers: Arc<RwLock<HashMap<String, BayesianClassifier>>>,
+    /// Insertion-order ring for tenant-classifier LRU eviction
+    tenant_order: Arc<RwLock<VecDeque<String>>>,
     approved_reviewers: Arc<RwLock<HashSet<String>>>,
     pending_samples: Arc<RwLock<VecDeque<PendingTrainingSample>>>,
     model_snapshots: Arc<RwLock<HashMap<String, BayesianSnapshot>>>,
+    /// Insertion-order ring for snapshot LRU eviction
+    snapshot_order: Arc<RwLock<VecDeque<String>>>,
     recent_probabilities: Arc<RwLock<VecDeque<f64>>>,
     baseline_probability: Arc<RwLock<Option<f64>>>,
     /// Per-class drift tracking:separate rolling windows for spam and ham
     recent_spam_probabilities: Arc<RwLock<VecDeque<f64>>>,
     recent_ham_probabilities: Arc<RwLock<VecDeque<f64>>>,
 }
+
+/// Maximum number of per-tenant classifiers retained in memory (LRU).
+const MAX_TENANT_CLASSIFIERS: usize = 1000;
+/// Maximum number of model snapshots retained in memory (LRU).
+const MAX_MODEL_SNAPSHOTS: usize = 50;
 
 impl SpamEngine {
     /// Create a new spam engine with default config
@@ -154,9 +163,11 @@ impl SpamEngine {
             config: SpamConfig::default(),
             bayesian: BayesianClassifier::new(BayesianModel::default()),
             tenant_classifiers: Arc::new(RwLock::new(HashMap::new())),
+            tenant_order: Arc::new(RwLock::new(VecDeque::new())),
             approved_reviewers: Arc::new(RwLock::new(HashSet::new())),
             pending_samples: Arc::new(RwLock::new(VecDeque::new())),
             model_snapshots: Arc::new(RwLock::new(HashMap::new())),
+            snapshot_order: Arc::new(RwLock::new(VecDeque::new())),
             recent_probabilities: Arc::new(RwLock::new(VecDeque::new())),
             baseline_probability: Arc::new(RwLock::new(None)),
             recent_spam_probabilities: Arc::new(RwLock::new(VecDeque::new())),
@@ -170,9 +181,11 @@ impl SpamEngine {
             config,
             bayesian: BayesianClassifier::new(BayesianModel::default()),
             tenant_classifiers: Arc::new(RwLock::new(HashMap::new())),
+            tenant_order: Arc::new(RwLock::new(VecDeque::new())),
             approved_reviewers: Arc::new(RwLock::new(HashSet::new())),
             pending_samples: Arc::new(RwLock::new(VecDeque::new())),
             model_snapshots: Arc::new(RwLock::new(HashMap::new())),
+            snapshot_order: Arc::new(RwLock::new(VecDeque::new())),
             recent_probabilities: Arc::new(RwLock::new(VecDeque::new())),
             baseline_probability: Arc::new(RwLock::new(None)),
             recent_spam_probabilities: Arc::new(RwLock::new(VecDeque::new())),
@@ -195,9 +208,10 @@ impl SpamEngine {
         // 1. Bayesian classification with cold-start protection
         let bayesian_prob = if self.config.enable_bayesian {
             let raw_prob = self.bayesian.classify(body);
-            // Cold-start:if model has insufficient training data, treat as neutral
-            let model = self.bayesian.export_model();
-            if model.total_samples() < self.config.min_training_samples {
+            // Cold-start:if model has insufficient training data, treat as neutral.
+            // Uses the cheap O(1) accessor — a full export_model() here would
+            // deep-clone the entire vocabulary on every email.
+            if self.bayesian.total_samples() < self.config.min_training_samples as u64 {
                 0.5 // Neutral — don't let an under-trained model influence scoring
             } else {
                 raw_prob
@@ -220,15 +234,9 @@ impl SpamEngine {
             }
         };
 
-        // 3. Content scoring
-        let content_result = if self.config.enable_content_scoring {
-            content_scorer::score_content(body)
-        } else {
-            ContentScore {
-                score: 0.0,
-                findings: Vec::new(),
-            }
-        };
+        // 3. Content scoring (including custom phrase blocklists — shared
+        // with analyze_for_tenant so both entry points score identically)
+        let content_result = self.score_content_with_blocklists(body);
 
         // 4. URL analysis
         let url_result = if self.config.enable_url_analysis {
@@ -241,20 +249,12 @@ impl SpamEngine {
             }
         };
 
-        // 5. Composite scoring with configurable weights
-        let composite = (bayesian_prob * 10.0 * self.config.bayesian_weight)
-            + (header_result.score * self.config.header_weight)
-            + (content_result.score * self.config.content_weight)
-            + (url_result.score * self.config.url_weight);
+        // 5. DMARC policy enforcement (shared path)
+        let dmarc_penalty = self.check_dmarc_policy(auth_results);
 
-        // 6. Classify
-        let classification = if composite >= self.config.reject_threshold {
-            SpamClass::Reject
-        } else if composite >= self.config.spam_threshold {
-            SpamClass::Spam
-        } else {
-            SpamClass::Ham
-        };
+        // 6. Composite scoring + classification (shared path)
+        let (composite, classification) =
+            self.composite_score(bayesian_prob, &header_result, &content_result, &url_result, dmarc_penalty);
 
         self.record_probability(bayesian_prob);
 
@@ -266,6 +266,63 @@ impl SpamEngine {
             content_score: content_result,
             url_score: url_result,
         }
+    }
+
+    /// Content scoring including the tenant-configured custom phrase
+    /// blocklists. Shared by `analyze` and `analyze_for_tenant` so the two
+    /// entry points cannot drift apart again.
+    fn score_content_with_blocklists(&self, body: &str) -> ContentScore {
+        if !self.config.enable_content_scoring {
+            return ContentScore {
+                score: 0.0,
+                findings: Vec::new(),
+            };
+        }
+        let mut base_score = content_scorer::score_content(body);
+        let lower_body = body.to_lowercase();
+        for phrase_list in &self.config.custom_phrase_blocklists {
+            for phrase in &phrase_list.phrases {
+                if lower_body.contains(&phrase.to_lowercase()) {
+                    base_score.score += 1.5 * phrase_list.weight;
+                    base_score.findings.push(ContentFinding {
+                        id: "CUSTOM_PHRASE",
+                        description: format!(
+                            "Custom phrase [{}]: \"{}\"",
+                            phrase_list.category, phrase
+                        ),
+                        penalty: 1.5 * phrase_list.weight,
+                    });
+                }
+            }
+        }
+        base_score
+    }
+
+    /// Shared composite scoring + classification. Keeping the formula in one
+    /// place guarantees `analyze` and `analyze_for_tenant` stay equivalent.
+    fn composite_score(
+        &self,
+        probability: f64,
+        header_result: &HeaderScore,
+        content_result: &ContentScore,
+        url_result: &UrlScore,
+        dmarc_penalty: f64,
+    ) -> (f64, SpamClass) {
+        let composite = (probability * 10.0 * self.config.bayesian_weight)
+            + (header_result.score * self.config.header_weight)
+            + (content_result.score * self.config.content_weight)
+            + (url_result.score * self.config.url_weight)
+            + dmarc_penalty;
+
+        let classification = if composite >= self.config.reject_threshold {
+            SpamClass::Reject
+        } else if composite >= self.config.spam_threshold {
+            SpamClass::Spam
+        } else {
+            SpamClass::Ham
+        };
+
+        (composite, classification)
     }
 
     /// Train the Bayesian classifier with a spam sample.
@@ -335,9 +392,20 @@ impl SpamEngine {
         let Some(sample) = pending.remove(index) else {
             return false;
         };
-        match sample.label {
-            TrainingLabel::Spam => self.bayesian.learn_spam(&sample.text),
-            TrainingLabel::Ham => self.bayesian.learn_ham(&sample.text),
+        // Route through the validated (entropy/token-count checked,
+        // rate-limited) learning path. A rejected sample is discarded — it
+        // must never bypass validation by using the legacy unvalidated API.
+        let trained = match sample.label {
+            TrainingLabel::Spam => self.bayesian.learn_spam_validated(&sample.text),
+            TrainingLabel::Ham => self.bayesian.learn_ham_validated(&sample.text),
+        };
+        if let Err(e) = trained {
+            tracing::warn!(
+                sample_id = %sample_id,
+                reviewer = %reviewer,
+                error = ?e,
+                "Approved training sample failed validation — discarded"
+            );
         }
         true
     }
@@ -354,6 +422,9 @@ impl SpamEngine {
     }
 
     /// Persist an in-memory model snapshot for rollback.
+    /// Snapshots are LRU-bounded (MAX_MODEL_SNAPSHOTS) — the oldest snapshot
+    /// is evicted once the cap is reached so long-running processes cannot
+    /// accumulate unbounded model copies.
     pub fn create_model_snapshot(&self, label: &str) -> String {
         let snapshot = BayesianSnapshot {
             id: format!("snapshot-{}", uuid::Uuid::new_v4()),
@@ -362,7 +433,17 @@ impl SpamEngine {
             model: self.bayesian.export_model(),
         };
         let id = snapshot.id.clone();
-        self.model_snapshots.write().insert(id.clone(), snapshot);
+        let mut snapshots = self.model_snapshots.write();
+        let mut order = self.snapshot_order.write();
+        snapshots.insert(id.clone(), snapshot);
+        order.push_back(id.clone());
+        while snapshots.len() > MAX_MODEL_SNAPSHOTS {
+            if let Some(oldest) = order.pop_front() {
+                snapshots.remove(&oldest);
+            } else {
+                break;
+            }
+        }
         id
     }
 
@@ -484,33 +565,9 @@ impl SpamEngine {
             }
         };
 
-        // 3. Content scoring (including custom phrase blocklists)
-        let content_result = if self.config.enable_content_scoring {
-            let mut base_score = content_scorer::score_content(body);
-            // Apply custom phrase blocklists
-            let lower_body = body.to_lowercase();
-            for phrase_list in &self.config.custom_phrase_blocklists {
-                for phrase in &phrase_list.phrases {
-                    if lower_body.contains(&phrase.to_lowercase()) {
-                        base_score.score += 1.5 * phrase_list.weight;
-                        base_score.findings.push(ContentFinding {
-                            id: "CUSTOM_PHRASE",
-                            description: format!(
-                                "Custom phrase [{}]: \"{}\"",
-                                phrase_list.category, phrase
-                            ),
-                            penalty: 1.5 * phrase_list.weight,
-                        });
-                    }
-                }
-            }
-            base_score
-        } else {
-            ContentScore {
-                score: 0.0,
-                findings: Vec::new(),
-            }
-        };
+        // 3. Content scoring (including custom phrase blocklists — shared
+        // scoring path with `analyze`)
+        let content_result = self.score_content_with_blocklists(body);
 
         // 4. URL analysis
         let url_result = if self.config.enable_url_analysis {
@@ -526,20 +583,14 @@ impl SpamEngine {
         // 5. DMARC policy enforcement check
         let dmarc_penalty = self.check_dmarc_policy(auth_results);
 
-        // 6. Composite scoring
-        let composite = (blended_prob * 10.0 * self.config.bayesian_weight)
-            + (header_result.score * self.config.header_weight)
-            + (content_result.score * self.config.content_weight)
-            + (url_result.score * self.config.url_weight)
-            + dmarc_penalty;
-
-        let classification = if composite >= self.config.reject_threshold {
-            SpamClass::Reject
-        } else if composite >= self.config.spam_threshold {
-            SpamClass::Spam
-        } else {
-            SpamClass::Ham
-        };
+        // 6. Composite scoring + classification (shared path)
+        let (composite, classification) = self.composite_score(
+            blended_prob,
+            &header_result,
+            &content_result,
+            &url_result,
+            dmarc_penalty,
+        );
 
         self.record_probability(blended_prob);
         self.record_per_class_probability(blended_prob, &classification);
@@ -554,22 +605,43 @@ impl SpamEngine {
         }
     }
 
-    /// Train the per-tenant Bayesian classifier with a spam sample
+    /// Train the per-tenant Bayesian classifier with a spam sample.
+    /// The classifier map is LRU-bounded (MAX_TENANT_CLASSIFIERS) so a
+    /// multi-tenant deployment cannot grow it without bound.
     pub fn train_tenant_spam(&self, tenant_id: &str, text: &str) {
         let mut classifiers = self.tenant_classifiers.write();
+        let mut order = self.tenant_order.write();
         let classifier = classifiers
             .entry(tenant_id.to_string())
             .or_insert_with(|| BayesianClassifier::new(BayesianModel::default()));
         classifier.learn_spam(text);
+        order.push_back(tenant_id.to_string());
+        while classifiers.len() > MAX_TENANT_CLASSIFIERS {
+            if let Some(oldest) = order.pop_front() {
+                classifiers.remove(&oldest);
+            } else {
+                break;
+            }
+        }
     }
 
     /// Train the per-tenant Bayesian classifier with a ham sample
+    /// (LRU-bounded, see [`Self::train_tenant_spam`]).
     pub fn train_tenant_ham(&self, tenant_id: &str, text: &str) {
         let mut classifiers = self.tenant_classifiers.write();
+        let mut order = self.tenant_order.write();
         let classifier = classifiers
             .entry(tenant_id.to_string())
             .or_insert_with(|| BayesianClassifier::new(BayesianModel::default()));
         classifier.learn_ham(text);
+        order.push_back(tenant_id.to_string());
+        while classifiers.len() > MAX_TENANT_CLASSIFIERS {
+            if let Some(oldest) = order.pop_front() {
+                classifiers.remove(&oldest);
+            } else {
+                break;
+            }
+        }
     }
 
     /// Check DMARC policy enforcement from auth_results header.
@@ -581,14 +653,20 @@ impl SpamEngine {
             return 0.0;
         };
         let lower = results.to_lowercase();
-        let dmarc_fail = lower.contains("dmarc=fail") || lower.contains("dmarc=none");
-        if !dmarc_fail {
-            return 0.0;
+        // dmarc=none is informational only:many legitimate senders publish no
+        // DMARC record. It is NOT a failure — treat it as a weak signal
+        // (0.5), consistent with header_analyzer's scoring.
+        if lower.contains("dmarc=none") {
+            return 0.5;
         }
-        // DMARC failed — apply penalty (the actual DNS p= policy would need
-        // an async lookup, so we apply a conservative penalty that acknowledges
-        // the failure without blocking outright)
-        2.5
+        if lower.contains("dmarc=fail") {
+            // DMARC explicitly failed — apply the full penalty (the actual
+            // DNS p= policy would need an async lookup, so we apply a
+            // conservative penalty that acknowledges the failure without
+            // blocking outright).
+            return 2.5;
+        }
+        0.0
     }
 
     fn record_per_class_probability(&self, probability: f64, class: &SpamClass) {
@@ -810,5 +888,98 @@ mod tests {
         let snap = engine.create_model_snapshot("baseline");
         let _ = engine.train_spam("buy now lottery winner free crypto");
         assert!(engine.rollback_to_snapshot(&snap));
+    }
+
+    // ── Security-fix regression tests ──
+
+    #[test]
+    fn test_dmarc_none_is_informational_not_full_penalty() {
+        let engine = SpamEngine::new();
+        // dmarc=none is not a failure — it must carry only a weak signal.
+        let none = engine.analyze("hello there friend", &[], Some("dmarc=none"));
+        let pass = engine.analyze("hello there friend", &[], Some("dmarc=pass"));
+        let fail = engine.analyze("hello there friend", &[], Some("dmarc=fail"));
+        // Weak (0.5) — may add a small delta over pass…
+        assert!(
+            none.score - pass.score <= 0.6,
+            "dmarc=none must add at most the informational 0.5 penalty (delta={})",
+            none.score - pass.score
+        );
+        // …while dmarc=fail adds the full 2.5.
+        assert!(
+            (fail.score - pass.score - 2.5).abs() < 1e-9,
+            "dmarc=fail must add exactly 2.5 (delta={})",
+            fail.score - pass.score
+        );
+        // And none is clearly weaker than fail.
+        assert!(fail.score > none.score);
+    }
+
+    #[test]
+    fn test_analyze_applies_custom_phrase_blocklists() {
+        let config = crate::config::SpamConfig {
+            custom_phrase_blocklists: vec![crate::config::CustomPhraseList {
+                category: "internal-policy".into(),
+                phrases: vec!["quuxblast offer".into()],
+                weight: 2.0,
+            }],
+            ..Default::default()
+        };
+        let engine = SpamEngine::with_config(config);
+        let verdict = engine.analyze("this message contains quuxblast offer inside", &[], None);
+        assert!(
+            verdict
+                .content_score
+                .findings
+                .iter()
+                .any(|f| f.id == "CUSTOM_PHRASE"),
+            "analyze() must apply custom phrase blocklists like analyze_for_tenant: {:?}",
+            verdict.content_score.findings
+        );
+
+        // Parity:analyze_for_tenant must produce the same content findings.
+        let tenant_verdict = engine.analyze_for_tenant(
+            "this message contains quuxblast offer inside",
+            &[],
+            None,
+            "tenant-1",
+        );
+        assert!(tenant_verdict
+            .content_score
+            .findings
+            .iter()
+            .any(|f| f.id == "CUSTOM_PHRASE"));
+    }
+
+    #[test]
+    fn test_tenant_classifier_map_is_bounded() {
+        let engine = SpamEngine::new();
+        for i in 0..(MAX_TENANT_CLASSIFIERS + 50) {
+            engine.train_tenant_spam(&format!("tenant-{i}"), "buy pills now");
+        }
+        let count = engine.tenant_classifiers.read().len();
+        assert!(
+            count <= MAX_TENANT_CLASSIFIERS,
+            "tenant classifier map must be LRU-bounded, got {}",
+            count
+        );
+    }
+
+    #[test]
+    fn test_model_snapshots_are_bounded() {
+        let engine = SpamEngine::new();
+        let mut ids = Vec::new();
+        for i in 0..(MAX_MODEL_SNAPSHOTS + 10) {
+            ids.push(engine.create_model_snapshot(&format!("s{i}")));
+        }
+        let count = engine.model_snapshots.read().len();
+        assert!(
+            count <= MAX_MODEL_SNAPSHOTS,
+            "snapshot map must be LRU-bounded, got {}",
+            count
+        );
+        // The oldest snapshots were evicted; the newest must survive.
+        assert!(!engine.model_snapshots.read().contains_key(&ids[0]));
+        assert!(engine.model_snapshots.read().contains_key(ids.last().unwrap()));
     }
 }

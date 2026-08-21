@@ -18,11 +18,11 @@ use KiwiCaptcha\VerificationAdmissionGate;
  * releasing an expired/double-released token is a no-op (ZREM of an absent
  * member) and can never touch a different token's slot.
  *
- * Each lease is a sorted-set member scored at its expiry (now + LEASE_MS).
- * The acquire script prunes expired leases first (ZREMRANGEBYSCORE up to
+ * Each lease is a sorted-set member scored at its expiry (now + `LEASE_MS`).
+ * The acquire script prunes expired leases first (`ZREMRANGEBYSCORE` up to
  * `now`; a lease whose score is in the past is dead), then admits when the
  * live count is below the cap. A worker that crashes while holding a lease
- * never releases it, but its lease expires after LEASE_MS and is reaped by
+ * never releases it, but its lease expires after `LEASE_MS` and is reaped by
  * the next acquire, with no watchdog counter to drift and no DECR race.
  *
  * Key: `kiwicaptcha:argon2:leases:<namespace>`, one lease set per
@@ -126,7 +126,7 @@ LUA;
 
     /**
      * Atomic-live usage: one script, TIME -> now_ms ->
-     * ZREMRANGEBYSCORE '-inf' now -> ZCARD. Mirrors the acquire path's
+     * `ZREMRANGEBYSCORE` '-inf' now -> ZCARD. Mirrors the acquire path's
      * pruning, so the returned count is the live lease count: expired
      * leases are reaped exactly as the next acquire would reap them, where
      * ZCARD alone would overcount while leases sit un-reaped between

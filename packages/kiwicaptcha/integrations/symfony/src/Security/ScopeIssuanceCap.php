@@ -56,7 +56,7 @@ namespace BelConsulting\KiwiCaptchaBundle\Security;
  *
  * The cap is a gate, not a bound: a request that consumes the last slot
  * is admitted, the next one in the same window is refused (the
- * controller returns 429 SCOPE_LIMITED before any challenge is minted).
+ * controller returns 429 `SCOPE_LIMITED` before any challenge is minted).
  *
  * A Redis failure propagates, fail closed: the caller refuses issuance
  * rather than minting an unbilled challenge, so the deployment-wide
@@ -75,7 +75,7 @@ final class ScopeIssuanceCap
     public const UNKNOWN_QUOTA_ID = 0;
 
     /**
-     * HKDF info for the scope-rate HMAC key: the key is
+     * `HKDF` info for the scope-rate HMAC key: the key is
      * derived from the bundle's risk master with this purpose tag, so the
      * scope pseudonyms are independent of every other derived key.
      */
@@ -257,7 +257,7 @@ LUA;
         // boundaries would let skewed hosts use different window keys.
         // Redis is the configured security backend here: no Redis TIME
         // proof, no quota proof, no challenge issuance (the controller
-        // maps the exception to 503 SERVICE_UNAVAILABLE).
+        // maps the exception to 503 `SERVICE_UNAVAILABLE`).
         $time = $this->redis->time();
         if (!\is_array($time) || !isset($time[0])) {
             throw new \RuntimeException('Redis TIME returned an invalid response for the scope issuance cap');

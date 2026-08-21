@@ -2867,6 +2867,19 @@ async fn refresh_token(
         crate::middleware::auth::decode_jwt_with_rotation(&token, &state.config, &validation)?;
     let old_claims = token_data.claims;
 
+    // Token-type confusion (audit B): the middleware already rejects
+    // non-session `typ` claims for API authentication, but refresh used to
+    // decode the cookie JWT blindly — letting a stream token (or any other
+    // non-session typ) be refreshed into a brand-new full `"*"`-scope
+    // session. Enforce the same discrimination here.
+    if !crate::middleware::auth::claims_typ_is_session(old_claims.typ.as_deref()) {
+        tracing::warn!(
+            token_type = old_claims.typ.as_deref().unwrap_or("<missing>"),
+            "rejecting refresh for a non-session token"
+        );
+        return Err(ApiError::Unauthorized("invalid token type".into()));
+    }
+
     let user_id = old_claims.sub.clone();
     let tenant_id = old_claims.tenant_id.clone();
 

@@ -203,7 +203,7 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
         // The controller enforces only waiter > lease; the Argon admission
         // lease and the retained consumed-state retention margin complete
         // the ordering and are validated here, since a configuration that
-        // breaks it makes crash recovery impossible (a PENDING_SAME waiter
+        // breaks it makes crash recovery impossible (a `PENDING_SAME` waiter
         // gives up before the owner lease can be taken over, or a
         // lease-bounded verification outlasts the Siteverify lease and is
         // displaced at takeover). Signed token expiry is irrelevant to the
@@ -227,7 +227,7 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             // late in its lifetime, whose crash-recovery takeover happens
             // after the signed expiry, reads nothing and the reconstruction
             // fails. The margin must therefore cover at least the
-            // PENDING_SAME waiter bound (the absolute tail of the
+            // `PENDING_SAME` waiter bound (the absolute tail of the
             // takeover/retry window).
             if ($config['risk']['redis']['ttl_margin_secs'] < $waiterBoundSecs) {
                 throw new \LogicException(sprintf(
@@ -841,7 +841,7 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             // The max-stale fail-closed window: past last_success +
             // max_stale the validator fails verification closed
             // (temporary_unavailable) and the controller refuses
-            // issuance with 503 SERVICE_UNAVAILABLE.
+            // issuance with 503 `SERVICE_UNAVAILABLE`.
             ->setArgument('$maxStaleSecs', $riskConfig['security_epoch_max_stale_secs'])
             ->setPublic(true));
 
@@ -942,7 +942,7 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             // counter; null when disabled).
             ->setArgument('$scopeIssuanceCap', $scopeCapRef)
             // The server-owned scope allowlist: when non-empty, issuance
-            // outside it is refused (422 SCOPE_NOT_ALLOWED) before
+            // outside it is refused (422 `SCOPE_NOT_ALLOWED`) before
             // risk/quota, making the per-scope quota namespace
             // server-bounded.
             ->setArgument('$allowedScopes', $riskConfig['allowed_scopes'])
@@ -956,7 +956,7 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             ->setArgument('$sitekeyPolicy', $sitekeyPolicy)
             // The security-epoch monitor drives the issuance-side
             // max-stale fail-closed check: a stale central policy read
-            // refuses issuance with 503 SERVICE_UNAVAILABLE.
+            // refuses issuance with 503 `SERVICE_UNAVAILABLE`.
             ->setArgument('$epochMonitor', new Reference(SecurityEpochMonitor::class))
             // The configured challenge TTL lets the anti-
             // stockpiling admission run before the challenge state is
@@ -1082,8 +1082,8 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
         ]))->addTag('form.type'));
 
         // Post-solve disposition store (final-disposition durability). The
-        // validator's one final-disposition path (PASS | DENY | STEP_UP |
-        // CHAIN_REQUIRED) is persisted per nonce, so a replay of a valid
+        // validator's one final-disposition path (`PASS` | `DENY` | `STEP_UP` |
+        // `CHAIN_REQUIRED`) is persisted per nonce, so a replay of a valid
         // proof reproduces the same disposition; a stored core result can
         // never bypass the post-solve policy (it only answers "was the
         // PoW cryptographically valid?"). Redis-backed whenever a Redis
@@ -1154,7 +1154,7 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             // The optional Ed25519 result-receipt signer for
             // exported verification results (null = disabled).
             ->setArgument('$receiptSigner', new Reference(ResultReceiptSigner::class))
-            // The chain ticket service issues the one-shot CHAIN_REQUIRED
+            // The chain ticket service issues the one-shot `CHAIN_REQUIRED`
             // tickets after a valid verification whose reassessment
             // demands a stronger stage (risk.chaining; null = disabled).
             ->setArgument('$chainTickets', $chainServiceRef)
@@ -1549,7 +1549,7 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
      *
      * Priority: the explicit risk.redis_service, then the bundle's own Redis
      * client (redis_service / RedisStorage) when it is a Predis client. A
-     * phpredis (\Redis) client cannot drive the risk-v1 EVALSHA store (its
+     * phpredis (\Redis) client cannot drive the risk-v1 `EVALSHA` store (its
      * constructor is typed Predis\Client) — refuse with an actionable
      * message instead of failing at request time.
      *

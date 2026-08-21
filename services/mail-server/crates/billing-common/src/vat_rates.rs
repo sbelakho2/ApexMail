@@ -120,6 +120,59 @@ pub fn get_eu_vat_rate(country: &str) -> Option<i32> {
     EU_VAT_RATES.get(&country.to_uppercase()).copied()
 }
 
+/// Validate the structural shape of an EU VAT registration number before it
+/// is trusted for reverse charge (0 %) treatment.
+///
+/// Rules (conservative, purely structural — full VIES validation happens
+/// out-of-band in vat_emta):
+///
+/// - trimmed, non-empty, ASCII alphanumeric only (no spaces/dashes);
+/// - total length 5–15 characters;
+/// - starts with a two-letter country prefix followed by 8–12 alphanumeric
+///   characters (the common EU format, e.g. `DE123456789`);
+/// - when `country` (the billing country) is provided, the prefix must match
+///   it — Greece's `EL` prefix is accepted for country `GR`.
+///
+/// Returns `false` for anything that cannot be a VAT number ("", "1", "x",
+/// free-form text), which means the normal destination rate is charged
+/// instead of silently zero-rating the invoice.
+pub fn is_valid_vat_number(vat: &str, country: Option<&str>) -> bool {
+    let vat = vat.trim();
+    if !(5..=15).contains(&vat.len()) {
+        return false;
+    }
+    if !vat.bytes().all(|b| b.is_ascii_alphanumeric()) {
+        return false;
+    }
+
+    let prefix: String = vat[..2].to_ascii_uppercase();
+    if !prefix.bytes().all(|b| b.is_ascii_alphabetic()) {
+        return false;
+    }
+    let body_len = vat.len() - 2;
+    if !(8..=12).contains(&body_len) {
+        return false;
+    }
+
+    if let Some(country) = country.map(str::trim).filter(|c| !c.is_empty()) {
+        let country = country.to_ascii_uppercase();
+        // Greece issues VAT numbers with the EL prefix.
+        let expected_prefix = match country.as_str() {
+            "GR" => "EL",
+            other => other,
+        };
+        // Only enforce prefix consistency when the prefix itself is a
+        // plausibly valid country code (two letters). This keeps unknown
+        // fictional country codes usable in tests without weakening the
+        // mismatch check.
+        if expected_prefix.len() == 2 && expected_prefix.bytes().all(|b| b.is_ascii_alphabetic()) {
+            return prefix == expected_prefix;
+        }
+    }
+
+    true
+}
+
 /// Calculate the VAT rate and amount for a given subtotal, customer country
 /// and optional VAT number.
 ///
@@ -129,7 +182,7 @@ pub fn get_eu_vat_rate(country: &str) -> Option<i32> {
 /// |---|---|
 /// | Estonia (`EE`) | 24 % (local) |
 /// | EU B2B with valid VAT number | 0 % (reverse charge) |
-/// | EU B2C (no VAT number) | Destination-country rate (falls back to Estonia) |
+/// | EU B2C (no/invalid VAT number) | Destination-country rate (falls back to Estonia) |
 /// | Non-EU | 0 % |
 pub fn calculate_vat(subtotal: i64, country: &str, vat_number: Option<&str>) -> (i32, i64) {
     if subtotal <= 0 {
@@ -143,7 +196,10 @@ pub fn calculate_vat(subtotal: i64, country: &str, vat_number: Option<&str>) -> 
     }
 
     if EU_COUNTRIES.contains(&country) {
-        if vat_number.is_some() {
+        if vat_number
+            .map(|vat| is_valid_vat_number(vat, Some(&country)))
+            .unwrap_or(false)
+        {
             // EU B2B — reverse charge (0 %)
             return (0, 0);
         }
@@ -262,5 +318,81 @@ mod tests {
     fn calculate_vat_non_positive_subtotal_zero() {
         assert_eq!(calculate_vat(0, "DE", None), (0, 0));
         assert_eq!(calculate_vat(-1000, "EE", None), (0, 0));
+    }
+
+    // ------------------------------------------------------------------
+    // Fix D — reverse charge only on structurally valid VAT numbers.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn is_valid_vat_number_rejects_degenerate_inputs() {
+        assert!(!is_valid_vat_number("", None));
+        assert!(!is_valid_vat_number(" ", None));
+        assert!(!is_valid_vat_number("1", None));
+        assert!(!is_valid_vat_number("x", None));
+        assert!(!is_valid_vat_number("DE", None)); // prefix without body
+        assert!(!is_valid_vat_number(
+            "DE123456789012345678901234567890",
+            None
+        )); // > 15 chars
+        assert!(!is_valid_vat_number("DE 1234-5678", None)); // spaces/dashes
+        assert!(!is_valid_vat_number("1234567890123", None)); // no country prefix
+    }
+
+    #[test]
+    fn is_valid_vat_number_accepts_realistic_eu_numbers() {
+        assert!(is_valid_vat_number("DE123456789", None));
+        assert!(is_valid_vat_number("FRXX123456789", None));
+        assert!(is_valid_vat_number("NL004495445B01", None));
+        assert!(is_valid_vat_number("de123456789", None)); // case-insensitive
+    }
+
+    #[test]
+    fn is_valid_vat_number_checks_country_prefix_consistency() {
+        assert!(is_valid_vat_number("DE123456789", Some("DE")));
+        assert!(is_valid_vat_number("de123456789", Some("de")));
+        // Greek VAT numbers use the EL prefix while the country is GR.
+        assert!(is_valid_vat_number("EL123456789", Some("GR")));
+        // Mismatched prefix — not zero-rated.
+        assert!(!is_valid_vat_number("DE123456789", Some("FR")));
+        assert!(!is_valid_vat_number("US123456789", Some("FR")));
+    }
+
+    #[test]
+    fn calculate_vat_invalid_vat_number_charges_normal_rate() {
+        // Garbage VAT numbers must NOT trigger reverse charge.
+        let (rate, amount) = calculate_vat(10_000, "DE", Some("1"));
+        assert_eq!(rate, 19);
+        assert_eq!(amount, 1_900);
+
+        let (rate, _) = calculate_vat(10_000, "DE", Some(""));
+        assert_eq!(rate, 19);
+
+        let (rate, _) = calculate_vat(10_000, "DE", Some("x"));
+        assert_eq!(rate, 19);
+
+        // Mismatched prefix: VAT number says DE, billing country is FR.
+        let (rate, amount) = calculate_vat(10_000, "FR", Some("DE123456789"));
+        assert_eq!(rate, 20);
+        assert_eq!(amount, 2_000);
+    }
+
+    #[test]
+    fn calculate_vat_valid_vat_number_still_reverse_charges() {
+        let (rate, amount) = calculate_vat(10_000, "DE", Some("DE123456789"));
+        assert_eq!(rate, 0);
+        assert_eq!(amount, 0);
+
+        let (rate, amount) = calculate_vat(10_000, "FR", Some("FRXX123456789"));
+        assert_eq!(rate, 0);
+        assert_eq!(amount, 0);
+    }
+
+    #[test]
+    fn estonia_never_reverse_charges_even_with_vat_number() {
+        // Local EE sales always charge 24 % regardless of VAT number.
+        let (rate, amount) = calculate_vat(10_000, "EE", Some("EE100591102"));
+        assert_eq!(rate, 24);
+        assert_eq!(amount, 2_400);
     }
 }

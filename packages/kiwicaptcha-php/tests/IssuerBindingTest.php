@@ -221,7 +221,8 @@ final class IssuerBindingTest extends TestCase
 
     public function testWrongIssuerErrorValue(): void
     {
-        self::assertSame('challenge was issued by a different deployment', VerifyError::WrongIssuer->value);
+        self::assertSame('wrong_issuer', VerifyError::WrongIssuer->value);
+        self::assertSame('challenge was issued by a different deployment', VerifyError::WrongIssuer->description());
     }
 
     public function testIssuerSurvivesTheRedisJsonWrappedRoundTrip(): void

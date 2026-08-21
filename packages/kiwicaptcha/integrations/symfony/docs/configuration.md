@@ -409,14 +409,14 @@ exactly the value the backend rendered, nothing else.
 
 Two binding modes:
 
-1. **Client-chosen binding (public, basic anti-abuse).** The application
+1) **Client-chosen binding (public, basic anti-abuse).** The application
    lets the client choose the binding, e.g. a per-page random nonce the
    page JavaScript generates and passes to the widget. This is fine for
    basic anti-abuse (it proves the browser chose a nonce and carries it
    back), but the binding is client-controlled: it proves nothing about a
    trusted backend decision. Suitable when the binding is a transaction
    correlation tag, not an authorization signal.
-2. **Backend-originated binding (the recommended sensitive-flow mode).**
+2) **Backend-originated binding (the recommended sensitive-flow mode).**
    The application backend renders the binding server-side from a
    `flow_id` stored server-side. The Symfony form type's `request_binding`
    option, the static `risk.request_binding` config, or a per-render

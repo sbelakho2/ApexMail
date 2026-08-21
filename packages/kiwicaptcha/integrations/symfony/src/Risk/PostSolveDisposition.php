@@ -11,22 +11,22 @@ namespace BelConsulting\KiwiCaptchaBundle\Risk;
  * cryptographically valid?", never "should the application accept this
  * protected action?". The latter is decided by the Symfony layer's
  * post-solve policy (fresh risk assessment, chaining, honeypot) and
- * persisted per nonce in a {@see PostSolveDispositionStore}, so a
- * replay of a valid proof reproduces the same final disposition instead
- * of bypassing the post-solve policy.
+ * persisted per nonce in a {@see PostSolveDispositionStore}. A replay of
+ * a valid proof then reproduces the same final disposition instead of
+ * bypassing the post-solve policy.
  *
- * The disposition carries only the final disposition itself — kind,
+ * The disposition carries only the final disposition itself: kind,
  * optional decision id (the post-solve assessment's decision handle, or
  * the consumed original pre-issue decision id on the plain pass path)
- * and the optional chain binding of a chain-required disposition: the
- * exact chain id and the chain's original server-held expiry,
- * chainExpiresAt, persisted as chain_expires_at. The expiry is bound to
- * the disposition's exact chain at finalize time, so the ticket signing
- * never consults the current obligation again: a concurrently opened
- * chain of the same transaction can never leak its expiry into this
- * disposition's ticket, and a completed chain (record retained) keeps
- * re-signing its deterministic ticket. Raw risk vectors, fingerprints
- * and descriptors are never persisted.
+ * and the optional chain binding of a chain-required disposition. The
+ * chain binding is the exact chain id and the chain's original
+ * server-held expiry, chainExpiresAt, persisted as chain_expires_at.
+ * The expiry is bound to the disposition's exact chain at finalize
+ * time, so the ticket signing never consults the current obligation
+ * again. A concurrently opened chain of the same transaction can never
+ * leak its expiry into this disposition's ticket, and a completed
+ * chain (record retained) keeps re-signing its deterministic ticket. Raw
+ * risk vectors, fingerprints and descriptors are never persisted.
  */
 final readonly class PostSolveDisposition
 {

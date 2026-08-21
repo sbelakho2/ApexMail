@@ -1,7 +1,7 @@
 # Security hardening
 
 The security properties of the bundle's endpoint and verification surface.
-The authoritative security document is [SECURITY.md](../../../../../SECURITY.md).
+The authoritative security document is [`SECURITY.md`](../../../../../SECURITY.md).
 Supported versions, vulnerability reporting, governance, asset/protocol-id coupling, CSP/worker requirements, proxy/IP-binding assumptions, Redis requirements, and the non-guarantees all live there.
 This page documents the bundle-level mechanisms.
 Where a property overlaps the security document, this page links there instead of re-explaining.
@@ -155,7 +155,7 @@ Set `public_base_url` (for example `https://captcha.example.com`) and the check 
 A forged `Host: evil.example` header can never make `Origin: https://evil.example` look same-origin.
 The expected origin stays stable behind load balancers and shared hosting.
 Without `public_base_url` (null, the default, fine for localhost/dev) the expected origin is derived from the request's own scheme+host.
-Production deployments behind shared infrastructure SHOULD set it.
+Production deployments behind shared infrastructure should set it.
 The issuer itself never derives anything from `Host`.
 A forged Host cannot alter the issued challenge.
 Scope and the socket peer's binding tag are the only context.
@@ -314,7 +314,7 @@ The knobs are applied to the storage service automatically:
   The consumed-state guards (the consumed-state single-use gate, the replayed-token checks) and the challenge records themselves must outlive token validity + max clock skew + failover margin.
   Otherwise a replayed/expired token can land on state that already expired and re-accepted it.
 
-The operational contract for the security Redis, where `maxmemory-policy noeviction` is mandatory, eviction is a security incident, and `maxmemory` is sized for the worst case, is authoritative in [SECURITY.md](../../../../../SECURITY.md#redis-requirements).
+The operational contract for the security Redis, where `maxmemory-policy noeviction` is mandatory, eviction is a security incident, and `maxmemory` is sized for the worst case, is authoritative in [`SECURITY.md`](../../../../../SECURITY.md#redis-requirements).
 
 ## Asymmetric result receipts
 
@@ -428,6 +428,6 @@ The in-process fallback gate has no per-scope budget (per-process, single-worker
 
 ## Related documents
 
-- [SECURITY.md](../../../../../SECURITY.md), the authoritative security document.
+- [`SECURITY.md`](../../../../../SECURITY.md), the authoritative security document.
 - [operations.md](operations.md): ingress limits, health endpoints, and the control-plane threat model.
 - [claims-registry.md](claims-registry.md): the tests that pin these properties.

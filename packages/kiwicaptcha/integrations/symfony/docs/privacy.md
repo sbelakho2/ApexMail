@@ -76,7 +76,7 @@ attribute:
 
 Telemetry is a supplementary signal: it is client-controlled and
 forgeable, so it is never treated as the security boundary; see
-[SECURITY.md](../../../../../SECURITY.md#what-kiwicaptcha-explicitly-does-not-protect-against).
+[`SECURITY.md`](../../../../../SECURITY.md#what-kiwicaptcha-explicitly-does-not-protect-against).
 `enforce_telemetry` (reject bot-scored telemetry at verification time) is
 defense-in-depth only. The enforcement key is documented in
 [configuration.md](configuration.md#privacy-posture).
@@ -119,5 +119,5 @@ assumptions and the tests that evidence them — live in
 - [claims-registry.md](claims-registry.md): the verifiable privacy claims.
 - [configuration.md](configuration.md#privacy-posture): the privacy
   configuration keys.
-- [SECURITY.md](../../../../../SECURITY.md): the security document; privacy and
+- [`SECURITY.md`](../../../../../SECURITY.md): the security document; privacy and
   security overlap only where noted.

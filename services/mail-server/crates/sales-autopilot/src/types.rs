@@ -75,16 +75,21 @@ pub enum MessageCategory {
     Customer,
     Support,
     Spam,
+    /// Fix I-5: opt-out requests are a first-class category handled with
+    /// priority — they are legally significant (CAN-SPAM) and previously
+    /// fell through the spam keyword heuristic.
+    Unsubscribe,
     Other,
 }
 
 impl std::fmt::Display for MessageCategory {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
+        match &self {
             Self::Lead => write!(f, "lead"),
             Self::Customer => write!(f, "customer"),
             Self::Support => write!(f, "support"),
             Self::Spam => write!(f, "spam"),
+            Self::Unsubscribe => write!(f, "unsubscribe"),
             Self::Other => write!(f, "other"),
         }
     }
@@ -99,6 +104,7 @@ impl MessageCategory {
             "customer" => Self::Customer,
             "support" => Self::Support,
             "spam" => Self::Spam,
+            "unsubscribe" => Self::Unsubscribe,
             _ => Self::Other,
         }
     }
@@ -224,6 +230,10 @@ pub struct CreateConversionBody {
     pub revenue: f64,
     #[serde(default)]
     pub description: String,
+    /// Fix I-3: optional explicit tenant scoping. When present it must match
+    /// the `x-tenant-id` header (see `required_tenant_id` in routes.rs).
+    #[serde(default)]
+    pub tenant_id: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -272,6 +282,12 @@ pub enum SalesError {
     #[error("unauthorized: {0}")]
     Unauthorized(String),
 
+    #[error("service unavailable: {0}")]
+    ServiceUnavailable(String),
+
+    #[error("not implemented: {0}")]
+    NotImplemented(String),
+
     #[error(transparent)]
     Internal(#[from] anyhow::Error),
 }
@@ -293,6 +309,10 @@ impl axum::response::IntoResponse for SalesError {
             SalesError::EnrichmentFailed(_) => (StatusCode::BAD_GATEWAY, self.to_string()),
             SalesError::RateLimited(_) => (StatusCode::TOO_MANY_REQUESTS, self.to_string()),
             SalesError::Unauthorized(_) => (StatusCode::FORBIDDEN, self.to_string()),
+            SalesError::ServiceUnavailable(_) => {
+                (StatusCode::SERVICE_UNAVAILABLE, self.to_string())
+            }
+            SalesError::NotImplemented(_) => (StatusCode::NOT_IMPLEMENTED, self.to_string()),
             SalesError::Database(_) | SalesError::Internal(_) => {
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal error".into())
             }

@@ -11,9 +11,9 @@ namespace BelConsulting\KiwiCaptchaBundle\Risk;
  * exception instead of defaulting (an unknown state must never become
  * pending, a corrupt kind never Pass, a missing disposition never a
  * silent pass). A malformed server record is a server-side anomaly: the
- * validator fails closed with the temporary_unavailable violation (the
- * client did not corrupt the Redis structure, never a 422), the detail
- * goes to the server log only, and the record is never treated as valid
+ * validator fails closed with the temporary_unavailable violation, never
+ * a 422. The client did not corrupt the Redis structure. The detail goes
+ * to the server log only, and the record is never treated as valid
  * state.
  */
 final class MalformedPostSolveDispositionException extends \RuntimeException

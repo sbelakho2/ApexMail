@@ -90,8 +90,11 @@ retained as `Issuer::hashIp()` for this path only.
   parameter: the one-shot record is the attempt bound (each submitted
   token can cost at most one memory-hard hash). The record is kept until
   its TTL and carries the committed deterministic result. A retry on an
-  already-consumed record returns the same outcome
-  (Valid/InsufficientWork) without re-deriving. A consumed record without
+  already-consumed record reproduces the same outcome
+  (Valid/InsufficientWork) without re-deriving only when it supplies the
+  exact operation identity recorded by the original consume; without the
+  matching identity the retry is reported as AlreadyConsumed.
+  InsufficientWork replays remain deterministic. A consumed record without
   a committed result (crash between consume and commit) is reported as
   ConsumeIndeterminate. After the proof derives, a final revalidation
   re-checks expiry and the current policy/region/issuer expectations with

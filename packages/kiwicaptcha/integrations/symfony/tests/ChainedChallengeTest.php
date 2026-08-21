@@ -391,6 +391,7 @@ final class ChainedChallengeTest extends TestCase
         $stage1 = $this->solvedStage1($storage);
         $stack = new RequestStack();
         $stack->push(Request::create('/', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7']));
+        $stack->getMainRequest()?->attributes->set(KiwiCaptchaValidator::OPERATION_ID_ATTRIBUTE, 'op-chained-test'); // the replay legs are the explicitly identified idempotent retry
 
         $validator = new KiwiCaptchaValidator(
             new Verifier($storage),
@@ -457,6 +458,7 @@ final class ChainedChallengeTest extends TestCase
         $stage1 = $this->solvedStage1($storage);
         $stack = new RequestStack();
         $stack->push(Request::create('/', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7']));
+        $stack->getMainRequest()?->attributes->set(KiwiCaptchaValidator::OPERATION_ID_ATTRIBUTE, 'op-chained-test'); // the replay legs are the explicitly identified idempotent retry
 
         $validator = new KiwiCaptchaValidator(
             new Verifier($storage),
@@ -521,6 +523,7 @@ final class ChainedChallengeTest extends TestCase
         $stage1 = $this->solvedStage1($storage);
         $stack = new RequestStack();
         $stack->push(Request::create('/', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7']));
+        $stack->getMainRequest()?->attributes->set(KiwiCaptchaValidator::OPERATION_ID_ATTRIBUTE, 'op-chained-test'); // the replay legs are the explicitly identified idempotent retry
 
         $validator = new KiwiCaptchaValidator(
             new Verifier($storage),
@@ -2658,6 +2661,7 @@ final class ChainedChallengeTest extends TestCase
         $stage1 = $this->solvedStage1($storage);
         $stack = new RequestStack();
         $stack->push(Request::create('/', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7']));
+        $stack->getMainRequest()?->attributes->set(KiwiCaptchaValidator::OPERATION_ID_ATTRIBUTE, 'op-chained-test'); // the replay legs are the explicitly identified idempotent retry
         [$violations] = $this->validateWithService($stage1['token'], $stack, $risk['gateway'], $storage, $chainService, resolver: $resolver);
 
         self::assertCount(1, $violations);

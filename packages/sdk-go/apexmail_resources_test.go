@@ -89,7 +89,7 @@ func TestAnalyticsGetBuildsQuery(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create client: %v", err)
 	}
-	response, err := client.Analytics.Get(context.Background(), AnalyticsOptions{GroupBy: "day", Tag: "welcome"})
+	response, err := client.Analytics.Get(context.Background(), AnalyticsOptions{From: "2026-01-01", To: "2026-01-31", GroupBy: "day", Tag: "welcome"})
 	if err != nil {
 		t.Fatalf("get analytics: %v", err)
 	}

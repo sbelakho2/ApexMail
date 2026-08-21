@@ -8,7 +8,7 @@
 // The output lines are ready to paste into a script/link tag:
 //   <script src="https://.../kiwicaptcha/2026-08-r1/widget-driver.js"
 //           integrity="sha384-..." crossorigin="anonymous"></script>
-// See SECURITY.md in this package for the full supply-chain guidance.
+// See `SECURITY.md` in this package for the full supply-chain guidance.
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";

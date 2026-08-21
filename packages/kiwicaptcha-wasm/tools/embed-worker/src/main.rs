@@ -1,8 +1,8 @@
 //! Regenerates the `KIWI_WORKER_SRC` template literal inside
-//! `assets/widget-driver.js` FROM the standalone `assets/kiwi-worker.js`:
+//! `assets/widget-driver.js` from the standalone `assets/kiwi-worker.js`:
 //! kiwi-worker.js is the source of truth; the
 //! driver's embedded copy is machine-generated so the two can never drift
-//! by hand. The tool is part of the PURE-RUST build pipeline — build.sh
+//! by hand. The tool is part of the pure-Rust build pipeline — build.sh
 //! invokes it (--locked) before the solver build.
 //!
 //! ```sh
@@ -10,14 +10,14 @@
 //! cargo run --locked --manifest-path tools/embed-worker/Cargo.toml -- --check    # exit 1 on drift (CI)
 //! ```
 //!
-//! The generated section is delimited by EXPLICIT SENTINEL COMMENTS
+//! The generated section is delimited by explicit sentinel comments
 //! (`KIWI_WORKER_SRC_BEGIN` … `KIWI_WORKER_SRC_END`) in the driver — the
 //! whole span is replaced wholesale, so no JavaScript token parsing (e.g.
 //! the first `` `; `` occurrence) can ever misfire, even if the worker
 //! source legitimately contains a backtick-semicolon sequence. The
 //! embedded literal is escaped for template-literal semantics (backslashes,
 //! backticks, `${`), so the executed bytes are identical to the standalone
-//! file. A closing-script-tag sequence is REJECTED with an ASCII
+//! file. A closing-script-tag sequence is rejected with an ASCII
 //! case-insensitive scan: the driver is inlined into pages by the
 //! renderers, so `</script>` in any casing would terminate the page's
 //! script element.
@@ -65,7 +65,7 @@ fn main() {
         die("widget-driver.js: generated section between the sentinels does not match the KIWI_WORKER_SRC assignment");
     }
 
-    // Replace whole LINES: the generated section spans from the BEGIN
+    // Replace whole lines: the generated section spans from the begin
     // marker line through the END marker line AND its continuation line
     // (the canonical block's shape); the head/tail boundaries land on line
     // starts so nothing is duplicated or dropped, and regeneration is

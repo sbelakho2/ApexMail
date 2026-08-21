@@ -126,26 +126,37 @@ async fn get_session(
                 &validation,
             ) {
                 let claims = token_data.claims;
-                let user_id = claims.sub.clone();
-                if !user_id.is_empty() {
-                    // Check user still exists and is active
-                    let user: Option<(String, String, Option<String>, String)> =
-                            sqlx::query_as(
-                                "SELECT id::text, email, name, role FROM users WHERE id = $1::uuid AND status = 'active'",
-                            )
-                            .bind(&user_id)
-                            .fetch_optional(&state.db)
-                            .await?;
+                // Audit B: stream tokens (typ != "session") must introspect as
+                // UNAUTHENTICATED — the session endpoint used to report any
+                // cryptographically valid JWT as an authenticated user, which
+                // let stream tokens masquerade as sessions for UI gating.
+                if !crate::middleware::auth::claims_typ_is_session(claims.typ.as_deref()) {
+                    tracing::warn!(
+                        token_type = claims.typ.as_deref().unwrap_or("<missing>"),
+                        "session introspection rejected a non-session token"
+                    );
+                } else {
+                    let user_id = claims.sub.clone();
+                    if !user_id.is_empty() {
+                        // Check user still exists and is active
+                        let user: Option<(String, String, Option<String>, String)> =
+                                sqlx::query_as(
+                                    "SELECT id::text, email, name, role FROM users WHERE id = $1::uuid AND status = 'active'",
+                                )
+                                .bind(&user_id)
+                                .fetch_optional(&state.db)
+                                .await?;
 
-                    if let Some((id, email, name, role)) = user {
-                        response.authenticated = true;
-                        response.session_type = Some("user".into());
-                        response.user = Some(serde_json::json!({
-                            "id": id,
-                            "email": email,
-                            "name": name,
-                            "role": role,
-                        }));
+                        if let Some((id, email, name, role)) = user {
+                            response.authenticated = true;
+                            response.session_type = Some("user".into());
+                            response.user = Some(serde_json::json!({
+                                "id": id,
+                                "email": email,
+                                "name": name,
+                                "role": role,
+                            }));
+                        }
                     }
                 }
             }

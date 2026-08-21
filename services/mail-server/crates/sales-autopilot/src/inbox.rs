@@ -62,8 +62,19 @@ impl InboxManager {
         let s = subject.to_lowercase();
         let f = from.to_lowercase();
 
+        // Fix I-5: opt-out requests are classified as Unsubscribe and must be
+        // handled with priority (CAN-SPAM) — they previously matched the spam
+        // keyword heuristic below and were buried as Spam.
         if s.contains("unsubscribe")
-            || s.contains("viagra")
+            || s.contains("remove me")
+            || s.contains("take me off")
+            || s.contains("stop emailing")
+            || s.contains("opt out")
+            || s.contains("opt-out")
+        {
+            return MessageCategory::Unsubscribe;
+        }
+        if s.contains("viagra")
             || s.contains("lottery")
             || f.contains("noreply")
         {

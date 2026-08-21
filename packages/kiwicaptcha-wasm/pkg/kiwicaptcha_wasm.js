@@ -37,7 +37,7 @@ export function alloc(len) {
 }
 
 /**
- * Free a buffer previously returned by [`alloc`].
+ * Free a buffer returned by [`alloc`].
  *
  * `len` must match the allocation size **exactly** (it is the length passed
  * to [`alloc`]); the same `Layout::from_size_align(len, 8)` is rebuilt so
@@ -102,6 +102,26 @@ export function solve_argon2_chunk(prefix_ptr, prefix_len, salt_ptr, salt_len, t
 export function solve_sha256_chunk(prefix_ptr, prefix_len, salt_ptr, salt_len, target_bits, start_counter, chunk_size) {
     const ret = wasm.solve_sha256_chunk(prefix_ptr, prefix_len, salt_ptr, salt_len, target_bits, start_counter, chunk_size);
     return ret;
+}
+
+/**
+ * The solver PROTOCOL/ABI VERSION (an integer is the
+ * clean primitive at the raw wasm-bindgen ABI boundary, where a String
+ * return surfaces as a [ptr, len] tuple). The runtime handshake uses it
+ * ONLY to prove that the driver, the worker and the WASM glue speak the
+ * same protocol generation; it is NOT an exact-artifact identity. Exact
+ * byte identity is guaranteed by the release system: tag + SHA256SUMS +
+ * SRI.txt + SLSA attestation.
+ *
+ * This value MUST equal `KIWI_SOLVER_PROTOCOL_VERSION` in
+ * `assets/kiwi-worker.js` — the worker verifies the loaded wasm's
+ * exported value against its constant BEFORE sending `ready`, so a
+ * mismatch fails closed instead of solving with a mismatched pair.
+ * @returns {number}
+ */
+export function solver_protocol_version() {
+    const ret = wasm.solver_protocol_version();
+    return ret >>> 0;
 }
 function __wbg_get_imports() {
     const import0 = {

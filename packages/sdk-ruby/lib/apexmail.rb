@@ -13,12 +13,13 @@
 #     subject: "Hello!",
 #     html:    "<h1>Hello World</h1>"
 #   )
-#   puts response[:message][:id]
+#   puts response[:id]
 
 require "net/http"
 require "uri"
 require "json"
 require "openssl"
+require "securerandom"
 require "time"
 
 module ApexMail
@@ -104,23 +105,27 @@ module ApexMail
     INITIAL_BACKOFF = 0.5
     MAX_BACKOFF = 5.0
     JITTER_MAX = 1.0
+    # Upper bound for the delay between retries. The server's Retry-After
+    # header is honored in full up to this cap (SDK-F: was capped at
+    # MAX_BACKOFF, silently truncating long rate-limit windows).
+    MAX_RETRY_AFTER = 120.0
 
-    def initialize(api_key:, base_url:, open_timeout:, read_timeout:, max_response_bytes:)
+    # @param sleeper     [#call] Test seam: object called with the delay in
+    #                            seconds instead of Kernel#sleep.
+    # @param http_factory [#call] Test seam: returns an object that quacks like
+    #                            Net::HTTP (start/request). Defaults to building
+    #                            a fresh Net::HTTP per request (no shared
+    #                            connection, so no cross-thread mutex needed).
+    def initialize(api_key:, base_url:, open_timeout:, read_timeout:, max_response_bytes:,
+                   sleeper: nil, http_factory: nil)
       @api_key      = api_key
       @base_uri     = URI.parse(base_url)
       raise ArgumentError, "baseUrl must use HTTPS" unless @base_uri.scheme == "https"
       @open_timeout = open_timeout
       @read_timeout = read_timeout
       @max_response_bytes = max_response_bytes
-      @mutex = Mutex.new
-      @http = Net::HTTP.new(@base_uri.host, @base_uri.port)
-      @http.use_ssl = @base_uri.scheme == "https"
-      @http.verify_mode = OpenSSL::SSL::VERIFY_PEER if @http.use_ssl?
-      @http.open_timeout = @open_timeout
-      @http.read_timeout = @read_timeout
-      @keep_alive_timeout = 30
-      @http.keep_alive_timeout = @keep_alive_timeout
-      @last_used_at = nil
+      @sleeper      = sleeper || ->(seconds) { sleep(seconds) }
+      @http_factory = http_factory || method(:build_http)
     end
 
     def request(method, path, body: nil, idempotency_key: nil)
@@ -128,38 +133,34 @@ module ApexMail
 
       loop do
         begin
-          resp = @mutex.synchronize do
-            ensure_connection
-            uri = URI.parse("#{@base_uri}#{path}")
-            req = build_request(method, uri, body, idempotency_key)
-            response_body = +""
-            resp = @http.request(req) do |response|
+          # Fresh connection per request (SDK-G L11): a single shared
+          # Net::HTTP guarded by a Mutex serialized all concurrent requests.
+          http = @http_factory.call
+          uri = URI.parse("#{@base_uri}#{path}")
+          req = build_request(method, uri, body, idempotency_key)
+          response_body = +""
+          resp = http.start do |session|
+            session.request(req) do |response|
               response.read_body do |chunk|
                 response_body << chunk
                 if response_body.bytesize > @max_response_bytes
-                  reset_connection
                   raise Error.new("Response body exceeds max_response_bytes",
                                   status_code: response.code.to_i)
                 end
               end
             end
-            @last_used_at = Time.now
-            [resp, response_body]
           end
 
-          resp, response_body = resp
-
           if retryable_status?(resp.code.to_i) && attempt < MAX_RETRIES
-            sleep(retry_delay(resp, attempt))
+            @sleeper.call(retry_delay(resp, attempt))
             attempt += 1
             next
           end
 
           return handle_response(resp, response_body)
         rescue IOError, EOFError, Timeout::Error, Errno::ECONNRESET, Errno::ECONNREFUSED, SocketError, OpenSSL::SSL::SSLError => e
-          @mutex.synchronize { reset_connection }
           if attempt < MAX_RETRIES
-            sleep(backoff(attempt))
+            @sleeper.call(backoff(attempt))
             attempt += 1
             next
           end
@@ -170,6 +171,15 @@ module ApexMail
 
     private
 
+    def build_http
+      http = Net::HTTP.new(@base_uri.host, @base_uri.port)
+      http.use_ssl = @base_uri.scheme == "https"
+      http.verify_mode = OpenSSL::SSL::VERIFY_PEER if http.use_ssl?
+      http.open_timeout = @open_timeout
+      http.read_timeout = @read_timeout
+      http
+    end
+
     def build_request(method, uri, body, idempotency_key)
       klass = {
         "GET"    => Net::HTTP::Get,
@@ -178,7 +188,9 @@ module ApexMail
         "DELETE" => Net::HTTP::Delete,
       }.fetch(method.upcase) { raise ArgumentError, "Unsupported HTTP method: #{method}" }
 
-      req = klass.new(uri.path.empty? ? "/" : uri.full_path)
+      # Use the raw path (which may include a query string) — URI::HTTP no
+      # longer exposes full_path/request_uri on modern Ruby versions.
+      req = klass.new(uri.path.empty? ? "/" : "#{uri.path}#{uri.query ? "?#{uri.query}" : ''}")
       req["X-API-Key"]      = @api_key
       req["Content-Type"]    = "application/json"
       req["User-Agent"]      = "apexmail-ruby/#{SDK_VERSION}"
@@ -187,42 +199,32 @@ module ApexMail
       req
     end
 
-    def ensure_connection
-      if @http.started? && @last_used_at && (Time.now - @last_used_at) > @keep_alive_timeout
-        reset_connection
-      end
-      @http.start unless @http.started?
-    end
-
-    def reset_connection
-      @http.finish if @http.started?
-    end
-
     def retryable_status?(status)
       status == 429 || status >= 500
     end
 
+    # Delay before the next retry: max(quadratic backoff, Retry-After),
+    # capped at MAX_RETRY_AFTER (120s).
     def retry_delay(resp, attempt)
-      retry_after = resp["Retry-After"]
       delay = backoff(attempt)
+      retry_after = parse_retry_after(resp["Retry-After"])
+      delay = retry_after if retry_after && retry_after > delay
 
-      if retry_after
-        seconds = Integer(retry_after, exception: false)
-        if seconds
-          retry_after_delay = seconds.to_f
-          delay = retry_after_delay if retry_after_delay > delay
-          return [delay, MAX_BACKOFF].min
-        end
+      [delay, MAX_RETRY_AFTER].min
+    end
 
-        begin
-          date = Time.httpdate(retry_after)
-          retry_after_delay = [date - Time.now, 0].max
-          delay = retry_after_delay if retry_after_delay > delay
-        rescue ArgumentError, TypeError
-        end
+    def parse_retry_after(value)
+      return nil if value.nil? || value.empty?
+
+      seconds = Integer(value, exception: false)
+      return seconds.to_f if seconds
+
+      begin
+        date = Time.httpdate(value)
+        [date - Time.now, 0].max
+      rescue ArgumentError, TypeError
+        nil
       end
-
-      [delay, MAX_BACKOFF].min
     end
 
     def backoff(attempt)
@@ -239,21 +241,27 @@ module ApexMail
                  JSON.parse(body_text, symbolize_names: true)
                end
 
-      error = parsed[:error]
-      if error.is_a?(Hash)
-        message = error[:message] || body_text
-        code = error[:code]
-        details = error[:details]
-      else
-        message = error || parsed[:message] || body_text
-        code = parsed[:code]
-        details = parsed[:errors]
-      end
-      message = "HTTP #{resp.code}" if message.to_s.empty?
+      # SDK-G L9: the body may be a top-level JSON array (e.g. some list
+      # endpoints); only treat it as an error envelope when it is a Hash.
+      if parsed.is_a?(Hash)
+        error = parsed[:error]
+        if error.is_a?(Hash)
+          message = error[:message] || body_text
+          code = error[:code]
+          details = error[:details]
+        else
+          message = error || parsed[:message] || body_text
+          code = parsed[:code]
+          details = parsed[:errors]
+        end
+        message = "HTTP #{resp.code}" if message.to_s.empty?
 
-      # SDK-111: Unwrap API envelope {"data": ..., "meta": ...}
-      if parsed.is_a?(Hash) && parsed.key?(:data)
-        parsed = parsed[:data]
+        # SDK-111: Unwrap API envelope {"data": ..., "meta": ...}
+        parsed = parsed[:data] if parsed.key?(:data)
+      else
+        message = body_text
+        code = nil
+        details = nil
       end
 
       case resp.code.to_i
@@ -283,7 +291,14 @@ module ApexMail
                         status_code: resp.code.to_i, code: code, details: details)
       end
     rescue JSON::ParserError => e
-      { raw: body_text, parse_error: e.message }
+      # SDK-A (critical): a non-JSON body (e.g. an HTML 502 page from a proxy)
+      # must raise — previously it was rescued and returned as a success hash
+      # like {raw:, parse_error:}.
+      raise Error.new(
+        "Invalid JSON response from API (HTTP #{resp.code}): #{e.message}",
+        status_code: resp.code.to_i, code: "PARSE_ERROR",
+        details: { raw_body: body_text[0, 500] }
+      )
     end
   end
 
@@ -357,7 +372,9 @@ module ApexMail
     # @option options [String]  :priority  ("high" | "normal" | "low")
     # @option options [String]  :scheduled_at  ISO 8601 datetime
     # @option options [String]  :idempotency_key
-    # @return [Hash]
+    # @return [Hash] The API response: {id:, status:, created_at:}. An
+    #   idempotency key is generated automatically when not supplied so that
+    #   transport-level retries can never cause a duplicate send (SDK-B).
     def send_email(from:, to:, subject:, html: nil, text: nil, **options)
       raise ArgumentError, '"from" is required' if from.nil?
       raise ArgumentError, '"to" is required' if to.nil?
@@ -371,7 +388,9 @@ module ApexMail
       validate_recipients(options[:cc], 'cc') if options[:cc]
       validate_recipients(options[:bcc], 'bcc') if options[:bcc]
 
-      idempotency_key = options.delete(:idempotency_key)
+      # SDK-B: automatic idempotency key (caller-supplied key wins) so a
+      # retried POST can never enqueue the same message twice.
+      idempotency_key = options.delete(:idempotency_key) || SecureRandom.uuid
       body = compact({
         from:         normalize_address(from),
         to:           normalize_recipients(to),
@@ -395,8 +414,11 @@ module ApexMail
     # Send up to 1,000 emails in one request.
     #
     # @param messages [Array<Hash>] Array of send parameters (same keys as #send)
-    # @return [Hash]
-    def batch(messages:)
+    # @param idempotency_key [String, nil] Optional caller-supplied key; a
+    #   random UUID is generated when omitted (SDK-B).
+    # @return [Hash] The API response: {accepted:, rejected:, results: [{index,
+    #   id?, status, error?}]}
+    def batch(messages:, idempotency_key: nil)
       list = Array(messages)
       raise ArgumentError, 'messages must include at least one item' if list.empty?
 
@@ -408,7 +430,7 @@ module ApexMail
       end
       @t.request("POST", "/v1/messages/batch", body: {
         messages: list.map { |m| normalize_send_params(m) },
-      })
+      }, idempotency_key: idempotency_key || SecureRandom.uuid)
     end
 
     # Retrieve an email by ID.

@@ -41,7 +41,7 @@ public class Main {
             "html", "<h1>Hello World</h1><p>Your email was sent successfully.</p>"
         ));
 
-        System.out.println("Email sent! ID: " + response.message().id());
+        System.out.println("Email sent! ID: " + response.id());
     }
 }
 ```

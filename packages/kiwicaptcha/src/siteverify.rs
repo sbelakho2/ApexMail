@@ -63,6 +63,9 @@ pub fn siteverify_response(
 /// semantics are decided here:
 /// - `Expired` — an already-validated token past its lifetime:
 ///   `timeout-or-duplicate`;
+/// - `AlreadyConsumed` — a proven-duplicate use of a retained token whose
+///   success is not replayable for this caller: `timeout-or-duplicate`
+///   (the provider duplicate vocabulary);
 /// - retryable SERVER-side conditions (`StorageUnavailable`,
 ///   `ConsumeIndeterminate`, `CapacityExceeded`, `AdmissionUnavailable`):
 ///   `internal-error`. `ConsumeIndeterminate` is retryable in a mapper
@@ -71,13 +74,14 @@ pub fn siteverify_response(
 ///   retries, and a non-idempotent caller treats the token as unknown;
 /// - everything else — an invalid solution, challenge, or identity
 ///   (`BadSignature`, `TooFast`, `IpMismatch`, `MissingClientIp`,
-///   `CounterTooLarge`, `WrongScope`, `WrongRegion`, `WrongIssuer`,
-///   `WrongPolicyVersion`, `UnknownKid`, `TooManyAttempts`,
-///   `InsufficientWork`, `MalformedRecord`, `BotDetected`,
-///   `MalformedToken`, `RecordNotFound`): `invalid-input-response`.
+///   `CounterTooLarge`, `WrongScope`, `RequestBindingMismatch`,
+///   `WrongRegion`, `WrongIssuer`, `WrongPolicyVersion`, `UnknownKid`,
+///   `TooManyAttempts`, `InsufficientWork`, `MalformedRecord`,
+///   `BotDetected`, `MalformedToken`, `RecordNotFound`):
+///   `invalid-input-response`.
 fn map_error(reason: &VerifyError) -> String {
     match reason {
-        VerifyError::Expired => "timeout-or-duplicate".into(),
+        VerifyError::Expired | VerifyError::AlreadyConsumed => "timeout-or-duplicate".into(),
         VerifyError::StorageUnavailable
         | VerifyError::ConsumeIndeterminate
         | VerifyError::CapacityExceeded
@@ -88,6 +92,7 @@ fn map_error(reason: &VerifyError) -> String {
         | VerifyError::MissingClientIp
         | VerifyError::CounterTooLarge
         | VerifyError::WrongScope
+        | VerifyError::RequestBindingMismatch
         | VerifyError::WrongRegion
         | VerifyError::WrongIssuer
         | VerifyError::WrongPolicyVersion
@@ -147,8 +152,11 @@ mod tests {
     #[test]
     fn maps_every_core_reason_to_its_exact_provider_code() {
         let cases: &[(VerifyError, &str)] = &[
-            // Already-validated token past its lifetime.
+            // Already-validated token past its lifetime, or a proven
+            // duplicate whose retained success is not replayable for this
+            // caller.
             (VerifyError::Expired, "timeout-or-duplicate"),
+            (VerifyError::AlreadyConsumed, "timeout-or-duplicate"),
             // Retryable server-side conditions (no proven-duplicate
             // context in a mapper).
             (VerifyError::StorageUnavailable, "internal-error"),
@@ -162,6 +170,10 @@ mod tests {
             (VerifyError::MissingClientIp, "invalid-input-response"),
             (VerifyError::CounterTooLarge, "invalid-input-response"),
             (VerifyError::WrongScope, "invalid-input-response"),
+            (
+                VerifyError::RequestBindingMismatch,
+                "invalid-input-response",
+            ),
             (VerifyError::WrongRegion, "invalid-input-response"),
             (VerifyError::WrongIssuer, "invalid-input-response"),
             (VerifyError::WrongPolicyVersion, "invalid-input-response"),
@@ -175,7 +187,7 @@ mod tests {
         ];
         assert_eq!(
             cases.len(),
-            21,
+            23,
             "the table must cover EVERY VerifyError variant"
         );
         for (reason, expected) in cases {
@@ -219,6 +231,7 @@ mod tests {
             &VerifyOutcome::Valid {
                 nonce: "n".into(),
                 request_binding: None,
+                from_stored_result: false,
             },
             Some(&record),
         );

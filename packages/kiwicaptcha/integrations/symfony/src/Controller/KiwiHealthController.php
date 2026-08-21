@@ -26,7 +26,7 @@ use Symfony\Component\HttpFoundation\Response;
  *         state), and two consecutive failures flip readiness. Argon
  *         queue fullness is never consulted.
  *      3. the central security-policy state is compatible: the Redis key
- *         `{kiwi:<ns>}:security-policy` (a HASH with
+ *         `{kiwi:<ns>}:security-policy` (a hash with
  *         `min_protocol_version` and `min_policy_epoch`). When the key is
  *         present, ready requires min_protocol_version <= 2 (this
  *         binary's max protocol version) and min_policy_epoch <= the
@@ -160,8 +160,8 @@ final class KiwiHealthController
 
     /**
      * The memory-budget readiness invariant:
-     * `max(1, argon_concurrency) x MAX_PROFILE_MIB + MEMORY_HEADROOM_MIB
-     * <= container_memory_mib`. True when the budget is null (the check is
+     * `max(1, argon_concurrency)` x `MAX_PROFILE_MIB` + `MEMORY_HEADROOM_MIB`
+     * `<= container_memory_mib`. True when the budget is null (the check is
      * skipped and documented) or the budget is large enough. A container
      * that cannot hold the worst-case verification memory load must not
      * serve traffic, since OOM in the middle of a memory-hard hash is a
@@ -222,7 +222,7 @@ final class KiwiHealthController
         $ok = false;
         try {
             $result = $this->redis->ping();
-            // phpredis: true; Predis: the 'PONG' Status response object.
+            // phpredis: true; Predis: the `PONG` Status response object.
             $ok = $result === true || (string) $result === 'PONG';
         } catch (\Throwable) {
             $ok = false;

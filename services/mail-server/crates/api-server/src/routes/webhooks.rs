@@ -8,6 +8,7 @@ use axum::{Json, Router};
 use chrono::{DateTime, Utc};
 use mail_common::{is_localhost, is_private_or_reserved_host};
 use serde::{Deserialize, Serialize};
+use std::net::SocketAddr;
 use url::Url;
 use uuid::Uuid;
 
@@ -81,9 +82,23 @@ pub struct ListWebhooksQuery {
 
 // ─── Validation ────────────────────────────────────────────────
 
-/// Validate webhook URL format and security requirements.
-/// Requires HTTPS (or HTTP for localhost in development).
-fn validate_webhook_url(url_str: &str) -> Result<(), String> {
+/// Env var that explicitly re-enables plain-HTTP loopback webhook targets for
+/// local development (audit F). Defaults to OFF — the previous unconditional
+/// localhost/127.0.0.1/::1 HTTP exemption let any authenticated tenant
+/// register an SSRF probe against services bound to the host's loopback.
+const ALLOW_LOCALHOST_WEBHOOKS_ENV: &str = "APEXMAIL_ALLOW_LOCALHOST_WEBHOOKS";
+
+fn localhost_webhooks_allowed() -> bool {
+    std::env::var(ALLOW_LOCALHOST_WEBHOOKS_ENV).is_ok_and(|value| value == "true")
+}
+
+/// Validate webhook URL format and security requirements (parameterised for
+/// testability — [`validate_webhook_url`] reads the env override).
+///
+/// Requires HTTPS (plain HTTP is only accepted for loopback hosts when
+/// `APEXMAIL_ALLOW_LOCALHOST_WEBHOOKS=true`), and rejects private/reserved
+/// hosts unless that same explicit override is set for a loopback target.
+fn validate_webhook_url_with(url_str: &str, allow_localhost: bool) -> Result<(), String> {
     let url = Url::parse(url_str).map_err(|e| format!("invalid URL: {}", e))?;
 
     let scheme = url.scheme();
@@ -91,19 +106,81 @@ fn validate_webhook_url(url_str: &str) -> Result<(), String> {
 
     // Require HTTPS for production URLs
     if scheme == "http" {
-        // Allow HTTP only for localhost/development
-        if host != "localhost" && host != "127.0.0.1" && host != "::1" {
-            return Err("webhook URL must use HTTPS for non-local hosts".into());
+        // Plain HTTP is only ever allowed for localhost/development targets
+        // AND only when the explicit env override is set (audit F).
+        if !(allow_localhost && is_localhost(host)) {
+            return Err("webhook URL must use HTTPS".into());
         }
     } else if scheme != "https" {
         return Err(format!("invalid URL scheme: {}, must be https", scheme));
     }
 
-    if !is_localhost(host) && is_private_or_reserved_host(host) {
+    // Loopback hosts bypass the private-range rejection ONLY under the same
+    // explicit override; every other private/reserved/metadata target is
+    // always rejected.
+    let loopback_exempt = allow_localhost && is_localhost(host);
+    if !loopback_exempt && is_private_or_reserved_host(host) {
         return Err("webhook URL cannot point to private or reserved addresses".into());
     }
 
     Ok(())
+}
+
+/// Validate webhook URL format and security requirements.
+/// Requires HTTPS (or HTTP for loopback hosts when
+/// `APEXMAIL_ALLOW_LOCALHOST_WEBHOOKS=true` is explicitly set).
+fn validate_webhook_url(url_str: &str) -> Result<(), String> {
+    validate_webhook_url_with(url_str, localhost_webhooks_allowed())
+}
+
+/// Filter resolved addresses down to those safe to dial (audit F).
+///
+/// Returns the first safe address to pin the connection to, rejecting the
+/// whole resolution set if ANY address is private/reserved (an attacker
+/// controlling DNS can mix public and private A records — rejecting the set,
+/// not skipping the bad entry, prevents partial-rebinding tricks).
+/// Loopback targets are tolerated only under the explicit dev override.
+fn select_pinned_addr(
+    addrs: &[SocketAddr],
+    allow_loopback: bool,
+) -> Result<SocketAddr, String> {
+    if addrs.is_empty() {
+        return Err("webhook URL could not be resolved to any IP address".into());
+    }
+    for addr in addrs {
+        let ip_str = addr.ip().to_string();
+        if is_private_or_reserved_host(&ip_str) {
+            if allow_loopback && addr.ip().is_loopback() {
+                continue;
+            }
+            return Err(
+                "webhook URL resolves to a private IP address (possible DNS rebinding)".into(),
+            );
+        }
+    }
+    // First non-loopback address when the override is on, else the first addr.
+    Ok(*addrs
+        .iter()
+        .find(|addr| !addr.ip().is_loopback())
+        .unwrap_or(&addrs[0]))
+}
+
+/// Build the dedicated webhook delivery client (audit F): DNS-pinned to the
+/// validated addresses and with redirects DISABLED — the shared
+/// `state.http_client` follows redirects, so a webhook endpoint replying
+/// `302 → http://169.254.169.254/...` would turn the validated delivery into
+/// an SSRF hop to internal services.
+fn webhook_delivery_client(
+    host: &str,
+    safe_addrs: &[SocketAddr],
+) -> Result<reqwest::Client, String> {
+    let mut builder = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(std::time::Duration::from_secs(10));
+    if !safe_addrs.is_empty() {
+        builder = builder.resolve_to_addrs(host, safe_addrs);
+    }
+    builder.build().map_err(|e| format!("failed to build webhook client: {e}"))
 }
 
 // ─── Handlers ──────────────────────────────────────────────────
@@ -298,46 +375,34 @@ async fn test_webhook(
         )));
     }
 
-    // RS-058: SSRF protection — resolve DNS and verify IP is not private/internal
-    // BEFORE making the HTTP request. Use the resolved IP directly to prevent
-    // DNS rebinding (TOCTOU) attacks between resolution and connection.
+    // RS-058 + audit F: SSRF protection — resolve DNS and verify every IP is
+    // public BEFORE making the HTTP request, then PIN the connection to the
+    // validated addresses. The previous code validated `safe_addrs` and then
+    // threw them away, posting to the hostname again via the shared client —
+    // a classic DNS-rebinding TOCTOU (the comment claimed pinning that never
+    // happened). The dedicated client also disables redirect following so a
+    // `302 → http://169.254.169.254/` reply cannot pivot the validated
+    // delivery to internal services.
     let url = Url::parse(&wh.url).map_err(|e| ApiError::BadRequest(format!("invalid URL: {e}")))?;
-    if let Some(host) = url.host_str() {
-        // Skip DNS check for localhost in dev
-        if host != "localhost" && host != "127.0.0.1" && host != "::1" {
-            let target_port = url.port_or_known_default().unwrap_or(443);
-            // Resolve DNS and check all returned IPs
-            match tokio::net::lookup_host(format!("{host}:{target_port}")).await {
-                Ok(addrs) => {
-                    let mut safe_addrs = Vec::new();
-                    for addr in addrs {
-                        let ip_str = addr.ip().to_string();
-                        if is_private_or_reserved_host(&ip_str) {
-                            return Err(ApiError::BadRequest(
-                                "webhook URL resolves to a private IP address (possible DNS rebinding)"
-                                    .into(),
-                            ));
-                        }
-                        safe_addrs.push(addr);
-                    }
-                    if safe_addrs.is_empty() {
-                        return Err(ApiError::BadRequest(
-                            "webhook URL could not be resolved to any IP address".into(),
-                        ));
-                    }
-                }
-                Err(e) => {
-                    return Err(ApiError::BadRequest(format!(
-                        "failed to resolve webhook URL host: {e}"
-                    )));
-                }
-            }
-        }
-    }
+    let host = url
+        .host_str()
+        .ok_or_else(|| ApiError::BadRequest("webhook URL has no host".into()))?
+        .to_string();
+
+    let allow_loopback = localhost_webhooks_allowed() && is_localhost(&host);
+    let target_port = url.port_or_known_default().unwrap_or(443);
+    let addrs: Vec<SocketAddr> = tokio::net::lookup_host(format!("{host}:{target_port}"))
+        .await
+        .map_err(|e| ApiError::BadRequest(format!("failed to resolve webhook URL host: {e}")))?
+        .collect();
+
+    // Reject the whole resolution set if any address is private/reserved;
+    // returns the address to pin (first public one).
+    let _pinned = select_pinned_addr(&addrs, allow_loopback).map_err(ApiError::BadRequest)?;
+
+    let client = webhook_delivery_client(&host, &addrs).map_err(ApiError::BadRequest)?;
 
     let timeout = std::time::Duration::from_millis(state.config.webhook_timeout_ms);
-
-    let client = state.http_client.clone();
 
     let payload = serde_json::json!({
         "type": "test",
@@ -517,13 +582,170 @@ mod tests {
 
     #[test]
     fn test_validate_webhook_url_allows_explicit_localhost_http() {
-        assert!(validate_webhook_url("http://localhost:3000/hook").is_ok());
-        assert!(validate_webhook_url("http://127.0.0.1:3000/hook").is_ok());
+        // NOTE (audit F): this test previously asserted that loopback HTTP
+        // URLs are accepted unconditionally. That exemption let any
+        // authenticated tenant point a webhook at services bound to the
+        // host's loopback (SSRF). Loopback HTTP is now only allowed when
+        // APEXMAIL_ALLOW_LOCALHOST_WEBHOOKS=true is explicitly set.
+        assert!(validate_webhook_url_with("http://localhost:3000/hook", true).is_ok());
+        assert!(validate_webhook_url_with("http://127.0.0.1:3000/hook", true).is_ok());
+        // Without the override, loopback HTTP (and HTTPS) targets are rejected.
+        assert!(validate_webhook_url_with("http://localhost:3000/hook", false).is_err());
+        assert!(validate_webhook_url_with("http://127.0.0.1:3000/hook", false).is_err());
+        assert!(validate_webhook_url_with("https://localhost:3000/hook", false).is_err());
+        assert!(validate_webhook_url_with("https://[::1]/hook", false).is_err());
+        // The override only ever applies to loopback — other private ranges
+        // stay blocked even with the flag on.
+        assert!(validate_webhook_url_with("http://10.0.0.5/hook", true).is_err());
+        assert!(validate_webhook_url_with("https://192.168.1.10/hook", true).is_err());
+        assert!(validate_webhook_url_with("https://169.254.169.254/hook", true).is_err());
     }
 
     #[test]
     fn test_validate_webhook_url_blocks_ipv6_link_local_targets() {
         let error = validate_webhook_url("https://[fe80::1]/hook").unwrap_err();
         assert!(error.contains("private or reserved addresses"));
+    }
+
+    #[test]
+    fn test_validate_webhook_url_blocks_private_and_metadata_targets() {
+        for url in [
+            "https://10.0.0.1/hook",
+            "https://192.168.0.1/hook",
+            "https://172.16.5.5/hook",
+            "https://169.254.169.254/latest/meta-data",
+            "https://metadata.google.internal/hook",
+            "https://printer.local/hook",
+            "https://service.internal/hook",
+        ] {
+            assert!(
+                validate_webhook_url(url).is_err(),
+                "{url} must be rejected as an SSRF target"
+            );
+        }
+        // Public HTTPS endpoints are accepted.
+        assert!(validate_webhook_url("https://hooks.example.com/endpoint").is_ok());
+        // Non-HTTP(s) schemes are rejected.
+        assert!(validate_webhook_url("file:///etc/passwd").is_err());
+        assert!(validate_webhook_url("gopher://127.0.0.1:6379/_INFO").is_err());
+        // Plain HTTP to a public host is rejected without the override.
+        assert!(validate_webhook_url("http://hooks.example.com/endpoint").is_err());
+    }
+
+    // ── DNS rebinding pin selection (audit F) ────────────────────
+
+    fn socket_addr(ip: &str, port: u16) -> SocketAddr {
+        format!("{ip}:{port}")
+            .parse()
+            .expect("test address must parse")
+    }
+
+    #[test]
+    fn test_select_pinned_addr_rejects_any_private_address_in_resolution_set() {
+        // Rebinding simulation: the hostname resolves to a public IP AND a
+        // private IP (attacker-controlled DNS mixing records). The whole set
+        // must be rejected — skipping only the private entry still lets the
+        // connection race between records.
+        let mixed = vec![
+            socket_addr("93.184.216.34", 443),
+            socket_addr("192.168.1.10", 443),
+        ];
+        let error = select_pinned_addr(&mixed, false).unwrap_err();
+        assert!(error.contains("DNS rebinding"), "unexpected error: {error}");
+
+        // Metadata endpoint in the resolution set.
+        let metadata = vec![
+            socket_addr("93.184.216.34", 443),
+            socket_addr("169.254.169.254", 443),
+        ];
+        assert!(select_pinned_addr(&metadata, false).is_err());
+
+        // All-public resolution pins the first address.
+        let public = vec![
+            socket_addr("93.184.216.34", 443),
+            socket_addr("104.16.132.229", 443),
+        ];
+        let pinned = select_pinned_addr(&public, false).expect("public addrs must pin");
+        assert_eq!(pinned, socket_addr("93.184.216.34", 443));
+
+        // Empty resolution is an error, not a panic or silent pass.
+        assert!(select_pinned_addr(&[], false).is_err());
+    }
+
+    #[test]
+    fn test_select_pinned_addr_loopback_only_under_override() {
+        let loopback = vec![socket_addr("127.0.0.1", 8080)];
+        assert!(select_pinned_addr(&loopback, false).is_err());
+        assert_eq!(
+            select_pinned_addr(&loopback, true).unwrap(),
+            socket_addr("127.0.0.1", 8080)
+        );
+
+        // Even with the override, non-loopback private addresses reject the set.
+        let mixed = vec![
+            socket_addr("127.0.0.1", 8080),
+            socket_addr("10.0.0.5", 8080),
+        ];
+        assert!(select_pinned_addr(&mixed, true).is_err());
+    }
+
+    /// Audit F: webhook delivery must not follow redirects — a webhook
+    /// endpoint replying `302 → http://127.0.0.1:1/metadata` must surface as
+    /// the 302 itself, never issue the second hop.
+    #[tokio::test]
+    async fn webhook_test_delivery_does_not_follow_redirects() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("failed to bind ephemeral test listener");
+        let port = listener.local_addr().unwrap().port();
+        let hits = std::sync::Arc::new(AtomicUsize::new(0));
+        let hits_clone = hits.clone();
+
+        let server = tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            while let Ok((mut sock, _)) = listener.accept().await {
+                hits_clone.fetch_add(1, Ordering::SeqCst);
+                let mut buf = [0u8; 4096];
+                let _ = sock.read(&mut buf).await;
+                // 302 pointing at an "internal" target that must never be dialed.
+                let _ = sock
+                    .write_all(
+                        b"HTTP/1.1 302 Found\r\n\
+                          Location: http://127.0.0.1:1/metadata\r\n\
+                          Content-Length: 0\r\n\
+                          Connection: close\r\n\r\n",
+                    )
+                    .await;
+                let _ = sock.shutdown().await;
+            }
+        });
+
+        let addrs = vec![SocketAddr::from(([127, 0, 0, 1], port))];
+        let client = webhook_delivery_client("127.0.0.1", &addrs)
+            .expect("failed to build pinned no-redirect client");
+
+        let response = client
+            .post(format!("http://127.0.0.1:{port}/hook"))
+            .timeout(std::time::Duration::from_secs(5))
+            .json(&serde_json::json!({"type": "test"}))
+            .send()
+            .await
+            .expect("pinned request must reach the local test server");
+
+        assert_eq!(
+            response.status().as_u16(),
+            302,
+            "the redirect itself must be surfaced, not followed"
+        );
+
+        server.abort();
+        let _ = server.await;
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            1,
+            "exactly one hop — the Location target must never be requested"
+        );
     }
 }

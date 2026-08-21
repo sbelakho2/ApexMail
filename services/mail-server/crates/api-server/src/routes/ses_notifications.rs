@@ -27,6 +27,9 @@ use rsa::RsaPublicKey;
 use serde::Deserialize;
 use sha1::Sha1;
 use sha2::Sha256;
+use std::collections::HashMap;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 use tracing::{debug, error, info, warn};
 use x509_parser::certificate::X509Certificate;
 use x509_parser::pem::parse_x509_pem;
@@ -190,23 +193,32 @@ async fn handle_sns_notification(
     // for the same SES message). Previously the key used only message_id,
     // which could cause a bounce to be incorrectly deduplicated if a delivery
     // notification with the same SNS message_id arrived first.
+    //
+    // Audit G(3): a Redis error used to be coerced to `false` ("duplicate")
+    // which acknowledged the notification with 200 OK — permanently losing
+    // the event (SNS treats 200 as delivered and never retries). On Redis
+    // failure we now return 5xx so SNS retries the delivery.
     let notification_type = sns_msg.message_type.as_str();
     if let Some(msg_id) = &sns_msg.message_id {
         let dedup_key = format!("apexmail:dedup:sns:{}:{}", msg_id, notification_type);
         let ttl_secs = 300; // 5 minutes — SNS retries within a few minutes at most.
-        let is_new: bool = redis::cmd("SET")
+        let mut conn = state.redis.get().await.map_err(|e| {
+            warn!(error = %e, "Failed to acquire redis for SNS dedup");
+            ApiError::ServiceUnavailable("Redis unavailable".into())
+        })?;
+        let is_new: Option<String> = redis::cmd("SET")
             .arg(&dedup_key)
             .arg("1")
             .arg("NX")
             .arg("EX")
             .arg(ttl_secs)
-            .query_async(&mut state.redis.get().await.map_err(|e| {
-                warn!(error = %e, "Failed to acquire redis for SNS dedup");
-                ApiError::ServiceUnavailable("Redis unavailable".into())
-            })?)
+            .query_async(&mut *conn)
             .await
-            .unwrap_or(false);
-        if !is_new {
+            .map_err(|e| {
+                warn!(error = %e, "Redis SET NX failed for SNS dedup — returning 5xx so SNS retries");
+                ApiError::ServiceUnavailable("Redis unavailable".into())
+            })?;
+        if is_new.is_none() {
             info!(message_id = %msg_id, "Deduplicated duplicate SNS notification");
             return Ok(StatusCode::OK);
         }
@@ -256,8 +268,11 @@ async fn handle_subscription_confirmation(
     info!(topic = ?msg.topic_arn, "Auto-confirming SNS subscription");
 
     state.http_client.get(url).send().await.map_err(|e| {
+        // Audit G(4): the transport error string (which can embed internal
+        // network details) must not leak to the (unauthenticated) caller —
+        // log the detail, return a generic message.
         error!(error = %e, "Failed to confirm SNS subscription");
-        ApiError::ServiceUnavailable(format!("SNS confirmation failed: {e}"))
+        ApiError::ServiceUnavailable("SNS confirmation failed".into())
     })?;
 
     info!(topic = ?msg.topic_arn, "SNS subscription confirmed");
@@ -270,7 +285,43 @@ async fn validate_sns_message(
     allowed_arns_raw: &str,
 ) -> Result<(), ApiError> {
     validate_sns_topic_arn(msg, allowed_arns_raw)?;
-    validate_sns_signature(http_client, msg).await
+    validate_sns_signature(http_client, msg).await?;
+    // Audit G(2): replay freshness — the signature check above proves the
+    // message was signed by AWS, but not that it is recent. Reject captured
+    // notifications older than 1 hour (SNS retries span at most ~1h including
+    // the initial attempt) and clock-skewed ones more than 10 minutes in the
+    // future.
+    validate_sns_timestamp_freshness(msg)
+}
+
+/// SNS `Timestamp` freshness bounds (audit G).
+const SNS_MAX_AGE_SECS: i64 = 3600;
+const SNS_MAX_FUTURE_SKEW_SECS: i64 = 600;
+
+fn validate_sns_timestamp_freshness(msg: &SnsMessage) -> Result<(), ApiError> {
+    let timestamp = msg.timestamp.as_deref().ok_or_else(|| {
+        ApiError::Validation(vec!["Missing Timestamp in SNS message".into()])
+    })?;
+
+    let parsed = chrono::DateTime::parse_from_rfc3339(timestamp)
+        .map_err(|_| ApiError::Validation(vec!["Invalid Timestamp in SNS message".into()]))?
+        .with_timezone(&chrono::Utc);
+
+    let now = chrono::Utc::now();
+    if now - parsed > chrono::Duration::seconds(SNS_MAX_AGE_SECS) {
+        warn!(timestamp = %timestamp, "Rejected stale SNS notification (replay)");
+        return Err(ApiError::Validation(vec![
+            "SNS notification timestamp is too old".into(),
+        ]));
+    }
+    if parsed - now > chrono::Duration::seconds(SNS_MAX_FUTURE_SKEW_SECS) {
+        warn!(timestamp = %timestamp, "Rejected future-dated SNS notification");
+        return Err(ApiError::Validation(vec![
+            "SNS notification timestamp is too far in the future".into(),
+        ]));
+    }
+
+    Ok(())
 }
 
 fn validate_sns_topic_arn(msg: &SnsMessage, allowed_arns_raw: &str) -> Result<(), ApiError> {
@@ -330,10 +381,55 @@ fn validate_signing_cert_url(cert_url: &str) -> Result<(), ApiError> {
     Ok(())
 }
 
+/// Cache of parsed SNS signing certificates keyed by cert URL (audit G).
+///
+/// The handler previously fetched the signing cert over HTTPS on EVERY POST —
+/// a per-request outbound round-trip (latency + a DoS amplification surface:
+/// every unauthenticated POST forced a TLS handshake to AWS). AWS publishes a
+/// small, slowly-rotating set of cert URLs, so a bounded TTL cache removes
+/// the repeated fetches while still picking up rotations.
+static SNS_SIGNING_KEY_CACHE: Mutex<Option<HashMap<String, (RsaPublicKey, Instant)>>> =
+    Mutex::new(None);
+
+/// Cert cache entry lifetime (AWS rotates signing certs roughly yearly; one
+/// hour keeps rotation pickup prompt while collapsing per-request traffic).
+const SNS_SIGNING_KEY_CACHE_TTL: Duration = Duration::from_secs(3600);
+/// Upper bound on cached cert URLs (defense against a caller spoofing many
+/// cert URLs — validate_signing_cert_url already restricts hosts to AWS SNS,
+/// so the cap is pure defense-in-depth).
+const SNS_SIGNING_KEY_CACHE_MAX_ENTRIES: usize = 16;
+
+fn cache_get_sns_signing_key(cert_url: &str) -> Option<RsaPublicKey> {
+    let guard = SNS_SIGNING_KEY_CACHE.lock().ok()?;
+    let cache = guard.as_ref()?;
+    let (key, fetched_at) = cache.get(cert_url)?;
+    if fetched_at.elapsed() > SNS_SIGNING_KEY_CACHE_TTL {
+        return None; // expired — caller refetches and re-inserts
+    }
+    Some(key.clone())
+}
+
+fn cache_put_sns_signing_key(cert_url: &str, key: RsaPublicKey) {
+    let Ok(mut guard) = SNS_SIGNING_KEY_CACHE.lock() else {
+        return;
+    };
+    let cache = guard.get_or_insert_with(HashMap::new);
+    // Simple bounded insert: evict everything when the cap is reached
+    // (entries are tiny and refetched on demand).
+    if cache.len() >= SNS_SIGNING_KEY_CACHE_MAX_ENTRIES && !cache.contains_key(cert_url) {
+        cache.clear();
+    }
+    cache.insert(cert_url.to_string(), (key, Instant::now()));
+}
+
 async fn fetch_sns_signing_key(
     http_client: &reqwest::Client,
     cert_url: &str,
 ) -> Result<RsaPublicKey, ApiError> {
+    if let Some(cached) = cache_get_sns_signing_key(cert_url) {
+        return Ok(cached);
+    }
+
     let response = http_client
         .get(cert_url)
         .send()
@@ -362,10 +458,16 @@ async fn fetch_sns_signing_key(
         ApiError::Validation(vec!["Invalid SNS signing certificate".into()])
     })?;
 
-    RsaPublicKey::from_pkcs1_der(&certificate.public_key().subject_public_key.data).map_err(|e| {
+    let key = RsaPublicKey::from_pkcs1_der(
+        &certificate.public_key().subject_public_key.data,
+    )
+    .map_err(|e| {
         warn!(error = %e, cert_url = %cert_url, "Invalid SNS signing certificate public key");
         ApiError::Validation(vec!["Invalid SNS signing certificate".into()])
-    })
+    })?;
+
+    cache_put_sns_signing_key(cert_url, key.clone());
+    Ok(key)
 }
 
 fn verify_sns_signature_with_key(
@@ -958,6 +1060,98 @@ mod tests {
         msg.signature = Some(BASE64.encode(signature.to_bytes()));
 
         assert!(verify_sns_signature_with_key(&msg, &public_key).is_ok());
+    }
+
+    // ── Timestamp freshness (audit G) ────────────────────────────
+
+    fn message_with_timestamp(ts: &str) -> SnsMessage {
+        let mut msg = sample_notification_message();
+        msg.timestamp = Some(ts.to_string());
+        msg
+    }
+
+    #[test]
+    fn sns_timestamp_freshness_accepts_current_timestamp() {
+        let now = chrono::Utc::now().to_rfc3339();
+        assert!(validate_sns_timestamp_freshness(&message_with_timestamp(&now)).is_ok());
+
+        // 30 minutes old — still inside the 1h retry window.
+        let half_hour_ago = (chrono::Utc::now() - chrono::Duration::minutes(30)).to_rfc3339();
+        assert!(validate_sns_timestamp_freshness(&message_with_timestamp(&half_hour_ago)).is_ok());
+
+        // Small future skew (2 minutes) is tolerated.
+        let soon = (chrono::Utc::now() + chrono::Duration::minutes(2)).to_rfc3339();
+        assert!(validate_sns_timestamp_freshness(&message_with_timestamp(&soon)).is_ok());
+    }
+
+    #[test]
+    fn sns_timestamp_freshness_rejects_old_and_far_future_timestamps() {
+        // A captured-and-replayed notification from 2 hours ago.
+        let two_hours_ago = (chrono::Utc::now() - chrono::Duration::hours(2)).to_rfc3339();
+        let err = validate_sns_timestamp_freshness(&message_with_timestamp(&two_hours_ago))
+            .expect_err("stale notification must be rejected");
+        assert!(matches!(err, ApiError::Validation(_)));
+
+        // Exactly past the 1h bound (61 minutes).
+        let sixty_one_minutes = (chrono::Utc::now() - chrono::Duration::minutes(61)).to_rfc3339();
+        assert!(validate_sns_timestamp_freshness(&message_with_timestamp(&sixty_one_minutes)).is_err());
+
+        // More than 10 minutes in the future — clock-skew abuse.
+        let far_future = (chrono::Utc::now() + chrono::Duration::minutes(30)).to_rfc3339();
+        let err = validate_sns_timestamp_freshness(&message_with_timestamp(&far_future))
+            .expect_err("far-future notification must be rejected");
+        assert!(matches!(err, ApiError::Validation(_)));
+
+        // Missing / malformed timestamps are rejected, not defaulted.
+        let mut msg = sample_notification_message();
+        msg.timestamp = None;
+        assert!(validate_sns_timestamp_freshness(&msg).is_err());
+        assert!(validate_sns_timestamp_freshness(&message_with_timestamp("not-a-date")).is_err());
+        assert!(validate_sns_timestamp_freshness(&message_with_timestamp("0")).is_err());
+    }
+
+    // ── Signing-cert cache (audit G) ─────────────────────────────
+
+    #[test]
+    fn sns_signing_cert_cache_roundtrips_and_respects_cap() {
+        // Ensure a clean slate (tests may run in any order).
+        if let Ok(mut guard) = SNS_SIGNING_KEY_CACHE.lock() {
+            *guard = None;
+        }
+
+        let mut rng = rsa::rand_core::OsRng;
+        let key = RsaPublicKey::from(RsaPrivateKey::new(&mut rng, 2048).unwrap());
+
+        let url = "https://sns.us-east-1.amazonaws.com/SimpleNotificationService-test-cache.pem";
+        assert!(
+            cache_get_sns_signing_key(url).is_none(),
+            "empty cache must miss"
+        );
+
+        cache_put_sns_signing_key(url, key.clone());
+        let cached = cache_get_sns_signing_key(url).expect("fresh entry must hit");
+        assert_eq!(cached, key, "cached key must round-trip identically");
+
+        // Overfilling the bounded cache evicts everything (refetched on demand).
+        for i in 0..SNS_SIGNING_KEY_CACHE_MAX_ENTRIES {
+            cache_put_sns_signing_key(
+                &format!("https://sns.us-east-1.amazonaws.com/SimpleNotificationService-{i}.pem"),
+                key.clone(),
+            );
+        }
+        assert!(
+            cache_get_sns_signing_key(url).is_none() || {
+                // whichever state, the cache must stay bounded
+                let len = SNS_SIGNING_KEY_CACHE
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .map(|c| c.len())
+                    .unwrap_or(0);
+                len <= SNS_SIGNING_KEY_CACHE_MAX_ENTRIES
+            },
+            "cache must stay bounded after overfill"
+        );
     }
 
     fn sample_notification_message() -> SnsMessage {

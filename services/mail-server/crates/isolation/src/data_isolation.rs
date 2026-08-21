@@ -17,6 +17,9 @@ static DANGEROUS_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
         r"(?i)SET\s+search_path",
         r"(?i)SET\s+role",
         r"(?i)SET\s+session",
+        // set_config( is the functional form of SET and must never appear in
+        // tenant-submitted SQL regardless of quoting/whitespace/case.
+        r"(?i)set_config\s*\(",
     ]
     .iter()
     .filter_map(|p| Regex::new(p).ok())
@@ -26,11 +29,148 @@ static DANGEROUS_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
 static IDENT_REGEX: LazyLock<Option<Regex>> =
     LazyLock::new(|| Regex::new(r"^[a-z_][a-z0-9_]{0,62}$").ok());
 
+/// Table references (`FROM x`, `JOIN s.t`, `UPDATE ONLY t`, `INTO "t"`) with
+/// flexible whitespace and optional schema qualification.
+static TABLE_REF_RE: LazyLock<Option<Regex>> = LazyLock::new(|| {
+    Regex::new(
+        r#"(?ix)
+        \b(?:from|join|update(?:\s+only)?|into)\s+
+        (
+            (?:"[^"]+"\s*\.\s*)*            # optional quoted schema qualification
+            (?:[A-Za-z_][A-Za-z0-9_$]*\s*\.\s*)*  # optional bare schema qualification
+            (?:"[^"]+"|[A-Za-z_][A-Za-z0-9_$]*)  # the table name itself
+        )
+        "#,
+    )
+    .ok()
+});
+
+/// Parameterized tenant predicate:`workspace_id = $N`, `workspace_id = ?`,
+/// or a current_setting-based RLS binding.
+static TENANT_PREDICATE_RE: LazyLock<Option<Regex>> = LazyLock::new(|| {
+    Regex::new(
+        r#"(?ix)
+        \b(?:workspace_id|organization_id)\s*=\s*(?:\$\d+|\?)
+        |
+        current_setting\s*\(\s*'app\.(?:current_workspace_id|current_org_id)'
+        "#,
+    )
+    .ok()
+});
+
+/// Extract the (lowercased, unquoted) table names referenced by
+/// FROM/JOIN/UPDATE/INTO clauses, tolerating schema qualification
+/// (`public.emails`) and quoted identifiers (`"Emails"`).
+fn referenced_tables(query: &str) -> Vec<String> {
+    let mut tables = Vec::new();
+    let Some(re) = TABLE_REF_RE.as_ref() else {
+        return tables;
+    };
+    for caps in re.captures_iter(query) {
+        let Some(m) = caps.get(1) else { continue };
+        let reference = m.as_str();
+        // Take the last dot-separated segment, strip quoting, lowercase.
+        let table = reference
+            .rsplit('.')
+            .next()
+            .unwrap_or(reference)
+            .trim()
+            .trim_matches('"')
+            .trim_matches('"')
+            .to_lowercase();
+        if !table.is_empty() {
+            tables.push(table);
+        }
+    }
+    tables
+}
+
+/// Strip SQL comments (`-- … EOL` and `/* … */`) while respecting single-quote
+/// string literals, so a predicate hidden inside a comment cannot satisfy the
+/// tenant-predicate check and comment contents cannot be used for evasion.
+fn strip_sql_comments(query: &str) -> String {
+    let mut out = String::with_capacity(query.len());
+    let bytes = query.as_bytes();
+    let mut i = 0;
+    let mut in_string = false;
+    while i < bytes.len() {
+        let c = bytes[i];
+        if in_string {
+            if c == b'\'' {
+                // '' is an escaped quote inside the literal
+                if i + 1 < bytes.len() && bytes[i + 1] == b'\'' {
+                    out.push_str("''");
+                    i += 2;
+                    continue;
+                }
+                in_string = false;
+            }
+            out.push(c as char);
+            i += 1;
+            continue;
+        }
+        match c {
+            b'\'' => {
+                in_string = true;
+                out.push('\'');
+                i += 1;
+            }
+            b'-' if i + 1 < bytes.len() && bytes[i + 1] == b'-' => {
+                // line comment:skip to end of line
+                while i < bytes.len() && bytes[i] != b'\n' {
+                    i += 1;
+                }
+                out.push('\n');
+            }
+            b'/' if i + 1 < bytes.len() && bytes[i + 1] == b'*' => {
+                // block comment:skip to closing */
+                i += 2;
+                while i + 1 < bytes.len() && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
+                    i += 1;
+                }
+                i = (i + 2).min(bytes.len());
+                out.push(' ');
+            }
+            _ => {
+                // copy one UTF-8 char
+                let ch_len = utf8_char_len(bytes, i);
+                if let Ok(s) = std::str::from_utf8(&bytes[i..(i + ch_len).min(bytes.len())]) {
+                    out.push_str(s);
+                    i += ch_len;
+                } else {
+                    out.push(c as char);
+                    i += 1;
+                }
+            }
+        }
+    }
+    out
+}
+
+fn utf8_char_len(bytes: &[u8], i: usize) -> usize {
+    let b = bytes[i];
+    if b < 0x80 {
+        1
+    } else if b >> 5 == 0b110 {
+        2
+    } else if b >> 4 == 0b1110 {
+        3
+    } else if b >> 3 == 0b11110 {
+        4
+    } else {
+        1
+    }
+}
+
 // ── Data Isolation Service ─────────────────────────────────
 
 pub struct DataIsolationService {
     db: PgPool,
     policies: Vec<DataAccessPolicy>,
+    /// Whether the policy set was successfully loaded from the database.
+    /// Requests are denied while this is false (fail-closed) — an empty or
+    /// failed policy load must never widen access.
+    policies_loaded: bool,
 }
 
 impl DataIsolationService {
@@ -38,21 +178,38 @@ impl DataIsolationService {
         Self {
             db,
             policies: Vec::new(),
+            policies_loaded: false,
         }
     }
 
     /// Load access policies from DB on startup.
+    /// Fails loudly:policy load errors are a startup hard error so a
+    /// misconfigured database cannot silently disable policy enforcement.
     pub async fn initialize(&mut self) -> anyhow::Result<()> {
         self.policies = self.load_policies().await?;
+        self.policies_loaded = true;
         info!(count = self.policies.len(), "Data access policies loaded");
         Ok(())
     }
 
     /// Validate a SQL query for safety in a tenant-isolated context.
     pub fn validate_query_access(&self, query: &str, ctx: &IsolationContext) -> bool {
+        if !self.policies_loaded {
+            warn!(
+                user_id = ctx.user_id,
+                workspace_id = ctx.workspace_id,
+                "Denied query:access policies have not been loaded (fail-closed)"
+            );
+            return false;
+        }
+
+        // Analyze the comment-stripped form so predicates hidden in comments
+        // cannot satisfy checks and commented-out clauses cannot evade them.
+        let stripped = strip_sql_comments(query);
+
         // Block dangerous patterns
         for pattern in DANGEROUS_PATTERNS.iter() {
-            if pattern.is_match(query) {
+            if pattern.is_match(&stripped) {
                 warn!(
                     user_id = ctx.user_id,
                     workspace_id = ctx.workspace_id,
@@ -62,30 +219,25 @@ impl DataIsolationService {
             }
         }
 
-        // #292:stronger table + predicate checks for SELECT/UPDATE/DELETE with JOIN/CTE-aware parsing.
-        let upper = query.to_uppercase();
-        let tenanted_tables = ["EMAILS", "CONTACTS", "TEMPLATES", "CAMPAIGNS", "WEBHOOKS"];
-        let touches_tenanted_table = tenanted_tables.iter().any(|table| {
-            upper.contains(&format!(" FROM {}", table))
-                || upper.contains(&format!(" JOIN {}", table))
-                || upper.contains(&format!(" UPDATE {}", table))
-                || upper.contains(&format!(" INTO {}", table))
-                || upper.contains(&format!(" {} ", table))
-        });
+        // #292:stronger table + predicate checks for SELECT/UPDATE/DELETE with
+        // JOIN/CTE-aware parsing. Table extraction tolerates schema
+        // qualification (`public.emails`), quoted identifiers, and arbitrary
+        // whitespace/newlines between the clause keyword and the table name.
+        let tenanted_tables = ["emails", "contacts", "templates", "campaigns", "webhooks"];
+        let referenced = referenced_tables(&stripped);
+        let touches_tenanted_table = referenced.iter().any(|t| tenanted_tables.contains(&t.as_str()));
 
         if touches_tenanted_table {
-            let has_workspace_predicate = upper.contains("WORKSPACE_ID =")
-                || upper.contains("WORKSPACE_ID=")
-                || upper.contains("ORGANIZATION_ID =")
-                || upper.contains("ORGANIZATION_ID=")
-                || upper.contains("CURRENT_SETTING('APP.CURRENT_WORKSPACE_ID')")
-                || upper.contains("CURRENT_SETTING('APP.CURRENT_ORG_ID')");
+            let has_workspace_predicate = TENANT_PREDICATE_RE
+                .as_ref()
+                .map(|re| re.is_match(&stripped))
+                .unwrap_or(false);
 
             if !has_workspace_predicate {
                 warn!(
                     user_id = ctx.user_id,
                     workspace_id = ctx.workspace_id,
-                    "Blocked query touching tenanted tables without required workspace/organization predicate"
+                    "Blocked query touching tenanted tables without required parameterized workspace/organization predicate"
                 );
                 return false;
             }
@@ -102,6 +254,16 @@ impl DataIsolationService {
         resource_id: &str,
         action: &str,
     ) -> anyhow::Result<bool> {
+        // Fail closed:if the policy set never loaded successfully, refuse.
+        if !self.policies_loaded {
+            warn!(
+                user_id = ctx.user_id,
+                resource = resource,
+                "Denied access:access policies have not been loaded (fail-closed)"
+            );
+            return Ok(false);
+        }
+
         // Verify workspace ownership
         let owns = self
             .verify_resource_ownership(ctx, resource, resource_id)
@@ -131,48 +293,9 @@ impl DataIsolationService {
         let table_quoted = quote_sql_ident(&table);
         let schema_quoted = quote_sql_ident(&schema);
 
-        sqlx::query(&format!(
-            "ALTER TABLE {}.{} ENABLE ROW LEVEL SECURITY",
-            schema_quoted, table_quoted
-        ))
-        .execute(&self.db)
-        .await?;
-
-        // SELECT policy
-        sqlx::query(&format!(
-            "CREATE POLICY workspace_isolation_select ON {}.{} FOR SELECT
-               USING (workspace_id = current_setting('app.current_workspace_id'))",
-            schema_quoted, table_quoted
-        ))
-        .execute(&self.db)
-        .await?;
-
-        // INSERT policy
-        sqlx::query(&format!(
-            "CREATE POLICY workspace_isolation_insert ON {}.{} FOR INSERT
-               WITH CHECK (workspace_id = current_setting('app.current_workspace_id'))",
-            schema_quoted, table_quoted
-        ))
-        .execute(&self.db)
-        .await?;
-
-        // UPDATE policy
-        sqlx::query(&format!(
-            "CREATE POLICY workspace_isolation_update ON {}.{} FOR UPDATE
-               USING (workspace_id = current_setting('app.current_workspace_id'))",
-            schema_quoted, table_quoted
-        ))
-        .execute(&self.db)
-        .await?;
-
-        // DELETE policy
-        sqlx::query(&format!(
-            "CREATE POLICY workspace_isolation_delete ON {}.{} FOR DELETE
-               USING (workspace_id = current_setting('app.current_workspace_id'))",
-            schema_quoted, table_quoted
-        ))
-        .execute(&self.db)
-        .await?;
+        for stmt in rls_statements(&schema_quoted, &table_quoted) {
+            sqlx::query(&stmt).execute(&self.db).await?;
+        }
 
         info!(table = table_name, schema = schema_name, "RLS configured");
         Ok(())
@@ -238,8 +361,7 @@ impl DataIsolationService {
             "SELECT id, name, resource, conditions, actions, effect FROM iso_access_policies",
         )
         .fetch_all(&self.db)
-        .await
-        .unwrap_or_default();
+        .await?;
 
         let mut policies = Vec::with_capacity(rows.len());
         for (id, name, resource, conditions, actions, effect) in rows {
@@ -503,6 +625,46 @@ fn quote_sql_ident(s: &str) -> String {
     format!("\"{}\"", s.replace('"', "\"\""))
 }
 
+/// The full set of DDL statements to enable workspace-scoped RLS on a table.
+///
+/// `FORCE ROW LEVEL SECURITY` is issued alongside `ENABLE`:without FORCE the
+/// table *owner* bypasses RLS entirely, so any code path connecting as the
+/// owning role would silently defeat tenant isolation. Service accounts that
+/// legitimately need to bypass RLS (migrations, backfills) must use a distinct
+/// role with the BYPASSRLS attribute — never the owning application role.
+fn rls_statements(schema_quoted: &str, table_quoted: &str) -> Vec<String> {
+    vec![
+        format!(
+            "ALTER TABLE {}.{} ENABLE ROW LEVEL SECURITY",
+            schema_quoted, table_quoted
+        ),
+        format!(
+            "ALTER TABLE {}.{} FORCE ROW LEVEL SECURITY",
+            schema_quoted, table_quoted
+        ),
+        format!(
+            "CREATE POLICY workspace_isolation_select ON {}.{} FOR SELECT
+               USING (workspace_id = current_setting('app.current_workspace_id'))",
+            schema_quoted, table_quoted
+        ),
+        format!(
+            "CREATE POLICY workspace_isolation_insert ON {}.{} FOR INSERT
+               WITH CHECK (workspace_id = current_setting('app.current_workspace_id'))",
+            schema_quoted, table_quoted
+        ),
+        format!(
+            "CREATE POLICY workspace_isolation_update ON {}.{} FOR UPDATE
+               USING (workspace_id = current_setting('app.current_workspace_id'))",
+            schema_quoted, table_quoted
+        ),
+        format!(
+            "CREATE POLICY workspace_isolation_delete ON {}.{} FOR DELETE
+               USING (workspace_id = current_setting('app.current_workspace_id'))",
+            schema_quoted, table_quoted
+        ),
+    ]
+}
+
 fn resource_to_table(resource: &str) -> String {
     match resource {
         "email" => "emails".into(),
@@ -556,6 +718,7 @@ mod tests {
         let svc = DataIsolationService {
             db: test_pool(),
             policies: vec![],
+            policies_loaded: true,
         };
         let ctx = make_ctx();
         assert!(!svc.validate_query_access("SELECT * FROM information_schema.tables", &ctx));
@@ -566,6 +729,7 @@ mod tests {
         let svc = DataIsolationService {
             db: test_pool(),
             policies: vec![],
+            policies_loaded: true,
         };
         let ctx = make_ctx();
         assert!(!svc.validate_query_access("SELECT * FROM pg_catalog.pg_tables", &ctx));
@@ -576,6 +740,7 @@ mod tests {
         let svc = DataIsolationService {
             db: test_pool(),
             policies: vec![],
+            policies_loaded: true,
         };
         let ctx = make_ctx();
         assert!(!svc.validate_query_access("SET search_path TO public", &ctx));
@@ -586,6 +751,7 @@ mod tests {
         let svc = DataIsolationService {
             db: test_pool(),
             policies: vec![],
+            policies_loaded: true,
         };
         let ctx = make_ctx();
         // SELECT on tenanted table without workspace_id filter
@@ -599,6 +765,7 @@ mod tests {
         let svc = DataIsolationService {
             db: test_pool(),
             policies: vec![],
+            policies_loaded: true,
         };
         let ctx = make_ctx();
         assert!(svc.validate_query_access(
@@ -612,9 +779,156 @@ mod tests {
         let svc = DataIsolationService {
             db: test_pool(),
             policies: vec![],
+            policies_loaded: true,
         };
         let ctx = make_ctx();
         assert!(svc.validate_query_access("SELECT * FROM iso_organizations WHERE id = $1", &ctx));
+    }
+
+    // ── SQL validator bypass regression tests ──
+
+    fn loaded_svc() -> DataIsolationService {
+        DataIsolationService {
+            db: test_pool(),
+            policies: vec![],
+            policies_loaded: true,
+        }
+    }
+
+    #[test]
+    fn test_validate_query_blocks_schema_qualified_table() {
+        let svc = loaded_svc();
+        let ctx = make_ctx();
+        // Schema qualification previously hid the tenanted table name.
+        assert!(!svc.validate_query_access(
+            "SELECT * FROM public.emails WHERE subject LIKE '%test%'",
+            &ctx
+        ));
+        // …and is fine when properly parameterized.
+        assert!(svc.validate_query_access(
+            "SELECT * FROM public.emails WHERE workspace_id = $1",
+            &ctx
+        ));
+    }
+
+    #[test]
+    fn test_validate_query_blocks_newline_obfuscated_table() {
+        let svc = loaded_svc();
+        let ctx = make_ctx();
+        assert!(!svc.validate_query_access(
+            "SELECT * FROM\n\temails\nWHERE subject LIKE '%test%'",
+            &ctx
+        ));
+    }
+
+    #[test]
+    fn test_validate_query_blocks_predicate_satisfied_by_comment() {
+        let svc = loaded_svc();
+        let ctx = make_ctx();
+        // The workspace predicate only exists inside a comment — the real
+        // predicate is a literal comparison. Must be blocked.
+        assert!(!svc.validate_query_access(
+            "SELECT * FROM emails WHERE subject = 'x' /* workspace_id = $1 */",
+            &ctx
+        ));
+        assert!(!svc.validate_query_access(
+            "SELECT * FROM emails WHERE subject = 'x' -- workspace_id = $1",
+            &ctx
+        ));
+    }
+
+    #[test]
+    fn test_validate_query_blocks_set_config() {
+        let svc = loaded_svc();
+        let ctx = make_ctx();
+        // set_config() is the functional form of SET and bypassed the
+        // `SET search_path` regex.
+        assert!(!svc.validate_query_access(
+            "SELECT set_config('search_path', 'public', false)",
+            &ctx
+        ));
+        assert!(!svc.validate_query_access(
+            "SELECT SET_CONFIG ( 'role', 'admin', true )",
+            &ctx
+        ));
+    }
+
+    #[test]
+    fn test_validate_query_blocks_literal_workspace_predicate() {
+        let svc = loaded_svc();
+        let ctx = make_ctx();
+        // A literal (non-parameterized) workspace predicate must not satisfy
+        // the tenancy requirement.
+        assert!(!svc.validate_query_access(
+            "SELECT * FROM emails WHERE workspace_id = 12345",
+            &ctx
+        ));
+        // `?` placeholder is an accepted parameterized form.
+        assert!(svc.validate_query_access(
+            "SELECT * FROM emails WHERE workspace_id = ?",
+            &ctx
+        ));
+    }
+
+    #[test]
+    fn test_validate_query_blocks_update_and_join_without_predicate() {
+        let svc = loaded_svc();
+        let ctx = make_ctx();
+        assert!(!svc.validate_query_access(
+            "UPDATE emails SET subject = $1 WHERE id = $2",
+            &ctx
+        ));
+        assert!(!svc.validate_query_access(
+            "SELECT * FROM contacts c JOIN emails e ON c.id = e.contact_id WHERE c.id = $1",
+            &ctx
+        ));
+        assert!(svc.validate_query_access(
+            "SELECT * FROM contacts c JOIN emails e ON c.id = e.contact_id WHERE e.workspace_id = $1",
+            &ctx
+        ));
+    }
+
+    #[test]
+    fn test_validate_query_fail_closed_when_policies_not_loaded() {
+        let svc = DataIsolationService {
+            db: test_pool(),
+            policies: vec![],
+            policies_loaded: false,
+        };
+        let ctx = make_ctx();
+        assert!(
+            !svc.validate_query_access("SELECT * FROM iso_organizations WHERE id = $1", &ctx),
+            "queries must be denied while policies are not loaded (fail-closed)"
+        );
+    }
+
+    #[test]
+    fn test_strip_sql_comments_preserves_strings() {
+        // `--` inside a string literal is not a comment.
+        let stripped = strip_sql_comments("SELECT 'a--b' FROM t");
+        assert!(stripped.contains("'a--b'"), "got: {}", stripped);
+        // Block comment removed.
+        let stripped = strip_sql_comments("SELECT 1 /* hidden workspace_id = $1 */ FROM t");
+        assert!(!stripped.contains("workspace_id"), "got: {}", stripped);
+    }
+
+    #[test]
+    fn test_referenced_tables_handles_qualification_and_whitespace() {
+        let tables = referenced_tables("SELECT * FROM\npublic.\"Emails\" e JOIN contacts ON true");
+        assert!(tables.contains(&"emails".to_string()), "got: {:?}", tables);
+        assert!(tables.contains(&"contacts".to_string()), "got: {:?}", tables);
+    }
+
+    #[test]
+    fn test_rls_statements_include_force() {
+        let stmts = rls_statements("\"public\"", "\"emails\"");
+        assert!(stmts.iter().any(|s| s.contains("ENABLE ROW LEVEL SECURITY")));
+        assert!(
+            stmts.iter().any(|s| s.contains("FORCE ROW LEVEL SECURITY")),
+            "FORCE RLS must be issued so the table owner is also subject to policies: {:?}",
+            stmts
+        );
+        assert_eq!(stmts.len(), 6);
     }
 
     #[test]
@@ -622,6 +936,7 @@ mod tests {
         let svc = DataIsolationService {
             db: test_pool(),
             policies: vec![],
+            policies_loaded: true,
         };
         let ctx = make_ctx();
         assert!(svc.evaluate_policies(&ctx, "email", "read"));
@@ -631,6 +946,7 @@ mod tests {
     fn test_evaluate_policies_deny_overrides() {
         let svc = DataIsolationService {
             db: test_pool(),
+            policies_loaded: true,
             policies: vec![DataAccessPolicy {
                 id: "p1".into(),
                 name: "Deny all writes".into(),
@@ -648,6 +964,7 @@ mod tests {
     fn test_evaluate_policies_allow() {
         let svc = DataIsolationService {
             db: test_pool(),
+            policies_loaded: true,
             policies: vec![DataAccessPolicy {
                 id: "p1".into(),
                 name: "Allow reads".into(),
@@ -666,6 +983,7 @@ mod tests {
         let svc = DataIsolationService {
             db: test_pool(),
             policies: vec![],
+            policies_loaded: true,
         };
         let ctx = make_ctx();
         let conds = vec![PolicyCondition {
@@ -681,6 +999,7 @@ mod tests {
         let svc = DataIsolationService {
             db: test_pool(),
             policies: vec![],
+            policies_loaded: true,
         };
         let ctx = make_ctx();
         let conds = vec![PolicyCondition {
@@ -696,6 +1015,7 @@ mod tests {
         let svc = DataIsolationService {
             db: test_pool(),
             policies: vec![],
+            policies_loaded: true,
         };
         let ctx = make_ctx();
         let conds = vec![PolicyCondition {
@@ -711,6 +1031,7 @@ mod tests {
         let svc = DataIsolationService {
             db: test_pool(),
             policies: vec![],
+            policies_loaded: true,
         };
         let ctx = make_ctx();
         let conds = vec![PolicyCondition {
@@ -726,6 +1047,7 @@ mod tests {
         let svc = DataIsolationService {
             db: test_pool(),
             policies: vec![],
+            policies_loaded: true,
         };
         let ctx = make_ctx();
         let conds = vec![PolicyCondition {
@@ -741,6 +1063,7 @@ mod tests {
         let svc = DataIsolationService {
             db: test_pool(),
             policies: vec![],
+            policies_loaded: true,
         };
         let ctx = make_ctx();
         let conds = vec![PolicyCondition {

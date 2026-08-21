@@ -261,10 +261,17 @@ pub fn analyze_urls_with_shorteners(body: &str, shorteners: Option<&[String]>) -
 }
 
 fn extract_host(url: &str) -> String {
-    let without_scheme = url
-        .strip_prefix("https://")
-        .or_else(|| url.strip_prefix("http://"))
-        .unwrap_or(url);
+    // Case-insensitive scheme strip:schemes are case-insensitive per RFC
+    // 3986 (`HTTPS://`, `HtTp://` …), and `extract_urls` preserves the
+    // original casing, so a lowercase-only strip missed uppercase URLs
+    // entirely (host stayed "HTTPS://BIT.LY" and never matched a shortener).
+    let without_scheme = if url.len() >= 8 && url[..8].eq_ignore_ascii_case("https://") {
+        &url[8..]
+    } else if url.len() >= 7 && url[..7].eq_ignore_ascii_case("http://") {
+        &url[7..]
+    } else {
+        url
+    };
     let host_end = without_scheme.find('/').unwrap_or(without_scheme.len());
     let host_with_port = &without_scheme[..host_end];
     // Strip userinfo (user:pass@)
@@ -356,6 +363,13 @@ pub struct DetonationReport {
 /// so that we can manually track each hop and enforce our own limit.
 /// When the `phishing` feature is **not** enabled, this always returns an
 /// error result without making any network calls.
+///
+/// # SSRF protection
+/// Every hop (the initial URL *and* each `Location` redirect) must resolve
+/// to a public address:private, loopback, link-local (including the cloud
+/// metadata range 169.254.0.0/16), ULA and other reserved ranges are
+/// refused before any request is made. Detonations are additionally bounded
+/// by a shared concurrency semaphore and a shared pooled HTTP client.
 pub async fn detonate_url(url: &str) -> DetonationResult {
     #[cfg(feature = "phishing")]
     {
@@ -374,29 +388,130 @@ pub async fn detonate_url(url: &str) -> DetonationResult {
     }
 }
 
+/// Maximum number of URL detonations allowed to run concurrently.
+pub const MAX_CONCURRENT_DETONATIONS: usize = 16;
+
+#[cfg(feature = "phishing")]
+fn detonation_semaphore() -> &'static tokio::sync::Semaphore {
+    static SEM: std::sync::OnceLock<tokio::sync::Semaphore> = std::sync::OnceLock::new();
+    SEM.get_or_init(|| tokio::sync::Semaphore::new(MAX_CONCURRENT_DETONATIONS))
+}
+
+/// Shared pooled HTTP client for detonations (connection reuse instead of a
+/// fresh client — and fresh connection pool — per URL).
+#[cfg(feature = "phishing")]
+fn shared_detonation_client() -> &'static reqwest::Client {
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(std::time::Duration::from_secs(REDIRECT_TIMEOUT_SECS))
+            .user_agent("Mozilla/5.0 (compatible; ApexMail-UrlScanner/1.0)")
+            .danger_accept_invalid_certs(false)
+            .build()
+            .expect("failed to build shared URL detonation client")
+    })
+}
+
+/// Whether an IP address is private, loopback, link-local (this covers the
+/// cloud metadata service at 169.254.169.254), ULA, or otherwise reserved.
+/// Such addresses must never be reached by URL detonation (SSRF guard).
+pub fn ip_is_private_or_reserved(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            let o = v4.octets();
+            v4.is_loopback()
+                || v4.is_private()
+                || v4.is_link_local()
+                || v4.is_broadcast()
+                || v4.is_multicast()
+                || v4.is_unspecified()
+                || v4.is_documentation()
+                || v4.is_shared() // 100.64.0.0/10 carrier-grade NAT
+                || o[0] == 0 // 0.0.0.0/8 "this network"
+                || o[0] >= 240 // 240.0.0.0/4 reserved
+        }
+        std::net::IpAddr::V6(v6) => {
+            let s = v6.segments();
+            v6.is_loopback()
+                || v6.is_unspecified()
+                || v6.is_multicast()
+                || (s[0] & 0xfe00) == 0xfc00 // fc00::/7 unique-local
+                || (s[0] & 0xffc0) == 0xfe80 // fe80::/10 link-local
+                || (s[0] == 0x2001 && (s[1] & 0xfff0) == 0x0db8) // 2001:db8::/32 doc
+                || (s[0] == 0x64 && s[1] == 0xff9b) // 64:ff9b::/96 NAT64
+        }
+    }
+}
+
+/// SSRF pre-flight check for a URL:IP literals are checked directly;
+/// hostnames must resolve, and *any* resolved address in a private/reserved
+/// range blocks the detonation. Resolution failure also blocks (fail-closed).
+#[cfg(feature = "phishing")]
+async fn url_blocked_by_ssrf_guard(url_str: &str) -> Option<String> {
+    let parsed = match url::Url::parse(url_str) {
+        Ok(u) => u,
+        Err(e) => return Some(format!("invalid URL: {e}")),
+    };
+    let host = match parsed.host() {
+        Some(url::Host::Domain(d)) => d.to_string(),
+        Some(url::Host::Ipv4(v4)) => {
+            return if ip_is_private_or_reserved(std::net::IpAddr::V4(v4)) {
+                Some(format!("SSRF guard:private/reserved IP literal {v4}"))
+            } else {
+                None
+            };
+        }
+        Some(url::Host::Ipv6(v6)) => {
+            return if ip_is_private_or_reserved(std::net::IpAddr::V6(v6)) {
+                Some(format!("SSRF guard:private/reserved IP literal {v6}"))
+            } else {
+                None
+            };
+        }
+        None => return Some("SSRF guard:URL has no host".into()),
+    };
+    let port = parsed.port_or_known_default().unwrap_or(80);
+
+    // Resolve via getaddrinfo on the blocking pool (async-safe).
+    let host_for_resolve = host.clone();
+    let addrs = tokio::task::spawn_blocking(move || {
+        use std::net::ToSocketAddrs;
+        (host_for_resolve.as_str(), port)
+            .to_socket_addrs()
+            .map(|it| it.collect::<Vec<_>>())
+    })
+    .await;
+
+    match addrs {
+        Ok(Ok(socks)) if !socks.is_empty() => {
+            for sock in socks {
+                if ip_is_private_or_reserved(sock.ip()) {
+                    return Some(format!(
+                        "SSRF guard:host {host} resolves to private/reserved address {}",
+                        sock.ip()
+                    ));
+                }
+            }
+            None
+        }
+        _ => Some(format!(
+            "SSRF guard:host {host} could not be resolved (fail-closed)"
+        )),
+    }
+}
+
 #[cfg(feature = "phishing")]
 async fn detonate_url_impl(url: &str) -> DetonationResult {
     use std::time::Duration;
 
-    let client = match reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .timeout(Duration::from_secs(REDIRECT_TIMEOUT_SECS))
-        .user_agent("Mozilla/5.0 (compatible; ApexMail-UrlScanner/1.0)")
-        .danger_accept_invalid_certs(false)
-        .build()
-    {
-        Ok(c) => c,
-        Err(e) => {
-            return DetonationResult {
-                original_url: url.to_string(),
-                final_url: url.to_string(),
-                redirect_chain: Vec::new(),
-                hops: 0,
-                truncated: false,
-                error: Some(format!("Failed to create HTTP client: {e}")),
-            };
-        }
-    };
+    // Bound concurrent detonations system-wide.
+    let _permit = detonation_semaphore()
+        .acquire()
+        .await
+        .expect("detonation semaphore is never closed");
+
+    let client = shared_detonation_client();
 
     let mut current = url.to_string();
     let mut chain: Vec<String> = Vec::new();
@@ -407,6 +522,18 @@ async fn detonate_url_impl(url: &str) -> DetonationResult {
         if hops >= MAX_REDIRECT_HOPS {
             truncated = true;
             break;
+        }
+
+        // SSRF pre-flight on every hop (initial URL and each redirect).
+        if let Some(reason) = url_blocked_by_ssrf_guard(&current).await {
+            return DetonationResult {
+                original_url: url.to_string(),
+                final_url: current,
+                redirect_chain: chain,
+                hops,
+                truncated: false,
+                error: Some(reason),
+            };
         }
 
         let resp = match client.head(&current).send().await {
@@ -688,6 +815,85 @@ mod tests {
         const _: () = assert!(
             MAX_REDIRECT_HOPS <= 20,
             "Should cap redirect hops to avoid infinite loops"
+        );
+    }
+
+    // ── Security-fix regression tests ──
+
+    #[test]
+    fn test_uppercase_scheme_url_analyzed() {
+        // Scheme stripping in extract_host is case-insensitive now, so an
+        // uppercase shortener URL must produce the URL_SHORTENER finding.
+        let score = analyze_urls("Check HTTPS://BIT.LY/X now");
+        assert!(
+            score.findings.iter().any(|f| f.id == "URL_SHORTENER"),
+            "uppercase-scheme shortener URL must be analyzed: {:?}",
+            score.findings
+        );
+    }
+
+    #[test]
+    fn test_extract_host_mixed_case_scheme() {
+        assert_eq!(extract_host("HtTpS://Example.COM/path"), "Example.COM");
+        assert_eq!(extract_host("HTTPS://bit.ly/x"), "bit.ly");
+        assert_eq!(extract_host("http://plain.example/"), "plain.example");
+    }
+
+    #[test]
+    fn test_ip_is_private_or_reserved_matrix() {
+        let parse = |s: &str| s.parse::<std::net::IpAddr>().unwrap();
+        for blocked in [
+            "127.0.0.1",
+            "10.0.0.1",
+            "192.168.1.1",
+            "172.16.0.1",
+            "169.254.169.254", // cloud metadata
+            "0.0.0.0",
+            "240.0.0.1",
+            "100.64.0.1",
+            "::1",
+            "fc00::1",
+            "fd12:3456::1",
+            "fe80::1",
+        ] {
+            assert!(
+                ip_is_private_or_reserved(parse(blocked)),
+                "{blocked} must be blocked by the SSRF guard"
+            );
+        }
+        for allowed in ["8.8.8.8", "1.1.1.1", "93.184.216.34", "2606:4700:4700::1111"] {
+            assert!(
+                !ip_is_private_or_reserved(parse(allowed)),
+                "{allowed} is public and must not be blocked"
+            );
+        }
+    }
+
+    #[cfg(feature = "phishing")]
+    #[tokio::test]
+    async fn test_detonate_refuses_private_and_metadata_ips() {
+        for url in [
+            "http://127.0.0.1:8080/admin",
+            "http://169.254.169.254/latest/meta-data/",
+            "http://10.1.2.3/internal",
+            "http://[::1]/x",
+        ] {
+            let result = detonate_url(url).await;
+            assert!(
+                result.error.as_deref().is_some_and(|e| e.contains("SSRF guard")),
+                "detonation of {url} must be blocked by the SSRF guard, got {:?}",
+                result.error
+            );
+            assert_eq!(result.hops, 0, "no request must be made for {url}");
+        }
+    }
+
+    #[cfg(feature = "phishing")]
+    #[test]
+    fn test_detonation_concurrency_cap_defined() {
+        assert!(
+            MAX_CONCURRENT_DETONATIONS > 0 && MAX_CONCURRENT_DETONATIONS <= 64,
+            "detonation concurrency must be bounded and sane"
         );
     }
 }

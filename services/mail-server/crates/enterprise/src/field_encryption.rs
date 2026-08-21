@@ -236,6 +236,20 @@ impl FieldEncryptor {
     /// Encrypt a plaintext field value.
     /// Returns a string prefixed with `ENC:v1:` containing the full envelope.
     pub fn encrypt(&self, plaintext: &str) -> Result<String, EncryptionError> {
+        self.encrypt_with_aad(plaintext, &[])
+    }
+
+    /// Encrypt a plaintext field value, binding the ciphertext to additional
+    /// authenticated data (AAD).
+    ///
+    /// The AAD is authenticated by AES-GCM but not stored in the envelope:
+    /// `decrypt_with_aad` must be called with the *same* AAD or decryption
+    /// fails. This is used to bind ciphertexts to a tenant so a ciphertext
+    /// produced for one tenant cannot be decrypted through another tenant's
+    /// context (cross-tenant decryption oracle).
+    pub fn encrypt_with_aad(&self, plaintext: &str, aad: &[u8]) -> Result<String, EncryptionError> {
+        use aes_gcm::aead::Payload;
+
         if plaintext.is_empty() {
             return Ok(String::new());
         }
@@ -248,18 +262,26 @@ impl FieldEncryptor {
             .try_fill_bytes(&mut dek)
             .expect("OsRng should not fail");
 
-        // 2. Encrypt plaintext with DEK
+        // 2. Encrypt plaintext with DEK (AAD-authenticated)
         let cipher = Aes256Gcm::new_from_slice(&dek).map_err(|e| {
             tracing::error!(error = %e, "DEK cipher init failed during encrypt");
             EncryptionError::EncryptionFailed
         })?;
         let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
-        let ciphertext = cipher.encrypt(&nonce, plaintext.as_bytes()).map_err(|e| {
-            tracing::error!(error = %e, "AES-GCM encrypt failed");
-            EncryptionError::EncryptionFailed
-        })?;
+        let ciphertext = cipher
+            .encrypt(
+                &nonce,
+                Payload {
+                    msg: plaintext.as_bytes(),
+                    aad,
+                },
+            )
+            .map_err(|e| {
+                tracing::error!(error = %e, "AES-GCM encrypt failed");
+                EncryptionError::EncryptionFailed
+            })?;
 
-        // 3. Wrap (encrypt) the DEK with the KEK
+        // 3. Wrap (encrypt) the DEK with the KEK (same AAD binding)
         let kek_cipher = Aes256Gcm::new_from_slice(&kek.key).map_err(|e| {
             tracing::error!(error = %e, "KEK cipher init failed during encrypt");
             EncryptionError::EncryptionFailed
@@ -267,10 +289,18 @@ impl FieldEncryptor {
         let kek_nonce = Aes256Gcm::generate_nonce(&mut OsRng);
 
         // Wrapped DEK = kek_nonce(12) || aes-gcm(dek, kek_nonce, kek)
-        let wrapped_dek_body = kek_cipher.encrypt(&kek_nonce, dek.as_ref()).map_err(|e| {
-            tracing::error!(error = %e, "DEK wrapping failed");
-            EncryptionError::EncryptionFailed
-        })?;
+        let wrapped_dek_body = kek_cipher
+            .encrypt(
+                &kek_nonce,
+                Payload {
+                    msg: dek.as_ref(),
+                    aad,
+                },
+            )
+            .map_err(|e| {
+                tracing::error!(error = %e, "DEK wrapping failed");
+                EncryptionError::EncryptionFailed
+            })?;
 
         let mut wrapped_dek = Vec::with_capacity(NONCE_LEN + wrapped_dek_body.len());
         wrapped_dek.extend_from_slice(kek_nonce.as_ref());
@@ -303,13 +333,36 @@ impl FieldEncryptor {
     /// If the value does not start with `ENC:v1:`, it is returned as-is
     /// (plaintext passthrough for gradual migration).
     pub fn decrypt(&self, value: &str) -> Result<String, EncryptionError> {
+        if value.is_empty() || !Self::is_encrypted(value) {
+            return Ok(value.to_string()); // plaintext passthrough
+        }
+        self.decrypt_with_aad(value, &[])
+    }
+
+    /// Decrypt an encrypted field value that was bound to AAD at encryption
+    /// time (see `encrypt_with_aad`).
+    ///
+    /// Unlike `decrypt`, this is **strict**: a value that is not an
+    /// `ENC:v1:` envelope is rejected instead of being passed through as
+    /// plaintext — the provenance of such a value is unknown, and treating it
+    /// as plaintext would let callers smuggle arbitrary data through a
+    /// decrypt endpoint. Empty values are likewise rejected.
+    pub fn decrypt_with_aad(&self, value: &str, aad: &[u8]) -> Result<String, EncryptionError> {
+        use aes_gcm::aead::Payload;
+
         if value.is_empty() {
-            return Ok(String::new());
+            return Err(EncryptionError::InvalidEnvelope(
+                "value is empty — unknown provenance".into(),
+            ));
         }
 
         let encoded = match value.strip_prefix(ENCRYPTED_PREFIX) {
             Some(e) => e,
-            None => return Ok(value.to_string()), // plaintext passthrough
+            None => {
+                return Err(EncryptionError::InvalidEnvelope(
+                    "value is not an encrypted envelope — unknown provenance".into(),
+                ))
+            }
         };
 
         let b64 = base64::engine::general_purpose::STANDARD;
@@ -375,9 +428,15 @@ impl FieldEncryptor {
         })?;
 
         let mut dek = kek_cipher
-            .decrypt(kek_nonce, &wrapped_dek[NONCE_LEN..])
+            .decrypt(
+                kek_nonce,
+                Payload {
+                    msg: &wrapped_dek[NONCE_LEN..],
+                    aad,
+                },
+            )
             .map_err(|e| {
-                tracing::error!(error = %e, "DEK unwrap failed — wrong KEK or tampered envelope");
+                tracing::error!(error = %e, "DEK unwrap failed — wrong KEK, wrong AAD, or tampered envelope");
                 EncryptionError::DecryptionFailed
             })?;
 
@@ -393,10 +452,18 @@ impl FieldEncryptor {
         })?;
         dek.zeroize();
 
-        let plaintext_bytes = cipher.decrypt(nonce, ciphertext).map_err(|e| {
-            tracing::error!(error = %e, "field decryption failed — corrupted data or wrong DEK");
-            EncryptionError::DecryptionFailed
-        })?;
+        let plaintext_bytes = cipher
+            .decrypt(
+                nonce,
+                Payload {
+                    msg: ciphertext,
+                    aad,
+                },
+            )
+            .map_err(|e| {
+                tracing::error!(error = %e, "field decryption failed — corrupted data, wrong DEK, or AAD/tenant mismatch");
+                EncryptionError::DecryptionFailed
+            })?;
 
         String::from_utf8(plaintext_bytes).map_err(|e| {
             tracing::error!(error = %e, "decrypted field is not valid UTF-8");
@@ -503,6 +570,56 @@ mod tests {
 
         let decrypted = enc.decrypt(&encrypted).unwrap();
         assert_eq!(decrypted, plaintext);
+    }
+
+    #[test]
+    fn aad_roundtrip_succeeds_with_matching_aad() {
+        let enc = test_encryptor();
+        let ciphertext = enc
+            .encrypt_with_aad("secret-value", b"tenant:tenant-a")
+            .unwrap();
+        let decrypted = enc
+            .decrypt_with_aad(&ciphertext, b"tenant:tenant-a")
+            .unwrap();
+        assert_eq!(decrypted, "secret-value");
+    }
+
+    #[test]
+    fn aad_wrong_tenant_cannot_decrypt() {
+        // Cross-tenant decryption oracle: ciphertext bound to tenant A must
+        // NOT decrypt under tenant B's AAD.
+        let enc = test_encryptor();
+        let ciphertext = enc
+            .encrypt_with_aad("secret-value", b"tenant:tenant-a")
+            .unwrap();
+        assert!(enc.decrypt_with_aad(&ciphertext, b"tenant:tenant-b").is_err());
+    }
+
+    #[test]
+    fn aad_bound_ciphertext_rejected_without_aad() {
+        let enc = test_encryptor();
+        let ciphertext = enc
+            .encrypt_with_aad("secret-value", b"tenant:tenant-a")
+            .unwrap();
+        // Unbinding (plain decrypt) must also fail — the AAD is not optional
+        // for AAD-bound envelopes.
+        assert!(enc.decrypt(&ciphertext).is_err());
+    }
+
+    #[test]
+    fn decrypt_with_aad_rejects_plaintext_provenance() {
+        let enc = test_encryptor();
+        // Unknown-provenance values must be rejected, not passed through.
+        assert!(enc.decrypt_with_aad("not-an-envelope", b"tenant:t").is_err());
+        assert!(enc.decrypt_with_aad("", b"tenant:t").is_err());
+    }
+
+    #[test]
+    fn aad_bound_ciphertexts_differ_for_different_tenants() {
+        let enc = test_encryptor();
+        let a = enc.encrypt_with_aad("v", b"tenant:a").unwrap();
+        let b = enc.encrypt_with_aad("v", b"tenant:b").unwrap();
+        assert_ne!(a, b);
     }
 
     #[test]

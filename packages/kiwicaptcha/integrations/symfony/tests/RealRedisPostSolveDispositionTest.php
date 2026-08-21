@@ -122,6 +122,21 @@ final class RealRedisPostSolveDispositionTest extends TestCase
     }
 
     /**
+     * The logical-operation identity the validator derives for (scope,
+     * canonical binding, explicit kiwi_operation_id) —
+     * hash('sha256', scope."\0".(binding ?? '')."\0".'opid:'.operationId).
+     * A direct core verification in these tests must record the SAME
+     * identity, so the validator's replay of the retained stored success
+     * is identity-proven (a different or null identity would be refused
+     * as AlreadyConsumed by the core's identity gate) and the replay gate
+     * accepts it (an explicit operation-id component).
+     */
+    private function operationIdentity(string $scope, ?string $binding, string $operationId = 'op-redis-test'): string
+    {
+        return hash('sha256', $scope."\0".($binding ?? '')."\0".'opid:'.$operationId);
+    }
+
+    /**
      * The chained-stage validator fixture: real challenge storage + Redis
      * chain state + the risk gateway (post_solve_check on) over the
      * 'login' scope, bound to the 'txn-alpha' transaction.
@@ -130,6 +145,7 @@ final class RealRedisPostSolveDispositionTest extends TestCase
     {
         $stack = new RequestStack();
         $stack->push(Request::create('/', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7']));
+        $stack->getMainRequest()?->attributes->set(KiwiCaptchaValidator::OPERATION_ID_ATTRIBUTE, 'op-redis-test');
 
         return new KiwiCaptchaValidator(
             $verifier,
@@ -566,11 +582,15 @@ final class RealRedisPostSolveDispositionTest extends TestCase
 
         $verifier = new Verifier($storage);
         $nowNs = (int) (microtime(true) * 1_000_000) + 1_000_000;
-        self::assertTrue($verifier->verify($token, self::SECRET, 'login', '198.51.100.7', $nowNs)->isOk());
+        // The pre-verify records the validator's own operation identity
+        // (scope 'login', no authority -> canonical binding null), so the
+        // validator's replay of the stored success is identity-proven.
+        self::assertTrue($verifier->verify($token, self::SECRET, 'login', '198.51.100.7', $nowNs, operationIdentity: $this->operationIdentity('login', null))->isOk());
 
         // fresh validation: the post-solve assessment denies the valid solve.
         $stack = new RequestStack();
         $stack->push(Request::create('/', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7']));
+        $stack->getMainRequest()?->attributes->set(KiwiCaptchaValidator::OPERATION_ID_ATTRIBUTE, 'op-redis-test');
         $validator = new KiwiCaptchaValidator(
             $verifier,
             $stack,
@@ -601,6 +621,7 @@ final class RealRedisPostSolveDispositionTest extends TestCase
         // assessment never runs again.
         $stack2 = new RequestStack();
         $stack2->push(Request::create('/', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7']));
+        $stack2->getMainRequest()?->attributes->set(KiwiCaptchaValidator::OPERATION_ID_ATTRIBUTE, 'op-redis-test');
         $validator2 = new KiwiCaptchaValidator(
             $verifier,
             $stack2,
@@ -657,10 +678,14 @@ final class RealRedisPostSolveDispositionTest extends TestCase
 
         $verifier = new Verifier($storage);
         $nowNs = (int) (microtime(true) * 1_000_000) + 1_000_000;
-        self::assertTrue($verifier->verify($tokenB, self::SECRET, 'login', '198.51.100.7', $nowNs)->isOk());
+        // The pre-verify records the validator's own operation identity
+        // (scope 'login', the authority's canonical binding 'txn-alpha'),
+        // so the validator's replays below are identity-proven.
+        self::assertTrue($verifier->verify($tokenB, self::SECRET, 'login', '198.51.100.7', $nowNs, operationIdentity: $this->operationIdentity('login', 'txn-alpha'))->isOk());
 
         $stack = new RequestStack();
         $stack->push(Request::create('/', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7']));
+        $stack->getMainRequest()?->attributes->set(KiwiCaptchaValidator::OPERATION_ID_ATTRIBUTE, 'op-redis-test');
         $validator = new KiwiCaptchaValidator(
             $verifier,
             $stack,
@@ -761,7 +786,10 @@ final class RealRedisPostSolveDispositionTest extends TestCase
 
         $verifier = new Verifier($storage);
         $nowNs = (int) (microtime(true) * 1_000_000) + 1_000_000;
-        self::assertTrue($verifier->verify($tokenB, self::SECRET, 'login', '198.51.100.7', $nowNs)->isOk());
+        // The pre-verify records the validator's own operation identity
+        // (scope 'login', the authority's canonical binding 'txn-alpha'),
+        // so the validator's replays below are identity-proven.
+        self::assertTrue($verifier->verify($tokenB, self::SECRET, 'login', '198.51.100.7', $nowNs, operationIdentity: $this->operationIdentity('login', 'txn-alpha'))->isOk());
 
         // Chain X opens for the transaction; the exact legacy v1 wire is
         // seeded for B's nonce.
@@ -875,7 +903,10 @@ final class RealRedisPostSolveDispositionTest extends TestCase
 
         $verifier = new Verifier($storage);
         $nowNs = (int) (microtime(true) * 1_000_000) + 1_000_000;
-        self::assertTrue($verifier->verify($tokenB, self::SECRET, 'login', '198.51.100.7', $nowNs)->isOk());
+        // The pre-verify records the validator's own operation identity
+        // (scope 'login', the authority's canonical binding 'txn-alpha'),
+        // so the validator's validations below are identity-proven.
+        self::assertTrue($verifier->verify($tokenB, self::SECRET, 'login', '198.51.100.7', $nowNs, operationIdentity: $this->operationIdentity('login', 'txn-alpha'))->isOk());
 
         $chainX = $chainService->requireStage2(base64_encode(random_bytes(32)), 'login', 'txn-alpha', 1, RiskAction::Argon32, time() + 300);
 

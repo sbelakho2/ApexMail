@@ -8,6 +8,9 @@ name = "smtp-auth-proxy"
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
-apxmail-lib = { path = "../../services/mail-server/crates/apxmail-lib" }
+# Path typo fixed: the crate directory/package is `apexmail-lib`
+# (`services/mail-server/crates/apexmail-lib`), previously declared as
+# `apxmail-lib`, which made even `cargo metadata` fail for this package.
+apexmail-lib = { path = "../../services/mail-server/crates/apexmail-lib" }
 sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "uuid"] }
 uuid = "1"

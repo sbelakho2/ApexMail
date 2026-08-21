@@ -12,7 +12,7 @@ use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use sqlx::{FromRow, Postgres, QueryBuilder};
+use sqlx::{Connection, FromRow, Postgres, QueryBuilder};
 use tokio::time::{interval_at, Instant, MissedTickBehavior};
 use tracing::{error, info, warn};
 use uuid::Uuid;
@@ -287,6 +287,43 @@ pub fn start_periodic_jobs(state: std::sync::Arc<AppState>) {
         }
     });
 
+    // ── Stripe webhook stale-pending reclaim (startup + hourly, Fix G) ──
+    let webhook_state = state.clone();
+    tokio::spawn(async move {
+        match crate::stripe_webhooks::reclaim_stale_pending_webhooks(webhook_state.as_ref()).await
+        {
+            Ok(reclaimed) if !reclaimed.is_empty() => {
+                info!(count = reclaimed.len(), "reclaimed stale pending stripe webhooks on startup");
+            }
+            Ok(_) => {}
+            Err(error_message) => {
+                error!(error = %error_message, "failed to reclaim stale pending stripe webhooks on startup");
+            }
+        }
+
+        let mut interval =
+            interval_at(Instant::now() + HOURLY_TASK_INTERVAL, HOURLY_TASK_INTERVAL);
+        interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+
+        loop {
+            interval.tick().await;
+
+            match crate::stripe_webhooks::reclaim_stale_pending_webhooks(
+                webhook_state.as_ref(),
+            )
+            .await
+            {
+                Ok(reclaimed) if !reclaimed.is_empty() => {
+                    info!(count = reclaimed.len(), "reclaimed stale pending stripe webhooks");
+                }
+                Ok(_) => {}
+                Err(error_message) => {
+                    error!(error = %error_message, "failed to reclaim stale pending stripe webhooks");
+                }
+            }
+        }
+    });
+
     // ── KMD VAT return generation (every 6 hours) ──────────────
     let kmd_state = state.clone();
     tokio::spawn(async move {
@@ -321,49 +358,48 @@ pub fn start_periodic_jobs(state: std::sync::Arc<AppState>) {
             interval.tick().await;
 
             match generate_kmd_if_due(kmd_state.as_ref()).await {
-                Ok(Some(result)) => {
-                    info!(
-                        tax_year = result.tax_year,
-                        tax_month = result.tax_month,
-                        invoice_count = result.invoice_count,
-                        total_vat_cents = result.total_vat_cents,
-                        "KMD VAT return generated for previous month"
-                    );
+                Ok(results) => {
+                    for result in results {
+                        info!(
+                            tax_year = result.tax_year,
+                            tax_month = result.tax_month,
+                            invoice_count = result.invoice_count,
+                            total_vat_cents = result.total_vat_cents,
+                            "KMD VAT return generated for previous month"
+                        );
 
-                    // Attempt electronic filing via EMTA (e-MTA) if configured.
-                    if emta_client.is_ready() {
-                        match attempt_emta_filing(&kmd_state.db, &emta_client, &result).await {
-                            Ok(Some(filing)) => {
-                                info!(
-                                    tax_year = result.tax_year,
-                                    tax_month = result.tax_month,
-                                    filing_reference = ?filing.filing_reference,
-                                    accepted = filing.accepted,
-                                    "KMD VAT return filed with EMTA"
-                                );
+                        // Attempt electronic filing via EMTA (e-MTA) if configured.
+                        if emta_client.is_ready() {
+                            match attempt_emta_filing(&kmd_state.db, &emta_client, &result).await {
+                                Ok(Some(filing)) => {
+                                    info!(
+                                        tax_year = result.tax_year,
+                                        tax_month = result.tax_month,
+                                        filing_reference = ?filing.filing_reference,
+                                        accepted = filing.accepted,
+                                        "KMD VAT return filed with EMTA"
+                                    );
+                                }
+                                Ok(None) => {
+                                    info!(
+                                        tax_year = result.tax_year,
+                                        tax_month = result.tax_month,
+                                        "KMD VAT return already filed with EMTA; skipping"
+                                    );
+                                }
+                                Err(e) => {
+                                    error!(
+                                        error = %e,
+                                        tax_year = result.tax_year,
+                                        tax_month = result.tax_month,
+                                        "EMTA filing failed"
+                                    );
+                                }
                             }
-                            Ok(None) => {
-                                info!(
-                                    tax_year = result.tax_year,
-                                    tax_month = result.tax_month,
-                                    "KMD VAT return already filed with EMTA; skipping"
-                                );
-                            }
-                            Err(e) => {
-                                error!(
-                                    error = %e,
-                                    tax_year = result.tax_year,
-                                    tax_month = result.tax_month,
-                                    "EMTA filing failed"
-                                );
-                            }
+                        } else {
+                            info!("EMTA client not ready (disabled or misconfigured); skipping electronic filing");
                         }
-                    } else {
-                        info!("EMTA client not ready (disabled or misconfigured); skipping electronic filing");
                     }
-                }
-                Ok(None) => {
-                    // Not yet due or already generated — nothing to do
                 }
                 Err(error_message) => {
                     error!(error = %error_message, "KMD VAT return generation failed");
@@ -692,42 +728,64 @@ async fn perform_month_end_closing(state: &AppState) -> Result<bool, String> {
 }
 
 /// Check if the previous month's KMD return is due (past the 20th)
-/// and generate it if it hasn't been generated yet.
+/// and generate it — plus every missed month since the last generated
+/// return — if not present yet (Fix I5: a service outage used to skip
+/// months permanently because only the immediately-previous month was
+/// ever considered).
 async fn generate_kmd_if_due(
     state: &AppState,
-) -> Result<Option<crate::vat_kmd::VatKmdResult>, String> {
+) -> Result<Vec<crate::vat_kmd::VatKmdResult>, String> {
     let now = Utc::now();
     let current_day = now.day();
     let current_month = now.month();
 
     // KMD for previous month is due on the 20th of the current month
     if current_day < 20 {
-        return Ok(None);
+        return Ok(Vec::new());
     }
 
     // Determine the target period (previous month)
-    let (target_year, target_month) = if current_month == 1 {
+    let target = if current_month == 1 {
         (now.year() - 1, 12u32)
     } else {
         (now.year(), current_month - 1)
     };
 
-    // Check if already generated
-    let existing = crate::vat_kmd::get_latest_kmd_return(&state.db).await?;
-    if let Some(kmd) = existing {
-        if kmd.tax_year == target_year && kmd.tax_month == target_month as i32 {
-            info!(
-                tax_year = target_year,
-                tax_month = target_month,
-                "KMD return already generated for this period"
-            );
-            return Ok(None);
-        }
+    let generated = crate::vat_kmd::list_generated_kmd_periods(&state.db).await?;
+    let missing = kmd_backfill_periods(&generated, target, KMD_BACKFILL_MAX_MONTHS);
+
+    let mut results = Vec::with_capacity(missing.len());
+    for (tax_year, tax_month) in missing {
+        info!(tax_year, tax_month, "generating KMD return for missed period");
+        results.push(
+            crate::vat_kmd::generate_kmd_return(&state.db, tax_year, tax_month).await?,
+        );
     }
 
-    // Generate the KMD return
-    let result = crate::vat_kmd::generate_kmd_return(&state.db, target_year, target_month).await?;
-    Ok(Some(result))
+    Ok(results)
+}
+
+/// Upper bound on how many missed KMD periods a single sweep will backfill
+/// (protects a fresh deployment from synthesizing years of empty returns).
+const KMD_BACKFILL_MAX_MONTHS: usize = 24;
+
+/// Pure companion of [`generate_kmd_if_due`]: the exact list of periods to
+/// generate, i.e. every missing month strictly after the latest generated
+/// period through `target` (inclusive). With nothing generated yet, only the
+/// target period is produced.
+fn kmd_backfill_periods(
+    generated: &[(i32, u32)],
+    target: (i32, u32),
+    cap: usize,
+) -> Vec<(i32, u32)> {
+    let last = generated.iter().copied().max();
+    let from = match last {
+        // Already generated at/after the target — nothing to do.
+        Some(last) if last >= target => return Vec::new(),
+        Some(last) => last,
+        None => return vec![target],
+    };
+    crate::vat_kmd::month_steps(from, target, cap)
 }
 
 /// Attempt to file the generated KMD VAT return with the EMTA (e-MTA) API.
@@ -1798,18 +1856,50 @@ async fn process_monthly_sla_credits(state: &AppState) -> Result<SlaCreditSweepR
             continue;
         }
 
-        let invoice_amount_cents: i64 = sqlx::query_scalar(
+        // Fix I6 — SLA credits are cash-equivalent: base them only on
+        // invoices that were actually paid, and credit in the invoice's own
+        // currency (mixed-currency totals must never be summed together).
+        let invoice_currency: String = sqlx::query_scalar(
             r#"
-            SELECT COALESCE(SUM(COALESCE(total, amount)), 0)::bigint
+            SELECT UPPER(currency)
             FROM invoices
             WHERE tenant_id = $1
+              AND status = 'paid'
               AND period_start >= $2
               AND period_end <= $3
+            ORDER BY created_at DESC
+            LIMIT 1
             "#,
         )
         .bind(&candidate.tenant_id)
         .bind(period_start)
         .bind(period_end)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(|error| {
+            format!(
+                "Failed to load invoice currency for SLA credits {}: {error}",
+                candidate.tenant_id
+            )
+        })?
+        .flatten()
+        .unwrap_or_else(|| "EUR".into());
+
+        let invoice_amount_cents: i64 = sqlx::query_scalar(
+            r#"
+            SELECT COALESCE(SUM(COALESCE(total, amount)), 0)::bigint
+            FROM invoices
+            WHERE tenant_id = $1
+              AND status = 'paid'
+              AND period_start >= $2
+              AND period_end <= $3
+              AND UPPER(currency) = $4
+            "#,
+        )
+        .bind(&candidate.tenant_id)
+        .bind(period_start)
+        .bind(period_end)
+        .bind(&invoice_currency)
         .fetch_one(&state.db)
         .await
         .map_err(|error| {
@@ -1869,7 +1959,7 @@ async fn process_monthly_sla_credits(state: &AppState) -> Result<SlaCreditSweepR
                     status,
                     created_at
                 )
-                SELECT gen_random_uuid(), $1, $2, $3, $4, $5, 'USD', 'pending', NOW()
+                SELECT gen_random_uuid(), $1, $2, $3, $4, $5, $6, 'pending', NOW()
                 WHERE NOT EXISTS (SELECT 1 FROM existing_credit)
                 RETURNING id
             )
@@ -1881,6 +1971,7 @@ async fn process_monthly_sla_credits(state: &AppState) -> Result<SlaCreditSweepR
         .bind(breach_percent)
         .bind(credit_percent)
         .bind(credit_amount)
+        .bind(&invoice_currency)
         .fetch_one(&state.db)
         .await
         .map_err(|error| {
@@ -1938,6 +2029,17 @@ async fn process_pending_dedicated_ip_charges(
         return Ok(0);
     };
 
+    // Fix I7 — the FOR UPDATE SKIP LOCKED claim previously ran in
+    // autocommit mode, so the row locks were released immediately and two
+    // maintenance ticks could double-charge the same IP. The fetch and the
+    // per-row processing now share one explicit transaction; each row runs
+    // inside a SAVEPOINT so one failure does not roll back the others.
+    // Double-charging remains impossible even if the transaction is lost
+    // after the Stripe call thanks to the Idempotency-Key.
+    let mut tx = state.db.begin().await.map_err(|error| {
+        format!("Failed to begin dedicated IP charge transaction: {error}")
+    })?;
+
     let rows = match sqlx::query_as::<_, DedicatedIpPendingRow>(
         r#"
         SELECT id, tenant_id, ip_address, stripe_subscription_item_id
@@ -1949,7 +2051,7 @@ async fn process_pending_dedicated_ip_charges(
         FOR UPDATE SKIP LOCKED
         "#,
     )
-    .fetch_all(&state.db)
+    .fetch_all(&mut *tx)
     .await
     {
         Ok(rows) => rows,
@@ -1966,13 +2068,37 @@ async fn process_pending_dedicated_ip_charges(
 
     let mut processed = 0_i64;
     for row in rows {
-        match charge_dedicated_ip(state, client, &row, &price_id).await {
-            Ok(()) => processed += 1,
+        let mut savepoint = match (&mut *tx).begin().await {
+            Ok(savepoint) => savepoint,
+            Err(error) => {
+                warn!(ip_id = %row.id, error = %error, "failed to open dedicated IP savepoint");
+                continue;
+            }
+        };
+
+        match charge_dedicated_ip(&mut savepoint, client, &row, &price_id).await {
+            Ok(()) => {
+                if let Err(error) = savepoint.commit().await {
+                    warn!(ip_id = %row.id, error = %error, "failed to commit dedicated IP savepoint");
+                    continue;
+                }
+                processed += 1;
+            }
             Err(error_message) => {
+                if let Err(rollback_error) = savepoint.rollback().await {
+                    warn!(ip_id = %row.id, error = %rollback_error, "failed to roll back dedicated IP savepoint");
+                }
+                // Record the backoff on the outer transaction (outside the
+                // rolled-back savepoint) so failed rows are retried later.
+                update_dedicated_ip_retry_metadata(&mut tx, &row.id).await;
                 warn!(tenant_id = %row.tenant_id, ip_id = %row.id, ip_address = %row.ip_address, error = %error_message, "failed to create dedicated IP Stripe subscription item");
             }
         }
     }
+
+    tx.commit().await.map_err(|error| {
+        format!("Failed to commit dedicated IP charge transaction: {error}")
+    })?;
 
     Ok(processed)
 }
@@ -1981,6 +2107,11 @@ async fn process_pending_dedicated_ip_cancels(
     state: &AppState,
     client: &Client,
 ) -> Result<i64, String> {
+    // Fix I7 — same explicit-transaction claim as the charge path.
+    let mut tx = state.db.begin().await.map_err(|error| {
+        format!("Failed to begin dedicated IP cancel transaction: {error}")
+    })?;
+
     let rows = match sqlx::query_as::<_, DedicatedIpPendingRow>(
         r#"
         SELECT id, tenant_id, ip_address, stripe_subscription_item_id
@@ -1991,7 +2122,7 @@ async fn process_pending_dedicated_ip_cancels(
         FOR UPDATE SKIP LOCKED
         "#,
     )
-    .fetch_all(&state.db)
+    .fetch_all(&mut *tx)
     .await
     {
         Ok(rows) => rows,
@@ -2008,19 +2139,40 @@ async fn process_pending_dedicated_ip_cancels(
 
     let mut processed = 0_i64;
     for row in rows {
-        match cancel_dedicated_ip_billing(state, client, &row).await {
-            Ok(()) => processed += 1,
+        let mut savepoint = match (&mut *tx).begin().await {
+            Ok(savepoint) => savepoint,
+            Err(error) => {
+                warn!(ip_id = %row.id, error = %error, "failed to open dedicated IP cancel savepoint");
+                continue;
+            }
+        };
+
+        match cancel_dedicated_ip_billing(&mut savepoint, client, &row).await {
+            Ok(()) => {
+                if let Err(error) = savepoint.commit().await {
+                    warn!(ip_id = %row.id, error = %error, "failed to commit dedicated IP cancel savepoint");
+                    continue;
+                }
+                processed += 1;
+            }
             Err(error_message) => {
+                if let Err(rollback_error) = savepoint.rollback().await {
+                    warn!(ip_id = %row.id, error = %rollback_error, "failed to roll back dedicated IP cancel savepoint");
+                }
                 warn!(tenant_id = %row.tenant_id, ip_id = %row.id, ip_address = %row.ip_address, error = %error_message, "failed to cancel dedicated IP Stripe subscription item");
             }
         }
     }
 
+    tx.commit().await.map_err(|error| {
+        format!("Failed to commit dedicated IP cancel transaction: {error}")
+    })?;
+
     Ok(processed)
 }
 
 async fn charge_dedicated_ip(
-    state: &AppState,
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     client: &Client,
     row: &DedicatedIpPendingRow,
     price_id: &str,
@@ -2036,30 +2188,22 @@ async fn charge_dedicated_ip(
         "#,
     )
     .bind(&row.tenant_id)
-    .fetch_optional(&state.db)
+    .fetch_optional(&mut **tx)
     .await
     .map_err(|error| format!("Failed to load tenant Stripe subscription: {error}"))?;
 
     let Some(subscription) = subscription else {
-        update_dedicated_ip_retry_metadata(state, &row.id).await;
         return Err("No active Stripe subscription for tenant".to_string());
     };
 
-    let response = match dedicated_ip_subscription_item_create(
+    let response = dedicated_ip_subscription_item_create(
         client,
         &subscription.stripe_subscription_id,
         price_id,
         &row.id,
         &row.tenant_id,
     )
-    .await
-    {
-        Ok(response) => response,
-        Err(error) => {
-            update_dedicated_ip_retry_metadata(state, &row.id).await;
-            return Err(error);
-        }
-    };
+    .await?;
 
     sqlx::query(
         r#"
@@ -2075,7 +2219,7 @@ async fn charge_dedicated_ip(
     )
     .bind(&row.id)
     .bind(response.id)
-    .execute(&state.db)
+    .execute(&mut **tx)
     .await
     .map_err(|error| format!("Failed to mark dedicated IP billing active: {error}"))?;
 
@@ -2083,7 +2227,7 @@ async fn charge_dedicated_ip(
 }
 
 async fn cancel_dedicated_ip_billing(
-    state: &AppState,
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     client: &Client,
     row: &DedicatedIpPendingRow,
 ) -> Result<(), String> {
@@ -2102,7 +2246,7 @@ async fn cancel_dedicated_ip_billing(
         "#,
     )
     .bind(&row.id)
-    .execute(&state.db)
+    .execute(&mut **tx)
     .await
     .map_err(|error| format!("Failed to finalize dedicated IP billing cancel: {error}"))?;
 
@@ -2196,7 +2340,10 @@ fn log_missing_dedicated_ip_table_once() {
     }
 }
 
-async fn update_dedicated_ip_retry_metadata(state: &AppState, ip_id: &str) {
+async fn update_dedicated_ip_retry_metadata(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    ip_id: &str,
+) {
     if let Err(error) = sqlx::query(
         r#"
         UPDATE dedicated_ips
@@ -2209,7 +2356,7 @@ async fn update_dedicated_ip_retry_metadata(state: &AppState, ip_id: &str) {
         "#,
     )
     .bind(ip_id)
-    .execute(&state.db)
+    .execute(&mut **tx)
     .await
     {
         warn!(ip_id = %ip_id, error = %error, "failed to update dedicated IP retry metadata");
@@ -2566,7 +2713,7 @@ async fn process_expired_wallet_reservations(state: &AppState) -> Result<i64, St
         ),
         wallet_updates AS (
             UPDATE wallets w
-            SET reserved = GREATEST(0, w.reserved - rt.total_amount::integer),
+            SET reserved = release_reserved_cents(w.reserved, rt.total_amount),
                 updated_at = NOW()
             FROM released_totals rt
             WHERE w.tenant_id = rt.tenant_id
@@ -2606,6 +2753,18 @@ async fn process_expired_wallet_reservations(state: &AppState) -> Result<i64, St
 struct ExpiredWalletReservationRow {
     tenant_id: String,
     released_count: i64,
+}
+
+/// Fix I12 — release a wallet reservation in BIGINT arithmetic.
+/// The previous SQL cast the summed reservations to INTEGER before
+/// subtracting, so a released total above 2^31-1 cents (~21.5M EUR) would
+/// overflow/wrap instead of clamping the reservation to zero.
+///
+/// SQL helper: `release_reserved_cents(reserved, total)` = bigint-clamped
+/// subtraction (see the migration-created function).
+#[cfg_attr(not(test), allow(dead_code))]
+fn release_reserved_cents_clamp(reserved: i64, released_total: i64) -> i64 {
+    reserved.saturating_sub(released_total).max(0)
 }
 
 pub(crate) async fn mark_payment_recovered(
@@ -2769,4 +2928,85 @@ struct StripeInvoiceListResponse {
 #[derive(Debug, Deserialize)]
 struct StripeInvoiceSummary {
     id: String,
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ------------------------------------------------------------------
+    // Fix I5 — KMD backfill covers every missed month.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn kmd_backfill_fills_three_month_gap() {
+        // Last generated: 2026-03. Target: 2026-06 → April, May, June.
+        let periods = kmd_backfill_periods(&[(2026, 3)], (2026, 6), 24);
+        assert_eq!(periods, vec![(2026, 4), (2026, 5), (2026, 6)]);
+    }
+
+    #[test]
+    fn kmd_backfill_with_no_history_generates_only_target() {
+        let periods = kmd_backfill_periods(&[], (2026, 6), 24);
+        assert_eq!(periods, vec![(2026, 6)]);
+    }
+
+    #[test]
+    fn kmd_backfill_is_noop_when_target_already_generated() {
+        assert!(kmd_backfill_periods(&[(2026, 6)], (2026, 6), 24).is_empty());
+        // Future-dated returns also block regeneration.
+        assert!(kmd_backfill_periods(&[(2026, 8)], (2026, 6), 24).is_empty());
+    }
+
+    #[test]
+    fn kmd_backfill_wraps_year_boundary() {
+        let periods = kmd_backfill_periods(&[(2026, 11)], (2027, 2), 24);
+        assert_eq!(periods, vec![(2026, 12), (2027, 1), (2027, 2)]);
+    }
+
+    #[test]
+    fn kmd_backfill_is_bounded() {
+        assert_eq!(
+            kmd_backfill_periods(&[(2024, 1)], (2026, 12), 5).len(),
+            5
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Fix I12 — wallet reservation release must not overflow.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn release_reserved_clamps_to_zero_on_large_totals() {
+        // Released total above INT range (~2.1B cents) previously wrapped
+        // through the ::integer cast and could leave phantom reservations.
+        assert_eq!(release_reserved_cents_clamp(500, 3_000_000_000), 0);
+        assert_eq!(release_reserved_cents_clamp(i64::MAX, i64::MAX), 0);
+    }
+
+    #[test]
+    fn release_reserved_subtracts_within_bounds() {
+        assert_eq!(release_reserved_cents_clamp(1_000, 400), 600);
+        assert_eq!(release_reserved_cents_clamp(1_000, 1_000), 0);
+        // Releasing more than reserved cannot go negative.
+        assert_eq!(release_reserved_cents_clamp(100, 200), 0);
+        assert_eq!(release_reserved_cents_clamp(0, 0), 0);
+    }
+
+    // ------------------------------------------------------------------
+    // Fix I6 — SLA credit percentage ladder.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn sla_credit_percentage_ladder() {
+        assert_eq!(sla_credit_percentage_for_breach(5.0), 100);
+        assert_eq!(sla_credit_percentage_for_breach(1.0), 50);
+        assert_eq!(sla_credit_percentage_for_breach(0.5), 25);
+        assert_eq!(sla_credit_percentage_for_breach(0.1), 10);
+        assert_eq!(sla_credit_percentage_for_breach(0.05), 0);
+    }
 }

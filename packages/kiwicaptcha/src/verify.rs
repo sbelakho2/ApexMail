@@ -208,6 +208,13 @@ pub enum VerifyOutcome {
         /// it again on the final protected POST — correlating the captcha
         /// result with the exact application transaction.
         request_binding: Option<String>,
+        /// `true` when this success is the retained committed outcome of an
+        /// earlier verification of the same nonce, replayed idempotently for
+        /// the logical operation that recorded it (the identity gate);
+        /// `false` for a fresh derivation. Callers that treat a
+        /// [`VerifyOutcome::Valid`] as authorization can therefore
+        /// distinguish a new proof from a retained-state replay.
+        from_stored_result: bool,
     },
     /// The solution is invalid; the reason explains why.
     Invalid(VerifyError),
@@ -252,6 +259,13 @@ pub enum VerifyError {
     CounterTooLarge,
     #[error("challenge was issued for a different scope")]
     WrongScope,
+    /// The caller pinned the challenge to an expected application
+    /// transaction binding (`request_binding`), but the record's signed
+    /// binding differs — or the record carries no binding at all (an
+    /// unbound challenge satisfies no binding-pinned redemption; fail
+    /// closed). The comparison is constant-time.
+    #[error("challenge is bound to a different application transaction (request_binding)")]
+    RequestBindingMismatch,
     #[error("challenge was issued for a different region")]
     WrongRegion,
     /// The stored record was issued under a different issuer identity than
@@ -302,6 +316,14 @@ pub enum VerifyError {
     /// it. See the consume no-retry rule in `redis_verify`.
     #[error("challenge consumption is indeterminate (storage I/O failure) — the challenge may or may not have been consumed; do not blindly retry this token")]
     ConsumeIndeterminate,
+    /// The challenge was already consumed by an earlier verification, and
+    /// its retained success is not idempotently replayable for this
+    /// caller: no operation identity was supplied, the record carries
+    /// none, or the supplied identity does not match the recorded one
+    /// (constant-time compare). A solved token can never fund a second
+    /// operation.
+    #[error("challenge already consumed — its retained success is not replayable for this caller")]
+    AlreadyConsumed,
     #[error("verification capacity exceeded — try again shortly")]
     CapacityExceeded,
     #[error("admission gate unavailable — try again shortly")]
@@ -725,6 +747,7 @@ pub fn verify_solution(ctx: &mut VerifyContext<'_>) -> VerifyOutcome {
         VerifyOutcome::Valid {
             nonce: ctx.record.nonce.clone(),
             request_binding: ctx.record.request_binding.clone(),
+            from_stored_result: false,
         }
     } else {
         VerifyOutcome::Invalid(VerifyError::InsufficientWork)
@@ -3922,7 +3945,8 @@ mod tests {
             outcome,
             VerifyOutcome::Valid {
                 nonce: expected_nonce,
-                request_binding: None
+                request_binding: None,
+                from_stored_result: false,
             }
         );
         let invalid = VerifyOutcome::Invalid(VerifyError::Expired);

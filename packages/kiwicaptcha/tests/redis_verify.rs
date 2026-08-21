@@ -125,6 +125,15 @@ fn fake_future_now() -> u64 {
     FAKE_FUTURE_NOW.load(Ordering::SeqCst)
 }
 
+/// Deterministic verifier clock for the consumed-evidence test: a fixed
+/// time far past the challenge's signed expiry, so the cheap TTL check
+/// deterministically fails while the retained record is still readable.
+static FAKE_EVIDENCE_NOW: AtomicU64 = AtomicU64::new(0);
+
+fn fake_evidence_now() -> u64 {
+    FAKE_EVIDENCE_NOW.load(Ordering::SeqCst)
+}
+
 /// Test prefix unique per process so concurrent test binaries never collide.
 fn prefix(label: &str) -> String {
     format!("kiwitest:{}:{label}:", std::process::id())
@@ -228,10 +237,30 @@ fn encode_token(nonce: &str, counter: u64) -> String {
     .encode()
 }
 
+/// Verify with a receipt time 1 s after issuance and the full contract
+/// inputs (operation identity + expected request binding).
+fn verify_with(
+    verifier: &ProductionVerifier,
+    token: &str,
+    issued_at_ns: u64,
+    operation_identity: Option<&str>,
+    expected_request_binding: Option<&str>,
+) -> VerifyOutcome {
+    verifier.verify(
+        token,
+        "login",
+        IP,
+        issued_at_ns + 1_000_000,
+        operation_identity,
+        expected_request_binding,
+    )
+}
+
 /// Verify with a receipt time 1 s after issuance — safely above every
-/// derived minimum-duration floor (SHA 5 ms, Argon2id 50 ms).
+/// derived minimum-duration floor (SHA 5 ms, Argon2id 50 ms) — and no
+/// operation identity / expected binding (the native-caller default).
 fn verify_at(verifier: &ProductionVerifier, token: &str, issued_at_ns: u64) -> VerifyOutcome {
-    verifier.verify(token, "login", IP, issued_at_ns + 1_000_000)
+    verify_with(verifier, token, issued_at_ns, None, None)
 }
 
 #[test]
@@ -363,6 +392,11 @@ fn php_written_record_with_non_null_operation_identity_parses_and_strips() {
         .stored_result
         .expect("the PHP-committed result must ride back");
     assert!(stored.valid);
+    assert_eq!(
+        consumed.operation_identity.as_deref(),
+        Some("deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"),
+        "the PHP-recorded identity must ride back on the consumed result"
+    );
 
     // The identity marker is preserved byte-exactly in the stored value
     // (the Rust reader only ever strips it, never rewrites it).
@@ -376,9 +410,11 @@ fn php_written_record_with_non_null_operation_identity_parses_and_strips() {
 #[test]
 fn two_concurrent_verifies_exactly_one_derives() {
     // The consumed-state transition keeps the record, so the
-    // concurrent loser returns the winner's stored outcome — the same
-    // Valid — or ConsumeIndeterminate when it races between the transition
-    // and the outcome commit, never RecordNotFound. Exactly one derive
+    // concurrent loser (a no-identity native caller) resolves the retained
+    // state through the identity gate: AlreadyConsumed once the winner's
+    // valid outcome is committed — never a second Valid, never
+    // RecordNotFound — or ConsumeIndeterminate when it races between the
+    // transition and the outcome commit. Exactly one derive
     // happens: commit_result stores exactly once, so the single stored
     // `consumed_result` (valid=true) pins the derive count; the counting
     // gate proves both racers passed through the Argon gate (the gate runs
@@ -412,8 +448,8 @@ fn two_concurrent_verifies_exactly_one_derives() {
     verifier.store().store(&issued.record).unwrap();
 
     // Two threads race the same token; the transition means exactly one of
-    // them wins it — the loser must return the stored outcome without any
-    // derivation.
+    // them wins it — the loser must resolve the retained state through the
+    // identity gate without any derivation.
     let barrier = Arc::new(Barrier::new(3));
     let mut handles = Vec::new();
     for _ in 0..2 {
@@ -422,29 +458,40 @@ fn two_concurrent_verifies_exactly_one_derives() {
         let token = token.clone();
         handles.push(thread::spawn(move || {
             barrier.wait();
-            verifier.verify(&token, "login", IP, issued_at_ns + 1_000_000)
+            verifier.verify(&token, "login", IP, issued_at_ns + 1_000_000, None, None)
         }));
     }
     barrier.wait();
 
     let mut valid = 0;
     let mut indeterminate = 0;
+    let mut already_consumed = 0;
     for handle in handles {
         match handle.join().unwrap() {
             VerifyOutcome::Valid { .. } => valid += 1,
             VerifyOutcome::Invalid(VerifyError::ConsumeIndeterminate) => indeterminate += 1,
+            VerifyOutcome::Invalid(VerifyError::AlreadyConsumed) => already_consumed += 1,
             other => panic!("unexpected concurrent outcome: {other:?}"),
         }
     }
     assert_eq!(
-        valid + indeterminate,
+        valid + indeterminate + already_consumed,
         2,
-        "one winner (Valid) + one loser (stored Valid or ConsumeIndeterminate)"
+        "one winner (Valid) + one identity-gated loser (AlreadyConsumed or ConsumeIndeterminate)"
     );
-    assert!(valid >= 1, "the transition winner must return Valid");
+    assert_eq!(valid, 1, "exactly the transition winner returns Valid");
     assert!(
         indeterminate <= 1,
         "only the loser may see ConsumeIndeterminate (racing before the commit)"
+    );
+    assert!(
+        already_consumed <= 1,
+        "only the loser may see AlreadyConsumed (racing after the commit)"
+    );
+    assert_eq!(
+        indeterminate + already_consumed,
+        1,
+        "the loser resolves the retained state through the identity gate: AlreadyConsumed when the winner's outcome is committed, ConsumeIndeterminate when it races before the commit"
     );
 
     // Exactly one derive + commit: the stored record carries ONE committed
@@ -472,7 +519,12 @@ fn two_concurrent_verifies_exactly_one_derives() {
 }
 
 #[test]
-fn replay_after_valid_verify_returns_the_stored_outcome() {
+fn replay_after_valid_verify_is_identity_gated() {
+    // The identity gate on the retained stored success: an exact
+    // operation-identity retry is the idempotent retained Valid (marked
+    // from_stored_result=true); a no-identity replay is
+    // AlreadyConsumed — one solved token can never fund a second
+    // operation. Never RecordNotFound, never a re-derivation.
     let Some(url) = redis_url() else { return };
     let prefix = prefix("replay");
     let issued = issue_challenge(
@@ -492,19 +544,383 @@ fn replay_after_valid_verify_returns_the_stored_outcome() {
     let verifier = verifier_for(&url, &prefix);
     verifier.store().store(&issued.record).unwrap();
 
-    assert!(matches!(
+    // Identity-bearing first verification → fresh Valid.
+    assert_eq!(
+        verify_with(&verifier, &token, issued_at_ns, Some("op-replay"), None),
+        VerifyOutcome::Valid {
+            nonce: issued.record.nonce.clone(),
+            request_binding: None,
+            from_stored_result: false,
+        }
+    );
+    // The consumed record is kept with the committed outcome — an exact
+    // identity retry returns the same Valid from the stored result,
+    // distinguishable from a fresh success.
+    assert_eq!(
+        verify_with(&verifier, &token, issued_at_ns, Some("op-replay"), None),
+        VerifyOutcome::Valid {
+            nonce: issued.record.nonce.clone(),
+            request_binding: None,
+            from_stored_result: true,
+        },
+        "the exact identity retry is the retained Valid"
+    );
+    // A no-identity replay is refused: the retained success never replays
+    // for a caller that cannot prove the recording operation identity.
+    assert_eq!(
         verify_at(&verifier, &token, issued_at_ns),
-        VerifyOutcome::Valid { .. }
-    ));
-    // The consumed record is kept with the committed outcome —
-    // a replay returns the same Valid (from the stored result), never
-    // RecordNotFound and never a re-derivation.
-    assert!(
-        matches!(
-            verify_at(&verifier, &token, issued_at_ns),
-            VerifyOutcome::Valid { .. }
+        VerifyOutcome::Invalid(VerifyError::AlreadyConsumed),
+        "a no-identity replay of a stored-valid record is AlreadyConsumed"
+    );
+}
+
+#[test]
+fn replay_outcomes_follow_the_operation_identity_gate() {
+    // The full cross-language replay matrix: an identity-bearing first
+    // verification records the identity atomically with the consume; an
+    // exact retry is the idempotent retained Valid; a different identity —
+    // or no identity — is AlreadyConsumed; a no-identity first
+    // verification succeeds fresh but its replay is AlreadyConsumed; the
+    // deterministic invalid outcome replays without any identity.
+    let Some(url) = redis_url() else { return };
+    let prefix = prefix("matrix");
+    let verifier = verifier_for(&url, &prefix);
+
+    // T + A first → fresh Valid (from_stored_result=false).
+    let issued_a = issue_challenge(
+        &sha_config(4),
+        "login",
+        IP,
+        now_unix(),
+        now_micros(),
+        0,
+        None,
+    )
+    .unwrap();
+    let counter_a = solve_for_test(&issued_a.record).expect("4-bit sha solves");
+    let token_a = encode_token(&issued_a.record.nonce, counter_a);
+    verifier.store().store(&issued_a.record).unwrap();
+    assert_eq!(
+        verify_with(
+            &verifier,
+            &token_a,
+            issued_a.record.issued_at_ns,
+            Some("op-a"),
+            None
         ),
-        "a replayed token returns the stored outcome of the first verification"
+        VerifyOutcome::Valid {
+            nonce: issued_a.record.nonce.clone(),
+            request_binding: None,
+            from_stored_result: false,
+        },
+        "T + A first: fresh Valid"
+    );
+
+    // T + A exact retry → the retained Valid (from_stored_result=true).
+    assert_eq!(
+        verify_with(
+            &verifier,
+            &token_a,
+            issued_a.record.issued_at_ns,
+            Some("op-a"),
+            None
+        ),
+        VerifyOutcome::Valid {
+            nonce: issued_a.record.nonce.clone(),
+            request_binding: None,
+            from_stored_result: true,
+        },
+        "T + A exact retry: the retained Valid"
+    );
+
+    // T + B → AlreadyConsumed (the retained success belongs to op-a).
+    assert_eq!(
+        verify_with(
+            &verifier,
+            &token_a,
+            issued_a.record.issued_at_ns,
+            Some("op-b"),
+            None
+        ),
+        VerifyOutcome::Invalid(VerifyError::AlreadyConsumed),
+        "T + B: a different identity is AlreadyConsumed"
+    );
+
+    // T + None first → fresh Valid; T + None second → AlreadyConsumed.
+    let issued_none = issue_challenge(
+        &sha_config(4),
+        "login",
+        IP,
+        now_unix(),
+        now_micros(),
+        0,
+        None,
+    )
+    .unwrap();
+    let counter_none = solve_for_test(&issued_none.record).expect("4-bit sha solves");
+    let token_none = encode_token(&issued_none.record.nonce, counter_none);
+    verifier.store().store(&issued_none.record).unwrap();
+    assert_eq!(
+        verify_at(&verifier, &token_none, issued_none.record.issued_at_ns),
+        VerifyOutcome::Valid {
+            nonce: issued_none.record.nonce.clone(),
+            request_binding: None,
+            from_stored_result: false,
+        },
+        "T + None first: fresh Valid"
+    );
+    assert_eq!(
+        verify_at(&verifier, &token_none, issued_none.record.issued_at_ns),
+        VerifyOutcome::Invalid(VerifyError::AlreadyConsumed),
+        "T + None second: a no-identity replay never receives the stored success"
+    );
+
+    // Wrong proof first → InsufficientWork (committed valid=false); the
+    // same nonce later → the deterministic invalid, identity-free.
+    let issued_wrong = issue_challenge(
+        &sha_config(4),
+        "login",
+        IP,
+        now_unix(),
+        now_micros(),
+        0,
+        None,
+    )
+    .unwrap();
+    let valid_counter = solve_for_test(&issued_wrong.record).expect("4-bit sha solves");
+    let wrong_counter = if valid_counter == 0 { 1 } else { 0 };
+    verifier.store().store(&issued_wrong.record).unwrap();
+    assert_eq!(
+        verify_with(
+            &verifier,
+            &encode_token(&issued_wrong.record.nonce, wrong_counter),
+            issued_wrong.record.issued_at_ns,
+            Some("op-wrong"),
+            None
+        ),
+        VerifyOutcome::Invalid(VerifyError::InsufficientWork),
+        "wrong proof first: InsufficientWork"
+    );
+    assert_eq!(
+        verify_with(
+            &verifier,
+            &encode_token(&issued_wrong.record.nonce, valid_counter),
+            issued_wrong.record.issued_at_ns,
+            None,
+            None
+        ),
+        VerifyOutcome::Invalid(VerifyError::InsufficientWork),
+        "the same nonce later: the deterministic invalid outcome replays without an identity"
+    );
+}
+
+#[test]
+fn expected_request_binding_is_enforced_in_the_cheap_phase() {
+    // The expected-request-binding contract: a matching binding verifies;
+    // a differing binding — or a record without one when one is expected —
+    // is RequestBindingMismatch, and the pending record is consumed by the
+    // cheap failure; None (the default) leaves the binding unenforced.
+    let Some(url) = redis_url() else { return };
+    let prefix = prefix("binding");
+    let issued = issue_challenge(
+        &sha_config(4),
+        "login",
+        IP,
+        now_unix(),
+        now_micros(),
+        0,
+        Some("txn-1"),
+    )
+    .unwrap();
+    let counter = solve_for_test(&issued.record).expect("4-bit sha solves");
+    let token = encode_token(&issued.record.nonce, counter);
+    let issued_at_ns = issued.record.issued_at_ns;
+    let verifier = verifier_for(&url, &prefix);
+
+    // Match: the record's signed binding equals the expectation.
+    verifier.store().store(&issued.record).unwrap();
+    assert_eq!(
+        verify_with(&verifier, &token, issued_at_ns, None, Some("txn-1")),
+        VerifyOutcome::Valid {
+            nonce: issued.record.nonce.clone(),
+            request_binding: Some("txn-1".into()),
+            from_stored_result: false,
+        },
+        "a matching expected binding verifies"
+    );
+
+    // Mismatch: a different expected binding is RequestBindingMismatch.
+    let issued_mismatch = issue_challenge(
+        &sha_config(4),
+        "login",
+        IP,
+        now_unix(),
+        now_micros(),
+        0,
+        Some("txn-1"),
+    )
+    .unwrap();
+    let counter_mismatch = solve_for_test(&issued_mismatch.record).expect("4-bit sha solves");
+    let token_mismatch = encode_token(&issued_mismatch.record.nonce, counter_mismatch);
+    verifier.store().store(&issued_mismatch.record).unwrap();
+    assert_eq!(
+        verify_with(
+            &verifier,
+            &token_mismatch,
+            issued_mismatch.record.issued_at_ns,
+            None,
+            Some("txn-2")
+        ),
+        VerifyOutcome::Invalid(VerifyError::RequestBindingMismatch),
+        "a differing expected binding is RequestBindingMismatch"
+    );
+    // The cheap failure consumed the pending record (one-shot semantics).
+    assert_eq!(
+        verify_with(
+            &verifier,
+            &token_mismatch,
+            issued_mismatch.record.issued_at_ns,
+            None,
+            Some("txn-1")
+        ),
+        VerifyOutcome::Invalid(VerifyError::RecordNotFound),
+        "the binding-mismatch cheap failure consumed the pending record"
+    );
+
+    // No binding on the record when one is expected → fail closed.
+    let issued_unbound = issue_challenge(
+        &sha_config(4),
+        "login",
+        IP,
+        now_unix(),
+        now_micros(),
+        0,
+        None,
+    )
+    .unwrap();
+    let counter_unbound = solve_for_test(&issued_unbound.record).expect("4-bit sha solves");
+    let token_unbound = encode_token(&issued_unbound.record.nonce, counter_unbound);
+    verifier.store().store(&issued_unbound.record).unwrap();
+    assert_eq!(
+        verify_with(
+            &verifier,
+            &token_unbound,
+            issued_unbound.record.issued_at_ns,
+            None,
+            Some("txn-1")
+        ),
+        VerifyOutcome::Invalid(VerifyError::RequestBindingMismatch),
+        "a record without a binding fails closed when one is expected"
+    );
+
+    // None → the binding is not enforced (merely returned).
+    let issued_none = issue_challenge(
+        &sha_config(4),
+        "login",
+        IP,
+        now_unix(),
+        now_micros(),
+        0,
+        Some("txn-1"),
+    )
+    .unwrap();
+    let counter_none = solve_for_test(&issued_none.record).expect("4-bit sha solves");
+    let token_none = encode_token(&issued_none.record.nonce, counter_none);
+    verifier.store().store(&issued_none.record).unwrap();
+    assert_eq!(
+        verify_with(
+            &verifier,
+            &token_none,
+            issued_none.record.issued_at_ns,
+            None,
+            None
+        ),
+        VerifyOutcome::Valid {
+            nonce: issued_none.record.nonce.clone(),
+            request_binding: Some("txn-1".into()),
+            from_stored_result: false,
+        },
+        "None disables the expected-binding check"
+    );
+}
+
+#[test]
+fn consumed_evidence_survives_a_cheap_failure_past_expiry() {
+    // The crash-recovery evidence contract: a consumed record with a
+    // committed outcome is the retained proof of the original verdict. A
+    // cheap-phase failure on a replay (here: the signed expiry passed) must
+    // NOT delete it — the delete is gated on the consumed state, so the
+    // evidence survives to its retention TTL and the replay resolves
+    // through the identity-gated consumed branch.
+    let Some(url) = redis_url() else { return };
+    let prefix = prefix("evidence");
+    let issued = issue_challenge(
+        &sha_config(4),
+        "login",
+        IP,
+        now_unix(),
+        now_micros(),
+        0,
+        None,
+    )
+    .unwrap();
+    let counter = solve_for_test(&issued.record).expect("4-bit sha solves");
+    let token = encode_token(&issued.record.nonce, counter);
+    let issued_at_ns = issued.record.issued_at_ns;
+
+    // Consume + commit with an operation identity (the Siteverify-shaped
+    // transition: identity recorded atomically with the state flip).
+    let store = store_for(&url, &prefix);
+    store.store(&issued.record).unwrap();
+    let consumed = store
+        .consume_with_operation_identity(&issued.record.nonce, Some("op-evidence"))
+        .unwrap()
+        .expect("pending record consumes");
+    assert!(consumed.first);
+    assert_eq!(
+        consumed.operation_identity.as_deref(),
+        Some("op-evidence"),
+        "the winner's own identity rides back on the transition result"
+    );
+    store
+        .commit_result(&issued.record.nonce, true, None)
+        .unwrap();
+
+    // Advance the verifier clock past the signed expiry: the cheap TTL
+    // check fails, but the record is consumed — the failure routes to the
+    // identity-gated consumed branch instead of deleting the evidence.
+    FAKE_EVIDENCE_NOW.store(now_unix() + 300, Ordering::SeqCst);
+    let verifier = verifier_for(&url, &prefix).with_now_fn(fake_evidence_now);
+    assert_eq!(
+        verify_with(&verifier, &token, issued_at_ns, Some("op-evidence"), None),
+        VerifyOutcome::Valid {
+            nonce: issued.record.nonce.clone(),
+            request_binding: None,
+            from_stored_result: true,
+        },
+        "the identity replay past expiry resolves the retained Valid"
+    );
+    assert_eq!(
+        verify_at(&verifier, &token, issued_at_ns),
+        VerifyOutcome::Invalid(VerifyError::AlreadyConsumed),
+        "a no-identity replay of the expired consumed record is AlreadyConsumed"
+    );
+
+    // The record still exists — the recovery evidence survived the cheap
+    // failure, intact with its committed outcome and identity.
+    let key = format!("{prefix}{}", issued.record.nonce);
+    let mut conn = redis::Client::open(url.clone())
+        .unwrap()
+        .get_connection()
+        .unwrap();
+    let raw: String = redis::cmd("GET").arg(&key).query(&mut conn).unwrap();
+    let stored: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    assert_eq!(stored["state"], "consumed");
+    assert_eq!(stored["consumed_result"]["valid"], true);
+    assert_eq!(
+        stored["operation_identity"],
+        serde_json::json!("op-evidence"),
+        "the identity marker survives untouched"
     );
 }
 
@@ -578,7 +994,7 @@ fn expired_record_returns_expired() {
 
         let verifier = verifier_for(&url, &prefix);
         verifier.store().store(&issued.record).unwrap();
-        match verifier.verify(&token, "login", IP, now_micros()) {
+        match verifier.verify(&token, "login", IP, now_micros(), None, None) {
             VerifyOutcome::Invalid(VerifyError::Expired) => return,
             VerifyOutcome::Invalid(VerifyError::RecordNotFound) => continue,
             other => panic!("expired record gave unexpected outcome: {other:?}"),
@@ -811,8 +1227,16 @@ fn argon_lease_is_held_during_verify_and_released_by_drop() {
     // transition and the Argon2id derivation, i.e. during the verify call.
     let worker = Arc::clone(&verifier);
     let worker_token = token.clone();
-    let handle =
-        thread::spawn(move || worker.verify(&worker_token, "login", IP, issued_at_ns + 1_000_000));
+    let handle = thread::spawn(move || {
+        worker.verify(
+            &worker_token,
+            "login",
+            IP,
+            issued_at_ns + 1_000_000,
+            None,
+            None,
+        )
+    });
 
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
     let mut seen_in_flight = false;
@@ -1099,7 +1523,9 @@ fn unreachable_store_maps_find_error_to_storage_unavailable() {
             &encode_token(&issued.record.nonce, 0),
             "login",
             IP,
-            now_micros()
+            now_micros(),
+            None,
+            None
         ),
         VerifyOutcome::Invalid(VerifyError::StorageUnavailable),
         "a find()/checkout failure must map to StorageUnavailable (the challenge is presumed intact), never RecordNotFound"
@@ -1691,17 +2117,17 @@ fn noncanonical_tokens_reach_the_verifier_as_malformed_token() {
     let url_safe = format!("-{}", &good[1..]); // '-' is outside the standard alphabet
     assert_ne!(url_safe, good);
     assert_eq!(
-        verifier.verify(&url_safe, "login", IP, issued_at_ns + 1_000_000),
+        verifier.verify(&url_safe, "login", IP, issued_at_ns + 1_000_000, None, None),
         VerifyOutcome::Invalid(VerifyError::MalformedToken)
     );
     let unpadded = good.trim_end_matches('=');
     assert_eq!(
-        verifier.verify(unpadded, "login", IP, issued_at_ns + 1_000_000),
+        verifier.verify(unpadded, "login", IP, issued_at_ns + 1_000_000, None, None),
         VerifyOutcome::Invalid(VerifyError::MalformedToken)
     );
     let loose = format!("{good}=");
     assert_eq!(
-        verifier.verify(&loose, "login", IP, issued_at_ns + 1_000_000),
+        verifier.verify(&loose, "login", IP, issued_at_ns + 1_000_000, None, None),
         VerifyOutcome::Invalid(VerifyError::MalformedToken)
     );
 
@@ -1934,7 +2360,9 @@ fn future_issued_challenge_beyond_skew_is_rejected() {
             &encode_token(&issued.record.nonce, counter),
             "login",
             IP,
-            issued.record.issued_at_ns + 1_000_000
+            issued.record.issued_at_ns + 1_000_000,
+            None,
+            None
         ),
         VerifyOutcome::Invalid(VerifyError::Expired),
         "a future-issued challenge beyond the clock skew must be rejected"
@@ -1978,7 +2406,9 @@ fn unknown_algorithm_variants_in_stored_records_are_record_not_found() {
                 &encode_token(&issued.record.nonce, 0),
                 "login",
                 IP,
-                now_micros()
+                now_micros(),
+                None,
+                None
             ),
             VerifyOutcome::Invalid(VerifyError::RecordNotFound),
             "algorithm {algo:?} must be undecodable (RecordNotFound), like PHP"
@@ -2078,7 +2508,9 @@ fn oversized_stored_record_is_rejected_before_parse() {
             &encode_token(&issued.record.nonce, 0),
             "login",
             IP,
-            now_micros()
+            now_micros(),
+            None,
+            None
         ),
         VerifyOutcome::Invalid(VerifyError::RecordNotFound),
         "a 10 MB stored value must be rejected at parse (RecordNotFound), like any corrupt key"
@@ -2132,15 +2564,15 @@ fn script_flush_is_recovered_deterministically() {
     );
 
     // The record is NOT burned: it still exists with the consumed state and
-    // the committed outcome, and a replay returns the same outcome — even
-    // after another flush (the replayed consume re-loads the script again).
+    // the committed outcome, and a replay resolves through the identity
+    // gate — even after another flush (the replayed consume re-loads the
+    // script again, finds the retained consumed state, and the no-identity
+    // caller is refused with AlreadyConsumed, never RecordNotFound).
     let _: () = redis::cmd("SCRIPT").arg("FLUSH").query(&mut conn).unwrap();
-    assert!(
-        matches!(
-            verify_at(&verifier, &token, issued_at_ns),
-            VerifyOutcome::Valid { .. }
-        ),
-        "a replay after a second flush returns the stored outcome — deterministic recovery"
+    assert_eq!(
+        verify_at(&verifier, &token, issued_at_ns),
+        VerifyOutcome::Invalid(VerifyError::AlreadyConsumed),
+        "a replay after a second flush re-loads the consume script and resolves through the identity gate"
     );
 
     let key = format!("{prefix}{}", issued.record.nonce);

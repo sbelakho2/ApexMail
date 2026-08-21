@@ -455,7 +455,14 @@ async fn get_plan_feature(
     State(state): State<Arc<AppState>>,
     Path(feature): Path<String>,
     Query(q): Query<TenantIdQuery>,
+    Extension(scope): Extension<TenantAuthScope>,
 ) -> Result<Response, ApiError> {
+    // Fix I8 — this is the only tenant-scoped plan route that previously
+    // skipped check_tenant_access, letting a cross-tenant token probe any
+    // tenant's feature flags.
+    if let Err(response) = check_tenant_access(&scope, &q.tenant_id) {
+        return Ok(response);
+    }
     let plan = plans::get_plan_for_tenant(&state.db, &q.tenant_id).await?;
     let has_access = plan
         .as_ref()
@@ -695,6 +702,10 @@ struct LegacyPaygEstimateBody {
 struct LegacyOverageEstimateBody {
     emails_sent: i64,
     email_limit: i64,
+    /// Optional tenant for server-side limit recomputation. When present the
+    /// client-supplied email_limit is ignored (Fix I13).
+    #[serde(default)]
+    tenant_id: Option<String>,
 }
 
 fn cents_to_usd_string(cents: i64) -> String {
@@ -814,18 +825,55 @@ async fn estimate_payg_cost(
 }
 
 async fn estimate_overage_cost(
+    State(state): State<Arc<AppState>>,
+    Extension(scope): Extension<TenantAuthScope>,
     Json(body): Json<LegacyOverageEstimateBody>,
 ) -> Result<Response, ApiError> {
     let emails_sent = match validate_non_negative(body.emails_sent, "emailsSent") {
         Ok(value) => value as i64,
         Err(response) => return Ok(response),
     };
-    let overage_cost_cents = plans::calculate_overage_cost(emails_sent, body.email_limit);
+
+    // Fix I13 — a negative client-supplied limit used to be passed straight
+    // into calculate_overage_cost, where negative means "unlimited". Reject
+    // it, and recompute the limit server-side when a tenant is named.
+    let email_limit = match validate_non_negative(body.email_limit, "emailLimit") {
+        Ok(value) => value as i64,
+        Err(response) => return Ok(response),
+    };
+
+    let mut tenant_access_denied: Option<Response> = None;
+    let email_limit = match body.tenant_id.as_deref() {
+        Some(tenant_id) => {
+            if let Err(response) = check_tenant_access(&scope, tenant_id) {
+                tenant_access_denied = Some(response);
+                email_limit
+            } else {
+                match plans::get_plan_for_tenant(&state.db, tenant_id).await? {
+                    Some(plan) => plan.email_limit,
+                    None => email_limit,
+                }
+            }
+        }
+        None => email_limit,
+    };
+
+    if let Some(response) = tenant_access_denied {
+        return Ok(response);
+    }
+
+    // Fix I10 — overage pricing comes from BillingConfig instead of the
+    // hardcoded 4/100 in plans.rs (default stays 40 millicents/email).
+    let overage_cost_cents = plans::calculate_overage_cost_with_rate(
+        emails_sent,
+        email_limit,
+        state.config.overage_rate_per_email_millicents,
+    );
 
     Ok(Json(serde_json::json!({
         "usage": {
             "emailsSent": emails_sent,
-            "emailLimit": body.email_limit,
+            "emailLimit": email_limit,
         },
         "overageCostCents": overage_cost_cents,
         "overageCostUsd": cents_to_usd_string(overage_cost_cents),
@@ -1375,6 +1423,15 @@ async fn get_revenue_report(
     Ok(Json(serde_json::json!({ "report": report })).into_response())
 }
 
+/// Fix I9 — normalize a yearly plan price to monthly MRR with round-half-up
+/// integer math (equivalent to SQL `ROUND(price_yearly / 12.0)`), so a
+/// yearly €25 000 plan counts as 2 083 cents/month instead of being
+/// truncated to 2 082.
+#[cfg_attr(not(test), allow(dead_code))]
+fn yearly_price_to_monthly_mrr(price_yearly: i64) -> i64 {
+    (price_yearly + 6) / 12
+}
+
 async fn get_mrr_report(
     State(state): State<Arc<AppState>>,
     Extension(scope): Extension<TenantAuthScope>,
@@ -1382,24 +1439,29 @@ async fn get_mrr_report(
     if let Err(response) = require_any_scope(&scope) {
         return Ok(response);
     }
+    // Fix C — MRR is computed from stripe_subscriptions (the table the
+    // webhook writers populate) joined via tenants.plan to plans pricing.
+    // Fix I9 — yearly prices are normalized with proper rounding and rows
+    // are bucketed by the subscription's active month (billing cycle start,
+    // falling back to creation), not by raw creation date.
     let report: serde_json::Value = sqlx::query_scalar(
         r#"
         SELECT COALESCE(json_agg(row_to_json(report_row) ORDER BY report_row.month DESC), '[]'::json)
         FROM (
             SELECT
-                DATE_TRUNC('month', s.created_at) as month,
+                DATE_TRUNC('month', COALESCE(s.billing_cycle_start, s.created_at)) as month,
                 COUNT(DISTINCT s.tenant_id) as active_subscriptions,
                 SUM(
                     CASE
-                        WHEN s.billing_interval = 'monthly' THEN p.price_monthly
-                        WHEN s.billing_interval = 'yearly' THEN p.price_yearly / 12
-                        ELSE 0
+                        WHEN s.billing_interval = 'yearly' THEN ROUND(p.price_yearly / 12.0)::bigint
+                        ELSE p.price_monthly
                     END
                 ) as mrr
-            FROM subscriptions s
-            JOIN plans p ON p.name = s.plan_name
+            FROM stripe_subscriptions s
+            JOIN tenants t ON t.id = s.tenant_id
+            JOIN plans p ON p.name = t.plan
             WHERE s.status = 'active'
-            GROUP BY DATE_TRUNC('month', s.created_at)
+            GROUP BY DATE_TRUNC('month', COALESCE(s.billing_cycle_start, s.created_at))
             ORDER BY month DESC
             LIMIT 12
         ) report_row
@@ -1419,32 +1481,33 @@ async fn get_churn_report(
     if let Err(response) = require_any_scope(&scope) {
         return Ok(response);
     }
+    // Fix C — churn computed from stripe_subscriptions (join tenants/plans).
     let report: serde_json::Value = sqlx::query_scalar(
         r#"
         SELECT COALESCE(json_agg(row_to_json(report_row) ORDER BY report_row.month DESC), '[]'::json)
         FROM (
             WITH churned AS (
                 SELECT
-                    DATE_TRUNC('month', s.updated_at) as month,
+                    DATE_TRUNC('month', COALESCE(s.canceled_at, s.updated_at)) as month,
                     COUNT(*) as churned_count,
                     SUM(
                         CASE
-                            WHEN s.billing_interval = 'monthly' THEN p.price_monthly
-                            WHEN s.billing_interval = 'yearly' THEN p.price_yearly / 12
-                            ELSE 0
+                            WHEN s.billing_interval = 'yearly' THEN ROUND(p.price_yearly / 12.0)::bigint
+                            ELSE p.price_monthly
                         END
                     ) as churned_mrr
-                FROM subscriptions s
-                JOIN plans p ON p.name = s.plan_name
+                FROM stripe_subscriptions s
+                JOIN tenants t ON t.id = s.tenant_id
+                JOIN plans p ON p.name = t.plan
                 WHERE s.status = 'canceled'
-                GROUP BY DATE_TRUNC('month', s.updated_at)
+                GROUP BY DATE_TRUNC('month', COALESCE(s.canceled_at, s.updated_at))
             ),
             starting AS (
                 SELECT
                     c.month,
                     COUNT(DISTINCT s.tenant_id) as starting_count
                 FROM churned c
-                LEFT JOIN subscriptions s
+                LEFT JOIN stripe_subscriptions s
                   ON s.created_at < c.month
                 GROUP BY c.month
             )
@@ -1683,19 +1746,43 @@ struct TenantQuery {
     tenant_id: String,
 }
 
+/// GET /usage?tenant_id=...&tz=Europe/Tallinn
+///
+/// Fix I15 — the period boundaries default to the historical UTC month, but
+/// an explicit IANA `tz` shifts them to local midnight so usage reporting
+/// can align with the Tallinn-based VAT periods. (KMD itself always uses
+/// Europe/Tallinn; this documented difference remains intentional.)
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UsageQuery {
+    tenant_id: String,
+    /// Optional IANA timezone name (e.g. "Europe/Tallinn").
+    #[serde(default)]
+    tz: Option<String>,
+}
+
 /// GET /usage?tenant_id=...
 async fn get_usage(
     State(state): State<Arc<AppState>>,
-    Query(q): Query<TenantQuery>,
+    Query(q): Query<UsageQuery>,
     Extension(scope): Extension<TenantAuthScope>,
 ) -> Result<Response, ApiError> {
     if let Err(response) = check_tenant_access(&scope, &q.tenant_id) {
         return Ok(response);
     }
-    let now = chrono::Utc::now();
-    let month_start_date = now.date_naive().with_day(1).unwrap_or(now.date_naive());
-    let period_start = month_start_date.and_time(chrono::NaiveTime::MIN).and_utc();
-    let period_end = period_start + chrono::Months::new(1);
+
+    let (period_start, period_end) =
+        match usage::month_period_for_tz(chrono::Utc::now(), q.tz.as_deref()) {
+            Ok(bounds) => bounds,
+            Err(error) => {
+                return Ok(error_response(
+                    StatusCode::BAD_REQUEST,
+                    ErrorCode::InvalidInput,
+                    error,
+                ));
+            }
+        };
+
     let summary = usage::get_usage(&state.db, &q.tenant_id, period_start, period_end).await?;
     Ok(Json(summary).into_response())
 }
@@ -2607,5 +2694,66 @@ mod tests {
             "'=SUM(A1:A2)"
         );
         assert_eq!(sanitize_csv_value(&serde_json::json!("plain")), "plain");
+    }
+
+    // ------------------------------------------------------------------
+    // Fix I9 — yearly → monthly MRR rounding.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn yearly_mrr_uses_half_up_rounding() {
+        // 25 000 / 12 = 2083.33 → 2 083 (not truncated 2 082).
+        assert_eq!(yearly_price_to_monthly_mrr(25_000), 2_083);
+        // 24 000 / 12 = exactly 2 000.
+        assert_eq!(yearly_price_to_monthly_mrr(24_000), 2_000);
+        // 100 / 12 = 8.33 → 8.
+        assert_eq!(yearly_price_to_monthly_mrr(100), 8);
+        // 6 / 12 = 0.5 → rounds up to 1.
+        assert_eq!(yearly_price_to_monthly_mrr(6), 1);
+        // Zero stays zero.
+        assert_eq!(yearly_price_to_monthly_mrr(0), 0);
+    }
+
+    // ------------------------------------------------------------------
+    // Fix I8 — /plans/features/:feature must enforce tenant scoping.
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn plan_feature_route_denies_cross_tenant_scoped_token() {
+        let app = test_router().await;
+
+        // Token scoped to tenant_a requesting tenant_b's features.
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/plans/features/advancedAnalytics?tenant_id=tenant_b")
+                    .header("x-api-key", "tenant_a:test-service-token")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        let (status, json) = response_json(response).await;
+        assert_eq!(
+            status,
+            StatusCode::FORBIDDEN,
+            "scoped token must not read another tenant's feature flags (body: {json})"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Fix I13 — overage estimate must reject negative limits.
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn overage_estimate_rejects_negative_email_limit() {
+        let response =
+            validate_non_negative(-1, "emailLimit").expect_err("negative limit must fail");
+        let (status, json) = response_json(response).await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(json["error"]["code"], "VALIDATION_ERROR");
+        assert_eq!(json["error"]["message"], "emailLimit must be non-negative");
     }
 }

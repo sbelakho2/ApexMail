@@ -6,6 +6,11 @@ namespace KiwiCaptcha;
 
 /**
  * Error codes for verification failures.
+ *
+ * Every case value is a machine-readable snake_case code (stable wire
+ * vocabulary, matching ^[a-z0-9_]+$): logs, metrics and cross-service
+ * consumers switch on it without parsing prose. The human-readable
+ * explanation lives in {@see self::description()}.
  */
 enum VerifyError: string
 {
@@ -15,9 +20,9 @@ enum VerifyError: string
     case IpMismatch = 'ip_mismatch';
     case MissingClientIp = 'missing_client_ip';
     case WrongRegion = 'wrong_region';
-    case WrongIssuer = 'challenge was issued by a different deployment';
-    case WrongPolicyVersion = 'challenge was issued under a different security-policy epoch';
-    case UnknownKid = 'unknown signing key id';
+    case WrongIssuer = 'wrong_issuer';
+    case WrongPolicyVersion = 'wrong_policy_version';
+    case UnknownKid = 'unknown_kid';
     case TooFast = 'too_fast';
     case InsufficientWork = 'insufficient_work';
     case MalformedRecord = 'malformed_record';
@@ -26,8 +31,44 @@ enum VerifyError: string
     case UnsupportedArgon2Params = 'unsupported_argon2_params';
     case TooManyAttempts = 'too_many_attempts';
     case TelemetryRejected = 'telemetry_rejected';
-    case CapacityExceeded = 'verification capacity exceeded — try again shortly';
-    case AdmissionUnavailable = 'verification admission backend unavailable — try again shortly';
-    case StorageUnavailable = 'verification storage backend unavailable — try again shortly';
-    case ConsumeIndeterminate = 'verification storage response indeterminate — the challenge may or may not have been consumed';
+    case CapacityExceeded = 'capacity_exceeded';
+    case AdmissionUnavailable = 'admission_unavailable';
+    case StorageUnavailable = 'storage_unavailable';
+    case ConsumeIndeterminate = 'consume_indeterminate';
+    case AlreadyConsumed = 'already_consumed';
+    case RequestBindingMismatch = 'request_binding_mismatch';
+
+    /**
+     * The human-readable explanation of the failure (operator-facing
+     * prose; never a value to switch on — use the case or ->value for
+     * that).
+     */
+    public function description(): string
+    {
+        return match ($this) {
+            self::BadSignature => 'challenge signature is invalid',
+            self::Expired => 'challenge has expired',
+            self::WrongScope => 'challenge was issued for a different scope',
+            self::IpMismatch => 'challenge was issued to a different client IP',
+            self::MissingClientIp => 'challenge is IP-bound but no client IP was supplied',
+            self::WrongRegion => 'challenge was issued for a different region',
+            self::WrongIssuer => 'challenge was issued by a different deployment',
+            self::WrongPolicyVersion => 'challenge was issued under a different security-policy epoch',
+            self::UnknownKid => 'unknown signing key id',
+            self::TooFast => 'solution arrived faster than the theoretical minimum (server-measured)',
+            self::InsufficientWork => 'solution does not meet the difficulty target',
+            self::MalformedRecord => 'stored challenge record is malformed',
+            self::RecordNotFound => 'challenge record not found (unknown or already deleted)',
+            self::MalformedToken => 'solution token is malformed',
+            self::UnsupportedArgon2Params => 'Argon2id parameters exceed the supported process ceilings',
+            self::TooManyAttempts => 'too many verification attempts',
+            self::TelemetryRejected => 'bot-signal telemetry rejected the solution',
+            self::CapacityExceeded => 'verification capacity exceeded — try again shortly',
+            self::AdmissionUnavailable => 'verification admission backend unavailable — try again shortly',
+            self::StorageUnavailable => 'verification storage backend unavailable — try again shortly',
+            self::ConsumeIndeterminate => 'verification storage response indeterminate — the challenge may or may not have been consumed',
+            self::AlreadyConsumed => 'the challenge was already consumed by a different logical operation',
+            self::RequestBindingMismatch => 'the challenge is not bound to the expected application transaction',
+        };
+    }
 }

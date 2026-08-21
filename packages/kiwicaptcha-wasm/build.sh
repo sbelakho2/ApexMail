@@ -17,7 +17,7 @@ if ! command -v "$WASM_BINDGEN_BIN" >/dev/null 2>&1; then
   cargo install wasm-bindgen-cli --version "$WASM_BINDGEN_VERSION" --locked
 fi
 
-# Version-lock: a DIFFERENT wasm-bindgen binary already on
+# Version-lock: a different wasm-bindgen binary already on
 # the machine must never be silently accepted — the emitted glue is
 # bindgen-version-specific, so a mismatched binary would produce release
 # bytes that differ from the pinned build. The installed version is read
@@ -45,15 +45,15 @@ cargo build --release --locked --target wasm32-unknown-unknown
 # NOT Node.js; -O typically shrinks the wasm ~20% and speeds up the hot
 # solver loops. Download a pinned, checksum-verified wasm-opt on first use
 # (no package managers, no runtime deps); the tarball is verified with
-# SHA-256 before extraction. In NON-STRICT mode
-# optimization may be SKIPPED when wasm-opt is unavailable/unverifiable (a
+# SHA-256 before extraction. In non-strict mode
+# optimization may be skipped when wasm-opt is unavailable/unverifiable (a
 # larger, slower artifact — its byte identity differs (the released
-# SHA256SUMS/SRI hashes change; the solver PROTOCOL id is unchanged by
+# SHA256SUMS/SRI hashes change; the solver protocol id is unchanged by
 # optimization, so a mixed-version deployment can never pair an optimized
 # with an unoptimized artifact under the same hash pins — the artifact
 # identity is the release SHA256SUMS/SRI chain, never the protocol id); in
-# STRICT mode (WASM_OPT_STRICT=1, used by the release pipeline) a missing
-# or unverifiable optimizer is FATAL. Set WASM_OPT_SHA256 to override the
+# strict mode (WASM_OPT_STRICT=1, used by the release pipeline) a missing
+# or unverifiable optimizer is fatal. Set WASM_OPT_SHA256 to override the
 # expected hash for any platform.
 # Known hashes (computed with `shasum -a 256` at pin time):
 #   Darwin-arm64  version_119: c12dffafb3e3274026268e90577bd86d98186f7be32457618672f8ca437d8d53
@@ -78,7 +78,7 @@ sha256_of() {
   fi
 }
 WASM_OPT_BIN="${WASM_OPT_BIN:-}"
-# An env-supplied binary is NEVER downloaded/verified by us — in strict
+# An env-supplied binary is never downloaded/verified by us — in strict
 # mode it must be authenticated by an explicit trusted executable SHA-256
 # (WASM_OPT_BIN_SHA256) rather than its version text alone.
 WASM_OPT_ENV_SUPPLIED=0
@@ -90,8 +90,8 @@ if [[ -z "$WASM_OPT_BIN" ]]; then
   WASM_OPT_BIN="$CACHE_DIR/wasm-opt"
 fi
 
-# Per-run verification: a PRE-EXISTING or CACHED wasm-opt
-# is authenticated on EVERY build — the version string must be exactly the
+# Per-run verification: a pre-existing or cached wasm-opt
+# is authenticated on every build — the version string must be exactly the
 # pinned binaryen (version_119), and a binary we downloaded ourselves must
 # still match the SHA-256 recorded at download time (a replaced or
 # corrupted cached executable fails closed instead of satisfying "strict").
@@ -116,12 +116,12 @@ verify_wasm_opt() {
       return 1
     fi
   elif [[ "${WASM_OPT_STRICT:-0}" == "1" ]]; then
-    # In STRICT mode there is NO version-text-only
-    # exception — the trusted executable hash is mandatory for EVERY
+    # In strict mode there is no version-text-only
+    # exception — the trusted executable hash is mandatory for every
     # binary, whether env-supplied or cached.
     if [[ "$WASM_OPT_ENV_SUPPLIED" == "1" ]]; then
       # An externally supplied binary must be authenticated by an
-      # EXPLICIT trusted SHA (WASM_OPT_BIN_SHA256) — version text alone
+      # explicit trusted SHA (WASM_OPT_BIN_SHA256) — version text alone
       # can be spoofed by an altered executable.
       if [[ -z "${WASM_OPT_BIN_SHA256:-}" ]]; then
         echo "WASM_OPT_STRICT=1 with an env-supplied WASM_OPT_BIN requires WASM_OPT_BIN_SHA256 (the trusted executable SHA-256)" >&2
@@ -176,7 +176,7 @@ if [[ ! -x "$WASM_OPT_BIN" ]]; then
         BIN_DIR="$(find "$CACHE_DIR" -path "*/bin/wasm-opt" -type f | head -1)"
         if [[ -n "$BIN_DIR" ]]; then
           WASM_OPT_BIN="$BIN_DIR"
-          # Record the EXECUTABLE's hash (not just the tarball's) so every
+          # Record the executable's hash (not just the tarball's) so every
           # later build can detect a replaced/corrupted cached binary.
           sha256_of "$WASM_OPT_BIN" > "$CACHE_DIR/wasm-opt.bin.sha256"
           echo "wasm-opt ready at $WASM_OPT_BIN (tarball + executable SHA-256 verified)"
@@ -198,7 +198,7 @@ if [[ -n "$WASM_OPT_BIN" ]] && ! verify_wasm_opt "$WASM_OPT_BIN"; then
   WASM_OPT_BIN=""
 fi
 # Release-build determinism: with WASM_OPT_STRICT=1 the
-# pipeline FAILS instead of silently skipping optimization when wasm-opt is
+# pipeline fails instead of silently skipping optimization when wasm-opt is
 # unavailable/unverifiable — a release build must either use the pinned
 # binaryen at the known SHA-256 or not exist. GitHub CI (ubuntu-latest,
 # x86_64-linux) now has a pinned hash, so a release job built there is

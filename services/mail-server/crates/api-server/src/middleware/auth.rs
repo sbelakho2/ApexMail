@@ -43,6 +43,18 @@ pub struct AuthUser {
     pub scopes: Vec<String>,
 }
 
+/// Char-boundary-safe byte prefix of `s`, at most `max` bytes long.
+/// Raw `&s[..max]` panics when `max` falls inside a multibyte UTF-8
+/// character; identifiers can carry non-ASCII bytes (JWT claims, Redis
+/// cache entries), so the Debug impl must never slice blindly.
+fn char_safe_prefix(s: &str, max: usize) -> &str {
+    let mut end = s.len().min(max);
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
 impl std::fmt::Debug for AuthUser {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AuthUser")
@@ -50,7 +62,7 @@ impl std::fmt::Debug for AuthUser {
                 "tenant_id",
                 &format!(
                     "{}..{}",
-                    &self.tenant_id[..self.tenant_id.len().min(4)],
+                    char_safe_prefix(&self.tenant_id, 4),
                     self.tenant_id.len()
                 ),
             )
@@ -59,14 +71,14 @@ impl std::fmt::Debug for AuthUser {
                 &self
                     .user_id
                     .as_ref()
-                    .map(|id| format!("{}..{}", &id[..id.len().min(4)], id.len())),
+                    .map(|id| format!("{}..{}", char_safe_prefix(id, 4), id.len())),
             )
             .field(
                 "api_key_id",
                 &self
                     .api_key_id
                     .as_ref()
-                    .map(|id| format!("{}..{}", &id[..id.len().min(4)], id.len())),
+                    .map(|id| format!("{}..{}", char_safe_prefix(id, 4), id.len())),
             )
             .field(
                 "session_id",
@@ -861,6 +873,17 @@ pub(crate) async fn invalidate_tenant_user_status_cache(tenant_id: &str, state: 
 
 // ─── JWT authentication ────────────────────────────────────────
 
+/// Token-type discrimination shared by EVERY consumer of `am_session`-style
+/// JWTs: API authentication, the refresh endpoint, and session
+/// introspection. A stream token (`typ = "stream"`, issued by
+/// `POST /v1/stream/token` for the tracking-service SSE endpoint) must
+/// never be accepted as (or refreshed into) a full API session.
+/// Tokens without a `typ` claim are pre-discrimination session tokens and
+/// stay valid — hard-requiring the claim would invalidate every live session.
+pub(crate) fn claims_typ_is_session(typ: Option<&str>) -> bool {
+    typ.map_or(true, |token_type| token_type == "session")
+}
+
 async fn authenticate_jwt(token: &str, state: &AppState) -> Result<AuthUser, ApiError> {
     // Check token blacklist
     if is_token_blacklisted(token, state).await? {
@@ -879,11 +902,12 @@ async fn authenticate_jwt(token: &str, state: &AppState) -> Result<AuthUser, Api
     // authenticate a regular API session. Tokens without a `typ` claim are
     // pre-discrimination session tokens and stay valid — hard-requiring the
     // claim would invalidate every live session.
-    if let Some(typ) = claims.typ.as_deref() {
-        if typ != "session" {
-            tracing::warn!(token_type = %typ, "rejecting non-session token used as session");
-            return Err(ApiError::Unauthorized("invalid token type".into()));
-        }
+    if !claims_typ_is_session(claims.typ.as_deref()) {
+        tracing::warn!(
+            token_type = claims.typ.as_deref().unwrap_or("<missing>"),
+            "rejecting non-session token used as session"
+        );
+        return Err(ApiError::Unauthorized("invalid token type".into()));
     }
 
     let user_id = claims.sub.clone();
@@ -1143,6 +1167,62 @@ mod tests {
     fn test_api_key_hashing() {
         let hash = hex::encode(Sha256::digest(b"am_live_abc123"));
         assert_eq!(hash.len(), 64);
+    }
+
+    // ── Token-type discrimination (audit B) ─────────────────────
+
+    #[test]
+    fn test_claims_typ_is_session_matrix() {
+        // Real session tokens
+        assert!(claims_typ_is_session(Some("session")));
+        // Legacy tokens issued before the typ claim existed
+        assert!(claims_typ_is_session(None));
+        // Stream tokens (routes/stream_tokens.rs) must never pass as sessions
+        assert!(!claims_typ_is_session(Some("stream")));
+        // Refresh-typed or arbitrary other typs must be rejected too
+        assert!(!claims_typ_is_session(Some("refresh")));
+        assert!(!claims_typ_is_session(Some("Session")));
+        assert!(!claims_typ_is_session(Some("")));
+        assert!(!claims_typ_is_session(Some("session\u{0}")));
+    }
+
+    // ── AuthUser Debug must not panic on non-ASCII identifiers (audit E) ──
+
+    #[test]
+    fn test_auth_user_debug_handles_multibyte_identifiers() {
+        // A tenant_id whose 4th byte lands inside a multibyte character
+        // ('中' = 3 bytes, 'é' = 2 bytes) previously panicked the Debug impl.
+        let user = AuthUser {
+            tenant_id: "中é中é中".into(),
+            user_id: Some("é中é".into()),
+            api_key_id: Some("😀ab".into()),
+            session_id: Some("sess".into()),
+            scopes: vec!["messages:read".into()],
+        };
+        // Formatting must not panic and must stay valid UTF-8.
+        let debug = format!("{user:?}");
+        assert!(debug.contains("AuthUser"));
+        assert!(debug.contains("[REDACTED]"));
+        // Single-byte prefix still works
+        let ascii_user = AuthUser {
+            tenant_id: "abcdefgh".into(),
+            user_id: None,
+            api_key_id: None,
+            session_id: None,
+            scopes: vec![],
+        };
+        let debug = format!("{ascii_user:?}");
+        assert!(debug.contains("abcd..8"), "unexpected debug output: {debug}");
+    }
+
+    #[test]
+    fn test_char_safe_prefix_never_splits_characters() {
+        assert_eq!(char_safe_prefix("abcdefgh", 4), "abcd");
+        assert_eq!(char_safe_prefix("中中中", 4), "中"); // 4 -> 3 bytes
+        assert_eq!(char_safe_prefix("ééé", 3), "é"); // 3 -> 2 bytes
+        assert_eq!(char_safe_prefix("😀", 3), ""); // 3 -> 0 bytes (surrogate-free cut)
+        assert_eq!(char_safe_prefix("short", 100), "short");
+        assert_eq!(char_safe_prefix("", 4), "");
     }
 
     #[test]

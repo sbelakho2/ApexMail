@@ -15,7 +15,7 @@ use KiwiCaptcha\VerificationAdmissionGate;
  * token and release() removes exactly that token. A stale or double release
  * is a no-op that can never remove a newer lease.
  *
- * LIMITATION (documented): PHP-FPM workers are separate processes with no
+ * Documented limitation: PHP-FPM workers are separate processes with no
  * shared memory, so this bounds concurrency per worker, not per deployment.
  * Multi-worker deployments must use the Redis-backed
  * {@see RedisAdmissionSemaphore} (cross-worker, tokenized leases) whenever a

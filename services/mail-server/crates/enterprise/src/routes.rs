@@ -72,7 +72,12 @@ impl AppState {
             contracts: ContractService::new(db.clone()),
             sso: SSOService::new(db.clone(), config.clone()),
             compliance: ComplianceService::new(db.clone()),
-            log_streaming: LogStreamingService::new(db.clone()),
+            // Fix H-2: destination-config secrets are encrypted at rest with
+            // a purpose-bound KEK derived from the configured stream key.
+            log_streaming: LogStreamingService::with_secret_key(
+                db.clone(),
+                &config.log_stream.encryption_key,
+            ),
             private_deploy: PrivateDeployService::new(db.clone()),
             sub_accounts: SubAccountService::new(
                 db.clone(),
@@ -98,7 +103,7 @@ type S = Arc<AppState>;
 
 #[derive(Debug, Clone)]
 struct AuthContext {
-    _user_id: String,
+    user_id: String,
     tenant_id: String,
     is_admin: bool,
 }
@@ -109,6 +114,12 @@ struct JwtClaims {
     tenant_id: String,
     #[serde(default)]
     admin: bool,
+    #[serde(default)]
+    #[allow(dead_code, reason = "validated by jsonwebtoken against config, not read directly")]
+    aud: Option<String>,
+    #[serde(default)]
+    #[allow(dead_code, reason = "validated by jsonwebtoken against config, not read directly")]
+    iss: Option<String>,
     #[serde(rename = "exp")]
     _exp: usize,
 }
@@ -141,6 +152,14 @@ async fn auth_middleware(
     let mut validation = Validation::new(Algorithm::RS256);
     validation.validate_exp = true;
     validation.validate_nbf = true;
+    // J-1: when the deployment pins an audience/issuer, tokens that do not
+    // match are rejected instead of being accepted on signature alone.
+    if let Some(aud) = state.config.jwt_audience.as_deref() {
+        validation.set_audience(&[aud]);
+    }
+    if let Some(iss) = state.config.jwt_issuer.as_deref() {
+        validation.set_issuer(&[iss]);
+    }
 
     let decoding_key = match DecodingKey::from_rsa_pem(state.config.jwt_public_key_pem.as_bytes()) {
         Ok(key) => key,
@@ -161,7 +180,7 @@ async fn auth_middleware(
     };
 
     req.extensions_mut().insert(AuthContext {
-        _user_id: claims.sub,
+        user_id: claims.sub,
         tenant_id: claims.tenant_id,
         is_admin: claims.admin,
     });
@@ -617,10 +636,31 @@ fn contract_routes() -> Router<S> {
         )
 }
 
+/// Build the CORS layer from the service configuration.
+///
+/// Fix J-10: the `cors_origins` config was parsed but never attached to the
+/// router, so the configured policy was dead. `*` (the non-production
+/// default) maps to `Any`; an explicit list maps to an exact-origin allowlist.
+fn cors_layer(config: &Config) -> tower_http::cors::CorsLayer {
+    use tower_http::cors::CorsLayer;
+    let layer = CorsLayer::new();
+    if config.cors_origins.iter().any(|origin| origin == "*") {
+        layer.allow_origin(tower_http::cors::Any)
+    } else {
+        let origins: Vec<axum::http::HeaderValue> = config
+            .cors_origins
+            .iter()
+            .filter_map(|origin| origin.parse().ok())
+            .collect();
+        layer.allow_origin(origins)
+    }
+}
+
 /// Create the enterprise API router.
 /// # Security Note (#249)
 /// This router must be wrapped with authentication middleware before deployment.
 pub fn router(state: Arc<AppState>) -> Router {
+    let cors = cors_layer(&state.config);
     Router::new()
         // Health (unauthenticated)
         .route("/health", get(health_check))
@@ -695,6 +735,12 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/sub-accounts/:id/suspend", post(sub_account_suspend))
         .route("/sub-accounts/stats/:parent_id", get(sub_account_stats))
         .route("/sub-accounts/:id/api-keys", post(sub_account_api_key))
+        // Fix J-4: list/revoke endpoints for sub-account API keys
+        .route("/sub-accounts/:id/api-keys", get(sub_account_api_keys_list))
+        .route(
+            "/sub-accounts/:id/api-keys/:key_id/revoke",
+            post(sub_account_api_key_revoke),
+        )
         // Support
         .route("/support/tickets", post(ticket_create))
         .route("/support/tickets/:id", get(ticket_get))
@@ -764,6 +810,7 @@ pub fn router(state: Arc<AppState>) -> Router {
             auth_middleware,
         ))
         .with_state(state)
+        .layer(cors)
         .layer(DefaultBodyLimit::max(2 * 1024 * 1024)) // 2 MB
         .layer(TimeoutLayer::new(Duration::from_secs(30)))
 }
@@ -844,6 +891,56 @@ fn require_admin(auth: &AuthContext) -> Option<(StatusCode, Json<serde_json::Val
     }
 }
 
+/// Types fetched by ID whose owning tenant must be checked against the
+/// authenticated caller before the resource is returned or mutated (fix A:
+/// by-ID handlers previously resolved any UUID across tenants).
+trait TenantOwned {
+    fn owner_tenant_id(&self) -> &str;
+}
+
+/// Check a fetched resource against the caller's tenant.
+///
+/// Mirrors the sibling handlers that already call `verify_tenant_access`:
+/// the resource's owner tenant (from the DB) must match the caller's tenant
+/// (or the caller must be an admin). `None` means "resource not found" and
+/// lets the underlying service result surface its normal NOT_FOUND payload.
+async fn guard_resource_tenant<T: TenantOwned + serde::Serialize>(
+    auth: &AuthContext,
+    result: &Result<crate::types::ApiResult<T>, String>,
+) -> Option<(StatusCode, Json<serde_json::Value>)> {
+    match result {
+        Ok(api_result) => match api_result.data.as_ref() {
+            Some(resource) => verify_tenant_access(auth, resource.owner_tenant_id()).err(),
+            None => None,
+        },
+        Err(_) => None,
+    }
+}
+
+macro_rules! impl_tenant_owned {
+    ($($t:ty),* $(,)?) => {
+        $(
+            impl TenantOwned for $t {
+                fn owner_tenant_id(&self) -> &str {
+                    &self.tenant_id
+                }
+            }
+        )*
+    };
+}
+
+impl_tenant_owned!(
+    crate::types::DataAccessRequest,
+    crate::types::LogStream,
+    crate::types::PrivateDeployment,
+    crate::types::DedicatedIP,
+    crate::types::BYOIPRange,
+    crate::types::SupportTicket,
+    crate::types::TemplateSubmission,
+    crate::types::WhiteLabelDomain,
+    crate::types::QuarterlyBusinessReview,
+);
+
 fn unwrap_contract_result<T>(
     result: ApiResult<T>,
 ) -> Result<T, (StatusCode, Json<serde_json::Value>)>
@@ -865,6 +962,14 @@ where
 
 fn clamp_limit(limit: i64, max: i64) -> i64 {
     limit.clamp(1, max)
+}
+
+/// Fix J-8: convert a per-thousand-emails overage rate into the per-email
+/// `overage_rate` stored on contracts using proper rounding. The previous
+/// integer division (`emails_per_thousand / 10`) silently truncated — a rate
+/// of 5 became 0, i.e. free overage.
+fn overage_rate_from_per_thousand(emails_per_thousand: i64) -> i64 {
+    ((emails_per_thousand as f64) / 10.0).round() as i64
 }
 
 fn clamp_offset(offset: i64) -> i64 {
@@ -905,11 +1010,52 @@ async fn readiness_check(State(state): State<S>) -> impl IntoResponse {
     }
 }
 
-async fn metrics(State(state): State<S>) -> impl IntoResponse {
+/// GET /metrics — Prometheus scrape endpoint.
+///
+/// Fix H-3: metrics are no longer exposed unauthenticated to any network
+/// peer. Access is granted when either:
+///   * the peer address is loopback (the monitoring sidecar pattern), or
+///   * the request carries the configured `METRICS_TOKEN` bearer token.
+async fn metrics(
+    State(state): State<S>,
+    connect_info: Option<axum::extract::ConnectInfo<std::net::SocketAddr>>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    let peer_is_loopback = connect_info
+        .map(|ci| ci.0.ip().is_loopback())
+        .unwrap_or(false);
+
+    let token_ok = state
+        .config
+        .metrics_token
+        .as_deref()
+        .and_then(|expected| {
+            headers
+                .get(AUTHORIZATION)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.strip_prefix("Bearer "))
+                .map(|provided| {
+                    // constant-time comparison via HMAC over both values
+                    let h = |v: &str| {
+                        use sha2::Digest;
+                        let mut hasher = sha2::Sha256::new();
+                        hasher.update(v.as_bytes());
+                        hasher.finalize()
+                    };
+                    h(provided) == h(expected)
+                })
+        })
+        .unwrap_or(false);
+
+    if !peer_is_loopback && !token_ok {
+        return err_json(StatusCode::UNAUTHORIZED, "Metrics access denied").into_response();
+    }
+
     (
         [(CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")],
         state.metrics_handle.render(),
     )
+        .into_response()
 }
 
 // ── Contract Handlers ──────────────────────────────────────────────────
@@ -1070,7 +1216,7 @@ async fn contract_create(
             auto_renew: false,
             base_price: body.base_fee,
             committed_volume: body.committed_volume.emails,
-            overage_rate: body.overage_rates.emails_per_thousand / 10,
+            overage_rate: overage_rate_from_per_thousand(body.overage_rates.emails_per_thousand),
             annual_prepay_discount: 0,
             additional_fees,
             payment_terms_days,
@@ -1127,20 +1273,35 @@ async fn contract_sign(
         Err(error) => return error,
     };
 
-    match state
-        .contracts
-        .sign_contract(
-            &tenant_id,
-            contract_id,
-            SignContractInput {
-                signature_data: body.signature_data,
-                signer_name: body.signer_name,
-                signer_title: body.signer_title,
-                signed_at: body.signed_at,
+    // Fix D: non-admin callers can only record a tenant-side signature —
+    // activation and the `tenants.plan` change require the platform-admin
+    // counter-signature path below.
+    if !auth.is_admin {
+        return match state
+            .contracts
+            .sign_contract(
+                &tenant_id,
+                contract_id,
+                SignContractInput {
+                    signature_data: body.signature_data,
+                    signer_name: body.signer_name,
+                    signer_title: body.signer_title,
+                    signed_at: body.signed_at,
+                },
+            )
+            .await
+        {
+            Ok(result) => match unwrap_contract_result(result) {
+                Ok(contract) => json_status(StatusCode::OK, contract),
+                Err(error) => error,
             },
-        )
-        .await
-    {
+            Err(error) => err_json(StatusCode::INTERNAL_SERVER_ERROR, &error),
+        };
+    }
+
+    // Platform-admin counter-signature: activates the contract and promotes
+    // the tenant plan. Requires a tenant signature to already exist.
+    match state.contracts.counter_sign_contract(contract_id).await {
         Ok(result) => match unwrap_contract_result(result) {
             Ok(contract) => json_status(StatusCode::OK, contract),
             Err(error) => error,
@@ -1265,7 +1426,7 @@ async fn contract_renew(
         overage_rate: terms
             .overage_rates
             .and_then(|rates| rates.emails_per_thousand)
-            .map(|value| value / 10),
+            .map(overage_rate_from_per_thousand),
     });
 
     match state
@@ -1383,12 +1544,31 @@ async fn sso_get_config_by_domain(
     }
 }
 
-async fn sso_saml_login(State(state): State<S>, Path(domain): Path<String>) -> impl IntoResponse {
-    service_result(state.sso.initiate_saml_login(&domain).await)
+/// GET /sso/login/saml/:domain
+///
+/// Fix G (dead ACS): this service has no SAML Assertion Consumer Service
+/// route — the `parse_and_validate_saml_response` / `handle_saml_callback`
+/// pair is not wired to any HTTP endpoint, so an IdP could never complete a
+/// login started here. Redirecting users to the IdP would strand them at a
+/// callback that does not exist. Until a callback route is wired, the login
+/// initiation fails fast with 501 instead of pretending SSO works.
+async fn sso_saml_login(State(_state): State<S>, Path(_domain): Path<String>) -> impl IntoResponse {
+    err_json(
+        StatusCode::NOT_IMPLEMENTED,
+        "SSO callback not configured: SAML login cannot complete because no ACS endpoint is wired; refusing to redirect to the IdP",
+    )
 }
 
-async fn sso_oidc_login(State(state): State<S>, Path(domain): Path<String>) -> impl IntoResponse {
-    service_result(state.sso.initiate_oidc_login(&domain).await)
+/// GET /sso/login/oidc/:domain
+///
+/// Fix G (dead ACS): same as the SAML login above — there is no OIDC callback
+/// route and no authorization-code → token exchange in this service, so the
+/// flow can never complete. Fail fast with 501 instead of redirecting.
+async fn sso_oidc_login(State(_state): State<S>, Path(_domain): Path<String>) -> impl IntoResponse {
+    err_json(
+        StatusCode::NOT_IMPLEMENTED,
+        "SSO callback not configured: OIDC login cannot complete because no callback/token-exchange endpoint is wired; refusing to redirect to the IdP",
+    )
 }
 
 /// Validate an SSO session.
@@ -1420,7 +1600,17 @@ async fn sso_validate_session(
     }
 }
 
-async fn sso_cleanup_sessions(State(state): State<S>) -> impl IntoResponse {
+/// POST /sso/cleanup — purge expired SSO sessions.
+///
+/// Fix J-12: this is an administrative maintenance operation; it now requires
+/// the admin claim instead of being callable by any authenticated tenant.
+async fn sso_cleanup_sessions(
+    State(state): State<S>,
+    Extension(auth): Extension<AuthContext>,
+) -> impl IntoResponse {
+    if let Some(e) = require_admin(&auth) {
+        return e;
+    }
     match state.sso.cleanup_expired_sessions().await {
         Ok(count) => ok_json(serde_json::json!({"cleaned": count})),
         Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, &e),
@@ -1495,26 +1685,59 @@ async fn compliance_zero_retention(
 async fn compliance_log_audit(
     State(state): State<S>,
     Extension(auth): Extension<AuthContext>,
+    connect_info: Option<axum::extract::ConnectInfo<std::net::SocketAddr>>,
+    headers: HeaderMap,
     Json(body): Json<AuditLogBody>,
 ) -> impl IntoResponse {
     if let Err(e) = verify_tenant_access(&auth, &body.tenant_id) {
         return e;
     }
+
+    // Fix C (audit-log forgery): identity columns are derived by the server
+    // and can no longer be forged by clients:
+    //   * user_id      — always the authenticated token subject (claims.sub)
+    //   * ip_address   — always the connection peer address
+    //   * user_agent   — always the request User-Agent header
+    // Body-supplied identity fields (user_id / ip_address / user_agent /
+    // session_id / request_id) are never persisted as identity; they are
+    // preserved under `metadata.client_supplied` for troubleshooting only.
+    let user_id = auth.user_id.clone();
+    let ip_address = connect_info.map(|ci| ci.0.ip().to_string());
+    let user_agent = headers
+        .get(axum::http::header::USER_AGENT)
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.to_string());
+
+    let mut metadata = body.metadata.unwrap_or_else(|| serde_json::json!({}));
+    if !metadata.is_object() {
+        metadata = serde_json::json!({ "client_metadata": metadata });
+    }
+    let client_supplied = serde_json::json!({
+        "user_id": body.user_id,
+        "ip_address": body.ip_address,
+        "user_agent": body.user_agent,
+        "session_id": body.session_id,
+        "request_id": body.request_id,
+    });
+    if let Some(obj) = metadata.as_object_mut() {
+        obj.insert("client_supplied".to_string(), client_supplied);
+    }
+
     match state
         .compliance
         .log_audit(
             body.tenant_id,
-            body.user_id.as_deref(),
+            Some(&user_id),
             &body.action,
             &body.resource_type,
             body.resource_id.as_deref(),
             body.old_value,
             body.new_value,
-            body.ip_address.as_deref(),
-            body.user_agent.as_deref(),
-            body.session_id.as_deref(),
-            body.request_id.as_deref(),
-            body.metadata,
+            ip_address.as_deref(),
+            user_agent.as_deref(),
+            None, // session_id: server-derived only (not yet available)
+            None, // request_id: server-derived only (not yet available)
+            Some(metadata),
         )
         .await
     {
@@ -1574,15 +1797,40 @@ async fn compliance_data_access(
 
 async fn compliance_approve_access(
     State(state): State<S>,
+    Extension(auth): Extension<AuthContext>,
     Path(id): Path<Uuid>,
     Json(body): Json<DataAccessApproveBody>,
 ) -> impl IntoResponse {
-    service_result(
-        state
-            .compliance
-            .approve_data_access(id, &body.approved_by, body.duration_minutes)
-            .await,
-    )
+    // Fix A: the data access request must belong to the caller's tenant
+    // before it can be approved.
+    let existing = state.compliance.get_data_access_request(id).await;
+    if let Some(e) = guard_resource_tenant(&auth, &existing).await {
+        return e;
+    }
+
+    // Fix J-3: the approver identity is derived from the authenticated token
+    // claims — the body-supplied `approved_by` is never trusted — and the
+    // granted duration is clamped to 1..=1440 minutes (max 24 h).
+    let approved_by = auth.user_id.clone();
+    let duration_minutes = body.duration_minutes.clamp(1, 1440);
+
+    match state
+        .compliance
+        .approve_data_access(id, &approved_by, duration_minutes)
+        .await
+    {
+        Ok(mut result) => {
+            // J-3: the raw access token is never echoed back to the client;
+            // only a non-guessable reference to the grant is returned.
+            if let Some(ref mut request) = result.data {
+                if request.access_token.is_some() {
+                    request.access_token = Some(format!("ref:{}", request.id));
+                }
+            }
+            service_result(Ok(result))
+        }
+        Err(e) => service_result::<crate::types::DataAccessRequest>(Err(e)),
+    }
 }
 
 async fn compliance_data_deletion(
@@ -1675,6 +1923,15 @@ struct EncryptFieldBody {
 
 const ENTERPRISE_FIELD_TOOLING_PURPOSE: &str = "enterprise/routes/field-tooling";
 
+/// AAD that binds a field-tooling ciphertext to a specific tenant.
+///
+/// Fix B: ciphertexts produced by `encrypt_field` are authenticated with the
+/// tenant id as additional authenticated data, so a ciphertext created for
+/// tenant A cannot be decrypted through tenant B's context.
+fn tenant_binding_aad(tenant_id: &str) -> Vec<u8> {
+    format!("enterprise/field-tooling/tenant:{tenant_id}").into_bytes()
+}
+
 fn managed_field_encryptor(
     config: &Config,
 ) -> Result<crate::field_encryption::FieldEncryptor, String> {
@@ -1709,7 +1966,7 @@ async fn encrypt_field(
         }
     };
 
-    match encryptor.encrypt(&body.value) {
+    match encryptor.encrypt_with_aad(&body.value, &tenant_binding_aad(&body.tenant_id)) {
         Ok(encrypted) => (
             StatusCode::OK,
             Json(serde_json::json!({
@@ -1763,7 +2020,10 @@ async fn decrypt_field(
         }
     };
 
-    match encryptor.decrypt(&body.value) {
+    // Fix B: decryption is bound to the caller's tenant — a ciphertext that
+    // was not encrypted for this tenant (or whose provenance is unknown)
+    // is rejected instead of being decrypted with the global KEK.
+    match encryptor.decrypt_with_aad(&body.value, &tenant_binding_aad(&body.tenant_id)) {
         Ok(decrypted) => (
             StatusCode::OK,
             Json(serde_json::json!({
@@ -1774,7 +2034,12 @@ async fn decrypt_field(
         Err(e) => (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({
-                "error": { "code": "DECRYPTION_FAILED", "message": format!("{e}") }
+                "error": {
+                    "code": "DECRYPTION_FAILED",
+                    "message": format!(
+                        "ciphertext is not decryptable for this tenant (wrong tenant binding, unknown provenance, or corrupt data): {e}"
+                    )
+                }
             })),
         ),
     }
@@ -1808,15 +2073,28 @@ async fn log_stream_create(
     )
 }
 
-async fn log_stream_get(State(state): State<S>, Path(id): Path<Uuid>) -> impl IntoResponse {
-    service_result(state.log_streaming.get(id).await)
+async fn log_stream_get(
+    State(state): State<S>,
+    Extension(auth): Extension<AuthContext>,
+    Path(id): Path<Uuid>,
+) -> impl IntoResponse {
+    let result = state.log_streaming.get(id).await;
+    if let Some(e) = guard_resource_tenant(&auth, &result).await {
+        return e;
+    }
+    service_result(result)
 }
 
 async fn log_stream_update(
     State(state): State<S>,
+    Extension(auth): Extension<AuthContext>,
     Path(id): Path<Uuid>,
     Json(body): Json<LogStreamUpdateBody>,
 ) -> impl IntoResponse {
+    let existing = state.log_streaming.get(id).await;
+    if let Some(e) = guard_resource_tenant(&auth, &existing).await {
+        return e;
+    }
     service_result(
         state
             .log_streaming
@@ -1831,7 +2109,15 @@ async fn log_stream_update(
     )
 }
 
-async fn log_stream_delete(State(state): State<S>, Path(id): Path<Uuid>) -> impl IntoResponse {
+async fn log_stream_delete(
+    State(state): State<S>,
+    Extension(auth): Extension<AuthContext>,
+    Path(id): Path<Uuid>,
+) -> impl IntoResponse {
+    let existing = state.log_streaming.get(id).await;
+    if let Some(e) = guard_resource_tenant(&auth, &existing).await {
+        return e;
+    }
     service_result(state.log_streaming.delete(id).await)
 }
 
@@ -1846,19 +2132,51 @@ async fn log_stream_list(
     service_result(state.log_streaming.list(tenant_id).await)
 }
 
-async fn log_stream_pause(State(state): State<S>, Path(id): Path<Uuid>) -> impl IntoResponse {
+async fn log_stream_pause(
+    State(state): State<S>,
+    Extension(auth): Extension<AuthContext>,
+    Path(id): Path<Uuid>,
+) -> impl IntoResponse {
+    let existing = state.log_streaming.get(id).await;
+    if let Some(e) = guard_resource_tenant(&auth, &existing).await {
+        return e;
+    }
     service_result(state.log_streaming.pause(id).await)
 }
 
-async fn log_stream_resume(State(state): State<S>, Path(id): Path<Uuid>) -> impl IntoResponse {
+async fn log_stream_resume(
+    State(state): State<S>,
+    Extension(auth): Extension<AuthContext>,
+    Path(id): Path<Uuid>,
+) -> impl IntoResponse {
+    let existing = state.log_streaming.get(id).await;
+    if let Some(e) = guard_resource_tenant(&auth, &existing).await {
+        return e;
+    }
     service_result(state.log_streaming.resume(id).await)
 }
 
-async fn log_stream_verify(State(state): State<S>, Path(id): Path<Uuid>) -> impl IntoResponse {
+async fn log_stream_verify(
+    State(state): State<S>,
+    Extension(auth): Extension<AuthContext>,
+    Path(id): Path<Uuid>,
+) -> impl IntoResponse {
+    let existing = state.log_streaming.get(id).await;
+    if let Some(e) = guard_resource_tenant(&auth, &existing).await {
+        return e;
+    }
     service_result(state.log_streaming.verify(id).await)
 }
 
-async fn log_stream_stats(State(state): State<S>, Path(id): Path<Uuid>) -> impl IntoResponse {
+async fn log_stream_stats(
+    State(state): State<S>,
+    Extension(auth): Extension<AuthContext>,
+    Path(id): Path<Uuid>,
+) -> impl IntoResponse {
+    let existing = state.log_streaming.get(id).await;
+    if let Some(e) = guard_resource_tenant(&auth, &existing).await {
+        return e;
+    }
     service_result(state.log_streaming.get_stats(id).await)
 }
 
@@ -1886,8 +2204,16 @@ async fn deploy_create(
     )
 }
 
-async fn deploy_get(State(state): State<S>, Path(id): Path<Uuid>) -> impl IntoResponse {
-    service_result(state.private_deploy.get(id).await)
+async fn deploy_get(
+    State(state): State<S>,
+    Extension(auth): Extension<AuthContext>,
+    Path(id): Path<Uuid>,
+) -> impl IntoResponse {
+    let result = state.private_deploy.get(id).await;
+    if let Some(e) = guard_resource_tenant(&auth, &result).await {
+        return e;
+    }
+    service_result(result)
 }
 
 async fn deploy_list(
@@ -1901,11 +2227,27 @@ async fn deploy_list(
     service_result(state.private_deploy.list(tenant_id).await)
 }
 
-async fn deploy_provision(State(state): State<S>, Path(id): Path<Uuid>) -> impl IntoResponse {
+async fn deploy_provision(
+    State(state): State<S>,
+    Extension(auth): Extension<AuthContext>,
+    Path(id): Path<Uuid>,
+) -> impl IntoResponse {
+    let existing = state.private_deploy.get(id).await;
+    if let Some(e) = guard_resource_tenant(&auth, &existing).await {
+        return e;
+    }
     service_result(state.private_deploy.provision(id).await)
 }
 
-async fn deploy_health(State(state): State<S>, Path(id): Path<Uuid>) -> impl IntoResponse {
+async fn deploy_health(
+    State(state): State<S>,
+    Extension(auth): Extension<AuthContext>,
+    Path(id): Path<Uuid>,
+) -> impl IntoResponse {
+    let existing = state.private_deploy.get(id).await;
+    if let Some(e) = guard_resource_tenant(&auth, &existing).await {
+        return e;
+    }
     service_result(state.private_deploy.health_check(id).await)
 }
 
@@ -1925,8 +2267,16 @@ async fn ip_allocate(
     )
 }
 
-async fn ip_get(State(state): State<S>, Path(id): Path<Uuid>) -> impl IntoResponse {
-    service_result(state.private_deploy.get_dedicated_ip(id).await)
+async fn ip_get(
+    State(state): State<S>,
+    Extension(auth): Extension<AuthContext>,
+    Path(id): Path<Uuid>,
+) -> impl IntoResponse {
+    let result = state.private_deploy.get_dedicated_ip(id).await;
+    if let Some(e) = guard_resource_tenant(&auth, &result).await {
+        return e;
+    }
+    service_result(result)
 }
 
 async fn ip_list(
@@ -1973,9 +2323,14 @@ async fn byoip_register(
 
 async fn byoip_verify(
     State(state): State<S>,
+    Extension(auth): Extension<AuthContext>,
     Path(id): Path<Uuid>,
     Json(body): Json<BYOIPVerifyBody>,
 ) -> impl IntoResponse {
+    let existing = state.private_deploy.get_byoip(id).await;
+    if let Some(e) = guard_resource_tenant(&auth, &existing).await {
+        return e;
+    }
     service_result(
         state
             .private_deploy
@@ -2160,6 +2515,50 @@ async fn sub_account_api_key(
     )
 }
 
+/// GET /sub-accounts/:id/api-keys — list a sub-account's API keys
+/// (masked: hashes stripped, fix J-4).
+async fn sub_account_api_keys_list(
+    State(state): State<S>,
+    Extension(auth): Extension<AuthContext>,
+    Path(id): Path<Uuid>,
+) -> impl IntoResponse {
+    match state.sub_accounts.get(id).await {
+        Ok(api_result) => {
+            if let Some(ref sub) = api_result.data {
+                if let Err(e) = verify_tenant_access(&auth, &sub.parent_id) {
+                    return e;
+                }
+            } else {
+                return service_result::<SubAccount>(Ok(api_result));
+            }
+        }
+        Err(e) => return service_result::<SubAccount>(Err(e)),
+    }
+    service_result(state.sub_accounts.list_api_keys(id).await)
+}
+
+/// POST /sub-accounts/:id/api-keys/:key_id/revoke — revoke an API key
+/// (fix J-4). Revoked keys fail `SubAccountService::verify_api_key`.
+async fn sub_account_api_key_revoke(
+    State(state): State<S>,
+    Extension(auth): Extension<AuthContext>,
+    Path((id, key_id)): Path<(Uuid, Uuid)>,
+) -> impl IntoResponse {
+    match state.sub_accounts.get(id).await {
+        Ok(api_result) => {
+            if let Some(ref sub) = api_result.data {
+                if let Err(e) = verify_tenant_access(&auth, &sub.parent_id) {
+                    return e;
+                }
+            } else {
+                return service_result::<SubAccount>(Ok(api_result));
+            }
+        }
+        Err(e) => return service_result::<SubAccount>(Err(e)),
+    }
+    service_result(state.sub_accounts.revoke_api_key(id, key_id).await)
+}
+
 // ── Support Handlers ───────────────────────────────────────────────────
 
 async fn ticket_create(
@@ -2185,15 +2584,28 @@ async fn ticket_create(
     )
 }
 
-async fn ticket_get(State(state): State<S>, Path(id): Path<Uuid>) -> impl IntoResponse {
-    service_result(state.support.get_ticket(id).await)
+async fn ticket_get(
+    State(state): State<S>,
+    Extension(auth): Extension<AuthContext>,
+    Path(id): Path<Uuid>,
+) -> impl IntoResponse {
+    let result = state.support.get_ticket(id).await;
+    if let Some(e) = guard_resource_tenant(&auth, &result).await {
+        return e;
+    }
+    service_result(result)
 }
 
 async fn ticket_update(
     State(state): State<S>,
+    Extension(auth): Extension<AuthContext>,
     Path(id): Path<Uuid>,
     Json(body): Json<TicketUpdateBody>,
 ) -> impl IntoResponse {
+    let existing = state.support.get_ticket(id).await;
+    if let Some(e) = guard_resource_tenant(&auth, &existing).await {
+        return e;
+    }
     service_result(
         state
             .support
@@ -2234,9 +2646,14 @@ async fn ticket_list(
 
 async fn comment_add(
     State(state): State<S>,
+    Extension(auth): Extension<AuthContext>,
     Path(ticket_id): Path<Uuid>,
     Json(body): Json<CommentBody>,
 ) -> impl IntoResponse {
+    let existing = state.support.get_ticket(ticket_id).await;
+    if let Some(e) = guard_resource_tenant(&auth, &existing).await {
+        return e;
+    }
     service_result(
         state
             .support
@@ -2254,9 +2671,14 @@ async fn comment_add(
 
 async fn comment_list(
     State(state): State<S>,
+    Extension(auth): Extension<AuthContext>,
     Path(ticket_id): Path<Uuid>,
     Query(q): Query<CommentFilterParams>,
 ) -> impl IntoResponse {
+    let existing = state.support.get_ticket(ticket_id).await;
+    if let Some(e) = guard_resource_tenant(&auth, &existing).await {
+        return e;
+    }
     service_result(
         state
             .support
@@ -2267,9 +2689,14 @@ async fn comment_list(
 
 async fn ticket_escalate(
     State(state): State<S>,
+    Extension(auth): Extension<AuthContext>,
     Path(id): Path<Uuid>,
     Json(body): Json<EscalateBody>,
 ) -> impl IntoResponse {
+    let existing = state.support.get_ticket(id).await;
+    if let Some(e) = guard_resource_tenant(&auth, &existing).await {
+        return e;
+    }
     service_result(
         state
             .support
@@ -2280,9 +2707,14 @@ async fn ticket_escalate(
 
 async fn ticket_satisfaction(
     State(state): State<S>,
+    Extension(auth): Extension<AuthContext>,
     Path(id): Path<Uuid>,
     Json(body): Json<SatisfactionBody>,
 ) -> impl IntoResponse {
+    let existing = state.support.get_ticket(id).await;
+    if let Some(e) = guard_resource_tenant(&auth, &existing).await {
+        return e;
+    }
     service_result(
         state
             .support
@@ -2327,8 +2759,16 @@ async fn template_submit(
     )
 }
 
-async fn template_get(State(state): State<S>, Path(id): Path<Uuid>) -> impl IntoResponse {
-    service_result(state.templates.get_submission(id).await)
+async fn template_get(
+    State(state): State<S>,
+    Extension(auth): Extension<AuthContext>,
+    Path(id): Path<Uuid>,
+) -> impl IntoResponse {
+    let result = state.templates.get_submission(id).await;
+    if let Some(e) = guard_resource_tenant(&auth, &result).await {
+        return e;
+    }
+    service_result(result)
 }
 
 async fn template_list(
@@ -2350,42 +2790,67 @@ async fn template_list(
     )
 }
 
+/// Approve a template submission.
+///
+/// Fix A: the submission must belong to the caller's tenant. Fix (role gate):
+/// approval is a reviewer action — only callers with the admin/reviewer claim
+/// may approve or reject submissions. The reviewer identity is taken from the
+/// authenticated claims, not the body.
 async fn template_approve(
     State(state): State<S>,
+    Extension(auth): Extension<AuthContext>,
     Path(id): Path<Uuid>,
     Json(body): Json<TemplateReviewBody>,
 ) -> impl IntoResponse {
+    if let Some(e) = require_admin(&auth) {
+        return e;
+    }
+    let existing = state.templates.get_submission(id).await;
+    if let Some(e) = guard_resource_tenant(&auth, &existing).await {
+        return e;
+    }
     service_result(
         state
             .templates
-            .approve(id, &body.reviewed_by, body.notes.as_deref())
+            .approve(id, &auth.user_id, body.notes.as_deref())
             .await,
     )
 }
 
 async fn template_reject(
     State(state): State<S>,
+    Extension(auth): Extension<AuthContext>,
     Path(id): Path<Uuid>,
     Json(body): Json<TemplateRejectBody>,
 ) -> impl IntoResponse {
-    service_result(
-        state
-            .templates
-            .reject(id, &body.reviewed_by, &body.reason)
-            .await,
-    )
+    if let Some(e) = require_admin(&auth) {
+        return e;
+    }
+    let existing = state.templates.get_submission(id).await;
+    if let Some(e) = guard_resource_tenant(&auth, &existing).await {
+        return e;
+    }
+    service_result(state.templates.reject(id, &auth.user_id, &body.reason).await)
 }
 
 async fn template_request_changes(
     State(state): State<S>,
+    Extension(auth): Extension<AuthContext>,
     Path(id): Path<Uuid>,
     Json(body): Json<TemplateReviewBody>,
 ) -> impl IntoResponse {
+    if let Some(e) = require_admin(&auth) {
+        return e;
+    }
+    let existing = state.templates.get_submission(id).await;
+    if let Some(e) = guard_resource_tenant(&auth, &existing).await {
+        return e;
+    }
     match &body.notes {
         Some(notes) => service_result(
             state
                 .templates
-                .request_changes(id, &body.reviewed_by, notes)
+                .request_changes(id, &auth.user_id, notes)
                 .await,
         ),
         None => err_json(
@@ -2464,8 +2929,13 @@ async fn whitelabel_add_domain(
 
 async fn whitelabel_verify_domain(
     State(state): State<S>,
+    Extension(auth): Extension<AuthContext>,
     Path(id): Path<Uuid>,
 ) -> impl IntoResponse {
+    let existing = state.whitelabel.get_domain(id).await;
+    if let Some(e) = guard_resource_tenant(&auth, &existing).await {
+        return e;
+    }
     service_result(state.whitelabel.verify_domain(id).await)
 }
 
@@ -2557,8 +3027,16 @@ async fn qbr_schedule(
     )
 }
 
-async fn qbr_get(State(state): State<S>, Path(id): Path<Uuid>) -> impl IntoResponse {
-    service_result(state.qbr.get(id).await)
+async fn qbr_get(
+    State(state): State<S>,
+    Extension(auth): Extension<AuthContext>,
+    Path(id): Path<Uuid>,
+) -> impl IntoResponse {
+    let result = state.qbr.get(id).await;
+    if let Some(e) = guard_resource_tenant(&auth, &result).await {
+        return e;
+    }
+    service_result(result)
 }
 
 async fn qbr_list(
@@ -2575,19 +3053,40 @@ async fn qbr_list(
     service_result(state.qbr.list(tenant_id, limit, offset).await)
 }
 
-async fn qbr_generate(State(state): State<S>, Path(id): Path<Uuid>) -> impl IntoResponse {
+async fn qbr_generate(
+    State(state): State<S>,
+    Extension(auth): Extension<AuthContext>,
+    Path(id): Path<Uuid>,
+) -> impl IntoResponse {
+    let existing = state.qbr.get(id).await;
+    if let Some(e) = guard_resource_tenant(&auth, &existing).await {
+        return e;
+    }
     service_result(state.qbr.generate(id).await)
 }
 
-async fn qbr_deliver(State(state): State<S>, Path(id): Path<Uuid>) -> impl IntoResponse {
+async fn qbr_deliver(
+    State(state): State<S>,
+    Extension(auth): Extension<AuthContext>,
+    Path(id): Path<Uuid>,
+) -> impl IntoResponse {
+    let existing = state.qbr.get(id).await;
+    if let Some(e) = guard_resource_tenant(&auth, &existing).await {
+        return e;
+    }
     service_result(state.qbr.mark_delivered(id).await)
 }
 
 async fn qbr_feedback(
     State(state): State<S>,
+    Extension(auth): Extension<AuthContext>,
     Path(id): Path<Uuid>,
     Json(body): Json<QBRFeedbackBody>,
 ) -> impl IntoResponse {
+    let existing = state.qbr.get(id).await;
+    if let Some(e) = guard_resource_tenant(&auth, &existing).await {
+        return e;
+    }
     service_result(
         state
             .qbr
@@ -2598,9 +3097,14 @@ async fn qbr_feedback(
 
 async fn qbr_update_goal(
     State(state): State<S>,
+    Extension(auth): Extension<AuthContext>,
     Path(id): Path<Uuid>,
     Json(body): Json<QBRGoalUpdateBody>,
 ) -> impl IntoResponse {
+    let existing = state.qbr.get(id).await;
+    if let Some(e) = guard_resource_tenant(&auth, &existing).await {
+        return e;
+    }
     service_result(
         state
             .qbr
@@ -2705,7 +3209,22 @@ async fn dpa_generate_pdf(
 }
 
 /// GET /qbr/:id/pdf — Generate a QBR PDF for the given report
-async fn qbr_generate_pdf(State(state): State<S>, Path(id): Path<Uuid>) -> impl IntoResponse {
+async fn qbr_generate_pdf(
+    State(state): State<S>,
+    Extension(auth): Extension<AuthContext>,
+    Path(id): Path<Uuid>,
+) -> impl IntoResponse {
+    // Fix A: the QBR must belong to the caller's tenant before rendering.
+    let existing = state.qbr.get(id).await;
+    if let Some((status, json)) = guard_resource_tenant(&auth, &existing).await {
+        let msg = json
+            .get("error")
+            .and_then(|v| v.as_str())
+            .unwrap_or("Tenant access denied")
+            .to_string();
+        return Err((status, msg));
+    }
+
     // Fetch the QBR data
     let qbr = match state.qbr.get(id).await {
         Ok(q) => q,

@@ -280,11 +280,27 @@ final class SiteVerifyTest extends TestCase
         $ok = $controller->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', ['response' => $solution, 'secret' => 'secret-login', 'remoteip' => '203.0.113.7']));
         self::assertTrue(json_decode((string) $ok->getContent(), true)['success']);
 
-        // The same login token against the admin secret: WrongScope.
+        // The same login token against the admin secret: the cheap phase
+        // would fail WrongScope, but the record is already consumed — its
+        // retained consumed state is recovery evidence and is never
+        // deleted by a cheap failure. The replay resolves through the
+        // consumed branch: without an operation identity (a
+        // non-idempotent request) the stored success is refused as
+        // AlreadyConsumed, the duplicate vocabulary. The escalation is
+        // refused either way — never success.
         $rejected = $controller->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', ['response' => $solution, 'secret' => 'secret-admin', 'remoteip' => '203.0.113.7']));
         $json = json_decode((string) $rejected->getContent(), true);
         self::assertFalse($json['success']);
-        self::assertSame(['invalid-input-response'], $json['error-codes']);
+        self::assertSame(['timeout-or-duplicate'], $json['error-codes']);
+        self::assertNotNull($storage->find($challenge->nonce), 'the consumed recovery evidence survives the cross-secret replay');
+
+        // The admin secret itself is sound: a challenge minted for the
+        // admin scope verifies with it.
+        $adminChallenge = $issuer->issue('admin_login', '203.0.113.7');
+        $adminSolution = $this->solveSolution($storage->find($adminChallenge->nonce));
+        usleep(((int) $adminChallenge->minDurationMs + 10) * 1000);
+        $adminOk = $controller->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', ['response' => $adminSolution, 'secret' => 'secret-admin', 'remoteip' => '203.0.113.7']));
+        self::assertTrue(json_decode((string) $adminOk->getContent(), true)['success'], 'the admin secret accepts its own scope');
     }
 
     public function testHostnameSurvivesARedisSerializeDeserializeRoundTrip(): void

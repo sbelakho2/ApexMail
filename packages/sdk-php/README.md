@@ -28,7 +28,7 @@ $response = $client->emails->send([
     'html'    => '<h1>Hello World</h1><p>Your email was sent successfully.</p>',
 ]);
 
-echo "Email sent! ID: " . $response['message']['id'] . "\n";
+echo "Email sent! ID: " . $response['id'] . "\n";
 ```
 
 ## Features
@@ -65,7 +65,7 @@ $responses = $client->emails->batch([
 
 // Get email status
 $email = $client->emails->get('email_id');
-echo $email['message']['status']; // "delivered"
+echo $email['status']; // "delivered"
 
 // List emails
 $emails = $client->emails->list([

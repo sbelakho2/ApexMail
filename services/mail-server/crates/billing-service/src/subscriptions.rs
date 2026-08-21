@@ -30,30 +30,39 @@ pub async fn create_subscription(
     Err(SubscriptionError::PaymentConfirmationRequired)
 }
 
+/// SQL used by [`get_subscription`] to read the live subscription.
+///
+/// Fix C — entitlement writers only ever touch `stripe_subscriptions` +
+/// `tenants.plan`; the legacy `subscriptions` table stays empty, so reads
+/// must resolve against stripe_subscriptions (period bounds live in
+/// billing_cycle_start/end) and join tenants for the effective plan name.
+const GET_SUBSCRIPTION_SQL: &str = r#"
+        SELECT
+            s.id, s.tenant_id,
+            COALESCE(t.plan, 'free') AS plan_name,
+            s.status, s.billing_interval,
+            s.billing_cycle_start AS current_period_start,
+            s.billing_cycle_end AS current_period_end,
+            s.stripe_subscription_id, s.stripe_customer_id,
+            s.cancel_at_period_end, s.created_at, s.updated_at
+        FROM stripe_subscriptions s
+        JOIN tenants t ON t.id = s.tenant_id
+        WHERE s.tenant_id = $1
+          AND s.status IN ('active', 'trialing', 'past_due')
+        ORDER BY s.created_at DESC
+        LIMIT 1
+        "#;
+
 /// Get the active subscription for a tenant.
 pub async fn get_subscription(
     pool: &PgPool,
     tenant_id: &str,
 ) -> Result<Option<Subscription>, SubscriptionError> {
-    let row: Option<SubRow> = sqlx::query_as(
-        r#"
-        SELECT
-            id, tenant_id, plan_name,
-            status, billing_interval,
-            current_period_start, current_period_end,
-            stripe_subscription_id, stripe_customer_id,
-            cancel_at_period_end, created_at, updated_at
-        FROM subscriptions
-        WHERE tenant_id = $1
-          AND status IN ('active', 'trialing', 'past_due')
-        ORDER BY created_at DESC
-        LIMIT 1
-        "#,
-    )
-    .bind(tenant_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(SubscriptionError::Db)?;
+    let row: Option<SubRow> = sqlx::query_as(GET_SUBSCRIPTION_SQL)
+        .bind(tenant_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(SubscriptionError::Db)?;
 
     row.map(|r| r.into_subscription()).transpose()
 }
@@ -321,6 +330,20 @@ mod tests {
             SubscriptionError::PaymentConfirmationRequired.to_string(),
             "direct plan changes require verified payment confirmation"
         );
+    }
+
+    // ------------------------------------------------------------------
+    // Fix C — the subscription reader must target the table the Stripe
+    // webhook writers actually populate.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn get_subscription_reads_stripe_subscriptions_not_legacy_table() {
+        assert!(GET_SUBSCRIPTION_SQL.contains("FROM stripe_subscriptions s"));
+        assert!(!GET_SUBSCRIPTION_SQL.contains("FROM subscriptions\n"));
+        assert!(GET_SUBSCRIPTION_SQL.contains("JOIN tenants t"));
+        assert!(GET_SUBSCRIPTION_SQL.contains("s.billing_cycle_start"));
+        assert!(GET_SUBSCRIPTION_SQL.contains("s.billing_cycle_end"));
     }
 
     #[tokio::test]

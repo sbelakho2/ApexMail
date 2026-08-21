@@ -161,10 +161,11 @@ impl IdsEngine {
         // Scan the ORIGINAL bytes first (preserves binary patterns like NOP
         // sleds that `from_utf8_lossy` would mangle), then also scan the
         // URL/HTML-entity-decoded form to catch evasion attempts. Merge both
-        // result sets, deduplicating by SID.
+        // result sets, deduplicating by SID. Both scans enforce the
+        // signatures' protocol filters against the inspected protocol.
         let normalized = normalize_payload(truncated);
-        let raw_matches = self.signatures.scan(truncated);
-        let norm_matches = self.signatures.scan(&normalized);
+        let raw_matches = self.signatures.scan_with_protocol(truncated, protocol);
+        let norm_matches = self.signatures.scan_with_protocol(&normalized, protocol);
         let mut seen_sids = std::collections::HashSet::new();
         let scan_matches: Vec<_> = raw_matches
             .into_iter()
@@ -275,12 +276,31 @@ impl IdsEngine {
 
         if !alerts.is_empty() {
             self.record_alert_count(src_ip, alerts.len() as u32);
-            warn!(
-                src_ip = %src_ip,
-                alert_count = alerts.len(),
-                verdict = ?verdict,
-                "IDS alerts generated"
-            );
+
+            // Alert rate limiting:once an IP has exceeded its per-minute alert
+            // budget, suppress further alert *emission* from that IP (the
+            // counters keep recording so the flood stays observable).
+            let over_limit = self
+                .alert_counts
+                .get(&src_ip)
+                .map(|entry| entry.value().0 > self.config.alert_rate_limit)
+                .unwrap_or(false);
+            if over_limit {
+                warn!(
+                    src_ip = %src_ip,
+                    rate_limit = self.config.alert_rate_limit,
+                    suppressed = alerts.len(),
+                    "IDS alerts suppressed by per-IP rate limit"
+                );
+                alerts.clear();
+            } else {
+                warn!(
+                    src_ip = %src_ip,
+                    alert_count = alerts.len(),
+                    verdict = ?verdict,
+                    "IDS alerts generated"
+                );
+            }
         }
 
         (verdict, alerts)
@@ -360,7 +380,10 @@ impl IdsEngine {
     /// Run periodic cleanup
     pub fn cleanup(&self) {
         let timeout = Duration::from_secs(self.config.connection_timeout_secs);
-        self.conn_tracker.cleanup(timeout);
+        let tracker_timeout = Duration::from_secs(self.config.portscan_window_secs);
+        // Comprehensive cleanup:without this the half-open and port-scan
+        // tracker maps grow without bound for the lifetime of the process.
+        self.conn_tracker.cleanup_all(timeout, tracker_timeout);
 
         // Evict stale alert rate-limit entries (older than 60 seconds)
         let stale_cutoff = Instant::now() - Duration::from_secs(60);
@@ -452,63 +475,91 @@ impl IdsEngine {
     }
 }
 
-fn is_syn_probe(protocol: &str, payload: &[u8]) -> bool {
+/// Heuristic to decide whether an inspection event represents a TCP SYN
+/// (connection-opening) packet for connection-tracking purposes.
+///
+/// Only an explicit SYN-labeled protocol counts. In particular, an empty
+/// payload on a plain "tcp" stream must NOT be treated as a SYN probe —
+/// the engine generally observes application payloads, and a bare
+/// `payload.starts_with(b"SYN ")` check would misfire on legitimate mail
+/// bodies that merely start with the word "SYN".
+fn is_syn_probe(protocol: &str, _payload: &[u8]) -> bool {
     let normalized = protocol.trim().to_ascii_lowercase();
     matches!(
         normalized.as_str(),
         "syn" | "tcp_syn" | "tcp-syn" | "tcp/syn" | "tcp_syn_packet"
-    ) || (normalized == "tcp" && payload.is_empty())
-        || payload.starts_with(b"SYN ")
-        || payload == b"SYN"
+    )
 }
 
 /// Normalize a payload for evasion-resistant signature matching.
-/// Performs a single pass of:/// 1. URL-decoding (`%XX` → byte)
+/// Performs up to three layers of:/// 1. URL-decoding (`%XX` → byte, `+` → space), iterated so that
+///    double-encoded payloads (`%252e` → `%2e` → `.`) are revealed
 /// 2. HTML entity decoding (`&#NNN;`, `&#xHH;`, `&lt;`, `&gt;`, `&amp;`, `&quot;`)
-/// This ensures signatures written in plain text still match payloads that
-/// have been encoded to bypass pattern-based detection.
+///
+/// Percent-decoding operates on raw BYTES and the result is only converted
+/// to text via `from_utf8_lossy` afterwards, so percent-encoded UTF-8
+/// sequences (`%C3%A9` → `é`) round-trip correctly instead of being mangled
+/// byte-as-char.
 fn normalize_payload(data: &[u8]) -> Vec<u8> {
-    let text = String::from_utf8_lossy(data);
+    // Up to 3 decode layers to expose double/triple URL-encoding.
+    let mut current = percent_decode_pass(data);
+    for _ in 0..2 {
+        let next = percent_decode_pass(&current);
+        if next == current {
+            break;
+        }
+        current = next;
+    }
+
+    let text = String::from_utf8_lossy(&current);
+    html_entity_decode(&text).into_bytes()
+}
+
+/// One pass of byte-level percent-decoding:`%HH` → byte (ASCII hex only),
+/// `+` → space.
+fn percent_decode_pass(data: &[u8]) -> Vec<u8> {
+    let mut result = Vec::with_capacity(data.len());
+    let mut i = 0;
+    while i < data.len() {
+        match data[i] {
+            b'+' => {
+                result.push(b' ');
+                i += 1;
+            }
+            b'%' if data.len() >= i + 3 => {
+                // Need two hex digits after '%'
+                let hex = [data[i + 1], data[i + 2]];
+                if hex[0].is_ascii_hexdigit() && hex[1].is_ascii_hexdigit() {
+                    let byte =
+                        u8::from_str_radix(std::str::from_utf8(&hex).unwrap_or("zz"), 16)
+                            .unwrap_or(b'%');
+                    result.push(byte);
+                    i += 3;
+                } else {
+                    result.push(b'%');
+                    i += 1;
+                }
+            }
+            other => {
+                result.push(other);
+                i += 1;
+            }
+        }
+    }
+    result
+}
+
+/// Decode HTML entities (`&lt;`, `&#60;`, `&#x3C;`, …) in a string.
+fn html_entity_decode(text: &str) -> String {
     let mut result = String::with_capacity(text.len());
     let mut chars = text.chars().peekable();
 
     while let Some(ch) = chars.next() {
         match ch {
-            // URL-form-encoded space:`+` in query strings is decoded as space.
-            // Attackers use `+` to bypass regex patterns that match on \s+,
-            // e.g., `UNION+SELECT` evades `union\s+select` without this step.
-            '+' => result.push(' '),
-            // URL decoding:%XX
-            '%' => {
-                let mut hex = String::new();
-                for _ in 0..2 {
-                    if let Some(&c) = chars.peek() {
-                        if c.is_ascii_hexdigit() {
-                            hex.push(c);
-                            chars.next();
-                        } else {
-                            break;
-                        }
-                    }
-                }
-                if hex.len() == 2 {
-                    if let Ok(byte) = u8::from_str_radix(&hex, 16) {
-                        result.push(byte as char);
-                    } else {
-                        result.push('%');
-                        result.push_str(&hex);
-                    }
-                } else {
-                    result.push('%');
-                    result.push_str(&hex);
-                }
-            }
-            // HTML entity decoding:&...;
             '&' => {
                 let mut entity = String::new();
                 let mut found_semi = false;
                 // Collect up to 10 chars looking for ';'
-                let mut lookahead: Vec<char> = Vec::new();
                 while let Some(&c) = chars.peek() {
                     if c == ';' {
                         chars.next();
@@ -519,7 +570,6 @@ fn normalize_payload(data: &[u8]) -> Vec<u8> {
                         break;
                     }
                     entity.push(c);
-                    lookahead.push(c);
                     chars.next();
                 }
                 if found_semi {
@@ -559,7 +609,7 @@ fn normalize_payload(data: &[u8]) -> Vec<u8> {
         }
     }
 
-    result.into_bytes()
+    result
 }
 
 #[cfg(test)]
@@ -1021,5 +1071,140 @@ mod tests {
             vrfy_count, 1,
             "Same SID should appear only once after dedup"
         );
+    }
+
+    // ── Security-fix regression tests ──
+
+    #[test]
+    #[allow(clippy::field_reassign_with_default)]
+    fn mail_containing_system_word_not_dropped() {
+        let engine = make_inline_engine();
+        let payload = b"Subject: maintenance window\r\n\r\nThe SYSTEM will reboot tonight.\r\n";
+        let (verdict, alerts) = engine.inspect(ip("10.9.0.1"), 25, "smtp", payload);
+        assert_ne!(verdict, IdsVerdict::Drop, "SYSTEM word must not Drop mail");
+        assert!(
+            alerts.iter().all(|a| !matches!(a.action, IdsVerdict::Drop)),
+            "no drop-action alerts expected: {:?}",
+            alerts
+        );
+    }
+
+    #[test]
+    #[allow(clippy::field_reassign_with_default)]
+    fn syn_word_and_empty_tcp_payload_not_treated_as_syn_probe() {
+        let mut config = IdsConfig::default();
+        config.inline_mode = true;
+        config.syn_flood_threshold = 1;
+        let engine = IdsEngine::new(config).expect("init IDS engine");
+        let source = ip("10.9.0.2");
+
+        // Payload merely *starting* with the word "SYN" is application data,
+        // not a connection-opening packet.
+        let (_, alerts) = engine.inspect(source, 25, "smtp", b"SYN scheduled\r\n");
+        assert!(
+            !alerts.iter().any(|a| a.id == 4000002),
+            "SYN-word payload must not trigger SYN flood detection"
+        );
+
+        // Empty payload on a plain "tcp" stream is not proof of a SYN packet
+        // either — the engine normally only sees application payloads.
+        let (_, alerts) = engine.inspect(source, 80, "tcp", b"");
+        assert!(
+            !alerts.iter().any(|a| a.id == 4000002),
+            "empty tcp payload must not trigger SYN flood detection"
+        );
+    }
+
+    #[test]
+    fn normalize_payload_double_decodes_percent() {
+        let data = b"GET /%252e%252e%252fetc/passwd HTTP/1.1\r\n";
+        let normalized = normalize_payload(data);
+        let s = String::from_utf8_lossy(&normalized);
+        assert!(
+            s.contains("../"),
+            "double-encoded %252e must decode to '.' twice: {}",
+            s
+        );
+    }
+
+    #[test]
+    fn normalize_payload_utf8_percent_encoded_round_trips() {
+        // %C3%A9 is the UTF-8 encoding of 'é' — decoding must yield the two
+        // raw UTF-8 bytes, not the mangled byte-as-char form.
+        let normalized = normalize_payload(b"%C3%A9");
+        assert_eq!(normalized, "é".as_bytes());
+    }
+
+    #[test]
+    fn double_encoded_traversal_detected_via_engine() {
+        let engine = make_engine();
+        // '%25%32%65' style split-encoding:only visible after TWO decode
+        // layers, and no raw signature pattern matches the literal bytes.
+        let payload = b"GET /%25%32%65%25%32%65%25%32%66etc/passwd HTTP/1.1\r\n";
+        let (_, alerts) = engine.inspect(ip("10.9.0.3"), 80, "http", payload);
+        assert!(
+            alerts
+                .iter()
+                .any(|a| a.category == "traversal" || a.category == "exploit"),
+            "multi-layer-encoded traversal must be detected: {:?}",
+            alerts
+        );
+    }
+
+    #[test]
+    #[allow(clippy::field_reassign_with_default)]
+    fn alert_rate_limit_suppresses_emission_but_records() {
+        let mut config = IdsConfig::default();
+        config.alert_rate_limit = 5;
+        let engine = IdsEngine::new(config).expect("init IDS engine");
+        let source = ip("10.9.0.4");
+        let payload = b"VRFY admin\r\n"; // one alert per inspection
+
+        let mut emitted = 0;
+        for _ in 0..6 {
+            let (_, alerts) = engine.inspect(source, 25, "smtp", payload);
+            if !alerts.is_empty() {
+                emitted += 1;
+            }
+        }
+        assert_eq!(
+            emitted, 5,
+            "exactly the first 5 alert batches should be emitted (cap = 5)"
+        );
+        // The counter must still be recorded even while suppressed.
+        let count = engine
+            .alert_counts
+            .get(&source)
+            .expect("rate-limit counter recorded")
+            .value()
+            .0;
+        assert_eq!(count, 6, "suppressed alerts are still counted");
+    }
+
+    #[test]
+    #[allow(clippy::field_reassign_with_default)]
+    fn cleanup_removes_stale_tracker_state() {
+        let mut config = IdsConfig::default();
+        config.portscan_threshold = 2;
+        let engine = IdsEngine::new(config).expect("init IDS engine");
+        let source = ip("10.9.0.5");
+        for port in [1000u16, 1001, 1002] {
+            let _ = engine.inspect(source, port, "tcp_syn", b"");
+        }
+        let stats = engine.conn_tracker.stats();
+        assert!(stats.tracked_ips_portscan >= 1);
+        assert!(stats.tracked_ips_half_open >= 1);
+
+        // Expire all tracked ports:zero-length windows evict everything,
+        // including flagged port-scan entries.
+        engine
+            .conn_tracker
+            .cleanup_all(Duration::ZERO, Duration::ZERO);
+        let stats = engine.conn_tracker.stats();
+        assert_eq!(
+            stats.tracked_ips_portscan, 0,
+            "flagged port_scan entries must be removable by cleanup"
+        );
+        assert_eq!(stats.tracked_ips_half_open, 0);
     }
 }

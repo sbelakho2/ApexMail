@@ -10,11 +10,11 @@ namespace BelConsulting\KiwiCaptchaBundle\SiteVerify;
  * Turnstile semantics: an optional UUID idempotency_key makes validation
  * retries safe while tokens remain single-use:
  *   same response + NO key        -> first success, second timeout-or-duplicate.
- *   same response + SAME key      -> first success, retries return the SAME
+ *   same response + same key      -> first success, retries return the same
  *                                    canonical response (only one redemption).
- *   same response + DIFFERENT key -> second key gets timeout-or-duplicate.
- *   same key + DIFFERENT response -> rejected (CONFLICT).
- *   same key + DIFFERENT remoteip -> rejected (CONFLICT: the claim binds
+ *   same response + different key -> second key gets timeout-or-duplicate.
+ *   same key + different response -> rejected (`CONFLICT`).
+ *   same key + different remoteip -> rejected (`CONFLICT`: the claim binds
  *                                    the canonicalized remoteip fingerprint).
  *
  * The crash window (claim -> consume -> crash before finalize) is
@@ -34,7 +34,7 @@ namespace BelConsulting\KiwiCaptchaBundle\SiteVerify;
  * Lease semantics: every claim and every successful takeover starts a
  * lease window (default 60 seconds, configurable per store constructor).
  * The lease is fixed: the controller never derives it from a token's
- * remaining signed validity. A PENDING_SAME waiter whose owner's lease
+ * remaining signed validity. A `PENDING_SAME` waiter whose owner's lease
  * has expired may atomically take over the entry and become the owner; a
  * crashed owner therefore blocks the key for at most one lease window
  * instead of the full TTL. The lease exceeds the maximum supported
@@ -55,8 +55,8 @@ interface SiteVerifyIdempotencyStore
      * The ordering invariant is strict and enforced by the Siteverify
      * controller at construction:
      *
-     *   max verification window  <  LEASE_SECONDS (60)
-     *                            <  the PENDING_SAME waiter bound (90)
+     *   max verification window  <  `LEASE_SECONDS` (60)
+     *                            <  the `PENDING_SAME` waiter bound (90)
      *                            <  the default challenge lifetime (120).
      *
      * A lease that outlives the waiter bound would make the crash-
@@ -101,7 +101,7 @@ interface SiteVerifyIdempotencyStore
     public function stored(string $backendId, string $idempotencyKey): ?array;
 
     /**
-     * Atomically take over a PENDING_SAME claim whose lease has expired.
+     * Atomically take over a `PENDING_SAME` claim whose lease has expired.
      * Succeeds only when the entry is still pending, the response hash
      * and the remoteip fingerprint both match the bound record, and
      * `lease_expires_at` is in the past: the caller then replaces the

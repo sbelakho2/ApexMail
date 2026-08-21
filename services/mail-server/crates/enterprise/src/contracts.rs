@@ -374,6 +374,14 @@ impl ContractService {
         }
     }
 
+    /// Record a tenant-side contract signature (self-service).
+    ///
+    /// Fix D (contract self-execution): a signature supplied over the API is
+    /// not verifiable by the platform, so a self-service signature NO LONGER
+    /// activates the contract and NO LONGER touches `tenants.plan`. It only
+    /// records the signature and leaves the contract in `pending_signature`,
+    /// awaiting a platform-admin counter-signature
+    /// (`counter_sign_contract`) to activate.
     pub async fn sign_contract(
         &self,
         tenant_id: &str,
@@ -394,6 +402,23 @@ impl ContractService {
             .await
             .map_err(|error| format!("Begin sign transaction: {error}"))?;
 
+        // Only allow signing a contract that exists and belongs to the tenant.
+        let owned: Option<(Uuid,)> = sqlx::query_as(
+            "SELECT id FROM enterprise_contracts WHERE id = $1 AND tenant_id = $2 FOR UPDATE",
+        )
+        .bind(contract_id)
+        .bind(tenant_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|error| format!("Lock contract for signing: {error}"))?;
+
+        if owned.is_none() {
+            tx.rollback()
+                .await
+                .map_err(|error| format!("Rollback sign transaction: {error}"))?;
+            return Ok(ApiResult::err("Contract not found", "NOT_FOUND"));
+        }
+
         sqlx::query(
             r#"
             INSERT INTO contract_signatures (
@@ -412,6 +437,71 @@ impl ContractService {
         .await
         .map_err(|error| format!("Insert contract signature: {error}"))?;
 
+        // Self-service signatures do not activate: return the contract as-is
+        // (still pending_signature) and deliberately leave `tenants.plan`
+        // untouched.
+        let row = sqlx::query_as::<_, ContractRow>(
+            r#"
+            SELECT id, tenant_id, contract_number, name, status, start_date, end_date, auto_renew,
+                base_price, committed_volume, overage_rate, annual_prepay_discount,
+                additional_fees, payment_terms_days, sla_credit_percentage, custom_terms,
+                allow_purchase_orders, dedicated_support, custom_features, custom_sla,
+                signed_at, signed_by, purchase_order_number, created_at, updated_at
+            FROM enterprise_contracts WHERE id = $1 AND tenant_id = $2
+            "#,
+        )
+        .bind(contract_id)
+        .bind(tenant_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|error| format!("Reload contract after signing: {error}"))?;
+
+        tx.commit()
+            .await
+            .map_err(|error| format!("Commit sign transaction: {error}"))?;
+
+        match row {
+            Some(row) => Ok(ApiResult::ok(row.into_contract())),
+            None => Ok(ApiResult::err("Contract not found", "NOT_FOUND")),
+        }
+    }
+
+    /// Platform-admin counter-signature: the ONLY path that activates a
+    /// contract and promotes `tenants.plan` to 'enterprise' (fix D).
+    ///
+    /// Requires that the tenant-side signature has already been recorded.
+    pub async fn counter_sign_contract(
+        &self,
+        contract_id: Uuid,
+    ) -> Result<ApiResult<EnterpriseContract>, String> {
+        let now = Utc::now();
+
+        let mut tx = self
+            .db
+            .begin()
+            .await
+            .map_err(|error| format!("Begin counter-sign transaction: {error}"))?;
+
+        // A tenant signature must exist before the platform counter-signs.
+        let tenant_sig: Option<(String, String, chrono::DateTime<Utc>)> = sqlx::query_as(
+            "SELECT signer_name, signer_title, signed_at FROM contract_signatures \
+             WHERE contract_id = $1 ORDER BY signed_at DESC LIMIT 1",
+        )
+        .bind(contract_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|error| format!("Load tenant signature: {error}"))?;
+
+        let Some((signer_name, signer_title, signed_at)) = tenant_sig else {
+            tx.rollback()
+                .await
+                .map_err(|error| format!("Rollback counter-sign transaction: {error}"))?;
+            return Ok(ApiResult::err(
+                "Contract has no tenant signature to counter-sign",
+                "NO_TENANT_SIGNATURE",
+            ));
+        };
+
         let row = sqlx::query_as::<_, ContractRow>(
             r#"
             UPDATE enterprise_contracts
@@ -419,11 +509,10 @@ impl ContractService {
                 signed_at = $2,
                 signed_by = $3,
                 updated_at = NOW()
-                        WHERE id = $1
-                            AND tenant_id = $4
-                            AND status = 'pending_signature'
-                            AND start_date <= $5
-                            AND end_date > $5
+            WHERE id = $1
+              AND status = 'pending_signature'
+              AND start_date <= $4
+              AND end_date > $4
             RETURNING
                 id, tenant_id, contract_number, name, status, start_date, end_date, auto_renew,
                 base_price, committed_volume, overage_rate, annual_prepay_discount,
@@ -433,9 +522,8 @@ impl ContractService {
             "#,
         )
         .bind(contract_id)
-        .bind(input.signed_at)
-        .bind(format!("{} ({})", input.signer_name, input.signer_title))
-        .bind(tenant_id)
+        .bind(signed_at)
+        .bind(format!("{} ({}) — counter-signed by platform", signer_name, signer_title))
         .bind(now)
         .fetch_optional(&mut *tx)
         .await
@@ -444,19 +532,24 @@ impl ContractService {
         let Some(row) = row else {
             tx.rollback()
                 .await
-                .map_err(|error| format!("Rollback sign transaction: {error}"))?;
-            return Ok(ApiResult::err("Contract not found", "NOT_FOUND"));
+                .map_err(|error| format!("Rollback counter-sign transaction: {error}"))?;
+            return Ok(ApiResult::err(
+                "Contract not found or not counter-signable in its current state",
+                "INVALID_STATE",
+            ));
         };
 
+        let activated_tenant = row.tenant_id.clone();
+
         sqlx::query("UPDATE tenants SET plan = 'enterprise', updated_at = NOW() WHERE id = $1")
-            .bind(tenant_id)
+            .bind(&activated_tenant)
             .execute(&mut *tx)
             .await
             .map_err(|error| format!("Promote tenant plan: {error}"))?;
 
         tx.commit()
             .await
-            .map_err(|error| format!("Commit sign transaction: {error}"))?;
+            .map_err(|error| format!("Commit counter-sign transaction: {error}"))?;
 
         Ok(ApiResult::ok(row.into_contract()))
     }

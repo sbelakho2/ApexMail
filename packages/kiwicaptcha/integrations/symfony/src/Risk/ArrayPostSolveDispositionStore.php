@@ -5,41 +5,41 @@ declare(strict_types=1);
 namespace BelConsulting\KiwiCaptchaBundle\Risk;
 
 /**
- * In-memory post-solve disposition store (test/dev semantics — the
- * extension uses the Redis variant whenever a Redis client is available).
+ * In-memory post-solve disposition store for test/dev semantics. The
+ * extension uses the Redis variant whenever a Redis client is available.
  *
- * Mirrors the Redis state machine exactly, with an explicit clock (the
- * optional `$now` constructor argument, defaulting to time()): claim is
- * the single-writer machine (missing -> pending(me, lease) -> 'claimed';
+ * Mirrors the Redis state machine exactly, with an explicit clock: the
+ * optional `$now` constructor argument defaults to time(). Claim is the
+ * single-writer machine: missing -> pending(me, lease) -> 'claimed';
  * pending+me -> 'pending'; pending+other+live -> 'pending' (busy);
  * pending+other+expired -> takeover -> 'taken_over'; complete ->
- * 'complete'), finalize is the atomic pending(me) -> complete transition
- * (never overwrites another owner's work), and every record expires with
- * its TTL (the short fixed lease is a contention bound, never the record
- * TTL). The machine reads the existing state before touching anything
+ * 'complete'. Finalize is the atomic pending(me) -> complete transition
+ * and never overwrites another owner's work. Every record expires with
+ * its TTL; the short fixed lease is a contention bound, never the record
+ * TTL. The machine reads the existing state before touching anything
  * else: a complete claim, a busy claim and a takeover never consume the
- * nonce -> decision mapping. Only the missing path consumes it (getdel
- * semantics, at most one winner) and persists the paired decision id in
- * the pending record in the same transition, the exact mirror of the
- * Redis claim Lua's keys[2] transfer. The pending record carries the
- * original decision handle the first owner's claim consumed; a takeover
- * keeps it, so a completed disposition survives the crash of its first
- * owner with the original decision id.
+ * nonce -> decision mapping. Only the missing path consumes it, with
+ * getdel semantics and at most one winner, and persists the paired
+ * decision id in the pending record in the same transition, the exact
+ * mirror of the Redis claim Lua's keys[2] transfer. The pending record
+ * carries the original decision handle the first owner's claim consumed;
+ * a takeover keeps it, so a completed disposition survives the crash of
+ * its first owner with the original decision id.
  *
  * Every record is decoded all-or-nothing against the strict schema, the
  * identical decode as the Redis store: a missing/malformed field or a
  * state-invariant violation throws
  * {@see MalformedPostSolveDispositionException}, never a defaulted
- * record (an unknown state never becomes pending, a corrupt kind never
- * Pass, a missing disposition never a silent pass, a ChainRequired
- * record without its chain expiry bound never a ticket). The decoder
+ * record. An unknown state never becomes pending, a corrupt kind never
+ * Pass, a missing disposition never a silent pass, and a ChainRequired
+ * record without its chain expiry bound never a ticket. The decoder
  * accepts both schema versions 1 and 2: new writes are v1, where
  * chain_required carries chain_expires_at, a shape an earlier release
- * already reads, while a v1 chain_required record with a null carried
- * expiry is a legacy record: the signing falls back to the exact chain
- * record's server-held bound (never corrupt). Any other v1 violation
+ * already reads. A v1 chain_required record with a null carried expiry
+ * is a legacy record: the signing falls back to the exact chain
+ * record's server-held bound, never corrupt. Any other v1 violation
  * stays corrupt, and a v2 chain_required record requires a positive
- * chain expiry (the forward-looking v2 acceptance). The strict decode
+ * chain expiry, the forward-looking v2 acceptance. The strict decode
  * runs on the read path and before every claim transition: a corrupt
  * server record throws (fail closed) and is never healed into valid
  * state by a takeover.
@@ -59,7 +59,7 @@ final class ArrayPostSolveDispositionStore implements PostSolveDispositionStore
 
     /**
      * @param \Closure|null $now         test seam: returns the current Unix
-     *                                   seconds (defaults to time()).
+     *                                   seconds, defaulting to time().
      * @param int           $ttlSecs     the record TTL (the extension wires
      *                                   Config::MAX_TTL_secs + ttl margin);
      *                                   0 = use the per-call claim TTL.
@@ -220,17 +220,18 @@ final class ArrayPostSolveDispositionStore implements PostSolveDispositionStore
      * The strict decode, all-or-nothing, identical to the Redis store's
      * decode: a missing/malformed field or a state-invariant violation
      * throws {@see MalformedPostSolveDispositionException}, never
-     * defaults. Validates: schema version 1 or 2 (the compatibility
-     * window, where v2 carries the strict chain-expiry requirement and
-     * v1 additionally accepts a legacy chain_required record with a null
-     * carried expiry; every other rule is identical for both versions);
-     * the exact state enum (pending|complete, nothing else); a
-     * non-empty string owner and an integer lease deadline required in
-     * pending and null in complete; the disposition required (a valid
-     * typed disposition with a well-shaped decision id / chain id, plus
-     * the chain expiry integer required on the ChainRequired kind, v1
-     * legacy excepted, and null outside it) in complete and null in
-     * pending; a non-empty string-or-null decision handle in both states.
+     * defaults. It validates schema version 1 or 2 within the
+     * compatibility window: v2 carries the strict chain-expiry
+     * requirement, and v1 additionally accepts a legacy chain_required
+     * record with a null carried expiry; every other rule is identical
+     * for both versions. The state must be exactly pending|complete. A
+     * non-empty string owner and an integer lease deadline are required
+     * in pending and null in complete. The disposition is required in
+     * complete and null in pending: a valid typed disposition with a
+     * well-shaped decision id or chain id, plus the chain expiry integer
+     * required on the ChainRequired kind, v1 legacy excepted, and null
+     * outside it. The decision handle must be a non-empty string or null
+     * in both states.
      *
      * @param array<string, mixed> $record
      *

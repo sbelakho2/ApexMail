@@ -253,8 +253,10 @@ impl ConnectionTracker {
             tracker
                 .ports
                 .retain(|(_, ts)| now.duration_since(*ts) < tracker_timeout);
-            // If no recent ports and not flagged, remove the entry
-            if tracker.ports.is_empty() && !tracker.flagged {
+            // Once no port in the tracking window remains the scan record is
+            // stale — drop it (flagged or not) so the map cannot grow without
+            // bound. A still-scanning source simply re-flags on new activity.
+            if tracker.ports.is_empty() {
                 removed += 1;
                 return false;
             }
@@ -349,5 +351,28 @@ mod tests {
 
         tracker.record_established(ip, 80);
         assert_eq!(tracker.half_open_for(&ip), 0);
+    }
+
+    #[test]
+    fn test_flagged_portscan_entry_removed_by_cleanup_all() {
+        let tracker = ConnectionTracker::new(100_000, 2, 60, 100);
+        let ip: IpAddr = "10.0.0.4".parse().expect("valid IP");
+
+        for port in 1..=3u16 {
+            let _ = tracker.record_syn(ip, port);
+        }
+        assert_eq!(tracker.stats().tracked_ips_portscan, 1);
+        assert!(tracker.half_open_for(&ip) > 0);
+
+        // Zero-length windows expire every tracked port; the FLAGGED
+        // port-scan entry must be evicted too so the map cannot grow
+        // without bound for the lifetime of the process.
+        tracker.cleanup_all(std::time::Duration::ZERO, std::time::Duration::ZERO);
+        assert_eq!(
+            tracker.stats().tracked_ips_portscan,
+            0,
+            "flagged port_scan entry must be removable via cleanup_all"
+        );
+        assert_eq!(tracker.stats().tracked_ips_half_open, 0);
     }
 }

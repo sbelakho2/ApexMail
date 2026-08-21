@@ -15,12 +15,20 @@
 //! "consumed"` (plus the committed outcome `consumed_result` and the
 //! logical-operation `operation_identity` marker), so a
 //! concurrent loser — or a later replay — observes the consumed record and
-//! returns the winner's committed outcome instead of RecordNotFound and
+//! resolves its retained outcome instead of RecordNotFound and
 //! instead of re-deriving. The winner derives exactly once and commits its
 //! outcome with [`RedisChallengeStore::commit_result`] (best-effort).
 //! A loser that finds the record consumed but NOT yet committed (crash
 //! between transition and commit) gets
 //! [`VerifyError::ConsumeIndeterminate`].
+//!
+//! The retained success is identity-gated: an already-consumed record with
+//! a committed valid outcome replays that success only for the logical
+//! operation that recorded it (the supplied operation identity must match
+//! the stored one, compared constant-time). A no-identity or mismatched
+//! replay sees [`VerifyError::AlreadyConsumed`], so one solved token can
+//! never fund a second operation; the deterministic invalid outcome
+//! (`valid = false`) replays without an identity, since it grants nothing.
 //!
 //! [`ProductionVerifier`] implements the PHP verifier's check order with
 //! atomic single-use enforced by the consumed-state transition:
@@ -28,10 +36,13 @@
 //! ```text
 //! token decode → store.find(nonce) peek (GET) → cheap validation (structure,
 //! v1 gate, signature, TTL incl. the future-time bound, scope, region,
-//! policy epoch, issuer, IP binding, server-measured min duration) →
-//! optional Argon admission gate → store.consume(nonce) (Lua transition) →
-//! first=false → return the stored outcome (or ConsumeIndeterminate) →
-//! re-validation of the consumed record → derive hash (once) →
+//! policy epoch, issuer, expected request binding, IP binding,
+//! server-measured min duration) → optional Argon admission gate →
+//! store.consume(nonce) (Lua transition; the operation identity is recorded
+//! atomically when supplied) → first=false → the identity-gated retained
+//! outcome (stored Valid only for the recording operation identity;
+//! otherwise AlreadyConsumed; no committed outcome → ConsumeIndeterminate)
+//! → re-validation of the consumed record → derive hash (once) →
 //! final re-validation with a fresh clock read + current expectations →
 //! leading-zero check → best-effort commit_result
 //! ```
@@ -45,7 +56,9 @@
 //! via the atomic Lua transition (pending → consumed). Under concurrency
 //! exactly one caller can ever win the transition: two racing `verify()`
 //! calls on the same token yield one [`VerifyOutcome::Valid`] (the winner,
-//! which derives) and one same outcome returned from the stored result (or
+//! which derives) and one identity-gated resolution of the retained state
+//! (the loser with no operation identity sees
+//! [`VerifyError::AlreadyConsumed`], or
 //! [`VerifyError::ConsumeIndeterminate`] if it races before the commit) —
 //! the loser never reaches hash derivation, so each nonce drives at most one
 //! expensive Argon2id/SHA-256 computation no matter how many requests race
@@ -69,7 +82,10 @@
 //! - [`VerifyError::StorageUnavailable`] — the peek via `find()` or its
 //!   pool checkout failed (unreachable backend, failed connect, read/write
 //!   timeout). A GET never consumes, so the challenge is presumed intact:
-//!   the client may retry it once the store recovers.
+//!   the client may retry it once the store recovers. The cheap-failure
+//!   path also reports StorageUnavailable when the retained-state read
+//!   fails: the record may be the consumed recovery evidence and is never
+//!   deleted.
 //! - [`VerifyError::ConsumeIndeterminate`] — the atomic consume failed with
 //!   an uncertain I/O error (e.g. the reply timed out), or the record was
 //!   already consumed without a committed outcome (crash between the
@@ -223,9 +239,18 @@ impl r2d2::ManageConnection for StoreConnectionManager {
 /// marks a pending record consumed (keeping it — the storage-level `state`
 /// field is added), or observes the already-consumed record.
 ///
+/// ARGV[1] is the JSON-encoded logical-operation identity ('' = none):
+/// when non-empty, the `"operation_identity":null` marker is spliced to
+/// the identity IN THE SAME atomic write as the state flip, exactly like
+/// the PHP identity-aware consume (the identity has passed the narrow
+/// `[A-Za-z0-9_-]` gate before the eval, so the raw replacement splice can
+/// never be interpreted as a Lua `string.gsub` template — `%` is the
+/// template escape and is excluded by construction).
+///
 /// Returns (as a Redis array reply):
 /// - missing key → `false` (Lua nil → Redis null → [`VerifyError::RecordNotFound`]);
-/// - `[record_json, 1]` — this caller won the transition (first);
+/// - `[record_json, 1]` — this caller won the transition (first; the JSON
+///   is the UPDATED value, so the recorded identity rides back);
 /// - `[record_json, 0]` — already consumed by a concurrent caller (the
 ///   record_json carries `state` and, once committed, `consumed_result`).
 ///
@@ -250,10 +275,16 @@ if string.find(v, '"state":"consumed"', 1, true) then
 end
 local updated, n = string.gsub(v, '"state":"pending"', '"state":"consumed"', 1)
 if n ~= 1 then return false end
+if ARGV[1] ~= '' then
+    local withIdentity, m = string.gsub(updated, '"operation_identity":null', '"operation_identity":' .. ARGV[1], 1)
+    if m == 1 then
+        updated = withIdentity
+    end
+end
 local ttl = redis.call('TTL', KEYS[1])
 if ttl < 1 then ttl = 1 end
 redis.call('SET', KEYS[1], updated, 'EX', ttl)
-return {v, 1}
+return {updated, 1}
 "#;
 
 /// One Lua script for the best-effort outcome commit: stores
@@ -289,7 +320,7 @@ return 1
 #[derive(Debug, Clone)]
 pub struct ConsumeResult {
     /// The consumed record (the value as stored — the runtime `state` /
-    /// `consumed_result` fields are stripped).
+    /// `consumed_result` / `operation_identity` fields are stripped).
     pub record: ChallengeRecord,
     /// `true` when this caller performed the pending → consumed transition
     /// and owns the single derivation; `false` when the record was already
@@ -298,6 +329,29 @@ pub struct ConsumeResult {
     /// The outcome a previous consumer committed, when one exists. Only
     /// meaningful when `first == false`.
     pub stored_result: Option<StoredConsumedResult>,
+    /// The logical-operation identity recorded with the pending → consumed
+    /// transition (an identity-bearing
+    /// [`RedisChallengeStore::consume_with_operation_identity`] call),
+    /// parsed from the stored envelope. `None` when the record carries
+    /// none: a plain consume, or a non-string marker from an
+    /// older/foreign writer.
+    pub operation_identity: Option<String>,
+}
+
+/// The retained consumed state of a record, read without any transition:
+/// the record plus its committed deterministic outcome and the recorded
+/// logical-operation identity — the runtime envelope state the verify
+/// flow's identity gate and the retained-outcome replay read. Mirrors the
+/// PHP `ConsumedStateReadableInterface::consumedState()` read.
+#[derive(Debug, Clone)]
+pub struct ConsumedState {
+    /// The consumed record (the runtime fields are stripped).
+    pub record: ChallengeRecord,
+    /// The committed deterministic outcome, when one exists.
+    pub stored_result: Option<StoredConsumedResult>,
+    /// The recorded logical-operation identity, when the consume recorded
+    /// one.
+    pub operation_identity: Option<String>,
 }
 
 /// A committed verification outcome, persisted at the storage layer so a
@@ -313,13 +367,18 @@ pub struct StoredConsumedResult {
 }
 
 /// A stored value decoded at the storage layer: the [`ChallengeRecord`]
-/// plus the optional committed outcome. The `state` / `operation_identity`
-/// fields are stripped from the JSON by [`decode_stored`] (they must never
-/// leak into the strict record parse); the transition flag comes from the
-/// Lua reply.
+/// plus the runtime envelope's `state` marker, the optional committed
+/// outcome and the recorded operation identity. The `state` /
+/// `consumed_result` / `operation_identity` fields are stripped from the
+/// JSON by [`decode_stored`] (they must never leak into the strict record
+/// parse); the transition flag comes from the Lua reply.
 struct StoredChallenge {
     record: ChallengeRecord,
+    /// The envelope's `state` marker ("pending" | "consumed"), when the
+    /// stored value carries one.
+    state: Option<String>,
     consumed_result: Option<StoredConsumedResult>,
+    operation_identity: Option<String>,
 }
 
 /// Maximum byte length of a stored record value. The canonical
@@ -354,6 +413,14 @@ fn decode_stored(raw: &str) -> Option<StoredChallenge> {
     let consumed_result = value
         .get("consumed_result")
         .and_then(|v| serde_json::from_value(v.clone()).ok());
+    let state = value
+        .get("state")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    let operation_identity = value
+        .get("operation_identity")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
     let obj = value.as_object_mut()?;
     obj.remove("state");
     obj.remove("consumed_result");
@@ -361,7 +428,9 @@ fn decode_stored(raw: &str) -> Option<StoredChallenge> {
     let record: ChallengeRecord = serde_json::from_value(value).ok()?;
     Some(StoredChallenge {
         record,
+        state,
         consumed_result,
+        operation_identity,
     })
 }
 
@@ -388,8 +457,42 @@ fn parse_consume(value: redis::Value) -> Option<ConsumeResult> {
         record: stored.record,
         first,
         stored_result: if first { None } else { stored.consumed_result },
+        operation_identity: stored.operation_identity,
     })
 }
+/// JSON-encode a caller-supplied logical-operation identity for the
+/// consume Lua splice, validating it against the shared `OperationIdentity`
+/// contract first: 1..128 bytes of `[A-Za-z0-9_-]` (the PHP core's
+/// alphabet — the narrow alphabet is exactly what makes the raw
+/// `string.gsub` replacement splice safe, since `%` — the Lua
+/// replacement-template escape — and every other template-special
+/// character are excluded by construction). A malformed identity (empty,
+/// over-long, or containing any other character) is rejected with an
+/// `Err` and the record is left untouched; the encoded form is
+/// byte-identical to PHP's `json_encode`, so both implementations write
+/// the same `"operation_identity":"<identity>"` splice.
+fn operation_identity_json(identity: &str) -> redis::RedisResult<String> {
+    let valid = !identity.is_empty()
+        && identity.len() <= 128
+        && identity
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-');
+    if !valid {
+        return Err(redis::RedisError::from((
+            redis::ErrorKind::TypeError,
+            "operation identity must be 1..128 bytes of [A-Za-z0-9_-]",
+            String::new(),
+        )));
+    }
+    serde_json::to_string(identity).map_err(|e| {
+        redis::RedisError::from((
+            redis::ErrorKind::TypeError,
+            "operation identity JSON encoding failed",
+            e.to_string(),
+        ))
+    })
+}
+
 /// Redis-backed challenge store with atomic single-use semantics.
 ///
 /// Records are stored as JSON at `{prefix}{nonce}` with an EX TTL of
@@ -679,7 +782,8 @@ impl RedisChallengeStore {
     ///   `{record, first = true}` is returned — the caller owns the single
     ///   derivation and must commit its outcome with [`Self::commit_result`].
     /// - `consumed` → `{record, first = false}` is returned; the caller must
-    ///   return the record's committed outcome (or
+    ///   resolve the record's retained outcome through the identity gate
+    ///   (the committed result, or
     ///   [`VerifyError::ConsumeIndeterminate`] when no outcome was committed
     ///   yet — the previous consumer crashed between transition and commit).
     /// - missing → `Ok(None)` (RecordNotFound).
@@ -695,7 +799,31 @@ impl RedisChallengeStore {
     /// caller must NOT retry the consume blindly — see the module docs'
     /// no-retry rule.
     pub fn consume(&self, nonce: &str) -> redis::RedisResult<Option<ConsumeResult>> {
+        self.consume_with_operation_identity(nonce, None)
+    }
+
+    /// The one-shot consume transition with the logical-operation identity:
+    /// identical semantics to [`Self::consume`]; when `operation_identity`
+    /// is non-null, the identity is recorded in the same atomic write as
+    /// the pending→consumed flip (the PHP
+    /// `consumeWithOperationIdentity` mirror). A non-null identity must be
+    /// 1..128 bytes of `[A-Za-z0-9_-]` (the shared `OperationIdentity`
+    /// contract — the alphabet is what makes the Lua splice safe, see
+    /// [`CONSUME_TRANSITION_LUA`]); a malformed identity is rejected with
+    /// an `Err` BEFORE the transition, the record is left untouched, and
+    /// the verify flow maps that to
+    /// [`VerifyError::ConsumeIndeterminate`], exactly like the PHP
+    /// verifier catches the identity `\InvalidArgumentException`.
+    pub fn consume_with_operation_identity(
+        &self,
+        nonce: &str,
+        operation_identity: Option<&str>,
+    ) -> redis::RedisResult<Option<ConsumeResult>> {
         let key = format!("{}{}", self.prefix, nonce);
+        let identity_arg = match operation_identity {
+            Some(identity) => operation_identity_json(identity)?,
+            None => String::new(),
+        };
         let wait_replicas = self.wait_replicas;
         let wait_timeout_ms = self.wait_timeout_ms;
         let mut conn = self.checkout()?;
@@ -704,7 +832,7 @@ impl RedisChallengeStore {
                 c,
                 &redis::Script::new(CONSUME_TRANSITION_LUA),
                 &key,
-                &[],
+                &[&identity_arg],
             )?;
             // Durability barrier: when the transition DID
             // execute, the consumed state must reach the configured replica
@@ -722,6 +850,40 @@ impl RedisChallengeStore {
             Ok(v)
         })?;
         Ok(parse_consume(value))
+    }
+
+    /// Read a record's retained consumed state without any transition —
+    /// the PHP `ConsumedStateReadableInterface::consumedState()` mirror.
+    ///
+    /// Returns `Ok(Some(ConsumedState))` only when the stored value exists
+    /// and its runtime envelope carries the `"state":"consumed"` marker;
+    /// `Ok(None)` when the key is missing, the value is not consumed
+    /// (pending), or the value is corrupt (undecodable — like the PHP
+    /// decode, a corrupt key reads as absent). An `Err` is a genuine
+    /// storage failure (unreachable backend, timeout).
+    ///
+    /// The verify flow uses this read to decide cheap-failure cleanup:
+    /// the best-effort delete applies only when the record is NOT already
+    /// consumed — the retained consumed record is the crash-recovery
+    /// evidence and must survive to its retention TTL.
+    pub fn consumed_state(&self, nonce: &str) -> redis::RedisResult<Option<ConsumedState>> {
+        let key = format!("{}{}", self.prefix, nonce);
+        let mut conn = self.checkout()?;
+        let raw = Self::run_command(&mut conn, |c| {
+            redis::cmd("GET").arg(key).query::<Option<String>>(c)
+        })?;
+        Ok(raw.and_then(|json| {
+            let stored = decode_stored(&json)?;
+            if stored.state.as_deref() == Some("consumed") {
+                Some(ConsumedState {
+                    record: stored.record,
+                    stored_result: stored.consumed_result,
+                    operation_identity: stored.operation_identity,
+                })
+            } else {
+                None
+            }
+        }))
     }
 
     /// Best-effort persistence of the proof outcome for an already-consumed
@@ -937,7 +1099,7 @@ impl ProductionVerifier {
 
     /// Override the verifier's clock: `f` returns the current Unix time in
     /// seconds used by the TTL checks and the post-derive final
-    /// re-validation. Mirrors the PHP Verifier.s `` clock
+    /// re-validation. Mirrors the PHP Verifier's `$now` clock
     /// override; the default is the real clock.
     #[doc(hidden)]
     pub fn with_now_fn(mut self, f: fn() -> u64) -> Self {
@@ -1044,18 +1206,42 @@ impl ProductionVerifier {
     /// - `now_ns` — server receipt time in epoch microseconds (the unit
     ///   shared with the PHP core), used with the record's `issued_at_ns`
     ///   for the server-measured minimum-duration check.
+    /// - `operation_identity` — the caller's logical-operation identity,
+    ///   recorded atomically with the pending→consumed transition when this
+    ///   call wins it (a PHP `consumeWithOperationIdentity`-equivalent
+    ///   write; a malformed identity is rejected with
+    ///   [`VerifyError::ConsumeIndeterminate`] before the transition, like
+    ///   the PHP verifier). It also authorizes the retained-state replay:
+    ///   an already-consumed record with a committed valid outcome is
+    ///   replayed idempotently ONLY for the identity that matches the
+    ///   recorded one (constant-time compare) — `None` (the default for
+    ///   every native caller) never receives a stored success, and any
+    ///   other caller sees [`VerifyError::AlreadyConsumed`]. The
+    ///   deterministic invalid outcome replays without an identity (it
+    ///   grants nothing).
+    /// - `expected_request_binding` — when provided, the record's signed
+    ///   `request_binding` must match exactly (constant-time compare); a
+    ///   differing binding — or a record without one — is rejected with
+    ///   [`VerifyError::RequestBindingMismatch`]. `None` disables the
+    ///   check (the binding is then merely returned on a valid outcome).
     ///
     /// Flow: decode → peek (GET) → cheap validation → Argon admission gate
-    /// (acquire → lease) → atomic consume (pending→consumed transition) →
-    /// re-validation of the consumed record → single derive → leading-zero
-    /// check → lease released by Drop. Terminal cheap failures (malformed
-    /// record, unsupported protocol, bad signature, expired, wrong scope,
-    /// IP mismatch, TooFast) consume the record via a best-effort DEL,
-    /// matching the PHP core's one-shot cheap-failure semantics; capacity /
-    /// admission-backend / storage failures never consume. The expensive
-    /// proof is burned exactly once, at the transition, so at most one hash
-    /// derivation ever runs per nonce (concurrent losers see
-    /// `RecordNotFound`).
+    /// (acquire → lease) → atomic consume (pending→consumed transition, the
+    /// operation identity recorded atomically when supplied) → identity-
+    /// gated resolution of the retained state when the record was already
+    /// consumed → re-validation of the consumed record → single derive →
+    /// leading-zero check → lease released by Drop. Terminal cheap failures
+    /// (malformed record, unsupported protocol, bad signature, expired,
+    /// wrong scope, binding mismatch, IP mismatch, TooFast) consume the
+    /// record via a best-effort DEL only when it is NOT already consumed —
+    /// the retained consumed record is the crash-recovery evidence and
+    /// routes to the identity-gated consumed branch instead, surviving to
+    /// its retention TTL; capacity / admission-backend / storage failures
+    /// never consume. The expensive proof is burned exactly once, at the
+    /// transition, so at most one hash derivation ever runs per nonce; a
+    /// concurrent loser (or a replay) resolves the retained state through
+    /// the identity gate — a no-identity loser of a stored-valid record
+    /// sees [`VerifyError::AlreadyConsumed`], never `RecordNotFound`.
     ///
     /// Storage failure semantics (see the module docs): a `find()` /
     /// checkout failure rejects with [`VerifyError::StorageUnavailable`]
@@ -1063,9 +1249,20 @@ impl ProductionVerifier {
     /// recovers); a `consume()` failure rejects with
     /// [`VerifyError::ConsumeIndeterminate`] and the consume is never
     /// retried automatically (the challenge may or may not have been
-    /// consumed). `Ok(None)` from either stays
-    /// [`VerifyError::RecordNotFound`] — a genuinely absent key.
-    pub fn verify(&self, token: &str, scope: &str, client_ip: &str, now_ns: u64) -> VerifyOutcome {
+    /// consumed); a failed retained-state read on the cheap-failure path
+    /// rejects with [`VerifyError::StorageUnavailable`] and never deletes
+    /// (the record may be the retained evidence). `Ok(None)` from
+    /// `find()`/`consume()` stays [`VerifyError::RecordNotFound`] — a
+    /// genuinely absent key.
+    pub fn verify(
+        &self,
+        token: &str,
+        scope: &str,
+        client_ip: &str,
+        now_ns: u64,
+        operation_identity: Option<&str>,
+        expected_request_binding: Option<&str>,
+    ) -> VerifyOutcome {
         // 1. Token decode. The counter is bounded here too: the decoder
         //    rejects counters at or above the solver cap
         //    (VerifyError::CounterTooLarge territory) with MalformedToken —
@@ -1089,17 +1286,39 @@ impl ProductionVerifier {
         // 3. Cheap validation on the peeked record. Per the shared
         //    cross-language consumption table (PHP mirrors this), terminal
         //    cheap failures consume the record: malformed stored record,
-        //    unsupported protocol, bad signature, expired, wrong scope, IP
-        //    mismatch and TooFast all burn the challenge (best-effort DEL —
-        //    a cleanup error never overrides the typed outcome), matching
-        //    PHP's one-shot cheap-failure semantics. NOT consumed:
-        //    missing IP/context (Rust requires the IP), Argon capacity
-        //    exhausted, admission backend unavailable, storage unavailable
-        //    (presumed intact) and ConsumeIndeterminate (consume never
-        //    retried). The expensive proof itself is burned by the transition.
-        if let Err(e) = self.check_cheap(&peek, scope, client_ip, now_ns) {
-            self.store.best_effort_delete(&token.nonce);
-            return VerifyOutcome::Invalid(e);
+        //    unsupported protocol, bad signature, expired, wrong scope,
+        //    binding mismatch, IP mismatch and TooFast all burn the
+        //    challenge (best-effort DEL — a cleanup error never overrides
+        //    the typed outcome), matching PHP's one-shot cheap-failure
+        //    semantics. NOT consumed: missing IP/context (Rust requires
+        //    the IP), Argon capacity exhausted, admission backend
+        //    unavailable, storage unavailable (presumed intact) and
+        //    ConsumeIndeterminate (consume never retried). The expensive
+        //    proof itself is burned by the transition.
+        //
+        //    The delete is gated on the retained consumed state: a
+        //    consumed record failing a cheap check is the crash-recovery
+        //    evidence (it carries the committed deterministic outcome of
+        //    the original verification) and must survive to its retention
+        //    TTL, so it routes to the identity-gated consumed branch
+        //    instead of being deleted. Pending (and missing) records keep
+        //    the one-shot cheap-failure delete.
+        if let Err(e) = self.check_cheap(&peek, scope, client_ip, now_ns, expected_request_binding)
+        {
+            match self.store.consumed_state(&token.nonce) {
+                Ok(Some(state)) => return self.resolve_consumed(state, operation_identity),
+                Ok(None) => {
+                    self.store.best_effort_delete(&token.nonce);
+                    return VerifyOutcome::Invalid(e);
+                }
+                Err(_) => {
+                    // The retained-state read failed: the record may be
+                    // the consumed evidence, so it is never deleted; the
+                    // typed retryable result lets the caller retry once
+                    // the store recovers.
+                    return VerifyOutcome::Invalid(VerifyError::StorageUnavailable);
+                }
+            }
         }
 
         // 4. Argon2id admission gate (optional): capacity control before the
@@ -1128,30 +1347,33 @@ impl ProductionVerifier {
         // 5. Atomic consume (the pending → consumed transition).
         //    The one-shot bound: exactly one caller wins the transition and
         //    derives; a concurrent loser observes `first == false` and
-        //    returns the winner's committed outcome (Valid/InsufficientWork)
-        //    without re-deriving — or ConsumeIndeterminate when the winner
-        //    crashed between the transition and the outcome commit. An
-        //    uncertain I/O failure → ConsumeIndeterminate: the transition
-        //    may or may not have executed — the consume is never retried.
-        let consumed = match self.store.consume(&token.nonce) {
+        //    resolves the retained state through the identity gate (the
+        //    stored Valid only for the recording operation identity —
+        //    otherwise AlreadyConsumed — or the deterministic
+        //    InsufficientWork; ConsumeIndeterminate when the winner crashed
+        //    between the transition and the outcome commit) without
+        //    re-deriving. The operation identity, when supplied, is
+        //    recorded in the same atomic write (PHP
+        //    consumeWithOperationIdentity parity). An uncertain I/O failure
+        //    → ConsumeIndeterminate: the transition may or may not have
+        //    executed — the consume is never retried.
+        let consumed = match self
+            .store
+            .consume_with_operation_identity(&token.nonce, operation_identity)
+        {
             Ok(Some(consumed)) => consumed,
             Ok(None) => return VerifyOutcome::Invalid(VerifyError::RecordNotFound),
             Err(_) => return VerifyOutcome::Invalid(VerifyError::ConsumeIndeterminate),
         };
         if !consumed.first {
-            return match consumed.stored_result {
-                Some(result) => {
-                    if result.valid {
-                        VerifyOutcome::Valid {
-                            nonce: consumed.record.nonce,
-                            request_binding: result.binding,
-                        }
-                    } else {
-                        VerifyOutcome::Invalid(VerifyError::InsufficientWork)
-                    }
-                }
-                None => VerifyOutcome::Invalid(VerifyError::ConsumeIndeterminate),
-            };
+            return self.resolve_consumed(
+                ConsumedState {
+                    record: consumed.record,
+                    stored_result: consumed.stored_result,
+                    operation_identity: consumed.operation_identity,
+                },
+                operation_identity,
+            );
         }
         let record = consumed.record;
 
@@ -1163,7 +1385,9 @@ impl ProductionVerifier {
         if !ct_eq(record.challenge.as_bytes(), peek.challenge.as_bytes()) {
             return VerifyOutcome::Invalid(VerifyError::MalformedRecord);
         }
-        if let Err(e) = self.check_cheap(&record, scope, client_ip, now_ns) {
+        if let Err(e) =
+            self.check_cheap(&record, scope, client_ip, now_ns, expected_request_binding)
+        {
             return VerifyOutcome::Invalid(e);
         }
 
@@ -1200,6 +1424,7 @@ impl ProductionVerifier {
             let outcome = VerifyOutcome::Valid {
                 nonce: record.nonce.clone(),
                 request_binding: record.request_binding.clone(),
+                from_stored_result: false,
             };
             let _ = self
                 .store
@@ -1213,8 +1438,52 @@ impl ProductionVerifier {
         }
     }
 
+    /// Resolve the outcome of an already-consumed record — the retained
+    /// deterministic outcome, identity-gated:
+    ///
+    /// - no committed outcome (crash between the transition and the
+    ///   commit): [`VerifyError::ConsumeIndeterminate`];
+    /// - a committed invalid outcome: the deterministic
+    ///   [`VerifyError::InsufficientWork`] — an invalid replay needs no
+    ///   identity (it grants nothing);
+    /// - a committed valid outcome: the idempotent retained success
+    ///   (marked `from_stored_result`) ONLY when the supplied operation
+    ///   identity is non-null AND the recorded identity is non-null AND
+    ///   they match (constant-time compare — the PHP `hash_equals` mirror).
+    ///   Every other caller — no identity, a record consumed without one,
+    ///   or a mismatched identity — sees [`VerifyError::AlreadyConsumed`]:
+    ///   one solved token can never fund a second operation.
+    fn resolve_consumed(
+        &self,
+        state: ConsumedState,
+        operation_identity: Option<&str>,
+    ) -> VerifyOutcome {
+        match state.stored_result {
+            Some(result) if !result.valid => VerifyOutcome::Invalid(VerifyError::InsufficientWork),
+            Some(result) => {
+                let identity_ok = match (state.operation_identity.as_deref(), operation_identity) {
+                    (Some(recorded), Some(supplied)) => {
+                        ct_eq(recorded.as_bytes(), supplied.as_bytes())
+                    }
+                    _ => false,
+                };
+                if identity_ok {
+                    VerifyOutcome::Valid {
+                        nonce: state.record.nonce,
+                        request_binding: result.binding,
+                        from_stored_result: true,
+                    }
+                } else {
+                    VerifyOutcome::Invalid(VerifyError::AlreadyConsumed)
+                }
+            }
+            None => VerifyOutcome::Invalid(VerifyError::ConsumeIndeterminate),
+        }
+    }
+
     /// The cheap validation phase: structural validation, the protocol-v1
-    /// gate, the signature re-check, TTL, scope, IP binding, and the
+    /// gate, the signature re-check, TTL, scope, region, policy epoch,
+    /// issuer, the expected request binding, IP binding, and the
     /// server-measured minimum duration — the checks PHP runs against the
     /// peeked record before the Argon admission gate. Run against the
     /// peeked record and re-run against the consumed record (race guard).
@@ -1224,6 +1493,7 @@ impl ProductionVerifier {
         scope: &str,
         client_ip: &str,
         now_ns: u64,
+        expected_request_binding: Option<&str>,
     ) -> Result<(), VerifyError> {
         // 3a. Cheap structural validation before any crypto or timing work.
         validate_record(record)?;
@@ -1327,6 +1597,20 @@ impl ProductionVerifier {
         if let Some(expected) = self.expected_issuer.as_deref() {
             if record.issuer.as_deref() != Some(expected) {
                 return Err(VerifyError::WrongIssuer);
+            }
+        }
+
+        // 3e5. Expected request binding: a caller that pins the
+        //      challenge to its application transaction requires the
+        //      record's signed request_binding to match exactly
+        //      (constant-time); a record without a binding fails closed —
+        //      an unbound challenge satisfies no binding-pinned
+        //      redemption. `None` (the default) leaves the binding
+        //      unenforced (merely returned on a valid outcome).
+        if let Some(expected) = expected_request_binding {
+            match record.request_binding.as_deref() {
+                Some(actual) if ct_eq(actual.as_bytes(), expected.as_bytes()) => {}
+                _ => return Err(VerifyError::RequestBindingMismatch),
             }
         }
 
@@ -1485,7 +1769,7 @@ mod tests {
         let token = encode_token(&issued.record.nonce, counter);
         FAKE_NOW_CALLS.store(0, Ordering::SeqCst);
         assert_eq!(
-            verifier.verify(&token, "login", IP, issued_at_ns + 1_000_000),
+            verifier.verify(&token, "login", IP, issued_at_ns + 1_000_000, None, None),
             VerifyOutcome::Invalid(VerifyError::Expired),
             "the final re-validation re-reads the clock: expired during the derive → Expired"
         );
@@ -1495,7 +1779,7 @@ mod tests {
         // (deterministic — pins the no-commit-on-gate-failure semantics).
         FAKE_NOW_CALLS.store(0, Ordering::SeqCst);
         assert_eq!(
-            verifier.verify(&token, "login", IP, issued_at_ns + 1_000_000),
+            verifier.verify(&token, "login", IP, issued_at_ns + 1_000_000, None, None),
             VerifyOutcome::Invalid(VerifyError::ConsumeIndeterminate)
         );
     }

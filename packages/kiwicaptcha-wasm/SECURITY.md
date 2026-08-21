@@ -92,21 +92,21 @@ Notes:
 
 For each release:
 
-1. Build, then record hashes:
+1) Build, then record hashes:
    ```sh
    shasum -a 256 assets/kiwicaptcha-wasm.js assets/kiwi-worker.js assets/widget-driver.js
    node tools/sri-hashes.mjs
    ```
-2. Publish the hash list as the attached `SHA256SUMS`/`SRI.txt` manifests (SHA-256 for artifact verification, sha384 SRI form for script tags).
+2) Publish the hash list as the attached `SHA256SUMS`/`SRI.txt` manifests (SHA-256 for artifact verification, sha384 SRI form for script tags).
    Both manifests are SLSA-attested release assets; the release notes reference them.
-3. Attest the artifacts with GitHub artifact attestations.
+3) Attest the artifacts with GitHub artifact attestations.
    The producer is the release workflow, `actions/attest-build-provenance` (SLSA provenance, tied to the OIDC identity of the repository/runner).
    `gh attestation create` does not exist.
    The release pipeline already attests all four assets on every `v*` tag; the consumer side verifies:
    ```sh
    gh attestation verify assets/kiwicaptcha-wasm.js --repo <org>/<repo>
    ```
-4. Publish the protocol id (see the protocol-id section below) alongside the hashes so integrators can tell which driver/worker pair a release contains.
+4) Publish the protocol id (see the protocol-id section below) alongside the hashes so integrators can tell which driver/worker pair a release contains.
    The attached `SHA256SUMS`/`SRI.txt` manifests are the authoritative record of the exact release bytes.
    Version immutable resource URLs by release or content identity (e.g. `/v1.6.19/widget-driver.js` or `widget-driver.<sha256>.js`), never by the protocol id alone.
    Several byte-different compatible releases can legitimately share one protocol id.

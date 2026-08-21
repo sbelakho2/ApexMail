@@ -135,12 +135,18 @@ impl SupportService {
         assigned_to: Option<Uuid>,
     ) -> Result<ApiResult<SupportTicket>, String> {
         let now = Utc::now();
+        // Fix J-6: first_response_at is only stamped when the update moves the
+        // ticket to a staff-facing status — a status set from the customer
+        // side (e.g. 'waiting_customer') or any non-transition no longer
+        // fabricates a "first response".
         let row = sqlx::query_as::<_, SupportTicket>(
             "UPDATE ent_support_tickets SET
              status = COALESCE($2, status),
              priority = COALESCE($3, priority),
              assigned_to = COALESCE($4, assigned_to),
-             first_response_at = CASE WHEN first_response_at IS NULL AND $2 IS NOT NULL THEN $5 ELSE first_response_at END,
+             first_response_at = CASE WHEN first_response_at IS NULL
+                 AND $2 IN ('open', 'pending', 'on_hold', 'escalated', 'resolved', 'closed')
+                 THEN $5 ELSE first_response_at END,
              updated_at = $5
              WHERE id = $1 RETURNING *"
         )
@@ -260,12 +266,14 @@ impl SupportService {
         rating: i32,
         feedback: Option<&str>,
     ) -> Result<ApiResult<SupportTicket>, String> {
-        // #262:Store feedback in the satisfaction_feedback column
+        // #262:Store feedback in the satisfaction_feedback column.
+        // Fix J-6: satisfaction is typically submitted after resolution; the
+        // update deliberately does not bump `updated_at` so post-resolution
+        // feedback does not skew avg_resolution_minutes.
         let row = sqlx::query_as::<_, SupportTicket>(
-            "UPDATE ent_support_tickets SET 
-             satisfaction_rating = $2, 
-             satisfaction_feedback = $3,
-             updated_at = NOW()
+            "UPDATE ent_support_tickets SET
+             satisfaction_rating = $2,
+             satisfaction_feedback = $3
              WHERE id = $1 RETURNING *",
         )
         .bind(id)
@@ -288,7 +296,7 @@ impl SupportService {
              COUNT(*),
              COUNT(*) FILTER (WHERE status IN ('open','new','pending')),
              AVG(EXTRACT(EPOCH FROM (first_response_at - created_at)) / 60.0)::float8,
-             AVG(CASE WHEN status = 'resolved' THEN EXTRACT(EPOCH FROM (updated_at - created_at)) / 60.0 END)::float8,
+             AVG(CASE WHEN status IN ('resolved','closed') THEN EXTRACT(EPOCH FROM (updated_at - created_at)) / 60.0 END)::float8,
              AVG(satisfaction_rating)::float8
              FROM ent_support_tickets WHERE tenant_id = $1"
         )
@@ -297,11 +305,14 @@ impl SupportService {
         .await
         .map_err(|e| format!("Get metrics: {e}"))?;
 
-        // SLA compliance
+        // Fix J-6: the SLA compliance denominator is ALL tickets in the
+        // tenant, not just the subset that already has a first response —
+        // the old formula measured "of the tickets we responded to, how many
+        // were on time", which ignored every unanswered ticket.
         let sla_row: (i64, i64) = sqlx::query_as(
             "SELECT
              COUNT(*) FILTER (WHERE first_response_at IS NOT NULL AND first_response_at <= sla_first_response_due),
-             COUNT(*) FILTER (WHERE first_response_at IS NOT NULL)
+             COUNT(*)
              FROM ent_support_tickets WHERE tenant_id = $1"
         )
         .bind(tenant_id)

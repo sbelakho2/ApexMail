@@ -1255,10 +1255,21 @@ fn admin_invoice_export_query(use_legacy_schema: bool) -> &'static str {
     }
 }
 
+/// Platform billing-admin capability check.
+///
+/// SECURITY (audit A): the wildcard scope `"*"` is granted to every tenant's
+/// admin/owner role (`scopes_for_role` in routes/auth.rs) so customers can
+/// manage their OWN tenant — it must never grant platform-level billing
+/// administration. Platform billing admin (`/v1/billing/admin/*`) is a
+/// system-tenant capability, exactly like the `/v1/admin/*` control plane
+/// (see `require_system_tenant_middleware`), so the caller must BOTH be a
+/// system-tenant user AND carry an admin scope.
 fn has_admin_access(auth: &AuthUser) -> bool {
-    auth.scopes
-        .iter()
-        .any(|scope| scope == "*" || scope == "billing:admin")
+    auth.tenant_id == "system"
+        && auth
+            .scopes
+            .iter()
+            .any(|scope| scope == "*" || scope == "billing:admin")
 }
 
 fn has_tenant_access(auth: &AuthUser, tenant_id: &str) -> bool {
@@ -4380,13 +4391,55 @@ mod tests {
 
     #[test]
     fn billing_routes_admin_access_rejects_tenant_only_scope() {
-        assert!(has_admin_access(&auth_user(&["*"], "tenant_1")));
-        assert!(has_admin_access(&auth_user(&["billing:admin"], "tenant_1")));
+        // NOTE (audit A): this test previously asserted that a non-system
+        // tenant holding "*" or "billing:admin" passes the billing-admin gate.
+        // That was the vulnerability — every customer tenant owner is granted
+        // "*" by scopes_for_role, so they could reach ALL
+        // /v1/billing/admin/* handlers (list tenants, apply credits, plan
+        // overrides, revenue reports, exports). Platform billing admin now
+        // requires the caller to belong to the `system` tenant.
+        assert!(
+            !has_admin_access(&auth_user(&["*"], "tenant_1")),
+            "non-system tenant with wildcard scope must NOT pass the billing-admin gate"
+        );
+        assert!(
+            !has_admin_access(&auth_user(&["billing:admin"], "tenant_1")),
+            "non-system tenant with billing:admin scope must NOT pass the gate"
+        );
         assert!(!has_admin_access(&auth_user(&["tenant:*"], "tenant_1")));
         assert!(!has_admin_access(&auth_user(
             &["tenant:tenant_1"],
             "tenant_1"
         )));
+    }
+
+    #[test]
+    fn billing_routes_admin_access_requires_system_tenant_with_admin_scope() {
+        // System-tenant admins (platform staff) still pass.
+        assert!(has_admin_access(&auth_user(&["*"], "system")));
+        assert!(has_admin_access(&auth_user(&["billing:admin"], "system")));
+        // System tenant WITHOUT an admin scope is rejected.
+        assert!(!has_admin_access(&auth_user(&["tenant:*"], "system")));
+        assert!(!has_admin_access(&auth_user(&["messages:read"], "system")));
+        // Wildcard granted to a customer tenant owner is rejected (audit A).
+        assert!(!has_admin_access(&auth_user(&["*"], "ten_customer_001")));
+    }
+
+    #[test]
+    fn billing_routes_admin_guards_return_403_for_customer_tenant_owner() {
+        // A customer tenant owner carries scopes ["*"] via scopes_for_role;
+        // both guard helpers must produce a 403 Response, not Ok(()).
+        let customer_owner = auth_user(&["*"], "ten_customer_001");
+        assert!(require_admin_access(&customer_owner).is_err());
+        assert!(require_admin_tenant_access(&customer_owner, "ten_customer_001").is_err());
+
+        let platform_admin = auth_user(&["*"], "system");
+        assert!(require_admin_access(&platform_admin).is_ok());
+        assert!(require_admin_tenant_access(&platform_admin, "ten_customer_001").is_ok());
+
+        // The 403 must not leak tenant details.
+        let err = require_admin_access(&customer_owner).unwrap_err();
+        assert_eq!(err.status(), StatusCode::FORBIDDEN);
     }
 
     #[test]

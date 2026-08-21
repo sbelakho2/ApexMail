@@ -69,6 +69,29 @@ final class KiwiCaptchaValidator extends ConstraintValidator
     public const REQUEST_BINDING_ATTRIBUTE = '_kiwi_captcha_request_binding';
 
     /**
+     * Request attribute holding the explicit per-operation identity
+     * (`kiwi_operation_id`) of the logical operation redeeming the token,
+     * e.g. the application's idempotency key for the protected action.
+     * Resolution order: this attribute, then the raw POSTed
+     * `kiwi_operation_id` field, then the constraint's static
+     * `operationId` option. The id must be unique per logical operation.
+     *
+     * Replay semantics: by default (no explicit operation id) verification
+     * is strictly single-use — the core records an operation identity with
+     * the pending→consumed transition, but a fromStoredResult outcome is
+     * never accepted by this validator, so a consumed token cannot fund a
+     * second request however it is re-presented (the fallback identity is
+     * a function of the token itself, which every request holding the
+     * token can derive; it proves nothing about the operation). With an
+     * explicit operation id the same logical operation's retry — same id,
+     * same token — replays the stored committed success (IP/TTL/telemetry
+     * exempt: the committed outcome was durably recorded only after those
+     * checks passed). A different id, a different binding, or a different
+     * token is refused (AlreadyConsumed / RequestBindingMismatch).
+     */
+    public const OPERATION_ID_ATTRIBUTE = '_kiwi_captcha_operation_id';
+
+    /**
      * The token verified correctly, but the chained-challenge
      * reassessment (risk.chaining) demands a stronger stage than the
      * first-stage profile (e.g. an Argon action or StepUp). The
@@ -246,8 +269,8 @@ final class KiwiCaptchaValidator extends ConstraintValidator
      * public key derived from the configured seed, never the private
      * key. Signature verification alone is not sufficient for single-use
      * actions: the integrator must atomically record the jti
-     * (INSERT IF NOT EXISTS) and treat a pre-existing jti as a replay
-     * (README).
+     * (`INSERT IF NOT EXISTS`) and treat a pre-existing jti as a replay
+     * (see the bundle README).
      */
     public function verifiedReceiptPayload(): ?string
     {
@@ -353,9 +376,92 @@ final class KiwiCaptchaValidator extends ConstraintValidator
         // the global cap).
         $request?->attributes->set(\BelConsulting\KiwiCaptchaBundle\Security\RequestScopeAdmissionGate::SCOPE_ATTRIBUTE, $constraint->scope);
 
+        // Transaction binding, resolved before the core verification.
+        // The authoritative canonical binding (the authority's server-owned
+        // resolution, or the raw request binding when no authority is
+        // configured) drives the verification itself: the operation
+        // identity and the core's expected-request-binding enforcement are
+        // both derived from it, so the same value that was signed at
+        // issuance is enforced atomically with the consume, not only
+        // compared after the fact. An authority failure (its backend
+        // temporarily unavailable) fails closed as temporary_unavailable
+        // It runs before any token is consumed; a violation is a silent pass,
+        // never a raw exception; a null resolution (the transaction is
+        // invalid/unknown) is the normal invalid-binding outcome via the
+        // post-verify comparison below. Without an authority the raw
+        // request binding (the request attribute the application
+        // controller copied from the POSTed kiwi_request_binding field —
+        // or the raw POST field) applies unchanged.
+        try {
+            $canonicalBinding = $this->resolveAuthoritativeBinding($constraint, $request);
+        } catch (PostSolveDispositionUnavailableException $e) {
+            $this->logger?->info('KiwiCaptcha: verification refused — the authoritative transaction binding is unavailable', [
+                'scope' => $constraint->scope,
+                'reason' => $e->getMessage(),
+            ]);
+            $this->context->buildViolation($constraint->message)
+                ->setCode(KiwiCaptcha::TEMPORARY_UNAVAILABLE_ERROR)
+                ->addViolation();
+
+            return;
+        }
+
+        // The operation identity: the logical operation redeeming the
+        // nonce, bound to the operation context in order of availability:
+        //
+        //  1. the explicit per-operation id the application supplies
+        //     (kiwi_operation_id — the request attribute, the POSTed field,
+        //     or the constraint option; an idempotency-key-shaped value).
+        //     The identity then carries an explicit operation-id component,
+        //     which is the ONLY component that authorizes the replay of a
+        //     stored committed success (the idempotent retry);
+        //  2. the canonical transaction binding when one resolves (the
+        //     authority's server-owned value, or the raw request binding);
+        //  3. the token nonce as the fallback when neither exists.
+        //
+        // The fallback exists so the pending→consumed transition always
+        // records a per-token identity (a different operation presenting
+        // the consumed token derives a different identity and is refused
+        // by the core as AlreadyConsumed) — but it proves nothing about
+        // the request: every holder of the token derives it. A
+        // fromStoredResult outcome reached through it is therefore refused
+        // below (strict single-use); only the explicit operation-id
+        // component authorizes the idempotent replay.
+        $operationId = $this->operationIdFor($constraint, $request);
+        if ($operationId !== null) {
+            $operationContext = 'opid:'.$operationId;
+        } elseif ($canonicalBinding !== null) {
+            $operationContext = 'binding:'.$canonicalBinding;
+        } else {
+            // An undecodable token hashes the empty nonce; the core rejects
+            // it as MalformedToken before the identity matters.
+            $operationContext = 'token:'.($this->verifiedNonceOf($value) ?? '');
+        }
+        $operationIdentity = hash('sha256', $constraint->scope."\0".($canonicalBinding ?? '')."\0".$operationContext);
+
+        // The core's expected-request-binding enforcement mirrors the
+        // post-verify comparison below: it applies only to a bound record
+        // (an unbound record skips the check entirely — BindingMode::None
+        // deployments verify regardless of any presented binding). The
+        // record read is the same storage the verifier reads next; a
+        // failure (no storage wired, unreadable record) leaves the
+        // expected binding unset and the post-verify comparison as the
+        // enforcement.
+        $expectedRequestBinding = null;
+        if ($canonicalBinding !== null) {
+            $record = $this->findVerifiedRecord($value);
+            if ($record?->requestBinding !== null) {
+                $expectedRequestBinding = $canonicalBinding;
+            }
+        }
+
         // CapacityExceeded (Argon2id admission saturated) surfaces as a
         // regular failed verification — fail closed as a captcha violation.
-        $outcome = $this->verifier->verify($value, $this->secretKey, $constraint->scope, $clientIp, null, $this->enforceTelemetry);
+        // The operation identity is recorded with the pending→consumed
+        // transition and gates the replay of the stored success; the
+        // expected request binding (when the record is bound) is enforced
+        // by the core before the consume.
+        $outcome = $this->verifier->verify($value, $this->secretKey, $constraint->scope, $clientIp, null, $this->enforceTelemetry, $operationIdentity, $expectedRequestBinding);
 
         // Ambiguous-consume deterministic retry: ConsumeIndeterminate
         // means the consume transition may have happened but its response
@@ -375,7 +481,31 @@ final class KiwiCaptchaValidator extends ConstraintValidator
         // disposition (pass | deny | step-up | chain-required) is
         // resolved and persisted for every valid outcome below, stored
         // retries included.
-        $outcome = $this->normalizeAmbiguousOutcome($outcome, $value, $request, $constraint->scope);
+        $outcome = $this->normalizeAmbiguousOutcome($outcome, $value, $operationIdentity);
+
+        // The replay gate: a fromStoredResult outcome is the core handing
+        // back the committed verdict of the attempt that consumed the
+        // record. The stored success is an authorization grant, and the
+        // identity that unlocked it proves the SAME logical operation only
+        // when it carries an explicit operation-id component — the binding
+        // and token-nonce components are derivable by any request holding
+        // the token (a different form submission re-posting the token),
+        // so without the explicit component the replay is refused here:
+        // strict single-use by default, idempotent retry only through
+        // kiwi_operation_id. The IP/TTL/telemetry cheap checks are not
+        // re-run on the core's replay path, which is exactly why this
+        // gate must hold for everything except the proven identity.
+        if ($outcome->isOk() && $this->isStoredResult($outcome) && $operationId === null) {
+            $this->logger?->info('KiwiCaptcha: replayed token refused — no explicit operation identity', [
+                'reason' => VerifyError::AlreadyConsumed->value,
+                'scope' => $constraint->scope,
+            ]);
+            $this->context->buildViolation($constraint->message)
+                ->setCode(KiwiCaptcha::REPLAYED_TOKEN_ERROR)
+                ->addViolation();
+
+            return;
+        }
 
         // The collapsed public code; the precise core reason (WrongScope,
         // Expired, BadSignature, ...) stays in the logs — never exposed
@@ -402,45 +532,19 @@ final class KiwiCaptchaValidator extends ConstraintValidator
             return;
         }
 
-        // Transaction binding: after a valid verification, the consumed
-        // record's signed request_binding must equal the binding the
-        // request carried. With an authority configured
-        // (risk.request_binding_authority) the presented binding is only
-        // a hint: the server-owned canonical transaction binding is
-        // resolved exactly once here — the same value the challenge
-        // controller signed at issuance — and it drives every binding
-        // decision of this validation (the comparison below, the stage-2
-        // transaction lookup, the obligation lookup and the chain
-        // creation; the authority is never consulted twice). An authority
-        // failure (its backend temporarily unavailable) fails closed as
-        // temporary_unavailable — a violation, never a silent pass, never
-        // a raw exception; a null resolution (the transaction is
-        // invalid/unknown) is the normal invalid-binding outcome.
-        // Without an authority the raw request binding (the request
-        // attribute the application controller copied from the POSTed
-        // kiwi_request_binding field — or the raw POST field) applies
-        // unchanged. A bound record with a missing/mismatched binding is
-        // rejected with the same invalid_or_expired outcome (the
-        // collapsed violation code): a challenge minted for one
-        // transaction is never redeemable for another. Unbound records
-        // (binding null) skip the check entirely. For a stored-result
-        // retry the outcome's requestBinding() is the stored consumed
-        // binding, so the same rule gives the stored-result contract:
-        // same binding -> same success, different binding ->
-        // invalid_or_expired.
-        try {
-            $canonicalBinding = $this->resolveAuthoritativeBinding($constraint, $request);
-        } catch (PostSolveDispositionUnavailableException $e) {
-            $this->logger?->info('KiwiCaptcha: valid proof rejected — the authoritative transaction binding is unavailable', [
-                'scope' => $constraint->scope,
-                'reason' => $e->getMessage(),
-            ]);
-            $this->context->buildViolation($constraint->message)
-                ->setCode(KiwiCaptcha::TEMPORARY_UNAVAILABLE_ERROR)
-                ->addViolation();
-
-            return;
-        }
+        // Transaction binding — belt-and-suspenders comparison after the
+        // verification. The canonical binding was resolved before the
+        // verification (and drives the operation identity and the core's
+        // expected-request-binding enforcement, which is now the primary
+        // gate); this comparison re-checks the verified outcome's binding
+        // against the same resolved canonical value. The consumed record's
+        // signed request_binding must equal the canonical binding: a
+        // challenge minted for one transaction is never redeemable for
+        // another. Unbound records (binding null) skip the check entirely.
+        // For a stored-result retry the outcome's requestBinding() is the
+        // stored consumed binding, so the same rule gives the
+        // stored-result contract: same binding -> same success, different
+        // binding -> invalid_or_expired.
         if (!$this->requestBindingMatches($outcome, $canonicalBinding)) {
             $this->logger?->info('KiwiCaptcha: valid proof rejected — request binding mismatch', [
                 'scope' => $constraint->scope,
@@ -638,54 +742,72 @@ final class KiwiCaptchaValidator extends ConstraintValidator
     /**
      * Ambiguous-consume normalization: decide the outcome of a
      * ConsumeIndeterminate verification from the stored consumed record
-     * instead of re-deriving, with no side effects. The normalized
-     * outcome flows through the same pipeline as any other verification,
-     * binding check, outstanding accounting and final disposition
+     * ({@see ConsumedStateReadableInterface::consumedState()}) instead of
+     * re-deriving, with no side effects. The normalized outcome flows
+     * through the same pipeline as any other verification, the replay
+     * gate, binding check, outstanding accounting and final disposition
      * included:
-     *  - a stored valid result yields a valid outcome carrying the
-     *    consumed record's nonce and stored binding. The pipeline's
-     *    binding check then applies the stored-result contract: same
-     *    binding, same success; different binding, invalid_or_expired.
+     *  - a stored valid result whose retained operation identity matches
+     *    the identity this validation derived (constant-time comparison)
+     *    yields a valid outcome carrying the consumed record's nonce and
+     *    stored binding — the same logical operation's committed verdict.
+     *    A mismatched or absent retained identity never normalizes to a
+     *    success: the pipeline refuses it as AlreadyConsumed (one solved
+     *    token can never fund a different operation through the
+     *    indeterminate branch).
      *  - a stored invalid result yields invalid(InsufficientWork): the
-     *    original derivation failed.
+     *    original derivation failed, deterministically for every caller.
      *  - storage unavailable, no record, still pending, or consumed
      *    without a committed result keeps the original indeterminate
      *    outcome: publicCode() maps ConsumeIndeterminate to
      *    temporary_unavailable, retryable, never silently valid.
      */
-    private function normalizeAmbiguousOutcome(VerifyOutcome $outcome, string $token, ?Request $request, ?string $scope): VerifyOutcome
+    private function normalizeAmbiguousOutcome(VerifyOutcome $outcome, string $token, string $operationIdentity): VerifyOutcome
     {
         if ($outcome->error !== VerifyError::ConsumeIndeterminate) {
             return $outcome;
         }
 
-        $record = $this->findConsumedRecord($token);
-        if ($record === null) {
-            // No storage wired, undecodable token, storage failure, record
-            // absent, or record still pending (the first attempt never
-            // consumed it — a retry will consume normally): the outcome
-            // stays indeterminate.
+        $consumed = $this->findConsumedRecord($token);
+        if ($consumed === null) {
+            // No storage wired, no consumed-state capability, undecodable
+            // token, storage failure, record absent, or record still
+            // pending (the first attempt never consumed it — a retry will
+            // consume normally): the outcome stays indeterminate.
             return $outcome;
         }
 
-        $result = $this->consumedResultOf($record);
-        if ($result === false) {
+        $result = $consumed->consumedResult;
+        if ($result !== null && !$result->valid) {
             // The original derivation failed — the stored result is the
-            // authoritative outcome.
+            // authoritative outcome, deterministic for every caller.
             return VerifyOutcome::invalid(VerifyError::InsufficientWork);
         }
-        if ($result !== true) {
+        if ($result === null) {
             // Consumed but the result was never committed (the original
             // attempt died mid-proof): genuinely indeterminate.
             return $outcome;
         }
 
-        // Stored valid result: deterministic retry. The pipeline's binding
-        // check enforces the stored-result contract: the normalized outcome
-        // carries the stored consumed binding, so the request binding must
-        // equal it — a challenge bound to one transaction is never
-        // redeemable for another, retries included.
-        return VerifyOutcome::valid($record->nonce, $this->consumedBindingOf($record), true);
+        // Stored valid result: the deterministic retry of the logical
+        // operation, authorized only by the retained identity. A null
+        // retained identity (a plain consume by a caller that recorded
+        // none) or any mismatch is refused — never a replayed success for
+        // a different operation.
+        if (
+            $consumed->operationIdentity === null
+            || !hash_equals($consumed->operationIdentity, $operationIdentity)
+        ) {
+            return VerifyOutcome::invalid(VerifyError::AlreadyConsumed);
+        }
+
+        // The pipeline's binding check enforces the stored-result
+        // contract: the normalized outcome carries the stored consumed
+        // binding, so the request binding must equal it — a challenge
+        // bound to one transaction is never redeemable for another,
+        // retries included. The replay gate above applies the same
+        // explicit-operation-id rule to this outcome as to the core's.
+        return VerifyOutcome::valid($consumed->record->nonce, $consumed->consumedResult?->binding, true);
     }
 
     /**
@@ -1478,17 +1600,20 @@ final class KiwiCaptchaValidator extends ConstraintValidator
 
     /**
      * The canonical transaction binding of the request, resolved exactly
-     * once per validation, before the signed-record binding comparison,
-     * and threaded through every binding decision of the validation:
-     * the stage-2 transaction lookup, the obligation lookup and the
-     * chain creation. The authority is never consulted twice. With an
-     * authority configured the presented request binding is only a
-     * hint: the authority resolves the server-owned canonical value,
-     * the same value the challenge controller signed at issuance. An
-     * authority throw, its backend temporarily unavailable, is
-     * fail-closed {@see PostSolveDispositionUnavailableException}: the
-     * caller answers temporary_unavailable, a violation, never a silent
-     * pass, never a raw exception. A null resolution, the transaction
+     * once per validation, before the core verification runs, and
+     * threaded through every binding decision of the validation: the
+     * operation identity, the core's expected-request-binding
+     * enforcement, the signed-record binding comparison, the stage-2
+     * transaction lookup, the obligation lookup and the chain creation.
+     * The authority is never consulted twice. With an authority
+     * configured the presented request binding is only a hint: the
+     * authority resolves the server-owned canonical value, the same
+     * value the challenge controller signed at issuance. An authority
+     * throw, its backend temporarily unavailable, is fail-closed
+     * {@see PostSolveDispositionUnavailableException}: the caller
+     * answers temporary_unavailable, a violation, never a silent pass,
+     * never a raw exception — and never a consumed token (the
+     * verification has not run yet). A null resolution, the transaction
      * is invalid/unknown, is the normal invalid-binding outcome;
      * without an authority the raw request binding applies unchanged.
      *
@@ -1615,10 +1740,10 @@ final class KiwiCaptchaValidator extends ConstraintValidator
      * transaction binding, VerifyOutcome::requestBinding(), to the
      * application. Both are available via {@see verifiedJti()} /
      * {@see verifiedRequestBinding()} and the request attribute
-     * VERIFIED_JTI_ATTRIBUTE, request-scoped and race-free for web
+     * `VERIFIED_JTI_ATTRIBUTE`, request-scoped and race-free for web
      * flows. The application keys its business operation idempotency on
      * (jti, action): a retry carrying the same jti must never create a
-     * second operation, see README. Also exports the Ed25519 result
+     * second operation, see the bundle README. Also exports the Ed25519 result
      * receipt when signing is configured.
      */
     private function finishSuccessfulApplicationVerification(string $value, VerifyOutcome $outcome, ?Request $request): void
@@ -1655,8 +1780,8 @@ final class KiwiCaptchaValidator extends ConstraintValidator
         // no secret material; the HMAC verification secret itself never
         // leaves the server). Signature verification alone is not
         // sufficient for single-use actions: the integrator must
-        // atomically record the jti (INSERT IF NOT EXISTS) and treat a
-        // pre-existing jti as a replay (README).
+        // atomically record the jti (`INSERT IF NOT EXISTS`) and treat a
+        // pre-existing jti as a replay (see the bundle README).
         if ($this->receiptSigner !== null && $jti !== null) {
             $this->signReceipt($this->findRecordByNonce($jti));
         }
@@ -1848,13 +1973,20 @@ final class KiwiCaptchaValidator extends ConstraintValidator
     }
 
     /**
-     * The consumed record behind a token: decoded nonce -> storage find,
-     * restricted to records in the consumed state (the consumed-state
-     * transition). null when the state cannot be resolved.
+     * The retained consumed state behind a token: decoded nonce ->
+     * {@see ConsumedStateReadableInterface::consumedState()}, the
+     * storage-capability read that carries the consumed record, its
+     * committed deterministic result and the operation identity recorded
+     * with the pending→consumed transition. Null when no storage is
+     * wired, the storage has no consumed-state capability (e.g. a PSR-6
+     * pool without it), the token cannot be decoded, the read fails, or
+     * the record is missing or still pending. The plain
+     * {@see StorageInterface::find()} carries no runtime state, so it is
+     * never used here.
      */
-    private function findConsumedRecord(string $token): ?ChallengeRecord
+    private function findConsumedRecord(string $token): ?\KiwiCaptcha\ConsumedRecord
     {
-        if ($this->storage === null) {
+        if (!$this->storage instanceof \KiwiCaptcha\ConsumedStateReadableInterface) {
             return null;
         }
         try {
@@ -1863,58 +1995,34 @@ final class KiwiCaptchaValidator extends ConstraintValidator
             return null;
         }
         try {
-            $record = $this->storage->find($nonce);
+            return $this->storage->consumedState($nonce);
         } catch (\Throwable) {
             return null;
         }
-        if ($record === null || !$this->recordIsConsumed($record)) {
+    }
+
+    /**
+     * The request's explicit per-operation id (kiwi_operation_id): the
+     * documented request attribute first, then the raw POSTed field, then
+     * the constraint's static option. Only a well-shaped identifier
+     * counts ([A-Za-z0-9._:-], 1..128 bytes — the same narrow alphabet as
+     * the request binding); a malformed value is ignored (strict
+     * single-use applies) rather than silently re-enabling replay.
+     */
+    private function operationIdFor(KiwiCaptcha $constraint, ?Request $request): ?string
+    {
+        $operationId = $request?->attributes->get(self::OPERATION_ID_ATTRIBUTE);
+        if (!\is_string($operationId) || $operationId === '') {
+            $operationId = $request?->request->get('kiwi_operation_id');
+        }
+        if (!\is_string($operationId) || $operationId === '') {
+            $operationId = $constraint->operationId;
+        }
+        if (!\is_string($operationId) || $operationId === '' || !Config::isValidIdentifier($operationId, 128)) {
             return null;
         }
 
-        return $record;
-    }
-
-    /**
-     * Whether the record is in the consumed state (the consumed-state
-     * transition of the consumed-state storage contract). Probing
-     * `ChallengeRecord::consumed` defensively: cores predating the
-     * transition never set it (false) — on those cores consumed records
-     * are deleted by consume(), so a ConsumeIndeterminate followed by a
-     * find() yields no record and stays unresolved.
-     */
-    private function recordIsConsumed(ChallengeRecord $record): bool
-    {
-        return (bool) ($record->consumed ?? false);
-    }
-
-    /**
-     * The stored consumed result of a consumed record: true = the
-     * original derivation was valid, false = it failed, null = consumed
-     * but no result committed (indeterminate). The parallel core
-     * exposes it as `ChallengeRecord::$consumedResult`.
-     */
-    private function consumedResultOf(ChallengeRecord $record): ?bool
-    {
-        $result = $record->consumedResult ?? null;
-
-        return $result === null ? null : (bool) $result;
-    }
-
-    /**
-     * The stored binding of the consumed state (the binding the
-     * original verification committed —
-     * `ChallengeRecord::$consumedBinding`, falling back to the record's
-     * signed request_binding on cores that store it there), or null for
-     * an unbound record.
-     */
-    private function consumedBindingOf(ChallengeRecord $record): ?string
-    {
-        $binding = $record->consumedBinding ?? $record->requestBinding;
-        if (!\is_string($binding) || $binding === '') {
-            return null;
-        }
-
-        return $binding;
+        return $operationId;
     }
 
     /**

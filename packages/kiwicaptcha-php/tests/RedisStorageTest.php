@@ -600,7 +600,8 @@ final class RedisStorageTest extends TestCase
         $expectedIssuedAtNs = $preConsume->issuedAtNs;
 
         $verifier = new Verifier($storage);
-        $first = $verifier->verify($token, '0123456789abcdef0123456789abcdef', 'login', '198.51.100.7');
+        $identity = 'op-'.hash('sha256', 'backend|uuid|response');
+        $first = $verifier->verify($token, '0123456789abcdef0123456789abcdef', 'login', '198.51.100.7', operationIdentity: $identity);
         self::assertTrue($first->isOk(), 'the first verification must succeed (got '.$first->code().')');
 
         // The consumed record persists with its exact integers intact;
@@ -610,9 +611,9 @@ final class RedisStorageTest extends TestCase
         self::assertNotNull($stored, 'the consumed record must persist until its TTL');
         self::assertSame($expectedIssuedAtNs, $stored->issuedAtNs, 'issued_at_ns must survive the consume transition byte-exactly');
 
-        // Deterministic retry: same context returns the same stored
-        // result without re-deriving.
-        $replay = $verifier->verify($token, '0123456789abcdef0123456789abcdef', 'login', '198.51.100.7');
+        // Deterministic retry: the exact same logical operation returns
+        // the same stored result without re-deriving.
+        $replay = $verifier->verify($token, '0123456789abcdef0123456789abcdef', 'login', '198.51.100.7', operationIdentity: $identity);
         self::assertTrue($replay->isOk(), 'the replay must return the stored result (got '.$replay->code().')');
         self::assertTrue($replay->fromStoredResult, 'the replay must come from the stored result');
         self::assertSame('txn-A', $replay->requestBinding, 'the stored binding must be exposed');
@@ -670,6 +671,34 @@ final class RedisStorageTest extends TestCase
         }
 
         self::assertTrue(true);
+    }
+
+    public function testConsumedStateParsesAConsumedResultWithNestedBraces(): void
+    {
+        // The consumed_result envelope parser must depth-match the JSON
+        // object (the same scanner the consume Lua uses), not stop at the
+        // first '}': a committed result whose binding ever contains
+        // nested braces (a foreign writer or a future schema widening;
+        // the PHP issuer's narrow identifier alphabet excludes them
+        // today) must still parse instead of silently degrading the
+        // retained state to resultless (a replay would then collapse to
+        // ConsumeIndeterminate).
+        $client = $this->requirePredis();
+        $storage = new RedisStorage($client);
+        $record = $this->makeRecord();
+        $envelope = json_encode(
+            $record->toArray() + ['state' => 'consumed', 'consumed_result' => ['valid' => true, 'binding' => 'txn{nested{"k":1}}tail'], 'operation_identity' => 'op-1'],
+            JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR,
+        );
+        $client->store['kiwicaptcha:'.$record->nonce] = $envelope;
+
+        $state = $storage->consumedState($record->nonce);
+        self::assertNotNull($state);
+        self::assertTrue($state->consumedBefore);
+        self::assertNotNull($state->consumedResult, 'a nested-brace consumed_result must parse, not degrade to resultless');
+        self::assertTrue($state->consumedResult->valid);
+        self::assertSame('txn{nested{"k":1}}tail', $state->consumedResult->binding);
+        self::assertSame('op-1', $state->operationIdentity);
     }
 
     public function testConsumeWithOperationIdentityRecordsTheIdentityInTheSameAtomicWrite(): void

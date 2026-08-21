@@ -114,7 +114,7 @@ pub struct ListMessagesQuery {
     #[serde(default)]
     pub status: Option<String>,
     /// Sort column — validated against [`ALLOWED_SORT_COLUMNS`] allowlist.
-    /// Defaults to `created_at` if not provided or invalid.
+    /// Defaults to `created_at`; an explicit unknown column is rejected with 400.
     #[serde(default = "default_sort_column")]
     pub sort_by: String,
 }
@@ -124,12 +124,16 @@ fn default_sort_column() -> String {
 }
 
 /// Validate the sort column against the allowlist.
-/// Returns the validated column name or the default `created_at`.
-fn validate_sort_column(column: &str) -> String {
+/// Returns the validated column name, or a 400 error for unknown columns —
+/// silently falling back to `created_at` masked client bugs and let callers
+/// probe for injection-relevant error differences (HC-003 hardening).
+fn validate_sort_column(column: &str) -> Result<String, ApiError> {
     if ALLOWED_SORT_COLUMNS.contains(&column) {
-        column.to_string()
+        Ok(column.to_string())
     } else {
-        "created_at".to_string()
+        Err(ApiError::BadRequest(format!(
+            "invalid sort_by '{column}': must be one of created_at, updated_at, status, subject"
+        )))
     }
 }
 
@@ -721,7 +725,27 @@ async fn send_batch(
                 });
                 continue;
             }
-            Err(err) => return Err(err),
+            Err(err) => {
+                // Quota infrastructure failure aborts the whole batch. The
+                // still-open transaction is dropped (message inserts roll
+                // back), but reservations for earlier items live OUTSIDE the
+                // transaction and must be released explicitly — otherwise they
+                // leak and permanently consume the tenant's quota.
+                for reservation in &committed_quota_reservations {
+                    if let Err(rollback_error) =
+                        rollback_email_quota(&state, &auth.tenant_id, reservation).await
+                    {
+                        tracing::error!(
+                            error = %rollback_error,
+                            tenant_id = %auth.tenant_id,
+                            event_id = %reservation.event_id,
+                            "failed to roll back reserved email quota after batch quota-reservation failure"
+                        );
+                    }
+                }
+                let _ = tx.rollback().await;
+                return Err(err);
+            }
         };
 
         let domain_id = sender_domain(&msg.from)
@@ -839,7 +863,16 @@ async fn list_messages(
     require_scopes(&auth, &["messages:read"])?;
 
     // Validate sort column against allowlist to prevent SQL injection (HC-003)
-    let sort_column = validate_sort_column(&params.sort_by);
+    let sort_column = validate_sort_column(&params.sort_by)?;
+    // Cursor pagination is only well-defined for the default `created_at`
+    // ordering — the cursor encodes a created_at timestamp, so honouring it
+    // under another sort column would page incorrectly (and let callers mix
+    // cursors across sorts). Reject the combination instead.
+    if params.cursor.is_some() && sort_column != "created_at" {
+        return Err(ApiError::BadRequest(
+            "cursor pagination is only supported for sort_by=created_at".into(),
+        ));
+    }
     let limit = clamp_limit(params.limit, 100);
 
     // Cursor-based pagination: decode the cursor (hex-encoded created_at timestamp)
@@ -1085,12 +1118,21 @@ async fn validate_send_with_domain_cache(
         if !apexmail_lib::validation::is_valid_email(email) {
             errors.push(format!("invalid recipient email: {email}"));
         }
+        // Header injection via recipients: a quoted-string local part could
+        // historically smuggle CR/LF past the email regex — reject control
+        // characters in every recipient, exactly like the subject check above.
+        if email.contains('\r') || email.contains('\n') || email.contains('\0') {
+            errors.push("recipient must not contain line breaks".into());
+        }
     }
     // Validate CC recipients
     if let Some(ref cc) = body.cc {
         for email in cc {
             if !apexmail_lib::validation::is_valid_email(email) {
                 errors.push(format!("invalid CC email: {email}"));
+            }
+            if email.contains('\r') || email.contains('\n') || email.contains('\0') {
+                errors.push("cc recipient must not contain line breaks".into());
             }
         }
     }
@@ -1099,6 +1141,9 @@ async fn validate_send_with_domain_cache(
         for email in bcc {
             if !apexmail_lib::validation::is_valid_email(email) {
                 errors.push(format!("invalid BCC email: {email}"));
+            }
+            if email.contains('\r') || email.contains('\n') || email.contains('\0') {
+                errors.push("bcc recipient must not contain line breaks".into());
             }
         }
     }
@@ -1717,6 +1762,79 @@ mod tests {
         assert_eq!(q.offset, 0);
         assert!(q.cursor.is_none());
         assert!(q.status.is_none());
+        assert_eq!(q.sort_by, "created_at");
+    }
+
+    // ── Sort-column / cursor hardening (audit J) ─────────────────
+
+    #[test]
+    fn test_validate_sort_column_rejects_unknown_column() {
+        // Allowed columns pass through verbatim
+        for column in ALLOWED_SORT_COLUMNS {
+            assert_eq!(
+                validate_sort_column(column).expect("allowed column must validate"),
+                column
+            );
+        }
+        // Injection probes and unknown names are rejected with 400 material
+        // (BadRequest), never silently coerced to the default column.
+        for probe in [
+            "created_at; DROP TABLE messages--",
+            "created_at DESC",
+            "1=1",
+            "subject\x00",
+            "nonexistent",
+            "",
+        ] {
+            match validate_sort_column(probe) {
+                Err(ApiError::BadRequest(_)) => {}
+                other => panic!("expected BadRequest for sort_by {probe:?}, got {other:?}"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn api_messages_validate_send_rejects_crlf_in_recipients() {
+        let Some(pool) =
+            crate::test_db::optional_pg_pool("api_messages_validate_send_rejects_crlf_in_recipients")
+                .await
+        else {
+            return;
+        };
+        apply_tool_migrations(&pool).await;
+
+        let tenant_id = insert_test_tenant(&pool, "message-crlf").await;
+        let _domain_id = insert_verified_domain(&pool, &tenant_id, "example.com").await;
+
+        // The quoted local part below is designed so a naive email validator
+        // would accept it; CR/LF smuggling a Bcc header must be rejected.
+        let body = SendMessageRequest {
+            from: "sender@example.com".into(),
+            to: vec![r#""x
+Bcc: victim@example.com"@example.com"#.into()],
+            cc: Some(vec!["good@example.com\r\nBcc: evil@example.com".into()]),
+            bcc: Some(vec!["nul\0byte@example.com".into()]),
+            subject: "CRLF smuggling".into(),
+            html: Some("<p>Hello</p>".into()),
+            text: None,
+            tags: None,
+            metadata: None,
+            scheduled_at: None,
+        };
+
+        let error = validate_send(&body, &pool, &tenant_id)
+            .await
+            .expect_err("CRLF-bearing recipients must be rejected");
+
+        match error {
+            ApiError::Validation(errors) => {
+                assert!(
+                    errors.iter().any(|e| e.contains("line breaks")),
+                    "expected line-break rejection, got {errors:?}"
+                );
+            }
+            other => panic!("expected validation error, got {other:?}"),
+        }
     }
 
     #[test]

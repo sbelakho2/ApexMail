@@ -9,7 +9,7 @@ namespace BelConsulting\KiwiCaptchaBundle\Risk;
  *
  * The validator resolves one final disposition (pass | deny | step-up |
  * chain-required) per verification and persists it before the
- * application sees the outcome, so a replay of the same token
+ * application sees the outcome. A replay of the same token then
  * reproduces the same disposition and can never bypass the post-solve
  * policy.
  *
@@ -28,13 +28,13 @@ interface PostSolveDispositionStore
      * Atomically claim the right to compute the nonce's disposition.
      *
      * @return 'claimed'|'pending'|'taken_over'|'complete'
-     *         claimed      — the caller holds a fresh claim
-     *                       (missing -> pending(me)).
-     *         pending      — pending with a live owner (me or another),
-     *                       busy.
-     *         taken_over   — the caller took over an expired-lease claim
-     *                       (pending(me)).
-     *         complete     — the final disposition is already persisted.
+     *         claimed:     the caller holds a fresh claim, missing
+     *                      going to pending(me).
+     *         pending:     pending with a live owner (me or another),
+     *                      busy.
+     *         taken_over:  the caller took over an expired-lease claim,
+     *                      reaching pending(me).
+     *         complete:    the final disposition is already persisted.
      *
      * @param string      $nonce       the verified challenge nonce (random
      *                                 security state).

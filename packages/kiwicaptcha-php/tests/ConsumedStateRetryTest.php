@@ -133,13 +133,18 @@ final class ConsumedStateRetryTest extends TestCase
     {
         [$storage, $record, $token] = $this->issueAndSolve();
         $verifier = new Verifier($storage, now: static fn (): int => self::ISSUED_AT);
+        // The same logical operation on both calls: the stored success
+        // replays only to the exact operation identity that consumed the
+        // record.
+        $identity = 'op-'.hash('sha256', 'login-op');
 
-        $first = $verifier->verify($token, Vectors::SECRET, 'login', '198.51.100.7', nowNs: $record->issuedAtNs + 1_000_000);
+        $first = $verifier->verify($token, Vectors::SECRET, 'login', '198.51.100.7', nowNs: $record->issuedAtNs + 1_000_000, operationIdentity: $identity);
         self::assertTrue($first->isOk());
 
         // The committed stored outcome replays on a retry.
-        $retry = $verifier->verify($token, Vectors::SECRET, 'login', '198.51.100.7', nowNs: $record->issuedAtNs + 1_000_000);
+        $retry = $verifier->verify($token, Vectors::SECRET, 'login', '198.51.100.7', nowNs: $record->issuedAtNs + 1_000_000, operationIdentity: $identity);
         self::assertTrue($retry->isOk(), sprintf('a retry must replay the committed Valid outcome, got %s', $retry->code()));
+        self::assertTrue($retry->fromStoredResult, 'the replay must come from the stored result');
         self::assertSame($record->nonce, $retry->nonce());
         self::assertNotNull($storage->find($record->nonce), 'the consumed record is kept until its TTL');
     }

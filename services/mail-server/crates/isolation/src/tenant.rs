@@ -123,6 +123,22 @@ fn validated_identifier(name: &str) -> anyhow::Result<String> {
     Ok(name.to_string())
 }
 
+/// Map a usage metric name to its JSONB key inside `iso_workspaces.usage`.
+/// Only exact matches of known fields are returned — the value is used as a
+/// bound parameter (never interpolated) inside the atomic increment UPDATE.
+fn usage_field(metric: &str) -> Option<&'static str> {
+    match metric {
+        "emails_sent_this_month" => Some("emails_sent_this_month"),
+        "storage_used_bytes" => Some("storage_used_bytes"),
+        "api_requests_this_minute" => Some("api_requests_this_minute"),
+        "webhooks_sent_this_month" => Some("webhooks_sent_this_month"),
+        "contacts_count" => Some("contacts_count"),
+        "templates_count" => Some("templates_count"),
+        "domains_count" => Some("domains_count"),
+        _ => None,
+    }
+}
+
 // ── Tenant Service ─────────────────────────────────────────
 
 pub struct TenantService {
@@ -600,21 +616,33 @@ impl TenantService {
         metric: &str,
         amount: i64,
     ) -> anyhow::Result<bool> {
-        let ws = self.get_workspace(workspace_id).await?;
+        // Deliberately bypass the 5-minute workspace cache:quota decisions
+        // must reflect the latest committed usage, never a stale snapshot.
+        let row: Option<(serde_json::Value, serde_json::Value)> =
+            sqlx::query_as("SELECT usage, quota FROM iso_workspaces WHERE id = $1")
+                .bind(workspace_id)
+                .fetch_optional(&self.db)
+                .await?;
+
+        let (usage, quota) = row
+            .ok_or_else(|| anyhow::anyhow!("Workspace not found: {}", workspace_id))?;
+        let usage: WorkspaceUsage = serde_json::from_value(usage)?;
+        let quota: QuotaConfig = serde_json::from_value(quota)?;
+
         let (current, limit) = match metric {
-            "emails_per_month" => (ws.usage.emails_sent_this_month, ws.quota.emails_per_month),
-            "storage_bytes" => (ws.usage.storage_used_bytes, ws.quota.storage_bytes),
+            "emails_per_month" => (usage.emails_sent_this_month, quota.emails_per_month),
+            "storage_bytes" => (usage.storage_used_bytes, quota.storage_bytes),
             "api_requests_per_minute" => (
-                ws.usage.api_requests_this_minute,
-                ws.quota.api_requests_per_minute,
+                usage.api_requests_this_minute,
+                quota.api_requests_per_minute,
             ),
             "webhooks_per_month" => (
-                ws.usage.webhooks_sent_this_month,
-                ws.quota.webhooks_per_month,
+                usage.webhooks_sent_this_month,
+                quota.webhooks_per_month,
             ),
-            "contacts" => (ws.usage.contacts_count, ws.quota.contacts_limit),
-            "templates" => (ws.usage.templates_count, ws.quota.templates_limit),
-            "domains" => (ws.usage.domains_count, ws.quota.domains_limit),
+            "contacts" => (usage.contacts_count, quota.contacts_limit),
+            "templates" => (usage.templates_count, quota.templates_limit),
+            "domains" => (usage.domains_count, quota.domains_limit),
             _ => anyhow::bail!("Unknown quota metric: {}", metric),
         };
         Ok(current + amount <= limit)
@@ -637,26 +665,30 @@ impl TenantService {
         metric: &str,
         amount: i64,
     ) -> anyhow::Result<()> {
-        let ws = self.get_workspace(workspace_id).await?;
-        let mut usage = ws.usage;
+        // Atomic server-side increment:the previous read-modify-write raced
+        // (lost updates) and could act on a 5-minute-stale cached snapshot.
+        // jsonb_set + COALESCE increments the counter inside a single UPDATE
+        // statement, so concurrent increments and stale caches cannot lose
+        // counts.
+        let field = usage_field(metric)
+            .ok_or_else(|| anyhow::anyhow!("Unknown usage metric: {}", metric))?;
 
-        match metric {
-            "emails_sent_this_month" => usage.emails_sent_this_month += amount,
-            "storage_used_bytes" => usage.storage_used_bytes += amount,
-            "api_requests_this_minute" => usage.api_requests_this_minute += amount,
-            "webhooks_sent_this_month" => usage.webhooks_sent_this_month += amount,
-            "contacts_count" => usage.contacts_count += amount,
-            "templates_count" => usage.templates_count += amount,
-            "domains_count" => usage.domains_count += amount,
-            _ => anyhow::bail!("Unknown usage metric: {}", metric),
-        }
-
-        sqlx::query("UPDATE iso_workspaces SET usage=$1, updated_at=$2 WHERE id=$3")
-            .bind(serde_json::to_value(&usage)?)
-            .bind(Utc::now())
-            .bind(workspace_id)
-            .execute(&self.db)
-            .await?;
+        sqlx::query(
+            "UPDATE iso_workspaces
+             SET usage = jsonb_set(
+                     usage,
+                     ARRAY[$2]::text[],
+                     to_jsonb(COALESCE((usage->>$2)::bigint, 0) + $1)
+                 ),
+                 updated_at = $3
+             WHERE id = $4",
+        )
+        .bind(amount)
+        .bind(field)
+        .bind(Utc::now())
+        .bind(workspace_id)
+        .execute(&self.db)
+        .await?;
 
         self.workspace_cache.remove(workspace_id);
         Ok(())
@@ -836,5 +868,28 @@ mod tests {
         // Falls back to defaults
         assert_eq!(org.status, TenantStatus::Pending);
         assert_eq!(org.isolation_level, IsolationLevel::Shared);
+    }
+
+    #[test]
+    fn test_usage_field_mapping() {
+        // Every usage metric used by increment_usage must map to the exact
+        // JSON key of WorkspaceUsage (used as the jsonb_set path).
+        for metric in [
+            "emails_sent_this_month",
+            "storage_used_bytes",
+            "api_requests_this_minute",
+            "webhooks_sent_this_month",
+            "contacts_count",
+            "templates_count",
+            "domains_count",
+        ] {
+            let field = usage_field(metric)
+                .unwrap_or_else(|| panic!("missing usage field for {metric}"));
+            assert_eq!(field, metric);
+        }
+        // Reject unknown metrics — they must never reach SQL.
+        assert!(usage_field("emails_per_month").is_none());
+        assert!(usage_field("workspace_id = $1").is_none());
+        assert!(usage_field("").is_none());
     }
 }

@@ -30,7 +30,7 @@ response = client.emails.send_email(
   html:    '<h1>Hello World</h1><p>Your email was sent successfully.</p>'
 )
 
-puts "Email sent! ID: #{response[:message][:id]}"
+puts "Email sent! ID: #{response[:id]}"
 ```
 
 ## Features
@@ -67,7 +67,7 @@ batch = client.emails.batch(messages: [
 
 # Get email status
 email = client.emails.get('email_id')
-puts email[:message][:status] # => "delivered"
+puts email[:status] # => "delivered"
 
 # List emails
 emails = client.emails.list(status: 'delivered', limit: 50)

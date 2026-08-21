@@ -9,6 +9,18 @@ use crate::types::{Campaign, CampaignStatus, SalesError};
 // Campaign email dispatcher trait (SA-5)
 // ---------------------------------------------------------------------------
 
+/// A campaign dispatch target: recipient email plus the CAN-SPAM
+/// unsubscribe link that MUST be appended to the outgoing message (SALES-02).
+#[derive(Debug, Clone)]
+pub struct DispatchRecipient {
+    pub email: String,
+    pub unsubscribe_link: String,
+}
+
+/// Maximum number of campaign emails a single recipient may receive within a
+/// 7-day window (fix I-2 CAN-SPAM frequency cap).
+pub const RECIPIENT_FREQUENCY_CAP_WEEKLY: i64 = 3;
+
 /// Abstraction for dispatching campaign emails to the outbound queue.
 ///
 /// # Security (SA-5)
@@ -26,9 +38,11 @@ pub trait CampaignEmailDispatcher: Send + Sync + std::fmt::Debug {
     /// Dispatch emails for a campaign that has just been started.
     ///
     /// `tenant_id` and `campaign_id` identify the campaign.
-    /// `recipient_emails` is the full list of campaign recipients.
-    /// Implementations should enqueue each recipient into the outbound
-    /// email queue, using `template_id` for content rendering.
+    /// `recipients` is the full list of (email, unsubscribe_link) pairs —
+    /// implementations MUST include the unsubscribe link in the rendered
+    /// message footer (CAN-SPAM). Implementations should enqueue each
+    /// recipient into the outbound email queue, using `template_id` for
+    /// content rendering.
     ///
     /// Returns the number of emails successfully enqueued.
     fn dispatch(
@@ -36,7 +50,7 @@ pub trait CampaignEmailDispatcher: Send + Sync + std::fmt::Debug {
         tenant_id: &str,
         campaign_id: Uuid,
         template_id: &str,
-        recipient_emails: &[String],
+        recipients: &[DispatchRecipient],
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<usize, SalesError>> + Send>>;
 
     /// Generate a CAN-SPAM compliant unsubscribe link for a campaign recipient (SALES-02).
@@ -62,12 +76,12 @@ impl CampaignEmailDispatcher for NoopCampaignDispatcher {
         tenant_id: &str,
         campaign_id: Uuid,
         template_id: &str,
-        recipient_emails: &[String],
+        recipients: &[DispatchRecipient],
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<usize, SalesError>> + Send>>
     {
         let tenant_id = tenant_id.to_string();
         let template_id = template_id.to_string();
-        let count = recipient_emails.len();
+        let count = recipients.len();
         Box::pin(async move {
             tracing::warn!(
                 tenant_id = %tenant_id,
@@ -138,6 +152,13 @@ impl CampaignManager {
     ) -> Self {
         self.email_dispatcher = Some(dispatcher);
         self
+    }
+
+    /// Fix I-1: does this manager have a real dispatcher wired? Production
+    /// wiring failures must be loud — the start route refuses with 503 when
+    /// this is false instead of returning 200 'active' while sending nothing.
+    pub fn has_email_dispatcher(&self) -> bool {
+        self.email_dispatcher.is_some()
     }
 
     /// Create a campaign in Draft status.
@@ -314,21 +335,22 @@ impl CampaignManager {
 
                 // SA-5: Dispatch campaign emails to the outbound queue.
                 // Fetch the recipients that have NOT been sent to yet (see
-                // `get_recipients`) and call the email dispatcher (if
+                // `get_recipients`), attach the CAN-SPAM unsubscribe footer
+                // link for each, and call the email dispatcher (if
                 // configured). Dispatching happens after the status commit;
                 // if it fails we surface the error instead of pretending the
                 // start succeeded silently.
                 if let Some(ref dispatcher) = self.email_dispatcher {
                     match self.get_recipients(tenant_id, id).await {
-                        Ok(emails) if !emails.is_empty() => {
+                        Ok(recipients) if !recipients.is_empty() => {
                             let enqueued = dispatcher
-                                .dispatch(tenant_id, id, &template_id, &emails)
+                                .dispatch(tenant_id, id, &template_id, &recipients)
                                 .await?;
                             tracing::info!(
                                 tenant_id = %tenant_id,
                                 campaign_id = %id,
                                 enqueued = enqueued,
-                                total_recipients = emails.len(),
+                                total_recipients = recipients.len(),
                                 "Campaign emails dispatched to outbound queue"
                             );
                             // Advance the send ledger only when the dispatcher
@@ -336,7 +358,11 @@ impl CampaignManager {
                             // ambiguous (the dispatcher reports only a count),
                             // so we retry the full batch on the next start
                             // rather than risk skipping recipients.
-                            if enqueued == emails.len() {
+                            if enqueued == recipients.len() {
+                                let emails: Vec<String> = recipients
+                                    .iter()
+                                    .map(|r| r.email.clone())
+                                    .collect();
                                 if let Err(mark_err) = self.mark_recipients_sent(id, &emails).await
                                 {
                                     tracing::warn!(
@@ -351,7 +377,7 @@ impl CampaignManager {
                                     tenant_id = %tenant_id,
                                     campaign_id = %id,
                                     enqueued = enqueued,
-                                    requested = emails.len(),
+                                    requested = recipients.len(),
                                     "dispatcher enqueued fewer emails than requested — send ledger not advanced"
                                 );
                             }
@@ -360,7 +386,7 @@ impl CampaignManager {
                             tracing::warn!(
                                 tenant_id = %tenant_id,
                                 campaign_id = %id,
-                                "Campaign started with zero unsent recipients — no emails dispatched"
+                                "Campaign started with zero dispatchable recipients — no emails dispatched"
                             );
                         }
                         Err(e) => {
@@ -393,8 +419,9 @@ impl CampaignManager {
         }
     }
 
-    /// Fetch the recipient emails for a campaign that have **not yet been
-    /// dispatched**, scoped to tenant.
+    /// Fetch the dispatchable recipients for a campaign: not yet sent,
+    /// scoped to tenant, NOT suppressed, and within the per-recipient
+    /// frequency cap.
     ///
     /// Send-ledger semantics: `sales_campaign_recipients.sent_at` (added in
     /// `initialize_schema`) records which recipients have already been sent
@@ -403,23 +430,93 @@ impl CampaignManager {
     /// previously every (re-)start re-dispatched the entire list, spamming
     /// everyone on each pause/start cycle. `mark_recipients_sent` stamps the
     /// ledger after a successful dispatch.
+    ///
+    /// Fix I-2 (CAN-SPAM): two additional filters run before any send:
+    ///   * suppression — recipients on the tenant's unsubscribe list are
+    ///     excluded entirely;
+    ///   * frequency cap — recipients already sent ≥
+    ///     `RECIPIENT_FREQUENCY_CAP_WEEKLY` campaigns in the last 7 days are
+    ///     excluded until the window rolls.
+    /// Each returned recipient carries the unsubscribe footer link that the
+    /// dispatcher MUST append to the outgoing message.
     async fn get_recipients(
         &self,
         tenant_id: &str,
         campaign_id: Uuid,
-    ) -> Result<Vec<String>, SalesError> {
+    ) -> Result<Vec<DispatchRecipient>, SalesError> {
+        let dispatcher = self
+            .email_dispatcher
+            .clone()
+            .ok_or_else(|| SalesError::ServiceUnavailable("email dispatcher not configured".into()))?;
+
         let rows = sqlx::query_as::<_, (String,)>(
             "SELECT r.email FROM sales_campaign_recipients r \
              JOIN sales_campaigns c ON r.campaign_id = c.id \
-             WHERE r.campaign_id = $1 AND c.tenant_id = $2 AND r.sent_at IS NULL",
+             WHERE r.campaign_id = $1 AND c.tenant_id = $2 AND r.sent_at IS NULL \
+             AND NOT EXISTS (\
+                 SELECT 1 FROM sales_unsubscribes u \
+                 WHERE u.tenant_id = c.tenant_id AND u.email = r.email\
+             ) \
+             AND (\
+                 SELECT COUNT(*) FROM sales_campaign_recipients r2 \
+                 JOIN sales_campaigns c2 ON r2.campaign_id = c2.id \
+                 WHERE r2.email = r.email AND c2.tenant_id = $2 \
+                   AND r2.sent_at > NOW() - INTERVAL '7 days'\
+             ) < $3",
         )
         .bind(campaign_id)
         .bind(tenant_id)
+        .bind(RECIPIENT_FREQUENCY_CAP_WEEKLY)
         .fetch_all(&self.db)
         .await
         .map_err(|e| SalesError::Database(e.to_string()))?;
 
-        Ok(rows.into_iter().map(|(email,)| email).collect())
+        Ok(rows
+            .into_iter()
+            .map(|(email,)| {
+                let link = dispatcher.unsubscribe_link(tenant_id, campaign_id, &email);
+                DispatchRecipient {
+                    email,
+                    unsubscribe_link: link,
+                }
+            })
+            .collect())
+    }
+
+    /// Record an unsubscribe (suppression) for a tenant (fix I-2).
+    /// Suppressed recipients are excluded from every future campaign send.
+    pub async fn suppress_recipient(
+        &self,
+        tenant_id: &str,
+        email: &str,
+    ) -> Result<(), SalesError> {
+        sqlx::query(
+            "INSERT INTO sales_unsubscribes (tenant_id, email, created_at) \
+             VALUES ($1, $2, NOW()) ON CONFLICT (tenant_id, email) DO NOTHING",
+        )
+        .bind(tenant_id)
+        .bind(email)
+        .execute(&self.db)
+        .await
+        .map_err(|e| SalesError::Database(e.to_string()))?;
+        Ok(())
+    }
+
+    /// Is a recipient currently suppressed for this tenant (fix I-2)?
+    pub async fn is_recipient_suppressed(
+        &self,
+        tenant_id: &str,
+        email: &str,
+    ) -> Result<bool, SalesError> {
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sales_unsubscribes WHERE tenant_id = $1 AND email = $2",
+        )
+        .bind(tenant_id)
+        .bind(email)
+        .fetch_one(&self.db)
+        .await
+        .map_err(|e| SalesError::Database(e.to_string()))?;
+        Ok(count > 0)
     }
 
     /// Stamp the send ledger: mark the given recipients as dispatched for a

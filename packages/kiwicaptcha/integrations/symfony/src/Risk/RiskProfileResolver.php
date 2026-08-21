@@ -18,10 +18,10 @@ use KiwiCaptcha\Risk\RiskAction;
  * family: the app's own difficulty is the floor, and a decision can never
  * weaken it. Within the configured family the action raises the difficulty:
  *
- *  - sha16/sha18/sha20  -> SHA-256 at 16/18/20 leading zero bits (only when
- *    the configured algorithm is sha256 and the action exceeds the app's
- *    difficulty_bits; no-op otherwise, since an argon2id deployment is
- *    already at least as strong).
+ *  - sha16/sha18/sha20  -> SHA-256 at 16/18/20 leading zero bits, only
+ *    when the configured algorithm is sha256 and the action exceeds the
+ *    app's difficulty_bits. It is a no-op otherwise, since an argon2id
+ *    deployment is already at least as strong.
  *  - argon16/32/64      -> the fixed-envelope Argon2id ladder: all three
  *    actions use the same server-controlled memory envelope
  *    (risk.argon_verification_memory_kib, default 16384 KiB, t=3, p=1).
@@ -30,9 +30,9 @@ use KiwiCaptcha\Risk\RiskAction;
  *    difficulty. The expected nonce search space rises along
  *    risk.argon_escalation_target_bits, a strictly increasing 3-rung
  *    ladder within 1..Config::MAX_ARGON2_TARGET_BITS ([1, 4, 8] by
- *    default, Argon16 -> 1, Argon32 -> 4, Argon64 -> 8), so the server's
- *    per-verification memory cost is bounded by one value regardless of
- *    the decision. The core's issueWithProfile accepts a profile directly
+ *    default, Argon16 -> 1, Argon32 -> 4, Argon64 -> 8). The server's
+ *    per-verification memory cost is then bounded by one value
+ *    regardless of the decision. The core's issueWithProfile accepts a profile directly
  *    regardless of the app default, so a SHA-configured deployment can
  *    still issue Argon work via the risk ladder.
  *  - step_up            -> never mapped to a challenge profile. StepUp is
@@ -48,10 +48,11 @@ use KiwiCaptcha\Risk\RiskAction;
  * configured parameters.
  *
  * The resolver is also the authoritative stage-strength comparison for
- * selective chaining, see {@see self::recordSatisfies()}: whether a
+ * selective chaining, see {@see self::recordSatisfies()}. Whether a
  * verified challenge record already satisfies a reassessed action is
- * decided with the actual configured ladders (the fixed 16/18/20 SHA rungs
- * and the configured argon ladder), never with hard-coded thresholds.
+ * decided with the actual configured ladders (the fixed 16/18/20 SHA
+ * rungs and the configured argon ladder), never with hard-coded
+ * thresholds.
  */
 final class RiskProfileResolver
 {
@@ -106,7 +107,7 @@ final class RiskProfileResolver
             RiskAction::Argon16 => $this->argon($this->argonTargetBits[0]),
             RiskAction::Argon32 => $this->argon($this->argonTargetBits[1]),
             RiskAction::Argon64 => $this->argon($this->argonTargetBits[2]),
-            // StepUp is handled by the controller (403 STEP_UP_REQUIRED)
+            // StepUp is handled by the controller (403 `STEP_UP_REQUIRED`)
             // and must never be mapped to a challenge profile.
             RiskAction::StepUp => throw new \LogicException('StepUp is handled by the controller, not mapped to a profile'),
             RiskAction::Deny => null, // handled by the caller before issuance

@@ -7,6 +7,7 @@ namespace KiwiCaptcha\Storage;
 use KiwiCaptcha\ChallengeRecord;
 use KiwiCaptcha\ConsumedRecord;
 use KiwiCaptcha\ConsumedResult;
+use KiwiCaptcha\NonAtomicStorageInterface;
 use KiwiCaptcha\OperationIdentity;
 use KiwiCaptcha\OperationIdentityAwareStorageInterface;
 use KiwiCaptcha\StorageInterface;
@@ -21,19 +22,23 @@ use Psr\Cache\CacheItemPoolInterface;
  * `operation_identity` marker (null | a bounded <= 128-byte
  * logical-operation identity) exactly like the Redis backend; the
  * identity-aware consume writes the identity in the same array write as
- * the state flip.
+ * the state flip. consumedState() is the read-only retained-state read:
+ * it decodes the stored envelope (the same array consume() wrote) and
+ * reports the consumed record, its committed result and its recorded
+ * operation identity without any transition.
  *
  * Important limitation: PSR-6 cannot express an atomic get-and-transition,
  * so `consume()` is not atomic under concurrency. Two racing requests can
  * both observe the pending state before either marks it consumed, and
- * both may win `consumedNow`. This is best-effort single-use;
- * implementers of {@see \KiwiCaptcha\AtomicStorageInterface} (e.g.
- * {@see RedisStorage} with its fused Lua transition) guarantee that
- * exactly one concurrent consumer wins. `consumedState()` therefore
- * always returns null (a pool exposes no atomic read-only inspection),
- * so consumed-outcome recovery is unavailable on this backend.
+ * both may win `consumedNow`. This is best-effort single-use; the class
+ * therefore carries the {@see NonAtomicStorageInterface} capability
+ * marker (implementers of {@see \KiwiCaptcha\AtomicStorageInterface},
+ * e.g. {@see RedisStorage} with its fused Lua transition, guarantee that
+ * exactly one concurrent consumer wins). The Verifier emits a one-time
+ * deprecation warning when constructed with a non-atomic backend;
+ * consumers that need strict single-use must refuse it outright.
  */
-final class Psr6Storage implements StorageInterface, OperationIdentityAwareStorageInterface
+final class Psr6Storage implements StorageInterface, OperationIdentityAwareStorageInterface, NonAtomicStorageInterface
 {
     /**
      * PSR-6 reserves the characters `{}()/\@:` in cache keys, so the
@@ -96,9 +101,31 @@ final class Psr6Storage implements StorageInterface, OperationIdentityAwareStora
 
     public function consumedState(string $nonce): ?ConsumedRecord
     {
-        // PSR-6 pools expose no atomic consumed-state inspection without
-        // a transition; reconstruction is unavailable on this backend.
-        return null;
+        // Read-only inspection of the stored envelope (the same array
+        // consume()/commitResult() write): no transition, no save. A
+        // pool item that is absent, unhit, non-array, still pending or
+        // undecodable reports null — nothing retained to read.
+        $item = $this->pool->getItem(self::key($nonce));
+        if (!$item->isHit()) {
+            return null;
+        }
+        $data = $item->get();
+        if (!\is_array($data) || ($data['state'] ?? 'pending') !== 'consumed') {
+            return null;
+        }
+        try {
+            $record = ChallengeRecord::fromArray(self::stripRuntimeFields($data));
+        } catch (\Throwable) {
+            return null;
+        }
+
+        return new ConsumedRecord(
+            $record,
+            false,
+            true,
+            self::parseResult($data['consumed_result'] ?? null),
+            self::parseIdentity($data['operation_identity'] ?? null),
+        );
     }
 
     public function consume(string $nonce): ?ConsumedRecord

@@ -217,7 +217,8 @@ final class SecurityPolicyTest extends TestCase
 
     public function testWrongPolicyVersionErrorValue(): void
     {
-        self::assertSame('challenge was issued under a different security-policy epoch', VerifyError::WrongPolicyVersion->value);
+        self::assertSame('wrong_policy_version', VerifyError::WrongPolicyVersion->value);
+        self::assertSame('challenge was issued under a different security-policy epoch', VerifyError::WrongPolicyVersion->description());
     }
 
     public function testFromArrayDefaultsPolicyVersionAndRequestBinding(): void

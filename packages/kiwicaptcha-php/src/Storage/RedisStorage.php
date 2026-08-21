@@ -330,11 +330,54 @@ LUA;
             return null;
         }
         $result = null;
-        if (preg_match('/"consumed_result":\s*(\{.*?\})/', $raw, $m) === 1) {
-            $result = $this->decodeResult($m[1]);
+        $resultJson = self::extractConsumedResultJson($raw);
+        if ($resultJson !== null) {
+            $result = $this->decodeResult($resultJson);
         }
 
         return new ConsumedRecord($record, false, true, $result, $this->decodeIdentity($raw));
+    }
+
+    /**
+     * Extract the `"consumed_result": {...}` JSON object from a stored
+     * envelope with a brace-depth scanner — the same matching the consume
+     * Lua performs (CONSUME_SCRIPT): from the object's opening brace,
+     * nesting counts up on '{' and down on '}', and the object ends only
+     * at the balancing '}'. A non-greedy regex would truncate at the
+     * FIRST '}' — e.g. a binding string containing braces (a foreign
+     * writer; the PHP issuer's identifier alphabet excludes them today,
+     * but the parser must not silently degrade a committed result to
+     * resultless on one).
+     *
+     * Returns the matched object text (starting at '{'), or null when no
+     * consumed_result marker is present.
+     */
+    private static function extractConsumedResultJson(string $raw): ?string
+    {
+        $marker = '"consumed_result":';
+        $pos = strpos($raw, $marker);
+        if ($pos === false) {
+            return null;
+        }
+        $start = strpos($raw, '{', $pos + \strlen($marker));
+        if ($start === false) {
+            return null;
+        }
+        $depth = 0;
+        $len = \strlen($raw);
+        for ($i = $start; $i < $len; $i++) {
+            $c = $raw[$i];
+            if ($c === '{') {
+                $depth++;
+            } elseif ($c === '}') {
+                $depth--;
+                if ($depth === 0) {
+                    return substr($raw, $start, $i - $start + 1);
+                }
+            }
+        }
+
+        return null;
     }
 
     public function commitResult(string $nonce, bool $valid, ?string $binding): bool

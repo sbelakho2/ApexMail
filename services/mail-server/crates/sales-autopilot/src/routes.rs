@@ -226,6 +226,31 @@ async fn initialize_schema_inner(db: &PgPool) -> Result<(), SalesError> {
     .await
     .map_err(|e| SalesError::Database(e.to_string()))?;
 
+    // ── Suppression list (fix I-2, CAN-SPAM) ──────────────────────────
+    // Recipients on this list are excluded from every campaign send; the
+    // dispatch path also enforces a per-recipient frequency cap (see
+    // CampaignManager::get_recipients).
+    sqlx::query(
+        r#"
+            CREATE TABLE IF NOT EXISTS sales_unsubscribes (
+                tenant_id TEXT NOT NULL,
+                email TEXT NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                PRIMARY KEY (tenant_id, email)
+            )
+        "#,
+    )
+    .execute(db)
+    .await
+    .map_err(|e| SalesError::Database(e.to_string()))?;
+
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_sales_unsubscribes_tenant ON sales_unsubscribes(tenant_id)",
+    )
+    .execute(db)
+    .await
+    .map_err(|e| SalesError::Database(e.to_string()))?;
+
     // ── Calendar events ────────────────────────────────────────────────
     sqlx::query(
         r#"
@@ -458,6 +483,34 @@ async fn require_service_token(
         .as_deref()
         .is_some_and(|p| apexmail_lib::timing_safe_compare(p, &state.service_token))
     {
+        // Fix I-3 (tenant scoping): this service uses a single shared
+        // internal token; the tenant is then taken from the (fully trusted)
+        // `x-tenant-id` header — the token holder can address any tenant by
+        // design. Authenticity of the tenant claim cannot be established at
+        // this layer, so the blast radius is reduced by an explicit
+        // deployment allowlist (`SALES_ALLOWED_TENANTS`). When unset, all
+        // tenants are allowed and a warning is logged once.
+        if let Some(tenant) = req
+            .headers()
+            .get("x-tenant-id")
+            .and_then(|v| v.to_str().ok())
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+        {
+            static WARNED_UNSCOPED: std::sync::Once = std::sync::Once::new();
+            match &state.config.allowed_tenants {
+                Some(allowed) if !allowed.iter().any(|a| a == tenant) => {
+                    warn!(tenant_id = %tenant, "tenant rejected: not in SALES_ALLOWED_TENANTS");
+                    return Err(StatusCode::FORBIDDEN);
+                }
+                Some(_) => {}
+                None => WARNED_UNSCOPED.call_once(|| {
+                    warn!(
+                        "SALES_ALLOWED_TENANTS is not set — the shared service token can address every tenant"
+                    );
+                }),
+            }
+        }
         Ok(next.run(req).await)
     } else {
         Err(StatusCode::UNAUTHORIZED)
@@ -1017,7 +1070,9 @@ async fn create_conversion(
     tenant_id: TenantId,
     Json(body): Json<CreateConversionBody>,
 ) -> Result<Json<serde_json::Value>, SalesError> {
-    let tenant_id = tenant_id.0;
+    // Fix I-3: header/payload tenant consistency is enforced on EVERY
+    // mutation — this handler previously missed the check.
+    let tenant_id = required_tenant_id(&tenant_id.0, body.tenant_id.as_deref())?;
     let span = tracing::info_span!("create_conversion", tenant_id = %tenant_id, operation = "create_conversion");
     async move {
         // Verify the campaign exists and belongs to this tenant
@@ -1262,6 +1317,14 @@ async fn start_campaign(
     let tenant_id = tenant_id.0;
     let span = tracing::info_span!("start_campaign", tenant_id = %tenant_id, campaign_id = %id, operation = "start_campaign");
     async move {
+        // Fix I-1: without a dispatcher the campaign would flip to 'active'
+        // and silently send nothing. Fail loudly with 503 instead.
+        if !state.campaigns.has_email_dispatcher() {
+            return Err(SalesError::ServiceUnavailable(
+                "email dispatcher not configured — campaign start refused (no emails would be sent)"
+                    .into(),
+            ));
+        }
         let campaign = state.campaigns.start_campaign(&tenant_id, id).await?;
         json_response(&campaign)
     }
@@ -1349,6 +1412,7 @@ async fn list_inbox(
             "customer" => MessageCategory::Customer,
             "support" => MessageCategory::Support,
             "spam" => MessageCategory::Spam,
+            "unsubscribe" => MessageCategory::Unsubscribe,
             _ => MessageCategory::Other,
         });
         let msgs = if let Some(c) = cat {
@@ -1483,8 +1547,15 @@ async fn reply_inbox_message(
         operation = "reply_inbox_message"
     );
     async move {
-        state.inbox.mark_replied(&tenant_id, id).await?;
-        json_response(&serde_json::json!({ "id": id, "replied": true }))
+        // Fix I-4: there is no email delivery path for inbox replies in this
+        // crate — the handler previously flipped the `replied` flag and
+        // answered `{replied: true}` without sending anything. Fail honestly
+        // with 501 (before mutating anything) until compose+queue is wired.
+        let _ = &state;
+        Err(SalesError::NotImplemented(
+            "reply delivery not implemented — no outbound email path is wired for inbox replies"
+                .into(),
+        ))
     }
     .instrument(span)
     .await

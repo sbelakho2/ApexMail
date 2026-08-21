@@ -41,6 +41,123 @@ const RECORD_USAGE_LUA: &str = r#"
 /// real-time counters it would have incremented.
 const DEDUP_TTL_SECS: i64 = 40 * 86_400;
 
+/// Fix I2 — resolve a tenant's effective plan limits. An active admin plan
+/// override (plan_overrides, migrations 069/093/098) wins over the tenant's
+/// own plan, exactly like plans::get_plan_for_tenant. Every quota path in
+/// this module (get_usage, check_quota, record_with_quota_check) reads
+/// through this shared statement.
+const TENANT_PLAN_LIMITS_SQL: &str = r#"
+        SELECT t.plan as plan_name,
+               p.email_limit,
+               p.api_call_limit
+        FROM tenants t
+        LEFT JOIN plan_overrides po
+          ON po.tenant_id = t.id
+         AND po.active = true
+         AND (po.expires_at IS NULL OR po.expires_at > NOW())
+        LEFT JOIN plans p ON p.name = COALESCE(po.plan, t.plan)
+        WHERE t.id = $1
+        "#;
+
+/// Fix E — which plan limit (if any) gates a metering event type.
+/// Only email and API-call quotas exist in plans.rs; the remaining metered
+/// resources (bandwidth, storage, webhooks, dedicated IP hours) are recorded
+/// without a quota gate (-1 = unlimited) rather than being blocked by the
+/// email limit.
+fn quota_limit_for_event(event_type: MeterEventType, limits: &PlanLimitRow) -> i64 {
+    match event_type {
+        MeterEventType::EmailsSent | MeterEventType::EmailsDelivered => limits.email_limit,
+        MeterEventType::ApiCalls => limits.api_call_limit,
+        MeterEventType::WebhooksDelivered
+        | MeterEventType::DedicatedIpHours
+        | MeterEventType::StorageGbHours
+        | MeterEventType::BandwidthGb => -1,
+    }
+}
+
+/// Fix I15 — month period boundaries for a tenant usage query. With no
+/// timezone the historical UTC behaviour is preserved; an explicit IANA
+/// timezone shifts both boundaries to local midnight (e.g. VAT-period-
+/// consistent Europe/Tallinn reporting), which keeps DST months correct.
+pub fn month_period_for_tz(
+    now: DateTime<Utc>,
+    tz: Option<&str>,
+) -> Result<(DateTime<Utc>, DateTime<Utc>), String> {
+    match tz.map(str::trim).filter(|value| !value.is_empty()) {
+        None => {
+            let month_start = now.date_naive().with_day(1).unwrap_or(now.date_naive());
+            let period_start = month_start
+                .and_hms_opt(0, 0, 0)
+                .unwrap_or_default()
+                .and_utc();
+            Ok((period_start, period_start + chrono::Months::new(1)))
+        }
+        Some(name) => {
+            let tz: chrono_tz::Tz = name
+                .parse()
+                .map_err(|_| format!("Unknown timezone: {name}"))?;
+            let local_now = now.with_timezone(&tz);
+
+            let mut year = local_now.year();
+            let mut month = local_now.month();
+            let mut period_start = local_midnight(&tz, year, month)?;
+
+            // The current instant may still belong to the previous local
+            // month's billing period if the local day is the 1st but the
+            // local time is before midnight (impossible by construction —
+            // period_start is the 1st 00:00), so a single boundary is enough.
+            if local_now < period_start {
+                month = month.saturating_sub(1);
+                if month == 0 {
+                    month = 12;
+                    year -= 1;
+                }
+                period_start = local_midnight(&tz, year, month)?;
+            }
+
+            let (next_year, next_month) = if month == 12 {
+                (year + 1, 1)
+            } else {
+                (year, month + 1)
+            };
+            let period_end = local_midnight(&tz, next_year, next_month)?;
+
+            Ok((period_start.with_timezone(&Utc), period_end.with_timezone(&Utc)))
+        }
+    }
+}
+
+fn local_midnight(
+    tz: &chrono_tz::Tz,
+    year: i32,
+    month: u32,
+) -> Result<chrono::DateTime<chrono_tz::Tz>, String> {
+    use chrono::TimeZone;
+
+    let naive = chrono::NaiveDate::from_ymd_opt(year, month, 1)
+        .and_then(|date| date.and_hms_opt(0, 0, 0))
+        .ok_or_else(|| format!("Invalid local midnight for {year}-{month:02}"))?;
+
+    match tz.from_local_datetime(&naive) {
+        chrono::LocalResult::Single(value) => Ok(value),
+        // Midnight DST gaps (rare) resolve to the first instant after the gap.
+        chrono::LocalResult::Ambiguous(earliest, _) => Ok(earliest),
+        chrono::LocalResult::None => {
+            let _ = naive;
+            // Spring-forward gap: step forward to the first valid wall time.
+            let later = naive + chrono::TimeDelta::hours(1);
+            match tz.from_local_datetime(&later) {
+                chrono::LocalResult::Single(value) | chrono::LocalResult::Ambiguous(value, _) => {
+                    Ok(value)
+                }
+                chrono::LocalResult::None => Err(format!(
+                    "Invalid local midnight for {year}-{month:02} in timezone"
+                )),
+            }
+        }
+    }
+}
+
 pub(crate) fn build_metering_audit_metadata(
     event_type: &str,
     quantity: i64,
@@ -198,21 +315,10 @@ pub async fn get_usage(
         }
     }
 
-    // Look up plan limits.
-    let limits: Option<TenantPlanLimitRow> = sqlx::query_as(
-        r#"
-        SELECT t.plan as plan_name,
-               p.email_limit,
-               p.api_call_limit
-        FROM tenants t
-        LEFT JOIN plans p ON t.plan = p.name
-        WHERE t.id = $1
-        "#,
-    )
-    .bind(tenant_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(UsageError::Db)?;
+    // Look up plan limits (override-aware — Fix I2).
+    let limits: Option<TenantPlanLimitRow> =
+        sqlx::query_as(TENANT_PLAN_LIMITS_SQL).bind(tenant_id).fetch_optional(pool).await
+        .map_err(UsageError::Db)?;
 
     let resolved_limits = resolve_plan_limits(limits);
     let emails_limit = resolved_limits.email_limit;
@@ -281,20 +387,9 @@ pub async fn check_quota(
         }
     };
 
-    let limits: Option<TenantPlanLimitRow> = sqlx::query_as(
-        r#"
-        SELECT t.plan as plan_name,
-               p.email_limit,
-               p.api_call_limit
-        FROM tenants t
-        LEFT JOIN plans p ON t.plan = p.name
-        WHERE t.id = $1
-        "#,
-    )
-    .bind(tenant_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(UsageError::Db)?;
+    let limits: Option<TenantPlanLimitRow> =
+        sqlx::query_as(TENANT_PLAN_LIMITS_SQL).bind(tenant_id).fetch_optional(pool).await
+        .map_err(UsageError::Db)?;
 
     let limit = resolve_plan_limits(limits).email_limit;
 
@@ -398,16 +493,19 @@ async fn load_metering_subscription_context(
     tenant_id: &str,
     recorded_at: DateTime<Utc>,
 ) -> Result<Option<MeteringSubscriptionContext>, UsageError> {
+    // Fix C — subscription state is written exclusively by the Stripe
+    // webhook handlers into stripe_subscriptions; the legacy `subscriptions`
+    // table is never populated, so enrichment must read stripe_subscriptions.
     let matched = sqlx::query_as::<_, MeteringSubscriptionContextRow>(
         r#"
-        SELECT id::text AS subscription_id,
-               current_period_start AS period_start,
-               current_period_end AS period_end
-        FROM subscriptions
+        SELECT stripe_subscription_id AS subscription_id,
+               billing_cycle_start AS period_start,
+               billing_cycle_end AS period_end
+        FROM stripe_subscriptions
         WHERE tenant_id = $1
           AND status IN ('active', 'trialing', 'past_due')
-          AND current_period_start <= $2
-          AND current_period_end > $2
+          AND billing_cycle_start <= $2
+          AND billing_cycle_end > $2
         ORDER BY created_at DESC
         LIMIT 1
         "#,
@@ -421,10 +519,10 @@ async fn load_metering_subscription_context(
     let fallback = if matched.is_none() {
         sqlx::query_as::<_, MeteringSubscriptionContextRow>(
             r#"
-            SELECT id::text AS subscription_id,
-                   current_period_start AS period_start,
-                   current_period_end AS period_end
-            FROM subscriptions
+            SELECT stripe_subscription_id AS subscription_id,
+                   billing_cycle_start AS period_start,
+                   billing_cycle_end AS period_end
+            FROM stripe_subscriptions
             WHERE tenant_id = $1
               AND status IN ('active', 'trialing', 'past_due')
             ORDER BY created_at DESC
@@ -528,22 +626,16 @@ pub async fn record_with_quota_check(
     let now = Utc::now();
     let meta = enrich_usage_metadata(pool, tenant_id, now, metadata).await?;
 
-    // 1. Dedup check (same as record_usage).
     let dedup_key = usage_dedup_key(id);
+    let counter_key = usage_counter_key(tenant_id, event_type, now);
     let mut conn = redis.get().await.map_err(UsageError::Redis)?;
-    let was_set: bool = redis::cmd("SET")
-        .arg(&dedup_key)
-        .arg("1")
-        .arg("EX")
-        .arg(DEDUP_TTL_SECS)
-        .arg("NX")
-        .query_async(&mut conn)
-        .await
-        .map_err(UsageError::RedisCmd)?;
 
-    if !was_set {
-        // Already processed — read current counter for informational purposes.
-        let counter_key = usage_counter_key(tenant_id, event_type, now);
+    // 1. Read-only dedup fast path. The dedup key is only *set* after the DB
+    //    row is durably persisted (Fix I11): a crash between reservation and
+    //    persist used to leave a dedup key with no DB row, permanently
+    //    swallowing the event on retry.
+    let already_recorded: Option<String> = conn.get(&dedup_key).await.unwrap_or(None);
+    if already_recorded.is_some() {
         let current: i64 = conn.get(&counter_key).await.unwrap_or(0);
         return Ok(QuotaRecordResult {
             allowed: true,
@@ -552,26 +644,17 @@ pub async fn record_with_quota_check(
         });
     }
 
-    // 2. Fetch plan limit from Postgres.
-    let limit_row: Option<TenantPlanLimitRow> = sqlx::query_as(
-        r#"
-        SELECT t.plan as plan_name,
-               p.email_limit,
-               p.api_call_limit
-        FROM tenants t
-        LEFT JOIN plans p ON t.plan = p.name
-        WHERE t.id = $1
-        "#,
-    )
-    .bind(tenant_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(UsageError::Db)?;
+    // 2. Fetch plan limits from Postgres (override-aware) and select the
+    //    quota for this event type (Fix E — API calls are no longer gated by
+    //    the email limit; unmetered types are unlimited).
+    let limit_row: Option<TenantPlanLimitRow> =
+        sqlx::query_as(TENANT_PLAN_LIMITS_SQL).bind(tenant_id).fetch_optional(pool).await
+        .map_err(UsageError::Db)?;
 
-    let limit = resolve_plan_limits(limit_row).email_limit;
+    let limit = quota_limit_for_event(event_type, &resolve_plan_limits(limit_row));
 
-    // 3. Atomic check-and-increment via Lua.
-    let counter_key = usage_counter_key(tenant_id, event_type, now);
+    // 3. Atomic check-and-increment via Lua. This is a *reservation*: if a
+    //    later step fails, rollback_quota_reservation() compensates.
     let ttl_seconds: i64 = 40 * 86_400; // 40 days
 
     let new_val: i64 = redis::Script::new(QUOTA_CHECK_AND_INCR_LUA)
@@ -584,9 +667,6 @@ pub async fn record_with_quota_check(
         .map_err(UsageError::RedisCmd)?;
 
     if new_val < 0 {
-        // Quota exceeded — roll back the dedup key so a retry after a plan
-        // upgrade can succeed.
-        let _: () = conn.del(&dedup_key).await.unwrap_or(());
         return Ok(QuotaRecordResult {
             allowed: false,
             current: new_val,
@@ -594,11 +674,13 @@ pub async fn record_with_quota_check(
         });
     }
 
-    // 4. Persist to DB and append an immutable audit record in the same transaction.
+    // 4. Persist to DB and append an immutable audit record in the same
+    //    transaction. rows_affected == 0 means the DB unique key recognised
+    //    a replay (crash between reservation and dedup-key set).
     let mut tx = pool.begin().await.map_err(UsageError::Db)?;
     let event_type_str = event_type_to_str(event_type);
-    if let Err(error) = async {
-        sqlx::query(
+    let persist_result: Result<u64, UsageError> = async {
+        let inserted = sqlx::query(
             r#"
             INSERT INTO metering_events (id, tenant_id, event_type, quantity, timestamp, metadata)
             VALUES ($1, $2, $3, $4, $5, $6)
@@ -632,29 +714,63 @@ pub async fn record_with_quota_check(
         .await
         .map_err(UsageError::Audit)?;
 
-        tx.commit().await.map_err(UsageError::Db)
+        tx.commit().await.map_err(UsageError::Db)?;
+        Ok(inserted.rows_affected())
     }
-    .await
-    {
-        if let Err(rollback_error) =
-            rollback_quota_reservation(redis, tenant_id, event_type, quantity, id, now).await
-        {
-            tracing::error!(
-                error = %rollback_error,
-                tenant_id,
-                event_id = %id,
-                "failed to roll back quota reservation after metering DB insert failure"
-            );
+    .await;
+
+    match persist_result {
+        Ok(rows_affected) => {
+            if rows_affected == 0 {
+                // Duplicate replay that raced past the Redis fast path:
+                // compensate the reservation and mark the dedup key so the
+                // next replay short-circuits in step 1.
+                rollback_quota_reservation(redis, tenant_id, event_type, quantity, id, now).await?;
+                let _: () = conn
+                    .set_ex(&dedup_key, "1", dedup_ttl_secs())
+                    .await
+                    .unwrap_or(());
+                return Ok(QuotaRecordResult {
+                    allowed: true,
+                    current: new_val,
+                    duplicate: true,
+                });
+            }
+
+            // 5. Persisted — now (and only now) publish the dedup key.
+            let _: () = redis::cmd("SET")
+                .arg(&dedup_key)
+                .arg("1")
+                .arg("EX")
+                .arg(DEDUP_TTL_SECS)
+                .arg("NX")
+                .query_async(&mut conn)
+                .await
+                .unwrap_or(());
+
+            Ok(QuotaRecordResult {
+                allowed: true,
+                current: new_val,
+                duplicate: false,
+            })
         }
+        Err(error) => {
+            // Persist failed — compensate the counter reservation so Redis
+            // stays consistent with the DB.
+            if let Err(rollback_error) =
+                rollback_quota_reservation(redis, tenant_id, event_type, quantity, id, now).await
+            {
+                tracing::error!(
+                    error = %rollback_error,
+                    tenant_id,
+                    event_id = %id,
+                    "failed to roll back quota reservation after metering DB insert failure"
+                );
+            }
 
-        return Err(error);
+            Err(error)
+        }
     }
-
-    Ok(QuotaRecordResult {
-        allowed: true,
-        current: new_val,
-        duplicate: false,
-    })
 }
 
 pub async fn rollback_usage_record(
@@ -778,6 +894,11 @@ fn event_type_to_str(et: MeterEventType) -> &'static str {
 
 fn usage_dedup_key(event_id: Uuid) -> String {
     format!("meter:dedup:{event_id}")
+}
+
+/// Dedup TTL clamped to the SET EX argument range (seconds).
+fn dedup_ttl_secs() -> u64 {
+    u64::try_from(DEDUP_TTL_SECS).unwrap_or(u32::MAX as u64)
 }
 
 fn usage_counter_key(tenant_id: &str, event_type: MeterEventType, at: DateTime<Utc>) -> String {
@@ -909,6 +1030,115 @@ mod tests {
 
         assert_eq!(limits.email_limit, 0);
         assert_eq!(limits.api_call_limit, 0);
+    }
+
+    // ------------------------------------------------------------------
+    // Fix E — quota gate must depend on the event type.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn quota_limit_for_event_gates_emails_by_email_limit() {
+        let limits = PlanLimitRow {
+            email_limit: 100,
+            api_call_limit: 1_000,
+        };
+
+        assert_eq!(
+            quota_limit_for_event(MeterEventType::EmailsSent, &limits),
+            100
+        );
+        assert_eq!(
+            quota_limit_for_event(MeterEventType::EmailsDelivered, &limits),
+            100
+        );
+    }
+
+    #[test]
+    fn quota_limit_for_event_gates_api_calls_by_api_call_limit() {
+        let limits = PlanLimitRow {
+            email_limit: 100,
+            api_call_limit: 1_000,
+        };
+
+        // A tiny email limit must NOT block API calls (old behaviour).
+        assert_eq!(quota_limit_for_event(MeterEventType::ApiCalls, &limits), 1_000);
+
+        let email_tight = PlanLimitRow {
+            email_limit: 1,
+            api_call_limit: 1_000,
+        };
+        assert_eq!(
+            quota_limit_for_event(MeterEventType::ApiCalls, &email_tight),
+            1_000
+        );
+    }
+
+    #[test]
+    fn quota_limit_for_event_leaves_unmetered_quotas_unlimited() {
+        let limits = PlanLimitRow {
+            email_limit: 100,
+            api_call_limit: 1_000,
+        };
+
+        // plans.rs has no per-type fields for these — they are recorded but
+        // not quota-gated (-1 = unlimited).
+        for event_type in [
+            MeterEventType::WebhooksDelivered,
+            MeterEventType::DedicatedIpHours,
+            MeterEventType::StorageGbHours,
+            MeterEventType::BandwidthGb,
+        ] {
+            assert_eq!(
+                quota_limit_for_event(event_type, &limits),
+                -1,
+                "{event_type:?} must not be gated by the email limit"
+            );
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Fix I15 — explicit timezone support for usage periods.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn month_period_defaults_to_utc_month_boundaries() {
+        let now = DateTime::parse_from_rfc3339("2026-04-15T12:30:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+
+        let (start, end) = month_period_for_tz(now, None).expect("utc period");
+
+        assert_eq!(start.to_rfc3339(), "2026-04-01T00:00:00+00:00");
+        assert_eq!(end.to_rfc3339(), "2026-05-01T00:00:00+00:00");
+    }
+
+    #[test]
+    fn month_period_respects_explicit_tallinn_timezone() {
+        // 2026-03-31T23:30:00Z is already April 1st in Tallinn (UTC+3).
+        let now = DateTime::parse_from_rfc3339("2026-03-31T23:30:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+
+        let (start, end) = month_period_for_tz(now, Some("Europe/Tallinn")).expect("period");
+
+        // April in Tallinn starts at 2026-03-31T21:00:00Z (EEST, UTC+3).
+        assert_eq!(start.to_rfc3339(), "2026-03-31T21:00:00+00:00");
+        assert_eq!(end.to_rfc3339(), "2026-04-30T21:00:00+00:00");
+    }
+
+    #[test]
+    fn month_period_rejects_unknown_timezone() {
+        let now = Utc::now();
+        assert!(month_period_for_tz(now, Some("Mars/Olympus")).is_err());
+    }
+
+    #[test]
+    fn tenant_plan_limits_sql_resolves_plan_overrides() {
+        // Fix I2 — the shared limit SQL must consult plan_overrides before
+        // the tenant's own plan.
+        assert!(TENANT_PLAN_LIMITS_SQL.contains("plan_overrides"));
+        assert!(TENANT_PLAN_LIMITS_SQL.contains("COALESCE(po.plan, t.plan)"));
+        assert!(TENANT_PLAN_LIMITS_SQL.contains("po.active = true"));
     }
 
     #[test]

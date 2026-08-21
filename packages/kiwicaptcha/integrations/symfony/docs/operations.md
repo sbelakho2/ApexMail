@@ -77,7 +77,7 @@ The canonical client IP, the one the challenge binds to, the rate-limit identity
 
 Ambiguous forwarding.
 When a trusted peer sends both `X-Forwarded-For` and `Forwarded`, the two chains can disagree and the canonical IP is ambiguous (Symfony itself refuses to derive one).
-With `risk.reject_ambiguous_forwarding: true` the request is rejected with HTTP 400 `{"error":{"code":"AMBIGUOUS_FORWARDING"}}` (the validator fails closed as `invalid_or_expired`).
+With `risk.reject_ambiguous_forwarding: true` the request is rejected with HTTP 400 `{"error":{"code":"AMBIGUOUS_FORWARDING"}}` (the validator fails closed on the captcha).
 With the default `false` the anomaly is logged and the request proceeds with the only unambiguous value, the socket peer.
 Headers from an untrusted peer are never ambiguous.
 They are ignored entirely.
@@ -244,18 +244,14 @@ The same-origin check then ignores whatever Host the request carries.
 HTTP/3/QUIC clients legitimately change source IPs mid-session (connection migration, NAT rebinding, cellular handover).
 The bundle's documented policy, and its actual behavior, is:
 
-- Exact IP → normal verification (the nonce-bound binding tag matches).
-- Same network (same /24 IPv4 or /56 IPv6 cohort) → acceptable, with a risk penalty.
-  The risk engine's subnet dimension is exactly this signal.
-  The migrated source scores through the subnet pseudonym while the source pseudonym changes, so the engine tightens difficulty instead of refusing.
-- Different network → treat as a fresh visitor.
-  The strict binding rejects the solve (the test suite documents the `IpMismatch` behavior; the challenge is burned single-use), and the client re-solves.
-  The application should additionally require a stronger `request_binding`/session check for high-value scopes.
+- An existing challenge is bound to the exact issuing IP, and verification requires that exact IP: there is no subnet tolerance (a same-/24 IPv4 or same-/56 IPv6 address never validates it).
+- Any IP change fails the binding, including a legitimate HTTP/3/QUIC connection migration, NAT rebinding, or cellular handover; the client must re-solve from the new address.
+- Subnet continuity applies only to new challenges and to subsequent risk assessment: a client that reappears from the same /24 IPv4 or /56 IPv6 subnet may contribute a continuity signal that adjusts the risk score/difficulty. It never validates an existing challenge.
 - Mobile clients → prefer `request_binding` (a per-page nonce bound to the transaction, immune to IP changes) over IP binding.
   Keep `binding_mode` strict for desktop/relay-mitigation posture and let the binding mismatch drive the documented re-solve path.
 
 The strict binding stays.
-A challenge bound to IP A verified from IP B fails closed (`IpMismatch` at the core, collapsed to `invalid_or_expired` by the validator).
+A challenge bound to IP A verified from IP B fails closed (`IpMismatch` at the core, rejected by the validator), and the client re-solves.
 The binding tag is a nonce-bound HMAC, never a stable IP-derived identifier, so the check is relay-mitigation, not a privacy leak.
 The QUIC policy above is the operator's deployment policy (which scopes bind, when to step up), implemented with the existing knobs.
 The protocol's fail-closed behavior is unchanged and documented by test.

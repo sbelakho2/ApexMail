@@ -77,8 +77,28 @@ pub enum DynamicDecision {
     Reject,
 }
 
-/// Optional dynamic analyzer (detonation / behavioral emulation).
-/// **No concrete implementation is provided by this crate.** This trait is an
+/// Shared, bounded Tokio runtime used to run dynamic analyzers.
+///
+/// Previously every attachment analysis spawned a dedicated OS thread *and*
+/// built a fresh Tokio runtime — one thread + one runtime leaked per
+/// analysis for stuck scanners. All analyses now share this single runtime
+/// with a small bounded blocking pool; analyzer implementations are expected
+/// to enforce their own I/O timeouts (the ClamAV analyzer sets socket
+/// read/write timeouts) so blocked scans cannot hold pool slots forever.
+fn shared_analyzer_runtime() -> &'static tokio::runtime::Runtime {
+    static RUNTIME: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
+    RUNTIME.get_or_init(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .max_blocking_threads(8)
+            .enable_all()
+            .thread_name("sandbox-analyzer")
+            .build()
+            .expect("failed to build shared sandbox analyzer runtime")
+    })
+}
+
+/// Optional dynamic analyzer (detonation / behavioral emulation)./// **No concrete implementation is provided by this crate.** This trait is an
 /// integration hook for callers that have access to a sandboxing backend such
 /// as a micro-VM detonation chamber, YARA/ClamAV scan integration, or
 /// behavioral emulation engine. To use it:/// 1. Implement `DynamicAnalyzer` for your backend.
@@ -223,43 +243,32 @@ impl SandboxEngine {
         let data = data.to_vec();
         let filename = filename.map(str::to_string);
 
-        let worker =
-            std::thread::spawn(move || -> Result<Option<DynamicAnalysisFinding>, String> {
-                let runtime = tokio::runtime::Builder::new_current_thread()
-                    .enable_time()
-                    .build()
-                    .map_err(|error| {
-                        format!("failed to create dynamic analyzer runtime: {error}")
-                    })?;
+        // Run on the shared, bounded blocking pool instead of spawning a
+        // fresh OS thread + Tokio runtime per attachment (which leaked one
+        // thread and one runtime per analysis). The pool size bounds the
+        // number of concurrently-stuck analyzer tasks; each analyzer is
+        // expected to enforce its own I/O timeouts (e.g. the ClamAV socket
+        // read/write timeout) so stalled scans release their pool slot.
+        let runtime = shared_analyzer_runtime();
+        let task = runtime.spawn_blocking(move || analyzer.analyze(&data, filename.as_deref()));
 
-                let result = runtime.block_on(async move {
-                    let analysis_task = tokio::task::spawn_blocking(move || {
-                        analyzer.analyze(&data, filename.as_deref())
-                    });
+        let joined = runtime.block_on(async {
+            match tokio::time::timeout(timeout_duration, task).await {
+                Ok(Ok(finding)) => Ok(finding),
+                Ok(Err(error)) => Err(format!("dynamic analyzer task failed: {error}")),
+                Err(_) => Err(format!(
+                    "dynamic analyzer timed out after {} seconds",
+                    timeout_duration.as_secs()
+                )),
+            }
+        });
 
-                    match tokio::time::timeout(timeout_duration, analysis_task).await {
-                        Ok(Ok(finding)) => Ok(finding),
-                        Ok(Err(error)) => Err(format!("dynamic analyzer task failed: {error}")),
-                        Err(_) => Err(format!(
-                            "dynamic analyzer timed out after {} seconds",
-                            timeout_duration.as_secs()
-                        )),
-                    }
-                });
-
-                runtime.shutdown_timeout(Duration::from_millis(100));
-                result
-            });
-
-        match worker.join() {
-            Ok(Ok(finding)) => Ok(finding),
-            Ok(Err(message)) => {
+        match joined {
+            Ok(finding) => Ok(finding),
+            Err(message) => {
                 warn!(error = %message, "dynamic analyzer failed");
                 Err(SandboxError::AnalysisError(message))
             }
-            Err(_) => Err(SandboxError::AnalysisError(
-                "dynamic analyzer worker panicked".into(),
-            )),
         }
     }
 
@@ -532,5 +541,36 @@ mod tests {
             result,
             Err(SandboxError::AnalysisError(message)) if message.contains("timed out")
         ));
+    }
+
+    #[test]
+    fn test_repeated_stuck_analyzes_share_bounded_pool() {
+        // Regression:previously each analysis spawned its own thread +
+        // runtime; a stuck analyzer leaked both. With the shared bounded
+        // pool, repeated analyses must each still hit their timeout (i.e.
+        // the engine never deadlocks or queues forever behind stuck tasks).
+        let config = SandboxConfig {
+            analysis_timeout_secs: 1,
+            ..Default::default()
+        };
+        let engine = SandboxEngine::with_dynamic_analyzer(config, Arc::new(MockDynamicSlow));
+
+        let start = std::time::Instant::now();
+        for _ in 0..3 {
+            let result = engine.analyze(b"hello", Some("readme.txt"));
+            assert!(
+                matches!(
+                    result,
+                    Err(SandboxError::AnalysisError(ref message)) if message.contains("timed out")
+                ),
+                "each stuck analysis must fail with a timeout"
+            );
+        }
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed < std::time::Duration::from_secs(10),
+            "3 timeout-bounded analyses must not run unbounded: {:?}",
+            elapsed
+        );
     }
 }

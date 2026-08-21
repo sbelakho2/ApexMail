@@ -13,8 +13,18 @@ use KiwiCaptcha\PoWAlgorithm;
 use KiwiCaptcha\Risk\RiskKeys;
 use KiwiCaptcha\SolutionToken;
 use KiwiCaptcha\Storage\RedisStorage;
+use BelConsulting\KiwiCaptchaBundle\Validator\Constraints\KiwiCaptcha as KiwiCaptchaConstraint;
+use BelConsulting\KiwiCaptchaBundle\Validator\Constraints\KiwiCaptchaValidator;
+use KiwiCaptcha\ConsumedRecord;
+use KiwiCaptcha\ConsumedStateReadableInterface;
+use KiwiCaptcha\Config;
+use KiwiCaptcha\OperationIdentityAwareStorageInterface;
 use KiwiCaptcha\Verifier;
 use PHPUnit\Framework\TestCase;
+use Symfony\Component\HttpFoundation\Request;
+use Symfony\Component\HttpFoundation\RequestStack;
+use Symfony\Component\Validator\ConstraintValidatorFactory;
+use Symfony\Component\Validator\Validation;
 
 /**
  * real-redis integration tests (CI service container: redis:7).
@@ -192,12 +202,13 @@ final class RealRedisIntegrationTest extends TestCase
         $token = SolutionToken::create($challenge->nonce, $counter, 5000, [])->encode();
 
         $verifier = new Verifier($storage);
+        $identity = 'op-'.hash('sha256', 'login-op');
         $nowNs = (int) (microtime(true) * 1_000_000) + 1_000_000;
-        $outcome = $verifier->verify($token, $secret, 'login', '198.51.100.7', $nowNs);
+        $outcome = $verifier->verify($token, $secret, 'login', '198.51.100.7', $nowNs, operationIdentity: $identity);
         self::assertTrue($outcome->isOk(), sprintf('expected valid, got %s', $outcome->code()));
 
-        $replay = $verifier->verify($token, $secret, 'login', '198.51.100.7', $nowNs);
-        self::assertTrue($replay->isOk(), 'a same-context replay returns the SAME stored result, never a second derivation');
+        $replay = $verifier->verify($token, $secret, 'login', '198.51.100.7', $nowNs, operationIdentity: $identity);
+        self::assertTrue($replay->isOk(), 'a replay of the same logical operation returns the SAME stored result, never a second derivation');
         self::assertTrue($replay->fromStoredResult, 'the replay must come from the stored result');
         self::assertSame($challenge->nonce, $replay->nonce, 'the replay exposes the canonical jti');
     }
@@ -326,5 +337,132 @@ final class RealRedisIntegrationTest extends TestCase
 
         // Cleanup for the next test run.
         $this->client->del('{kiwi:ci-health}:security-policy');
+    }
+
+    public function testConsumeIndeterminateResolvesToTheStoredOutcomeThroughTheValidator(): void
+    {
+        // The ambiguous consume (the transition landed in Redis but the
+        // response was lost) resolves through the validator's
+        // consumed-state normalization: the retained record, its committed
+        // result and its operation identity are read back via
+        // consumedState() from the REAL Redis backend, and the matching
+        // identity yields the stored success; a different operation's
+        // identity never does.
+        $inner = new RedisStorage($this->client, 'ci:indeterminate:');
+        $flaky = new FlakyConsumeRedisStorage($inner);
+        $issuer = new Issuer(new Config(secretKey: '0123456789abcdef0123456789abcdef', targetBits: 8), $inner);
+        $challenge = $issuer->issue('login', '198.51.100.7', 'txn-123');
+        usleep(($challenge->minDurationMs + 10) * 1000);
+        $saltBytes = base64_decode($challenge->salt, true);
+        $counter = 0;
+        do {
+            $hash = hash('sha256', $challenge->prefix.$counter.$saltBytes, true);
+            $counter++;
+        } while (Verifier::leadingZeroBits($hash) < $challenge->targetBits);
+        --$counter;
+        $token = SolutionToken::create($challenge->nonce, $counter, 5000, [])->encode();
+        $verifier = new Verifier($flaky);
+
+        $validate = function (?string $operationId, ?string $binding) use ($verifier, $flaky, $token): array {
+            $stack = new RequestStack();
+            $request = Request::create('/', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7']);
+            if ($binding !== null) {
+                $request->attributes->set(KiwiCaptchaValidator::REQUEST_BINDING_ATTRIBUTE, $binding);
+            }
+            if ($operationId !== null) {
+                $request->attributes->set(KiwiCaptchaValidator::OPERATION_ID_ATTRIBUTE, $operationId);
+            }
+            $stack->push($request);
+            $validator = new KiwiCaptchaValidator($verifier, $stack, '0123456789abcdef0123456789abcdef', false, null, null, null, null, $flaky);
+            $factory = new ConstraintValidatorFactory([KiwiCaptchaValidator::class => $validator]);
+            $engine = Validation::createValidatorBuilder()->setConstraintValidatorFactory($factory)->getValidator();
+            $dto = new class {
+                public ?string $captcha = null;
+            };
+            $dto->captcha = $token;
+            $meta = $engine->getMetadataFor($dto::class);
+            $meta->addPropertyConstraint('captcha', new KiwiCaptchaConstraint(['scope' => 'login']));
+            $violations = $engine->validate($dto);
+            $codes = [];
+            foreach ($violations as $violation) {
+                $codes[] = (string) $violation->getCode();
+            }
+
+            return $codes;
+        };
+
+        // The original operation consumes + commits its valid result.
+        self::assertSame([], $validate('op-123', 'txn-123'));
+        self::assertNotNull($inner->consumedState($challenge->nonce)?->consumedResult, 'the committed result is retained in Redis');
+
+        // The retry's consume response is lost: ConsumeIndeterminate,
+        // normalized from the retained Redis state — the identity matches,
+        // the stored success resolves (the replay gate accepts the
+        // explicit operation id).
+        $flaky->throwOnConsume = true;
+        self::assertSame([], $validate('op-123', 'txn-123'), 'the identity-matching stored outcome resolves the ambiguous retry');
+
+        // A different logical operation under the same lost-response
+        // conditions: never the stored success.
+        self::assertSame(['invalid_or_expired'], $validate('op-123', 'txn-OTHER'), 'a different binding derives a different identity — refused');
+        $flaky->throwOnConsume = false;
+    }
+}
+
+/**
+ * A real-Redis storage whose consume transition response can be dropped
+ * on demand: everything delegates to the Redis backend, only the
+ * consume() / consumeWithOperationIdentity() reply is lost after the
+ * transition lands (the wire failure that produces ConsumeIndeterminate).
+ */
+final class FlakyConsumeRedisStorage implements \KiwiCaptcha\StorageInterface, OperationIdentityAwareStorageInterface, ConsumedStateReadableInterface
+{
+    public bool $throwOnConsume = false;
+
+    public function __construct(private readonly RedisStorage $inner)
+    {
+    }
+
+    public function store(ChallengeRecord $record): void
+    {
+        $this->inner->store($record);
+    }
+
+    public function find(string $nonce): ?ChallengeRecord
+    {
+        return $this->inner->find($nonce);
+    }
+
+    public function consumedState(string $nonce): ?ConsumedRecord
+    {
+        return $this->inner->consumedState($nonce);
+    }
+
+    public function consume(string $nonce): ?ConsumedRecord
+    {
+        if ($this->throwOnConsume) {
+            throw new \RuntimeException('simulated lost consume response');
+        }
+
+        return $this->inner->consume($nonce);
+    }
+
+    public function consumeWithOperationIdentity(string $nonce, ?string $operationIdentity): ?ConsumedRecord
+    {
+        if ($this->throwOnConsume) {
+            throw new \RuntimeException('simulated lost consume response');
+        }
+
+        return $this->inner->consumeWithOperationIdentity($nonce, $operationIdentity);
+    }
+
+    public function commitResult(string $nonce, bool $valid, ?string $binding): bool
+    {
+        return $this->inner->commitResult($nonce, $valid, $binding);
+    }
+
+    public function delete(string $nonce): void
+    {
+        $this->inner->delete($nonce);
     }
 }

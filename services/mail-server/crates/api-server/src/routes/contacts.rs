@@ -595,6 +595,25 @@ async fn bulk_resolve_duplicates(
     Ok(Json(BulkActionResult { affected }))
 }
 
+/// Maximum rows accepted by the CSV/XLSX import (audit J) — matches
+/// `bulk_import`'s MAX_BULK_CONTACTS so the file path cannot bypass the
+/// JSON path's cap.
+const MAX_IMPORT_ROWS: usize = 10_000;
+
+/// Maximum accepted XLSX body size (audit J): zip-bomb decompression guard.
+/// A tiny malicious xlsx can expand to gigabytes of cells; the global 10 MB
+/// body limit does not bound the DECOMPRESSED size.
+const MAX_XLSX_BODY_BYTES: usize = 2 * 1024 * 1024;
+
+/// Maximum total cells materialised from an XLSX sheet (audit J): second
+/// decompression guard, bounding work even for legitimately small files
+/// that encode huge sparse sheets.
+const MAX_XLSX_TOTAL_CELLS: u64 = 5_000_000;
+
+/// Insert chunk size for the import path (audit J): inserting one row per
+/// round-trip let a 10k-row file hold 10k sequential queries.
+const IMPORT_CHUNK_SIZE: usize = 500;
+
 async fn import_contacts(
     State(state): State<AppState>,
     auth: AuthUser,
@@ -613,16 +632,36 @@ async fn import_contacts(
         || content_type.contains("xlsx")
         || (body.len() >= 4 && &body[..4] == b"PK\x03\x04"); // ZIP magic bytes
 
+    if is_xlsx && body.len() > MAX_XLSX_BODY_BYTES {
+        return Err(ApiError::PayloadTooLarge(format!(
+            "XLSX import files must be smaller than {} bytes",
+            MAX_XLSX_BODY_BYTES
+        )));
+    }
+
     let rows: Vec<(String, Option<String>)> = if is_xlsx {
         parse_xlsx_rows(&body)?
     } else {
         parse_csv_rows(&body)?
     };
 
+    // Audit J: cap the row count like bulk_import does — an unbounded file
+    // import could otherwise tie up a connection with unbounded work.
+    if rows.len() > MAX_IMPORT_ROWS {
+        return Err(ApiError::Validation(vec![format!(
+            "import file contains {} rows; maximum is {MAX_IMPORT_ROWS}",
+            rows.len()
+        )]));
+    }
+
     let mut imported = 0i64;
     let mut skipped = 0i64;
     let mut errors = Vec::new();
 
+    // Validate + normalise everything up front so DB failures cannot leave
+    // a half-imported batch of validated rows behind.
+    let mut valid_rows: Vec<(usize, String, Option<String>)> = Vec::new();
+    let mut seen_emails: std::collections::HashSet<String> = std::collections::HashSet::new();
     for (idx, (raw_email, name)) in rows.iter().enumerate() {
         let email = raw_email.trim();
 
@@ -635,26 +674,50 @@ async fn import_contacts(
         // Normalise to lowercase so rows are deduped against the
         // case-sensitive unique index consistently with create_contact.
         let email = email.to_lowercase();
-        let id = Uuid::new_v4();
+        // In-file duplicates are skipped up front: a multi-row upsert cannot
+        // touch the same conflict row twice in one statement.
+        if !seen_emails.insert(email.clone()) {
+            errors.push(format!("Row {}: duplicate email in file", idx + 1));
+            skipped += 1;
+            continue;
+        }
+        valid_rows.push((idx + 1, email, name.clone()));
+    }
+
+    // Batched inserts (audit J): one multi-row upsert per 500-row chunk
+    // instead of one round-trip per row.
+    for chunk in valid_rows.chunks(IMPORT_CHUNK_SIZE) {
+        let ids: Vec<Uuid> = chunk.iter().map(|_| Uuid::new_v4()).collect();
+        let emails: Vec<String> = chunk.iter().map(|(_, email, _)| email.clone()).collect();
+        let names: Vec<Option<String>> =
+            chunk.iter().map(|(_, _, name)| name.clone()).collect();
+
         let result = sqlx::query(
-            "INSERT INTO contacts (id, tenant_id, email, name, status, created_at, updated_at)
-             VALUES ($1, $2, $3, $4, 'active', NOW(), NOW())
-             ON CONFLICT (tenant_id, email) DO UPDATE SET
-                name = COALESCE(EXCLUDED.name, contacts.name),
-                updated_at = NOW()",
+            r#"INSERT INTO contacts (id, tenant_id, email, name, status, created_at, updated_at)
+               SELECT id, $2, email, name, 'active', NOW(), NOW()
+               FROM UNNEST($1::uuid[], $3::text[], $4::text[]) AS t(id, email, name)
+               ON CONFLICT (tenant_id, email) DO UPDATE SET
+                  name = COALESCE(EXCLUDED.name, contacts.name),
+                  updated_at = NOW()"#,
         )
-        .bind(id)
+        .bind(&ids)
         .bind(auth.tenant_id.to_string())
-        .bind(&email)
-        .bind(name.as_deref())
+        .bind(&emails)
+        .bind(&names)
         .execute(&state.db)
         .await;
 
         match result {
-            Ok(_) => imported += 1,
+            Ok(_) => imported += chunk.len() as i64,
             Err(e) => {
-                errors.push(format!("Row {}: {}", idx + 1, e));
-                skipped += 1;
+                // Audit J: never return the raw sqlx error string (it can
+                // leak schema details and query fragments) — log the detail,
+                // report a generic per-row message.
+                tracing::error!(error = %e, tenant_id = %auth.tenant_id, "contact import chunk failed");
+                for (row_number, _, _) in chunk {
+                    errors.push(format!("Row {row_number}: failed to import"));
+                }
+                skipped += chunk.len() as i64;
             }
         }
     }
@@ -706,6 +769,17 @@ fn parse_xlsx_rows(data: &[u8]) -> Result<Vec<(String, Option<String>)>, ApiErro
     let range = workbook
         .worksheet_range(&sheet_name)
         .map_err(|e| ApiError::BadRequest(format!("XLSX sheet error: {e}")))?;
+
+    // Audit J: decompression-bomb guard — the sheet's total cell count is
+    // bounded BEFORE materialising rows, so a tiny malicious xlsx encoding a
+    // huge sparse sheet cannot exhaust memory/CPU.
+    let (row_count, col_count) = range.get_size();
+    let total_cells = row_count as u64 * col_count as u64;
+    if total_cells > MAX_XLSX_TOTAL_CELLS {
+        return Err(ApiError::PayloadTooLarge(format!(
+            "XLSX sheet expands to {total_cells} cells; maximum is {MAX_XLSX_TOTAL_CELLS}"
+        )));
+    }
 
     let mut rows = Vec::new();
     let mut is_header = true;

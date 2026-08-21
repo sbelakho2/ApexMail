@@ -106,14 +106,18 @@ final class ChallengeFlowTest extends TestCase
 
         $token = \KiwiCaptcha\SolutionToken::create($challenge['nonce'], $counter, 5000, ['wd' => false])->encode();
 
+        // The logical operation identity: the stored success replays only
+        // to the exact operation that consumed the record.
+        $identity = 'op-'.hash('sha256', 'login-op');
+
         // Verify locally
-        $outcome = $verifier->verify($token, self::SECRET, 'login', '198.51.100.7');
+        $outcome = $verifier->verify($token, self::SECRET, 'login', '198.51.100.7', operationIdentity: $identity);
         self::assertTrue($outcome->isOk(), sprintf('expected valid, got %s', $outcome->code()));
 
-        // Retry semantics: an identical replay in the same
-        // context returns the same stored result without re-deriving.
-        $replay = $verifier->verify($token, self::SECRET, 'login', '198.51.100.7');
-        self::assertTrue($replay->isOk(), 'same-context replay must return the stored result');
+        // Retry semantics: an identical replay of the same logical
+        // operation returns the same stored result without re-deriving.
+        $replay = $verifier->verify($token, self::SECRET, 'login', '198.51.100.7', operationIdentity: $identity);
+        self::assertTrue($replay->isOk(), 'same-operation replay must return the stored result');
         self::assertTrue($replay->fromStoredResult, 'the replay must come from the stored result, not a second derivation');
 
         // Wrong scope fails

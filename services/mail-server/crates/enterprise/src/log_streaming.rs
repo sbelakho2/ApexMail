@@ -10,6 +10,46 @@ use crate::types::*;
 /// Log Streaming Service:deliver logs to S3, Webhook, Splunk, Datadog, etc.
 pub struct LogStreamingService {
     db: PgPool,
+    /// Fix H-2: encryptor used to protect destination-config secrets at
+    /// rest, bound to the owning tenant via AAD. `None` disables at-rest
+    /// protection (legacy construction path).
+    secret_encryptor: Option<crate::field_encryption::FieldEncryptor>,
+}
+
+/// Destination-config keys whose values are credentials and must be
+/// encrypted at rest and masked in responses (fix H-2).
+pub const SECRET_CONFIG_FIELDS: &[&str] = &[
+    "token",
+    "api_key",
+    "secret",
+    "password",
+    "secret_key",
+    "access_key",
+    "client_secret",
+    "shared_key",
+];
+
+const LOG_STREAM_SECRET_PURPOSE: &str = "enterprise/log-streaming/destination-secrets";
+
+fn stream_secret_aad(tenant_id: &str) -> Vec<u8> {
+    format!("{LOG_STREAM_SECRET_PURPOSE}/tenant:{tenant_id}").into_bytes()
+}
+
+/// Replace secret values with a mask that keeps only the last 4 characters.
+pub fn mask_destination_config(config: &serde_json::Value) -> serde_json::Value {
+    let mut masked = config.clone();
+    let Some(obj) = masked.as_object_mut() else {
+        return masked;
+    };
+    for field in SECRET_CONFIG_FIELDS {
+        if let Some(value) = obj.get_mut(*field) {
+            if let Some(secret) = value.as_str() {
+                let tail: String = secret.chars().rev().take(4).collect::<Vec<_>>().into_iter().rev().collect();
+                *value = serde_json::json!(format!("****{tail}"));
+            }
+        }
+    }
+    masked
 }
 
 #[derive(Debug, Clone, sqlx::FromRow)]
@@ -69,9 +109,99 @@ impl From<LogStreamDbRow> for LogStream {
     }
 }
 
+/// Mask secret fields of a stream's destination config before returning it
+/// to a client (fix H-2: list/get responses must not echo secrets).
+fn mask_stream(mut stream: LogStream) -> LogStream {
+    if let Some(config) = stream.destination_config.take() {
+        stream.destination_config = Some(mask_destination_config(&config));
+    }
+    stream
+}
+
 impl LogStreamingService {
     pub fn new(db: PgPool) -> Self {
-        Self { db }
+        Self {
+            db,
+            secret_encryptor: None,
+        }
+    }
+
+    /// Construct with at-rest secret protection for destination configs
+    /// (fix H-2). `secret` derives a purpose-bound KEK via
+    /// `field_encryption::derive_kek_from_secret`.
+    pub fn with_secret_key(db: PgPool, secret: &str) -> Self {
+        let secret_encryptor =
+            crate::field_encryption::encryptor_from_secret(secret, LOG_STREAM_SECRET_PURPOSE)
+                .ok();
+        if secret_encryptor.is_none() {
+            tracing::error!(
+                "Failed to derive log-stream destination secret encryptor — secrets will NOT be encrypted at rest"
+            );
+        }
+        Self {
+            db,
+            secret_encryptor,
+        }
+    }
+
+    /// Encrypt secret fields of a destination config (tenant-bound AAD).
+    fn encrypt_config_secrets(
+        &self,
+        tenant_id: &str,
+        config: &mut serde_json::Value,
+    ) -> Result<(), String> {
+        let Some(encryptor) = &self.secret_encryptor else {
+            return Ok(());
+        };
+        let aad = stream_secret_aad(tenant_id);
+        let Some(obj) = config.as_object_mut() else {
+            return Ok(());
+        };
+        for field in SECRET_CONFIG_FIELDS {
+            if let Some(value) = obj.get_mut(*field) {
+                if let Some(secret) = value.as_str() {
+                    if secret.is_empty()
+                        || crate::field_encryption::FieldEncryptor::is_encrypted(secret)
+                    {
+                        continue;
+                    }
+                    let encrypted = encryptor
+                        .encrypt_with_aad(secret, &aad)
+                        .map_err(|e| format!("Encrypt destination secret: {e}"))?;
+                    *value = serde_json::json!(encrypted);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Decrypt secret fields of a destination config (tenant-bound AAD).
+    /// Values that were stored in plaintext (legacy) pass through.
+    fn decrypt_config_secrets(
+        &self,
+        tenant_id: &str,
+        config: &mut serde_json::Value,
+    ) -> Result<(), String> {
+        let Some(encryptor) = &self.secret_encryptor else {
+            return Ok(());
+        };
+        let aad = stream_secret_aad(tenant_id);
+        let Some(obj) = config.as_object_mut() else {
+            return Ok(());
+        };
+        for field in SECRET_CONFIG_FIELDS {
+            if let Some(value) = obj.get_mut(*field) {
+                if let Some(secret) = value.as_str() {
+                    if crate::field_encryption::FieldEncryptor::is_encrypted(secret) {
+                        let decrypted = encryptor
+                            .decrypt_with_aad(secret, &aad)
+                            .map_err(|e| format!("Decrypt destination secret: {e}"))?;
+                        *value = serde_json::json!(decrypted);
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Create a new log stream
@@ -88,6 +218,12 @@ impl LogStreamingService {
         batch_interval_seconds: Option<i32>,
         compression_enabled: bool,
     ) -> Result<ApiResult<LogStream>, String> {
+        // Fix H-2: secrets in the destination config are encrypted at rest,
+        // bound to the owning tenant.
+        let mut destination_config = destination_config;
+        if let Some(config) = destination_config.as_mut() {
+            self.encrypt_config_secrets(&tenant_id, config)?;
+        }
         let id = Uuid::new_v4();
         let row = sqlx::query_as::<_, LogStreamDbRow>(
             "INSERT INTO ent_log_streams (id, tenant_id, name, description, destination_type, status, enabled, destination_config, log_categories, batch_size, batch_interval_seconds, compression_enabled, format, total_events_delivered, total_bytes_delivered, delivery_failures_count, created_at, updated_at)
@@ -95,14 +231,14 @@ impl LogStreamingService {
              RETURNING *"
         )
         .bind(id).bind(&tenant_id).bind(name).bind(description)
-        .bind(destination_type).bind(&destination_config).bind(&log_categories)
+        .bind(destination_config).bind(&log_categories)
         .bind(batch_size).bind(batch_interval_seconds).bind(compression_enabled)
         .fetch_one(&self.db)
         .await
         .map_err(|e| format!("Create log stream: {e}"))?;
 
         info!(tenant_id = %tenant_id, name = name, dest = destination_type, "Log stream created");
-        Ok(ApiResult::ok(row.into()))
+        Ok(ApiResult::ok(mask_stream(row.into())))
     }
 
     /// Get a log stream by ID
@@ -115,7 +251,7 @@ impl LogStreamingService {
                 .map_err(|e| format!("Get log stream: {e}"))?;
 
         match row {
-            Some(r) => Ok(ApiResult::ok(r.into())),
+            Some(r) => Ok(ApiResult::ok(mask_stream(r.into()))),
             None => Ok(ApiResult::err("Log stream not found", "NOT_FOUND")),
         }
     }
@@ -130,7 +266,9 @@ impl LogStreamingService {
         .await
         .map_err(|e| format!("List log streams: {e}"))?;
 
-        Ok(ApiResult::ok(rows.into_iter().map(Into::into).collect()))
+        Ok(ApiResult::ok(
+            rows.into_iter().map(|r| mask_stream(r.into())).collect(),
+        ))
     }
 
     /// Update a log stream
@@ -142,6 +280,22 @@ impl LogStreamingService {
         destination_config: Option<serde_json::Value>,
         log_categories: Option<Vec<String>>,
     ) -> Result<ApiResult<LogStream>, String> {
+        // Fix H-2: encrypt secrets of the replacement config with the
+        // stream's owning tenant binding.
+        let mut destination_config = destination_config;
+        if let Some(config) = destination_config.as_mut() {
+            let owner: Option<String> = sqlx::query_scalar(
+                "SELECT tenant_id FROM ent_log_streams WHERE id = $1",
+            )
+            .bind(id)
+            .fetch_optional(&self.db)
+            .await
+            .map_err(|e| format!("Load stream tenant: {e}"))?;
+            match owner {
+                Some(tenant_id) => self.encrypt_config_secrets(&tenant_id, config)?,
+                None => return Ok(ApiResult::err("Log stream not found", "NOT_FOUND")),
+            }
+        }
         let row = sqlx::query_as::<_, LogStreamDbRow>(
             "UPDATE ent_log_streams SET
              name = COALESCE($2, name),
@@ -161,7 +315,7 @@ impl LogStreamingService {
         .map_err(|e| format!("Update log stream: {e}"))?;
 
         match row {
-            Some(r) => Ok(ApiResult::ok(r.into())),
+            Some(r) => Ok(ApiResult::ok(mask_stream(r.into()))),
             None => Ok(ApiResult::err("Log stream not found", "NOT_FOUND")),
         }
     }
@@ -222,19 +376,29 @@ impl LogStreamingService {
                 .await
                 .map_err(|e| format!("Get stream for verify: {e}"))?;
 
-        let stream = match stream {
+        let mut stream = match stream {
             Some(s) => LogStream::from(s),
             None => return Ok(ApiResult::err("Log stream not found", "NOT_FOUND")),
         };
+
+        // Fix H-2: decrypt the at-rest secrets with the owning tenant binding
+        // for the outbound verification request.
+        if let Some(config) = stream.destination_config.as_mut() {
+            if let Err(e) = self.decrypt_config_secrets(&stream.tenant_id, config) {
+                return Ok(ApiResult::err(e, "SECRET_DECRYPT_FAILED"));
+            }
+        }
 
         // Verify based on destination type
         let result = match stream.destination_type.as_str() {
             "webhook" => verify_webhook(&stream).await,
             "splunk" => verify_splunk(&stream).await,
             "datadog" => verify_datadog(&stream).await,
-            _ => Ok(
-                serde_json::json!({"verified": true, "message": "Destination type check passed"}),
-            ),
+            // Fix F: unknown destination types must NOT auto-verify.
+            other => Ok(serde_json::json!({
+                "verified": false,
+                "reason": format!("unsupported destination type '{other}'"),
+            })),
         };
 
         match result {
@@ -345,80 +509,315 @@ impl LogStreamingService {
 
         Ok(rows.into_iter().map(Into::into).collect())
     }
+
+    /// One pass of the background delivery loop (fix H-1).
+    ///
+    /// Pulls active streams (bounded batch) and delivers a bounded heartbeat
+    /// event batch to each verified destination through the SSRF-guarded,
+    /// address-pinned client — wiring `get_active_streams`, `record_delivery`
+    /// and `hmac_sign` into a live best-effort delivery path. Delivery errors
+    /// are recorded per-stream and never abort the cycle.
+    pub async fn run_delivery_cycle(&self) -> Result<u64, String> {
+        const MAX_STREAMS_PER_CYCLE: usize = 50;
+        let streams = self.get_active_streams().await?;
+        let mut delivered = 0u64;
+
+        for stream in streams.into_iter().take(MAX_STREAMS_PER_CYCLE) {
+            let mut stream = stream;
+            if let Some(config) = stream.destination_config.as_mut() {
+                if let Err(e) = self.decrypt_config_secrets(&stream.tenant_id, config) {
+                    tracing::warn!(stream_id = %stream.id, error = %e, "delivery: secret decrypt failed");
+                    let _ = self
+                        .record_delivery(
+                            stream.id,
+                            &format!("hb-{}", Uuid::new_v4()),
+                            0,
+                            0,
+                            0,
+                            false,
+                            Some(&e),
+                        )
+                        .await;
+                    continue;
+                }
+            }
+
+            let started = std::time::Instant::now();
+            let outcome = deliver_heartbeat(&stream).await;
+            let duration_ms = started.elapsed().as_millis().min(i32::MAX as u128) as i32;
+            let batch_id = format!("hb-{}", Uuid::new_v4());
+
+            match outcome {
+                Ok(bytes) => {
+                    delivered += 1;
+                    if let Err(e) = self
+                        .record_delivery(stream.id, &batch_id, 1, bytes as i64, duration_ms, true, None)
+                        .await
+                    {
+                        tracing::warn!(stream_id = %stream.id, error = %e, "delivery: record failed");
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(stream_id = %stream.id, error = %e, "delivery: heartbeat failed");
+                    if let Err(record_err) = self
+                        .record_delivery(stream.id, &batch_id, 0, 0, duration_ms, false, Some(&e))
+                        .await
+                    {
+                        tracing::warn!(stream_id = %stream.id, error = %record_err, "delivery: record failed");
+                    }
+                }
+            }
+        }
+
+        Ok(delivered)
+    }
+}
+
+/// Deliver a single-event heartbeat batch to a stream's destination using
+/// the SSRF-guarded, address-pinned client (fix H-1 / F).
+async fn deliver_heartbeat(stream: &LogStream) -> Result<usize, String> {
+    let config = stream
+        .destination_config
+        .as_ref()
+        .ok_or("No destination config")?;
+
+    let payload = serde_json::json!([{
+        "ts": chrono::Utc::now().to_rfc3339(),
+        "service": "enterprise",
+        "type": "heartbeat",
+        "stream_id": stream.id.to_string(),
+    }]);
+    let body = serde_json::to_vec(&payload).map_err(|e| format!("Encode heartbeat: {e}"))?;
+
+    match stream.destination_type.as_str() {
+        "webhook" => {
+            let url = config
+                .get("url")
+                .and_then(|v| v.as_str())
+                .ok_or("No webhook URL")?;
+            let dest = ssrf_guard_url(url).await?;
+            let mut request = pinned_client(&dest.host, dest.addr)?
+                .post(dest.url)
+                .header("Content-Type", "application/json");
+            // H-1: HMAC-sign the payload when a shared secret is configured.
+            if let Some(secret) = config.get("secret").and_then(|v| v.as_str()) {
+                let signature = hmac_sign(secret.as_bytes(), &body)?;
+                request = request.header("X-ApexMail-Signature", format!("sha256={signature}"));
+            }
+            let resp = request
+                .body(body.clone())
+                .send()
+                .await
+                .map_err(|e| format!("Webhook delivery failed: {e}"))?;
+            if !resp.status().is_success() {
+                return Err(format!("Webhook returned status {}", resp.status()));
+            }
+            Ok(body.len())
+        }
+        "splunk" => {
+            let url = config
+                .get("url")
+                .and_then(|v| v.as_str())
+                .ok_or("No Splunk URL")?;
+            let token = config
+                .get("token")
+                .and_then(|v| v.as_str())
+                .ok_or("No HEC token")?;
+            let mut base = ssrf_guard_url(url).await?;
+            base.url.set_path("/services/collector/event");
+            base.url.set_query(None);
+            let resp = pinned_client(&base.host, base.addr)?
+                .post(base.url)
+                .header("Authorization", format!("Splunk {token}"))
+                .body(body.clone())
+                .send()
+                .await
+                .map_err(|e| format!("Splunk delivery failed: {e}"))?;
+            if !resp.status().is_success() {
+                return Err(format!("Splunk returned status {}", resp.status()));
+            }
+            Ok(body.len())
+        }
+        "datadog" => {
+            let api_key = config
+                .get("api_key")
+                .and_then(|v| v.as_str())
+                .ok_or("No Datadog API key")?;
+            let dest =
+                ssrf_guard_url("https://http-intake.logs.datadoghq.com/api/v2/logs").await?;
+            let resp = pinned_client(&dest.host, dest.addr)?
+                .post(dest.url)
+                .header("DD-API-KEY", api_key)
+                .body(body.clone())
+                .send()
+                .await
+                .map_err(|e| format!("Datadog delivery failed: {e}"))?;
+            if !resp.status().is_success() {
+                return Err(format!("Datadog returned status {}", resp.status()));
+            }
+            Ok(body.len())
+        }
+        other => Err(format!(
+            "unsupported destination type '{other}' — no delivery path configured"
+        )),
+    }
 }
 
 // ── Delivery helpers ───────────────────────────────────────────────────
 
-/// Shared HTTP client for verification requests — avoids repeated TLS setup.
-fn http_client() -> &'static reqwest::Client {
-    use std::sync::OnceLock;
-    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
-    CLIENT.get_or_init(|| {
-        reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(10))
-            .build()
-            .unwrap_or_else(|e| {
-                tracing::error!(error = %e, "Failed to build log streaming client, using fallback with timeout");
-                reqwest::Client::builder()
-                    .timeout(std::time::Duration::from_secs(10))
-                    .build()
-                    .expect("Client::builder with only timeout should never fail")
-            })
-    })
+// ── SSRF guard (fix F) ───────────────────────────────────────────────────────
+
+fn is_private_or_reserved_v4(v4: &std::net::Ipv4Addr) -> bool {
+    let o = v4.octets();
+    v4.is_loopback() // 127/8
+        || v4.is_private() // 10/8, 172.16/12, 192.168/16
+        || v4.is_link_local() // 169.254/16 (AWS/GCP metadata)
+        || v4.is_unspecified() // 0.0.0.0
+        || v4.is_broadcast() // 255.255.255.255
+        || v4.is_documentation() // 192.0.2/24, 198.51.100/24, 203.0.113/24
+        || o[0] == 0 // "this" network
+        || o[0] >= 240 // reserved for future use
+        // 100.64/10 — CGNAT shared address space
+        || (o[0] == 100 && o[1] >= 64 && o[1] <= 127)
+        // 192.0.0/24 — IETF protocol assignments
+        || (o[0] == 192 && o[1] == 0 && o[2] == 0)
+        // 198.18/15 — benchmarking
+        || (o[0] == 198 && (o[1] == 18 || o[1] == 19))
 }
 
-/// Validate that a URL is safe for server-side requests (SSRF protection)
-/// #252:Prevents requests to internal/private networks
-fn is_safe_url(url: &str) -> Result<bool, String> {
-    let parsed = reqwest::Url::parse(url).map_err(|e| format!("Invalid URL: {e}"))?;
-
-    // Must use HTTPS for security
-    if parsed.scheme() != "https" {
-        return Ok(false);
+/// Pure IP classification: is this address private, reserved, loopback,
+/// link-local, or otherwise unsuitable as an outbound destination?
+///
+/// Unit-testable without DNS — tests feed addresses directly.
+pub fn is_private_or_reserved_ip(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => is_private_or_reserved_v4(&v4),
+        std::net::IpAddr::V6(v6) => {
+            let s = v6.segments();
+            v6.is_loopback() // ::1
+                || v6.is_unspecified() // ::
+                || v6.is_multicast()
+                // fe80::/10 — link-local
+                || (s[0] & 0xffc0) == 0xfe80
+                // fc00::/7 — unique local addresses
+                || (s[0] & 0xfe00) == 0xfc00
+                // IPv4-mapped (::ffff:a.b.c.d) — re-check the embedded v4
+                || v6
+                    .to_ipv4_mapped()
+                    .is_some_and(|embedded| is_private_or_reserved_v4(&embedded))
+        }
     }
+}
 
-    // Check for private/internal hostnames
-    let host = parsed.host_str().ok_or("No host in URL")?;
-    let blocked_patterns = [
-        "localhost",
-        "127.0.0.1",
-        "::1",
-        "0.0.0.0",
-        "169.254.",
-        "10.",
-        "192.168.",
-        "172.16.",
-        "172.17.",
-        "172.18.",
-        "172.19.",
-        "172.20.",
-        "172.21.",
-        "172.22.",
-        "172.23.",
-        "172.24.",
-        "172.25.",
-        "172.26.",
-        "172.27.",
-        "172.28.",
-        "172.29.",
-        "172.30.",
-        "172.31.",
-        ".local",
-        ".internal",
-        ".corp",
-        "metadata.google",
-        "169.254.169.254", // AWS/GCP metadata
-    ];
+/// Addresses explicitly allow-listed via `LOG_STREAMING_SSRF_ALLOWLIST`
+/// (comma-separated IPs) — an escape hatch for internal test destinations.
+static SSRF_ALLOWLIST: std::sync::LazyLock<Vec<std::net::IpAddr>> = std::sync::LazyLock::new(|| {
+    std::env::var("LOG_STREAMING_SSRF_ALLOWLIST")
+        .unwrap_or_default()
+        .split(',')
+        .filter_map(|entry| entry.trim().parse().ok())
+        .collect()
+});
 
-    let host_lower = host.to_lowercase();
-    for pattern in blocked_patterns {
-        if host_lower.starts_with(pattern) || host_lower.ends_with(pattern) || host_lower == pattern
-        {
-            return Ok(false);
+/// Cached per-destination clients whose DNS is pinned to the validated
+/// address (fix F: closes the DNS-rebinding TOCTOU between validation and
+/// the actual request). Bounded cache — evicted wholesale when it grows past
+/// a small cap.
+static PINNED_CLIENTS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<(String, std::net::SocketAddr), reqwest::Client>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+/// Build (or fetch from the bounded cache) an HTTP client whose DNS for
+/// `host` is pinned to the validated `addr`.
+pub fn pinned_client(host: &str, addr: std::net::SocketAddr) -> Result<reqwest::Client, String> {
+    let key = (host.to_string(), addr);
+    {
+        let cache = PINNED_CLIENTS
+            .lock()
+            .map_err(|_| "pinned client cache poisoned")?;
+        if let Some(client) = cache.get(&key) {
+            return Ok(client.clone());
         }
     }
 
-    Ok(true)
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .resolve(host, addr)
+        .build()
+        .map_err(|e| format!("Build pinned client for {host}: {e}"))?;
+
+    let mut cache = PINNED_CLIENTS
+        .lock()
+        .map_err(|_| "pinned client cache poisoned")?;
+    if cache.len() >= 64 {
+        cache.clear();
+    }
+    cache.insert(key, client.clone());
+    Ok(client)
+}
+
+/// A destination URL that passed the resolving SSRF guard.
+pub struct GuardedDestination {
+    /// Original URL string (post-parse).
+    pub url: reqwest::Url,
+    /// Hostname to pin in the outgoing request.
+    pub host: String,
+    /// The resolved, validated address to pin the outgoing request to.
+    pub addr: std::net::SocketAddr,
+}
+
+/// Resolving SSRF guard for outbound destination URLs (fix F).
+///
+/// The previous check matched hostname *strings* ("10.", "localhost", …)
+/// without DNS resolution, so `https://evil.com` → 10.0.0.5 or a DNS rebinding
+/// answer sailed through, and the Splunk verifier did not even call it. This
+/// guard:
+///   1. requires HTTPS,
+///   2. resolves the hostname (or parses a literal IP),
+///   3. rejects the URL when ANY resolved address is private/reserved
+///      (unless explicitly allow-listed via env),
+///   4. returns the resolved address so the caller can pin it for the actual
+///      request (pinned client) — closing DNS-rebinding TOCTOU.
+pub async fn ssrf_guard_url(url: &str) -> Result<GuardedDestination, String> {
+    let parsed = reqwest::Url::parse(url).map_err(|e| format!("Invalid URL: {e}"))?;
+    if parsed.scheme() != "https" {
+        return Err("Destination URL must use HTTPS".into());
+    }
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| "No host in URL".to_string())?
+        .to_string();
+    let port = parsed.port_or_known_default().ok_or("No port")?;
+
+    // Literal IP or DNS resolution.
+    let ips: Vec<std::net::IpAddr> = if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        vec![ip]
+    } else {
+        tokio::net::lookup_host((host.as_str(), port))
+            .await
+            .map_err(|e| format!("DNS resolution failed for {host}: {e}"))?
+            .map(|socket_addr| socket_addr.ip())
+            .collect()
+    };
+    if ips.is_empty() {
+        return Err(format!("DNS resolution returned no addresses for {host}"));
+    }
+
+    let allowlist = &*SSRF_ALLOWLIST;
+    for ip in &ips {
+        if is_private_or_reserved_ip(*ip) && !allowlist.contains(ip) {
+            return Err(format!(
+                "Destination {host} resolves to a blocked private/reserved address ({ip})"
+            ));
+        }
+    }
+
+    let addr = std::net::SocketAddr::new(ips[0], port);
+    Ok(GuardedDestination {
+        url: parsed,
+        host,
+        addr,
+    })
 }
 
 async fn verify_webhook(stream: &LogStream) -> Result<serde_json::Value, String> {
@@ -431,13 +830,11 @@ async fn verify_webhook(stream: &LogStream) -> Result<serde_json::Value, String>
         .and_then(|v| v.as_str())
         .ok_or("No webhook URL")?;
 
-    // #252:SSRF protection - validate URL is safe before making request
-    if !is_safe_url(url)? {
-        return Err("Webhook URL blocked: internal/private addresses not allowed".into());
-    }
+    // Fix F: resolving SSRF guard with a pinned address.
+    let dest = ssrf_guard_url(url).await?;
 
-    let resp = http_client()
-        .post(url)
+    let resp = pinned_client(&dest.host, dest.addr)?
+        .post(dest.url)
         .header("Content-Type", "application/json")
         .body(r#"{"test": true}"#)
         .send()
@@ -465,8 +862,14 @@ async fn verify_splunk(stream: &LogStream) -> Result<serde_json::Value, String> 
         .and_then(|v| v.as_str())
         .ok_or("No HEC token")?;
 
-    let resp = http_client()
-        .post(format!("{url}/services/collector/event"))
+    // Fix F: the Splunk verifier previously never called the SSRF guard at
+    // all — route it through the same resolving guard and pin the address.
+    let mut base = ssrf_guard_url(url).await?;
+    base.url.set_path("/services/collector/event");
+    base.url.set_query(None);
+
+    let resp = pinned_client(&base.host, base.addr)?
+        .post(base.url)
         .header("Authorization", format!("Splunk {token}"))
         .json(&serde_json::json!({"event": "test", "sourcetype": "apexmail"}))
         .send()
@@ -490,8 +893,12 @@ async fn verify_datadog(stream: &LogStream) -> Result<serde_json::Value, String>
         .and_then(|v| v.as_str())
         .ok_or("No Datadog API key")?;
 
-    let resp = http_client()
-        .post("https://http-intake.logs.datadoghq.com/api/v2/logs")
+    // Datadog's intake host is fixed and public — still route it through the
+    // guard for uniformity (fix F: all destinations verified alike).
+    let dest = ssrf_guard_url("https://http-intake.logs.datadoghq.com/api/v2/logs").await?;
+
+    let resp = pinned_client(&dest.host, dest.addr)?
+        .post(dest.url)
         .header("DD-API-KEY", api_key)
         .json(
             &serde_json::json!([{"message": "ApexMail connectivity test", "ddsource": "apexmail"}]),

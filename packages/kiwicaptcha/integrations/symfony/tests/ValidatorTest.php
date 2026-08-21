@@ -593,6 +593,61 @@ final class ValidatorTest extends TestCase
         self::assertSame('txn-123', $validator->verifiedRequestBinding(), 'the record\'s SIGNED request binding must be exposed after a valid solve');
     }
 
+    /**
+     * The business-level regression: one solved token funds exactly ONE
+     * logical operation. The operation identity is (scope, authoritative
+     * transaction binding): the same token submitted to a different
+     * operation — a different transaction binding or a different scope —
+     * derives a different identity, and the core refuses the stored
+     * success as AlreadyConsumed. The validator surfaces that refusal
+     * through its core-failure path as invalid_or_expired, NEVER a Pass,
+     * so `if ($outcome->isOk()) { performProtectedAction(); }` can never
+     * fund a second protected action from one solve.
+     */
+    public function testSameSolvedTokenForTwoDifferentOperationsSecondIsRejectedNeverPass(): void
+    {
+        $storage = new ArrayStorage();
+        $issuer = new Issuer(new Config(secretKey: self::SECRET, targetBits: 8), $storage);
+        $verifier = new Verifier($storage);
+        $challenge = $issuer->issue('login', '198.51.100.7', 'txn-123');
+        usleep(($challenge->minDurationMs + 10) * 1000);
+        $token = $this->solveToken($challenge->prefix, $challenge->salt, $challenge->targetBits, $challenge->nonce);
+        $dto = new class {
+            public ?string $captcha = null;
+        };
+        $dto->captcha = $token;
+
+        // Operation 1: (scope login, binding txn-123) — the first Pass.
+        [$engine1] = $this->buildBindingEngine($verifier, 'txn-123');
+        $meta1 = $engine1->getMetadataFor($dto::class);
+        $meta1->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
+        self::assertCount(0, $engine1->validate($dto), 'the first operation passes');
+
+        // Operation 2: the SAME token under a DIFFERENT authoritative
+        // binding (a different transaction): a different logical operation
+        // — the second submission MUST be rejected, never Pass.
+        [$engine2] = $this->buildBindingEngine($verifier, 'txn-OTHER');
+        $meta2 = $engine2->getMetadataFor($dto::class);
+        $meta2->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
+        $violations2 = $engine2->validate($dto);
+        self::assertCount(1, $violations2);
+        self::assertSame(KiwiCaptcha::INVALID_OR_EXPIRED_ERROR, $violations2[0]->getCode(), 'a different transaction presenting the same token is rejected (AlreadyConsumed), never Pass');
+
+        // Operation 3: the SAME token under a DIFFERENT scope — also a
+        // different logical operation, refused the same way.
+        [$engine3] = $this->buildBindingEngine($verifier, 'txn-123');
+        $meta3 = $engine3->getMetadataFor($dto::class);
+        $meta3->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'signup']));
+        $violations3 = $engine3->validate($dto);
+        self::assertCount(1, $violations3);
+        self::assertSame(KiwiCaptcha::INVALID_OR_EXPIRED_ERROR, $violations3[0]->getCode(), 'a different scope presenting the same token is rejected (AlreadyConsumed), never Pass');
+
+        // The consumed recovery evidence survives both rejections.
+        $state = $storage->consumedState($challenge->nonce);
+        self::assertNotNull($state, 'the consumed evidence is retained');
+        self::assertTrue($state->consumedResult?->valid ?? false, 'the committed success is retained');
+    }
+
 // ── the authoritative transaction binding (end-to-end) ─────────────────────
 
     public function testBindingAuthorityMapsThePresentedHintToTheCanonicalBinding(): void
@@ -816,12 +871,15 @@ final class ValidatorTest extends TestCase
     /**
      * @return array{0: \Symfony\Component\Validator\Validator\ValidatorInterface, 1: RequestStack, 2: KiwiCaptchaValidator}
      */
-    private function buildRetryEngine(Verifier $verifier, ?StorageInterface $storage, string $ip = '198.51.100.7', ?string $binding = null): array
+    private function buildRetryEngine(Verifier $verifier, ?StorageInterface $storage, string $ip = '198.51.100.7', ?string $binding = null, ?string $operationId = null): array
     {
         $stack = new RequestStack();
         $request = Request::create('/', 'POST', [], [], [], ['REMOTE_ADDR' => $ip]);
         if ($binding !== null) {
             $request->attributes->set(KiwiCaptchaValidator::REQUEST_BINDING_ATTRIBUTE, $binding);
+        }
+        if ($operationId !== null) {
+            $request->attributes->set(KiwiCaptchaValidator::OPERATION_ID_ATTRIBUTE, $operationId);
         }
         $stack->push($request);
 
@@ -837,39 +895,6 @@ final class ValidatorTest extends TestCase
         $issuer = new Issuer(new Config(secretKey: self::SECRET, targetBits: 8), $storage);
 
         return $issuer->issue('login', '198.51.100.7', $binding);
-    }
-
-    /**
-     * Whether the vendored core already carries the consumed-state
-     * fields (ChallengeRecord::$consumed / $consumedResult / $consumedBinding
-     * and the wire_keys entries). The parallel core work adds them; until
-     * then the full stored-result scenarios cannot be constructed.
-     */
-    private function coreSupportsConsumedState(): bool
-    {
-        try {
-            $sample = ChallengeRecord::fromArray([
-                'nonce' => base64_encode(str_repeat('a', 32)),
-                'scope' => 'login',
-                'binding_tag' => '',
-                'issued_at' => 1_800_000_000,
-                'expires_at' => 1_800_000_120,
-                'algorithm' => 'sha256',
-                'm_kib' => 0,
-                't' => 1,
-                'p' => 1,
-                'target_bits' => 8,
-                'salt' => base64_encode('1234567890abcdef'),
-                'prefix' => 'prefix',
-                'challenge' => 'challenge',
-                'min_duration_ms' => 0,
-            ])->toArray();
-            ChallengeRecord::fromArray($sample + ['consumed' => true, 'consumed_result' => null, 'consumed_binding' => null]);
-
-            return true;
-        } catch (\Throwable) {
-            return false;
-        }
     }
 
     /**
@@ -938,20 +963,16 @@ final class ValidatorTest extends TestCase
 
     /**
      * (a) the full stored-result retry: first verification succeeds
-     * (consume transition + derive + committed result); a lost response
-     * makes the client re-submit the same token with the same binding.
-     * The retry resolves from the stored result — the same success (jti
-     * + binding exposed) with no second consume and no second derive.
-     *
-     * Requires the current core (consumed-state record fields + the
-     * stored-result re-verify path); skipped until it is vendored.
+     * (consume transition + derive + committed result) under an explicit
+     * operation id; a lost response makes the client re-submit the same
+     * token with the same binding and the same operation id. The retry
+     * resolves from the stored result — the same success (jti + binding
+     * exposed) with no second consume and no second derive. Without the
+     * operation id the same retry is refused (strict single-use: the
+     * binding alone is derivable by any holder of the token).
      */
-    public function testStoredResultRetryWithSameBindingSucceedsWithoutSecondDerive(): void
+    public function testStoredResultRetryWithSameBindingAndOperationIdSucceedsWithoutSecondDerive(): void
     {
-        if (!$this->coreSupportsConsumedState()) {
-            self::markTestSkipped('the consumed-state record + stored-result re-verify path is not vendored yet');
-        }
-
         $storage = new ConsumedStateStorage();
         $verifier = new Verifier($storage);
         $challenge = $this->issueBoundChallenge('txn-123', $storage);
@@ -959,8 +980,9 @@ final class ValidatorTest extends TestCase
         $token = $this->solveToken($challenge->prefix, $challenge->salt, $challenge->targetBits, $challenge->nonce);
 
         // first verification: real derive — consume transition + committed
-        // result (the verifier commits after deriving).
-        [$engine, $stack, $validator] = $this->buildRetryEngine($verifier, $storage, binding: 'txn-123');
+        // result (the verifier commits after deriving). The operation id
+        // names the logical operation, so the retry can prove it.
+        [$engine, $stack, $validator] = $this->buildRetryEngine($verifier, $storage, binding: 'txn-123', operationId: 'op-123');
         $dto = new class {
             public ?string $captcha = null;
         };
@@ -973,8 +995,8 @@ final class ValidatorTest extends TestCase
         self::assertSame(1, $storage->commits, 'the verifier must commit the derivation result');
 
         // lost response: the client never saw the reply and re-submits the
-        // same token with the same binding.
-        [$engine2, $stack2, $validator2] = $this->buildRetryEngine($verifier, $storage, binding: 'txn-123');
+        // same token with the same binding and the SAME operation id.
+        [$engine2, $stack2, $validator2] = $this->buildRetryEngine($verifier, $storage, binding: 'txn-123', operationId: 'op-123');
         $dto2 = new class {
             public ?string $captcha = null;
         };
@@ -982,25 +1004,40 @@ final class ValidatorTest extends TestCase
         $meta2 = $engine2->getMetadataFor($dto2::class);
         $meta2->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
 
-        self::assertCount(0, $engine2->validate($dto2), 'a retry with the SAME binding must produce the SAME success');
+        self::assertCount(0, $engine2->validate($dto2), 'a retry with the SAME binding and operation id must produce the SAME success');
         self::assertSame($challenge->nonce, $stack2->getMainRequest()?->attributes->get(KiwiCaptchaValidator::VERIFIED_JTI_ATTRIBUTE), 'the retry must expose the SAME canonical jti');
         self::assertSame('txn-123', $validator2->verifiedRequestBinding(), 'the retry must expose the stored signed binding');
-        self::assertSame(1, $storage->consumes, 'the retry must NOT consume again — the outcome came from the STORED RESULT, no second derive');
-        self::assertSame(1, $storage->commits, 'the retry must NOT commit again');
+        self::assertSame(2, $storage->consumes, 'the retry reached the consume transition (consumedBefore), but...');
+        self::assertSame(1, $storage->commits, 'the retry must NOT commit again — the outcome came from the STORED RESULT, no second derive');
         self::assertSame(0, $storage->deletes);
+
+        // The same retry WITHOUT the operation id: the derived identity no
+        // longer matches the stored one (which carries the opid component),
+        // so the core refuses the stored success as AlreadyConsumed —
+        // invalid_or_expired, never a pass. (The pure binding-only replay
+        // gate, where the identities DO match, is covered by
+        // OperationIdentityReplayTest.)
+        [$engine3, $stack3] = $this->buildRetryEngine($verifier, $storage, binding: 'txn-123');
+        $dto3 = new class {
+            public ?string $captcha = null;
+        };
+        $dto3->captcha = $token;
+        $meta3 = $engine3->getMetadataFor($dto3::class);
+        $meta3->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
+        $violations = $engine3->validate($dto3);
+        self::assertCount(1, $violations, 'a binding-only retry (no operation id) must be refused');
+        self::assertSame(KiwiCaptcha::INVALID_OR_EXPIRED_ERROR, $violations[0]->getCode());
     }
 
     /**
      * (b) the retry with a different request binding is refused
      * with invalid_or_expired — a challenge bound to one transaction is
-     * never redeemable for another, retries included.
+     * never redeemable for another, retries included (the derived
+     * operation identity differs, so the core refuses the stored success
+     * as AlreadyConsumed).
      */
     public function testStoredResultRetryWithDifferentBindingFailsInvalidOrExpired(): void
     {
-        if (!$this->coreSupportsConsumedState()) {
-            self::markTestSkipped('the consumed-state record + stored-result re-verify path is not vendored yet');
-        }
-
         $storage = new ConsumedStateStorage();
         $verifier = new Verifier($storage);
         $challenge = $this->issueBoundChallenge('txn-123', $storage);
@@ -1017,8 +1054,8 @@ final class ValidatorTest extends TestCase
         $meta->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
         self::assertCount(0, $engine->validate($dto));
 
-        // Retry with a different binding: the stored-result outcome carries
-        // the stored binding, the binding check rejects the mismatch.
+        // Retry with a different binding: a different logical operation —
+        // the derived identity no longer matches the stored one.
         [$engine2, $stack2] = $this->buildRetryEngine($verifier, $storage, binding: 'txn-OTHER');
         $dto2 = new class {
             public ?string $captcha = null;
@@ -1040,10 +1077,6 @@ final class ValidatorTest extends TestCase
      */
     public function testStoredResultRetryOfAFailedDeriveFailsInvalidOrExpired(): void
     {
-        if (!$this->coreSupportsConsumedState()) {
-            self::markTestSkipped('the consumed-state record + stored-result re-verify path is not vendored yet');
-        }
-
         $storage = new ConsumedStateStorage();
         $verifier = new Verifier($storage);
         $challenge = $this->issueBoundChallenge('txn-123', $storage);
@@ -1067,7 +1100,7 @@ final class ValidatorTest extends TestCase
         self::assertCount(1, $violations);
         self::assertSame(KiwiCaptcha::INVALID_OR_EXPIRED_ERROR, $violations[0]->getCode(), 'a stored INVALID result must resolve the retry to invalid_or_expired');
         self::assertNull($stack->getMainRequest()?->attributes->get(KiwiCaptchaValidator::VERIFIED_JTI_ATTRIBUTE));
-        self::assertSame(0, $storage->consumes, 'the retry must not re-derive a record with a committed result');
+        self::assertSame(1, $storage->commits, 'the retry must not re-derive a record with a committed result — no second commit (the consume transition only reads the stored outcome)');
     }
 
     /**
@@ -1077,10 +1110,6 @@ final class ValidatorTest extends TestCase
      */
     public function testConsumedWithoutCommittedResultStaysTemporaryUnavailable(): void
     {
-        if (!$this->coreSupportsConsumedState()) {
-            self::markTestSkipped('the consumed-state record + stored-result re-verify path is not vendored yet');
-        }
-
         $storage = new ConsumedStateStorage();
         $verifier = new Verifier($storage);
         $challenge = $this->issueBoundChallenge('txn-123', $storage);
@@ -1101,6 +1130,69 @@ final class ValidatorTest extends TestCase
         $violations = $engine->validate($dto);
         self::assertCount(1, $violations);
         self::assertSame(KiwiCaptcha::TEMPORARY_UNAVAILABLE_ERROR, $violations[0]->getCode(), 'consumed-without-result must stay indeterminate (temporary_unavailable)');
+    }
+
+    /**
+     * The ambiguous-consume stored-valid normalization is identity-gated:
+     * a ConsumeIndeterminate outcome resolves to the stored success only
+     * when the retained operation identity equals this validation's
+     * derived identity; a different operation's identity (or a plain
+     * consume that recorded none) is refused as invalid_or_expired —
+     * never a replayed success for a different operation.
+     */
+    public function testAmbiguousConsumeNormalizationIsIdentityGated(): void
+    {
+        $storage = new ConsumedStateStorage();
+        $verifier = new Verifier($storage);
+        $challenge = $this->issueBoundChallenge('txn-123', $storage);
+        usleep(($challenge->minDurationMs + 10) * 1000);
+        $token = $this->solveToken($challenge->prefix, $challenge->salt, $challenge->targetBits, $challenge->nonce);
+
+        // The original attempt consumed, derived, committed a VALID
+        // result... but its response was lost after the commit. Model the
+        // lost response on the retry: the first validation succeeds here,
+        // then a later attempt throws on consume while the record already
+        // carries the committed valid result.
+        [$engine] = $this->buildRetryEngine($verifier, $storage, binding: 'txn-123', operationId: 'op-123');
+        $dto = new class {
+            public ?string $captcha = null;
+        };
+        $dto->captcha = $token;
+        $meta = $engine->getMetadataFor($dto::class);
+        $meta->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
+        self::assertCount(0, $engine->validate($dto));
+        self::assertNotNull($storage->consumedState($challenge->nonce)?->consumedResult);
+
+        // The SAME logical operation retries, and this time the consume
+        // response is lost: ConsumeIndeterminate, normalized from the
+        // stored record — the retained identity matches the derived one,
+        // so the stored success resolves (and the replay gate accepts it:
+        // explicit operation id).
+        $storage->throwOnConsume = true;
+        [$engine2, $stack2] = $this->buildRetryEngine($verifier, $storage, binding: 'txn-123', operationId: 'op-123');
+        $dto2 = new class {
+            public ?string $captcha = null;
+        };
+        $dto2->captcha = $token;
+        $meta2 = $engine2->getMetadataFor($dto2::class);
+        $meta2->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
+        self::assertCount(0, $engine2->validate($dto2), 'the identity-matching stored success resolves the ambiguous retry');
+        self::assertSame($challenge->nonce, $stack2->getMainRequest()?->attributes->get(KiwiCaptchaValidator::VERIFIED_JTI_ATTRIBUTE));
+
+        // A DIFFERENT operation's retry under the same lost-response
+        // conditions (a different binding derives a different identity):
+        // refused, never the stored success.
+        [$engine3, $stack3] = $this->buildRetryEngine($verifier, $storage, binding: 'txn-OTHER', operationId: 'op-123');
+        $dto3 = new class {
+            public ?string $captcha = null;
+        };
+        $dto3->captcha = $token;
+        $meta3 = $engine3->getMetadataFor($dto3::class);
+        $meta3->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
+        $violations = $engine3->validate($dto3);
+        self::assertCount(1, $violations, 'a different operation must never resolve the ambiguous retry to the stored success');
+        self::assertSame(KiwiCaptcha::INVALID_OR_EXPIRED_ERROR, $violations[0]->getCode());
+        self::assertNull($stack3->getMainRequest()?->attributes->get(KiwiCaptchaValidator::VERIFIED_JTI_ATTRIBUTE));
     }
 
 // ── quic IP-migration policy ───────────────────────────────────────────────
@@ -1127,11 +1219,16 @@ final class ValidatorTest extends TestCase
 
         // Same exact IP: valid.
         self::assertTrue($verifier->verify($token, self::SECRET, 'login', '198.51.100.7')->isOk(), 'the exact bound IP verifies');
-        // A different network: the nonce-bound tag cannot match -> IpMismatch
-        // (fail closed, one-shot — the challenge is burned by the attempt).
+        // A different network: the nonce-bound tag cannot match — the
+        // cheap phase fails, but the record is already consumed, so the
+        // retained consumed evidence is preserved and the replay resolves
+        // through the consumed branch: with no identity proven, the
+        // stored success is refused as AlreadyConsumed (fail closed,
+        // one-shot — the challenge is burned by the first attempt).
         $outcome = $verifier->verify($token, self::SECRET, 'login', '203.0.113.9');
         self::assertFalse($outcome->isOk());
-        self::assertSame(\KiwiCaptcha\VerifyError::IpMismatch, $outcome->error, 'the strict IP binding must fail closed on a different source');
+        self::assertSame(\KiwiCaptcha\VerifyError::AlreadyConsumed, $outcome->error, 'an IP-mismatch replay of a consumed record is AlreadyConsumed, never a replay of the stored success');
+        self::assertNotNull($storage->find($challenge->nonce), 'the consumed recovery evidence survives the IP-mismatch replay');
 
         // Through the validator: the same mismatch collapses to
         // invalid_or_expired — the client never learns which
@@ -1358,10 +1455,14 @@ final class ValidatorTest extends TestCase
      *
      * @return array{0: \Symfony\Component\Validator\Validator\ValidatorInterface, 1: RequestStack, 2: KiwiCaptchaValidator}
      */
-    private function dispositionEngine(Verifier $verifier, RiskGateway $gateway, PostSolveDispositionStore $store, array $post = [], int $ttlMargin = 0, ?ChainedChallengeTicketService $chainTickets = null, ?RiskProfileResolver $resolver = null, ?RequestBindingAuthorityInterface $bindingAuthority = null, int $chainTtlSecs = 300, ?\BelConsulting\KiwiCaptchaBundle\SiteVerify\SiteVerifyMetadataStore $metadataStore = null, ?RequestStack $requestStack = null): array
+    private function dispositionEngine(Verifier $verifier, RiskGateway $gateway, PostSolveDispositionStore $store, array $post = [], int $ttlMargin = 0, ?ChainedChallengeTicketService $chainTickets = null, ?RiskProfileResolver $resolver = null, ?RequestBindingAuthorityInterface $bindingAuthority = null, int $chainTtlSecs = 300, ?\BelConsulting\KiwiCaptchaBundle\SiteVerify\SiteVerifyMetadataStore $metadataStore = null, ?RequestStack $requestStack = null, ?string $operationId = null): array
     {
         $stack = $requestStack ?? new RequestStack();
-        $stack->push(Request::create('/', 'POST', $post, [], [], ['REMOTE_ADDR' => '198.51.100.7']));
+        $request = Request::create('/', 'POST', $post, [], [], ['REMOTE_ADDR' => '198.51.100.7']);
+        if ($operationId !== null) {
+            $request->attributes->set(KiwiCaptchaValidator::OPERATION_ID_ATTRIBUTE, $operationId);
+        }
+        $stack->push($request);
         $validator = new KiwiCaptchaValidator(
             $verifier,
             $stack,
@@ -1504,7 +1605,7 @@ final class ValidatorTest extends TestCase
         usleep(($challenge->minDurationMs + 10) * 1000);
         $token = $this->solveToken($challenge->prefix, $challenge->salt, $challenge->targetBits, $challenge->nonce);
 
-        [$engine] = $this->dispositionEngine($this->verifier, $risk['gateway'], $store);
+        [$engine] = $this->dispositionEngine($this->verifier, $risk['gateway'], $store, operationId: 'op-retry');
         $dto = new class {
             public ?string $captcha = null;
         };
@@ -1524,7 +1625,7 @@ final class ValidatorTest extends TestCase
 
         // replay (the same token — the core replays its stored result): the
         // persisted disposition reproduces the same deny — never a pass.
-        [$engine2] = $this->dispositionEngine($this->verifier, $risk['gateway'], $store);
+        [$engine2] = $this->dispositionEngine($this->verifier, $risk['gateway'], $store, operationId: 'op-retry');
         $meta2 = $engine2->getMetadataFor($dto::class);
         $meta2->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
         $violations = $engine2->validate($dto);
@@ -1546,7 +1647,7 @@ final class ValidatorTest extends TestCase
         usleep(($challenge->minDurationMs + 10) * 1000);
         $token = $this->solveToken($challenge->prefix, $challenge->salt, $challenge->targetBits, $challenge->nonce);
 
-        [$engine] = $this->dispositionEngine($this->verifier, $risk['gateway'], $store);
+        [$engine] = $this->dispositionEngine($this->verifier, $risk['gateway'], $store, operationId: 'op-retry');
         $dto = new class {
             public ?string $captcha = null;
         };
@@ -1559,7 +1660,7 @@ final class ValidatorTest extends TestCase
         self::assertSame(KiwiCaptcha::POST_SOLVE_STEP_UP_REQUIRED, $violations[0]->getCode());
         self::assertSame(PostSolveDispositionKind::StepUp, $store->read($challenge->nonce)?->disposition?->kind, 'the StepUp disposition must be persisted per nonce');
 
-        [$engine2] = $this->dispositionEngine($this->verifier, $risk['gateway'], $store);
+        [$engine2] = $this->dispositionEngine($this->verifier, $risk['gateway'], $store, operationId: 'op-retry');
         $meta2 = $engine2->getMetadataFor($dto::class);
         $meta2->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
         $violations = $engine2->validate($dto);
@@ -1579,7 +1680,7 @@ final class ValidatorTest extends TestCase
         usleep(($challenge->minDurationMs + 10) * 1000);
         $token = $this->solveToken($challenge->prefix, $challenge->salt, $challenge->targetBits, $challenge->nonce);
 
-        [$engine, $stack] = $this->dispositionEngine($this->verifier, $risk['gateway'], $store);
+        [$engine, $stack] = $this->dispositionEngine($this->verifier, $risk['gateway'], $store, operationId: 'op-retry');
         $dto = new class {
             public ?string $captcha = null;
         };
@@ -1591,7 +1692,7 @@ final class ValidatorTest extends TestCase
         self::assertSame($challenge->nonce, $stack->getMainRequest()?->attributes->get(KiwiCaptchaValidator::VERIFIED_JTI_ATTRIBUTE), 'a fresh pass exposes the canonical jti');
         self::assertSame(PostSolveDispositionKind::Pass, $store->read($challenge->nonce)?->disposition?->kind, 'the pass disposition must be persisted per nonce');
 
-        [$engine2, $stack2] = $this->dispositionEngine($this->verifier, $risk['gateway'], $store);
+        [$engine2, $stack2] = $this->dispositionEngine($this->verifier, $risk['gateway'], $store, operationId: 'op-retry');
         $meta2 = $engine2->getMetadataFor($dto::class);
         $meta2->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
         self::assertCount(0, $engine2->validate($dto), 'a replay of a passed token must pass again');
@@ -1613,7 +1714,7 @@ final class ValidatorTest extends TestCase
         // dies before the post-solve claim (the store is unreachable) — the
         // client sees temporary_unavailable, the token is NOT burned.
         $failing = $this->faultedStore($inner, failClaim: true);
-        [$engine] = $this->dispositionEngine($this->verifier, $risk['gateway'], $failing);
+        [$engine] = $this->dispositionEngine($this->verifier, $risk['gateway'], $failing, operationId: 'op-retry');
         $dto = new class {
             public ?string $captcha = null;
         };
@@ -1629,7 +1730,7 @@ final class ValidatorTest extends TestCase
         // request 2 (retry, store recovered): the retry claims the nonce
         // fresh, computes the disposition (deny) and persists it — the
         // post-solve policy runs exactly once.
-        [$engine2] = $this->dispositionEngine($this->verifier, $risk['gateway'], $inner);
+        [$engine2] = $this->dispositionEngine($this->verifier, $risk['gateway'], $inner, operationId: 'op-retry');
         $meta2 = $engine2->getMetadataFor($dto::class);
         $meta2->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
         $violations = $engine2->validate($dto);
@@ -1656,7 +1757,7 @@ final class ValidatorTest extends TestCase
         // request 1: the claim is won, the post-solve assessment runs, then
         // the process dies before the finalize — temporary_unavailable.
         $crashed = $this->faultedStore($inner, failFinalize: true);
-        [$engine] = $this->dispositionEngine($this->verifier, $risk['gateway'], $crashed);
+        [$engine] = $this->dispositionEngine($this->verifier, $risk['gateway'], $crashed, operationId: 'op-retry');
         $meta = $engine->getMetadataFor($dto::class);
         $meta->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
         $violations = $engine->validate($dto);
@@ -1670,7 +1771,7 @@ final class ValidatorTest extends TestCase
         // (the dedupe identity is identical; a deduping backend applies it
         // exactly once).
         $advance(16);
-        [$engine2] = $this->dispositionEngine($this->verifier, $risk['gateway'], $inner);
+        [$engine2] = $this->dispositionEngine($this->verifier, $risk['gateway'], $inner, operationId: 'op-retry');
         $meta2 = $engine2->getMetadataFor($dto::class);
         $meta2->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
         $violations = $engine2->validate($dto);
@@ -1709,7 +1810,7 @@ final class ValidatorTest extends TestCase
         // request 1 wins the claim, runs the assessment, dies before the
         // finalize (lease left live).
         $crashed = $this->faultedStore($inner, failFinalize: true);
-        [$engine] = $this->dispositionEngine($this->verifier, $risk['gateway'], $crashed);
+        [$engine] = $this->dispositionEngine($this->verifier, $risk['gateway'], $crashed, operationId: 'op-retry');
         $meta = $engine->getMetadataFor($dto::class);
         $meta->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
         self::assertSame(KiwiCaptcha::TEMPORARY_UNAVAILABLE_ERROR, $engine->validate($dto)[0]->getCode());
@@ -1718,7 +1819,7 @@ final class ValidatorTest extends TestCase
         // request 2 (concurrent, same token, claim still live): the busy
         // claim is temporary_unavailable — never a second assessment, never
         // a silent pass.
-        [$engine2] = $this->dispositionEngine($this->verifier, $risk['gateway'], $inner);
+        [$engine2] = $this->dispositionEngine($this->verifier, $risk['gateway'], $inner, operationId: 'op-retry');
         $meta2 = $engine2->getMetadataFor($dto::class);
         $meta2->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
         $violations = $engine2->validate($dto);
@@ -1729,7 +1830,7 @@ final class ValidatorTest extends TestCase
         // The owner still completes after its lease expires: exactly one
         // more assessment, then the final disposition.
         $advance(16);
-        [$engine3] = $this->dispositionEngine($this->verifier, $risk['gateway'], $inner);
+        [$engine3] = $this->dispositionEngine($this->verifier, $risk['gateway'], $inner, operationId: 'op-retry');
         $meta3 = $engine3->getMetadataFor($dto::class);
         $meta3->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
         $violations = $engine3->validate($dto);
@@ -1789,7 +1890,7 @@ final class ValidatorTest extends TestCase
 
         // filled exact decoy: reassesses through the risk-v2 path; the
         // stronger-PoW demand with chaining disabled is terminal StepUp.
-        [$engine] = $this->dispositionEngine($this->verifier, $risk['gateway'], $store, [$decoy => 'filled']);
+        [$engine] = $this->dispositionEngine($this->verifier, $risk['gateway'], $store, [$decoy => 'filled'], operationId: 'op-retry');
         $meta = $engine->getMetadataFor($dto::class);
         $meta->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
         $violations = $engine->validate($dto);
@@ -1822,7 +1923,7 @@ final class ValidatorTest extends TestCase
 
         // replay of the same token: the persisted StepUp disposition
         // reproduces — the honeypot is never re-scored.
-        [$engine2] = $this->dispositionEngine($this->verifier, $risk['gateway'], $store, [$decoy => 'filled']);
+        [$engine2] = $this->dispositionEngine($this->verifier, $risk['gateway'], $store, [$decoy => 'filled'], operationId: 'op-retry');
         $meta2 = $engine2->getMetadataFor($dto::class);
         $meta2->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
         $violations = $engine2->validate($dto);
@@ -1839,7 +1940,7 @@ final class ValidatorTest extends TestCase
             public ?string $captcha = null;
         };
         $dto2->captcha = $otherToken;
-        [$engine3] = $this->dispositionEngine($this->verifier, $risk['gateway'], $store, ['decoy_00000000' => 'filled']);
+        [$engine3] = $this->dispositionEngine($this->verifier, $risk['gateway'], $store, ['decoy_00000000' => 'filled'], operationId: 'op-retry');
         $meta3 = $engine3->getMetadataFor($dto2::class);
         $meta3->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
         self::assertCount(0, $engine3->validate($dto2), 'a mismatched decoy name is not this challenge\'s decoy — no reassessment');
@@ -1854,7 +1955,7 @@ final class ValidatorTest extends TestCase
             public ?string $captcha = null;
         };
         $dto3->captcha = $thirdToken;
-        [$engine4] = $this->dispositionEngine($this->verifier, $risk['gateway'], $store, [$thirdDecoy => '']);
+        [$engine4] = $this->dispositionEngine($this->verifier, $risk['gateway'], $store, [$thirdDecoy => ''], operationId: 'op-retry');
         $meta4 = $engine4->getMetadataFor($dto3::class);
         $meta4->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
         self::assertCount(0, $engine4->validate($dto3), 'an EMPTY exact decoy is no honeypot evidence — no reassessment');
@@ -1882,7 +1983,7 @@ final class ValidatorTest extends TestCase
         // fresh: the reassessment demands Argon32 — the solved sha-8 does
         // not satisfy it, the authoritative binding resolves, the chain
         // opens: chain_required with the persisted chain id.
-        [$engine] = $this->dispositionEngine($this->verifier, $risk['gateway'], $store, chainTickets: $chainService, resolver: $resolver, bindingAuthority: $this->bindingAuthority());
+        [$engine] = $this->dispositionEngine($this->verifier, $risk['gateway'], $store, chainTickets: $chainService, resolver: $resolver, bindingAuthority: $this->bindingAuthority(), operationId: 'op-retry');
         $meta = $engine->getMetadataFor($dto::class);
         $meta->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
         $violations = $engine->validate($dto);
@@ -1904,7 +2005,7 @@ final class ValidatorTest extends TestCase
         // re-signs the ticket with the requirement's original expiry, so
         // the deterministic ticket is byte-identical (a re-signed ticket
         // can never outlive its chain state).
-        [$engine2] = $this->dispositionEngine($this->verifier, $risk['gateway'], $store, chainTickets: $chainService, resolver: $resolver, bindingAuthority: $this->bindingAuthority());
+        [$engine2] = $this->dispositionEngine($this->verifier, $risk['gateway'], $store, chainTickets: $chainService, resolver: $resolver, bindingAuthority: $this->bindingAuthority(), operationId: 'op-retry');
         $meta2 = $engine2->getMetadataFor($dto::class);
         $meta2->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
         $violations = $engine2->validate($dto);
@@ -1944,7 +2045,7 @@ final class ValidatorTest extends TestCase
         $dto->captcha = $token;
 
         // fresh: the chain opens and the disposition is persisted.
-        [$engine] = $this->dispositionEngine($this->verifier, $risk['gateway'], $store, chainTickets: $chainService, resolver: $resolver, bindingAuthority: $this->bindingAuthority());
+        [$engine] = $this->dispositionEngine($this->verifier, $risk['gateway'], $store, chainTickets: $chainService, resolver: $resolver, bindingAuthority: $this->bindingAuthority(), operationId: 'op-retry');
         $meta = $engine->getMetadataFor($dto::class);
         $meta->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
         $violations = $engine->validate($dto);
@@ -1955,7 +2056,7 @@ final class ValidatorTest extends TestCase
         // survives): the replay cannot re-sign a ticket for a chain that
         // no longer exists — fail closed.
         $chainClock += 3600;
-        [$engine2] = $this->dispositionEngine($this->verifier, $risk['gateway'], $store, chainTickets: $chainService, resolver: $resolver, bindingAuthority: $this->bindingAuthority());
+        [$engine2] = $this->dispositionEngine($this->verifier, $risk['gateway'], $store, chainTickets: $chainService, resolver: $resolver, bindingAuthority: $this->bindingAuthority(), operationId: 'op-retry');
         $meta2 = $engine2->getMetadataFor($dto::class);
         $meta2->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
         $violations = $engine2->validate($dto);
@@ -2075,7 +2176,7 @@ final class ValidatorTest extends TestCase
         // in the pending claim, then dies before the finalize —
         // temporary_unavailable.
         $crashed = $this->faultedStore($store, failFinalize: true);
-        [$engine] = $this->dispositionEngine($this->verifier, $risk['gateway'], $crashed);
+        [$engine] = $this->dispositionEngine($this->verifier, $risk['gateway'], $crashed, operationId: 'op-retry');
         $meta = $engine->getMetadataFor($dto::class);
         $meta->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
         $violations = $engine->validate($dto);
@@ -2088,7 +2189,7 @@ final class ValidatorTest extends TestCase
         // completes the pass with the original decision id, never a fresh
         // one.
         $advance(16);
-        [$engine2] = $this->dispositionEngine($this->verifier, $risk['gateway'], $store);
+        [$engine2] = $this->dispositionEngine($this->verifier, $risk['gateway'], $store, operationId: 'op-retry');
         $meta2 = $engine2->getMetadataFor($dto::class);
         $meta2->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
         self::assertCount(0, $engine2->validate($dto), 'the takeover completes the pass');
@@ -2134,7 +2235,7 @@ final class ValidatorTest extends TestCase
         // NOT consumed (the requirement lookup ran before the atomic
         // claim-with-decision).
         $failing->failObligationChainId = true;
-        [$engine] = $this->dispositionEngine($this->verifier, $risk['gateway'], $store, chainTickets: $chainService, bindingAuthority: $this->bindingAuthority(), metadataStore: $metaStore, requestStack: $stack);
+        [$engine] = $this->dispositionEngine($this->verifier, $risk['gateway'], $store, chainTickets: $chainService, bindingAuthority: $this->bindingAuthority(), metadataStore: $metaStore, requestStack: $stack, operationId: 'op-retry');
         $meta = $engine->getMetadataFor($dto::class);
         $meta->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
         $violations = $engine->validate($dto);
@@ -2148,7 +2249,7 @@ final class ValidatorTest extends TestCase
         // with the claim and the final disposition confirms the original
         // decision id — never a null handle.
         $failing->failObligationChainId = false;
-        [$engine2] = $this->dispositionEngine($this->verifier, $risk['gateway'], $store, chainTickets: $chainService, bindingAuthority: $this->bindingAuthority(), metadataStore: $metaStore, requestStack: $stack);
+        [$engine2] = $this->dispositionEngine($this->verifier, $risk['gateway'], $store, chainTickets: $chainService, bindingAuthority: $this->bindingAuthority(), metadataStore: $metaStore, requestStack: $stack, operationId: 'op-retry');
         $meta2 = $engine2->getMetadataFor($dto::class);
         $meta2->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
         self::assertCount(0, $engine2->validate($dto), 'the retry passes after the backend recovers');
@@ -2259,7 +2360,7 @@ final class ValidatorTest extends TestCase
 
         // The signing takes the expiry from the exact chain X's record
         // (via requirementFor).
-        [$engine] = $this->dispositionEngine($this->verifier, $risk['gateway'], $store, chainTickets: $chainService, resolver: $resolver, bindingAuthority: $this->bindingAuthority());
+        [$engine] = $this->dispositionEngine($this->verifier, $risk['gateway'], $store, chainTickets: $chainService, resolver: $resolver, bindingAuthority: $this->bindingAuthority(), operationId: 'op-retry');
         $meta = $engine->getMetadataFor($dto::class);
         $meta->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
         $violations = $engine->validate($dto);
@@ -2285,7 +2386,7 @@ final class ValidatorTest extends TestCase
         self::assertNotSame($chainX->chainId, $chainY->chainId, 'the cleared obligation opens a FRESH chain');
         self::assertSame($chainY->chainId, $chainService->findOpenRequirement('login', 'auth-txn-1', 1)?->chainId, 'Y now owns the transaction obligation');
 
-        [$engine2] = $this->dispositionEngine($this->verifier, $risk['gateway'], $store, chainTickets: $chainService, resolver: $resolver, bindingAuthority: $this->bindingAuthority());
+        [$engine2] = $this->dispositionEngine($this->verifier, $risk['gateway'], $store, chainTickets: $chainService, resolver: $resolver, bindingAuthority: $this->bindingAuthority(), operationId: 'op-retry');
         $meta2 = $engine2->getMetadataFor($dto::class);
         $meta2->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
         $violations = $engine2->validate($dto);
@@ -2331,7 +2432,7 @@ final class ValidatorTest extends TestCase
         $record['disposition'] = new PostSolveDisposition(PostSolveDispositionKind::ChainRequired, 'decision-1', $chainX->chainId, $chainX->expiresAt + 1000);
         $this->injectDispositionRecord($store, $nonce, $record);
 
-        [$engine] = $this->dispositionEngine($this->verifier, $risk['gateway'], $store, chainTickets: $chainService, resolver: $resolver, bindingAuthority: $this->bindingAuthority());
+        [$engine] = $this->dispositionEngine($this->verifier, $risk['gateway'], $store, chainTickets: $chainService, resolver: $resolver, bindingAuthority: $this->bindingAuthority(), operationId: 'op-retry');
         $meta = $engine->getMetadataFor($dto::class);
         $meta->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
         $violations = $engine->validate($dto);
@@ -2342,7 +2443,7 @@ final class ValidatorTest extends TestCase
         // The matching value signs normally with the exact chain's bound.
         $record['disposition'] = new PostSolveDisposition(PostSolveDispositionKind::ChainRequired, 'decision-1', $chainX->chainId, $chainX->expiresAt);
         $this->injectDispositionRecord($store, $nonce, $record);
-        [$engine2] = $this->dispositionEngine($this->verifier, $risk['gateway'], $store, chainTickets: $chainService, resolver: $resolver, bindingAuthority: $this->bindingAuthority());
+        [$engine2] = $this->dispositionEngine($this->verifier, $risk['gateway'], $store, chainTickets: $chainService, resolver: $resolver, bindingAuthority: $this->bindingAuthority(), operationId: 'op-retry');
         $meta2 = $engine2->getMetadataFor($dto::class);
         $meta2->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
         $violations = $engine2->validate($dto);
@@ -2383,7 +2484,7 @@ final class ValidatorTest extends TestCase
         };
         $dto->captcha = $token;
 
-        [$engine] = $this->dispositionEngine($verifier, $risk['gateway'], $store, ttlMargin: 5, chainTickets: $chainService, resolver: $resolver, bindingAuthority: $this->bindingAuthority());
+        [$engine] = $this->dispositionEngine($verifier, $risk['gateway'], $store, ttlMargin: 5, chainTickets: $chainService, resolver: $resolver, bindingAuthority: $this->bindingAuthority(), operationId: 'op-123');
         $meta = $engine->getMetadataFor($dto::class);
         $meta->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
         $violations = $engine->validate($dto);
@@ -2403,17 +2504,25 @@ final class ValidatorTest extends TestCase
         self::assertSame('complete', $record->state);
         self::assertSame($chainId, $record->disposition?->chainId, 'the survived disposition keeps the SAME chain id');
 
-        // The expired token itself is refused by the core (the stored
-        // result's retryable window is the token validity) — never a pass,
-        // never a fresh assessment, and the disposition is untouched.
-        [$engine2] = $this->dispositionEngine($verifier, $risk['gateway'], $store, ttlMargin: 5, chainTickets: $chainService, resolver: $resolver, bindingAuthority: $this->bindingAuthority());
+        // The expired token replayed by the EXACT same logical operation
+        // (the validator derives the operation identity from the scope,
+        // the authoritative transaction binding and the explicit
+        // kiwi_operation_id, so the retry carries the same identity as the
+        // original solve) reproduces the retained deterministic outcome:
+        // the core's committed result is expiry-exempt — it was durably
+        // recorded only after the original final expiry check passed —
+        // and the disposition replay contract returns the same
+        // chain_required. The protected action is refused (never a pass,
+        // never a fresh assessment), and the persisted disposition is
+        // untouched.
+        [$engine2] = $this->dispositionEngine($verifier, $risk['gateway'], $store, ttlMargin: 5, chainTickets: $chainService, resolver: $resolver, bindingAuthority: $this->bindingAuthority(), operationId: 'op-123');
         $meta2 = $engine2->getMetadataFor($dto::class);
         $meta2->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
         $violations = $engine2->validate($dto);
         self::assertCount(1, $violations);
-        self::assertSame(KiwiCaptcha::INVALID_OR_EXPIRED_ERROR, $violations[0]->getCode(), 'the expired token is refused by the core — never a pass');
-        self::assertSame(1, \count($risk['store']->observations), 'the expired-token attempt must not reassess');
-        self::assertSame($chainId, $store->read($nonce)?->disposition?->chainId, 'the refused replay must not disturb the persisted disposition');
+        self::assertSame(KiwiCaptchaValidator::CHAIN_REQUIRED_ERROR, $violations[0]->getCode(), 'the identity-proven expired replay reproduces the retained chain_required disposition — never a pass');
+        self::assertSame(1, \count($risk['store']->observations), 'the stored-result replay must not reassess');
+        self::assertSame($chainId, $store->read($nonce)?->disposition?->chainId, 'the replayed disposition keeps the SAME chain id');
 
         // The disposition outlives the retained core-result window (token
         // lifetime + margin = 7 s): still complete past it, expiring only
@@ -2651,7 +2760,7 @@ final class ValidatorTest extends TestCase
             public ?string $captcha = null;
         };
         $dto->captcha = $token2;
-        [$engine] = $this->dispositionEngine($this->verifier, $risk['gateway'], $store, chainTickets: $failingService, bindingAuthority: $this->bindingAuthority());
+        [$engine] = $this->dispositionEngine($this->verifier, $risk['gateway'], $store, chainTickets: $failingService, bindingAuthority: $this->bindingAuthority(), operationId: 'op-retry');
         $meta = $engine->getMetadataFor($dto::class);
         $meta->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
         $violations = $engine->validate($dto);
@@ -2664,7 +2773,7 @@ final class ValidatorTest extends TestCase
         // The transition recovers: the retry completes the terminal
         // step-up.
         $failing->failStepUpRequired = false;
-        [$engine2] = $this->dispositionEngine($this->verifier, $risk['gateway'], $store, chainTickets: $failingService, bindingAuthority: $this->bindingAuthority());
+        [$engine2] = $this->dispositionEngine($this->verifier, $risk['gateway'], $store, chainTickets: $failingService, bindingAuthority: $this->bindingAuthority(), operationId: 'op-retry');
         $meta2 = $engine2->getMetadataFor($dto::class);
         $meta2->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
         $violations2 = $engine2->validate($dto);
@@ -2844,7 +2953,7 @@ final class ValidatorTest extends TestCase
             public ?string $captcha = null;
         };
         $dtoA->captcha = $tokenA;
-        [$engineA] = $this->dispositionEngine($this->verifier, $risk['gateway'], $store, chainTickets: $chainService, bindingAuthority: $this->bindingAuthority());
+        [$engineA] = $this->dispositionEngine($this->verifier, $risk['gateway'], $store, chainTickets: $chainService, bindingAuthority: $this->bindingAuthority(), operationId: 'op-retry');
         $metaA = $engineA->getMetadataFor($dtoA::class);
         $metaA->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
         $violationsA = $engineA->validate($dtoA);
@@ -2863,7 +2972,7 @@ final class ValidatorTest extends TestCase
         };
         $dtoB->captcha = $tokenB;
         $failing->failTransactionDenied = true;
-        [$engineB] = $this->dispositionEngine($this->verifier, $risk['gateway'], $store, chainTickets: $chainService, bindingAuthority: $this->bindingAuthority());
+        [$engineB] = $this->dispositionEngine($this->verifier, $risk['gateway'], $store, chainTickets: $chainService, bindingAuthority: $this->bindingAuthority(), operationId: 'op-retry');
         $metaB = $engineB->getMetadataFor($dtoB::class);
         $metaB->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
         $violationsB = $engineB->validate($dtoB);
@@ -2876,7 +2985,7 @@ final class ValidatorTest extends TestCase
         // retry completes the terminalization and the denial.
         $advance(16);
         $failing->failTransactionDenied = false;
-        [$engineB2] = $this->dispositionEngine($this->verifier, $risk['gateway'], $store, chainTickets: $chainService, bindingAuthority: $this->bindingAuthority());
+        [$engineB2] = $this->dispositionEngine($this->verifier, $risk['gateway'], $store, chainTickets: $chainService, bindingAuthority: $this->bindingAuthority(), operationId: 'op-retry');
         $metaB2 = $engineB2->getMetadataFor($dtoB::class);
         $metaB2->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
         $violationsB2 = $engineB2->validate($dtoB);
@@ -2960,7 +3069,7 @@ final class ValidatorTest extends TestCase
                 $risk['store']->setVector(SignalVector::fromArray($vectors[$assessment]));
             }
 
-            [$engine] = $this->dispositionEngine($this->verifier, $risk['gateway'], $store, chainTickets: $chainService, resolver: $resolver, bindingAuthority: $this->bindingAuthority(), metadataStore: $metaStore);
+            [$engine] = $this->dispositionEngine($this->verifier, $risk['gateway'], $store, chainTickets: $chainService, resolver: $resolver, bindingAuthority: $this->bindingAuthority(), metadataStore: $metaStore, operationId: 'op-retry');
             $meta = $engine->getMetadataFor($dto::class);
             $meta->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
             $violations = $engine->validate($dto);
@@ -2974,7 +3083,7 @@ final class ValidatorTest extends TestCase
             // replay of S (the stored-result retry): the same terminal
             // result — never Pass, never 503 (the replay path is
             // consistent).
-            [$engine2] = $this->dispositionEngine($this->verifier, $risk['gateway'], $store, chainTickets: $chainService, resolver: $resolver, bindingAuthority: $this->bindingAuthority(), metadataStore: $metaStore);
+            [$engine2] = $this->dispositionEngine($this->verifier, $risk['gateway'], $store, chainTickets: $chainService, resolver: $resolver, bindingAuthority: $this->bindingAuthority(), metadataStore: $metaStore, operationId: 'op-retry');
             $meta2 = $engine2->getMetadataFor($dto::class);
             $meta2->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
             $violations2 = $engine2->validate($dto);
@@ -3018,7 +3127,7 @@ final class ValidatorTest extends TestCase
             public ?string $captcha = null;
         };
         $dtoB->captcha = $tokenB;
-        [$engineB] = $this->dispositionEngine($this->verifier, $risk['gateway'], $store, chainTickets: $chainService, bindingAuthority: $this->bindingAuthority());
+        [$engineB] = $this->dispositionEngine($this->verifier, $risk['gateway'], $store, chainTickets: $chainService, bindingAuthority: $this->bindingAuthority(), operationId: 'op-retry');
         $metaB = $engineB->getMetadataFor($dtoB::class);
         $metaB->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
         $violationsB = $engineB->validate($dtoB);
@@ -3039,7 +3148,7 @@ final class ValidatorTest extends TestCase
             public ?string $captcha = null;
         };
         $dto->captcha = $tokenS;
-        [$engine] = $this->dispositionEngine($this->verifier, $risk['gateway'], $store, chainTickets: $chainService, resolver: $resolver, bindingAuthority: $this->bindingAuthority(), metadataStore: $metaStore);
+        [$engine] = $this->dispositionEngine($this->verifier, $risk['gateway'], $store, chainTickets: $chainService, resolver: $resolver, bindingAuthority: $this->bindingAuthority(), metadataStore: $metaStore, operationId: 'op-retry');
         $meta = $engine->getMetadataFor($dto::class);
         $meta->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
         $violations = $engine->validate($dto);
@@ -3051,7 +3160,7 @@ final class ValidatorTest extends TestCase
         self::assertSame('denied', $chainService->requirementFor($chainId)?->state, 'the chain stays terminal denied');
 
         // replay of S: the same terminal denial — never Pass, never 503.
-        [$engine2] = $this->dispositionEngine($this->verifier, $risk['gateway'], $store, chainTickets: $chainService, resolver: $resolver, bindingAuthority: $this->bindingAuthority(), metadataStore: $metaStore);
+        [$engine2] = $this->dispositionEngine($this->verifier, $risk['gateway'], $store, chainTickets: $chainService, resolver: $resolver, bindingAuthority: $this->bindingAuthority(), metadataStore: $metaStore, operationId: 'op-retry');
         $meta2 = $engine2->getMetadataFor($dto::class);
         $meta2->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
         $violations2 = $engine2->validate($dto);
@@ -3088,7 +3197,7 @@ final class ValidatorTest extends TestCase
             public ?string $captcha = null;
         };
         $dtoB->captcha = $tokenB;
-        [$engineB] = $this->dispositionEngine($this->verifier, $risk['gateway'], $store, chainTickets: $chainService, bindingAuthority: $this->bindingAuthority());
+        [$engineB] = $this->dispositionEngine($this->verifier, $risk['gateway'], $store, chainTickets: $chainService, bindingAuthority: $this->bindingAuthority(), operationId: 'op-retry');
         $metaB = $engineB->getMetadataFor($dtoB::class);
         $metaB->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
         $violationsB = $engineB->validate($dtoB);
@@ -3108,7 +3217,7 @@ final class ValidatorTest extends TestCase
             public ?string $captcha = null;
         };
         $dto->captcha = $tokenS;
-        [$engine] = $this->dispositionEngine($this->verifier, $risk['gateway'], $store, chainTickets: $chainService, resolver: $resolver, bindingAuthority: $this->bindingAuthority());
+        [$engine] = $this->dispositionEngine($this->verifier, $risk['gateway'], $store, chainTickets: $chainService, resolver: $resolver, bindingAuthority: $this->bindingAuthority(), operationId: 'op-retry');
         $meta = $engine->getMetadataFor($dto::class);
         $meta->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
         $violations = $engine->validate($dto);
@@ -3120,7 +3229,7 @@ final class ValidatorTest extends TestCase
         self::assertSame('step_up_required', $chainService->requirementFor($chainId)?->state, 'the chain stays terminal step_up_required');
 
         // replay of S: the same terminal step-up — never Pass, never 503.
-        [$engine2] = $this->dispositionEngine($this->verifier, $risk['gateway'], $store, chainTickets: $chainService, resolver: $resolver, bindingAuthority: $this->bindingAuthority());
+        [$engine2] = $this->dispositionEngine($this->verifier, $risk['gateway'], $store, chainTickets: $chainService, resolver: $resolver, bindingAuthority: $this->bindingAuthority(), operationId: 'op-retry');
         $meta2 = $engine2->getMetadataFor($dto::class);
         $meta2->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
         $violations2 = $engine2->validate($dto);
@@ -3201,7 +3310,7 @@ final class ValidatorTest extends TestCase
             public ?string $captcha = null;
         };
         $dtoA->captcha = $tokenA;
-        [$engineA] = $this->dispositionEngine($this->verifier, $risk['gateway'], $store, chainTickets: $chainService, bindingAuthority: $this->bindingAuthority());
+        [$engineA] = $this->dispositionEngine($this->verifier, $risk['gateway'], $store, chainTickets: $chainService, bindingAuthority: $this->bindingAuthority(), operationId: 'op-retry');
         $metaA = $engineA->getMetadataFor($dtoA::class);
         $metaA->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
         $violationsA = $engineA->validate($dtoA);
@@ -3222,7 +3331,7 @@ final class ValidatorTest extends TestCase
         };
         $dtoB->captcha = $tokenB;
         $faulted = $this->faultedStore($store, failFinalize: true);
-        [$engineB] = $this->dispositionEngine($this->verifier, $risk['gateway'], $faulted, chainTickets: $chainService, bindingAuthority: $this->bindingAuthority());
+        [$engineB] = $this->dispositionEngine($this->verifier, $risk['gateway'], $faulted, chainTickets: $chainService, bindingAuthority: $this->bindingAuthority(), operationId: 'op-retry');
         $metaB = $engineB->getMetadataFor($dtoB::class);
         $metaB->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
         $violationsB = $engineB->validate($dtoB);
@@ -3235,7 +3344,7 @@ final class ValidatorTest extends TestCase
         // dominance rule rediscovers the terminal transaction and
         // reconstructs the terminal disposition — persisted AS Deny.
         $advance(16);
-        [$engineB2] = $this->dispositionEngine($this->verifier, $risk['gateway'], $store, chainTickets: $chainService, bindingAuthority: $this->bindingAuthority());
+        [$engineB2] = $this->dispositionEngine($this->verifier, $risk['gateway'], $store, chainTickets: $chainService, bindingAuthority: $this->bindingAuthority(), operationId: 'op-retry');
         $metaB2 = $engineB2->getMetadataFor($dtoB::class);
         $metaB2->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
         $violationsB2 = $engineB2->validate($dtoB);

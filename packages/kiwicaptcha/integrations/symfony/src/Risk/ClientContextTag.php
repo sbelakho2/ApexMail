@@ -41,11 +41,11 @@ final class ClientContextTag
      * Derives the bounded tag: base36 of the top `BITS` bits of
      * sha256(deployment | session | descriptor).
      *
-     * Deterministic within (deployment, session, descriptor) — there is no
-     * time input, so the tag is identical whenever it is computed for the
-     * same continuity session and the same coarse capabilities: the
-     * session's first tag stays the baseline for its whole lifetime.
-     * Changing the session or the descriptor produces a different tag.
+     * Deterministic within (deployment, session, descriptor), with no time
+     * input: the tag is identical whenever it is computed for the same
+     * continuity session and the same coarse capabilities. The session's
+     * first tag stays the baseline for its whole lifetime. Changing the
+     * session or the descriptor produces a different tag.
      */
     public static function derive(string $deployment, string $session, string $descriptor): string
     {

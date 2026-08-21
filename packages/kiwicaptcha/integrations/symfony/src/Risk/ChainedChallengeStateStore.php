@@ -122,12 +122,11 @@ interface ChainedChallengeStateStore
      *
      * @return array{stage1Nonce: string, scope: string, requestBinding: ?string, requiredAction: string, requiredRank: int, policyVersion: int, chainDepth: int, state: 'available'|'reserved'|'issued'|'verified'|'step_up_required'|'denied'|'completed', owner: ?string, leaseUntil: ?int, stage2Nonce: ?string, obligationId: string, expiresAt: int}|null
      *
-     * @throws MalformedChainedChallengeStateException when the record
-     *                                                 violates the strict
-     *                                                 v2 schema (fail
-     *                                                 closed; the caller
+     * @throws MalformedChainedChallengeStateException on a strict-schema
+     *                                                 violation (fail
+     *                                                 closed); the caller
      *                                                 answers
-     *                                                 temporary-unavailable).
+     *                                                 temporary-unavailable.
      */
     public function read(string $chainId): ?array;
 

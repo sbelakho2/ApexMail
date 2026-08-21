@@ -167,7 +167,7 @@
 116 packages/kiwicaptcha/integrations/symfony/Resources/public/widget-driver.js
 0 packages/kiwicaptcha/integrations/symfony/bin/sync-assets.sh
 3 packages/kiwicaptcha/integrations/symfony/docs/chained-challenges.md
-8 packages/kiwicaptcha/integrations/symfony/docs/claims-registry.md
+7 packages/kiwicaptcha/integrations/symfony/docs/claims-registry.md
 2 packages/kiwicaptcha/integrations/symfony/docs/configuration.md
 5 packages/kiwicaptcha/integrations/symfony/docs/getting-started.md
 0 packages/kiwicaptcha/integrations/symfony/docs/glossary.md
@@ -332,4 +332,4 @@
 0 tests/browser/specs/risk-v2.spec.mjs
 2 tests/browser/specs/security.spec.mjs
 1 tests/browser/specs/widget.spec.mjs
-TOTAL 976
+TOTAL 975

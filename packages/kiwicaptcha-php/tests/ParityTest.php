@@ -115,7 +115,8 @@ final class ParityTest extends TestCase
     public function testReplayReturnsTheCommittedStoredOutcome(): void
     {
         // The record is consumed but kept until its TTL, and the
-        // deterministic result is committed; a replay of the same token
+        // deterministic result is committed; a replay of the same token by
+        // the exact same logical operation (the same operation identity)
         // returns the same Valid outcome without re-deriving (the bundle
         // dedupes same-binding retries at the validator).
         $storage = new ArrayStorage();
@@ -123,9 +124,10 @@ final class ParityTest extends TestCase
 
         $verifier = new Verifier($storage, now: static fn (): int => Vectors::NOW, acceptLegacyV1: true);
         $token = $this->tokenFor(Vectors::SHA);
+        $identity = 'op-'.hash('sha256', 'parity-replay');
 
-        self::assertTrue($verifier->verify($token, Vectors::SECRET, 'login', Vectors::CLIENT_IP)->isOk());
-        $outcome = $verifier->verify($token, Vectors::SECRET, 'login', Vectors::CLIENT_IP);
+        self::assertTrue($verifier->verify($token, Vectors::SECRET, 'login', Vectors::CLIENT_IP, operationIdentity: $identity)->isOk());
+        $outcome = $verifier->verify($token, Vectors::SECRET, 'login', Vectors::CLIENT_IP, operationIdentity: $identity);
         self::assertTrue($outcome->isOk(), sprintf('a replay must return the committed stored outcome, got %s', $outcome->code()));
         self::assertSame(Vectors::SHA['nonce'], $outcome->nonce(), 'the replay exposes the same nonce');
     }

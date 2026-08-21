@@ -5,6 +5,9 @@ declare(strict_types=1);
 namespace BelConsulting\KiwiCaptchaBundle\Tests\Fixtures;
 
 use KiwiCaptcha\ChallengeRecord;
+use KiwiCaptcha\ConsumedRecord;
+use KiwiCaptcha\ConsumedStateReadableInterface;
+use KiwiCaptcha\OperationIdentityAwareStorageInterface;
 use KiwiCaptcha\Storage\ArrayStorage;
 use KiwiCaptcha\StorageInterface;
 
@@ -12,13 +15,16 @@ use KiwiCaptcha\StorageInterface;
  * Emulates the consumed-state storage contract on top of an
  * ArrayStorage: consume() is a state transition (pending -> consumed)
  * rather than a delete, commitResult() records the derivation outcome,
- * and find() attaches the consumed state when the core's
- * ChallengeRecord supports it. `throwOnConsume` simulates a lost consume
- * response (the wire failure that produces ConsumeIndeterminate). Every
- * transition is counted (`consumes`, `deletes`, `commits`) so tests can
- * assert "no second derive / no re-consume" via the storage counters.
+ * and consumedState() is the read-only retained-state read the core and
+ * the validator's ambiguous-consume normalization use. The identity-
+ * aware consume records the logical-operation identity atomically with
+ * the state flip, exactly like the Redis/array backends.
+ * `throwOnConsume` simulates a lost consume response (the wire failure
+ * that produces ConsumeIndeterminate). Every transition is counted
+ * (`consumes`, `deletes`, `commits`) so tests can assert "no second
+ * derive / no re-consume" via the storage counters.
  */
-final class ConsumedStateStorage implements StorageInterface
+final class ConsumedStateStorage implements StorageInterface, ConsumedStateReadableInterface, OperationIdentityAwareStorageInterface
 {
     public int $consumes = 0;
     public int $deletes = 0;
@@ -26,12 +32,6 @@ final class ConsumedStateStorage implements StorageInterface
 
     /** When true, consume() throws — simulating a lost response. */
     public bool $throwOnConsume = false;
-
-    /** @var array<string, true> nonces in the consumed state */
-    public array $consumed = [];
-
-    /** @var array<string, array{0: bool, 1: ?string}> nonce => [valid, binding] */
-    public array $committed = [];
 
     public function __construct(private readonly ArrayStorage $inner = new ArrayStorage())
     {
@@ -47,25 +47,29 @@ final class ConsumedStateStorage implements StorageInterface
         return $this->inner->find($nonce);
     }
 
-                public function consumedState(string $nonce): ?\KiwiCaptcha\ConsumedRecord
-            {
-                return null;
-            }
+    public function consumedState(string $nonce): ?ConsumedRecord
+    {
+        return $this->inner->consumedState($nonce);
+    }
 
-public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
+    public function consume(string $nonce): ?ConsumedRecord
     {
         if ($this->throwOnConsume) {
             throw new \RuntimeException('simulated lost consume response');
         }
         $this->consumes++;
-        $record = $this->inner->find($nonce);
-        if ($record === null) {
-            return null;
-        }
-        // The consumed-state transition: the record persists, the state flips.
-        $this->consumed[$nonce] = true;
 
-        return new \KiwiCaptcha\ConsumedRecord($record, true, false, null);
+        return $this->inner->consume($nonce);
+    }
+
+    public function consumeWithOperationIdentity(string $nonce, ?string $operationIdentity): ?ConsumedRecord
+    {
+        if ($this->throwOnConsume) {
+            throw new \RuntimeException('simulated lost consume response');
+        }
+        $this->consumes++;
+
+        return $this->inner->consumeWithOperationIdentity($nonce, $operationIdentity);
     }
 
     public function delete(string $nonce): void
@@ -74,38 +78,16 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         $this->inner->delete($nonce);
     }
 
-    /** @internal test hook: commit the outcome of a derivation (new-core API). */
     public function commitResult(string $nonce, bool $valid, ?string $binding): bool
     {
         $this->commits++;
-        $this->committed[$nonce] = [$valid, $binding];
 
-        return true;
+        return $this->inner->commitResult($nonce, $valid, $binding);
     }
 
     /** @internal test hook: transition a record to consumed without a result. */
     public function transitionConsumed(string $nonce): void
     {
-        $this->consumed[$nonce] = true;
-    }
-
-    /**
-     * Attach the consumed-state fields to the record when the core's
-     * ChallengeRecord supports them (the current wire_keys); on cores that
-     * predate the transition the plain record is returned (consumed records
-     * were deleted there anyway).
-     */
-    private function withConsumedState(ChallengeRecord $record): ChallengeRecord
-    {
-        try {
-            $data = $record->toArray();
-            $data['consumed'] = isset($this->consumed[$record->nonce]);
-            $data['consumed_result'] = $this->committed[$record->nonce][0] ?? null;
-            $data['consumed_binding'] = $this->committed[$record->nonce][1] ?? null;
-
-            return ChallengeRecord::fromArray($data);
-        } catch (\Throwable) {
-            return $record;
-        }
+        $this->inner->consume($nonce);
     }
 }

@@ -3,28 +3,46 @@
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
 use chrono::{Duration, Utc};
+use hkdf::Hkdf;
 use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use tokio::sync::RwLock;
 use tracing::info;
 use uuid::Uuid;
+use zeroize::Zeroizing;
 
 use crate::config::SecurityConfig;
 use crate::types::*;
 
 // ── Audit Service ──────────────────────────────────────────
 
+/// HKDF info label for the audit-log HMAC subkey.
+const AUDIT_HMAC_INFO: &[u8] = b"apexmail-isolation/audit-hmac/v1";
+
+/// Derive a dedicated HMAC subkey from the master encryption key via
+/// HKDF-SHA256. The master key itself must never be used directly as an HMAC
+/// key:compromise of one usage must not imply compromise of the other, and
+/// the audit hash chain must be verifiable without exposing the KEK.
+fn derive_audit_hmac_key(master_key: &str) -> Zeroizing<String> {
+    let hk = Hkdf::<Sha256>::new(None, master_key.as_bytes());
+    let mut okm = [0u8; 32];
+    // 32 bytes is a valid HKDF-SHA256 output length, expand cannot fail.
+    hk.expand(AUDIT_HMAC_INFO, &mut okm)
+        .expect("32-byte HKDF-SHA256 output is always valid");
+    Zeroizing::new(hex::encode(okm))
+}
+
 pub struct AuditService {
     db: PgPool,
     config: SecurityConfig,
-    signing_key: String,
+    signing_key: Zeroizing<String>,
     buffer: RwLock<Vec<AuditEvent>>,
 }
 
 impl AuditService {
     pub fn new(db: PgPool, config: SecurityConfig) -> Self {
-        let signing_key = config.encryption_key.to_string(); // use as HMAC key
+        let signing_key = derive_audit_hmac_key(&config.encryption_key);
         Self {
             db,
             config,
@@ -765,6 +783,34 @@ mod tests {
             ));
             assert_eq!(buf.len(), 2);
         });
+    }
+
+    #[test]
+    fn test_audit_hmac_key_is_derived_not_master() {
+        let master = "test-key-for-audit-at-least-32-chars!!";
+        let derived = derive_audit_hmac_key(master);
+        // The HMAC subkey must NOT be the master KEK itself.
+        assert_ne!(derived.as_str(), master);
+        // Deterministic derivation:the same master yields the same subkey.
+        assert_eq!(derived.as_str(), derive_audit_hmac_key(master).as_str());
+        // Different master → different subkey.
+        assert_ne!(
+            derived.as_str(),
+            derive_audit_hmac_key("another-key-also-at-least-32-characters").as_str()
+        );
+        // 32 bytes hex-encoded.
+        assert_eq!(derived.len(), 64);
+        assert!(derived.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn test_audit_service_uses_derived_signing_key() {
+        let svc = test_service();
+        assert_ne!(
+            svc.signing_key.as_str(),
+            "test-key-for-audit-at-least-32-chars!!",
+            "AuditService must not use the master KEK directly as its HMAC key"
+        );
     }
 
     fn test_runtime() -> &'static tokio::runtime::Runtime {

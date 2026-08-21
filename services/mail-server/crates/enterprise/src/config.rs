@@ -290,6 +290,15 @@ pub struct Config {
     pub node_env: String,
     pub jwt_secret: String,
     pub jwt_public_key_pem: String,
+    /// Fix J-1: optional pinned JWT audience (`JWT_AUDIENCE`). When set,
+    /// tokens whose `aud` does not match are rejected.
+    pub jwt_audience: Option<String>,
+    /// Fix J-1: optional pinned JWT issuer (`JWT_ISSUER`). When set, tokens
+    /// whose `iss` does not match are rejected.
+    pub jwt_issuer: Option<String>,
+    /// Fix H-3: optional bearer token that grants access to `/metrics` from
+    /// non-loopback peers (`METRICS_TOKEN`).
+    pub metrics_token: Option<String>,
     pub db: DatabaseConfig,
     pub redis: RedisConfig,
     pub sso: SSOConfig,
@@ -367,6 +376,18 @@ impl Config {
             node_env,
             jwt_secret,
             jwt_public_key_pem,
+            jwt_audience: env::var("JWT_AUDIENCE")
+                .ok()
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty()),
+            jwt_issuer: env::var("JWT_ISSUER")
+                .ok()
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty()),
+            metrics_token: env::var("METRICS_TOKEN")
+                .ok()
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty()),
             db: DatabaseConfig::from_env(),
             redis: RedisConfig::from_env(),
             sso: {
@@ -512,6 +533,16 @@ impl Config {
         // Validate JWT public key PEM in production
         if self.node_env == "production" && self.jwt_public_key_pem.trim().is_empty() {
             return Err("JWT_PUBLIC_KEY_PEM must be set in production".into());
+        }
+
+        // Fix H-2: log-stream destination secrets cannot be protected at rest
+        // without a key — require one in production instead of silently
+        // storing credentials in plaintext.
+        if self.node_env == "production" && self.log_stream.encryption_key.trim().is_empty() {
+            return Err(
+                "LOG_STREAM_ENCRYPTION_KEY must be set in production to encrypt destination credentials at rest"
+                    .into(),
+            );
         }
 
         // Validate SSO secrets when their features are enabled

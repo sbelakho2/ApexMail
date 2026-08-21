@@ -6,7 +6,7 @@ The Rust implementation (`packages/kiwicaptcha-risk`) and the PHP
 implementation (`packages/kiwicaptcha-risk-php`) MUST be byte-for-byte
 identical in:
 
-1. `RiskEventKind` — fixed enum, values 1..17:
+1) `RiskEventKind` — fixed enum, values 1..17:
 
    | value | name |
    |-------|------|
@@ -36,16 +36,16 @@ identical in:
    contaminate an individual visitor. `RiskDenied` (17) performs no state
    mutation, so a risk decision that already denied is never double-counted.
 
-2. `SignalVector` — 13 fixed-point fields (u16/int, each 0..1000), in this
+2) `SignalVector` — 13 fixed-point fields (u16/int, each 0..1000), in this
    exact order (JSON keys in `fixtures.json`):
 
    `source_fast, source_slow, subnet_fast, issue_debt, bad_proof, malformed,
    replay, action_failure, scope_switch, global_pressure, network_risk,
    trust_credit, principal_credit`
 
-3. `RiskWeights` — same 13 fields, u16/int.
+3) `RiskWeights` — same 13 fields, u16/int.
 
-4. Scoring — `weighted(v, w) = (v * w) / 1000` integer division;
+4) Scoring — `weighted(v, w) = (v * w) / 1000` integer division;
    `score(base, signals, weights)`:
    ```
    risk = base
@@ -57,7 +57,7 @@ identical in:
    Rust uses saturating arithmetic; PHP clamps at the end with
    `max(0, min(1000, risk))`.
 
-5. `RiskAction` — ordered enum:
+5) `RiskAction` — ordered enum:
 
    `Allow < Sha16 < Sha18 < Sha20 < Argon16 < Argon32 < Argon64 < StepUp < Deny`
 
@@ -75,14 +75,14 @@ identical in:
    | 930–979 | StepUp |
    | 980–1000 | Deny |
 
-6. Clock: all pressure decay, hysteresis, cooldown and state timestamps
+6) Clock: all pressure decay, hysteresis, cooldown and state timestamps
    derive from the Redis `TIME` command inside the risk script (`ARGV[3]`
    now_ms is kept for wire compatibility but unused). Multi-node app
    clocks can never change shared risk-state behavior. Application wall
    clocks remain only for the HMAC pseudonym epoch, where ±1 epoch
    lookups tolerate boundary skew.
 
-7. `RiskReason` — enum: SourceBurst, SourceSustained, NetworkBurst,
+7) `RiskReason` — enum: SourceBurst, SourceSustained, NetworkBurst,
    ChallengeDebt, InvalidProofs, MalformedTraffic, ReplayTraffic,
    ActionFailures, ScopeHopping, GlobalAttack, LocalNetworkRisk,
    CapacityPressure, HardRateLimit, Cooldown. Top 3–4 reasons are
@@ -90,7 +90,7 @@ identical in:
    They are never exposed to the end-user client; the browser-facing
    APIs emit opaque error codes, never reasons.
 
-8. Identity: `HKDF-SHA256` derives four 32-byte keys (`source`,
+8) Identity: `HKDF-SHA256` derives four 32-byte keys (`source`,
    `subnet`, `session`, `principal`) from
    `hash_hkdf('sha256', master, 32, info, 'kiwicaptcha-risk-v1')` and
    `Hkdf::<Sha256>::new(Some(b"kiwicaptcha-risk-v1"), master)`.
@@ -112,7 +112,7 @@ identical in:
    - principal: HMAC over the application principal ID bytes; context
      `b"prin"`; no epoch.
 
-9. State: leaky fixed-point counters (1000 = one unit) with the canonical
+9) State: leaky fixed-point counters (1000 = one unit) with the canonical
    Lua in `risk-v1.lua` (embedded verbatim by both implementations, loaded via
    `EVALSHA` with `NOSCRIPT` fallback). Redis keys use the hash tag
    `{kiwi:<deployment>}`:
@@ -121,7 +121,7 @@ identical in:
    `...:session:<hex16>` · `...:principal:<hex16>` · `...:global` ·
    `...:dedupe:<event_id>`
 
-10. Global pressure levels 0..4 with hysteresis (enter at the normalized
+10) Global pressure levels 0..4 with hysteresis (enter at the normalized
    thresholds 300/550/750/900, i.e. 30/55/75/90% of global saturation —
    raw 21000/38500/52500/63000 against the default sat_global 70000
    fixed-point; exit at 250/450/650/850 after the hysteresis window; the

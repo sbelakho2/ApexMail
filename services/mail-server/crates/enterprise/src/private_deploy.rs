@@ -260,12 +260,77 @@ impl PrivateDeployService {
     }
 
     /// Allocate a dedicated IP
+    ///
+    /// Fix J-7: the requested address must come from the configured pool
+    /// (`ip_pool_available`) and must still be `available` — arbitrary,
+    /// non-pool, or already-allocated addresses are rejected instead of being
+    /// inserted blindly.
     pub async fn allocate_dedicated_ip(
         &self,
         tenant_id: String,
         deployment_id: Option<Uuid>,
         ip_address: &str,
     ) -> Result<ApiResult<DedicatedIP>, String> {
+        // Validate the IP is parseable first (reject hostnames/garbage).
+        let parsed: std::net::IpAddr = match ip_address.parse() {
+            Ok(ip) => ip,
+            Err(_) => {
+                return Ok(ApiResult::err(
+                    "Invalid IP address",
+                    "INVALID_IP",
+                ))
+            }
+        };
+
+        // ip_pool_available.allocated_to is a UUID column — the claiming
+        // tenant must therefore be addressable as one.
+        let tenant_uuid: Uuid = match tenant_id.parse() {
+            Ok(u) => u,
+            Err(_) => {
+                return Ok(ApiResult::err(
+                    "Tenant id must be a UUID for dedicated IP allocation",
+                    "INVALID_TENANT",
+                ))
+            }
+        };
+
+        // Atomically claim the pool entry: only succeeds when the address is
+        // in the pool AND still available. A collision (already allocated)
+        // fails the conditional update.
+        let claimed: Option<Uuid> = sqlx::query_scalar(
+            "UPDATE ip_pool_available \
+             SET status = 'allocated', allocated_to = $2, allocated_at = NOW(), updated_at = NOW() \
+             WHERE ip_address = $1::inet AND status = 'available' \
+             RETURNING id",
+        )
+        .bind(ip_address)
+        .bind(tenant_uuid)
+        .fetch_optional(&self.db)
+        .await
+        .map_err(|e| format!("Claim pool IP: {e}"))?;
+
+        if claimed.is_none() {
+            // Distinguish "not in pool at all" from "in pool but not available".
+            let in_pool: Option<String> = sqlx::query_scalar(
+                "SELECT status::text FROM ip_pool_available WHERE ip_address = $1::inet",
+            )
+            .bind(ip_address)
+            .fetch_optional(&self.db)
+            .await
+            .map_err(|e| format!("Check pool IP: {e}"))?;
+            let (code, msg) = match in_pool.as_deref() {
+                Some(status) => (
+                    "IP_NOT_AVAILABLE",
+                    format!("IP {parsed} is in the pool but not available (status: {status})"),
+                ),
+                None => (
+                    "IP_NOT_IN_POOL",
+                    format!("IP {parsed} is not part of any configured address pool"),
+                ),
+            };
+            return Ok(ApiResult::err(msg, code));
+        }
+
         let id = Uuid::new_v4();
         let row = sqlx::query_as::<_, DedicatedIPDbRow>(
             "INSERT INTO ent_dedicated_ips (id, tenant_id, deployment_id, ip_address, status, emails_sent_total, bounces_total, complaints_total, blocklisted, created_at)
@@ -589,6 +654,22 @@ impl PrivateDeployService {
         Ok(ApiResult::ok(row.into()))
     }
 
+    /// Get a BYOIP range by ID (used for tenant ownership checks).
+    pub async fn get_byoip(&self, id: Uuid) -> Result<ApiResult<BYOIPRange>, String> {
+        let row = sqlx::query_as::<_, BYOIPRangeDbRow>(
+            "SELECT * FROM ent_byoip_ranges WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_optional(&self.db)
+        .await
+        .map_err(|e| format!("Get BYOIP: {e}"))?;
+
+        match row {
+            Some(r) => Ok(ApiResult::ok(r.into())),
+            None => Ok(ApiResult::err("BYOIP range not found", "NOT_FOUND")),
+        }
+    }
+
     /// Verify BYOIP ownership
     /// #253:Requires proof-of-control token match before marking verified.
     pub async fn verify_byoip(
@@ -688,28 +769,14 @@ pub fn calculate_reputation(bounce_rate: f64, complaint_rate: f64, blocklisted: 
     score.clamp(0.0, 100.0)
 }
 
-/// Shared HTTP client for health checks — avoids TLS handshake per request
-/// #270:Reuse client instead of creating new one per health check
-fn health_client() -> &'static reqwest::Client {
-    use std::sync::OnceLock;
-    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
-    CLIENT.get_or_init(|| {
-        reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(10))
-            .build()
-            .unwrap_or_else(|e| {
-                tracing::error!(error = %e, "Failed to build health check client, using fallback with timeout");
-                reqwest::Client::builder()
-                    .timeout(std::time::Duration::from_secs(10))
-                    .build()
-                    .expect("Client::builder with only timeout should never fail")
-            })
-    })
-}
-
 async fn check_health_endpoint(url: &str) -> Result<bool, String> {
-    let resp = health_client()
-        .get(url)
+    // Fix J-11: health-check URLs are operator-supplied and previously hit
+    // arbitrary hosts unchecked (SSRF). Route through the resolving SSRF
+    // guard and use a client pinned to the validated address.
+    let dest = crate::log_streaming::ssrf_guard_url(url).await?;
+    let client = crate::log_streaming::pinned_client(&dest.host, dest.addr)?;
+    let resp = client
+        .get(dest.url)
         .send()
         .await
         .map_err(|e| format!("Health check failed: {e}"))?;

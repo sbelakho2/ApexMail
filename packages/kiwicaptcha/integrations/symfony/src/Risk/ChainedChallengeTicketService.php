@@ -231,7 +231,7 @@ final class ChainedChallengeTicketService
      * cleared (a terminal verified chain) and for the lost-reply
      * confirmation of the issuance/verification transitions. Also the
      * validator's by-chain-id liveness check when it re-signs a
-     * CHAIN_REQUIRED ticket, whose signing expiry comes from the
+     * `CHAIN_REQUIRED` ticket, whose signing expiry comes from the
      * disposition-carried bound, never the obligation lookup.
      *
      * @throws MalformedChainedChallengeStateException when the record

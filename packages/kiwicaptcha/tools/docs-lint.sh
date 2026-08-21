@@ -13,6 +13,12 @@
 # stay equal or decrease, a path new in the committed baseline is
 # allowed only when listed in the adoption manifest (docs-lint-adopted.txt
 # next to this script), and the total may only stay equal or decrease.
+# Adoption is one-shot: an entry whose path has landed (a row in the
+# committed baseline, or already in the comparison base baseline) is
+# consumed and removed from the manifest on the next --integrity run
+# (atomic tmp+mv; --no-write-adopted keeps the manifest read-only for
+# CI), so a path dropped and later reintroduced is never silently
+# re-adopted by a stale entry.
 # The committed baseline ratchets toward zero, then advisory mode is removed.
 # Scan scope: the five kiwicaptcha package families under packages/
 # (kiwicaptcha, kiwicaptcha-php, kiwicaptcha-risk, kiwicaptcha-risk-php,
@@ -35,13 +41,16 @@ MAX_EM=2
 MAX_WORDS=40
 MAX_CONTRAST=2
 MAX_BOLD=2
-ALLOWLIST="WCAG HTTP HTTPS WASM HTML JSON HMAC NVDA SMIL POUR SLSA CORS QUIC OIDC UUID CIDR ASCII MUST POST PATCH OPTIONS CSRF SIGTERM A11Y SHA256SUMS HMAC-SHA IP-HMAC FAIL-CLOSED KIWI"
+ALLOWLIST="WCAG HTTP HTTPS WASM HTML JSON HMAC NVDA SMIL POUR SLSA CORS QUIC OIDC UUID CIDR ASCII MUST POST PATCH OPTIONS CSRF SIGTERM A11Y SHA256SUMS HMAC-SHA IP-HMAC FAIL-CLOSED KIWI ARGV KEYS KEEPTTL EXPIRE TIME WAIT INCR DECR ZSET PING EVAL GETDEL ZCARD ZREM HGET SETNX TTL PHP-FPM GITHUB"
 
 WITH_SOURCE=0
 BASELINE=""
 UPDATE_BASELINE=""
 INTEGRITY=""
 ROOT=""
+NO_WRITE_ADOPTED=0
+CUR_BASELINE_OVERRIDE=""
+MANIFEST_OVERRIDE=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --source) WITH_SOURCE=1 ;;
@@ -60,8 +69,20 @@ while [ "$#" -gt 0 ]; do
       if [ "$#" -eq 0 ]; then echo "docs-lint.sh: --integrity requires a file" >&2; exit 0; fi
       INTEGRITY="$1"
       ;;
+    --current-baseline)
+      shift
+      if [ "$#" -eq 0 ]; then echo "docs-lint.sh: --current-baseline requires a file" >&2; exit 0; fi
+      CUR_BASELINE_OVERRIDE="$1"
+      ;;
+    --adopted-manifest)
+      shift
+      if [ "$#" -eq 0 ]; then echo "docs-lint.sh: --adopted-manifest requires a file" >&2; exit 0; fi
+      MANIFEST_OVERRIDE="$1"
+      ;;
+    --no-write-adopted) NO_WRITE_ADOPTED=1 ;;
     -h|--help)
-      echo "usage: docs-lint.sh [--source] [--baseline FILE] [--update-baseline FILE] [--integrity FILE] [ROOT_DIR]"
+      echo "usage: docs-lint.sh [--source] [--baseline FILE] [--update-baseline FILE] [--integrity FILE]"
+      echo "                     [--current-baseline FILE] [--adopted-manifest FILE] [--no-write-adopted] [ROOT_DIR]"
       echo "prose lint over the kiwicaptcha package families and the repository's human-facing text; advisory"
       echo "(exit 0) unless --baseline FILE is given, which fails (exit 1)"
       echo "when any scanned file exceeds its per-file row or the total"
@@ -72,6 +93,20 @@ while [ "$#" -gt 0 ]; do
       echo "stay equal or decrease, new paths must be adopted in"
       echo "docs-lint-adopted.txt, and the total may only stay equal or"
       echo "decrease"
+      echo ""
+      echo "adoption is one-shot: an entry whose path has landed (a row in"
+      echo "the current committed baseline, or already in the comparison"
+      echo "base baseline) is consumed and removed from the manifest on the"
+      echo "next --integrity run, so a path dropped and later reintroduced"
+      echo "is NOT re-adopted by a stale entry (it needs a fresh adoption,"
+      echo "and until then its implicit baseline row is zero)."
+      echo "--current-baseline FILE / --adopted-manifest FILE override the"
+      echo "committed baseline / adoption manifest the integrity step reads"
+      echo "(defaults: the files next to this script; for tests and dry runs)."
+      echo "--no-write-adopted skips the one-shot manifest rewrite: the"
+      echo "integrity check still runs (a consumed entry still counts as"
+      echo "adopted for that run) but the manifest is left untouched — the"
+      echo "read-only/CI mode; a later writable run consumes the entry."
       exit 0
       ;;
     -*) echo "docs-lint.sh: unknown option: $1" >&2; exit 0 ;;
@@ -167,6 +202,7 @@ function emit(l,  nb, s, i) {
     next
   }
   if (infence) next
+  if ($0 ~ /^[ \t]*\|/) { next }
   emit($0)
 }
 MDEOF
@@ -243,8 +279,15 @@ function check_para(  t, s, k, ns, wc, n, i, tok, core, after, lw, m) {
   s = t2
   while (match(s, /[A-Z][A-Z0-9-]{3,}/)) {
     tok = substr(s, RSTART, RLENGTH)
+    before = RSTART > 1 ? substr(s, RSTART - 1, 1) : ""
     after = substr(s, RSTART + RLENGTH, 1)
     if (after ~ /[a-z]/) { s = substr(s, RSTART + 1); continue }
+    # A token glued to a code reference (::, ->, ., $, _, or a backtick on
+    # either side) is an identifier or constant, not prose.
+    if (before ~ /[:._>$`]|[-]/ && before != "-" || after == "`" || before == "`") {
+      s = substr(s, RSTART + RLENGTH)
+      continue
+    }
     core = tok
     gsub(/[0-9-]+$/, "", core)
     if (length(core) >= 4 && !is_allowed(core)) {
@@ -414,7 +457,7 @@ DUPAWK
 
 excluded() {
   "$AWK_BIN" '
-    /\/vendor\// || /\/node_modules\// || /\/target\// || /\/pkg\// || /\/assets\// || /\/resources\// || /\/\.venv\// || /\/\.pytest_cache\// || /\/\.git\// { next }
+    /\/vendor\// || /\/node_modules\// || /\/target\// || /\/pkg\// || /\/assets\// || /\/resources\// || /\/Resources\/public\// || /\/\.venv\// || /\/\.pytest_cache\// || /\/\.git\// { next }
     { print }
   '
 }
@@ -493,8 +536,13 @@ grep -v '^SUMMARY' "$out_tmp"
 
 for f in $md_files; do
   "$AWK_BIN" -f "$tmpd/mdprose.awk" "$f" |
-    "$AWK_BIN" -f "$tmpd/checks.awk" -v mode=dup |
-    "$AWK_BIN" -v f="$f" '{ printf "%s\t%s\n", $0, f }'
+    case "$f" in
+    *Resources/ACCESSIBILITY.md) ;; # byte-parity mirror: dup content is canonical elsewhere
+    *)
+      "$AWK_BIN" -f "$tmpd/checks.awk" -v mode=dup |
+        "$AWK_BIN" -v f="$f" '{ printf "%s\t%s\n", $0, f }'
+      ;;
+  esac
 done > "$dup_tmp"
 
 echo ""
@@ -676,6 +724,8 @@ if [ -n "$INTEGRITY" ]; then
   fi
   cur_baseline="$SCRIPT_DIR/docs-lint-baseline.txt"
   manifest="$SCRIPT_DIR/docs-lint-adopted.txt"
+  if [ -n "$CUR_BASELINE_OVERRIDE" ]; then cur_baseline="$CUR_BASELINE_OVERRIDE"; fi
+  if [ -n "$MANIFEST_OVERRIDE" ]; then manifest="$MANIFEST_OVERRIDE"; fi
   if [ ! -f "$cur_baseline" ]; then
     echo "docs-lint.sh: committed baseline not found: $cur_baseline" >&2
     exit 1
@@ -687,6 +737,68 @@ if [ -n "$INTEGRITY" ]; then
   fail=0
   if ! ratchet_check "$cur_baseline"; then fail=1; fi
   if ! integrity_check "$INTEGRITY" "$cur_baseline" "$manifest"; then fail=1; fi
+
+  # One-shot adoption: an entry whose path has LANDED — a row in the
+  # current committed baseline (the adoption took effect there), or a row
+  # already in the comparison base baseline (it landed in an ancestor) —
+  # is consumed. Consumed entries are removed from the manifest (atomic
+  # tmp+mv, comments/blank lines untouched), so a path dropped from the
+  # baseline and later reintroduced is never re-adopted by a stale entry:
+  # it needs a fresh adoption, and until then its implicit baseline row
+  # is zero. --no-write-adopted keeps the manifest read-only (CI): the
+  # entry still counts as adopted for THIS run; a later writable run
+  # consumes it.
+  consumed=$(
+    "$AWK_BIN" -v basefile="$INTEGRITY" -v curfile="$cur_baseline" -v manifest="$manifest" '
+      BEGIN {
+        while ((getline bl < basefile) > 0) {
+          if (bl ~ /^TOTAL[ \t]/) continue
+          split(bl, a, " ")
+          base[a[2]] = 1
+        }
+        while ((getline cl < curfile) > 0) {
+          if (cl ~ /^TOTAL[ \t]/) continue
+          split(cl, b, " ")
+          cur[b[2]] = 1
+        }
+        while ((getline ml < manifest) > 0) {
+          entry = ml
+          sub(/^[ \t]*/, "", entry)
+          sub(/[ \t]*#.*/, "", entry)
+          sub(/[ \t]+$/, "", entry)
+          if (entry == "") continue
+          if ((entry in cur) || (entry in base)) print entry
+        }
+      }
+    '
+  )
+  if [ -n "$consumed" ]; then
+    if [ "$NO_WRITE_ADOPTED" -eq 1 ]; then
+      echo "docs-lint.sh: note: consumed adoption entries kept (--no-write-adopted):"
+      printf '%s\n' "$consumed" | sed 's/^/  /'
+    else
+      printf '%s\n' "$consumed" > "$tmpd/consumed.txt"
+      manifest_out="${manifest}.docs-lint-new"
+      if "$AWK_BIN" -v consumedfile="$tmpd/consumed.txt" '
+        BEGIN { while ((getline cl < consumedfile) > 0) consumed[cl] = 1 }
+        {
+          entry = $0
+          sub(/^[ \t]*/, "", entry)
+          sub(/[ \t]*#.*/, "", entry)
+          sub(/[ \t]+$/, "", entry)
+          if (entry != "" && (entry in consumed)) next
+          print
+        }
+      ' "$manifest" > "$manifest_out" && mv -f "$manifest_out" "$manifest"; then
+        echo "docs-lint.sh: adoption manifest updated (consumed entries removed, one-shot):"
+        printf '%s\n' "$consumed" | sed 's/^/  /'
+      else
+        rm -f "$manifest_out"
+        echo "docs-lint.sh: cannot rewrite the adoption manifest: $manifest (stale entries kept)" >&2
+      fi
+    fi
+  fi
+
   if [ "$fail" -eq 1 ]; then exit 1; fi
   echo "docs-lint.sh: OK: total $tot at or below the committed baseline; every scanned file at or below its per-file row; committed baseline monotonic vs the base baseline (no tracked-path increase, no un-adopted new path, total at or below the base total)"
   exit 0

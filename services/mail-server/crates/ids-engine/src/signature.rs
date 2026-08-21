@@ -64,12 +64,20 @@ pub struct Signature {
     pub references: Vec<String>,
 }
 
+/// Minimum number of bytes a lone content token must have before a
+/// content-only Drop/Reject signature may fire on that single token.
+/// Prevents hard-blocking (Drop) traffic on the basis of one short,
+/// ubiquitous token such as `SYSTEM` or `cmd=`.
+const MIN_DROP_SINGLE_TOKEN_LEN: usize = 6;
+
 /// Compiled signature set with Aho-Corasick automaton
 pub struct SignatureSet {
     /// The compiled automaton
     automaton: Option<AhoCorasick>,
     /// Pattern index -> signature mapping
     pattern_to_sig: Vec<usize>,
+    /// Length of each registered content pattern (parallel to `pattern_to_sig`)
+    pattern_lens: Vec<usize>,
     /// All signatures
     signatures: Vec<Signature>,
     /// Compiled regex patterns per signature (indexed by signature index).
@@ -84,6 +92,7 @@ impl SignatureSet {
             return Ok(Self {
                 automaton: None,
                 pattern_to_sig: Vec::new(),
+                pattern_lens: Vec::new(),
                 signatures,
                 compiled_regexes: Vec::new(),
             });
@@ -91,6 +100,7 @@ impl SignatureSet {
 
         let mut all_patterns = Vec::new();
         let mut pattern_to_sig = Vec::new();
+        let mut pattern_lens = Vec::new();
 
         // Compile per-signature regex patterns.
         let mut compiled_regexes = Vec::with_capacity(signatures.len());
@@ -98,6 +108,7 @@ impl SignatureSet {
             for pattern in &sig.content_patterns {
                 all_patterns.push(pattern.clone());
                 pattern_to_sig.push(sig_idx);
+                pattern_lens.push(pattern.len());
             }
 
             let mut regexes = Vec::with_capacity(sig.regex_patterns.len());
@@ -127,35 +138,60 @@ impl SignatureSet {
         Ok(Self {
             automaton: Some(automaton),
             pattern_to_sig,
+            pattern_lens,
             signatures,
             compiled_regexes,
         })
     }
 
-    /// Scan a payload against all signatures.
-    /// Returns matched signature indices.
-    /// Matching logic:/// - If a signature has **only** `content_patterns`:Aho-Corasick hit fires it.
-    /// - If a signature has **only** `regex_patterns`:at least one regex must match.
-    /// - If both are specified:AC hit required AND at least one regex must match.
+    /// Scan a payload against all signatures without a protocol constraint
+    /// (every signature is eligible regardless of its `protocol` field).
     pub fn scan(&self, payload: &[u8]) -> Vec<ScanMatch> {
+        self.scan_with_protocol(payload, "")
+    }
+
+    /// Scan a payload, enforcing each signature's `protocol` field.
+    ///
+    /// A signature is only eligible when its `protocol` is empty/`any`/`*`
+    /// or matches `protocol` (case-insensitive). An empty `protocol`
+    /// argument disables protocol filtering entirely (legacy `scan`
+    /// behavior) so callers that do not know the protocol fail open for
+    /// *detection* rather than silently skipping signatures.
+    pub fn scan_with_protocol(&self, payload: &[u8], protocol: &str) -> Vec<ScanMatch> {
         let mut matched_sigs = std::collections::HashSet::new();
         let mut results = Vec::new();
+
+        let proto_filter = normalize_protocol(protocol);
 
         // Phase 1:find AC content-pattern matches and map each back to its sig.
         // Using find_overlapping_iter (requires MatchKind::Standard) ensures
         // that two signatures sharing an identical byte string both receive a
         // match notification — LeftmostFirst + find_iter would suppress the
-        // second hit, causing the later signature to never fire.
+        // second hit, causing the later sig to never fire.
         let mut ac_matched_sigs = std::collections::HashSet::new();
+        // Per-signature hit specificity:(number of distinct content patterns
+        // that matched, length of the longest matched pattern).
+        let mut sig_hit_details: std::collections::HashMap<usize, (u32, usize)> =
+            std::collections::HashMap::new();
         if let Some(automaton) = &self.automaton {
             for mat in automaton.find_overlapping_iter(payload) {
-                let sig_idx = self.pattern_to_sig[mat.pattern().as_usize()];
+                let pat_idx = mat.pattern().as_usize();
+                let sig_idx = self.pattern_to_sig[pat_idx];
                 ac_matched_sigs.insert(sig_idx);
+                let e = sig_hit_details.entry(sig_idx).or_insert((0, 0));
+                e.0 += 1;
+                e.1 = e.1.max(self.pattern_lens[pat_idx]);
             }
         }
 
         // Phase 2:evaluate each signature
         for (sig_idx, sig) in self.signatures.iter().enumerate() {
+            // Protocol enforcement:when a filter protocol is supplied, the
+            // signature's protocol must be unset/"any" or apply to it.
+            if !proto_filter.is_empty() && !protocol_applies(&sig.protocol, &proto_filter) {
+                continue;
+            }
+
             let has_content = !sig.content_patterns.is_empty();
             let has_regex = !sig.regex_patterns.is_empty();
             // OR semantics:ANY one of the sig's content patterns being present
@@ -167,14 +203,32 @@ impl SignatureSet {
             // regex_patterns for the confirming term.
             let ac_hit = ac_matched_sigs.contains(&sig_idx);
 
+            // Specificity guard for hard-block actions:a content-only
+            // Drop/Reject signature must not fire on a single short token —
+            // that would drop legitimate traffic containing a ubiquitous
+            // word. Require either ≥2 distinct matched tokens or one
+            // sufficiently long (≥ MIN_DROP_SINGLE_TOKEN_LEN bytes) token.
+            let destructive = matches!(
+                sig.action,
+                SignatureAction::Drop | SignatureAction::Reject
+            );
+            let specificity_ok = if destructive && has_content && !has_regex {
+                sig_hit_details
+                    .get(&sig_idx)
+                    .map(|(count, max_len)| *count >= 2 || *max_len >= MIN_DROP_SINGLE_TOKEN_LEN)
+                    .unwrap_or(false)
+            } else {
+                true
+            };
+
             let fires = match (has_content, has_regex) {
                 (true, true) => {
                     // Hybrid:any content pattern hit AND at least one regex match
-                    ac_hit && self.any_regex_match(sig_idx, payload)
+                    ac_hit && specificity_ok && self.any_regex_match(sig_idx, payload)
                 }
                 (true, false) => {
                     // Content-only:any content pattern hit suffices
-                    ac_hit
+                    ac_hit && specificity_ok
                 }
                 (false, true) => {
                     // Regex-only:at least one regex must match
@@ -215,10 +269,44 @@ impl SignatureSet {
     }
 }
 
+/// Normalize a protocol name for comparison (trim + ASCII lowercase).
+fn normalize_protocol(p: &str) -> String {
+    p.trim().to_ascii_lowercase()
+}
+
+/// Expand a protocol name to the set of protocols it is compatible with.
+/// TLS-secured variants (`https`, `smtps`, …) also match signatures written
+/// for the cleartext base protocol.
+fn compatible_protocols(p: &str) -> Vec<String> {
+    let base = match p {
+        "https" => Some("http"),
+        "smtps" | "submission" => Some("smtp"),
+        "imaps" => Some("imap"),
+        "pop3s" => Some("pop3"),
+        _ => None,
+    };
+    match base {
+        Some(b) => vec![p.to_string(), b.to_string()],
+        None => vec![p.to_string()],
+    }
+}
+
+/// Whether a signature's protocol applies to the inspected wire protocol.
+fn protocol_applies(sig_protocol: &str, wire_protocol: &str) -> bool {
+    let sig_proto = normalize_protocol(sig_protocol);
+    if matches!(sig_proto.as_str(), "" | "any" | "*") {
+        return true;
+    }
+    let wire_proto = normalize_protocol(wire_protocol);
+    if sig_proto == wire_proto {
+        return true;
+    }
+    compatible_protocols(&wire_proto).contains(&sig_proto)
+}
+
 /// Result of a signature scan match
 #[derive(Debug, Clone)]
-pub struct ScanMatch {
-    /// Signature ID
+pub struct ScanMatch {    /// Signature ID
     pub sid: u32,
     /// Alert message
     pub message: String,
@@ -1217,6 +1305,94 @@ mod tests {
             "Clean payload triggered regex sigs: {:?}",
             regex_sids
         );
+    }
+
+    // ── Protocol enforcement & Drop-specificity tests ──
+
+    #[test]
+    fn test_protocol_mismatched_signature_skipped() {
+        let sigs = builtin_mail_signatures();
+        let set = SignatureSet::new(sigs).expect("compile sigs");
+        // SID 2000010 ("/etc/passwd") is an HTTP signature:an SMTP payload
+        // must not fire it once protocol filtering is enforced.
+        let matches = set.scan_with_protocol(b"GET /etc/passwd HTTP/1.1\r\n", "smtp");
+        assert!(
+            !matches.iter().any(|m| m.sid == 2000010),
+            "HTTP-only signature must be skipped for smtp protocol: {:?}",
+            matches
+        );
+        // Same payload with the matching protocol still fires.
+        let matches = set.scan_with_protocol(b"GET /etc/passwd HTTP/1.1\r\n", "http");
+        assert!(matches.iter().any(|m| m.sid == 2000010));
+        // Protocol matching must be case-insensitive.
+        let matches = set.scan_with_protocol(b"GET /etc/passwd HTTP/1.1\r\n", "HTTP");
+        assert!(matches.iter().any(|m| m.sid == 2000010));
+    }
+
+    #[test]
+    fn test_any_protocol_signature_matches_all_protocols() {
+        let sig = Signature {
+            sid: 8888003,
+            rev: 1,
+            message: "Test any-protocol sig".into(),
+            content_patterns: vec![b"123-45-6789".to_vec()],
+            action: SignatureAction::Alert,
+            severity: SigSeverity::Info,
+            category: "test".into(),
+            protocol: "any".into(),
+            references: vec![],
+            regex_patterns: vec![],
+        };
+        let set = SignatureSet::new(vec![sig]).expect("compile");
+        for proto in ["smtp", "http", "dns", "tls"] {
+            let matches = set.scan_with_protocol(b"SSN: 123-45-6789", proto);
+            assert!(
+                matches.iter().any(|m| m.sid == 8888003),
+                "any-protocol sig must fire under {}",
+                proto
+            );
+        }
+    }
+
+    #[test]
+    fn test_single_short_token_cannot_drop() {
+        // A content-only Drop signature whose only matched token is shorter
+        // than MIN_DROP_SINGLE_TOKEN_LEN must not fire.
+        let sig = Signature {
+            sid: 8888001,
+            rev: 1,
+            message: "Test short-token drop".into(),
+            content_patterns: vec![b"cmd=".to_vec()],
+            action: SignatureAction::Drop,
+            severity: SigSeverity::High,
+            category: "test".into(),
+            protocol: "http".into(),
+            references: vec![],
+            regex_patterns: vec![],
+        };
+        let set = SignatureSet::new(vec![sig]).expect("compile");
+        let matches = set.scan(b"GET /?cmd= HTTP/1.1\r\n");
+        assert!(
+            matches.is_empty(),
+            "single short token must not trigger a Drop: {:?}",
+            matches
+        );
+        // Two distinct tokens firing is enough to drop.
+        let sig2 = Signature {
+            sid: 8888002,
+            rev: 1,
+            message: "Test two-token drop".into(),
+            content_patterns: vec![b"cmd=".to_vec(), b";wget ".to_vec()],
+            action: SignatureAction::Drop,
+            severity: SigSeverity::High,
+            category: "test".into(),
+            protocol: "http".into(),
+            references: vec![],
+            regex_patterns: vec![],
+        };
+        let set2 = SignatureSet::new(vec![sig2]).expect("compile");
+        let matches2 = set2.scan(b"GET /?cmd=;wget x HTTP/1.1\r\n");
+        assert!(matches2.iter().any(|m| m.sid == 8888002));
     }
 
     #[test]

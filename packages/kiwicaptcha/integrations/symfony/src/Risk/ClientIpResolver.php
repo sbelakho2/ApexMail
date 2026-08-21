@@ -10,43 +10,44 @@ use Symfony\Component\HttpFoundation\Request;
 
 /**
  * Trusted client-IP policy: one explicit mode decides how the
- * canonical client IP is derived, and every IP consumer in the bundle, the
- * challenge controller (issuance binding tag, rate-limit identity, risk
- * source pseudonym) and the validator (binding re-check, post-solve risk
- * context), goes through this resolver, so all of them always see the same
- * canonical IP.
+ * canonical client IP is derived. Every IP consumer in the bundle goes
+ * through this resolver, so all of them always see the same canonical IP.
+ * The consumers are the challenge controller (issuance binding tag,
+ * rate-limit identity, risk source pseudonym) and the validator (binding
+ * re-check, post-solve risk context).
  *
  * Modes:
  *
  *  - `direct` (risk.client_ip_mode: direct): forwarding headers are always
- *    ignored. The canonical IP is the socket peer (SERVER REMOTE_ADDR) and
- *    nothing else — regardless of any application-level trusted-proxy
- *    configuration, a forged X-Forwarded-For / Forwarded from any peer can
- *    never influence it.
+ *    ignored. The canonical IP is the socket peer (the PHP `REMOTE_ADDR`
+ *    server variable) and nothing else — regardless of any
+ *    application-level trusted-proxy configuration, a forged
+ *    X-Forwarded-For / Forwarded from any peer can never influence it.
  *
  *  - `symfony_trusted_proxies` (default): Symfony's own trusted-proxy
  *    machinery is configured from risk.trusted_proxies: the CIDR list is
- *    passed to Request::setTrustedProxies() (with HEADER_X_FORWARDED_FOR |
- *    HEADER_FORWARDED), and Symfony already ignores forwarding headers from
+ *    passed to Request::setTrustedProxies() (with `HEADER_X_FORWARDED_FOR` |
+ *    `HEADER_FORWARDED`), and Symfony already ignores forwarding headers from
  *    untrusted peers. When the bundle's list is non-empty it takes ownership
- *    of the trusted-proxy configuration (deployment-wide, per process, the
- *    static Symfony setting); an empty list leaves the application's own
- *    configuration untouched (the effective trust set is whatever Symfony
- *    has) and the bundle never clobbers it.
+ *    of the trusted-proxy configuration: the static Symfony setting is
+ *    deployment-wide and per process. An empty list leaves the
+ *    application's own
+ *    configuration untouched: the effective trust set is whatever Symfony
+ *    has, and the bundle never clobbers it.
  *
  * Ambiguous forwarding: when the peer is trusted and both X-Forwarded-For
  * and Forwarded are present, the two chains can disagree — the canonical IP
  * becomes ambiguous. With risk.reject_ambiguous_forwarding=true the resolver
  * throws {@see AmbiguousForwardingException} (the controller turns it into
- * HTTP 400 AMBIGUOUS_FORWARDING, the validator fails closed as
+ * HTTP 400 `AMBIGUOUS_FORWARDING`, the validator fails closed as
  * invalid_or_expired); with the default false the anomaly is logged and the
  * request proceeds with Symfony's derivation.
  *
  * Duplicate security-singular headers: a request carrying Origin, Forwarded,
- * X-Forwarded-For or X-Real-IP more than once is parser ambiguity — different
+ * X-Forwarded-For or X-Real-IP more than once is parser ambiguity: different
  * intermediaries will pick different values, so the header-derived identity
  * is untrustworthy. The challenge controller rejects such a request with 400
- * DUPLICATE_HEADER before this resolver is ever consulted; the resolver
+ * `DUPLICATE_HEADER` before this resolver is ever consulted; the resolver
  * therefore treats a duplicate as ambiguous, since it is rejected earlier,
  * never silently resolved.
  *

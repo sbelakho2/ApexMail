@@ -21,10 +21,10 @@ use Symfony\Component\OptionsResolver\OptionsResolver;
  * KiwiCaptchaValidator constraint verifies the token locally on submit.
  *
  * The default 'endpoint' option is derived from the bundle's configured
- * `route_prefix` (rtrim($prefix, '/').'/challenge'), so the form posts to
- * the actual route, mirroring the standalone Twig widget, which already
- * derives its endpoint from the same prefix. 'endpoint' remains
- * overridable per form.
+ * `route_prefix` (the prefix with any trailing slash removed, plus
+ * '/challenge'), so the form posts to the actual route. It mirrors the
+ * standalone Twig widget, which already derives its endpoint from the
+ * same prefix. 'endpoint' remains overridable per form.
  *
  * The default 'telemetry' option follows the bundle's configured telemetry
  * mode ('off' default; forced 'off' under strict privacy mode) and is

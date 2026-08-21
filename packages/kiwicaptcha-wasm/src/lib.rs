@@ -2,7 +2,7 @@
 //!
 //! Exposes two chunked proof-of-work solvers:
 //! - `solve_sha256_chunk`  — classic CPU-bound SHA-256 PoW.
-//! - `solve_argon2_chunk`  — memory-hard Argon2id PoW (ASIC/GPU resistant).
+//! - `solve_argon2_chunk`  — memory-hard Argon2id PoW (chosen to resist specialized hardware).
 //!
 //! Both take the challenge prefix and salt as raw pointer/length pairs (the
 //! widget allocates the buffers with `__wbindgen_malloc`, copies the bytes,
@@ -14,8 +14,8 @@
 //! The counter is encoded as its decimal representation (identical to the
 //! server verifier in `kiwicaptcha::verify::derive_hash` and to the pure-JS
 //! fallback), so all three solvers agree byte-for-byte on the preimage:
-//! `SHA-256(prefix || decimal(counter) || salt)` / Argon2id with the same
-//! password layout.
+//! the SHA-256 hash of the prefix, the decimal counter and the salt, or
+//! the same password layout for Argon2id.
 
 use argon2::{Algorithm, Argon2, Params, Version};
 use sha2::{Digest, Sha256};
@@ -29,17 +29,17 @@ pub fn init_panic_hook() {
     console_error_panic_hook::set_once();
 }
 
-/// The solver PROTOCOL/ABI VERSION (an integer is the
+/// The solver protocol/ABI version (an integer is the
 /// clean primitive at the raw wasm-bindgen ABI boundary, where a String
 /// return surfaces as a [ptr, len] tuple). The runtime handshake uses it
-/// ONLY to prove that the driver, the worker and the WASM glue speak the
-/// same protocol generation; it is NOT an exact-artifact identity. Exact
+/// only to prove that the driver, the worker and the WASM glue speak the
+/// same protocol generation; it is not an exact-artifact identity. Exact
 /// byte identity is guaranteed by the release system: tag + SHA256SUMS +
 /// SRI.txt + SLSA attestation.
 ///
 /// This value MUST equal `KIWI_SOLVER_PROTOCOL_VERSION` in
 /// `assets/kiwi-worker.js` — the worker verifies the loaded wasm's
-/// exported value against its constant BEFORE sending `ready`, so a
+/// exported value against its constant before sending `ready`, so a
 /// mismatch fails closed instead of solving with a mismatched pair.
 #[wasm_bindgen]
 pub fn solver_protocol_version() -> u32 {
@@ -124,8 +124,8 @@ pub unsafe fn dealloc(ptr: *mut u8, len: usize) {
 }
 
 /// Search `[start_counter, start_counter + chunk_size)` for a counter whose
-/// `SHA-256(prefix || decimal(counter) || salt)` output has at least
-/// `target_bits` leading zero bits. Returns the counter or -1.
+/// SHA-256 hash of the prefix, the decimal counter and the salt has at
+/// least `target_bits` leading zero bits. Returns the counter or -1.
 #[wasm_bindgen]
 pub fn solve_sha256_chunk(
     prefix_ptr: *const u8,
@@ -166,8 +166,8 @@ pub fn solve_sha256_chunk(
 }
 
 /// Search `[start_counter, start_counter + chunk_size)` for a counter whose
-/// `Argon2id(prefix || decimal(counter), salt)` output has at least
-/// `target_bits` leading zero bits. Returns the counter or -1.
+/// Argon2id hash of the prefix, the decimal counter and the salt has at
+/// least `target_bits` leading zero bits. Returns the counter or -1.
 ///
 /// `m_kib`/`t`/`p` are the Argon2id parameters; they must match the server's
 /// issued challenge parameters exactly. Invalid parameters return -1 so the
@@ -191,7 +191,7 @@ pub fn solve_argon2_chunk(
     let prefix = unsafe { std::slice::from_raw_parts(prefix_ptr, prefix_len) };
     let salt = unsafe { std::slice::from_raw_parts(salt_ptr, salt_len) };
 
-    // Protocol unit: m_kib is KIBIBYTES (65536 = 64 MiB); the argon2
+    // Protocol unit: m_kib is in kibibytes (65536 = 64 MiB); the argon2
     // crate takes the same 1 KiB blocks. The solver MUST use the exact
     // parameters the server verifier uses.
     let params = match Params::new(m_kib, t, p, Some(32)) {
@@ -254,7 +254,7 @@ fn write_decimal(mut n: u32, buf: &mut [u8; 12]) -> usize {
     j
 }
 
-/// Count leading zero BITS of a 32-byte hash (big-endian bit order).
+/// Count the leading zero bits of a 32-byte hash (big-endian bit order).
 fn leading_zero_bits(hash: &[u8]) -> u32 {
     let mut count = 0;
     for &byte in hash {

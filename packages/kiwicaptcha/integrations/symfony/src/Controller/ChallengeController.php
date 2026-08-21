@@ -106,7 +106,7 @@ final class ChallengeController
     /**
      * Headers carrying client identity or forwarding trust: each must
      * appear at most once, since intermediaries pick different values on
-     * duplicates. A duplicate gets 400 DUPLICATE_HEADER before any
+     * duplicates. A duplicate gets 400 `DUPLICATE_HEADER` before any
      * header-derived identity is trusted.
      */
     private const SECURITY_SINGULAR_HEADERS = ['origin', 'forwarded', 'x-forwarded-for', 'x-real-ip'];
@@ -203,7 +203,7 @@ final class ChallengeController
         // Path canonicality: the raw request URI must be the canonical
         // target, with no empty segments, dot segments, percent-encoded
         // bytes, trailing slash or backslashes. A noncanonical target gets
-        // 404 CANONICAL_PATH_REQUIRED before any handling; the proxy stack
+        // 404 `CANONICAL_PATH_REQUIRED` before any handling; the proxy stack
         // should reach the same decision at the edge.
         if (!$this->isCanonicalRequestTarget((string) $request->getRequestUri())) {
             return $this->privateJson(
@@ -325,7 +325,7 @@ final class ChallengeController
         // risk.security_epoch_max_stale_secs, the central policy may have
         // moved (an emergency revocation could have landed while this node
         // could not read), so issuance is refused with 503
-        // SERVICE_UNAVAILABLE. Within the window the cached max keeps
+        // `SERVICE_UNAVAILABLE`. Within the window the cached max keeps
         // serving.
         if ($this->epochMonitor !== null) {
             $this->epochMonitor->refresh();
@@ -386,7 +386,7 @@ final class ChallengeController
         // 'symfony_trusted_proxies' mode Symfony's trusted-proxy machinery
         // ignores them from untrusted peers. An ambiguous double-forwarding
         // from a trusted peer is logged, or rejected with 400
-        // AMBIGUOUS_FORWARDING when risk.reject_ambiguous_forwarding is
+        // `AMBIGUOUS_FORWARDING` when risk.reject_ambiguous_forwarding is
         // true, before any state is written.
         try {
             $clientIp = $this->clientIpResolver !== null
@@ -404,7 +404,7 @@ final class ChallengeController
         // disagree on the effective value ({"scope":"login","scope":"signup"}
         // is a parser-ambiguity probe). The raw body is scanned with a
         // recursive duplicate-key detector before decoding; a duplicate at
-        // any depth gets 422 DUPLICATE_FIELD. On a document it cannot walk,
+        // any depth gets 422 `DUPLICATE_FIELD`. On a document it cannot walk,
         // the scanner returns null and the strict json_decode below handles
         // the malformed document.
         $duplicateKey = $this->scanForDuplicateJsonKey($requestBody);
@@ -577,7 +577,7 @@ final class ChallengeController
         // configured static risk.request_binding applies. With a
         // request_binding_authority, the binding is resolved only through
         // the authority, and a binding it cannot confirm for this
-        // transaction is refused with 422 INVALID_REQUEST_BINDING before
+        // transaction is refused with 422 `INVALID_REQUEST_BINDING` before
         // any state is touched. Without the authority, the value is
         // validated here (1..128 bytes, the identifier charset) before it
         // reaches the issuer.
@@ -634,7 +634,7 @@ final class ChallengeController
         // the chain and its obligation mapping ({kiwi:<ns>}:chain-obligation:
         // <obligationId> -> chainId, keyed on the bounded pseudonymous
         // obligation id of the policy-epoch/scope/binding triple) were
-        // created atomically at the CHAIN_REQUIRED stage, so a client cannot
+        // created atomically at the `CHAIN_REQUIRED` stage, so a client cannot
         // restart the transaction at stage 1 by discarding the ticket. The
         // gate runs before any admission control touches a counter, so an
         // invalid, forged, foreign or expired ticket never consumes
@@ -919,7 +919,7 @@ final class ChallengeController
             } catch (UnknownScopeException) {
                 if ($this->risk->unknownScopeMode() === 'reject') {
                     // Reject mode: no challenge, same response as a Deny
-                    // decision (429 RISK_DENIED), no baseline fallback. No
+                    // decision (429 `RISK_DENIED`), no baseline fallback. No
                     // risk feedback is recorded, since the engine declined
                     // to evaluate the scope. The reserved chain is
                     // released; the ticket stays usable.
@@ -1021,7 +1021,7 @@ final class ChallengeController
         // risk.max_challenges_per_scope_per_minute is configured, the
         // atomic {kiwi:<ns>}:issuance:<scopeIdentity>:<minute> fixed-window
         // counter (INCR + EXPIRE 60 in one Lua script) refuses 429
-        // SCOPE_LIMITED beyond the cap. The check consumes the slot it
+        // `SCOPE_LIMITED` beyond the cap. The check consumes the slot it
         // admits, so a denial below is not double-counted. The quota keys
         // on the server-owned scope identity (the risk policy's canonical
         // scope id), never on the raw scope string; when allowed_scopes is
@@ -2099,7 +2099,7 @@ final class ChallengeController
     }
 
     /**
-     * Whether the direct peer of the request (REMOTE_ADDR, the immediate
+     * Whether the direct peer of the request (`REMOTE_ADDR`, the immediate
      * connection, never a forwarded header) is inside the configured
      * risk.trusted_tls_proxies CIDRs. The trusted-edge TLS header is read
      * only from such a peer: the direct peer must be the trusted proxy or
@@ -2212,7 +2212,8 @@ final class ChallengeController
             if (!\is_array($parts) || !isset($parts['scheme'], $parts['host'])) {
                 return false;
             }
-            $origin = $parts['scheme'].'://'.$parts['host'].(isset($parts['port']) ? ':'.$parts['port'] : '');
+            $origin = $parts['scheme'] . '://'
+                . $parts['host'] . (isset($parts['port']) ? ':' . $parts['port'] : '');
         }
 
         $candidate = self::normalizeOrigin($origin);

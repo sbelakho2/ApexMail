@@ -187,8 +187,32 @@ impl EncryptionService {
         Ok(result)
     }
 
-    pub async fn decrypt(&self, encrypted: &EncryptedField) -> anyhow::Result<String> {
+    /// Decrypt an encrypted field, binding the operation to the expected
+    /// tenant. The data key is looked up by `key_id` and must be *owned* by
+    /// `expected_tenant_id` (the organization the caller is acting for) —
+    /// otherwise a ciphertext from one tenant could be decrypted through
+    /// another tenant's context (cross-tenant confusion).
+    pub async fn decrypt(
+        &self,
+        encrypted: &EncryptedField,
+        expected_tenant_id: &str,
+    ) -> anyhow::Result<String> {
         let key = self.get_key_by_id(&encrypted.key_id).await?;
+
+        // Tenant binding:the key that encrypted this field must belong to the
+        // tenant the caller claims. Fail closed on mismatch.
+        if key.organization_id != expected_tenant_id {
+            warn!(
+                key_org = %key.organization_id,
+                expected_tenant = %expected_tenant_id,
+                key_id = %encrypted.key_id,
+                "SECURITY: refused decryption of cross-tenant ciphertext"
+            );
+            anyhow::bail!(
+                "Decryption refused:ciphertext key does not belong to the requesting tenant"
+            );
+        }
+
         let raw_key =
             Zeroizing::new(self.decrypt_data_key(&key.organization_id, &key.encrypted_key)?);
 
@@ -232,10 +256,13 @@ impl EncryptionService {
     }
 
     /// Decrypt specific fields of an object based on policy.
+    /// `expected_organization_id` binds every decryption to the requesting
+    /// tenant (see [`Self::decrypt`]).
     pub async fn decrypt_object(
         &self,
         resource: &str,
         data: &serde_json::Value,
+        expected_organization_id: &str,
     ) -> anyhow::Result<serde_json::Value> {
         let Some(policy) = self.get_policy_for_resource(resource) else {
             return Ok(data.clone());
@@ -246,7 +273,7 @@ impl EncryptionService {
             for field in &policy.fields {
                 if let Some(val) = obj.get(field) {
                     if let Ok(enc) = serde_json::from_value::<EncryptedField>(val.clone()) {
-                        let decrypted = self.decrypt(&enc).await?;
+                        let decrypted = self.decrypt(&enc, expected_organization_id).await?;
                         obj.insert(field.clone(), serde_json::Value::String(decrypted));
                     }
                 }

@@ -75,6 +75,38 @@ pub struct TimeseriesPoint {
 
 // ─── Handlers ──────────────────────────────────────────────────
 
+/// Maximum allowed `from`→`to` window for stats/timeseries queries (audit J):
+/// unbounded ranges let a single request aggregate the tenant's entire event
+/// history, a cheap resource-exhaustion vector.
+const MAX_STATS_WINDOW_DAYS: i64 = 92;
+
+/// Resolve and validate the stats query window (audit J).
+///
+/// * `from > to` → 400 (previously produced silently empty result sets and
+///   masked client bugs).
+/// * window longer than 92 days → 400.
+/// * Missing bounds default to the caller-provided defaults.
+fn resolve_stats_window(
+    params: &StatsQuery,
+    default_from: fn() -> DateTime<Utc>,
+) -> Result<(DateTime<Utc>, DateTime<Utc>), ApiError> {
+    let from = params.from.unwrap_or_else(default_from);
+    let to = params.to.unwrap_or_else(Utc::now);
+
+    if from > to {
+        return Err(ApiError::BadRequest(
+            "'from' must not be later than 'to'".into(),
+        ));
+    }
+    if to - from > chrono::Duration::days(MAX_STATS_WINDOW_DAYS) {
+        return Err(ApiError::BadRequest(format!(
+            "time range exceeds the maximum of {MAX_STATS_WINDOW_DAYS} days"
+        )));
+    }
+
+    Ok((from, to))
+}
+
 async fn list_events(
     State(state): State<AppState>,
     auth: AuthUser,
@@ -144,10 +176,7 @@ async fn event_stats(
 ) -> Result<Json<EventStats>, ApiError> {
     require_scopes(&auth, &["events:read"])?;
 
-    let from = params
-        .from
-        .unwrap_or_else(|| Utc::now() - chrono::Duration::days(30));
-    let to = params.to.unwrap_or_else(Utc::now);
+    let (from, to) = resolve_stats_window(&params, || Utc::now() - chrono::Duration::days(30))?;
 
     let row = sqlx::query_as::<_, StatsRow>(
         "SELECT
@@ -183,10 +212,7 @@ async fn event_timeseries(
 ) -> Result<Json<Vec<TimeseriesPoint>>, ApiError> {
     require_scopes(&auth, &["events:read"])?;
 
-    let from = params
-        .from
-        .unwrap_or_else(|| Utc::now() - chrono::Duration::days(7));
-    let to = params.to.unwrap_or_else(Utc::now);
+    let (from, to) = resolve_stats_window(&params, || Utc::now() - chrono::Duration::days(7))?;
 
     let rows = sqlx::query_as::<_, TimeseriesRow>(
         "SELECT date_trunc('hour', timestamp) as bucket, event_type, COUNT(*) as count
@@ -297,5 +323,71 @@ mod tests {
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["event_type"], "opened");
+    }
+
+    // ── Stats window bounds (audit J) ────────────────────────────
+
+    fn stats_query(from: Option<DateTime<Utc>>, to: Option<DateTime<Utc>>) -> StatsQuery {
+        StatsQuery { from, to }
+    }
+
+    #[test]
+    fn stats_window_defaults_applied_when_bounds_missing() {
+        let (from, to) = resolve_stats_window(&stats_query(None, None), || {
+            Utc::now() - chrono::Duration::days(30)
+        })
+        .expect("default window must resolve");
+        let now = Utc::now();
+        assert!((from - (now - chrono::Duration::days(30))).num_seconds().abs() < 5);
+        assert!((to - now).num_seconds().abs() < 5);
+    }
+
+    #[test]
+    fn stats_window_rejects_inverted_range() {
+        let now = Utc::now();
+        let err = resolve_stats_window(
+            &stats_query(Some(now), Some(now - chrono::Duration::days(1))),
+            || now - chrono::Duration::days(30),
+        )
+        .expect_err("from > to must be a 400");
+        assert!(matches!(err, ApiError::BadRequest(_)));
+    }
+
+    #[test]
+    fn stats_window_rejects_range_over_92_days() {
+        let now = Utc::now();
+        // 93 days — just over the cap.
+        let err = resolve_stats_window(
+            &stats_query(
+                Some(now - chrono::Duration::days(93)),
+                Some(now),
+            ),
+            || now - chrono::Duration::days(30),
+        )
+        .expect_err("over-long range must be a 400");
+        match err {
+            ApiError::BadRequest(message) => {
+                assert!(message.contains("92"), "unexpected message: {message}");
+            }
+            other => panic!("expected BadRequest, got {other:?}"),
+        }
+
+        // Exactly 92 days is allowed.
+        assert!(resolve_stats_window(
+            &stats_query(
+                Some(now - chrono::Duration::days(92)),
+                Some(now),
+            ),
+            || now - chrono::Duration::days(30),
+        )
+        .is_ok());
+
+        // Inverted + huge (from in the future) is rejected as inverted first.
+        let err = resolve_stats_window(
+            &stats_query(Some(now + chrono::Duration::days(400)), Some(now)),
+            || now - chrono::Duration::days(30),
+        )
+        .unwrap_err();
+        assert!(matches!(err, ApiError::BadRequest(_)));
     }
 }

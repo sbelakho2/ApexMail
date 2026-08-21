@@ -30,7 +30,9 @@ class Emails
      *   @type string        $scheduled_at    ISO 8601
      *   @type string        $idempotency_key
      * }
-     * @return array
+     * @return array The API response: {id, status, created_at}. When no
+     *   idempotency_key is supplied, one is generated automatically so that
+     *   transport-level retries can never cause a duplicate send (SDK-B).
      */
     public function send(array $params): array
     {
@@ -56,7 +58,12 @@ class Emails
             $this->validateRecipients($params['bcc'], 'bcc');
         }
 
+        // SDK-B: automatic idempotency key (caller-supplied key wins) so a
+        // retried POST can never enqueue the same message twice.
         $idempotencyKey = $params['idempotency_key'] ?? null;
+        if ($idempotencyKey === null || $idempotencyKey === '') {
+            $idempotencyKey = Client::uuid4();
+        }
 
         $body = array_filter([
             'from'         => $this->normalizeAddress($params['from'] ?? null),
@@ -83,13 +90,16 @@ class Emails
      * Send up to 1,000 emails in a single request.
      *
      * @param array[] $messages  Array of parameter arrays (same shape as send())
-     * @return array
+     * @param string|null $idempotencyKey Optional caller-supplied key; a random
+     *   UUID v4 is generated when omitted (SDK-B).
+     * @return array The API response: {accepted, rejected, results: [{index,
+     *   id?, status, error?}]}
      */
-    public function batch(array $messages): array
+    public function batch(array $messages, ?string $idempotencyKey = null): array
     {
         return $this->client->request('POST', '/v1/messages/batch', [
             'messages' => array_map([$this, 'normalizeSendParams'], $messages),
-        ]);
+        ], $idempotencyKey ?? Client::uuid4());
     }
 
     /** Get an email by ID. */

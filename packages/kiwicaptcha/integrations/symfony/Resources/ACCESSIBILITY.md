@@ -111,7 +111,7 @@ Only the conservative claim in the Positioning section is published.
 
 ## EAA compatibility mapping
 
-Directive (EU) 2019/882 Annex I requires covered services' identification, security and payment functionality to be perceivable, operable, understandable and robust.
+Directive (EU) 2019/882 Annex I requires covered services' identification, security and payment functionality to be perceivable, operable and understandable, and to stay compatible with assistive technologies.
 The component-scoped EAA statement is:
 
 > KiwiCaptcha is designed to support EAA accessibility requirements for identification and security functionality when integrated into a conforming service.

@@ -42,7 +42,7 @@ final class ArrayChainedChallengeStateStore implements TransactionalChainedChall
 
     /**
      * @param \Closure|null $now test seam: returns the current unix
-     *                           seconds (defaults to microtime(true)).
+     *                           seconds, defaulting to microtime(true).
      */
     public function __construct(private readonly ?\Closure $now = null)
     {
@@ -400,17 +400,17 @@ final class ArrayChainedChallengeStateStore implements TransactionalChainedChall
         if ($record === null) {
             return 'missing';
         }
-        // OBLIGATION-BOUND (the mirror of the Redis Lua — atomic over
-        // BOTH keys): the chain record must STILL agree on the
-        // obligation id AND the obligation mapping must STILL point at
-        // this chain — otherwise the transaction's chain moved and
-        // NOTHING is transitioned (fail closed).
+        // Obligation-bound (the mirror of the Redis Lua, atomic over
+        // both keys): the chain record must still agree on the
+        // obligation id, and the obligation mapping must still point at
+        // this chain; otherwise the transaction's chain moved and
+        // nothing is transitioned (fail closed).
         if ($record['obligationId'] !== $obligationId) {
             return 'obligation_moved';
         }
         $mapped = $this->obligations[$obligationId] ?? null;
         if ($mapped === null) {
-            // The obligation mapping is GONE while the chain survives —
+            // The obligation mapping is gone while the chain survives —
             // the transaction already ended (the mapping is deleted
             // atomically at verification): there is no chain left to
             // terminalize.

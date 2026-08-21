@@ -27,9 +27,18 @@ static STANDARD_LOCAL_RE: LazyLock<Option<Regex>> =
     LazyLock::new(|| Regex::new(r"^[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+$").ok());
 
 /// Quoted-string local-part: anything inside double quotes (RFC 5322 §3.2.4).
-/// Allows escaped characters (`\x`) and all printable ASCII inside the quotes.
-static QUOTED_LOCAL_RE: LazyLock<Option<Regex>> =
-    LazyLock::new(|| Regex::new(r#"^"[^"]*(?:\\.[^"]*)*"$"#).ok());
+/// Allows escaped characters (`\x`) and all printable characters inside the
+/// quotes.
+///
+/// # Security (CRLF injection)
+/// Both the literal (first alternative) and escaped (second alternative)
+/// character classes exclude all control characters (`\x00-\x1F`, `\x7F`),
+/// so CR/LF/NUL can never appear inside a quoted local part — not even as a
+/// `\<CR>` quoted-pair, which downstream unescaping would turn back into a
+/// raw header separator.
+static QUOTED_LOCAL_RE: LazyLock<Option<Regex>> = LazyLock::new(|| {
+    Regex::new(r#"^"(?:[^"\x00-\x1F\x7F]|\\[^\x00-\x1F\x7F])*"$"#).ok()
+});
 
 /// Domain part: standard RFC 5322 domain name or domain literal.
 /// - Domain names: letters, digits, hyphens, at least one dot, TLD ≥ 2 chars.
@@ -238,6 +247,27 @@ mod tests {
         assert!(is_valid_email(r#""test user"@example.com"#));
         assert!(is_valid_email(r#""test.user"@example.com"#));
         assert!(is_valid_email(r#""test@user"@example.com"#));
+        // Escaped characters (quoted-pair)
+        assert!(is_valid_email(r#""test\.user"@example.com"#));
+        assert!(is_valid_email(r#""test\"user"@example.com"#));
+        // Unicode inside quotes is permitted (SMTPUTF8-style quoted local part)
+        assert!(is_valid_email("\"tëst üser@example.com\"@example.com"));
+    }
+
+    #[test]
+    fn test_quoted_local_part_rejects_control_characters() {
+        // CR/LF inside a quoted local part enables header injection
+        // ("x\nBcc: ..." smuggling) — must be rejected.
+        assert!(!is_valid_email("\"x\nBcc: a@b.c\"@example.com"));
+        assert!(!is_valid_email("\"x\r\nBcc: a@b.c\"@example.com"));
+        assert!(!is_valid_email("\"x\rBcc: a@b.c\"@example.com"));
+        // Escaped control characters are rejected too: downstream unescaping
+        // would re-materialise the raw CR/LF.
+        assert!(!is_valid_email("\"x\\\nBcc: a@b.c\"@example.com"));
+        // NUL anywhere in the local part is rejected
+        assert!(!is_valid_email("\"a\0b\"@example.com"));
+        // Sanity: the CRLF payload without quotes is invalid as well
+        assert!(!is_valid_email("x\nBcc: a@b.c@example.com"));
     }
 
     #[test]

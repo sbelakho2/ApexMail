@@ -145,7 +145,7 @@ async fn handle_stripe_webhook(
             }
 
             error!(event_id = %event_id, error = %error_message, "stripe webhook processing failed");
-            json_error(StatusCode::BAD_REQUEST, "Webhook processing failed")
+            json_error(error.http_status(), "Webhook processing failed")
         }
     }
 }
@@ -365,11 +365,16 @@ async fn process_webhook(
             });
         }
         WebhookEventClaim::AlreadyPending => {
-            info!(event_id = %event.id, event_type = %event.event_type, "stripe webhook is already being processed by another worker");
-            return Ok(ProcessWebhookResult {
-                event_type: event.event_type,
-                processed: false,
-            });
+            // Fix G — acknowledging a concurrently-pending event with a 200
+            // makes Stripe stop retrying; if the worker that claimed it then
+            // crashes, the row is stuck in `pending` forever. Return a
+            // retryable status instead so Stripe keeps retrying (and the
+            // stale-pending reclaimer below eventually resets the row).
+            info!(event_id = %event.id, event_type = %event.event_type, "stripe webhook is already being processed by another worker; asking Stripe to retry");
+            return Err(ProcessWebhookError::RetryLater(format!(
+                "event {} is pending on another worker",
+                event.id
+            )));
         }
     }
 
@@ -528,6 +533,99 @@ fn classify_webhook_claim(row: Option<WebhookEventClaimRow>) -> WebhookEventClai
         }
         _ => WebhookEventClaim::AlreadyPending,
     }
+}
+
+/// Age after which a `pending` webhook event row is considered abandoned
+/// (claiming worker crashed mid-processing) and may be reclaimed (Fix G).
+pub const STALE_PENDING_RECLAIM_SECS: u64 = 10 * 60;
+
+/// Cutoff timestamp for the stale-pending reclaim sweep.
+fn stale_pending_cutoff(now: DateTime<Utc>) -> DateTime<Utc> {
+    now - TimeDelta::seconds(STALE_PENDING_RECLAIM_SECS as i64)
+}
+
+/// Reclaim webhook events stuck in `pending` for longer than
+/// [`STALE_PENDING_RECLAIM_SECS`]. Rows are reset to `received` (with the
+/// reason recorded in `error`) so either a Stripe retry or a deadletter
+/// replay can claim them again. Returns the reclaimed event ids.
+///
+/// Wired into the maintenance worker loop (runs on startup and hourly).
+pub async fn reclaim_stale_pending_webhooks(
+    state: &AppState,
+) -> Result<Vec<String>, String> {
+    let cutoff = stale_pending_cutoff(Utc::now());
+    let reclaimed: Vec<String> = sqlx::query_scalar(
+        r#"
+        UPDATE stripe_webhook_events
+        SET status = 'received',
+            error = 'reclaimed: pending exceeded stale threshold',
+            updated_at = NOW()
+        WHERE status = 'pending'
+          AND updated_at < $1
+        RETURNING stripe_event_id
+        "#,
+    )
+    .bind(cutoff)
+    .fetch_all(&state.db)
+    .await
+    .map_err(|error| format!("Failed to reclaim stale pending webhook events: {error}"))?;
+
+    if !reclaimed.is_empty() {
+        warn!(
+            count = reclaimed.len(),
+            "reclaimed stale pending stripe webhook events"
+        );
+    }
+
+    Ok(reclaimed)
+}
+
+/// Map Stripe invoice money fields (all integer minor units / cents) onto
+/// the local invoice columns, deriving whichever of subtotal/VAT/total is
+/// missing. Negative or absent amounts degrade to zero (Fix A).
+fn derive_invoice_totals(
+    subtotal: Option<i64>,
+    tax: Option<i64>,
+    total: Option<i64>,
+    amount_due: i64,
+) -> (i64, i64, i64) {
+    let subtotal = subtotal.filter(|value| *value > 0);
+    let tax = tax.filter(|value| *value > 0);
+    let total = total.filter(|value| *value > 0);
+    let amount_due = amount_due.max(0);
+
+    let (subtotal, vat, total) = match (subtotal, total) {
+        (Some(sub), Some(tot)) => {
+            let vat = tax.filter(|value| sub + value <= tot).unwrap_or((tot - sub).max(0));
+            (sub, vat, tot)
+        }
+        (Some(sub), None) => {
+            let vat = tax.unwrap_or(0);
+            (sub, vat, sub + vat)
+        }
+        (None, Some(tot)) => (tot, 0, tot),
+        (None, None) => (amount_due, 0, amount_due),
+    };
+
+    (subtotal, vat, total)
+}
+
+/// Effective VAT rate (percent) implied by a subtotal + VAT amount pair.
+fn derive_invoice_vat_rate(subtotal: i64, vat_amount: i64) -> i32 {
+    if subtotal <= 0 || vat_amount <= 0 {
+        return 0;
+    }
+    i32::try_from((vat_amount * 100 + subtotal / 2) / subtotal).unwrap_or(0)
+}
+
+/// Normalize a Stripe currency code for the local `invoices.currency`
+/// column (lowercase, like invoices.rs). Defaults to `eur`.
+fn normalize_stripe_currency(currency: Option<&str>) -> String {
+    currency
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_ascii_lowercase)
+        .unwrap_or_else(|| "eur".into())
 }
 
 /// Verify the HMAC-SHA256 signature header over `payload` (the timestamp
@@ -1066,7 +1164,8 @@ async fn handle_subscription_deleted(
 }
 
 async fn handle_invoice_paid(state: &AppState, invoice: InvoiceEvent) -> Result<(), String> {
-    // Prefer tenant_id from event metadata (immutable snapshot from Stripe).
+    // Prefer tenant_id from event metadata (immutable snapshot from Stripe),
+    // then fall back to resolving the invoice's subscription locally.
     let metadata_tenant_id = tenant_id_from_metadata(
         invoice
             .subscription_details
@@ -1077,67 +1176,10 @@ async fn handle_invoice_paid(state: &AppState, invoice: InvoiceEvent) -> Result<
 
     let subscription_id = invoice.subscription.as_ref().map(ExpandableId::id);
 
-    // Atomically update the invoice, resolving tenant_id either from event
-    // metadata or via a subquery on stripe_subscriptions. This eliminates the
-    // TOCTOU window between tenant resolution and the UPDATE.
-    let result = if let Some(ref tenant_id) = metadata_tenant_id {
-        sqlx::query(
-            "UPDATE invoices SET status = 'paid', paid_at = NOW(), updated_at = NOW()
-             WHERE stripe_invoice_id = $1 AND tenant_id = $2",
-        )
-        .bind(&invoice.id)
-        .bind(tenant_id)
-        .execute(&state.db)
-        .await
-    } else if let Some(ref sub_id) = subscription_id {
-        sqlx::query(
-            r#"
-            UPDATE invoices
-            SET status = 'paid',
-                paid_at = NOW(),
-                updated_at = NOW(),
-                tenant_id = COALESCE(tenant_id, (
-                    SELECT tenant_id FROM stripe_subscriptions
-                    WHERE stripe_subscription_id = $2
-                    ORDER BY created_at DESC LIMIT 1
-                ))
-            WHERE stripe_invoice_id = $1
-              AND (
-                  -- Only update if tenant was already known or we can resolve it
-                  tenant_id IS NOT NULL
-                  OR EXISTS (
-                      SELECT 1 FROM stripe_subscriptions
-                      WHERE stripe_subscription_id = $2
-                  )
-              )
-            "#,
-        )
-        .bind(&invoice.id)
-        .bind(sub_id)
-        .execute(&state.db)
-        .await
-    } else {
-        // No tenant_id available from either source — nothing to update
-        info!(
-            invoice_id = %invoice.id,
-            "stripe invoice paid but no tenant_id could be resolved — skipping"
-        );
-        return Ok(());
-    };
-
-    result.map_err(|error| format!("Failed to mark invoice as paid: {error}"))?;
-
-    // If a previously-dunning invoice was settled, clear the tenant's dunning
-    // state (healthy again), release queued messages and drop the cached
-    // status — mirrors the auto-pay recovery path in maintenance.rs.
-    // (Control flow guarantees at least one of metadata tenant_id /
-    // subscription_id is present here; the both-None case returned above.)
-    let recovered_tenant: Option<String> = match metadata_tenant_id.as_deref() {
-        Some(tenant_id) => Some(tenant_id.to_string()),
-        None => {
-            let sub_id = subscription_id
-                .as_deref()
-                .expect("subscription id is present when metadata tenant id is absent");
+    // Resolve tenant via the subscription fallback when metadata is absent.
+    let fallback_tenant_id = match (&metadata_tenant_id, subscription_id) {
+        (Some(_), _) => None,
+        (None, Some(sub_id)) => {
             sqlx::query_scalar::<_, String>(
                 r#"
                 SELECT tenant_id
@@ -1150,32 +1192,199 @@ async fn handle_invoice_paid(state: &AppState, invoice: InvoiceEvent) -> Result<
             .bind(sub_id)
             .fetch_optional(&state.db)
             .await
-            .map_err(|error| format!("Failed to resolve tenant for payment recovery: {error}"))?
+            .map_err(|error| format!("Failed to resolve tenant from subscription: {error}"))?
         }
+        (None, None) => None,
     };
 
-    if let Some(tenant_id) = recovered_tenant {
-        crate::maintenance::mark_payment_recovered(state, &tenant_id).await?;
+    // Never silently drop paid revenue: when no tenant can be resolved the
+    // event is deadlettered with a reason (it can be replayed once the
+    // subscription row exists).
+    let Some(tenant_id) = metadata_tenant_id.or(fallback_tenant_id) else {
+        return Err(format!(
+            "invoice.paid for {} could not be resolved to a tenant (no metadata tenant_id, no subscription match)",
+            invoice.id
+        ));
+    };
+
+    // Atomically update the invoice, resolving tenant_id either from event
+    // metadata or via a subquery on stripe_subscriptions. This eliminates the
+    // TOCTOU window between tenant resolution and the UPDATE.
+    let result = sqlx::query(
+        r#"
+        UPDATE invoices SET status = 'paid', paid_at = NOW(), updated_at = NOW()
+        WHERE stripe_invoice_id = $1
+          AND (tenant_id = $2 OR tenant_id IS NULL)
+        "#,
+    )
+    .bind(&invoice.id)
+    .bind(&tenant_id)
+    .execute(&state.db)
+    .await;
+
+    match result {
+        Ok(execution) if execution.rows_affected() > 0 => { /* existing row marked paid */ }
+        Ok(_) => {
+            // Fix A — no local row matched, meaning the invoice was created
+            // on Stripe's side (e.g. subscription billing or Meter usage)
+            // without a local draft. Insert the paid invoice so revenue is
+            // recorded. ON CONFLICT makes replays idempotent.
+            insert_paid_invoice_from_stripe(state, &invoice, &tenant_id).await?;
+        }
+        Err(error) => return Err(format!("Failed to mark invoice as paid: {error}")),
     }
+
+    // If a previously-dunning invoice was settled, clear the tenant's dunning
+    // state (healthy again), release queued messages and drop the cached
+    // status — mirrors the auto-pay recovery path in maintenance.rs.
+    crate::maintenance::mark_payment_recovered(state, &tenant_id).await?;
 
     info!(
         invoice_id = %invoice.id,
+        tenant_id = %tenant_id,
         "stripe invoice marked as paid"
     );
     Ok(())
 }
 
+/// Insert a paid invoice from a Stripe `invoice.paid` event when no local
+/// row exists (Fix A). Money stays integer cents; the currency, subtotal,
+/// VAT and total come from the Stripe payload; sequential numbering uses the
+/// existing `invoice_number_seq` unless Stripe assigned a number.
+/// Idempotent via ON CONFLICT (stripe_invoice_id) (unique index, migration 101).
+async fn insert_paid_invoice_from_stripe(
+    state: &AppState,
+    invoice: &InvoiceEvent,
+    tenant_id: &str,
+) -> Result<(), String> {
+    let (subtotal, vat_total, total) =
+        derive_invoice_totals(invoice.subtotal, invoice.tax, invoice.total, invoice.amount_due);
+    let vat_rate = derive_invoice_vat_rate(subtotal, vat_total);
+    let currency = normalize_stripe_currency(invoice.currency.as_deref());
+
+    let issued_at = invoice
+        .created
+        .and_then(|secs| DateTime::<Utc>::from_timestamp(secs, 0))
+        .unwrap_or_else(Utc::now);
+    let period_start = invoice
+        .period_start
+        .and_then(|secs| DateTime::<Utc>::from_timestamp(secs, 0))
+        .unwrap_or(issued_at);
+    let period_end = invoice
+        .period_end
+        .and_then(|secs| DateTime::<Utc>::from_timestamp(secs, 0))
+        .unwrap_or(issued_at);
+
+    // Best-effort capture of the billing country for KMD bucketing (I4):
+    // invoices created directly from Stripe carry no local VAT derivation,
+    // so store the current address; the VAT rate is derived from the Stripe
+    // amounts themselves.
+    let billing_country: Option<String> = sqlx::query_scalar(
+        "SELECT UPPER(country) FROM billing_addresses WHERE tenant_id = $1",
+    )
+    .bind(tenant_id)
+    .fetch_optional(&state.db)
+    .await
+    .unwrap_or(None)
+    .flatten();
+
+    sqlx::query(
+        r#"
+        INSERT INTO invoices (
+            id, tenant_id, stripe_invoice_id, invoice_number, status,
+            currency, amount, subtotal, vat_total, total,
+            issued_at, due_at, paid_at, period_start, period_end,
+            billing_country, vat_rate,
+            created_at, updated_at
+        ) VALUES (
+            gen_random_uuid(), $1, $2,
+            COALESCE($3, to_char(NOW(), 'YYYY') || '-' || LPAD(nextval('invoice_number_seq')::text, 6, '0')),
+            'paid', $4, $7, $5, $6, $7,
+            to_timestamp($8), to_timestamp($8), NOW(), to_timestamp($9), to_timestamp($10),
+            $11, $12,
+            NOW(), NOW()
+        )
+        ON CONFLICT (stripe_invoice_id) DO UPDATE SET
+            status = 'paid',
+            paid_at = COALESCE(invoices.paid_at, NOW()),
+            updated_at = NOW()
+        "#,
+    )
+    .bind(tenant_id)
+    .bind(&invoice.id)
+    .bind(invoice.number.as_deref().filter(|value| !value.is_empty()))
+    .bind(&currency)
+    .bind(subtotal)
+    .bind(vat_total)
+    .bind(total)
+    .bind(issued_at.timestamp())
+    .bind(period_start.timestamp())
+    .bind(period_end.timestamp())
+    .bind(billing_country)
+    .bind(vat_rate)
+    .execute(&state.db)
+    .await
+    .map_err(|error| format!("Failed to insert paid Stripe invoice {}: {error}", invoice.id))?;
+
+    info!(
+        invoice_id = %invoice.id,
+        tenant_id = %tenant_id,
+        subtotal,
+        vat_total,
+        total,
+        currency = %currency,
+        "inserted missing local invoice from Stripe invoice.paid event"
+    );
+
+    Ok(())
+}
+
 async fn handle_payment_failed(state: &AppState, invoice: InvoiceEvent) -> Result<(), String> {
-    let Some(tenant_id) = tenant_id_from_metadata(
+    // Fix H — resolve the tenant from event metadata first, then fall back
+    // to the same stripe_subscriptions lookup handle_invoice_paid uses.
+    // Unresolvable events are deadlettered (via the returned error) instead
+    // of being silently dropped.
+    let metadata_tenant_id = tenant_id_from_metadata(
         invoice
             .subscription_details
             .as_ref()
             .and_then(|details| details.metadata.as_ref()),
-    ) else {
-        return Ok(());
+    )
+    .map(str::to_string);
+
+    let tenant_id = match metadata_tenant_id {
+        Some(tenant_id) => tenant_id,
+        None => {
+            let Some(sub_id) = invoice.subscription.as_ref().map(ExpandableId::id) else {
+                return Err(format!(
+                    "invoice.payment_failed for {} has neither subscription metadata nor a subscription reference — tenant unresolvable",
+                    invoice.id
+                ));
+            };
+
+            sqlx::query_scalar::<_, String>(
+                r#"
+                SELECT tenant_id
+                FROM stripe_subscriptions
+                WHERE stripe_subscription_id = $1
+                ORDER BY created_at DESC
+                LIMIT 1
+                "#,
+            )
+            .bind(sub_id)
+            .fetch_optional(&state.db)
+            .await
+            .map_err(|error| format!("Failed to resolve tenant from subscription: {error}"))?
+            .ok_or_else(|| {
+                format!(
+                    "invoice.payment_failed for {} references unknown subscription {sub_id} — tenant unresolvable",
+                    invoice.id
+                )
+            })?
+        }
     };
 
-    let dunning = record_failed_payment(state, tenant_id, &invoice.id, invoice.amount_due).await?;
+    let dunning = record_failed_payment(state, &tenant_id, &invoice.id, invoice.amount_due).await?;
 
     sqlx::query(
         r#"
@@ -1183,7 +1392,7 @@ async fn handle_payment_failed(state: &AppState, invoice: InvoiceEvent) -> Resul
         VALUES (gen_random_uuid(), $1, 'payment_failed', $2, 'pending', NOW())
         "#,
     )
-    .bind(tenant_id)
+    .bind(&tenant_id)
     .bind(serde_json::json!({
         "invoiceId": invoice.id,
         "amount": invoice.amount_due,
@@ -1226,54 +1435,43 @@ async fn handle_trial_ending(
     Ok(())
 }
 
-async fn record_failed_payment(
-    state: &AppState,
-    tenant_id: &str,
-    invoice_id: &str,
-    amount: i64,
-) -> Result<DunningResult, String> {
-    let config = get_dunning_config_for_tenant(state, tenant_id).await;
-    let now = Utc::now();
-    let mut tx = state
-        .db
-        .begin()
-        .await
-        .map_err(|error| format!("Failed to begin payment failure transaction: {error}"))?;
+/// Post-increment dunning state as returned by the atomic upsert.
+#[derive(Debug, Clone, sqlx::FromRow)]
+struct DunningSnapshot {
+    failed_payment_count: i32,
+    first_failed_at: Option<DateTime<Utc>>,
+    status: String,
+}
 
-    let existing = sqlx::query_as::<_, DunningRecordRow>(
-        r#"
-        SELECT failed_payment_count, first_failed_at, status
-        FROM dunning_records
-        WHERE tenant_id = $1
-        "#,
-    )
-    .bind(tenant_id)
-    .fetch_optional(&mut *tx)
-    .await
-    .map_err(|error| format!("Failed to load dunning record: {error}"))?;
+/// Dunning state decision derived from the post-increment snapshot (pure —
+/// Fix H). `failed_payment_count` here is the already-incremented value
+/// produced SQL-side, so concurrent failures can never lose an increment;
+/// `first_failed_at` is the LEAST() of the existing value and `now`, also
+/// computed SQL-side.
+#[derive(Debug)]
+struct ComputedDunningState {
+    failed_payment_count: i32,
+    first_failed_at: DateTime<Utc>,
+    status: String,
+    suspended_at: Option<DateTime<Utc>>,
+    grace_period_ends_at: Option<DateTime<Utc>>,
+}
 
-    let is_first_failure = existing
+fn next_dunning_state(
+    existing: Option<DunningSnapshot>,
+    now: DateTime<Utc>,
+    config: &DunningConfig,
+) -> ComputedDunningState {
+    let first_failed_at = existing
         .as_ref()
-        .map(|row| row.status == "healthy")
-        .unwrap_or(true);
-    let first_failed_at = if is_first_failure {
-        now
-    } else {
-        existing
-            .as_ref()
-            .and_then(|row| row.first_failed_at)
-            .unwrap_or(now)
-    };
-    let failed_payment_count = if is_first_failure {
-        1
-    } else {
-        existing
-            .as_ref()
-            .map(|row| row.failed_payment_count + 1)
-            .unwrap_or(1)
-    };
-
-    let next_retry_at = calculate_next_retry(first_failed_at, failed_payment_count, &config);
+        .and_then(|row| row.first_failed_at)
+        .unwrap_or(now);
+    let failed_payment_count = existing
+        .as_ref()
+        .map(|row| row.failed_payment_count)
+        // The insert path passes the already-incremented count (SQL side);
+        // a missing snapshot means this is the first failure.
+        .unwrap_or(1);
     let days_since_first_failure = (now - first_failed_at).num_days().max(0);
 
     let mut new_status = "warning".to_string();
@@ -1297,57 +1495,106 @@ async fn record_failed_payment(
         }
     }
 
+    ComputedDunningState {
+        failed_payment_count,
+        first_failed_at,
+        status: new_status,
+        suspended_at,
+        grace_period_ends_at,
+    }
+}
+
+async fn record_failed_payment(
+    state: &AppState,
+    tenant_id: &str,
+    invoice_id: &str,
+    amount: i64,
+) -> Result<DunningResult, String> {
+    let config = get_dunning_config_for_tenant(state, tenant_id).await;
+    let now = Utc::now();
+    let mut tx = state
+        .db
+        .begin()
+        .await
+        .map_err(|error| format!("Failed to begin payment failure transaction: {error}"))?;
+
+    // Fix H — single UPSERT with SQL-side increment. The counter increment
+    // and first_failed_at=LEAST(existing, now) happen atomically inside the
+    // statement, eliminating the read-compute-write race that lost
+    // increments under concurrent invoice.payment_failed events.
     // dunning_records.id is VARCHAR(26) (migrations 087/093) — a 36-char
     // gen_random_uuid() string would overflow the column. Generate the id
     // in Rust with the shared 26-char generator instead.
     let dunning_record_id = generate_audit_log_id();
 
+    let snapshot = sqlx::query_as::<_, DunningSnapshot>(
+        r#"
+        INSERT INTO dunning_records (
+            id, tenant_id, status, failed_payment_count, first_failed_at,
+            last_failed_at, next_retry_at, suspended_at, grace_period_ends_at,
+            created_at, updated_at
+        )
+        VALUES ($2, $1, 'warning', 1, $3, $3, NULL, NULL, NULL, NOW(), NOW())
+        ON CONFLICT (tenant_id) DO UPDATE SET
+            failed_payment_count = dunning_records.failed_payment_count + 1,
+            first_failed_at = LEAST(
+                COALESCE(dunning_records.first_failed_at, EXCLUDED.first_failed_at),
+                EXCLUDED.first_failed_at
+            ),
+            last_failed_at = EXCLUDED.last_failed_at,
+            updated_at = NOW()
+        RETURNING failed_payment_count, first_failed_at, status
+        "#,
+    )
+    .bind(tenant_id)
+    .bind(&dunning_record_id)
+    .bind(now)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(|error| format!("Failed to upsert dunning counters: {error}"))?;
+
+    let computed = next_dunning_state(Some(snapshot), now, &config);
+    let next_retry_at = calculate_next_retry(
+        computed.first_failed_at,
+        computed.failed_payment_count,
+        &config,
+    );
+
     sqlx::query(
         r#"
-        WITH upsert_dunning AS (
-            INSERT INTO dunning_records (
-                id, tenant_id, status, failed_payment_count, first_failed_at,
-                last_failed_at, next_retry_at, suspended_at, grace_period_ends_at,
-                created_at, updated_at
-            )
-            VALUES ($11, $1, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW())
-            ON CONFLICT (tenant_id) DO UPDATE SET
-                status = $2,
-                failed_payment_count = $3,
-                last_failed_at = $5,
-                next_retry_at = $6,
-                suspended_at = COALESCE(dunning_records.suspended_at, $7),
-                grace_period_ends_at = COALESCE($8, dunning_records.grace_period_ends_at),
+        WITH update_dunning AS (
+            UPDATE dunning_records
+            SET status = $2,
+                next_retry_at = $3,
+                suspended_at = COALESCE(dunning_records.suspended_at, $4),
+                grace_period_ends_at = COALESCE($5, dunning_records.grace_period_ends_at),
                 updated_at = NOW()
+            WHERE tenant_id = $1
             RETURNING tenant_id
         ),
         log_event AS (
             INSERT INTO dunning_events (
                 id, tenant_id, event_type, invoice_id, created_at
             )
-            VALUES (gen_random_uuid(), $1, 'payment_failed', $9, NOW())
+            VALUES (gen_random_uuid(), $1, 'payment_failed', $6, NOW())
             RETURNING tenant_id
         ),
         suspend_tenant AS (
             UPDATE tenants
             SET status = 'suspended', updated_at = NOW()
-            WHERE id = $1 AND $10 = true
+            WHERE id = $1 AND $7 = true
             RETURNING id
         )
         SELECT 1
         "#,
     )
     .bind(tenant_id)
-    .bind(&new_status)
-    .bind(failed_payment_count)
-    .bind(first_failed_at)
-    .bind(now)
+    .bind(&computed.status)
     .bind(next_retry_at)
-    .bind(suspended_at)
-    .bind(grace_period_ends_at)
+    .bind(computed.suspended_at)
+    .bind(computed.grace_period_ends_at)
     .bind(invoice_id)
-    .bind(new_status == "hard_suspended")
-    .bind(&dunning_record_id)
+    .bind(computed.status == "hard_suspended")
     .execute(&mut *tx)
     .await
     .map_err(|error| format!("Failed to upsert dunning state: {error}"))?;
@@ -1360,9 +1607,9 @@ async fn record_failed_payment(
         Some(invoice_id),
         serde_json::json!({
             "amount": amount,
-            "failedPaymentCount": failed_payment_count,
-            "daysSinceFirstFailure": days_since_first_failure,
-            "status": new_status,
+            "failedPaymentCount": computed.failed_payment_count,
+            "daysSinceFirstFailure": (now - computed.first_failed_at).num_days().max(0),
+            "status": computed.status,
             "nextRetryAt": next_retry_at.map(|value| value.to_rfc3339()),
         }),
         now,
@@ -1377,10 +1624,10 @@ async fn record_failed_payment(
     send_dunning_notification(
         state,
         tenant_id,
-        &new_status,
+        &computed.status,
         serde_json::json!({
-            "failedCount": failed_payment_count,
-            "daysSinceFirstFailure": days_since_first_failure,
+            "failedCount": computed.failed_payment_count,
+            "daysSinceFirstFailure": (now - computed.first_failed_at).num_days().max(0),
             "nextRetryAt": next_retry_at.map(|value| value.to_rfc3339()),
         }),
     )
@@ -1391,7 +1638,7 @@ async fn record_failed_payment(
         let cache_result: Result<(), _> = redis::AsyncCommands::set_ex(
             &mut conn,
             &cache_key,
-            &new_status,
+            &computed.status,
             DUNNING_STATUS_CACHE_TTL_SECONDS,
         )
         .await;
@@ -1401,7 +1648,7 @@ async fn record_failed_payment(
     }
 
     Ok(DunningResult {
-        status: new_status,
+        status: computed.status,
         next_retry_at,
     })
 }
@@ -1600,17 +1847,32 @@ struct ProcessWebhookResult {
 enum ProcessWebhookError {
     RecordDeadletter(String),
     DeadletterFlowHandled(String),
+    /// Transient condition (e.g. another worker holds the event): Stripe
+    /// must retry. Maps to 5xx and never deadletters (Fix G).
+    RetryLater(String),
 }
 
 impl ProcessWebhookError {
     fn message(&self) -> &str {
         match self {
-            Self::RecordDeadletter(message) | Self::DeadletterFlowHandled(message) => message,
+            Self::RecordDeadletter(message)
+            | Self::DeadletterFlowHandled(message)
+            | Self::RetryLater(message) => message,
         }
     }
 
     fn should_record_deadletter(&self) -> bool {
         matches!(self, Self::RecordDeadletter(_))
+    }
+
+    /// HTTP status Stripe sees. Retryable errors use 503 (Stripe retries on
+    /// any non-2xx; 5xx signals server-side transience); business failures
+    /// keep the legacy 400.
+    fn http_status(&self) -> StatusCode {
+        match self {
+            Self::RetryLater(_) => StatusCode::SERVICE_UNAVAILABLE,
+            Self::RecordDeadletter(_) | Self::DeadletterFlowHandled(_) => StatusCode::BAD_REQUEST,
+        }
     }
 }
 
@@ -1777,6 +2039,26 @@ struct InvoiceEvent {
     id: String,
     amount_due: i64,
     #[serde(default)]
+    currency: Option<String>,
+    /// Subtotal excluding VAT, in the invoice currency's minor unit (cents).
+    #[serde(default)]
+    subtotal: Option<i64>,
+    /// Total tax/VAT, in cents.
+    #[serde(default)]
+    tax: Option<i64>,
+    /// Grand total including VAT, in cents.
+    #[serde(default)]
+    total: Option<i64>,
+    /// Human-readable invoice number assigned by Stripe (e.g. "2026-000042").
+    #[serde(default)]
+    number: Option<String>,
+    #[serde(default)]
+    created: Option<i64>,
+    #[serde(default)]
+    period_start: Option<i64>,
+    #[serde(default)]
+    period_end: Option<i64>,
+    #[serde(default)]
     attempt_count: Option<i64>,
     #[serde(default)]
     subscription_details: Option<InvoiceSubscriptionDetails>,
@@ -1803,13 +2085,6 @@ impl ExpandableId {
             Self::Object { id } => id,
         }
     }
-}
-
-#[derive(Debug, sqlx::FromRow)]
-struct DunningRecordRow {
-    failed_payment_count: i32,
-    first_failed_at: Option<DateTime<Utc>>,
-    status: String,
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -2472,6 +2747,231 @@ mod tests {
         }));
 
         assert_eq!(decision, WebhookEventClaim::AlreadyPending);
+    }
+
+    // ------------------------------------------------------------------
+    // Fix G — AlreadyPending must be retryable, not a silent 200.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn retry_later_error_maps_to_500_and_no_deadletter() {
+        let error = ProcessWebhookError::RetryLater("event pending on another worker".into());
+
+        assert_eq!(error.http_status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert!(!error.should_record_deadletter());
+        assert_eq!(error.message(), "event pending on another worker");
+    }
+
+    #[test]
+    fn deadlettered_errors_map_to_400_and_skip_duplicate_deadletter() {
+        let error = ProcessWebhookError::DeadletterFlowHandled("business failure".into());
+
+        assert_eq!(error.http_status(), StatusCode::BAD_REQUEST);
+        // The deadletter was already written atomically with the DB status
+        // flip inside process_webhook — must not be recorded twice.
+        assert!(!error.should_record_deadletter());
+    }
+
+    #[test]
+    fn stale_pending_cutoff_is_ten_minutes_in_the_past() {
+        let now = Utc::now();
+        let cutoff = stale_pending_cutoff(now);
+
+        assert_eq!(now - cutoff, TimeDelta::seconds(STALE_PENDING_RECLAIM_SECS as i64));
+    }
+
+    // ------------------------------------------------------------------
+    // Fix A — invoice.paid must insert revenue when no local row exists.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn derive_invoice_totals_prefers_explicit_stripe_amounts() {
+        let (subtotal, vat, total) =
+            derive_invoice_totals(Some(10_000), Some(2_400), Some(12_400), 12_400);
+        assert_eq!((subtotal, vat, total), (10_000, 2_400, 12_400));
+    }
+
+    #[test]
+    fn derive_invoice_totals_derives_vat_from_total_minus_subtotal() {
+        // Older Stripe payloads may omit `tax`; derive it from total-subtotal.
+        let (subtotal, vat, total) =
+            derive_invoice_totals(Some(10_000), None, Some(12_400), 12_400);
+        assert_eq!((subtotal, vat, total), (10_000, 2_400, 12_400));
+    }
+
+    #[test]
+    fn derive_invoice_totals_falls_back_to_amount_due_without_subtotal() {
+        // Only amount_due known: treat it as the taxable subtotal, VAT 0.
+        let (subtotal, vat, total) = derive_invoice_totals(None, None, None, 5_000);
+        assert_eq!((subtotal, vat, total), (5_000, 0, 5_000));
+    }
+
+    #[test]
+    fn derive_invoice_totals_handles_empty_and_negative_inputs() {
+        assert_eq!(derive_invoice_totals(None, None, None, 0), (0, 0, 0));
+        assert_eq!(derive_invoice_totals(None, None, None, -5), (0, 0, 0));
+        // Inconsistent Stripe data never yields a negative VAT.
+        assert_eq!(
+            derive_invoice_totals(Some(2_000), None, Some(1_000), 1_000),
+            (2_000, 0, 1_000)
+        );
+    }
+
+    #[test]
+    fn derive_invoice_vat_rate_computes_effective_rate() {
+        assert_eq!(derive_invoice_vat_rate(10_000, 2_400), 24);
+        assert_eq!(derive_invoice_vat_rate(10_000, 1_900), 19);
+        assert_eq!(derive_invoice_vat_rate(10_000, 0), 0);
+        assert_eq!(derive_invoice_vat_rate(0, 500), 0);
+    }
+
+    #[test]
+    fn normalize_stripe_currency_defaults_to_eur_and_lowercases() {
+        assert_eq!(normalize_stripe_currency(Some("EUR")), "eur");
+        assert_eq!(normalize_stripe_currency(Some("usd")), "usd");
+        assert_eq!(normalize_stripe_currency(Some("  ")), "eur");
+        assert_eq!(normalize_stripe_currency(None), "eur");
+    }
+
+    #[test]
+    fn invoice_event_decodes_full_stripe_amount_payload() {
+        let payload = serde_json::json!({
+            "id": "in_123",
+            "amount_due": 12_400,
+            "currency": "eur",
+            "subtotal": 10_000,
+            "tax": 2_400,
+            "total": 12_400,
+            "number": "2026-000042",
+            "created": 1_777_000_000,
+            "period_start": 1_777_000_000,
+            "period_end": 1_779_000_000,
+            "attempt_count": 1,
+            "subscription": "sub_1",
+            "subscription_details": { "metadata": { "tenant_id": "tenant_1" } }
+        });
+
+        let invoice: InvoiceEvent = serde_json::from_value(payload).expect("decode");
+        assert_eq!(invoice.id, "in_123");
+        assert_eq!(invoice.subtotal, Some(10_000));
+        assert_eq!(invoice.tax, Some(2_400));
+        assert_eq!(invoice.total, Some(12_400));
+        assert_eq!(invoice.currency.as_deref(), Some("eur"));
+        assert_eq!(invoice.number.as_deref(), Some("2026-000042"));
+        assert_eq!(invoice.subscription.as_ref().map(ExpandableId::id), Some("sub_1"));
+    }
+
+    #[test]
+    fn invoice_event_decodes_minimal_payload_with_defaults() {
+        let payload = serde_json::json!({ "id": "in_min", "amount_due": 500 });
+
+        let invoice: InvoiceEvent = serde_json::from_value(payload).expect("decode");
+        assert_eq!(invoice.id, "in_min");
+        assert_eq!(invoice.amount_due, 500);
+        assert!(invoice.subtotal.is_none());
+        assert!(invoice.subscription_details.is_none());
+        assert!(invoice.subscription.is_none());
+        assert!(invoice.currency.is_none());
+    }
+
+    // ------------------------------------------------------------------
+    // Fix H — dunning state computed from atomically-incremented counters.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn dunning_state_first_failure_is_warning() {
+        let now = Utc::now();
+        let state = next_dunning_state(None, now, &dunning_config());
+
+        assert_eq!(state.failed_payment_count, 1);
+        assert_eq!(state.status, "warning");
+        assert_eq!(state.first_failed_at, now);
+        assert!(state.suspended_at.is_none());
+    }
+
+    #[test]
+    fn dunning_state_consumes_post_increment_snapshot() {
+        // The SQL upsert increments the counter atomically; this function only
+        // sees the already-incremented snapshot (count=2 for a second
+        // failure) and must preserve it together with the original
+        // first_failed_at.
+        let now = Utc::now();
+        let first = now - TimeDelta::days(2);
+
+        let state = next_dunning_state(
+            Some(DunningSnapshot {
+                failed_payment_count: 2,
+                first_failed_at: Some(first),
+                status: "warning".into(),
+            }),
+            now,
+            &dunning_config(),
+        );
+
+        assert_eq!(state.failed_payment_count, 2);
+        assert_eq!(state.first_failed_at, first);
+        assert_eq!(state.status, "warning");
+    }
+
+    #[test]
+    fn dunning_state_soft_suspends_after_threshold_days() {
+        let now = Utc::now();
+        let first = now - TimeDelta::days(7); // soft_suspend_after_days = 7
+
+        let state = next_dunning_state(
+            Some(DunningSnapshot {
+                failed_payment_count: 3,
+                first_failed_at: Some(first),
+                status: "warning".into(),
+            }),
+            now,
+            &dunning_config(),
+        );
+
+        assert_eq!(state.status, "soft_suspended");
+        assert!(state.suspended_at.is_some());
+        assert!(state.grace_period_ends_at.is_none());
+    }
+
+    #[test]
+    fn dunning_state_hard_suspends_and_sets_grace_once() {
+        let now = Utc::now();
+        let first = now - TimeDelta::days(21); // hard_suspend_after_days = 21
+
+        let state = next_dunning_state(
+            Some(DunningSnapshot {
+                failed_payment_count: 5,
+                first_failed_at: Some(first),
+                status: "warning".into(),
+            }),
+            now,
+            &dunning_config(),
+        );
+
+        assert_eq!(state.status, "hard_suspended");
+        assert!(state.suspended_at.is_some());
+        assert_eq!(
+            state.grace_period_ends_at,
+            Some(now + TimeDelta::days(7))
+        );
+
+        // Already hard-suspended → grace/suspension timestamps preserved.
+        let state = next_dunning_state(
+            Some(DunningSnapshot {
+                failed_payment_count: 6,
+                first_failed_at: Some(first),
+                status: "hard_suspended".into(),
+            }),
+            now,
+            &dunning_config(),
+        );
+        assert_eq!(state.status, "hard_suspended");
+        assert!(state.suspended_at.is_none());
+        assert!(state.grace_period_ends_at.is_none());
+    }
+
+    fn dunning_config() -> DunningConfig {
+        DunningConfig::default()
     }
 
     // -----------------------------------------------------------------------

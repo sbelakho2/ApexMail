@@ -330,6 +330,19 @@ impl BayesianClassifier {
         self.model.read().classify(text)
     }
 
+    /// Total number of training samples (spam + ham).
+    /// Cheap O(1) accessor — use this instead of [`Self::export_model`]
+    /// (which deep-clones the entire vocabulary) for count checks.
+    pub fn total_samples(&self) -> u64 {
+        self.model.read().total_samples()
+    }
+
+    /// Current vocabulary size.
+    /// Cheap O(1) accessor — see [`Self::total_samples`].
+    pub fn vocab_size(&self) -> u64 {
+        self.model.read().vocab_size
+    }
+
     /// Online training:learn from a spam sample (validated + rate-limited).
     /// Returns `Err` if validation or rate limit fails.
     pub fn learn_spam_validated(&self, text: &str) -> Result<(), TrainingError> {
@@ -427,11 +440,38 @@ fn calculate_entropy(text: &str) -> f64 {
 /// Tokenize text into unigrams and bigrams (lowercased, alphanumeric only, 3+ chars).
 /// Bigrams capture two-word context (e.g., "free offer") which significantly
 /// improves classification accuracy compared to unigrams alone.
+///
+/// Obfuscation resistance:invisible (zero-width) characters are stripped
+/// before splitting, and each word is folded through the shared homoglyph /
+/// leet map from `content_scorer` (Cyrillic а→a, Greek ο→o, leet digits,
+/// …) and NFC-normalized, so homoglyph-substituted spellings produce the
+/// same tokens as their plain Latin equivalents.
 fn tokenize(text: &str) -> Vec<String> {
-    let unigrams: Vec<String> = text
+    use unicode_normalization::UnicodeNormalization;
+
+    // 1. Strip invisible characters that would otherwise split words at
+    //    invisible boundaries ("fr\u{200b}ee" → "fr" + "ee"), then NFC.
+    let stripped: String = text
+        .chars()
+        .filter(|c| !crate::content_scorer::is_invisible_char(*c))
+        .nfc()
+        .collect();
+
+    // 2. Split on non-alphanumerics, then fold per word. Folding *before*
+    //    the split would glue punctuation substitutions onto neighboring
+    //    words (normalize_leet_speak maps '!' → 'i', so "World!" would
+    //    become "Worldi").
+    let unigrams: Vec<String> = stripped
         .split(|c: char| !c.is_alphanumeric())
-        .filter(|w| w.len() >= 3)
-        .map(|w| w.to_lowercase())
+        .filter_map(|w| {
+            let folded = crate::content_scorer::normalize_leet_speak(w);
+            let token = folded.to_lowercase();
+            if token.chars().count() >= 3 {
+                Some(token)
+            } else {
+                None
+            }
+        })
         .collect();
 
     let mut tokens = unigrams.clone();
@@ -743,5 +783,57 @@ mod tests {
         // Should still classify normally
         let prob = model.classify(special);
         assert!((0.0..=1.0).contains(&prob));
+    }
+
+    // ── Obfuscation-resistant tokenization tests ──
+
+    #[test]
+    fn test_tokenize_cyrillic_homoglyph_matches_latin() {
+        // "frее" with Cyrillic е (U+0435) must tokenize identically to the
+        // plain Latin "free".
+        let plain = tokenize("free money now");
+        let homoglyph = tokenize("fr\u{0435}\u{0435} money now");
+        assert!(
+            plain.contains(&"free".to_string()),
+            "plain tokens missing free: {:?}",
+            plain
+        );
+        assert!(
+            homoglyph.contains(&"free".to_string()),
+            "Cyrillic-\u{0435} substituted 'free' must fold to the Latin token: {:?}",
+            homoglyph
+        );
+    }
+
+    #[test]
+    fn test_tokenize_strips_zero_width_and_nfc_normalizes() {
+        // Zero-width space inside a word must not split it into shards.
+        let tokens = tokenize("fr\u{200b}ee mon\u{feff}ey");
+        assert!(tokens.contains(&"free".to_string()), "got {:?}", tokens);
+        assert!(tokens.contains(&"money".to_string()), "got {:?}", tokens);
+        // Decomposed (NFD) é normalizes to the composed form, matching the
+        // composed spelling used during training.
+        let decomposed = tokenize("cafe\u{301}");
+        assert!(decomposed.contains(&"caf\u{e9}".to_string()), "got {:?}", decomposed);
+    }
+
+    #[test]
+    fn test_tokenize_punctuation_not_glued() {
+        // The leet map maps '!' to 'i'; folding must not glue it onto the
+        // preceding word ("World!" must stay "world", not "worldi").
+        let tokens = tokenize("Hello, World! This is a test-message.");
+        assert!(tokens.contains(&"world".to_string()), "got {:?}", tokens);
+        assert!(tokens.contains(&"hello".to_string()), "got {:?}", tokens);
+    }
+
+    #[test]
+    fn test_classifier_total_samples_and_vocab_accessors() {
+        let classifier = BayesianClassifier::new(BayesianModel::default());
+        assert_eq!(classifier.total_samples(), 0);
+        assert_eq!(classifier.vocab_size(), 0);
+        classifier.learn_spam("buy cheap pills now offer");
+        classifier.learn_ham("meeting notes attached report");
+        assert_eq!(classifier.total_samples(), 2);
+        assert!(classifier.vocab_size() > 0);
     }
 }

@@ -98,6 +98,10 @@ public final class Emails {
      * <p>Required keys: {@code from}, {@code to}, {@code subject} plus at least one of
      * {@code html}, {@code text}, or {@code templateId}.
      *
+     * <p>When no {@code idempotencyKey} is supplied, a random UUID v4 is generated
+     * per logical send and replayed across transport retries of that send, so
+     * a retried POST can never enqueue the same message twice (SDK-B).
+     *
      * @param params  Email parameters
      * @return API response including {@code id} of the queued message
      */
@@ -107,7 +111,11 @@ public final class Emails {
         }
         Map<String, Object> body = params.toMap();
         validateSendParams(body);
-        return client.request("POST", "/v1/messages", body, SendResponse.class, params.idempotencyKey());
+        String idempotencyKey = params.idempotencyKey();
+        if (idempotencyKey == null || idempotencyKey.isBlank()) {
+            idempotencyKey = java.util.UUID.randomUUID().toString();
+        }
+        return client.request("POST", "/v1/messages", body, SendResponse.class, idempotencyKey);
     }
 
     public SendResponse send(Map<String, Object> params) {
@@ -168,9 +176,24 @@ public final class Emails {
     /**
      * Send up to 1,000 emails in one API call.
      *
+     * <p>An idempotency key is generated automatically and replayed across
+     * transport retries of the batch call (SDK-B); supply {@code idempotencyKey}
+     * via the overload to control it.
+     *
      * @param messages  List of parameter maps (same shape as {@link #send})
      */
     public BatchResponse batch(List<Map<String, Object>> messages) {
+        return batch(messages, null);
+    }
+
+    /**
+     * Send up to 1,000 emails in one API call with an optional idempotency key.
+     *
+     * @param messages        List of parameter maps (same shape as {@link #send})
+     * @param idempotencyKey  Caller-supplied idempotency key; a random UUID v4
+     *                        is generated when null/blank (SDK-B)
+     */
+    public BatchResponse batch(List<Map<String, Object>> messages, String idempotencyKey) {
         if (messages == null || messages.isEmpty()) {
             throw new IllegalArgumentException("messages must not be empty");
         }
@@ -194,7 +217,10 @@ public final class Emails {
                 throw new IllegalArgumentException("message at index " + i + " missing html, text, or templateId");
             }
         }
-        return client.request("POST", "/v1/messages/batch", Map.of("messages", messages), BatchResponse.class);
+        String key = (idempotencyKey == null || idempotencyKey.isBlank())
+            ? java.util.UUID.randomUUID().toString()
+            : idempotencyKey;
+        return client.request("POST", "/v1/messages/batch", Map.of("messages", messages), BatchResponse.class, key);
     }
 
     /** Get a sent email by its ID. */
@@ -284,7 +310,17 @@ public final class Emails {
         }
     }
 
-    public record SendResponse(Message message) {
+    /**
+     * Response from a single send. Real API shape (after envelope unwrap) is
+     * the flat object {@code {"id": ..., "status": ..., "created_at": ...}}.
+     */
+    public record SendResponse(
+        String id,
+        String status,
+        @com.fasterxml.jackson.annotation.JsonProperty("created_at") String createdAt,
+        /** Deprecated: legacy nested shape; the live API never populates it. */
+        Message message
+    ) {
         public record Message(
             String id,
             String messageId,
@@ -295,15 +331,30 @@ public final class Emails {
         ) {}
     }
 
-    public record BatchResponse(java.util.List<BatchItem> results, Summary summary) {
+    /**
+     * Response from a batch send. Real API shape (after envelope unwrap) is
+     * {@code {accepted, rejected, results: [{index, id?, status, error?}]}}.
+     */
+    public record BatchResponse(
+        Integer accepted,
+        Integer rejected,
+        java.util.List<BatchItem> results,
+        /** Deprecated: legacy nested shape; the live API never populates it. */
+        Summary summary
+    ) {
+        /** One batch outcome: {index, id (accepted only), status, error (rejected only)}. */
         public record BatchItem(
             int index,
-            boolean success,
-            String messageId,
-            String error
+            String id,
+            String status,
+            String error,
+            /** Deprecated legacy fields (never populated by the live API). */
+            Boolean success,
+            String messageId
         ) {}
 
-        public record Summary(int total, int success, int failed) {}
+        /** Deprecated legacy aggregate; the API returns accepted/rejected counts instead. */
+        public record Summary(Integer total, Integer success, Integer failed) {}
     }
 
     public record EmailDetail(

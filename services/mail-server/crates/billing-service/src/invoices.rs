@@ -141,6 +141,39 @@ pub struct NewLineItem {
     pub unit_price: i64,
 }
 
+/// Round-half-up VAT for a single base amount (integer cents).
+fn round_vat(amount: i64, rate: i32) -> i64 {
+    ((amount * rate as i64) + 50) / 100
+}
+
+/// Allocate VAT across invoice lines following the EU convention: round each
+/// line independently, then adjust the final non-zero line so the per-line
+/// sum always reconciles exactly with the VAT computed on the (rounded)
+/// invoice total. Without this, sums of per-line rounding drift by ±1 cent
+/// from the headline `vat_total`, breaking KMD returns and PDF totals.
+///
+/// Returns the VAT amount (cents) per line, aligned with `amounts`.
+fn allocate_vat_across_lines(amounts: &[i64], rate: i32) -> Vec<i64> {
+    let mut allocated: Vec<i64> = amounts.iter().map(|&a| round_vat(a, rate)).collect();
+    let total: i64 = amounts.iter().sum();
+    let target = round_vat(total, rate);
+    let drift = target - allocated.iter().sum::<i64>();
+
+    if drift != 0 {
+        // Adjust the final line that already carries VAT (falling back to the
+        // last line when every per-line rounding rounded down to zero).
+        let slot = allocated
+            .iter()
+            .rposition(|value| *value != 0)
+            .unwrap_or(allocated.len().saturating_sub(1));
+        if let Some(value) = allocated.get_mut(slot) {
+            *value += drift;
+        }
+    }
+
+    allocated
+}
+
 /// Create an invoice.
 pub async fn create_invoice(
     pool: &PgPool,
@@ -157,15 +190,23 @@ pub async fn create_invoice(
 
     let invoice_number = generate_invoice_number(pool).await?;
 
+    // All lines on one invoice share the billing address, hence the same VAT
+    // rate; compute it once from the full subtotal so per-line allocations
+    // reconcile with the headline total (Fix I3).
+    let line_amounts: Vec<i64> = input
+        .line_items
+        .iter()
+        .map(|item| item.quantity * item.unit_price)
+        .collect();
+    let subtotal: i64 = line_amounts.iter().sum();
+    let (vat_rate, _) = calculate_vat(subtotal, &addr.country, addr.vat_number.as_deref());
+    let vat_allocations = allocate_vat_across_lines(&line_amounts, vat_rate);
+
     let mut line_items = Vec::with_capacity(input.line_items.len());
-    let mut subtotal: i64 = 0;
     let mut vat_total: i64 = 0;
 
-    for item in &input.line_items {
+    for (item, vat_amount) in input.line_items.iter().zip(vat_allocations) {
         let amount = item.quantity * item.unit_price;
-        let (vat_rate, vat_amount) =
-            calculate_vat(amount, &addr.country, addr.vat_number.as_deref());
-        subtotal += amount;
         vat_total += vat_amount;
         line_items.push(InvoiceLineItem {
             description: item.description.clone(),
@@ -192,11 +233,13 @@ pub async fn create_invoice(
             id, tenant_id, stripe_invoice_id, invoice_number, status,
             currency, amount, subtotal, vat_total, total, line_items,
             issued_at, due_at, period_start, period_end,
+            billing_country, vat_rate,
             created_at, updated_at
         ) VALUES (
             $1, $2, $3, $4, 'draft',
             $5, $8, $6, $7, $8, $9,
             $10, $11, $12, $13,
+            $14, $15,
             $10, $10
         )
         "#,
@@ -214,6 +257,8 @@ pub async fn create_invoice(
     .bind(due_at)
     .bind(input.period_start)
     .bind(input.period_end)
+    .bind(addr.country.to_uppercase())
+    .bind(vat_rate)
     .execute(pool)
     .await
     .map_err(InvoiceError::Db)?;
@@ -661,7 +706,6 @@ fn hex_encode(bytes: &[u8]) -> String {
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -696,6 +740,63 @@ mod tests {
         let (rate, amt) = calculate_vat(10_000, "EE", None);
         assert_eq!(rate, 24);
         assert_eq!(amt, 2_400); // 24 % of 10 000
+    }
+
+    // ------------------------------------------------------------------
+    // Fix I3 — per-line VAT rounding must reconcile with the rounded total.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn allocate_vat_lines_sums_to_total_rounded_vat() {
+        // Three lines of 3 cents each at 24 %: per-line rounding gives
+        // 1+1+1 = 3, but round(9 * 24%) = 2. The last line absorbs the -1.
+        let allocated = allocate_vat_across_lines(&[3, 3, 3], 24);
+
+        assert_eq!(allocated, vec![1, 1, 0]);
+        assert_eq!(
+            allocated.iter().sum::<i64>(),
+            ((3 + 3 + 3) * 24 + 50) / 100
+        );
+    }
+
+    #[test]
+    fn allocate_vat_lines_absorbs_plus_one_cent_drift() {
+        // Lines of 1 cent at 24 %: each line rounds to 0, but the total
+        // rounds to 1 — the final line is adjusted up by +1.
+        let allocated = allocate_vat_across_lines(&[1, 1, 1], 24);
+
+        assert_eq!(allocated, vec![0, 0, 1]);
+        assert_eq!(allocated.iter().sum::<i64>(), ((1 + 1 + 1) * 24 + 50) / 100);
+    }
+
+    #[test]
+    fn allocate_vat_lines_exact_rounding_needs_no_adjustment() {
+        let allocated = allocate_vat_across_lines(&[10_000, 5_000], 24);
+
+        // Exact per-line rounding already reconciles — no drift to absorb.
+        assert_eq!(
+            allocated,
+            vec![
+                (10_000 * 24 + 50) / 100,
+                (5_000 * 24 + 50) / 100
+            ]
+        );
+    }
+
+    #[test]
+    fn allocate_vat_lines_zero_rate_and_empty_inputs() {
+        assert!(allocate_vat_across_lines(&[], 24).is_empty());
+        assert_eq!(allocate_vat_across_lines(&[100, 200], 0), vec![0, 0]);
+    }
+
+    #[test]
+    fn allocate_vat_lines_adjusts_last_nonzero_line_only() {
+        // A trailing zero-amount line must not receive the reconciliation
+        // adjustment; the last *non-zero* line absorbs it instead.
+        let allocated = allocate_vat_across_lines(&[3, 3, 3, 0], 24);
+
+        assert_eq!(allocated, vec![1, 1, 0, 0]);
+        assert_eq!(allocated.iter().sum::<i64>(), 2);
     }
 
     #[test]

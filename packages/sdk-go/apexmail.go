@@ -15,6 +15,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -39,6 +40,7 @@ const (
 	defaultMaxRetries            = 3
 	defaultInitialBackoff        = 500 * time.Millisecond
 	defaultMaxBackoff            = 5 * time.Second
+	maxRetryAfterDelay           = 120 * time.Second
 	defaultIdleConnTimeout       = 90 * time.Second
 	defaultTLSHandshakeTimeout   = 10 * time.Second
 	defaultMaxIdleConns          = 100
@@ -243,16 +245,28 @@ func isValidEmailAddress(value string) bool {
 	if trimmed == "" {
 		return false
 	}
-	if _, err := mail.ParseAddress(trimmed); err == nil {
-		parts := strings.Split(trimmed, "@")
-		if len(parts) == 2 {
-			domain := strings.TrimSpace(parts[1])
-			if strings.Contains(domain, ".") {
-				return true
-			}
-		}
+	addr, err := mail.ParseAddress(trimmed)
+	if err != nil {
+		return false
 	}
-	return emailPattern.MatchString(trimmed)
+	// SDK-G L5: reject display-name forms like `Display Name <a@b.c>` — the
+	// caller must pass the bare address (use EmailAddress{Name: ...} for
+	// display names). mail.ParseAddress accepts them, so require the parsed
+	// address to be identical to the input, then re-validate the address
+	// itself against the plain-address pattern.
+	return addr.Address == trimmed && emailPattern.MatchString(addr.Address)
+}
+
+// newUUID4 generates a random RFC 4122 version-4 UUID using crypto/rand.
+// Used for automatic idempotency keys on send endpoints (SDK-B).
+func newUUID4() (string, error) {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", fmt.Errorf("apexmail: generate uuid: %w", err)
+	}
+	b[6] = (b[6] & 0x0f) | 0x40
+	b[8] = (b[8] & 0x3f) | 0x80
+	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16]), nil
 }
 
 // WebhookSignatureOptions configures webhook signature verification.
@@ -444,15 +458,16 @@ func readLimitedBody(resp *http.Response, maxBytes int64) ([]byte, error) {
 
 // retryDelay computes the delay before the next retry using:
 //
-//	delay = max(retryAfterSeconds, baseDelay * attempt²)
+//	delay = min(max(retryAfterSeconds, baseDelay * attempt²), maxRetryAfterDelay)
 //
 // The server's Retry-After header (integer seconds or HTTP-date) is honored
-// first. When absent or unparseable, quadratic backoff is used instead.
-// Both paths are capped at defaultMaxBackoff.
+// in full — capped at a sane maximum of 120s (SDK-F: previously the server's
+// value was silently truncated to defaultMaxBackoff = 5s). Quadratic backoff
+// on its own remains capped at defaultMaxBackoff.
 func retryDelay(resp *http.Response, attempt int) time.Duration {
 	retryAfter := resp.Header.Get("Retry-After")
 
-	// Compute quadratic backoff: baseDelay * attempt²
+	// Compute quadratic backoff: baseDelay * attempt² (capped at 5s)
 	backoff := calculateBackoff(attempt)
 
 	if retryAfter == "" {
@@ -461,46 +476,35 @@ func retryDelay(resp *http.Response, attempt int) time.Duration {
 
 	// Try integer seconds (most common)
 	if seconds, err := strconv.Atoi(retryAfter); err == nil {
-		retryAfterDelay := time.Duration(seconds) * time.Second
-		if retryAfterDelay > backoff {
-			backoff = retryAfterDelay
+		if d := time.Duration(seconds) * time.Second; d > backoff {
+			backoff = d
 		}
-		if backoff > defaultMaxBackoff {
-			return defaultMaxBackoff
-		}
-		return backoff
+		return capRetryDelay(backoff)
 	}
 
 	// Try HTTP-date format (RFC 1123)
-	if t, err := time.Parse(time.RFC1123, retryAfter); err == nil {
-		retryAfterDelay := time.Until(t)
-		if retryAfterDelay < 0 {
-			retryAfterDelay = 0
+	for _, layout := range []string{time.RFC1123, time.RFC1123Z} {
+		if t, err := time.Parse(layout, retryAfter); err == nil {
+			if d := time.Until(t); d > backoff {
+				backoff = d
+			}
+			return capRetryDelay(backoff)
 		}
-		if retryAfterDelay > backoff {
-			backoff = retryAfterDelay
-		}
-		if backoff > defaultMaxBackoff {
-			return defaultMaxBackoff
-		}
-		return backoff
-	}
-	if t, err := time.Parse(time.RFC1123Z, retryAfter); err == nil {
-		retryAfterDelay := time.Until(t)
-		if retryAfterDelay < 0 {
-			retryAfterDelay = 0
-		}
-		if retryAfterDelay > backoff {
-			backoff = retryAfterDelay
-		}
-		if backoff > defaultMaxBackoff {
-			return defaultMaxBackoff
-		}
-		return backoff
 	}
 
 	// Unparseable header — fall back to quadratic backoff
 	return backoff
+}
+
+// capRetryDelay bounds the total retry delay at maxRetryAfterDelay.
+func capRetryDelay(delay time.Duration) time.Duration {
+	if delay < 0 {
+		return 0
+	}
+	if delay > maxRetryAfterDelay {
+		return maxRetryAfterDelay
+	}
+	return delay
 }
 
 // calculateBackoff computes quadratic backoff: baseDelay * attempt²,
@@ -778,7 +782,10 @@ type SendOptions struct {
 	IdempotencyKey string
 }
 
-// SendEmailMessage contains details for a queued send.
+// SendEmailMessage contains details for a queued send (legacy nested shape).
+//
+// Deprecated: the API returns a flat {id, status, created_at} object; use the
+// top-level SendEmailResponse fields instead.
 type SendEmailMessage struct {
 	ID          string `json:"id"`
 	MessageID   string `json:"messageId"`
@@ -788,12 +795,23 @@ type SendEmailMessage struct {
 	CreatedAt   string `json:"createdAt"`
 }
 
-// SendEmailResponse is returned by Emails.Send.
+// SendEmailResponse is returned by Emails.Send. The real API (after envelope
+// unwrap) is the flat object {"id": "...", "status": "...", "created_at": "..."}.
 type SendEmailResponse struct {
+	ID        string `json:"id"`
+	Status    string `json:"status"`
+	CreatedAt string `json:"created_at"`
+
+	// Deprecated: legacy nested shape kept only so old mock payloads still
+	// decode. The live API never populates this field.
 	Message SendEmailMessage `json:"message"`
 }
 
 // Send sends a single transactional email.
+//
+// When no IdempotencyKey is supplied in opts, a random UUID v4 is generated
+// per logical send and replayed across transport retries of that send, so a
+// retried POST can never enqueue the same message twice (SDK-B).
 func (a *EmailsAPI) Send(ctx context.Context, req *SendEmailRequest, opts ...SendOptions) (*SendEmailResponse, error) {
 	if err := validateSendEmailRequest(req); err != nil {
 		return nil, err
@@ -801,6 +819,13 @@ func (a *EmailsAPI) Send(ctx context.Context, req *SendEmailRequest, opts ...Sen
 	var idempotencyKey string
 	if len(opts) > 0 {
 		idempotencyKey = opts[0].IdempotencyKey
+	}
+	if idempotencyKey == "" {
+		key, err := newUUID4()
+		if err != nil {
+			return nil, err
+		}
+		idempotencyKey = key
 	}
 	var resp SendEmailResponse
 	err := a.client.do(ctx, http.MethodPost, "/v1/messages", req, &resp, idempotencyKey)
@@ -813,28 +838,44 @@ type BatchSendRequest struct {
 }
 
 // BatchResultItem represents the outcome of a single email in a batch.
+// Real API shape: {index, id (accepted only), status: "queued"|"rejected", error (rejected only)}.
 type BatchResultItem struct {
-	Index     int    `json:"index"`
+	Index  int    `json:"index"`
+	ID     string `json:"id,omitempty"`
+	Status string `json:"status"`
+	Error  string `json:"error,omitempty"`
+
+	// Deprecated legacy fields (never populated by the live API).
 	Success   bool   `json:"success"`
 	MessageID string `json:"messageId,omitempty"`
-	Error     string `json:"error,omitempty"`
 }
 
-// BatchSummary contains aggregate batch statistics.
+// BatchSummary contains aggregate batch statistics (legacy shape).
+//
+// Deprecated: the API returns top-level accepted/rejected counts instead.
 type BatchSummary struct {
 	Total   int `json:"total"`
 	Success int `json:"success"`
 	Failed  int `json:"failed"`
 }
 
-// BatchSendResponse is returned by Emails.Batch.
+// BatchSendResponse is returned by Emails.Batch. The real API (after
+// envelope unwrap) is {accepted, rejected, results: [{index, id?, status, error?}]}.
 type BatchSendResponse struct {
-	Results []BatchResultItem `json:"results"`
-	Summary BatchSummary      `json:"summary"`
+	Accepted int               `json:"accepted"`
+	Rejected int               `json:"rejected"`
+	Results  []BatchResultItem `json:"results"`
+
+	// Deprecated: legacy nested shape kept only so old mock payloads still
+	// decode. The live API never populates this field.
+	Summary BatchSummary `json:"summary"`
 }
 
 // Batch sends up to 1,000 emails in a single request.
-func (a *EmailsAPI) Batch(ctx context.Context, req *BatchSendRequest) (*BatchSendResponse, error) {
+//
+// An idempotency key is generated automatically when not supplied in opts
+// (SDK-B) and is replayed across transport retries of the batch call.
+func (a *EmailsAPI) Batch(ctx context.Context, req *BatchSendRequest, opts ...SendOptions) (*BatchSendResponse, error) {
 	if req == nil {
 		return nil, fmt.Errorf("apexmail: batch request is required")
 	}
@@ -849,8 +890,19 @@ func (a *EmailsAPI) Batch(ctx context.Context, req *BatchSendRequest) (*BatchSen
 			return nil, fmt.Errorf("apexmail: batch message %d: %w", idx, err)
 		}
 	}
+	var idempotencyKey string
+	if len(opts) > 0 {
+		idempotencyKey = opts[0].IdempotencyKey
+	}
+	if idempotencyKey == "" {
+		key, err := newUUID4()
+		if err != nil {
+			return nil, err
+		}
+		idempotencyKey = key
+	}
 	var resp BatchSendResponse
-	err := a.client.do(ctx, http.MethodPost, "/v1/messages/batch", req, &resp)
+	err := a.client.do(ctx, http.MethodPost, "/v1/messages/batch", req, &resp, idempotencyKey)
 	return &resp, err
 }
 

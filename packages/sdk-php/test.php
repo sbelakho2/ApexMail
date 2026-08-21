@@ -10,6 +10,16 @@ declare(strict_types=1);
 
 require_once __DIR__ . '/src/Client.php';
 
+// Load the resource classes (PSR-4 ApexMail\ → src/) via the Composer
+// autoloader when available, otherwise require them explicitly.
+if (is_file(__DIR__ . '/vendor/autoload.php')) {
+    require_once __DIR__ . '/vendor/autoload.php';
+} else {
+    foreach (glob(__DIR__ . '/src/Resources/*.php') ?: [] as $resourceFile) {
+        require_once $resourceFile;
+    }
+}
+
 // ── Test harness ──────────────────────────────────────────────────────────
 
 $passed = 0;
@@ -86,7 +96,7 @@ echo "\nEmails\n";
 // send()
 $client = new MockClient();
 $client->queueResponse([
-    'message' => ['id' => 'msg_123', 'status' => 'queued', 'recipients' => 1, 'createdAt' => '2025-01-01']
+    'id' => 'msg_123', 'status' => 'queued', 'created_at' => '2025-01-01T00:00:00Z',
 ]);
 $resp = $client->emails->send([
     'from'    => 'a@example.com',
@@ -95,41 +105,66 @@ $resp = $client->emails->send([
     'html'    => '<p>hi</p>',
 ]);
 expect('send() calls POST /v1/messages', $client->calls[0]['method'] === 'POST' && $client->calls[0]['path'] === '/v1/messages');
-expect('send() returns message id', $resp['message']['id'] === 'msg_123');
+expect('send() returns flat id (real API shape)', $resp['id'] === 'msg_123');
+expect('send() returns status', $resp['status'] === 'queued');
 
 // send() with idempotency key
 $client = new MockClient();
-$client->queueResponse(['message' => ['id' => 'msg_456', 'status' => 'queued', 'createdAt' => '2025-01-01']]);
+$client->queueResponse(['id' => 'msg_456', 'status' => 'queued', 'created_at' => '2025-01-01T00:00:00Z']);
 $client->emails->send([
     'from' => 'a@b.c', 'to' => 'x@y.z', 'subject' => 'Hi', 'text' => 'Hi',
     'idempotency_key' => 'key-001',
 ]);
 expect('send() forwards idempotencyKey', $client->calls[0]['idempotencyKey'] === 'key-001');
 
+// SDK-B: automatic idempotency keys (caller key wins; unique per logical send)
+$client = new MockClient();
+$client->queueResponse(['id' => 'm1', 'status' => 'queued']);
+$client->queueResponse(['id' => 'm2', 'status' => 'queued']);
+$client->emails->send(['from' => 'a@b.c', 'to' => 'x@y.z', 'subject' => 'Hi', 'text' => 'Hi']);
+$client->emails->send(['from' => 'a@b.c', 'to' => 'x@y.z', 'subject' => 'Hi again', 'text' => 'Hi']);
+expect('send() auto-generates idempotencyKey', !empty($client->calls[0]['idempotencyKey']));
+expect('send() generates different keys per logical send', $client->calls[0]['idempotencyKey'] !== $client->calls[1]['idempotencyKey']);
+
+// SDK-B: batch auto-generates an idempotency key
+$client = new MockClient();
+$client->queueResponse(['accepted' => 1, 'rejected' => 0, 'results' => []]);
+$client->emails->batch([
+    ['from' => 'a@b.c', 'to' => 'x@y.z', 'subject' => 'msg 1', 'text' => 'x'],
+]);
+expect('batch() auto-generates idempotencyKey', !empty($client->calls[0]['idempotencyKey']));
+$client->emails->batch(
+    [['from' => 'a@b.c', 'to' => 'x@y.z', 'subject' => 'msg 2', 'text' => 'x']],
+    'batch-key-1'
+);
+expect('batch() forwards caller idempotencyKey', $client->calls[1]['idempotencyKey'] === 'batch-key-1');
+
 // batch()
 $client = new MockClient();
 $client->queueResponse([
+    'accepted' => 2,
+    'rejected' => 1,
     'results' => [
-        ['index' => 0, 'success' => true, 'messageId' => 'm1'],
-        ['index' => 1, 'success' => true, 'messageId' => 'm2'],
+        ['index' => 0, 'id' => 'm1', 'status' => 'queued'],
+        ['index' => 1, 'status' => 'rejected', 'error' => 'invalid recipient'],
     ],
-    'summary' => ['total' => 2, 'success' => 2, 'failed' => 0],
 ]);
 $resp = $client->emails->batch([
-    ['from' => 'a@b.c', 'to' => 'x@y.z', 'subject' => 'msg 1'],
-    ['from' => 'a@b.c', 'to' => 'p@q.r', 'subject' => 'msg 2'],
+    ['from' => 'a@b.c', 'to' => 'x@y.z', 'subject' => 'msg 1', 'text' => 'x'],
+    ['from' => 'a@b.c', 'to' => 'p@q.r', 'subject' => 'msg 2', 'text' => 'x'],
 ]);
 expect('batch() calls POST /v1/messages/batch', $client->calls[0]['path'] === '/v1/messages/batch');
-expect('batch() returns results', count($resp['results']) === 2);
-expect('batch() summary total', $resp['summary']['total'] === 2);
+expect('batch() accepted count (real API shape)', $resp['accepted'] === 2);
+expect('batch() rejected count', $resp['rejected'] === 1);
+expect('batch() rejected items map error', $resp['results'][1]['error'] === 'invalid recipient');
 
 // get()
 $client = new MockClient();
-$client->queueResponse(['message' => ['id' => 'msg_789', 'status' => 'delivered']]);
+$client->queueResponse(['id' => 'msg_789', 'status' => 'delivered', 'subject' => 'Hi']);
 $resp = $client->emails->get('msg_789');
-expect('get() calls GET /v1/messages/{id}', 
+expect('get() calls GET /v1/messages/{id}',
     $client->calls[0]['method'] === 'GET' && $client->calls[0]['path'] === '/v1/messages/msg_789');
-expect('get() returns message', $resp['message']['id'] === 'msg_789');
+expect('get() returns flat message (real API shape)', $resp['id'] === 'msg_789');
 
 // list()
 $client = new MockClient();
@@ -206,8 +241,8 @@ expect('webhooks.get() returns webhook', $resp['webhook']['id'] === 'wh_1');
 $client = new MockClient();
 $client->queueResponse(['webhook' => ['id' => 'wh_1', 'url' => 'https://new.com/hook', 'events' => ['message.bounced']]]);
 $resp = $client->webhooks->update('wh_1', ['url' => 'https://new.com/hook', 'events' => ['message.bounced']]);
-expect('webhooks.update() PATCH /v1/webhooks/{id}',
-    $client->calls[0]['method'] === 'PATCH' && $client->calls[0]['path'] === '/v1/webhooks/wh_1');
+expect('webhooks.update() PUT /v1/webhooks/{id}',
+    $client->calls[0]['method'] === 'PUT' && $client->calls[0]['path'] === '/v1/webhooks/wh_1');
 expect('webhooks.update() body has url', $client->calls[0]['body']['url'] === 'https://new.com/hook');
 expect('webhooks.update() body has events', $client->calls[0]['body']['events'] === ['message.bounced']);
 
@@ -394,6 +429,152 @@ try {
 } catch (\ApexMail\Exceptions\NetworkException $e) {
     expect('NetworkException raised on transport failure', true);
     expect('NetworkException message', str_contains($e->getMessage(), 'timed out'));
+}
+
+// ── Retry delay computation (SDK-F) ───────────────────────────────────────
+
+echo "\nRetry delay computation\n";
+
+expect('Retry-After 60 → 60s delay (not capped at 5)', \ApexMail\Client::computeRetryDelay('60', 0) === 60.0);
+expect('Retry-After 300 → capped at 120s', \ApexMail\Client::computeRetryDelay('300', 0) === 120.0);
+expect('no Retry-After, attempt 0 → 0s backoff', \ApexMail\Client::computeRetryDelay(null, 0) === 0.0);
+expect('no Retry-After, attempt 2 → 2s backoff', \ApexMail\Client::computeRetryDelay(null, 2) === 2.0);
+expect('garbage Retry-After falls back to backoff', \ApexMail\Client::computeRetryDelay('not-a-date', 1) === 0.5);
+expect('uuid4() shape', (bool) preg_match('/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/', \ApexMail\Client::uuid4()));
+expect('uuid4() uniqueness', \ApexMail\Client::uuid4() !== \ApexMail\Client::uuid4());
+
+// ── Live stub-server tests (non-happy-path + idempotency) ─────────────────
+
+echo "\nStub server integration\n";
+
+$stubPort = 18123;
+$recordFile = sys_get_temp_dir() . '/apexmail_php_sdk_stub_headers.jsonl';
+$counterFile = sys_get_temp_dir() . '/apexmail_php_sdk_stub_counter';
+@unlink($recordFile);
+@unlink($counterFile);
+
+$proc = proc_open(
+    [PHP_BINARY, '-S', "127.0.0.1:{$stubPort}", __DIR__ . '/stub_server.php'],
+    [1 => ['file', '/dev/null', 'w'], 2 => ['file', '/dev/null', 'w']],
+    $pipes
+);
+$stubReady = false;
+for ($i = 0; $i < 50; $i++) {
+    $sock = @fsockopen('127.0.0.1', $stubPort, $errno, $errstr, 0.2);
+    if ($sock) {
+        fclose($sock);
+        $stubReady = true;
+        break;
+    }
+    usleep(50_000);
+}
+
+function stub_client(int $maxRetries, int $maxBytes = 20971520): \ApexMail\Client
+{
+    global $stubPort;
+    return new \ApexMail\Client('am_test_stubserver000001', [
+        'baseUrl' => "http://127.0.0.1:{$stubPort}",
+        'maxRetries' => $maxRetries,
+        'maxResponseBytes' => $maxBytes,
+        'timeout' => 10,
+    ]);
+}
+
+function recorded_stub_requests(): array
+{
+    global $recordFile;
+    if (!is_file($recordFile)) {
+        return [];
+    }
+    return array_filter(array_map(
+        static fn (string $line) => json_decode($line, true),
+        file($recordFile, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) ?: []
+    ));
+}
+
+if ($stubReady) {
+    try {
+        // Real API shapes through the full HTTP stack (envelope unwrapped).
+        $client = stub_client(0);
+        $resp = $client->emails->send([
+            'from' => 'a@example.com', 'to' => 'b@example.com',
+            'subject' => 'Hi', 'text' => 'Hello',
+        ]);
+        expect('live send returns flat {id,status,created_at}',
+            $resp['id'] === 'msg_live_1' && $resp['status'] === 'queued' && isset($resp['created_at']));
+
+        $resp = $client->emails->batch([
+            ['from' => 'a@example.com', 'to' => 'b@example.com', 'subject' => 'Hi', 'text' => 'x'],
+        ]);
+        expect('live batch returns {accepted,rejected,results}', $resp['accepted'] === 2 && $resp['rejected'] === 1);
+        expect('live batch rejected item has error, no id',
+            $resp['results'][1]['error'] === 'invalid recipient' && !isset($resp['results'][1]['id']));
+
+        // SDK-B: same idempotency key across retries of one send.
+        @unlink($recordFile);
+        $client = stub_client(2);
+        $resp = $client->request('POST', '/flaky500', ['from' => 'a@example.com'], 'stub-fixed-key');
+        expect('flaky send succeeds after retry', $resp['id'] === 'msg_after_retry');
+        $messages = array_values(array_filter(recorded_stub_requests(), static fn ($r) => $r['path'] === '/flaky500'));
+        expect('flaky send issued exactly 2 requests', count($messages) === 2);
+        expect('same X-Idempotency-Key across both attempts',
+            $messages[0]['idempotency'] === 'stub-fixed-key' && $messages[1]['idempotency'] === 'stub-fixed-key');
+
+        // SDK-B: two logical sends get different auto keys.
+        @unlink($recordFile);
+        $client = stub_client(0);
+        $client->request('POST', '/v1/messages', ['a' => 1], \ApexMail\Client::uuid4());
+        $client->request('POST', '/v1/messages', ['a' => 2], \ApexMail\Client::uuid4());
+        $messages = array_values(array_filter(recorded_stub_requests(), static fn ($r) => $r['path'] === '/v1/messages' && $r['method'] === 'POST'));
+        expect('two sends carry different idempotency keys',
+            count($messages) >= 2 && $messages[0]['idempotency'] !== $messages[1]['idempotency']);
+
+        // Non-happy-path: 502 with an HTML body must throw, not return a hash.
+        $client = stub_client(0);
+        try {
+            $client->request('GET', '/html502');
+            assert_fail('502 HTML throws ApiException', 'no exception thrown');
+        } catch (\ApexMail\Exceptions\ApiException $e) {
+            expect('502 HTML throws ApiException', true);
+            expect('502 HTML keeps status 502', $e->getStatusCode() === 502);
+            expect('502 HTML apiCode is PARSE_ERROR', $e->getApiCode() === 'PARSE_ERROR');
+        }
+
+        // Non-happy-path: non-JSON 200 is an invalid response.
+        $client = stub_client(0);
+        try {
+            $client->request('GET', '/nonjson200');
+            assert_fail('non-JSON 200 throws ApiException', 'no exception thrown');
+        } catch (\ApexMail\Exceptions\ApiException $e) {
+            expect('non-JSON 200 throws ApiException', true);
+            expect('non-JSON 200 apiCode is PARSE_ERROR', $e->getApiCode() === 'PARSE_ERROR');
+        }
+
+        // Non-happy-path: 429 with Retry-After surfaces the header.
+        $client = stub_client(0);
+        try {
+            $client->request('GET', '/retryafter');
+            assert_fail('429 throws RateLimitException', 'no exception thrown');
+        } catch (\ApexMail\Exceptions\RateLimitException $e) {
+            expect('429 throws RateLimitException', true);
+            expect('429 exposes Retry-After header', $e->getRetryAfter() === '60');
+        }
+
+        // Non-happy-path: huge body rejected by the streaming cap.
+        $client = stub_client(0, 1024);
+        try {
+            $client->request('GET', '/huge');
+            assert_fail('oversized body throws', 'no exception thrown');
+        } catch (\ApexMail\Exceptions\NetworkException $e) {
+            expect('oversized body throws NetworkException', str_contains($e->getMessage(), 'maxResponseBytes'));
+        }
+    } finally {
+        proc_terminate($proc);
+        proc_close($proc);
+    }
+} else {
+    assert_fail('stub server started', 'could not start php -S stub server');
+    proc_terminate($proc);
 }
 
 // ── Summary ───────────────────────────────────────────────────────────────

@@ -81,7 +81,7 @@ final class KiwiCaptchaRuntime
      * (no CSP promise to make).
      *
      * The application should append this directive to the Content-Security-
-     * Policy header of every page that embeds the widget: frame-ancestors
+     * Policy header of every page that embeds the widget. Frame-ancestors
      * is ignored inside <meta> tags, so the header is the only delivery
      * that works, and the challenge endpoint itself emits the header
      * automatically. The value already includes the directive name:

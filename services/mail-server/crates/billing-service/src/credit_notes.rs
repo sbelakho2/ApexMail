@@ -66,6 +66,29 @@ pub enum CreditNoteError {
 // Public API
 // ---------------------------------------------------------------------------
 
+/// Invoice row lookup used by [`create_credit_note`]. `FOR UPDATE` serializes
+/// concurrent credit-note writers on the same invoice so the read of
+/// `already_credited` can never race (Fix F — TOCTOU over-credit).
+const LOCK_INVOICE_FOR_CREDIT_SQL: &str =
+    "SELECT status::text, total FROM invoices WHERE id = $1 AND tenant_id = $2 FOR UPDATE";
+
+/// Validate a credit amount against the invoice total and the amount already
+/// credited (pure — Fix F). Callers must hold a row lock on the invoice while
+/// reading `already_credited` for this to be race-free.
+fn validate_credit_amount(
+    amount: i64,
+    invoice_total: i64,
+    already_credited: i64,
+) -> Result<(), CreditNoteError> {
+    if amount <= 0 {
+        return Err(CreditNoteError::AmountExceedsInvoice);
+    }
+    if already_credited.saturating_add(amount) > invoice_total {
+        return Err(CreditNoteError::AmountExceedsInvoice);
+    }
+    Ok(())
+}
+
 /// Create a credit note **idempotently**.
 ///
 /// If a credit note with the same `idempotency_key` already exists, the
@@ -78,6 +101,10 @@ pub enum CreditNoteError {
 /// 2. Wallet credit is applied inside the same transaction via
 ///    `wallet_transactions`.
 /// 3. An audit log entry is written for every *first* creation.
+/// 4. Fix F — the invoice row is locked with `SELECT ... FOR UPDATE` for the
+///    whole transaction, so two concurrent credit notes (different keys)
+///    cannot both read the same `already_credited` and over-credit the
+///    invoice; the second is rejected with `AmountExceedsInvoice`.
 ///
 /// ## Pre-conditions
 ///
@@ -90,14 +117,15 @@ pub async fn create_credit_note(
 ) -> Result<CreditNote, CreditNoteError> {
     let now = Utc::now();
 
-    // ── 1. Validate the invoice ──────────────────────────────────────────
-    let invoice_row: Option<(String, i64)> =
-        sqlx::query_as("SELECT status::text, total FROM invoices WHERE id = $1 AND tenant_id = $2")
-            .bind(input.invoice_id)
-            .bind(&input.tenant_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(CreditNoteError::Db)?;
+    // ── 1. Open the transaction and lock the invoice row (Fix F) ────────
+    let mut tx = pool.begin().await.map_err(CreditNoteError::Db)?;
+
+    let invoice_row: Option<(String, i64)> = sqlx::query_as(LOCK_INVOICE_FOR_CREDIT_SQL)
+        .bind(input.invoice_id)
+        .bind(&input.tenant_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(CreditNoteError::Db)?;
 
     let Some((invoice_status, invoice_total)) = invoice_row else {
         return Err(CreditNoteError::InvoiceNotFound(input.invoice_id));
@@ -116,21 +144,18 @@ pub async fn create_credit_note(
         }
     }
 
-    // The credit amount must be positive and must not exceed the *remaining*
-    // creditable balance (invoice total minus already-credited amounts).
-    if input.amount <= 0 {
-        return Err(CreditNoteError::AmountExceedsInvoice);
-    }
-
+    // The credit amount must not exceed the *remaining* creditable balance
+    // (invoice total minus already-credited amounts). Read under the row
+    // lock, so a concurrent writer's committed credits are visible here.
     let already_credited: i64 = sqlx::query_scalar(
         "SELECT COALESCE(SUM(amount), 0)::BIGINT FROM credit_notes WHERE invoice_id = $1",
     )
     .bind(input.invoice_id)
-    .fetch_one(pool)
+    .fetch_one(&mut *tx)
     .await
     .map_err(CreditNoteError::Db)?;
 
-    if already_credited.saturating_add(input.amount) > invoice_total {
+    if let Err(error) = validate_credit_amount(input.amount, invoice_total, already_credited) {
         tracing::warn!(
             invoice_id = %input.invoice_id,
             invoice_total,
@@ -138,11 +163,8 @@ pub async fn create_credit_note(
             requested = input.amount,
             "credit amount would exceed invoice total"
         );
-        return Err(CreditNoteError::AmountExceedsInvoice);
+        return Err(error);
     }
-
-    // ── 2. Idempotent insert ─────────────────────────────────────────────
-    let mut tx = pool.begin().await.map_err(CreditNoteError::Db)?;
 
     let row: Option<CreditNoteRow> = sqlx::query_as(
         r#"
@@ -324,5 +346,54 @@ mod tests {
         assert_eq!(note.id, deserialized.id);
         assert_eq!(note.amount, deserialized.amount);
         assert_eq!(note.idempotency_key, deserialized.idempotency_key);
+    }
+
+    // ------------------------------------------------------------------
+    // Fix F — credit cap enforced under invoice row lock.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn validate_credit_amount_accepts_credits_within_invoice_total() {
+        // Sequential credits with different keys: 60 + 40 = 100 ≤ 100.
+        assert!(validate_credit_amount(60, 100, 40).is_ok());
+        assert!(validate_credit_amount(100, 100, 0).is_ok());
+        assert!(validate_credit_amount(1, 100, 99).is_ok());
+    }
+
+    #[test]
+    fn validate_credit_amount_rejects_second_credit_exceeding_total() {
+        // First credit of 60 already committed; a concurrent/retry credit of
+        // 41 with a different key must be rejected (60 + 41 > 100).
+        let err = validate_credit_amount(41, 100, 60).unwrap_err();
+        assert!(matches!(err, CreditNoteError::AmountExceedsInvoice));
+
+        // Exactly reaching the total is allowed; one cent more is not.
+        assert!(validate_credit_amount(40, 100, 60).is_ok());
+        let err = validate_credit_amount(41, 100, 60).unwrap_err();
+        assert!(matches!(err, CreditNoteError::AmountExceedsInvoice));
+    }
+
+    #[test]
+    fn validate_credit_amount_rejects_non_positive_amounts() {
+        for amount in [0, -1, -10_000] {
+            let err = validate_credit_amount(amount, 100, 0).unwrap_err();
+            assert!(
+                matches!(err, CreditNoteError::AmountExceedsInvoice),
+                "amount {amount} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_credit_amount_does_not_overflow_on_huge_credits() {
+        // saturating_add must not wrap around and accidentally allow the
+        // credit (i64::MAX + 1 would wrap to a small number without it).
+        let err = validate_credit_amount(i64::MAX, 100, 1).unwrap_err();
+        assert!(matches!(err, CreditNoteError::AmountExceedsInvoice));
+    }
+
+    #[test]
+    fn credit_note_invoice_lookup_locks_the_row() {
+        assert!(LOCK_INVOICE_FOR_CREDIT_SQL.contains("FOR UPDATE"));
     }
 }

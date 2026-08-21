@@ -70,7 +70,7 @@ WASM; the memory-hard solver has no JS fallback. Check CSP: the worker
 needs `worker-src blob:` (the driver builds it from a Blob URL of locally
 embedded code) and `script-src` needs `'wasm-unsafe-eval'`. The
 authoritative requirements are in
-[SECURITY.md](../../../../../SECURITY.md#csp--worker-requirements); the
+[`SECURITY.md`](../../../../../SECURITY.md#csp--worker-requirements); the
 recommended profile is in [getting-started.md](getting-started.md).
 
 **Challenges are rejected as `rate_limited` under load.** the Argon2id
@@ -124,7 +124,7 @@ central security-policy hash; the readiness contract is in
 
 ## Related resources
 
-- [SECURITY.md](../../../../../SECURITY.md): supported versions and how to
+- [`SECURITY.md`](../../../../../SECURITY.md): supported versions and how to
   report a vulnerability.
 - [claims-registry.md](claims-registry.md): the behaviors pinned by tests.
 - [glossary.md](glossary.md): terminology used in the codes above.

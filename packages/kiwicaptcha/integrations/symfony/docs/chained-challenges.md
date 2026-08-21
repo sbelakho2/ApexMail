@@ -56,7 +56,7 @@ whose obligation cannot match the current transaction is refused.
 
 ## Stage 1 → stage 2 flow
 
-1. **Stage 1.** The client solves the ordinary challenge. When the
+1) **Stage 1.** The client solves the ordinary challenge. When the
    post-solve assessment answers `CHAIN_REQUIRED` (or an open obligation
    requires a higher rank than the stage-1 proof satisfied), the valid
    solve issues exactly one chain ticket and creates/raises the
@@ -64,14 +64,14 @@ whose obligation cannot match the current transaction is refused.
    application presents the stage-2 widget with the ticket
    (`data-kiwi-chain-ticket`; presented once, then cleared).
 
-2. **Stage 2.** A challenge request carrying the ticket mints the stronger
+2) **Stage 2.** A challenge request carrying the ticket mints the stronger
    challenge. The required rank can only ever raise; the stage-2 TTL is
    clipped to the chain's remaining lifetime, with the configured
    minimum-duration floor respected. `markIssued` transitions the chain
    to `issued(stage2Nonce)`; a retry recovers the exact same issued
    challenge instead of re-minting.
 
-3. **Terminal transitions.** Only successful verification of that exact
+3) **Terminal transitions.** Only successful verification of that exact
    stage-2 nonce ends the chain. The stage-2 solve's final disposition
    decides the terminal state:
    - `PASS` → `verified(nonce)`, terminal, and the obligation mapping is

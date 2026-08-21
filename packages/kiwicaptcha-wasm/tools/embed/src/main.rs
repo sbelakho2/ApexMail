@@ -6,7 +6,7 @@
 //!   1. strips all ESM syntax (`export function` -> `function`, drops export tails)
 //!   2. removes the fetch/URL loading branch (we always pass bytes directly)
 //!   3. inlines the .wasm binary as base64
-//!   4. wraps everything in an IIFE exposing `window.__kiwiCaptchaWasm.load()`
+//!   4. wraps everything in an `IIFE` exposing `window.__kiwiCaptchaWasm.load()`
 //!
 //! Pure Rust, no Node.js. Usage: `kiwicaptcha-embed [pkgDir] [outFile]`
 

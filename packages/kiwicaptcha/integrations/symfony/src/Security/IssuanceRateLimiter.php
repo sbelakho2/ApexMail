@@ -87,7 +87,7 @@ return 1
 LUA;
 
     /**
-     * Epoch-rotated variant of LIMIT_SCRIPT (3 keys): KEYS[1] = previous
+     * Epoch-rotated variant of `LIMIT_SCRIPT` (3 keys): KEYS[1] = previous
      * client pseudonym, KEYS[2] = current client pseudonym, KEYS[3] = one
      * stable deployment-global ZSET with no client identity, which must
      * never be rotated or the global budget would silently become

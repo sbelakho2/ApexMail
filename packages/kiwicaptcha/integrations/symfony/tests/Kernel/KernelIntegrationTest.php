@@ -207,6 +207,9 @@ final class KernelIntegrationTest extends TestCase
         $this->waitOutMinDuration($challenge);
 
         $factory = $this->container()->get('form.factory');
+        // The retry legs below model the explicitly identified idempotent
+        // retry (the same kiwi_operation_id re-presented with the token).
+        $this->container()->get('request_stack')->getMainRequest()?->attributes->set(KiwiCaptchaValidator::OPERATION_ID_ATTRIBUTE, 'op-kernel-test');
         $form = $factory->createNamed('captcha', KiwiCaptchaType::class, null, ['scope' => 'login']);
         $form->submit($this->solveToken($challenge));
         self::assertTrue($form->isValid(), $this->describe($form->getErrors(true)));
@@ -233,6 +236,9 @@ final class KernelIntegrationTest extends TestCase
         $dto->kiwiToken = $this->solveToken($challenge);
 
         $validator = $this->container()->get('validator');
+        // The retry leg below models the explicitly identified idempotent
+        // retry (the same kiwi_operation_id re-presented with the token).
+        $this->container()->get('request_stack')->getMainRequest()?->attributes->set(KiwiCaptchaValidator::OPERATION_ID_ATTRIBUTE, 'op-kernel-test');
         $violations = $validator->validate($dto);
         self::assertCount(0, $violations, $this->describeViolations($violations));
 

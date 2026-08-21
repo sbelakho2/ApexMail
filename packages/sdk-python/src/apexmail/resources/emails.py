@@ -7,6 +7,7 @@ API operations for sending and managing emails.
 from __future__ import annotations
 
 import re
+import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Optional, Union
 
@@ -108,6 +109,9 @@ def _parse_batch_results(data: Any) -> list[SendEmailResponse]:
             code="INVALID_RESPONSE",
         )
 
+    # SDK-D: rejected items lack 'id' and carry {index, status: "rejected",
+    # error} — SendEmailResponse models them with an optional id, so this no
+    # longer raises ValidationError after the API already accepted siblings.
     return [SendEmailResponse(**item) for item in results]
 
 
@@ -198,8 +202,12 @@ class EmailsResource:
         if metadata:
             payload["metadata"] = metadata
 
-        # FIX-500-CRITICAL: Thread idempotency_key to the HTTP client (was silently dropped!)
-        data = self._client._request("POST", "/v1/messages", json=payload, idempotency_key=idempotency_key)
+        # FIX-500-CRITICAL + SDK-B: thread idempotency_key to the HTTP client
+        # (was silently dropped); when not supplied, generate one per logical
+        # send so transport-level retries can never cause a duplicate send.
+        data = self._client._request(
+            "POST", "/v1/messages", json=payload, idempotency_key=idempotency_key or str(uuid.uuid4())
+        )
         return SendEmailResponse(**data)
 
     def batch(
@@ -213,10 +221,12 @@ class EmailsResource:
 
         Args:
             emails: List of email objects with same fields as send()
-            idempotency_key: Idempotency key for safe retries
+            idempotency_key: Idempotency key for safe retries; a random UUID
+                is generated when omitted (SDK-B)
 
         Returns:
-            List of SendEmailResponse objects
+            List of SendEmailResponse objects (one per message; rejected
+            items have status "rejected", an `error` message and no `id`)
         """
         # FIX-500-286: Validate batch size
         if not emails:
@@ -239,7 +249,7 @@ class EmailsResource:
             "POST",
             "/v1/messages/batch",
             json={"messages": processed},
-            idempotency_key=idempotency_key,
+            idempotency_key=idempotency_key or str(uuid.uuid4()),
         )
         return _parse_batch_results(data)
 
@@ -387,8 +397,12 @@ class AsyncEmailsResource:
         if metadata:
             payload["metadata"] = metadata
 
-        # FIX-500-CRITICAL: Thread idempotency_key to the HTTP client (was silently dropped!)
-        data = await self._client._request("POST", "/v1/messages", json=payload, idempotency_key=idempotency_key)
+        # FIX-500-CRITICAL + SDK-B: thread idempotency_key to the HTTP client
+        # (was silently dropped); when not supplied, generate one per logical
+        # send so transport-level retries can never cause a duplicate send.
+        data = await self._client._request(
+            "POST", "/v1/messages", json=payload, idempotency_key=idempotency_key or str(uuid.uuid4())
+        )
         return SendEmailResponse(**data)
 
     async def batch(
@@ -397,7 +411,12 @@ class AsyncEmailsResource:
         *,
         idempotency_key: Optional[str] = None,
     ) -> list[SendEmailResponse]:
-        """Send multiple emails in a batch asynchronously."""
+        """Send multiple emails in a batch asynchronously.
+
+        Rejected items come back with status "rejected", an `error` message
+        and no `id` (SDK-D). An idempotency key is generated automatically
+        when not supplied (SDK-B).
+        """
         # FIX-500-286: Validate batch size
         if not emails:
             raise ValidationError('"emails" list must not be empty')
@@ -418,7 +437,7 @@ class AsyncEmailsResource:
             "POST",
             "/v1/messages/batch",
             json={"messages": processed},
-            idempotency_key=idempotency_key,
+            idempotency_key=idempotency_key or str(uuid.uuid4()),
         )
         return _parse_batch_results(data)
 

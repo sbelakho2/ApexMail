@@ -8,7 +8,9 @@ import com.fasterxml.jackson.datatype.jdk8.Jdk8Module;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 
 
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.io.InputStream;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -51,6 +53,12 @@ public final class ApexMailClient implements AutoCloseable {
     private static final int DEFAULT_MAX_RETRIES = 3;
     private static final Duration DEFAULT_INITIAL_BACKOFF = Duration.ofMillis(500);
     private static final Duration DEFAULT_MAX_BACKOFF = Duration.ofSeconds(5);
+    /**
+     * Upper bound for retry delays. The server's Retry-After header is
+     * honored in full up to this cap (SDK-F: was capped at 5s, truncating
+     * long rate-limit windows).
+     */
+    private static final Duration DEFAULT_MAX_RETRY_AFTER = Duration.ofSeconds(120);
     private static final int DEFAULT_MAX_RESPONSE_BYTES = 20 * 1024 * 1024;
     private static final Pattern API_KEY_PATTERN = Pattern.compile("^am_(live|test)_[A-Za-z0-9]{16,}$");
 
@@ -63,6 +71,7 @@ public final class ApexMailClient implements AutoCloseable {
 
     private final String apiKey;
     private final String baseUrl;
+    private final Duration timeout;
     private final HttpClient httpClient;
     private final ExecutorService executor;
     private final ObjectMapper objectMapper;
@@ -163,6 +172,7 @@ public final class ApexMailClient implements AutoCloseable {
             throw new IllegalArgumentException("maxThreads must be >= 1, got " + maxThreads);
         }
         this.apiKey  = apiKey;
+        this.timeout = (timeout == null || timeout.isZero() || timeout.isNegative()) ? DEFAULT_TIMEOUT : timeout;
         this.baseUrl = baseUrl.endsWith("/") ? baseUrl.substring(0, baseUrl.length() - 1) : baseUrl;
         if (!this.baseUrl.startsWith("https://")) {
             throw new IllegalArgumentException("baseUrl must use HTTPS");
@@ -230,41 +240,113 @@ public final class ApexMailClient implements AutoCloseable {
 
     <T> T request(String method, String path, Object body, Class<T> responseType,
                           String idempotencyKey) {
+        String jsonBody = serializeBody(body);
+        TransportResponse transport = execute(method, path, jsonBody, idempotencyKey);
+
+        if (responseType == Void.class || transport.body() == null || transport.body().isBlank()) {
+            return null;
+        }
+        try {
+            return objectMapper.readValue(unwrapEnvelope(transport.body()), responseType);
+        } catch (IOException e) {
+            throw new ApexMailException(
+                "Failed to parse response body: " + e.getMessage(),
+                "PARSE_ERROR", transport.status(), null, e);
+        }
+    }
+
+    <T> T request(String method, String path, Object body, TypeReference<T> responseType) {
+        return request(method, path, body, responseType, null);
+    }
+
+    <T> T request(String method, String path, Object body, TypeReference<T> responseType,
+                          String idempotencyKey) {
+        String jsonBody = serializeBody(body);
+        TransportResponse transport = execute(method, path, jsonBody, idempotencyKey);
+
+        if (transport.body() == null || transport.body().isBlank()) {
+            return null;
+        }
+        try {
+            return objectMapper.readValue(unwrapEnvelope(transport.body()), responseType);
+        } catch (IOException e) {
+            throw new ApexMailException(
+                "Failed to parse response body: " + e.getMessage(),
+                "PARSE_ERROR", transport.status(), null, e);
+        }
+    }
+
+    /**
+     * Serialize the request body once, before any retry loop. Serialization
+     * failures are deterministic, so they must NOT be retried (SDK-B).
+     */
+    private String serializeBody(Object body) {
+        if (body == null) {
+            return "";
+        }
+        try {
+            return objectMapper.writeValueAsString(body);
+        } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
+            throw new ApexMailException(
+                "Failed to serialize request body: " + e.getMessage(),
+                "SERIALIZATION_ERROR", 0, null, e);
+        }
+    }
+
+    private record TransportResponse(int status, String body) {}
+
+    /**
+     * Run the HTTP request with retries (transport errors, 429, 5xx).
+     * The whole loop is bounded by a deadline derived from the configured
+     * timeout (SDK-E: previously the loop could run unbounded).
+     */
+    private TransportResponse execute(String method, String path, String jsonBody, String idempotencyKey) {
         int attempt = 0;
+        // Overall budget for all attempts of this call, including retry sleeps.
+        long deadlineNanos = System.nanoTime()
+            + this.timeout.multipliedBy(DEFAULT_MAX_RETRIES + 1L).toNanos();
+
         while (true) {
+            if (System.nanoTime() >= deadlineNanos) {
+                throw new ApexMailException(
+                    "Retry deadline exceeded for " + method + " " + path,
+                    "RETRY_TIMEOUT", 0, null);
+            }
             try {
-                String jsonBody = body != null ? objectMapper.writeValueAsString(body) : "";
-                HttpResponse<String> response = httpClient.send(
+                HttpResponse<InputStream> response = httpClient.send(
                     buildRequest(method, path, jsonBody, idempotencyKey),
-                    HttpResponse.BodyHandlers.ofString()
+                    HttpResponse.BodyHandlers.ofInputStream()
                 );
 
                 int status = response.statusCode();
                 lastRateLimit = RateLimitInfo.from(response);
-                String responseBody = safeResponseBody(response);
+                String responseBody = readBodyCapped(response);
                 ensureResponseWithinLimit(responseBody);
 
                 if ((status == 429 || status >= 500) && attempt < DEFAULT_MAX_RETRIES) {
                     Duration delay = retryDelay(response, attempt);
+                    if (System.nanoTime() + delay.toNanos() > deadlineNanos) {
+                        throw new ApexMailException(
+                            "Retry budget exhausted before retry #" + (attempt + 1) + " of " + method + " " + path,
+                            "RETRY_TIMEOUT", 0, null);
+                    }
                     waitForRetry(delay);
                     attempt++;
                     continue;
                 }
 
                 if (status >= 200 && status < 300) {
-                    if (responseType == Void.class || responseBody == null || responseBody.isBlank()) {
-                        return null;
-                    }
-                    // SDK-111: Unwrap API envelope {"data": ..., "meta": ...}
-                    String unwrapped = unwrapEnvelope(responseBody);
-                    return objectMapper.readValue(unwrapped, responseType);
+                    return new TransportResponse(status, responseBody);
                 }
 
                 Map<String, Object> parsed = parseErrorBody(responseBody);
                 throwApiException(status, parsed);
-                return null; // unreachable
+                throw new IllegalStateException("unreachable");
 
             } catch (IOException e) {
+                if (System.nanoTime() >= deadlineNanos) {
+                    throw new ApexMailException("Retry deadline exceeded: " + e.getMessage(), "RETRY_TIMEOUT", 0, null, e);
+                }
                 if (attempt < DEFAULT_MAX_RETRIES) {
                     try {
                         sleepBackoff(attempt);
@@ -283,62 +365,31 @@ public final class ApexMailClient implements AutoCloseable {
         }
     }
 
-    <T> T request(String method, String path, Object body, TypeReference<T> responseType) {
-        return request(method, path, body, responseType, null);
-    }
-
-    <T> T request(String method, String path, Object body, TypeReference<T> responseType,
-                          String idempotencyKey) {
-        int attempt = 0;
-        while (true) {
-            try {
-                String jsonBody = body != null ? objectMapper.writeValueAsString(body) : "";
-                HttpResponse<String> response = httpClient.send(
-                    buildRequest(method, path, jsonBody, idempotencyKey),
-                    HttpResponse.BodyHandlers.ofString()
-                );
-
-                int status = response.statusCode();
-                lastRateLimit = RateLimitInfo.from(response);
-                String responseBody = safeResponseBody(response);
-                ensureResponseWithinLimit(responseBody);
-
-                if ((status == 429 || status >= 500) && attempt < DEFAULT_MAX_RETRIES) {
-                    Duration delay = retryDelay(response, attempt);
-                    waitForRetry(delay);
-                    attempt++;
-                    continue;
-                }
-
-                if (status >= 200 && status < 300) {
-                    if (responseBody == null || responseBody.isBlank()) {
-                        return null;
-                    }
-                    // SDK-111: Unwrap API envelope {"data": ..., "meta": ...}
-                    String unwrapped = unwrapEnvelope(responseBody);
-                    return objectMapper.readValue(unwrapped, responseType);
-                }
-
-                Map<String, Object> parsed = parseErrorBody(responseBody);
-                throwApiException(status, parsed);
-                return null; // unreachable
-
-            } catch (IOException e) {
-                if (attempt < DEFAULT_MAX_RETRIES) {
-                    try {
-                        sleepBackoff(attempt);
-                    } catch (InterruptedException ie) {
-                        Thread.currentThread().interrupt();
-                        throw new ApexMailException("Request interrupted", ie);
-                    }
-                    attempt++;
-                    continue;
-                }
-                throw new ApexMailException("Network error: " + e.getMessage(), e);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                throw new ApexMailException("Request interrupted", e);
+    /**
+     * Read the response body stream into a string, aborting as soon as the
+     * body is known to exceed the size cap instead of buffering it all
+     * (SDK-G: streaming size cap via BodyHandlers.ofInputStream).
+     */
+    private static String readBodyCapped(HttpResponse<InputStream> response) {
+        try (InputStream in = response.body()) {
+            if (in == null) {
+                return "";
             }
+            ByteArrayOutputStream buffer = new ByteArrayOutputStream();
+            byte[] chunk = new byte[8192];
+            long total = 0;
+            int read;
+            while ((read = in.read(chunk)) != -1) {
+                total += read;
+                if (total > DEFAULT_MAX_RESPONSE_BYTES) {
+                    throw new ApexMailException(
+                        "Response body exceeds max size limit", "response_too_large", 0, null);
+                }
+                buffer.write(chunk, 0, read);
+            }
+            return buffer.toString(StandardCharsets.UTF_8);
+        } catch (IOException e) {
+            throw new ApexMailException("Failed to read response body: " + e.getMessage(), "READ_ERROR", 0, null, e);
         }
     }
 
@@ -407,7 +458,7 @@ public final class ApexMailClient implements AutoCloseable {
             case 403 -> new ForbiddenException(message, code, status, details);
             case 404 -> new NotFoundException(message, code, status, details);
             case 409 -> new ConflictException(message, code, status, details);
-            case 400 -> new ValidationException(message, code, status, details);
+            case 400, 422 -> new ValidationException(message, code, status, details); // SDK-E: 422 → ValidationException
             case 429 -> new RateLimitException(message, code, status, details);
             default  -> new ApexMailException(message, code, status, details);
         };
@@ -426,7 +477,14 @@ public final class ApexMailClient implements AutoCloseable {
         if (parts.signature() == null || parts.signature().isBlank()) {
             return false;
         }
-        long timestamp = parts.timestamp() != null ? parts.timestamp() : System.currentTimeMillis() / 1000L;
+        // SDK-E: a missing or malformed `t=` component must be rejected.
+        // Substituting "now" for a missing timestamp made the tolerance
+        // window vacuous (any signature signed with the current second
+        // verified).
+        if (parts.timestamp() == null) {
+            return false;
+        }
+        long timestamp = parts.timestamp();
         long toleranceSeconds = tolerance != null ? tolerance.getSeconds() : 300L;
         if (Math.abs((System.currentTimeMillis() / 1000L) - timestamp) > toleranceSeconds) {
             return false;
@@ -509,12 +567,14 @@ public final class ApexMailClient implements AutoCloseable {
     /**
      * Computes retry delay using the formula:
      * {@code delay = max(retryAfterSeconds, baseDelay * attempt²)},
-     * capped at {@link #DEFAULT_MAX_BACKOFF}.
+     * capped at {@link #DEFAULT_MAX_RETRY_AFTER} (120s).
      * <p>
-     * This ensures the server's requested delay is always honored while
-     * still providing quadratic backoff growth as the attempt count increases.
+     * The server's requested delay is honored in full up to that cap
+     * (SDK-F: previously truncated at 5s) while quadratic backoff on its own
+     * remains capped at {@link #DEFAULT_MAX_BACKOFF}.
+     * Package-private for unit testing.
      */
-    private static Duration retryDelay(HttpResponse<String> response, int attempt) {
+    static Duration retryDelay(HttpResponse<?> response, int attempt) {
         long retryAfterSeconds = -1;
         Optional<String> retryAfter = response.headers().firstValue("Retry-After");
         if (retryAfter.isPresent()) {
@@ -542,7 +602,7 @@ public final class ApexMailClient implements AutoCloseable {
         // Compute quadratic backoff: baseDelay * attempt²
         long backoffMillis = DEFAULT_INITIAL_BACKOFF.toMillis() * (long) (attempt * attempt);
 
-        // Use max(retryAfter, quadraticBackoff), then cap at DEFAULT_MAX_BACKOFF
+        // Use max(retryAfter, quadraticBackoff), then cap at 120s
         if (retryAfterSeconds > 0) {
             long retryAfterMillis = retryAfterSeconds * 1000L;
             if (retryAfterMillis > backoffMillis) {
@@ -550,8 +610,8 @@ public final class ApexMailClient implements AutoCloseable {
             }
         }
 
-        return backoffMillis > DEFAULT_MAX_BACKOFF.toMillis()
-            ? DEFAULT_MAX_BACKOFF
+        return backoffMillis > DEFAULT_MAX_RETRY_AFTER.toMillis()
+            ? DEFAULT_MAX_RETRY_AFTER
             : Duration.ofMillis(backoffMillis);
     }
 
@@ -576,6 +636,10 @@ public final class ApexMailClient implements AutoCloseable {
     private HttpRequest buildRequest(String method, String path, String jsonBody, String idempotencyKey) {
         HttpRequest.Builder builder = HttpRequest.newBuilder()
             .uri(URI.create(baseUrl + path))
+            // SDK-E: bound each request with the configured timeout. Without
+            // a request-level timeout only the connect timeout applied and a
+            // slow server could hang a request forever.
+            .timeout(timeout)
             .header("X-API-Key", apiKey)
             .header("Content-Type", "application/json")
             .header("Accept", "application/json")
@@ -597,11 +661,6 @@ public final class ApexMailClient implements AutoCloseable {
         if (responseBody != null && responseBody.getBytes(StandardCharsets.UTF_8).length > DEFAULT_MAX_RESPONSE_BYTES) {
             throw new ApexMailException("Response body exceeds max size limit", "response_too_large", 0);
         }
-    }
-
-    private static String safeResponseBody(HttpResponse<String> response) {
-        String body = response.body();
-        return body == null ? "" : body;
     }
 
     private void waitForRetry(Duration delay) throws InterruptedException {

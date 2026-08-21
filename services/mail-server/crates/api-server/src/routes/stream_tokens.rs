@@ -7,7 +7,10 @@
 //! SSE endpoint (`GET /v1/stream`).
 //!
 //! The token is intentionally:
-//! - Short-lived (5 minutes) to limit replay window.
+//! - Short-lived: 5 minutes (300 s) by default; a requested TTL is clamped
+//!   to a hard range of 60 s minimum / 3600 s (1 hour) maximum (audit J —
+//!   the module previously claimed "5 minutes" while the handler accepted
+//!   up to an hour; the enforced cap is now what the docs state).
 //! - Signed with RS256 using the application's RSA private key
 //!   (the same public key the tracking-service uses to verify).
 //! - Scoped to `["stream"]` — the tracking-service rejects tokens without
@@ -43,7 +46,8 @@ pub struct CreateStreamTokenRequest {
     /// Optional:restrict token to a specific message ID.
     #[serde(default)]
     pub message_id: Option<String>,
-    /// Optional:token TTL in seconds (max 3600, default 300).
+    /// Optional:token TTL in seconds. Clamped server-side to
+    /// [60, 3600]; defaults to 300 (5 minutes).
     #[serde(default = "default_ttl")]
     pub ttl_seconds: u64,
 }
@@ -176,5 +180,22 @@ mod tests {
         assert_eq!(300u64.clamp(60, 3600), 300);
         // Max
         assert_eq!(7200u64.clamp(60, 3600), 3600);
+        // Audit J: the documented hard cap is 3600s and the documented
+        // default is 300s — aggressive callers cannot exceed one hour and
+        // absent callers get five minutes.
+        assert_eq!(u64::MAX.clamp(60, 3600), 3600);
+        assert_eq!(0u64.clamp(60, 3600), 60);
+    }
+
+    #[test]
+    fn test_request_defaults_ttl_when_absent() {
+        let req: CreateStreamTokenRequest =
+            serde_json::from_str(r#"{}"#).expect("empty body must deserialize");
+        assert_eq!(req.ttl_seconds, default_ttl());
+        // Unknown fields are rejected.
+        assert!(serde_json::from_str::<CreateStreamTokenRequest>(
+            r#"{"ttl_seconds": 300, "extra": true}"#
+        )
+        .is_err());
     }
 }

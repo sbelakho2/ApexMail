@@ -548,8 +548,12 @@ pub fn compare_with_benchmarks(
 }
 
 /// Estimate percentile ranking based on known quartile values
+///
+/// Fix J-9: the result is clamped to 0..=100 — extrapolating past the p90
+/// anchor (e.g. a value twice the p90) previously produced "137th percentile"
+/// rankings.
 pub fn estimate_percentile(value: f64, p25: f64, median: f64, p75: f64, p90: f64) -> f64 {
-    if value <= p25 {
+    let raw = if value <= p25 {
         let ratio = if p25 > 0.0 { value / p25 } else { 0.0 };
         ratio * 25.0
     } else if value <= median {
@@ -560,7 +564,8 @@ pub fn estimate_percentile(value: f64, p25: f64, median: f64, p75: f64, p90: f64
         75.0 + ((value - p75) / (p90 - p75).max(0.001)) * 15.0
     } else {
         90.0 + ((value - p90) / p90.max(0.001)) * 10.0
-    }
+    };
+    raw.clamp(0.0, 100.0)
 }
 
 /// Calculate quarter-over-quarter change

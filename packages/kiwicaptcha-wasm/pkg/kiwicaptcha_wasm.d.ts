@@ -33,7 +33,7 @@
 export function alloc(len: number): number;
 
 /**
- * Free a buffer previously returned by [`alloc`].
+ * Free a buffer returned by [`alloc`].
  *
  * `len` must match the allocation size **exactly** (it is the length passed
  * to [`alloc`]); the same `Layout::from_size_align(len, 8)` is rebuilt so
@@ -69,6 +69,22 @@ export function solve_argon2_chunk(prefix_ptr: number, prefix_len: number, salt_
  */
 export function solve_sha256_chunk(prefix_ptr: number, prefix_len: number, salt_ptr: number, salt_len: number, target_bits: number, start_counter: number, chunk_size: number): number;
 
+/**
+ * The solver PROTOCOL/ABI VERSION (an integer is the
+ * clean primitive at the raw wasm-bindgen ABI boundary, where a String
+ * return surfaces as a [ptr, len] tuple). The runtime handshake uses it
+ * ONLY to prove that the driver, the worker and the WASM glue speak the
+ * same protocol generation; it is NOT an exact-artifact identity. Exact
+ * byte identity is guaranteed by the release system: tag + SHA256SUMS +
+ * SRI.txt + SLSA attestation.
+ *
+ * This value MUST equal `KIWI_SOLVER_PROTOCOL_VERSION` in
+ * `assets/kiwi-worker.js` — the worker verifies the loaded wasm's
+ * exported value against its constant BEFORE sending `ready`, so a
+ * mismatch fails closed instead of solving with a mismatched pair.
+ */
+export function solver_protocol_version(): number;
+
 export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembly.Module;
 
 export interface InitOutput {
@@ -78,6 +94,7 @@ export interface InitOutput {
     readonly init_panic_hook: () => void;
     readonly solve_argon2_chunk: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number) => number;
     readonly solve_sha256_chunk: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => number;
+    readonly solver_protocol_version: () => number;
     readonly __wbindgen_export: (a: number, b: number, c: number) => void;
     readonly __wbindgen_export2: (a: number, b: number) => number;
     readonly __wbindgen_export3: (a: number, b: number, c: number, d: number) => number;

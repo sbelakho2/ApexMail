@@ -51,11 +51,11 @@ use KiwiCaptcha\ChallengeRecord;
  * single-use actions — a valid signature proves the payload was signed by
  * the server, not that the jti has not already been consumed elsewhere. An
  * integrator accepting a receipt for a one-time action must additionally
- * record the jti atomically (INSERT jti IF NOT EXISTS on an idempotency
- * table / `SET <key> NX`, or a UNIQUE constraint). Treat a pre-existing jti
- * as a replay: verify_and_consume — verify the signature, then atomically
+ * record the jti atomically: insert-if-absent on an idempotency table
+ * (`SET <key> NX`) or a unique constraint. Treat a pre-existing jti as a
+ * replay: verify_and_consume — verify the signature, then atomically
  * insert the jti; only a first insert proceeds with the action. See the
- * README ("Asymmetric result receipts").
+ * `README` ("Asymmetric result receipts").
  */
 final class ResultReceiptSigner
 {

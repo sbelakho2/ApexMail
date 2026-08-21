@@ -173,11 +173,20 @@ const DOCUMENTATION_PHRASES: &[&str] = &[
     "developer",
 ];
 
-/// Risk reduction factor for context modifiers (75% reduction).
-const CONTEXT_RISK_FACTOR: f64 = 0.25;
+/// Risk reduction factor for context modifiers. Total reduction is capped
+/// at 25% (factor 0.75):context clues alone must never be able to
+/// de-facto suppress a PII finding — a real card number preceded by
+/// "e.g." is still a real card number leaving the organization.
+const CONTEXT_RISK_FACTOR: f64 = 0.75;
 
-/// Detect context modifier for a PII match based on preceding text.
-fn detect_context_modifier(text: &str, match_offset: usize) -> Option<ContextModifier> {
+/// Size of the short window (characters immediately before the match) in
+/// which an "example" phrase must appear for the Example modifier.
+const EXAMPLE_WINDOW: usize = 48;
+
+/// Detect context modifier for a PII match based on surrounding text.
+/// `matched` is the matched PII substring itself (used for paired-quote
+/// detection on both sides).
+fn detect_context_modifier(text: &str, match_offset: usize, matched: &str) -> Option<ContextModifier> {
     // Get context before the match, preferring a sentence boundary when one is nearby.
     let raw_window_start = match_offset.saturating_sub(CONTEXT_WINDOW);
     let window_start = text
@@ -200,28 +209,48 @@ fn detect_context_modifier(text: &str, match_offset: usize) -> Option<ContextMod
         }
     }
 
-    // Check for example phrases
-    for phrase in EXAMPLE_PHRASES {
-        if context.contains(phrase) {
-            return Some(ContextModifier::Example);
+    // Example phrases only count when they appear IMMEDIATELY before the
+    // match (short window) AND the value itself is wrapped in quotes or
+    // backtick code formatting — "e.g. <code>4111…</code>". A stray word
+    // like "sample" three sentences earlier must not mask real PII.
+    let short_window_start = match_offset.saturating_sub(EXAMPLE_WINDOW);
+    let short_window = &text[short_window_start..match_offset].to_lowercase();
+    let quoted_or_code = is_wrapped_in_quotes_or_code(text, match_offset, matched);
+    if quoted_or_code {
+        for phrase in EXAMPLE_PHRASES {
+            if short_window.contains(phrase) {
+                return Some(ContextModifier::Example);
+            }
+        }
+        for phrase in DOCUMENTATION_PHRASES {
+            if short_window.contains(phrase) {
+                return Some(ContextModifier::Documentation);
+            }
         }
     }
 
-    // Check for documentation phrases
-    for phrase in DOCUMENTATION_PHRASES {
-        if context.contains(phrase) {
-            return Some(ContextModifier::Documentation);
-        }
-    }
-
-    // Check for quoted context (simplistic check)
-    let quote_count = context.matches('"').count() + context.matches('\'').count();
-    if quote_count % 2 == 1 {
-        // Odd number of quotes suggests we're inside a quoted string
+    // Quoted context:require a REAL paired quote (or code formatting) on
+    // BOTH sides of the match. The old heuristic counted apostrophes in the
+    // preceding window, so prose like "Here's the card 4111…" looked like a
+    // quoted string and slashed the risk by 75%.
+    if quoted_or_code {
         return Some(ContextModifier::Quoted);
     }
 
     None
+}
+
+/// Whether the match at `match_offset` is wrapped in a matched pair of
+/// quote characters or backtick code formatting on both sides.
+fn is_wrapped_in_quotes_or_code(text: &str, match_offset: usize, matched: &str) -> bool {
+    let match_end = match_offset + matched.len();
+    let before = text[..match_offset].trim_end();
+    let after = text[match_end..].trim_start();
+
+    let open = before.chars().last();
+    let close = after.chars().next();
+
+    matches!((open, close), (Some(a), Some(b)) if a == b && (a == '"' || a == '\'' || a == '`'))
 }
 
 /// Apply context modifier to a base risk score.

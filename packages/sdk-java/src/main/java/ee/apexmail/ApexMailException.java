@@ -31,6 +31,13 @@ public class ApexMailException extends RuntimeException {
         this.details    = details;
     }
 
+    public ApexMailException(String message, String code, int statusCode, Object details, Throwable cause) {
+        super(message, cause);
+        this.code       = code;
+        this.statusCode = statusCode;
+        this.details    = details;
+    }
+
     /** Machine-readable error code returned by the API (may be null). */
     public String getCode() { return code; }
 

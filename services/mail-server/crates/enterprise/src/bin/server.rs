@@ -57,9 +57,14 @@ async fn main() -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(&bind_addr).await?;
     info!(addr = %bind_addr, "Enterprise server listening");
 
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
+    // ConnectInfo is required by the audit-log identity derivation (fix C:
+    // peer IP) and the /metrics loopback check (fix H-3).
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await?;
 
     info!("Enterprise server shutdown complete");
     Ok(())
@@ -115,7 +120,29 @@ fn spawn_background_jobs(state: Arc<AppState>, _db: sqlx::PgPool) {
         }
     });
 
-    info!("Background jobs started: SLA check (60s), auto-escalation (5m), session cleanup (1h)");
+    // Job 4:Log-stream delivery loop (fix H-1). Periodically pulls the
+    // active streams and delivers a bounded heartbeat batch to each
+    // verified destination via the SSRF-guarded, address-pinned client.
+    // Best-effort: failures are recorded per stream and retried next cycle.
+    let delivery_state = state.clone();
+    let flush_interval = std::time::Duration::from_millis(
+        delivery_state.config.log_stream.flush_interval_ms.max(1_000),
+    );
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(flush_interval);
+        loop {
+            interval.tick().await;
+            match delivery_state.log_streaming.run_delivery_cycle().await {
+                Ok(delivered) if delivered > 0 => {
+                    info!(delivered = delivered, "Log-stream heartbeat deliveries completed");
+                }
+                Ok(_) => {}
+                Err(e) => tracing::error!(error = %e, "Log-stream delivery cycle failed"),
+            }
+        }
+    });
+
+    info!("Background jobs started: SLA check (60s), auto-escalation (5m), session cleanup (1h), log-stream delivery (flush interval)");
 }
 
 /// Wait for Ctrl+C or SIGTERM for graceful shutdown

@@ -188,11 +188,14 @@ pub fn detect_polyglot_signatures(data: &[u8]) -> Vec<(FileType, usize)> {
     // Only scan a reasonable prefix (first 64KB) to avoid DOS on huge files
     let scan_limit = data.len().min(65536);
 
-    // Signatures to look for at non-zero offsets
+    // Signatures to look for at non-zero offsets.
+    // NOTE:"MZ" (PE) is deliberately NOT in this list:a 2-byte magic
+    // occurring anywhere in the first 64 KB of a text/document file is a
+    // massive false-positive source. PE executables are instead detected
+    // via `detect_file_type`, which requires the MZ magic at offset 0.
     let signatures: &[(&[u8], FileType)] = &[
         (b"\x50\x4B\x03\x04", FileType::Zip),
         (b"\xD0\xCF\x11\xE0", FileType::Ole2),
-        (b"\x4D\x5A", FileType::PeExe),
         (b"\x7F\x45\x4C\x46", FileType::Elf),
         (b"%PDF", FileType::Pdf),
         (b"\x52\x61\x72\x21", FileType::Rar),
@@ -221,6 +224,26 @@ pub fn compute_sha256(data: &[u8]) -> String {
     hex::encode(hasher.finalize())
 }
 
+/// Extract the effective file extension from a filename.
+///
+/// Windows (and some mail clients) strip trailing dots and spaces from
+/// filenames, so `payload.exe.` and `payload.exe ` must be treated as `.exe`.
+/// Names without a dot (`Makefile`) have no extension at all, and a filename
+/// ending in a bare dot must not yield an empty-string extension.
+pub fn extract_extension(filename: &str) -> Option<String> {
+    // Trailing dots/spaces/NULs are dropped when the file is written on the
+    // most common target platform — the *effective* name is what matters.
+    let cleaned = filename.trim_end_matches(['.', ' ', '\u{0}']);
+    // Only the final path component carries the extension.
+    let last_component = cleaned.rsplit(['/', '\\']).next().unwrap_or(cleaned);
+    let dot = last_component.rfind('.')?;
+    let ext = &last_component[dot + 1..];
+    if ext.is_empty() {
+        return None;
+    }
+    Some(ext.to_lowercase())
+}
+
 /// Inspect a file's contents for risk indicators
 pub fn inspect_file(data: &[u8], filename: Option<&str>) -> FileInspection {
     let file_type = detect_file_type(data);
@@ -229,8 +252,8 @@ pub fn inspect_file(data: &[u8], filename: Option<&str>) -> FileInspection {
     let mut findings = Vec::with_capacity(16);
     let mut risk_score = 0.0;
 
-    // Extract extension
-    let extension = filename.and_then(|f| f.rsplit('.').next().map(|e| e.to_lowercase()));
+    // Extract extension (trailing-dot/space and no-extension safe)
+    let extension = filename.and_then(extract_extension);
 
     // Check extension mismatch
     let extension_mismatch = if let Some(ref ext) = extension {
@@ -355,15 +378,19 @@ pub fn inspect_file(data: &[u8], filename: Option<&str>) -> FileInspection {
             risk_score += 6.0;
         }
 
-        // Check for external OLE links (remote payload injection)
+        // Check for external OLE links (remote payload injection).
+        // Risk lowered from 5.0 → 2.0:external *images* are common in
+        // legitimate DOCX files and 5.0 alone pushed clean documents into
+        // quarantine. 2.0 keeps the signal visible below the
+        // suspicious/quarantine threshold while still accumulating.
         if has_external_ole_links(data) {
             findings.push(InspectionFinding {
                 id: "OOXML_EXTERNAL_OLE",
                 description: "External OLE/relationship links detected (potential remote payload)"
                     .into(),
-                risk: 5.0,
+                risk: 2.0,
             });
-            risk_score += 5.0;
+            risk_score += 2.0;
         }
 
         // Check for encrypted/password-protected ZIP
@@ -660,11 +687,70 @@ pub fn is_zip_encrypted(data: &[u8]) -> bool {
         }
     }
 
-    // Also check for encryption in central directory (end of ZIP)
-    // Look for AES encryption marker
-    if data.windows(2).any(|w| w == [0x99, 0x01]) {
-        // AES extra field ID
-        return true;
+    // Fall back to the central directory (authoritative):locate the End Of
+    // Central Directory record and check each entry's general-purpose flags.
+    // The previous heuristic flagged ANY occurrence of the two bytes
+    // 0x99 0x01 anywhere in the file (e.g. inside file contents), producing
+    // false "encrypted archive" verdicts on ordinary files.
+    zip_central_directory_encrypted(data)
+}
+
+/// Walk the ZIP central directory and report whether any entry has the
+/// "encrypted" general-purpose flag (bit 0) or strong-encryption flag
+/// (bit 6) set. AES-encrypted entries created by WinZip set these flags and
+/// carry an AES extra field (0x9901) *inside a central-directory header*, so
+/// checking flags here is both stricter and more accurate than scanning for
+/// the raw 0x99 0x01 byte pair anywhere in the file.
+fn zip_central_directory_encrypted(data: &[u8]) -> bool {
+    const EOCD_SIG: [u8; 4] = [0x50, 0x4B, 0x05, 0x06];
+    const CDFH_SIG: [u8; 4] = [0x50, 0x4B, 0x01, 0x02];
+
+    // Locate the End Of Central Directory record (search backwards; the
+    // classic EOCD is 22 bytes plus an optional comment of up to 65535).
+    let tail_start = data.len().saturating_sub(22 + 65_535);
+    let mut eocd = None;
+    if data.len() >= 22 {
+        let mut i = data.len() - 22;
+        loop {
+            if data[i..].starts_with(&EOCD_SIG) {
+                eocd = Some(i);
+                break;
+            }
+            if i == tail_start || i == 0 {
+                break;
+            }
+            i -= 1;
+        }
+    }
+    let Some(eocd) = eocd else {
+        return false;
+    };
+    if eocd + 22 > data.len() {
+        return false;
+    }
+
+    let entry_count = u16::from_le_bytes([data[eocd + 10], data[eocd + 11]]);
+    let cd_offset = u32::from_le_bytes([
+        data[eocd + 16],
+        data[eocd + 17],
+        data[eocd + 18],
+        data[eocd + 19],
+    ]) as usize;
+
+    // Walk `entry_count` central-directory file headers.
+    let mut offset = cd_offset;
+    for _ in 0..entry_count {
+        if offset + 46 > data.len() || !data[offset..].starts_with(&CDFH_SIG) {
+            break; // malformed or truncated — not evidence of encryption
+        }
+        let flags = u16::from_le_bytes([data[offset + 8], data[offset + 9]]);
+        if flags & 0x0001 != 0 || flags & 0x0040 != 0 {
+            return true;
+        }
+        let name_len = u16::from_le_bytes([data[offset + 28], data[offset + 29]]) as usize;
+        let extra_len = u16::from_le_bytes([data[offset + 30], data[offset + 31]]) as usize;
+        let comment_len = u16::from_le_bytes([data[offset + 32], data[offset + 33]]) as usize;
+        offset += 46 + name_len + extra_len + comment_len;
     }
 
     false
@@ -829,6 +915,58 @@ fn inspect_pdf(data: &[u8]) -> Vec<InspectionFinding> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Build a minimal (store-method) ZIP with one entry and controlled
+    /// general-purpose flags for the local header and central directory.
+    fn make_test_zip(local_flags: u16, central_flags: u16, content: &[u8]) -> Vec<u8> {
+        let name = b"file.txt";
+        let mut out = Vec::new();
+        // Local file header (30 bytes + name)
+        out.extend_from_slice(&[0x50, 0x4B, 0x03, 0x04]);
+        out.extend_from_slice(&20u16.to_le_bytes()); // version needed
+        out.extend_from_slice(&local_flags.to_le_bytes());
+        out.extend_from_slice(&0u16.to_le_bytes()); // method:store
+        out.extend_from_slice(&0u16.to_le_bytes()); // mod time
+        out.extend_from_slice(&0u16.to_le_bytes()); // mod date
+        out.extend_from_slice(&0u32.to_le_bytes()); // crc32
+        out.extend_from_slice(&(content.len() as u32).to_le_bytes()); // comp size
+        out.extend_from_slice(&(content.len() as u32).to_le_bytes()); // uncomp size
+        out.extend_from_slice(&(name.len() as u16).to_le_bytes());
+        out.extend_from_slice(&0u16.to_le_bytes()); // extra len
+        out.extend_from_slice(name);
+        out.extend_from_slice(content);
+        let cd_offset = out.len() as u32;
+        // Central directory file header (46 bytes + name)
+        out.extend_from_slice(&[0x50, 0x4B, 0x01, 0x02]);
+        out.extend_from_slice(&20u16.to_le_bytes()); // version made by
+        out.extend_from_slice(&20u16.to_le_bytes()); // version needed
+        out.extend_from_slice(&central_flags.to_le_bytes());
+        out.extend_from_slice(&0u16.to_le_bytes()); // method
+        out.extend_from_slice(&0u16.to_le_bytes()); // time
+        out.extend_from_slice(&0u16.to_le_bytes()); // date
+        out.extend_from_slice(&0u32.to_le_bytes()); // crc32
+        out.extend_from_slice(&(content.len() as u32).to_le_bytes());
+        out.extend_from_slice(&(content.len() as u32).to_le_bytes());
+        out.extend_from_slice(&(name.len() as u16).to_le_bytes());
+        out.extend_from_slice(&0u16.to_le_bytes()); // extra len
+        out.extend_from_slice(&0u16.to_le_bytes()); // comment len
+        out.extend_from_slice(&0u16.to_le_bytes()); // disk number start
+        out.extend_from_slice(&0u16.to_le_bytes()); // internal attrs
+        out.extend_from_slice(&0u32.to_le_bytes()); // external attrs
+        out.extend_from_slice(&cd_offset.to_le_bytes()); // local header offset
+        out.extend_from_slice(name);
+        let cd_size = out.len() as u32 - cd_offset;
+        // End of central directory (22 bytes)
+        out.extend_from_slice(&[0x50, 0x4B, 0x05, 0x06]);
+        out.extend_from_slice(&0u16.to_le_bytes()); // disk number
+        out.extend_from_slice(&0u16.to_le_bytes()); // disk with CD
+        out.extend_from_slice(&1u16.to_le_bytes()); // entries this disk
+        out.extend_from_slice(&1u16.to_le_bytes()); // total entries
+        out.extend_from_slice(&cd_size.to_le_bytes());
+        out.extend_from_slice(&cd_offset.to_le_bytes());
+        out.extend_from_slice(&0u16.to_le_bytes()); // comment len
+        out
+    }
 
     #[test]
     fn test_detect_pdf() {
@@ -1028,5 +1166,70 @@ mod tests {
             result.findings
         );
         assert!(result.risk_score >= 7.0);
+    }
+
+    // ── FP-heuristic + extension-extraction regression tests ──
+
+    #[test]
+    fn test_midfile_mz_in_text_not_flagged() {
+        // 'MZ' appearing mid-file in ordinary text must NOT be treated as an
+        // embedded PE / polyglot indicator.
+        let data = b"release notes: fixed MZ parsing bug and other issues\nsecond line\n";
+        let result = inspect_file(data, Some("notes.txt"));
+        assert_eq!(result.file_type, FileType::PlainText);
+        assert!(
+            !result.findings.iter().any(|f| f.id == "POLYGLOT_DETECTED"),
+            "mid-file MZ in text must not flag polyglot: {:?}",
+            result.findings
+        );
+        assert!(
+            !result.findings.iter().any(|f| f.id.starts_with("EXECUTABLE")),
+            "mid-file MZ must not be treated as an executable"
+        );
+    }
+
+    #[test]
+    fn test_mz_at_offset_zero_flagged() {
+        let data = [0x4D, 0x5A, 0x90, 0x00, 0x03, 0x00, 0x00, 0x00];
+        let result = inspect_file(&data, Some("update.exe"));
+        assert_eq!(result.file_type, FileType::PeExe);
+        assert!(result.findings.iter().any(|f| f.id == "EXECUTABLE_PE"));
+    }
+
+    #[test]
+    fn test_zip_aes_magic_in_content_not_flagged_encrypted() {
+        // The bytes 0x99 0x01 inside ordinary stored content must not trigger
+        // the encrypted-archive heuristic (central-directory flags are the
+        // authoritative signal now).
+        let zip = make_test_zip(0, 0, b"binary-looking content \x99\x01 tail");
+        assert!(!is_zip_encrypted(&zip));
+    }
+
+    #[test]
+    fn test_zip_central_directory_encrypted_flag_detected() {
+        // Central-directory flag bit 0 set → encrypted.
+        let zip = make_test_zip(0, 0x0001, b"payload");
+        assert!(is_zip_encrypted(&zip));
+    }
+
+    #[test]
+    fn test_extract_extension_windows_trailing_dots_and_spaces() {
+        assert_eq!(extract_extension("payload.exe."), Some("exe".into()));
+        assert_eq!(extract_extension("payload.exe "), Some("exe".into()));
+        assert_eq!(extract_extension("payload.exe. . "), Some("exe".into()));
+        assert_eq!(extract_extension("Makefile"), None);
+        assert_eq!(extract_extension("archive.tar.gz"), Some("gz".into()));
+        assert_eq!(extract_extension("no_extension."), None);
+        assert_eq!(extract_extension("dir/file.doc"), Some("doc".into()));
+    }
+
+    #[test]
+    fn test_trailing_dot_exe_filename_blocked() {
+        // "payload.exe." must be treated as an EXE attachment (Windows
+        // strips the trailing dot when writing the file).
+        let data = b"plain text, definitely not an executable";
+        let result = inspect_file(data, Some("payload.exe."));
+        assert_eq!(result.extension.as_deref(), Some("exe"));
+        assert!(result.findings.iter().any(|f| f.id == "BLOCKED_EXTENSION"));
     }
 }

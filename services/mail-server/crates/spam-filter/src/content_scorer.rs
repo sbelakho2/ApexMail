@@ -33,6 +33,11 @@ struct SpamPhraseSet {
     penalties: Vec<f64>,
     ids: Vec<&'static str>,
     descriptions: Vec<&'static str>,
+    /// Whether the pattern is a single common word (no whitespace). Such
+    /// patterns ("urgent", "expire", "winner", …) fire on huge amounts of
+    /// legitimate mail, so their standalone weight is halved — multi-word
+    /// phrases keep full weight because the combination is far more specific.
+    single_word: Vec<bool>,
 }
 
 fn spam_phrase_set() -> Option<&'static SpamPhraseSet> {
@@ -1226,6 +1231,10 @@ fn spam_phrase_set() -> Option<&'static SpamPhraseSet> {
 
             let (pats, penalties, ids, descs): (Vec<_>, Vec<_>, Vec<_>, Vec<_>) =
                 patterns.into_iter().multiunzip();
+            let single_word: Vec<bool> = pats
+                .iter()
+                .map(|p: &str| !p.chars().any(char::is_whitespace))
+                .collect();
 
             let automaton = AhoCorasick::builder()
                 .ascii_case_insensitive(true)
@@ -1237,6 +1246,7 @@ fn spam_phrase_set() -> Option<&'static SpamPhraseSet> {
                 penalties,
                 ids,
                 descriptions: descs,
+                single_word,
             })
         })
         .as_ref()
@@ -1267,6 +1277,16 @@ where
     }
 }
 
+/// Whether a character is invisible/zero-width and must be stripped before
+/// tokenization or phrase matching (such characters silently split or join
+/// words without any visual trace).
+pub fn is_invisible_char(c: char) -> bool {
+    matches!(
+        c,
+        '\u{200B}' | '\u{200C}' | '\u{200D}' | '\u{FEFF}' | '\u{00AD}'
+    )
+}
+
 /// Normalize leet-speak and common character substitutions.
 /// Maps common obfuscation characters to their ASCII equivalents so that
 /// phrases like "V1@gr@" are matched against "viagra" by the Aho-Corasick
@@ -1274,6 +1294,10 @@ where
 pub fn normalize_leet_speak(text: &str) -> String {
     let mut result = String::with_capacity(text.len());
     for c in text.chars() {
+        if is_invisible_char(c) {
+            // Strip zero-width characters
+            continue;
+        }
         let replacement = match c {
             '0' | 'Ø' | 'ø' => 'o',
             '1' | '|' | 'ℓ' => 'l',
@@ -1297,10 +1321,6 @@ pub fn normalize_leet_speak(text: &str) -> String {
             'р' => 'p',       // Cyrillic р
             'с' => 'c',       // Cyrillic с
             'х' => 'x',       // Cyrillic х
-            '\u{200B}' | '\u{200C}' | '\u{200D}' | '\u{FEFF}' | '\u{00AD}' => {
-                // Strip zero-width characters
-                continue;
-            }
             other => other,
         };
         result.push(replacement);
@@ -1331,13 +1351,23 @@ pub fn score_content(body: &str) -> ContentScore {
             }
         }
 
-        // Collect deduplicated findings
+        // Collect deduplicated findings. Single common words ("urgent",
+        // "expire", …) contribute only HALF their base penalty:alone they
+        // are strong false-positive sources on legitimate mail (a message
+        // saying "this is urgent" is not spam by that fact alone). Multi-
+        // word phrases retain the full penalty.
         for (idx, &hit) in matched.iter().enumerate() {
             if hit {
+                let base = phrases.penalties[idx];
+                let penalty = if phrases.single_word[idx] {
+                    base * 0.5
+                } else {
+                    base
+                };
                 findings.push(ContentFinding {
                     id: phrases.ids[idx],
                     description: phrases.descriptions[idx].to_string(),
-                    penalty: phrases.penalties[idx],
+                    penalty,
                 });
             }
         }

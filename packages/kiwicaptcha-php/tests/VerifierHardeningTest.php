@@ -436,7 +436,8 @@ final class VerifierHardeningTest extends TestCase
 
     /**
      * Consume-on-verify: a first verify that succeeds consumes the
-     * record and commits the deterministic valid outcome, so a replay
+     * record and commits the deterministic valid outcome, so a replay of
+     * the exact same logical operation (the same operation identity)
      * returns the same Valid without re-deriving. The attempt bound is
      * the single-use record; there is no maxAttempts parameter.
      */
@@ -444,13 +445,15 @@ final class VerifierHardeningTest extends TestCase
     {
         $storage = new ArrayStorage();
         [$record, $token] = $this->issueAndSolve($storage, minDurationMs: 0);
+        $identity = 'op-'.hash('sha256', 'login-op');
 
         $verifier = new Verifier($storage, acceptLegacyV1: true);
-        $first = $verifier->verify($token, Vectors::SECRET, 'login', '198.51.100.77');
+        $first = $verifier->verify($token, Vectors::SECRET, 'login', '198.51.100.77', operationIdentity: $identity);
         self::assertTrue($first->isOk(), sprintf('first verify must succeed, got %s', $first->code()));
 
-        $second = $verifier->verify($token, Vectors::SECRET, 'login', '198.51.100.77');
-        self::assertTrue($second->isOk(), sprintf('a replay must return the committed stored outcome, got %s', $second->code()));
+        $second = $verifier->verify($token, Vectors::SECRET, 'login', '198.51.100.77', operationIdentity: $identity);
+        self::assertTrue($second->isOk(), sprintf('a replay of the same operation must return the committed stored outcome, got %s', $second->code()));
+        self::assertTrue($second->fromStoredResult, 'the replay must come from the stored result, never a second derivation');
         self::assertNotNull($storage->find($record->nonce), 'the consumed record is KEPT until its TTL (replay protection is the consumed marker, not absence)');
     }
 

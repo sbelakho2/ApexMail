@@ -79,18 +79,46 @@ class KiwiCaptcha extends Constraint
      */
     public const POST_SOLVE_STEP_UP_REQUIRED = 'kiwi.post_solve_step_up_required';
 
+    /**
+     * The token's challenge was already consumed and its stored success was
+     * replayed back WITHOUT a proven logical operation: the default
+     * configuration is strict single-use, so a second, distinct request
+     * presenting an already-consumed token is refused (the stored verdict
+     * replays only to an explicitly identified idempotent retry, see
+     * {@see KiwiCaptchaValidator::OPERATION_ID_ATTRIBUTE}). Distinct from
+     * INVALID_OR_EXPIRED_ERROR so applications can tell "this exact token
+     * was already used" (the Siteverify vocabulary's timeout-or-duplicate)
+     * from an ordinary invalid token — the attacker already knows the token
+     * was consumed, so this leaks no check-by-check oracle.
+     */
+    public const REPLAYED_TOKEN_ERROR = 'replayed_token';
+
     protected const ERROR_NAMES = [
         self::INVALID_OR_EXPIRED_ERROR => 'INVALID_OR_EXPIRED_ERROR',
         self::RATE_LIMITED_ERROR => 'RATE_LIMITED_ERROR',
         self::TEMPORARY_UNAVAILABLE_ERROR => 'TEMPORARY_UNAVAILABLE_ERROR',
         self::POST_SOLVE_REJECTED_ERROR => 'POST_SOLVE_REJECTED_ERROR',
         self::POST_SOLVE_STEP_UP_REQUIRED => 'POST_SOLVE_STEP_UP_REQUIRED',
+        self::REPLAYED_TOKEN_ERROR => 'REPLAYED_TOKEN_ERROR',
     ];
 
     public string $message = 'The security check failed. Please try again.';
 
     /** Expected challenge scope (null = accept any scope). */
     public ?string $scope = null;
+
+    /**
+     * Optional explicit per-operation id (the logical operation redeeming
+     * the token, e.g. an idempotency key): with it, a retried request
+     * re-presenting the SAME id plus the SAME token replays the stored
+     * verification outcome (the idempotent retry); without it, a consumed
+     * token never validates twice (strict single-use). Per-request values
+     * (the request attribute / POSTed kiwi_operation_id field) take
+     * precedence over this static option. The id MUST be unique per
+     * logical operation — a constant here would re-enable cross-request
+     * replay of consumed tokens.
+     */
+    public ?string $operationId = null;
 
     public function __construct(
         mixed $options = null,
@@ -108,6 +136,7 @@ class KiwiCaptcha extends Constraint
         if (\is_array($options)) {
             $scope = \is_string($options['scope'] ?? null) ? $options['scope'] : $scope;
             $message = \is_string($options['message'] ?? null) ? $options['message'] : $message;
+            $this->operationId = \is_string($options['operationId'] ?? null) && $options['operationId'] !== '' ? $options['operationId'] : $this->operationId;
         }
         $this->scope = $scope ?? $this->scope;
         $this->message = $message ?? $this->message;

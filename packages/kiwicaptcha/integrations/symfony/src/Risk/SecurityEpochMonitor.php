@@ -12,7 +12,7 @@ use KiwiCaptcha\Verifier;
  * Reads the central security-policy state, the `{kiwi:<ns>}:security-policy`
  * hash's `min_policy_epoch` field, the same key the readiness probe
  * consults, with a short cache (risk.security_epoch_cache_secs, default
- * 1 s), and feeds the {@see Verifier}'s expected policy epoch per
+ * 1 s). It feeds the {@see Verifier}'s expected policy epoch per
  * verification, so a central policy bump revokes outstanding challenges
  * within one cache window instead of waiting for a redeploy.
  *
@@ -31,10 +31,11 @@ use KiwiCaptcha\Verifier;
  *     `now > last_success + risk.security_epoch_max_stale_secs` (default
  *     60 s, min 10 s) the monitor reports {@see isStale()}. A stale monitor
  *     is the deliberate constrained degradation: the cached max may no
- *     longer reflect the central policy (an emergency revocation could
- *     have landed while the node could not read), so the validator fails
- *     verification closed (temporary_unavailable) and the challenge
- *     controller refuses issuance with 503 SERVICE_UNAVAILABLE. Within the
+ *     longer reflect the central policy, since an emergency revocation
+ *     could have landed while the node could not read. The validator
+ *     then fails verification closed (temporary_unavailable), and the
+ *     challenge controller refuses issuance with 503
+ *     `SERVICE_UNAVAILABLE`. Within the
  *     window the cached max keeps serving, so availability is preserved
  *     for a bounded outage. A monitor without a Redis client is never
  *     stale: "no central state by design" is a configured posture, not a
@@ -184,7 +185,7 @@ final class SecurityEpochMonitor
      * outdated, since an emergency revocation could have landed while this
      * node could not read, so the caller must fail closed: the validator
      * returns temporary_unavailable and the challenge controller refuses
-     * issuance with 503 SERVICE_UNAVAILABLE. Within the window the cached
+     * issuance with 503 `SERVICE_UNAVAILABLE`. Within the window the cached
      * max keeps serving (bounded outage tolerance). A monitor without a
      * Redis client is never stale (no central state by design — the
      * configured epoch is authoritative). A monitor that never succeeded a

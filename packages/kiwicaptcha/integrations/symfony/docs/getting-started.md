@@ -208,17 +208,23 @@ a pre-existing jti as a replay. See the receipts section in
 
 **Idempotency contract:** the application MUST key its protected business
 operation on `(jti, action)` and make it idempotent. A retry carrying the
-same jti must never create a second operation. KiwiCaptcha guarantees each
-jti verifies at most once (single-use consumption). The HTTP request itself
+same jti must never create a second operation. KiwiCaptcha performs the
+proof-of-work derivation exactly once: one consumer wins the
+pending-to-consumed transition, and a consumed token reproduces its
+retained verification outcome only for the exact same logical operation.
+The validator derives the operation identity from the scope and the
+authoritative transaction binding, so a different operation presenting
+the same token is rejected. The HTTP request itself
 can be retried (network retries, double-submits, a client that received the
 response while the app crashed before the DB write). The same token, already
 consumed, must not be re-solvable, but a retried request carrying the same
-token/jti reaches the application again. Persist `(jti, action)` as the
-idempotency key of the business operation (e.g. a `UNIQUE` constraint on the
-order/password-reset row), and return the stored result on a duplicate
-instead of executing the operation twice. The jti is high-entropy (256-bit
-random challenge nonce), unguessable, and never reused across challenges, so
-it is safe to expose in application tables and logs.
+token/jti reaches the application again. The application still enforces
+`(jti, action)` business idempotency for its own side effects. Persist
+`(jti, action)` as the idempotency key of the business operation (e.g. a
+`UNIQUE` constraint on the order/password-reset row), and return the stored
+result on a duplicate instead of executing the operation twice. The jti is
+high-entropy (256-bit random challenge nonce), unguessable, and never reused
+across challenges, so it is safe to expose in application tables and logs.
 
 ## Next steps
 

@@ -37,6 +37,15 @@ pub struct SalesConfig {
     /// in the 0–100 lead score calculation (SALES-01).
     #[serde(default)]
     pub lead_scoring: LeadScoringWeights,
+
+    /// Fix I-3: optional tenant allowlist (`SALES_ALLOWED_TENANTS`, comma
+    /// separated). The service authenticates callers with a single shared
+    /// internal token and then trusts the `x-tenant-id` header — the token
+    /// holder can address any tenant by design. Scoping the deployment to an
+    /// explicit tenant list reduces that blast radius. `None` = all tenants
+    /// allowed (a warning is logged in that case).
+    #[serde(default)]
+    pub allowed_tenants: Option<Vec<String>>,
 }
 
 /// Configurable weights for the lead scoring formula (SALES-01).
@@ -79,6 +88,7 @@ impl Default for SalesConfig {
             scraper_rpm: 30,
             redis_url: "redis://127.0.0.1:6379".into(),
             lead_scoring: LeadScoringWeights::default(),
+            allowed_tenants: None,
         }
     }
 }
@@ -129,6 +139,12 @@ impl SalesConfig {
                     "an integer 0-100",
                 )?,
             },
+            allowed_tenants: read_env(&["SALES_ALLOWED_TENANTS"])?.map(|raw| {
+                raw.split(',')
+                    .map(|t| t.trim().to_string())
+                    .filter(|t| !t.is_empty())
+                    .collect::<Vec<_>>()
+            }),
         };
         config
             .validate()

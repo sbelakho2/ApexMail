@@ -507,6 +507,20 @@ impl DynamicAnalyzer for ClamAvSocketAnalyzer {
             });
         }
 
+        // Fail-closed finding:if the scanner is unavailable, malformed, or
+        // times out, the file must NOT be treated as clean. It is rejected
+        // with a clear reason so operators can see the scanner outage.
+        let scanner_unavailable = |reason: String| DynamicAnalysisFinding {
+            id: "CLAMAV_UNAVAILABLE".into(),
+            description: format!(
+                "ClamAV scanner unavailable ({}): verdict cannot be verified for {}",
+                reason,
+                filename.unwrap_or("<unnamed>")
+            ),
+            risk: 8.0,
+            decision: DynamicDecision::Reject,
+        };
+
         // Attempt connection to ClamAV socket
         #[cfg(unix)]
         {
@@ -521,23 +535,27 @@ impl DynamicAnalyzer for ClamAvSocketAnalyzer {
                     id: "CLAMAV_SOCKET_INVALID".into(),
                     description: format!("ClamAV socket validation failed: {}", msg),
                     risk: 8.0,
-                    decision: DynamicDecision::Flag,
+                    decision: DynamicDecision::Reject,
                 });
             }
 
             let stream = match std::os::unix::net::UnixStream::connect(&self.socket_path) {
                 Ok(s) => s,
                 Err(e) => {
-                    tracing::warn!(
+                    // Fail-closed:a missing scanner must never read as "clean".
+                    tracing::error!(
                         socket = %self.socket_path,
                         error = %e,
-                        "ClamAV socket connection failed — skipping dynamic analysis"
+                        "ClamAV socket connection failed — failing closed"
                     );
-                    return None;
+                    return Some(scanner_unavailable(format!("connect failed: {e}")));
                 }
             };
 
-            // Set a reasonable timeout
+            // Hard upper bound on the blocking scan:the read/write timeouts
+            // guarantee the connection is dropped (and the OS reclaims it)
+            // even if clamd stalls, so the caller's bounded blocking pool
+            // cannot be held hostage indefinitely.
             let timeout = std::time::Duration::from_secs(30);
             let _ = stream.set_read_timeout(Some(timeout));
             let _ = stream.set_write_timeout(Some(timeout));
@@ -545,45 +563,43 @@ impl DynamicAnalyzer for ClamAvSocketAnalyzer {
             let mut stream = std::io::BufWriter::new(stream);
 
             // Send INSTREAM command
-            if stream.write_all(b"zINSTREAM\0").is_err() {
-                return None;
+            if let Err(e) = stream.write_all(b"zINSTREAM\0") {
+                return Some(scanner_unavailable(format!("write failed: {e}")));
             }
 
             // Send data in 8KB chunks
             let chunk_size = 8192;
             for chunk in data.chunks(chunk_size) {
                 let len = (chunk.len() as u32).to_be_bytes();
-                if stream.write_all(&len).is_err() || stream.write_all(chunk).is_err() {
-                    return None;
+                if let Err(e) = stream.write_all(&len)
+                    .and_then(|_| stream.write_all(chunk))
+                {
+                    return Some(scanner_unavailable(format!("write failed: {e}")));
                 }
             }
 
             // Send zero-length terminator
-            if stream.write_all(&[0, 0, 0, 0]).is_err() {
-                return None;
+            if let Err(e) = stream.write_all(&[0, 0, 0, 0]) {
+                return Some(scanner_unavailable(format!("write failed: {e}")));
             }
 
-            if stream.flush().is_err() {
-                return None;
+            if let Err(e) = stream.flush() {
+                return Some(scanner_unavailable(format!("flush failed: {e}")));
             }
 
             // Read response
-            let mut inner = stream.into_inner().ok()?;
+            let mut inner = match stream.into_inner() {
+                Ok(inner) => inner,
+                Err(e) => return Some(scanner_unavailable(format!("stream error: {e}"))),
+            };
             let mut response = String::new();
-            if inner.read_to_string(&mut response).is_err() {
-                return None;
+            if let Err(e) = inner.read_to_string(&mut response) {
+                return Some(scanner_unavailable(format!("read failed: {e}")));
             }
 
-            let response = response.trim();
-
-            if response.contains("FOUND") {
-                // Extract virus name:"stream:Eicar-Signature FOUND"
-                let virus_name = response
-                    .strip_prefix("stream: ")
-                    .and_then(|s| s.strip_suffix(" FOUND"))
-                    .unwrap_or("unknown");
-
-                return Some(DynamicAnalysisFinding {
+            match parse_clamd_response(&response) {
+                ClamdVerdict::Clean => None, // Clean
+                ClamdVerdict::Detected(virus_name) => Some(DynamicAnalysisFinding {
                     id: format!(
                         "CLAMAV_{}",
                         virus_name.replace(['-', '.', ' '], "_").to_uppercase()
@@ -595,21 +611,72 @@ impl DynamicAnalyzer for ClamAvSocketAnalyzer {
                     ),
                     risk: 10.0,
                     decision: DynamicDecision::Reject,
-                });
+                }),
+                ClamdVerdict::Invalid => {
+                    // Unexpected/garbage response — fail closed, not clean.
+                    tracing::error!(
+                        response = %response,
+                        "Unexpected ClamAV response — failing closed"
+                    );
+                    Some(scanner_unavailable("unexpected response".into()))
+                }
             }
+        }
+    }
+}
 
-            if response.contains("OK") {
-                return None; // Clean
+/// Strictly parsed clamd INSTREAM response.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClamdVerdict {
+    /// `stream: OK`
+    Clean,
+    /// `stream: <name> FOUND`
+    Detected(String),
+    /// Anything else — the scanner output cannot be trusted.
+    Invalid,
+}
+
+/// Parse a clamd INSTREAM response strictly:
+/// - exactly `OK` (optionally after `stream: `, trailing newline/whitespace
+///   allowed) means clean;
+/// - a line ending in `FOUND` yields the detected signature name;
+/// - every other output is `Invalid` and must be treated as a scanner
+///   failure (fail-closed), never as clean.
+pub fn parse_clamd_response(response: &str) -> ClamdVerdict {
+    let trimmed = response.trim();
+    if trimmed.is_empty() {
+        return ClamdVerdict::Invalid;
+    }
+    // Possibly multiple lines (multi-file sessions); evaluate each line.
+    let mut saw_any = false;
+    for line in trimmed.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        saw_any = true;
+        if line == "OK" || line == "stream: OK" {
+            continue;
+        }
+        if let Some(name) = line.strip_prefix("stream: ") {
+            if let Some(virus) = name.strip_suffix(" FOUND") {
+                if !virus.is_empty() {
+                    return ClamdVerdict::Detected(virus.to_string());
+                }
             }
-
-            // Unexpected response
-            tracing::warn!(
-                response = %response,
-                "Unexpected ClamAV response"
+        }
+        // Bare "… FOUND" without stream prefix (IDSESSION style)
+        if line.ends_with(" FOUND") && line.len() > " FOUND".len() {
+            return ClamdVerdict::Detected(
+                line.trim_end_matches(" FOUND").trim().to_string(),
             );
         }
-
-        None
+        return ClamdVerdict::Invalid;
+    }
+    if saw_any {
+        ClamdVerdict::Clean
+    } else {
+        ClamdVerdict::Invalid
     }
 }
 
@@ -871,5 +938,63 @@ mod tests {
         assert!(finding.is_some());
         let f = finding.expect("finding");
         assert_eq!(f.id, "CLAMAV_SIZE_EXCEEDED");
+    }
+
+    // ── ClamAV fail-closed + strict parsing tests ──
+
+    #[test]
+    fn test_clamav_unreachable_scanner_fails_closed() {
+        // Nonexistent socket path:the previous behavior returned None
+        // (treated as clean = fail-open). It must now fail closed.
+        let analyzer = ClamAvSocketAnalyzer::new(
+            "/nonexistent/clamd-socket-for-test-8f3a.ctl".into(),
+        );
+        let finding = analyzer
+            .analyze(b"innocuous", Some("doc.pdf"))
+            .expect("scanner outage must produce a finding");
+        assert_eq!(finding.id, "CLAMAV_UNAVAILABLE");
+        assert_eq!(finding.decision, DynamicDecision::Reject);
+        assert!(
+            finding.description.contains("doc.pdf"),
+            "reason must name the unverified file: {}",
+            finding.description
+        );
+    }
+
+    #[test]
+    fn test_clamav_relative_socket_path_rejected() {
+        let analyzer = ClamAvSocketAnalyzer::new("relative/clamd.ctl".into());
+        let finding = analyzer
+            .analyze(b"data", None)
+            .expect("invalid socket must produce a finding");
+        assert_eq!(finding.id, "CLAMAV_SOCKET_INVALID");
+        assert_eq!(finding.decision, DynamicDecision::Reject);
+    }
+
+    #[test]
+    fn test_parse_clamd_response_strict() {
+        use super::*;
+        // Clean responses
+        assert_eq!(parse_clamd_response("OK"), ClamdVerdict::Clean);
+        assert_eq!(parse_clamd_response("stream: OK"), ClamdVerdict::Clean);
+        assert_eq!(parse_clamd_response("stream: OK\n"), ClamdVerdict::Clean);
+        // Detections
+        assert_eq!(
+            parse_clamd_response("stream: Eicar-Signature FOUND\n"),
+            ClamdVerdict::Detected("Eicar-Signature".into())
+        );
+        assert_eq!(
+            parse_clamd_response("Win.Trojan.Example FOUND"),
+            ClamdVerdict::Detected("Win.Trojan.Example".into())
+        );
+        // Invalid:must never be treated as clean (fail-closed)
+        assert_eq!(parse_clamd_response(""), ClamdVerdict::Invalid);
+        assert_eq!(parse_clamd_response("UNKNOWN STATUS"), ClamdVerdict::Invalid);
+        // Substring traps:"OK" inside another word is not a clean verdict.
+        assert_eq!(parse_clamd_response("OKAY BUT WEIRD"), ClamdVerdict::Invalid);
+        assert_eq!(
+            parse_clamd_response("stream: UNKNOWN"),
+            ClamdVerdict::Invalid
+        );
     }
 }

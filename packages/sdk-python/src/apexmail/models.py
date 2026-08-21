@@ -23,6 +23,7 @@ class EmailStatus(str, Enum):
     BOUNCED = "bounced"
     COMPLAINED = "complained"
     FAILED = "failed"
+    REJECTED = "rejected"
 
 
 class DomainStatus(str, Enum):
@@ -128,10 +129,21 @@ class Envelope(BaseModel):
 
 
 class SendEmailResponse(BaseModel):
-    """Response from sending an email."""
+    """Response from sending an email.
 
-    id: str
+    Real API shape (single send): {id, status, created_at}. In batch
+    responses each result item is {index, id (accepted only), status
+    ("queued" | "rejected"), error (rejected only)} — so `id` is optional
+    and `index`/`error` may be present (SDK-D).
+    """
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    id: Optional[str] = None
     status: EmailStatus
+    index: Optional[int] = None
+    error: Optional[str] = None
+    created_at: Optional[datetime] = Field(default=None, alias="createdAt")
 
 
 class Email(BaseModel):

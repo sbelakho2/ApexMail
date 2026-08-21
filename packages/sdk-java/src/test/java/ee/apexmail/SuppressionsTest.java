@@ -109,17 +109,50 @@ class SuppressionsTest {
         }
 
         @Override
-        @SuppressWarnings("unchecked")
         public <T> HttpResponse<T> send(HttpRequest request, HttpResponse.BodyHandler<T> responseBodyHandler)
             throws IOException {
             method.set(request.method());
             path.set(request.uri().getRawPath());
             query.set(Optional.ofNullable(request.uri().getQuery()).orElse(""));
-            return (HttpResponse<T>) new SimpleHttpResponse(
-                request,
-                200,
-                "{\"suppressed\":true,\"reason\":\"bounce\"}"
-            );
+            return handlerResponse(request, responseBodyHandler, 200,
+                "{\"suppressed\":true,\"reason\":\"bounce\"}");
+        }
+
+        /**
+         * Builds a response by feeding the canned body through the caller's
+         * BodyHandler so any handler (ofString, ofInputStream, ...) works.
+         */
+        private static <T> HttpResponse<T> handlerResponse(
+            HttpRequest request,
+            HttpResponse.BodyHandler<T> responseBodyHandler,
+            int status,
+            String body
+        ) {
+            HttpResponse.ResponseInfo info = new HttpResponse.ResponseInfo() {
+                @Override public int statusCode() { return status; }
+                @Override public HttpHeaders headers() {
+                    return HttpHeaders.of(Map.of("Content-Type", List.of("application/json")), (l, r) -> true);
+                }
+                @Override public HttpClient.Version version() { return HttpClient.Version.HTTP_1_1; }
+            };
+            HttpResponse.BodySubscriber<T> subscriber = responseBodyHandler.apply(info);
+            subscriber.onSubscribe(new Flow.Subscription() {
+                @Override public void request(long n) {}
+                @Override public void cancel() {}
+            });
+            subscriber.onNext(List.of(ByteBuffer.wrap(body.getBytes(StandardCharsets.UTF_8))));
+            subscriber.onComplete();
+            T parsed = subscriber.getBody().toCompletableFuture().join();
+            return new HttpResponse<>() {
+                @Override public int statusCode() { return status; }
+                @Override public HttpRequest request() { return request; }
+                @Override public Optional<HttpResponse<T>> previousResponse() { return Optional.empty(); }
+                @Override public HttpHeaders headers() { return info.headers(); }
+                @Override public T body() { return parsed; }
+                @Override public Optional<SSLSession> sslSession() { return Optional.empty(); }
+                @Override public URI uri() { return request.uri(); }
+                @Override public HttpClient.Version version() { return HttpClient.Version.HTTP_1_1; }
+            };
         }
 
         @Override
@@ -146,55 +179,4 @@ class SuppressionsTest {
         }
     }
 
-    private static final class SimpleHttpResponse implements HttpResponse<String> {
-        private final HttpRequest request;
-        private final int statusCode;
-        private final String body;
-
-        private SimpleHttpResponse(HttpRequest request, int statusCode, String body) {
-            this.request = request;
-            this.statusCode = statusCode;
-            this.body = body;
-        }
-
-        @Override
-        public int statusCode() {
-            return statusCode;
-        }
-
-        @Override
-        public HttpRequest request() {
-            return request;
-        }
-
-        @Override
-        public Optional<HttpResponse<String>> previousResponse() {
-            return Optional.empty();
-        }
-
-        @Override
-        public HttpHeaders headers() {
-            return HttpHeaders.of(Map.of("Content-Type", List.of("application/json")), (left, right) -> true);
-        }
-
-        @Override
-        public String body() {
-            return body;
-        }
-
-        @Override
-        public Optional<SSLSession> sslSession() {
-            return Optional.empty();
-        }
-
-        @Override
-        public URI uri() {
-            return request.uri();
-        }
-
-        @Override
-        public HttpClient.Version version() {
-            return HttpClient.Version.HTTP_1_1;
-        }
-    }
 }

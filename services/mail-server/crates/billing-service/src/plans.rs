@@ -284,23 +284,63 @@ pub fn builtin_quota_limits(plan_name: Option<&str>) -> (i64, i64) {
 // Database helpers
 // ---------------------------------------------------------------------------
 
-/// Upsert a plan seed into the database.
-pub async fn upsert_plan(pool: &PgPool, seed: &PlanSeed) -> Result<Plan, sqlx::Error> {
-    let input = PlanUpsertInput {
-        name: seed.name.to_string(),
-        display_name: seed.display_name.to_string(),
-        description: seed.description.to_string(),
-        price_monthly: seed.price_monthly,
-        price_yearly: seed.price_yearly,
-        email_limit: seed.email_limit,
-        api_call_limit: seed.api_call_limit,
-        sort_order: seed.sort_order,
-        features: seed.features.clone(),
-        stripe_price_id_monthly: None,
-        stripe_price_id_yearly: None,
-    };
+/// ON CONFLICT clause shape used by [`upsert_plan`] (Fix I1): re-seeding
+/// preserves operator-configured prices/limits/features via COALESCE toward
+/// the existing row; only missing plans receive the seed defaults.
+const SEED_PLAN_UPSERT_SQL: &str = r#"
+        INSERT INTO plans (
+            id, name, display_name, description,
+            price_monthly, price_yearly, email_limit, api_call_limit,
+            features, stripe_price_id_monthly, stripe_price_id_yearly,
+            is_active, sort_order, created_at, updated_at
+        ) VALUES (
+            gen_random_uuid(), $1, $2, $3,
+            $4, $5, $6, $7,
+            $8, NULL, NULL, true, $9, $10, $10
+        )
+        ON CONFLICT (name) DO UPDATE SET
+            display_name  = EXCLUDED.display_name,
+            description   = EXCLUDED.description,
+            price_monthly = COALESCE(plans.price_monthly, EXCLUDED.price_monthly),
+            price_yearly  = COALESCE(plans.price_yearly, EXCLUDED.price_yearly),
+            email_limit   = COALESCE(plans.email_limit, EXCLUDED.email_limit),
+            api_call_limit= COALESCE(plans.api_call_limit, EXCLUDED.api_call_limit),
+            features      = COALESCE(plans.features, EXCLUDED.features),
+            sort_order    = EXCLUDED.sort_order,
+            updated_at    = $10
+        RETURNING
+            id, name, display_name, description,
+            price_monthly, price_yearly, email_limit, api_call_limit,
+            features, stripe_price_id_monthly, stripe_price_id_yearly,
+            is_active, sort_order, created_at, updated_at
+        "#;
 
-    upsert_plan_input(pool, &input).await
+/// Upsert a plan seed into the database.
+///
+/// Fix I1 — seeding must never clobber prices, limits, or features an
+/// operator has already configured (e.g. a custom Enterprise price set via
+/// the admin PATCH route). Existing values win; only missing plans are
+/// inserted with the seed defaults.
+pub async fn upsert_plan(pool: &PgPool, seed: &PlanSeed) -> Result<Plan, sqlx::Error> {
+    let features_json =
+        serde_json::to_value(&seed.features).map_err(|e| sqlx::Error::Decode(Box::new(e)))?;
+    let now = Utc::now();
+
+    let row: PlanRow = sqlx::query_as(SEED_PLAN_UPSERT_SQL)
+        .bind(seed.name)
+        .bind(seed.display_name)
+        .bind(seed.description)
+        .bind(seed.price_monthly)
+        .bind(seed.price_yearly)
+        .bind(seed.email_limit)
+        .bind(seed.api_call_limit)
+        .bind(&features_json)
+        .bind(seed.sort_order)
+        .bind(now)
+        .fetch_one(pool)
+        .await?;
+
+    Ok(row.into_plan())
 }
 
 pub async fn upsert_plan_input(
@@ -431,6 +471,9 @@ pub async fn get_plan_for_tenant(
 }
 
 /// Derive quota/rate-limit info for a tenant from their current plan.
+///
+/// Fix I2 — quota resolution honours active admin plan overrides exactly
+/// like [`get_plan_for_tenant`], instead of only consulting `tenants.plan`.
 pub async fn get_quota_for_tenant(
     pool: &PgPool,
     tenant_id: &str,
@@ -439,12 +482,16 @@ pub async fn get_quota_for_tenant(
         r#"
         SELECT
             t.id    as tenant_id,
-            t.plan  as plan_name,
+            COALESCE(po.plan, t.plan) as plan_name,
             p.email_limit,
             p.api_call_limit,
             p.features
         FROM tenants t
-        LEFT JOIN plans p ON t.plan = p.name
+        LEFT JOIN plan_overrides po
+          ON po.tenant_id = t.id
+         AND po.active = true
+         AND (po.expires_at IS NULL OR po.expires_at > NOW())
+        LEFT JOIN plans p ON p.name = COALESCE(po.plan, t.plan)
         WHERE t.id = $1
         "#,
     )
@@ -487,9 +534,30 @@ pub async fn get_quota_for_tenant(
     }))
 }
 
+/// Default overage price per email in millicents
+/// (`€0.40 / 1 000 emails = 0.04 cents = 40 millicents`). Kept as a constant
+/// so the legacy two-argument [`calculate_overage_cost`] wrapper and
+/// [`crate::config::BillingConfig::overage_rate_per_email_millicents`]
+/// (Fix I10) stay in sync.
+pub const DEFAULT_OVERAGE_RATE_MILLICENTS: i64 = 40;
+
 /// Calculate overage cost in cents.
 /// `€0.40 / 1 000 emails = 0.04 cents / email`
+///
+/// Legacy signature kept for API compatibility (api-server callers); uses
+/// the default rate. New call sites should thread the configured rate via
+/// [`calculate_overage_cost_with_rate`].
 pub fn calculate_overage_cost(emails_sent: i64, email_limit: i64) -> i64 {
+    calculate_overage_cost_with_rate(emails_sent, email_limit, DEFAULT_OVERAGE_RATE_MILLICENTS)
+}
+
+/// Calculate overage cost in cents using an explicit per-email rate in
+/// millicents (Fix I10 — the rate is config-driven, defaulting to 40).
+pub fn calculate_overage_cost_with_rate(
+    emails_sent: i64,
+    email_limit: i64,
+    rate_millicents: i64,
+) -> i64 {
     if email_limit < 0 {
         return 0; // unlimited
     }
@@ -497,9 +565,13 @@ pub fn calculate_overage_cost(emails_sent: i64, email_limit: i64) -> i64 {
         return 0;
     }
     let overage = emails_sent - email_limit;
-    // 0.04 cents per email → ceil(overage * 4 / 100)
-    // Use i128 intermediate arithmetic to prevent overflow for values near i64::MAX/4.
-    ((overage as i128).saturating_mul(4).saturating_add(99) / 100) as i64
+    // rate millicents/email → cents: ceil(overage * rate / 1000).
+    // Use i128 intermediate arithmetic to prevent overflow near i64 bounds.
+    let safe_rate = rate_millicents.max(0);
+    ((overage as i128)
+        .saturating_mul(safe_rate as i128)
+        .saturating_add(999))
+        .div_euclid(1000) as i64
 }
 
 // ---------------------------------------------------------------------------
@@ -659,6 +731,65 @@ mod tests {
     fn overage_above_limit() {
         // 1 000 overage emails * 0.04 cents = 40 cents
         assert_eq!(calculate_overage_cost(31_000, 30_000), 40);
+    }
+
+    // ------------------------------------------------------------------
+    // Fix I10 — overage rate is configurable (default 40 millicents).
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn overage_with_rate_defaults_match_legacy_math() {
+        for (sent, limit) in [(31_000, 30_000), (50_000, 30_000), (1, 0)] {
+            assert_eq!(
+                calculate_overage_cost_with_rate(sent, limit, DEFAULT_OVERAGE_RATE_MILLICENTS),
+                calculate_overage_cost(sent, limit),
+                "legacy wrapper and default rate must agree for ({sent}, {limit})"
+            );
+        }
+    }
+
+    #[test]
+    fn overage_with_custom_rate_scales_linearly() {
+        // Double the rate → double the cost.
+        assert_eq!(
+            calculate_overage_cost_with_rate(31_000, 30_000, 80),
+            2 * calculate_overage_cost(31_000, 30_000)
+        );
+        // Zero rate → free overage.
+        assert_eq!(calculate_overage_cost_with_rate(31_000, 30_000, 0), 0);
+    }
+
+    #[test]
+    fn overage_with_rate_rounds_up_per_millicent_precision() {
+        // 1 overage email at 40 millicents = 0.04 cents → rounds up to 1 cent.
+        assert_eq!(calculate_overage_cost_with_rate(31, 30, 40), 1);
+        // 25 overage emails at 40 millicents = exactly 1 cent.
+        assert_eq!(calculate_overage_cost_with_rate(55, 30, 40), 1);
+        // 26 overage emails → 1.04 cents → 2 cents.
+        assert_eq!(calculate_overage_cost_with_rate(56, 30, 40), 2);
+    }
+
+    // ------------------------------------------------------------------
+    // Fix I1 — seeding preserves operator-configured plan values.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn seed_upsert_sql_preserves_configured_plan_values() {
+        // The seed SQL must COALESCE toward the existing row so re-seeding
+        // never reverts admin-configured prices/limits/features.
+        for column in [
+            "price_monthly",
+            "price_yearly",
+            "email_limit",
+            "api_call_limit",
+            "features",
+        ] {
+            let preserve = format!("COALESCE(plans.{column}, EXCLUDED.{column})");
+            assert!(
+                SEED_PLAN_UPSERT_SQL.contains(&preserve),
+                "seed upsert must preserve plans.{column} (expected `{preserve}`)"
+            );
+        }
     }
 
     #[test]

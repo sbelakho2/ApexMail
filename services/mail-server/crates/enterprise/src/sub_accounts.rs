@@ -235,6 +235,74 @@ impl SubAccountService {
         })))
     }
 
+    /// List the API keys of a sub-account (fix J-4). Key hashes are never
+    /// returned — only the id, prefix, name, status and metadata.
+    pub async fn list_api_keys(
+        &self,
+        sub_account_id: Uuid,
+    ) -> Result<ApiResult<Vec<SubAccountApiKey>>, String> {
+        let rows = sqlx::query_as::<_, SubAccountApiKey>(
+            "SELECT id, sub_account_id, key_hash, key_prefix, name, permissions, rate_limit, last_used_at, expires_at, revoked, created_at \
+             FROM ent_sub_account_api_keys WHERE sub_account_id = $1 ORDER BY created_at DESC",
+        )
+        .bind(sub_account_id)
+        .fetch_all(&self.db)
+        .await
+        .map_err(|e| format!("List sub-account API keys: {e}"))?;
+
+        // Strip the key hashes before serializing.
+        let masked = rows
+            .into_iter()
+            .map(|mut key| {
+                key.key_hash = String::new();
+                key
+            })
+            .collect();
+        Ok(ApiResult::ok(masked))
+    }
+
+    /// Revoke a sub-account API key (fix J-4). Idempotent — revoking an
+    /// already-revoked key succeeds.
+    pub async fn revoke_api_key(
+        &self,
+        sub_account_id: Uuid,
+        key_id: Uuid,
+    ) -> Result<ApiResult<serde_json::Value>, String> {
+        let result = sqlx::query(
+            "UPDATE ent_sub_account_api_keys SET revoked = true WHERE id = $1 AND sub_account_id = $2",
+        )
+        .bind(key_id)
+        .bind(sub_account_id)
+        .execute(&self.db)
+        .await
+        .map_err(|e| format!("Revoke sub-account API key: {e}"))?;
+
+        if result.rows_affected() == 0 {
+            Ok(ApiResult::err("API key not found", "NOT_FOUND"))
+        } else {
+            info!(sub_account_id = %sub_account_id, key_id = %key_id, "Sub-account API key revoked");
+            Ok(ApiResult::ok(serde_json::json!({"revoked": true})))
+        }
+    }
+
+    /// Verify a raw sub-account API key: hash it and look up a matching,
+    /// non-revoked, non-expired key (fix J-4 enforcement hook).
+    ///
+    /// Returns `(key_id, sub_account_id)` on success. Revoked keys fail even
+    /// though their hash remains stored.
+    pub async fn verify_api_key(&self, raw_key: &str) -> Result<Option<(Uuid, Uuid)>, String> {
+        let key_hash = sha256_hex(raw_key);
+        let row: Option<(Uuid, Uuid)> = sqlx::query_as(
+            "SELECT id, sub_account_id FROM ent_sub_account_api_keys \
+             WHERE key_hash = $1 AND revoked = false AND (expires_at IS NULL OR expires_at > NOW())",
+        )
+        .bind(&key_hash)
+        .fetch_optional(&self.db)
+        .await
+        .map_err(|e| format!("Verify sub-account API key: {e}"))?;
+        Ok(row)
+    }
+
     /// Check volume allocation for a sub-account
     pub fn check_volume_allowed(
         &self,

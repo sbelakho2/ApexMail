@@ -119,6 +119,62 @@ fn is_unique_violation(error: &sqlx::Error) -> bool {
     matches!(error, sqlx::Error::Database(db_error) if db_error.code().as_deref() == Some("23505"))
 }
 
+/// Validate that every SCIM group member reference resolves to a user that
+/// exists AND belongs to the caller's tenant (audit C).
+///
+/// Previously the member `value` UUIDs were inserted into
+/// `scim_group_members` without any ownership check, so a tenant admin could
+/// enrol arbitrary foreign-tenant user UUIDs into their SCIM group; the
+/// group list/get endpoints then exposed those users' email addresses via
+/// the `LEFT JOIN users` display fallback.
+///
+/// Returns the parsed, tenant-verified user UUIDs in the same order as
+/// `values`, or a 400 listing how many references failed validation.
+async fn validate_members_in_tenant(
+    db: &sqlx::PgPool,
+    tenant_id: &str,
+    values: &[String],
+) -> Result<Vec<Uuid>, ApiError> {
+    let mut parsed = Vec::with_capacity(values.len());
+    for value in values {
+        let user_id = Uuid::parse_str(value).map_err(|_| {
+            ApiError::BadRequest(format!(
+                "invalid member id '{value}': must be a user UUID"
+            ))
+        })?;
+        parsed.push(user_id);
+    }
+
+    if parsed.is_empty() {
+        return Ok(parsed);
+    }
+
+    let found: Vec<(uuid::Uuid,)> =
+        sqlx::query_as("SELECT id FROM users WHERE id = ANY($1) AND tenant_id = $2")
+            .bind(&parsed)
+            .bind(tenant_id)
+            .fetch_all(db)
+            .await
+            .map_err(|error| {
+                tracing::error!(error = %error, tenant_id = %tenant_id, "SCIM member tenant validation query failed");
+                ApiError::Internal("database error".into())
+            })?;
+
+    let found_ids: std::collections::HashSet<Uuid> = found.into_iter().map(|(id,)| id).collect();
+    let invalid_count = parsed
+        .iter()
+        .filter(|id| !found_ids.contains(id))
+        .count();
+
+    if invalid_count > 0 {
+        return Err(ApiError::BadRequest(format!(
+            "{invalid_count} member(s) do not exist in this tenant"
+        )));
+    }
+
+    Ok(parsed)
+}
+
 // ─── Handlers ──────────────────────────────────────────────────
 
 async fn list_users(
@@ -419,6 +475,22 @@ async fn create_group(
     let scim_id = id.to_string();
     let now = Utc::now();
 
+    // Audit C: verify every member belongs to the caller's tenant BEFORE the
+    // group row is written — foreign-tenant user UUIDs must be rejected with
+    // a 400 and leave no group row behind, instead of being silently
+    // enrolled and later exposed via list/get (their emails leak through the
+    // users JOIN display fallback).
+    let member_ids = validate_members_in_tenant(
+        &state.db,
+        &auth.tenant_id,
+        &body
+            .members
+            .iter()
+            .map(|member| member.value.clone())
+            .collect::<Vec<_>>(),
+    )
+    .await?;
+
     sqlx::query(
         "INSERT INTO scim_groups (id, tenant_id, display_name, scim_id, created_at, updated_at)
          VALUES ($1, $2, $3, $4, $5, $5)",
@@ -431,22 +503,20 @@ async fn create_group(
     .execute(&state.db)
     .await?;
 
-    // Add members if provided
-    for member in &body.members {
-        if let Ok(user_id) = Uuid::parse_str(&member.value) {
-            sqlx::query(
-                "INSERT INTO scim_group_members (group_id, user_id, tenant_id, display, created_at)
-                 VALUES ($1, $2, $3, $4, $5)
-                 ON CONFLICT (group_id, user_id) DO NOTHING",
-            )
-            .bind(id)
-            .bind(user_id)
-            .bind(auth.tenant_id.to_string())
-            .bind(&member.display)
-            .bind(now)
-            .execute(&state.db)
-            .await?;
-        }
+    // Add members if provided (validated above)
+    for (member, user_id) in body.members.iter().zip(member_ids) {
+        sqlx::query(
+            "INSERT INTO scim_group_members (group_id, user_id, tenant_id, display, created_at)
+             VALUES ($1, $2, $3, $4, $5)
+             ON CONFLICT (group_id, user_id) DO NOTHING",
+        )
+        .bind(id)
+        .bind(user_id)
+        .bind(auth.tenant_id.to_string())
+        .bind(&member.display)
+        .bind(now)
+        .execute(&state.db)
+        .await?;
     }
 
     Ok((
@@ -534,20 +604,29 @@ async fn update_group(
         .await?;
 
     let now = Utc::now();
-    for member in &body.members {
-        if let Ok(user_id) = Uuid::parse_str(&member.value) {
-            sqlx::query(
-                "INSERT INTO scim_group_members (group_id, user_id, tenant_id, display, created_at)
-                 VALUES ($1, $2, $3, $4, $5)",
-            )
-            .bind(&row.id)
-            .bind(user_id)
-            .bind(auth.tenant_id.to_string())
-            .bind(&member.display)
-            .bind(now)
-            .execute(&state.db)
-            .await?;
-        }
+    // Audit C: every replacement member must belong to the caller's tenant.
+    let member_ids = validate_members_in_tenant(
+        &state.db,
+        &auth.tenant_id,
+        &body
+            .members
+            .iter()
+            .map(|member| member.value.clone())
+            .collect::<Vec<_>>(),
+    )
+    .await?;
+    for (member, user_id) in body.members.iter().zip(member_ids) {
+        sqlx::query(
+            "INSERT INTO scim_group_members (group_id, user_id, tenant_id, display, created_at)
+             VALUES ($1, $2, $3, $4, $5)",
+        )
+        .bind(&row.id)
+        .bind(user_id)
+        .bind(auth.tenant_id.to_string())
+        .bind(&member.display)
+        .bind(now)
+        .execute(&state.db)
+        .await?;
     }
 
     Ok(Json(ScimGroup {
@@ -611,26 +690,36 @@ async fn patch_group(
             "add" => {
                 if op.path.as_deref() == Some("members") {
                     if let Some(serde_json::Value::Array(members)) = op.value {
-                        for member in members {
+                        let mut values = Vec::with_capacity(members.len());
+                        for member in &members {
                             if let Some(value) = member.get("value").and_then(|v| v.as_str()) {
-                                if let Ok(user_id) = Uuid::parse_str(value) {
-                                    let display = member
-                                        .get("display")
-                                        .and_then(|v| v.as_str())
-                                        .map(|s| s.to_string());
-                                    sqlx::query(
-                                        "INSERT INTO scim_group_members (group_id, user_id, tenant_id, display, created_at)
-                                         VALUES ($1, $2, $3, $4, $5) ON CONFLICT (group_id, user_id) DO NOTHING",
-                                    )
-                                    .bind(&row.id)
-                                    .bind(user_id)
-                                    .bind(auth.tenant_id.to_string())
-                                    .bind(&display)
-                                    .bind(now)
-                                    .execute(&state.db)
-                                    .await?;
-                                }
+                                values.push(value.to_string());
                             }
+                        }
+                        // Audit C: added members must belong to the caller's
+                        // tenant — same rule as create/update.
+                        let validated = validate_members_in_tenant(
+                            &state.db,
+                            &auth.tenant_id,
+                            &values,
+                        )
+                        .await?;
+                        for (member, user_id) in members.iter().zip(validated) {
+                            let display = member
+                                .get("display")
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string());
+                            sqlx::query(
+                                "INSERT INTO scim_group_members (group_id, user_id, tenant_id, display, created_at)
+                                 VALUES ($1, $2, $3, $4, $5) ON CONFLICT (group_id, user_id) DO NOTHING",
+                            )
+                            .bind(&row.id)
+                            .bind(user_id)
+                            .bind(auth.tenant_id.to_string())
+                            .bind(&display)
+                            .bind(now)
+                            .execute(&state.db)
+                            .await?;
                         }
                     }
                 }
@@ -1185,5 +1274,106 @@ mod tests {
         let pg_unique_code = "23505";
         assert_eq!(pg_unique_code.len(), 5);
         assert!(pg_unique_code.chars().all(|c| c.is_ascii_digit()));
+    }
+
+    // ── Cross-tenant member injection (audit C) ─────────────────
+
+    #[tokio::test]
+    async fn scim_group_creation_rejects_foreign_tenant_members_and_writes_no_rows() {
+        let Some(pool) = crate::test_db::optional_pg_pool(
+            "scim_group_creation_rejects_foreign_tenant_members_and_writes_no_rows",
+        )
+        .await
+        else {
+            return;
+        };
+
+        let tenant_a = format!("ten_scim_a_{}", Uuid::new_v4().simple());
+        let tenant_b = format!("ten_scim_b_{}", Uuid::new_v4().simple());
+        for tenant_id in [&tenant_a, &tenant_b] {
+            sqlx::query(
+                "INSERT INTO tenants (id, name, slug, plan, status)
+                 VALUES ($1, $2, $3, 'free', 'active')",
+            )
+            .bind(tenant_id)
+            .bind(format!("SCIM test tenant {tenant_id}"))
+            .bind(format!("scim-{tenant_id}"))
+            .execute(&pool)
+            .await
+            .expect("failed to insert test tenant");
+        }
+
+        // A user that belongs ONLY to tenant B.
+        let foreign_user_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO users (id, tenant_id, email, name, password_hash, role, status)
+             VALUES ($1, $2, $3, NULL, '!disabled', 'member', 'active')",
+        )
+        .bind(foreign_user_id)
+        .bind(&tenant_b)
+        .bind(format!("victim-{foreign_user_id}@foreign.example"))
+        .execute(&pool)
+        .await
+        .expect("failed to insert foreign user");
+
+        // Tenant A's admin tries to enrol tenant B's user.
+        let error = validate_members_in_tenant(
+            &pool,
+            &tenant_a,
+            &[foreign_user_id.to_string(), "not-a-uuid".to_string()],
+        )
+        .await
+        .expect_err("foreign-tenant member must be rejected");
+
+        match error {
+            ApiError::BadRequest(message) => {
+                assert!(
+                    message.contains("do not exist in this tenant"),
+                    "unexpected rejection message: {message}"
+                );
+            }
+            other => panic!("expected BadRequest, got {other:?}"),
+        }
+
+        // No group row may be written for the failed creation (the handler
+        // validates members BEFORE inserting the group).
+        let groups: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM scim_groups WHERE tenant_id = $1",
+        )
+        .bind(&tenant_a)
+        .fetch_one(&pool)
+        .await
+        .expect("failed to count groups");
+        assert_eq!(groups.0, 0, "no group row may exist for a rejected create");
+
+        // A same-tenant member validates cleanly.
+        let own_user_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO users (id, tenant_id, email, name, password_hash, role, status)
+             VALUES ($1, $2, $3, NULL, '!disabled', 'member', 'active')",
+        )
+        .bind(own_user_id)
+        .bind(&tenant_a)
+        .bind(format!("member-{own_user_id}@own.example"))
+        .execute(&pool)
+        .await
+        .expect("failed to insert own-tenant user");
+
+        let validated = validate_members_in_tenant(&pool, &tenant_a, &[own_user_id.to_string()])
+            .await
+            .expect("same-tenant member must validate");
+        assert_eq!(validated, vec![own_user_id]);
+
+        // Cleanup
+        for tenant_id in [&tenant_a, &tenant_b] {
+            let _ = sqlx::query("DELETE FROM users WHERE tenant_id = $1")
+                .bind(tenant_id)
+                .execute(&pool)
+                .await;
+            let _ = sqlx::query("DELETE FROM tenants WHERE id = $1")
+                .bind(tenant_id)
+                .execute(&pool)
+                .await;
+        }
     }
 }

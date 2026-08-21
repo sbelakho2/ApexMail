@@ -693,6 +693,7 @@ mod tests {
                     invoice_count: 4,
                 },
             ],
+            excluded_other_currency: Vec::new(),
             kmd_id: Uuid::nil(),
         }
     }

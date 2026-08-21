@@ -5,7 +5,7 @@ integration for Symfony 6, 7 and 8, with first-party behavioral heuristics
 as a supplementary signal. The bundle makes no third-party requests and no
 third-party tracking: challenges are issued and verified locally by the
 [`kiwicaptcha/kiwicaptcha-php`] core (HMAC-SHA256 signing, IP binding,
-single-use storage, SHA-256 + Argon2id proof-of-work), the widget inlines
+single-use storage, SHA-256 + Argon2id proof-of-work). The widget inlines
 its own CSS, WASM solver, and driver, so no request ever leaves your
 application, and the secret key never leaves your server. The precise
 scope of these claims — with their assumptions and the tests that evidence
@@ -14,12 +14,12 @@ them — is in [docs/claims-registry.md](docs/claims-registry.md) and
 
 This bundle is the only Symfony integration of KiwiCaptcha. KiwiCaptcha is
 anti-abuse protection: a human never solves the challenge, their CPU does,
-and a bot's CPU can do the same work. The core value is economic: every
-signup/login/reset/scraping attempt carries a real, tunable computational
-cost, making mass abuse uneconomical. Browser behavioral telemetry is
+and a bot's CPU can do the same work. The economic core: every signup,
+login, reset or scraping attempt carries a real, tunable computational
+cost that makes mass abuse uneconomical. Browser behavioral telemetry is
 client-controlled and forgeable — a supplementary signal, never the
-security boundary ([SECURITY.md](../../../../SECURITY.md) states
-authoritatively what KiwiCaptcha does and does not protect against).
+security boundary. [`SECURITY.md`](../../../../SECURITY.md) states
+authoritatively what KiwiCaptcha does and does not protect against.
 
 ## Quick start
 
@@ -46,51 +46,51 @@ configuration reference is **[docs/configuration.md](docs/configuration.md)**.
 
 ## Integrations
 
-- [`kiwicaptcha/kiwicaptcha-php`] — the framework-neutral PHP core this
+- [`kiwicaptcha/kiwicaptcha-php`]: the framework-neutral PHP core this
   bundle wraps.
-- `kiwicaptcha/kiwicaptcha-risk-php` — the adaptive risk engine
+- `kiwicaptcha/kiwicaptcha-risk-php`: the adaptive risk engine
   (cross-language risk-v1 contract, byte-identical with the Rust
-  implementation), used by the bundle's optional risk layer
-  ([risk-engine.md](docs/risk-engine.md)).
-- Rust core + WASM solver assets — the widget markup/CSS/JS is a single
+  implementation), used by the bundle's optional risk layer. See
+  [risk-engine.md](docs/risk-engine.md).
+- Rust core + WASM solver assets: the widget markup/CSS/JS has a single
   source of truth in the Rust repository; keep the bundled copies in sync
-  with `bin/sync-assets.sh`
-  ([operations.md](docs/operations.md#widget-assets)).
-- Protocol — the canonical risk-v1 state protocol lives in
+  with `bin/sync-assets.sh`. See
+  [operations.md](docs/operations.md#widget-assets).
+- Protocol: the canonical risk-v1 state protocol lives in
   [protocol/risk-v1](../../../../protocol/risk-v1/README.md).
-- Accessibility — WCAG 2.2 AA evidence, scope and limitations:
-  [Resources/ACCESSIBILITY.md](Resources/ACCESSIBILITY.md).
+- Accessibility: WCAG 2.2 AA evidence, scope and limitations in
+  [`Resources/ACCESSIBILITY.md`](Resources/ACCESSIBILITY.md).
 
 ## Related
 
-- [SECURITY.md](../../../../SECURITY.md) — the authoritative security
+- [`SECURITY.md`](../../../../SECURITY.md): the authoritative security
   document for the whole product.
-- The PHP core's own documentation and the product root README cover the
+- The PHP core's own documentation and the product root `README` cover the
   framework-neutral and Rust sides.
 
 ## What it is not
 
-1. **Proof of computation, not proof of human.** KiwiCaptcha verifies that a
-   client spent CPU time — not that a human did. Any automated client that
-   pays the same cost passes.
-2. **Telemetry is client-controlled and forgeable.** Whatever the widget
-   reports, a custom client can omit or fake. Treat telemetry as a
-   supplementary signal, never the security boundary. Under strict privacy
-   mode the widget collects nothing (`telemetry: off`).
-3. **IP binding is best-effort.** IPs legitimately change behind NAT/proxies,
-   so a strict binding would reject real users. Operators can disable the
-   check entirely (`binding_mode: none` issues challenges with an EMPTY
-   binding tag — the core BindingMode is fully wired through the DI layer);
-   it is a relay mitigation, not a guarantee.
-4. **Server-side timing is a heuristic, off by default.** The minimum-duration
+1) Proof of computation, rather than proof of human. KiwiCaptcha verifies
+   that a client spent CPU time — not that a human did. Any automated
+   client that pays the same cost passes.
+2) Telemetry is forgeable by design. A custom client can omit or fake
+   anything the widget reports. Treat telemetry as a supplementary signal,
+   never the security boundary. Under strict privacy mode the widget
+   collects nothing (`telemetry: off`).
+3) IP binding is best-effort. Because IPs legitimately change behind
+   NAT/proxies, strict binding would reject real users. Operators can
+   disable the check entirely (`binding_mode: none` issues challenges with
+   an empty binding tag; the core BindingMode is fully wired through the DI
+   layer); it is a relay mitigation rather than a guarantee.
+4) Server-side timing is a heuristic, off by default. The minimum-duration
    floor is measured by your server, so a client cannot buy its way out of
    it — but the server clock must be correct, and strict privacy mode
    disables the floor entirely (`min_duration_ms: 0`).
-5. **The WASM solver and its JS fallback are open source.** An attacker can
-   always write their own solver (or reuse the source). The value is the
-   **cost** per attempt, not the impossibility of solving.
+5) The WASM solver and its JS fallback ship as open source. An attacker
+   can always write their own solver or reuse the shipped source. The
+   value is the cost per attempt, not the impossibility of solving.
 
-## License
+## License and copyright
 
 MIT — Copyright (c) 2026 Bel Consulting OÜ.
 

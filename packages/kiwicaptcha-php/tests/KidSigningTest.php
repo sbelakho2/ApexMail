@@ -335,7 +335,8 @@ final class KidSigningTest extends TestCase
 
     public function testUnknownKidErrorValue(): void
     {
-        self::assertSame('unknown signing key id', VerifyError::UnknownKid->value);
+        self::assertSame('unknown_kid', VerifyError::UnknownKid->value);
+        self::assertSame('unknown signing key id', VerifyError::UnknownKid->description());
     }
 
     public function testRevokedKidRejectedEvenWhenSecretPresent(): void

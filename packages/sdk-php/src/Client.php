@@ -16,7 +16,7 @@ namespace ApexMail;
  *       'subject' => 'Hello!',
  *       'html'    => '<h1>Hello World</h1>',
  *   ]);
- *   echo $response['message']['id'];
+ *   echo $response['id'];
  *
  * @package ApexMail
  */
@@ -26,6 +26,8 @@ class Client
     public const SDK_VERSION     = '1.0.0';
     public const DEFAULT_URL     = 'https://api.apexmail.ee';
     public const DEFAULT_MAX_RESPONSE_BYTES = 20971520;
+    /** Upper bound for retry delays; the server's Retry-After is honored in full up to this cap. */
+    public const MAX_RETRY_AFTER_SECONDS = 120.0;
     private const API_KEY_REGEX  = '/^am_(live|test)_[A-Za-z0-9]{16,}$/';
 
     private string $apiKey;
@@ -56,7 +58,10 @@ class Client
 
         $this->apiKey  = $apiKey;
         $this->baseUrl = rtrim($options['baseUrl'] ?? self::DEFAULT_URL, '/');
-        if (!str_starts_with($this->baseUrl, 'https://')) {
+        if (!str_starts_with($this->baseUrl, 'https://')
+            && !preg_match('#^http://(localhost|127\.0\.0\.1)(:\d+)?/?$#', $this->baseUrl)) {
+            // HTTP is only permitted for loopback addresses (local testing);
+            // production URLs must use HTTPS.
             throw new \InvalidArgumentException('baseUrl must use HTTPS');
         }
         $this->timeout = (int) ($options['timeout'] ?? 30);
@@ -91,6 +96,23 @@ class Client
     ): array {
         $url = $this->baseUrl . $path;
 
+        // SDK-G L4: serialize the body BEFORE opening the cURL handle so a
+        // JsonException can never leak an open handle, and so each retry
+        // attempt reuses the same pre-computed payload.
+        $jsonBody = null;
+        if ($body !== null) {
+            try {
+                $jsonBody = json_encode($body, JSON_THROW_ON_ERROR);
+            } catch (\JsonException $e) {
+                throw new Exceptions\ApexMailException(
+                    'Failed to encode request body as JSON: ' . $e->getMessage(),
+                    0,
+                    'JSON_ENCODE_ERROR',
+                    []
+                );
+            }
+        }
+
         $attempt = 0;
         while (true) {
             $retryAfter = null;
@@ -115,58 +137,66 @@ class Client
             $maxBytes = $this->maxResponseBytes;
 
             $ch = curl_init($url);
-            curl_setopt_array($ch, [
-                CURLOPT_CUSTOMREQUEST  => strtoupper($method),
-                CURLOPT_RETURNTRANSFER => true,
-                CURLOPT_HTTPHEADER     => $headers,
-                CURLOPT_TIMEOUT        => $this->timeout,
-                CURLOPT_FOLLOWLOCATION => false,
-                CURLOPT_SSL_VERIFYPEER => true,
-                CURLOPT_SSL_VERIFYHOST => 2,
-                CURLOPT_HEADERFUNCTION => static function ($curl, $header) use (&$retryAfter, &$rateLimit) {
-                    $len = strlen($header);
-                    $trimmed = trim($header);
-                    if ($trimmed === '' || !str_contains($trimmed, ':')) {
+            try {
+                curl_setopt_array($ch, [
+                    CURLOPT_CUSTOMREQUEST  => strtoupper($method),
+                    CURLOPT_RETURNTRANSFER => true,
+                    CURLOPT_HTTPHEADER     => $headers,
+                    CURLOPT_TIMEOUT        => $this->timeout,
+                    CURLOPT_FOLLOWLOCATION => false,
+                    CURLOPT_SSL_VERIFYPEER => true,
+                    CURLOPT_SSL_VERIFYHOST => 2,
+                    CURLOPT_HEADERFUNCTION => static function ($curl, $header) use (&$retryAfter, &$rateLimit) {
+                        $len = strlen($header);
+                        $trimmed = trim($header);
+                        if ($trimmed === '' || !str_contains($trimmed, ':')) {
+                            return $len;
+                        }
+
+                        [$name, $value] = explode(':', $trimmed, 2);
+                        $value = trim($value);
+                        switch (strtolower($name)) {
+                            case 'retry-after':
+                                $retryAfter = $value;
+                                $rateLimit['retryAfter'] = $value;
+                                break;
+                            case 'x-ratelimit-limit':
+                                $rateLimit['limit'] = $value;
+                                break;
+                            case 'x-ratelimit-remaining':
+                                $rateLimit['remaining'] = $value;
+                                break;
+                            case 'x-ratelimit-reset':
+                                $rateLimit['reset'] = $value;
+                                break;
+                        }
                         return $len;
-                    }
+                    },
+                    CURLOPT_WRITEFUNCTION => static function ($curl, string $chunk) use (&$responseBody, &$responseTooLarge, $maxBytes): int {
+                        if ((strlen($responseBody) + strlen($chunk)) > $maxBytes) {
+                            $responseTooLarge = true;
+                            return 0;
+                        }
+                        $responseBody .= $chunk;
+                        return strlen($chunk);
+                    },
+                ]);
 
-                    [$name, $value] = explode(':', $trimmed, 2);
-                    $value = trim($value);
-                    switch (strtolower($name)) {
-                        case 'retry-after':
-                            $retryAfter = $value;
-                            $rateLimit['retryAfter'] = $value;
-                            break;
-                        case 'x-ratelimit-limit':
-                            $rateLimit['limit'] = $value;
-                            break;
-                        case 'x-ratelimit-remaining':
-                            $rateLimit['remaining'] = $value;
-                            break;
-                        case 'x-ratelimit-reset':
-                            $rateLimit['reset'] = $value;
-                            break;
-                    }
-                    return $len;
-                },
-                CURLOPT_WRITEFUNCTION => static function ($curl, string $chunk) use (&$responseBody, &$responseTooLarge, $maxBytes): int {
-                    if ((strlen($responseBody) + strlen($chunk)) > $maxBytes) {
-                        $responseTooLarge = true;
-                        return 0;
-                    }
-                    $responseBody .= $chunk;
-                    return strlen($chunk);
-                },
-            ]);
+                if ($jsonBody !== null) {
+                    curl_setopt($ch, CURLOPT_POSTFIELDS, $jsonBody);
+                }
 
-            if ($body !== null) {
-                curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($body, JSON_THROW_ON_ERROR));
+                curl_exec($ch);
+                $statusCode = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
+                $curlError  = curl_error($ch);
+            } finally {
+                // SDK-G L4: deterministically drop the last reference to the
+                // handle so it is released even on write aborts (e.g.
+                // response-too-large) or exceptions. curl_close() is a no-op
+                // since PHP 8.0 (deprecated in 8.5), so unset() is the
+                // correct release mechanism.
+                unset($ch);
             }
-
-            curl_exec($ch);
-            $statusCode = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
-            $curlError  = curl_error($ch);
-            curl_close($ch);
 
             if ($responseTooLarge) {
                 throw new Exceptions\NetworkException('Response body exceeds maxResponseBytes', 0);
@@ -189,9 +219,20 @@ class Client
                 continue;
             }
 
-            $decoded = $responseBody !== ''
-                ? $this->decodeResponseBody($responseBody)
-                : [];
+            try {
+                $decoded = $responseBody !== ''
+                    ? $this->decodeResponseBody($responseBody)
+                    : [];
+            } catch (\JsonException $e) {
+                // Non-JSON body (e.g. an HTML 502 page from a proxy): raise a
+                // proper SDK exception instead of leaking a JsonException.
+                throw new Exceptions\ApiException(
+                    'Invalid JSON response from API (HTTP ' . $statusCode . '): ' . $e->getMessage(),
+                    $statusCode,
+                    'PARSE_ERROR',
+                    $this->lastRateLimit ?? []
+                );
+            }
 
             if ($statusCode >= 400) {
                 $this->throwApiError($statusCode, $decoded, $this->lastRateLimit);
@@ -207,15 +248,29 @@ class Client
     }
 
     /**
-     * Sleep for max(retryAfter, baseDelay * attempt²) seconds, capped at 5s.
+     * Sleep for max(retryAfter, baseDelay * attempt²) seconds.
      *
      * Honors the server's Retry-After header (integer seconds or HTTP-date)
-     * while providing quadratic backoff growth as attempts increase.
+     * in full, capped at a sane maximum of 120s (SDK-F: was silently capped
+     * at 5s, truncating long rate-limit windows).
      */
     private function sleepRetryAfter(?string $retryAfter, int $attempt): void
     {
-        // Compute quadratic backoff: baseDelay * attempt²
-        $backoff = $this->calculateBackoff($attempt);
+        usleep((int) (self::computeRetryDelay($retryAfter, $attempt) * 1_000_000));
+    }
+
+    private function sleepBackoff(int $attempt): void
+    {
+        usleep((int) (self::computeRetryDelay(null, $attempt) * 1_000_000));
+    }
+
+    /**
+     * Pure delay computation (unit-testable, no sleeping):
+     * delay = min(max(quadraticBackoff, retryAfterSeconds), 120.0).
+     */
+    public static function computeRetryDelay(?string $retryAfter, int $attempt): float
+    {
+        $backoff = self::calculateBackoff($attempt);
 
         if ($retryAfter !== null && $retryAfter !== '') {
             $retryAfterSeconds = -1;
@@ -232,20 +287,39 @@ class Client
             }
 
             if ($retryAfterSeconds >= 0) {
-                $backoff = max($backoff, $retryAfterSeconds);
+                $backoff = max($backoff, (float) $retryAfterSeconds);
             }
         }
 
-        $backoff = min($backoff, 5.0);
-        usleep((int) ($backoff * 1_000_000));
+        return min($backoff, self::MAX_RETRY_AFTER_SECONDS);
     }
 
     /**
      * Quadratic backoff: baseDelay * attempt², used when no Retry-After header.
      */
-    private function calculateBackoff(int $attempt): float
+    private static function calculateBackoff(int $attempt): float
     {
         return 0.5 * ($attempt * $attempt);
+    }
+
+    /**
+     * Generate a random UUID v4 (RFC 4122) without external dependencies.
+     * Used for automatic idempotency keys on send endpoints (SDK-B).
+     */
+    public static function uuid4(): string
+    {
+        $bytes = random_bytes(16);
+        $bytes[6] = chr((ord($bytes[6]) & 0x0f) | 0x40);
+        $bytes[8] = chr((ord($bytes[8]) & 0x3f) | 0x80);
+        $hex = bin2hex($bytes);
+        return sprintf(
+            '%s-%s-%s-%s-%s',
+            substr($hex, 0, 8),
+            substr($hex, 8, 4),
+            substr($hex, 12, 4),
+            substr($hex, 16, 4),
+            substr($hex, 20, 12)
+        );
     }
 
     public static function verifyWebhookSignature(

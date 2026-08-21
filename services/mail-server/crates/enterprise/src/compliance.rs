@@ -190,9 +190,19 @@ impl ComplianceService {
                enabled_frameworks=EXCLUDED.enabled_frameworks, status='active',
                encryption_at_rest=EXCLUDED.encryption_at_rest, encryption_in_transit=EXCLUDED.encryption_in_transit,
                audit_log_retention_days=EXCLUDED.audit_log_retention_days,
-               require_mfa=EXCLUDED.require_mfa, baa_signed=EXCLUDED.baa_signed,
-               dpa_signed=EXCLUDED.dpa_signed, zero_retention_mode=EXCLUDED.zero_retention_mode,
-               data_retention_days=EXCLUDED.data_retention_days,
+               require_mfa=EXCLUDED.require_mfa,
+               -- Fix J-2: re-enabling frameworks must not reset existing
+               -- attestations. The INSERT always supplies false/NULL here, so
+               -- keep the existing TRUE values (boolean OR / COALESCE).
+               baa_signed=ent_compliance_configs.baa_signed OR EXCLUDED.baa_signed,
+               dpa_signed=ent_compliance_configs.dpa_signed OR EXCLUDED.dpa_signed,
+               zero_retention_mode=ent_compliance_configs.zero_retention_mode OR EXCLUDED.zero_retention_mode,
+               baa_signed_at=COALESCE(EXCLUDED.baa_signed_at, ent_compliance_configs.baa_signed_at),
+               baa_signatory_name=COALESCE(EXCLUDED.baa_signatory_name, ent_compliance_configs.baa_signatory_name),
+               baa_signatory_title=COALESCE(EXCLUDED.baa_signatory_title, ent_compliance_configs.baa_signatory_title),
+               baa_signatory_email=COALESCE(EXCLUDED.baa_signatory_email, ent_compliance_configs.baa_signatory_email),
+               dpa_signed_at=COALESCE(EXCLUDED.dpa_signed_at, ent_compliance_configs.dpa_signed_at),
+               data_retention_days=COALESCE(EXCLUDED.data_retention_days, ent_compliance_configs.data_retention_days),
                updated_at=$7
              RETURNING *"
         )
@@ -367,6 +377,25 @@ impl ComplianceService {
 
         info!(tenant_id = %tenant_id, request_type = request_type, "Data access request created");
         Ok(ApiResult::ok(row.into()))
+    }
+
+    /// Get a data access request by ID (used for tenant ownership checks).
+    pub async fn get_data_access_request(
+        &self,
+        id: Uuid,
+    ) -> Result<ApiResult<DataAccessRequest>, String> {
+        let row = sqlx::query_as::<_, DataAccessRequestRow>(
+            "SELECT * FROM ent_data_access_requests WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_optional(&self.db)
+        .await
+        .map_err(|e| format!("Get data access request: {e}"))?;
+
+        match row {
+            Some(r) => Ok(ApiResult::ok(r.into())),
+            None => Ok(ApiResult::err("Request not found", "NOT_FOUND")),
+        }
     }
 
     /// Approve a data access request

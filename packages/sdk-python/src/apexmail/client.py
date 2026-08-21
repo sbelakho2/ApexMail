@@ -48,6 +48,9 @@ DEFAULT_TOTAL_RETRY_TIMEOUT = 90.0
 DEFAULT_MAX_RESPONSE_BYTES = 20 * 1024 * 1024
 DEFAULT_INITIAL_BACKOFF = 0.5
 DEFAULT_MAX_BACKOFF = 5.0
+# Upper bound for retry delays. The server's Retry-After header is honored in
+# full up to this cap (SDK-F: was effectively uncapped/overridden by backoff).
+MAX_RETRY_AFTER_SECONDS = 120.0
 # Retry on these status codes
 RETRYABLE_STATUS_CODES = {408, 429, 500, 502, 503, 504}
 
@@ -104,8 +107,13 @@ class BaseClient:
         }
 
     def close(self) -> None:
-        """Clear sensitive API key data from memory."""
+        """Clear sensitive API key data from memory.
+
+        SDK-G L8: the base headers dict also embeds the API key and must be
+        cleared, not just the _api_key field.
+        """
         self._api_key = ""
+        self._base_headers = {}
 
     def __repr__(self) -> str:
         key = self.api_key
@@ -159,7 +167,9 @@ class BaseClient:
         # FIX-500-294: Handle 204 No Content (DELETE responses)
         if response.status_code == 204:
             return {}
-        if response.status_code == 200 or response.status_code == 201:
+        # SDK-G L7: treat every 2xx status as success (202/206/etc. were
+        # previously falling through to the error path).
+        if 200 <= response.status_code < 300:
             self._ensure_response_size(response)
             data = response.json()
             # SDK-111: Unwrap API envelope {"data": ..., "meta": ...}
@@ -210,13 +220,15 @@ class BaseClient:
 
         Returns the delay in seconds if the response status code is retryable
         and the attempt is not the final one, or None to indicate no retry.
+        The server's Retry-After is honored in full, capped at
+        MAX_RETRY_AFTER_SECONDS (SDK-F).
         """
         if response.status_code in RETRYABLE_STATUS_CODES and attempt < self.max_retries:
             delay = self._calculate_backoff(attempt)
             if response.status_code == 429:
                 retry_after = self._parse_retry_after(response.headers.get("Retry-After"))
                 if retry_after is not None:
-                    delay = max(delay, retry_after)
+                    delay = min(max(delay, retry_after), MAX_RETRY_AFTER_SECONDS)
             return delay
         return None
 
@@ -237,6 +249,28 @@ class BaseClient:
         if last_exception:
             raise last_exception
         raise ApexMailError(message="Request failed", code="UNKNOWN", status_code=0)
+
+    def _buffer_capped(self, stream: httpx.Response) -> httpx.Response:
+        """Read a streaming response into memory, aborting as soon as the
+        body is known to exceed max_response_bytes instead of buffering it
+        all first (SDK-G streaming size cap)."""
+        chunks: list[bytes] = []
+        total = 0
+        for chunk in stream.iter_bytes():
+            total += len(chunk)
+            if total > self.max_response_bytes:
+                raise ApexMailError(
+                    message="Response body exceeds maxResponseBytes",
+                    code="RESPONSE_TOO_LARGE",
+                    status_code=0,
+                )
+            chunks.append(chunk)
+        return httpx.Response(
+            stream.status_code,
+            headers=stream.headers,
+            content=b"".join(chunks),
+            request=stream.request,
+        )
 
     def _build_exception_from_httpx_error(self, e: Exception, attempt: int) -> Exception:
         """Build an ApexMailError from a httpx transport exception."""
@@ -318,36 +352,41 @@ class ApexMail(BaseClient):
         params: Optional[dict] = None,
         idempotency_key: Optional[str] = None,
     ) -> dict:
-        """Make a synchronous HTTP request with retry logic."""
+        """Make a synchronous HTTP request with retry logic.
+
+        Responses are consumed as a stream and capped at max_response_bytes
+        while reading (SDK-G).
+        """
         headers = self._get_headers(idempotency_key)
         last_exception: Optional[Exception] = None
         started_at = time.monotonic()
-        
+
         for attempt in range(self.max_retries + 1):
             self._check_total_timeout(started_at)
             try:
-                response = self._client.request(
+                with self._client.stream(
                     method=method,
                     url=path,
                     json=json,
                     params=params,
                     headers=headers,
-                )
-                
+                ) as stream:
+                    response = self._buffer_capped(stream)
+
                 delay = self._retry_delay(response, attempt)
                 if delay is not None:
                     self._sleep(delay)
                     continue
-                    
+
                 return self._handle_response(response)
-                
+
             except (httpx.TimeoutException, httpx.NetworkError) as e:
                 last_exception = e
                 if attempt < self.max_retries:
                     self._sleep(self._calculate_backoff(attempt))
                     continue
                 raise self._build_exception_from_httpx_error(e, attempt) from e
-        
+
         self._build_timeout_error(attempt, last_exception)
 
     def close(self) -> None:
@@ -416,6 +455,26 @@ class AsyncApexMail(BaseClient):
         self.analytics = AsyncAnalyticsResource(self)
         self.api_keys = AsyncApiKeysResource(self)
 
+    async def _buffer_capped_async(self, stream: httpx.Response) -> httpx.Response:
+        """Async twin of _buffer_capped: stream + cap while buffering."""
+        chunks: list[bytes] = []
+        total = 0
+        async for chunk in stream.aiter_bytes():
+            total += len(chunk)
+            if total > self.max_response_bytes:
+                raise ApexMailError(
+                    message="Response body exceeds maxResponseBytes",
+                    code="RESPONSE_TOO_LARGE",
+                    status_code=0,
+                )
+            chunks.append(chunk)
+        return httpx.Response(
+            stream.status_code,
+            headers=stream.headers,
+            content=b"".join(chunks),
+            request=stream.request,
+        )
+
     async def _request(
         self,
         method: str,
@@ -425,36 +484,41 @@ class AsyncApexMail(BaseClient):
         params: Optional[dict] = None,
         idempotency_key: Optional[str] = None,
     ) -> dict:
-        """Make an asynchronous HTTP request with retry logic."""
+        """Make an asynchronous HTTP request with retry logic.
+
+        Responses are consumed as a stream and capped at max_response_bytes
+        while reading (SDK-G).
+        """
         headers = self._get_headers(idempotency_key)
         last_exception: Optional[Exception] = None
         started_at = time.monotonic()
-        
+
         for attempt in range(self.max_retries + 1):
             self._check_total_timeout(started_at)
             try:
-                response = await self._client.request(
+                async with self._client.stream(
                     method=method,
                     url=path,
                     json=json,
                     params=params,
                     headers=headers,
-                )
-                
+                ) as stream:
+                    response = await self._buffer_capped_async(stream)
+
                 delay = self._retry_delay(response, attempt)
                 if delay is not None:
                     await asyncio.sleep(delay)
                     continue
-                    
+
                 return self._handle_response(response)
-                
+
             except (httpx.TimeoutException, httpx.NetworkError) as e:
                 last_exception = e
                 if attempt < self.max_retries:
                     await asyncio.sleep(self._calculate_backoff(attempt))
                     continue
                 raise self._build_exception_from_httpx_error(e, attempt) from e
-        
+
         self._build_timeout_error(attempt, last_exception)
 
     async def close(self) -> None:

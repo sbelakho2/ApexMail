@@ -84,7 +84,14 @@ async fn forgot_password(
 
     if let Ok(mut conn) = state.redis.get().await {
         let ip_rate_key = format!("apexmail:forgot_password_rate:ip:{client_ip}");
-        let email_rate_key = format!("apexmail:forgot_password_rate:email:{}", &email);
+        // Audit J: hash the address in the Redis key (like the login lockout
+        // does) — storing raw emails as key names pollutes Redis with PII,
+        // leaks addresses to anyone with Redis list/scan access, and keeps
+        // the victim's mailbox address resident long after the window.
+        let email_rate_key = format!(
+            "apexmail:forgot_password_rate:email:{}",
+            hash_token(&email)
+        );
 
         // Atomic rate-limit check using Lua script to avoid INCR + EXPIRE race condition.
         // The script atomically increments the counter and sets expiry on first creation.
@@ -259,6 +266,33 @@ mod tests {
             percent_encode_component("user@example.com"),
             "user%40example.com"
         );
+    }
+
+    #[test]
+    fn test_email_rate_limit_key_is_hashed_not_raw_pii() {
+        // Audit J: the Redis rate-limit key must not embed the raw email —
+        // it would leave PII resident in Redis key names and leak addresses
+        // to anything able to SCAN the keyspace.
+        let email = "victim@example.com";
+        let key = format!(
+            "apexmail:forgot_password_rate:email:{}",
+            hash_token(email)
+        );
+        assert!(!key.contains(email), "key must not contain raw email: {key}");
+        assert!(!key.contains("victim"), "key must not contain the local part");
+        assert!(key.starts_with("apexmail:forgot_password_rate:email:"));
+        // Deterministic — the same address maps to the same bucket.
+        let again = format!(
+            "apexmail:forgot_password_rate:email:{}",
+            hash_token(email)
+        );
+        assert_eq!(key, again);
+        // Distinct addresses map to distinct buckets.
+        let other = format!(
+            "apexmail:forgot_password_rate:email:{}",
+            hash_token("other@example.com")
+        );
+        assert_ne!(key, other);
     }
 
     #[test]

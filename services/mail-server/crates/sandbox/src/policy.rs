@@ -44,10 +44,15 @@ pub fn evaluate_policy(inspection: &FileInspection, config: &SandboxConfig) -> P
     let mut risk_score = inspection.risk_score;
     let mut force_reject = false;
 
-    // 1. Blocked extension
+    // 1. Blocked extension (blocked_extensions ∪ dangerous_extensions —
+    //    the "dangerous" set is the operator's elevated-analysis list and
+    //    previously had no effect at all; both sets now block).
     if let Some(ref ext) = inspection.extension {
         if config.blocked_extensions.contains(ext) {
             reasons.push(format!("Blocked extension: .{}", ext));
+            force_reject = true;
+        } else if config.dangerous_extensions.contains(ext) {
+            reasons.push(format!("Dangerous extension: .{}", ext));
             force_reject = true;
         }
     }
@@ -123,6 +128,29 @@ mod tests {
         let config = SandboxConfig::default();
         let result = evaluate_policy(&inspection, &config);
         assert_eq!(result.decision, PolicyDecision::Reject);
+    }
+
+    #[test]
+    fn test_dangerous_extension_blocks() {
+        // `.jar` is in dangerous_extensions but NOT in blocked_extensions —
+        // previously the dangerous set was dead configuration and the file
+        // would have been allowed. The union must now reject.
+        let data = b"plain text wearing a dangerous extension";
+        let inspection = file_inspector::inspect_file(data, Some("applet.jar"));
+        let config = SandboxConfig::default();
+        assert!(
+            config.dangerous_extensions.contains("jar"),
+            "test premise:jar must be in the default dangerous set"
+        );
+        assert!(!config.blocked_extensions.contains("jar"));
+        let result = evaluate_policy(&inspection, &config);
+        assert_eq!(
+            result.decision,
+            PolicyDecision::Reject,
+            "dangerous extensions must be enforced: {:?}",
+            result.reasons
+        );
+        assert!(result.reasons.iter().any(|r| r.contains("jar")));
     }
 
     #[test]

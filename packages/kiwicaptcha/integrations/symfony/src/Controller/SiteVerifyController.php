@@ -581,7 +581,13 @@ final class SiteVerifyController
                     : null;
                 if ($consumed?->operationIdentity === $operationFingerprint) {
                     if ($consumed->consumedResult !== null) {
-                        $reconstructed = $this->recovery->recover($response);
+                        // The identity travels into the recovery call: the
+                        // stored valid outcome is released only to the
+                        // exact logical operation (constant-time compare
+                        // inside the recovery; the equality above already
+                        // proved it, and the inner gate keeps the recovery
+                        // API itself from being a replay oracle).
+                        $reconstructed = $this->recovery->recover($response, $operationFingerprint);
                     } else {
                         $resumeOutcome = $this->verifier->resumeConsumedOperation(
                             $response,
@@ -938,7 +944,10 @@ final class SiteVerifyController
         // bad signature), and internal-error is a retryable server-side
         // condition (outage, admission rejection, capacity). A too-fast or
         // wrong-solution token is an invalid response, never a malformed
-        // request.
+        // request. A token already consumed by a different logical
+        // operation (AlreadyConsumed) is the duplicate vocabulary, and a
+        // token not bound to the expected application transaction
+        // (RequestBindingMismatch) is an invalid response.
         //
         // ConsumeIndeterminate is a retryable server-side condition, never
         // an asserted duplicate: the atomic consume's response was lost,
@@ -951,7 +960,8 @@ final class SiteVerifyController
         // retry contract for a challenge that may still be perfectly
         // redeemable.
         return match ($error) {
-            VerifyError::Expired => 'timeout-or-duplicate',
+            VerifyError::Expired,
+            VerifyError::AlreadyConsumed => 'timeout-or-duplicate',
             VerifyError::StorageUnavailable,
             VerifyError::AdmissionUnavailable,
             VerifyError::CapacityExceeded,
@@ -968,6 +978,7 @@ final class SiteVerifyController
             VerifyError::WrongRegion,
             VerifyError::WrongIssuer,
             VerifyError::WrongPolicyVersion,
+            VerifyError::RequestBindingMismatch,
             VerifyError::TooFast,
             VerifyError::InsufficientWork,
             VerifyError::UnsupportedArgon2Params,

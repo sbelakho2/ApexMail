@@ -146,6 +146,51 @@ final class Psr6StorageTest extends TestCase
         self::assertSame(0, $consumed?->record->issuedAtNs);
     }
 
+    public function testConsumedStateReadsTheStoredConsumedEnvelope(): void
+    {
+        $storage = new Psr6Storage($this->makePool());
+        $storage->store($this->makeRecord());
+        self::assertNull($storage->consumedState('nonce-1'), 'a pending record has no consumed state');
+
+        $consumed = $storage->consume('nonce-1');
+        self::assertNotNull($consumed);
+        self::assertTrue($consumed->consumedNow);
+        $storage->commitResult('nonce-1', true, 'txn');
+
+        // The retained consumed state must be readable without a
+        // transition: the envelope carries the consumed flag, the
+        // committed result and the recorded operation identity exactly
+        // like the Redis/array backends.
+        $state = $storage->consumedState('nonce-1');
+        self::assertNotNull($state, 'consumedState() must read the stored consumed envelope');
+        self::assertTrue($state->consumedBefore);
+        self::assertFalse($state->consumedNow, 'the read-only inspection performs no transition');
+        self::assertTrue($state->consumedResult?->valid ?? false, 'the committed result is readable');
+        self::assertSame('txn', $state->consumedResult?->binding);
+
+        $storage->store($this->makeRecord('nonce-2'));
+        $storage->consumeWithOperationIdentity('nonce-2', 'op-id-1');
+        $identityState = $storage->consumedState('nonce-2');
+        self::assertNotNull($identityState);
+        self::assertSame('op-id-1', $identityState->operationIdentity, 'the recorded operation identity is readable');
+    }
+
+    public function testConsumedStateOfAMissingRecordIsNull(): void
+    {
+        $storage = new Psr6Storage($this->makePool());
+        self::assertNull($storage->consumedState('absent-nonce'));
+    }
+
+    public function testPsr6StorageIsMarkedNonAtomic(): void
+    {
+        // The capability stamp consumers can test: PSR-6 cannot fuse
+        // read and transition, so the storage declares itself best-effort
+        // ({@see \KiwiCaptcha\NonAtomicStorageInterface}) instead of
+        // merely not claiming AtomicStorageInterface.
+        self::assertNotInstanceOf(\KiwiCaptcha\AtomicStorageInterface::class, new Psr6Storage($this->makePool()));
+        self::assertInstanceOf(\KiwiCaptcha\NonAtomicStorageInterface::class, new Psr6Storage($this->makePool()));
+    }
+
     public function testPsr6StorageIsNotAtomic(): void
     {
         // PSR-6 cannot fuse read and transition, so Psr6Storage is
