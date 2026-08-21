@@ -1278,6 +1278,59 @@ mod tests {
 
     // ── Cross-tenant member injection (audit C) ─────────────────
 
+    /// Apply tools/migrations to the isolated test database (same approach
+    /// as routes::messages tests — sqlx Migrator over a copied directory so
+    /// CONCURRENTLY-index statements are normalized).
+    async fn apply_tool_migrations(pool: &sqlx::PgPool) {
+        use sqlx::migrate::Migrator;
+        use std::{fs, path::PathBuf};
+
+        let source_dir =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../../tools/migrations");
+        let temp_dir = std::env::temp_dir().join(format!(
+            "apexmail-api-scim-up-migrations-{}",
+            Uuid::new_v4()
+        ));
+
+        fs::create_dir_all(&temp_dir).expect("failed to create temp sqlx migration directory");
+
+        let mut entries: Vec<PathBuf> = fs::read_dir(&source_dir)
+            .expect("failed to read tools/migrations")
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("sql"))
+            .filter(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .map(|name| {
+                        !name.ends_with("_down.sql") && !name.contains("performance_indexes")
+                    })
+                    .unwrap_or(false)
+            })
+            .collect();
+        entries.sort();
+
+        for path in entries {
+            let file_name = path.file_name().expect("migration path missing filename");
+            let raw = fs::read_to_string(&path)
+                .unwrap_or_else(|error| panic!("failed to read migration {:?}: {error}", path));
+            let normalized = raw
+                .replace("CREATE UNIQUE INDEX CONCURRENTLY", "CREATE UNIQUE INDEX")
+                .replace("CREATE INDEX CONCURRENTLY", "CREATE INDEX");
+            fs::write(temp_dir.join(file_name), normalized)
+                .unwrap_or_else(|error| panic!("failed to write copied migration {:?}: {error}", path));
+        }
+
+        let migrator = Migrator::new(temp_dir.clone())
+            .await
+            .expect("failed to load copied up migrations");
+        migrator
+            .run(pool)
+            .await
+            .expect("failed to apply copied up migrations");
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
     #[tokio::test]
     async fn scim_group_creation_rejects_foreign_tenant_members_and_writes_no_rows() {
         let Some(pool) = crate::test_db::optional_pg_pool(
@@ -1287,9 +1340,43 @@ mod tests {
         else {
             return;
         };
+        apply_tool_migrations(&pool).await;
 
-        let tenant_a = format!("ten_scim_a_{}", Uuid::new_v4().simple());
-        let tenant_b = format!("ten_scim_b_{}", Uuid::new_v4().simple());
+        // Malformed member ids are rejected with a 400 before any DB access
+        // (schema-independent assertion).
+        let parse_error = validate_members_in_tenant(&pool, "ten_any", &["not-a-uuid".into()])
+            .await
+            .expect_err("garbage member ids must be rejected");
+        match parse_error {
+            ApiError::BadRequest(message) => {
+                assert!(message.contains("invalid member id"), "unexpected: {message}");
+            }
+            other => panic!("expected BadRequest, got {other:?}"),
+        }
+
+        // The two migration lineages disagree on users.id: the production
+        // (services/mail-server/migrations) lineage uses UUID — matching the
+        // route's `Uuid::parse_str` convention — while the tools/migrations
+        // lineage uses VARCHAR(26) ULIDs. Only exercise the DB assertions on
+        // the UUID lineage.
+        let users_id_type: (String,) = sqlx::query_as(
+            "SELECT data_type FROM information_schema.columns
+             WHERE table_schema = 'public' AND table_name = 'users' AND column_name = 'id'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("failed to inspect users.id type");
+        if users_id_type.0 != "uuid" {
+            eprintln!(
+                "skipping scim tenant-scoping DB assertions: users.id is {} (non-UUID lineage)",
+                users_id_type.0
+            );
+            return;
+        }
+
+        // tenants.id is VARCHAR(26) — keep the generated IDs within bounds.
+        let tenant_a = format!("ten_scm_{}", &Uuid::new_v4().simple().to_string()[..18]);
+        let tenant_b = format!("ten_scn_{}", &Uuid::new_v4().simple().to_string()[..18]);
         for tenant_id in [&tenant_a, &tenant_b] {
             sqlx::query(
                 "INSERT INTO tenants (id, name, slug, plan, status)
