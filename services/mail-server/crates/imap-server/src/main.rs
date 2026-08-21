@@ -186,42 +186,77 @@ async fn subscribed_mailboxes(account_id: &str) -> HashSet<String> {
 
 const AUTH_FAILURE_LIMIT: usize = 5;
 const AUTH_FAILURE_WINDOW: Duration = Duration::from_secs(5 * 60);
+/// Aggregate cap on failed authentications per source IP across ALL
+/// usernames, so an attacker spraying many username variants from one IP
+/// cannot dodge the per-(ip, username) lockout.
+const AUTH_IP_FAILURE_LIMIT: usize = 100;
 
 type AuthFailureTable = HashMap<(String, String), VecDeque<std::time::Instant>>;
 static AUTH_FAILURES: LazyLock<Arc<Mutex<AuthFailureTable>>> =
+    LazyLock::new(|| Arc::new(Mutex::new(HashMap::new())));
+/// Per-IP failure history across all usernames.
+static AUTH_IP_FAILURES: LazyLock<Arc<Mutex<HashMap<String, VecDeque<std::time::Instant>>>>> =
     LazyLock::new(|| Arc::new(Mutex::new(HashMap::new())));
 
 fn prune_stale(failures: &mut VecDeque<std::time::Instant>, now: std::time::Instant) {
     failures.retain(|t| now.duration_since(*t) < AUTH_FAILURE_WINDOW);
 }
 
-/// Returns `true` when (ip, username) is currently locked out.
+/// Returns `true` when (ip, username) is currently locked out, either via
+/// its own failure history or via the per-IP aggregate cap.
 async fn auth_is_locked(ip: &str, username: &str) -> bool {
     let mut table = AUTH_FAILURES.lock().await;
-    match table.get_mut(&(ip.to_string(), username.to_string())) {
+    let pair_locked = match table.get_mut(&(ip.to_string(), username.to_string())) {
         Some(failures) => {
             prune_stale(failures, std::time::Instant::now());
             failures.len() >= AUTH_FAILURE_LIMIT
+        }
+        None => false,
+    };
+    if pair_locked {
+        return true;
+    }
+    drop(table);
+    let mut ip_table = AUTH_IP_FAILURES.lock().await;
+    match ip_table.get_mut(ip) {
+        Some(failures) => {
+            prune_stale(failures, std::time::Instant::now());
+            failures.len() >= AUTH_IP_FAILURE_LIMIT
         }
         None => false,
     }
 }
 
 /// Record a failed attempt. Once the limit is reached within the window the
-/// pair stays locked until the oldest failure ages out.
+/// pair stays locked until the oldest failure ages out. Failures also count
+/// towards the per-IP aggregate budget.
 async fn auth_record_failure(ip: &str, username: &str) {
-    let mut table = AUTH_FAILURES.lock().await;
     let now = std::time::Instant::now();
-    // Opportunistically drop fully-expired keys so the table cannot grow
-    // without bound when an attacker sprays many username variants.
-    table.retain(|_, failures| {
+    {
+        let mut table = AUTH_FAILURES.lock().await;
+        // Opportunistically drop fully-expired keys so the table cannot grow
+        // without bound when an attacker sprays many username variants.
+        table.retain(|_, failures| {
+            prune_stale(failures, now);
+            !failures.is_empty()
+        });
+        let failures = table
+            .entry((ip.to_string(), username.to_string()))
+            .or_default();
+        failures.push_back(now);
+    }
+    // Per-IP aggregate accounting (bound the deque for safety).
+    let mut ip_table = AUTH_IP_FAILURES.lock().await;
+    ip_table.retain(|_, failures| {
         prune_stale(failures, now);
         !failures.is_empty()
     });
-    let failures = table
-        .entry((ip.to_string(), username.to_string()))
-        .or_default();
+    let failures = ip_table.entry(ip.to_string()).or_default();
     failures.push_back(now);
+    // Hard cap the stored history so a hostile IP cannot grow it unboundedly.
+    while failures.len() > AUTH_IP_FAILURE_LIMIT {
+        failures.pop_front();
+    }
 }
 
 /// Clear the failure history after a successful login.
@@ -236,12 +271,23 @@ async fn auth_clear_failures(ip: &str, username: &str) {
 // `u64::MAX` represents the `*` wildcard and is resolved against actual
 // mailbox contents at use time (never expanded blindly).
 
+/// Maximum number of intervals accepted in one sequence set. A single
+/// command carrying thousands of intervals is either hostile or broken;
+/// expanding it is O(intervals x mailbox) work, so reject it up front.
+const MAX_SEQ_INTERVALS: usize = 1_000;
+/// Upper bound on resolved UIDs a single sequence set may expand to. Guards
+/// the resolve step against pathological interval lists over huge mailboxes.
+const MAX_RESOLVED_UIDS: usize = 100_000;
+
 fn parse_sequence_set(input: &str) -> Result<Vec<(u64, u64)>> {
     let mut intervals = Vec::new();
     if input.trim().is_empty() {
         return Ok(intervals);
     }
     for part in input.split(',') {
+        if intervals.len() >= MAX_SEQ_INTERVALS {
+            bail!("Too many intervals in sequence set (max {})", MAX_SEQ_INTERVALS);
+        }
         let part = part.trim();
         if part.is_empty() {
             continue;
@@ -291,15 +337,42 @@ fn parse_sequence_set(input: &str) -> Result<Vec<(u64, u64)>> {
 /// `uid_map` is the mailbox's UID list in ascending order (index + 1 = sequence
 /// number). In UID mode, `max_uid` caps wildcard/large ranges so they are
 /// expanded only over existing messages.
+///
+/// Bounds: intervals are sorted and merged first (dedup at the interval
+/// level), the uid_map is then walked exactly once with a moving cursor, and
+/// resolution fails once more than [`MAX_RESOLVED_UIDS`] messages would be
+/// produced — a hostile set such as `1:*,1:*,...` can no longer materialize
+/// billions of entries before dedup.
 fn resolve_intervals(
     intervals: &[(u64, u64)],
     is_uid: bool,
     uid_map: &[u64],
     max_uid: u64,
-) -> Vec<u64> {
-    let mut out = Vec::new();
-    if is_uid {
-        for &(s, e) in intervals {
+) -> Result<Vec<u64>> {
+    let mut merged: Vec<(u64, u64)> = intervals.to_vec();
+    merged.sort_unstable();
+    merged.dedup();
+    // Merge overlapping/adjacent intervals so the single pass below never
+    // revisits a UID and the output stays bounded by the mailbox size.
+    let mut collapsed: Vec<(u64, u64)> = Vec::with_capacity(merged.len());
+    for &(s, e) in &merged {
+        match collapsed.last_mut() {
+            Some(last) if s <= last.1.saturating_add(1) => {
+                last.1 = last.1.max(e);
+            }
+            _ => collapsed.push((s, e)),
+        }
+    }
+
+    let mut out: Vec<u64> = Vec::new();
+    let len = uid_map.len() as u64;
+    if collapsed.is_empty() || uid_map.is_empty() {
+        return Ok(out);
+    }
+
+    let mut cursor = 0usize; // index into uid_map; never moves backwards
+    for &(s, e) in &collapsed {
+        let (lo, hi) = if is_uid {
             let lo = if s == u64::MAX { max_uid } else { s };
             let hi = if e == u64::MAX { max_uid } else { e };
             // RFC 3501 §9: `n:*` always includes the last message, even when
@@ -309,21 +382,8 @@ fn resolve_intervals(
             } else {
                 lo
             };
-            if lo == 0 || lo > hi {
-                continue;
-            }
-            for &u in uid_map {
-                if u >= lo && u <= hi {
-                    out.push(u);
-                }
-            }
-        }
-    } else {
-        let len = uid_map.len() as u64;
-        if len == 0 {
-            return out;
-        }
-        for &(s, e) in intervals {
+            (lo, hi)
+        } else {
             // Sequence numbers beyond the mailbox size are ignored; a range's
             // upper bound is truncated to the last message (RFC 3501 §6.4.8).
             let lo = if s == u64::MAX { len } else { s };
@@ -335,29 +395,57 @@ fn resolve_intervals(
             } else {
                 lo
             };
-            if lo == 0 || lo > len || lo > hi {
-                continue;
+            (lo, hi)
+        };
+        if lo == 0 || lo > hi {
+            continue;
+        }
+
+        if is_uid {
+            while cursor < uid_map.len() && uid_map[cursor] < lo {
+                cursor += 1;
             }
-            for i in lo..=hi {
+            while cursor < uid_map.len() && uid_map[cursor] <= hi {
+                out.push(uid_map[cursor]);
+                cursor += 1;
+                if out.len() > MAX_RESOLVED_UIDS {
+                    bail!(
+                        "Sequence set resolves to too many messages (max {})",
+                        MAX_RESOLVED_UIDS
+                    );
+                }
+            }
+        } else {
+            // lo/hi are sequence numbers; clamp hi to the mailbox size.
+            let hi = hi.min(len);
+            let mut i = lo;
+            while i <= hi && ((i as usize) <= uid_map.len()) {
                 out.push(uid_map[(i - 1) as usize]);
+                i += 1;
+                if out.len() > MAX_RESOLVED_UIDS {
+                    bail!(
+                        "Sequence set resolves to too many messages (max {})",
+                        MAX_RESOLVED_UIDS
+                    );
+                }
             }
         }
     }
     out.sort_unstable();
     out.dedup();
-    out
+    Ok(out)
 }
 
 /// Resolve a sequence set against the session's current mailbox view.
 fn resolve_sequence_set(session: &ImapSession, input: &str, is_uid: bool) -> Result<Vec<u64>> {
     let intervals = parse_sequence_set(input)?;
     let max_uid = session.uid_map.iter().copied().max().unwrap_or(0);
-    Ok(resolve_intervals(
+    resolve_intervals(
         &intervals,
         is_uid,
         &session.uid_map,
         max_uid,
-    ))
+    )
 }
 
 // ── Response formatters ─────────────────────────────────────────────────────
@@ -775,41 +863,40 @@ fn imap_utf7_encode(s: &str) -> String {
 }
 
 /// IMAP LIST/LSUB pattern matching. `*` matches any sequence of characters,
-/// `%` matches any sequence except the hierarchy delimiter `/`.
+/// `%` matches any sequence except the hierarchy delimiter `/` (it must not
+/// consume a `/`).
 /// Mailbox names are case-insensitive per RFC 3501, so ASCII case is folded.
+///
+/// Implemented as a dynamic-programming match so `%` backtracks correctly
+/// (the previous single-backtrack-point scanner mis-evaluated patterns like
+/// `%ab` against `aab`). Complexity is O(name x pattern), and inputs are
+/// bounded mailbox names, so this is safe on hostile input.
 fn imap_pattern_match(name: &str, pattern: &str) -> bool {
     if pattern.is_empty() {
         return name.is_empty();
     }
     let n: Vec<char> = name.chars().map(|c| c.to_ascii_lowercase()).collect();
     let p: Vec<char> = pattern.chars().map(|c| c.to_ascii_lowercase()).collect();
-    let (mut i, mut j) = (0usize, 0usize);
-    let mut star: Option<(usize, usize)> = None;
-    while i < n.len() {
-        if j < p.len() && p[j] == n[i] {
-            i += 1;
-            j += 1;
-        } else if j < p.len() && p[j] == '*' {
-            star = Some((i, j));
-            j += 1;
-        } else if j < p.len() && p[j] == '%' {
-            if n[i] == '/' {
-                j += 1;
-            } else {
-                i += 1;
-            }
-        } else if let Some((si, sj)) = star {
-            i = si + 1;
-            star = Some((i, sj));
-            j = sj + 1;
-        } else {
-            return false;
+    let nlen = n.len();
+    let plen = p.len();
+
+    // dp[i][j] = does n[i..] match p[j..]?
+    let mut dp = vec![vec![false; plen + 1]; nlen + 1];
+    // Base case: the name is exhausted — only trailing wildcards may remain.
+    dp[nlen][plen] = true;
+    for j in (0..plen).rev() {
+        dp[nlen][j] = matches!(p[j], '*' | '%') && dp[nlen][j + 1];
+    }
+    for i in (0..nlen).rev() {
+        for j in (0..plen).rev() {
+            dp[i][j] = match p[j] {
+                '*' => dp[i + 1][j] || dp[i][j + 1],
+                '%' => (n[i] != '/' && dp[i + 1][j]) || dp[i][j + 1],
+                c => c == n[i] && dp[i + 1][j + 1],
+            };
         }
     }
-    while j < p.len() && (p[j] == '*' || p[j] == '%') {
-        j += 1;
-    }
-    j == p.len()
+    dp[0][0]
 }
 
 /// Combine a LIST reference and pattern per RFC 3501 §6.3.8.
@@ -885,6 +972,26 @@ fn greeting_line(tls_active: bool, allow_insecure_auth: bool, starttls_available
 
 const MAX_COMMAND_LINE: usize = 1024 * 1024;
 const MAX_LITERAL_SIZE: usize = 32 * 1024 * 1024;
+/// Maximum number of literals accepted in a single command. A command
+/// carrying hundreds of literal specs is hostile; each one would otherwise
+/// receive a continuation and a pre-allocated buffer.
+const MAX_LITERALS_PER_COMMAND: usize = 64;
+/// Maximum total literal bytes accepted in a single command. Bounds the
+/// combined pre-allocated buffers (64 x 32 MB would otherwise be 2 GB).
+const MAX_TOTAL_LITERAL_BYTES: usize = 64 * 1024 * 1024;
+
+/// Literal budget check for a command: given the literals already read
+/// (count/total bytes) and the next literal's declared size, decide whether
+/// reading it stays inside the per-command budget.
+fn literal_within_budget(count_so_far: usize, total_so_far: usize, size: usize) -> bool {
+    if count_so_far >= MAX_LITERALS_PER_COMMAND {
+        return false;
+    }
+    if size > MAX_LITERAL_SIZE {
+        return false;
+    }
+    total_so_far.saturating_add(size) <= MAX_TOTAL_LITERAL_BYTES
+}
 
 /// Read one physical line (bounded) as lossy UTF-8. Returns None on EOF.
 async fn read_line_limited<R: AsyncRead + Unpin>(
@@ -993,8 +1100,9 @@ async fn read_command<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
             Some((start, end, size, non_sync)) => {
                 assembled.push_str(&pending[..start]);
                 assembled.push_str(&format!("\x01LIT{}\x01", literals.len()));
-                if size > MAX_LITERAL_SIZE {
-                    bail!("Literal too large");
+                let total_so_far: usize = literals.iter().map(|l| l.len()).sum();
+                if !literal_within_budget(literals.len(), total_so_far, size) {
+                    bail!("Literal data exceeds per-command budget");
                 }
                 if !non_sync {
                     write_line(writer, "+ Ready for literal data\r\n").await?;
@@ -1513,6 +1621,11 @@ async fn handle_select<W: AsyncWrite + Unpin>(
     let mut msgs = list_resp.messages;
     msgs.sort_by_key(|m| m.uid);
     session.uid_map = msgs.iter().map(|m| m.uid).collect();
+    // The session's message view is capped at the list limit, so EXISTS must
+    // report the size of the resolvable view (uid_map), not the store's total
+    // count — otherwise EXISTS > highest usable sequence number and clients
+    // desync when fetching the phantom tail.
+    session.exists = session.uid_map.len().min(u32::MAX as usize) as u32;
 
     // RFC 3501 §6.3.1: [UNSEEN n] is the sequence number of the FIRST unseen
     // message, sent only when the mailbox contains unseen messages.
@@ -1661,7 +1774,7 @@ async fn handle_fetch<W: AsyncWrite + Unpin>(
     let uid_map: Vec<u64> = all_msgs.iter().map(|m| m.uid).collect();
     let max_uid = uid_map.last().copied().unwrap_or(0);
 
-    let uids = resolve_intervals(&intervals, is_uid, &uid_map, max_uid);
+    let uids = resolve_intervals(&intervals, is_uid, &uid_map, max_uid)?;
     if uids.is_empty() {
         return write_line(writer, &tagged_ok(tag, "FETCH completed")).await;
     }
@@ -1672,199 +1785,237 @@ async fn handle_fetch<W: AsyncWrite + Unpin>(
     let need_body = items.iter().any(body_item_needs_content);
     let sets_seen = !session.read_only && items.iter().any(body_item_sets_seen);
 
-    // Fetch message bodies in parallel.
-    let mut body_futures = Vec::new();
-    for &uid in &uids {
-        if !meta_map.contains_key(&uid) {
-            continue;
-        }
-        if need_body {
-            let req = GetMessageRequest {
-                account_id: session.account_id.clone(),
-                mailbox: session.mailbox.clone(),
-                uid,
-                include_body: true,
-            };
-            let mut c = session.client.clone();
-            body_futures.push(async move {
-                let resp = c.get_message(req).await;
-                (uid, resp)
-            });
-        }
-    }
-    // Fetch message bodies with bounded concurrency (8 in flight). Results
-    // are keyed by UID, and responses below are emitted in sequence-number
-    // order, so completing out of order does not affect the FETCH response.
+    // Stream bodies in bounded chunks instead of buffering every matching
+    // body up front: the previous collect()-into-HashMap held ALL bodies in
+    // memory at once, so `FETCH 1:* BODY[]` on a large mailbox was an OOM
+    // vector. With chunks of FETCH_CONCURRENCY, at most 8 bodies (and their
+    // responses) are resident at any time; each response is written to the
+    // socket as its chunk completes, so no additional per-command cap on
+    // body FETCHes is needed.
     const FETCH_CONCURRENCY: usize = 8;
-    let body_results: HashMap<u64, Result<GetMessageBody>> = futures::stream::iter(body_futures)
-        .buffer_unordered(FETCH_CONCURRENCY)
-        .map(|(uid, r)| {
-            let parsed = r
-                .map(|resp| {
-                    let resp = resp.into_inner();
-                    GetMessageBody { body: resp.body }
+    for chunk in uids.chunks(FETCH_CONCURRENCY) {
+        let mut body_futures = Vec::new();
+        if need_body {
+            for &uid in chunk {
+                if !meta_map.contains_key(&uid) {
+                    continue;
+                }
+                let req = GetMessageRequest {
+                    account_id: session.account_id.clone(),
+                    mailbox: session.mailbox.clone(),
+                    uid,
+                    include_body: true,
+                };
+                let mut c = session.client.clone();
+                body_futures.push(async move {
+                    let resp = c.get_message(req).await;
+                    (uid, resp)
+                });
+            }
+        }
+        // Fetch this chunk's bodies with bounded concurrency. Results are
+        // keyed by UID; responses are emitted in sequence-number order, so
+        // completing out of order does not affect the FETCH response.
+        let body_results: HashMap<u64, Result<GetMessageBody>> =
+            futures::stream::iter(body_futures)
+                .buffer_unordered(FETCH_CONCURRENCY)
+                .map(|(uid, r)| {
+                    let parsed = r
+                        .map(|resp| {
+                            let resp = resp.into_inner();
+                            GetMessageBody { body: resp.body }
+                        })
+                        .map_err(|e| anyhow::anyhow!("{}", e));
+                    (uid, parsed)
                 })
-                .map_err(|e| anyhow::anyhow!("{}", e));
-            (uid, parsed)
-        })
-        .collect()
-        .await;
+                .collect()
+                .await;
 
-    // Fire \Seen flag updates for non-peek BODY fetches on unread messages.
-    let mut seen_futures = Vec::new();
-    for &uid in &uids {
-        let meta = match meta_map.get(&uid) {
-            Some(m) => m,
-            None => continue,
-        };
-        let was_seen = meta.flags.clone().unwrap_or_default().seen;
-        if sets_seen && !was_seen {
-            let req = SetFlagsRequest {
-                account_id: session.account_id.clone(),
-                mailbox: session.mailbox.clone(),
-                uids: vec![uid],
-                flags: Some(MessageFlags {
-                    seen: true,
-                    ..Default::default()
-                }),
-                operation: FlagOperation::Add as i32,
+        // Emit responses in sequence-number order for this chunk.
+        for &uid in chunk {
+            let meta = match meta_map.get(&uid) {
+                Some(m) => m,
+                None => continue,
             };
-            let mut c = session.client.clone();
-            seen_futures.push(async move {
-                let _ = c.set_flags(req).await;
-            });
+            let seq = match uid_map.iter().position(|&u| u == uid) {
+                Some(i) => i as u32 + 1,
+                None => continue,
+            };
+            emit_fetch_response(
+                writer,
+                uid,
+                seq,
+                meta,
+                &items,
+                body_results.get(&uid),
+                is_uid,
+                sets_seen,
+            )
+            .await?;
         }
+
+        // Fire \Seen flag updates for non-peek BODY fetches on unread
+        // messages in this chunk.
+        let mut seen_futures = Vec::new();
+        for &uid in chunk {
+            let meta = match meta_map.get(&uid) {
+                Some(m) => m,
+                None => continue,
+            };
+            let was_seen = meta.flags.clone().unwrap_or_default().seen;
+            if sets_seen && !was_seen {
+                let req = SetFlagsRequest {
+                    account_id: session.account_id.clone(),
+                    mailbox: session.mailbox.clone(),
+                    uids: vec![uid],
+                    flags: Some(MessageFlags {
+                        seen: true,
+                        ..Default::default()
+                    }),
+                    operation: FlagOperation::Add as i32,
+                };
+                let mut c = session.client.clone();
+                seen_futures.push(async move {
+                    let _ = c.set_flags(req).await;
+                });
+            }
+        }
+        futures::stream::iter(seen_futures)
+            .for_each_concurrent(FETCH_CONCURRENCY, |fut| fut)
+            .await;
     }
 
-    // Emit responses in sequence-number order.
-    for &uid in &uids {
-        let meta = match meta_map.get(&uid) {
-            Some(m) => m.clone(),
-            None => continue,
-        };
-        let seq = match uid_map.iter().position(|&u| u == uid) {
-            Some(i) => i as u32 + 1,
-            None => continue,
-        };
-
-        let mut flags = meta.flags.clone().unwrap_or_default();
-        if sets_seen && !flags.seen {
-            flags.seen = true;
-        }
-
-        let mut attrs: Vec<String> = Vec::new();
-        let mut body_payloads: Vec<(String, Vec<u8>)> = Vec::new();
-
-        for item in &items {
-            for ritem in resolve_macro_item(item) {
-                match ritem {
-                    FetchItem::Uid => {
-                        attrs.push(format!("UID {}", uid));
-                    }
-                    FetchItem::Flags => {
-                        attrs.push(format!("FLAGS {}", format_imap_flags(&flags)));
-                    }
-                    FetchItem::InternalDate => {
-                        attrs.push(format!(
-                            "INTERNALDATE {}",
-                            format_internal_date(meta.internal_date)
-                        ));
-                    }
-                    FetchItem::Rfc822Size => {
-                        attrs.push(format!("RFC822.SIZE {}", meta.size));
-                    }
-                    FetchItem::Envelope => {
-                        let env = meta.envelope.clone().unwrap_or_default();
-                        attrs.push(format!("ENVELOPE {}", format_envelope(&env)));
-                    }
-                    FetchItem::Body {
-                        section,
-                        peek: _,
-                        name,
-                        partial,
-                    } => {
-                        let raw = match body_results.get(&uid) {
-                            Some(Ok(b)) => &b.body,
-                            Some(Err(e)) => {
-                                warn!("Failed to get message body for UID {}: {}", uid, e);
-                                continue;
-                            }
-                            None => continue,
-                        };
-                        let (header, text) = header_and_text(raw);
-                        let section_bytes: &[u8] = match section {
-                            BodySection::Full => raw,
-                            BodySection::Header => header,
-                            BodySection::Text => text,
-                        };
-                        let mut payload = section_bytes.to_vec();
-                        // RFC 3501 §7.4.2: a partial fetch response names the
-                        // section with its origin, e.g. BODY[HEADER]<0>.
-                        let resp_name = match partial {
-                            Some((offset, _)) => format!("{}<{}>", name, offset),
-                            None => name.clone(),
-                        };
-                        if let Some((offset, octets)) = partial {
-                            let end = if octets == 0 {
-                                payload.len()
-                            } else {
-                                offset.saturating_add(octets).min(payload.len())
-                            };
-                            if offset < payload.len() {
-                                payload = payload[offset..end].to_vec();
-                            } else {
-                                payload.clear();
-                            }
-                        }
-                        body_payloads.push((resp_name, payload));
-                    }
-                    FetchItem::Fast | FetchItem::All | FetchItem::Full => {}
-                }
-            }
-        }
-
-        if is_uid {
-            attrs.insert(0, format!("UID {}", uid));
-        }
-
-        // Write `* seq FETCH (attr1 attr2 BODY[] {n}` then the literal bytes
-        // then `) CRLF`.
-        let mut out = format!("* {} FETCH (", seq);
-        let mut first = true;
-        for a in &attrs {
-            if !first {
-                out.push(' ');
-            }
-            out.push_str(a);
-            first = false;
-        }
-        for (name, payload) in &body_payloads {
-            if !first {
-                out.push(' ');
-            }
-            out.push_str(&format!("{} {{{}}}", name, payload.len()));
-            first = false;
-        }
-        writer.write_all(out.as_bytes()).await?;
-        if !body_payloads.is_empty() {
-            // RFC 3501 §7.4.2: after the last literal the closing paren
-            // follows immediately (no trailing space).
-            writer.write_all(b"\r\n").await?;
-            for (i, (_, payload)) in body_payloads.iter().enumerate() {
-                if i > 0 {
-                    writer.write_all(b" ").await?;
-                }
-                writer.write_all(payload).await?;
-            }
-        }
-        writer.write_all(b")\r\n").await?;
-    }
-
-    futures::stream::iter(seen_futures)
-        .for_each_concurrent(FETCH_CONCURRENCY, |fut| fut)
-        .await;
     writer.flush().await?;
     write_line(writer, &tagged_ok(tag, "FETCH completed")).await
+}
+
+/// Emit one `* <seq> FETCH (...)` response, including any literal body
+/// payloads, for a single message. Split out of `handle_fetch` so the
+/// chunked streaming path can write each response as soon as its chunk's
+/// bodies have arrived.
+#[allow(clippy::too_many_arguments)]
+async fn emit_fetch_response<W: AsyncWrite + Unpin>(
+    writer: &mut W,
+    uid: u64,
+    seq: u32,
+    meta: &mail_proto::MessageMeta,
+    items: &[FetchItem],
+    body: Option<&Result<GetMessageBody>>,
+    is_uid: bool,
+    sets_seen: bool,
+) -> Result<()> {
+    let mut flags = meta.flags.clone().unwrap_or_default();
+    if sets_seen && !flags.seen {
+        flags.seen = true;
+    }
+
+    let mut attrs: Vec<String> = Vec::new();
+    let mut body_payloads: Vec<(String, Vec<u8>)> = Vec::new();
+
+    for item in items {
+        for ritem in resolve_macro_item(item) {
+            match ritem {
+                FetchItem::Uid => {
+                    attrs.push(format!("UID {}", uid));
+                }
+                FetchItem::Flags => {
+                    attrs.push(format!("FLAGS {}", format_imap_flags(&flags)));
+                }
+                FetchItem::InternalDate => {
+                    attrs.push(format!(
+                        "INTERNALDATE {}",
+                        format_internal_date(meta.internal_date)
+                    ));
+                }
+                FetchItem::Rfc822Size => {
+                    attrs.push(format!("RFC822.SIZE {}", meta.size));
+                }
+                FetchItem::Envelope => {
+                    let env = meta.envelope.clone().unwrap_or_default();
+                    attrs.push(format!("ENVELOPE {}", format_envelope(&env)));
+                }
+                FetchItem::Body {
+                    section,
+                    peek: _,
+                    name,
+                    partial,
+                } => {
+                    let raw = match body {
+                        Some(Ok(b)) => &b.body,
+                        Some(Err(e)) => {
+                            warn!("Failed to get message body for UID {}: {}", uid, e);
+                            continue;
+                        }
+                        None => continue,
+                    };
+                    let (header, text) = header_and_text(raw);
+                    let section_bytes: &[u8] = match section {
+                        BodySection::Full => raw,
+                        BodySection::Header => header,
+                        BodySection::Text => text,
+                    };
+                    let mut payload = section_bytes.to_vec();
+                    // RFC 3501 §7.4.2: a partial fetch response names the
+                    // section with its origin, e.g. BODY[HEADER]<0>.
+                    let resp_name = match partial {
+                        Some((offset, _)) => format!("{}<{}>", name, offset),
+                        None => name.clone(),
+                    };
+                    if let Some((offset, octets)) = partial {
+                        let end = if octets == 0 {
+                            payload.len()
+                        } else {
+                            offset.saturating_add(octets).min(payload.len())
+                        };
+                        if offset < payload.len() {
+                            payload = payload[offset..end].to_vec();
+                        } else {
+                            payload.clear();
+                        }
+                    }
+                    body_payloads.push((resp_name, payload));
+                }
+                FetchItem::Fast | FetchItem::All | FetchItem::Full => {}
+            }
+        }
+    }
+
+    if is_uid {
+        attrs.insert(0, format!("UID {}", uid));
+    }
+
+    // Write `* seq FETCH (attr1 attr2 BODY[] {n}` then the literal bytes
+    // then `) CRLF`.
+    let mut out = format!("* {} FETCH (", seq);
+    let mut first = true;
+    for a in &attrs {
+        if !first {
+            out.push(' ');
+        }
+        out.push_str(a);
+        first = false;
+    }
+    for (name, payload) in &body_payloads {
+        if !first {
+            out.push(' ');
+        }
+        out.push_str(&format!("{} {{{}}}", name, payload.len()));
+        first = false;
+    }
+    writer.write_all(out.as_bytes()).await?;
+    if !body_payloads.is_empty() {
+        // RFC 3501 §7.4.2: after the last literal the closing paren
+        // follows immediately (no trailing space).
+        writer.write_all(b"\r\n").await?;
+        for (i, (_, payload)) in body_payloads.iter().enumerate() {
+            if i > 0 {
+                writer.write_all(b" ").await?;
+            }
+            writer.write_all(payload).await?;
+        }
+    }
+    writer.write_all(b")\r\n").await?;
+    Ok(())
 }
 
 fn parse_fetch_args(args: &str) -> Result<(String, String)> {
@@ -2192,6 +2343,28 @@ fn parse_store_args(args: &str, literals: &[Vec<u8>]) -> Result<(String, StoreOp
 
 // ── SEARCH ──────────────────────────────────────────────────────────────────
 
+/// Maximum SEARCH criteria tokens per command. Without a cap, every token
+/// triggers a full retain() pass over the mailbox — 100k tokens x 100k
+/// messages is 10^10 predicate evaluations.
+const MAX_SEARCH_TOKENS: usize = 64;
+
+/// Tokenize SEARCH arguments (resolving literal/quoted tokens) with a hard
+/// cap on the criteria count; hostile SEARCHes are rejected before any
+/// per-message evaluation begins.
+fn collect_search_tokens(args: &str, literals: &[Vec<u8>]) -> Result<Vec<String>> {
+    let tokens: Vec<String> = tokenize_command_args(args.trim())
+        .iter()
+        .map(|t| resolve_token(t, literals))
+        .collect();
+    if tokens.len() > MAX_SEARCH_TOKENS {
+        bail!(
+            "Too many SEARCH criteria (max {})",
+            MAX_SEARCH_TOKENS
+        );
+    }
+    Ok(tokens)
+}
+
 async fn handle_search<W: AsyncWrite + Unpin>(
     session: &mut ImapSession,
     tag: &str,
@@ -2231,10 +2404,12 @@ async fn handle_search<W: AsyncWrite + Unpin>(
     let mut keep: Vec<&mail_proto::MessageMeta> = all.iter().collect();
     let mut fulltext_terms: Vec<String> = Vec::new();
 
-    let tokens: Vec<String> = tokenize_command_args(args.trim())
-        .iter()
-        .map(|t| resolve_token(t, literals))
-        .collect();
+    let tokens = match collect_search_tokens(args, literals) {
+        Ok(t) => t,
+        Err(e) => {
+            return write_line(writer, &tagged_bad(tag, &format!("{}", e))).await;
+        }
+    };
     let mut i = 0;
     while i < tokens.len() {
         let tok = tokens[i].to_uppercase();
@@ -2372,7 +2547,16 @@ async fn handle_search<W: AsyncWrite + Unpin>(
                 keep.retain(|m| found.contains(&m.uid));
             }
             Err(e) => {
+                // Fail closed: silently ignoring a failing search backend
+                // would return UNFILTERED results as matches. Return NO so
+                // the client knows the search could not be executed (e.g.
+                // encrypted stores cannot search over ciphertext).
                 warn!("mailstore search failed: {}", e);
+                return write_line(
+                    writer,
+                    &tagged_no(tag, &format!("SEARCH failed: {}", e)),
+                )
+                .await;
             }
         }
     }
@@ -2541,23 +2725,58 @@ async fn handle_move<W: AsyncWrite + Unpin>(
     let srcs: Vec<String> = pairs.iter().map(|(s, _)| s.to_string()).collect();
     let dsts: Vec<String> = pairs.iter().map(|(_, d)| d.to_string()).collect();
 
+    // RFC 6851 §4.3: MOVE MUST send an untagged EXPUNGE response for each
+    // message removed from the source mailbox, using sequence numbers of the
+    // source mailbox. Emitting them in descending order keeps the original
+    // numbering valid as each removal renumbers later messages.
+    let expunge_seqs = expunge_seqs_descending(&session.uid_map, &uids);
+
     // Update the session's view: moved messages are gone from this mailbox.
-    session.uid_map.retain(|u| !uids.contains(u));
+    retain_except(&mut session.uid_map, &uids);
     session.exists = session.uid_map.len().min(u32::MAX as usize) as u32;
 
-    write_line(
-        writer,
-        &tagged_ok(
-            tag,
-            &format!(
-                "[COPYUID {} {} {}] MOVE completed",
-                dest_uidvalidity,
-                srcs.join(","),
-                dsts.join(",")
-            ),
+    let mut responses = expunge_response_lines(&expunge_seqs);
+    responses.push_str(&tagged_ok(
+        tag,
+        &format!(
+            "[COPYUID {} {} {}] MOVE completed",
+            dest_uidvalidity,
+            srcs.join(","),
+            dsts.join(",")
         ),
-    )
-    .await
+    ));
+    write_line(writer, &responses).await
+}
+
+/// Sequence numbers (in the CURRENT session view) of the given UIDs, in
+/// descending order — the order in which untagged `* n EXPUNGE` responses
+/// must be emitted so earlier numbers stay valid as later ones are removed.
+fn expunge_seqs_descending(uid_map: &[u64], removed: &[u64]) -> Vec<u32> {
+    let removed_set: HashSet<u64> = removed.iter().copied().collect();
+    let mut seqs: Vec<u32> = uid_map
+        .iter()
+        .enumerate()
+        .filter(|(_, &u)| removed_set.contains(&u))
+        .map(|(i, _)| i as u32 + 1)
+        .collect();
+    seqs.sort_unstable_by(|a, b| b.cmp(a));
+    seqs
+}
+
+/// Remove `removed` UIDs from `uid_map` in O(n) (a naive
+/// `retain(|u| !removed.contains(u))` is O(n*m) and quadratic on big moves).
+fn retain_except(uid_map: &mut Vec<u64>, removed: &[u64]) {
+    let removed_set: HashSet<u64> = removed.iter().copied().collect();
+    uid_map.retain(|u| !removed_set.contains(u));
+}
+
+/// Untagged EXPUNGE response lines for pre-computed (descending) sequences.
+fn expunge_response_lines(seqs: &[u32]) -> String {
+    let mut out = String::new();
+    for &s in seqs {
+        out.push_str(&format!("* {} EXPUNGE\r\n", s));
+    }
+    out
 }
 
 fn parse_copy_args(args: &str, literals: &[Vec<u8>]) -> Result<(String, String)> {
@@ -2648,6 +2867,187 @@ async fn handle_delete<W: AsyncWrite + Unpin>(
     }
 }
 
+// ── RENAME ──────────────────────────────────────────────────────────────────
+//
+// RENAME is implemented as create-new -> move every message -> delete-old.
+// The mailstore has no atomic rename, so the flow must be defensive: errors
+// are propagated (never swallowed), messages are moved in pages so
+// mailboxes larger than one list page survive, and the source mailbox is
+// only deleted once it is verifiably empty. The old implementation listed
+// one page, ignored move errors, and unconditionally deleted the source —
+// with the DB's ON DELETE CASCADE that destroyed every unmoved message.
+
+/// Page size used when moving messages during RENAME. Matches the
+/// mailstore's list cap.
+const RENAME_PAGE_SIZE: u32 = 100_000;
+/// Hard limit on pages per RENAME (guards against a pathological mailbox).
+const RENAME_MAX_PAGES: usize = 10_000;
+
+/// The mailstore operations RENAME needs, as a trait so the flow is unit
+/// testable against a mock (the real gRPC client cannot be instantiated in
+/// tests).
+trait RenameApi: Send {
+    fn create_mailbox(&mut self, account_id: &str, name: &str)
+        -> futures::future::BoxFuture<'_, anyhow::Result<()>>;
+    fn list_page(
+        &mut self,
+        account_id: &str,
+        mailbox: &str,
+        uid_min: u64,
+        uid_max: u64,
+        limit: u32,
+    ) -> futures::future::BoxFuture<'_, anyhow::Result<Vec<u64>>>;
+    fn move_messages(
+        &mut self,
+        account_id: &str,
+        source: &str,
+        dest: &str,
+        uids: Vec<u64>,
+    ) -> futures::future::BoxFuture<'_, anyhow::Result<()>>;
+    fn delete_mailbox(
+        &mut self,
+        account_id: &str,
+        name: &str,
+    ) -> futures::future::BoxFuture<'_, anyhow::Result<()>>;
+}
+
+impl RenameApi for MailstoreClient {
+    fn create_mailbox(
+        &mut self,
+        account_id: &str,
+        name: &str,
+    ) -> futures::future::BoxFuture<'_, anyhow::Result<()>> {
+        let req = CreateMailboxRequest {
+            account_id: account_id.to_string(),
+            name: name.to_string(),
+            special_use: String::new(),
+        };
+        Box::pin(async move {
+            self.create_mailbox(req).await?;
+            Ok(())
+        })
+    }
+
+    fn list_page(
+        &mut self,
+        account_id: &str,
+        mailbox: &str,
+        uid_min: u64,
+        uid_max: u64,
+        limit: u32,
+    ) -> futures::future::BoxFuture<'_, anyhow::Result<Vec<u64>>> {
+        let req = ListMessagesRequest {
+            account_id: account_id.to_string(),
+            mailbox: mailbox.to_string(),
+            uid_min,
+            uid_max,
+            limit: limit as i32,
+        };
+        Box::pin(async move {
+            let resp = self.list_messages(req).await?;
+            let mut uids: Vec<u64> = resp.into_inner().messages.iter().map(|m| m.uid).collect();
+            uids.sort_unstable();
+            uids.dedup();
+            Ok(uids)
+        })
+    }
+
+    fn move_messages(
+        &mut self,
+        account_id: &str,
+        source: &str,
+        dest: &str,
+        uids: Vec<u64>,
+    ) -> futures::future::BoxFuture<'_, anyhow::Result<()>> {
+        let req = MoveMessageRequest {
+            account_id: account_id.to_string(),
+            source_mailbox: source.to_string(),
+            dest_mailbox: dest.to_string(),
+            uids,
+        };
+        Box::pin(async move {
+            self.move_message(req).await?;
+            Ok(())
+        })
+    }
+
+    fn delete_mailbox(
+        &mut self,
+        account_id: &str,
+        name: &str,
+    ) -> futures::future::BoxFuture<'_, anyhow::Result<()>> {
+        let req = DeleteMailboxRequest {
+            account_id: account_id.to_string(),
+            name: name.to_string(),
+        };
+        Box::pin(async move {
+            self.delete_mailbox(req).await?;
+            Ok(())
+        })
+    }
+}
+
+/// Core RENAME flow. Returns Ok(()) on success; Err(msg) maps to a tagged NO
+/// and guarantees the source mailbox was NOT deleted.
+async fn rename_mailbox_flow(
+    api: &mut dyn RenameApi,
+    account_id: &str,
+    old_name: &str,
+    new_name: &str,
+) -> Result<(), String> {
+    api.create_mailbox(account_id, new_name)
+        .await
+        .map_err(|e| format!("RENAME failed: {}", e))?;
+
+    // Move messages in pages, walking the UID space downwards (the mailstore
+    // lists newest-first under its LIMIT), so mailboxes larger than one list
+    // page are renamed completely.
+    let mut uid_max = u64::MAX;
+    let mut pages = 0usize;
+    loop {
+        pages += 1;
+        if pages > RENAME_MAX_PAGES {
+            return Err("RENAME failed: too many pages".to_string());
+        }
+        let page = api
+            .list_page(account_id, old_name, 1, uid_max, RENAME_PAGE_SIZE)
+            .await
+            .map_err(|e| format!("RENAME failed: could not list source mailbox: {}", e))?;
+        if page.is_empty() {
+            break;
+        }
+        api.move_messages(account_id, old_name, new_name, page.clone())
+            .await
+            .map_err(|e| format!("RENAME failed: could not move messages: {}", e))?;
+        if page.len() < RENAME_PAGE_SIZE as usize {
+            break;
+        }
+        // Continue with the UIDs strictly below this page's oldest UID.
+        let oldest = page[0];
+        if oldest == 0 {
+            break;
+        }
+        uid_max = oldest - 1;
+    }
+
+    // Completeness check: only delete the source when it is verifiably
+    // empty. Anything left (move failure swallowed upstream, concurrent
+    // delivery, ...) keeps the mailbox — and its messages — intact.
+    let remaining = api
+        .list_page(account_id, old_name, 1, u64::MAX, 1)
+        .await
+        .map_err(|e| format!("RENAME failed: could not verify source mailbox: {}", e))?;
+    if !remaining.is_empty() {
+        return Err("RENAME failed: rename incomplete, source mailbox still has messages"
+            .to_string());
+    }
+
+    api.delete_mailbox(account_id, old_name)
+        .await
+        .map_err(|e| format!("RENAME failed: could not delete source mailbox: {}", e))?;
+    Ok(())
+}
+
 async fn handle_rename<W: AsyncWrite + Unpin>(
     session: &mut ImapSession,
     tag: &str,
@@ -2669,53 +3069,11 @@ async fn handle_rename<W: AsyncWrite + Unpin>(
     }
 
     let mut client = session.client.clone();
-
-    let c_req = CreateMailboxRequest {
-        account_id: session.account_id.clone(),
-        name: new_name.clone(),
-        special_use: String::new(),
-    };
-    match client.create_mailbox(c_req).await {
-        Ok(_) => {}
-        Err(e) => {
-            return write_line(writer, &tagged_no(tag, &format!("RENAME failed: {}", e))).await;
-        }
-    }
-
-    let list_req = ListMessagesRequest {
-        account_id: session.account_id.clone(),
-        mailbox: old_name.clone(),
-        uid_min: 1,
-        uid_max: u64::MAX,
-        limit: 100_000,
-    };
-    let list_resp = match client.list_messages(list_req).await {
-        Ok(r) => r.into_inner(),
-        Err(_) => mail_proto::ListMessagesResponse {
-            messages: Vec::new(),
-        },
-    };
-
-    let uids: Vec<u64> = list_resp.messages.iter().map(|m| m.uid).collect();
-    if !uids.is_empty() {
-        let move_req = MoveMessageRequest {
-            account_id: session.account_id.clone(),
-            source_mailbox: old_name.clone(),
-            dest_mailbox: new_name.clone(),
-            uids,
-        };
-        let _ = client.move_message(move_req).await;
-    }
-
-    let d_req = DeleteMailboxRequest {
-        account_id: session.account_id.clone(),
-        name: old_name.clone(),
-    };
-    match client.delete_mailbox(d_req).await {
-        Ok(_) => {}
-        Err(e) => {
-            return write_line(writer, &tagged_no(tag, &format!("RENAME failed: {}", e))).await;
-        }
+    if let Err(msg) =
+        rename_mailbox_flow(&mut client, &session.account_id, &old_name, &new_name).await
+    {
+        warn!("RENAME {} -> {}: {}", old_name, new_name, msg);
+        return write_line(writer, &tagged_no(tag, &msg)).await;
     }
 
     rename_subscription(&session.account_id, &old_name, &new_name).await;
@@ -3186,7 +3544,7 @@ async fn handle_expunge<W: AsyncWrite + Unpin>(
         }
     }
 
-    session.uid_map.retain(|u| !resp.expunged_uids.contains(u));
+    retain_except(&mut session.uid_map, &resp.expunged_uids);
     session.exists = session.uid_map.len().min(u32::MAX as usize) as u32;
 
     if !resp.expunged_uids.is_empty() {
@@ -3212,9 +3570,11 @@ async fn handle_noop<W: AsyncWrite + Unpin>(
         {
             let mb = status.into_inner().mailbox.unwrap_or_default();
             if mb.exists != session.exists {
-                responses.push_str(&format!("* {} EXISTS\r\n", mb.exists));
-                session.exists = mb.exists;
+                // Refresh first, then report EXISTS from the session's
+                // resolvable view so the count always matches the uid_map
+                // (the store count may exceed the capped list view).
                 refresh_session_view(session).await;
+                responses.push_str(&format!("* {} EXISTS\r\n", session.exists));
             }
             if mb.recent != session.recent {
                 responses.push_str(&format!("* {} RECENT\r\n", mb.recent));
@@ -3450,8 +3810,11 @@ async fn process_mailbox_event<W: AsyncWrite + Unpin>(
     for s in rem_seqs {
         out.push_str(&format!("* {} EXPUNGE\r\n", s));
     }
+    // EXISTS reports the size of the session's resolvable view (the capped
+    // uid_map), keeping sequence numbers and EXISTS consistent.
+    let view_exists = new_uids.len().min(u32::MAX as usize) as u32;
     if !added.is_empty() || exists_changed {
-        out.push_str(&format!("* {} EXISTS\r\n", mb.exists));
+        out.push_str(&format!("* {} EXISTS\r\n", view_exists));
     }
     if recent_changed {
         out.push_str(&format!("* {} RECENT\r\n", mb.recent));
@@ -3468,7 +3831,7 @@ async fn process_mailbox_event<W: AsyncWrite + Unpin>(
         .max(mb.uidnext);
     {
         let mut g = session.lock().await;
-        g.exists = mb.exists;
+        g.exists = view_exists;
         g.recent = mb.recent;
         g.uid_next = new_uidnext;
         g.uid_map = new_uids;
@@ -4062,12 +4425,14 @@ mod tests {
                 false,
                 &uid_map,
                 max_uid
-            ),
+            )
+            .unwrap(),
             vec![10, 20, 30]
         );
         // seq * → last message
         assert_eq!(
-            resolve_intervals(&parse_sequence_set("*").unwrap(), false, &uid_map, max_uid),
+            resolve_intervals(&parse_sequence_set("*").unwrap(), false, &uid_map, max_uid)
+                .unwrap(),
             vec![40]
         );
         // seq 2:* → 20,30,40
@@ -4077,12 +4442,14 @@ mod tests {
                 false,
                 &uid_map,
                 max_uid
-            ),
+            )
+            .unwrap(),
             vec![20, 30, 40]
         );
         // out of range → empty
         assert_eq!(
-            resolve_intervals(&parse_sequence_set("5").unwrap(), false, &uid_map, max_uid),
+            resolve_intervals(&parse_sequence_set("5").unwrap(), false, &uid_map, max_uid)
+                .unwrap(),
             Vec::<u64>::new()
         );
         // overlapping ranges dedup
@@ -4092,7 +4459,8 @@ mod tests {
                 false,
                 &uid_map,
                 max_uid
-            ),
+            )
+            .unwrap(),
             vec![10, 20, 30, 40]
         );
     }
@@ -4108,12 +4476,13 @@ mod tests {
                 true,
                 &uid_map,
                 max_uid
-            ),
+            )
+            .unwrap(),
             vec![20, 30]
         );
         // UID * → max uid
         assert_eq!(
-            resolve_intervals(&parse_sequence_set("*").unwrap(), true, &uid_map, max_uid),
+            resolve_intervals(&parse_sequence_set("*").unwrap(), true, &uid_map, max_uid).unwrap(),
             vec![40]
         );
         // UID 15:* → 20,30,40
@@ -4123,7 +4492,8 @@ mod tests {
                 true,
                 &uid_map,
                 max_uid
-            ),
+            )
+            .unwrap(),
             vec![20, 30, 40]
         );
         // sparse: only existing uids in range
@@ -4133,12 +4503,13 @@ mod tests {
                 true,
                 &uid_map,
                 max_uid
-            ),
+            )
+            .unwrap(),
             vec![10, 20]
         );
         // empty mailbox
         assert_eq!(
-            resolve_intervals(&parse_sequence_set("1:*").unwrap(), true, &[], 0),
+            resolve_intervals(&parse_sequence_set("1:*").unwrap(), true, &[], 0).unwrap(),
             Vec::<u64>::new()
         );
     }
@@ -4154,7 +4525,8 @@ mod tests {
                 true,
                 &uid_map,
                 max_uid
-            ),
+            )
+            .unwrap(),
             vec![40]
         );
         // Descending wildcard range *:30 → 30..max
@@ -4164,7 +4536,8 @@ mod tests {
                 true,
                 &uid_map,
                 max_uid
-            ),
+            )
+            .unwrap(),
             vec![30, 40]
         );
         // Sequence mode: seq 5:* on a 4-message mailbox → the last message.
@@ -4174,7 +4547,8 @@ mod tests {
                 false,
                 &uid_map,
                 max_uid
-            ),
+            )
+            .unwrap(),
             vec![40]
         );
         // Sequence mode descending: *:2 → messages 2..=4
@@ -4184,7 +4558,8 @@ mod tests {
                 false,
                 &uid_map,
                 max_uid
-            ),
+            )
+            .unwrap(),
             vec![20, 30, 40]
         );
         // Ranges entirely above the mailbox without a wildcard stay empty.
@@ -4194,7 +4569,8 @@ mod tests {
                 true,
                 &uid_map,
                 max_uid
-            ),
+            )
+            .unwrap(),
             Vec::<u64>::new()
         );
     }
@@ -4472,5 +4848,475 @@ mod tests {
         assert_eq!(tag, "a4");
         assert_eq!(cmd, "NOOP");
         assert_eq!(args, "");
+    }
+
+    // ── N(1): per-IP aggregate lockout ─────────────────────────────────────
+
+    #[tokio::test]
+    async fn auth_ip_aggregate_lockout_blocks_username_spraying() {
+        // Unique IPs so parallel tests cannot interfere via the global table.
+        let ip = format!("10.44.44.44:{}", std::process::id());
+        let other_ip = format!("10.44.44.45:{}", std::process::id());
+
+        // Each individual (ip, username) pair stays below the per-pair limit.
+        for i in 0..AUTH_IP_FAILURE_LIMIT {
+            let user = format!("spray-{}@example.com", i);
+            assert!(
+                !auth_is_locked(&ip, &user).await,
+                "per-pair limit must not trigger with one failure each"
+            );
+            auth_record_failure(&ip, &user).await;
+        }
+
+        // ...but the per-IP aggregate now locks every user from that IP,
+        // including brand-new ones.
+        assert!(auth_is_locked(&ip, "fresh-victim@example.com").await);
+
+        // A different source IP is unaffected (no cross-tenant lockout).
+        assert!(!auth_is_locked(&other_ip, "fresh-victim@example.com").await);
+    }
+
+    // ── A: sequence-set bombs ──────────────────────────────────────────────
+
+    #[test]
+    fn seq_set_interval_count_is_bounded() {
+        // 50k `1:*` intervals in one command must be rejected at parse time,
+        // before any mailbox expansion happens.
+        let bomb = "1:*,".repeat(50_000);
+        let started = std::time::Instant::now();
+        let res = parse_sequence_set(&bomb);
+        let elapsed = started.elapsed();
+        assert!(res.is_err(), "50k intervals must be BAD");
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "parse took too long: {:?}",
+            elapsed
+        );
+        assert!(res
+            .unwrap_err()
+            .to_string()
+            .contains("Too many intervals"));
+
+        // Exactly at the cap is still accepted.
+        let at_cap = "1,".repeat(MAX_SEQ_INTERVALS);
+        assert!(parse_sequence_set(&at_cap.trim_end_matches(',')).is_ok());
+    }
+
+    #[test]
+    fn seq_set_resolution_bomb_is_rejected_fast() {
+        // A view LARGER than the resolution cap: resolving everything must
+        // fail fast at the cap instead of materializing an unbounded set.
+        let big_map: Vec<u64> = (1..=(MAX_RESOLVED_UIDS as u64 + 1)).collect();
+        let started = std::time::Instant::now();
+        let res = resolve_intervals(&[(1, u64::MAX)], true, &big_map, big_map.len() as u64);
+        let elapsed = started.elapsed();
+        assert!(res.is_err(), "resolving past the cap must fail");
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "resolution took too long: {:?}",
+            elapsed
+        );
+        // Repeated hostile ranges do not multiply the work: they collapse.
+        let dupes = vec![(1u64, u64::MAX); MAX_SEQ_INTERVALS];
+        let started = std::time::Instant::now();
+        let res2 = resolve_intervals(&dupes, true, &big_map, big_map.len() as u64);
+        assert!(res2.is_err());
+        assert!(started.elapsed() < Duration::from_secs(2));
+
+        // Exactly AT the cap passes: 1000 x 1:* over a 50k view resolves once.
+        let uid_map: Vec<u64> = (1..=50_000u64).collect();
+        let dupes = vec![(1u64, u64::MAX); 1_000];
+        let resolved = resolve_intervals(&dupes, true, &uid_map, 50_000).unwrap();
+        assert_eq!(resolved.len(), 50_000);
+    }
+
+    // ── I(1): wildcard matching with proper % backtracking ────────────────
+
+    #[test]
+    fn percent_backtracking_cases() {
+        // The classic case the old single-backtrack scanner got wrong.
+        assert!(imap_pattern_match("aab", "%ab"));
+        assert!(imap_pattern_match("aaab", "%ab"));
+        assert!(imap_pattern_match("ab", "%ab")); // % matches empty
+        assert!(!imap_pattern_match("ba", "%ab"));
+        assert!(!imap_pattern_match("ab", "%aab"));
+        // Multiple wildcards requiring backtracking.
+        assert!(imap_pattern_match("xaybz", "x%y%z"));
+        assert!(!imap_pattern_match("xayz", "x%y%w"));
+        // Delimiter semantics: % never crosses '/'.
+        assert!(!imap_pattern_match("Work/Project", "%"));
+        assert!(imap_pattern_match("Work", "%"));
+        assert!(imap_pattern_match("Work/Project", "%/%"));
+        assert!(!imap_pattern_match("Work/Project/Sub", "%/%"));
+        assert!(!imap_pattern_match("a/b", "a%"));
+        assert!(imap_pattern_match("ab", "a%"));
+        assert!(imap_pattern_match("", "%"));
+        assert!(imap_pattern_match("", "*"));
+        // * still crosses the delimiter.
+        assert!(imap_pattern_match("Work/Project", "*"));
+        assert!(imap_pattern_match("Work/Project", "Work/*"));
+        // Case folding.
+        assert!(imap_pattern_match("InBoX", "inbox%"));
+    }
+
+    // ── I(2)/(3): MOVE EXPUNGE wire output + O(n) retain ──────────────────
+
+    #[test]
+    fn expunge_seqs_descending_and_retain_except() {
+        let mut uid_map = vec![10, 20, 30, 40, 50];
+        let seqs = expunge_seqs_descending(&uid_map, &[20, 50]);
+        assert_eq!(seqs, vec![5, 2]);
+        assert_eq!(
+            expunge_response_lines(&seqs),
+            "* 5 EXPUNGE\r\n* 2 EXPUNGE\r\n"
+        );
+        retain_except(&mut uid_map, &[20, 50]);
+        assert_eq!(uid_map, vec![10, 30, 40]);
+        // UIDs not present are ignored.
+        assert_eq!(expunge_seqs_descending(&uid_map, &[999]), Vec::<u32>::new());
+    }
+
+    #[test]
+    fn retain_except_handles_large_sets_fast() {
+        // Loose performance assertion: 100k view x 50k removals must finish
+        // quickly with the HashSet implementation (the naive contains() loop
+        // is quadratic).
+        let mut big: Vec<u64> = (0..100_000u64).map(|i| i * 2).collect();
+        let to_remove: Vec<u64> = (0..50_000u64).map(|i| i * 4).collect();
+        let started = std::time::Instant::now();
+        retain_except(&mut big, &to_remove);
+        let elapsed = started.elapsed();
+        assert_eq!(big.len(), 50_000);
+        assert!(elapsed < Duration::from_secs(2), "took {:?}", elapsed);
+    }
+
+    // ── E: SEARCH criteria token cap ───────────────────────────────────────
+
+    #[test]
+    fn search_token_cap_rejects_criteria_bomb() {
+        let bomb = "SEEN ".repeat(100_000);
+        let started = std::time::Instant::now();
+        let res = collect_search_tokens(&bomb, &[]);
+        let elapsed = started.elapsed();
+        assert!(res.is_err(), "100k criteria tokens must be BAD");
+        assert!(res
+            .unwrap_err()
+            .to_string()
+            .contains("Too many SEARCH criteria"));
+        assert!(elapsed < Duration::from_secs(1));
+
+        // Normal searches pass through unchanged.
+        let ok = collect_search_tokens("SEEN UNSEEN SUBJECT \"hello world\"", &[]).unwrap();
+        assert_eq!(ok.len(), 4);
+        assert_eq!(ok[3], "hello world");
+    }
+
+    // ── H: literal budget ──────────────────────────────────────────────────
+
+    #[test]
+    fn literal_budget_unit_matrix() {
+        const MB: usize = 1024 * 1024;
+        // Single literal within per-literal and total caps.
+        assert!(literal_within_budget(0, 0, 32 * MB));
+        // A single literal over MAX_LITERAL_SIZE fails.
+        assert!(!literal_within_budget(0, 0, 32 * MB + 1));
+        // The "100 x 32MB" scenario: two 32MB literals total exactly 64MB
+        // (allowed at the cap), one byte more is refused.
+        assert!(literal_within_budget(1, 32 * MB, 32 * MB));
+        assert!(!literal_within_budget(1, 32 * MB, 32 * MB + 1));
+        // Count cap: the 65th literal is refused regardless of size.
+        assert!(!literal_within_budget(MAX_LITERALS_PER_COMMAND, 0, 1));
+        assert!(literal_within_budget(MAX_LITERALS_PER_COMMAND - 1, 0, 1));
+        // Total saturates instead of overflowing.
+        assert!(!literal_within_budget(0, usize::MAX, 1));
+    }
+
+    #[tokio::test]
+    async fn read_command_rejects_literal_count_bomb() {
+        use tokio::io::AsyncWriteExt;
+        let (mut client_io, server_io) = tokio::io::duplex(1 << 16);
+        let (mut server_r, mut server_w) = tokio::io::split(server_io);
+        let mut reader = BufReader::new(server_r);
+
+        let client_task = tokio::spawn(async move {
+            client_io.write_all(b"a5 APPEND INBOX {1+}\r\n").await.unwrap();
+            client_io.write_all(b"x").await.unwrap();
+            // 63 more one-byte LITERAL+ literals.
+            for _ in 1..MAX_LITERALS_PER_COMMAND {
+                client_io.write_all(b"x {1+}\r\n").await.unwrap();
+                client_io.write_all(b"x").await.unwrap();
+            }
+            // The (MAX+1)-th literal spec must be rejected before any data
+            // is read for it.
+            client_io.write_all(b"x {1+}\r\n").await.unwrap();
+            let mut sink = [0u8; 8];
+            let _ = client_io.read(&mut sink).await;
+        });
+
+        let result = read_command(&mut reader, &mut server_w).await;
+        // Drop the server halves so the client's trailing read sees EOF.
+        drop(reader);
+        drop(server_w);
+        client_task.await.unwrap();
+        assert!(
+            result.is_err(),
+            "literal count bomb must be an error, got {:?}",
+            result
+        );
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("per-command budget"));
+    }
+
+    // ── D: FETCH response emission ─────────────────────────────────────────
+
+    /// Minimal synchronous AsyncWrite sink for capturing wire output.
+    struct VecWriter(Vec<u8>);
+
+    impl VecWriter {
+        fn new() -> Self {
+            Self(Vec::new())
+        }
+
+        fn output(&self) -> String {
+            String::from_utf8_lossy(&self.0).into_owned()
+        }
+    }
+
+    impl AsyncWrite for VecWriter {
+        fn poll_write(
+            mut self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+            buf: &[u8],
+        ) -> std::task::Poll<std::io::Result<usize>> {
+            self.0.extend_from_slice(buf);
+            std::task::Poll::Ready(Ok(buf.len()))
+        }
+
+        fn poll_flush(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+    }
+
+    #[tokio::test]
+    async fn emit_fetch_response_writes_body_literal() {
+        let mut w = VecWriter::new();
+        let meta = mail_proto::MessageMeta {
+            uid: 7,
+            size: 25,
+            internal_date: 0,
+            flags: Some(MessageFlags::default()),
+            envelope: Some(mail_proto::EmailEnvelope {
+                subject: "hi".to_string(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        // (is_uid=true below prepends the UID attribute, so the item list
+        // mirrors a real `UID FETCH ... FLAGS BODY.PEEK[TEXT]` command.)
+        let items = vec![
+            FetchItem::Flags,
+            FetchItem::Body {
+                section: BodySection::Text,
+                peek: true,
+                name: "BODY[TEXT]".to_string(),
+                partial: None,
+            },
+        ];
+        let body = Ok(GetMessageBody {
+            body: b"From: a\r\n\r\nhello world".to_vec(),
+        });
+        emit_fetch_response(&mut w, 7, 2, &meta, &items, Some(&body), true, false)
+            .await
+            .unwrap();
+        let out = w.output();
+        assert!(
+            out.starts_with("* 2 FETCH (UID 7 FLAGS () BODY[TEXT] {11}\r\n"),
+            "unexpected wire output: {:?}",
+            out
+        );
+        assert!(out.ends_with("hello world)\r\n"), "got {:?}", out);
+    }
+
+    #[tokio::test]
+    async fn emit_fetch_response_body_error_skips_only_body() {
+        let mut w = VecWriter::new();
+        let meta = mail_proto::MessageMeta {
+            uid: 9,
+            size: 0,
+            ..Default::default()
+        };
+        let items = vec![
+            FetchItem::Uid,
+            FetchItem::Body {
+                section: BodySection::Full,
+                peek: true,
+                name: "BODY[]".to_string(),
+                partial: None,
+            },
+        ];
+        let body: Result<GetMessageBody> = Err(anyhow::anyhow!("backend down"));
+        emit_fetch_response(&mut w, 9, 1, &meta, &items, Some(&body), false, false)
+            .await
+            .unwrap();
+        let out = w.output();
+        // Metadata attrs still emitted; only the failed BODY attribute is
+        // omitted rather than failing the whole FETCH.
+        assert_eq!(out, "* 1 FETCH (UID 9)\r\n");
+    }
+
+    // ── B: RENAME flow against a mock mailstore ────────────────────────────
+
+    struct MockRenameApi {
+        /// Current source mailbox contents (UIDs).
+        uids: Vec<u64>,
+        created: Vec<String>,
+        moved: Vec<u64>,
+        deleted: Vec<String>,
+        list_calls: usize,
+        /// Fail the move when it contains this UID.
+        fail_move_for: Option<u64>,
+        /// Simulate a swallowed/failed removal: move "succeeds" but this UID
+        /// stays in the source.
+        keep_in_source: Option<u64>,
+    }
+
+    impl MockRenameApi {
+        fn new(uids: Vec<u64>) -> Self {
+            Self {
+                uids,
+                created: Vec::new(),
+                moved: Vec::new(),
+                deleted: Vec::new(),
+                list_calls: 0,
+                fail_move_for: None,
+                keep_in_source: None,
+            }
+        }
+    }
+
+    impl RenameApi for MockRenameApi {
+        fn create_mailbox(
+            &mut self,
+            _account_id: &str,
+            name: &str,
+        ) -> futures::future::BoxFuture<'_, anyhow::Result<()>> {
+            self.created.push(name.to_string());
+            Box::pin(std::future::ready(Ok(())))
+        }
+
+        fn list_page(
+            &mut self,
+            _account_id: &str,
+            _mailbox: &str,
+            uid_min: u64,
+            uid_max: u64,
+            limit: u32,
+        ) -> futures::future::BoxFuture<'_, anyhow::Result<Vec<u64>>> {
+            self.list_calls += 1;
+            // Mimic the real backend: the NEWEST `limit` UIDs within
+            // [uid_min, uid_max], returned ascending.
+            let in_range: Vec<u64> = self
+                .uids
+                .iter()
+                .copied()
+                .filter(|&u| u >= uid_min && u <= uid_max)
+                .collect();
+            let take = (limit as usize).min(in_range.len());
+            let mut page: Vec<u64> = in_range[in_range.len() - take..].to_vec();
+            page.sort_unstable();
+            Box::pin(std::future::ready(Ok(page)))
+        }
+
+        fn move_messages(
+            &mut self,
+            _account_id: &str,
+            _source: &str,
+            _dest: &str,
+            uids: Vec<u64>,
+        ) -> futures::future::BoxFuture<'_, anyhow::Result<()>> {
+            if let Some(doomed) = self.fail_move_for {
+                if uids.contains(&doomed) {
+                    return Box::pin(std::future::ready(Err(anyhow::anyhow!(
+                        "move failed for uid {}",
+                        doomed
+                    ))));
+                }
+            }
+            self.moved.extend(uids.iter().copied());
+            let keep = self.keep_in_source;
+            let page: HashSet<u64> = uids.iter().copied().collect();
+            self.uids.retain(|u| !page.contains(u) || keep == Some(*u));
+            Box::pin(std::future::ready(Ok(())))
+        }
+
+        fn delete_mailbox(
+            &mut self,
+            _account_id: &str,
+            name: &str,
+        ) -> futures::future::BoxFuture<'_, anyhow::Result<()>> {
+            self.deleted.push(name.to_string());
+            Box::pin(std::future::ready(Ok(())))
+        }
+    }
+
+    #[tokio::test]
+    async fn rename_success_moves_everything_and_deletes_source() {
+        let mut api = MockRenameApi::new((1..=1000).collect());
+        let res = rename_mailbox_flow(&mut api, "acct", "Old", "New").await;
+        assert!(res.is_ok(), "got {:?}", res);
+        assert_eq!(api.moved.len(), 1000);
+        assert!(api.created == vec!["New".to_string()]);
+        assert_eq!(api.deleted, vec!["Old".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn rename_move_failure_returns_error_and_never_deletes_source() {
+        let mut api = MockRenameApi::new(vec![1, 2, 3]);
+        api.fail_move_for = Some(2);
+        let res = rename_mailbox_flow(&mut api, "acct", "Old", "New").await;
+        assert!(res.is_err());
+        assert!(
+            res.unwrap_err().contains("could not move messages"),
+            "must surface the move failure"
+        );
+        assert!(api.deleted.is_empty(), "source mailbox must survive");
+        // Untouched messages still live in the source.
+        assert!(api.uids.contains(&1) && api.uids.contains(&3));
+    }
+
+    #[tokio::test]
+    async fn rename_pages_mailboxes_larger_than_one_page() {
+        // 2.5 pages worth of messages: every one must be moved.
+        let total = (RENAME_PAGE_SIZE as usize * 5) / 2;
+        let mut api = MockRenameApi::new((1..=total as u64).collect());
+        let res = rename_mailbox_flow(&mut api, "acct", "Old", "New").await;
+        assert!(res.is_ok(), "got {:?}", res);
+        assert_eq!(api.moved.len(), total, "overflow beyond one page moved too");
+        assert!(api.list_calls >= 3, "expected multiple pages");
+        assert_eq!(api.deleted, vec!["Old".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn rename_refuses_to_delete_nonempty_source() {
+        // A message that "fails to move" silently (or arrives concurrently)
+        // must prevent the source deletion — the old code cascade-deleted it.
+        let mut api = MockRenameApi::new((1..=10).collect());
+        api.keep_in_source = Some(7);
+        let res = rename_mailbox_flow(&mut api, "acct", "Old", "New").await;
+        assert!(res.is_err());
+        assert!(res.unwrap_err().contains("rename incomplete"));
+        assert!(api.deleted.is_empty(), "source mailbox must survive");
     }
 }

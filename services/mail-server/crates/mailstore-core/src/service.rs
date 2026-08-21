@@ -43,9 +43,20 @@ use mail_proto::generated::{
 /// Mailstore gRPC service
 pub struct MailstoreServiceImpl {
     storage: Arc<MessageStorage>,
-    /// O-4.2:Global rate limiter — 1000 requests per second burst
-    rate_limiter: GovRateLimiter<NotKeyed, InMemoryState, DefaultClock>,
+    /// O-4.2:Per-account rate limiters — 1000 requests/second burst each.
+    ///
+    /// Keyed per account (M): the previous single global limiter let one hot
+    /// account exhaust the entire budget and starve every other tenant.
+    /// Limiters are tracked in a bounded map; when the cap is reached the
+    /// map is reset (memory stays bounded, attackers lose their budget too,
+    /// legitimate accounts rebuild burst within a second).
+    rate_limiters: std::sync::Mutex<HashMap<String, Arc<PerAccountLimiter>>>,
 }
+
+type PerAccountLimiter = GovRateLimiter<NotKeyed, InMemoryState, DefaultClock>;
+
+/// Maximum simultaneously tracked rate-limit keys (bounded memory).
+const MAX_TRACKED_RATE_KEYS: usize = 10_000;
 
 /// A dummy Argon2 password hash used to equalize timing on the
 /// "account not found" and "stored hash unparseable" paths of
@@ -70,6 +81,52 @@ fn dummy_verify_password(password: &[u8]) {
     if let Ok(parsed) = PasswordHash::new(&DUMMY_PASSWORD_HASH) {
         let _ = Argon2::default().verify_password(password, &parsed);
     }
+}
+
+// ── IMAP flag <-> labels column mapping (G) ────────────────────────────────
+//
+// The schema has boolean columns for \Seen/\Flagged/\Deleted/\Spam but none
+// for \Answered/\Draft or custom keywords. The `labels` TEXT[] column is
+// unused elsewhere, so those flags are persisted there — no migration
+// required, and they round-trip through STORE/FETCH FLAGS.
+
+const LABEL_ANSWERED: &str = "\\Answered";
+const LABEL_DRAFT: &str = "\\Draft";
+
+/// IMAP flags without a boolean column, encoded as label entries.
+fn proto_flag_labels(flags: &MessageFlags) -> Vec<String> {
+    let mut labels = Vec::new();
+    if flags.answered {
+        labels.push(LABEL_ANSWERED.to_string());
+    }
+    if flags.draft {
+        labels.push(LABEL_DRAFT.to_string());
+    }
+    for custom in &flags.custom {
+        if !custom.starts_with('\\') {
+            labels.push(custom.clone());
+        }
+    }
+    labels.sort();
+    labels.dedup();
+    labels
+}
+
+/// Decode label entries back into (answered, draft, custom keywords).
+fn labels_to_proto(labels: &[String]) -> (bool, bool, Vec<String>) {
+    let mut answered = false;
+    let mut draft = false;
+    let mut custom = Vec::new();
+    for label in labels {
+        if label.eq_ignore_ascii_case(LABEL_ANSWERED) {
+            answered = true;
+        } else if label.eq_ignore_ascii_case(LABEL_DRAFT) {
+            draft = true;
+        } else {
+            custom.push(label.clone());
+        }
+    }
+    (answered, draft, custom)
 }
 
 #[derive(Debug)]
@@ -245,18 +302,34 @@ fn map_storage_error(context: &str, e: anyhow::Error) -> Status {
 
 impl MailstoreServiceImpl {
     pub fn new(storage: Arc<MessageStorage>) -> Self {
-        // O-4.2:Global rate limiter at 1000 requests/second with burst of 2000
-        let rate_limiter = GovRateLimiter::direct(GovQuota::per_second(nonzero!(1000u32)));
         Self {
             storage,
-            rate_limiter,
+            rate_limiters: std::sync::Mutex::new(HashMap::new()),
         }
     }
 
-    /// O-4.2:Check if the request should be rate-limited.
+    /// O-4.2:Check the per-account rate limit. Each key (account id or, for
+    /// authenticate, the login email) gets its own 1000 req/s budget.
     #[allow(clippy::result_large_err)]
-    fn check_rate_limit<T>(&self, _request: &Request<T>) -> Result<(), Status> {
-        if self.rate_limiter.check().is_err() {
+    fn check_rate_limit(&self, key: &str) -> Result<(), Status> {
+        let key = if key.trim().is_empty() {
+            "-"
+        } else {
+            key.trim()
+        };
+        let limiter = {
+            let mut map = self.rate_limiters.lock().unwrap();
+            if map.len() >= MAX_TRACKED_RATE_KEYS && !map.contains_key(key) {
+                // Bound memory: drop all tracked limiters (see struct docs).
+                map.clear();
+            }
+            Arc::clone(map.entry(key.to_string()).or_insert_with(|| {
+                Arc::new(GovRateLimiter::direct(GovQuota::per_second(nonzero!(
+                    1000u32
+                ))))
+            }))
+        };
+        if limiter.check().is_err() {
             return Err(Status::resource_exhausted(
                 "Rate limit exceeded. Please reduce request frequency.",
             ));
@@ -269,6 +342,8 @@ impl MailstoreServiceImpl {
     }
 
     fn message_to_meta(message: &StoredMessage, mailbox_name: &str) -> MessageMeta {
+        // G: \\Answered / \\Draft / custom keywords live in the labels column.
+        let (answered, draft, custom) = labels_to_proto(&message.labels);
         MessageMeta {
             id: message.id.to_string(),
             account_id: message.account_id.to_string(),
@@ -302,12 +377,12 @@ impl MailstoreServiceImpl {
             }),
             flags: Some(MessageFlags {
                 seen: message.is_read,
-                answered: false,
+                answered,
                 flagged: message.is_starred,
                 deleted: message.is_deleted,
-                draft: false,
+                draft,
                 recent: false,
-                custom: vec![],
+                custom,
             }),
             internal_date: message.date.timestamp(),
         }
@@ -348,57 +423,20 @@ impl MailstoreServiceImpl {
             is_starred: flags.flagged,
             is_deleted: flags.deleted,
             is_spam: false,
+            labels: proto_flag_labels(flags),
         }
     }
 
     fn stored_to_proto_flags(flags: &StoredMessageFlags) -> MessageFlags {
+        let (answered, draft, custom) = labels_to_proto(&flags.labels);
         MessageFlags {
             seen: flags.is_read,
-            answered: false,
+            answered,
             flagged: flags.is_starred,
             deleted: flags.is_deleted,
-            draft: false,
+            draft,
             recent: false,
-            custom: vec![],
-        }
-    }
-
-    fn apply_flag_operation(
-        current: &StoredMessageFlags,
-        update: &MessageFlags,
-        operation: FlagOperation,
-    ) -> StoredMessageFlags {
-        let update_flags = Self::proto_to_stored_flags(update);
-        match operation {
-            FlagOperation::Add => StoredMessageFlags {
-                is_read: current.is_read || update_flags.is_read,
-                is_starred: current.is_starred || update_flags.is_starred,
-                is_deleted: current.is_deleted || update_flags.is_deleted,
-                is_spam: current.is_spam || update_flags.is_spam,
-            },
-            FlagOperation::Remove => StoredMessageFlags {
-                is_read: if update_flags.is_read {
-                    false
-                } else {
-                    current.is_read
-                },
-                is_starred: if update_flags.is_starred {
-                    false
-                } else {
-                    current.is_starred
-                },
-                is_deleted: if update_flags.is_deleted {
-                    false
-                } else {
-                    current.is_deleted
-                },
-                is_spam: if update_flags.is_spam {
-                    false
-                } else {
-                    current.is_spam
-                },
-            },
-            FlagOperation::Set | FlagOperation::Unspecified => update_flags,
+            custom,
         }
     }
 
@@ -450,7 +488,7 @@ impl MailstoreService for MailstoreServiceImpl {
         &self,
         request: Request<StoreMessageRequest>,
     ) -> Result<Response<StoreMessageResponse>, Status> {
-        self.check_rate_limit(&request)?;
+        self.check_rate_limit(&request.get_ref().account_id)?;
         let req = request.into_inner();
 
         let (account_id, mailbox) = self
@@ -483,7 +521,7 @@ impl MailstoreService for MailstoreServiceImpl {
             is_starred: flags.flagged,
             is_deleted: flags.deleted,
             is_spam: false,
-            labels: vec![],
+            labels: proto_flag_labels(&flags),
             headers: metadata.headers,
             attachments: vec![],
             created_at: chrono::Utc::now(),
@@ -519,7 +557,7 @@ impl MailstoreService for MailstoreServiceImpl {
         &self,
         request: Request<GetMessageRequest>,
     ) -> Result<Response<GetMessageResponse>, Status> {
-        self.check_rate_limit(&request)?;
+        self.check_rate_limit(&request.get_ref().account_id)?;
         let req = request.into_inner();
 
         let (account_id, mailbox) = self
@@ -556,7 +594,7 @@ impl MailstoreService for MailstoreServiceImpl {
         &self,
         request: Request<ListMessagesRequest>,
     ) -> Result<Response<ListMessagesResponse>, Status> {
-        self.check_rate_limit(&request)?;
+        self.check_rate_limit(&request.get_ref().account_id)?;
         let req = request.into_inner();
 
         let (account_id, mailbox) = self
@@ -570,11 +608,16 @@ impl MailstoreService for MailstoreServiceImpl {
         );
 
         let limit = Self::clamp_limit(if req.limit > 0 { req.limit as i64 } else { 100 }, 100_000);
+        // UID bounds are pushed into SQL so the storage LIMIT applies AFTER
+        // the bound — the previous post-filter truncated pages lossily for
+        // mailboxes larger than the limit (breaking exact UID paging).
         let messages = self
             .storage
             .list_messages(&MessageQuery {
                 account_id,
                 mailbox_id: Some(mailbox.id),
+                uid_min: (req.uid_min > 0).then_some(req.uid_min),
+                uid_max: (req.uid_max > 0).then_some(req.uid_max),
                 limit,
                 offset: 0,
                 ..Default::default()
@@ -584,16 +627,7 @@ impl MailstoreService for MailstoreServiceImpl {
 
         let metas = messages
             .into_iter()
-            .filter_map(|message| {
-                let uid = Self::message_uid(&message);
-                if (req.uid_min == 0 || uid >= req.uid_min)
-                    && (req.uid_max == 0 || uid <= req.uid_max)
-                {
-                    Some(Self::message_to_meta(&message, &mailbox.name))
-                } else {
-                    None
-                }
-            })
+            .map(|message| Self::message_to_meta(&message, &mailbox.name))
             .collect();
 
         Ok(Response::new(ListMessagesResponse { messages: metas }))
@@ -604,7 +638,7 @@ impl MailstoreService for MailstoreServiceImpl {
         &self,
         request: Request<SearchMessagesRequest>,
     ) -> Result<Response<SearchMessagesResponse>, Status> {
-        self.check_rate_limit(&request)?;
+        self.check_rate_limit(&request.get_ref().account_id)?;
         let req = request.into_inner();
 
         let (account_id, mailbox) = self
@@ -643,7 +677,7 @@ impl MailstoreService for MailstoreServiceImpl {
         &self,
         request: Request<SetFlagsRequest>,
     ) -> Result<Response<SetFlagsResponse>, Status> {
-        self.check_rate_limit(&request)?;
+        self.check_rate_limit(&request.get_ref().account_id)?;
         let req = request.into_inner();
 
         let (account_id, mailbox) = self
@@ -661,27 +695,20 @@ impl MailstoreService for MailstoreServiceImpl {
             return Ok(Response::new(SetFlagsResponse { updated_count: 0 }));
         }
 
-        let current_flags = self
-            .storage
-            .get_message_flags_by_uids(&account_id, &mailbox.id, &uids)
-            .await
-            .map_err(|e| Status::internal(format!("Failed to fetch flags: {}", e)))?;
-
         let update_flags = req.flags.unwrap_or_default();
         let operation = FlagOperation::try_from(req.operation).unwrap_or(FlagOperation::Set);
 
-        let mut updated = 0u32;
-        for uid in &uids {
-            if let Some(current) = current_flags.get(uid) {
-                let merged = Self::apply_flag_operation(current, &update_flags, operation);
-                let rows = self
-                    .storage
-                    .update_message_flags_by_uid(&account_id, &mailbox.id, *uid, &merged)
-                    .await
-                    .map_err(|e| Status::internal(format!("Failed to update flags: {}", e)))?;
-                updated = updated.saturating_add(rows.min(u32::MAX as u64) as u32);
-            }
-        }
+        // F: the whole operation is one SQL statement — the boolean flags
+        // and the label-backed flags merge inside the database, so two
+        // concurrent set_flags calls (e.g. adding different flags) both
+        // persist instead of the second clobbering the first's read.
+        let stored = Self::proto_to_stored_flags(&update_flags);
+        let updated = self
+            .storage
+            .apply_flag_operation_by_uids(&account_id, &mailbox.id, &uids, &stored, operation)
+            .await
+            .map_err(|e| Status::internal(format!("Failed to update flags: {}", e)))?
+            .min(u32::MAX as u64) as u32;
 
         if updated > 0 {
             self.storage
@@ -710,7 +737,7 @@ impl MailstoreService for MailstoreServiceImpl {
         &self,
         request: Request<GetFlagsRequest>,
     ) -> Result<Response<GetFlagsResponse>, Status> {
-        self.check_rate_limit(&request)?;
+        self.check_rate_limit(&request.get_ref().account_id)?;
         let req = request.into_inner();
 
         let (account_id, mailbox) = self
@@ -747,7 +774,7 @@ impl MailstoreService for MailstoreServiceImpl {
         &self,
         request: Request<MoveMessageRequest>,
     ) -> Result<Response<MoveMessageResponse>, Status> {
-        self.check_rate_limit(&request)?;
+        self.check_rate_limit(&request.get_ref().account_id)?;
         let req = request.into_inner();
 
         let (account_id, source_mailbox) = self
@@ -803,7 +830,7 @@ impl MailstoreService for MailstoreServiceImpl {
         &self,
         request: Request<CopyMessageRequest>,
     ) -> Result<Response<CopyMessageResponse>, Status> {
-        self.check_rate_limit(&request)?;
+        self.check_rate_limit(&request.get_ref().account_id)?;
         let req = request.into_inner();
 
         let (account_id, source_mailbox) = self
@@ -861,7 +888,7 @@ impl MailstoreService for MailstoreServiceImpl {
         &self,
         request: Request<CreateMailboxRequest>,
     ) -> Result<Response<CreateMailboxResponse>, Status> {
-        self.check_rate_limit(&request)?;
+        self.check_rate_limit(&request.get_ref().account_id)?;
         let req = request.into_inner();
 
         let account_id = Uuid::parse_str(req.account_id.trim())
@@ -914,7 +941,7 @@ impl MailstoreService for MailstoreServiceImpl {
         &self,
         request: Request<DeleteMailboxRequest>,
     ) -> Result<Response<DeleteMailboxResponse>, Status> {
-        self.check_rate_limit(&request)?;
+        self.check_rate_limit(&request.get_ref().account_id)?;
         let req = request.into_inner();
 
         let account_id = Uuid::parse_str(req.account_id.trim())
@@ -961,7 +988,7 @@ impl MailstoreService for MailstoreServiceImpl {
         &self,
         request: Request<ListMailboxesRequest>,
     ) -> Result<Response<ListMailboxesResponse>, Status> {
-        self.check_rate_limit(&request)?;
+        self.check_rate_limit(&request.get_ref().account_id)?;
         let req = request.into_inner();
 
         let account_id = Uuid::parse_str(req.account_id.trim())
@@ -999,7 +1026,7 @@ impl MailstoreService for MailstoreServiceImpl {
         &self,
         request: Request<GetMailboxStatusRequest>,
     ) -> Result<Response<GetMailboxStatusResponse>, Status> {
-        self.check_rate_limit(&request)?;
+        self.check_rate_limit(&request.get_ref().account_id)?;
         let req = request.into_inner();
 
         let (_account_id, mailbox) = self
@@ -1023,7 +1050,7 @@ impl MailstoreService for MailstoreServiceImpl {
         &self,
         request: Request<ExpungeRequest>,
     ) -> Result<Response<ExpungeResponse>, Status> {
-        self.check_rate_limit(&request)?;
+        self.check_rate_limit(&request.get_ref().account_id)?;
         let req = request.into_inner();
 
         let (account_id, mailbox) = self
@@ -1066,7 +1093,7 @@ impl MailstoreService for MailstoreServiceImpl {
         &self,
         request: Request<CreateAccountRequest>,
     ) -> Result<Response<CreateAccountResponse>, Status> {
-        self.check_rate_limit(&request)?;
+        self.check_rate_limit("sys:create-account")?;
         let req = request.into_inner();
 
         if req.email.trim().is_empty() || req.password.is_empty() {
@@ -1113,7 +1140,14 @@ impl MailstoreService for MailstoreServiceImpl {
         &self,
         request: Request<GetAccountRequest>,
     ) -> Result<Response<GetAccountResponse>, Status> {
-        self.check_rate_limit(&request)?;
+        self.check_rate_limit(&{
+            let r = request.get_ref();
+            if r.account_id.trim().is_empty() {
+                r.email.clone()
+            } else {
+                r.account_id.clone()
+            }
+        })?;
         let req = request.into_inner();
 
         let account = if !req.account_id.trim().is_empty() {
@@ -1148,7 +1182,7 @@ impl MailstoreService for MailstoreServiceImpl {
         &self,
         request: Request<AuthenticateRequest>,
     ) -> Result<Response<AuthenticateResponse>, Status> {
-        self.check_rate_limit(&request)?;
+        self.check_rate_limit(&request.get_ref().email)?;
         let req = request.into_inner();
         debug!(email = %mail_common::pii::redact_email(&req.email), "Authentication attempt");
 
@@ -1216,7 +1250,7 @@ impl MailstoreService for MailstoreServiceImpl {
         &self,
         request: Request<GetQuotaRequest>,
     ) -> Result<Response<GetQuotaResponse>, Status> {
-        self.check_rate_limit(&request)?;
+        self.check_rate_limit(&request.get_ref().account_id)?;
         let req = request.into_inner();
 
         let account_id = Uuid::parse_str(req.account_id.trim())
@@ -1253,7 +1287,7 @@ impl MailstoreService for MailstoreServiceImpl {
         &self,
         request: Request<SubscribeMailboxRequest>,
     ) -> Result<Response<Self::SubscribeMailboxStream>, Status> {
-        self.check_rate_limit(&request)?;
+        self.check_rate_limit(&request.get_ref().account_id)?;
         let req = request.into_inner();
 
         let (account_id, mailbox) = self
@@ -1329,6 +1363,8 @@ impl MailstoreService for MailstoreServiceImpl {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::MessageStorage;
+    use sqlx::PgPool;
 
     #[test]
     fn parse_message_metadata_extracts_envelope_fields() {
@@ -1378,5 +1414,117 @@ mod tests {
         assert_eq!(metadata.from_address, "unknown@localhost");
         assert!(metadata.to_addresses.is_empty());
         assert!(metadata.subject.is_empty());
+    }
+
+    // ── M: per-account rate limiter isolation ──────────────────────────────
+
+    #[tokio::test]
+    async fn rate_limit_one_account_cannot_exhaust_another() {
+        // Lazy pool: check_rate_limit never queries, so no DB is needed.
+        let pool = PgPool::connect_lazy("postgres://localhost/apexmail_test").unwrap();
+        let svc = MailstoreServiceImpl::new(Arc::new(MessageStorage::new(pool)));
+
+        let hot = "11111111-1111-1111-1111-111111111111";
+        let quiet = "22222222-2222-2222-2222-222222222222";
+
+        // The hot account burns its ENTIRE per-second burst (1000 req/s).
+        for _ in 0..1000 {
+            assert!(svc.check_rate_limit(hot).is_ok());
+        }
+        assert!(
+            svc.check_rate_limit(hot).is_err(),
+            "hot account must hit its own limit"
+        );
+
+        // The other account's budget is untouched — the old global limiter
+        // starved it here.
+        for _ in 0..100 {
+            assert!(svc.check_rate_limit(quiet).is_ok());
+        }
+
+        // Empty keys share a fallback bucket instead of panic-ing.
+        assert!(svc.check_rate_limit("").is_ok());
+    }
+
+    // ── G: IMAP flag <-> labels round-trip ─────────────────────────────────
+
+    #[test]
+    fn imap_flag_labels_round_trip() {
+        let proto = MessageFlags {
+            seen: true,
+            answered: true,
+            flagged: true,
+            deleted: false,
+            draft: true,
+            recent: false,
+            custom: vec!["Junk".to_string(), "$label1".to_string()],
+        };
+
+        let stored = MailstoreServiceImpl::proto_to_stored_flags(&proto);
+        assert!(stored.is_read && stored.is_starred && !stored.is_deleted);
+        // \\Answered, \\Draft and custom keywords all land in labels.
+        assert_eq!(stored.labels.len(), 4);
+
+        let back = MailstoreServiceImpl::stored_to_proto_flags(&stored);
+        assert!(back.answered, "\\Answered must survive the round trip");
+        assert!(back.draft, "\\Draft must survive the round trip");
+        assert!(back.seen && back.flagged && !back.deleted);
+        let mut custom = back.custom.clone();
+        custom.sort();
+        assert_eq!(custom, vec!["$label1".to_string(), "Junk".to_string()]);
+    }
+
+    #[test]
+    fn message_meta_exposes_label_backed_flags() {
+        // STORE +FLAGS (\\Answered \\Draft) then FETCH FLAGS — the meta the
+        // FETCH path serializes must carry the label-backed flags.
+        let message = StoredMessage {
+            id: Uuid::new_v4(),
+            account_id: Uuid::new_v4(),
+            mailbox_id: Uuid::new_v4(),
+            uid: 5,
+            message_id: "<m@example.com>".to_string(),
+            from_address: "a@example.com".to_string(),
+            from_name: None,
+            to_addresses: vec![],
+            cc_addresses: vec![],
+            bcc_addresses: vec![],
+            subject: "s".to_string(),
+            date: chrono::Utc::now(),
+            text_body: None,
+            html_body: None,
+            raw_message: None,
+            raw_size: 0,
+            is_read: true,
+            is_starred: false,
+            is_deleted: false,
+            is_spam: false,
+            labels: vec![
+                "\\Answered".to_string(),
+                "\\Draft".to_string(),
+                "NonJunk".to_string(),
+            ],
+            headers: serde_json::Value::Null,
+            attachments: vec![],
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+
+        let meta = MailstoreServiceImpl::message_to_meta(&message, "INBOX");
+        let flags = meta.flags.expect("flags present");
+        assert!(flags.seen);
+        assert!(flags.answered, "\\Answered must come back from labels");
+        assert!(flags.draft, "\\Draft must come back from labels");
+        assert_eq!(flags.custom, vec!["NonJunk".to_string()]);
+    }
+
+    #[test]
+    fn proto_flag_labels_ignores_system_prefixed_customs() {
+        let proto = MessageFlags {
+            custom: vec!["\\Recent".to_string(), "Keyword".to_string()],
+            ..Default::default()
+        };
+        let labels = proto_flag_labels(&proto);
+        assert_eq!(labels, vec!["Keyword".to_string()]);
     }
 }

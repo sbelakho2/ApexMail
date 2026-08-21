@@ -1,6 +1,8 @@
 // rustfmt doesn't do a very good job on nom parser invocations.
 #![cfg_attr(rustfmt, rustfmt_skip)]
 
+use nom::IResult;
+
 use crate::core::*;
 use crate::types::*;
 
@@ -248,11 +250,46 @@ named!(pub(crate) body<BodyStructure>, paren_delimited!(
     alt!(body_type_text | body_type_message | body_type_basic | body_type_multipart)
 ));
 
-named!(pub(crate) msg_att_body_structure<AttributeValue>, do_parse!(
+/// Maximum accepted BODYSTRUCTURE nesting depth. Every recursion level in
+/// `body` / `body_extension` consumes at least one `(`, so pre-scanning the
+/// paren nesting depth bounds the recursive descent. Without this cap a
+/// hostile server could overflow the client's stack with deeply nested
+/// parentheses.
+const MAX_BODYSTRUCTURE_DEPTH: usize = 64;
+
+fn max_paren_depth(input: &[u8]) -> usize {
+    let mut depth = 0usize;
+    let mut max = 0usize;
+    for &b in input {
+        match b {
+            b'(' => {
+                depth += 1;
+                if depth > max {
+                    max = depth;
+                }
+            }
+            b')' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+    }
+    max
+}
+
+named!(msg_att_body_structure_inner<AttributeValue>, do_parse!(
     tag_no_case!("BODYSTRUCTURE ") >>
     body: body >>
     (AttributeValue::BodyStructure(body))
 ));
+
+pub(crate) fn msg_att_body_structure(input: &[u8]) -> IResult<&[u8], AttributeValue> {
+    if max_paren_depth(input) > MAX_BODYSTRUCTURE_DEPTH {
+        return Err(nom::Err::Error(nom::error::make_error(
+            input,
+            nom::error::ErrorKind::TooLarge,
+        )));
+    }
+    msg_att_body_structure_inner(input)
+}
 
 #[cfg(test)]
 mod tests {
@@ -293,6 +330,40 @@ mod tests {
                 extension: None,
             }
         )
+    }
+
+    #[test]
+    fn test_deeply_nested_bodystructure_is_rejected_not_stack_overflow() {
+        // 200 nested parens after BODYSTRUCTURE: far beyond the depth cap,
+        // must return an error quickly instead of recursing to a stack
+        // overflow.
+        let depth = 200;
+        let input = format!(
+            "* 1 FETCH (BODYSTRUCTURE {}{})\r\n",
+            "(".repeat(depth),
+            ")".repeat(depth)
+        );
+        let started = std::time::Instant::now();
+        let res = crate::parser::parse_response(input.as_bytes());
+        let elapsed = started.elapsed();
+        assert!(res.is_err(), "nested bomb must parse to an error");
+        assert!(elapsed.as_secs() < 5, "took too long: {:?}", elapsed);
+    }
+
+    #[test]
+    fn test_moderately_nested_bodystructure_within_cap_parses() {
+        // Depth 3 is fine.
+        const RESPONSE: &[u8] = b"* 2 FETCH (BODYSTRUCTURE ((\"TEXT\" \"PLAIN\" (\"CHARSET\" \"US-ASCII\") NIL NIL \"7BIT\" 3028 92)(\"APPLICATION\" \"OCTET-STREAM\" (\"NAME\" \"cc.cc\") NIL NIL \"BASE64\" 2424) \"MIXED\"))\r\n";
+        match crate::parser::parse_response(RESPONSE) {
+            Ok((_, crate::types::Response::Fetch(_, attrs))) => {
+                assert!(
+                    matches!(attrs[0], crate::types::AttributeValue::BodyStructure(_)),
+                    "expected BODYSTRUCTURE, got {:?}",
+                    attrs[0]
+                );
+            },
+            rsp => panic!("unexpected response {:?}", rsp),
+        }
     }
 
     #[test]

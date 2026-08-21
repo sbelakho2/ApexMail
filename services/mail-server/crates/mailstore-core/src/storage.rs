@@ -17,6 +17,11 @@ use crate::models::*;
 /// `row_to_message` can distinguish encrypted content from legacy plaintext.
 const ENCRYPTED_PREFIX: &str = "$AES256GCM$";
 
+/// Hard cap on stored (non-deleted) messages per account. Mirrors the
+/// `max_messages` quota advertised by the service (100_000); enforced inside
+/// the store transaction so concurrent deliveries cannot overshoot.
+const MAX_MESSAGES_PER_ACCOUNT: i64 = 100_000;
+
 /// Returned by [`MessageStorage::store_message`] when storing a message would
 /// push the account over its storage quota. Mapped to a
 /// `ResourceExhausted` gRPC status by the service layer.
@@ -71,10 +76,23 @@ impl MessageStorage {
         self.encryption_key.is_some()
     }
 
-    /// Encrypt a body string (text_body or html_body) if encryption is enabled.
-    /// Returns `$AES256GCM$<base64(ciphertext)>` when encryption is active,
-    /// or the original `None`/`Some(plaintext)` when not.
-    fn encrypt_body(&self, body: Option<String>) -> Result<Option<String>> {
+    /// AAD binding a message's encrypted content to its owning account and
+    /// row identity (N: AAD binding). The row id is stable across MOVEs and
+    /// new rows are re-encrypted on COPY, so ciphertext cannot be relocated
+    /// between accounts but mail keeps working after moves.
+    fn message_aad(account_id: &Uuid, message_id: &Uuid) -> Vec<u8> {
+        let mut aad = b"apexmail:message:".to_vec();
+        aad.extend_from_slice(account_id.as_bytes());
+        aad.push(b':');
+        aad.extend_from_slice(message_id.as_bytes());
+        aad
+    }
+
+    /// Encrypt a body string (text_body or html_body) if encryption is
+    /// enabled, bound to the given AAD. Returns `$AES256GCM$<base64(ciphertext)>`
+    /// when encryption is active, or the original `None`/`Some(plaintext)`
+    /// when not.
+    fn encrypt_body(&self, body: Option<String>, aad: &[u8]) -> Result<Option<String>> {
         let plaintext = match body {
             Some(t) => t,
             None => return Ok(None),
@@ -83,7 +101,7 @@ impl MessageStorage {
             Some(k) => k,
             None => return Ok(Some(plaintext)),
         };
-        let ciphertext = encryption::encrypt(plaintext.as_bytes(), key)?;
+        let ciphertext = encryption::encrypt_with_aad(plaintext.as_bytes(), key, aad)?;
         let encoded = format!(
             "{}{}",
             ENCRYPTED_PREFIX,
@@ -94,8 +112,10 @@ impl MessageStorage {
 
     /// Decrypt a body string previously encrypted by [`encrypt_body`].
     /// If the value does not start with `$AES256GCM$`, it is returned as-is
-    /// (legacy plaintext backward compatibility).
-    fn decrypt_body(&self, body: Option<String>) -> Result<Option<String>> {
+    /// (legacy plaintext backward compatibility). Values encrypted with the
+    /// new AAD binding decrypt with the matching AAD; rows written before
+    /// AAD binding (empty AAD) decrypt via an explicit fallback.
+    fn decrypt_body(&self, body: Option<String>, aad: &[u8]) -> Result<Option<String>> {
         let stored = match body {
             Some(t) => t,
             None => return Ok(None),
@@ -108,7 +128,12 @@ impl MessageStorage {
             let ciphertext = base64::engine::general_purpose::STANDARD
                 .decode(encoded)
                 .map_err(|e| anyhow!("Failed to decode encrypted body: {e}"))?;
-            let plaintext = encryption::decrypt(&ciphertext, key)?;
+            let plaintext = match encryption::decrypt_with_aad(&ciphertext, key, aad) {
+                Ok(pt) => pt,
+                // Backward compatibility: rows encrypted before AAD binding
+                // used an empty AAD.
+                Err(_) => encryption::decrypt_with_aad(&ciphertext, key, &[])?,
+            };
             let result = String::from_utf8(plaintext)
                 .map_err(|e| anyhow!("Decrypted body is not valid UTF-8: {e}"))?;
             Ok(Some(result))
@@ -118,9 +143,10 @@ impl MessageStorage {
         }
     }
 
-    /// Encrypt raw RFC5322 message bytes at rest when encryption is enabled.
-    /// The `$AES256GCM$` prefix distinguishes ciphertext from legacy values.
-    fn encrypt_raw(&self, raw: Option<Vec<u8>>) -> Result<Option<Vec<u8>>> {
+    /// Encrypt raw RFC5322 message bytes at rest when encryption is enabled,
+    /// bound to the given AAD. The `$AES256GCM$` prefix distinguishes
+    /// ciphertext from legacy values.
+    fn encrypt_raw(&self, raw: Option<Vec<u8>>, aad: &[u8]) -> Result<Option<Vec<u8>>> {
         let plaintext = match raw {
             Some(t) => t,
             None => return Ok(None),
@@ -129,7 +155,7 @@ impl MessageStorage {
             Some(k) => k,
             None => return Ok(Some(plaintext)),
         };
-        let ciphertext = encryption::encrypt(&plaintext, key)?;
+        let ciphertext = encryption::encrypt_with_aad(&plaintext, key, aad)?;
         let encoded = base64::engine::general_purpose::STANDARD.encode(&ciphertext);
         let mut result = Vec::with_capacity(ENCRYPTED_PREFIX.len() + encoded.len());
         result.extend_from_slice(ENCRYPTED_PREFIX.as_bytes());
@@ -138,8 +164,9 @@ impl MessageStorage {
     }
 
     /// Decrypt raw message bytes previously encrypted by [`encrypt_raw`].
-    /// Values without the `$AES256GCM$` prefix are passed through unchanged.
-    fn decrypt_raw(&self, raw: Option<Vec<u8>>) -> Result<Option<Vec<u8>>> {
+    /// Values without the `$AES256GCM$` prefix are passed through unchanged;
+    /// pre-AAD rows fall back to an empty AAD.
+    fn decrypt_raw(&self, raw: Option<Vec<u8>>, aad: &[u8]) -> Result<Option<Vec<u8>>> {
         let stored = match raw {
             Some(t) => t,
             None => return Ok(None),
@@ -152,7 +179,11 @@ impl MessageStorage {
             let ciphertext = base64::engine::general_purpose::STANDARD
                 .decode(encoded)
                 .map_err(|e| anyhow!("Failed to decode encrypted raw message: {e}"))?;
-            let plaintext = encryption::decrypt(&ciphertext, key)?;
+            let plaintext = match encryption::decrypt_with_aad(&ciphertext, key, aad) {
+                Ok(pt) => pt,
+                // Backward compatibility: rows encrypted before AAD binding.
+                Err(_) => encryption::decrypt_with_aad(&ciphertext, key, &[])?,
+            };
             Ok(Some(plaintext))
         } else {
             // Legacy plaintext value – return as-is
@@ -574,6 +605,21 @@ impl MessageStorage {
             }
         }
 
+        // N: enforce the message-count quota inside the same transaction (the
+        // account row lock above serializes concurrent deliveries).
+        let used_messages: i64 = sqlx::query_scalar(
+            r#"
+            SELECT COUNT(*) FROM mail_messages
+            WHERE account_id = $1 AND is_deleted = false
+        "#,
+        )
+        .bind(message.account_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        if used_messages >= MAX_MESSAGES_PER_ACCOUNT {
+            return Err(QuotaExceeded.into());
+        }
+
         // DI-006: Check for existing message with the same message_id in this mailbox.
         // This prevents duplicate insertion when the same email is delivered twice.
         if !message.message_id.is_empty() {
@@ -621,10 +667,12 @@ impl MessageStorage {
         .fetch_one(&mut *tx)
         .await?;
 
-        // O‑4.3:Encrypt body content before storing if encryption is enabled
-        let encrypted_text = self.encrypt_body(message.text_body.clone())?;
-        let encrypted_html = self.encrypt_body(message.html_body.clone())?;
-        let encrypted_raw = self.encrypt_raw(message.raw_message.clone())?;
+        // O‑4.3:Encrypt body content before storing if encryption is enabled,
+        // bound to the account + row id (see message_aad).
+        let aad = Self::message_aad(&message.account_id, &message.id);
+        let encrypted_text = self.encrypt_body(message.text_body.clone(), &aad)?;
+        let encrypted_html = self.encrypt_body(message.html_body.clone(), &aad)?;
+        let encrypted_raw = self.encrypt_raw(message.raw_message.clone(), &aad)?;
 
         let id = sqlx::query_scalar::<_, Uuid>(r#"
             INSERT INTO mail_messages (
@@ -765,6 +813,18 @@ impl MessageStorage {
             param_idx += 1;
         }
 
+        // UID bounds are pushed into SQL (not post-filtered) so LIMIT-based
+        // paging over the UID space is exact even in mailboxes larger than
+        // one page.
+        if query.uid_min.is_some() {
+            sql.push_str(&format!(" AND uid >= ${}", param_idx));
+            param_idx += 1;
+        }
+        if query.uid_max.is_some() {
+            sql.push_str(&format!(" AND uid <= ${}", param_idx));
+            param_idx += 1;
+        }
+
         if query.is_read.is_some() {
             sql.push_str(&format!(" AND is_read = ${}", param_idx));
             param_idx += 1;
@@ -794,6 +854,12 @@ impl MessageStorage {
 
         if let Some(ref mailbox_id) = query.mailbox_id {
             q = q.bind(mailbox_id);
+        }
+        if let Some(uid_min) = query.uid_min {
+            q = q.bind(uid_min.min(i64::MAX as u64) as i64);
+        }
+        if let Some(uid_max) = query.uid_max {
+            q = q.bind(uid_max.min(i64::MAX as u64) as i64);
         }
         if let Some(is_read) = query.is_read {
             q = q.bind(is_read);
@@ -828,6 +894,16 @@ impl MessageStorage {
         // O-4.1:Reject empty queries and queries shorter than minimum term length
         if q.len() < Self::MIN_SEARCH_TERM_LENGTH {
             return Ok((Vec::new(), 0));
+        }
+
+        // Fail closed: with encryption at rest, text_body is ciphertext and
+        // the to_tsvector index below would match ciphertext tokens,
+        // returning wrong results. Refuse the search instead — the IMAP
+        // layer surfaces this as NO rather than silently wrong matches.
+        if self.is_encryption_enabled() {
+            return Err(anyhow!(
+                "SEARCH not supported with encrypted store (index would match ciphertext)"
+            ));
         }
 
         let total: i64 = sqlx::query_scalar(
@@ -884,7 +960,7 @@ impl MessageStorage {
 
         let rows = sqlx::query(
             r#"
-            SELECT uid, is_read, is_starred, is_deleted, is_spam
+            SELECT uid, is_read, is_starred, is_deleted, is_spam, labels
             FROM mail_messages
             WHERE account_id = $1 AND mailbox_id = $2 AND uid = ANY($3)
         "#,
@@ -898,6 +974,7 @@ impl MessageStorage {
         let mut map = HashMap::new();
         for row in rows {
             let uid: i64 = row.get("uid");
+            let labels: Option<Vec<String>> = row.get("labels");
             map.insert(
                 uid,
                 MessageFlags {
@@ -905,11 +982,83 @@ impl MessageStorage {
                     is_starred: row.get("is_starred"),
                     is_deleted: row.get("is_deleted"),
                     is_spam: row.get("is_spam"),
+                    labels: labels.unwrap_or_default(),
                 },
             );
         }
 
         Ok(map)
+    }
+
+    /// SQL assignment clause implementing each flag operation entirely in the
+    /// database (F: lost-update fix). Booleans merge with OR / AND NOT and the
+    /// label-backed IMAP flags merge as array union/difference, so two
+    /// concurrent flag updates both persist instead of one clobbering the
+    /// other based on a stale read.
+    fn flag_update_sql(operation: mail_proto::generated::FlagOperation) -> &'static str {
+        use mail_proto::generated::FlagOperation;
+        match operation {
+            FlagOperation::Add => {
+                "SET is_read = is_read OR $4, \
+                 is_starred = is_starred OR $5, \
+                 is_deleted = is_deleted OR $6, \
+                 is_spam = is_spam OR $7, \
+                 labels = (SELECT COALESCE(array_agg(DISTINCT l), ARRAY[]::text[]) \
+                           FROM unnest(labels || $8::text[]) AS l), \
+                 updated_at = NOW()"
+            }
+            FlagOperation::Remove => {
+                "SET is_read = is_read AND NOT $4, \
+                 is_starred = is_starred AND NOT $5, \
+                 is_deleted = is_deleted AND NOT $6, \
+                 is_spam = is_spam AND NOT $7, \
+                 labels = COALESCE(ARRAY(SELECT DISTINCT l FROM unnest(labels) AS l \
+                           WHERE l <> ALL($8::text[])), ARRAY[]::text[]), \
+                 updated_at = NOW()"
+            }
+            FlagOperation::Set | FlagOperation::Unspecified => {
+                "SET is_read = $4, is_starred = $5, is_deleted = $6, is_spam = $7, \
+                 labels = $8::text[], updated_at = NOW()"
+            }
+        }
+    }
+
+    /// Apply a flag operation to a set of UIDs in a single SQL statement per
+    /// operation (F: replaces the read-modify-write loop, eliminating the
+    /// lost-update race between concurrent set_flags calls).
+    pub async fn apply_flag_operation_by_uids(
+        &self,
+        account_id: &Uuid,
+        mailbox_id: &Uuid,
+        uids: &[i64],
+        flags: &MessageFlags,
+        operation: mail_proto::generated::FlagOperation,
+    ) -> Result<u64> {
+        if uids.is_empty() {
+            return Ok(0);
+        }
+        // SAFETY: flag_update_sql returns one of three compile-time constant
+        // strings; only bind placeholders ($4..$8) are interpolated.
+        let sql = format!(
+            r#"
+            UPDATE mail_messages
+            {}
+            WHERE account_id = $1 AND mailbox_id = $2 AND uid = ANY($3)
+        "#,
+            Self::flag_update_sql(operation)
+        );
+        let result = sqlx::query(&sql)
+            .bind(account_id)
+            .bind(mailbox_id)
+            .bind(uids)
+            .bind(flags.is_read)
+            .bind(flags.is_starred)
+            .bind(flags.is_deleted)
+            .bind(flags.is_spam)
+            .bind(&flags.labels)
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected())
     }
 
     /// Update message flags by UID.
@@ -923,7 +1072,8 @@ impl MessageStorage {
         let result = sqlx::query(
             r#"
             UPDATE mail_messages
-            SET is_read = $4, is_starred = $5, is_deleted = $6, is_spam = $7, updated_at = NOW()
+            SET is_read = $4, is_starred = $5, is_deleted = $6, is_spam = $7,
+                labels = $8::text[], updated_at = NOW()
             WHERE account_id = $1 AND mailbox_id = $2 AND uid = $3
         "#,
         )
@@ -934,6 +1084,7 @@ impl MessageStorage {
         .bind(flags.is_starred)
         .bind(flags.is_deleted)
         .bind(flags.is_spam)
+        .bind(&flags.labels)
         .execute(&self.pool)
         .await?;
 
@@ -974,7 +1125,8 @@ impl MessageStorage {
         sqlx::query(
             r#"
             UPDATE mail_messages
-            SET is_read = $2, is_starred = $3, is_deleted = $4, is_spam = $5, updated_at = NOW()
+            SET is_read = $2, is_starred = $3, is_deleted = $4, is_spam = $5,
+                labels = $6::text[], updated_at = NOW()
             WHERE id = $1
         "#,
         )
@@ -983,6 +1135,7 @@ impl MessageStorage {
         .bind(flags.is_starred)
         .bind(flags.is_deleted)
         .bind(flags.is_spam)
+        .bind(&flags.labels)
         .execute(&self.pool)
         .await?;
 
@@ -1285,14 +1438,18 @@ impl MessageStorage {
     // ========== Helper Methods ==========
 
     fn row_to_message(&self, row: &sqlx::postgres::PgRow) -> Result<StoredMessage> {
+        let account_id: Uuid = row.get("account_id");
+        let id: Uuid = row.get("id");
+        let aad = Self::message_aad(&account_id, &id);
         // O‑4.3:Decrypt body content if encryption is enabled.
-        // Backward compatible: plaintext bodies are passed through unchanged.
+        // Backward compatible: plaintext bodies are passed through unchanged,
+        // and pre-AAD rows fall back to an empty AAD inside decrypt_*.
         let text_body: Option<String> = row.get("text_body");
         let html_body: Option<String> = row.get("html_body");
-        let text_body = self.decrypt_body(text_body)?;
-        let html_body = self.decrypt_body(html_body)?;
+        let text_body = self.decrypt_body(text_body, &aad)?;
+        let html_body = self.decrypt_body(html_body, &aad)?;
         let raw_message: Option<Vec<u8>> = row.get("raw_message");
-        let raw_message = self.decrypt_raw(raw_message)?;
+        let raw_message = self.decrypt_raw(raw_message, &aad)?;
 
         Ok(StoredMessage {
             id: row.get("id"),
@@ -1398,5 +1555,168 @@ impl MessageStorage {
         .await?;
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A lazy pool never connects unless a query runs; the helpers under
+    /// test either never touch the DB or fail closed before querying.
+    fn lazy_storage_with_encryption() -> MessageStorage {
+        let pool = PgPool::connect_lazy("postgres://localhost/apexmail_test").unwrap();
+        MessageStorage::with_encryption(pool, b"0123456789abcdef0123456789abcdef".to_vec())
+    }
+
+    fn lazy_storage_without_encryption() -> MessageStorage {
+        let pool = PgPool::connect_lazy("postgres://localhost/apexmail_test").unwrap();
+        MessageStorage::new(pool)
+    }
+
+    #[tokio::test]
+    async fn body_encryption_binds_aad_and_relocation_fails() {
+        let store = lazy_storage_with_encryption();
+        let account = Uuid::new_v4();
+        let row = Uuid::new_v4();
+        let other_row = Uuid::new_v4();
+        let aad = MessageStorage::message_aad(&account, &row);
+        let other_aad = MessageStorage::message_aad(&account, &other_row);
+
+        let enc = store
+            .encrypt_body(Some("secret body".to_string()), &aad)
+            .unwrap()
+            .expect("encrypted value");
+        assert!(enc.starts_with("$AES256GCM$"));
+
+        // Matching AAD decrypts.
+        assert_eq!(
+            store.decrypt_body(Some(enc.clone()), &aad).unwrap(),
+            Some("secret body".to_string())
+        );
+        // A relocated ciphertext (different row AAD) must NOT decrypt.
+        assert!(store.decrypt_body(Some(enc.clone()), &other_aad).is_err());
+    }
+
+    #[tokio::test]
+    async fn body_decryption_falls_back_to_pre_aad_rows_and_plaintext() {
+        let store = lazy_storage_with_encryption();
+        let account = Uuid::new_v4();
+        let aad = MessageStorage::message_aad(&account, &Uuid::new_v4());
+
+        // Legacy plaintext value passes through untouched.
+        assert_eq!(
+            store.decrypt_body(Some("plain".to_string()), &aad).unwrap(),
+            Some("plain".to_string())
+        );
+        // A row encrypted BEFORE AAD binding (empty AAD) still decrypts via
+        // the fallback path.
+        let key = b"0123456789abcdef0123456789abcdef";
+        let legacy = encryption::encrypt(b"old row", key).unwrap();
+        let encoded = format!(
+            "{}{}",
+            ENCRYPTED_PREFIX,
+            base64::engine::general_purpose::STANDARD.encode(&legacy)
+        );
+        assert_eq!(
+            store.decrypt_body(Some(encoded), &aad).unwrap(),
+            Some("old row".to_string())
+        );
+        // None stays None.
+        assert_eq!(store.decrypt_body(None, &aad).unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn raw_encryption_binds_aad_and_falls_back() {
+        let store = lazy_storage_with_encryption();
+        let aad = MessageStorage::message_aad(&Uuid::new_v4(), &Uuid::new_v4());
+        let other_aad = MessageStorage::message_aad(&Uuid::new_v4(), &Uuid::new_v4());
+
+        let enc = store
+            .encrypt_raw(Some(b"raw rfc822 bytes".to_vec()), &aad)
+            .unwrap()
+            .expect("encrypted value");
+        assert!(enc.starts_with(ENCRYPTED_PREFIX.as_bytes()));
+        assert_eq!(
+            store.decrypt_raw(Some(enc.clone()), &aad).unwrap(),
+            Some(b"raw rfc822 bytes".to_vec())
+        );
+        assert!(store.decrypt_raw(Some(enc), &other_aad).is_err());
+
+        // Legacy raw plaintext passes through.
+        assert_eq!(
+            store.decrypt_raw(Some(b"plain".to_vec()), &aad).unwrap(),
+            Some(b"plain".to_vec())
+        );
+    }
+
+    #[test]
+    fn aad_is_deterministic_and_scoped() {
+        let account = Uuid::new_v4();
+        let id = Uuid::new_v4();
+        assert_eq!(
+            MessageStorage::message_aad(&account, &id),
+            MessageStorage::message_aad(&account, &id)
+        );
+        assert_ne!(
+            MessageStorage::message_aad(&account, &id),
+            MessageStorage::message_aad(&Uuid::new_v4(), &id)
+        );
+        assert_ne!(
+            MessageStorage::message_aad(&account, &id),
+            MessageStorage::message_aad(&account, &Uuid::new_v4())
+        );
+    }
+
+    #[tokio::test]
+    async fn search_fails_closed_on_encrypted_store_without_touching_db() {
+        let store = lazy_storage_with_encryption();
+        // Must error BEFORE any query: with a lazy (unconnected) pool a DB
+        // touch would surface a connection error instead of this message.
+        let err = store
+            .search_messages(&Uuid::new_v4(), &Uuid::new_v4(), "finding", 10, 0)
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("encrypted store"),
+            "unexpected error: {}",
+            err
+        );
+
+        // Short queries still short-circuit to empty (honest no-results).
+        let unencrypted = lazy_storage_without_encryption();
+        let (msgs, total) = unencrypted
+            .search_messages(&Uuid::new_v4(), &Uuid::new_v4(), "x", 10, 0)
+            .await
+            .unwrap();
+        assert!(msgs.is_empty());
+        assert_eq!(total, 0);
+    }
+
+    #[test]
+    fn flag_update_sql_merges_in_database() {
+        use mail_proto::generated::FlagOperation;
+        // Add: OR-merge the booleans, union the labels.
+        let add = MessageStorage::flag_update_sql(FlagOperation::Add);
+        assert!(add.contains("is_read = is_read OR $4"));
+        assert!(add.contains("is_starred = is_starred OR $5"));
+        assert!(add.contains("is_deleted = is_deleted OR $6"));
+        assert!(add.contains("labels || $8::text[]"));
+        // Remove: AND NOT the booleans, subtract the labels.
+        let remove = MessageStorage::flag_update_sql(FlagOperation::Remove);
+        assert!(remove.contains("is_read = is_read AND NOT $4"));
+        assert!(remove.contains("l <> ALL($8::text[])"));
+        // Set: plain assignment of both booleans and labels.
+        let set = MessageStorage::flag_update_sql(FlagOperation::Set);
+        assert!(set.contains("is_read = $4"));
+        assert!(set.contains("labels = $8::text[]"));
+        assert_eq!(
+            MessageStorage::flag_update_sql(FlagOperation::Unspecified),
+            set
+        );
+        // All three templates keep the timestamp bump.
+        for sql in [add, remove, set] {
+            assert!(sql.contains("updated_at = NOW()"));
+        }
     }
 }

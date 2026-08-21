@@ -137,6 +137,10 @@ pub struct MessageFlags {
     pub is_starred: bool,
     pub is_deleted: bool,
     pub is_spam: bool,
+    /// IMAP flags with no dedicated boolean column (\\Answered, \\Draft and
+    /// custom keywords) are persisted in the `labels` TEXT[] column so they
+    /// round-trip without a schema change.
+    pub labels: Vec<String>,
 }
 
 /// Message list query
@@ -147,6 +151,10 @@ pub struct MessageQuery {
     pub is_read: Option<bool>,
     pub is_starred: Option<bool>,
     pub is_deleted: Option<bool>,
+    /// Inclusive UID lower bound (pushed into SQL so LIMIT paging is exact).
+    pub uid_min: Option<u64>,
+    /// Inclusive UID upper bound (pushed into SQL so LIMIT paging is exact).
+    pub uid_max: Option<u64>,
     pub search_query: Option<String>,
     pub from_date: Option<DateTime<Utc>>,
     pub to_date: Option<DateTime<Utc>>,

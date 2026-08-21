@@ -35,3 +35,8 @@ project = "dochtman/Projects"
 
 [badges.maintenance]
 status = "passively-maintained"
+
+# Standalone test builds: this crate is patched into the parent workspace
+# (see the root [patch.crates-io]) but is not a member, so cargo refuses to
+# run its tests without an explicit empty workspace table here.
+[workspace]

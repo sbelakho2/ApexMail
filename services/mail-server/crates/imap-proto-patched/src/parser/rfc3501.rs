@@ -376,7 +376,9 @@ named!(msg_att_envelope<AttributeValue>, do_parse!(
 named!(msg_att_internal_date<AttributeValue>, do_parse!(
     tag_no_case!("INTERNALDATE ") >>
     date: nstring_utf8 >>
-    (AttributeValue::InternalDate(date.unwrap()))
+    // RFC 3501 INTERNALDATE is always a quoted date-time, but tolerate a
+    // malformed NIL instead of panicking on unwrap().
+    (AttributeValue::InternalDate(date.unwrap_or("")))
 ));
 
 named!(msg_att_flags<AttributeValue>, do_parse!(
@@ -461,7 +463,14 @@ named!(resp_text<(Option<ResponseCode>, Option<&str>)>, do_parse!(
         let res = if text.is_empty() {
             None
         } else if code.is_some() {
-            Some(&text[1..])
+            // A resp-text-code is normally followed by SP + text; drop the
+            // leading space. Strip char-safely: a malformed response whose
+            // text starts with a multibyte byte sequence must not panic on
+            // the byte slice below.
+            match text.strip_prefix(' ') {
+                Some(rest) => Some(rest),
+                None => Some(text),
+            }
         } else {
             Some(text)
         };
@@ -845,6 +854,36 @@ mod tests {
         match parse_response(b"* 4644 FETCH (UID ") {
             Err(nom::Err::Incomplete(_)) => {},
             rsp => panic!("should be incomplete: {:?}", rsp),
+        }
+    }
+
+    #[test]
+    fn test_internal_date_nil_does_not_panic() {
+        // A malformed NIL INTERNALDATE used to hit unwrap() and panic.
+        match parse_response(b"* 1 FETCH (INTERNALDATE NIL)\r\n") {
+            Ok((_, Response::Fetch(_, attrs))) => {
+                assert_eq!(attrs[0], AttributeValue::InternalDate(""));
+            },
+            rsp => panic!("unexpected response {:?}", rsp),
+        }
+    }
+
+    #[test]
+    fn test_resp_text_multibyte_after_code_does_not_panic() {
+        // `&text[1..]` used to slice mid-char and panic when the text after
+        // a response code began with a multibyte sequence.
+        match parse_response("a OK [ALERT] \u{fc}n\u{ef}code\r\n".as_bytes()) {
+            Ok((_, Response::Done { information, .. })) => {
+                assert_eq!(information, Some("\u{fc}n\u{ef}code"));
+            },
+            rsp => panic!("unexpected response {:?}", rsp),
+        }
+        // With the conventional leading space the space is still stripped.
+        match parse_response("a NO [PARSE] f\u{e4}il\r\n".as_bytes()) {
+            Ok((_, Response::Done { information, .. })) => {
+                assert_eq!(information, Some("f\u{e4}il"));
+            },
+            rsp => panic!("unexpected response {:?}", rsp),
         }
     }
 
