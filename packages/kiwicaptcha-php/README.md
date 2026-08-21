@@ -2,7 +2,7 @@
 
 Privacy-preserving proof-of-work anti-abuse protection with first-party behavioral heuristics as a supplementary signal, for PHP 8.1+. There are no third-party services, requests, or tracking, and no iframes. The widget is an inline script that solves a SHA-256 (or memory-hard Argon2id) proof-of-work via an embedded WASM solver with a pure-JS fallback. This package is the framework-neutral core. The Symfony integration lives in the separate [`bel-consulting/kiwicaptcha-symfony`](packages/kiwicaptcha/integrations/symfony/README.md) bundle.
 
-KiwiCaptcha is not a reliable human-vs-bot discriminator. A human never solves the challenge; their CPU does, and a bot's CPU can do the same work. The core value is economic: every signup/login/reset/scraping attempt carries a real, tunable computational cost, making mass abuse uneconomical. Browser behavioral telemetry is a supplement, not the security boundary. It is client-controlled and forgeable.
+KiwiCaptcha is not a reliable human-vs-bot discriminator. A human never solves the challenge; their CPU does, and a bot's CPU can do the same work. The core value is economic: every signup/login/reset/scraping attempt carries a real, tunable computational cost, making mass abuse uneconomical. Browser behavioral telemetry is a supplementary, client-controlled signal and is forgeable.
 
 This package is fully self-contained. It implements the entire KiwiCaptcha protocol itself (challenge issuance, HMAC signing, IP binding, single-use storage, proof-of-work verification) and needs nothing but PHP + libsodium.
 
@@ -14,20 +14,20 @@ Byte-for-byte compatible with the reference implementation in
 **Protocol v2** (current issuance, `protocol_version` 2):
 
 - canonical payload = `v2|nonce|scope|binding_tag|issued_at|expires_at|algorithm|m_kib|t|p|target_bits|salt|min_duration_ms|region|policy_version|request_binding|issuer|kid`
-  (the canonical key set is `ChallengeRecord::WIRE_KEYS`, the single
-  source of truth for the record schema; `region`/`request_binding`/
-  `issuer` render as empty segments when unset; `policy_version` is the
-  security-policy epoch, default 1; `issuer` is the deployment identity,
+- The canonical key set is `ChallengeRecord::WIRE_KEYS`, the single
+  source of truth for the record schema. `region`/`request_binding`/
+  `issuer` render as empty segments when unset. `policy_version` is the
+  security-policy epoch, default 1. `issuer` is the deployment identity,
   a dev/staging/production compartment that holds even with shared secret
-  keys; `kid` is the signing key id, default 1, the final canonical field.
+  keys. `kid` is the signing key id, default 1, the final canonical field.
   The verifier selects the signature secret per kid via `secretsByKid`
   and rejects any record whose kid is in its `revokedKids` set with
-  UnknownKid immediately. Compromise revocation overrides the rotation
-  grace.)
+  UnknownKid immediately; compromise revocation overrides the rotation
+  grace.
 - challenge = `base64(canonical_payload) + "." + hex(hmac_sha256(secret, canonical_payload))`.
   Every record field that shapes verification is covered by the HMAC, so
   a tampered record can never pass.
-- prefix = `challenge + "|" + salt + "|"` (salt = base64 of 16 random bytes)
+- prefix = `challenge + "|" + salt + "|"`, with salt = base64 of 16 random bytes.
 - nonce-bound IP binding: the record's `binding_tag` is an HMAC-SHA256 of
   the canonical IP form (4-byte IPv4 / 16-byte IPv6, IPv4-mapped IPv6
   normalized to IPv4) keyed by the secret and bound to the challenge nonce
@@ -147,9 +147,9 @@ BelConsulting\KiwiCaptchaBundle\KiwiCaptchaBundle::class => ['all' => true],
 
 and provides the Twig widget (`kiwi_captcha_widget`), the `KiwiCaptchaType`
 form field, the `KiwiCaptcha` validator constraint, and the
-`POST /kiwi-captcha/challenge` endpoint. See its
-[README](packages/kiwicaptcha/integrations/symfony/README.md) for
-configuration. Without Symfony, use the core directly:
+`POST /kiwi-captcha/challenge` endpoint. See the
+[bundle documentation](packages/kiwicaptcha/integrations/symfony/README.md)
+for configuration. Without Symfony, use the core directly:
 
 ```php
 use KiwiCaptcha\Config;
@@ -202,8 +202,9 @@ if ($outcome->isOk()) { /* allow */ }
 ## Symfony integration
 
 The Symfony integration is not bundled in this package. It lives in the
-separate [`bel-consulting/kiwicaptcha-symfony`](packages/kiwicaptcha/integrations/symfony/README.md)
-bundle, which depends on this core via Composer. It provides:
+separate `bel-consulting/kiwicaptcha-symfony` bundle (see the
+[integration package](packages/kiwicaptcha/integrations/symfony/README.md)),
+which depends on this core via Composer. It provides:
 
 - the Twig widget (`kiwi_captcha_widget`),
 - the `KiwiCaptchaType` form field,
@@ -266,7 +267,7 @@ release, never ad-hoc against a running Redis.
 The Symfony bundle (`bel-consulting/kiwicaptcha-symfony`) fails fast: if
 `storage` is left at the in-memory default in any environment other than
 `test`/`dev`, the container throws a `LogicException` with this guidance
-instead of silently losing every challenge between requests under PHP-FPM.
+instead of silently losing every challenge between requests under `PHP-FPM`.
 
 ## Testing
 
@@ -275,51 +276,52 @@ composer install
 vendor/bin/phpunit
 ```
 
-434 tests / 1113 assertions covering cross-language parity (SHA-256 + Argon2id
+434 tests / 1113 assertions cover cross-language parity (SHA-256 + Argon2id
 fixtures generated by the Rust crate), protocol v2 (canonical payload,
 nonce-bound binding tags over the canonical IP form incl. IPv4-mapped IPv6
 normalization, `binding_tag`/`protocol_version` record schema evolution,
-counter bounds), token codec edge cases, replay, tampering, expiry, IP
-binding, minimum duration, clock-skew tolerance, the one-shot
-consume-on-verify model, kid-keyed secrets with compromise revocation,
-allocation/length and recursion hardening (the 659-accepted differential
-fuzz corpus, 1 MB token and 10 MB body caps, 100k-level nesting), and the
-storage adapters (Array, PSR-6, Redis, including the language-neutral JSON
-record format). The Symfony integration is tested in the
-`bel-consulting/kiwicaptcha-symfony` package.
+and counter bounds), token codec edge cases, replay, tampering, expiry,
+IP binding, minimum duration, and clock-skew tolerance. They also cover
+the one-shot consume-on-verify model, kid-keyed secrets with compromise
+revocation, allocation/length and recursion hardening (the 659-accepted
+differential fuzz corpus, 1 MB token and 10 MB body caps, 100k-level
+nesting), and the storage adapters (Array, PSR-6, Redis, including the
+language-neutral JSON record format).
+
+The Symfony integration is tested in the `bel-consulting/kiwicaptcha-symfony`
+package.
 
 ## Limitations
 
-1. **Proof of computation, not proof of human.** KiwiCaptcha verifies that a
+1. Proof of computation, not proof of human. KiwiCaptcha verifies that a
    client spent CPU time, not that a human did. Any automated client that
    pays the same cost passes. It protects against mass signups,
    credential-stuffing economics, scraping, and endpoint flooding; combine
    it with first-party server evidence (rate/reputation, passkeys, email
    verification) for high-value operations. Do not add fingerprinting to
    "prove" humanity; it is forgeable and sacrifices privacy.
-2. **Telemetry is client-controlled and forgeable.** Whatever the widget
+2. Telemetry is client-controlled and forgeable. Whatever the widget
    reports, a custom client can omit or fake. Treat telemetry as a
    supplementary signal, never the security boundary, and rely on
    server-side abuse signals (per-account/IP-HMAC/network velocity, PoW
    success ratios, concurrent unsolved challenges). Keep telemetry off by
-   default (Privacy Strict).
-3. **IP binding is best-effort and mode-dependent.** `none` disables it
+   default.
+3. IP binding is best-effort and mode-dependent. `none` disables it
    (purest privacy); `bound` uses a nonce-bound HMAC (no stable
    identifier, breaks under IP churn). IPs legitimately change behind
    NAT/proxies, so a strict binding would reject real users. It is a
    relay mitigation, not a guarantee, and operators can disable the check
    entirely.
-4. **Server-side timing needs a trusted clock, and is only a heuristic.**
-   The minimum-duration floor is measured by your server, so a client
-   cannot buy its way out of it. It is a timing-anomaly heuristic, not a
-   gate: a fast bot can always wait before submitting (it still pays the
-   full PoW cost per attempt), and a valid solution can occur at counter
-   0. The server clock must be correct: timing uses wall-clock epoch
-   microseconds (persisted in the challenge record), so all hosts
-   involved must be NTP-synced. A 5s skew tolerance
-   (`Verifier::SKEW_TOLERANCE_US`) keeps slightly unsynced hosts from
-   failing verification, and the proof-of-work check is never skipped.
-5. **The WASM solver and its JS fallback are open source.** An attacker can
+4. Server-side timing needs a trusted clock, and is only a heuristic.
+   The minimum-duration floor is measured by your server. A fast bot can
+   always wait before submitting (it still pays the full PoW cost per
+   attempt), and a valid solution can occur at counter 0. The server
+   clock must be correct: timing uses wall-clock epoch microseconds
+   (persisted in the challenge record), so all hosts involved must be
+   NTP-synced. A 5s skew tolerance (`Verifier::SKEW_TOLERANCE_US`) keeps
+   slightly unsynced hosts passing verification while the proof-of-work
+   check still applies.
+5. The WASM solver and its JS fallback are open source. An attacker can
    always write their own solver (or reuse the source). The value is the
    cost per attempt, not the impossibility of solving: they still cannot
    predict the nonce, salt, secret, or signed parameters, and must still
@@ -390,4 +392,4 @@ application must not add any.
 
 ## License
 
-MIT, see [LICENSE](LICENSE). Copyright (c) 2026 Bel Consulting OÜ.
+MIT, see the [license file](LICENSE). Copyright (c) 2026 Bel Consulting OÜ.

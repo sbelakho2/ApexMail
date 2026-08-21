@@ -2,10 +2,10 @@
 2 .github/workflows/regenerate-assets.yml
 47 .github/workflows/release.yml
 2 .github/workflows/sync-assets.yml
-15 README.md
+14 README.md
 4 SECURITY.md
 4 packages/kiwicaptcha-php/CHANGELOG.md
-12 packages/kiwicaptcha-php/README.md
+6 packages/kiwicaptcha-php/README.md
 0 packages/kiwicaptcha-php/src/AtomicStorageInterface.php
 0 packages/kiwicaptcha-php/src/Challenge.php
 0 packages/kiwicaptcha-php/src/ChallengeProfile.php
@@ -332,4 +332,4 @@
 0 tests/browser/specs/risk-v2.spec.mjs
 2 tests/browser/specs/security.spec.mjs
 1 tests/browser/specs/widget.spec.mjs
-TOTAL 1039
+TOTAL 1032
