@@ -17,7 +17,7 @@ use std::net::SocketAddr;
 use axum::{
     body::Body,
     extract::{ConnectInfo, DefaultBodyLimit, Request, State},
-    http::{HeaderMap, HeaderValue, StatusCode},
+    http::{HeaderMap, StatusCode},
     middleware::{self, Next},
     response::Response,
     routing::{get, post},
@@ -174,6 +174,47 @@ fn is_in_trusted(ip: std::net::IpAddr, ranges: &[ipnetwork::IpNetwork]) -> bool 
 
 // ── Rate-limiting middleware ───────────────────────────────────────────────────
 
+/// G.1: emergency in-process quota applied while Redis (the primary limiter)
+/// is unreachable. Bounded fail-open: instead of unlimited pass-through, each
+/// IP gets at most `EMERGENCY_LOCAL_LIMIT` requests per minute counted in
+/// process memory. Conservative by design — well below the configured
+/// ceiling in normal operation.
+const EMERGENCY_LOCAL_LIMIT: u32 = 120;
+
+#[derive(Default)]
+struct LocalFallbackWindow {
+    minute: u64,
+    count: u32,
+}
+
+/// Per-IP, per-minute local fallback counter (single-process only).
+static LOCAL_FALLBACK: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, LocalFallbackWindow>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+fn local_fallback_limit(configured: u32) -> u32 {
+    configured.min(EMERGENCY_LOCAL_LIMIT).max(1)
+}
+
+/// Count `ip` against the local fallback window; true when still allowed.
+fn local_fallback_allows(ip: &str, configured: u32, now_min: u64) -> bool {
+    let limit = local_fallback_limit(configured);
+    let mut map = LOCAL_FALLBACK.lock().unwrap_or_else(|e| e.into_inner());
+    // Opportunistic cleanup: drop stale windows so the map cannot grow
+    // without bound during a long Redis outage.
+    map.retain(|_, w| w.minute == now_min);
+    let window = map.entry(ip.to_string()).or_default();
+    if window.minute != now_min {
+        window.minute = now_min;
+        window.count = 0;
+    }
+    if window.count >= limit {
+        return false;
+    }
+    window.count += 1;
+    true
+}
+
 /// Redis sliding-window rate limiter:max N requests per minute per IP.
 /// Uses the `rl:{ip}:{minute}` key scheme (scoped under the `tracking:` keyPrefix).
 async fn rate_limit_middleware(
@@ -218,35 +259,82 @@ async fn rate_limit_middleware(
     .await;
 
     match result {
-        Ok(count) if count > cfg.max_per_minute as u64 => {
-            warn!(ip = %ip, count = count, "Rate limit exceeded");
-            let path = req.uri().path();
-            let mut resp = if path.contains("/o/") || path.ends_with(".gif") {
-                // Return a transparent GIF for pixel paths (-500-351)
-                let len = TRANSPARENT_GIF.len().to_string();
-                Response::builder()
-                    .status(StatusCode::TOO_MANY_REQUESTS)
-                    .header("content-type", "image/gif")
-                    .header("content-length", len)
-                    .header("retry-after", "60")
-                    .body(Body::from(TRANSPARENT_GIF))
-                    .unwrap_or_default()
-            } else {
-                Response::builder()
-                    .status(StatusCode::TOO_MANY_REQUESTS)
-                    .header("content-type", "application/json")
-                    .header("retry-after", "60")
-                    .body(Body::from(r#"{"error":"Rate limit exceeded"}"#))
-                    .unwrap_or_default()
-            };
-            resp.headers_mut()
-                .insert("retry-after", HeaderValue::from_static("60"));
-            resp
-        }
+        Ok(count) if count > cfg.max_per_minute as u64 => rate_limited_response(&ip, count, req),
         Err(e) => {
-            tracing::error!(error = %e, "Rate limit Redis error, allowing request");
-            next.run(req).await
+            // G.1: bounded fail-open — Redis errors no longer mean unlimited
+            // traffic; a conservative local per-IP quota still applies.
+            tracing::error!(error = %e, "Rate limit Redis error — applying local emergency quota");
+            if local_fallback_allows(&ip, cfg.max_per_minute, now_min) {
+                next.run(req).await
+            } else {
+                warn!(ip = %ip, "Local emergency rate limit exceeded");
+                rate_limited_response(&ip, u64::from(local_fallback_limit(cfg.max_per_minute)), req)
+            }
         }
         _ => next.run(req).await,
+    }
+}
+
+fn rate_limited_response(ip: &str, count: u64, req: Request) -> Response {
+    warn!(ip = %ip, count = count, "Rate limit exceeded");
+    let path = req.uri().path();
+    if path.contains("/o/") || path.ends_with(".gif") {
+        // Return a transparent GIF for pixel paths (-500-351)
+        let len = TRANSPARENT_GIF.len().to_string();
+        Response::builder()
+            .status(StatusCode::TOO_MANY_REQUESTS)
+            .header("content-type", "image/gif")
+            .header("content-length", len)
+            .header("retry-after", "60")
+            .body(Body::from(TRANSPARENT_GIF))
+            .unwrap_or_default()
+    } else {
+        Response::builder()
+            .status(StatusCode::TOO_MANY_REQUESTS)
+            .header("content-type", "application/json")
+            .header("retry-after", "60")
+            .body(Body::from(r#"{"error":"Rate limit exceeded"}"#))
+            .unwrap_or_default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// G.1: the local fallback limit is the conservative emergency quota,
+    /// clamped by (and never above) the configured Redis limit.
+    #[test]
+    fn local_fallback_limit_is_conservative() {
+        assert_eq!(local_fallback_limit(1000), EMERGENCY_LOCAL_LIMIT);
+        assert_eq!(local_fallback_limit(60), 60);
+        assert_eq!(local_fallback_limit(0), 1, "never zero (fail-closed-ish)");
+    }
+
+    /// G.1: when Redis is down, an IP is still capped — the emergency quota
+    /// bounds the fail-open window instead of allowing unlimited traffic.
+    #[test]
+    fn local_fallback_allows_only_up_to_the_emergency_quota() {
+        LOCAL_FALLBACK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+        const IP: &str = "198.51.100.7";
+        let limit = local_fallback_limit(1000);
+        for i in 0..limit {
+            assert!(
+                local_fallback_allows(IP, 1000, 4242),
+                "request {} must be allowed",
+                i + 1
+            );
+        }
+        assert!(
+            !local_fallback_allows(IP, 1000, 4242),
+            "request beyond the emergency quota must be throttled"
+        );
+        // Other IPs are unaffected (per-IP windows).
+        assert!(local_fallback_allows("198.51.100.8", 1000, 4242));
+        // A new minute resets the window.
+        assert!(local_fallback_allows(IP, 1000, 4243));
     }
 }

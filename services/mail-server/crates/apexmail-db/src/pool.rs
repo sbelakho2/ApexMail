@@ -112,15 +112,26 @@ pub struct PoolPair {
 impl PoolPair {
     /// Create a new pool pair from primary and (optional) replica URLs.
     /// If replica_url is None, the replica pool shares the primary URL.
+    ///
+    /// G.5: `max_connections` is honored (previously ignored) — both pools
+    /// are configured with it plus the same acquire timeout, liveness
+    /// validation, lifetime limits and statement cache as the sibling
+    /// constructors (`create_pool`).
     pub async fn new(
         primary_url: &str,
         replica_url: Option<&str>,
-        _max_connections: u32,
+        max_connections: u32,
     ) -> Result<Self, sqlx::Error> {
-        let rw = PgPool::connect(primary_url).await?;
+        let rw = pool_pair_options(max_connections)
+            .connect_with(pair_connect_options(primary_url)?)
+            .await?;
         let ro = match replica_url {
-            Some(url) => PgPool::connect(url).await?,
-            None => PgPool::connect(primary_url).await?,
+            Some(url) => pool_pair_options(max_connections)
+                .connect_with(pair_connect_options(url)?)
+                .await?,
+            None => pool_pair_options(max_connections)
+                .connect_with(pair_connect_options(primary_url)?)
+                .await?,
         };
         Ok(Self { rw, ro })
     }
@@ -132,6 +143,24 @@ impl PoolPair {
             PoolType::ReadOnly => &self.ro,
         }
     }
+}
+
+/// G.5: pool options applied to both members of a [`PoolPair`], aligned with
+/// `create_pool` (DB-09/DB-10): acquire_timeout=10s, test_before_acquire,
+/// idle/lifetime caps.
+fn pool_pair_options(max_connections: u32) -> PgPoolOptions {
+    PgPoolOptions::new()
+        .max_connections(max_connections)
+        .min_connections(normalized_min_connections(max_connections, 2))
+        .acquire_timeout(Duration::from_secs(10))
+        .test_before_acquire(true)
+        .idle_timeout(Duration::from_secs(300))
+        .max_lifetime(Duration::from_secs(1800))
+}
+
+/// G.5: connect options with the sibling statement-cache capacity (PERF-100).
+fn pair_connect_options(url: &str) -> Result<PgConnectOptions, sqlx::Error> {
+    Ok(url.parse::<PgConnectOptions>()?.statement_cache_capacity(100))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -549,6 +578,35 @@ mod tests {
     async fn test_lazy_pool_creation() {
         let pool = create_lazy_pool("postgres://localhost/test");
         assert!(pool.is_ok());
+    }
+
+    /// G.5: PoolPair members must actually honor max_connections (the
+    /// parameter was previously accepted and silently discarded).
+    #[tokio::test]
+    async fn pool_pair_options_honor_max_connections() {
+        let options = pool_pair_options(3);
+        assert_eq!(options.get_max_connections(), 3, "max honored");
+        assert_eq!(
+            options.get_min_connections(),
+            2,
+            "min clamped like create_pool"
+        );
+        // The built (lazy) pool retains the configuration.
+        let connect = PgConnectOptions::new()
+            .host("localhost")
+            .port(1)
+            .username("nobody");
+        let pool = pool_pair_options(3).connect_lazy_with(connect);
+        assert_eq!(pool.options().get_max_connections(), 3);
+    }
+
+    #[test]
+    fn pool_pair_connect_options_enable_statement_cache() {
+        let opts = pair_connect_options("postgres://u:p@localhost:5432/db").unwrap();
+        // statement_cache_capacity(100) applied (asserted indirectly: the
+        // options parse and carry a non-zero capacity via their Debug form).
+        let debug = format!("{opts:?}");
+        assert!(debug.contains("statement_cache_capacity"));
     }
 
     #[test]

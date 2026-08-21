@@ -48,15 +48,59 @@ pub fn generate_request_id() -> String {
     generate_id("req", 16)
 }
 
-/// Generate a webhook signing key.
-pub fn generate_webhook_secret() -> String {
-    generate_id("whsec", 24)
+/// F: generate `len` characters from `alphabet` using OsRng with rejection
+/// sampling (no modulo bias). Shared by the security-sensitive generators
+/// (webhook secrets, verification tokens) — the nanoid path is NOT used for
+/// secrets because its PRNG is not cryptographically secure.
+fn generate_secure_from_alphabet(alphabet: &[u8], len: usize) -> Result<String, String> {
+    use rand::rngs::OsRng;
+    use rand::TryRngCore;
+
+    if alphabet.is_empty() {
+        return Err("alphabet must not be empty".into());
+    }
+    // Largest multiple of alphabet.len() that fits in u8 — values above it
+    // are rejected and redrawn so every character is equally likely.
+    let alphabet_len = alphabet.len() as u16;
+    let bound = (256u32 / alphabet_len as u32 * alphabet_len as u32) as u8;
+    let mut out = String::with_capacity(len);
+    let mut bytes = [0u8; 64];
+    let mut filled = 0;
+    while out.len() < len {
+        if filled == 0 {
+            OsRng
+                .try_fill_bytes(&mut bytes)
+                .map_err(|e| format!("OsRng failure: {e}"))?;
+            filled = bytes.len();
+        }
+        filled -= 1;
+        let b = bytes[filled];
+        if b < bound {
+            out.push(alphabet[(b as usize) % alphabet.len()] as char);
+        }
+    }
+    Ok(out)
 }
 
-/// Generate an email verification token.
-pub fn generate_verification_token() -> String {
-    generate_id("vfy", 32)
+/// Generate a webhook signing key (F: CSPRNG-backed, 24 chars of [0-9a-z],
+/// same length/format as the previous nanoid implementation but drawn from
+/// OsRng with rejection sampling).
+pub fn generate_webhook_secret() -> String {
+    let body = generate_secure_from_alphabet(DEFAULT_ALPHABET_MAP, 24)
+        .expect("OsRng-backed generation should not fail");
+    format!("whsec_{body}")
 }
+
+/// Generate an email verification token (F: CSPRNG-backed, 32 chars of
+/// [0-9a-z]).
+pub fn generate_verification_token() -> String {
+    let body = generate_secure_from_alphabet(DEFAULT_ALPHABET_MAP, 32)
+        .expect("OsRng-backed generation should not fail");
+    format!("vfy_{body}")
+}
+
+/// The DEFAULT_ALPHABET as bytes ([0-9a-z], 36 chars).
+const DEFAULT_ALPHABET_MAP: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyz";
 
 #[cfg(test)]
 mod tests {
@@ -101,5 +145,52 @@ mod tests {
     fn test_webhook_secret() {
         let s = generate_webhook_secret();
         assert!(s.starts_with("whsec_"));
+    }
+
+    // ── F: CSPRNG-backed secret generators ─────────────────────────────
+
+    #[test]
+    fn webhook_secret_length_and_charset() {
+        for _ in 0..100 {
+            let s = generate_webhook_secret();
+            assert!(s.starts_with("whsec_"), "got {s}");
+            let body = &s["whsec_".len()..];
+            assert_eq!(body.len(), 24, "length preserved: {s}");
+            assert!(
+                body.chars().all(|c| c.is_ascii_digit() || c.is_ascii_lowercase()),
+                "alphanumeric charset only: {s}"
+            );
+        }
+    }
+
+    #[test]
+    fn verification_token_length_and_charset() {
+        for _ in 0..100 {
+            let s = generate_verification_token();
+            assert!(s.starts_with("vfy_"), "got {s}");
+            let body = &s["vfy_".len()..];
+            assert_eq!(body.len(), 32, "length preserved: {s}");
+            assert!(
+                body.chars().all(|c| c.is_ascii_digit() || c.is_ascii_lowercase()),
+                "alphanumeric charset only: {s}"
+            );
+        }
+    }
+
+    #[test]
+    fn secret_generators_unique_over_10k_draws() {
+        // Note: the entropy SOURCE itself cannot be asserted from userland —
+        // these tests pin length, charset, and collision-freedom of the
+        // output distribution.
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..10_000 {
+            assert!(seen.insert(generate_webhook_secret()));
+            assert!(seen.insert(generate_verification_token()));
+        }
+    }
+
+    #[test]
+    fn secure_alphabet_rejects_empty() {
+        assert!(generate_secure_from_alphabet(b"", 8).is_err());
     }
 }

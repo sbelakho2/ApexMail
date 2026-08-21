@@ -113,6 +113,8 @@ impl AnalyticsConfig {
                 tracing::warn!("failed to load .env: {error}");
             }
         }
+        let node_env = std::env::var("NODE_ENV").unwrap_or_else(|_| "development".into());
+        let is_production = matches!(node_env.as_str(), "production" | "prod");
         let mut config = Self {
             database_url: std::env::var("DATABASE_URL").unwrap_or_default(),
             redis_url: std::env::var("REDIS_URL")
@@ -165,9 +167,18 @@ impl AnalyticsConfig {
         if let Err(err) = config.validate() {
             tracing::error!(error = %err, "Invalid analytics config; applying safe defaults");
             if config.database_url.trim().is_empty() {
-                config.database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
-                    "postgres://postgres:postgres@localhost:5432/apexmail".into()
-                });
+                // G.7: no credential-bearing fallback URL. Only a local
+                // trust-style development default is applied, and only
+                // outside production — production keeps the empty value so
+                // the invalid config surfaces (see `validate`).
+                if is_production {
+                    tracing::error!(
+                        "DATABASE_URL is not set in production — refusing to invent a \
+                         credential-bearing default; analytics will fail to start"
+                    );
+                } else {
+                    config.database_url = "postgres://apexmail@localhost:5432/apexmail".into();
+                }
             }
             if config.redis_url.trim().is_empty() {
                 config.redis_url =
@@ -188,6 +199,14 @@ impl AnalyticsConfig {
             if config.compaction.cold_retention_days < config.compaction.hot_retention_days {
                 config.compaction.cold_retention_days = config.compaction.hot_retention_days;
             }
+        }
+        if is_production && config.sto_hmac_key.trim().is_empty() {
+            // D.2: unsalted SHA-256 fallback must not silently activate in
+            // production — analytics PII hashing REQUIRES the HMAC key there.
+            tracing::error!(
+                "ANALYTICS_STO_HMAC_KEY must be set in production (PII hashing would \
+                 otherwise fall back to unsalted SHA-256)"
+            );
         }
         config
     }
@@ -217,13 +236,33 @@ impl AnalyticsConfig {
         if self.clickhouse.max_connections == 0 {
             return Err("CLICKHOUSE_MAX_CONNECTIONS must be > 0".into());
         }
+        // D.2: production requires the HMAC key (same pattern as other
+        // crates' prod-validation: empty security material is a config error).
+        if is_production_environment() && self.sto_hmac_key.trim().is_empty() {
+            return Err(
+                "ANALYTICS_STO_HMAC_KEY must be set outside development (PII hashing)".into(),
+            );
+        }
         Ok(())
     }
+}
+
+/// True when NODE_ENV indicates production (the convention used by the
+/// sibling services).
+fn is_production_environment() -> bool {
+    matches!(
+        std::env::var("NODE_ENV").unwrap_or_default().as_str(),
+        "production" | "prod"
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    /// Serializes tests that mutate process env vars.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn test_defaults() {
@@ -233,5 +272,47 @@ mod tests {
         assert_eq!(cfg.compaction.batch_size, 100_000);
         assert_eq!(cfg.clickhouse.max_connections, 20);
         assert_eq!(cfg.clickhouse.insert_timeout_seconds, 30);
+    }
+
+    /// D.2: an empty HMAC key must be rejected in production.
+    #[test]
+    fn empty_hmac_key_is_rejected_in_production() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut cfg = AnalyticsConfig::default();
+        // Satisfy the unrelated validations so the HMAC check is exercised.
+        cfg.database_url = "postgres://u:p@localhost:5432/apexmail".into();
+        cfg.sto_hmac_key = String::new();
+        let saved = std::env::var("NODE_ENV").ok();
+        std::env::set_var("NODE_ENV", "production");
+        let result = cfg.validate();
+        match saved {
+            Some(v) => std::env::set_var("NODE_ENV", v),
+            None => std::env::remove_var("NODE_ENV"),
+        }
+        let err = result.expect_err("prod config with empty HMAC key must be rejected");
+        assert!(err.contains("ANALYTICS_STO_HMAC_KEY"), "got: {err}");
+    }
+
+    /// G.7: no credential-bearing postgres:postgres fallback may be invented.
+    #[test]
+    fn from_env_never_invents_postgres_postgres_url() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let saved_db = std::env::var("DATABASE_URL").ok();
+        let saved_node = std::env::var("NODE_ENV").ok();
+        std::env::remove_var("DATABASE_URL");
+        std::env::set_var("NODE_ENV", "development");
+        let cfg = AnalyticsConfig::from_env();
+        assert_ne!(
+            cfg.database_url,
+            "postgres://postgres:postgres@localhost:5432/apexmail"
+        );
+        match saved_db {
+            Some(v) => std::env::set_var("DATABASE_URL", v),
+            None => std::env::remove_var("DATABASE_URL"),
+        }
+        match saved_node {
+            Some(v) => std::env::set_var("NODE_ENV", v),
+            None => std::env::remove_var("NODE_ENV"),
+        }
     }
 }

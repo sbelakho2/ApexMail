@@ -190,9 +190,23 @@ pub struct TrackingConfig {
 
 impl Default for TrackingConfig {
     fn default() -> Self {
+        // C: the public tracking host is unified with tracking-service —
+        // both read TRACKING_PUBLIC_HOST (falling back to TRACKING_BASE_URL,
+        // the service's legacy variable) with the service's default
+        // `https://t.apexmail.ee`. The worker previously defaulted to
+        // `tracking.apexmail.ee`, which does not serve the tracking routes.
+        let base_url = std::env::var("TRACKING_PUBLIC_HOST")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .or_else(|| {
+                std::env::var("TRACKING_BASE_URL")
+                    .ok()
+                    .filter(|v| !v.trim().is_empty())
+            })
+            .unwrap_or_else(|| "https://t.apexmail.ee".to_string());
         Self {
             enabled: false,
-            base_url: "https://tracking.apexmail.ee".to_string(),
+            base_url,
             open_pixel_path: "/o".to_string(),
             click_redirect_path: "/c".to_string(),
         }

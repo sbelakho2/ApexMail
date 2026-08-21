@@ -11,6 +11,9 @@ pub struct EdgeCasesConfig {
     pub redis_url: String,
     pub api_key: String,
     pub node_env: String,
+    /// A. Fail-closed auth: explicit development-only bypass for the missing
+    /// INTERNAL_API_KEY case. Default false; a true value logs a loud warning.
+    pub allow_anonymous: bool,
     pub attachments: AttachmentLimits,
     pub retry: RetryConfig,
     pub loop_detection: LoopDetectionConfig,
@@ -173,6 +176,7 @@ impl Default for EdgeCasesConfig {
             redis_url: "redis://localhost:6379".into(),
             api_key: String::new(),
             node_env: "development".into(),
+            allow_anonymous: false,
             attachments: AttachmentLimits::default(),
             retry: RetryConfig::default(),
             loop_detection: LoopDetectionConfig::default(),
@@ -192,6 +196,22 @@ impl EdgeCasesConfig {
                 "INTERNAL_API_KEY must be set outside development".into(),
             ));
         }
+        // A. Fail-closed auth: anonymous access requires an explicit opt-in
+        // and is never permitted outside development.
+        let allow_anonymous = std::env::var("EDGE_CASES_ALLOW_ANONYMOUS")
+            .map(|v| v == "true" || v == "1")
+            .unwrap_or(false);
+        if allow_anonymous {
+            if node_env != "development" {
+                return Err(ConfigError::SecurityViolation(
+                    "EDGE_CASES_ALLOW_ANONYMOUS may only be enabled in development".into(),
+                ));
+            }
+            tracing::warn!(
+                "SECURITY: EDGE_CASES_ALLOW_ANONYMOUS=true — edge-cases protected routes are \
+                 UNAUTHENTICATED. Never enable this in production."
+            );
+        }
         Ok(Self {
             port: std::env::var("EDGE_CASES_PORT")
                 .ok()
@@ -202,6 +222,7 @@ impl EdgeCasesConfig {
                 .unwrap_or_else(|_| "redis://127.0.0.1:6379".into()),
             api_key,
             node_env,
+            allow_anonymous,
             attachments: AttachmentLimits::default(),
             retry: RetryConfig::default(),
             loop_detection: LoopDetectionConfig::default(),

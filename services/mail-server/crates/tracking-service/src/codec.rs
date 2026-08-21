@@ -42,10 +42,7 @@ pub struct TrackingData {
 pub struct UnsubscribeData {
     pub tenant_id: String,
     pub recipient: String,
-    #[expect(
-        dead_code,
-        reason = "timestamp is decoded for token-expiry validation in the unsubscribe flow"
-    )]
+    /// Decoded for token-expiry validation in the unsubscribe flow.
     pub timestamp_ms: u64,
 }
 
@@ -83,13 +80,9 @@ pub struct TrackingCodec {
     sig_key: SigKey,
 }
 
-// Token encode/generation methods are not yet wired at the binary level
-// (the decode path is active; encode will be used once the MTA calls this service
-// to embed tokens into outgoing messages).
-#[expect(
-    dead_code,
-    reason = "encode helpers are kept with the decode path for outbound token generation"
-)]
+// C: since the crate is also a library, the encode helpers are part of the
+// public surface (the worker-processors email tracker uses this exact
+// format for outbound tokens).
 impl TrackingCodec {
     /// Build a codec from the master secret string.
     /// Derives two sub-keys with HMAC-SHA-256.

@@ -328,7 +328,10 @@ impl Config {
             failover: FailoverConfig {
                 enabled: env_or_bool("FAILOVER_ENABLED", true),
                 threshold: env_or_u32("FAILOVER_THRESHOLD", 3),
-                failback_enabled: env_or_bool("FAILBACK_ENABLED", true),
+                // G.8: failback defaults to MANUAL. Automatic failback can
+                // promote a lagging original primary and cause silent data
+                // loss; operators must opt in with FAILBACK_ENABLED=true.
+                failback_enabled: env_or_bool("FAILBACK_ENABLED", false),
                 failback_delay_ms: env_or_u64("FAILBACK_DELAY", 300000),
             },
             health: HealthCheckConfig {

@@ -84,6 +84,7 @@ async fn main() -> anyhow::Result<()> {
         calendar,
         delivery,
         api_key: config.api_key.clone(),
+        allow_anonymous: config.allow_anonymous,
     });
 
     let mut cors = CorsLayer::new()

@@ -21,7 +21,7 @@ use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use scraper::{Html, Selector};
 use std::collections::HashMap;
 use std::sync::LazyLock;
-use tracing::warn;
+use tracing::{error, warn};
 
 use super::types::EmailJob;
 use crate::common::TrackingConfig;
@@ -46,6 +46,129 @@ pub struct TrackingPayload {
     pub campaign_id: Option<String>,
 }
 
+// ── C: AES-128-GCM tracking token codec (worker side) ────────────────────────
+//
+// The tracking-service decodes URL tokens with `TrackingCodec`
+// (crates/tracking-service/src/codec.rs): AES-128-GCM envelopes whose key is
+// HMAC-SHA256(TRACKING_SECRET_KEY, "encryption")[0..16]. This module mirrors
+// that ENCODE path exactly (same key derivation inputs, same binary payload
+// layout v2/v3, same IV||tag||ciphertext wire format) so every token the
+// worker embeds decodes on the service side. Previously the worker emitted
+// base64url(JSON) which the service could never decode — every rewritten
+// link fell back to the marketing homepage and opens were never recorded.
+
+/// Env var holding the shared master secret (same name as tracking-service).
+const TRACKING_SECRET_KEY_ENV: &str = "TRACKING_SECRET_KEY";
+
+/// Env var for the hashing salt (G.3d: configurable instead of hardcoded).
+const TRACKING_HASH_SALT_ENV: &str = "TRACKING_HASH_SALT";
+
+const IV_LEN: usize = 12;
+const AUTH_TAG_LEN: usize = 16;
+
+/// Read the shared tracking master secret. Returns an error string when the
+/// key is unset or too short — callers must NOT emit tokens in that case
+/// (they would be undecodable and leak the payload shape).
+fn tracking_secret() -> Result<zeroize::Zeroizing<String>, &'static str> {
+    let key =
+        zeroize::Zeroizing::new(std::env::var(TRACKING_SECRET_KEY_ENV).unwrap_or_default());
+    if key.trim().is_empty() {
+        return Err(TRACKING_SECRET_KEY_ENV);
+    }
+    // tracking-service requires >= 32 characters; mirror that so a shared
+    // deployment cannot silently disagree on key policy.
+    if key.len() < 32 {
+        return Err(TRACKING_SECRET_KEY_ENV);
+    }
+    Ok(key)
+}
+
+/// HMAC-SHA256(secret, info) truncated to `len` bytes — identical to
+/// tracking-service `derive_key_hmac`.
+fn derive_key_hmac(secret: &[u8], info: &[u8], len: usize) -> zeroize::Zeroizing<Vec<u8>> {
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+    let mut mac =
+        <Hmac<Sha256> as Mac>::new_from_slice(secret).expect("HMAC accepts any key size");
+    mac.update(info);
+    let result = mac.finalize().into_bytes();
+    zeroize::Zeroizing::new(result[..len].to_vec())
+}
+
+fn write_u16be(buf: &mut Vec<u8>, v: u16) {
+    buf.push((v >> 8) as u8);
+    buf.push((v & 0xff) as u8);
+}
+
+/// Serialize into the service's binary payload format:
+/// version u8 + u16-BE length-prefixed tenantId, messageId, recipient,
+/// linkId and (v3 only) originalUrl — identical to tracking-service
+/// `serialize_tracking_data`.
+fn serialize_payload(
+    tenant_id: &str,
+    message_id: &str,
+    recipient: &str,
+    original_url: Option<&str>,
+) -> Vec<u8> {
+    let url_bytes = original_url.unwrap_or("").as_bytes();
+    let version: u8 = if original_url.is_some() { 3 } else { 2 };
+    let mut buf = Vec::with_capacity(
+        1 + 2 * 5 + tenant_id.len() + message_id.len() + recipient.len() + url_bytes.len(),
+    );
+    buf.push(version);
+    for field in [tenant_id.as_bytes(), message_id.as_bytes(), recipient.as_bytes(), b""] {
+        write_u16be(&mut buf, field.len() as u16);
+        buf.extend_from_slice(field);
+    }
+    if version == 3 {
+        write_u16be(&mut buf, url_bytes.len() as u16);
+        buf.extend_from_slice(url_bytes);
+    }
+    buf
+}
+
+/// Encode a tracking payload into the AES-128-GCM envelope decodable by
+/// tracking-service (`TrackingCodec::decode`).
+///
+/// Wire format: base64url(IV[12] || AuthTag[16] || ciphertext).
+pub fn encode_tracking_id(payload: &TrackingPayload) -> Result<String, &'static str> {
+    use aes_gcm::aead::rand_core::RngCore;
+    use aes_gcm::aead::{Aead, KeyInit, Payload};
+    use aes_gcm::aead::OsRng;
+    use aes_gcm::{Aes128Gcm, Key, Nonce};
+
+    let secret = tracking_secret()?;
+    let enc_key = derive_key_hmac(secret.as_bytes(), b"encryption", 16);
+    let mut key_bytes = [0u8; 16];
+    key_bytes.copy_from_slice(&enc_key[..16]);
+
+    let plaintext = serialize_payload(
+        &payload.tenant_id,
+        &payload.message_id,
+        &payload.recipient_hash,
+        payload.original_url.as_deref(),
+    );
+
+    let mut iv_bytes = [0u8; IV_LEN];
+    OsRng.fill_bytes(&mut iv_bytes);
+
+    let cipher = Aes128Gcm::new(Key::<Aes128Gcm>::from_slice(&key_bytes));
+    let nonce = Nonce::from_slice(&iv_bytes);
+    let aad: &[u8] = b"";
+    let mut ciphertext_with_tag = cipher
+        .encrypt(nonce, Payload { msg: &plaintext, aad })
+        .map_err(|_| "aes-gcm encrypt failed")?;
+    let tag_start = ciphertext_with_tag.len() - AUTH_TAG_LEN;
+    let tag: Vec<u8> = ciphertext_with_tag.split_off(tag_start);
+
+    let mut combined = Vec::with_capacity(IV_LEN + AUTH_TAG_LEN + ciphertext_with_tag.len());
+    combined.extend_from_slice(&iv_bytes);
+    combined.extend_from_slice(&tag);
+    combined.extend_from_slice(&ciphertext_with_tag);
+
+    Ok(URL_SAFE_NO_PAD.encode(&combined))
+}
+
 /// Lazily compiled CSS selector for `<body>` elements.
 static BODY_SELECTOR: LazyLock<Selector> =
     LazyLock::new(|| Selector::parse("body").expect("`body` is a valid CSS selector"));
@@ -64,43 +187,34 @@ static STYLE_SELECTOR: LazyLock<Selector> =
 
 /// Hash a tenant ID for privacy-preserving tracking.
 /// The server maintains a mapping of hashes to tenant IDs.
+/// G.3d: the salt is configurable via `TRACKING_HASH_SALT` and the digest is
+/// 16 bytes (was 8 unsalted) to resist rainbow-table reversal.
 fn hash_tenant_id(tenant_id: &str) -> String {
-    use sha2::{Digest, Sha256};
-    let mut hasher = Sha256::new();
-    // Add salt to prevent rainbow table attacks
-    hasher.update(b"apexmail_tenant_v1:");
-    hasher.update(tenant_id.as_bytes());
-    let result = hasher.finalize();
-    hex::encode(&result[..8])
-}
-
-/// Encode a tracking payload to a URL-safe string.
-pub fn encode_tracking_id(payload: &TrackingPayload) -> String {
-    match serde_json::to_string(payload) {
-        Ok(json) => URL_SAFE_NO_PAD.encode(json.as_bytes()),
-        Err(e) => {
-            tracing::error!(error = %e, "Failed to serialize tracking payload");
-            // Return a distinctive invalid token instead of empty string
-            format!("err_{}", payload.message_id)
-        }
-    }
-}
-
-/// Decode a tracking ID back to its payload.
-#[cfg(test)]
-pub fn decode_tracking_id(encoded: &str) -> Option<TrackingPayload> {
-    let bytes = URL_SAFE_NO_PAD.decode(encoded).ok()?;
-    serde_json::from_slice(&bytes).ok()
+    salted_hash(b"apexmail_tenant_v1:", tenant_id)
 }
 
 /// Hash an email address for privacy-preserving tracking.
+/// G.3d: salted + 16-byte digest (previously unsalted SHA-256 truncated to
+/// 8 bytes, which was trivially reversible for a known domain set).
 fn hash_email(email: &str) -> String {
+    salted_hash(b"apexmail_email_v1:", email)
+}
+
+/// SHA-256(salt || value) hex-encoded, first 16 bytes. The salt comes from
+/// `TRACKING_HASH_SALT` when set (shared across redeployments) and otherwise
+/// uses the built-in domain-separation prefix.
+fn salted_hash(domain_prefix: &[u8], value: &str) -> String {
     use sha2::{Digest, Sha256};
+    let configured = std::env::var(TRACKING_HASH_SALT_ENV).unwrap_or_default();
     let mut hasher = Sha256::new();
-    hasher.update(email.as_bytes());
+    hasher.update(domain_prefix);
+    if !configured.is_empty() {
+        hasher.update(configured.as_bytes());
+        hasher.update(b":");
+    }
+    hasher.update(value.as_bytes());
     let result = hasher.finalize();
-    // Use first 8 bytes encoded as hex (16 chars) for compactness
-    hex::encode(&result[..8])
+    hex::encode(&result[..16])
 }
 
 /// Check whether a byte-offset in the original HTML falls inside a `<script>`
@@ -164,7 +278,16 @@ fn build_payload(job: &EmailJob, original_url: Option<String>) -> TrackingPayloa
 /// no `<body>` element is found in the parse tree.
 pub fn add_tracking_pixel(html: &str, job: &EmailJob, config: &TrackingConfig) -> String {
     let payload = build_payload(job, None);
-    let tracking_id = encode_tracking_id(&payload);
+    let tracking_id = match encode_tracking_id(&payload) {
+        Ok(id) => id,
+        Err(missing) => {
+            error!(
+                env = missing,
+                "tracking pixel skipped: {missing} is not configured (>= 32 chars, shared with tracking-service)"
+            );
+            return html.to_string();
+        }
+    };
     let pixel_url = format!(
         "{}{}/{}",
         config.base_url, config.open_pixel_path, tracking_id
@@ -238,7 +361,17 @@ pub fn rewrite_links(html: &str, job: &EmailJob, config: &TrackingConfig) -> Str
         }
 
         let payload = build_payload(job, Some(href_attr.to_string()));
-        let tracking_id = encode_tracking_id(&payload);
+        let tracking_id = match encode_tracking_id(&payload) {
+            Ok(id) => id,
+            Err(missing) => {
+                error!(
+                    env = missing,
+                    "link rewriting skipped: {missing} is not configured (>= 32 chars, shared with tracking-service)"
+                );
+                replacements.clear();
+                break;
+            }
+        };
         let tracked_url = format!(
             "{}{}/{}",
             config.base_url, config.click_redirect_path, tracking_id
@@ -302,6 +435,16 @@ pub fn rewrite_links(html: &str, job: &EmailJob, config: &TrackingConfig) -> Str
 mod tests {
     use super::*;
 
+    /// Serializes env-mutating tests (std::env is process-global).
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    const TEST_SECRET: &str = "test-secret-key-32-bytes-minimum!!";
+
+    fn with_test_secret() -> std::sync::MutexGuard<'static, ()> {
+        let guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var(TRACKING_SECRET_KEY_ENV, TEST_SECRET);
+        guard
+    }
+
     fn make_test_job() -> EmailJob {
         EmailJob {
             id: "job_1".to_string(),
@@ -333,28 +476,129 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_encode_decode_tracking_id() {
-        let payload = TrackingPayload {
+    fn sample_payload() -> TrackingPayload {
+        TrackingPayload {
             message_id: "msg_123".to_string(),
-            tenant_id: "ten_456".to_string(),
-            recipient_hash: "abc123".to_string(),
+            tenant_id: hash_tenant_id("ten_456"),
+            recipient_hash: hash_email("user@example.com"),
             original_url: Some("https://example.com".to_string()),
             campaign_id: Some("camp_789".to_string()),
-        };
-
-        let encoded = encode_tracking_id(&payload);
-        let decoded = decode_tracking_id(&encoded);
-        assert!(decoded.is_some(), "decode should succeed");
-        if let Some(decoded) = decoded {
-            assert_eq!(decoded.message_id, payload.message_id);
-            assert_eq!(decoded.tenant_id, payload.tenant_id);
-            assert_eq!(decoded.original_url, payload.original_url);
         }
+    }
+
+    /// C: a worker-encoded token must decode with the tracking-service codec
+    /// under the SAME key — this is the exact production contract.
+    #[test]
+    fn worker_token_decodes_in_tracking_service_codec() {
+        let _guard = with_test_secret();
+        let payload = sample_payload();
+        let token = encode_tracking_id(&payload).expect("encode");
+
+        let codec = tracking_service::codec::TrackingCodec::new(TEST_SECRET);
+        let decoded = codec
+            .decode(&token)
+            .expect("tracking-service must decode worker token");
+        assert_eq!(decoded.message_id, payload.message_id);
+        assert_eq!(decoded.tenant_id, payload.tenant_id);
+        assert_eq!(decoded.recipient, payload.recipient_hash);
+        assert_eq!(
+            decoded.original_url.as_deref(),
+            Some("https://example.com")
+        );
+        // linkId is not used by the worker path.
+        assert!(decoded.link_id.is_none());
+    }
+
+    /// Open-pixel tokens (no original URL) use payload v2 and also decode.
+    #[test]
+    fn worker_open_token_decodes_in_tracking_service_codec() {
+        let _guard = with_test_secret();
+        let payload = TrackingPayload {
+            original_url: None,
+            ..sample_payload()
+        };
+        let token = encode_tracking_id(&payload).expect("encode");
+        let codec = tracking_service::codec::TrackingCodec::new(TEST_SECRET);
+        let decoded = codec.decode(&token).expect("decode open token");
+        assert_eq!(decoded.message_id, "msg_123");
+        assert!(decoded.original_url.is_none());
+    }
+
+    /// A wrong key must fail decode (AEAD tag mismatch), not return garbage.
+    #[test]
+    fn wrong_key_fails_decode_in_tracking_service_codec() {
+        let _guard = with_test_secret();
+        let token = encode_tracking_id(&sample_payload()).expect("encode");
+        let wrong =
+            tracking_service::codec::TrackingCodec::new("another-secret-key-32-bytes-minimum");
+        assert!(wrong.decode(&token).is_none());
+    }
+
+    /// Tokens must never be emitted without a configured secret.
+    #[test]
+    fn encode_without_secret_is_refused_and_html_untouched() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var(TRACKING_SECRET_KEY_ENV);
+        let payload = sample_payload();
+        assert!(encode_tracking_id(&payload).is_err());
+
+        // Fail-safe: the pixel/link rewriters leave the HTML unchanged rather
+        // than embedding undecodable tokens.
+        let job = make_test_job();
+        let config = make_test_config();
+        let html = r#"<html><body><a href="https://example.com/x">x</a></body></html>"#;
+        assert_eq!(add_tracking_pixel(html, &job, &config), html);
+        assert_eq!(rewrite_links(html, &job, &config), html);
+    }
+
+    /// Short secrets are refused (tracking-service requires >= 32 chars).
+    #[test]
+    fn short_secret_is_refused() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var(TRACKING_SECRET_KEY_ENV, "too-short");
+        assert!(encode_tracking_id(&sample_payload()).is_err());
+    }
+
+    /// G.3d: hashes are 16-byte digests, stable, and salt-configurable.
+    #[test]
+    fn hashes_are_salted_and_16_bytes() {
+        let a = hash_email("user@example.com");
+        let b = hash_email("user@example.com");
+        assert_eq!(a, b, "stable");
+        assert_eq!(a.len(), 32, "16 bytes hex-encoded");
+        assert_ne!(a, hash_email("other@example.com"));
+        assert_ne!(hash_tenant_id("t1"), hash_tenant_id("t2"));
+
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var(TRACKING_HASH_SALT_ENV, "pepper");
+        let salted = hash_email("user@example.com");
+        assert_ne!(a, salted, "configured salt changes the digest");
+        std::env::remove_var(TRACKING_HASH_SALT_ENV);
+    }
+
+    /// C: worker and tracking-service default tracking hosts must match.
+    #[test]
+    fn default_tracking_hosts_are_unified() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("TRACKING_PUBLIC_HOST");
+        std::env::remove_var("TRACKING_BASE_URL");
+        assert_eq!(
+            TrackingConfig::default().base_url,
+            "https://t.apexmail.ee",
+            "worker default must equal the tracking-service default"
+        );
+        // Explicit override wins on both sides.
+        std::env::set_var("TRACKING_PUBLIC_HOST", "https://tracks.example.com");
+        assert_eq!(
+            TrackingConfig::default().base_url,
+            "https://tracks.example.com"
+        );
+        std::env::remove_var("TRACKING_PUBLIC_HOST");
     }
 
     #[test]
     fn test_add_tracking_pixel() {
+        let _guard = with_test_secret();
         let html = "<html><body><p>Hello</p></body></html>";
         let job = make_test_job();
         let config = make_test_config();
@@ -368,6 +612,7 @@ mod tests {
 
     #[test]
     fn test_add_tracking_pixel_no_body() {
+        let _guard = with_test_secret();
         let html = "<div>No body tag here</div>";
         let job = make_test_job();
         let config = make_test_config();
@@ -378,6 +623,7 @@ mod tests {
 
     #[test]
     fn test_add_tracking_pixel_skips_script_body() {
+        let _guard = with_test_secret();
         // </body> inside <script> should NOT be matched
         let html = r#"<html><body><p>Hello</p><script>if (x) { document.write('</body>'); }</script></body></html>"#;
         let job = make_test_job();
@@ -396,6 +642,7 @@ mod tests {
 
     #[test]
     fn test_add_tracking_pixel_skips_style_body() {
+        let _guard = with_test_secret();
         let html = r#"<html><body><p>Hello</p><style>.x::after { content: '</body>'; }</style></body></html>"#;
         let job = make_test_job();
         let config = make_test_config();
@@ -416,6 +663,7 @@ mod tests {
 
     #[test]
     fn test_rewrite_links() {
+        let _guard = with_test_secret();
         let html = r#"<a href="https://example.com/page">Click here</a>"#;
         let job = make_test_job();
         let config = make_test_config();
@@ -427,6 +675,7 @@ mod tests {
 
     #[test]
     fn test_skip_mailto_links() {
+        let _guard = with_test_secret();
         let html = r#"<a href="mailto:test@example.com">Email us</a>"#;
         let job = make_test_job();
         let config = make_test_config();
@@ -438,6 +687,7 @@ mod tests {
 
     #[test]
     fn test_skip_unsubscribe_links() {
+        let _guard = with_test_secret();
         let html = r#"<a href="https://example.com/unsubscribe">Unsubscribe</a>"#;
         let job = make_test_job();
         let config = make_test_config();
@@ -450,6 +700,7 @@ mod tests {
 
     #[test]
     fn test_skip_tel_links() {
+        let _guard = with_test_secret();
         let html = r#"<a href="tel:+1234567890">Call us</a>"#;
         let job = make_test_job();
         let config = make_test_config();
@@ -460,6 +711,7 @@ mod tests {
 
     #[test]
     fn test_rewrite_links_multiple_anchors() {
+        let _guard = with_test_secret();
         let html = r#"<a href="https://example.com/page1">Link1</a><a href="https://example.com/page2">Link2</a>"#;
         let job = make_test_job();
         let config = make_test_config();
@@ -473,6 +725,7 @@ mod tests {
 
     #[test]
     fn test_no_links_unchanged() {
+        let _guard = with_test_secret();
         let html = "<div>No links here</div>";
         let job = make_test_job();
         let config = make_test_config();

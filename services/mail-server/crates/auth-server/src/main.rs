@@ -279,6 +279,7 @@ async fn register_post(
 /// Extract (host, port) from a service URL such as
 /// `redis://:password@redis:6379/0`, falling back to `default_port` when the
 /// URL carries no explicit port.
+#[allow(dead_code)]
 fn url_host_port(raw: &str, default_port: u16) -> Option<(String, u16)> {
     let parsed = url::Url::parse(raw).ok()?;
     let host = parsed.host_str()?.to_string();
@@ -321,63 +322,25 @@ check();setInterval(check,60000)
 }
 
 // ─── Health endpoint ─────────────────────────────────────
+//
+// G.6: /v1/health is reachable from the public internet via nginx, so the
+// payload must NOT leak queue internals (email_queue depth, backlog state).
+// It reports ok/error + version only; richer (still non-sensitive) service
+// probes live on /status/api, which is the status page's purpose.
 
 async fn health_check(State(state): State<AppState>) -> impl IntoResponse {
-    let mut services = Vec::new();
-    let mut all_operational = true;
-
-    // Database connectivity check
-    let db_ok = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM tenants")
+    // Database connectivity check — the only dependency whose failure makes
+    // the service itself unable to answer authoritatively.
+    let db_ok = sqlx::query_scalar::<_, i64>("SELECT 1::bigint")
         .fetch_one(&state.db)
         .await
         .is_ok();
-    services.push(serde_json::json!({
-        "name": "database",
-        "status": if db_ok { "connected" } else { "disconnected" }
-    }));
-    if !db_ok {
-        all_operational = false;
-    }
-
-    // Redis connectivity — real TCP connect to the host:port parsed from
-    // REDIS_URL. (The previous implementation shelled out to redis-cli,
-    // which does not exist in the slim runtime image, so the probe always
-    // reported disconnected.)
-    let redis_url = std::env::var("REDIS_URL").ok().filter(|s| !s.is_empty());
-    let redis_ok = match redis_url.as_deref().and_then(|u| url_host_port(u, 6379)) {
-        Some((host, port)) => tcp_connect_ok(&host, port, std::time::Duration::from_secs(2)).await,
-        None => true, // Not required when unconfigured
-    };
-
-    services.push(serde_json::json!({
-        "name": "redis",
-        "status": if redis_ok { "connected" } else if redis_url.is_some() { "disconnected" } else { "not_configured" }
-    }));
-    if redis_url.is_some() && !redis_ok {
-        all_operational = false;
-    }
-
-    // Queue depth check
-    let queue_depth = sqlx::query_scalar::<_, i64>(
-        "SELECT COALESCE(COUNT(*), 0) FROM email_queue WHERE status IN ('pending', 'processing')",
-    )
-    .fetch_one(&state.db)
-    .await
-    .unwrap_or(0);
-
-    services.push(serde_json::json!({
-        "name": "queue",
-        "status": if queue_depth < 1000 { "nominal" } else if queue_depth < 10000 { "backlogged" } else { "critical" },
-        "depth": queue_depth
-    }));
 
     (
         StatusCode::OK,
         Json(serde_json::json!({
-            "status": if all_operational { "healthy" } else { "degraded" },
-            "services": services,
-            "queue_depth": queue_depth,
-            "timestamp": chrono::Utc::now().to_rfc3339()
+            "status": if db_ok { "ok" } else { "error" },
+            "version": env!("CARGO_PKG_VERSION"),
         })),
     )
         .into_response()
@@ -501,10 +464,11 @@ async fn status_history() -> impl IntoResponse {
 
 #[tokio::main]
 async fn main() {
-    let db_url = std::env::var("DATABASE_URL")
-        .unwrap_or_else(|_| "postgres://apexmail@127.0.0.1:5432/apexmail".into());
-    let session_secret =
-        std::env::var("SESSION_SECRET").unwrap_or_else(|_| uuid::Uuid::new_v4().to_string());
+    // G.6: DATABASE_URL must be provided — the previous embedded default
+    // (postgres://apexmail@127.0.0.1:5432/apexmail) silently pointed
+    // misconfigured deployments at a host that may not exist.
+    let db_url = resolve_database_url();
+    let session_secret = resolve_session_secret();
 
     let pool = PgPoolOptions::new()
         .max_connections(5)
@@ -531,4 +495,111 @@ async fn main() {
     axum::serve(tokio::net::TcpListener::bind(addr).await.unwrap(), app)
         .await
         .unwrap();
+}
+
+/// G.6: require DATABASE_URL — no credential-bearing embedded fallback.
+fn resolve_database_url() -> String {
+    match std::env::var("DATABASE_URL") {
+        Ok(url) if !url.trim().is_empty() => url,
+        _ => panic!("DATABASE_URL must be set (no embedded default is provided)"),
+    }
+}
+
+/// G.6: SESSION_SECRET is REQUIRED in production (the random-UUID fallback
+/// invalidated all sessions on every restart and was never operator
+/// controlled); development keeps the fallback with a loud warning.
+fn resolve_session_secret() -> String {
+    match std::env::var("SESSION_SECRET") {
+        Ok(secret) if !secret.trim().is_empty() => secret,
+        _ => {
+            if is_production_env() {
+                panic!("SESSION_SECRET must be set in production (ENVIRONMENT=production)");
+            }
+            let fallback = uuid::Uuid::new_v4().to_string();
+            eprintln!(
+                "WARNING: SESSION_SECRET is not set — using a random per-process value. \
+                 All sessions are invalidated on restart; set SESSION_SECRET for stability."
+            );
+            fallback
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Serializes env-mutating tests.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn fake_state() -> AppState {
+        let db = PgPoolOptions::new()
+            .max_connections(1)
+            .connect_lazy("postgres://fake:fake@localhost:1/fake")
+            .unwrap();
+        AppState {
+            db,
+            session_secret: "test-secret".into(),
+        }
+    }
+
+    /// G.6: the public /v1/health payload must contain ONLY ok/error status
+    /// and the version — no queue depth, no service internals.
+    #[tokio::test]
+    async fn health_payload_has_no_queue_internals() {
+        let response = health_check(State(fake_state())).await.into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(json.get("status").is_some(), "status required");
+        assert!(json.get("version").is_some(), "version required");
+        for banned in ["queue_depth", "services", "depth", "timestamp"] {
+            assert!(json.get(banned).is_none(), "{banned} must not appear");
+        }
+    }
+
+    /// G.6: no embedded DATABASE_URL fallback.
+    #[test]
+    fn database_url_is_required() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let saved = std::env::var("DATABASE_URL").ok();
+        std::env::remove_var("DATABASE_URL");
+        let result = std::panic::catch_unwind(resolve_database_url);
+        if let Some(value) = saved {
+            std::env::set_var("DATABASE_URL", value);
+        }
+        assert!(
+            result.is_err(),
+            "missing DATABASE_URL must be a hard startup error"
+        );
+    }
+
+    /// G.6: SESSION_SECRET is required in production, random fallback only
+    /// in development.
+    #[test]
+    fn session_secret_required_in_production() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let saved_secret = std::env::var("SESSION_SECRET").ok();
+        let saved_env = std::env::var("ENVIRONMENT").ok();
+        std::env::remove_var("SESSION_SECRET");
+
+        std::env::set_var("ENVIRONMENT", "production");
+        let prod = std::panic::catch_unwind(resolve_session_secret);
+        assert!(prod.is_err(), "production must refuse the UUID fallback");
+
+        std::env::set_var("ENVIRONMENT", "development");
+        let dev = resolve_session_secret();
+        assert!(!dev.is_empty(), "dev keeps the warned fallback");
+
+        match saved_secret {
+            Some(v) => std::env::set_var("SESSION_SECRET", v),
+            None => std::env::remove_var("SESSION_SECRET"),
+        }
+        match saved_env {
+            Some(v) => std::env::set_var("ENVIRONMENT", v),
+            None => std::env::remove_var("ENVIRONMENT"),
+        }
+    }
 }

@@ -52,11 +52,7 @@ pub struct DatabaseConfig {
 #[derive(Debug, Clone)]
 pub struct RedisConfig {
     pub url: String,
-    // key_prefix used in processor; flagged only because binary target sees no external consumer
-    #[expect(
-        dead_code,
-        reason = "Redis key prefix is consumed by processor deployments outside the binary-only check target"
-    )]
+    /// Redis key prefix used by processor deployments.
     pub key_prefix: String,
     pub pool_size: usize,
 }
@@ -255,7 +251,13 @@ pub fn load() -> Result<Config> {
         },
         clickhouse,
         tracking: TrackingConfig {
-            base_url: var_or("TRACKING_BASE_URL", "https://t.apexmail.ee"),
+            // C: TRACKING_PUBLIC_HOST is the unified public tracking host
+            // shared with the worker's link rewriter; TRACKING_BASE_URL is
+            // kept as a legacy alias. Default matches the worker.
+            base_url: var_or(
+                "TRACKING_PUBLIC_HOST",
+                &var_or("TRACKING_BASE_URL", "https://t.apexmail.ee"),
+            ),
             pixel_path: var_or("TRACKING_PIXEL_PATH", "/o"),
             click_path: var_or("TRACKING_CLICK_PATH", "/c"),
             unsubscribe_path: var_or("TRACKING_UNSUBSCRIBE_PATH", "/u"),

@@ -2,8 +2,9 @@
 
 use axum::{
     extract::{DefaultBodyLimit, Path, Query, State},
-    http::{HeaderMap, StatusCode},
-    response::{IntoResponse, Json},
+    http::{HeaderMap, Method, StatusCode},
+    middleware::{self, Next},
+    response::{IntoResponse, Json, Response},
     routing::{delete, get, post, put},
     Router,
 };
@@ -61,6 +62,40 @@ fn check_api_key(headers: &HeaderMap, config: &Config) -> Result<(), StatusCode>
         Ok(())
     } else {
         Err(StatusCode::UNAUTHORIZED)
+    }
+}
+
+// ── Fencing write-guard (B.1 enforcement) ──────────────────
+
+/// B.1 enforcement: this node must refuse to serve mutating requests while
+/// its Redis fence key (`ha:fenced:{self}`) exists. Read-only requests and
+/// the split-brain / unfence recovery endpoints are exempt so a fenced node
+/// can still be operated on (otherwise recovery would deadlock).
+async fn fence_guard(
+    State(state): State<Arc<AppState>>,
+    request: axum::extract::Request,
+    next: Next,
+) -> Response {
+    let method = request.method().clone();
+    let path = request.uri().path().to_string();
+    let mutating = matches!(
+        method,
+        Method::POST | Method::PUT | Method::DELETE | Method::PATCH
+    );
+    let recovery_path = path.starts_with("/api/v1/failover/split-brain") || path.ends_with("/unfence");
+    if !mutating || recovery_path {
+        return next.run(request).await;
+    }
+    match state.failover.ensure_not_fenced().await {
+        Ok(()) => next.run(request).await,
+        Err(reason) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({
+                "error": "node is fenced — writes refused",
+                "reason": reason,
+            })),
+        )
+            .into_response(),
     }
 }
 
@@ -134,6 +169,7 @@ pub fn build_router(state: Arc<AppState>) -> Router<()> {
         .route("/api/v1/chaos/experiments/:id/abort", post(chaos_abort))
         .layer(DefaultBodyLimit::max(1024 * 1024)) // 1 MB
         .layer(TimeoutLayer::new(Duration::from_secs(30)))
+        .layer(middleware::from_fn_with_state(Arc::clone(&state), fence_guard))
         .with_state(state)
 }
 
@@ -196,14 +232,23 @@ async fn failover_initiate(
         .map_err(internal_err)
 }
 
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FailbackQuery {
+    /// B.3: force failback even when replication lag cannot be verified.
+    /// The forced event is recorded with `forced: true` metadata.
+    force: Option<bool>,
+}
+
 async fn failover_failback(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
+    Query(q): Query<FailbackQuery>,
 ) -> Result<impl IntoResponse, StatusCode> {
     check_api_key(&headers, &state.config)?;
     state
         .failover
-        .initiate_failback()
+        .initiate_failback_opt(q.force.unwrap_or(false))
         .await
         .map(Json)
         .map_err(internal_err)
@@ -1004,6 +1049,10 @@ mod tests {
 
     fn test_state() -> Arc<AppState> {
         let config = test_config();
+        test_state_with_config(config)
+    }
+
+    fn test_state_with_config(config: Arc<Config>) -> Arc<AppState> {
         let config_for_services = Arc::clone(&config);
         let pool = test_pool();
         Arc::new(AppState {
@@ -1121,5 +1170,138 @@ mod tests {
     fn test_route_count() {
         // Verify we have 40+ routes by building the router and checking it doesn't panic
         let _app = build_router(test_state());
+    }
+
+    /// B.1 enforcement: a fenced node must refuse mutating requests (503)
+    /// while reads and recovery endpoints still work.
+    #[test]
+    fn test_fenced_node_refuses_mutating_requests() {
+        // Ephemeral redis-server; skip when unavailable.
+        let listener = match std::net::TcpListener::bind(("127.0.0.1", 0)) {
+            Ok(l) => l,
+            Err(_) => {
+                eprintln!("skipping: cannot allocate port");
+                return;
+            }
+        };
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        let mut child = match std::process::Command::new("redis-server")
+            .args([
+                "--port",
+                &port.to_string(),
+                "--save",
+                "",
+                "--appendonly",
+                "no",
+                "--daemonize",
+                "no",
+            ])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+        {
+            Ok(child) => child,
+            Err(_) => {
+                eprintln!("skipping: redis-server not available");
+                return;
+            }
+        };
+        // Wait for readiness.
+        let mut ready = false;
+        for _ in 0..50 {
+            if let Ok(client) = redis::Client::open(format!("redis://127.0.0.1:{port}").as_str()) {
+                if let Ok(mut conn) = client.get_connection() {
+                    if redis::cmd("PING")
+                        .query::<String>(&mut conn)
+                        .map(|r| r == "PONG")
+                        .unwrap_or(false)
+                    {
+                        ready = true;
+                        break;
+                    }
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        if !ready {
+            let _ = child.kill();
+            let _ = child.wait();
+            eprintln!("skipping: redis-server did not become ready");
+            return;
+        }
+
+        test_runtime().block_on(async move {
+            let mut config = Config::from_env();
+            config.internal_api_key = TEST_INTERNAL_API_KEY.into();
+            config.admin_api_key = TEST_ADMIN_API_KEY.into();
+            config.redis.host = "127.0.0.1".into();
+            config.redis.port = port;
+            config.multi_region.node_id = "fenced-node".into();
+            let state = test_state_with_config(Arc::new(config));
+            let app: Router<()> = build_router(state.clone());
+
+            // Not fenced: the guard passes (request proceeds; DB errors → 500,
+            // which proves the guard itself did not block).
+            let req = Request::builder()
+                .method("POST")
+                .uri("/api/v1/failover/initiate")
+                .header("x-api-key", TEST_INTERNAL_API_KEY)
+                .body(Body::from("{}"))
+                .unwrap();
+            let resp = app.clone().oneshot(req).await.unwrap();
+            assert_ne!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+            // Fence this node in Redis.
+            let mut conn = redis::Client::open(format!("redis://127.0.0.1:{port}").as_str())
+                .unwrap()
+                .get_multiplexed_async_connection()
+                .await
+                .unwrap();
+            let _: () = redis::cmd("SET")
+                .arg("ha:fenced:fenced-node")
+                .arg("1")
+                .query_async(&mut conn)
+                .await
+                .unwrap();
+
+            // Mutating request → 503 with the fence reason.
+            let req = Request::builder()
+                .method("POST")
+                .uri("/api/v1/failover/initiate")
+                .header("x-api-key", TEST_INTERNAL_API_KEY)
+                .body(Body::from("{}"))
+                .unwrap();
+            let resp = app.clone().oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+            let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert!(json["error"].as_str().unwrap().contains("fenced"));
+
+            // Reads still pass.
+            let req = Request::builder()
+                .uri("/api/v1/failover/status")
+                .header("x-api-key", TEST_INTERNAL_API_KEY)
+                .body(Body::empty())
+                .unwrap();
+            let resp = app.clone().oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+
+            // Split-brain recovery endpoints are exempt from the guard.
+            let req = Request::builder()
+                .method("POST")
+                .uri("/api/v1/failover/split-brain/resolve")
+                .header("x-api-key", TEST_INTERNAL_API_KEY)
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"winner_node":"fenced-node"}"#))
+                .unwrap();
+            let resp = app.oneshot(req).await.unwrap();
+            assert_ne!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        });
+
+        let _ = child.kill();
+        let _ = child.wait();
     }
 }

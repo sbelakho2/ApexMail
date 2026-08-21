@@ -1,11 +1,22 @@
 //! Webhook testing — send test payloads, verify HMAC-SHA256 signatures.
 //!
 //! Provides test-related webhook helpers.
+//!
+//! # G.4 — SSRF protection
+//!
+//! Hostname-only checks can be bypassed by a DNS name that resolves to a
+//! private address (or rebinds after validation). This module mirrors the
+//! in-repo correct pattern (`worker-processors/src/webhook/ssrf.rs`):
+//! resolve the hostname, reject ANY private/reserved IP in the answer set,
+//! and PIN the connection to the validated IP via
+//! `reqwest::ClientBuilder::resolve` so DNS rebinding cannot swap the
+//! address between validation and connection.
 
 use chrono::Utc;
 use hmac::{Hmac, Mac};
 use mail_common::is_private_or_reserved_host;
 use sha2::Sha256;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use uuid::Uuid;
 
 use crate::types::{DevExError, WebhookTestResult};
@@ -24,7 +35,6 @@ type HmacSha256 = Hmac<Sha256>;
 /// 3. Remove old secret from `Vec`.
 #[derive(Debug, Clone)]
 pub struct WebhookTester {
-    http: reqwest::Client,
     /// Ordered list of active signing secrets (first = active signing key).
     signing_secrets: Vec<String>,
 }
@@ -34,21 +44,17 @@ impl WebhookTester {
     /// The **first** secret is used for signing; all are accepted for verification.
     ///
     /// Returns an error if the list is empty.
+    ///
+    /// G.4: the tester no longer holds a shared HTTP client — each send
+    /// builds a client PINNED to the SSRF-validated resolved IP.
     pub fn new(signing_secrets: Vec<String>) -> Result<Self, DevExError> {
         if signing_secrets.is_empty() {
             return Err(DevExError::WebhookError(
                 "At least one webhook signing secret is required".into(),
             ));
         }
-        let http = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(10))
-            .build()
-            .map_err(|e| DevExError::WebhookError(format!("HTTP client: {e}")))?;
 
-        Ok(Self {
-            http,
-            signing_secrets,
-        })
+        Ok(Self { signing_secrets })
     }
 
     /// Build a test webhook payload for a given event type.
@@ -146,17 +152,24 @@ impl WebhookTester {
         }
 
         // Block requests to private/internal networks
-        if let Some(host) = parsed.host_str() {
+        let host = if let Some(host) = parsed.host_str() {
             if is_private_or_reserved_host(host) {
                 return Err(DevExError::Validation(
                     "Webhook URLs pointing to private/internal networks are not allowed".into(),
                 ));
             }
+            host.to_string()
         } else {
             return Err(DevExError::Validation(
                 "Webhook URL must have a host".into(),
             ));
-        }
+        };
+        let port = parsed.port_or_known_default().unwrap_or(80);
+
+        // G.4: resolving guard — resolve, reject private/reserved answers,
+        // and pin the connection to the validated address.
+        let resolved = resolve_host(&host, port).await?;
+        validate_resolved_addrs(&host, &resolved)?;
 
         let payload = Self::build_test_payload(event_type);
         let body = serde_json::to_vec(&payload)?;
@@ -164,8 +177,17 @@ impl WebhookTester {
 
         let start = std::time::Instant::now();
 
-        let result = self
-            .http
+        // Pin: a per-request client bound to the validated IP so the HTTP
+        // stack cannot re-resolve the hostname (DNS rebinding). Test
+        // webhooks are infrequent, so per-request client construction is
+        // acceptable.
+        let pinned_client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .resolve(&host, resolved[0])
+            .build()
+            .map_err(|e| DevExError::WebhookError(format!("HTTP client: {e}")))?;
+
+        let result = pinned_client
             .post(url)
             .header("Content-Type", "application/json")
             .header("X-Webhook-Signature", &signature)
@@ -205,6 +227,105 @@ impl WebhookTester {
             }),
         }
     }
+}
+
+// ── G.4: resolving SSRF guard (mirrors worker-processors/src/webhook/ssrf.rs) ──
+
+/// Resolve `host:port` off the async runtime (std DNS + /etc/hosts).
+async fn resolve_host(host: &str, port: u16) -> Result<Vec<SocketAddr>, DevExError> {
+    let host = host.to_string();
+    tokio::task::spawn_blocking(move || {
+        use std::net::ToSocketAddrs;
+        (host.as_str(), port)
+            .to_socket_addrs()
+            .map(|iter| iter.collect::<Vec<_>>())
+            .map_err(|e| {
+                DevExError::Validation(format!("Webhook host could not be resolved: {e}"))
+            })
+    })
+    .await
+    .map_err(|e| DevExError::WebhookError(format!("DNS resolution task failed: {e}")))?
+}
+
+/// Reject when ANY resolved address is private/reserved — a name that
+/// resolves to even one internal IP is treated as internal (attackers
+/// control which answer the connector picks).
+fn validate_resolved_addrs(host: &str, addrs: &[SocketAddr]) -> Result<(), DevExError> {
+    if addrs.is_empty() {
+        return Err(DevExError::Validation(
+            "Webhook host could not be resolved".into(),
+        ));
+    }
+    for addr in addrs {
+        if is_private_ip(&addr.ip()) {
+            return Err(DevExError::Validation(format!(
+                "Webhook URL resolves to a private/internal IP: {} (via {host})",
+                addr.ip()
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Check if an IP address is private/internal (same coverage as
+/// worker-processors/src/webhook/ssrf.rs::is_private_ip).
+pub fn is_private_ip(ip: &IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(ip) => is_private_ipv4(ip),
+        IpAddr::V6(ip) => is_private_ipv6(ip),
+    }
+}
+
+fn is_private_ipv4(ip: &Ipv4Addr) -> bool {
+    let o = ip.octets();
+    // Loopback 127.0.0.0/8, private 10/8, 172.16/12, 192.168/16,
+    // link-local (incl. cloud metadata) 169.254/16, CGNAT 100.64/10,
+    // documentation ranges, broadcast/unspecified.
+    o[0] == 127
+        || o[0] == 10
+        || (o[0] == 172 && (16..=31).contains(&o[1]))
+        || (o[0] == 192 && o[1] == 168)
+        || (o[0] == 169 && o[1] == 254)
+        || (o[0] == 100 && (64..=127).contains(&o[1]))
+        || (o[0] == 192 && o[1] == 0 && o[2] == 2)
+        || (o[0] == 198 && o[1] == 51 && o[2] == 100)
+        || (o[0] == 203 && o[1] == 0 && o[2] == 113)
+        || ip.is_broadcast()
+        || ip.is_unspecified()
+}
+
+fn is_private_ipv6(ip: &Ipv6Addr) -> bool {
+    if ip.is_loopback() || ip.is_unspecified() {
+        return true;
+    }
+    let s = ip.segments();
+    // Link-local fe80::/10, unique-local fc00::/7, deprecated site-local fec0::/10.
+    if s[0] & 0xffc0 == 0xfe80 || s[0] & 0xfe00 == 0xfc00 || s[0] & 0xffc0 == 0xfec0 {
+        return true;
+    }
+    // 6to4 (2002::/16) and Teredo (2001:0::/32) embed IPv4 — inspect it.
+    if s[0] == 0x2002 {
+        let embedded = Ipv4Addr::new((s[1] >> 8) as u8, (s[1] & 0xff) as u8, (s[2] >> 8) as u8, (s[2] & 0xff) as u8);
+        if is_private_ipv4(&embedded) {
+            return true;
+        }
+    }
+    if s[0] == 0x2001 && s[1] == 0x0000 {
+        let embedded = Ipv4Addr::new(
+            (s[6] >> 8) as u8 ^ 0xff,
+            (s[6] & 0xff) as u8 ^ 0xff,
+            (s[7] >> 8) as u8 ^ 0xff,
+            (s[7] & 0xff) as u8 ^ 0xff,
+        );
+        if is_private_ipv4(&embedded) {
+            return true;
+        }
+    }
+    // IPv4-mapped addresses.
+    if let Some(v4) = ip.to_ipv4_mapped() {
+        return is_private_ipv4(&v4);
+    }
+    false
 }
 
 /// RS-064: Constant-time byte comparison that does NOT leak length through timing.
@@ -310,5 +431,99 @@ mod tests {
         assert!(is_private_or_reserved_host("127.0.0.1"));
         assert!(is_private_or_reserved_host("fe80::1"));
         assert!(!is_private_or_reserved_host("hooks.apexmail.ee"));
+    }
+
+    // ── G.4: resolving SSRF guard tests ────────────────────────────────
+
+    fn addr(ip: &str) -> SocketAddr {
+        SocketAddr::new(ip.parse().unwrap(), 443)
+    }
+
+    #[test]
+    fn private_resolving_addresses_are_rejected() {
+        for ip in [
+            "127.0.0.1",
+            "10.1.2.3",
+            "172.16.0.9",
+            "192.168.1.1",
+            "169.254.169.254", // cloud metadata
+            "100.64.0.1",      // CGNAT
+            "::1",
+            "fe80::1",
+            "fc00::1",
+            "::ffff:127.0.0.1", // IPv4-mapped
+        ] {
+            let err = validate_resolved_addrs("evil.example", &[addr(ip)])
+                .expect_err("private/resolved target must be rejected");
+            assert!(
+                matches!(err, DevExError::Validation(_)),
+                "expected Validation error for {ip}"
+            );
+        }
+        // ANY private answer in the set rejects the whole set.
+        assert!(validate_resolved_addrs(
+            "mixed.example",
+            &[addr("8.8.8.8"), addr("10.0.0.5")]
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn public_resolving_addresses_pass() {
+        assert!(validate_resolved_addrs("ok.example", &[addr("8.8.8.8")]).is_ok());
+        assert!(validate_resolved_addrs(
+            "ok.example",
+            &[addr("1.1.1.1"), addr("2606:4700:4700::1111")]
+        )
+        .is_ok());
+        // Empty answer set is a resolution failure, not a pass.
+        assert!(validate_resolved_addrs("empty.example", &[]).is_err());
+    }
+
+    /// A hostname that RESOLVES to loopback (works offline via /etc/hosts)
+    /// must be rejected by the resolving guard — the hostname-only check
+    /// cannot catch this class.
+    #[tokio::test]
+    async fn loopback_resolving_hostname_is_rejected() {
+        let addrs = resolve_host("localhost", 443).await.unwrap();
+        assert!(!addrs.is_empty());
+        let err = validate_resolved_addrs("localhost", &addrs)
+            .expect_err("localhost resolves to loopback — must be rejected");
+        assert!(matches!(err, DevExError::Validation(_)));
+    }
+
+    /// Direct IP-literal private targets are rejected end-to-end before any
+    /// HTTP request is attempted.
+    #[tokio::test]
+    async fn send_test_webhook_rejects_private_target() {
+        let tester = WebhookTester::new(vec!["whsec_test".to_string()]).unwrap();
+        for url in [
+            "http://127.0.0.1:8080/hook",
+            "http://10.0.0.1/hook",
+            "http://[::1]:8080/hook",
+        ] {
+            let err = tester
+                .send_test_webhook(url, "email.delivered")
+                .await
+                .expect_err("private target must be rejected before sending");
+            assert!(
+                matches!(err, DevExError::Validation(_)),
+                "expected Validation error for {url}, got {err:?}"
+            );
+        }
+    }
+
+    /// A public hostname passes the resolving guard (network-dependent —
+    /// skipped when DNS is unavailable in the test environment).
+    #[tokio::test]
+    async fn send_test_webhook_allows_public_target() {
+        let addrs = match resolve_host("example.com", 443).await {
+            Ok(addrs) if !addrs.is_empty() => addrs,
+            _ => {
+                eprintln!("skipping: DNS unavailable in test environment");
+                return;
+            }
+        };
+        assert!(validate_resolved_addrs("example.com", &addrs).is_ok());
     }
 }

@@ -299,7 +299,18 @@ async fn main() {
 
     let app = routes::router(state);
 
-    let addr = SocketAddr::from(([0, 0, 0, 0], config.port));
+    // G.2: the /metrics endpoint is unauthenticated, so the server binds to
+    // loopback by default. Set METRICS_BIND_ADDR (e.g. "0.0.0.0") to expose
+    // it on other interfaces — restrict access with network policy.
+    let bind_ip: std::net::IpAddr = std::env::var("METRICS_BIND_ADDR")
+        .unwrap_or_else(|_| "127.0.0.1".to_string())
+        .trim()
+        .parse()
+        .unwrap_or_else(|_| {
+            tracing::warn!("invalid METRICS_BIND_ADDR — falling back to 127.0.0.1");
+            std::net::IpAddr::from([127, 0, 0, 1])
+        });
+    let addr = SocketAddr::from((bind_ip, config.port));
     tracing::info!(%addr, "Listening");
 
     let listener = match tokio::net::TcpListener::bind(addr).await {

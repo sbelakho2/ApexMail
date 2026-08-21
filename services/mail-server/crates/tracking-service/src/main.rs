@@ -12,14 +12,6 @@
 //! • Waits for in-flight requests to complete (tower graceful shutdown).
 //! • Drains the Redis WAL → Postgres (EventProcessor::stop).
 
-mod bot;
-mod codec;
-mod config;
-mod processor;
-mod routes;
-mod state;
-mod templates;
-
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
@@ -33,12 +25,14 @@ use tokio::signal;
 use tracing::info;
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
-use crate::bot::BotDetector;
-use crate::codec::TrackingCodec;
-use crate::config::load as load_config;
-use crate::processor::EventProcessor;
-use crate::routes::{build_router, health::SHUTTING_DOWN};
-use crate::state::AppState;
+// The service is built as a library (src/lib.rs) plus this thin binary so
+// other ApexMail components (worker-processors) can share the codec exactly.
+use tracking_service::bot::BotDetector;
+use tracking_service::codec::TrackingCodec;
+use tracking_service::config::load as load_config;
+use tracking_service::processor::EventProcessor;
+use tracking_service::routes::{build_router, health::SHUTTING_DOWN};
+use tracking_service::state::AppState;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -146,15 +140,21 @@ async fn main() -> Result<()> {
 
     // ── Optional metrics server ───────────────────────────────────────
     if cfg.metrics.enabled {
-        let metrics_addr: std::net::SocketAddr = format!("0.0.0.0:{}", cfg.metrics.port)
-            .parse()
-            .context("Bad metrics port")?;
+        // G.2: metrics are unauthenticated — bind to loopback by default.
+        // Set METRICS_BIND_ADDR (e.g. 0.0.0.0) to expose them on other
+        // interfaces, restricted by network policy.
+        let bind_addr = std::env::var("METRICS_BIND_ADDR")
+            .unwrap_or_else(|_| "127.0.0.1".into());
+        let metrics_addr: std::net::SocketAddr =
+            format!("{}:{}", bind_addr.trim(), cfg.metrics.port)
+                .parse()
+                .with_context(|| format!("Bad metrics bind address '{bind_addr}'"))?;
         let builder = metrics_exporter_prometheus::PrometheusBuilder::new();
         builder
             .with_http_listener(metrics_addr)
             .install_recorder()
             .context("Failed to install Prometheus recorder")?;
-        info!(port = cfg.metrics.port, "Prometheus metrics server ready");
+        info!(%metrics_addr, "Prometheus metrics server ready");
     }
 
     // ── App state ─────────────────────────────────────────────────────

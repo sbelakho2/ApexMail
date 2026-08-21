@@ -49,6 +49,112 @@ const ERROR_THRESHOLD: usize = 10;
 /// Cooldown duration when error rate is too high.
 const ERROR_COOLDOWN: Duration = Duration::from_secs(60);
 
+/// G.3b: per-recipient suppression — remove the recipient from the pending
+/// set and only mark the row 'suppressed' when nothing remains owed.
+const SUPPRESSED_UPDATE_SQL: &str = r#"
+    UPDATE email_queue
+    SET metadata = jsonb_set(
+            COALESCE(metadata, '{}'::jsonb),
+            '{pending_recipients}',
+            COALESCE(
+                metadata->'pending_recipients',
+                CASE WHEN jsonb_array_length(to_jsonb(to_addresses)) > 0
+                     THEN to_jsonb(to_addresses) END,
+                CASE WHEN "to" IS NOT NULL AND "to" <> ''
+                     THEN to_jsonb(ARRAY["to"]) END,
+                '[]'::jsonb
+            ) - $3::text
+        ),
+        status = CASE WHEN COALESCE(
+                metadata->'pending_recipients',
+                CASE WHEN jsonb_array_length(to_jsonb(to_addresses)) > 0
+                     THEN to_jsonb(to_addresses) END,
+                CASE WHEN "to" IS NOT NULL AND "to" <> ''
+                     THEN to_jsonb(ARRAY["to"]) END,
+                '[]'::jsonb
+            ) - $3::text = '[]'::jsonb
+            THEN 'suppressed' ELSE status END,
+        error_message = $1,
+        updated_at = NOW()
+    WHERE id = $2::uuid
+"#;
+
+/// G.3c: duplicate-window reclaim bookkeeping — drop the recipient from the
+/// pending set and append it to an auditable `possibly_sent` metadata list.
+const POSSIBLY_SENT_UPDATE_SQL: &str = r#"
+    UPDATE email_queue
+    SET metadata = jsonb_set(
+            jsonb_set(
+                COALESCE(metadata, '{}'::jsonb),
+                '{pending_recipients}',
+                COALESCE(
+                    metadata->'pending_recipients',
+                    CASE WHEN jsonb_array_length(to_jsonb(to_addresses)) > 0
+                         THEN to_jsonb(to_addresses) END,
+                    CASE WHEN "to" IS NOT NULL AND "to" <> ''
+                         THEN to_jsonb(ARRAY["to"]) END,
+                    '[]'::jsonb
+                ) - $2::text
+            ),
+            '{possibly_sent}',
+            COALESCE(metadata->'possibly_sent', '[]'::jsonb) || to_jsonb(ARRAY[$2::text])
+        ),
+        status = CASE WHEN COALESCE(
+                metadata->'pending_recipients',
+                CASE WHEN jsonb_array_length(to_jsonb(to_addresses)) > 0
+                     THEN to_jsonb(to_addresses) END,
+                CASE WHEN "to" IS NOT NULL AND "to" <> ''
+                     THEN to_jsonb(ARRAY["to"]) END,
+                '[]'::jsonb
+            ) - $2::text = '[]'::jsonb
+            THEN 'sent' ELSE status END,
+        updated_at = NOW()
+    WHERE id = $1::uuid
+"#;
+
+/// G.3c: send-idempotency marker key — one marker per (row, attempt,
+/// recipient), the exact unit of `transport.send`. Held with the row's
+/// visibility lease so a crashed worker's reclaim hits the marker.
+fn send_marker_key(job: &EmailJob) -> String {
+    format!("email:send:{}:{}:{}", job.id, job.attempt, job.to)
+}
+
+/// G.3c: try to claim the send slot (Redis SET NX EX). `Ok(true)` — we own
+/// this send; `Ok(false)` — a previous claim may already have sent (crashed
+/// worker, expired lease); `Err` — Redis unavailable (best-effort mode: the
+/// send proceeds, logged).
+async fn try_claim_send_slot(
+    redis: &RedisPool,
+    job: &EmailJob,
+    ttl_secs: u64,
+) -> Result<bool, String> {
+    let mut conn = redis.get().await.map_err(|e| e.to_string())?;
+    let claimed: Option<String> = redis::cmd("SET")
+        .arg(send_marker_key(job))
+        .arg("1")
+        .arg("NX")
+        .arg("EX")
+        .arg(ttl_secs.max(1))
+        .query_async(&mut *conn)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(claimed.is_some())
+}
+
+/// G.3c: release the send marker once the attempt is fully handled.
+async fn release_send_slot(redis: &RedisPool, job: &EmailJob) {
+    match redis.get().await {
+        Ok(mut conn) => {
+            let _: () = redis::cmd("DEL")
+                .arg(send_marker_key(job))
+                .query_async(&mut *conn)
+                .await
+                .unwrap_or(());
+        }
+        Err(e) => warn!(error = %e, "failed to release send idempotency marker"),
+    }
+}
+
 /// One `email_queue` row as decoded by `fetch_jobs`, before per-recipient
 /// expansion (FIX-8).
 #[derive(Debug, Clone, sqlx::FromRow)]
@@ -115,6 +221,29 @@ fn queued_row_to_jobs(row: QueuedEmailRow) -> Vec<EmailJob> {
             created_at: row.created_at,
         })
         .collect()
+}
+
+/// G.3a: expand claimed rows into send units, counting every expanded
+/// recipient against the available concurrency slots.
+fn expand_rows_within_cap(rows: Vec<QueuedEmailRow>, cap: usize) -> Vec<EmailJob> {
+    let mut jobs: Vec<EmailJob> = Vec::new();
+    for row in rows {
+        if jobs.len() >= cap {
+            break;
+        }
+        let expanded = queued_row_to_jobs(row);
+        let remaining = cap - jobs.len();
+        if expanded.len() > remaining {
+            warn!(
+                claimed_recipients = expanded.len(),
+                admitted_recipients = remaining,
+                "multi-recipient row exceeds available concurrency slots — excess \
+                 recipients deferred until the next lease cycle"
+            );
+        }
+        jobs.extend(expanded.into_iter().take(remaining));
+    }
+    jobs
 }
 
 /// Email processor for sending emails from the queue.
@@ -413,7 +542,12 @@ impl EmailProcessor {
 
         // FIX-8: expand one queued row into one send unit PER recipient so
         // multi-recipient messages no longer drop recipients 2..N.
-        Ok(rows.into_iter().flat_map(queued_row_to_jobs).collect())
+        // G.3a: recipient expansion counts against the concurrency budget —
+        // `limit` is the available slot count, and the expansion is capped to
+        // it so one 10k-recipient row cannot fan out into 10k concurrent
+        // sends. Recipients beyond the cap remain in the row's pending set
+        // and are delivered after the visibility lease expires.
+        Ok(expand_rows_within_cap(rows, limit))
     }
 
     /// Batch suppression check for efficiency.
@@ -585,11 +719,41 @@ impl EmailProcessor {
         // Prepare email
         let email = self.prepare_email(job, &domain)?;
 
+        // G.3c: send idempotency — claim the (row, attempt, recipient) send
+        // slot before touching the transport. A reclaim whose previous
+        // attempt may have sent (lease expired mid-send) finds the marker
+        // still held and does NOT re-send; the recipient is recorded as
+        // possibly-sent instead. The X-ApexMail-Message-ID header added by
+        // prepare_email lets downstream systems dedupe the rare true
+        // duplicate. Best-effort: without Redis the send proceeds (logged).
+        let marker_ttl_secs = self.config.base.visibility_timeout.as_secs().max(1);
+        match try_claim_send_slot(&self.redis, job, marker_ttl_secs).await {
+            Ok(true) => {}
+            Ok(false) => {
+                warn!(
+                    job_id = %job.id,
+                    recipient = %job.to,
+                    attempt = job.attempt,
+                    "send marker still held — previous attempt may have sent; skipping re-send"
+                );
+                self.handle_possibly_sent(job).await?;
+                return Ok(());
+            }
+            Err(e) => {
+                warn!(
+                    job_id = %job.id,
+                    error = %e,
+                    "send idempotency marker unavailable — proceeding (best-effort)"
+                );
+            }
+        }
+
         // Send email
-        match self.transport.send(&email).await {
+        let send_result = self.transport.send(&email).await;
+        let outcome: ProcessorResult<()> = match send_result {
             Ok(result) => {
                 self.smtp_circuit_breaker.record_success();
-                self.handle_success(job, &result).await?;
+                self.handle_success(job, &result).await
             }
             Err(e) => {
                 self.smtp_circuit_breaker.record_failure();
@@ -604,11 +768,16 @@ impl EmailProcessor {
                     self.handle_error(job, &e).await?;
                 }
 
-                return Err(e);
+                Err(e)
             }
-        }
+        };
 
-        Ok(())
+        // G.3c: release the marker once the attempt is fully handled — on
+        // success the pending set already excludes this recipient; on
+        // failure the next attempt mints a fresh marker (attempt increments).
+        release_send_slot(&self.redis, job).await;
+
+        outcome
     }
 
     /// Check warmup limits for a domain.
@@ -979,16 +1148,34 @@ impl EmailProcessor {
     }
 
     /// Handle suppressed recipient.
+    ///
+    /// G.3b: the row carries MULTIPLE recipients (FIX-8) — suppressing one
+    /// must not terminate the whole row while siblings are still in flight.
+    /// The recipient is removed from `metadata.pending_recipients` (mirroring
+    /// `handle_success`) and the row only becomes 'suppressed' when the
+    /// pending set is empty.
     async fn handle_suppressed(&self, job: &EmailJob, reason: &str) -> ProcessorResult<()> {
-        sqlx::query(
-            r#"
-            UPDATE email_queue SET status = 'suppressed', error_message = $1 WHERE id = $2::uuid
-            "#,
-        )
-        .bind(reason)
-        .bind(&job.id)
-        .execute(&self.db)
-        .await?;
+        sqlx::query(SUPPRESSED_UPDATE_SQL)
+            .bind(reason)
+            .bind(&job.id)
+            .bind(&job.to)
+            .execute(&self.db)
+            .await?;
+
+        Ok(())
+    }
+
+    /// G.3c: a duplicate-window reclaim — the (row, attempt, recipient) send
+    /// marker was still held, so a previous worker may already have sent this
+    /// message. Record the recipient as possibly-sent in the row metadata
+    /// (auditable) and remove it from the pending set so the row completes
+    /// instead of redelivery-looping.
+    async fn handle_possibly_sent(&self, job: &EmailJob) -> ProcessorResult<()> {
+        sqlx::query(POSSIBLY_SENT_UPDATE_SQL)
+            .bind(&job.id)
+            .bind(&job.to)
+            .execute(&self.db)
+            .await?;
 
         Ok(())
     }
@@ -2148,5 +2335,184 @@ mod tests {
         );
         assert_eq!(envelope_domain("no-at-sign"), None);
         assert_eq!(envelope_domain("@"), Some(""));
+    }
+
+    // ---------------------------------------------------------------------------
+    // G.3a: recipient expansion respects the concurrency cap
+    // ---------------------------------------------------------------------------
+
+    fn row_with_id(id: &str, to_addresses: Option<Vec<String>>) -> QueuedEmailRow {
+        QueuedEmailRow {
+            id: id.into(),
+            message_id: format!("msg-{id}"),
+            ..queued_row("first@example.com", to_addresses)
+        }
+    }
+
+    #[test]
+    fn expansion_is_capped_to_available_slots() {
+        let recipients: Vec<String> = (1..=5).map(|i| format!("user{i}@example.com")).collect();
+        let rows = vec![row_with_id("r1", Some(recipients))];
+        let jobs = expand_rows_within_cap(rows, 3);
+        assert_eq!(jobs.len(), 3, "a 5-recipient row must not exceed 3 slots");
+        assert_eq!(jobs[0].to, "user1@example.com");
+        assert_eq!(jobs[2].to, "user3@example.com");
+    }
+
+    #[test]
+    fn expansion_counts_across_multiple_rows() {
+        let rows = vec![
+            row_with_id("r1", Some(vec!["a@example.com".into()])),
+            row_with_id(
+                "r2",
+                Some(vec![
+                    "b@example.com".into(),
+                    "c@example.com".into(),
+                    "d@example.com".into(),
+                ]),
+            ),
+            row_with_id("r3", Some(vec!["e@example.com".into()])),
+        ];
+        let jobs = expand_rows_within_cap(rows, 2);
+        assert_eq!(jobs.len(), 2);
+        assert_eq!(jobs[0].id, "r1");
+        assert_eq!(jobs[1].id, "r2");
+        // The third row was never admitted once the cap was reached.
+        assert!(jobs.iter().all(|j| j.id != "r3"));
+    }
+
+    #[test]
+    fn expansion_with_zero_slots_yields_nothing() {
+        let rows = vec![row_with_id("r1", Some(vec!["a@example.com".into()]))];
+        assert!(expand_rows_within_cap(rows, 0).is_empty());
+    }
+
+    // ---------------------------------------------------------------------------
+    // G.3b/G.3c: suppression + send idempotency SQL and marker
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn suppressed_update_only_marks_row_terminal_when_pending_set_empty() {
+        // G.3b: the suppression update must decrement the per-recipient
+        // pending set (not blanket-flip the row) and only set the terminal
+        // 'suppressed' status when the set is empty.
+        let sql = SUPPRESSED_UPDATE_SQL;
+        assert!(sql.contains("pending_recipients"), "must maintain the pending set");
+        assert!(sql.contains("- $3::text"), "must remove the suppressed recipient");
+        assert!(
+            sql.contains("THEN 'suppressed' ELSE status END"),
+            "status must be conditional"
+        );
+        assert!(sql.contains("error_message = $1"), "reason must be recorded");
+    }
+
+    #[test]
+    fn possibly_sent_update_records_audit_trail_and_completes_row() {
+        let sql = POSSIBLY_SENT_UPDATE_SQL;
+        assert!(sql.contains("possibly_sent"), "must append an audit marker");
+        assert!(sql.contains("- $2::text"), "must remove the recipient from pending");
+        assert!(
+            sql.contains("THEN 'sent' ELSE status END"),
+            "row completes when pending empties"
+        );
+    }
+
+    #[test]
+    fn send_marker_key_is_scoped_to_row_attempt_and_recipient() {
+        let job = queued_row("a@example.com", Some(vec!["a@example.com".into()]));
+        let jobs = queued_row_to_jobs(job);
+        let key = send_marker_key(&jobs[0]);
+        assert_eq!(key, "email:send:job-1:0:a@example.com");
+    }
+
+    /// G.3c: simulate the reclaim sequence — the first claim wins, the
+    /// reclaim of a lease that expired mid-send is refused, and the marker
+    /// is releasable once the attempt is handled.
+    #[tokio::test]
+    async fn send_marker_prevents_double_send_on_reclaim() {
+        // Ephemeral redis-server; skip when unavailable.
+        let listener = match std::net::TcpListener::bind(("127.0.0.1", 0)) {
+            Ok(l) => l,
+            Err(_) => {
+                eprintln!("skipping: cannot allocate port");
+                return;
+            }
+        };
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        let mut child = match std::process::Command::new("redis-server")
+            .args([
+                "--port",
+                &port.to_string(),
+                "--save",
+                "",
+                "--appendonly",
+                "no",
+                "--daemonize",
+                "no",
+            ])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+        {
+            Ok(child) => child,
+            Err(_) => {
+                eprintln!("skipping: redis-server not available");
+                return;
+            }
+        };
+        let mut ready = false;
+        for _ in 0..50 {
+            if let Ok(client) = redis::Client::open(format!("redis://127.0.0.1:{port}").as_str()) {
+                if let Ok(mut conn) = client.get_connection() {
+                    if redis::cmd("PING")
+                        .query::<String>(&mut conn)
+                        .map(|r| r == "PONG")
+                        .unwrap_or(false)
+                    {
+                        ready = true;
+                        break;
+                    }
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        if !ready {
+            let _ = child.kill();
+            let _ = child.wait();
+            eprintln!("skipping: redis-server did not become ready");
+            return;
+        }
+
+        let result: ProcessorResult<()> = async {
+            let redis = deadpool_redis::Config::from_url(format!("redis://127.0.0.1:{port}"))
+                .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+                .map_err(|e| ProcessorError::Job(e.to_string()))?;
+            let job = queued_row("a@example.com", Some(vec!["a@example.com".into()]));
+            let job = queued_row_to_jobs(job).remove(0);
+
+            // 1. Original worker claims the send slot.
+            assert!(try_claim_send_slot(&redis, &job, 60).await.unwrap());
+            // 2. Worker crashes mid-send; the row is reclaimed with the SAME
+            //    attempt — the marker is still held → no double send.
+            assert!(
+                !try_claim_send_slot(&redis, &job, 60).await.unwrap(),
+                "reclaim of an in-flight attempt must be refused"
+            );
+            // 3. A different recipient of the same row is independent.
+            let sibling = EmailJob {
+                to: "b@example.com".into(),
+                ..job.clone()
+            };
+            assert!(try_claim_send_slot(&redis, &sibling, 60).await.unwrap());
+            // 4. After the attempt is handled the marker is released.
+            release_send_slot(&redis, &job).await;
+            assert!(try_claim_send_slot(&redis, &job, 60).await.unwrap());
+            Ok(())
+        }
+        .await;
+        let _ = child.kill();
+        let _ = child.wait();
+        result.expect("marker sequence");
     }
 }

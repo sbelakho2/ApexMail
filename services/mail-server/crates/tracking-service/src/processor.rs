@@ -166,6 +166,12 @@ impl ClickHouseEventRow {
     /// Map a WAL tracking event onto the ClickHouse row. All optional fields
     /// are flattened to non-null strings — the `events` table has no
     /// `Nullable` columns.
+    ///
+    /// D (PII): the raw recipient is NEVER stored in the OLAP events table.
+    /// It is privacy-encoded via `analytics::email_hash` — an HMAC digest
+    /// (stable, so per-recipient grouping keeps working) plus a truncated
+    /// `a***@domain` form for human debugging. Postgres remains the
+    /// system-of-record for raw recipients.
     pub fn from_tracking_event(ev: &TrackingEvent) -> Self {
         let ts = ev.timestamp;
         let timestamp = time::OffsetDateTime::from_unix_timestamp(ts.timestamp())
@@ -178,7 +184,7 @@ impl ClickHouseEventRow {
             message_id: ev.message_id.clone(),
             event_type: ev.event_type.to_string(),
             timestamp,
-            recipient: ev.recipient.clone(),
+            recipient: analytics::email_hash::recipient_for_analytics(&ev.recipient),
             recipient_domain: recipient_domain(&ev.recipient),
             link_id: ev.link_id.clone().unwrap_or_default(),
             user_agent: ev.user_agent.clone().unwrap_or_default(),
@@ -1198,6 +1204,15 @@ mod tests {
 
         assert_eq!(row.id, "evt_1");
         assert_eq!(row.event_type, "clicked");
+        // D: the OLAP row never carries the raw recipient — only the
+        // privacy-encoded HMAC + redacted form.
+        assert!(row.recipient.starts_with("h:"), "got {}", row.recipient);
+        assert!(!row.recipient.contains("User@"), "got {}", row.recipient);
+        assert!(
+            row.recipient.contains("***@Example.com"),
+            "got {}",
+            row.recipient
+        );
         assert_eq!(row.recipient_domain, "example.com");
         assert_eq!(row.link_id, "lnk_1");
         assert_eq!(row.user_agent, "TestAgent");

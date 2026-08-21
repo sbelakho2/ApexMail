@@ -31,6 +31,12 @@ pub struct AppState {
     pub calendar: CalendarService,
     pub delivery: DeliveryService,
     pub api_key: String,
+    /// A. Fail-closed auth: when no API key is configured, every protected
+    /// route must return 503 (auth not configured) — never pass-through.
+    /// The ONLY bypass is this explicit development opt-in flag
+    /// (`EDGE_CASES_ALLOW_ANONYMOUS=true`), which is off by default and logs
+    /// a loud warning at startup.
+    pub allow_anonymous: bool,
 }
 
 // ── router ─────────────────────────────────────────────────────────────────────
@@ -85,6 +91,18 @@ async fn require_api_key(
     }
 
     if state.api_key.trim().is_empty() {
+        // Fail CLOSED: an unconfigured key must never silently open the
+        // service. Protected routes get a 503 unless the operator explicitly
+        // opted into anonymous development access.
+        if !state.allow_anonymous {
+            tracing::error!(
+                "auth not configured (INTERNAL_API_KEY empty) — refusing request; \
+                 set INTERNAL_API_KEY or, in development only, \
+                 EDGE_CASES_ALLOW_ANONYMOUS=true"
+            );
+            return Err(StatusCode::SERVICE_UNAVAILABLE);
+        }
+        tracing::debug!("anonymous access allowed via EDGE_CASES_ALLOW_ANONYMOUS");
         return Ok(next.run(request).await);
     }
 
@@ -541,5 +559,136 @@ impl std::str::FromStr for CalendarMethod {
             "PUBLISH" => Ok(CalendarMethod::Publish),
             _ => Err(format!("Unknown calendar method: {s}")),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::Request;
+    use tower::ServiceExt;
+
+    fn test_runtime() -> &'static tokio::runtime::Runtime {
+        use std::sync::OnceLock;
+        static RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+        RT.get_or_init(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+        })
+    }
+
+    /// Build an AppState backed by lazy (never-connected) pools so the auth
+    /// middleware can be exercised without any database. `/eai/normalize` is
+    /// a pure handler, so an authorized request also completes offline.
+    fn test_state(api_key: &str, allow_anonymous: bool) -> Arc<AppState> {
+        let _guard = test_runtime().enter();
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect_lazy("postgres://fake:fake@localhost:1/fake")
+            .unwrap();
+        let redis_pool = deadpool_redis::Config::from_url("redis://localhost:1")
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .expect("redis pool");
+        let config = crate::config::EdgeCasesConfig::default();
+        Arc::new(AppState {
+            eai: EAIService::new(pool.clone(), redis_pool.clone()),
+            attachment: AttachmentService::new(
+                pool.clone(),
+                config.attachments.clone(),
+                config.clamav.clone(),
+            ),
+            calendar: CalendarService::new(pool.clone()),
+            delivery: DeliveryService::new(
+                pool.clone(),
+                redis_pool.clone(),
+                config.retry.clone(),
+                config.loop_detection.clone(),
+                &config.auto_responder.subject_patterns,
+            ),
+            api_key: api_key.to_string(),
+            allow_anonymous,
+        })
+    }
+
+    fn normalize_request(api_key: Option<&str>) -> Request<Body> {
+        let mut builder = Request::builder()
+            .method("POST")
+            .uri("/eai/normalize")
+            .header("content-type", "application/json");
+        if let Some(key) = api_key {
+            builder = builder.header("x-api-key", key);
+        }
+        builder.body(Body::from(r#"{"content":"hello"}"#)).unwrap()
+    }
+
+    async fn run(state: Arc<AppState>, api_key: Option<&str>) -> StatusCode {
+        let app = router(state);
+        let resp = app.oneshot(normalize_request(api_key)).await.unwrap();
+        resp.status()
+    }
+
+    #[test]
+    fn test_no_key_configured_fails_closed_with_503() {
+        test_runtime().block_on(async {
+            let status = run(test_state("", false), None).await;
+            assert_eq!(
+                status,
+                StatusCode::SERVICE_UNAVAILABLE,
+                "unconfigured key must fail closed with 503, not pass through"
+            );
+            // Even a supplied key cannot help when none is configured.
+            assert_eq!(
+                run(test_state("", false), Some("anything")).await,
+                StatusCode::SERVICE_UNAVAILABLE
+            );
+        });
+    }
+
+    #[test]
+    fn test_wrong_key_rejected_with_401() {
+        test_runtime().block_on(async {
+            assert_eq!(
+                run(test_state("correct-key", false), Some("wrong-key")).await,
+                StatusCode::UNAUTHORIZED
+            );
+            assert_eq!(
+                run(test_state("correct-key", false), None).await,
+                StatusCode::UNAUTHORIZED
+            );
+        });
+    }
+
+    #[test]
+    fn test_correct_key_allowed_200() {
+        test_runtime().block_on(async {
+            assert_eq!(
+                run(test_state("correct-key", false), Some("correct-key")).await,
+                StatusCode::OK
+            );
+        });
+    }
+
+    #[test]
+    fn test_explicit_anonymous_flag_allows_200() {
+        test_runtime().block_on(async {
+            assert_eq!(
+                run(test_state("", true), None).await,
+                StatusCode::OK,
+                "EDGE_CASES_ALLOW_ANONYMOUS dev opt-in must allow requests"
+            );
+        });
+    }
+
+    #[test]
+    fn test_health_bypasses_auth() {
+        test_runtime().block_on(async {
+            let app = router(test_state("", false));
+            let req = Request::builder().uri("/health").body(Body::empty()).unwrap();
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+        });
     }
 }

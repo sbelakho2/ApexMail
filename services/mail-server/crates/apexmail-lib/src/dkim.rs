@@ -316,6 +316,32 @@ mod tests {
         }
     }
 
+    /// E: new DKIM-key writes NEVER fall back to plaintext storage — a
+    /// missing key is a typed error. Legacy plaintext rows remain readable
+    /// (documented migration path in `decrypt_dkim_private_key`).
+    #[test]
+    fn encryption_without_key_never_writes_plaintext() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let previous = std::env::var(DKIM_PRIVATE_KEY_ENCRYPTION_KEY_ENV).ok();
+        std::env::remove_var(DKIM_PRIVATE_KEY_ENCRYPTION_KEY_ENV);
+
+        let err = encrypt_dkim_private_key("private key", b"tenant=t1;domain=d1")
+            .expect_err("missing key must fail closed");
+        assert!(matches!(err, DkimKeyError::EncryptionKeyMissing));
+        // Legacy plaintext rows stay readable for a controlled migration.
+        assert_eq!(
+            decrypt_dkim_private_key("legacy-plaintext-key", b"tenant=t1;domain=d1")
+                .unwrap()
+                .as_str(),
+            "legacy-plaintext-key"
+        );
+
+        match previous {
+            Some(value) => std::env::set_var(DKIM_PRIVATE_KEY_ENCRYPTION_KEY_ENV, value),
+            None => std::env::remove_var(DKIM_PRIVATE_KEY_ENCRYPTION_KEY_ENV),
+        }
+    }
+
     #[test]
     fn normalizing_dns_key_ignores_quotes_and_whitespace() {
         assert!(dkim_public_keys_match("MIIB IjAN", "\"MIIB\" \nIjAN",));

@@ -12,6 +12,8 @@ path = "src/main.rs"
 
 [dependencies]
 mail-common = { path = "../mail-common", features = ["sqlx"] }
+# D: recipient privacy-encoding for the ClickHouse analytics ingest path.
+analytics = { path = "../analytics" }
 
 # Async runtime
 tokio.workspace = true
