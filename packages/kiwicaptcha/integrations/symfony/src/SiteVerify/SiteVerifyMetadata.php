@@ -6,30 +6,30 @@ namespace BelConsulting\KiwiCaptchaBundle\SiteVerify;
 
 /**
  * Provider-compatible challenge metadata (Turnstile action / cData /
- * sitekey), bound to the challenge at ISSUANCE and returned from verified
- * server state. A backend Siteverify request can NEVER supply these — the
- * trust direction is server-owned: the widget declares them at challenge
+ * sitekey), bound to the challenge at issuance and returned from verified
+ * server state. A backend Siteverify request can never supply these: the
+ * trust direction is server-owned — the widget declares them at challenge
  * time, the server validates and persists them against the nonce, and the
  * verification response reads them back.
  *
- * The PRIVATE chain fields (chainId / chainDepth) are server-stamped by
- * the stage-2 chain controller only: they never travel in the cdata (the
- * application's own cdata is preserved untouched, so the Siteverify
- * response keeps returning the app's value), and the validator reads the
+ * The private chain fields (chainId / chainDepth) are server-stamped by
+ * the stage-2 chain controller only: they never travel in the cdata, so
+ * the application's own cdata is preserved untouched and the Siteverify
+ * response keeps returning the app's value. The validator reads the
  * chainId to end a chain at stage 2. Old persisted records without the
  * fields parse with nulls/0.
  */
 final readonly class SiteVerifyMetadata
 {
     /**
-     * @param string|null $action Turnstile action (regex ^[a-z0-9_-]{0,32}$)
-     * @param string|null $cdata  Turnstile cData (regex ^[a-z0-9_-]{0,255}$)
-     * @param string|null $sitekey the public sitekey the widget rendered for
+     * @param string|null $action Turnstile action (regex ^[a-z0-9_-]{0,32}$).
+     * @param string|null $cdata  Turnstile cData (regex ^[a-z0-9_-]{0,255}$).
+     * @param string|null $sitekey the public sitekey the widget rendered for.
      * @param string|null $chainId the server-stamped chain id of a stage-2
      *                             issued challenge (private; null = not a
-     *                             stage-2 chain challenge)
+     *                             stage-2 chain challenge).
      * @param int         $chainDepth the chain depth of a stage-2 issued
-     *                                challenge (2; 0 = not chained)
+     *                                challenge (2; 0 = not chained).
      */
     public function __construct(
         public ?string $action,

@@ -14,23 +14,26 @@ use KiwiCaptcha\StorageInterface;
 
 /**
  * In-memory storage (single-process, non-persistent). Intended for tests,
- * CLI tools, and single-worker apps where Redis/DB is not available.
+ * CLI tools, and single-worker apps where Redis or a database is not
+ * available.
  *
- * consume() is the one-shot TRANSITION: the record is marked
- * consumed and KEPT until deletion — replay protection is the consumed
- * marker, not absence. The transition is read-then-write; the state is a
- * plain in-process array that NO other process or thread can observe (PHP
- * copies on fork, so forked children never share it). Because the state is
- * unshareable, the read-modify-write transition is de-facto atomic — the
- * class therefore implements {@see AtomicStorageInterface}. Shared backends
- * with genuine concurrent access (PSR-6 pools, Redis MULTI-less clients)
- * must implement the compare-and-set contract themselves; see
- * {@see Psr6Storage} for the documented counter-example.
+ * consume() is the one-shot transition: the record is marked consumed
+ * and kept until deletion; replay protection is the consumed marker, not
+ * absence. The transition is read-then-write, and the state is a plain
+ * in-process array that no other process or thread can observe (PHP
+ * copies on fork, so forked children never share it). Because the state
+ * is unshareable, the read-modify-write transition is de-facto atomic,
+ * and the class therefore implements {@see AtomicStorageInterface}.
+ * Shared backends with genuine concurrent access (PSR-6 pools, Redis
+ * clients without transactions) must implement the compare-and-set
+ * contract themselves; see {@see Psr6Storage} for the documented
+ * counter-example.
  *
  * The runtime envelope mirrors the Redis backend: every entry carries the
  * `operation_identity` marker (null | a bounded <= 128-byte
- * logical-operation identity written in the SAME transition as the state
- * flip via {@see OperationIdentityAwareStorageInterface::consumeWithOperationIdentity()}),
+ * logical-operation identity written in the same transition as the state
+ * flip via
+ * {@see OperationIdentityAwareStorageInterface::consumeWithOperationIdentity()}),
  * exposed on the consumed read.
  */
 final class ArrayStorage implements AtomicStorageInterface, \KiwiCaptcha\ConsumedStateReadableInterface, OperationIdentityAwareStorageInterface
@@ -64,11 +67,11 @@ final class ArrayStorage implements AtomicStorageInterface, \KiwiCaptcha\Consume
 
     public function consumeWithOperationIdentity(string $nonce, ?string $operationIdentity): ?ConsumedRecord
     {
-        // The identity — validated against the narrow shared alphabet
-        // ({@see OperationIdentity::validate()} — 1..128 bytes of
-        // [A-Za-z0-9_-], REJECTED with InvalidArgumentException when
-        // malformed, never silently dropped) — lands in the SAME write as
-        // the state flip.
+        // The identity, validated against the narrow shared alphabet via
+        // {@see OperationIdentity::validate()} (1..128 bytes of
+        // [A-Za-z0-9_-]), lands in the same write as the state flip. A
+        // malformed identity is rejected with InvalidArgumentException,
+        // never silently dropped.
         $validated = OperationIdentity::validate($operationIdentity);
         $entry = $this->records[$nonce] ?? null;
         if ($entry === null) {

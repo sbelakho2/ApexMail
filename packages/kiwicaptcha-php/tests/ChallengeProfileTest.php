@@ -16,10 +16,10 @@ use PHPUnit\Framework\TestCase;
 
 /**
  * ChallengeProfile: adaptive-risk difficulty profiles and
- * Issuer::issueWithProfile() — profiles must validate against the SAME
+ * Issuer::issueWithProfile(). Profiles must validate against the same
  * bounds as Config/issuance and must issue challenges that are
  * byte-for-byte indistinguishable from a normal issue (same wire format,
- * signing, storage — only the parameters differ).
+ * signing, storage; only the parameters differ).
  */
 final class ChallengeProfileTest extends TestCase
 {

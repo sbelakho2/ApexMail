@@ -9,12 +9,12 @@ use KiwiCaptcha\MalformedRecordException;
 use PHPUnit\Framework\TestCase;
 
 /**
- * Differential malicious-record parsing: the SAME deterministic
- * fuzz corpus (protocol/risk-v1/fuzz-corpus.json — 1000 mutations of a
- * valid record, seed 0x5EED0001) must be accepted (and rejected)
- * IDENTICALLY by the PHP and Rust parsers. The Rust side pins 659 accepted
- * records; fromArray is the strict serde mirror, so it must land on the
- * SAME 659.
+ * Differential malicious-record parsing: the same deterministic fuzz
+ * corpus (protocol/risk-v1/fuzz-corpus.json, 1000 mutations of a valid
+ * record, seed 0x5EED0001) must be accepted and rejected identically by
+ * the PHP and Rust parsers. The Rust side pins 659 accepted records;
+ * fromArray is the strict serde mirror, so it must land on the same
+ * 659.
  */
 final class FuzzCorpusParityTest extends TestCase
 {
@@ -43,11 +43,12 @@ final class FuzzCorpusParityTest extends TestCase
             } catch (MalformedRecordException) {
                 $rejected++;
             } catch (\Throwable $e) {
-                // fromArray is a documented-exception-only parse
-                // path — every corpus entry must end in either a record or
+                // fromArray is a documented-exception-only parse path:
+                // every corpus entry must end in either a record or
                 // MalformedRecordException. A TypeError/Error/ValueError
-                // leaking out is a parser bug (e.g. an unchecked type cast
-                // or an int overflow in a range comparison), not a rejection.
+                // leaking out is a parser bug (e.g. an unchecked type
+                // cast or an int overflow in a range comparison), not a
+                // rejection.
                 self::fail(sprintf(
                     'unexpected %s from fromArray for corpus entry: %s',
                     $e::class,

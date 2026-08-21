@@ -8,59 +8,60 @@ use KiwiCaptcha\Issuer;
 use KiwiCaptcha\Risk\RiskKeys;
 
 /**
- * Anti-stockpiling: bounded outstanding UNSOLVED challenges per source and
+ * Anti-stockpiling: bounded outstanding unsolved challenges per source and
  * deployment-wide.
  *
- * Keys (one hash-tag family {kiwi:<ns>} — Cluster safe):
- *   {kiwi:<ns>}:outstanding:<hex>          per-source counter
- *   {kiwi:<ns>}:outstanding:global         deployment-wide counter
+ * Keys (one hash-tag family {kiwi:<ns>}, Cluster safe):
+ *   {kiwi:<ns>}:outstanding:<hex>          per-source counter.
+ *   {kiwi:<ns>}:outstanding:global         deployment-wide counter.
  *
- * The source identity is hex(hmac_sha256(canonical-ip-bytes, RiskKeys::event)):
- * the raw IP NEVER appears in Redis, and the same canonical key as the
- * challenge binding tag is used (IPv4-mapped-IPv6 normalized), so two textual
- * spellings of one address hit the same counter. The HMAC key is the risk
- * package's purpose-separated 'event' key (derived from the risk master
- * secret by RiskKeys::fromMaster) — shared with the risk engine's own
- * event-id pseudonyms, never a raw identifier.
+ * The source identity is the hex form of
+ * hmac_sha256(canonical-ip-bytes, RiskKeys::event). The raw IP never
+ * appears in Redis, and the same canonical key as the
+ * challenge binding tag is used (IPv4-mapped-IPv6 normalized), so two
+ * textual spellings of one address hit the same counter. The HMAC key is
+ * the risk package's purpose-separated 'event' key (derived from the risk
+ * master secret by RiskKeys::fromMaster), shared with the risk engine's
+ * own event-id pseudonyms, never a raw identifier.
  *
- * Issuance ({@see issue()}): ONE atomic Lua script — GET both counters,
- * refuse (0 = source cap, -1 = global cap) BEFORE anything is written, then
+ * Issuance, see {@see issue()}: one atomic Lua script — GET both counters,
+ * refuse (0 = source cap, -1 = global cap) before anything is written, then
  * INCR both and EXPIRE both with (challenge lifetime + ttl_margin_secs). A
  * challenge is only returned to the client when the script admitted it, so
  * the counters can never silently exceed the caps through concurrency.
  *
- * Verification ({@see solved()}): best-effort DECR of the PER-SOURCE counter
- * (floored at 0) when a challenge verifies successfully. The GLOBAL counter
- * is never decremented: it is deployment-wide pressure that decays only by
- * EXPIRE (identity-neutral, matching the risk engine's global-pressure
- * semantics).
+ * Verification, see {@see solved()}: best-effort DECR of the per-source
+ * counter (floored at 0) when a challenge verifies successfully. The global
+ * counter is never decremented: it is deployment-wide pressure that decays
+ * only by EXPIRE (identity-neutral, matching the risk engine's
+ * global-pressure semantics).
  *
- * ABORTED-BEFORE-HANDOFF ({@see abortedBeforeHandoff()}): when a challenge
- * was ADMITTED but PROVEN never handed out (a mint/metadata/chain-state
- * failure the controller can positively attribute), the PER-SOURCE slot is
- * returned best-effort (floored at 0) so a crashed issuance does not
- * silently consume the source's stockpile budget. The GLOBAL counter is
- * left to expire naturally — deployment-wide pressure is never a literal
- * count. An INDETERMINATE failure (the chain state cannot be read after a
- * thrown issuance transition — the challenge may be the authoritative
- * issued stage-2) must NOT call this: the slot belongs to the client until
- * proven otherwise.
+ * Aborted before handoff, see {@see abortedBeforeHandoff()}: when a
+ * challenge was admitted but proven never handed out, a mint/metadata/
+ * chain-state failure the controller can positively attribute, the
+ * per-source slot is returned best-effort (floored at 0). A crashed
+ * issuance therefore does not silently consume the source's stockpile
+ * budget. The global counter is left to expire naturally: deployment-wide
+ * pressure is never a literal count. An indeterminate failure (the chain
+ * state cannot be read after a thrown issuance transition, the challenge
+ * may be the authoritative issued stage-2) must not call this: the slot
+ * belongs to the client until proven otherwise.
  *
- * Failure behavior: a Redis error on issuance is NOT swallowed — the caller
+ * Failure behavior: a Redis error on issuance is not swallowed — the caller
  * (challenge controller) refuses issuance when the counter cannot be
  * consulted (fail closed: no challenge without a checked stockpile bound).
- * The verification-side decrement IS best-effort (a failed DECR never breaks
- * a valid solve).
+ * The verification-side decrement is best-effort (a failed DECR never
+ * breaks a valid solve).
  */
 final class OutstandingChallenges
 {
     /**
      * Atomic check + increment + expiry:
-     *   KEYS[1] = {kiwi:<ns>}:outstanding:<hex>   (per-source counter)
-     *   KEYS[2] = {kiwi:<ns>}:outstanding:global  (global counter)
-     *   ARGV[1] = per-source cap
-     *   ARGV[2] = global cap
-     *   ARGV[3] = TTL in seconds (challenge lifetime + ttl margin)
+     *   KEYS[1] = {kiwi:<ns>}:outstanding:<hex>   (per-source counter).
+     *   KEYS[2] = {kiwi:<ns>}:outstanding:global  (global counter).
+     *   ARGV[1] = per-source cap.
+     *   ARGV[2] = global cap.
+     *   ARGV[3] = TTL in seconds (challenge lifetime + ttl margin).
      * Returns 1 when admitted (both counters incremented + expired),
      * 0 when the per-source cap is reached, -1 when the global cap is
      * reached (nothing written on refusal).
@@ -79,11 +80,11 @@ return 1
 LUA;
 
     /**
-     * Best-effort per-source decrement after a VALID verification:
-     *   KEYS[1] = the per-source counter
-     * Floored at 0 (a DECR can never drive the counter negative — a
+     * Best-effort per-source decrement after a valid verification.
+     * KEYS[1] = the per-source counter.
+     * Floored at 0: a DECR can never drive the counter negative, and a
      * verification after the counter expired must not fabricate a negative
-     * outstanding count that later admits extra issuances).
+     * outstanding count that later admits extra issuances.
      */
     private const SOLVED_SCRIPT = <<<'LUA'
 -- Outstanding challenge solve: best-effort DECR floored at 0
@@ -93,12 +94,12 @@ return v - 1
 LUA;
 
     /**
-     * Best-effort per-source decrement when an ADMITTED challenge was
-     * PROVEN not handed out (the controller's proven-not-handed-out
-     * failure paths — mint/metadata/chain-state failures):
-     *   KEYS[1] = the per-source counter
-     * Floored at 0 (a DECR can never drive the counter negative). The
-     * GLOBAL counter is left to expire naturally — deployment-wide
+     * Best-effort per-source decrement when an admitted challenge was
+     * proven not handed out (the controller's proven-not-handed-out
+     * failure paths — mint/metadata/chain-state failures).
+     * KEYS[1] = the per-source counter.
+     * Floored at 0: a DECR can never drive the counter negative. The
+     * global counter is left to expire naturally: deployment-wide
      * pressure, not a literal count. Best-effort like solved(): a failed
      * rollback never changes the response; the counter decays by EXPIRE
      * otherwise.
@@ -139,7 +140,8 @@ LUA;
 
     /**
      * The per-source counter key for a client IP: the raw IP never appears
-     * in Redis — only hex(hmac_sha256(canonical-ip-bytes, keys->event)).
+     * in Redis, only the hex form of
+     * hmac_sha256(canonical-ip-bytes, keys->event).
      * An unparseable IP (or an empty one) is bucketed with the other
      * unidentifiable sources under a constant tag (conservative shared
      * budget, mirroring the issuance rate limiter).
@@ -156,7 +158,7 @@ LUA;
     }
 
     /**
-     * Admit one issued challenge: atomic check of BOTH caps, then INCR both
+     * Admit one issued challenge: atomic check of both caps, then INCR both
      * counters and EXPIRE both with (challenge lifetime + ttl margin).
      *
      * @return int 1 = admitted, 0 = per-source cap reached, -1 = global cap
@@ -179,7 +181,7 @@ LUA;
     }
 
     /**
-     * Best-effort per-source decrement after a VALID verification. Never
+     * Best-effort per-source decrement after a valid verification. Never
      * throws: a failed decrement must never break a valid solve (the counter
      * only decays by its EXPIRE otherwise).
      */
@@ -194,14 +196,14 @@ LUA;
     }
 
     /**
-     * Best-effort per-source decrement when an ADMITTED challenge was
-     * PROVEN never handed out (the controller's proven-not-handed-out
+     * Best-effort per-source decrement when an admitted challenge was
+     * proven never handed out (the controller's proven-not-handed-out
      * failure paths): the source slot is returned so a crashed issuance
      * does not silently consume the source's stockpile budget. The
-     * GLOBAL counter is never decremented (deployment-wide pressure
+     * global counter is never decremented (deployment-wide pressure
      * decays by EXPIRE). Never throws: a failed rollback must never
-     * change the issuance response. The caller MUST NOT call this for an
-     * INDETERMINATE failure (the chain state cannot be read after a
+     * change the issuance response. The caller must not call this for an
+     * indeterminate failure (the chain state cannot be read after a
      * thrown issuance transition — the challenge may be the
      * authoritative issued stage-2).
      */

@@ -16,20 +16,20 @@ use KiwiCaptcha\Tests\Fixtures\Vectors;
 use PHPUnit\Framework\TestCase;
 
 /**
- * Signing key ids: the issued record carries a `kid` (wire key
- * ALWAYS present, default 1; the 22-key schema), the v2 canonical payload
- * ends with `|<kid>` (the FINAL field, after issuer), and a verifier
- * configured with a kid-keyed SECRET SET selects the signature secret per
- * kid — an unknown kid, or one beyond the newest configured kid (the
- * rollback/forward guard), fails with VerifyError::UnknownKid. An empty
- * set keeps the legacy single-secret path (the verify() $secretKey
- * parameter).
+ * Signing key ids: the issued record carries a `kid` (wire key always
+ * present, default 1; the 22-key schema), and the v2 canonical payload
+ * ends with `|<kid>` (the final field, after issuer). A verifier
+ * configured with a kid-keyed secret set selects the signature secret
+ * per kid. An unknown kid, or one beyond the newest configured kid,
+ * fails with VerifyError::UnknownKid; this is the rollback/forward
+ * guard. An empty set keeps the legacy single-secret path, the
+ * verify() $secretKey parameter.
  *
- * Compromise revocation: a verifier configured with a
- * revokedKids set rejects any record whose kid is in it with
- * UnknownKid IMMEDIATELY — before the signature check — so revocation
- * overrides the normal rotation grace even when the kid's secret is still
- * present in secretsByKid.
+ * Compromise revocation: a verifier configured with a revokedKids set
+ * rejects any record whose kid is in it with UnknownKid immediately,
+ * before the signature check. Revocation therefore overrides the normal
+ * rotation grace even when the kid's secret is still present in
+ * secretsByKid.
  */
 final class KidSigningTest extends TestCase
 {
@@ -115,8 +115,8 @@ final class KidSigningTest extends TestCase
 
     public function testLegacySingleSecretPathIgnoresKid(): void
     {
-        // An EMPTY secretsByKid keeps the legacy path: the verify() secret
-        // parameter authenticates any kid.
+        // An empty secretsByKid keeps the legacy path: the verify()
+        // secret parameter authenticates any kid.
         [$record, $token] = $this->issue(kid: 3);
 
         $storage = new ArrayStorage();
@@ -140,7 +140,8 @@ final class KidSigningTest extends TestCase
         $storage = new ArrayStorage();
         $storage->store($record);
 
-        // The verifier holds BOTH secrets; the kid selects SECRET_2.
+        // The verifier holds both secrets; the kid selects the second
+        // secret.
         $verifier = new Verifier(
             $storage,
             now: static fn (): int => self::ISSUED_AT,
@@ -177,10 +178,10 @@ final class KidSigningTest extends TestCase
 
     public function testFutureKeyedRecordIsRejectedByTheRollbackGuardEvenWhenSigned(): void
     {
-        // The rollback/forward guard: a challenge signed with the CURRENT
-        // secret but stamped with a kid AHEAD of the newest configured kid
-        // must never verify on an older node — the guard fires BEFORE the
-        // signature check.
+        // The rollback/forward guard: a challenge signed with the
+        // current secret but stamped with a kid ahead of the newest
+        // configured kid must never verify on an older node; the guard
+        // fires before the signature check.
         [$record, $token] = $this->issue(kid: 4, secret: self::SECRET_1);
 
         $storage = new ArrayStorage();
@@ -199,8 +200,8 @@ final class KidSigningTest extends TestCase
 
     public function testKidInTheSignedRangeButNotConfiguredIsUnknown(): void
     {
-        // The map is not contiguous: kid 2 sits BELOW the max (3) but has no
-        // configured secret — still unknown.
+        // The map is not contiguous: kid 2 sits below the max (3) but
+        // has no configured secret; it is still unknown.
         [$record, $token] = $this->issue(kid: 2, secret: self::SECRET_2);
 
         $storage = new ArrayStorage();
@@ -286,7 +287,7 @@ final class KidSigningTest extends TestCase
     public function testTamperingKidBreaksTheSignature(): void
     {
         // kid is signed into the canonical: a record rebuilt with a
-        // DIFFERENT kid than the one its challenge was signed under must
+        // different kid than the one its challenge was signed under must
         // fail the signature re-check (BadSignature), never verify.
         [$record, $token] = $this->issue(kid: 1);
         $tampered = new ChallengeRecord(
@@ -339,9 +340,10 @@ final class KidSigningTest extends TestCase
 
     public function testRevokedKidRejectedEvenWhenSecretPresent(): void
     {
-        // A PERFECTLY-SIGNED challenge under a revoked kid must fail with
-        // UnknownKid: compromise revocation overrides the rotation grace
-        // (kid 2's secret IS in secretsByKid and the signature would pass).
+        // A perfectly signed challenge under a revoked kid must fail
+        // with UnknownKid: compromise revocation overrides the rotation
+        // grace (kid 2's secret is in secretsByKid and the signature
+        // would pass).
         [$record, $token] = $this->issue(kid: 2, secret: self::SECRET_2);
 
         $storage = new ArrayStorage();
@@ -367,11 +369,11 @@ final class KidSigningTest extends TestCase
 
     public function testRevokedKidRejectedBeforeSignatureWork(): void
     {
-        // The revocation gate fires BEFORE the signature check: the stored
-        // record is TAMPERED (scope swapped) so the signature re-check
-        // would fail with BadSignature — yet the cheap revocation gate
-        // wins and reports UnknownKid. If the gate ever deferred to the
-        // signature comparison, this would surface BadSignature instead.
+        // The revocation gate fires before the signature check: the
+        // stored record is tampered (scope swapped) so the signature
+        // re-check would fail with BadSignature, yet the cheap revocation
+        // gate wins and reports UnknownKid. If the gate ever deferred to
+        // the signature comparison, this would surface BadSignature.
         [$record, $token] = $this->issue(kid: 2, secret: self::SECRET_2);
         $tampered = new ChallengeRecord(
             nonce: $record->nonce,

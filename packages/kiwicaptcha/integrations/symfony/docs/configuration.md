@@ -33,15 +33,15 @@ kiwi_captcha:
 
 Validation notes:
 
-- `secret_key` — at least 16 bytes; 32 random bytes recommended.
-- `difficulty_bits` — SHA-256 difficulty, 1..=20 (the browser solver
+- `secret_key`: at least 16 bytes; 32 random bytes recommended.
+- `difficulty_bits`: SHA-256 difficulty, 1..=20 (the browser solver
   ceiling); the config tree ceiling tracks the core constant.
-- `argon_t >= 3` and `argon_p == 1` — the intentional Argon2id protocol
+- `argon_t >= 3` and `argon_p == 1`: the intentional Argon2id protocol
   profile (libsodium's raw Argon2id interface, so Rust and PHP verify
   identical hashes).
-- `challenge_ttl_secs` — bounded by the protocol ceiling (the record
+- `challenge_ttl_secs`: bounded by the protocol ceiling (the record
   validation requires `expires_at - issued_at <= 300 s`).
-- `algorithm` — the issued algorithm always comes from the server; a
+- `algorithm`: the issued algorithm always comes from the server; a
   client-supplied `algorithm` field in the challenge POST is accepted only
   for forward-compatibility and never changes the issued algorithm.
 
@@ -78,8 +78,8 @@ Validation notes:
     #                                       # (defense-in-depth only)
 ```
 
-The privacy modes themselves (strict vs standard, and why `binding_mode` is
-never forced) are the privacy contract — see
+The privacy modes themselves (strict vs standard, and why `binding_mode`
+is never forced) are the privacy contract; see
 [privacy.md](privacy.md#privacy-modes).
 
 ## Production hardening
@@ -136,10 +136,9 @@ never forced) are the privacy contract — see
 
 ## Risk configuration
 
-The adaptive risk engine is **opt-in and off by default** (privacy posture —
-enabling it adds a first-party continuity cookie, see
-[privacy.md](privacy.md#continuity-cookie) and
-[risk-engine.md](risk-engine.md)):
+The adaptive risk engine is opt-in and off by default. Enabling it adds a
+first-party continuity cookie; see [privacy.md](privacy.md#continuity-cookie)
+and [risk-engine.md](risk-engine.md):
 
 ```yaml
 kiwi_captcha:
@@ -380,8 +379,8 @@ kiwi_captcha:
 
 ## Scope identity
 
-**Scope ids are part of the Redis state identity.** The `id` (or the
-crc32-derived default) must stay stable once deployed — renaming a scope or
+Scope ids are part of the Redis state identity. The `id` (or the
+crc32-derived default) must stay stable once deployed. Renaming a scope or
 reordering ids silently fragments its risk history. Two scopes sharing an id
 collide and are refused at compile time.
 
@@ -389,49 +388,49 @@ collide and are refused at compile time.
 scope names; a scope outside the server allowlist is refused before any
 quota runs.
 
-`risk.unknown_scope.mode` decides what happens to scopes NOT configured in
+`risk.unknown_scope.mode` decides what happens to scopes not configured in
 `risk.scopes`:
 
-- `baseline` (default) — the engine declines, and the default challenge is
+- `baseline` (default): the engine declines, and the default challenge is
   issued (no risk assessment for that scope).
-- `reject` — TRUE rejection: HTTP 429 `RISK_DENIED`, no challenge.
-- `minimum` — a synthetic policy (base_risk 100, min/degraded sha20) applies.
+- `reject`: true rejection, HTTP 429 `RISK_DENIED`, no challenge.
+- `minimum`: a synthetic policy (base_risk 100, min/degraded sha20) applies.
 
 ## Transaction binding
 
-A challenge can be bound to ONE application transaction: the issuing side
+A challenge can be bound to one application transaction. The issuing side
 signs a `request_binding` (1..128 chars of `[A-Za-z0-9._:-]`)
 into the record, and verification only accepts the solve when the final
-POST presents the SAME binding — a challenge minted for one transaction is
+POST presents the same binding. A challenge minted for one transaction is
 never redeemable for another. The widget carries the binding end-to-end.
-**The binding is ALWAYS server-originated in the bundle: the
-widget driver never generates a binding of its own** — the rendered widget
-container carries exactly the value the backend rendered, nothing else.
+The binding is always server-originated in the bundle: the widget driver
+never generates a binding of its own. The rendered widget container carries
+exactly the value the backend rendered, nothing else.
 
-TWO BINDING MODES:
+Two binding modes:
 
 1. **Client-chosen binding (public, basic anti-abuse).** The application
-   lets the CLIENT choose the binding — e.g. a per-page random nonce the
+   lets the client choose the binding, e.g. a per-page random nonce the
    page JavaScript generates and passes to the widget. This is fine for
    basic anti-abuse (it proves the browser chose a nonce and carries it
    back), but the binding is client-controlled: it proves nothing about a
    trusted backend decision. Suitable when the binding is a transaction
    correlation tag, not an authorization signal.
-2. **BACKEND-ORIGINATED binding (the recommended sensitive-flow mode).**
+2. **Backend-originated binding (the recommended sensitive-flow mode).**
    The application backend renders the binding server-side from a
-   `flow_id` stored server-side: the Symfony form type's `request_binding`
-   option (or the static `risk.request_binding` config, or a per-render
-   `request_binding` passed to the standalone widget) carries a value the
-   backend itself issued — a flow/session identifier the backend created
+   `flow_id` stored server-side. The Symfony form type's `request_binding`
+   option, the static `risk.request_binding` config, or a per-render
+   `request_binding` passed to the standalone widget carries a value the
+   backend itself issued, a flow/session identifier the backend created
    and persists. The widget renders that value and only ever forwards it;
    the verification side enforces it against the signed record. A binding
    minted by the backend (and stored server-side) can be checked against
-   the backend's own flow state after verification — a client can never
+   the backend's own flow state after verification. A client can never
    invent a binding the backend did not issue.
 
-- **Config** — `risk.request_binding` sets a STATIC binding used whenever
+- **Config** — `risk.request_binding` sets a static binding used whenever
   the request sends no `request_binding` field (e.g. server-side
-  integrations). For DYNAMIC per-transaction bindings (recommended: a
+  integrations). For dynamic per-transaction bindings (recommended: a
   backend-issued `flow_id` nonce per page load) the application supplies
   the value per request/form:
   - `KiwiCaptchaType` option `'request_binding' => $flowId` (defaults to the
@@ -439,16 +438,18 @@ TWO BINDING MODES:
     container;
   - the standalone widget accepts `'request_binding'` in the
     `kiwi_captcha_widget({...})` context.
-- **Widget flow** — the driver reads `data-kiwi-request-binding`, includes
-  `request_binding` in the challenge POST body (the controller validates
-  1..128 chars of `[A-Za-z0-9._:-]` — 422
-  `INVALID_REQUEST_BINDING` otherwise, then
-  passes it to the core Issuer, which signs it into the record), and — on a
-  successful solve — creates the hidden `kiwi_request_binding` input in the
-  form, next to the token input. The driver contains NO binding-generation
-  code (no `crypto.randomUUID`-style synthesis — pinned by test): the
-  rendered container carries ONLY the server-provided binding.
-- **Verification** — after a VALID verification, the validator compares the
+
+- **Widget flow** — the driver reads `data-kiwi-request-binding` and
+  includes `request_binding` in the challenge POST body. The controller
+  validates 1..128 chars of `[A-Za-z0-9._:-]` (422
+  `INVALID_REQUEST_BINDING` otherwise), passes the value to the core
+  Issuer, which signs it into the record, and on a successful solve
+  creates the hidden `kiwi_request_binding` input in the form, next to the
+  token input. The driver contains no binding-generation code (no
+  `crypto.randomUUID`-style synthesis, pinned by test): the rendered
+  container carries only the server-provided binding.
+
+- **Verification** — after a valid verification, the validator compares the
   consumed record's signed binding against the request binding. The
   application controller copies the POSTed field into the request attribute
   before validating:
@@ -463,9 +464,9 @@ TWO BINDING MODES:
 
   (The validator also falls back to the raw POSTed `kiwi_request_binding`
   field, so the plain widget flow works without the shim.) A bound record
-  with a missing or mismatched binding fails with the SAME
-  `invalid_or_expired` violation — no jti is exposed, the solve is burned
-  (single-use), and the client re-solves. An UNBOUND record skips the check
+  with a missing or mismatched binding fails with the same
+  `invalid_or_expired` violation. No jti is exposed, the solve is burned
+  (single-use), and the client re-solves. An unbound record skips the check
   entirely. The verified binding is exposed via
   `KiwiCaptchaValidator::verifiedRequestBinding()`
   (`VerifyOutcome::requestBinding()`).
@@ -474,21 +475,21 @@ TWO BINDING MODES:
 
 Scope/tenant identifiers and request bindings are restricted to the
 `[A-Za-z0-9._:-]+` alphabet with a 128-char ceiling. The static
-`risk.request_binding` is validated against the same charset at COMPILE
-time. The verification side enforces exact equality between the signed
-record values and what the final POST carries, so a challenge minted under
-a valid identifier is never redeemable under a different one — see
+`risk.request_binding` is validated against the same charset at compile
+time. The verification side requires exact equality between the signed
+record values and the values the final POST carries, so a challenge minted
+under a valid identifier can never be redeemed under a different one. See
 [Identifier validation](security-hardening.md#identifier-validation) for
 the endpoint-level enforcement.
 
-## Related
+## Related documentation
 
-- [privacy.md](privacy.md) — what the privacy keys mean (modes, telemetry,
+- [privacy.md](privacy.md): what the privacy keys mean (modes, telemetry,
   binding).
-- [risk-engine.md](risk-engine.md) — how the risk options behave.
-- [operations.md](operations.md) — deployment options (rate limiting,
+- [risk-engine.md](risk-engine.md): how the risk options behave.
+- [operations.md](operations.md): deployment options (rate limiting,
   admission gates, health endpoints, client-IP policy).
-- [siteverify.md](siteverify.md) — `risk.siteverify_secrets` and the
+- [siteverify.md](siteverify.md): `risk.siteverify_secrets` and the
   siteverify endpoint.
-- [migration.md](migration.md) — `risk.sitekey_allowlist` and the migration
+- [migration.md](migration.md): `risk.sitekey_allowlist` and the migration
   surface.

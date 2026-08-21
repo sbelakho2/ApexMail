@@ -11,12 +11,12 @@ namespace KiwiCaptcha\Risk\Network;
  * reserved, hosting, proxy, tor, blocked. Matching is done on the raw
  * prefix bits of the inet_pton bytes, so IPv4/IPv6 never cross-match.
  *
- * The rule set is compiled ONCE at construction into a bitwise radix trie
- * (two children per level; IPv4 depth 32, IPv6 depth 128): classify(ip)
- * walks the trie in O(prefix depth) instead of an O(n) CIDR scan, while
- * preserving the exact classification semantics (longest-prefix match
- * wins — the flags of every matching prefix are OR'd — same NetworkFlags
- * fields and labels).
+ * The rule set is compiled once at construction into a bitwise radix
+ * trie (two children per level; IPv4 depth 32, IPv6 depth 128).
+ * classify(ip) walks the trie in O(prefix depth) instead of an O(n)
+ * CIDR scan, preserving the longest-prefix match semantics: the flags
+ * of every matching prefix are OR'd into the same NetworkFlags fields
+ * and labels.
  *
  * Constructor input format (per entry):
  *   ['cidr' => '203.0.113.0/24', 'flags' => ['hosting', 'proxy']]

@@ -23,12 +23,12 @@ use Symfony\Component\Validator\Constraint;
 class KiwiCaptcha extends Constraint
 {
     /**
-     * The token-level verification failure: EVERY token-level
+     * The token-level verification failure: every token-level
      * core error — WrongScope, IpMismatch, Expired, MalformedToken,
      * BadSignature, TooFast, WrongRegion, WrongPolicyVersion,
      * MissingClientIp, CounterTooLarge, InsufficientWork, RecordNotFound,
      * MalformedRecord, a request-binding mismatch — collapses to
-     * ONE public code `invalid_or_expired`. The precise internal reason is
+     * one public code `invalid_or_expired`. The precise internal reason is
      * never exposed to the client (no oracle for which check failed); it
      * stays in the logs. The alias NOT_SOLVED_ERROR keeps the legacy
      * name for BC.
@@ -49,10 +49,10 @@ class KiwiCaptcha extends Constraint
     /**
      * The verification could not be completed because a security backend
      * (the challenge storage or the admission gate) is unavailable
-     * (AdmissionUnavailable / StorageUnavailable), or the consume outcome is
-     * unresolvably INDETERMINATE (ConsumeIndeterminate: the
-     * storage first tries the consumed record's committed result, and only
-     * a genuinely unresolvable ambiguity lands here). Distinct so
+     * (AdmissionUnavailable / StorageUnavailable), or the consume outcome
+     * is unresolvably indeterminate. ConsumeIndeterminate means the
+     * storage first tried the consumed record's committed result, and
+     * only a genuinely unresolvable ambiguity lands here. Distinct so
      * applications can surface a temporary service problem instead of a
      * re-solve loop.
      */
@@ -103,7 +103,7 @@ class KiwiCaptcha extends Constraint
         // Symfony 8 removed the array-options -> constructor-parameter
         // hydration (deprecated since 7.1), so `new KiwiCaptcha(['scope'
         // => 'login'])` — the documented convention on 6.x/7.x — silently
-        // produced a null scope. Accept BOTH forms explicitly: array
+        // produced a null scope. Accept both forms explicitly: array
         // options (6.x/7.x convention) and named arguments (8.x).
         if (\is_array($options)) {
             $scope = \is_string($options['scope'] ?? null) ? $options['scope'] : $scope;

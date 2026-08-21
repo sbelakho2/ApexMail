@@ -5,72 +5,72 @@ declare(strict_types=1);
 namespace BelConsulting\KiwiCaptchaBundle\Security;
 
 /**
- * PER-SCOPE issuance cap: a Redis fixed-window counter bounding
- * how many challenges a scope may issue per minute.
+ * Per-scope issuance cap: a Redis fixed-window counter bounding how many
+ * challenges a scope may issue per minute.
  *
- * Key: `{kiwi:<ns>}:issuance:<scopeIdentity>:<minute>` — one independent
+ * Key: `{kiwi:<ns>}:issuance:<scopeIdentity>:<minute>`, one independent
  * window per scope per minute.
  *
- * SCOPE IDENTITY (the trust boundary): a security
- * quota must operate over a SERVER-OWNED identity, not an attacker-chosen
- * dimension. The key component is the risk policy's canonical server-side
- * scope id: the configured `risk.scopes.<name>.id` (a stable u32 that two
- * scopes can never share), the shared synthetic id the extension reserves
- * for unknown scopes in 'minimum' mode, or — for ANY scope the server
- * cannot resolve in ANY mode, including risk-disabled deployments —
- * {@see self::UNKNOWN_QUOTA_ID}, one reserved bucket shared by every
+ * Scope identity, the trust boundary: a security quota must operate over
+ * a server-owned identity, not an attacker-chosen dimension. The key
+ * component is the risk policy's canonical server-side scope id: the
+ * configured `risk.scopes.<name>.id`, a stable u32 that two scopes can
+ * never share, or the shared synthetic id the extension reserves for
+ * unknown scopes in 'minimum' mode. Any scope the server cannot resolve
+ * in any mode, risk-disabled deployments included, falls back to
+ * {@see self::UNKNOWN_QUOTA_ID}: one reserved bucket shared by every
  * unresolved name.
- * CLUSTER CLOCK ASSUMPTION: the window minute is read
- * via Redis TIME and the quota key is then executed against the hash-slot
- * owner — on a single primary or Sentinel deployment the TIME read and
- * the Lua share one server, which is the supported topology. On a genuine
- * multi-primary Redis Cluster the TIME read is NOT intrinsically tied to
- * the slot owner executing the script, so skew between nodes can shift
- * window boundaries; Cluster deployments should route TIME and the keyed
- * EVAL to the same node or accept the skew bound. The cardinality of the
- * quota namespace is therefore
- * ALWAYS bounded by the server-owned configuration; an attacker can never
- * mint fresh quota windows by inventing scope names. The raw scope string
- * is never a Redis key component: the controller always
- * passes a server-owned id; the HMAC fallback in {@see self::scopeKey()}
- * exists only for defensive/direct construction and only keeps
- * attacker-controlled BYTES out of the key name — it does NOT bound
- * cardinality (per-name soft limiting, never an independent security
- * bound).
+ *
+ * Cluster clock assumption: the window minute is read via Redis TIME and
+ * the quota key is then executed against the hash-slot owner. On a
+ * single primary or Sentinel deployment the TIME read and the Lua share
+ * one server, which is the supported topology. On a genuine
+ * multi-primary Redis Cluster the TIME read has no intrinsic tie to
+ * the slot owner executing the script, so skew between nodes can
+ * shift window boundaries. Cluster deployments should route TIME and
+ * the keyed EVAL to the same node or accept the skew bound. The
+ * cardinality of the quota namespace is always bounded by the
+ * server-owned configuration: an attacker can never mint fresh quota
+ * windows by inventing scope names. The raw scope string is never a
+ * Redis key component: the controller always passes a server-owned id;
+ * the HMAC fallback in {@see self::scopeKey()} exists only for
+ * defensive/direct construction and only keeps attacker-controlled
+ * bytes out of the key name. It does not bound cardinality: per-name
+ * soft limiting, never an independent security bound.
  *
  * The HMAC key K_scope is derived from the bundle's risk master
  * (master_secret, falling back to the captcha secret_key) with
- * `hash_hkdf('sha256', master, 32, 'kiwi/v2/scope-rate')` —
- * {@see self::deriveScopeHmacKey()} — purpose-separated from the risk
- * identity keys, so a scope pseudonym is never derivable from any other
- * keyed material. The minute is derived from the Redis server clock when
- * Redis is the backend, so all workers share one window even when an
- * application host's wall clock drifts. The key shares the risk store's
- * hash-tag family (Cluster safe).
+ * `hash_hkdf('sha256', master, 32, 'kiwi/v2/scope-rate')`,
+ * {@see self::deriveScopeHmacKey()}, purpose-separated from the risk
+ * identity keys. A scope pseudonym is never derivable from any other
+ * keyed material. The minute is derived from the Redis server clock
+ * when Redis is the backend, so all workers share one window even when
+ * an application host's wall clock drifts. The key shares the risk
+ * store's hash-tag family (Cluster safe).
  *
- * ONE atomic Lua script (INCR + EXPIRE in a single round trip): the first
- * increment of a fresh window stamps its 60 s TTL, and the cap is checked on
- * the returned count — a concurrent reader can never observe an INCR-ed
- * value without its expiry, and the counter can never persist past its
- * minute.
+ * One atomic Lua script (INCR + EXPIRE in a single round trip): the
+ * first increment of a fresh window stamps its 60 s TTL, and the cap is
+ * checked on the returned count. A concurrent reader can never observe
+ * an INCR-ed value without its expiry, and the counter can never
+ * persist past its minute.
  *
- * The cap is a GATE, not a bound: a request that consumes the last slot is
- * admitted, the next one in the same window is refused (the controller
- * returns 429 SCOPE_LIMITED before any challenge is minted).
+ * The cap is a gate, not a bound: a request that consumes the last slot
+ * is admitted, the next one in the same window is refused (the
+ * controller returns 429 SCOPE_LIMITED before any challenge is minted).
  *
- * A Redis failure PROPAGATES (fail closed): the caller refuses issuance
- * rather than minting an unbilled challenge — the deployment-wide billed-work
- * cap must not silently degrade to unlimited.
+ * A Redis failure propagates, fail closed: the caller refuses issuance
+ * rather than minting an unbilled challenge, so the deployment-wide
+ * billed-work cap must not silently degrade to unlimited.
  */
 final class ScopeIssuanceCap
 {
     /**
-     * The RESERVED quota identity for scopes the server cannot resolve to
-     * a configured policy scope id: unknown scopes in ANY
-     * risk mode — including risk-disabled deployments — share this one
-     * bucket, so an attacker can never mint fresh per-scope quota windows
-     * by inventing scope names. Configured scope ids are 1..=4294967295
-     * (risk-v1), so 0 never collides with a real policy id.
+     * The reserved quota identity for scopes the server cannot resolve
+     * to a configured policy scope id: unknown scopes in any risk mode,
+     * risk-disabled deployments included, share this one bucket. An
+     * attacker can never mint fresh per-scope quota windows by inventing
+     * scope names. Configured scope ids are 1..=4294967295 (risk-v1), so
+     * 0 never collides with a real policy id.
      */
     public const UNKNOWN_QUOTA_ID = 0;
 
@@ -97,24 +97,24 @@ LUA;
 
     /**
      * @param \Redis|\Predis\Client|null $redis       the security Redis
-     *                                                (null = cap disabled —
-     *                                                no-op)
+     *                                                (null = cap disabled,
+     *                                                no-op).
      * @param string                     $keyPrefix   full key prefix
      *                                                including the hash tag,
      *                                                e.g. "{kiwi:prod}:
-     *                                                issuance:"
+     *                                                issuance:".
      * @param int                        $cap         per-scope per-minute cap
-     *                                                (0 = unlimited, no-op)
+     *                                                (0 = unlimited, no-op).
      * @param string                     $scopeHmacKey the 32-byte scope-HMAC
-     *                                                key —
-     *                                                {@see self::deriveScopeHmacKey()});
+     *                                                key,
+     *                                                {@see self::deriveScopeHmacKey()};
      *                                                the raw scope is never
-     *                                                a Redis key component
+     *                                                a Redis key component.
      * @param \Closure|null              $now         epoch-seconds clock
      *                                                override for tests
      *                                                (falls back to the Redis
      *                                                server clock when Redis
-     *                                                is the backend)
+     *                                                is the backend).
      */
     public function __construct(
         private readonly \Redis|\Predis\Client|null $redis = null,
@@ -134,7 +134,7 @@ LUA;
      * The scope-rate HMAC key: `hash_hkdf('sha256', master,
      * 32, 'kiwi/v2/scope-rate')` — derived from the bundle's risk master
      * (risk.master_secret, falling back to the captcha secret_key) with the
-     * purpose-separated info tag. The SAME derivation is used by the risk
+     * purpose-separated info tag. The same derivation is used by the risk
      * package's calibration scope keys (both languages), so scope
      * pseudonyms stay consistent across the bundle and the engine.
      */
@@ -145,19 +145,19 @@ LUA;
     }
 
     /**
-     * Whether the scope's window has room for one more issuance. CONSUMING:
-     * an allowed check increments the window counter (the callers counts the
-     * issuance it then performs). Never throws for a disabled cap (null
-     * Redis or cap 0) — always allowed.
+     * Whether the scope's window has room for one more issuance.
+     * Consuming: an allowed check increments the window counter, counting
+     * the issuance the caller then performs. Never throws for a disabled
+     * cap (null Redis or cap 0) — always allowed.
      *
-     * The canonical server-owned scope identity is MANDATORY: the
+     * The canonical server-owned scope identity is mandatory: the
      * configured `risk.scopes.<name>.id`, the shared synthetic
      * unknown-scope id, or {@see self::UNKNOWN_QUOTA_ID} for every
-     * unresolved scope. There is deliberately NO nullable fallback — a
-     * per-name HMAC namespace cannot bound attacker-chosen cardinality, so
-     * it is unreachable from the security cap. (Direct integrators who
+     * unresolved scope. There is deliberately no nullable fallback: a
+     * per-name HMAC namespace cannot bound attacker-chosen cardinality,
+     * so it is unreachable from the security cap. Direct integrators who
      * explicitly want the non-cardinality-safe per-name form must call
-     * {@see self::allowSoftLegacy()} by that name.)
+     * {@see self::allowSoftLegacy()} by that name.
      *
      * @throws \Throwable when Redis fails (fail closed — the caller refuses
      *                    issuance rather than minting an unbilled challenge)
@@ -174,13 +174,13 @@ LUA;
     }
 
     /**
-     * LEGACY per-name SOFT quota: keys the window on
-     * `hex(hmac_sha256(scope, K_scope))`, which hides attacker-controlled
-     * BYTES but does NOT bound attacker-controlled cardinality — every
-     * unique scope name mints a unique counter. This is NOT a security
-     * bound and is NOT used anywhere in the bundle; it exists only for
-     * integrators migrating from the earlier per-name shape and is named to
-     * make the distinction impossible to miss.
+     * Legacy per-name soft quota: keys the window on the hex form of
+     * hmac_sha256(scope, K_scope), which hides attacker-controlled
+     * bytes but does not bound attacker-controlled cardinality — every
+     * unique scope name mints a unique counter. This is not a security
+     * bound and is not used anywhere in the bundle; it exists only for
+     * integrators migrating from the earlier per-name shape and is named
+     * to make the distinction impossible to miss.
      */
     public function allowSoftLegacy(string $scope): bool
     {
@@ -195,12 +195,12 @@ LUA;
 
     /**
      * The fixed-window key for the security cap:
-     * `{kiwi:<ns>}:issuance:<canonicalScopeId>:<minute>` — the server-owned
-     * scope id (decimal) is the quota identity; the RAW scope never appears
-     * in Redis (the nullable HMAC fallback is confined to the legacy form —
-     * {@see self::windowKeySoftLegacy()}). The minute comes from
-     * the Redis server clock (one TIME read shared with the script's
-     * EXPIRE) or the injected clock when Redis is unavailable.
+     * `{kiwi:<ns>}:issuance:<canonicalScopeId>:<minute>`: the server-owned
+     * scope id (decimal) is the quota identity; the raw scope never
+     * appears in Redis (the nullable HMAC fallback is confined to the
+     * legacy form, see {@see self::windowKeySoftLegacy()}). The minute
+     * comes from the Redis server clock (one TIME read shared with the
+     * script's EXPIRE) or the injected clock when Redis is unavailable.
      */
     public function windowKey(string $scope, int $canonicalScopeId): string
     {
@@ -208,9 +208,9 @@ LUA;
     }
 
     /**
-     * Legacy per-name window key (`hex(hmac_sha256(scope, K_scope))`) for
-     * {@see self::allowSoftLegacy()} — hides the raw bytes, does NOT bound
-     * cardinality.
+     * Legacy per-name window key, the hex form of
+     * hmac_sha256(scope, K_scope), for {@see self::allowSoftLegacy()} —
+     * hides the raw bytes, does not bound cardinality.
      */
     public function windowKeySoftLegacy(string $scope): string
     {
@@ -218,7 +218,7 @@ LUA;
     }
 
     /**
-     * The keyed scope pseudonym: hex(hmac_sha256(scope, K_scope)) — 64 hex
+     * The keyed scope pseudonym: hmac_sha256(scope, K_scope) in hex, 64
      * chars, constant-length regardless of the scope, so distinct scopes
      * never collide structurally and the raw string is never a key
      * component.
@@ -250,14 +250,14 @@ LUA;
         if ($this->now !== null) {
             return intdiv((int) ($this->now)(), 60);
         }
-        // The window minute comes from the REDIS SERVER
-        // clock (all application workers share one window) and the clock
-        // invariant FAILS CLOSED — a TIME failure raises instead of
-        // silently switching to each host's wall clock (which around
-        // minute boundaries would let skewed hosts use different window
-        // keys). Redis is the configured security backend here: no Redis
-        // TIME proof -> no quota proof -> no challenge issuance (the
-        // controller maps the exception to 503 SERVICE_UNAVAILABLE).
+        // The window minute comes from the Redis server clock (all
+        // application workers share one window), and the clock invariant
+        // fails closed: a TIME failure raises instead of silently
+        // switching to each host's wall clock, which around minute
+        // boundaries would let skewed hosts use different window keys.
+        // Redis is the configured security backend here: no Redis TIME
+        // proof, no quota proof, no challenge issuance (the controller
+        // maps the exception to 503 SERVICE_UNAVAILABLE).
         $time = $this->redis->time();
         if (!\is_array($time) || !isset($time[0])) {
             throw new \RuntimeException('Redis TIME returned an invalid response for the scope issuance cap');

@@ -15,43 +15,43 @@ use Psr\Cache\CacheItemPoolInterface;
 /**
  * PSR-6 backed storage (Symfony Cache, etc.).
  *
- * consume() is the one-shot TRANSITION: the record is marked
- * consumed and KEPT until its own expiration — replay protection is the
- * consumed marker, not absence. The runtime envelope carries the
+ * consume() is the one-shot transition: the record is marked consumed
+ * and kept until its own expiration; replay protection is the consumed
+ * marker, not absence. The runtime envelope carries the
  * `operation_identity` marker (null | a bounded <= 128-byte
  * logical-operation identity) exactly like the Redis backend; the
- * identity-aware consume writes the identity in the SAME array write as
+ * identity-aware consume writes the identity in the same array write as
  * the state flip.
  *
- * IMPORTANT LIMITATION: PSR-6 cannot express an atomic get-and-transition,
- * so `consume()` is NOT atomic under concurrency — two racing requests can
- * both observe the pending state before either marks it consumed, and both
- * may win `consumedNow`. This is best-effort single-use; implementers of
- * {@see \KiwiCaptcha\AtomicStorageInterface} (e.g. {@see RedisStorage}, fused
- * Lua transition) guarantee that exactly one concurrent consumer wins.
- * `consumedState()` therefore always returns null (a pool exposes no
- * atomic read-only inspection), so consumed-outcome recovery is
- * unavailable on this backend.
+ * Important limitation: PSR-6 cannot express an atomic get-and-transition,
+ * so `consume()` is not atomic under concurrency. Two racing requests can
+ * both observe the pending state before either marks it consumed, and
+ * both may win `consumedNow`. This is best-effort single-use;
+ * implementers of {@see \KiwiCaptcha\AtomicStorageInterface} (e.g.
+ * {@see RedisStorage} with its fused Lua transition) guarantee that
+ * exactly one concurrent consumer wins. `consumedState()` therefore
+ * always returns null (a pool exposes no atomic read-only inspection),
+ * so consumed-outcome recovery is unavailable on this backend.
  */
 final class Psr6Storage implements StorageInterface, OperationIdentityAwareStorageInterface
 {
     /**
-     * PSR-6 reserves the characters `{}()/\@:` in cache keys, so the prefix
-     * deliberately avoids the colon used by the Redis backend (Symfony Cache
-     * rejects keys such as "kiwicaptcha:nonce").
+     * PSR-6 reserves the characters `{}()/\@:` in cache keys, so the
+     * prefix deliberately avoids the colon used by the Redis backend
+     * (Symfony Cache rejects keys such as "kiwicaptcha:nonce").
      */
     private const PREFIX = 'kc_';
 
     /**
      * PSR-6 cache key for a challenge nonce.
      *
-     * The wire nonce is standard Base64 and may legitimately contain the
-     * reserved PSR-6 characters `/` and `+` (and is 44 chars). Conforming
+     * The wire nonce is standard base64 and may legitimately contain the
+     * reserved PSR-6 characters `/` and `+` (it is 44 chars). Conforming
      * pools are allowed to reject such keys, so the nonce is never used
-     * directly as a cache key — it is hashed to a PSR-6-safe hex digest.
+     * directly as a cache key; it is hashed to a PSR-6-safe hex digest.
      *
-     * Key length: 3 (prefix) + 60 (hex digest) = 63 characters — within the
-     * 64-character maximum that PSR-6 only REQUIRES implementations to
+     * Key length: 3 (prefix) + 60 (hex digest) = 63 characters, within
+     * the 64-character maximum that PSR-6 requires implementations to
      * support, so every conforming pool accepts it.
      */
     private static function key(string $nonce): string
@@ -85,9 +85,9 @@ final class Psr6Storage implements StorageInterface, OperationIdentityAwareStora
         try {
             return ChallengeRecord::fromArray(self::stripRuntimeFields($data));
         } catch (\Throwable) {
-            // Corrupt/foreign stored data (e.g. an unknown algorithm value)
-            // must never surface as an exception — treat it as absent and
-            // clean up the poisoned key.
+            // Corrupt/foreign stored data (e.g. an unknown algorithm
+            // value) must not surface as an exception; treat it as
+            // absent and clean up the poisoned key.
             $this->pool->deleteItem(self::key($nonce));
 
             return null;
@@ -97,17 +97,16 @@ final class Psr6Storage implements StorageInterface, OperationIdentityAwareStora
     public function consumedState(string $nonce): ?ConsumedRecord
     {
         // PSR-6 pools expose no atomic consumed-state inspection without
-        // a transition; reconstruction is unavailable on this backend
-        // (the bundle refuses non-atomic storage for Siteverify anyway).
+        // a transition; reconstruction is unavailable on this backend.
         return null;
     }
 
     public function consume(string $nonce): ?ConsumedRecord
     {
-        // Read first, transition second. PSR-6 offers no atomic get-and-set,
-        // so this is best-effort single-use: under concurrency two readers
-        // may both observe the pending state (see the class docblock — the
-        // Redis backend is the atomic one).
+        // Read first, transition second. PSR-6 offers no atomic
+        // get-and-set, so this is best-effort single-use: under
+        // concurrency two readers may both observe the pending state
+        // (see the class docblock; the Redis backend is the atomic one).
         $item = $this->pool->getItem(self::key($nonce));
         if (!$item->isHit()) {
             return null;
@@ -142,12 +141,12 @@ final class Psr6Storage implements StorageInterface, OperationIdentityAwareStora
 
     public function consumeWithOperationIdentity(string $nonce, ?string $operationIdentity): ?ConsumedRecord
     {
-        // Same read-then-transition as consume(); the identity — validated
-        // against the narrow shared alphabet ({@see
-        // OperationIdentity::validate()} — 1..128 bytes of
-        // [A-Za-z0-9_-], REJECTED with InvalidArgumentException when
-        // malformed, never silently dropped) — lands in the SAME array
-        // write as the state flip.
+        // Same read-then-transition as consume(); the identity, validated
+        // against the narrow shared alphabet via {@see
+        // OperationIdentity::validate()} (1..128 bytes of
+        // [A-Za-z0-9_-]), lands in the same array write as the state
+        // flip. A malformed identity is rejected with
+        // InvalidArgumentException, never silently dropped.
         $validated = OperationIdentity::validate($operationIdentity);
         $item = $this->pool->getItem(self::key($nonce));
         if (!$item->isHit()) {

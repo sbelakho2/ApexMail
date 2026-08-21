@@ -22,15 +22,16 @@ use Symfony\Component\DependencyInjection\Reference;
 /**
  * The risk wiring contract at the definition level (extension load, no
  * container compile): the emergency limiter uses the NEW ProcessEmergencyCap
- * name, the calibrator receives the three bound knobs + the outcome
- * receipt/ledger TTL (outcome_receipt_ttl_secs -> receiptTtlSecs and the
- * appended outcomeTtlSecs), the store receives the outcome-ledger TTL, the
- * engine receives enableGlobalPressure from global_pressure.enabled, the
- * provider is built with the issuance-counter key + client + hard limit (no
- * breaker — backend health is the engine's degraded mode), the controller
- * receives the issuance counter, and the gateway receives the request stack,
- * the decision-handle Redis wiring (TTL = risk.nonce_to_decision_ttl_secs),
- * the calibrator when enabled and (optionally) the principal resolver.
+ * name. The calibrator receives the three bound knobs plus the outcome
+ * receipt/ledger TTL (outcome_receipt_ttl_secs -> receiptTtlSecs and
+ * the appended outcomeTtlSecs). The store receives
+ * the outcome-ledger TTL, the engine receives enableGlobalPressure from
+ * global_pressure.enabled, the provider gets the issuance-counter key +
+ * client + hard limit (no breaker — backend health is the engine's
+ * degraded mode), and the controller receives the issuance counter. The
+ * gateway receives the request stack, the decision-handle Redis wiring
+ * (TTL = risk.nonce_to_decision_ttl_secs), the calibrator when enabled
+ * and (optionally) the principal resolver.
  */
 final class RiskWiringTest extends TestCase
 {
@@ -159,7 +160,7 @@ final class RiskWiringTest extends TestCase
         self::assertSame('{kiwi:wiring-test}:issuance:', $args[2], 'arg 2 = the issuance counter key prefix (hash-tagged)');
         self::assertSame(20000, $args[3], 'arg 3 = resource_capacity.issuance_per_second (the DEPLOYMENT-WIDE denominator, default 20000)');
 
-        // The deployment denominator is a SEPARATE knob from the per-process
+        // The deployment denominator is a separate knob from the per-process
         // emergency cap: hard_limits.process_per_second stays exclusively on
         // the emergency limiter.
         $risk = $this->riskDefaults();
@@ -168,7 +169,7 @@ final class RiskWiringTest extends TestCase
         self::assertSame(12345, $container->getDefinition('kiwi_captcha.risk.resource_pressure')->getArguments()[3], 'the provider denominator follows resource_capacity.issuance_per_second (root-level node)');
         self::assertSame([999], $container->getDefinition('kiwi_captcha.risk.emergency_limiter')->getArguments(), 'hard_limits.process_per_second remains ONLY the local emergency cap');
 
-        // The breaker is hoisted for the ENGINE's degraded mode only — the
+        // The breaker is hoisted for the engine's degraded mode only — the
         // provider no longer consumes it (no riskBackendHealth field).
         self::assertTrue($container->hasDefinition('kiwi_captcha.risk.breaker'));
         self::assertSame('kiwi_captcha.risk.breaker', (string) $container->getDefinition('kiwi_captcha.risk.engine')->getArgument('$breaker'));
@@ -271,7 +272,7 @@ final class RiskWiringTest extends TestCase
                 ->setArguments([new Reference('fake_redis'), 'kiwicaptcha:']);
         };
 
-        // The risk.redis knobs target the CHALLENGE storage when it is a
+        // The risk.redis knobs target the challenge storage when it is a
         // RedisStorage definition. Opting out (defaults) must leave the
         // definition untouched (older cores stay compatible).
         $container = $this->load($this->riskDefaults(), ['storage' => 'my.redis.storage'], $registerRedisStorage);
@@ -460,11 +461,11 @@ final class RiskWiringTest extends TestCase
         self::assertSame(3, $monitor->getArgument(4), 'the monitor uses risk.security_epoch_cache_secs');
         self::assertSame('eu-central-1', $monitor->getArgument('$region'), 'the monitor re-applies the verifier region on every rotation');
 
-        // The VALIDATOR receives the monitor (per-verification refresh).
+        // The validator receives the monitor (per-verification refresh).
         $validator = $container->getDefinition(\BelConsulting\KiwiCaptchaBundle\Validator\Constraints\KiwiCaptchaValidator::class);
         self::assertSame(\BelConsulting\KiwiCaptchaBundle\Risk\SecurityEpochMonitor::class, (string) $validator->getArgument('$epochMonitor'), 'the validator must refresh the epoch monitor before every verification');
 
-        // Wired even when the risk ENGINE is off (the central state exists
+        // Wired even when the risk engine is off (the central state exists
         // independently; the monitor serves the configured epoch without
         // Redis).
         $container = new ContainerBuilder();
@@ -491,7 +492,7 @@ final class RiskWiringTest extends TestCase
         $signer = $this->load($risk)->getDefinition(\BelConsulting\KiwiCaptchaBundle\Security\ResultReceiptSigner::class);
         self::assertSame($seed, $signer->getArgument(0), 'the configured Ed25519 seed reaches the signer');
 
-        // A malformed seed fails at COMPILE time.
+        // A malformed seed fails at compile time.
         foreach ([base64_encode(random_bytes(16)), 'not-base64!!'] as $bad) {
             try {
                 $risk = $this->riskDefaults();
@@ -518,7 +519,7 @@ final class RiskWiringTest extends TestCase
         $controllerArgs = $container->getDefinition(ChallengeController::class)->getArguments();
         self::assertSame('kiwi_captcha.risk.scope_issuance_cap', (string) $controllerArgs['$scopeIssuanceCap'], 'the controller receives the scope cap');
 
-        // Cap > 0 WITHOUT any Redis client: fail fast at compile time.
+        // Cap > 0 without any Redis client: fail fast at compile time.
         try {
             $risk = $this->riskDefaults();
             $risk['enabled'] = false;
@@ -574,7 +575,7 @@ final class RiskWiringTest extends TestCase
     public function testHealthControllerWiredEvenWhenRiskEngineIsOff(): void
     {
         // The health endpoints live under the risk.* config namespace but
-        // must work without the risk ENGINE (no state store needed).
+        // must work without the risk engine (no state store needed).
         $container = new ContainerBuilder();
         $container->setParameter('kernel.environment', 'test');
         (new KiwiCaptchaExtension())->load([['secret_key' => self::SECRET, 'risk' => ['enabled' => false]]], $container);

@@ -11,78 +11,78 @@ use KiwiCaptcha\Risk\RiskAction;
  * legitimate (post-hoc, e.g. from support flags) and produces a bias
  * adjustment per scope. The bias is added to the raw risk score.
  *
- * THE OUTCOME LEDGER IS ALWAYS ON and independent of calibration: every
- * decision gets a PENDING ledger entry ({"o":"P","scope","hour","score","w"})
- * at registration — either atomically inside register_decision.lua
+ * The outcome ledger is always on and independent of calibration: every
+ * decision gets a pending ledger entry ({"o":"P","scope","hour","score","w"})
+ * at registration, either atomically inside register_decision.lua
  * (calibration enabled) or via the store's outcome_register.lua (calibration
- * disabled). ConfirmedLegitimate/ConfirmedAbuse work IDENTICALLY with or
- * without calibration; calibration only OBSERVES the outcome state via the
+ * disabled). ConfirmedLegitimate/ConfirmedAbuse work identically with or
+ * without calibration; calibration only observes the outcome state via the
  * canonical confirm.lua / correction.lua scripts. The ledger is the
- * exactly-once authority: PENDING -> LEGITIMATE/ABUSE once, correction
+ * exactly-once authority: pending -> legitimate/abuse once, correction
  * flips it.
  *
- * Implementation is BOUNDED Redis aggregate buckets:
+ * Implementation is bounded Redis aggregate buckets.
  *   - buckets: {kiwi:<ns>}:cal:<scope>:<hour> (hash, fields
  *     legit_count / legit_score_sum / abuse_count / abuse_score_sum /
- *     sample_total / sample_resolved — EXACT scores, not band-quantized —
- *     written ONLY by the canonical register_decision.lua /
- *     confirm.lua / correction.lua scripts, EXPIRE 48 h) — at most 24 keys
- *     per scope, no in-process sample arrays; the sample counters live in
- *     the SAME scope/hour buckets so scope, window, label population and
- *     resolution population are ONE cohort;
+ *     sample_total / sample_resolved, exact scores not band-quantized,
+ *     written only by the canonical register_decision.lua /
+ *     confirm.lua / correction.lua scripts, expire 48 h). At most 24 keys
+ *     per scope and no in-process sample arrays. The sample counters live
+ *     in the same scope/hour buckets, so scope, window, label population
+ *     and resolution population are one cohort.
  *   - bias state: {kiwi:<ns>}:cal:state:<scope> (hash, fields
- *     bias_mp/ts) — written atomically by the calibration.lua bias script
+ *     bias_mp/ts), written atomically by the calibration.lua bias script
  *     (read prev -> rate-clamp -> write), bounding how fast the bias may
- *     move per minute;
+ *     move per minute.
  *   - receipts: {kiwi:<ns>}:cal:receipt:<decision_id> (JSON string with
- *     scope/band/action/decision_hour/score/sampled, EXPIRE 300 s),
- *     created ATOMICALLY with the sample denominator and the PENDING
+ *     scope/band/action/decision_hour/score/sampled, expire 300 s),
+ *     created atomically with the sample denominator and the pending
  *     ledger entry by register_decision.lua (a sample can never be counted
- *     without its receipt), consumed EXACTLY ONCE atomically inside
- *     confirm.lua — the outcome is EITHER fully recorded OR not consumed
- *     (no crash window between reading and incrementing the bucket);
+ *     without its receipt), consumed exactly once atomically inside
+ *     confirm.lua. The outcome is either fully recorded or not consumed,
+ *     with no crash window between reading and incrementing the bucket.
  *   - outcome ledger: {kiwi:<ns>}:cal:ledger:<decision_id> (JSON string
- *     {"o","scope","hour","score","w"}) — the ALWAYS-ON exactly-once
- *     authority, written by register_decision.lua (PENDING) and flipped by
+ *     {"o","scope","hour","score","w"}), the always-on exactly-once
+ *     authority, written by register_decision.lua (pending) and flipped by
  *     confirm.lua / correction.lua.
  *
- * The resolution gate (random_sample mode) compares the PER-SCOPE
- * 24-bucket sample_total/sample_resolved sums — no singleton counters:
- * bias adjustment is suspended while sample_total >= min_samples AND
- * sample_resolved < sample_total * minimum_resolution_ratio. The
- * denominator is booked ATOMICALLY with the receipt by
- * register_decision.lua (sample_total HINCRBY when the decision was
- * sampled); sample_resolved is INCRed by confirm.lua on a status-1
+ * The resolution gate (random_sample mode) compares the per-scope
+ * 24-bucket sample_total/sample_resolved sums, with no singleton
+ * counters. Bias adjustment is suspended while sample_total >= min_samples
+ * AND sample_resolved < sample_total * minimum_resolution_ratio. The
+ * denominator is booked atomically with the receipt by
+ * register_decision.lua (sample_total hincrby when the decision was
+ * sampled); sample_resolved is incremented by confirm.lua on a status-1
  * confirmation.
  *
  * confirmOutcome() applies the store's sampling mode and returns the
- * SHARED accepted-outcome status (wire contract with the Rust mirror):
- *   0 = nothing consumed (receipt missing / already confirmed / corrupt /
- *      unsampled-discard),
- *   1 = FIRST confirmation; the exact score was recorded into the scope
- *      bucket (+ the sampled-resolved counter in random_sample mode),
- *   2 = FIRST confirmation; deliberately unsampled in random_sample mode
- *      (consumed, never calibrated, resolved counter untouched).
+ * shared accepted-outcome status, wire contract with the Rust mirror.
+ * Status 0 = nothing consumed (receipt missing / already confirmed /
+ * corrupt / unsampled-discard). Status 1 = first confirmation; the exact
+ * score was recorded into the scope bucket (+ the sampled-resolved
+ * counter in random_sample mode). Status 2 = first confirmation;
+ * deliberately unsampled in random_sample mode (consumed, never
+ * calibrated, resolved counter untouched).
  * Statuses 1 and 2 both authorize the first-party reputation event exactly
  * once; status 0 must never book one (a webhook retry must never amplify).
  *
  * biasForScope() never returns a nonzero bias below the store's
  * minSamples threshold and clamps the raw bias to its maxAdjustment; the
  * final bias is rate-limited and cached in-process per scope for 30 s.
- * NON-FINITE GUARD: the returned bias is ALWAYS a bounded
- * integer within ±maxAdjustment — a non-finite script reply (NaN/±Inf
- * from corrupted bucket values) maps to +maxAdjustment (fail HIGH, never
- * 0, never lower-risk-than-max).
+ * Non-finite guard: the returned bias is always a bounded integer within
+ * ±maxAdjustment. A non-finite script reply (NaN/±Inf from corrupted
+ * bucket values) maps to +maxAdjustment, fail high, never 0 and never
+ * lower-risk-than-max.
  */
 interface CalibrationStore
 {
     /**
-     * Registers the decision ATOMICALLY via the canonical
+     * Registers the decision atomically via the canonical
      * register_decision.lua: the receipt (pairing the decision with its
-     * scope/band/action/decision_hour/score/sampled), the sampled-TOTAL
-     * denominator (HINCRBY sample_total in the decision-hour bucket when
-     * sampled) and the PENDING outcome-ledger entry are created in ONE
-     * invocation — a sample can never be counted without its receipt, and
+     * scope/band/action/decision_hour/score/sampled), the sampled-total
+     * denominator (hincrby sample_total in the decision-hour bucket when
+     * sampled) and the pending outcome-ledger entry are created in one
+     * invocation. A sample can never be counted without its receipt, and
      * a decision always has an outcome-ledger entry regardless of
      * calibration.
      *
@@ -93,8 +93,8 @@ interface CalibrationStore
 
     /**
      * The assessment-time sampling decision: 'complete'/'weighted' always
-     * sample, 'random_sample' samples with samplingProbabilityPpm. PURE —
-     * no side effects: the sampled-TOTAL denominator is booked atomically
+     * sample, 'random_sample' samples with samplingProbabilityPpm. Pure,
+     * no side effects: the sampled-total denominator is booked atomically
      * with the receipt by recordReceipt()/register_decision.lua.
      */
     public function sample(): bool;
@@ -102,12 +102,12 @@ interface CalibrationStore
     /**
      * Atomically consumes the decision's receipt (single canonical
      * confirm.lua script: ledger CAS P->L/A exactly once + calibration
-     * bucket increment against the DECISION-time hour) — or discards an
-     * unsampled receipt in random-sample mode. Returns the SHARED
-     * accepted-outcome status:
-     * 0 = nothing consumed, 1 = FIRST confirmation recorded (calibration +
-     * resolved counter in random_sample mode), 2 = FIRST confirmation,
-     * deliberately unsampled (consumed, no calibration).
+     * bucket increment against the decision-time hour), or discards an
+     * unsampled receipt in random-sample mode. Returns the shared
+     * accepted-outcome status: 0 = nothing consumed, 1 = first
+     * confirmation recorded (calibration + resolved counter in
+     * random_sample mode), 2 = first confirmation, deliberately unsampled
+     * (consumed, no calibration).
      *
      * @throws \InvalidArgumentException when the store's sampling mode is
      *                                   'weighted' and $weight is null
@@ -116,7 +116,7 @@ interface CalibrationStore
 
     /**
      * Corrects a confirmed outcome via the canonical
-     * correction.lua: flips the ledger L <-> A, REVERSES the original
+     * correction.lua: flips the ledger L <-> A, reverses the original
      * bucket contribution (exact recorded weight, clamped at zero) and
      * adds the corrected contribution. The corrected outcome is
      * authoritative for future events; if the decision-time bucket already
@@ -133,7 +133,7 @@ interface CalibrationStore
      * Per-scope sampling resolution statistics over the 24-bucket window
      * (canonical sampling_metrics.lua): sampledTotal/sampledResolved sums
      * and the resolution ratio (1.0 when nothing was sampled). sampledExpired
-     * = max(0, sampledTotal - sampledResolved) — an APPROXIMATION that
+     * = max(0, sampledTotal - sampledResolved), an approximation that
      * includes in-flight receipts (booked at decision time, resolved on
      * confirmation).
      *

@@ -11,7 +11,7 @@ use Symfony\Component\DependencyInjection\ContainerInterface;
 
 /**
  * Privacy posture enforcement as a kernel config-process test: in
- * privacy_mode 'strict' the extension must FORCE telemetry 'off',
+ * privacy_mode 'strict' the extension must force telemetry 'off',
  * same_origin_only true, and min_duration_ms 0 even when the operator
  * explicitly requests otherwise; 'standard' passes the operator's choices
  * through untouched.
@@ -96,7 +96,7 @@ final class StrictPrivacyConfigTest extends TestCase
     public function testStrictForcesEnforceTelemetryFalse(): void
     {
         // strict + enforce_telemetry: true must compile to enforce_telemetry
-        // false — an off widget sends EMPTY telemetry and enforcement would
+        // false — an off widget sends empty telemetry and enforcement would
         // reject every legitimate solve.
         $kernel = new StrictPrivacyTestKernel('test', true);
         $kernel->boot();

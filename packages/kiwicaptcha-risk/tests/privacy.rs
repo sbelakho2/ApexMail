@@ -1,4 +1,5 @@
-//! Redis privacy guarantees (real Redis, skipped unless RISK_REDIS_URL):
+//! Redis privacy guarantees (real Redis, skipped unless the Redis test
+//! URL is set):
 //! issuing observations from a single IP must leave NO raw personal data in
 //! the state — keys, hash values and metadata contain only HMAC pseudonyms
 //! and numeric counters.
@@ -109,14 +110,14 @@ fn no_raw_pii_anywhere_in_redis_state() {
         store.observe(o).expect("observation applies");
     }
 
-    // SCAN the namespace and pull every key, field name and value.
+    // Scan the namespace and pull every key, field name and value.
     let mut conn = client().get_connection().expect("connection");
     let pattern = format!("{{kiwi:{ns}}}:*");
     let scanned: Vec<String> = conn.scan_match(pattern).expect("scan").collect();
     assert!(!scanned.is_empty(), "scan must find the issued keys");
 
-    // The CURRENT source pseudonym is what got stored (the current-epoch
-    // key). The ±1 boundary keys are OBSERVER-ONLY in risk.lua (HMGET,
+    // The current source pseudonym is what got stored (the current-epoch
+    // key). The ±1 boundary keys are observer-only in risk.lua (hmget,
     // never saved), so the epoch-scoped prev/next pseudonyms never even
     // enter the key space at the boundary.
     assert!(
@@ -134,7 +135,7 @@ fn no_raw_pii_anywhere_in_redis_state() {
         "epoch+1 pseudonym must not be persisted (observer-only boundary key)"
     );
     // Session/principal state IS persisted when the observation carries
-    // them (has_session/has_principal), but ONLY under their HMAC
+    // them (has_session/has_principal), but only under their HMAC
     // pseudonyms — the key shape is `:risk:principal:<32-hex>` and the raw
     // principal id exists nowhere, in any form (asserted by the blob scan
     // below).

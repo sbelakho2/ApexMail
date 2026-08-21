@@ -7,9 +7,10 @@ namespace BelConsulting\KiwiCaptchaBundle\Security;
 use KiwiCaptcha\VerificationAdmissionGate;
 
 /**
- * Redis-backed Argon2id admission gate — the audit's TOKENIZED-LEASE design.
+ * Redis-backed Argon2id admission gate implementing the tokenized-lease
+ * design of the audit.
  *
- * Caps concurrent Argon2id verifications ACROSS all PHP-FPM workers sharing
+ * Caps concurrent Argon2id verifications across all PHP-FPM workers sharing
  * the Redis instance. Implements the core's
  * {@see \KiwiCaptcha\VerificationAdmissionGate}: acquire() returns an opaque
  * lease token, release() removes exactly that token. Stale releases cannot
@@ -19,17 +20,17 @@ use KiwiCaptcha\VerificationAdmissionGate;
  *
  * Each lease is a sorted-set member scored at its expiry (now + LEASE_MS).
  * The acquire script prunes expired leases first (ZREMRANGEBYSCORE up to
- * `now` — a lease whose score is in the past is dead), then admits when the
+ * `now`; a lease whose score is in the past is dead), then admits when the
  * live count is below the cap. A worker that crashes while holding a lease
  * never releases it, but its lease expires after LEASE_MS and is reaped by
- * the next acquire — no watchdog counter to drift, no DECR race.
+ * the next acquire, with no watchdog counter to drift and no DECR race.
  *
- * Key: `kiwicaptcha:argon2:leases:<namespace>` — one lease set per
+ * Key: `kiwicaptcha:argon2:leases:<namespace>`, one lease set per
  * deployment; the namespace is sanitized to [A-Za-z0-9_.-] (defaults to
  * 'default' when empty).
  *
  * A `maxConcurrent` <= 0 disables the cap: acquire() returns the sentinel
- * token 'disabled' and release() no-ops — the verifier's lease lifecycle
+ * token 'disabled' and release() no-ops; the verifier's lease lifecycle
  * stays uniform.
  */
 final class RedisAdmissionSemaphore implements VerificationAdmissionGate
@@ -38,34 +39,35 @@ final class RedisAdmissionSemaphore implements VerificationAdmissionGate
     private const DEFAULT_LEASE_MS = 45_000;
 
     /**
-     * Atomic acquire with the bounded WAITERS guard AND the
-     * PER-SCOPE budget:
-     *   KEYS[1]  = lease set key (global)
-     *   KEYS[2]  = waiters counter key
-     *   KEYS[3]  = per-scope lease set key ('' = no scope)
-     *   ARGV[1]  = max concurrent leases (global cap)
-     *   ARGV[2]  = lease lifetime in ms (LEASE_MS)
-     *   ARGV[3]  = unique lease token
-     *   ARGV[4]  = max waiters (argon2_max_waiters)
-     *   ARGV[5]  = per-scope cap (argon2_max_per_tenant)
-     *   ARGV[6]  = 1 when KEYS[3] is a live per-scope set, else 0
+     * Atomic acquire with the bounded waiters guard and the per-scope
+     * budget:
+     *   KEYS[1]  = lease set key (global).
+     *   KEYS[2]  = waiters counter key.
+     *   KEYS[3]  = per-scope lease set key ('' = no scope).
+     *   ARGV[1]  = max concurrent leases (global cap).
+     *   ARGV[2]  = lease lifetime in ms (LEASE_MS).
+     *   ARGV[3]  = unique lease token.
+     *   ARGV[4]  = max waiters (argon2_max_waiters).
+     *   ARGV[5]  = per-scope cap (argon2_max_per_tenant).
+     *   ARGV[6]  = 1 when KEYS[3] is a live per-scope set, else 0.
      *
-     * Lease semantics are unchanged: expired leases are pruned, the lease is
-     * granted when a slot is free. The per-scope set is checked IN ADDITION
-     * to the global cap: a scope whose own set is full is refused even when
-     * the global set has room (per-tenant fairness — one busy scope can
-     * never starve the others' Argon budget), and the global cap always
-     * wins (the deployment-wide memory invariant). A granted caller is a
-     * served waiter, so the waiters counter is decremented (floored at 0)
-     * in the same script. When a cap is saturated the caller WOULD block
-     * behind the gate: the GLOBAL waiters counter is incremented with the
-     * lease lifetime's TTL; once the waiter count EXCEEDS maxWaiters the
-     * acquire returns null IMMEDIATELY (the caller is refused without
-     * queueing — CapacityExceeded surfaces as the 429/violation) and its
-     * waiter entry is removed in the same script, so the counter can never
-     * grow unboundedly under a saturation storm. The waiters guard stays
-     * global — one shared bounded queue regardless of which cap refused.
-     * Returns 1 when the lease was granted, 0 when refused.
+     * Lease semantics are unchanged: expired leases are pruned, the lease
+     * is granted when a slot is free. The per-scope set is checked in
+     * addition to the global cap: a scope whose own set is full is refused
+     * even when the global set has room (per-tenant fairness: one busy
+     * scope can never starve the others' Argon budget). The global cap
+     * always wins (the deployment-wide memory invariant). A granted caller
+     * is a served waiter, so the waiters counter is decremented (floored
+     * at 0) in the same script. When a cap is saturated the caller would
+     * block behind the gate: the global waiters counter is incremented
+     * with the lease lifetime's TTL. Once the waiter count exceeds
+     * maxWaiters, the acquire returns null immediately, the caller refused
+     * without queueing (CapacityExceeded surfaces as the 429/violation),
+     * and its waiter entry is removed in the same script. The counter can
+     * therefore never grow unboundedly under a saturation storm. The
+     * waiters guard stays global, one shared bounded queue regardless of
+     * which cap refused. Returns 1 when the lease was granted, 0 when
+     * refused.
      */
     private const ACQUIRE_SCRIPT = <<<'LUA'
 local time = redis.call('TIME')
@@ -104,8 +106,8 @@ LUA;
 
     /**
      * Atomic release (exact audit semantics): removes exactly the lease
-     * token from the global set AND — when the token carries a per-scope
-     * suffix — from that scope's set. ZREM of an absent member is a no-op,
+     * token from the global set and, when the token carries a per-scope
+     * suffix, from that scope's set. ZREM of an absent member is a no-op,
      * so stale releases cannot remove a newer lease.
      *
      * KEYS[1] = lease set key (global)
@@ -123,12 +125,12 @@ return removed
 LUA;
 
     /**
-     * Atomic-live usage: ONE script — TIME -> now_ms ->
+     * Atomic-live usage: one script, TIME -> now_ms ->
      * ZREMRANGEBYSCORE '-inf' now -> ZCARD. Mirrors the acquire path's
-     * pruning, so the returned count is the LIVE lease count (expired
-     * leases are reaped exactly as the next acquire would reap them —
+     * pruning, so the returned count is the live lease count: expired
+     * leases are reaped exactly as the next acquire would reap them, where
      * ZCARD alone would overcount while leases sit un-reaped between
-     * acquires).
+     * acquires.
      *
      * KEYS[1] = lease set key
      */
@@ -146,25 +148,25 @@ LUA;
 
     /**
      * @param \Redis|\Predis\Client $client       Redis client (phpredis or
-     *                                            Predis — the same clients
-     *                                            RedisStorage accepts; the
-     *                                            bundle itself has no hard
-     *                                            dependency on either)
-     * @param int                   $maxConcurrent cap; <= 0 disables the cap
+     *                                            Predis; the same clients
+     *                                            RedisStorage accepts, and
+     *                                            the bundle itself has no
+     *                                            hard dependency on either).
+     * @param int                   $maxConcurrent cap; <= 0 disables the cap.
      * @param string                $namespace     per-deployment discriminator
      *                                             (sanitized to
-     *                                             [A-Za-z0-9_.-])
+     *                                             [A-Za-z0-9_.-]).
      * @param int                   $maxWaiters    bounded waiters guard
      *                                             (argon2_max_waiters, >= 1):
      *                                             when a cap is saturated and
      *                                             the waiter count exceeds it,
      *                                             acquire() refuses immediately
-     *                                             instead of queueing
-     * @param int                   $maxPerScope   PER-SCOPE budget
+     *                                             instead of queueing.
+     * @param int                   $maxPerScope   per-scope budget
      *                                             (argon2_max_per_tenant, >= 1):
      *                                             each scope string has its
      *                                             own lease set checked in
-     *                                             addition to the global cap
+     *                                             addition to the global cap.
      */
     public function __construct(
         private readonly \Redis|\Predis\Client $client,
@@ -185,7 +187,7 @@ LUA;
         }
         $suffix = preg_replace('/[^A-Za-z0-9_.-]/', '_', $namespace) ?: 'default';
         $this->key = 'kiwicaptcha:argon2:leases:'.$suffix;
-        // The waiters counter must live in the SAME hash slot as the lease
+        // The waiters counter must live in the same hash slot as the lease
         // set (one EVAL script touches both keys), so it is hash-tagged with
         // the lease key's tag family.
         $this->waitersKey = '{kiwicaptcha:argon2:leases:'.$suffix.'}:sem:waiters';
@@ -195,13 +197,13 @@ LUA;
      * Acquire an Argon2id admission slot.
      *
      * @param string|null $scope the scope string (the challenge's scope) for
-     *                           the PER-SCOPE budget: the scope's
+     *                           the per-scope budget: the scope's
      *                           own lease set ({kiwicaptcha:argon2:leases:
      *                           <ns>}:<scope>) is checked against
-     *                           argon2_max_per_tenant IN ADDITION to the
-     *                           global cap. Null = no per-scope attribution
-     *                           (only the global cap applies) — the core
-     *                           verifier passes the STORED record's scope.
+     *                           argon2_max_per_tenant in addition to the
+     *                           global cap. Null = no per-scope attribution,
+     *                           only the global cap applies; the core
+     *                           verifier passes the stored record's scope.
      */
     public function acquire(?string $scope = null): ?string
     {
@@ -212,10 +214,10 @@ LUA;
         $scopeKey = '';
         $hasScope = false;
         if ($scope !== null && $scope !== '') {
-            // Per-scope set: {kiwicaptcha:argon2:leases:<ns>}:<scope> —
-            // hash-tagged with the same family as the waiters counter
-            // (Cluster safe). The token carries the sanitized scope suffix
-            // so release() can remove the lease from BOTH sets.
+        // Per-scope set: {kiwicaptcha:argon2:leases:<ns>}:<scope> —
+        // hash-tagged with the same family as the waiters counter
+        // (Cluster safe). The token carries the sanitized scope suffix
+        // so release() can remove the lease from both sets.
             $scopeSuffix = preg_replace('/[^A-Za-z0-9_.-]/', '_', $scope) ?: 'scope';
             $scopeKey = '{'.$this->key.'}:'.$scopeSuffix;
             $token .= '.'.$scopeSuffix;
@@ -257,13 +259,13 @@ LUA;
     }
 
     /**
-     * Live number of held leases (atomic TIME + prune + ZCARD in ONE Lua
-     * script, so the count is LIVE — expired leases are reaped exactly as
-     * the next acquire would reap them), or 0 when the cap is disabled
+     * Live number of held leases, atomic TIME + prune + ZCARD in one Lua
+     * script, so the count is live: expired leases are reaped exactly as
+     * the next acquire would reap them. 0 when the cap is disabled
      * (genuinely zero leases — the sentinel path never touches Redis).
      *
      * A Throwable from the backend (connection failure, script error)
-     * returns null — "unknown", never 0: 0 means the gate is verifiably
+     * returns null, "unknown", never 0: 0 means the gate is verifiably
      * empty, null means the gate cannot be measured. The caller (the
      * resource-pressure provider) treats null conservatively as saturated.
      * Read-side telemetry — never breaks the caller.

@@ -7,24 +7,24 @@ namespace KiwiCaptcha\Tests\Fixtures;
 /**
  * In-memory stand-in for Predis\Client used by the RedisStorage tests.
  *
- * There is no real Redis in CI. Predis dispatches every command through
- * `__call`, so this fake intercepts exactly the commands RedisStorage sends
- * (get, set, del, eval, exists, wait) and emulates the Lua scripts'
- * semantics:
+ * There is no real Redis in CI. Predis dispatches every command
+ * through `__call`, so this fake intercepts exactly the commands
+ * RedisStorage sends (get, set, del, eval, exists, wait). It emulates
+ * the Lua scripts' semantics:
  *
- *  - consume-transition script: marks the stored record consumed (keeps it)
- *    and returns {json, consumed_now, consumed_before, result_json} — the
- *    one-shot transition, not a delete.
+ *  - consume-transition script: marks the stored record consumed (keeps
+ *    it) and returns {json, consumed_now, consumed_before, result_json};
+ *    the one-shot transition, not a delete.
  *  - commit-result script: stores {valid, binding} on a consumed record
  *    without a result yet; returns 1/0.
- *  - WAIT: returns {@see FakePredisClient::$waitAck} (default 0 — a real
- *    replica-less Redis reports 0 acknowledged replicas without error; only
- *    the number of acknowledged replicas is returned). Tests set waitAck to
- *    model a satisfied or violated durability barrier.
+ *  - WAIT: returns {@see FakePredisClient::$waitAck} (default 0; a real
+ *    replica-less Redis reports 0 acknowledged replicas without error,
+ *    and only the number of acknowledged replicas is returned). Tests
+ *    set waitAck to model a satisfied or violated durability barrier.
  *
- * Every call is recorded in {@see FakePredisClient::$calls} so tests can
- * assert on the Redis commands issued (Lua usage, EX expiration, WAIT
- * arguments, etc.).
+ * Every call is recorded in {@see FakePredisClient::$calls} so tests
+ * can assert on the Redis commands issued (Lua usage, EX expiration,
+ * and the like).
  */
 final class FakePredisClient extends \Predis\Client
 {
@@ -34,7 +34,7 @@ final class FakePredisClient extends \Predis\Client
     /** @var array<string, int> */
     public array $expirations = [];
 
-    /** Number of replicas WAIT reports as acknowledging the last write. */
+    /** Number of replicas the WAIT command reports as acknowledging. */
     public int $waitAck = 0;
 
     /** @var list<array{0: string, 1: list<mixed>}> */
@@ -114,8 +114,9 @@ final class FakePredisClient extends \Predis\Client
         $args = \array_slice($keysAndArgs, $numKeys);
 
         // Consume transition: mark consumed, keep the record. ARGV[1] is
-        // the JSON-escaped operation identity ('' = none) — it lands in
-        // the same write as the state flip, mirroring the real Lua splice.
+        // the JSON-escaped operation identity ('' = none); it lands in
+        // the same write as the state flip, mirroring the real Lua
+        // splice.
         if (str_contains($script, 'consume transition')) {
             $key = (string) $keys[0];
             if (!isset($this->store[$key])) {
@@ -140,8 +141,8 @@ final class FakePredisClient extends \Predis\Client
             }
             $this->store[$key] = json_encode($obj, JSON_UNESCAPED_SLASHES);
 
-            // The winner receives the UPDATED bytes (the identity rides
-            // back on its own ConsumedRecord — mirroring the real Lua).
+            // The winner receives the updated bytes (the identity rides
+            // back on its own ConsumedRecord, mirroring the real Lua).
             return [$this->store[$key], 1, 0, ''];
         }
 

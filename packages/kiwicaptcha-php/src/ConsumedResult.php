@@ -8,13 +8,13 @@ namespace KiwiCaptcha;
  * A verification result committed to a consumed challenge record.
  *
  * The storage layer stores this as the record's optional `consumed_result`
- * JSON field — `{"valid": bool, "binding": string|null}` — so a retry on an
- * already-consumed record returns the SAME deterministic outcome as the
- * attempt that consumed it, without re-deriving the proof.
+ * JSON field, `{"valid": bool, "binding": string|null}`, so a retry on
+ * an already-consumed record returns the same deterministic outcome as
+ * the attempt that consumed it, without re-deriving the proof.
  *
- * This is a storage-layer runtime field: it is NEVER part of the canonical
- * `ChallengeRecord` wire schema (the 21 base keys). The storage wraps the
- * record JSON with `state`/`consumed_result` and strips them again before
+ * This is a storage-layer runtime field; it is never part of the
+ * canonical `ChallengeRecord` wire schema. The storage wraps the record
+ * JSON with `state`/`consumed_result` and strips them again before
  * parsing.
  */
 final class ConsumedResult
@@ -32,10 +32,10 @@ final class ConsumedResult
     }
 
     /**
-     * Rebuild a stored consumed_result. Lenient on structure (the value is
-     * written by {@see StorageInterface::commitResult()} — a corrupt value
-     * is treated as absent by the storages, degrading to ConsumeIndeterminate
-     * rather than crashing the verify path).
+     * Rebuild a stored consumed_result. Lenient on structure: the value
+     * is written by {@see StorageInterface::commitResult()}, and a
+     * corrupt value is treated as absent by the storages, degrading to
+     * ConsumeIndeterminate rather than crashing the verify path.
      *
      * @param array<string, mixed> $data
      *

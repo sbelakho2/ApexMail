@@ -20,30 +20,32 @@ use KiwiCaptcha\Risk\Storage\RedisRiskStateStore;
 use PHPUnit\Framework\TestCase;
 
 /**
- * TRUST-BOUNDARY PROPERTY.
+ * Trust-boundary property.
  *
- * The SignalVector carries NO client-visible fields: every one of its 13
- * fields is server-derived (the risk-v1.lua state channels and the
- * classifier's network-risk side channel). "Perturbing client-controlled
- * inputs of a vector" is therefore impossible — the vector-level property
- * risk_final >= risk_server_only holds trivially (a vector is a pure
- * function of server state; the scorer is a pure function of the vector,
- * and monotonicity of every field is already covered by ScoringPropertyTest).
+ * The SignalVector carries no client-visible fields: every one of its
+ * 13 fields is server-derived (the risk-v1.lua state channels and the
+ * classifier's network-risk side channel). Perturbing client-controlled
+ * inputs of a vector is therefore impossible, and the vector-level
+ * property risk_final >= risk_server_only holds trivially: a vector is
+ * a pure function of server state and the scorer is a pure function of
+ * the vector. Monotonicity of every field is already covered by
+ * ScoringPropertyTest.
  *
- * The REAL trust boundary is the engine: the RiskContext fields (scope,
+ * The real trust boundary is the engine: the RiskContext fields (scope,
  * sourceIp, sessionId, principalId, idempotencyKey, event) are
- * client-visible. The invariant under test: for IDENTICAL server state,
- * assess() with client-supplied session/principal/idempotency fields NEVER
- * yields a score lower than the same assessment without them.
+ * client-visible. The invariant under test: for identical server state,
+ * assess() with client-supplied session/principal/idempotency fields
+ * never yields a score lower than the same assessment without them.
  *
  * Subtlety: different IPs produce different pseudonyms with different
- * state, so the property is constrained to IDENTICAL server state — fresh
- * keys per iteration (two FRESH namespaces, one for the baseline context,
- * one for the varied context: the empty state is bit-identical). With
- * empty state the Lua's aggregation (risk-v1.lua: source/session/principal
- * dimensions MAX into the signal channels — they never subtract) leaves
- * every signal unchanged when a fresh session/principal is added, so the
- * invariant must hold; the 500 randomized iterations below pin it.
+ * state, so the property is constrained to identical server state.
+ * Fresh keys per iteration (two fresh namespaces, one for the baseline
+ * context and one for the varied context, whose empty state is
+ * bit-identical). With empty state the Lua's aggregation (risk-v1.lua:
+ * source/session/principal dimensions MAX into the signal channels,
+ * they never subtract) leaves every signal unchanged when a fresh
+ * session/principal is added, so the invariant must hold; the 500
+ * randomized iterations below pin it.
  */
 final class RiskPropertyTest extends TestCase
 {
@@ -143,10 +145,11 @@ final class RiskPropertyTest extends TestCase
     }
 
     /**
-     * The engine-level trust-boundary invariant, 500 randomized iterations
-     * against real Redis (skipped without RISK_REDIS_URL): with IDENTICAL
-     * (fresh, empty) server state, client-supplied session/principal/
-     * idempotency-key fields never lower the RiskDecision score.
+     * The engine-level trust-boundary invariant, 500 randomized
+     * iterations against real Redis (skipped when no Redis URL is
+     * configured). With identical fresh, empty server state,
+     * client-supplied session/principal/idempotency-key fields never
+     * lower the RiskDecision score.
      */
     public function testClientSuppliedIdentityFieldsNeverLowerTheScore(): void
     {
@@ -166,9 +169,9 @@ final class RiskPropertyTest extends TestCase
             $key = $this->randomId($prng, 'idem');
             $flags = $classifier->classify($ip);
 
-            // Two FRESH namespaces = bit-identical EMPTY server state: the
+            // Two fresh namespaces = bit-identical empty server state: the
             // score is a pure function of the state, and the varied context
-            // differs from the baseline ONLY in the client-supplied fields.
+            // differs from the baseline only in the client-supplied fields.
             $baselineStore = new RedisRiskStateStore($client, namespace: 'propb' . bin2hex(random_bytes(4)));
             $variedStore = new RedisRiskStateStore($client, namespace: 'propv' . bin2hex(random_bytes(4)));
             $baseline = $this->engine($baselineStore)->assess($this->context($scope, $ip, null, null, $flags));

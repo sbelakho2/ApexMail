@@ -20,16 +20,14 @@ use Symfony\Component\DependencyInjection\ContainerBuilder;
 use Symfony\Component\DependencyInjection\Reference;
 
 /**
- * The selective-chaining wiring contract at the definition level (extension
- * load, no container compile): risk.chaining wires the Redis-backed chain
- * state store (in-memory when no Redis client exists) + the ticket service
- * (with the chain TTL, the SHORT reservation lease and the deployment's
- * authoritative transaction-binding resolver), and injects the service into
- * BOTH the challenge controller (stage-2 gate) and the validator
- * (CHAIN_REQUIRED issuance); risk.trusted_tls_header flows into the
- * controller. chaining.enabled requires risk.enabled AND a non-null
- * risk.request_binding_authority — the extension refuses the combination
- * at compile time.
+ * The selective-chaining wiring contract at the definition level
+ * (extension load, no container compile): risk.chaining wires the
+ * Redis-backed chain state store (in-memory when no Redis client exists)
+ * plus the ticket service into both the challenge controller and the
+ * validator. risk.trusted_tls_header flows into the controller.
+ * chaining.enabled requires risk.enabled and a non-null
+ * risk.request_binding_authority — the extension refuses the
+ * combination at compile time.
  */
 final class ChainingWiringTest extends TestCase
 {
@@ -92,7 +90,7 @@ final class ChainingWiringTest extends TestCase
 
         $html = $runtime->renderWidget($env, ['risk_client_context' => true]);
         // The attribute name also appears in the embedded driver source;
-        // assert on the CONTAINER tag sequence (the only render surface).
+        // assert on the container tag sequence (the only render surface).
         self::assertStringNotContainsString('data-kiwi-telemetry="off" data-kiwi-risk-context="coarse"', $html, 'strict privacy mode must never render the opt-in attribute');
     }
 
@@ -133,7 +131,7 @@ final class ChainingWiringTest extends TestCase
 
     public function testChainingWithoutRedisClientWiresTheArrayStore(): void
     {
-        // The risk engine itself REQUIRES a Predis client, so chaining
+        // The risk engine itself requires a Predis client, so chaining
         // without any Redis client cannot be reached through the normal
         // risk wiring; the Array branch mirrors the idempotency-store
         // pattern for completeness (the extension prefers the risk Redis).
@@ -188,9 +186,9 @@ final class ChainingWiringTest extends TestCase
         self::assertSame(self::BINDING_AUTHORITY, (string) $authority, 'the authoritative transaction-binding resolver flows into the controller (a client-supplied string is never signed unexamined)');
 
         // The post-solve disposition store is injected into the controller
-        // too: a consumed-valid stage-2 challenge is NEVER terminal from
+        // too: a consumed-valid stage-2 challenge is never terminal from
         // the core's consumed result alone — the controller reads the
-        // nonce's FINAL disposition and transitions the chain by kind.
+        // nonce's final disposition and transitions the chain by kind.
         $disposition = $controller->getArgument('$postSolveDispositionStore');
         self::assertInstanceOf(Reference::class, $disposition, 'the controller receives the post-solve disposition store');
 
@@ -205,8 +203,8 @@ final class ChainingWiringTest extends TestCase
 
     public function testChainingEnabledWithoutTheBindingAuthorityIsRefusedAtCompileTime(): void
     {
-        // The chain is a SERVER-SIDE TRANSACTION OBLIGATION anchored on
-        // the AUTHORITATIVE binding — chaining without the authority is a
+        // The chain is a server-side transaction obligation anchored on
+        // the authoritative binding — chaining without the authority is a
         // configuration error, refused at compile time (the config tree),
         // never silently degraded.
         try {
@@ -231,7 +229,7 @@ final class ChainingWiringTest extends TestCase
     public function testNonMonotoneOrOutOfRangeArgonLadderIsRefusedAtCompileTime(): void
     {
         // The argon escalation ladder must satisfy
-        // 1 <= rung1 < rung2 < rung3 <= Config::MAX_ARGON2_TARGET_BITS:
+        // 1 <= rung1 < rung2 < rung3 <= Config::MAX_argon2_target_bits:
         // a non-monotone or out-of-range ladder is refused when the
         // config tree processes the extension load — never silently
         // accepted.

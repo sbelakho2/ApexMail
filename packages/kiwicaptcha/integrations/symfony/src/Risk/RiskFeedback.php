@@ -15,7 +15,7 @@ use KiwiCaptcha\VerifyError;
  * proof is malformed traffic, a rejected-but-well-formed proof is an
  * invalid proof, an expired challenge is expiry (not abuse), and a
  * record-not-found is treated as a replay attempt (the one-shot record is
- * gone — either replayed or never existed). Infrastructure failures
+ * gone, either replayed or never existed). Infrastructure failures
  * (CapacityExceeded) return null: the request was not the client's fault
  * and must not pollute its risk state.
  */

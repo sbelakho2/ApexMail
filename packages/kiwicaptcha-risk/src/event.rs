@@ -4,7 +4,7 @@
 //! event identifiers passed into the canonical state script (`risk.lua`) and
 //! must be byte-identical across the PHP and Rust implementations.
 //!
-//! Values 18..20 are the ADDITIVE risk-v2 surface: honeypot/decoy evidence
+//! Values 18..20 are the additive risk-v2 surface: honeypot/decoy evidence
 //! kinds. They ride the same observation path (idempotency domain separation,
 //! dedupe receipt) but the state script treats them as no-ops (like
 //! `RiskDenied`) — the honeypot signal itself is scored from the risk-v2
@@ -122,9 +122,9 @@ impl RiskEventKind {
 
 /// One immutable observation applied atomically to the risk state.
 ///
-/// Source/subnet identities are EPOCH-scoped hex pseudonyms (32 hex chars)
+/// Source/subnet identities are epoch-scoped hex pseudonyms (32 hex chars)
 /// from the identity factory: `source_id` is the current-epoch id,
-/// `source_id_prev`/`source_id_next` are the SAME source HMAC'd with the
+/// `source_id_prev`/`source_id_next` are the same source HMAC'd with the
 /// epoch-1/epoch+1 windows (the store's ±1 keys must never reuse the
 /// current-epoch pseudonym). `session_id`/`principal_id` are 128-bit
 /// pseudonyms, or `None` when the request carries no session/principal.
@@ -171,17 +171,17 @@ impl RiskObservation {
 pub const MAX_IDEMPOTENCY_KEY_BYTES: usize = 4096;
 
 /// Normalizes a caller idempotency key into the canonical `event_id`
-/// representation BEFORE it becomes a Redis key suffix (byte-identical with
+/// representation before it becomes a Redis key suffix (byte-identical with
 /// PHP):
 ///
 /// - `None` or empty → a fresh random 16-byte hex id
 ///   ([`RiskObservation::new_event_id`]);
-/// - more than [`MAX_IDEMPOTENCY_KEY_BYTES`] bytes →
+/// - more than the 4096-byte contract limit →
 ///   [`RiskError::InvalidIdempotencyKey`];
-/// - otherwise → lowercase hex of
-///   `HMAC-SHA256(event_key, pack('N', scope) . chr(event) . key)` (64 hex
+/// - otherwise → lowercase hex of the HMAC-SHA256 MAC over
+///   event_key, `pack('N', scope)`, `chr(event)` and the key (64 hex
 ///   chars; `pack('N', scope)` is the scope as a big-endian u32, `chr(event)`
-///   is the event value as ONE byte).
+///   is the event value as one byte).
 ///
 /// The scope + event domain separation means the same caller key produces a
 /// different `event_id` per scope AND per event kind, so a retry of one
@@ -321,8 +321,8 @@ mod tests {
     #[test]
     fn idempotency_normalization_hmacs_scope_event_and_key() {
         let key = event_key();
-        // Anchored vectors computed with the PHP mirror:
-        //   hash_hmac('sha256', pack('N', scope) . chr(event) . $key, $eventKey)
+        // Anchored vectors computed with the PHP mirror: hash_hmac of
+        // sha256 over pack('N', scope) . chr(event) . $key with $eventKey,
         // in lowercase hex.
         assert_eq!(
             normalize_idempotency_key(Some("deadbeef"), 1, RiskEventKind::PreIssue, &key).unwrap(),
@@ -362,7 +362,7 @@ mod tests {
             normalize_idempotency_key(Some("other-key"), 1, RiskEventKind::PreIssue, &key).unwrap(),
             normalized
         );
-        // DOMAIN SEPARATION: the same caller key must never collide across
+        // Domain separation: the same caller key must never collide across
         // scopes or event kinds.
         assert_ne!(
             normalize_idempotency_key(Some("deadbeef"), 2, RiskEventKind::PreIssue, &key).unwrap(),

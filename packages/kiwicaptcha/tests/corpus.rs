@@ -1,9 +1,9 @@
-//! Differential malicious-record parsing: the SAME corpus must be rejected
+//! Differential malicious-record parsing: the same corpus must be rejected
 //! (and accepted) identically by the Rust and PHP parsers.
 //!
 //! The corpus lives at protocol/risk-v1/fuzz-corpus.json (deterministic
 //! seed 0x5EED0001, 1000 mutations of a valid record). The accepted count
-//! is pinned: the PHP fromArray parser must accept the SAME 659 records.
+//! is pinned: the PHP fromArray parser must accept the same 659 records.
 
 #[test]
 fn malicious_corpus_acceptance_is_pinned() {

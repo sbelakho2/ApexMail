@@ -9,15 +9,15 @@ namespace KiwiCaptcha\Risk;
  *
  * Each source/subnet identity carries its epoch plus the pseudonyms for
  * epoch-1 (previous boundary), the current epoch and epoch+1 (next
- * boundary) — every epoch key uses the pseudonym HMAC'd with ITS OWN
+ * boundary). Every epoch key uses the pseudonym HMAC'd with its own
  * epoch, never the current-epoch pseudonym. sessionId/principalId are the
  * same 16-byte hex pseudonyms, or null when the request carries no
  * session/principal. eventId is either 16 random bytes in hex (no caller
- * idempotency key) or the 64-hex HMAC-SHA256 of the event+scope domain-
- * separated caller idempotency key (keyed by the master-derived event
- * key; the raw key never appears in Redis and low-entropy keys are not
- * dictionary-recoverable) and is the dedupe key (an identical event_id
- * never double-increments).
+ * idempotency key) or the 64-hex HMAC-SHA256 of the event+scope
+ * domain-separated caller idempotency key, keyed by the master-derived
+ * event key. The raw key never appears in Redis and low-entropy keys are
+ * not dictionary-recoverable. eventId is the dedupe key; an identical
+ * event_id never double-increments.
  */
 final class RiskObservation
 {

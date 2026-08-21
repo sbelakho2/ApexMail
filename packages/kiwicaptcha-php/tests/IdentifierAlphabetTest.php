@@ -16,15 +16,15 @@ use KiwiCaptcha\Tests\Fixtures\Vectors;
 use PHPUnit\Framework\TestCase;
 
 /**
- * Narrow identifier alphabet: scope, issuer, region and
- * request_binding must match `[A-Za-z0-9._:-]+` with the length caps
- * (scope <= 128, request_binding <= 128, issuer <= 128, region <= 64).
- * The issuer rejects non-conforming values at issuance (SignError-like:
- * \InvalidArgumentException); the record parser rejects non-conforming
- * deployment-bound identifiers (region/request_binding/issuer) as
- * MalformedRecord; the verifier's validate_record enforces the alphabet
- * for scope (fromArray deliberately treats scope as an opaque string —
- * serde parity, pinned by the differential fuzz corpus).
+ * Narrow identifier alphabet: scope, issuer, region and request_binding
+ * must match `[A-Za-z0-9._:-]+` with the length caps (scope <= 128,
+ * request_binding <= 128, issuer <= 128, region <= 64). The issuer
+ * rejects non-conforming values at issuance (\InvalidArgumentException);
+ * the record parser rejects non-conforming deployment-bound identifiers
+ * (region/request_binding/issuer) as MalformedRecord. The verifier's
+ * validate_record enforces the alphabet for scope; fromArray
+ * deliberately treats scope as an opaque string, a serde-parity choice
+ * pinned by the differential fuzz corpus.
  */
 final class IdentifierAlphabetTest extends TestCase
 {
@@ -252,9 +252,10 @@ final class IdentifierAlphabetTest extends TestCase
 
     public function testFromArrayTreatsScopeAsOpaqueSerdeString(): void
     {
-        // The differential fuzz corpus pins scope as an opaque string —
-        // 'login|admin' and unicode scopes must still PARSE (exactly like
-        // the Rust serde `String` field), so the 659-accepted split holds.
+        // The differential fuzz corpus pins scope as an opaque string:
+        // 'login|admin' and unicode scopes must still parse (exactly like
+        // the Rust serde `String` field), so the 659-accepted split
+        // holds.
         $record = ChallengeRecord::fromArray(self::mutate('scope', 'login|admin'));
         self::assertSame('login|admin', $record->scope);
 
@@ -264,11 +265,11 @@ final class IdentifierAlphabetTest extends TestCase
 
     public function testVerifierRejectsNonConformingScopeRecords(): void
     {
-        // The VERIFIER's validate_record enforces the scope alphabet
-        // a parsed-but-non-conforming scope fails closed as
-        // MalformedRecord before any crypto work. The record carries a
-        // structurally valid 32-byte nonce and 16-byte salt so the scope
-        // alphabet check is the ONLY validation failure.
+        // The verifier's validate_record enforces the scope alphabet; a
+        // parsed-but-non-conforming scope fails closed as MalformedRecord
+        // before any crypto work. The record carries a structurally valid
+        // 32-byte nonce and 16-byte salt so the scope alphabet check is
+        // the only validation failure.
         foreach (['login|admin', "log\u{00FC}n", 'log in'] as $scope) {
             $data = self::mutate('scope', $scope);
             $data['nonce'] = 'QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVphYmNkZWY=';
@@ -292,7 +293,7 @@ final class IdentifierAlphabetTest extends TestCase
     public function testVerifierAcceptsConformingScopeRecords(): void
     {
         // Control: a conforming multi-character scope ('us-east-1' style)
-        // passes validation and fails later at the signature check — never
+        // passes validation and fails later at the signature check, never
         // at validate_record.
         $data = self::mutate('scope', 'a.b:c_d-e');
         $data['nonce'] = 'QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVphYmNkZWY=';

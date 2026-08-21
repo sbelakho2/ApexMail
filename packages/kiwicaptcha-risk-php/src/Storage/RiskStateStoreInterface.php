@@ -11,11 +11,11 @@ use KiwiCaptcha\Risk\SignalVector;
  * Risk state store: atomically applies an observation and returns the
  * resulting SignalVector.
  *
- * The OUTCOME LEDGER is part of the store contract: the always-on,
+ * The outcome ledger is part of the store contract: the always-on,
  * calibration-independent exactly-once authority for confirmed outcomes
- * (PENDING -> LEGITIMATE/ABUSE once, correction flips it). Confirmed
- * outcomes work identically with or without calibration — calibration
- * only OBSERVES the ledger via the canonical confirm/correction scripts.
+ * (pending -> legitimate/abuse once, correction flips it). Confirmed
+ * outcomes work identically with or without calibration; calibration
+ * only observes the ledger via the canonical confirm/correction scripts.
  */
 interface RiskStateStoreInterface
 {
@@ -33,23 +33,23 @@ interface RiskStateStoreInterface
     public function observe(RiskObservation $observation): SignalVector;
 
     /**
-     * Registers the decision's PENDING outcome-ledger entry (SET NX EX via
+     * Registers the decision's pending outcome-ledger entry (SET NX EX via
      * the canonical outcome_register.lua): {"o":"P","scope","hour","score","w":1}
      * keyed {kiwi:<ns>}:cal:ledger:<decisionId> with the store's
-     * outcomeTtlSecs. Used when calibration is DISABLED — the engine always
+     * outcomeTtlSecs. Used when calibration is disabled; the engine always
      * registers one ledger entry per decision regardless of calibration.
      *
-     * @return bool true when the PENDING entry was created, false when the
+     * @return bool true when the pending entry was created, false when the
      *              decision is already registered
      * @throws RiskStoreException when the underlying state backend fails
      */
     public function registerOutcome(string $decisionId, int $scope, int $decisionHour, int $score): bool;
 
     /**
-     * Confirms the decision's outcome EXACTLY ONCE (canonical
-     * outcome_confirm.lua): PENDING -> L/A. Returns 1 when THIS call
+     * Confirms the decision's outcome exactly once (canonical
+     * outcome_confirm.lua): pending -> L/A. Returns 1 when this call
      * performed the first confirmation, 0 when the decision is unknown,
-     * already confirmed or the ledger is not PENDING — a webhook retry
+     * already confirmed or the ledger is not pending. A webhook retry
      * can never confirm twice.
      *
      * @throws RiskStoreException when the underlying state backend fails

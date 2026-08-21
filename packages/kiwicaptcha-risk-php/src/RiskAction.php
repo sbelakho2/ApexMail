@@ -7,10 +7,10 @@ namespace KiwiCaptcha\Risk;
 /**
  * Ordered risk actions, fixed by the cross-language risk-v1 contract.
  *
- * The ordering (Allow < Sha16 < Sha18 < Sha20 < Argon16 < Argon32 < Argon64
- * < StepUp < Deny) is the escalation ladder; `rank()` is strictly monotonic
- * and is the only comparison that may be used to combine actions (score
- * bands, scope minima, global floors).
+ * The ordering Allow < Sha16 < Sha18 < Sha20 < Argon16 < Argon32 < Argon64
+ * < StepUp < Deny is the escalation ladder. `rank()` is strictly monotonic
+ * and is the only comparison that may be used to combine actions: score
+ * bands, scope minima, global floors.
  */
 enum RiskAction: string
 {

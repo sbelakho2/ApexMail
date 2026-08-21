@@ -14,8 +14,9 @@ use PHPUnit\Framework\TestCase;
 
 /**
  * Psr6Storage behaviour, including the regression test for the broken
- * consume() (it used to delete-first-then-find, which PSR-6's delete
- * postcondition makes always return null — every verification failed).
+ * consume(): it used to delete-first-then-find, which PSR-6's delete
+ * postcondition makes always return null, so every verification
+ * failed.
  */
 final class Psr6StorageTest extends TestCase
 {
@@ -46,9 +47,10 @@ final class Psr6StorageTest extends TestCase
 
     public function testStoreThenConsumeReturnsRecord(): void
     {
-        // REGRESSION: consume() must return the stored record. PSR-6's delete
-        // postcondition makes a subsequent find miss, so a transition that
-        // deletes instead of keeping the record would break the contract.
+        // Regression: consume() must return the stored record. PSR-6's
+        // delete postcondition makes a subsequent find miss, so a
+        // transition that deletes instead of keeping the record would
+        // break the contract.
         $storage = new Psr6Storage($this->makePool());
         $storage->store($this->makeRecord());
 
@@ -61,9 +63,9 @@ final class Psr6StorageTest extends TestCase
 
     public function testConsumeMarksConsumedAndKeepsTheRecord(): void
     {
-        // consume() is a transition — the record is kept (marked
-        // consumed) until its own expiration; a retry observes the consumed
-        // marker instead of a missing record.
+        // consume() is a transition: the record is kept (marked
+        // consumed) until its own expiration; a retry observes the
+        // consumed marker instead of a missing record.
         $storage = new Psr6Storage($this->makePool());
         $storage->store($this->makeRecord());
         $storage->consume('nonce-1'); // first call wins the transition
@@ -147,8 +149,9 @@ final class Psr6StorageTest extends TestCase
     public function testPsr6StorageIsNotAtomic(): void
     {
         // PSR-6 cannot fuse read and transition, so Psr6Storage is
-        // best-effort single-use — it must NOT claim AtomicStorageInterface
-        // (only RedisStorage's fused Lua transition backend does).
+        // best-effort single-use; it must not claim
+        // AtomicStorageInterface (only RedisStorage's fused Lua
+        // transition backend does).
         self::assertNotInstanceOf(\KiwiCaptcha\AtomicStorageInterface::class, new Psr6Storage($this->makePool()));
     }
 
@@ -202,9 +205,10 @@ final class Psr6StorageTest extends TestCase
 
     public function testPsr6KeyLengthNeverExceeds64Characters(): void
     {
-        // PSR-6 only REQUIRES support for keys up to 64 characters; longer
-        // keys are optional. Base64 nonces may contain '/', '+', and are 44
-        // chars — the hashed 'kc_' + 60-hex key must stay within 64.
+        // PSR-6 only requires support for keys up to 64 characters;
+        // longer keys are optional. Base64 nonces may contain '/' and
+        // '+', and are 44 chars; the hashed 'kc_' + 60-hex key must
+        // stay within 64.
         $key = new \ReflectionMethod(Psr6Storage::class, 'key');
 
         foreach ([

@@ -11,7 +11,7 @@ use Symfony\Component\DependencyInjection\ContainerInterface;
 /**
  * The form widget must follow the configured route_prefix: the default
  * 'endpoint' option of KiwiCaptchaType is derived from the prefix, so the
- * rendered data-kiwi-endpoint points at the ACTUAL registered route (same as
+ * rendered data-kiwi-endpoint points at the actual registered route (same as
  * the standalone Twig widget). The option stays overridable per form.
  */
 final class PrefixFormIntegrationTest extends TestCase

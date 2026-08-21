@@ -16,17 +16,19 @@ use KiwiCaptcha\Tests\Fixtures\Vectors;
 use PHPUnit\Framework\TestCase;
 
 /**
- * POST-DERIVE FINAL REVALIDATION: after the proof derives
- * successfully and BEFORE returning Valid, the verifier re-checks against
- * the CURRENT server clock (its now closure) and the CURRENT expectations.
+ * Post-derive final revalidation: after the proof derives successfully
+ * and before returning Valid, the verifier re-checks against the
+ * current server clock (its now closure) and the current expectations.
  *
  * Race tests:
- *  (a) a record with a tiny remaining lifetime: the first cheap TTL check
- *      passes, the final re-check (with an ADVANCED clock) rejects Expired —
- *      the challenge expired DURING the expensive derivation;
- *  (b) the expected policy_version rotates between the cheap check and the
- *      final re-check — the final re-check reads the CURRENT expectation
- *      and rejects WrongPolicyVersion (same for region and issuer).
+ *  (a) a record with a tiny remaining lifetime: the first cheap TTL
+ *      check passes, and the final re-check (with an advanced clock)
+ *      rejects Expired; the challenge expired during the expensive
+ *      derivation.
+ *  (b) the expected policy_version rotates between the cheap check and
+ *      the final re-check: the final re-check reads the current
+ *      expectation and rejects WrongPolicyVersion (same for region and
+ *      issuer).
  */
 final class FinalRevalidationTest extends TestCase
 {
@@ -73,11 +75,11 @@ final class FinalRevalidationTest extends TestCase
 
     public function testCheapCheckPassesButFinalRecheckRejectsExpiredDuringDerivation(): void
     {
-        // Race (a): the challenge has ~1s of lifetime — the cheap TTL check
-        // (first clock call, now = issued_at) passes, but the expensive
-        // derivation crosses the expiry: the final re-check reads the
-        // ADVANCED clock (second call, now = expires_at) and rejects
-        // Expired even though the proof was valid.
+        // Race (a): the challenge has ~1s of lifetime; the cheap TTL
+        // check (first clock call, now = issued_at) passes, but the
+        // expensive derivation crosses the expiry. The final re-check
+        // reads the advanced clock (second call, now = expires_at) and
+        // rejects Expired even though the proof was valid.
         [$record, $token] = $this->issueAndSolve($this->shaConfig(ttlSecs: 1));
         $storage = new ArrayStorage();
         $storage->store($record);
@@ -112,11 +114,12 @@ final class FinalRevalidationTest extends TestCase
 
     public function testPolicyVersionRotatedBetweenCheapAndFinalRecheck(): void
     {
-        // Race (b): the deployment rotates its expected policy epoch DURING
-        // the verification (the rotation lands on the second clock read —
-        // the final re-check's expiry check — so the cheap check already
-        // passed with the cheap-phase expectation). The final re-check reads the
-        // CURRENT expected value and rejects WrongPolicyVersion.
+        // Race (b): the deployment rotates its expected policy epoch
+        // during the verification (the rotation lands on the second clock
+        // read, the final re-check's expiry check, so the cheap check
+        // already passed with the cheap-phase expectation). The final
+        // re-check reads the current expected value and rejects
+        // WrongPolicyVersion.
         [$record, $token] = $this->issueAndSolve($this->shaConfig(policyVersion: 2));
         $storage = new ArrayStorage();
         $storage->store($record);
@@ -188,7 +191,8 @@ final class FinalRevalidationTest extends TestCase
 
     public function testRotationToMatchingExpectationsStillVerifies(): void
     {
-        // Control: a rotation that lands on MATCHING values must not reject.
+        // Control: a rotation that lands on matching values must not
+        // reject.
         [$record, $token] = $this->issueAndSolve($this->shaConfig(policyVersion: 2, issuer: 'prod'));
         $storage = new ArrayStorage();
         $storage->store($record);
@@ -212,10 +216,10 @@ final class FinalRevalidationTest extends TestCase
 
     public function testFinalRecheckRejectsExpiredConsumedRecord(): void
     {
-        // Expiry at the final re-check happens AFTER consume — the record is
-        // already transitioned, so a subsequent retry (with a stable clock)
-        // replays the committed valid outcome... but the FIRST attempt is
-        // Expired: the final re-check fires before any commit.
+        // Expiry at the final re-check happens after consume; the record
+        // is already transitioned, so a subsequent retry (with a stable
+        // clock) replays the committed valid outcome. But the first
+        // attempt is Expired: the final re-check fires before any commit.
         [$record, $token] = $this->issueAndSolve($this->shaConfig(ttlSecs: 1));
         $storage = new ArrayStorage();
         $storage->store($record);
@@ -231,8 +235,8 @@ final class FinalRevalidationTest extends TestCase
         $outcome = $verifier->verify($token, Vectors::SECRET, 'login', self::CLIENT_IP, nowNs: $record->issuedAtNs + 1_000_000);
         self::assertSame(VerifyError::Expired, $outcome->error);
 
-        // The record is consumed WITHOUT a committed result (the final
-        // re-check failed before commit) — a retry is intrinsically
+        // The record is consumed without a committed result (the final
+        // re-check failed before commit); a retry is intrinsically
         // ambiguous, never a replay of Valid.
         $retry = $storage->consume($record->nonce);
         self::assertNotNull($retry);

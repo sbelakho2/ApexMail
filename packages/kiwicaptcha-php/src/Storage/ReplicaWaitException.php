@@ -9,10 +9,10 @@ namespace KiwiCaptcha\Storage;
  * threshold after a durability-critical write (challenge issuance, the
  * pending→consumed transition, or the deterministic-result commit).
  *
- * With `waitReplicas > 0` the storage layer makes a HARD durability
+ * With `waitReplicas > 0` the storage layer makes a hard durability
  * promise: the caller only learns the write "succeeded" once at least
  * `waitReplicas` replicas acknowledged it. A replica-less or lagging
- * replica set therefore FAILS CLOSED — the challenge is never handed to
+ * replica set therefore fails closed: the challenge is never handed to
  * the client (issuance), the consumed transition reports the intrinsically
  * ambiguous indeterminate state (verification), and a result commit stays
  * best-effort. Silently proceeding on a weaker acknowledgement is what

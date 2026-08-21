@@ -10,21 +10,13 @@ use KiwiCaptcha\StorageInterface;
 
 /**
  * Emulates the consumed-state storage contract on top of an
- * ArrayStorage:
- *
- *  - consume() is a STATE TRANSITION (pending -> consumed), never a delete —
- *    records persist until their TTL;
- *  - commitResult($nonce, $valid, $binding) records the outcome of the
- *    derivation (what the core does after deriving);
- *  - find() returns the record WITH the consumed state attached
- *    (`consumed` / `consumed_result` / `consumed_binding`) when the core's
- *    ChallengeRecord supports those fields — and the plain record on cores
- *    that predate them;
- *  - `throwOnConsume` simulates a LOST consume response (the wire failure
- *    that produces ConsumeIndeterminate).
- *
- * Every transition is counted (`consumes`, `deletes`, `commits`) so tests
- * can assert "no second derive / no re-consume" via the storage counters.
+ * ArrayStorage: consume() is a state transition (pending -> consumed)
+ * rather than a delete, commitResult() records the derivation outcome,
+ * and find() attaches the consumed state when the core's
+ * ChallengeRecord supports it. `throwOnConsume` simulates a lost consume
+ * response (the wire failure that produces ConsumeIndeterminate). Every
+ * transition is counted (`consumes`, `deletes`, `commits`) so tests can
+ * assert "no second derive / no re-consume" via the storage counters.
  */
 final class ConsumedStateStorage implements StorageInterface
 {
@@ -70,7 +62,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         if ($record === null) {
             return null;
         }
-        // The consumed-state TRANSITION: the record persists, the state flips.
+        // The consumed-state transition: the record persists, the state flips.
         $this->consumed[$nonce] = true;
 
         return new \KiwiCaptcha\ConsumedRecord($record, true, false, null);
@@ -99,7 +91,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
 
     /**
      * Attach the consumed-state fields to the record when the core's
-     * ChallengeRecord supports them (the current WIRE_KEYS); on cores that
+     * ChallengeRecord supports them (the current wire_keys); on cores that
      * predate the transition the plain record is returned (consumed records
      * were deleted there anyway).
      */

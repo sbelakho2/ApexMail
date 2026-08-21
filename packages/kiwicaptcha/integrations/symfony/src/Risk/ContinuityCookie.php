@@ -11,21 +11,21 @@ use Symfony\Component\HttpFoundation\Request;
  * First-party session continuity cookie for the adaptive risk engine.
  *
  * The risk-v1 "session" signal links observations from the same browser
- * across requests. The link material must be a fresh random nonce — never an
- * IP-derived or device-derived identifier — so this service mints exactly
- * that: a 16-byte random value (hex, 32 chars) stored in a first-party,
- * HttpOnly, SameSite=Strict cookie (the constructor's default; the operator
- * may relax it). The engine only ever stores the keyed
- * pseudonym of the value (HMAC-SHA256 with the derived session key), never
- * the value itself.
+ * across requests. The link material must be a fresh random nonce, never
+ * an IP-derived or device-derived identifier, so this service mints
+ * exactly that: a 16-byte random value (hex, 32 chars) stored in a
+ * first-party, HttpOnly, SameSite=Strict cookie (the constructor's
+ * default; the operator may relax it). The engine only ever stores the
+ * keyed pseudonym of the value (HMAC-SHA256 with the derived session
+ * key), never the value itself.
  *
- * Privacy contract: the cookie is a random nonce with no embedded identity;
- * it expires after the configured TTL (default 30 minutes; the spec's
- * 15-30 minute window) and follows the
- * request scheme for the Secure flag (null default). Browsers that reject the
- * cookie (e.g. third-party contexts, strict blockers) simply fall back to a
- * session-less risk identity — the engine pads an absent session with zeros,
- * so availability is never coupled to cookie acceptance.
+ * Privacy contract: the cookie is a random nonce with no embedded
+ * identity; it expires after the configured TTL (default 30 minutes; the
+ * spec's 15-30 minute window) and follows the request scheme for the
+ * Secure flag (null default). Browsers that reject the cookie (e.g.
+ * third-party contexts, strict blockers) simply fall back to a
+ * session-less risk identity — the engine pads an absent session with
+ * zeros, so availability is never coupled to cookie acceptance.
  */
 final class ContinuityCookie
 {

@@ -20,16 +20,16 @@ use Symfony\Component\Routing\RouteCollection;
  * src/Controller directory, never for vendor bundle directories. This loader
  * is the bundle-owned source of truth for the routes, and the paths are built
  * from the `kiwi_captcha.route_prefix` config option so the configured prefix
- * affects the ACTUAL routes (not just the widget's requested endpoint).
+ * affects the actual routes, not just the widget's requested endpoint.
  *
  * Routes:
- *  - POST  {prefix}/challenge          (the widget's challenge endpoint)
- *  - GET   {prefix}/health/live        (liveness — always 200)
- *  - GET   {prefix}/health/ready       (readiness — 200 only when
- *                                       signing keys + security Redis + the
- *                                       CENTRAL security-policy state are all
+ *  - POST  {prefix}/challenge          (the widget's challenge endpoint).
+ *  - GET   {prefix}/health/live        (liveness, always 200).
+ *  - GET   {prefix}/health/ready       (readiness, 200 only when signing
+ *                                       keys + security Redis + the central
+ *                                       security-policy state are all
  *                                       compatible; risk.health.enabled
- *                                       defaults true)
+ *                                       defaults true).
  *
  * Loaded either automatically (the extension prepends
  * src/Resources/config/routes.php as the app's framework.router.resource when
@@ -100,8 +100,8 @@ final class KiwiCaptchaRouteLoader extends Loader
         ));
 
         // Rollback-resistant health split: liveness is never
-        // tied to saturation; readiness gate-keeps the security Redis + the
-        // CENTRAL security-policy state. Both are GET-only.
+        // tied to saturation; readiness gate-keeps the security Redis and
+        // the central security-policy state. Both are GET-only.
         if ($this->healthEnabled) {
             $routes->add('kiwicaptcha_health_live', new Route(
                 $prefix.'/health/live',

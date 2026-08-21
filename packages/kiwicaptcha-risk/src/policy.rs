@@ -20,11 +20,11 @@
 //!
 //! `policy_version` (the config's `version`, stamped on every decision):
 //! bump it whenever the operator policy materially changes. A model
-//! revision ([`crate::RISK_MODEL_REVISION`]) that MATERIALLY affects
-//! security — e.g. changes how scores are computed or how calibration
-//! moves the bias — REQUIRES a `policy_version` bump too, so the
-//! decision's `policy_version` always pins down both the operator policy
-//! AND the security-relevant model generation it was computed under.
+//! revision that materially affects security — e.g. changes how scores
+//! are computed or how calibration moves the bias — requires a
+//! `policy_version` bump too, so the decision's `policy_version` always
+//! pins down both the operator policy AND the security-relevant model
+//! generation it was computed under.
 
 use std::collections::HashMap;
 
@@ -148,7 +148,7 @@ impl RiskPolicy {
     /// Invariants: the config `version` MUST equal the requested version;
     /// every scope id must be within 1..=u32::MAX (0 rejected); every
     /// `base_risk` must be an integer within 0..=1000 (no silent cast);
-    /// `global_floors` must have EXACTLY 5 entries (levels 0..4) with
+    /// `global_floors` must have exactly 5 entries (levels 0..4) with
     /// level 0 = Allow and levels 1..4 valid actions.
     pub fn from_config(version: u32, config: &Value) -> Result<RiskPolicy, PolicyError> {
         let config_version = config
@@ -325,14 +325,14 @@ impl RiskPolicy {
     /// minimum and the global floor, then hard overrides with reasons.
     ///
     /// Argon re-escalation order: `action = strongest(band, minimum,
-    /// floor)` FIRST; THEN, when the FINAL action is Argon and the argon
+    /// floor)` first; then, when the final action is Argon and the argon
     /// capacity is below 300, the action steps UP to `StepUp` — the
-    /// capacity check is LAST, so floors/minimum can never reintroduce
+    /// capacity check is last, so floors/minimum can never reintroduce
     /// Argon after a demotion.
     ///
     /// Hysteresis: with `hysteresis` the band selection uses
     /// the scope's previous action — escalate to the next band only at its
-    /// ENTER threshold (upper + 10), de-escalate only below its EXIT
+    /// enter threshold (upper + 10), de-escalate only below its exit
     /// threshold (lower − 10); fresh scopes and StepUp/Deny use the plain
     /// mapping. The map stores the SCORE-selected action, so hard
     /// overrides never poison the profile. `None` keeps the plain band
@@ -379,11 +379,11 @@ impl RiskPolicy {
             reasons.push(RiskReason::LocalNetworkRisk);
             deny = true;
         }
-        // The cooldown_until value from the store is the GLOBAL hysteresis
+        // The cooldown_until value from the store is the global hysteresis
         // hold marker (the level-until deadline), NOT a per-source denial
         // window — treating it as such would deny every request while the
         // global level is merely elevated. Cooldown denial applies only at
-        // EMERGENCY level, where the global controller intends a temporary
+        // emergency level, where the global controller intends a temporary
         // admission stop.
         if cooldown_until_ms > 0 && now_ms < cooldown_until_ms && global_level >= 4 {
             reasons.push(RiskReason::Cooldown);
@@ -394,7 +394,7 @@ impl RiskPolicy {
         if deny {
             action = RiskAction::Deny;
         } else if action.is_argon() && r.argon_capacity < 300 {
-            // Capacity check LAST: the FINAL action is Argon and the
+            // Capacity check last: the final action is Argon and the
             // backend cannot serve memory-hard work — re-escalate to the
             // interactive step-up flow instead of weakening the guard.
             action = RiskAction::StepUp;
@@ -425,8 +425,8 @@ impl RiskPolicy {
 
     /// Degraded decision (state backend unavailable): the scope's degraded
     /// action clamped to at least the scope minimum AND the global floor of
-    /// the store's last known level (`global_floors[min(level, 4)]`;
-    /// level 0 = Allow). Never fails open below the minimum or the floor.
+    /// the store's last known level — `global_floors[min(level, 4)]`;
+    /// level 0 = Allow. Never fails open below the minimum or the floor.
     pub fn degraded_decision(&self, scope: u32, global_level: u8) -> RiskDecision {
         let degraded = self
             .scopes
@@ -504,8 +504,8 @@ fn sort_json_keys(keys: &mut Vec<&String>) {
     }
 }
 
-/// PHP `json_encode` default string escaping (JSON_UNESCAPED_SLASHES |
-/// JSON_UNESCAPED_UNICODE semantics).
+/// PHP `json_encode` default string escaping — unescaped slashes,
+/// unescaped unicode semantics.
 fn escape_json_string(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
     out.push('"');
@@ -816,7 +816,7 @@ mod tests {
     fn floors_or_minimum_never_reintroduce_argon() {
         // Score 600 -> Argon16; global floor 4 is Sha20 (rank 3 < 4) so the
         // strongest() is still Argon16. With argon capacity exhausted the
-        // FINAL action must StepUp — a subsequent floor/minimum clamp must
+        // final action must StepUp — a subsequent floor/minimum clamp must
         // not resurrect Argon.
         let p = policy();
         let d = p.decide(
@@ -888,7 +888,7 @@ mod tests {
     fn cooldown_override_only_at_emergency_level() {
         let p = policy();
         let now = 1_700_000_000_000;
-        // Elevated-but-non-emergency level: the hysteresis hold is a LEVEL
+        // Elevated-but-non-emergency level: the hysteresis hold is a level
         // marker, NOT a per-source denial window — no deny.
         let d = p.decide(1, 0, &zero_vector(), &healthy(), 2, now, now + 5000);
         assert_ne!(
@@ -963,7 +963,7 @@ mod tests {
     fn degraded_uses_last_known_level_floor() {
         let p = policy();
         // scope 2: degraded sha20 (3), minimum sha16 (1). The floor only
-        // matters when it is STRONGER than the degraded action: at level 4
+        // matters when it is stronger than the degraded action: at level 4
         // (floor sha20) and level 0 (allow) the result stays Sha20.
         assert_eq!(p.degraded_decision(2, 0).action, RiskAction::Sha20);
         assert_eq!(p.degraded_decision(2, 4).action, RiskAction::Sha20);
@@ -1099,9 +1099,9 @@ mod tests {
     }
 
     /// Policy-level wiring: an oscillating boundary score
-    /// (449/451/449…) with the engine's hysteresis map yields a STABLE
+    /// (449/451/449…) with the engine's hysteresis map yields a stable
     /// action (no flip-flop), while the plain `decide` (no map) keeps the
-    /// pre-audit mapping.
+    /// plain band mapping.
     #[test]
     fn hysteresis_stabilizes_oscillating_boundary_scores() {
         let p = policy();
@@ -1142,7 +1142,7 @@ mod tests {
     }
 
     /// Hysteresis never violates the scope minimum or the
-    /// global floor (the clamps apply AFTER the band selection).
+    /// global floor (the clamps apply after the band selection).
     #[test]
     fn hysteresis_never_violates_minimum_or_floor() {
         let p = policy();

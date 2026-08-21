@@ -5,41 +5,22 @@ declare(strict_types=1);
 namespace BelConsulting\KiwiCaptchaBundle\Tests\Fixtures;
 
 /**
- * In-memory stand-in for Predis\Client used by the Redis-backed semaphore and
- * rate-limiter tests (no real Redis in CI).
+ * In-memory stand-in for Predis\Client used by the Redis-backed semaphore
+ * and rate-limiter tests (no real Redis in CI). Predis dispatches every
+ * command through `__call`, so this fake intercepts exactly the commands
+ * the bundle sends and emulates their semantics. The command surface:
  *
- * Predis dispatches every command through `__call`, so this fake intercepts
- * exactly the commands the bundle sends and emulates their semantics:
- *
- *  - TIME: reads the configurable clock ({@see self::setTimeMs()}) so tests
- *    can advance the "Redis server time" to exercise lease/window expiry.
- *  - ZSET primitives: ZADD, ZREM, ZREMRANGEBYSCORE, ZCARD, PEXPIRE — used by
- *    the tokenized-lease semaphore (sorted set of lease tokens) and the
- *    sliding-window rate limiter (sorted sets of hit timestamps).
- *  - HINCRBYFLOAT: one hash field bump (the calibration score-bucket
+ *  - time: reads the configurable clock via {@see self::setTimeMs()} so
+ *    tests can advance the "Redis server time" to exercise lease/window
+ *    expiry.
+ *  - zset primitives (zadd, zrem, zremrangebyscore, zcard, pexpire): the
+ *    tokenized-lease semaphore and the sliding-window rate limiter.
+ *  - hincrbyfloat: one hash field bump (the calibration score-bucket
  *    outcome counters).
- *  - EVAL: interprets the bundle's Lua scripts by their shape:
- *      - semaphore ACQUIRE (2 keys: lease set + waiters counter; TIME +
- *        prune + cap + ZADD, bounded WAITERS guard: saturated acquires are
- *        counted in the waiters counter with the lease TTL; once the waiter
- *        count exceeds maxWaiters the caller is refused without queueing
- *        and its waiter entry is removed in the same script; a granted
- *        lease decrements the waiters counter),
- *      - semaphore RELEASE (ZREM of one member),
- *      - outstanding-challenge ISSUE (2 keys: per-source + global counter;
- *        GET both caps -> refuse 0/-1 before anything is written -> INCR
- *        both + EXPIRE both),
- *      - outstanding-challenge SOLVE (1 key: best-effort DECR floored at 0),
- *      - rate-limiter (2 keys, 4 args, TIME + prune both + caps + ZADD both),
- *      - calibration CONFIRM (4 keys: outcome ledger + receipt + bucket +
- *        resolved counter; ledger check -> validate -> flip the ledger ->
- *        DEL receipt -> HINCRBYFLOAT + EXPIRE, mirroring the canonical
- *        confirm.lua),
- *      - calibration CORRECTION (2 keys: ledger + bucket; flip the ledger
- *        1 -> 2 + reverse the bucket deltas, mirroring correction.lua),
- *      - outcome-ledger CONFIRM / CORRECT (1 key: ledger; the engine-level
- *        once-only gate used without a calibration store),
- *    mirroring the scripts' semantics exactly.
+ *  - eval: interprets the bundle's Lua scripts by their shape — semaphore
+ *    acquire/release, outstanding-challenge issue/solve, the rate
+ *    limiter, calibration confirm/correction and the outcome-ledger
+ *    confirm/correct, mirroring the scripts' semantics.
  *
  * Every call is recorded in {@see FakePredisClient::$calls} so tests can
  * assert on the Redis commands issued.
@@ -49,16 +30,16 @@ final class FakePredisClient extends \Predis\Client
     /** @var array<string, array<string, float>> sorted sets: key => member => score */
     public array $zsets = [];
 
-    /** @var array<string, int> PEXPIRE/EXPIRE deadlines in ms */
+    /** @var array<string, int> pexpire/expire deadlines in ms */
     public array $expirations = [];
 
-    /** @var array<string, int> plain INCR counters (issuance-rate signal) */
+    /** @var array<string, int> plain incr counters (issuance-rate signal) */
     public array $counters = [];
 
-    /** @var array<string, string> plain strings (SET / GETDEL decision handles) */
+    /** @var array<string, string> plain strings (SET / getdel decision handles) */
     public array $strings = [];
 
-    /** @var array<string, array<string, float|string>> hashes (HINCRBYFLOAT calibration buckets + HSET policy fields) */
+    /** @var array<string, array<string, float|string>> hashes (hincrbyfloat calibration buckets + hset policy fields) */
     public array $hashes = [];
 
     /** @var list<array{0: string, 1: list<mixed>}> */
@@ -77,17 +58,17 @@ final class FakePredisClient extends \Predis\Client
         $this->clockMs = $ms;
     }
 
-    /** Current fake server time in ms (mirrors the Lua TIME read). */
+    /** Current fake server time in ms (mirrors the Lua time read). */
     public function timeMs(): float
     {
         return $this->clockMs;
     }
 
-    /** Redis TIME emulation: [seconds, microseconds]. */
+    /** Redis time emulation: [seconds, microseconds]. */
     public function time(): mixed
     {
         if ($this->timeUnavailable) {
-            // A real Redis error (e.g. READONLY on a replica) — the cap
+            // A real Redis error (e.g. readonly on a replica) — the cap
             // must fail closed rather than fall back to host clocks.
             throw new \Predis\Response\ServerException("READONLY You can't write against a read only replica");
         }
@@ -116,7 +97,7 @@ final class FakePredisClient extends \Predis\Client
 
     /**
      * @internal test hook: make a command fail with a server exception
-     * (Redis-outage tests). '*' fails EVERY command; a command name fails
+     * (Redis-outage tests). '*' fails every command; a command name fails
      * only that one.
      */
     public ?string $failCommand = null;
@@ -154,7 +135,7 @@ final class FakePredisClient extends \Predis\Client
         };
     }
 
-    /** @internal test hook: make PING fail (health probe tests). */
+    /** @internal test hook: make ping fail (health probe tests). */
     public bool $pingFails = false;
 
     private function pingOk(): bool
@@ -163,7 +144,7 @@ final class FakePredisClient extends \Predis\Client
     }
 
     /**
-     * HGETALL: the full hash (the central security-policy state read by the
+     * hgetall: the full hash (the central security-policy state read by the
      * readiness probe), or an empty array when the key does not exist.
      */
     private function fakeHgetall(array $arguments): array
@@ -172,7 +153,7 @@ final class FakePredisClient extends \Predis\Client
     }
 
     /**
-     * HSET: set one hash field (the central security-policy state written
+     * hset: set one hash field (the central security-policy state written
      * by tests; values are stored as strings).
      */
     private function fakeHset(array $arguments): int
@@ -188,7 +169,7 @@ final class FakePredisClient extends \Predis\Client
     }
 
     /**
-     * HGET: one hash field, or null when the key/field does not exist.
+     * hget: one hash field, or null when the key/field does not exist.
      */
     private function fakeHget(array $arguments): ?string
     {
@@ -203,7 +184,7 @@ final class FakePredisClient extends \Predis\Client
     }
 
     /**
-     * HINCRBYFLOAT: bump one hash field (the calibration score-bucket
+     * hincrbyfloat: bump one hash field (the calibration score-bucket
      * outcome counters) and return the new value as a string.
      */
     private function fakeHincrbyfloat(array $arguments): string
@@ -218,7 +199,7 @@ final class FakePredisClient extends \Predis\Client
     }
 
     /**
-     * GET: the plain string value, then the plain INCR counter, or null when
+     * GET: the plain string value, then the plain incr counter, or null when
      * the key does not exist.
      */
     private function fakeGet(array $arguments): ?string
@@ -229,7 +210,7 @@ final class FakePredisClient extends \Predis\Client
     }
 
     /**
-     * GETDEL: atomic read + remove of a plain string (null when absent) —
+     * getdel: atomic read + remove of a plain string (null when absent) —
      * the nonce->decision handle consumption.
      */
     private function fakeGetdel(array $arguments): ?string
@@ -279,7 +260,7 @@ final class FakePredisClient extends \Predis\Client
         return 'OK';
     }
 
-    /** INCR: bump the plain counter and return the new value. */
+    /** incr: bump the plain counter and return the new value. */
     private function fakeIncr(array $arguments): int
     {
         $key = (string) $arguments[0];
@@ -288,7 +269,7 @@ final class FakePredisClient extends \Predis\Client
         return $this->counters[$key];
     }
 
-    /** DECR: lower the plain counter (floored at 0) and return the new value. */
+    /** decr: lower the plain counter (floored at 0) and return the new value. */
     private function fakeDecr(array $arguments): int
     {
         $key = (string) $arguments[0];
@@ -397,10 +378,10 @@ final class FakePredisClient extends \Predis\Client
         $rest = \array_slice($keysAndArgs, $numKeys);
 
         if (str_contains($script, 'Outstanding challenge issuance')) {
-            // OutstandingChallenges::issue: KEYS[1] per-source counter,
-            // KEYS[2] global counter; ARGV[1] source cap, ARGV[2] global
-            // cap, ARGV[3] TTL seconds. GET both caps -> refuse 0/-1
-            // BEFORE anything is written -> INCR both + EXPIRE both.
+            // OutstandingChallenges::issue: keys[1] per-source counter,
+            // keys[2] global counter; argv[1] source cap, argv[2] global
+            // cap, argv[3] TTL seconds. GET both caps -> refuse 0/-1
+            // before anything is written -> incr both + expire both.
             $source = (string) $keys[0];
             $global = (string) $keys[1];
             $sourceCap = (int) $rest[0];
@@ -421,8 +402,8 @@ final class FakePredisClient extends \Predis\Client
         }
 
         if (str_contains($script, 'Outstanding challenge solve')) {
-            // OutstandingChallenges::solved: KEYS[1] per-source counter;
-            // best-effort DECR floored at 0.
+            // OutstandingChallenges::solved: keys[1] per-source counter;
+            // best-effort decr floored at 0.
             $key = (string) $keys[0];
             $v = $this->counters[$key] ?? 0;
             if ($v > 0) {
@@ -433,15 +414,15 @@ final class FakePredisClient extends \Predis\Client
         }
 
         if (str_contains($script, 'waiters')) {
-            // Acquire with the bounded WAITERS guard + the
-            // PER-SCOPE budget: KEYS[1] global lease set,
-            // KEYS[2] waiters counter, KEYS[3] per-scope lease set ('' =
-            // no scope); ARGV[1] global cap, ARGV[2] leaseMs, ARGV[3]
-            // token, ARGV[4] maxWaiters, ARGV[5] per-scope cap, ARGV[6]
-            // hasScope. Grant (and serve one waiter) when the GLOBAL slot
+            // Acquire with the bounded waiters guard + the
+            // per-scope budget: keys[1] global lease set,
+            // keys[2] waiters counter, keys[3] per-scope lease set ('' =
+            // no scope); argv[1] global cap, argv[2] leaseMs, argv[3]
+            // token, argv[4] maxWaiters, argv[5] per-scope cap, argv[6]
+            // hasScope. Grant (and serve one waiter) when the global slot
             // is free AND the scope budget (when present) has room; the
-            // lease is recorded in BOTH sets. Saturated acquires (either
-            // cap) are counted in the GLOBAL waiters counter with the lease
+            // lease is recorded in both sets. Saturated acquires (either
+            // cap) are counted in the global waiters counter with the lease
             // TTL and refused-without-queueing (entry removed in the same
             // script) once the count exceeds maxWaiters.
             $key = (string) $keys[0];
@@ -489,9 +470,9 @@ final class FakePredisClient extends \Predis\Client
         }
 
         if (str_contains($script, 'per-scope lease removal')) {
-            // Release with the PER-SCOPE budget: KEYS[1] global
-            // set, KEYS[2] per-scope set ('' = no scope); ARGV[1] token,
-            // ARGV[2] hasScope. Removes the token from BOTH sets.
+            // Release with the per-scope budget: keys[1] global
+            // set, keys[2] per-scope set ('' = no scope); argv[1] token,
+            // argv[2] hasScope. Removes the token from both sets.
             $removed = $this->fakeZrem([$keys[0], $rest[0]]);
             if ((int) $rest[1] === 1) {
                 $this->fakeZrem([$keys[1], $rest[0]]);
@@ -501,8 +482,8 @@ final class FakePredisClient extends \Predis\Client
         }
 
         if (str_contains($script, 'return redis.call(\'ZCARD\', KEYS[1])')) {
-            // Semaphore USAGE: TIME -> prune -> ZCARD in one script
-            // (atomic-live — matches the acquire pruning).
+            // Semaphore usage: time -> prune -> zcard in one script
+            // (atomic-live, matching the acquire pruning).
             $key = (string) $keys[0];
             $this->fakeZremrangebyscore([$key, '-inf', (string) $this->timeMs()]);
 
@@ -510,10 +491,10 @@ final class FakePredisClient extends \Predis\Client
         }
 
         if (str_contains($script, 'Scope issuance cap')) {
-            // ScopeIssuanceCap::allow: KEYS[1] =
-            // {kiwi:<ns>}:issuance:<hex(hmac_sha256(scope, K_scope))>:<minute>
+            // ScopeIssuanceCap::allow: keys[1] =
+            // {kiwi:<ns>}:issuance:<hex hmac-sha256(scope, K_scope)>:<minute>
             // (the raw scope is never a key component);
-            // ARGV[1] = cap. INCR -> EXPIRE 60 on the first increment ->
+            // argv[1] = cap. incr -> expire 60 on the first increment ->
             // refuse beyond the cap (0), else 1.
             $key = (string) $keys[0];
             $cap = (int) $rest[0];
@@ -526,7 +507,7 @@ final class FakePredisClient extends \Predis\Client
         }
 
         if (str_contains($script, 'redis.call(\'INCR\', KEYS[1])')) {
-            // Issuance counter: INCR + EXPIRE 1 in one atomic script.
+            // Issuance counter: incr + expire 1 in one atomic script.
             $key = (string) $keys[0];
             $n = $this->fakeIncr([$key]);
             $this->fakePexpire([$key, 1000]);
@@ -535,11 +516,11 @@ final class FakePredisClient extends \Predis\Client
         }
 
         if (str_contains($script, 'Decision registration: receipt + sample denominator + outcome ledger')) {
-            // Canonical register_decision.lua: KEYS[1] receipt, KEYS[2]
-            // decision-hour bucket, KEYS[3] outcome ledger;
-            // ARGV[1] receipt JSON, ARGV[2] receipt TTL, ARGV[3] sampled,
-            // ARGV[4] bucket TTL, ARGV[5] outcome TTL, ARGV[6] scope,
-            // ARGV[7] decision_hour, ARGV[8] score, ARGV[9] weight.
+            // Canonical register_decision.lua: keys[1] receipt, keys[2]
+            // decision-hour bucket, keys[3] outcome ledger;
+            // argv[1] receipt JSON, argv[2] receipt TTL, argv[3] sampled,
+            // argv[4] bucket TTL, argv[5] outcome TTL, argv[6] scope,
+            // argv[7] decision_hour, argv[8] score, argv[9] weight.
             $receiptKey = (string) $keys[0];
             $bucketKey = (string) $keys[1];
             $ledgerKey = (string) $keys[2];
@@ -565,11 +546,11 @@ final class FakePredisClient extends \Predis\Client
         }
 
         if (str_contains($script, 'Calibration confirmation: outcome ledger CAS + receipt + bucket')) {
-            // Canonical confirm.lua (v2): KEYS[1] receipt, KEYS[2]
-            // DECISION-TIME bucket, KEYS[3] outcome ledger;
-            // ARGV[1] mode, ARGV[2] weight, ARGV[3] legitimate,
-            // ARGV[4] bucket TTL, ARGV[5] outcome TTL, ARGV[6] expected
-            // scope, ARGV[7] expected decision_hour.
+            // Canonical confirm.lua (v2): keys[1] receipt, keys[2]
+            // decision-time bucket, keys[3] outcome ledger;
+            // argv[1] mode, argv[2] weight, argv[3] legitimate,
+            // argv[4] bucket TTL, argv[5] outcome TTL, argv[6] expected
+            // scope, argv[7] expected decision_hour.
             $receiptKey = (string) $keys[0];
             $bucketKey = (string) $keys[1];
             $ledgerKey = (string) $keys[2];
@@ -649,10 +630,10 @@ final class FakePredisClient extends \Predis\Client
         }
 
         if (str_contains($script, 'Calibration correction: flip the outcome ledger + reverse/redo')) {
-            // Canonical correction.lua: KEYS[1] ledger, KEYS[2]
-            // decision-time bucket; ARGV[1] new outcome, ARGV[2] weight,
-            // ARGV[3] bucket TTL, ARGV[4] outcome TTL, ARGV[5] expected
-            // scope, ARGV[6] expected hour.
+            // Canonical correction.lua: keys[1] ledger, keys[2]
+            // decision-time bucket; argv[1] new outcome, argv[2] weight,
+            // argv[3] bucket TTL, argv[4] outcome TTL, argv[5] expected
+            // scope, argv[6] expected hour.
             $ledgerKey = (string) $keys[0];
             $bucketKey = (string) $keys[1];
             $newOutcome = (string) $rest[0];
@@ -724,8 +705,8 @@ final class FakePredisClient extends \Predis\Client
         }
 
         if (str_contains($script, 'register: create a PENDING entry')) {
-            // Canonical outcome_register.lua: KEYS[1] ledger;
-            // ARGV[1] scope, ARGV[2] hour, ARGV[3] score, ARGV[4] TTL.
+            // Canonical outcome_register.lua: keys[1] ledger;
+            // argv[1] scope, argv[2] hour, argv[3] score, argv[4] TTL.
             $ledgerKey = (string) $keys[0];
             if (isset($this->strings[$ledgerKey])) {
                 return 0;
@@ -743,8 +724,8 @@ final class FakePredisClient extends \Predis\Client
         }
 
         if (str_contains($script, 'Outcome ledger confirm: PENDING -> L/A exactly once')) {
-            // Canonical outcome_confirm.lua: KEYS[1] ledger;
-            // ARGV[1] outcome, ARGV[2] TTL.
+            // Canonical outcome_confirm.lua: keys[1] ledger;
+            // argv[1] outcome, argv[2] TTL.
             $ledgerKey = (string) $keys[0];
             $ledgerRaw = $this->strings[$ledgerKey] ?? null;
             if ($ledgerRaw === null) {
@@ -762,8 +743,8 @@ final class FakePredisClient extends \Predis\Client
         }
 
         if (str_contains($script, 'Outcome ledger correction: flip L <-> A')) {
-            // Canonical outcome_correct.lua: KEYS[1] ledger;
-            // ARGV[1] new outcome, ARGV[2] TTL.
+            // Canonical outcome_correct.lua: keys[1] ledger;
+            // argv[1] new outcome, argv[2] TTL.
             $ledgerKey = (string) $keys[0];
             $ledgerRaw = $this->strings[$ledgerKey] ?? null;
             if ($ledgerRaw === null) {
@@ -794,13 +775,13 @@ final class FakePredisClient extends \Predis\Client
         }
 
         if (!str_contains($script, 'ZREMRANGEBYSCORE')) {
-            // Release: return redis.call('ZREM', KEYS[1], ARGV[1]).
+            // Release: return redis.call('zrem', keys[1], argv[1]).
             return $this->fakeZrem([$keys[0], $rest[0]]);
         }
 
         // TIME-based scripts: semaphore acquire (1 key), global-only rate
-        // limiter (1 key) or the full rate limiter (2/3 keys). The `now`
-        // mirrors the Lua TIME read.
+        // limiter (1 key) or the full rate limiter (2/3 keys). `now`
+        // mirrors the Lua time read.
         $now = $this->timeMs();
 
         if (str_contains($script, 'ZADD", KEYS[1], now, ARGV[3]') || str_contains($script, "ZADD', KEYS[1], now, ARGV[3]")) {
@@ -863,7 +844,7 @@ final class FakePredisClient extends \Predis\Client
         }
 
         // Epoch-rotated limiter (3 keys): clientPrev, clientCur, and ONE
-        // STABLE global ZSET. Only the CLIENT keys are per-epoch; the
+        // stable global zset. Only the client keys are per-epoch; the
         // global budget is shared by every client regardless of epoch.
         $clientPrev = (string) $keys[0];
         $clientCur = (string) $keys[1];

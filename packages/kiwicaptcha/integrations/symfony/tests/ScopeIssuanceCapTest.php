@@ -14,17 +14,17 @@ use KiwiCaptcha\Storage\ArrayStorage;
 use PHPUnit\Framework\TestCase;
 
 /**
- * Per-scope issuance cap: a Redis fixed-window counter
- * ({kiwi:<ns>}:issuance:<hex(hmac_sha256(scope, K_scope))>:<minute>, INCR +
- * EXPIRE 60 in one atomic Lua script) bounds how many challenges a scope
- * may issue per minute — the public site key + claimed origin can no longer
- * create unlimited billed verification work per scope.
+ * Per-scope issuance cap: a Redis fixed-window counter keyed by
+ * {kiwi:<ns>}:issuance:<hex hmac-sha256(scope, K_scope)>:<minute>, incr
+ * + expire 60 in one atomic Lua script, bounds how many challenges a
+ * scope may issue per minute. The public site key and claimed origin
+ * can no longer create unlimited billed verification work per scope.
  *
- * The RAW SCOPE STRING IS NEVER A REDIS KEY COMPONENT: the
- * scope is attacker-controlled (bounded alphabet, unbounded cardinality),
- * so the window key carries hex(hmac_sha256(scope, K_scope)) where K_scope
- * is derived from the bundle's master with hash_hkdf info
- * 'kiwi/v2/scope-rate' (ScopeIssuanceCap::deriveScopeHmacKey).
+ * The raw scope string is never a Redis key component: the scope is
+ * attacker-controlled (bounded alphabet, unbounded cardinality), so the
+ * window key carries hmac-sha256(scope, K_scope), with K_scope derived
+ * from the bundle's master via hash_hkdf info 'kiwi/v2/scope-rate'
+ * (ScopeIssuanceCap::deriveScopeHmacKey).
  */
 final class ScopeIssuanceCapTest extends TestCase
 {
@@ -63,7 +63,7 @@ final class ScopeIssuanceCapTest extends TestCase
     }
 
     /**
-     * The security cap's canonical scope id is MANDATORY —
+     * The security cap's canonical scope id is mandatory —
      * calling allow() without one is a compile-time/static-analysis error
      * (there is no nullable fallback that silently recreates the
      * per-name-HMAC attack surface).
@@ -84,7 +84,7 @@ final class ScopeIssuanceCapTest extends TestCase
     }
 
     /**
-     * The per-name HMAC form survives ONLY as the
+     * The per-name HMAC form survives only as the
      * explicitly-named legacy soft-quota API — it hides bytes but does not
      * bound cardinality, and the name makes the distinction impossible to
      * miss.
@@ -100,7 +100,7 @@ final class ScopeIssuanceCapTest extends TestCase
 
         $key = '{kiwi:t}:issuance:'.hash_hmac('sha256', 'login', $this->hmacKey()).':'.intdiv($this->nowSecs, 60);
         self::assertSame(3, $redis->counters[$key], 'the legacy window is the HMAC per-name form');
-        // And the canonical form is a DIFFERENT window for the same scope
+        // And the canonical form is a different window for the same scope
         // name — the two APIs never share keys.
         self::assertTrue($cap->allow('login', 1), 'the canonical window is independent of the legacy one');
     }
@@ -139,9 +139,10 @@ final class ScopeIssuanceCapTest extends TestCase
 
     /**
      * When the caller supplies the risk policy's canonical
-     * SERVER-OWNED scope id, the quota keys on THAT identity — the
-     * namespace is bounded by the server-owned set (two spellings of one
-     * scope share a window; the HMAC fallback is only for unscoped calls).
+     * server-owned scope id, the quota keys on that identity — the
+     * namespace is bounded by the server-owned set. Two spellings of one
+     * scope share a window; the HMAC fallback is only for unscoped
+     * calls.
      */
     public function testCanonicalScopeIdIsTheQuotaIdentity(): void
     {
@@ -171,11 +172,11 @@ final class ScopeIssuanceCapTest extends TestCase
     }
 
     /**
-     * The window minute comes from the Redis server clock
-     * and the cap FAILS CLOSED when that clock is unavailable — a TIME
-     * failure raises instead of silently switching to each host's wall
-     * clock (around minute boundaries, skewed hosts would use different
-     * window keys and defeat the shared-window invariant).
+     * The window minute comes from the Redis server clock and the cap
+     * fails closed when that clock is unavailable. A time failure raises
+     * instead of silently switching to each host's wall clock — around
+     * minute boundaries, skewed hosts would use different window keys
+     * and defeat the shared-window invariant.
      */
     public function testMinuteFailsClosedWhenRedisTimeIsUnavailable(): void
     {
@@ -197,7 +198,7 @@ final class ScopeIssuanceCapTest extends TestCase
 
     public function testDeriveScopeHmacKeyIsPurposeSeparated(): void
     {
-        // The HKDF info tag 'kiwi/v2/scope-rate' must yield a key that
+        // The hkdf info tag 'kiwi/v2/scope-rate' must yield a key that
         // differs from the raw master and is deterministic across workers.
         $key = ScopeIssuanceCap::deriveScopeHmacKey(self::SECRET);
         self::assertSame(32, \strlen($key));
@@ -270,7 +271,7 @@ final class ScopeIssuanceCapTest extends TestCase
     public function testUnresolvedScopesShareTheReservedWindow(): void
     {
         // Without a risk gateway every scope resolves to
-        // the single reserved UNKNOWN_QUOTA_ID — invented names share one
+        // the single reserved unknown_quota_ID — invented names share one
         // window instead of minting fresh per-name quotas.
         $storage = new ArrayStorage();
         $issuer = new Issuer(new Config(secretKey: self::SECRET, targetBits: 8, ttlSecs: 120), $storage);
@@ -286,7 +287,7 @@ final class ScopeIssuanceCapTest extends TestCase
 
     public function testDistinctCanonicalScopeIdsHaveIndependentWindows(): void
     {
-        // The per-scope independence property holds for SERVER-OWNED ids:
+        // The per-scope independence property holds for server-owned ids:
         // two configured scopes (ids 1 and 2) never share a window.
         $redis = new FakePredisClient();
         $cap = new ScopeIssuanceCap($redis, '{kiwi:t}:issuance:', 1, $this->hmacKey(), fn (): int => $this->nowSecs);

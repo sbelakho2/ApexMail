@@ -11,8 +11,8 @@ use Symfony\Component\HttpFoundation\Request;
  * Kernel with the adaptive risk engine AND selective chained challenges
  * (risk.chaining) enabled, plus the trusted-edge TLS header and the
  * deployment's authoritative transaction-binding resolver. The fake
- * Predis client cannot speak the risk-v1 EVALSHA protocol, so runtime
- * engine calls degrade — this kernel only exercises the WIRING (services
+ * Predis client cannot speak the risk-v1 evalsha protocol, so runtime
+ * engine calls degrade — this kernel only exercises the wiring (services
  * exist and are injected into the controller + validator).
  */
 final class ChainingTestKernel extends TestKernel
@@ -58,7 +58,7 @@ final class ChainingTestKernel extends TestKernel
 /**
  * The authoritative transaction-binding fixture of the chaining kernel: a
  * transaction is anchored on the fixed 'txn-alpha' binding (the presented
- * client string is a HINT — a different presented value is refused, exactly
+ * client string is a hint — a different presented value is refused, exactly
  * like the production authority contract).
  */
 final class ChainingBindingAuthority implements RequestBindingAuthorityInterface

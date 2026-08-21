@@ -8,7 +8,7 @@ use PHPUnit\Framework\TestCase;
 use Symfony\Bundle\FrameworkBundle\KernelBrowser;
 
 /**
- * The challenge route must work through the REAL router, not just by invoking
+ * The challenge route must work through the real router, not just by invoking
  * the controller directly. These tests boot a full kernel (the extension
  * auto-registers the bundle's routes file via framework.router.resource when
  * the app has not configured the router itself) and drive it through
@@ -101,7 +101,7 @@ final class RouterIntegrationTest extends TestCase
 
     public function testEveryResponseCarriesPrivateDocumentHeaders(): void
     {
-        // A dedicated client WITHOUT reboot so the in-memory rate-limit
+        // A dedicated client without reboot so the in-memory rate-limit
         // state survives across requests (429 path).
         $client = new KernelBrowser(new TestKernel('test', true));
         $client->disableReboot();
@@ -142,7 +142,7 @@ final class RouterIntegrationTest extends TestCase
     public function testSameOriginPostIsAllowed(): void
     {
         // With public_base_url configured, same-origin
-        // is defined by the SERVER-CONFIGURED origin — a request whose
+        // is defined by the server-configured origin — a request whose
         // Origin matches it is accepted regardless of the request's own
         // scheme/host.
         self::$browser->request('POST', '/kiwi-captcha/challenge', server: ['CONTENT_TYPE' => 'application/json', 'HTTP_ORIGIN' => 'https://captcha.example.com'], content: '{"scope":"login"}');
@@ -151,8 +151,8 @@ final class RouterIntegrationTest extends TestCase
 
     public function testForcedHostCannotMasqueradeAsSameOrigin(): void
     {
-        // The invariant's point: a request served with a FORGED Host
-        // header and an Origin matching that forged host must be REJECTED —
+        // The invariant's point: a request served with a forged Host
+        // header and an Origin matching that forged host must be rejected —
         // the expected origin comes from server config, never from the
         // request's Host.
         self::$browser->request('POST', '/kiwi-captcha/challenge', server: [
@@ -250,7 +250,7 @@ final class RouterIntegrationTest extends TestCase
     public function testChallengeResponseCarriesNoStoreAndPragmaThroughTheRouter(): void
     {
         // Explicit KernelBrowser assertion of the no-store +
-        // Pragma contract on the challenge endpoint (the ONLY dynamic
+        // Pragma contract on the challenge endpoint (the only dynamic
         // bundle endpoint besides health — verification is server-side via
         // the validator, there is no public verify route).
         $client = new KernelBrowser(new TestKernel('test', true));

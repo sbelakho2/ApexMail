@@ -1,4 +1,4 @@
-//! The NO-PANIC invariant under attacker-controlled
+//! The no-panic invariant under attacker-controlled
 //! input.
 //!
 //! ~5000 deterministic random byte mutations of a valid solution token and a
@@ -8,7 +8,7 @@
 //! a test failure.
 //!
 //! Kept fast by construction: the seed record is SHA-256, and a mutation can
-//! only preserve the v2 signature by hitting the UNSIGNED record fields
+//! only preserve the v2 signature by hitting the unsigned record fields
 //! (`issued_at_ns` / `attempts_used`) — so `verify_solution` never derives a
 //! memory-hard hash inside the loop (a mutated `algorithm`/parameter breaks
 //! the signature before derivation, and the Argon ceilings are validated

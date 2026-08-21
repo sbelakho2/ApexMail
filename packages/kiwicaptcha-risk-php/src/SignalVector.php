@@ -5,7 +5,7 @@ declare(strict_types=1);
 namespace KiwiCaptcha\Risk;
 
 /**
- * 13 fixed-point signal fields (each 0..1000), in the EXACT contract order.
+ * 13 fixed-point signal fields (each 0..1000), in the exact contract order.
  *
  * JSON key order in the fixtures and `toArray()` must match:
  *   source_fast, source_slow, subnet_fast, issue_debt, bad_proof, malformed,

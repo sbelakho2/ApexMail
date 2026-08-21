@@ -1,11 +1,11 @@
-//! SLOW-SCRIPT GUARD (a guard, NOT a benchmark): the
-//! verification-path scripts (risk-v1.lua + the calibration read) must run
-//! well under a generous bound when the state is at its MAXIMUM allowed
-//! size (every key carrying its full bounded field set — 12 flat fields
-//! per risk state hash, 6 fields per calibration bucket, all 24 buckets +
-//! state present). The asserted bound is a generous 50 ms AVERAGE over
-//! 100 runs so CI noise can never flake it; typical means are
-//! sub-millisecond. Skipped unless RISK_REDIS_URL is set.
+//! Slow-script guard (a guard, not a benchmark): the verification-path
+//! scripts (risk-v1.lua + the calibration read) must run well under a
+//! generous bound when the state is at its maximum allowed size (every key
+//! carrying its full bounded field set — 12 flat fields per risk state
+//! hash, 6 fields per calibration bucket, all 24 buckets + state present).
+//! The asserted bound is a generous 50 ms average over 100 runs so CI
+//! noise can never flake it; typical means are sub-millisecond. Skipped
+//! unless the Redis test URL is set.
 
 mod common;
 
@@ -23,7 +23,7 @@ fn unique_namespace(prefix: &str) -> String {
     common::unique_namespace(prefix)
 }
 
-/// The 12 STATE_FIELDS of the risk state hashes at their maximum.
+/// The 12 state fields of the risk state hashes at their maximum.
 fn seed_risk_state(conn: &mut redis::Connection, key: &str, now: i64) {
     let cmd = redis::Cmd::hset_multiple(
         key,
@@ -69,7 +69,7 @@ fn now_ms() -> i64 {
         .as_millis() as i64
 }
 
-/// risk-v1.lua under MAXIMUM state (all 10 keys present with all 12
+/// risk-v1.lua under maximum state (all 10 keys present with all 12
 /// fields, full event path — session/principal present, dedupe miss):
 /// 100 runs must average under the generous 50 ms guard.
 #[test]
@@ -144,7 +144,7 @@ fn risk_v1_average_stays_under_budget_at_maximum_state() {
     );
 }
 
-/// calibration.lua under MAXIMUM state (24 buckets × 6 fields + rate
+/// calibration.lua under maximum state (24 buckets × 6 fields + rate
 /// state): 100 runs must average under the generous 50 ms guard.
 #[test]
 fn calibration_average_stays_under_budget_at_maximum_state() {

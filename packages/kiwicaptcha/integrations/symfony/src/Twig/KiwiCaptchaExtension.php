@@ -13,12 +13,12 @@ final class KiwiCaptchaExtension extends AbstractExtension
     {
         return [
             new TwigFunction('kiwi_captcha_widget', [KiwiCaptchaRuntime::class, 'renderWidget'], ['is_safe' => ['html'], 'needs_environment' => true]),
-            // The explicit frame-ancestors CSP directive for the
-            // WIDGET PAGE (null when risk.challenge_origin_allowlist is
-            // empty). The application appends it to its own
+            // The explicit frame-ancestors CSP directive for the widget
+            // page (null when risk.challenge_origin_allowlist is empty).
+            // The application appends it to its own
             // Content-Security-Policy header — frame-ancestors is ignored
             // inside <meta> tags, so the header is the only effective
-            // delivery; the challenge ENDPOINT emits the header itself.
+            // delivery; the challenge endpoint emits the header itself.
             new TwigFunction('kiwi_captcha_csp_frame_ancestors', [KiwiCaptchaRuntime::class, 'cspFrameAncestors']),
         ];
     }

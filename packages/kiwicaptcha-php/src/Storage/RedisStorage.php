@@ -12,34 +12,36 @@ use KiwiCaptcha\OperationIdentity;
 use KiwiCaptcha\OperationIdentityAwareStorageInterface;
 
 /**
- * Redis-backed storage with TRUE atomic one-shot semantics.
+ * Redis-backed storage with atomic one-shot semantics.
  *
- * `consume()` is a TRANSITION, not a delete: an atomic Lua
- * script marks the record consumed and KEEPS it until its TTL. Replay
- * protection is the consumed marker, not absence — and the record can carry
- * a deterministic verification result (`consumed_result`) so a retry on an
- * already-consumed record returns the SAME outcome without re-deriving.
- * `commitResult()` stores that result atomically (only when the record is
- * consumed and has no result yet). Two concurrent consumers race inside a
- * single eval: Redis serializes the script, so exactly one caller wins
- * `consumedNow` — strict single-use under concurrency.
+ * `consume()` is a transition, not a delete: an atomic Lua script marks
+ * the record consumed and keeps it until its TTL. Replay protection is
+ * the consumed marker, not absence, and the record can carry a
+ * deterministic verification result (`consumed_result`) so a retry on an
+ * already-consumed record returns the same outcome without re-deriving.
+ * `commitResult()` stores that result atomically, only when the record
+ * is consumed and has no result yet. Two concurrent consumers race inside
+ * a single eval; Redis serializes the script, so exactly one caller wins
+ * `consumedNow`, giving strict single-use under concurrency.
  *
  * - phpredis (\Redis): eval() with the script.
- * - Predis: eval() (the same script; the server must support Lua, i.e. any
- *   Redis >= 2.6).
+ * - Predis: eval() (the same script; the server must support Lua, i.e.
+ *   any Redis >= 2.6).
  *
- * Records are stored as JSON: the canonical `ChallengeRecord::WIRE_KEYS` schema
- * (LANGUAGE-NEUTRAL — a Rust service using the same Redis instance can read
- * them, and vice versa) WRAPPED with the three runtime fields `state`
- * ("pending"|"consumed"), `consumed_result` (null | {valid, binding}) and
- * `operation_identity` (null | a bounded <= 128-byte logical-operation
- * identity recorded atomically with the pending→consumed transition via
+ * Records are stored as JSON in the canonical `ChallengeRecord` wire
+ * keys schema, which is language-neutral: a Rust service using the same
+ * Redis instance can read them and vice versa. The JSON is wrapped with
+ * the three runtime fields `state` ("pending"|"consumed"),
+ * `consumed_result` (null | {valid, binding}) and `operation_identity`
+ * (null | a bounded <= 128-byte logical-operation identity recorded
+ * atomically with the pending→consumed transition via
  * {@see OperationIdentityAwareStorageInterface}). The runtime fields are
- * storage-layer additions AFTER the canonical parse: `decode()` strips them
- * before {@see ChallengeRecord::fromArray()} so the strict serde-mirror
- * parser never sees them (deny_unknown_fields parity with the Rust reader,
- * which strips them the same way). The record's TTL is the key expiration;
- * the consume transition preserves it.
+ * storage-layer additions after the canonical parse: `decode()` strips
+ * them before {@see ChallengeRecord::fromArray()} so the strict
+ * serde-mirror parser never sees them. That preserves deny_unknown_fields
+ * parity with the Rust reader, which strips them the same way. The
+ * record's TTL is the key expiration; the consume transition preserves
+ * it.
  *
  * Implements {@see \KiwiCaptcha\AtomicStorageInterface}: the fused
  * read-transition makes consume() strict single-use under concurrency.
@@ -50,17 +52,18 @@ final class RedisStorage implements AtomicStorageInterface, \KiwiCaptcha\Consume
      * Atomic consume transition: GET the record; if present and not yet
      * consumed, flip `state` to "consumed" (preserving the key TTL). When
      * ARGV[1] is a non-empty JSON-escaped identity, the
-     * `"operation_identity":null` marker is spliced to the identity IN THE
-     * SAME script — the identity lands atomically with the state flip, so
-     * the stored identity is provably the ACTUAL atomic consume winner's.
-     * The identity has ALREADY passed {@see OperationIdentity::validate()}
-     * before it reaches ARGV: the 1..128-byte `[A-Za-z0-9_-]` alphabet
-     * excludes `%` and every other Lua `string.gsub` replacement-template
-     * escape BY CONSTRUCTION, so the raw replacement-string splice below
-     * can never be interpreted as a template (a replacement function is
-     * unnecessary). Returns nil for a missing record, else {json,
-     * consumed_now, consumed_before, consumed_result_json} — the result is
-     * the committed JSON ("" when absent).
+     * `"operation_identity":null` marker is spliced to the identity in
+     * the same script, so the identity lands atomically with the state
+     * flip and the stored identity is provably the actual atomic consume
+     * winner's. The identity has already passed
+     * {@see OperationIdentity::validate()} before it reaches the script.
+     * The 1..128-byte `[A-Za-z0-9_-]` alphabet excludes `%` and every
+     * other Lua `string.gsub` replacement-template escape by
+     * construction, so the raw replacement-string splice below can never
+     * be interpreted as a template; a replacement function is
+     * unnecessary. Returns nil for a missing record, else {json,
+     * consumed_now, consumed_before, consumed_result_json}, where the
+     * result is the committed JSON ("" when absent).
      */
     private const CONSUME_SCRIPT = <<<'LUA'
 -- kiwicaptcha consume transition
@@ -120,10 +123,10 @@ return {v, consumedNow, consumedBefore, 'null'}
 LUA;
 
     /**
-     * Atomic result commit: store {valid, binding} as `consumed_result` ONLY
-     * when the record exists, is consumed, and has no result yet. Returns
-     * 1 on success, 0 otherwise. ARGV = {valid "1"|"0", binding, has_binding
-     * "1"|"0"}.
+     * Atomic result commit: store {valid, binding} as `consumed_result`
+     * only when the record exists, is consumed, and has no result yet.
+     * Returns 1 on success, 0 otherwise. ARGV = {valid "1"|"0", binding,
+     * has_binding "1"|"0"}.
      */
     private const COMMIT_SCRIPT = <<<'LUA'
 -- kiwicaptcha commit result
@@ -163,19 +166,19 @@ LUA;
      *                            (issuance SET, the pending→consumed
      *                            transition, the result commit) is followed
      *                            by a Redis WAIT whose acknowledgement count
-     *                            is VERIFIED: fewer than waitReplicas acked
+     *                            is verified. Fewer than waitReplicas acked
      *                            replicas raises {@see ReplicaWaitException}
-     *                            (fail closed — the guarantee is
+     *                            (fail closed: the guarantee is
      *                            unconditional, never silently downgraded).
      *                            Async-replication failover can otherwise
      *                            lose a write or resurrect a consumed
-     *                            record from a stale replica
-     * @param int $waitTimeoutMs  WAIT timeout in milliseconds (default 100)
+     *                            record from a stale replica.
+     * @param int $waitTimeoutMs  wait timeout in milliseconds (default 100).
      * @param int $ttlMarginSecs  extra retention on the record beyond token
-     *                            validity: TTL = expires_at - now + margin
-     *                            (must exceed max clock skew + failover
-     *                            margin so a replayed token can never land on
-     *                            an already-expired state)
+     *                            validity: TTL = expires_at - now + margin.
+     *                            Must exceed max clock skew + failover
+     *                            margin so a replayed token can never land
+     *                            on an already-expired state.
      */
     public function __construct(
         private readonly \Redis|\Predis\Client $client,
@@ -224,13 +227,14 @@ LUA;
             return null;
         }
 
-        // Durability barrier: the pending→consumed
-        // transition must reach the configured replica count before the
-        // caller is allowed to treat the record as consumed. WAIT N proves
-        // that at least N replicas acknowledged the write; it does NOT
-        // constrain which replicas a future failover manager promotes —
-        // replay-safe promotion additionally requires the threshold to
-        // cover every eligible failover target or promotion gating.
+        // Durability barrier: the pending→consumed transition must reach
+        // the configured replica count before the caller may treat the
+        // record as consumed. The WAIT acknowledgement count proves that
+        // at least the configured number of replicas received the write;
+        // it does not constrain which replicas a future failover manager
+        // promotes. Replay-safe promotion additionally requires the
+        // threshold to cover every eligible failover target or promotion
+        // gating.
         if ($this->waitReplicas > 0) {
             $this->waitAndVerify('the pending→consumed transition');
         }
@@ -262,12 +266,12 @@ LUA;
     public function consumeWithOperationIdentity(string $nonce, ?string $operationIdentity): ?ConsumedRecord
     {
         $key = $this->prefix.$nonce;
-        // The identity is validated against the narrow shared alphabet
-        // ({@see OperationIdentity::validate()} — 1..128 bytes of
-        // [A-Za-z0-9_-]) BEFORE it can reach the Lua splice: a malformed
-        // identity is REJECTED, never silently dropped, and the record is
+        // The identity is validated against the narrow shared alphabet,
+        // see {@see OperationIdentity::validate()} (1..128 bytes of
+        // [A-Za-z0-9_-]), before it can reach the Lua splice. A malformed
+        // identity is rejected, never silently dropped, and the record is
         // left untouched. The alphabet also makes the raw string.gsub
-        // replacement splice safe — `%` is a replacement-template escape
+        // replacement splice safe: `%` is a replacement-template escape
         // in Lua and is excluded by construction.
         $identityArg = '';
         $validated = OperationIdentity::validate($operationIdentity);
@@ -279,13 +283,14 @@ LUA;
             return null;
         }
 
-        // Durability barrier: the pending→consumed
-        // transition must reach the configured replica count before the
-        // caller is allowed to treat the record as consumed. WAIT N proves
-        // that at least N replicas acknowledged the write; it does NOT
-        // constrain which replicas a future failover manager promotes —
-        // replay-safe promotion additionally requires the threshold to
-        // cover every eligible failover target or promotion gating.
+        // Durability barrier: the pending→consumed transition must reach
+        // the configured replica count before the caller may treat the
+        // record as consumed. The WAIT acknowledgement count proves that
+        // at least the configured number of replicas received the write;
+        // it does not constrain which replicas a future failover manager
+        // promotes. Replay-safe promotion additionally requires the
+        // threshold to cover every eligible failover target or promotion
+        // gating.
         if ($this->waitReplicas > 0) {
             $this->waitAndVerify('the pending→consumed transition');
         }
@@ -338,12 +343,11 @@ LUA;
         $raw = $this->evalScript(self::COMMIT_SCRIPT, [$key, $valid ? '1' : '0', $binding ?? '', $binding === null ? '0' : '1'], 1);
         $committed = $raw === 1 || $raw === '1' || $raw === true;
 
-        // Durability barrier: a committed deterministic
-        // result that only lives on the primary would be lost on promotion,
-        // degrading a retry to ConsumeIndeterminate. The barrier keeps the
-        // commit's durability contract honest. Callers treat commit as
-        // best-effort, so a barrier failure cannot change the outcome — it
-        // only surfaces the (safe) degraded state on the next retry.
+        // Durability barrier: a committed deterministic result that only
+        // lives on the primary would be lost on promotion, degrading a
+        // retry to ConsumeIndeterminate. Callers treat commit as
+        // best-effort, so a barrier failure cannot change the outcome; it
+        // only surfaces the safe degraded state on the next retry.
         if ($committed && $this->waitReplicas > 0) {
             $this->waitAndVerify('the result commit');
         }
@@ -371,20 +375,21 @@ LUA;
 
     /**
      * Block until at least waitReplicas replicas acknowledged the previous
-     * write, and FAIL CLOSED when they did not.
+     * write, and fail closed when they did not.
      *
      * Redis WAIT returns the number of replicas that processed the write
-     * (0 on a replica-less server). The barrier asserts that number against
-     * the configured threshold: with `waitReplicas > 0` the durability
-     * promise is unconditional, so a lagging/unreachable replica set raises
-     * {@see ReplicaWaitException} instead of silently downgrading the
-     * guarantee — exactly the failure the failover replay window relied on.
+     * (0 on a replica-less server). The barrier asserts that number
+     * against the configured threshold. With `waitReplicas > 0` the
+     * durability promise is unconditional, so a lagging or unreachable
+     * replica set raises {@see ReplicaWaitException} instead of silently
+     * downgrading the guarantee; that failure is exactly the failover
+     * replay window this barrier exists to close.
      */
     private function waitAndVerify(string $what): void
     {
         if ($this->client instanceof \Redis) {
-            // phpredis has no typed WAIT method; rawCommand mirrors the
-            // GETDEL path.
+            // phpredis has no typed wait method; rawCommand sends the
+            // command directly.
             $acked = $this->client->rawCommand('WAIT', $this->waitReplicas, $this->waitTimeoutMs);
         } else {
             // Predis removed the typed wait() method from its command
@@ -413,7 +418,7 @@ LUA;
     /**
      * Decode a stored JSON value back into a record, stripping the storage
      * runtime fields (`state`, `consumed_result`, `operation_identity`)
-     * BEFORE the strict serde-mirror parse — the canonical record schema
+     * before the strict serde-mirror parse; the canonical record schema
      * never sees them.
      *
      * @return ChallengeRecord|null null when the value is absent, not valid

@@ -150,7 +150,7 @@ impl RiskIdentityFactory {
         self.subnet_id_for_epoch(ip, now_secs / self.subnet_epoch_secs)
     }
 
-    /// Source pseudonym (hex) for an EXPLICIT epoch: context `b"src"`,
+    /// Source pseudonym (hex) for an explicit epoch: context `b"src"`,
     /// material = family byte + packed IP.
     pub fn source_id_for_epoch(&self, ip: IpAddr, epoch: i64) -> String {
         hex::encode(pseudonym(
@@ -161,7 +161,7 @@ impl RiskIdentityFactory {
         ))
     }
 
-    /// Subnet pseudonym (hex) for an EXPLICIT epoch: context `b"net"`,
+    /// Subnet pseudonym (hex) for an explicit epoch: context `b"net"`,
     /// material = masked network (/24 IPv4, /56 IPv6).
     pub fn subnet_id_for_epoch(&self, ip: IpAddr, epoch: i64) -> String {
         hex::encode(pseudonym(
@@ -236,7 +236,7 @@ mod tests {
 
     #[test]
     fn pseudonym_matches_contract_shape() {
-        // HMAC-SHA256(key=0x42*32, "kiwi-risk-id-v1\0src\0" || epoch(7) || material)
+        // HMAC-SHA256 over key=0x42*32 and "kiwi-risk-id-v1\0src\0" || epoch(7) || material
         // prefix must be 16 bytes of the full digest.
         let key = [0x42u8; 32];
         let mut mac = HmacSha256::new_from_slice(&key).unwrap();

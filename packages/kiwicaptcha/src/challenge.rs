@@ -18,7 +18,7 @@ use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use hmac::{Hmac, Mac};
 /// OS-backed cryptographic randomness for all security identities
 /// (nonce, Argon salt, request bindings, lease ids). Failures are
-/// PROPAGATED — challenge creation must fail rather than fall back to a
+/// propagated — challenge creation must fail rather than fall back to a
 /// weak generator.
 pub fn security_random<const N: usize>() -> Result<[u8; N], getrandom::Error> {
     let mut buf = [0u8; N];
@@ -45,11 +45,11 @@ type HmacSha256 = Hmac<Sha256>;
 #[serde(rename_all = "lowercase")]
 pub enum PoWAlgorithm {
     /// Classic CPU-bound SHA-256 PoW: extremely cheap server verification,
-    /// difficulty up to [`SOLVER_MAX_TARGET_BITS`].
+    /// difficulty up to the solver's target-bits ceiling.
     Sha256,
     /// Memory-hard Argon2id PoW: increases the cost of massively parallel and
-    /// specialized solving, difficulty capped at
-    /// [`SOLVER_MAX_ARGON2_TARGET_BITS`] because every hash is expensive.
+    /// specialized solving, difficulty capped at the argon2 solver target
+    /// ceiling because every hash is expensive.
     Argon2id,
 }
 
@@ -111,16 +111,15 @@ pub enum BindingMode {
 /// binding_tag, issued_at, expires_at, algorithm 'sha256'|'argon2id', m_kib,
 /// t, p, target_bits, salt, prefix, challenge, min_duration_ms, issued_at_ns,
 /// attempts_used optional, protocol_version, region, policy_version,
-/// request_binding, issuer, kid, hostname — see `WIRE_KEYS` on the PHP side).
-/// Both languages write and read this exact
-/// shape, so a record persisted by PHP can be verified by Rust and vice
-/// versa.
+/// request_binding, issuer, kid, hostname). Both languages write and
+/// read this exact shape, so a record persisted by PHP can be verified by
+/// Rust and vice versa.
 ///
 /// # Protocol versions
 ///
 /// - `protocol_version == 1` (legacy): signed with the v1 canonical input
 ///   `nonce|scope|ip_hash|issued_at`; `binding_tag` carries the legacy
-///   `hash_ip` (sha256(secret||ip)) value and reads the legacy `ip_hash` JSON
+///   `hash_ip` value (the sha256 digest of secret and ip) and reads the legacy `ip_hash` JSON
 ///   key via serde alias. Kept verifiable for the migration window (max TTL).
 /// - `protocol_version == 2` (current): signed with the v2 full-parameter
 ///   canonical input and a nonce-bound `binding_tag`.
@@ -152,29 +151,30 @@ pub struct ChallengeRecord {
     /// The salt and prefix bound to this challenge.
     pub salt: String,
     pub prefix: String,
-    /// The signed challenge string (`base64(payload).signature`) — stored so the
-    /// verifier can re-check the HMAC without re-parsing the prefix.
+    /// The signed challenge string — `base64(payload)` plus `.signature` —
+    /// stored so the verifier can re-check the HMAC without re-parsing the
+    /// prefix.
     pub challenge: String,
     /// The minimum plausible solve time in milliseconds for the issued
     /// difficulty, computed at issuance from the algorithm and target bits.
     /// The floor is a timing-anomaly heuristic, not a proof of human
     /// behavior: proof-of-work is probabilistic (a valid solution can occur
     /// at counter 0) and a fast bot can wait before submitting, so the floor
-    /// only rejects solves that ARRIVE faster than the theoretical minimum
+    /// only rejects solves that arrive faster than the theoretical minimum
     /// (measured server-side from issuance to receipt). An override (e.g.
     /// operator tuning) replaces the computed value; 0 disables the check.
     pub min_duration_ms: u64,
     /// High-resolution (epoch microseconds, not nanoseconds) server-side
-    /// issuance timestamp — `SystemTime::now().duration_since(UNIX_EPOCH)
-    /// .as_micros()`. This is used to enforce the minimum-duration check with
+    /// issuance timestamp from `SystemTime::now`, in microseconds.
+    /// This is used to enforce the minimum-duration check with
     /// a SERVER-measured elapsed time — the client-reported duration is
     /// forgeable and is only used as telemetry. It is server-side state only
     /// (never signed into the canonical payload, never sent to the client);
-    /// a ZERO value is REJECTED as malformed (`MissingIssuedAtNs`) — there is
+    /// a zero value is rejected as malformed (`MissingIssuedAtNs`) — there is
     /// no fallback to the attacker-controlled client duration; the verifier
     /// is strict.
     /// The name keeps the `_ns` suffix for backward compatibility
-    /// with stored records; the UNIT is microseconds and is shared with PHP
+    /// with stored records; the unit is microseconds and is shared with PHP
     /// (`ChallengeRecord` JSON interchange).
     #[serde(default)]
     pub issued_at_ns: u64,
@@ -189,18 +189,18 @@ pub struct ChallengeRecord {
     /// pre-v2 records keep verifying during the migration window (max TTL).
     #[serde(default = "default_protocol_version")]
     pub protocol_version: u8,
-    /// Region the challenge was issued for. It is an AUTHENTICATED field of
+    /// Region the challenge was issued for. It is an authenticated field of
     /// the v2 canonical payload (`...|min_duration_ms|region|policy_version|
     /// ...` is the signed input), so it is recoverable from the
     /// client-visible challenge (base64 of the canonical payload) — it is
     /// simply not separately exposed as a top-level response property. The
-    /// JSON key is ALWAYS present for v2 records — `null` when the challenge
+    /// JSON key is always present for v2 records — `null` when the challenge
     /// is region-unbound — for byte parity with the PHP `toArray()` key set.
     /// Absent in legacy stored records: `#[serde(default)]`.
     #[serde(default)]
     pub region: Option<String>,
     /// Security-policy epoch that authorized this challenge (signed). On
-    /// redemption the CURRENT security policy version must match — bumping
+    /// redemption the current security policy version must match — bumping
     /// it (origin/action-policy changes, emergency revocation, compromised
     /// tenant) immediately invalidates outstanding challenges. Cosmetic
     /// configuration changes must NOT bump it.
@@ -209,15 +209,15 @@ pub struct ChallengeRecord {
     /// Application-supplied transaction binding: a random nonce the host
     /// application generates and must present again on the final protected
     /// POST — turning a Kiwi result from "permission to perform action X
-    /// somewhere" into "permission to continue THIS transaction".
+    /// somewhere" into "permission to continue this transaction".
     #[serde(default)]
     pub request_binding: Option<String>,
-    /// Deployment identity of the ISSUING application (e.g. "auth-gateway",
+    /// Deployment identity of the issuing application (e.g. "auth-gateway",
     /// "signup-eu-1"). Signed into the v2 canonical payload (the
-    /// field before the FINAL `kid`) so a challenge minted for one audience
+    /// field before the final `kid`) so a challenge minted for one audience
     /// cannot be redeemed in front of another verifier; a verifier configured
     /// with an expected issuer rejects records whose issuer differs — or that
-    /// carry no issuer at all (fail closed). The JSON key is ALWAYS present
+    /// carry no issuer at all (fail closed). The JSON key is always present
     /// for v2 records — `null` when unset — for byte parity with the PHP
     /// `toArray()` key set. Absent in legacy stored records:
     /// `#[serde(default)]`.
@@ -225,21 +225,21 @@ pub struct ChallengeRecord {
     pub issuer: Option<String>,
     /// Server-side issuance metadata: the Host the challenge was
     /// issued for, when the issuing application provides it. Used by the
-    /// provider-compatible Siteverify response (`hostname` field); NEVER
+    /// provider-compatible Siteverify response (`hostname` field); never
     /// signed into the canonical payload and never sent to the client. The
-    /// JSON key is ALWAYS present — `null` when unset — for byte parity
+    /// JSON key is always present — `null` when unset — for byte parity
     /// with the PHP `toArray()` key set. Absent in legacy stored
     /// records: `#[serde(default)]`.
     #[serde(default)]
     pub hostname: Option<String>,
     /// Key identifier of the signing secret this challenge was issued with.
-    /// The FINAL v2 canonical field (`|<kid>` after the issuer);
+    /// The final v2 canonical field (`|<kid>` after the issuer);
     /// a verifier configured with a `secrets_by_kid` map selects the signing
     /// secret by this id and rejects unknown ids with
     /// [`crate::verify::VerifyError::UnknownKid`] — plus the forward guard: a
     /// record whose kid exceeds the verifier's newest configured kid is
     /// rejected even if the key were somehow known, so future-keyed
-    /// challenges never verify on older nodes. The JSON key is ALWAYS
+    /// challenges never verify on older nodes. The JSON key is always
     /// present (default 1), so records stored without a key id
     /// keep verifying unchanged. Shared with the PHP core.
     #[serde(default = "default_kid")]
@@ -270,8 +270,8 @@ pub struct ChallengeConfig {
     /// memory-hard parameters below are ignored and `target_bits` is used.
     pub algorithm: PoWAlgorithm,
     /// Memory cost in KiB for Argon2id challenges (ignored for SHA-256).
-    /// Must satisfy `8 * p <= m_kib <= SOLVER_MAX_ARGON2_M_KIB` (Argon2
-    /// minimum; the browser-wasm memory ceiling) and be browser-solvable.
+    /// Must satisfy `8 * p <= m_kib <= 65536` (the Argon2 minimum and the
+    /// browser-wasm memory ceiling) and be browser-solvable.
     pub m_kib: u32,
     /// Time cost for Argon2id challenges.
     pub t: u32,
@@ -283,7 +283,7 @@ pub struct ChallengeConfig {
     /// more expensive than SHA-256.
     pub target_bits: u32,
     /// Difficulty (leading zero bits) for Argon2id challenges. Must be
-    /// 1..=[`SOLVER_MAX_ARGON2_TARGET_BITS`] — 0 and values above the ceiling
+    /// 1..=10 — 0 and values above the ceiling
     /// are rejected at issuance (the value is also defensively clamped in
     /// [`ChallengeConfig::effective_target_bits`] so the widget can always
     /// finish).
@@ -320,12 +320,12 @@ pub struct ChallengeConfig {
     pub region: Option<String>,
     /// Issuer identity stamped into every issued challenge: a
     /// stable deployment string (e.g. "auth-gateway") signed as the v2
-    /// canonical field before the FINAL `kid`. A verifier configured with an
+    /// canonical field before the final `kid`. A verifier configured with an
     /// expected issuer rejects records with a different — or missing —
     /// issuer ([`VerifyError::WrongIssuer`]).
     pub issuer: Option<String>,
     /// Key identifier of the signing secret. Stamped into every
-    /// issued record and signed as the FINAL v2 canonical field (`|<kid>`),
+    /// issued record and signed as the final v2 canonical field (`|<kid>`),
     /// so the verifier can rotate secrets: it picks the signing secret by
     /// this id from its `secrets_by_kid` map. Default 1. Must be >= 1.
     pub kid: u32,
@@ -335,12 +335,12 @@ impl ChallengeConfig {
     /// Compute the adjusted SHA-256 target bits based on current active solver
     /// count. When `auto_tune` is disabled, auto-tune bounds have NO effect —
     /// only the solver ceiling applies (`target_bits` capped at
-    /// [`SOLVER_MAX_TARGET_BITS`]); a configured `target_bits` below the
+    /// the solver maximum); a configured `target_bits` below the
     /// tuning bounds stays as-is. Otherwise linearly interpolates between
     /// `auto_tune_min_bits` (0 active) and `auto_tune_max_bits` (50+ active
     /// solvers).
     ///
-    /// The result is clamped to [`SOLVER_MAX_TARGET_BITS`] so the issued
+    /// The result is clamped to the solver maximum so the issued
     /// difficulty always stays within what the browser solver can finish.
     pub fn tuned_target_bits(&self, active_solves: u64) -> u32 {
         if !self.auto_tune {
@@ -372,7 +372,7 @@ impl ChallengeConfig {
     ///
     /// The floor is a timing-anomaly heuristic: PoW is probabilistic (a valid
     /// solution can occur at counter 0) and a fast bot can wait before
-    /// submitting, so the floor only rejects solves that ARRIVE faster than
+    /// submitting, so the floor only rejects solves that arrive faster than
     /// the theoretical minimum, as measured by the server clock:
     /// - SHA-256: assumes up to 5e9 hashes/sec (beyond any browser; catches
     ///   hardware-accelerated/precomputed solves) with an absolute 5 ms floor.
@@ -407,8 +407,8 @@ pub fn hash_ip(ip: &str, salt: &str) -> String {
 
 /// Compute the nonce-bound IP binding tag for a challenge.
 ///
-/// `tag = hex(HMAC-SHA256(K_ip_bind, "kiwicaptcha/ip-bind/v2\\0" || nonce ||
-/// "\\0" || family || canonical_ip_bytes))` where `family` is a single byte
+/// `tag` is the hex encoding of `HMAC-SHA256(K_ip_bind, "kiwicaptcha/ip-bind/v2\\0" || nonce ||
+/// "\\0" || family || canonical_ip_bytes)` where `family` is a single byte
 /// `0x04` (IPv4) or `0x06` (IPv6), `canonical_ip_bytes` is the inet_pton
 /// byte sequence with IPv4-mapped IPv6 addresses (`::ffff:a.b.c.d`) normalized
 /// to 4-byte IPv4, and `K_ip_bind` is the HKDF-derived IP-binding purpose key
@@ -443,11 +443,11 @@ pub fn binding_tag(nonce: &str, ip: &str, secret: &str) -> Result<String, SignEr
 }
 
 /// The canonical current-time value for the `now_ns` parameter: epoch
-/// MICROSECONDS (despite the `_ns` name).
+/// microseconds (despite the `_ns` name).
 ///
 /// This is the unit Rust and PHP share in the `issued_at_ns` record field,
-/// so both sides must feed it the same way:
-/// `SystemTime::now().duration_since(UNIX_EPOCH).as_micros()`.
+/// so both sides must feed it the same way: the system clock's microseconds
+/// since the Unix epoch.
 pub fn now_epoch_micros() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -488,8 +488,8 @@ fn canonical_signing_input(payload: &ChallengePayload) -> String {
 /// set so no issuance parameter can be tampered with without breaking the
 /// signature:
 /// `v2|nonce|scope|binding_tag|issued_at|expires_at|algorithm|m_kib|t|p|target_bits|salt|min_duration_ms|region|policy_version|request_binding|issuer|kid`.
-/// `region`, `request_binding` and `issuer` render as the EMPTY segment when
-/// unset; `kid` is the FINAL field, appended after the issuer.
+/// `region`, `request_binding` and `issuer` render as the empty segment when
+/// unset; `kid` is the final field, appended after the issuer.
 pub(crate) fn canonical_signing_input_v2(record: &ChallengeRecord) -> String {
     format!(
         "v2|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
@@ -587,7 +587,7 @@ fn verify_canonical(canonical: &str, signature: &str, secret_key: &str) -> Resul
     if secret_key.len() < 16 {
         return Err(SignError::KeyTooShort);
     }
-    // The HMAC-SHA256 tag is EXACTLY 64 hex characters — a
+    // The HMAC-SHA256 tag is exactly 64 hex characters — a
     // longer signature is rejected before any hex::decode allocation
     // (attacker-written oversized signature bytes never drive a decode
     // buffer).
@@ -654,20 +654,21 @@ pub struct ChallengeCache {
 ///
 /// The widget solver (`packages/kiwicaptcha/src/widget.rs`) caps its search
 /// at `MAX = 5_000_000` hashes. At `n` target bits the expected work is
-/// `2^n` hashes; at 20 bits that is ~1.05M (P(solve) ≈ 99.1% within the cap),
-/// while at 24 bits it is ~16.7M (P(solve) ≈ 25.9% — ~74% of users would
-/// fail). Difficulty is therefore clamped to this ceiling so the auto-tuner
-/// can never issue a challenge the widget cannot solve.
+/// `2^n` hashes; at 20 bits that is ~1.05M (solve probability ≈ 99.1% within
+/// the cap), while at 24 bits it is ~16.7M (solve probability ≈ 25.9% —
+/// ~74% of users would fail). Difficulty is therefore clamped to this
+/// ceiling so the auto-tuner can never issue a challenge the widget cannot
+/// solve.
 pub const SOLVER_MAX_TARGET_BITS: u32 = 20;
 
-/// Hard floor on the difficulty (`target_bits`) the VERIFIER accepts in a
+/// Hard floor on the difficulty (`target_bits`) the verifier accepts in a
 /// signed record: 0 would accept a trivially-solvable challenge.
 /// Shared with the PHP core.
 pub const MIN_DIFFICULTY: u32 = 1;
-/// Hard ceiling on the difficulty (`target_bits`) the VERIFIER accepts in a
+/// Hard ceiling on the difficulty (`target_bits`) the verifier accepts in a
 /// signed record: above the solver ceiling no legitimate widget
-/// can finish. Applied to BOTH algorithms by `validate_record` — Argon2id
-/// issuance stays stricter ([`SOLVER_MAX_ARGON2_TARGET_BITS`]), exactly like
+/// can finish. Applied to both algorithms by `validate_record` — Argon2id
+/// issuance stays stricter at the argon2 solver ceiling, exactly like
 /// the t=7..=16 verifier-vs-issuer split. Shared with the PHP core.
 pub const MAX_DIFFICULTY: u32 = 20;
 
@@ -684,15 +685,15 @@ pub const MAX_TTL_SECS: u64 = 300;
 
 /// Maximum tolerated clock skew (seconds) between the issuer and verifier
 /// clocks. The TTL check rejects challenges whose `issued_at` is
-/// more than this far in the FUTURE relative to the verifier's current time
+/// more than this far in the future relative to the verifier's current time
 /// — a future-issued challenge beyond the skew is a time-domain anomaly and
 /// invalid. Shared with the PHP core.
 pub const MAX_CLOCK_SKEW_SECS: u64 = 60;
 
-/// Maximum Argon2id time cost at ISSUANCE (browser-solver policy): the
+/// Maximum Argon2id time cost at issuance (browser-solver policy): the
 /// browser solver caps at 6, so higher values would be unsolvable for
 /// legit clients and issuance refuses them. Distinct from the verifier's
-/// structural ceiling [`MAX_ARGON_TIME`] (16): `validate_record` accepts
+/// structural ceiling of 16: `validate_record` accepts
 /// signed records with t in 7..=16, but no KiwiCaptcha issuer mints them.
 pub const MAX_ARGON_T: u32 = 6;
 
@@ -710,27 +711,27 @@ pub const SOLVER_MAX_ARGON2_TARGET_BITS: u32 = 10;
 /// hardware.
 pub const SOLVER_MAX_ARGON2_M_KIB: u32 = 65536;
 
-/// Hard floor on the Argon2id memory cost (KiB) the VERIFIER accepts in a
+/// Hard floor on the Argon2id memory cost (KiB) the verifier accepts in a
 /// signed record. Below this the record is malformed —
 /// verification never runs a memory-hard computation with implausible
 /// parameters. Shared with the PHP core.
 pub const MIN_ARGON_MEMORY_KIB: u32 = 8;
-/// Hard ceiling on the Argon2id memory cost (KiB) the VERIFIER accepts in a
-/// signed record. Matches [`SOLVER_MAX_ARGON2_M_KIB`]; above it
+/// Hard ceiling on the Argon2id memory cost (KiB) the verifier accepts in a
+/// signed record. Matches the solver's argon2 memory ceiling; above it
 /// the record is malformed before any allocation. Shared with the PHP core.
 pub const MAX_ARGON_MEMORY_KIB: u32 = SOLVER_MAX_ARGON2_M_KIB;
-/// Hard floor on the Argon2id time cost the VERIFIER accepts in a signed
+/// Hard floor on the Argon2id time cost the verifier accepts in a signed
 /// record: `t < 3` is not libsodium-representable. Shared with
 /// the PHP core.
 pub const MIN_ARGON_TIME: u32 = 3;
-/// Hard ceiling on the Argon2id time cost the VERIFIER accepts in a signed
+/// Hard ceiling on the Argon2id time cost the verifier accepts in a signed
 /// record: above 16 the memory-hard computation is unbounded.
 /// Shared with the PHP core.
 pub const MAX_ARGON_TIME: u32 = 16;
-/// Hard floor on the Argon2id parallelism the VERIFIER accepts in a signed
+/// Hard floor on the Argon2id parallelism the verifier accepts in a signed
 /// record.
 pub const MIN_PARALLELISM: u32 = 1;
-/// Hard ceiling on the Argon2id parallelism the VERIFIER accepts in a signed
+/// Hard ceiling on the Argon2id parallelism the verifier accepts in a signed
 /// record.
 pub const MAX_PARALLELISM: u32 = 4;
 
@@ -834,7 +835,7 @@ impl Default for ChallengeCache {
 /// - `now_unix` — current Unix timestamp in seconds (injected for
 ///   testability); used for the signed payload, TTL, and the client-facing
 ///   challenge.
-/// - `now_ns` — high-resolution issuance timestamp in EPOCH MICROSECONDS
+/// - `now_ns` — high-resolution issuance timestamp in epoch microseconds
 ///   (see [`now_epoch_micros`]; the field name keeps the `_ns`
 ///   suffix but the unit is microseconds, shared with PHP), used exclusively
 ///   for server-side minimum-duration enforcement.
@@ -897,7 +898,7 @@ pub fn issue_challenge(
 
     let algorithm = config.algorithm;
     let target_bits = config.effective_target_bits(active_solves);
-    // SHA-256 difficulty must be 1..=SOLVER_MAX_TARGET_BITS: 0 would mint a
+    // SHA-256 difficulty must be 1..=20: 0 would mint a
     // trivially-solvable challenge and anything above the solver ceiling can
     // never be solved by the widget. (Argon2id target bits are validated in
     // the block below.)
@@ -911,12 +912,12 @@ pub fn issue_challenge(
     // PHP/libsodium verification additionally cannot represent t < 3 or
     // p != 1, so those are rejected at issuance too — otherwise a challenge
     // could be issued successfully and then always fail PHP verification
-    // (cross-language parity requirement, see README). Issuance must never
-    // mint a record the verifier would reject: m_kib above the browser-wasm
-    // memory ceiling (SOLVER_MAX_ARGON2_M_KIB, 64 MiB) is refused, t above
-    // MAX_ARGON_T is refused (validate_record rejects it), and
-    // argon2_target_bits must be 1..=SOLVER_MAX_ARGON2_TARGET_BITS (0 is
-    // silently clamped to 1 by effective_target_bits today — reject it).
+    // (cross-language parity requirement). Issuance must never mint a record
+    // the verifier would reject: m_kib above the browser-wasm memory
+    // ceiling (64 MiB) is refused, t above the issuance ceiling is refused
+    // (validate_record rejects it), and argon2_target_bits must be within
+    // the argon2 solver range (0 is silently clamped to 1 by
+    // effective_target_bits today — reject it).
     if algorithm == PoWAlgorithm::Argon2id {
         if config.m_kib < 8 * config.p {
             return Err(SignError::InvalidArgon2Params);
@@ -935,8 +936,8 @@ pub fn issue_challenge(
     }
 
     // Issuance must never mint a record the verifier would reject: the
-    // verifier's validate_record rejects any lifetime above MAX_TTL_SECS
-    // (300s), so a longer configured TTL is refused here, not at
+    // verifier's validate_record rejects any lifetime above the TTL cap
+    // (300 s), so a longer configured TTL is refused here, not at
     // verification time.
     if config.ttl_secs == 0 || config.ttl_secs > MAX_TTL_SECS {
         return Err(SignError::InvalidTtl);
@@ -969,7 +970,7 @@ pub fn issue_challenge(
     let expires_at = now_unix.saturating_add(config.ttl_secs);
 
     // Minimum plausible solve duration: derived from the issued difficulty, or
-    // replaced by an operator override (Some(0) disables the check).
+    // replaced by an operator override, where `Some(0)` disables the check.
     let min_duration_ms = config
         .min_duration_ms
         .unwrap_or_else(|| config.min_duration_ms_for(target_bits));
@@ -1034,7 +1035,7 @@ pub fn issue_challenge(
 
 /// Issue a challenge from an adaptive-risk difficulty profile.
 ///
-/// Builds a clone of `config` (the caller's config is NEVER mutated):
+/// Builds a clone of `config` (the caller's config is never mutated):
 /// `algorithm`, `m_kib`, `t`, `p`, and `target_bits` come from the profile,
 /// and `argon2_target_bits` equals the profile's `target_bits` for Argon2id
 /// profiles (SHA-256 profiles leave it as configured). `ttl_secs`,
@@ -1043,7 +1044,7 @@ pub fn issue_challenge(
 /// The profile is validated first ([`ChallengeProfile::validate`]);
 /// an invalid profile is rejected before anything is issued. Delegates to
 /// [`issue_challenge`], so the wire format, signing, and storage are
-/// IDENTICAL to a regular issue — only the parameters differ.
+/// identical to a regular issue — only the parameters differ.
 #[allow(clippy::too_many_arguments)]
 pub fn issue_challenge_with_profile(
     config: &ChallengeConfig,
@@ -1118,7 +1119,7 @@ pub enum SignError {
     /// (raised by [`binding_tag`] when a nonce-bound binding tag is computed).
     #[error("client IP is not a valid IPv4 or IPv6 address")]
     InvalidIp,
-    /// SHA-256 difficulty must be 1..=[`SOLVER_MAX_TARGET_BITS`] — 0 would
+    /// SHA-256 difficulty must be within the solver ceiling — 0 would
     /// mint a trivially-solvable challenge and values above the ceiling can
     /// never be solved by the widget.
     #[error("SHA-256 difficulty must be 1..=SOLVER_MAX_TARGET_BITS (20)")]
@@ -1168,7 +1169,7 @@ mod hex {
 mod tests {
     use super::*;
 
-    // Test "now_ns" values are epoch MICROSECONDS (1_700_000_000_000_000 µs
+    // Test "now_ns" values are epoch microseconds (1_700_000_000_000_000 µs
     // ≈ 2023-11-14 UTC) — the unit the crate shares with PHP, see
     // [`now_epoch_micros`].
 
@@ -1291,7 +1292,7 @@ mod tests {
     #[test]
     fn oversized_signature_is_rejected_before_hex_decode() {
         // The HMAC-SHA256 tag is exactly 64 hex characters — a
-        // longer signature is rejected as a mismatch BEFORE any hex::decode
+        // longer signature is rejected as a mismatch before any hex::decode
         // allocation (an attacker-written megabyte "signature" never drives
         // a decode buffer), on both the v1 and v2 canonical paths.
         let key = "0123456789abcdef0123456789abcdef";
@@ -1513,7 +1514,7 @@ mod tests {
         // Moderate load — roughly midway between min and the solver ceiling.
         let mid = issue_challenge(&config, "login", "1.1.1.1", 1, 1000000000, 25, None).unwrap();
         assert!(mid.challenge.target_bits >= 14 && mid.challenge.target_bits <= 16);
-        // Peak load — clamped to SOLVER_MAX_TARGET_BITS (not 24), because the
+        // Peak load — clamped to the solver ceiling (not 24), because the
         // browser solver's 5M-hash cap would fail ~74% of solves at 24 bits.
         let peak = issue_challenge(&config, "login", "1.1.1.1", 1, 1000000000, 50, None).unwrap();
         assert_eq!(peak.challenge.target_bits, SOLVER_MAX_TARGET_BITS);
@@ -1957,7 +1958,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(unbound.record.region, None);
-        // The JSON key is ALWAYS present (null when unbound) — PHP toArray()
+        // The JSON key is always present (null when unbound) — PHP toArray()
         // parity, 23 keys.
         let value = serde_json::to_value(&issued.record).unwrap();
         assert_eq!(value["region"], "eu-west-1");
@@ -1996,7 +1997,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(unbound.record.issuer, None);
-        // The JSON key is ALWAYS present (null when unbound) — PHP toArray()
+        // The JSON key is always present (null when unbound) — PHP toArray()
         // parity, 23 keys.
         let value = serde_json::to_value(&issued.record).unwrap();
         assert_eq!(value["issuer"], "auth-gw-eu");
@@ -2004,9 +2005,9 @@ mod tests {
         assert_eq!(unbound_value["issuer"], serde_json::Value::Null);
         assert!(unbound_value.as_object().unwrap().contains_key("issuer"));
 
-        // The issuer is the v2 canonical field before the FINAL kid (audits
-        // #67/#91): appended after request_binding, empty when unset; the
-        // canonical always ends with `|<kid>`.
+        // The issuer is the v2 canonical field before the final kid:
+        // appended after request_binding, empty when unset; the canonical
+        // always ends with `|<kid>`.
         let canonical = crate::challenge::canonical_signing_input_v2(&issued.record);
         assert!(
             canonical.ends_with("|auth-gw-eu|1"),
@@ -2232,7 +2233,7 @@ mod tests {
     #[test]
     fn issuance_stamps_and_signs_the_kid() {
         // config.kid is stamped on the record and signed as the
-        // FINAL canonical field — the record JSON carries it and
+        // final canonical field — the record JSON carries it and
         // the signed challenge string embeds it byte-exactly.
         let base = profile_base_config();
         let with_kid = ChallengeConfig {
@@ -2275,7 +2276,7 @@ mod tests {
         assert_eq!(default_kid.record.kid, 1, "default kid is 1");
         let value = serde_json::to_value(&default_kid.record).unwrap();
         assert_eq!(value["kid"], 1);
-        // A record JSON WITHOUT the kid key deserializes with kid = 1.
+        // A record JSON without the kid key deserializes with kid = 1.
         let mut no_kid = value;
         no_kid.as_object_mut().unwrap().remove("kid");
         let decoded: ChallengeRecord = serde_json::from_value(no_kid).unwrap();
@@ -2292,7 +2293,7 @@ mod tests {
             ChallengeProfile {
                 algorithm: PoWAlgorithm::Argon2id,
                 target_bits: 1,
-                m_kib: 1, // below MIN_ARGON_MEMORY_KIB
+                m_kib: 1, // below the memory minimum
                 t: 3,
                 p: 1,
             },
@@ -2300,7 +2301,7 @@ mod tests {
                 algorithm: PoWAlgorithm::Argon2id,
                 target_bits: 1,
                 m_kib: 16 * 1024,
-                t: 2, // below MIN_ARGON_TIME (3)
+                t: 2, // below the time minimum (3)
                 p: 1,
             },
             ChallengeProfile {

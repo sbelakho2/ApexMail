@@ -153,7 +153,7 @@ final class RiskPolicyTest extends TestCase
     public function testArgonCapacityEscalatesToStepUpLast(): void
     {
         $policy = RiskPolicy::fromConfig($this->config());
-        // The argon-capacity check is the LAST step: a final Argon action
+        // The argon-capacity check is the last step: a final Argon action
         // with argonCapacity < 300 escalates to StepUp (never Sha20, and
         // never reintroduced by the floor/minimum re-clamp).
         $d = $policy->decide(1, 600, $this->zeroVector(), new ResourcePressure(299, 1000), 0, 1_700_000_000_000);
@@ -168,7 +168,7 @@ final class RiskPolicyTest extends TestCase
     public function testArgonCapacityCheckIsLastSoFloorsCannotReintroduceArgon(): void
     {
         // scope 3 has minimum argon32; with a global floor of argon16 and
-        // low argon capacity, the final action must STILL step up (the
+        // low argon capacity, the final action must still step up (the
         // capacity check runs after the floor/minimum re-clamp).
         $config = $this->config();
         $config['global_floors'] = [0 => 'allow', 1 => 'argon16', 2 => 'argon32', 3 => 'argon64', 4 => 'argon64'];
@@ -302,7 +302,7 @@ final class RiskPolicyTest extends TestCase
     {
         $policy = RiskPolicy::fromConfig($this->config());
         $now = 1_700_000_000_000;
-        // Elevated-but-non-emergency level: the hysteresis hold is a LEVEL
+        // Elevated-but-non-emergency level: the hysteresis hold is a level
         // marker, NOT a per-source denial window — no deny.
         $d = $policy->decide(1, 0, $this->zeroVector(), $this->healthy(), 2, $now, $now + 5000);
         self::assertNotSame(RiskAction::Deny, $d->action, 'level-2 hysteresis hold must not deny');
@@ -377,7 +377,7 @@ final class RiskPolicyTest extends TestCase
     }
 
     /**
-     * ABSOLUTE USER-VISIBLE CAP: the adaptive escalation is
+     * Absolute user-visible cap: the adaptive escalation is
      * bounded. The policy's maximum action across every scope, every
      * global floor and every possible score is the configured ladder top
      * (Deny) — and never above it, so there is no unbounded punishment

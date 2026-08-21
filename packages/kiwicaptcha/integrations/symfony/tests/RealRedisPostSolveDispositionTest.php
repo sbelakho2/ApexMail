@@ -46,10 +46,10 @@ use Symfony\Component\Validator\Validation;
  * unreachable).
  *
  * Exercises the store's single-Lua state machine (claim / takeover /
- * finalize / replay) and the full end-to-end replay guarantee that fakes
+ * finalize / replay) and the end-to-end replay guarantee that fakes
  * cannot prove: a valid token whose post-solve assessment denies replays
- * as deny from the persisted nonce-keyed disposition, and the replay
- * never re-runs the assessment (exactly one risk observation).
+ * as deny from the persisted nonce-keyed disposition. The replay never
+ * re-runs the assessment (exactly one risk observation).
  */
 final class RealRedisPostSolveDispositionTest extends TestCase
 {
@@ -744,8 +744,8 @@ final class RealRedisPostSolveDispositionTest extends TestCase
         // The exact legacy v1 wire
         // ({"v":1,"state":"complete","disposition":{"kind":"chain_required","chain_id":"X","decision_id":"D"}}
         // — no chain_expires_at) is accepted, never corrupt: the signing
-        // takes the expiry from the exact chain X's record
-        // (requirementFor(X)), never the current obligation Y, and the
+        // takes the expiry from the exact chain X's record (via
+        // requirementFor), never the current obligation Y, and the
         // record is never rewritten (pure compat-read).
         $storage = new RedisStorage($this->client, 'ci-psd-legacy:');
         $chainStore = new RedisChainedChallengeStateStore($this->client, 'ci-psd-chain');
@@ -780,7 +780,7 @@ final class RealRedisPostSolveDispositionTest extends TestCase
 
         // The reader accepts the legacy record: the carried expiry is
         // null — and the signing takes the expiry from the exact chain
-        // X's record (requirementFor(X)).
+        // X's record (via requirementFor).
         $record = $dispositions->read($nonceB);
         self::assertNotNull($record);
         self::assertSame($chainX->chainId, $record->disposition?->chainId);

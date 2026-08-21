@@ -165,7 +165,7 @@ final class KernelIntegrationTest extends TestCase
         // default is null in the test kernel).
         $form = $factory->createNamed('captcha', KiwiCaptchaType::class, null, ['scope' => 'login']);
         $html = $this->twig()->render('@Test/form.html.twig', ['form' => $form->createView()]);
-        // The driver script always mentions the attribute; the CONTAINER
+        // The driver script always mentions the attribute; the container
         // must not carry it when no binding is configured.
         self::assertStringContainsString('data-kiwi-telemetry="off">', $html, 'without the option the widget container must not render data-kiwi-request-binding');
     }
@@ -212,9 +212,9 @@ final class KernelIntegrationTest extends TestCase
         self::assertTrue($form->isValid(), $this->describe($form->getErrors(true)));
 
         // Retry semantics: an identical replay in the same
-        // context returns the SAME stored result WITHOUT a second
+        // context returns the same stored result without a second
         // derivation — deterministic retry safety, not reuse of a second
-        // operation. A replay under a DIFFERENT binding is rejected.
+        // operation. A replay under a different binding is rejected.
         $form = $factory->createNamed('captcha', KiwiCaptchaType::class, null, ['scope' => 'login']);
         $form->submit($this->solveToken($challenge));
         self::assertTrue($form->isValid(), 'same-context retry must return the same stored result');
@@ -292,7 +292,7 @@ final class KernelIntegrationTest extends TestCase
     }
 
     /**
-     * The REAL bundle routes must serve the compatibility
+     * The real bundle routes must serve the compatibility
      * loader — the browser fixture hid the missing Request
      * import (the controller's type declarations resolved to a
      * nonexistent namespace-local class and the production routes could

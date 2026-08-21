@@ -16,13 +16,13 @@ use Psr\Log\NullLogger;
 use Symfony\Component\HttpFoundation\Request;
 
 /**
- * Trusted client-IP policy: the explicit risk.client_ip_mode
- * decides how the canonical client IP is derived. "direct" ALWAYS ignores
- * forwarding headers (socket peer only); "symfony_trusted_proxies" routes
- * through Symfony's trusted-proxy machinery configured from the CIDR list —
- * forwarding headers from UNTRUSTED peers are ignored, headers from a
- * TRUSTED peer are used, and BOTH X-Forwarded-For + Forwarded from a
- * trusted peer is an anomaly (logged, or rejected with 400 when
+ * Trusted client-IP policy: the explicit risk.client_ip_mode decides how
+ * the canonical client IP is derived. "direct" always ignores forwarding
+ * headers (socket peer only). "symfony_trusted_proxies" routes through
+ * Symfony's trusted-proxy machinery configured from the CIDR list:
+ * headers from untrusted peers are ignored, headers from a trusted peer
+ * are used. Both X-Forwarded-For and Forwarded from a trusted peer is an
+ * anomaly (logged, or rejected with 400 when
  * risk.reject_ambiguous_forwarding is true).
  */
 final class ClientIpResolverTest extends TestCase
@@ -31,7 +31,7 @@ final class ClientIpResolverTest extends TestCase
 
     protected function tearDown(): void
     {
-        // setTrustedProxies is GLOBAL static state — reset it so no test
+        // setTrustedProxies is global static state — reset it so no test
         // leaks its trust configuration into another.
         Request::setTrustedProxies([], -1);
     }
@@ -60,7 +60,7 @@ final class ClientIpResolverTest extends TestCase
 
     public function testDirectModeIgnoresForwardingEvenFromTrustedCidrs(): void
     {
-        // The trusted_proxies list is UNUSED in direct mode.
+        // The trusted_proxies list is unused in direct mode.
         $resolver = new ClientIpResolver(ClientIpResolver::MODE_DIRECT, ['10.0.0.0/8']);
 
         self::assertSame('10.1.2.3', $resolver->resolve($this->request('10.1.2.3', [
@@ -109,7 +109,7 @@ final class ClientIpResolverTest extends TestCase
         };
         $resolver = new ClientIpResolver(ClientIpResolver::MODE_SYMFONY_TRUSTED_PROXIES, ['10.0.0.0/8'], false, $logger);
 
-        // Both headers from a trusted peer: the anomaly is LOGGED, the
+        // Both headers from a trusted peer: the anomaly is logged, the
         // request proceeds (reject_ambiguous_forwarding defaults false).
         $ip = $resolver->resolve($this->request('10.1.2.3', [
             'X-Forwarded-For' => '203.0.113.9',
@@ -133,7 +133,7 @@ final class ClientIpResolverTest extends TestCase
 
     public function testBothForwardingHeadersFromUntrustedPeerAreNotAnAnomaly(): void
     {
-        // From an UNTRUSTED peer both headers are ignored entirely — never
+        // From an untrusted peer both headers are ignored entirely — never
         // ambiguous, never an anomaly (even with rejection enabled).
         $resolver = new ClientIpResolver(ClientIpResolver::MODE_SYMFONY_TRUSTED_PROXIES, ['10.0.0.0/8'], true);
 
@@ -152,9 +152,9 @@ final class ClientIpResolverTest extends TestCase
     // ── Controller wiring ─────────────────────────────────────────────────
 
     /**
-     * The controller's canonical client IP follows the mode: in direct mode
-     * a forged X-Forwarded-For cannot change the IP the challenge is BOUND
-     * to (the binding tag must match the socket peer).
+     * The controller's canonical client IP follows the mode: in direct
+     * mode a forged X-Forwarded-For cannot change the IP the challenge is
+     * bound to (the binding tag must match the socket peer).
      */
     public function testControllerBindsToTheSocketPeerInDirectMode(): void
     {

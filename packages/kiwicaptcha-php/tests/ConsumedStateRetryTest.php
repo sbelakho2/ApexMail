@@ -19,12 +19,12 @@ use KiwiCaptcha\Tests\Fixtures\Vectors;
 use PHPUnit\Framework\TestCase;
 
 /**
- * CONSUMED-STATE RETRY: consume() is a one-shot TRANSITION that
- * keeps the record until its TTL — replay protection is the consumed
- * marker, not absence. The deterministic verification result
- * (consumed_result) is committed best-effort, so a retry on an
- * already-consumed record returns the SAME outcome (Valid/InsufficientWork)
- * without re-deriving; a consumed record without a committed result (crash
+ * Consumed-state retry: consume() is a one-shot transition that keeps
+ * the record until its TTL; replay protection is the consumed marker,
+ * not absence. The deterministic verification result (consumed_result)
+ * is committed best-effort, so a retry on an already-consumed record
+ * returns the same outcome (Valid/InsufficientWork) without
+ * re-deriving. A consumed record without a committed result (crash
  * between consume and commit) is reported as ConsumeIndeterminate.
  */
 final class ConsumedStateRetryTest extends TestCase
@@ -160,7 +160,7 @@ final class ConsumedStateRetryTest extends TestCase
         $first = $verifier->verify($wrongToken, Vectors::SECRET, 'login', '198.51.100.7');
         self::assertSame(VerifyError::InsufficientWork, $first->error);
 
-        // The correct token retries into the STORED invalid outcome — no
+        // The correct token retries into the stored invalid outcome; no
         // re-derivation, same InsufficientWork.
         $second = $verifier->verify($token, Vectors::SECRET, 'login', '198.51.100.7');
         self::assertSame(VerifyError::InsufficientWork, $second->error, 'a retry must replay the committed invalid outcome');
@@ -169,8 +169,8 @@ final class ConsumedStateRetryTest extends TestCase
     public function testConsumedWithoutCommittedResultIsIndeterminate(): void
     {
         // Crash between consume and commit: the record is consumed but no
-        // result was stored. The verifier reports ConsumeIndeterminate — the
-        // caller treats it as ambiguous (never re-derives, never replays).
+        // result was stored. The verifier reports ConsumeIndeterminate;
+        // the caller treats it as ambiguous.
         [$storage, $record, $token] = $this->issueAndSolve();
         $storage->store($record);
         $consumed = $storage->consume($record->nonce);
@@ -185,10 +185,10 @@ final class ConsumedStateRetryTest extends TestCase
 
     public function testCommitResultFailureNeverChangesTheValidOutcome(): void
     {
-        // Best-effort commit: a throwing storage must not turn Valid into a
-        // failure — the outcome stands, the record stays consumed without a
-        // result (a retry degrades to ConsumeIndeterminate, which is safer
-        // than re-deriving a wrong outcome).
+        // Best-effort commit: a throwing storage must not turn Valid into
+        // a failure. The outcome stands, and the record stays consumed
+        // without a result; a retry degrades to ConsumeIndeterminate,
+        // which is safer than re-deriving a wrong outcome.
         [$base, $record, $token] = $this->issueAndSolve();
         $storage = new class($base) implements StorageInterface {
             public bool $threw = false;

@@ -29,12 +29,10 @@ impl NetworkFlags {
     /// Fixed-point network risk contribution, matching the PHP built-in
     /// values: 1000 blocked, 950 reserved, 750 known proxy, 650 Tor exit,
     /// 600 known hosting, 0 otherwise. When several flags are set the worst
-    /// category wins. The policy's `>= 900` hard deny fires for BLOCKED and
-    /// RESERVED sources (both are operator-supplied CIDR rules that must
+    /// category wins. The policy's `>= 900` hard deny fires for blocked and
+    /// reserved sources (both are operator-supplied CIDR rules that must
     /// never appear as legitimate remote sources); known proxies/hosting and
-    /// Tor raise the adaptive score without hard-denying. The `>= 900`
-    /// hard deny fires for blocked
-    /// sources only.
+    /// Tor raise the adaptive score without hard-denying.
     pub fn network_risk(self) -> u16 {
         if self.blocked() {
             return 1000;
@@ -96,12 +94,12 @@ impl CidrEntry {
 /// Bitwise radix trie over the canonical address bits.
 ///
 /// IPv4 addresses traverse a depth-32 tree, IPv6 a depth-128 tree; the two
-/// families live in SEPARATE tries (a `/0` IPv4 entry can never match an
+/// families live in separate tries (a `/0` IPv4 entry can never match an
 /// IPv6 address, mirroring the legacy family check). The trie is built
-/// ONCE in the constructor; `classify` walks at most `prefix depth` nodes
+/// once in the constructor; `classify` walks at most `prefix depth` nodes
 /// (32/128), never scanning the whole entry list.
 ///
-/// Classification preserves the EXACT legacy semantics: the flags of EVERY
+/// Classification preserves the exact legacy semantics: the flags of every
 /// matching prefix on the path are combined (OR) — a `/0` hosting entry
 /// and a `/32` tor entry both apply to the same address.
 #[derive(Debug, Default)]
@@ -167,10 +165,10 @@ impl CidrNetworkClassifier {
     }
 }
 
-/// Inserts one entry into a family trie: `prefix` ADDRESS bits (the family
+/// Inserts one entry into a family trie: `prefix` address bits (the family
 /// byte is stripped — it selects the trie, it never counts toward the
 /// prefix depth) walk the binary tree; the entry's flags land on the node
-/// at the prefix depth (duplicate CIDRs COMBINE their flags, exactly like
+/// at the prefix depth (duplicate CIDRs combine their flags, exactly like
 /// the legacy linear scan).
 fn insert(root: &mut TrieNode, entry: CidrEntry, flags: NetworkFlags) {
     let bits = address_bits(entry.network);
@@ -188,7 +186,7 @@ fn insert(root: &mut TrieNode, entry: CidrEntry, flags: NetworkFlags) {
     }
 }
 
-/// The canonical address bits, MSB first, WITH the family byte stripped.
+/// The canonical address bits, MSB first, with the family byte stripped.
 fn address_bits(ip: IpAddr) -> Vec<u8> {
     let canonical = canonical_ip(ip);
     let mut bits = Vec::with_capacity((canonical.len() - 1) * 8);

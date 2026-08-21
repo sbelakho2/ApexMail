@@ -10,7 +10,7 @@ use Symfony\Component\DependencyInjection\ContainerBuilder;
 
 /**
  * Kernel with the production-hardening options enabled: per-IP issuance rate
- * limiting (with a shared PSR-6 pool) and the Argon2id verification
+ * limiting (with a shared psr-6 pool) and the Argon2id verification
  * concurrency cap. Proves the extension wires them into the real services.
  */
 final class HardenedTestKernel extends TestKernel

@@ -1,7 +1,7 @@
 //! Shared helpers for the kiwicaptcha-risk integration tests.
 //!
 //! Every Redis-backed test here is hermetic: it skips (prints a notice and
-//! returns) unless `RISK_REDIS_URL` is set, so the suite is green without
+//! returns) unless the Redis test URL is set, so the suite is green without
 //! any infrastructure.
 #![allow(dead_code)]
 
@@ -52,7 +52,7 @@ pub fn event_id(n: u64) -> String {
 }
 
 /// `tcp://` predis-style URLs are normalized to `redis://`; `None` when
-/// `RISK_REDIS_URL` is unset or empty (the caller skips).
+/// the Redis test URL is unset or empty (the caller skips).
 pub fn redis_url() -> Option<String> {
     match std::env::var("RISK_REDIS_URL") {
         Ok(url) if !url.is_empty() => Some(if let Some(rest) = url.strip_prefix("tcp://") {
@@ -79,7 +79,7 @@ fn epoch_id(pattern: u8, marker: u8) -> String {
 }
 
 /// Epoch-scoped pseudonyms (prev/current/next) derived from one base
-/// pattern, at the T0 epoch window. Each epoch id is DISTINCT (the current
+/// pattern, at the T0 epoch window. Each epoch id is distinct (the current
 /// epoch's pseudonym is never reused for the ±1 keys).
 pub fn epoch_ids(pattern: u8, now_ms: u64) -> (i64, String, String, String) {
     let epoch = ((now_ms / 1000) / RISK_EPOCH_SECS as u64) as i64;

@@ -10,7 +10,7 @@ use KiwiCaptcha\Risk\SignalVector;
 use PHPUnit\Framework\TestCase;
 
 /**
- * Performance micro-benchmark, ASSERTED (never skipped): score() must
+ * Performance micro-benchmark, asserted (never skipped): score() must
  * complete 100,000 iterations with p99 < 1500 µs per call.
  *
  * The spec target is p99 < 150 µs per iteration; CI variance (shared

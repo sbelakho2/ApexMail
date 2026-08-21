@@ -8,10 +8,10 @@ namespace BelConsulting\KiwiCaptchaBundle\Risk;
  * The durable post-solve disposition record behind one nonce: the store's
  * claim state (pending = a computation is in flight / complete = the final
  * disposition is persisted), the claim owner and lease deadline while
- * pending, the final disposition once complete, and the ORIGINAL pre-issue
- * decision handle the first owner consumed (the handle survives in the
+ * pending, the final disposition once complete, and the original pre-issue
+ * decision handle the first owner consumed. The handle survives in the
  * pending claim so a crash-taken-over computation keeps it; the complete
- * record keeps it too).
+ * record keeps it too.
  */
 final readonly class PostSolveDispositionRecord
 {

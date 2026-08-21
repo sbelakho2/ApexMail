@@ -16,13 +16,13 @@ use KiwiCaptcha\Tests\Fixtures\Vectors;
 use PHPUnit\Framework\TestCase;
 
 /**
- * Deployment issuer binding: the issued record carries an
- * optional deployment identity (NULL = unbound), the record JSON always
- * includes the `issuer` key (byte parity with the Rust serde schema — 21
- * keys), the issuer is the FINAL field of the signed v2 canonical payload
- * (appended after `request_binding`), and a verifier configured with an
- * expected issuer rejects any record whose issuer does not match EXACTLY
- * (WrongIssuer) — including unbound records — creating a
+ * Deployment issuer binding: the issued record carries an optional
+ * deployment identity (null = unbound), and the record JSON always
+ * includes the `issuer` key (byte parity with the Rust serde schema, 21
+ * keys). The issuer is the final field of the signed v2 canonical
+ * payload, appended after `request_binding`. A verifier configured with
+ * an expected issuer rejects any record whose issuer does not match
+ * exactly (WrongIssuer), including unbound records, creating a
  * dev/staging/production compartment even when deployments share secret
  * keys.
  */
@@ -100,8 +100,8 @@ final class IssuerBindingTest extends TestCase
     public function testIssuerIsThePenultimateFieldOfTheSignedCanonicalPayload(): void
     {
         // Canonical v2 payload: `...|min_duration_ms|region|policy_version|
-        // request_binding|issuer|kid` — kid (default 1) is the FINAL
-        // segment, appended AFTER the issuer.
+        // request_binding|issuer|kid`; kid (default 1) is the final
+        // segment, appended after the issuer.
         [, $record] = $this->issue('staging');
 
         $canonical = Issuer::canonicalPayload(
@@ -169,8 +169,8 @@ final class IssuerBindingTest extends TestCase
 
     public function testVerifierRejectsUnboundRecordFailClosed(): void
     {
-        // A NULL record issuer is redeemable by every deployment, so an
-        // issuer-configured verifier must fail CLOSED on it.
+        // A null record issuer is redeemable by every deployment, so an
+        // issuer-configured verifier must fail closed on it.
         [$storage, , $token] = $this->issue(null);
 
         $verifier = new Verifier($storage, expectedIssuer: 'prod');
@@ -197,7 +197,7 @@ final class IssuerBindingTest extends TestCase
 
     public function testSharedSecretDoesNotDefeatTheCompartment(): void
     {
-        // Two deployments SHARING the secret
+        // Two deployments sharing the secret
         // key must still reject each other's challenges via the issuer.
         [$storageA, , $tokenA] = $this->issue('dev');
 
@@ -226,9 +226,9 @@ final class IssuerBindingTest extends TestCase
 
     public function testIssuerSurvivesTheRedisJsonWrappedRoundTrip(): void
     {
-        // Storage-layer sanity: the issuer is a BASE canonical key (not a
-        // runtime field), so it must survive the wrapped-JSON round trip
-        // even though the canonical record parser strips state/
+        // Storage-layer sanity: the issuer is a base canonical key (not
+        // a runtime field), so it must survive the wrapped-JSON round
+        // trip even though the canonical record parser strips state and
         // consumed_result.
         if (!\class_exists(\Predis\Client::class)) {
             self::markTestSkipped('predis/predis is not installed');

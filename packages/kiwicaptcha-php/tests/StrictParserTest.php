@@ -185,9 +185,9 @@ final class StrictParserTest extends TestCase
 
         yield 'algorithm alias argon2' => [self::mutate('algorithm', 'argon2'), 'must be exactly'];
 
-        // Unknown algorithm strings must be rejected IDENTICALLY
-        // to the Rust parser (PoWAlgorithm enum — exact lowercase names
-        // only, no aliases, no spelling variants).
+        // Unknown algorithm strings must be rejected identically to the
+        // Rust parser (PoWAlgorithm enum: exact lowercase names only, no
+        // aliases, no spelling variants).
         yield 'algorithm unknown argon2d' => [self::mutate('algorithm', 'argon2d'), 'must be exactly'];
 
         yield 'algorithm unknown sha1' => [self::mutate('algorithm', 'sha1'), 'must be exactly'];

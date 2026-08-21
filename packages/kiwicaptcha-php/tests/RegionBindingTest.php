@@ -15,11 +15,11 @@ use KiwiCaptcha\Tests\Fixtures\Vectors;
 use PHPUnit\Framework\TestCase;
 
 /**
- * Region binding: the issued record carries an
- * optional region (NULL = unbound), the record JSON always includes the
- * `region` key (byte parity with the Rust serde schema — 21 keys), and a
- * verifier configured with an expected region rejects any record whose
- * region does not match EXACTLY (WrongRegion), including unbound records.
+ * Region binding: the issued record carries an optional region (null =
+ * unbound), and the record JSON always includes the `region` key (byte
+ * parity with the Rust serde schema, 21 keys). A verifier configured
+ * with an expected region rejects any record whose region does not
+ * match exactly (WrongRegion), including unbound records.
  */
 final class RegionBindingTest extends TestCase
 {
@@ -111,8 +111,8 @@ final class RegionBindingTest extends TestCase
 
     public function testVerifierRegionRejectsUnboundRecordFailClosed(): void
     {
-        // A NULL record region is redeemable in every region, so a
-        // region-configured verifier must fail CLOSED on it.
+        // A null record region is redeemable in every region, so a
+        // region-configured verifier must fail closed on it.
         [$storage, , $token] = $this->issue(null);
 
         $verifier = new Verifier($storage, region: 'eu');
@@ -144,12 +144,13 @@ final class RegionBindingTest extends TestCase
 
     public function testRegionIsPartOfTheSignedCanonicalPayload(): void
     {
-        // region, policy_version, and request_binding
-        // ARE part of the signed canonical payload — the v2 signature covers
-        // the FULL canonical (`...|min_duration_ms|region|policy_version|
-        // request_binding`), so a record's embedded signature must equal the
-        // v2 signature over its canonical INCLUDING the region, and two
-        // records issued for different regions carry different signatures.
+        // region, policy_version, and request_binding are part of the
+        // signed canonical payload: the v2 signature covers the full
+        // canonical (`...|min_duration_ms|region|policy_version|
+        // request_binding`), so a record's embedded signature must equal
+        // the v2 signature over its canonical including the region. Two
+        // records issued for different regions carry different
+        // signatures.
         [, $recordA] = $this->issue('eu');
         [, $recordB] = $this->issue('us');
 

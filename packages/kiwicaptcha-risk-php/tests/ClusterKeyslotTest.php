@@ -9,21 +9,22 @@ use Predis\Client;
 use PHPUnit\Framework\TestCase;
 
 /**
- * REDIS CLUSTER KEYSLOT TESTS.
+ * Redis Cluster keyslot tests.
  *
- * Every multi-key Lua invocation must use keys in the same hash slot (the
- * {kiwi:<ns>} tag). For each canonical script's key set we build the keys
- * EXACTLY as the production code builds them, then assert all slots are
- * equal. The slot is asked from the SERVER itself via CLUSTER KEYSLOT when
- * the instance serves it; standalone Redis 7 refuses the CLUSTER command
- * ("This instance has cluster support disabled"), so the test then falls
- * back to the canonical CRC-16/XMODEM slot computation — the EXACT
- * algorithm Redis Cluster uses for hash tags (slot = crc16(tag) & 0x3FFF),
- * whose reference vectors are pinned in the store's assertSameSlot and the
- * keyslot tests. Either way the assertion is identical: every key of one
- * script invocation must hash to ONE slot.
+ * Every multi-key Lua invocation must use keys in the same hash slot
+ * (the {kiwi:<ns>} tag). For each canonical script's key set the keys
+ * are built exactly as the production code builds them, then all slots
+ * are asserted equal. The slot is asked from the server itself via the
+ * cluster keyslot command when the instance serves it. Standalone Redis
+ * 7 refuses the cluster command ("This instance has cluster support
+ * disabled"), so the test falls back to the canonical CRC-16/xmodem
+ * slot computation. That is the exact algorithm Redis Cluster uses for
+ * hash tags: slot = crc16(tag) & 0x3FFF, whose reference vectors are
+ * pinned in the store's assertSameSlot and the keyslot tests. Either
+ * way every key of one script invocation must hash to one slot.
  *
- * Skipped unless RISK_REDIS_URL is set, like the other Redis-backed tests.
+ * Skipped unless a Redis URL is configured, like the other Redis-backed
+ * tests.
  */
 final class ClusterKeyslotTest extends TestCase
 {
@@ -62,9 +63,9 @@ final class ClusterKeyslotTest extends TestCase
     }
 
     /**
-     * Server-authoritative slot when the instance serves CLUSTER KEYSLOT;
-     * the canonical CRC-16/XMODEM slot computation otherwise (standalone
-     * Redis refuses the CLUSTER command).
+     * Server-authoritative slot when the instance serves the cluster
+     * keyslot command; the canonical CRC-16/xmodem slot computation
+     * otherwise, since standalone Redis refuses the cluster command.
      */
     private function slotOf(string $key): int
     {
@@ -218,8 +219,8 @@ final class ClusterKeyslotTest extends TestCase
     public function testSlotAgreesWithTheLocalCrc16Assertion(): void
     {
         // The store's own assertSameSlot (pure CRC-16 over the tag) must
-        // agree with the slot computation used by this test — on a cluster-
-        // enabled instance the server's CLUSTER KEYSLOT answer is used and
+        // agree with the slot computation used by this test. On a
+        // cluster-enabled instance the server's keyslot answer is used and
         // must agree with the local CRC-16 too.
         $ns = 'ks' . bin2hex(random_bytes(4));
         $store = new RedisRiskStateStore($this->client, namespace: $ns);

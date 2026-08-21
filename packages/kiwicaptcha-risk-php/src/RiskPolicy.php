@@ -10,7 +10,7 @@ namespace KiwiCaptcha\Risk;
  * Configuration shape:
  *   [
  *     'version' => int,
- *     'weights' => [...13 snake_case weights...],
+ *     'weights' => [...13 snake_case weights...].
  *     'scopes' => [
  *        <int scope> => [
  *          'base_risk' => int,
@@ -18,21 +18,21 @@ namespace KiwiCaptcha\Risk;
  *          'post_solve_check' => bool,
  *          'degraded' => 'allow'|...,               // RiskAction string
  *        ],
- *     ],
+ *     ].
  *     'global_floors' => [0 => 'allow', 1 => 'sha16', 2 => 'sha18', 3 => 'sha20', 4 => 'sha20'],
- *   ]   (index 0 must be 'allow'; levels 1..4 valid actions; missing
- *         levels 1..4 default from DEFAULT_GLOBAL_FLOORS)
+ *     with index 0 = 'allow' and levels 1..4 valid actions. Missing
+ *     levels 1..4 default from the built-in default floors.
  *
  * The `hash` is sha256 of the canonical JSON of the config (recursively
- * key-sorted, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE).
+ * key-sorted, with unescaped slashes and unescaped unicode).
  *
  * policy_version (the config's `version`, stamped on every decision):
  * bump it whenever the operator policy materially changes. A model
- * revision (RiskModel::REVISION) that MATERIALLY affects security —
- * e.g. changes how scores are computed or how calibration moves the
- * bias — REQUIRES a policy_version bump too, so the decision's
- * policy_version always pins down both the operator policy AND the
- * security-relevant model generation it was computed under.
+ * revision that materially affects security, e.g. changes how scores
+ * are computed or how calibration moves the bias, requires a
+ * policy_version bump too, so the decision's policy_version always
+ * pins down both the operator policy and the security-relevant model
+ * generation it was computed under.
  */
 final class RiskPolicy
 {
@@ -60,7 +60,7 @@ final class RiskPolicy
     }
 
     /**
-     * Parses and VALIDATES a policy config. Rejects: a version that does
+     * Parses and validates a policy config. Rejects: a version that does
      * not match the requested (default: contract) version, base_risk
      * outside 0..1000, scope ids outside 1..4294967295, and global_floors
      * that are not exactly 5 actions (index 0 = Allow, entries 1..4 valid
@@ -169,21 +169,23 @@ final class RiskPolicy
      * minimum and the global floor, then hard overrides with reasons.
      *
      * Argon re-escalation ordering: ladder → strongest(minimum, floor) →
-     * capacity — the argon-capacity check is the LAST step, so the final
+     * capacity. The argon-capacity check is the last step, so the final
      * floor/minimum re-clamp can never reintroduce Argon. A final Argon
      * action with argonCapacity < 300 escalates to StepUp.
      *
      * Hysteresis: with $hysteresis the band selection uses the
      * scope's previous action — escalate to the next band only at its
-     * ENTER threshold (upper + 10), de-escalate only below its EXIT
-     * threshold (lower − 10); fresh scopes and StepUp/Deny use the plain
-     * mapping. The map stores the SCORE-selected action, so hard overrides
-     * never poison the profile. Passing null (the default) keeps the plain
-     * band mapping, byte-identical with the previous behavior.
+     * enter threshold (upper + 10), de-escalate only below its exit
+     * threshold (lower − 10). Fresh scopes and StepUp/Deny use the
+     * plain mapping. The map stores the score-selected action, so hard
+     * overrides never poison the profile. Passing null (the default)
+     * keeps the plain band mapping, byte-identical with the previous
+     * behavior.
      *
      * Reasons: policy override reasons first, then the top signal
-     * contributors (contribution = (v * w) / 1000, sorted by contribution
-     * desc, ties in SignalVector order), deduped and capped at 4 total.
+     * contributors, contribution = (v * w) / 1000, sorted by
+     * contribution desc with ties in SignalVector order, deduped and
+     * capped at 4 total.
      *
      * @param int $cooldownUntilMs additional (store-provided) cooldown deadline; defaults to none
      */
@@ -227,11 +229,11 @@ final class RiskPolicy
             $deny = true;
         }
         $retryAfterMs = null;
-        // The cooldown_until value from the store is the GLOBAL hysteresis
+        // The cooldown_until value from the store is the global hysteresis
         // hold marker (the level-until deadline), NOT a per-source denial
         // window — treating it as such would deny every request while the
         // global level is merely elevated. Cooldown denial applies only at
-        // EMERGENCY level, where the global controller intends a temporary
+        // emergency level, where the global controller intends a temporary
         // admission stop.
         if ($cooldownUntilMs > 0 && $nowMs < $cooldownUntilMs && $globalLevel >= 4) {
             $reasons[] = RiskReason::Cooldown;
@@ -245,7 +247,7 @@ final class RiskPolicy
             $action = $this->strongest($action, $minimum, $floor);
         }
 
-        // Argon capacity is the LAST step: the floor/minimum re-clamp above
+        // Argon capacity is the last step: the floor/minimum re-clamp above
         // can never reintroduce Argon, and the capacity downgrade never
         // falls back below the ladder.
         if ($action->isArgon() && $r->argonCapacity < 300) {
@@ -338,7 +340,7 @@ final class RiskPolicy
         return $best;
     }
 
-    /** Recursively key-sorted, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE. */
+    /** Recursively key-sorted, with unescaped slashes and unescaped unicode. */
     private static function canonicalJson(array $value): string
     {
         self::sortRecursive($value);

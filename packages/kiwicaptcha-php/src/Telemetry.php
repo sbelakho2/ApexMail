@@ -5,7 +5,7 @@ declare(strict_types=1);
 namespace KiwiCaptcha;
 
 /**
- * Bot-detection telemetry scorer — mirrors the Rust crate's
+ * Bot-detection telemetry scorer, mirroring the Rust crate's
  * `score_telemetry` (packages/kiwicaptcha/src/verify.rs) exactly.
  *
  * Returns true when the telemetry is characteristic of a bot, false for
@@ -15,15 +15,15 @@ namespace KiwiCaptcha;
  *  1. webdriver flag set ("wd" == true).
  *  2. Solve completes in > 30s with zero mouse/key events (headless solver).
  *  3. Solve takes > 300s total (well beyond expected).
- *  4. >= 24 discrete event timings ("et") whose mean interval is >= 8ms with
- *     a coefficient of variation < 0.02 — bots simulate events with perfectly
- *     uniform intervals, which a person cannot produce.
+ *  4. >= 24 discrete event timings ("et") whose mean interval is >= 8ms
+ *     with a coefficient of variation < 0.02. Bots simulate events with
+ *     perfectly uniform intervals, which a person cannot produce.
  *
  * The check is deliberately conservative: it only considers *discrete*
- * events (pointerdown, non-repeat keydown, wheel, click — never coalesced
- * mousemove or OS key auto-repeat), so a burst of sub-frame events that
- * rounds to identical millisecond timestamps is never misclassified
- * (mean < 8ms fails the gate).
+ * events (pointerdown, non-repeat keydown, wheel, click; never coalesced
+ * mousemove or OS key auto-repeat). A burst of sub-frame events that
+ * rounds to identical millisecond timestamps is therefore never
+ * misclassified; a mean below 8ms fails the gate.
  */
 final class Telemetry
 {
@@ -93,8 +93,8 @@ final class Telemetry
         }
 
         // Soft signals (hc=0, dm=0 / hc=0, pl=0) are logged by the Rust
-        // verifier but never rejected — the PHP port has no logger dependency,
-        // so they are intentionally ignored here.
+        // verifier but never rejected; the PHP port has no logger
+        // dependency, so they are intentionally ignored here.
 
         return false;
     }

@@ -1,9 +1,9 @@
-//! HKDF-SHA256 identity keys, derived exactly per the risk-v1 contract:
+//! hkdf-sha256 identity keys, derived exactly per the risk-v1 contract:
 //!
-//! `Hkdf::<Sha256>::new(Some(b"kiwicaptcha-risk-v1"), master)` expanded to 32
-//! bytes with `info` in {source, subnet, session, principal, event}. The PHP
-//! side derives the same keys with `hash_hkdf('sha256', master, 32, info,
-//! 'kiwicaptcha-risk-v1')`.
+//! `Hkdf::<Sha256>` with salt `kiwicaptcha-risk-v1` and master input,
+//! expanded to 32 bytes per `info` in {source, subnet, session, principal,
+//! event}. The PHP side derives the same keys with
+//! `hash_hkdf('sha256', master, 32, info, 'kiwicaptcha-risk-v1')`.
 
 use hkdf::Hkdf;
 use sha2::Sha256;
@@ -21,7 +21,7 @@ pub struct RiskKeys {
 }
 
 impl RiskKeys {
-    /// HKDF salt used by both implementations.
+    /// hkdf salt used by both implementations.
     pub const SALT: &'static [u8] = b"kiwicaptcha-risk-v1";
     pub const INFO_SOURCE: &'static [u8] = b"source";
     pub const INFO_SUBNET: &'static [u8] = b"subnet";
@@ -29,7 +29,7 @@ impl RiskKeys {
     pub const INFO_PRINCIPAL: &'static [u8] = b"principal";
     pub const INFO_EVENT: &'static [u8] = b"event";
 
-    /// Derives the five keys with HKDF-SHA256 (salt `kiwicaptcha-risk-v1`,
+    /// Derives the five keys with hkdf-sha256 (salt `kiwicaptcha-risk-v1`,
     /// 32-byte output per info).
     pub fn from_master(master: &[u8]) -> RiskKeys {
         let hk = Hkdf::<Sha256>::new(Some(Self::SALT), master);
@@ -63,9 +63,9 @@ mod tests {
     use super::*;
     use hex::ToHex;
 
-    /// Parity anchors computed by the PHP implementation
-    /// (`hash_hkdf('sha256', str_repeat(chr(0x42), 32), 32, info,
-    /// 'kiwicaptcha-risk-v1')`). The Rust `Hkdf::<Sha256>` derivation MUST
+    /// Parity anchors computed by the PHP implementation: hash_hkdf of
+    /// sha256 over 0x42 repeated 32 times, 32 bytes, info and
+    /// 'kiwicaptcha-risk-v1'. The Rust `Hkdf::<Sha256>` derivation must
     /// reproduce these exactly.
     #[test]
     fn hkdf_keys_match_php_parity_anchors() {

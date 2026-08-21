@@ -11,7 +11,7 @@ namespace KiwiCaptcha\Risk;
  * event identifiers passed into the canonical state script (risk.lua) and
  * must be byte-identical across the PHP and Rust implementations.
  *
- * Values 18..20 are the ADDITIVE risk-v2 surface: honeypot/decoy evidence
+ * Values 18..20 are the additive risk-v2 surface: honeypot/decoy evidence
  * kinds. They ride the same observation path (idempotency domain separation,
  * dedupe receipt) but the state script treats them as no-ops (like
  * RiskDenied) — the honeypot signal itself is scored from the risk-v2

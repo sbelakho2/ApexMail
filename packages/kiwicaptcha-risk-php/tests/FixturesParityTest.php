@@ -10,7 +10,7 @@ use KiwiCaptcha\Risk\RiskWeights;
 use PHPUnit\Framework\TestCase;
 
 /**
- * Golden fixture parity: EVERY protocol/risk-v1/fixtures.json vector must
+ * Golden fixture parity: every protocol/risk-v1/fixtures.json vector must
  * reproduce expected_score exactly (byte-identical with the Rust side).
  */
 final class FixturesParityTest extends TestCase

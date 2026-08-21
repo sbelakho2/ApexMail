@@ -11,8 +11,8 @@ use PHPUnit\Framework\TestCase;
 use Symfony\Bundle\FrameworkBundle\Test\KernelTestCase;
 
 /**
- * binding_mode: 'none' must be FULLY wired through the bundle into the core
- * Issuer: challenges carry an EMPTY binding tag and verification succeeds
+ * binding_mode: 'none' must be fully wired through the bundle into the core
+ * Issuer: challenges carry an empty binding tag and verification succeeds
  * from any client IP (maximum privacy; relay protection off).
  */
 final class NoBindingIntegrationTest extends KernelTestCase
@@ -36,13 +36,13 @@ final class NoBindingIntegrationTest extends KernelTestCase
         $storage = $container->get('kiwi_captcha.storage.array');
         $challenge = $issuer->issue('login', '203.0.113.9');
 
-        // The signed v2 canonical must carry an EMPTY binding-tag segment.
+        // The signed v2 canonical must carry an empty binding-tag segment.
         $canonical = base64_decode(explode('.', $challenge->challenge)[0], true);
         $parts = explode('|', (string) $canonical);
         self::assertSame('v2', $parts[0]);
         self::assertSame('', $parts[3], 'binding_mode none must produce an empty binding tag');
 
-        // Solve + verify from a DIFFERENT IP: must pass (no binding).
+        // Solve + verify from a different IP: must pass (no binding).
         $counter = 0;
         do {
             $h = hash('sha256', $challenge->prefix . $counter . base64_decode($challenge->salt, true), true);

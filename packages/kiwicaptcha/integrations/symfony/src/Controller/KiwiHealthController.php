@@ -11,57 +11,57 @@ use Symfony\Component\HttpFoundation\Response;
 /**
  * Rollback-resistant liveness/readiness split.
  *
- *  - `/health/live`  — ALWAYS 200 while the process runs. Never tied to
+ *  - `/health/live` always 200 while the process runs. Never tied to
  *    saturation, Redis, or any external state: a process that is up is
  *    "live" (the orchestrator only cares that the worker exists and can
  *    answer).
  *
- *  - `/health/ready` — 200 only when ALL of:
- *      1. the issuer/verifier SIGNING KEYS are configured (the bundle
+ *  - `/health/ready` is 200 only when all of:
+ *      1. the issuer/verifier signing keys are configured (the bundle
  *         secret is required, so this is normally trivially true);
- *      2. the SECURITY Redis is reachable: a PING probe, cached ~1 s
- *         (in-process). Transient probe timeouts NEVER fail readiness on
+ *      2. the security Redis is reachable: a PING probe, cached ~1 s
+ *         in-process. Transient probe timeouts never fail readiness on
  *         their own: the first failure is debounced for one cache window
- *         (a blip that recovers within ~1 s keeps the last healthy state);
- *         two consecutive failures flip readiness. Argon queue fullness is
- *         NEVER consulted.
- *      3. the CENTRAL security-policy state is compatible: Redis key
+ *         (a blip that recovers within ~1 s keeps the last healthy
+ *         state), and two consecutive failures flip readiness. Argon
+ *         queue fullness is never consulted.
+ *      3. the central security-policy state is compatible: the Redis key
  *         `{kiwi:<ns>}:security-policy` (a HASH with
- *         `min_protocol_version` + `min_policy_epoch`). When the key is
- *         present, ready requires min_protocol_version <= 2 (this binary's
- *         max protocol version) AND min_policy_epoch <= the configured
- *         risk.policy_version — a NEWER central policy (mixed-version
- *         rolling deployments, rollbacks) takes an outdated binary OUT of the
- *         pool BEFORE it serves traffic it cannot honor. When the key is
- *         ABSENT the binary's own configuration is authoritative.
- *      4. the MEMORY-BUDGET invariant holds (only when
+ *         `min_protocol_version` and `min_policy_epoch`). When the key is
+ *         present, ready requires min_protocol_version <= 2 (this
+ *         binary's max protocol version) and min_policy_epoch <= the
+ *         configured risk.policy_version. A newer central policy
+ *         (mixed-version rolling deployments, rollbacks) takes an
+ *         outdated binary out of the pool before it serves traffic it
+ *         cannot honor. When the key is absent the binary's own
+ *         configuration is authoritative.
+ *      4. the memory-budget invariant holds (only when
  *         risk.container_memory_mib is configured):
- *         `argon2_max_concurrent_verifications × the FIXED Argon verification
- *         envelope (risk.argon_verification_memory_kib — the risk ladder's
- *         worst-case per-verification memory; default 16384 KiB)
- *         + 256 MiB headroom <= container_memory_mib`. A violated invariant
- *         refuses startup (503 memory_budget_invariant): the configured
- *         container cannot hold the worst-case memory-hard verification
- *         load plus headroom, so the process must not serve traffic. When
- *         container_memory_mib is null (or the concurrency cap is 0 =
- *         unlimited) the check is skipped (documented — the invariant is
- *         only meaningful with a finite cap; an unlimited cap needs an
- *         explicit budget decision).
+ *         `argon2_max_concurrent_verifications x the fixed Argon
+ *         verification envelope (risk.argon_verification_memory_kib, the
+ *         risk ladder's worst-case per-verification memory, default
+ *         16384 KiB) + 256 MiB headroom <= container_memory_mib`. A
+ *         violated invariant refuses startup (503 memory_budget_invariant).
+ *         When container_memory_mib is null (or the concurrency cap is 0
+ *         = unlimited) the check is skipped: the invariant is only
+ *         meaningful with a finite cap, and an unlimited cap needs an
+ *         explicit budget decision.
  *
  * The route paths follow the configured route_prefix (default
  * /kiwi-captcha/health/live + /health/ready) and are registered by
  * {@see \BelConsulting\KiwiCaptchaBundle\Routing\KiwiCaptchaRouteLoader}
  * when risk.health.enabled is true (default).
  *
- * Every response is a private JSON document (never cached by proxies/CDNs).
+ * Every response is a private JSON document (never cached by proxies or
+ * CDNs).
  */
 final class KiwiHealthController
 {
     /**
-     * The binary's MAXIMUM challenge protocol version. A central
+     * The binary's maximum challenge protocol version. A central
      * security-policy hash demanding a higher version means this binary
-     * cannot verify the challenges the fleet now issues — it must not be
-     * ready.
+     * cannot verify the challenges the fleet now issues, so it must not
+     * be ready.
      */
     public const MAX_PROTOCOL_VERSION = 2;
 
@@ -81,37 +81,38 @@ final class KiwiHealthController
 
     /**
      * @param \Redis|\Predis\Client|null $redis         the security Redis
-     *                                                   client (null = no
+     *                                                   client. Null = no
      *                                                   external security
-     *                                                   state — the Redis
-     *                                                   legs are vacuous)
+     *                                                   state, so the Redis
+     *                                                   legs are vacuous.
      * @param string                     $namespace     the risk namespace
      *                                                   (sanitized) used for
      *                                                   the central policy
-     *                                                   key
+     *                                                   key.
      * @param int                        $policyVersion the configured
-     *                                                   risk.policy_version
-     * @param callable(): float|null     $nowMs         clock override (tests)
+     *                                                   risk.policy_version.
+     * @param callable(): float|null     $nowMs         clock override
+     *                                                   (tests).
      * @param int                        $argonConcurrency  the configured
      *                                                   argon2_max_concurrent_
      *                                                   verifications (0 =
      *                                                   unlimited; the
      *                                                   invariant treats it
-     *                                                   as 1 — at least one
-     *                                                   hash must fit)
+     *                                                   as 1, so at least
+     *                                                   one hash must fit).
      * @param int|null                   $containerMemoryMib risk.container_
-     *                                                   memory_mib — null
+     *                                                   memory_mib; null
      *                                                   (default) skips the
-     *                                                   invariant
-     * @param int                        $argonEnvelopeMemoryKib the FIXED
+     *                                                   invariant.
+     * @param int                        $argonEnvelopeMemoryKib the fixed
      *                                                   adaptive verification
      *                                                   memory envelope
      *                                                   (risk.argon_verification_
-     *                                                   memory_kib)
-     *                                                   — the worst-case
+     *                                                   memory_kib), the
+     *                                                   worst-case
      *                                                   per-verification
      *                                                   memory of the risk
-     *                                                   ladder, risk-independent
+     *                                                   ladder.
      */
     public function __construct(
         private readonly string $secretKey,
@@ -159,17 +160,17 @@ final class KiwiHealthController
 
     /**
      * The memory-budget readiness invariant:
-     * `max(1, argon_concurrency) × MAX_PROFILE_MIB + MEMORY_HEADROOM_MIB
-     * <= container_memory_mib`. True (ready) when the budget is null (the
-     * check is skipped and documented) or the budget is large enough — a
-     * container that cannot hold the worst-case verification memory load
-     * must not serve traffic (OOM in the middle of a memory-hard hash is a
-     * security failure, not just an availability one).
+     * `max(1, argon_concurrency) x MAX_PROFILE_MIB + MEMORY_HEADROOM_MIB
+     * <= container_memory_mib`. True when the budget is null (the check is
+     * skipped and documented) or the budget is large enough. A container
+     * that cannot hold the worst-case verification memory load must not
+     * serve traffic, since OOM in the middle of a memory-hard hash is a
+     * security failure, not just an availability one.
      *
      * The concurrency cap is floored at 1: a cap of 0 means "unlimited",
-     * for which no worst case exists — the invariant then only guarantees
-     * the headroom (the operator must set a finite cap for a meaningful
-     * check, see README).
+     * for which no worst case exists, so the invariant then only
+     * guarantees the headroom (the operator must set a finite cap for a
+     * meaningful check).
      */
     public function memoryBudgetOk(): bool
     {
@@ -183,12 +184,12 @@ final class KiwiHealthController
     }
 
     /**
-     * Max adaptive-profile memory in MiB: the risk ladder's
-     * largest per-verification memory is the FIXED verification envelope
-     * (risk.argon_verification_memory_kib) — the
-     * escalating 16/32/64 MiB argon profiles are gone, so the worst case is the
-     * single configured envelope, independent of the risk decision. Defaults
-     * to the classic argon64 65536 KiB ceiling when the knob is absent.
+     * Max adaptive-profile memory in MiB: the risk ladder's largest
+     * per-verification memory is the fixed verification envelope
+     * (risk.argon_verification_memory_kib). The escalating 16/32/64 MiB
+     * argon profiles are gone, so the worst case is the single configured
+     * envelope, independent of the risk decision. Defaults to the classic
+     * argon64 65536 KiB ceiling when the knob is absent.
      */
     private function maxProfileMib(): int
     {
@@ -200,11 +201,11 @@ final class KiwiHealthController
     /**
      * Security Redis reachability: a PING probe, cached ~1 s.
      *
-     * Transient timeouts never fail readiness on their own: the FIRST
-     * failed probe is debounced for one cache window (a blip that recovers
-     * within ~1 s keeps the last healthy state); a second consecutive
-     * failure — or a failure on a freshly booted process — flips readiness.
-     * A probe exception (timeout/refused) is a probe failure, never a
+     * Transient timeouts never fail readiness on their own: the first
+     * failed probe is debounced for one cache window. A blip that recovers
+     * within ~1 s keeps the last healthy state; a second consecutive
+     * failure, or a failure on a freshly booted process, flips readiness.
+     * A probe exception (timeout or refused) is a probe failure, never a
      * propagated error.
      */
     private function securityRedisReachable(): bool
@@ -229,8 +230,8 @@ final class KiwiHealthController
 
         if (!$ok) {
             if ($this->lastProbeOk === true && !$this->pendingProbeFailure) {
-                // First failure after a healthy state: debounce — keep the
-                // last healthy result for one more cache window.
+                // First failure after a healthy state: debounce, keeping
+                // the last healthy result for one more cache window.
                 $this->pendingProbeFailure = true;
             } else {
                 $this->lastProbeOk = false;
@@ -246,10 +247,10 @@ final class KiwiHealthController
     }
 
     /**
-     * CENTRAL security-policy compatibility (cached ~1 s):
-     * `{kiwi:<ns>}:security-policy` hash — when PRESENT, ready requires
-     * min_protocol_version <= {@see self::MAX_PROTOCOL_VERSION} AND
-     * min_policy_epoch <= the configured risk.policy_version. When ABSENT
+     * Central security-policy compatibility (cached ~1 s):
+     * `{kiwi:<ns>}:security-policy` hash. When present, ready requires
+     * min_protocol_version <= {@see self::MAX_PROTOCOL_VERSION} and
+     * min_policy_epoch <= the configured risk.policy_version. When absent
      * (or when no Redis is configured) the binary's own configuration is
      * authoritative.
      *

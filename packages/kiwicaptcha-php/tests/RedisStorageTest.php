@@ -101,7 +101,7 @@ final class RedisStorageTest extends TestCase
         $setCalls = array_values(array_filter($client->calls, fn ($c) => $c[0] === 'SET'));
         self::assertSame('EX', $setCalls[0][1][2] ?? null, 'store must set the key expiration');
         // The TTL must be fused into the SET command (SET key val
-        // EX ttl) — a separate EXPIRE round trip is not atomic and must
+        // EX ttl); a separate expire round trip is not atomic and must
         // never be issued.
         $expireCalls = array_values(array_filter($client->calls, fn ($c) => $c[0] === 'EXPIRE'));
         self::assertSame([], $expireCalls, 'store must set the TTL in the SET command, never a separate EXPIRE');
@@ -110,9 +110,10 @@ final class RedisStorageTest extends TestCase
     public function testStoreTtlIncludesTheMargin(): void
     {
         // ttlMarginSecs extends the record's retention beyond
-        // token validity — TTL = expires_at - now + margin. The margin must
-        // exceed max clock skew + failover margin so a replayed token can
-        // never land on an already-expired state that re-accepted it.
+        // token validity: TTL = expires_at - now + margin. The margin
+        // must exceed max clock skew + failover margin so a replayed
+        // token can never land on an already-expired state that
+        // re-accepted it.
         $client = $this->requirePredis();
         $storage = new RedisStorage($client, ttlMarginSecs: 30);
         $record = $this->makeRecord();
@@ -142,7 +143,7 @@ final class RedisStorageTest extends TestCase
     public function testStoreIssuesWaitAndVerifiesThresholdWhenConfigured(): void
     {
         // With waitReplicas > 0 the durability barrier is
-        // unconditional — store() issues WAIT after SET and FAILS CLOSED
+        // unconditional: store() issues WAIT after SET and fails closed
         // when the acknowledged replica count is below the threshold.
         $client = $this->requirePredis();
         $storage = new RedisStorage($client, waitReplicas: 2, waitTimeoutMs: 100);
@@ -158,7 +159,8 @@ final class RedisStorageTest extends TestCase
         self::assertNotEmpty($waits, 'store must issue WAIT after SET when waitReplicas > 0');
         self::assertSame([2, 100], $waits[0][1], 'WAIT must carry the configured numreplicas and timeout');
 
-        // The same store satisfies the barrier when the replica set ACKs.
+        // The same store satisfies the barrier when the replica set
+        // acknowledges.
         $client->waitAck = 2;
         $storage->store($this->makeRecord('redis-nonce-2'));
         self::assertCount(2, array_values(array_filter($client->calls, fn ($c) => $c[0] === 'WAIT')));
@@ -186,19 +188,20 @@ final class RedisStorageTest extends TestCase
 
         $data = json_decode((string) $raw, true, flags: JSON_THROW_ON_ERROR);
         self::assertIsArray($data);
-        // The stored JSON is the shared language-neutral schema — the 22
-        // canonical ChallengeRecord keys (identical to the Rust serde keys,
-        // including attempts_used (Rust: #[serde(default)]) so a PHP-written
-        // record is complete for a Rust reader) WRAPPED with the three
-        // storage runtime fields: `state` ("pending"),
+        // The stored JSON is the shared language-neutral schema: the 22
+        // canonical ChallengeRecord keys (identical to the Rust serde
+        // keys, including attempts_used via #[serde(default)] so a
+        // PHP-written record is complete for a Rust reader), wrapped
+        // with the three storage runtime fields `state` ("pending"),
         // `consumed_result` (null) and `operation_identity` (null).
-        // Protocol v2 emits binding_tag ONLY — never the legacy ip_hash key
-        // alongside it: the Rust reader uses #[serde(alias = "ip_hash")] and
-        // serde rejects a struct carrying both the field and its alias as a
-        // duplicate field, making a dual-key record unreadable by Rust
-        // (caught by the live cross-language round trip). The canonical key
-        // set is `ChallengeRecord::WIRE_KEYS` — that list is the source of
-        // truth for the stored wire schema.
+        // Protocol v2 emits binding_tag only, never the legacy ip_hash
+        // key alongside it: the Rust reader uses #[serde(alias =
+        // "ip_hash")] and serde rejects a struct carrying both the field
+        // and its alias as a duplicate field, making a dual-key record
+        // unreadable by Rust (caught by the live cross-language round
+        // trip). The canonical key list is the source of truth for the
+        // stored wire schema.
+
         self::assertSame([
             'nonce', 'scope', 'binding_tag', 'issued_at', 'expires_at',
             'algorithm', 'm_kib', 't', 'p', 'target_bits', 'salt', 'prefix',
@@ -231,8 +234,8 @@ final class RedisStorageTest extends TestCase
 
     public function testReadsRecordsWrittenWithoutAttemptsUsed(): void
     {
-        // A Rust-written record may omit attempts_used (serde default) — the
-        // PHP reader must accept it and default to 0.
+        // A Rust-written record may omit attempts_used (serde default);
+        // the PHP reader must accept it and default to 0.
         $client = $this->requirePredis();
         $data = $this->makeRecord('rust-rec')->toArray();
         unset($data['attempts_used']);
@@ -253,8 +256,8 @@ final class RedisStorageTest extends TestCase
 
     public function testConsumeIsAtomicSingleUseTransition(): void
     {
-        // consume() is a TRANSITION, not a delete — the winner
-        // gets consumedNow, the record is KEPT (marked consumed), and a
+        // consume() is a transition, not a delete: the winner gets
+        // consumedNow, the record is kept (marked consumed), and a
         // second consume returns the same record with consumedBefore.
         $client = $this->requirePredis();
         $storage = new RedisStorage($client);
@@ -303,7 +306,7 @@ final class RedisStorageTest extends TestCase
 
     public function testCommitResultStoresTheDeterministicOutcome(): void
     {
-        // commitResult only lands on a CONSUMED record without a
+        // commitResult only lands on a consumed record without a
         // result yet; the stored JSON then carries consumed_result.
         $client = $this->requirePredis();
         $storage = new RedisStorage($client);
@@ -335,10 +338,10 @@ final class RedisStorageTest extends TestCase
     public function testConsumeIssuesWaitAndFailsClosedBelowThreshold(): void
     {
         // The pending→consumed transition carries the same
-        // durability barrier as issuance — a promotion must never resurrect
-        // a consumed record from a stale replica. With the threshold unmet,
-        // consume() throws (the transition DID happen on the primary; the
-        // caller treats the state as indeterminate).
+        // durability barrier as issuance; a promotion must never
+        // resurrect a consumed record from a stale replica. With the
+        // threshold unmet, consume() throws (the transition did happen
+        // on the primary; the caller treats the state as indeterminate).
         $client = $this->requirePredis();
         $storage = new RedisStorage($client, waitReplicas: 1, waitTimeoutMs: 100);
         $client->waitAck = 1;
@@ -362,9 +365,9 @@ final class RedisStorageTest extends TestCase
 
     public function testCommitResultIssuesWaitAndFailsClosedBelowThreshold(): void
     {
-        // The deterministic-result commit is also barriered
-        // (best-effort callers: a barrier failure cannot change the
-        // outcome, but it surfaces the safe degraded state on retry).
+        // The deterministic-result commit is also barriered; for
+        // best-effort callers a barrier failure cannot change the
+        // outcome, but it surfaces the safe degraded state on retry.
         $client = $this->requirePredis();
         $storage = new RedisStorage($client, waitReplicas: 1, waitTimeoutMs: 100);
         $client->waitAck = 1;
@@ -398,9 +401,9 @@ final class RedisStorageTest extends TestCase
 
     public function testConsumeReturnsTheCommittedResultOnRetry(): void
     {
-        // The deterministic retry: after commit, a retry consume returns the
-        // record WITH the stored result — the verifier replays it without
-        // re-deriving.
+        // The deterministic retry: after commit, a retry consume returns
+        // the record with the stored result, and the verifier replays it
+        // without re-deriving.
         $client = $this->requirePredis();
         $storage = new RedisStorage($client);
         $storage->store($this->makeRecord());
@@ -458,10 +461,10 @@ final class RedisStorageTest extends TestCase
 
     public function testLegacySerializedValueIsHandledGracefully(): void
     {
-        // Records written by PHP builds before the JSON interchange change:
-        // serialize() output is not JSON, so it must decode to null (the
-        // challenge is treated as missing) rather than crashing the verify
-        // path.
+        // Records written by PHP builds before the JSON interchange
+        // change: serialize() output is not JSON, so it must decode to
+        // null (the challenge is treated as missing) rather than crashing
+        // the verify path.
         $client = $this->requirePredis();
         $client->store['kiwicaptcha:legacy'] = serialize(['nonce' => 'legacy']);
         $storage = new RedisStorage($client);
@@ -471,10 +474,10 @@ final class RedisStorageTest extends TestCase
 
     public function testRealRedisStoreFindConsumeWithWaitBarrierFailsClosed(): void
     {
-        // Against a REAL Redis: a replica-less server
-        // reports 0 acknowledged replicas, so a configured waitReplicas=1
-        // barrier must FAIL CLOSED — store() throws and the challenge is
-        // never handed to the client (the write is not durably replicated).
+        // Against a real Redis: a replica-less server reports 0
+        // acknowledged replicas, so a configured waitReplicas=1 barrier
+        // must fail closed; store() throws and the challenge is never
+        // handed to the client (the write is not durably replicated).
         // Skipped when the local test Redis (127.0.0.1:6399, no password)
         // is unreachable.
         if (!\class_exists(\Predis\Client::class)) {
@@ -521,10 +524,10 @@ final class RedisStorageTest extends TestCase
 
     public function testWrongCounterConsumesAndRetryReplaysTheInvalidOutcome(): void
     {
-        // The record is consumed BEFORE the proof is checked. A
-        // wrong counter burns the challenge (InsufficientWork) and commits
-        // the deterministic invalid outcome — the subsequent correct token
-        // sees the SAME InsufficientWork without re-deriving.
+        // The record is consumed before the proof is checked. A wrong
+        // counter burns the challenge (InsufficientWork) and commits the
+        // deterministic invalid outcome; the subsequent correct token
+        // sees the same InsufficientWork without re-deriving.
         $client = $this->requirePredis();
         $storage = new RedisStorage($client);
         $issuer = new Issuer(
@@ -546,9 +549,10 @@ final class RedisStorageTest extends TestCase
 
         $challenge = $issuer->issue('login', '198.51.100.77');
 
-        // A WRONG counter must be PROVABLY wrong: at 8 bits a random counter
-        // coincidentally meets the target with p=1/256 (a flake seen in CI).
-        // Search upward until the hash provably misses the target.
+        // A wrong counter must be provably wrong: at 8 bits a random
+        // counter coincidentally meets the target with p=1/256 (a flake
+        // seen in CI). Search upward until the hash provably misses the
+        // target.
         $wrongCounter = 1;
         $saltBytes = base64_decode($challenge->salt, true);
         while (Verifier::leadingZeroBits(hash('sha256', $challenge->prefix.$wrongCounter.$saltBytes, true)) >= $challenge->targetBits) {
@@ -599,15 +603,15 @@ final class RedisStorageTest extends TestCase
         $first = $verifier->verify($token, '0123456789abcdef0123456789abcdef', 'login', '198.51.100.7');
         self::assertTrue($first->isOk(), 'the first verification must succeed (got '.$first->code().')');
 
-        // The consumed record persists with its exact integers intact (the
-        // Lua must NEVER re-encode the record: cjson
-        // rewrote issued_at_ns in scientific notation).
+        // The consumed record persists with its exact integers intact;
+        // the Lua must never re-encode the record, since cjson rewrote
+        // issued_at_ns in scientific notation.
         $stored = $storage->find($challenge->nonce);
         self::assertNotNull($stored, 'the consumed record must persist until its TTL');
         self::assertSame($expectedIssuedAtNs, $stored->issuedAtNs, 'issued_at_ns must survive the consume transition byte-exactly');
 
-        // Deterministic retry: same context returns the SAME stored result
-        // without re-deriving.
+        // Deterministic retry: same context returns the same stored
+        // result without re-deriving.
         $replay = $verifier->verify($token, '0123456789abcdef0123456789abcdef', 'login', '198.51.100.7');
         self::assertTrue($replay->isOk(), 'the replay must return the stored result (got '.$replay->code().')');
         self::assertTrue($replay->fromStoredResult, 'the replay must come from the stored result');
@@ -642,10 +646,11 @@ final class RedisStorageTest extends TestCase
 
     public function testBindingArgumentIsCappedBeforeEvalArgv(): void
     {
-        // The binding embedded into the commit-result EVAL ARGV
+        // The binding embedded into the commit-result eval arguments
         // is the record's request_binding, which the strict record parse
-        // caps at 128 bytes of the identifier alphabet BEFORE it can reach
-        // evalScript — a 10 KB "binding" can never enter the ARGV.
+        // caps at 128 bytes of the identifier alphabet before it can
+        // reach evalScript; a 10 KB "binding" can never enter the script
+        // arguments.
         $client = $this->requirePredis();
         $storage = new RedisStorage($client);
 
@@ -660,7 +665,8 @@ final class RedisStorageTest extends TestCase
             ]);
             self::fail('a 10 KB request_binding must be rejected at parse');
         } catch (\KiwiCaptcha\MalformedRecordException) {
-            // expected: the 128-byte identifier cap fires before any EVAL
+            // expected: the 128-byte identifier cap fires before any
+            // eval
         }
 
         self::assertTrue(true);
@@ -668,9 +674,9 @@ final class RedisStorageTest extends TestCase
 
     public function testConsumeWithOperationIdentityRecordsTheIdentityInTheSameAtomicWrite(): void
     {
-        // The identity lands IN THE SAME write as the pending→consumed
+        // The identity lands in the same write as the pending→consumed
         // flip (the Lua splice), so the stored identity is provably the
-        // ACTUAL atomic consume winner's — read back via consumedState().
+        // actual atomic consume winner's; read back via consumedState().
         $client = $this->requirePredis();
         $storage = new RedisStorage($client);
         $storage->store($this->makeRecord());
@@ -692,11 +698,11 @@ final class RedisStorageTest extends TestCase
 
     public function testConsumeWithOperationIdentityRejectsOversizedIdentities(): void
     {
-        // The identity is bounded (never store unbounded blobs) AND
-        // validated against the narrow alphabet BEFORE the transition: a
-        // malformed identity is REJECTED, never silently dropped — a
+        // The identity is bounded (never store unbounded blobs) and
+        // validated against the narrow alphabet before the transition.
+        // A malformed identity is rejected, never silently dropped: a
         // caller that believes the recovery identity was recorded while
-        // the consume stored null would violate the deterministic-
+        // the consume stored null would violate the deterministic
         // recovery contract.
         $client = $this->requirePredis();
         $storage = new RedisStorage($client);
@@ -715,11 +721,12 @@ final class RedisStorageTest extends TestCase
 
     public function testConsumeWithOperationIdentityRejectsGsubSpecialCharacters(): void
     {
-        // The narrow alphabet exists because the identity is JSON-encoded
-        // and spliced into the Lua string.gsub REPLACEMENT string, where
-        // `%` is the replacement-template escape: `%` (and every other
-        // non-alphabet character) is rejected BY CONSTRUCTION, so the raw
-        // splice can never be interpreted as a template.
+        // The narrow alphabet exists because the identity is
+        // JSON-encoded and spliced into the Lua string.gsub replacement
+        // string, where `%` is the replacement-template escape: `%` (and
+        // every other non-alphabet character) is rejected by
+        // construction, so the raw splice can never be interpreted as a
+        // template.
         $client = $this->requirePredis();
         $storage = new RedisStorage($client);
         $storage->store($this->makeRecord());

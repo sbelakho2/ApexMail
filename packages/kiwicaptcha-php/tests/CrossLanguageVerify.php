@@ -3,15 +3,15 @@
 declare(strict_types=1);
 
 /**
- * CI cross-language harness (reverse direction): reads a RUST-ISSUED record
- * (KC_RUST_RECORD env, KC_RUST_ALGO=sha256|argon2id), solves it in pure PHP,
- * and verifies it with the PHP verifier.
+ * CI cross-language harness (reverse direction): reads a Rust-issued
+ * record (env KC_RUST_RECORD, algorithm KC_RUST_ALGO=sha256|argon2id),
+ * solves it in pure PHP, and verifies it with the PHP verifier.
  *
- * KC_RUST_REGION optionally sets the verifier's expected region — a record
- * issued for another region (or unbound) then fails with wrong_region,
- * exercising the region interop in both directions.
+ * The KC_RUST_REGION env optionally sets the verifier's expected region;
+ * a record issued for another region (or unbound) then fails with
+ * wrong_region, exercising the region interop in both directions.
  *
- * Run: KC_RUST_RECORD=/tmp/rust_record.json [KC_RUST_ALGO=sha256] php tests/CrossLanguageVerify.php
+ * Run: php tests/CrossLanguageVerify.php
  */
 
 require __DIR__.'/../vendor/autoload.php';

@@ -8,9 +8,9 @@ use Symfony\Component\Config\Loader\LoaderInterface;
 use Symfony\Component\DependencyInjection\ContainerBuilder;
 
 /**
- * Kernel with privacy_mode 'strict' while the operator EXPLICITLY requests
+ * Kernel with privacy_mode 'strict' while the operator explicitly requests
  * the privacy-sensitive options (telemetry 'full', same_origin_only false,
- * min_duration_ms 500). The extension must FORCE them off/true/0 — that is
+ * min_duration_ms 500). The extension must force them off/true/0 — that is
  * the strict privacy contract.
  */
 final class StrictPrivacyTestKernel extends TestKernel
@@ -35,7 +35,7 @@ final class StrictPrivacyTestKernel extends TestKernel
                 'telemetry' => 'full',
                 'same_origin_only' => false,
                 'min_duration_ms' => 500,
-                'enforce_telemetry' => true, // must be FORCED false by strict
+                'enforce_telemetry' => true, // must be forced false by strict
             ]);
         });
     }

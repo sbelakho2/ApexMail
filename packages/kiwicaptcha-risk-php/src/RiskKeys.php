@@ -5,13 +5,13 @@ declare(strict_types=1);
 namespace KiwiCaptcha\Risk;
 
 /**
- * HKDF-SHA256 identity keys, derived exactly per the risk-v1 contract:
+ * hkdf-sha256 identity keys, derived exactly per the risk-v1 contract:
  *
  *   key = hash_hkdf('sha256', master, 32, info, 'kiwicaptcha-risk-v1')
  *
  * for info in {source, subnet, session, principal, event}. The Rust side
- * derives the same keys with Hkdf::<Sha256>::new(Some(b"kiwicaptcha-risk-v1"), master)
- * and expand(32).
+ * derives the same keys with `Hkdf::<Sha256>` using salt
+ * `kiwicaptcha-risk-v1`, master, and expand(32).
  */
 final class RiskKeys
 {

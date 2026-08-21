@@ -7,20 +7,20 @@ namespace KiwiCaptcha;
 /**
  * A named difficulty profile for adaptive-risk issuance.
  *
- * Profiles carry the SAME parameter space as {@see Config} but only the
+ * Profiles carry the same parameter space as {@see Config} but only the
  * proof-of-work parameters (algorithm, difficulty, and for Argon2id the
- * memory/time/parallelism costs) — TTL and minimum-duration policy stay
- * owned by the issuer's Config. {@see Issuer::issueWithProfile()} clones the
- * issuer Config, overlays the profile, and delegates to the normal
- * {@see Issuer::issue()} path, so the wire format, signing, and storage are
- * identical to a regular issuance.
+ * memory/time/parallelism costs); TTL and minimum-duration policy stay
+ * owned by the issuer's Config. {@see Issuer::issueWithProfile()} clones
+ * the issuer Config, overlays the profile, and delegates to the normal
+ * {@see Issuer::issue()} path, so the wire format, signing, and storage
+ * are identical to a regular issuance.
  *
- * Validation ({@see self::validate()}) enforces the exact bounds Config
- * (and issuance) enforce, so a profile can never mint a challenge the
- * verifier would reject:
- * - SHA-256: targetBits within 1..MAX_SHA_TARGET_BITS (20).
- * - Argon2id: targetBits within 1..MAX_ARGON2_TARGET_BITS (10),
- *   t within 3..MAX_ARGON_T (6), p === 1, mKib within 8..65536.
+ * Validation, see {@see self::validate()}, enforces the exact bounds
+ * Config and issuance enforce, so a profile can never mint a challenge
+ * the verifier would reject:
+ * - SHA-256: targetBits within 1..20.
+ * - Argon2id: targetBits within 1..10, t within 3..6, p === 1, mKib
+ *   within 8..65536.
  */
 final class ChallengeProfile
 {

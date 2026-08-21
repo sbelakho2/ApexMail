@@ -18,11 +18,12 @@ use KiwiCaptcha\Tests\Fixtures\Vectors;
 use PHPUnit\Framework\TestCase;
 
 /**
- * The protocol-v2 Verifier rewrite: structural record validation, the
- * peek-then-consume one-shot flow (cheap checks burn the record, the proof
- * phase consumes it), the optional Argon2id admission gate, TOCTOU
- * fail-closed behaviour, server-side timing without the client-duration
- * fallback, and byte-exact parity with the Rust shared fixture vector.
+ * The protocol-v2 Verifier: structural record validation, the
+ * peek-then-consume one-shot flow (cheap checks burn the record, the
+ * proof phase consumes it), and the optional Argon2id admission gate.
+ * Also covers fail-closed behaviour on swapped records, server-side
+ * timing without the client-duration fallback, and byte-exact parity
+ * with the Rust shared fixture vector.
  */
 final class VerifierGateTest extends TestCase
 {
@@ -73,9 +74,10 @@ final class VerifierGateTest extends TestCase
 
     /**
      * A protocol-v2 SHA-256 record over the shared secret, with a
-     * structurally consistent challenge/prefix (bindingTag bound to
-     * self::CLIENT_IP). Named overrides: nonce, scope, bindingTag, issuedAt,
-     * expiresAt, salt, targetBits, minDurationMs, issuedAtNs, protocolVersion.
+     * structurally consistent challenge/prefix (bindingTag bound to the
+     * test client IP). Named overrides: nonce, scope, bindingTag,
+     * issuedAt, expiresAt, salt, targetBits, minDurationMs, issuedAtNs,
+     * protocolVersion.
      */
     private function v2Sha256Record(...$overrides): ChallengeRecord
     {
@@ -269,8 +271,9 @@ final class VerifierGateTest extends TestCase
     public function testToctouConsumedRecordDiffersFromPeekedIsMalformed(): void
     {
         $peek = $this->v2Sha256Record();
-        // A second record over the SAME nonce but a different salt/challenge:
-        // consume() returns it even though find() returned $peek.
+        // A second record over the same nonce but a different
+        // salt/challenge: consume() returns it even though find()
+        // returned $peek.
         $swapped = $this->v2Sha256Record(nonce: $peek->nonce, salt: $this->validSalt());
         self::assertNotSame($peek->challenge, $swapped->challenge);
 
@@ -417,7 +420,7 @@ final class VerifierGateTest extends TestCase
 
     public function testTtlAboveCeilingBurnsRecord(): void
     {
-        // expiresAt - issuedAt = 301 > MAX_TTL_SECS (300).
+        // expiresAt - issuedAt = 301, above the 300 s TTL ceiling.
         $record = $this->v2Sha256Record(issuedAt: self::ISSUED_AT, expiresAt: self::ISSUED_AT + 301);
         $storage = new ArrayStorage();
         $storage->store($record);
@@ -431,8 +434,9 @@ final class VerifierGateTest extends TestCase
 
     public function testLifetimeAtTheMaximumTtlCeilingIsAccepted(): void
     {
-        // expiresAt - issuedAt = 300 == MAX_TTL_SECS: within the ceiling, so
-        // the record is structurally valid and verifies end-to-end.
+        // expiresAt - issuedAt = 300, exactly the TTL ceiling: within
+        // the bound, so the record is structurally valid and verifies
+        // end-to-end.
         $record = $this->v2Sha256Record(issuedAt: self::ISSUED_AT, expiresAt: self::ISSUED_AT + 300);
         $storage = new ArrayStorage();
         $storage->store($record);
@@ -446,9 +450,9 @@ final class VerifierGateTest extends TestCase
 
     public function testFutureIssuedBeyondClockSkewRejectedAsExpired(): void
     {
-        // A signed challenge claiming issued_at = now + 61s
-        // exceeds MAX_CLOCK_SKEW (60s) — no real issuer host is that far
-        // ahead, so the TTL check rejects it as Expired.
+        // A signed challenge claiming issued_at = now + 61s exceeds the
+        // 60 s future-skew bound; no real issuer host is that far ahead,
+        // so the TTL check rejects it as Expired.
         $record = $this->v2Sha256Record(issuedAt: self::ISSUED_AT + 61, expiresAt: self::ISSUED_AT + 61 + 120);
         $storage = new ArrayStorage();
         $storage->store($record);
@@ -462,8 +466,8 @@ final class VerifierGateTest extends TestCase
 
     public function testFutureIssuedAtTheClockSkewBoundaryVerifies(): void
     {
-        // issued_at = now + 60 sits exactly AT the MAX_CLOCK_SKEW
-        // boundary — the future bound uses `>`, so the record is accepted
+        // issued_at = now + 60 sits exactly at the future-skew
+        // boundary; the future bound uses `>`, so the record is accepted
         // and verifies end-to-end.
         $record = $this->v2Sha256Record(issuedAt: self::ISSUED_AT + 60, expiresAt: self::ISSUED_AT + 60 + 120);
         $storage = new ArrayStorage();
@@ -489,10 +493,10 @@ final class VerifierGateTest extends TestCase
 
     public function testArgonTAboveProcessCeilingRejectsAsUnsupported(): void
     {
-        // t=32 exceeds the absolute process ceiling (MAX_ARGON_TIME=16,
-        // The record is SIGNED with the shared secret, so the
-        // failure is UnsupportedArgon2Params (not MalformedRecord) — the
-        // signature authenticates the parameters before the ceiling check.
+        // t=32 exceeds the absolute process ceiling of 16 passes. The
+        // record is signed with the shared secret, so the failure is
+        // UnsupportedArgon2Params (not MalformedRecord): the signature
+        // authenticates the parameters before the ceiling check.
         $record = $this->argon2Record(t: 32);
         $storage = new ArrayStorage();
         $storage->store($record);
@@ -548,8 +552,8 @@ final class VerifierGateTest extends TestCase
 
     public function testMissingIssuedAtNsIsMalformedWithoutLegacyFallback(): void
     {
-        // No client-duration fallback anymore: an untimed record cannot be
-        // verified, even with a solved proof and an enforced floor.
+        // No client-duration fallback anymore: an untimed record cannot
+        // be verified, even with a solved proof and an enforced floor.
         $record = $this->v2Sha256Record(minDurationMs: 1000, issuedAtNs: 0);
         $storage = new ArrayStorage();
         $storage->store($record);
@@ -564,8 +568,8 @@ final class VerifierGateTest extends TestCase
 
     public function testV1RecordRejectedByDefault(): void
     {
-        // The v1 migration window is closed by default: no legitimate v1
-        // record can outlive the 300 s maximum challenge lifetime.
+        // The v1 migration window is closed by default: no legitimate
+        // v1 record can outlive the 300 s maximum challenge lifetime.
         $nonce = $this->validNonce();
         $scope = 'login';
         $ipHash = Issuer::hashIp('198.51.100.77', Vectors::SECRET);
@@ -689,9 +693,9 @@ final class VerifierGateTest extends TestCase
         $ip = '192.168.1.5';
         $bindingTag = Issuer::bindingTag($nonce, $ip, $secret);
 
-        // Canonical v2 layout: the field order
-        // with region/request_binding/issuer as empty segments, policy_version
-        // 1, and the FINAL kid segment 1.
+        // Canonical v2 layout: the field order with
+        // region/request_binding/issuer as empty segments, policy_version
+        // 1, and the final kid segment 1.
         $canonicalV2 = 'v2|'.$nonce.'|'.$scope.'|'.$bindingTag.'|'.$issuedAt.'|'.$expiresAt.'|sha256|0|1|1|8|'.$salt.'|0||1|||1';
         self::assertSame(
             $canonicalV2,
@@ -750,9 +754,9 @@ final class VerifierGateTest extends TestCase
 
     public function testLegacySecondPositionClosureIsTreatedAsClockOverride(): void
     {
-        // BC shim: pre-gate callers passed the clock override positionally
-        // as the constructor's second argument. It must be treated as $now,
-        // not as an admission gate.
+        // BC shim: pre-gate callers passed the clock override
+        // positionally as the constructor's second argument. It must be
+        // treated as $now, not as an admission gate.
         $record = $this->v2Sha256Record();
         $storage = new ArrayStorage();
         $storage->store($record);
@@ -765,9 +769,10 @@ final class VerifierGateTest extends TestCase
 
     public function testBoundRecordWithoutClientIpFailsClosed(): void
     {
-        // A non-empty binding tag means the challenge IS bound — omitting
+        // A non-empty binding tag means the challenge is bound: omitting
         // the client IP must fail with MissingClientIp, not silently skip
-        // the check (the caller must provide the IP it passed to issuance).
+        // the check (the caller must provide the IP it passed to
+        // issuance).
         $storage = new ArrayStorage();
         $secret = '0123456789abcdef0123456789abcdef';
         $issuer = new Issuer(new \KiwiCaptcha\Config(secretKey: $secret, targetBits: 8), $storage);
@@ -806,8 +811,9 @@ final class VerifierGateTest extends TestCase
 
     public function testProtocolVersion3IsMalformed(): void
     {
-        // Only protocol versions 1 (legacy migration) and 2 (current) exist
-        // in the wire contract — anything else is a corrupt/foreign record.
+        // Only protocol versions 1 (legacy migration) and 2 (current)
+        // exist in the wire contract; anything else is a corrupt or
+        // foreign record.
         $storage = new ArrayStorage();
         $issuer = new Issuer(new \KiwiCaptcha\Config(secretKey: '0123456789abcdef0123456789abcdef', targetBits: 8), $storage);
         $challenge = $issuer->issue('login', '198.51.100.7');
@@ -844,8 +850,8 @@ final class VerifierGateTest extends TestCase
 
     public function testValidOutcomeExposesTheDecodedNonce(): void
     {
-        // The canonical replay id (jti) is the decoded token's
-        // nonce — a VALID outcome must expose it.
+        // The canonical replay id (jti) is the decoded token's nonce; a
+        // valid outcome must expose it.
         $record = $this->v2Sha256Record();
         $storage = new ArrayStorage();
         $storage->store($record);
@@ -873,11 +879,12 @@ final class VerifierGateTest extends TestCase
 
     public function testMalformedTokenNonceIsNull(): void
     {
-        // The url-safe variant of a well-formed token decodes to the same
-        // plaintext but is NOT canonical base64 — the verifier
-        // rejects it as MalformedToken and exposes no nonce. The telemetry
-        // '?' bytes (positioned via duration=1000) guarantee the token's
-        // base64 contains '/' so the variant genuinely differs.
+        // The url-safe variant of a well-formed token decodes to the
+        // same plaintext but is not canonical base64; the verifier
+        // rejects it as MalformedToken and exposes no nonce. The
+        // telemetry '?' bytes (positioned via duration=1000) guarantee
+        // the token's base64 contains '/' so the variant genuinely
+        // differs.
         $nonce = base64_encode(random_bytes(32));
         $raw = SolutionToken::create($nonce, 1, 1000, ['q' => '?>~?'])->encode();
         $urlSafe = strtr($raw, '+/', '-_');

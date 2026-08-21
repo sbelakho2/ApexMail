@@ -17,7 +17,7 @@ use PHPUnit\Framework\TestCase;
 /**
  * In-process Argon2id admission gate (token-set based): acquire() mints a
  * unique token, release() removes exactly that token — stale or double
- * releases are no-ops. Bounds concurrency PER PROCESS (PHP-FPM workers share
+ * releases are no-ops. Bounds concurrency PER process (php-fpm workers share
  * no memory); the Redis-backed gate is the cross-worker bound.
  */
 final class InProcessArgonGateTest extends TestCase

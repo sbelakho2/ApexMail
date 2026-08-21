@@ -71,7 +71,7 @@ final class RiskV2ScoringTest extends TestCase
     public function testHoneypotPlusElevatedSignalsCrossesDeny(): void
     {
         // bad_proof 1000 (220) + issue_debt 1000 (150) + global_pressure
-        // 1000 (170) + source_fast 900 (171) = 711; base 100 -> 811 WITHOUT
+        // 1000 (170) + source_fast 900 (171) = 711; base 100 -> 811 without
         // the honeypot factor (Argon32, no hard-deny thresholds hit).
         $elevated = SignalVector::fromArray([
             'bad_proof' => 1000,

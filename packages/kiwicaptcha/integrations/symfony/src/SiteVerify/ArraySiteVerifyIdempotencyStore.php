@@ -17,11 +17,12 @@ final class ArraySiteVerifyIdempotencyStore implements SiteVerifyIdempotencyStor
     /**
      * @param \Closure|null $now test seam: returns the current Unix seconds
      *                           used for lease comparisons (defaults to
-     *                           time()); advancing it simulates lease expiry
+     *                           time()); advancing it simulates lease
+     *                           expiry.
      * @param int           $leaseSeconds the ownership lease window in
      *                                    seconds (defaults to the interface
      *                                    constant) — every claim, takeover
-     *                                    and renew uses THIS value
+     *                                    and renew uses this value.
      */
     public function __construct(
         ?\Closure $now = null,

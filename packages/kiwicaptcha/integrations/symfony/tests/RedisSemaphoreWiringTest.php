@@ -21,7 +21,7 @@ use Symfony\Component\DependencyInjection\Reference;
  * Redis client is available (redis_service option, or RedisStorage as the
  * storage backend), InProcessArgonGate otherwise, null gate for sha256 or
  * cap 0. When a Redis client is available, the rate limiter must use the
- * ATOMIC Redis backend with the global cap and deployment namespace.
+ * atomic Redis backend with the global cap and deployment namespace.
  */
 final class RedisSemaphoreWiringTest extends TestCase
 {
@@ -154,7 +154,7 @@ final class RedisSemaphoreWiringTest extends TestCase
         // locally configured issuance algorithm — a SHA-issuing service may
         // verify Argon records written by another service (cross-language
         // shared storage), and the verifier consults the gate based on the
-        // STORED record. The Redis semaphore must therefore be wired.
+        // stored record. The Redis semaphore must therefore be wired.
         $container = $this->load([
             'redis_service' => 'my.redis.client',
         ], static function (ContainerBuilder $c): void {

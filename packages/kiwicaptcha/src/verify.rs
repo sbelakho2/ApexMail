@@ -1,9 +1,9 @@
 //! Proof-of-work verification for KiwiCaptcha.
 //!
 //! Given a stored [`ChallengeRecord`] and a client-submitted counter, this
-//! module re-derives the hash (`SHA-256(prefix || counter || salt)` or
-//! `Argon2id(prefix || counter, salt)` per the record's algorithm) and checks
-//! that the raw output has at least `target_bits` leading zero bits.
+//! module re-derives the hash (SHA-256 over the record's prefix, counter,
+//! and salt, or Argon2id per the record's algorithm) and checks that the
+//! raw output has at least `target_bits` leading zero bits.
 //!
 //! Because the computation is driven by the record's explicit algorithm and
 //! difficulty, the verifier always performs exactly the work the issuer
@@ -20,7 +20,7 @@ use crate::challenge::{
 };
 
 /// Clock-skew tolerance (microseconds) for the server-side minimum-duration
-/// check. When the issuer host's clock is AHEAD of the verifier host
+/// check. When the issuer host's clock is ahead of the verifier host
 /// (`now_ns < issued_at_ns`), the apparent "elapsed" time is negative; a skew
 /// within this bound (5 s) skips the floor heuristic, a larger skew is a
 /// clock anomaly and the solution is rejected with [`VerifyError::TooFast`].
@@ -48,7 +48,7 @@ pub(crate) fn derive_hash(record: &ChallengeRecord, counter: u64) -> Result<[u8;
             if record.m_kib < 8 * record.p || check_argon2_ceilings(record).is_err() {
                 return Err(VerifyError::MalformedRecord);
             }
-            // Protocol unit: m_kib is KIBIBYTES (65536 = 64 MiB); the
+            // Protocol unit: m_kib is in kibibytes (65536 = 64 MiB); the
             // argon2 crate's Params::new takes the same 1 KiB blocks.
             let params = Params::new(record.m_kib, record.t, record.p, Some(32))
                 .map_err(|_| VerifyError::MalformedRecord)?;
@@ -99,7 +99,7 @@ pub struct VerifyContext<'a> {
     /// Optional per-key-id secrets: `kid → master secret`. When
     /// present, the record's `kid` selects the secret for the signature (and
     /// IP-binding) checks — the secret rotation map. An unknown kid — or a
-    /// kid beyond the map's NEWEST configured id (the forward/rollback guard:
+    /// kid beyond the map's newest configured id (the forward/rollback guard:
     /// future-keyed challenges must never verify on older nodes, even if the
     /// key were somehow known) — rejects with
     /// [`VerifyError::UnknownKid`]. When `None`, `secret_key` is used
@@ -107,8 +107,8 @@ pub struct VerifyContext<'a> {
     pub secrets_by_kid: Option<&'a HashMap<u32, String>>,
     /// Compromise-revoked key ids: `kid → revoked` — e.g. a key
     /// that leaked. A record whose `kid` is in this set is rejected with
-    /// [`VerifyError::UnknownKid`] IMMEDIATELY — before the signature check —
-    /// even when the secret is present: compromise revocation OVERRIDES the
+    /// [`VerifyError::UnknownKid`] immediately, before the signature check,
+    /// even when the secret is present: compromise revocation overrides the
     /// rotation grace (a revoked key may legitimately remain in
     /// `secrets_by_kid` while the deployment retires it, but its challenges
     /// must never verify). When `None`, no kid is revoked.
@@ -116,13 +116,13 @@ pub struct VerifyContext<'a> {
     /// The client's claimed counter.
     pub counter: u64,
     /// The client's reported solve duration in milliseconds. This value is
-    /// CLIENT-CONTROLLED and therefore forgeable — it is NOT used to enforce
+    /// client-controlled and therefore forgeable — it is NOT used to enforce
     /// the minimum duration (that is measured server-side via
     /// `issued_at_ns`/`now_ns`); it is only fed to the telemetry scorer.
     pub duration_ms: u64,
     /// The current Unix timestamp in seconds (for the TTL check).
     pub now_unix: u64,
-    /// The server's receipt time in EPOCH MICROSECONDS — the same unit as the
+    /// The server's receipt time in epoch microseconds — the same unit as the
     /// record's `issued_at_ns` (the field names keep the `_ns`
     /// suffix; the unit is microseconds, shared with PHP). Together they
     /// provide a server-measured elapsed time, used to enforce the minimum
@@ -132,7 +132,7 @@ pub struct VerifyContext<'a> {
     /// The minimum acceptable solve duration in milliseconds. The floor is a
     /// timing-anomaly heuristic: PoW is probabilistic (a valid solution can
     /// occur at counter 0) and a fast bot can wait before submitting, so the
-    /// floor only rejects solves that ARRIVE (per the server clock) faster
+    /// floor only rejects solves that arrive (per the server clock) faster
     /// than the theoretical minimum — a heuristic, never a proof of human
     /// behavior, and the client-reported duration is never trusted. The
     /// effective floor is `max(min_duration_ms, record.min_duration_ms)`;
@@ -153,18 +153,18 @@ pub struct VerifyContext<'a> {
     /// like the region expectation). When `None`, the record's issuer is not
     /// checked.
     pub expected_issuer: Option<&'a str>,
-    /// The CURRENT security-policy epoch. When set, a record whose
+    /// The current security-policy epoch. When set, a record whose
     /// `policy_version` differs is rejected with
     /// [`VerifyError::WrongPolicyVersion`] — outstanding challenges die
     /// immediately on policy revocation.
     pub expected_policy_version: Option<u32>,
     /// The current client's IP address. In v2 the binding is the
-    /// NONCE-BOUND HMAC tag: verification recomputes the tag from the
+    /// nonce-bound HMAC tag: verification recomputes the tag from the
     /// challenge nonce + canonical client IP under the derived purpose key
     /// and rejects a mismatch with [`VerifyError::IpMismatch`]. The nonce-
     /// bound tag is the current binding model (v1 records use the legacy
     /// `hash_ip`). When `None` and the
-    /// record's binding tag is NON-EMPTY, the solution is rejected with
+    /// record's binding tag is non-empty, the solution is rejected with
     /// [`VerifyError::MissingClientIp`] — a bound challenge requires its IP.
     /// Only records with an empty binding tag (`BindingMode::None`) verify
     /// without an IP.
@@ -182,7 +182,7 @@ pub struct VerifyContext<'a> {
     /// Accept protocol-v1 (legacy) challenges. v2 has been the issuance
     /// format for longer than the maximum challenge lifetime (300 s), so no
     /// legitimate v1 record can still exist — v1 is rejected by default.
-    /// Set this ONLY during a coordinated migration window.
+    /// Set this only during a coordinated migration window.
     pub accept_legacy_v1: bool,
     /// Maximum number of verification attempts against this record
     /// (`record.attempts_used`). 0 = unlimited. Attempts are counted on every
@@ -205,7 +205,7 @@ pub enum VerifyOutcome {
         nonce: String,
         /// The application-supplied transaction binding: the host application
         /// generated this nonce and must present
-        /// it again on the final protected POST — correlating the CAPTCHA
+        /// it again on the final protected POST — correlating the captcha
         /// result with the exact application transaction.
         request_binding: Option<String>,
     },
@@ -254,20 +254,20 @@ pub enum VerifyError {
     WrongScope,
     #[error("challenge was issued for a different region")]
     WrongRegion,
-    /// The stored record was issued under a DIFFERENT issuer identity than
+    /// The stored record was issued under a different issuer identity than
     /// the verifier's configured expected issuer — or under no
     /// issuer at all (an issuer-expecting deployment fails closed on
     /// issuer-unbound challenges).
     #[error("challenge was issued by a different issuer")]
     WrongIssuer,
-    /// The stored record was issued under a DIFFERENT security-policy epoch
+    /// The stored record was issued under a different security-policy epoch
     /// than the verifier's configured current version — the policy that
     /// authorized the challenge (origin/action rules, difficulty floors,
     /// revocation) is no longer in force, so the challenge is invalid.
     #[error("challenge was issued under a different security-policy epoch")]
     WrongPolicyVersion,
     /// The record's key id (`kid`) is unknown to this verifier —
-    /// either absent from its `secrets_by_kid` map, or NEWER than the
+    /// either absent from its `secrets_by_kid` map, or newer than the
     /// newest configured key (the forward/rollback guard: a challenge keyed
     /// with a future kid must never verify on an older node, even if the
     /// key were somehow known). The deployment must roll forward its key
@@ -308,9 +308,9 @@ pub enum VerifyError {
     AdmissionUnavailable,
 }
 
-/// Comprehensive structural validation of a stored [`ChallengeRecord`].
+/// Structural validation of a stored [`ChallengeRecord`].
 ///
-/// Runs as the FIRST check of [`verify_solution`] (after attempt accounting),
+/// Runs as the first check of [`verify_solution`] (after attempt accounting),
 /// before any hash is derived, so a malformed or attacker-crafted record can
 /// never drive an expensive verification:
 /// - `scope` 1..=128 bytes of `[A-Za-z0-9._:-]`;
@@ -321,12 +321,12 @@ pub enum VerifyError {
 ///   decode);
 /// - `salt` decodes as base64 to exactly 16 bytes (24-char pre-bound before
 ///   decode);
-/// - `expires_at > issued_at` and `expires_at - issued_at <= MAX_TTL_SECS`;
+/// - `expires_at > issued_at` and the lifetime stays within the protocol
+///   TTL cap;
 /// - `prefix` is exactly `challenge|salt|`;
-/// - `target_bits` 1..=MAX_DIFFICULTY for BOTH algorithms (the
-///   Argon2id issuance ceiling stays stricter at
-///   [`SOLVER_MAX_ARGON2_TARGET_BITS`], exactly like the t=7..=16
-///   verifier-vs-issuer split);
+/// - `target_bits` within the explicit difficulty bounds for both algorithms
+///   (the Argon2id issuance ceiling stays stricter at the solver's argon2
+///   target-bits cap, exactly like the t=7..=16 verifier-vs-issuer split);
 /// - Argon2id: the hard parameter ceilings: `m_kib` 8..=65536,
 ///   `t` 3..=16, `p` 1..=4.
 ///
@@ -371,7 +371,7 @@ pub fn validate_record(record: &ChallengeRecord) -> Result<(), VerifyError> {
             return Err(VerifyError::MalformedRecord);
         }
     }
-    // Exact-length pre-bounds BEFORE any base64 decode — the
+    // Exact-length pre-bounds before any base64 decode — the
     // nonce is the 44-char base64 of 32 bytes and the salt the 24-char
     // base64 of 16 bytes. An oversized (attacker-written) value is rejected
     // as malformed without allocating a decode buffer for it.
@@ -396,7 +396,7 @@ pub fn validate_record(record: &ChallengeRecord) -> Result<(), VerifyError> {
         return Err(VerifyError::MalformedRecord);
     }
     // The difficulty bounds are explicit constants, applied to
-    // BOTH algorithms — 0 would accept a trivially-solvable challenge and
+    // both algorithms — 0 would accept a trivially-solvable challenge and
     // anything above the solver ceiling can never be produced by a widget.
     use crate::challenge::{MAX_DIFFICULTY, MIN_DIFFICULTY};
     if record.target_bits < MIN_DIFFICULTY || record.target_bits > MAX_DIFFICULTY {
@@ -413,16 +413,14 @@ pub fn validate_record(record: &ChallengeRecord) -> Result<(), VerifyError> {
 
 /// Validate the hard Argon2id parameter ceilings.
 ///
-/// Checks `m_kib`/`t`/`p` against [`crate::challenge::MIN_ARGON_MEMORY_KIB`],
-/// [`crate::challenge::MAX_ARGON_MEMORY_KIB`], [`crate::challenge::MIN_ARGON_TIME`],
-/// [`crate::challenge::MAX_ARGON_TIME`], [`crate::challenge::MIN_PARALLELISM`],
-/// [`crate::challenge::MAX_PARALLELISM`] — the verifier must never run (or
-/// allocate for) a memory-hard computation with parameters outside these
-/// bounds, even when the record is properly signed.
+/// Checks `m_kib`/`t`/`p` against the hard Argon2id parameter ceilings —
+/// the verifier must never run (or allocate for) a memory-hard computation
+/// with parameters outside these bounds, even when the record is properly
+/// signed.
 ///
 /// Returns [`VerifyError::MalformedRecord`] when any parameter is out of
-/// range. Called by [`validate_record`] (the cheap pre-signature gate) AND
-/// explicitly AFTER signature authentication in [`verify_solution`] and the
+/// range. Called by [`validate_record`] (the cheap pre-signature gate) and
+/// explicitly after signature authentication in [`verify_solution`] and the
 /// production verifier, so a signed record is validated against the ceilings
 /// again immediately before any allocation happens.
 pub(crate) fn check_argon2_ceilings(record: &ChallengeRecord) -> Result<(), VerifyError> {
@@ -450,14 +448,14 @@ pub(crate) fn check_argon2_ceilings(record: &ChallengeRecord) -> Result<(), Veri
 ///    rejected with [`VerifyError::TooManyAttempts`]. The caller persists the
 ///    mutated record on failure, or consumes it on success (single-use).
 /// 2. Structural record validation ([`validate_record`]) — a cheap phase that
-///    runs BEFORE any hash is derived, so malformed or attacker-crafted
+///    runs before any hash is derived, so malformed or attacker-crafted
 ///    records can never drive expensive verification work.
 /// 3. Re-verify the HMAC signature over the protocol-appropriate canonical
 ///    input (v1 for `protocol_version == 1` records, v2 otherwise; v2
 ///    signatures use the HKDF-derived challenge key). When
 ///    `secrets_by_kid` is configured, the record's `kid` selects the secret:
 ///    an unknown — or future — kid rejects with
-///    [`VerifyError::UnknownKid`] before any signature work. A REVOKED kid
+///    [`VerifyError::UnknownKid`] before any signature work. A revoked kid
 ///    (`revoked_kids`) rejects with [`VerifyError::UnknownKid`]
 ///    even earlier, before the signature check, even when its secret is
 ///    present: compromise revocation overrides the rotation grace.
@@ -471,11 +469,11 @@ pub(crate) fn check_argon2_ceilings(record: &ChallengeRecord) -> Result<(), Veri
 /// 8. Check the IP binding: for v2 records, recompute the nonce-bound
 ///    `binding_tag` from `client_ip` + record nonce + secret and compare in
 ///    constant time; for v1 records, compare the legacy `hash_ip`. An empty
-///    `binding_tag` skips the check. A `None` `client_ip` with a NON-EMPTY
+///    `binding_tag` skips the check. A `None` `client_ip` with a non-empty
 ///    tag fails closed with [`VerifyError::MissingClientIp`] — only records
 ///    issued with `BindingMode::None` (empty tag) verify without an IP.
-/// 9. Check the minimum duration with the SERVER clock (see
-///    [`SKEW_TOLERANCE_US`] for the clock-skew policy). The client-reported
+/// 9. Check the minimum duration with the server clock, honoring the
+///    clock-skew tolerance. The client-reported
 ///    duration is forgeable and is never trusted for this check. Records
 ///    without `issued_at_ns` are malformed (there is no client-duration
 ///    fallback).
@@ -484,7 +482,7 @@ pub(crate) fn check_argon2_ceilings(record: &ChallengeRecord) -> Result<(), Veri
 ///     actual PoW). The valid outcome's `nonce` field carries the consumed
 ///     canonical nonce (jti).
 pub fn verify_solution(ctx: &mut VerifyContext<'_>) -> VerifyOutcome {
-    // 0. Attempt accounting — counted on EVERY verification call, correct or
+    // 0. Attempt accounting — counted on every verification call, correct or
     //    not, so a wrong-candidate loop cannot burn unbounded server-side
     //    computation (especially memory-hard Argon2id hashing).
     ctx.record.attempts_used = ctx.record.attempts_used.saturating_add(1);
@@ -492,16 +490,16 @@ pub fn verify_solution(ctx: &mut VerifyContext<'_>) -> VerifyOutcome {
         return VerifyOutcome::Invalid(VerifyError::TooManyAttempts);
     }
 
-    // 0b. Cheap structural validation FIRST — before any signature work or
+    // 0b. Cheap structural validation first — before any signature work or
     //     hash derivation (XII): a malformed record can never drive an
     //     expensive verification.
     if let Err(e) = validate_record(ctx.record) {
         return VerifyOutcome::Invalid(e);
     }
 
-    // 0c. Counter bound: the official solvers never search beyond
-    //     SOLVER_MAX_HASHES; a larger counter is not a legitimate solution
-    //     and must not reach hash derivation (deterministic rejection).
+    // 0c. Counter bound: the official solvers never search beyond the
+    //     solver cap; a larger counter is not a legitimate solution and
+    //     must not reach hash derivation (deterministic rejection).
     if ctx.counter >= crate::challenge::SOLVER_MAX_HASHES {
         return VerifyOutcome::Invalid(VerifyError::CounterTooLarge);
     }
@@ -516,12 +514,12 @@ pub fn verify_solution(ctx: &mut VerifyContext<'_>) -> VerifyOutcome {
 
     // 1a. Key-rotation resolution: when a `secrets_by_kid` map
     //     is configured, the record's kid selects the signing secret. An
-    //     unknown kid — or a kid NEWER than the map's newest id (the
+    //     unknown kid — or a kid newer than the map's newest id (the
     //     forward/rollback guard: future-keyed challenges must never verify
     //     on older nodes, even if the key were somehow known) — is rejected
-    //     with UnknownKid BEFORE any signature work.
-    //     Compromise revocation is checked FIRST: a REVOKED kid is
-    //     rejected immediately — before the signature check — even when its
+    //     with UnknownKid before any signature work.
+    //     Compromise revocation is checked first: a revoked kid is
+    //     rejected immediately, before the signature check, even when its
     //     secret is still present in `secrets_by_kid` (or the single-key
     //     path): revocation overrides the rotation grace.
     if let Some(revoked) = ctx.revoked_kids {
@@ -558,8 +556,8 @@ pub fn verify_solution(ctx: &mut VerifyContext<'_>) -> VerifyOutcome {
         Err(_) => return VerifyOutcome::Invalid(VerifyError::BadSignature),
     }
 
-    // 1c. Hard Argon2id parameter ceilings — validated AFTER the
-    //     signature has been authenticated and BEFORE any Params::new or
+    // 1c. Hard Argon2id parameter ceilings — validated after the
+    //     signature has been authenticated and before any Params::new or
     //     memory allocation: even a properly signed record must never drive
     //     an out-of-bounds memory-hard computation.
     if ctx.record.algorithm == PoWAlgorithm::Argon2id {
@@ -571,7 +569,7 @@ pub fn verify_solution(ctx: &mut VerifyContext<'_>) -> VerifyOutcome {
     // 2. TTL. The challenge is invalid outside its validity window
     //    [issued_at, expires_at): expired once now reaches expires_at, and
     //    a future-issued challenge is a time-domain anomaly
-    //    when its issued_at is more than MAX_CLOCK_SKEW_SECS ahead of the
+    //    when its issued_at is more than the clock-skew bound ahead of the
     //    verifier clock — the issuer and verifier clocks are broken.
     if ctx.now_unix >= ctx.record.expires_at {
         return VerifyOutcome::Invalid(VerifyError::Expired);
@@ -621,9 +619,9 @@ pub fn verify_solution(ctx: &mut VerifyContext<'_>) -> VerifyOutcome {
     // 2c. IP binding: the challenge was issued to a client IP; a different
     //     submission IP means the token was relayed. Enforced here (not just
     //     at the route layer) so the secure behavior cannot be forgotten.
-    //     The stored record is AUTHORITATIVE: an empty binding tag means
+    //     The stored record is authoritative: an empty binding tag means
     //     binding is disabled (BindingMode::None) and the check is skipped; a
-    //     NON-EMPTY tag means the challenge IS bound, so a missing client IP
+    //     non-empty tag means the challenge is bound, so a missing client IP
     //     fails closed (MissingClientIp) instead of silently skipping the
     //     check.
     if !ctx.record.binding_tag.is_empty() {
@@ -642,13 +640,13 @@ pub fn verify_solution(ctx: &mut VerifyContext<'_>) -> VerifyOutcome {
         }
     }
 
-    // 3. Minimum duration — SERVER-MEASURED. The client-reported duration_ms
+    // 3. Minimum duration — server-measured. The client-reported duration_ms
     //    is forgeable and is deliberately not trusted for enforcement. The
     //    floor is a timing-anomaly heuristic: a fast bot can wait before
-    //    submitting, so it only rejects solves that ARRIVE faster than the
+    //    submitting, so it only rejects solves that arrive faster than the
     //    theoretical minimum. Records without a high-resolution issuance
     //    timestamp are malformed — there is no client-duration fallback. This
-    //    is enforced UNCONDITIONALLY (even when the timing floor is disabled)
+    //    is enforced unconditionally (even when the timing floor is disabled)
     //    to match the PHP verifier exactly.
     if ctx.record.issued_at_ns == 0 {
         return VerifyOutcome::Invalid(VerifyError::MalformedRecord);
@@ -658,7 +656,7 @@ pub fn verify_solution(ctx: &mut VerifyContext<'_>) -> VerifyOutcome {
         if ctx.now_ns >= ctx.record.issued_at_ns {
             // High-resolution path: elapsed time between issuance and receipt,
             // both observed by the server clock. Both `now_ns` and
-            // `issued_at_ns` are EPOCH MICROSECONDS (the names keep the `_ns`
+            // `issued_at_ns` are epoch microseconds (the names keep the `_ns`
             // suffix), so the ms floor is compared in the
             // same unit: ms -> µs (× 1_000).
             let elapsed_us = ctx.now_ns - ctx.record.issued_at_ns;
@@ -667,10 +665,10 @@ pub fn verify_solution(ctx: &mut VerifyContext<'_>) -> VerifyOutcome {
             }
         } else {
             // Issuer host ahead of verifier host: apparent elapsed time is
-            // negative. A skew within SKEW_TOLERANCE_US is a clock anomaly we
-            // tolerate (skip the floor heuristic — the negative elapsed time
-            // carries no timing signal); a larger skew means the clocks are
-            // broken and the timing guarantee is void.
+            // negative. A skew within the tolerance bound is a clock anomaly
+            // we tolerate (skip the floor heuristic — the negative elapsed
+            // time carries no timing signal); a larger skew means the clocks
+            // are broken and the timing guarantee is void.
             let skew = ctx.record.issued_at_ns - ctx.now_ns;
             if skew > SKEW_TOLERANCE_US {
                 return VerifyOutcome::Invalid(VerifyError::TooFast);
@@ -680,7 +678,7 @@ pub fn verify_solution(ctx: &mut VerifyContext<'_>) -> VerifyOutcome {
 
     // 4. Optional telemetry scoring. Strict mode also rejects clients that
     //    submit NO telemetry (a custom non-browser solver does not send it)
-    //    or an EMPTY telemetry payload (the PHP widget emits `{}` when no
+    //    or an empty telemetry payload (the PHP widget emits `{}` when no
     //    telemetry was collected).
     if ctx.enforce_telemetry {
         match ctx.telemetry {
@@ -704,11 +702,11 @@ pub fn verify_solution(ctx: &mut VerifyContext<'_>) -> VerifyOutcome {
         Err(e) => return VerifyOutcome::Invalid(e),
     };
 
-    // 5b. FINAL re-validation: the expensive derivation may have
-    //     taken long enough that the challenge expired DURING it — or the
+    // 5b. Final re-validation: the expensive derivation may have
+    //     taken long enough that the challenge expired during it — or the
     //     verifier's current expectations (policy epoch, region, issuer) may
-    //     have changed while the hash was computing. Re-check the CURRENT
-    //     server time (ctx.now_unix) and the current expectations BEFORE the
+    //     have changed while the hash was computing. Re-check the current
+    //     server time (ctx.now_unix) and the current expectations before the
     //     outcome is declared valid: a challenge that expired mid-derive is
     //     Expired even though the record is already consumed.
     if let Err(e) = final_revalidate(
@@ -733,17 +731,17 @@ pub fn verify_solution(ctx: &mut VerifyContext<'_>) -> VerifyOutcome {
     }
 }
 
-/// POST-DERIVE final re-validation: re-check the challenge's
-/// validity with the CURRENT server time and the CURRENT verifier
-/// expectations, AFTER the (potentially long) proof derivation succeeded but
-/// BEFORE the outcome is declared valid.
+/// Post-derive final re-validation: re-check the challenge's
+/// validity with the current server time and the current verifier
+/// expectations, after the (potentially long) proof derivation succeeded but
+/// before the outcome is declared valid.
 ///
-/// A challenge can expire DURING the expensive derivation — the cheap TTL
+/// A challenge can expire during the expensive derivation — the cheap TTL
 /// check ran before the hash was computed — and the verifier's current
 /// expectations (security-policy epoch, region, issuer) can change while the
-/// proof is being derived. This gate is therefore re-run as the LAST step of
+/// proof is being derived. This gate is therefore re-run as the last step of
 /// [`verify_solution`] and of the production verifier (whose final step
-/// passes a FRESH clock read — the real race — see `redis_verify`).
+/// passes a fresh clock read — the real race — see `redis_verify`).
 ///
 /// Checks, in order:
 /// - `now_unix >= expires_at` → [`VerifyError::Expired`];
@@ -807,11 +805,11 @@ pub(crate) fn signature_from_challenge(record: &ChallengeRecord) -> &str {
 /// server-side solver for the dev-bypass path). This brute-forces until the
 /// difficulty target is met.
 pub fn solve_for_test(record: &ChallengeRecord) -> Option<u64> {
-    // Capped at the real solver's search space: a counter >= SOLVER_MAX_HASHES
-    // is rejected by verify_solution (CounterTooLarge), so the test solver
-    // must never produce one. At 20 bits a legit solver finds no counter
-    // within the cap with p ≈ 0.85% — callers that need a guaranteed solve
-    // should use a lower difficulty.
+    // Capped at the real solver's search space: a counter at or above the
+    // solver cap is rejected by verify_solution (CounterTooLarge), so the
+    // test solver must never produce one. At 20 bits a legit solver finds
+    // no counter within the cap with p ≈ 0.85% — callers that need a
+    // guaranteed solve should use a lower difficulty.
     for counter in 0..crate::challenge::SOLVER_MAX_HASHES {
         if let Ok(hash) = derive_hash(record, counter) {
             if leading_zero_bits(&hash) >= record.target_bits {
@@ -968,7 +966,7 @@ mod tests {
     };
 
     const NOW_UNIX: u64 = 1_000_000;
-    // EPOCH MICROSECONDS (1_700_000_000_000_000 µs ≈ 2023-11-14 UTC) — the
+    // Epoch microseconds (1_700_000_000_000_000 µs ≈ 2023-11-14 UTC) — the
     // unit shared with PHP; field names keep the `_ns` suffix.
     const NOW_NS: u64 = 1_700_000_000_000_000;
 
@@ -1049,7 +1047,7 @@ mod tests {
     }
 
     /// Re-sign a mutated Argon2id record so its parameters are covered by a
-    /// VALID v2 signature — the ceiling checks must fire on
+    /// valid v2 signature — the ceiling checks must fire on
     /// properly signed records, not on signature failures.
     fn resign_v2(record: &mut ChallengeRecord, secret: &str) {
         let canonical = super::super::challenge::canonical_signing_input_v2(record);
@@ -1177,9 +1175,9 @@ mod tests {
 
     #[test]
     fn issuance_rejects_ttl_outside_protocol_range() {
-        // The verifier's validate_record rejects lifetimes > MAX_TTL_SECS
-        // (300) and TTL 0 is meaningless — issuance must refuse to mint a
-        // record it would later declare malformed.
+        // The verifier's validate_record rejects lifetimes above the protocol
+        // TTL cap (300) and TTL 0 is meaningless — issuance must refuse to
+        // mint a record it would later declare malformed.
         let base = ChallengeConfig {
             secret_key: "test-key-16-bytes!".into(),
             kid: 1,
@@ -1215,10 +1213,9 @@ mod tests {
 
     #[test]
     fn issuance_rejects_argon_t_above_protocol_ceiling() {
-        // The verifier's structural ceiling is MAX_ARGON_TIME (16), so t=7
-        // is structurally acceptable — but issuance refuses t > MAX_ARGON_T
-        // (6), the browser-solver ceiling (PHP Config already does; Rust
-        // must match).
+        // The verifier's structural ceiling for t is 16, so t=7 is
+        // structurally acceptable — but issuance refuses t above 6, the
+        // browser-solver ceiling (PHP Config already does; Rust must match).
         let config = ChallengeConfig {
             secret_key: "test-key-16-bytes!".into(),
             kid: 1,
@@ -1272,8 +1269,8 @@ mod tests {
 
     #[test]
     fn argon2_issuance_rejects_memory_above_solver_ceiling() {
-        // The verifier already rejects records above SOLVER_MAX_ARGON2_M_KIB
-        // (64 MiB — the wasm heap ceiling); issuance must never mint one.
+        // The verifier already rejects records above the argon2 solver memory
+        // ceiling (64 MiB — the wasm heap cap); issuance must never mint one.
         let config = ChallengeConfig {
             secret_key: "test-key-16-bytes!".into(),
             kid: 1,
@@ -1313,9 +1310,9 @@ mod tests {
 
     #[test]
     fn argon2_issuance_validates_target_bits_range() {
-        // argon2_target_bits must be 1..=SOLVER_MAX_ARGON2_TARGET_BITS: 0
-        // would silently clamp to a degenerate difficulty and 11 exceeds the
-        // solver ceiling — both must fail at issuance.
+        // argon2_target_bits must be within the argon2 solver target range:
+        // 0 would silently clamp to a degenerate difficulty and 11 exceeds
+        // the solver ceiling — both must fail at issuance.
         for bits in [0u32, 11] {
             let config = ChallengeConfig {
                 secret_key: "test-key-16-bytes!".into(),
@@ -1427,11 +1424,11 @@ mod tests {
 
     #[test]
     fn too_fast_solution_is_rejected_server_side() {
-        // The floor is enforced with the SERVER clock (now_ns - issued_at_ns),
-        // NOT the forgeable client duration_ms. Here the client CLAIMS a long
-        // duration but the server measures a sub-floor elapsed time.
+        // The floor is enforced with the server clock (now_ns - issued_at_ns),
+        // not the forgeable client duration_ms. Here the client claims a
+        // long duration but the server measures a sub-floor elapsed time.
         // Deterministic setup: an 8-bit record (solve guaranteed below the
-        // 5M counter cap) with an EXPLICIT 60 s ctx floor.
+        // 5M counter cap) with an explicit 60 s ctx floor.
         let mut record = make_record(8);
         let counter = solve_for_test(&record).unwrap();
         let mut ctx = VerifyContext {
@@ -1574,8 +1571,8 @@ mod tests {
 
     #[test]
     fn ip_mismatch_is_rejected_at_core_level() {
-        // The review's point 6: IP binding must be enforced by the core
-        // verifier itself, not left to the route layer.
+        // IP binding must be enforced by the core verifier itself, not left
+        // to the route layer.
         let mut record = make_record(8);
         let counter = solve_for_test(&record).unwrap();
         let mut ctx = VerifyContext {
@@ -1636,7 +1633,7 @@ mod tests {
             VerifyOutcome::Invalid(VerifyError::MissingClientIp)
         );
 
-        // A record with an EMPTY binding tag (BindingMode::None) still
+        // A record with an empty binding tag (BindingMode::None) still
         // verifies without an IP — binding is genuinely disabled. Issued
         // properly so the v2 signature (which covers the tag) stays valid.
         let config = ChallengeConfig {
@@ -1694,7 +1691,7 @@ mod tests {
     fn attempt_cap_counts_every_verification() {
         let mut record = make_record(8);
         let counter = solve_for_test(&record).unwrap();
-        // First call (even a WRONG counter) consumes the single attempt.
+        // First call (even a wrong counter) consumes the single attempt.
         let wrong = if counter == 0 { 1 } else { 0 };
         let mut ctx = VerifyContext {
             record: &mut record,
@@ -2064,9 +2061,9 @@ mod tests {
 
     #[test]
     fn clock_skew_within_tolerance_skips_the_floor() {
-        // Issuer host ahead of verifier host by 1 s (within the 5 s
-        // SKEW_TOLERANCE_US): the floor heuristic is skipped and a correct
-        // PoW passes.
+        // Issuer host ahead of verifier host by 1 s (within the 5 s skew
+        // tolerance): the floor heuristic is skipped and a correct PoW
+        // passes.
         let mut record = make_record(8);
         let counter = solve_for_test(&record).unwrap();
         assert!(record.min_duration_ms > 0, "record floor must be positive");
@@ -2098,8 +2095,9 @@ mod tests {
 
     #[test]
     fn clock_skew_beyond_tolerance_is_rejected() {
-        // Issuer host ahead by 6 s (> SKEW_TOLERANCE_US): clocks are broken —
-        // the timing guarantee is void and the solution is rejected.
+        // Issuer host ahead by 6 s (beyond the 5 s skew tolerance): clocks
+        // are broken — the timing guarantee is void and the solution is
+        // rejected.
         let mut record = make_record(8);
         let counter = solve_for_test(&record).unwrap();
         let mut ctx = VerifyContext {
@@ -2299,7 +2297,7 @@ mod tests {
 
     #[test]
     fn verify_rejects_counter_beyond_solver_cap() {
-        // The solver caps at MAX_SHA_HASHES (5M); verify_solution must reject
+        // The solver caps at 5M hashes; verify_solution must reject
         // larger counters deterministically (a huge counter is not a
         // legitimate solution and must never reach hash derivation).
         let mut record = make_record(4);
@@ -2310,9 +2308,10 @@ mod tests {
             VerifyOutcome::Invalid(VerifyError::CounterTooLarge)
         );
 
-        // EXACTLY at the cap is also rejected: the official decoder rejects
-        // counter >= 5,000,000 (the JS solver searches 0..4,999,999), so the
-        // direct verifier must match (protocol parity).
+        // The cap value itself is also rejected: the official decoder
+        // rejects counter >= 5,000,000 (the JS solver searches
+        // 0..4,999,999), so the direct verifier must match (protocol
+        // parity).
         let mut record2 = make_record(4);
         let outcome = verify(&mut record2, crate::challenge::SOLVER_MAX_HASHES, 5000);
         assert_eq!(
@@ -2449,7 +2448,7 @@ mod tests {
         let mut argon_record = make_argon2_record(8, 128);
         let sha_counter = solve_for_test(&sha_record).unwrap();
 
-        // Deterministic core assertion: the two algorithms derive DIFFERENT
+        // Deterministic core assertion: the two algorithms derive different
         // hashes for the same counter (the algorithm is part of the input).
         let sha_hash = derive_hash(&sha_record, sha_counter).unwrap();
         let argon_hash = derive_hash(&argon_record, sha_counter).unwrap();
@@ -2493,10 +2492,9 @@ mod tests {
 
     #[test]
     fn verify_duration_floor_is_per_challenge() {
-        // The record's own floor is authoritative when ctx.min_duration_ms is 0.
-        // Deterministic setup: 8-bit record (solve guaranteed below the 5M
-        // solver cap); its issued SHA-256 floor is max(ceil(256/5e9*1000), 5)
-        // = 5 ms.
+        // The record's own floor is authoritative when ctx.min_duration_ms
+        // is 0. Deterministic setup: 8-bit record (solve guaranteed below
+        // the 5M solver cap); its issued SHA-256 floor is 5 ms.
         let mut record = make_record(8);
         let counter = solve_for_test(&record).unwrap();
         assert_eq!(record.min_duration_ms, 5);
@@ -2554,7 +2552,7 @@ mod tests {
     fn verify_accepts_full_difficulty_range() {
         // Every difficulty from 1 to the solver cap must issue and verify.
         // (0 is rejected at issuance with InvalidDifficulty.) The solver
-        // search is capped at SOLVER_MAX_HASHES (the real solver contract):
+        // search is capped at the real solver's hash limit:
         // at 20 bits no counter exists within the cap with p ≈ 0.85% — that
         // is the documented "Exhausted" outcome, so the test asserts Valid
         // when a counter exists and accepts cap-exhaustion at 20 bits only.
@@ -2613,7 +2611,7 @@ mod tests {
         );
 
         let mut bad_ttl = make_record(8);
-        bad_ttl.expires_at = bad_ttl.issued_at + 301; // > MAX_TTL_SECS
+        bad_ttl.expires_at = bad_ttl.issued_at + 301; // beyond the TTL cap
         assert_eq!(validate_record(&bad_ttl), Err(VerifyError::MalformedRecord));
 
         let mut bad_scope = make_record(8);
@@ -2631,7 +2629,7 @@ mod tests {
         );
 
         let mut argon_bad_t = make_argon2_record(4, 128);
-        argon_bad_t.t = 32; // above MAX_ARGON_TIME (16)
+        argon_bad_t.t = 32; // above the t ceiling (16)
         assert_eq!(
             validate_record(&argon_bad_t),
             Err(VerifyError::MalformedRecord)
@@ -2652,14 +2650,14 @@ mod tests {
         );
 
         let mut argon_low_t = make_argon2_record(4, 128);
-        argon_low_t.t = 2; // below MIN_ARGON_TIME (3)
+        argon_low_t.t = 2; // below the t minimum (3)
         assert_eq!(
             validate_record(&argon_low_t),
             Err(VerifyError::MalformedRecord)
         );
 
         let mut argon_bad_p = make_argon2_record(4, 128);
-        argon_bad_p.p = 5; // above MAX_PARALLELISM (4)
+        argon_bad_p.p = 5; // above the parallelism ceiling (4)
         assert_eq!(
             validate_record(&argon_bad_p),
             Err(VerifyError::MalformedRecord)
@@ -3097,7 +3095,7 @@ mod tests {
 
     #[test]
     fn v2_fixture_with_issuer_set_verifies() {
-        // The issuer is the field before the FINAL kid: a
+        // The issuer is the field before the final kid: a
         // fixture record with an issuer set re-signs and verifies — the
         // byte-exact anchor the PHP side pins too.
         let mut record = fixture_record(2);
@@ -3141,7 +3139,7 @@ mod tests {
     fn kid_selects_the_secret_for_signature_and_binding() {
         // With `secrets_by_kid` configured, the record's kid
         // selects the signing secret — a challenge issued under kid 2 with
-        // secret B verifies ONLY against B, never against the other keys.
+        // secret B verifies only against B, never against the other keys.
         let key_b = "0123456789abcdef0123456789abcdef";
         let mut record = make_record_with_kid(8, 2, key_b);
         assert_eq!(
@@ -3178,7 +3176,7 @@ mod tests {
             "the kid-selected secret must verify the signature AND the binding tag"
         );
 
-        // The same kid with a DIFFERENT secret → BadSignature (the secret
+        // The same kid with a different secret → BadSignature (the secret
         // selection is real, not cosmetic).
         let mut wrong: HashMap<u32, String> = HashMap::new();
         wrong.insert(2, "WRONG-KEY-16-bytes!".to_string());
@@ -3238,12 +3236,12 @@ mod tests {
     fn unknown_kid_is_rejected_with_unknown_kid() {
         // A record whose kid is absent from the verifier's key
         // map is rejected with UnknownKid — before any signature work (the
-        // correct signature for a DIFFERENT kid can never rescue it).
+        // correct signature for a different kid can never rescue it).
         let key_a = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
         let mut record = make_record_with_kid(8, 1, key_a);
         let counter = solve_for_test(&record).unwrap();
 
-        // The map holds ONLY kid 2 — kid 1 is unknown to this verifier.
+        // The map holds only kid 2 — kid 1 is unknown to this verifier.
         let mut secrets: HashMap<u32, String> = HashMap::new();
         secrets.insert(2, "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB".to_string());
         let mut ctx = VerifyContext {
@@ -3270,7 +3268,7 @@ mod tests {
             verify_solution(&mut ctx),
             VerifyOutcome::Invalid(VerifyError::UnknownKid)
         );
-        // An EMPTY map rejects every kid (max configured = 0).
+        // An empty map rejects every kid (max configured = 0).
         let empty: HashMap<u32, String> = HashMap::new();
         let mut ctx_empty = VerifyContext {
             record: &mut record,
@@ -3300,7 +3298,7 @@ mod tests {
 
     #[test]
     fn future_kid_is_rejected_by_the_forward_guard() {
-        // The forward/rollback guard: a record keyed with a kid NEWER
+        // The forward/rollback guard: a record keyed with a kid newer
         // than the verifier's newest configured kid must never verify on an
         // older node — UnknownKid fires even though the record is otherwise
         // perfectly signed and the node has simply not rolled forward yet.
@@ -3403,8 +3401,8 @@ mod tests {
 
     #[test]
     fn revoked_kid_is_rejected_even_when_the_secret_is_present() {
-        // A REVOKED kid is rejected with UnknownKid IMMEDIATELY —
-        // before the signature check — even though the record is perfectly
+        // A revoked kid is rejected with UnknownKid immediately,
+        // before the signature check, even though the record is perfectly
         // signed and the verifier still holds its secret: compromise
         // revocation overrides the rotation grace (a leaked key stays in
         // secrets_by_kid while the deployment retires it, but its challenges
@@ -3514,7 +3512,7 @@ mod tests {
 
     #[test]
     fn tampering_with_kid_breaks_the_v2_signature() {
-        // The kid is the FINAL signed canonical field: swapping it must
+        // The kid is the final signed canonical field: swapping it must
         // invalidate the signature (a kid-1 challenge cannot be replayed as
         // kid-2).
         let key = "0123456789abcdef0123456789abcdef";
@@ -3536,8 +3534,8 @@ mod tests {
     // ── explicit difficulty bounds ─────────────────────────────────────
     #[test]
     fn validate_record_enforces_the_explicit_difficulty_bounds() {
-        // MIN_DIFFICULTY = 1 and MAX_DIFFICULTY = 20 apply to BOTH
-        // algorithms — 0, 21, 256 and 65535 are rejected, 1 and 20 accepted.
+        // The difficulty bounds 1 and 20 apply to both algorithms — 0, 21,
+        // 256 and 65535 are rejected, 1 and 20 accepted.
         use crate::challenge::{MAX_DIFFICULTY, MIN_DIFFICULTY};
         assert_eq!(MIN_DIFFICULTY, 1);
         assert_eq!(MAX_DIFFICULTY, 20);
@@ -3577,10 +3575,10 @@ mod tests {
 
     #[test]
     fn difficulty_bounds_reject_before_any_hash_computation() {
-        // The ceiling-test pattern: solve with a SANE record, then verify
-        // against an out-of-bounds-difficulty record with the VALID counter —
+        // The ceiling-test pattern: solve with a sane record, then verify
+        // against an out-of-bounds-difficulty record with the valid counter —
         // MalformedRecord must fire in validate_record (pre-hash), never
-        // reach derive_hash. A hash-based path would ACCEPT the valid
+        // reach derive_hash. A hash-based path would accept the valid
         // counter; only the pre-hash gate can reject it.
         for bad in [0u32, 21, 256, 65_535] {
             let mut sha = make_record(8);
@@ -3607,7 +3605,7 @@ mod tests {
     #[test]
     fn validate_record_rejects_oversized_nonce_and_salt_before_decode() {
         // The exact-length pre-bounds (nonce 44 chars, salt
-        // 24 chars) fire BEFORE any base64 decode — a megabyte salt/nonce
+        // 24 chars) fire before any base64 decode — a megabyte salt/nonce
         // string is rejected as MalformedRecord without allocating a decode
         // buffer. Also verified end-to-end: validate_record is the first
         // check of verify_solution, so an oversized field never reaches
@@ -3715,12 +3713,12 @@ mod tests {
 
     #[test]
     fn future_issued_challenge_beyond_skew_is_rejected() {
-        // A challenge issued more than MAX_CLOCK_SKEW_SECS (60) in the
+        // A challenge issued more than the clock-skew bound (60 s) in the
         // future relative to the verifier clock is a time-domain anomaly —
         // the TTL check rejects it. Mutating issued_at invalidates the
         // signature, so re-sign first.
         let mut record = make_record(8);
-        record.issued_at = NOW_UNIX + 62; // > now (NOW_UNIX+1) + 60 → anomaly
+        record.issued_at = NOW_UNIX + 62; // > now + 60 → anomaly
         record.expires_at = record.issued_at + 120;
         resign_v2(&mut record, "test-key-16-bytes!");
         let counter = solve_for_test(&record).unwrap();
@@ -3752,7 +3750,7 @@ mod tests {
         // Exactly AT the skew bound is still acceptable (issued_at ==
         // now + 60): the boundary is inclusive.
         let mut record = make_record(8);
-        record.issued_at = NOW_UNIX + 61; // == now (NOW_UNIX+1) + 60
+        record.issued_at = NOW_UNIX + 61; // == now + 60
         record.expires_at = record.issued_at + 120;
         resign_v2(&mut record, "test-key-16-bytes!");
         let counter = solve_for_test(&record).unwrap();
@@ -3782,13 +3780,13 @@ mod tests {
         ));
     }
 
-    // ── POST-DERIVE final re-validation ───────────────────────────────
+    // ── post-derive final re-validation ───────────────────────────────
 
     #[test]
     fn final_revalidation_race_expired_during_derive() {
         // The expensive derivation may straddle expires_at: the cheap TTL
         // check passes, the hash derives, and by the final re-check the
-        // CURRENT server time has advanced past expiry. The final gate must
+        // current server time has advanced past expiry. The final gate must
         // reject — deterministically simulated with an advanced now_unix.
         let mut record = make_record(8);
         let counter = solve_for_test(&record).unwrap();
@@ -3841,7 +3839,7 @@ mod tests {
     fn final_revalidation_rejects_changed_expectations() {
         // Expectations (policy epoch, region, issuer) can change while the
         // proof is deriving: the final gate re-checks them all against the
-        // CURRENT configuration.
+        // current configuration.
         let mut record = make_record(8);
         let counter = solve_for_test(&record).unwrap();
         let now_unix = NOW_UNIX + 1;
@@ -3898,7 +3896,7 @@ mod tests {
     fn unknown_algorithm_variants_are_rejected_at_parse_time() {
         // serde rejects unknown PoWAlgorithm variants exactly like
         // PHP's fromArray throws MalformedRecordException — "argon2d",
-        // "sha1", "sha256-v2" and "ARGON2ID" are all parse errors, and the
+        // "sha1", "sha256-v2" and "argon2id" are all parse errors, and the
         // storage layer maps a corrupt key to RecordNotFound (PHP parity).
         let record = make_record(8);
         for algo in ["argon2d", "sha1", "sha256-v2", "ARGON2ID"] {
@@ -3938,9 +3936,9 @@ mod tests {
         // MalformedRecord before any Params::new/allocation.
         use crate::challenge::{MAX_ARGON_MEMORY_KIB, MAX_ARGON_TIME};
         for (field, value) in [
-            ("m_kib", 1u32),                     // below MIN_ARGON_MEMORY_KIB
+            ("m_kib", 1u32),                     // below the memory minimum
             ("m_kib", MAX_ARGON_MEMORY_KIB + 1), // 131072, above the ceiling
-            ("t", 1u32),                         // below MIN_ARGON_TIME
+            ("t", 1u32),                         // below the time minimum
             ("t", MAX_ARGON_TIME + 1),           // 32, above the ceiling
         ] {
             let mut record = make_argon2_record(4, 128);
@@ -3960,9 +3958,9 @@ mod tests {
 
     #[test]
     fn signed_argon2_record_at_max_parallelism_verifies() {
-        // Ceiling outcome for p: MAX_PARALLELISM = 4 is WITHIN the
-        // hard range, so a properly signed record with p=4 (and m_kib >= 8*p,
-        // t >= 3) must verify.
+        // Ceiling outcome for p: the parallelism ceiling is 4, so a
+        // properly signed record with p=4 (and m_kib >= 8*p, t >= 3) must
+        // verify.
         let mut record = make_argon2_record(4, 64);
         record.p = 4;
         record.m_kib = 64; // >= 8 * 4
@@ -3981,7 +3979,7 @@ mod tests {
     #[test]
     fn signed_argon2_record_above_max_parallelism_is_rejected() {
         let mut record = make_argon2_record(4, 128);
-        record.p = 5; // above MAX_PARALLELISM
+        record.p = 5; // above the parallelism ceiling
         resign_v2(&mut record, "test-key-16-bytes!");
         assert_eq!(
             verify(&mut record, 0, 5000),
@@ -4009,7 +4007,7 @@ mod tests {
     // ip = "192.168.1.5"; protocol_version = 2 (v1 vector below);
     // region/request_binding/issuer all unset, kid = 1 → the canonical ends
     // `|0||1|||1` (issuer is the penultimate field, empty when
-    // unset; kid is the FINAL field, 1 when unset).
+    // unset; kid is the final field, 1 when unset).
     const FIXTURE_SECRET: &str = "0123456789abcdef0123456789abcdef";
     const FIXTURE_NONCE: &str = "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVphYmNkZWY=";
     const FIXTURE_SALT: &str = "MTIzNDU2Nzg5MGFiY2RlZg==";
@@ -4090,7 +4088,7 @@ mod tests {
 
     #[test]
     fn binding_tag_matches_the_shared_fixture() {
-        // Locks the exact v2 binding tag from the SHARED FIXTURE VECTOR.
+        // Locks the exact v2 binding tag from the shared fixture vector.
         assert_eq!(
             binding_tag(FIXTURE_NONCE, "192.168.1.5", FIXTURE_SECRET).unwrap(),
             FIXTURE_BINDING_TAG
@@ -4134,7 +4132,7 @@ mod tests {
     #[test]
     fn v1_fixture_record_still_verifies_with_migration_flag() {
         // protocol_version 1 + legacy canonical + legacy ip_hash binding —
-        // verifiable ONLY during an explicit migration window.
+        // verifiable only during an explicit migration window.
         let mut record = fixture_record(1);
         assert_eq!(record.challenge, FIXTURE_CHALLENGE_V1);
         let b64 = FIXTURE_CHALLENGE_V1.split('.').next().unwrap();

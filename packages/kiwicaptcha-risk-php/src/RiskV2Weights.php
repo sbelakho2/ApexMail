@@ -5,11 +5,11 @@ declare(strict_types=1);
 namespace KiwiCaptcha\Risk;
 
 /**
- * The 3 ADDITIVE risk-v2 weight fields, same names/order as RiskV2Signals.
+ * The 3 additive risk-v2 weight fields, same names/order as RiskV2Signals.
  *
  * The risk-v1 contract weights (RiskWeights) are untouched — these are a
- * separate, additive surface with identical fixed-point semantics. DEFAULT
- * weights are byte-identical with the Rust mirror.
+ * separate, additive surface with identical fixed-point semantics. The
+ * default weights are byte-identical with the Rust mirror.
  */
 final class RiskV2Weights
 {

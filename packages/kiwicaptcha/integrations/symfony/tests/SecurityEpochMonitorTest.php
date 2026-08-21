@@ -20,12 +20,12 @@ use Symfony\Component\Validator\ConstraintValidatorFactory;
 use Symfony\Component\Validator\Validation;
 
 /**
- * Bounded-revocation-latency security epoch: the monitor reads
- * the central {kiwi:<ns>}:security-policy hash's min_policy_epoch with a
- * SHORT cache, keeps a MONOTONIC in-process max (a regressed central value
- * is ignored), serves the last-observed max on Redis failure, and feeds the
- * verifier's expected policy epoch per verification — so a central bump
- * revokes old-version challenges within one cache window.
+ * Bounded-revocation-latency security epoch: the monitor reads the
+ * central {kiwi:<ns>}:security-policy hash's min_policy_epoch, keeps a
+ * monotonic in-process max (ignoring a regressed central value), serves
+ * the last-observed max on Redis failure, and feeds the verifier's
+ * expected policy epoch per verification. A central bump revokes
+ * old-version challenges within one cache window.
  */
 final class SecurityEpochMonitorTest extends TestCase
 {
@@ -103,8 +103,8 @@ final class SecurityEpochMonitorTest extends TestCase
         self::assertTrue($verifier->verify($beforeToken, self::SECRET, 'login', '198.51.100.7')->isOk());
 
         // One monitor refresh (cache window 1 s) observes the bump and
-        // rotates the verifier: within the cache TTL a PENDING old-version
-        // challenge is REJECTED.
+        // rotates the verifier: within the cache TTL a pending old-version
+        // challenge is rejected.
         self::assertSame(2, $monitor->currentEpoch());
         $outcome = $verifier->verify($oldToken, self::SECRET, 'login', '198.51.100.7');
         self::assertFalse($outcome->isOk());
@@ -138,7 +138,7 @@ final class SecurityEpochMonitorTest extends TestCase
         self::assertSame(3, $monitor->currentEpoch());
         self::assertSame(VerifyError::WrongPolicyVersion, $verifier->verify($revokedToken, self::SECRET, 'login', '198.51.100.7')->error, 'the bump revokes epoch-1 challenges');
 
-        // The central value REGRESSES to 1 (a misconfigured rollback of the
+        // The central value regresses to 1 (a misconfigured rollback of the
         // policy hash): the monotonic guard must keep the observed max 3.
         $this->setCentralEpoch($redis, 1);
         $this->clockMs = 2000; // past the cache window -> a re-read happens
@@ -218,7 +218,7 @@ final class SecurityEpochMonitorTest extends TestCase
     }
 
     /**
-     * The VALIDATOR path ("the validator + any verification path
+     * The validator path ("the validator + any verification path
      * use the monitor's current epoch"): a monitor observing the bump makes
      * an old-version solve fail with the collapsed invalid_or_expired
      * violation, and the monitor's refresh happens per verification.
@@ -301,7 +301,7 @@ final class SecurityEpochMonitorTest extends TestCase
         self::assertSame(2, $monitor->currentEpoch(), 'the cached max is still the enforced epoch');
         self::assertTrue($monitor->isStale(), 'past last_success + max_stale the monitor is stale');
 
-        // A SUCCESSFUL read refreshes the deadline: the outage ends at
+        // A successful read refreshes the deadline: the outage ends at
         // T0+90 s, the next refresh confirms the central state and the
         // monitor is fresh again.
         $redis->failCommand = null;
@@ -343,7 +343,7 @@ final class SecurityEpochMonitorTest extends TestCase
     }
 
     /**
-     * The VALIDATOR fails verification CLOSED with the distinct
+     * The validator fails verification closed with the distinct
      * temporary_unavailable violation when the monitor is stale — the token
      * is NOT burned (retryable), the server refuses to trust its own cache.
      */
@@ -377,7 +377,7 @@ final class SecurityEpochMonitorTest extends TestCase
             'within the window the cached revocation applies (epoch-1 token dies)'
         );
 
-        // Past the window with Redis still down: verification fails CLOSED
+        // Past the window with Redis still down: verification fails closed
         // with temporary_unavailable — never invalid_or_expired (the token
         // is not burned) and never a guessed success.
         $redis->failCommand = '*';
@@ -392,8 +392,8 @@ final class SecurityEpochMonitorTest extends TestCase
     }
 
     /**
-     * The CHALLENGE CONTROLLER refuses issuance with 503
-     * SERVICE_UNAVAILABLE when the monitor is stale — within the window the
+     * The challenge controller refuses issuance with 503
+     * service_unavailable when the monitor is stale — within the window the
      * cached max still serves (issuance keeps working).
      */
     public function testControllerRefusesIssuanceWith503WhenStale(): void
@@ -408,7 +408,7 @@ final class SecurityEpochMonitorTest extends TestCase
         $response = $controller->challenge(JsonRequest::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], '{"scope":"login"}'));
         self::assertSame(200, $response->getStatusCode(), 'within the max-stale window issuance keeps serving');
 
-        // Past the window with Redis down: 503 SERVICE_UNAVAILABLE.
+        // Past the window with Redis down: 503 service_unavailable.
         $redis->failCommand = '*';
         $this->clockMs = 90_000;
         $response = $controller->challenge(JsonRequest::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], '{"scope":"login"}'));

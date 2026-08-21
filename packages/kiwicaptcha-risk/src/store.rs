@@ -45,9 +45,9 @@ pub trait RiskStateStore {
     /// - backend errors (`BackendUnavailable`, `ScriptError`, `Timeout`).
     fn observe(&self, o: &crate::event::RiskObservation) -> Result<Observed, RiskStoreError>;
 
-    /// Registers a PENDING outcome-ledger entry for one decision
-    /// (`outcome_register.lua`). The OUTCOME LEDGER IS ALWAYS ON and
-    /// independent of calibration: with calibration DISABLED the engine
+    /// Registers a pending outcome-ledger entry for one decision
+    /// (`outcome_register.lua`). The outcome ledger is always on and
+    /// independent of calibration: with calibration disabled the engine
     /// books the ledger here at decision time, so
     /// ConfirmedLegitimate/ConfirmedAbuse work identically with or without
     /// calibration. `decision_hour` is `now_ms / 3_600_000` (the decision's
@@ -69,7 +69,7 @@ pub trait RiskStateStore {
     ) -> Result<bool, RiskStoreError>;
 
     /// Confirms a decision's ledger entry exactly once
-    /// (`outcome_confirm.lua`): PENDING -> L/A. Returns `1` for the FIRST
+    /// (`outcome_confirm.lua`): pending -> L/A. Returns `1` for the first
     /// confirmation (reputation eligible), `0` when the decision is
     /// unknown/already confirmed.
     ///
@@ -103,17 +103,17 @@ pub trait RiskStateStore {
     }
 }
 
-/// OPTIONAL risk-v2 capability: records the session's FIRST-seen
+/// Optional risk-v2 capability: records the session's first-seen
 /// client-context tag and returns the recorded tag.
 ///
-/// Kept OUT of the [`RiskStateStore`] trait so existing v1 implementations
-/// compile unchanged. The DEFAULT implementation reports no record surface
-/// (`Ok(None)`), so a store without the capability degrades the
-/// session-consistency signal to neutral (consistent) — exactly the
+/// Kept out of the [`RiskStateStore`] trait so existing v1 implementations
+/// compile unchanged. The default implementation reports no record
+/// surface — `Ok(None)` — so a store without the capability degrades the
+/// session-consistency signal to neutral (consistent), exactly the
 /// backend-miss semantics.
 ///
-/// OPT-IN: the capability traits are OPTIONAL — a third-party store
-/// implementing only [`RiskStateStore`] opts in by adding the two EMPTY
+/// Opt-in: the capability traits are optional — a third-party store
+/// implementing only [`RiskStateStore`] opts in by adding the two empty
 /// impls (`impl SessionContextTagStore for MyStore {}` and
 /// `impl SessionTlsTagStore for MyStore {}`); the default methods then
 /// provide the neutral v2 signals (no record surface -> "consistent").
@@ -121,12 +121,12 @@ pub trait RiskStateStore {
 /// implements the real record surfaces.
 pub trait SessionContextTagStore {
     /// The risk-v2 session client-context record: records `tag` as the
-    /// session's FIRST-seen client-context tag (SET NX, first write wins)
-    /// and returns the recorded tag — `Ok(Some(first))` when a record
-    /// exists, `Ok(None)` when the store has no record surface.
+    /// session's first-seen client-context tag (SET NX, first write wins)
+    /// and returns the recorded tag — `Some(first)` when a record exists,
+    /// `None` when the store has no record surface.
     ///
     /// The record is keyed by the session's HMAC pseudonym (never the raw
-    /// cookie value) and expires with the SAME TTL as the risk-v1 session
+    /// cookie value) and expires with the same TTL as the risk-v1 session
     /// state. The engine derives the `session_consistency` signal by
     /// comparing the current request's tag against the returned first tag;
     /// `Ok(None)` / `Err` degrade to "consistent" (neutral), never breaking
@@ -140,17 +140,17 @@ pub trait SessionContextTagStore {
     }
 }
 
-/// OPTIONAL risk-v2 capability: records the session's FIRST-seen
+/// Optional risk-v2 capability: records the session's first-seen
 /// trusted-edge TLS classification tag and returns the recorded tag.
 ///
-/// Kept OUT of the [`RiskStateStore`] trait so existing v1 implementations
-/// compile unchanged. The DEFAULT implementation reports no record surface
-/// (`Ok(None)`), so a store without the capability degrades the
-/// tls-inconsistency signal to neutral (consistent) — exactly the
+/// Kept out of the [`RiskStateStore`] trait so existing v1 implementations
+/// compile unchanged. The default implementation reports no record
+/// surface — `Ok(None)` — so a store without the capability degrades the
+/// tls-inconsistency signal to neutral (consistent), exactly the
 /// backend-miss semantics.
 ///
-/// OPT-IN: the capability traits are OPTIONAL — a third-party store
-/// implementing only [`RiskStateStore`] opts in by adding the two EMPTY
+/// Opt-in: the capability traits are optional — a third-party store
+/// implementing only [`RiskStateStore`] opts in by adding the two empty
 /// impls (`impl SessionContextTagStore for MyStore {}` and
 /// `impl SessionTlsTagStore for MyStore {}`); the default methods then
 /// provide the neutral v2 signals (no record surface -> "consistent").
@@ -158,14 +158,14 @@ pub trait SessionContextTagStore {
 /// implements the real record surfaces.
 pub trait SessionTlsTagStore {
     /// The risk-v2 session trusted-edge TLS record: records `tag` as the
-    /// session's FIRST-seen TLS classification tag (SET NX, first write
+    /// session's first-seen TLS classification tag (SET NX, first write
     /// wins) and returns the recorded tag — the first coarse, server-
-    /// attested TLS classification (e.g. "tls13|http2", supplied ONLY by
+    /// attested TLS classification (e.g. "tls13|http2", supplied only by
     /// trusted proxy/CDN infrastructure) the session ever presented, or
     /// `Ok(None)` when the store has no record surface.
     ///
     /// The record is keyed by the session's HMAC pseudonym (never the raw
-    /// cookie value) and expires with the SAME TTL as the risk-v1 session
+    /// cookie value) and expires with the same TTL as the risk-v1 session
     /// state. The engine derives the `tls_inconsistency` signal by
     /// comparing the current request's tag against the returned first tag;
     /// `Ok(None)` / `Err` degrade to "consistent" (neutral), never breaking

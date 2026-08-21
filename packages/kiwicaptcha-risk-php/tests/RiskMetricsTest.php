@@ -21,16 +21,16 @@ use KiwiCaptcha\Risk\Tests\RiskStateStoreStub;
 use PHPUnit\Framework\TestCase;
 
 /**
- * METRICS CARDINALITY.
+ * Metrics cardinality.
  *
- * RiskMetrics counter keys must be BOUNDED: recording decisions with
- * distinct decisionIds/challengeIds must never grow the counters map (no
- * identity-bearing keys). The engine's key construction is the bounded
- * tuple "decisions:<scope>:<action>:<band>" (scope is deployment-config
- * bounded, action is an enum value, band is 0..10) plus a handful of fixed
- * literals (denied:limiter, degraded:breaker, degraded:store, gauges,
- * latencies) — the tests below pin that construction and prove the map
- * does not grow with the ids.
+ * RiskMetrics counter keys must be bounded: recording decisions with
+ * distinct decisionIds/challengeIds must never grow the counters map,
+ * since no key carries an identity. The engine's key construction is
+ * the bounded tuple "decisions:<scope>:<action>:<band>", where scope is
+ * deployment-config bounded, action is an enum value, and band is
+ * 0..10, plus a handful of fixed literals (denied:limiter,
+ * degraded:breaker, degraded:store, gauges, latencies). The tests below
+ * pin that construction and prove the map does not grow with the ids.
  */
 final class RiskMetricsTest extends TestCase
 {
@@ -85,9 +85,9 @@ final class RiskMetricsTest extends TestCase
     }
 
     /**
-     * Engine-level cardinality: 200 assessments with DISTINCT idempotency
-     * keys (each a distinct challenge/event id) and DISTINCT decision ids
-     * must leave the counters map bounded — no identity-bearing keys.
+     * Engine-level cardinality: 200 assessments with distinct idempotency
+     * keys (each a distinct challenge/event id) and distinct decision ids
+     * must leave the counters map bounded, with no identity-bearing keys.
      */
     public function testEngineMetricsDoNotGrowWithDecisionIds(): void
     {

@@ -22,9 +22,9 @@ use Symfony\Component\OptionsResolver\OptionsResolver;
  *
  * The default 'endpoint' option is derived from the bundle's configured
  * `route_prefix` (rtrim($prefix, '/').'/challenge'), so the form posts to
- * the ACTUAL route — mirroring the standalone Twig widget, which already
- * derives its endpoint from the same prefix. 'endpoint' remains overridable
- * per form.
+ * the actual route, mirroring the standalone Twig widget, which already
+ * derives its endpoint from the same prefix. 'endpoint' remains
+ * overridable per form.
  *
  * The default 'telemetry' option follows the bundle's configured telemetry
  * mode ('off' default; forced 'off' under strict privacy mode) and is
@@ -65,7 +65,7 @@ class KiwiCaptchaType extends AbstractType
     {
         $resolver->setDefaults([
             // The bundle's route prefix is injected by the extension; the
-            // form endpoint follows the ACTUAL registered route.
+            // form endpoint follows the actual registered route.
             'endpoint' => rtrim($this->routePrefix, '/').'/challenge',
             'scope' => 'login',
             'nonce' => null,
@@ -77,7 +77,7 @@ class KiwiCaptchaType extends AbstractType
             // challenge POST and carries it in the hidden
             // kiwi_request_binding form field. Defaults to the configured
             // static risk.request_binding; the application may supply a
-            // DYNAMIC per-transaction binding per form.
+            // dynamic per-transaction binding per form.
             'request_binding' => $this->requestBinding,
             // The constraint's expected scope follows the form's scope option.
             'constraints' => static fn (Options $options): array => [

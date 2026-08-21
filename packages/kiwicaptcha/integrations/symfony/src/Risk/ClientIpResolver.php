@@ -9,46 +9,46 @@ use Symfony\Component\HttpFoundation\IpUtils;
 use Symfony\Component\HttpFoundation\Request;
 
 /**
- * Trusted client-IP policy: ONE explicit mode decides how the
- * canonical client IP is derived, and every IP consumer in the bundle — the
+ * Trusted client-IP policy: one explicit mode decides how the
+ * canonical client IP is derived, and every IP consumer in the bundle, the
  * challenge controller (issuance binding tag, rate-limit identity, risk
  * source pseudonym) and the validator (binding re-check, post-solve risk
- * context) — goes through this resolver, so all of them always see the SAME
+ * context), goes through this resolver, so all of them always see the same
  * canonical IP.
  *
  * Modes:
  *
- *  - `direct` (risk.client_ip_mode: direct): forwarding headers are ALWAYS
+ *  - `direct` (risk.client_ip_mode: direct): forwarding headers are always
  *    ignored. The canonical IP is the socket peer (SERVER REMOTE_ADDR) and
  *    nothing else — regardless of any application-level trusted-proxy
- *    configuration, a forged X-Forwarded-For / Forwarded from ANY peer can
+ *    configuration, a forged X-Forwarded-For / Forwarded from any peer can
  *    never influence it.
  *
  *  - `symfony_trusted_proxies` (default): Symfony's own trusted-proxy
- *    machinery is configured from risk.trusted_proxies — the CIDR list is
+ *    machinery is configured from risk.trusted_proxies: the CIDR list is
  *    passed to Request::setTrustedProxies() (with HEADER_X_FORWARDED_FOR |
  *    HEADER_FORWARDED), and Symfony already ignores forwarding headers from
  *    untrusted peers. When the bundle's list is non-empty it takes ownership
- *    of the trusted-proxy configuration (deployment-wide, per process — the
- *    static Symfony setting); an EMPTY list leaves the application's own
+ *    of the trusted-proxy configuration (deployment-wide, per process, the
+ *    static Symfony setting); an empty list leaves the application's own
  *    configuration untouched (the effective trust set is whatever Symfony
  *    has) and the bundle never clobbers it.
  *
- * AMBIGUOUS FORWARDING: when the peer IS trusted and BOTH X-Forwarded-For
- * AND Forwarded are present, the two chains can disagree — the canonical IP
+ * Ambiguous forwarding: when the peer is trusted and both X-Forwarded-For
+ * and Forwarded are present, the two chains can disagree — the canonical IP
  * becomes ambiguous. With risk.reject_ambiguous_forwarding=true the resolver
  * throws {@see AmbiguousForwardingException} (the controller turns it into
  * HTTP 400 AMBIGUOUS_FORWARDING, the validator fails closed as
  * invalid_or_expired); with the default false the anomaly is logged and the
  * request proceeds with Symfony's derivation.
  *
- * DUPLICATE SECURITY-SINGULAR HEADERS: a request carrying
- * Origin, Forwarded, X-Forwarded-For or X-Real-IP MORE THAN ONCE is parser
- * ambiguity — different intermediaries will pick different values, so the
- * header-derived identity is untrustworthy. The challenge CONTROLLER rejects
- * such a request with 400 DUPLICATE_HEADER BEFORE this resolver is ever
- * consulted; the resolver therefore treats a duplicate as ambiguous (it is
- * rejected earlier, never silently resolved).
+ * Duplicate security-singular headers: a request carrying Origin, Forwarded,
+ * X-Forwarded-For or X-Real-IP more than once is parser ambiguity — different
+ * intermediaries will pick different values, so the header-derived identity
+ * is untrustworthy. The challenge controller rejects such a request with 400
+ * DUPLICATE_HEADER before this resolver is ever consulted; the resolver
+ * therefore treats a duplicate as ambiguous, since it is rejected earlier,
+ * never silently resolved.
  *
  * An unparseable/missing socket peer yields the empty string (the callers'
  * existing "no usable risk signal" handling applies).
@@ -91,7 +91,7 @@ final class ClientIpResolver
     public function resolve(Request $request): string
     {
         if ($this->mode === self::MODE_DIRECT) {
-            // Socket peer only: forwarding headers are ALWAYS ignored.
+            // Socket peer only: forwarding headers are always ignored.
             return (string) $request->server->get('REMOTE_ADDR', '');
         }
 
@@ -116,7 +116,7 @@ final class ClientIpResolver
 
             // Symfony itself refuses to derive an IP from both trusted
             // headers (ConflictingHeadersException). Without rejection the
-            // request proceeds — but the only UNAMBIGUOUS value is the
+            // request proceeds, but the only unambiguous value is the
             // socket peer: never a header-derived guess.
             try {
                 return (string) ($request->getClientIp() ?? $peer);

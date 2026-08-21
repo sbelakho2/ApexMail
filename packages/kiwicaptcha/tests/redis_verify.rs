@@ -2,8 +2,8 @@
 //!
 //! Gated two ways:
 //! - The whole file compiles only with `--features redis`.
-//! - Every test that touches Redis skips (returns) unless `RISK_REDIS_URL`
-//!   is set — the same env-gated pattern as `tests/cross_language.rs` — so
+//! - Every test that touches Redis skips (returns) unless the Redis URL
+//!   env var is set — the same env-gated pattern as `tests/cross_language.rs` — so
 //!   local `cargo test --features redis` stays hermetic. The pure-JSON
 //!   cross-language key-parity test runs without Redis.
 
@@ -47,7 +47,7 @@ impl ArgonAdmissionGate for BoolGate {
     }
 }
 
-/// Gate + RAII lease pair that counts acquires, in-flight leases, and
+/// Gate and lease pair that counts acquires, in-flight leases, and
 /// releases — proves one acquire corresponds to exactly one Drop.
 struct CountingGate {
     active: Arc<AtomicUsize>,
@@ -118,7 +118,7 @@ fn now_micros() -> u64 {
 
 /// Deterministic verifier clock for the future-issued-skew test: the fixed
 /// issue-time second — the 61 s future-issued challenge is then
-/// ALWAYS beyond the 60 s skew bound, with no wall-clock race.
+/// always beyond the 60 s skew bound, with no wall-clock race.
 static FAKE_FUTURE_NOW: AtomicU64 = AtomicU64::new(0);
 
 fn fake_future_now() -> u64 {
@@ -140,9 +140,9 @@ fn redis_url() -> Option<String> {
     }
 }
 
-/// Minimal RESP2 command parser for the fake-Redis test server: returns the
-/// command's argument strings and the number of bytes consumed, or `None`
-/// while the buffer holds only a partial command.
+/// Minimal Redis-protocol command parser for the fake-Redis test server:
+/// returns the command's argument strings and the number of bytes consumed,
+/// or `None` while the buffer holds only a partial command.
 fn parse_resp_command(buf: &[u8]) -> Option<(Vec<String>, usize)> {
     fn split_crlf(buf: &[u8]) -> Option<(&[u8], &[u8])> {
         let i = buf.windows(2).position(|w| w == b"\r\n")?;
@@ -322,7 +322,7 @@ fn php_written_record_with_non_null_operation_identity_parses_and_strips() {
 
     let mut value = serde_json::to_string(&issued.record).unwrap();
     value.truncate(value.len() - 1);
-    // The envelope EXACTLY as the PHP identity-aware consume writes it
+    // The envelope exactly as the PHP identity-aware consume writes it
     // (hex identity — the bounded Siteverify fingerprint shape).
     value.push_str(
         ",\"state\":\"consumed\",\"consumed_result\":{\"valid\":true,\"binding\":null},\
@@ -340,7 +340,7 @@ fn php_written_record_with_non_null_operation_identity_parses_and_strips() {
         .unwrap();
 
     let store = store_for(&url, &prefix);
-    // The strict parse strips the runtime fields (including the NON-NULL
+    // The strict parse strips the runtime fields (including the non-null
     // operation_identity) — the canonical record comes back intact.
     let found = store
         .find(&issued.record.nonce)
@@ -376,13 +376,13 @@ fn php_written_record_with_non_null_operation_identity_parses_and_strips() {
 #[test]
 fn two_concurrent_verifies_exactly_one_derives() {
     // The consumed-state transition keeps the record, so the
-    // concurrent loser now returns the WINNER'S STORED OUTCOME — the SAME
+    // concurrent loser returns the winner's stored outcome — the same
     // Valid — or ConsumeIndeterminate when it races between the transition
-    // and the outcome commit. NOT RecordNotFound. Exactly one derive
+    // and the outcome commit, never RecordNotFound. Exactly one derive
     // happens: commit_result stores exactly once, so the single stored
     // `consumed_result` (valid=true) pins the derive count; the counting
     // gate proves both racers passed through the Argon gate (the gate runs
-    // BEFORE the transition, so both acquire; only the winner derives).
+    // before the transition, so both acquire; only the winner derives).
     let Some(url) = redis_url() else { return };
     let prefix = prefix("race");
     let issued = issue_challenge(
@@ -496,8 +496,8 @@ fn replay_after_valid_verify_returns_the_stored_outcome() {
         verify_at(&verifier, &token, issued_at_ns),
         VerifyOutcome::Valid { .. }
     ));
-    // The consumed record is KEPT with the committed outcome —
-    // a replay returns the SAME Valid (from the stored result), never
+    // The consumed record is kept with the committed outcome —
+    // a replay returns the same Valid (from the stored result), never
     // RecordNotFound and never a re-derivation.
     assert!(
         matches!(
@@ -541,7 +541,7 @@ fn wrong_counter_is_insufficient_work_and_burns_the_record() {
         VerifyOutcome::Invalid(VerifyError::InsufficientWork)
     );
     // The retry with the correct counter sees the stored
-    // valid=false outcome — the SAME InsufficientWork, not RecordNotFound.
+    // valid=false outcome — the same InsufficientWork, not RecordNotFound.
     assert_eq!(
         verify_at(
             &verifier,
@@ -559,8 +559,8 @@ fn expired_record_returns_expired() {
     // Issue with a past wall-clock via the issuer's now_unix knob:
     // expires_at lands 1 s in the past, so the verifier's TTL check must
     // fire. Redis EX TTLs a past-expiry record at 1 s, so on the rare
-    // occasion the GETDEL misses the window (RecordNotFound), retry with a
-    // fresh challenge.
+    // occasion the record expires before the verifier reads it
+    // (RecordNotFound), retry with a fresh challenge.
     for attempt in 0..3 {
         let prefix = prefix(&format!("expired-{attempt}"));
         let issued = issue_challenge(
@@ -694,7 +694,7 @@ fn cheap_validation_failure_consumes_the_record() {
         VerifyOutcome::Invalid(VerifyError::BadSignature)
     );
 
-    // Cross-language table: terminal cheap failures CONSUME the
+    // Cross-language table: terminal cheap failures consume the
     // record (best-effort DEL), matching the PHP core — a retry with the
     // correct token now sees RecordNotFound.
     let good_token = encode_token(&issued.record.nonce, counter);
@@ -806,9 +806,9 @@ fn argon_lease_is_held_during_verify_and_released_by_drop() {
     let verifier = Arc::new(verifier_for(&url, &prefix).with_argon_gate(gate));
     verifier.store().store(&issued.record).unwrap();
 
-    // Verify on a worker thread so the main thread can OBSERVE the lease in
-    // flight: it must be held (count == 1) across the atomic GETDEL and the
-    // Argon2id derivation, i.e. DURING the verify call.
+    // Verify on a worker thread so the main thread can observe the lease in
+    // flight: it must be held (count == 1) across the atomic consume
+    // transition and the Argon2id derivation, i.e. during the verify call.
     let worker = Arc::clone(&verifier);
     let worker_token = token.clone();
     let handle =
@@ -979,7 +979,7 @@ fn connection_pool_reuses_connections_round_robin() {
     let token = encode_token(&issued.record.nonce, counter);
     let issued_at_ns = issued.record.issued_at_ns;
 
-    // Default pool size is DEFAULT_POOL_SIZE; with_pool_size overrides it.
+    // Default pool size is the crate default; with_pool_size overrides it.
     assert_eq!(store_for(&url, &prefix).pool_size(), DEFAULT_POOL_SIZE);
     assert_eq!(
         RedisChallengeStore::with_pool_size(
@@ -1033,7 +1033,7 @@ fn pool_reuses_the_same_slots_across_operations() {
         prefix.clone(),
         2,
     );
-    // 48 operations over a 2-slot pool: the SAME two slots must serve every
+    // 48 operations over a 2-slot pool: the same two slots must serve every
     // operation (lazy open on first use, reuse afterwards) — a pool that
     // recreated connections per operation would show more than 2 total
     // connections.
@@ -1076,9 +1076,9 @@ fn pool_reuses_the_same_slots_across_operations() {
 #[test]
 fn unreachable_store_maps_find_error_to_storage_unavailable() {
     // Bind a listener and drop it so the port is guaranteed closed: pool
-    // connects fail fast with ECONNREFUSED and the checkout returns after
-    // the bounded POOL_CHECKOUT_TIMEOUT. No RISK_REDIS_URL needed — this
-    // test is hermetic.
+    // connects fail fast with a connection-refused error and the checkout
+    // returns after the bounded pool checkout timeout. No Redis URL needed
+    // — this test is hermetic.
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     drop(listener);
@@ -1123,11 +1123,11 @@ fn hung_getdel_maps_consume_error_to_consume_indeterminate() {
     let nonce = issued.record.nonce.clone();
     let issued_at_ns = issued.record.issued_at_ns;
 
-    // A miniature RESP2 server: answers the PEEK (GET) with the stored
-    // record's JSON so the verifier's cheap phase succeeds, and then NEVER
-    // replies to the consume transition (EVAL) — the client's read timeout
-    // fires and consume() must map to ConsumeIndeterminate. Hermetic: no
-    // RISK_REDIS_URL needed.
+    // A miniature Redis-protocol server: answers the peek (GET) with the
+    // stored record's JSON so the verifier's cheap phase succeeds, and then
+    // never replies to the consume transition script — the client's read
+    // timeout fires and consume() must map to ConsumeIndeterminate.
+    // Hermetic: no Redis URL needed.
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     std::thread::spawn(move || {
@@ -1143,9 +1143,9 @@ fn hung_getdel_maps_consume_error_to_consume_indeterminate() {
                     while let Some((args, consumed)) = parse_resp_command(&buf) {
                         buf.drain(..consumed);
                         match args[0].as_str() {
-                            // Hold the connection open WITHOUT a reply: the
+                            // Hold the connection open without a reply: the
                             // client hits its 1 s read timeout. (The redis
-                            // crate invokes scripts via EVALSHA.)
+                            // crate invokes scripts by sha.)
                             "EVAL" | "EVALSHA" => loop {
                                 std::thread::sleep(std::time::Duration::from_secs(1));
                             },
@@ -1175,10 +1175,10 @@ fn hung_getdel_maps_consume_error_to_consume_indeterminate() {
 
 #[test]
 fn record_json_keys_match_php_cross_language_format() {
-    // The 22 keys PHP ChallengeRecord::toArray() emits for v2 records — the
+    // The keys PHP ChallengeRecord::toArray() emits for v2 records — the
     // exact key set a PHP RedisStorage writes and fromArray() reads. The
-    // `region` and `issuer` keys are ALWAYS present: null
-    // when unbound, exactly like PHP; `kid` is ALWAYS present
+    // `region` and `issuer` keys are always present: null
+    // when unbound, exactly like PHP; `kid` is always present
     // (default 1). No Redis needed: pure language-neutral schema parity.
     const PHP_KEYS: [&str; 23] = [
         "nonce",
@@ -1279,7 +1279,7 @@ fn record_json_keys_match_php_cross_language_format() {
     assert_eq!(decoded.region, None);
     assert_eq!(decoded.issuer, None);
     assert_eq!(decoded.kid, 1);
-    // A PHP record WITHOUT the kid key still deserializes (serde default 1).
+    // A PHP record without the kid key still deserializes (serde default 1).
     let mut no_kid_written = php_written.clone();
     no_kid_written.as_object_mut().unwrap().remove("kid");
     let decoded: ChallengeRecord = serde_json::from_value(no_kid_written).unwrap();
@@ -1294,7 +1294,7 @@ fn record_json_keys_match_php_cross_language_format() {
     issuer_written["issuer"] = serde_json::json!("auth-gw");
     let decoded: ChallengeRecord = serde_json::from_value(issuer_written).unwrap();
     assert_eq!(decoded.issuer.as_deref(), Some("auth-gw"));
-    // Old PHP records WITHOUT the region/issuer keys still deserialize
+    // Old PHP records without the region/issuer keys still deserialize
     // (serde default).
     let mut legacy_written = php_written;
     legacy_written.as_object_mut().unwrap().remove("region");
@@ -1309,7 +1309,7 @@ fn record_json_keys_match_php_cross_language_format() {
 #[test]
 fn replica_wait_barrier_fails_closed_without_replicas() {
     // with_wait(1, ...) makes the durability promise
-    // UNCONDITIONAL — after the SET a WAIT is issued and its
+    // unconditional — after the SET a replica wait is issued and its
     // acknowledgement count is verified. A replica-less server returns 0
     // (after the timeout), so the store MUST fail closed: a challenge that
     // only lives on the primary must never be handed to the client.
@@ -1335,10 +1335,10 @@ fn replica_wait_barrier_fails_closed_without_replicas() {
         "unexpected error: {err}"
     );
 
-    // The same store satisfies the barrier when WAIT reports the required
-    // acknowledgement count (a replica set that acked the write). WAIT is
-    // the single point of truth, so this exercises the success path
-    // against a store whose barrier is genuinely met.
+    // The same store satisfies the barrier when the wait reports the
+    // required acknowledgement count (a replica set that acked the write).
+    // The wait count is the single point of truth, so this exercises the
+    // success path against a store whose barrier is genuinely met.
     let prefix_ok = prefix("wait-ok");
     let store_ok = store_for(&url, &prefix_ok)
         .with_wait(0, 0) // no barrier: plain round-trip still works
@@ -1362,7 +1362,7 @@ fn replica_wait_barrier_fails_closed_without_replicas() {
 
     // The default store has no wait configured.
     assert_eq!(store_for(&url, &wait_prefix).wait_config(), (0, 0));
-    // wait_replicas=0 disables the WAIT entirely.
+    // wait_replicas=0 disables the wait entirely.
     store_for(&url, &wait_prefix)
         .with_wait(0, 5000)
         .store(&issued.record)
@@ -1372,7 +1372,7 @@ fn replica_wait_barrier_fails_closed_without_replicas() {
 #[test]
 fn consume_and_commit_barriers_fail_closed_without_replicas() {
     // The pending→consumed transition and the deterministic
-    // result commit carry the SAME verified replica barrier as issuance —
+    // result commit carry the same verified replica barrier as issuance —
     // a promotion must never resurrect a consumed record from a stale
     // replica, and a committed result must survive promotion. Against a
     // replica-less server both fail closed after the write landed.
@@ -1390,7 +1390,7 @@ fn consume_and_commit_barriers_fail_closed_without_replicas() {
     .unwrap();
     let store = store_for(&url, &barrier_prefix).with_wait(1, 200);
 
-    // Issuance without a barrier, then a BARRIERED consume.
+    // Issuance without a barrier, then a barriered consume.
     store_for(&url, &barrier_prefix)
         .store(&issued.record)
         .unwrap();
@@ -1486,7 +1486,7 @@ fn ttl_margin_extends_the_redis_ttl_only() {
     );
 
     // End-to-end: a record stored with a margin verifies normally, and a
-    // stale record (past expires_at but within the margin) is still REJECTED
+    // stale record (past expires_at but within the margin) is still rejected
     // by the verifier's TTL check (the margin is storage-only).
     let verifier = verifier_for(&url, &prefix);
     let store_margin = store_for(&url, &prefix).with_ttl_margin(30);
@@ -1506,7 +1506,7 @@ fn ttl_margin_extends_the_redis_ttl_only() {
 fn verifier_expected_region_rejects_mismatched_and_unbound_records() {
     // ProductionVerifier::with_expected_region enforces the
     // region in the cheap phase. A record issued for a different region —
-    // or for no region — is rejected with WrongRegion BEFORE any consume.
+    // or for no region — is rejected with WrongRegion before any consume.
     let Some(url) = redis_url() else { return };
     let prefix = prefix("region");
     let config = ChallengeConfig {
@@ -1722,7 +1722,7 @@ fn noncanonical_tokens_reach_the_verifier_as_malformed_token() {
 
 #[test]
 fn consumed_state_transition_and_outcome_commit_lifecycle() {
-    // At the STORE level: consume() is a Lua transition that KEEPS
+    // At the store level: consume() is a Lua transition that keeps
     // the record (state=pending → consumed), commit_result() stores the
     // outcome exactly once, and a later consume returns first=false with the
     // stored result.
@@ -1794,7 +1794,7 @@ fn consumed_state_transition_and_outcome_commit_lifecycle() {
         .commit_result(&issued.record.nonce, false, Some("x"))
         .unwrap());
 
-    // 5. Committing a PENDING record is a no-op (0); a binding round-trips.
+    // 5. Committing a pending record is a no-op (0); a binding round-trips.
     let issued2 = issue_challenge(
         &sha_config(4),
         "login",
@@ -1841,7 +1841,7 @@ fn consumed_state_transition_and_outcome_commit_lifecycle() {
 fn verifier_expected_issuer_rejects_mismatched_and_unbound_records() {
     // At the production boundary: with_expected_issuer enforces
     // the issuer in the cheap phase. A record issued by a different issuer
-    // — or by no issuer — is rejected with WrongIssuer BEFORE any consume.
+    // — or by no issuer — is rejected with WrongIssuer before any consume.
     let Some(url) = redis_url() else { return };
     let prefix = prefix("issuer");
     let config = ChallengeConfig {
@@ -1907,9 +1907,9 @@ fn verifier_expected_issuer_rejects_mismatched_and_unbound_records() {
 #[test]
 fn future_issued_challenge_beyond_skew_is_rejected() {
     // At the production boundary: a challenge whose issued_at is
-    // more than MAX_CLOCK_SKEW_SECS (60) ahead of the verifier clock is a
-    // time-domain anomaly — the cheap TTL phase rejects it with Expired.
-    // The verifier's clock is INJECTED (the PHP `$now` override equivalent)
+    // more than the clock-skew bound (60 s) ahead of the verifier clock is
+    // a time-domain anomaly — the cheap TTL phase rejects it with Expired.
+    // The verifier's clock is injected (the PHP `$now` override equivalent)
     // so the check is fully deterministic: the 61 s future-issued challenge
     // is always beyond the 60 s skew bound, no wall-clock race.
     let Some(url) = redis_url() else { return };
@@ -1986,14 +1986,14 @@ fn unknown_algorithm_variants_in_stored_records_are_record_not_found() {
     }
 }
 
-// ── revocation, allocation-after-length, NOSCRIPT recovery ──
+// ── revocation, allocation-after-length, no-script recovery ──
 
 #[test]
 fn revoked_kid_is_rejected_before_signature_checks() {
     // At the production boundary: with_revoked_kids rejects the
-    // record in the cheap phase with UnknownKid — BEFORE the signature
+    // record in the cheap phase with UnknownKid — before the signature
     // check — even when the kid's secret is present in secrets_by_kid:
-    // compromise revocation overrides the rotation grace. An UNREVOKED kid
+    // compromise revocation overrides the rotation grace. An unrevoked kid
     // with its secret present verifies normally.
     let Some(url) = redis_url() else { return };
     let prefix = prefix("revoked");
@@ -2018,7 +2018,7 @@ fn revoked_kid_is_rejected_before_signature_checks() {
     let token = encode_token(&issued.record.nonce, counter);
     let issued_at_ns = issued.record.issued_at_ns;
 
-    // Perfectly signed, secret PRESENT, kid REVOKED → UnknownKid.
+    // Perfectly signed, secret present, kid revoked → UnknownKid.
     let revoking = verifier_for(&url, &prefix)
         .with_secrets_by_kid([(2, key_b.to_string())])
         .with_revoked_kids([2]);
@@ -2029,7 +2029,7 @@ fn revoked_kid_is_rejected_before_signature_checks() {
         "a revoked kid must be rejected even with its secret present"
     );
 
-    // Same record, a DIFFERENT kid revoked → the unrevoked kid verifies.
+    // Same record, a different kid revoked → the unrevoked kid verifies.
     let unrevoked = verifier_for(&url, &prefix)
         .with_secrets_by_kid([(2, key_b.to_string())])
         .with_revoked_kids([9]);
@@ -2046,7 +2046,7 @@ fn revoked_kid_is_rejected_before_signature_checks() {
 #[test]
 fn oversized_stored_record_is_rejected_before_parse() {
     // At the production boundary: a 10 MB attacker-written value
-    // under the nonce key is rejected by the stored-record length cap BEFORE
+    // under the nonce key is rejected by the stored-record length cap before
     // any JSON parse and maps to RecordNotFound — exactly like any other
     // corrupt key (PHP parity), never a large parse and never a panic.
     let Some(url) = redis_url() else { return };
@@ -2087,9 +2087,9 @@ fn oversized_stored_record_is_rejected_before_parse() {
 
 #[test]
 fn script_flush_is_recovered_deterministically() {
-    // The redis crate's Script invoke() handles NOSCRIPT by
-    // re-loading the script text (EVALSHA → NOSCRIPT → SCRIPT LOAD →
-    // EVALSHA), so a SCRIPT FLUSH cannot break verification: the record is
+    // The redis crate's Script invoke() handles a no-script error by
+    // re-loading the script text (invoke → no-script → load → invoke), so
+    // a script-cache flush cannot break verification: the record is
     // NOT burned and the verification proceeds normally — deterministically,
     // and again after a second flush (every script invocation re-covers).
     let Some(url) = redis_url() else { return };
@@ -2116,12 +2116,13 @@ fn script_flush_is_recovered_deterministically() {
         .get_connection()
         .unwrap();
 
-    // Wipe the server-side script cache: BOTH Lua scripts are now unloaded
+    // Wipe the server-side script cache: both Lua scripts are now unloaded
     // (the consume transition AND the outcome commit).
     let _: () = redis::cmd("SCRIPT").arg("FLUSH").query(&mut conn).unwrap();
 
-    // The first verify after the flush re-loads the scripts on NOSCRIPT and
-    // proceeds normally: the full consume → derive → commit lifecycle works.
+    // The first verify after the flush re-loads the scripts on a no-script
+    // error and proceeds normally: the full consume → derive → commit
+    // lifecycle works.
     assert!(
         matches!(
             verify_at(&verifier, &token, issued_at_ns),
@@ -2131,8 +2132,8 @@ fn script_flush_is_recovered_deterministically() {
     );
 
     // The record is NOT burned: it still exists with the consumed state and
-    // the committed outcome, and a replay returns the SAME outcome — even
-    // after ANOTHER flush (the replayed consume re-loads the script again).
+    // the committed outcome, and a replay returns the same outcome — even
+    // after another flush (the replayed consume re-loads the script again).
     let _: () = redis::cmd("SCRIPT").arg("FLUSH").query(&mut conn).unwrap();
     assert!(
         matches!(

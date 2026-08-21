@@ -9,8 +9,8 @@ use Symfony\Component\HttpFoundation\RequestStack;
 
 /**
  * Request-scope-aware admission gate: forwards every acquire()
- * from the core Verifier to the inner {@see RedisAdmissionSemaphore} WITH
- * the current request's captcha scope, so the semaphore's PER-SCOPE budget
+ * from the core Verifier to the inner {@see RedisAdmissionSemaphore} with
+ * the current request's captcha scope, so the semaphore's per-scope budget
  * ({kiwicaptcha:argon2:leases:<ns>}:<scope>, argon2_max_per_tenant)
  * engages on top of the global cap.
  *
@@ -22,9 +22,9 @@ use Symfony\Component\HttpFoundation\RequestStack;
  * verifier use, non-web contexts, a null constraint scope) the acquire is
  * unscoped — only the global cap applies.
  *
- * The interface contract stays unchanged (acquire(): ?string — the core
- * verifier calls it without arguments); the scope is an implementation
- * detail of the bundle wiring.
+ * The interface contract stays unchanged: acquire() returns ?string, and
+ * the core verifier calls it without arguments. The scope is an
+ * implementation detail of the bundle wiring.
  */
 final class RequestScopeAdmissionGate implements VerificationAdmissionGate
 {

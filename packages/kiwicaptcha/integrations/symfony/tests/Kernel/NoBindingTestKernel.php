@@ -8,7 +8,7 @@ use Symfony\Component\Config\Loader\LoaderInterface;
 use Symfony\Component\DependencyInjection\ContainerBuilder;
 
 /**
- * Kernel with binding_mode 'none': the core Issuer must emit EMPTY binding
+ * Kernel with binding_mode 'none': the core Issuer must emit empty binding
  * tags and verification must pass from any client IP.
  */
 final class NoBindingTestKernel extends TestKernel

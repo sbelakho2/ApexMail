@@ -11,9 +11,9 @@ use KiwiCaptcha\Risk\RiskReason;
 use PHPUnit\Framework\TestCase;
 
 /**
- * MODEL REVISION: the risk packages expose the model
- * generation as RiskModel::REVISION (17), and every RiskDecision carries
- * it as modelRevision in the public JSON (bounded, unlike the internal
+ * Model revision: the risk packages expose the model generation as a
+ * revision constant (17), and every RiskDecision carries it as
+ * modelRevision in the public JSON (bounded, unlike the internal
  * decisionId).
  */
 final class RiskModelTest extends TestCase

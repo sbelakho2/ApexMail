@@ -16,16 +16,16 @@ namespace BelConsulting\KiwiCaptchaBundle\SiteVerify;
  * `owner` is a random per-request token so only the owning request can
  * finalize (a stale retry can never overwrite a completed outcome). The
  * claim binds the canonicalized remoteip fingerprint alongside the
- * response hash: a retry with the same key but a DIFFERENT fingerprint
- * is a CONFLICT (a changed remoteip can materially change the
- * verification outcome, so no entry may be joined or reused across
- * fingerprints). Records written without a fingerprint (created by an
- * older release) carry none and therefore CONFLICT with every claim —
- * fail-closed — and expire on TTL. The owner's lease
+ * response hash. A retry with the same key but a different fingerprint
+ * is a conflict: a changed remoteip can materially change the
+ * verification outcome, and no entry may be joined or reused across
+ * fingerprints. Records written without a fingerprint (created by an
+ * older release) carry none and therefore conflict with every claim,
+ * fail-closed, and expire on TTL. The owner's lease
  * (`lease_expires_at`, set from the server clock via redis TIME at
- * claim creation) is CONFIGURABLE (`leaseSeconds`, default
+ * claim creation) is configurable (`leaseSeconds`, default
  * {@see SiteVerifyIdempotencyStore::LEASE_SECONDS}) and bounds how long
- * a crashed owner blocks the key: after expiry an atomic TAKEOVER
+ * a crashed owner blocks the key. After expiry an atomic takeover
  * transfers ownership to a waiter, and the lease length itself (not any
  * process-global timer) protects a live owner mid-verification.
  */
@@ -164,7 +164,7 @@ LUA;
     {
         $owner = bin2hex(random_bytes(16));
         // The takeover Lua already receives the lease via ARGV[4]; pass
-        // the per-call override so the FIXED configured lease is
+        // the per-call override so the fixed configured lease is
         // maintained across the takeover (null = the configured lease —
         // the controller always passes null; the lease is never derived
         // from a token's remaining validity).

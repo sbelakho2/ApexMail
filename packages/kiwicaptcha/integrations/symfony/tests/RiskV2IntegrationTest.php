@@ -25,11 +25,11 @@ use PHPUnit\Framework\TestCase;
 
 /**
  * Risk-v2 bundle wiring: decoy-marked challenge requests feed honeypot
- * evidence into the risk gateway WITHOUT gating issuance, the session
+ * evidence into the risk gateway without gating issuance. The session
  * client-context tag drives the session-consistency signal through the
  * full stack (controller -> gateway -> engine -> store), and the trusted
- * proxy-supplied TLS classification tag drives the TLS-consistency signal
- * through the same stack.
+ * proxy-supplied TLS classification tag drives the TLS-consistency
+ * signal through the same stack.
  */
 final class RiskV2IntegrationTest extends TestCase
 {
@@ -136,7 +136,7 @@ final class RiskV2IntegrationTest extends TestCase
         $decision1 = $stack['gateway']->preIssue('login', '198.51.100.7', $session, null, $first);
         self::assertSame(100, $decision1->score);
 
-        // Same session, CHANGED coarse capabilities: a different tag -> the
+        // Same session, changed coarse capabilities: a different tag -> the
         // session-consistency signal raises the aggregate (100 + 120 = 220).
         $second = $stack['gateway']->clientContextV2(false, $session, 'vp=3,t=1,l=zh,z=2');
         self::assertNotNull($second);
@@ -186,12 +186,12 @@ final class RiskV2IntegrationTest extends TestCase
         $decision1 = $stack['gateway']->preIssue('login', '198.51.100.7', $session, null, $first);
         self::assertSame(100, $decision1->score, 'the first TLS tag-bearing request is neutral');
 
-        // Same session, SAME TLS tag: neutral.
+        // Same session, same TLS tag: neutral.
         $again = $stack['gateway']->clientContextV2(false, $session, $descriptor, 'tls13|http2');
         $decision2 = $stack['gateway']->preIssue('login', '198.51.100.7', $session, null, $again);
         self::assertSame(100, $decision2->score, 'an unchanged TLS tag stays neutral');
 
-        // Same session, CHANGED TLS tag: the tls_inconsistency signal
+        // Same session, changed TLS tag: the tls_inconsistency signal
         // raises the aggregate (100 + 80 = 180).
         $changed = $stack['gateway']->clientContextV2(false, $session, $descriptor, 'tls12|http1');
         $decision3 = $stack['gateway']->preIssue('login', '198.51.100.7', $session, null, $changed);
@@ -221,7 +221,7 @@ final class RiskV2IntegrationTest extends TestCase
         $session = str_repeat('3b', 16);
         $descriptor = 'vp=1,t=0,l=en,z=1';
 
-        // Null override: the DEFAULT weights apply (100 + 1000*200/1000 = 300).
+        // Null override: the default weights apply (100 + 1000*200/1000 = 300).
         $default = $stack['gateway']->clientContextV2(true, $session, $descriptor);
         self::assertNotNull($default);
         $decisionDefault = $stack['gateway']->preIssue('login', '198.51.100.7', $session, null, $default, null);
@@ -234,7 +234,7 @@ final class RiskV2IntegrationTest extends TestCase
 
     public function testConfiguredV2WeightsReachTheEngineThroughTheGateway(): void
     {
-        // The gateway's CONSTRUCTOR weights are the operator-configured
+        // The gateway's constructor weights are the operator-configured
         // risk.v2.* values: a honeypot hit scores with the configured
         // weight when no per-call override is given.
         $issuer = new Issuer(new Config(secretKey: self::SECRET, targetBits: 8, ttlSecs: 120), new ArrayStorage());
@@ -274,7 +274,7 @@ final class RiskV2IntegrationTest extends TestCase
         self::assertNotNull($v1);
         self::assertSame(100, $v1->score);
 
-        // The v2 post-solve assessment WITH the honeypot hit scores
+        // The v2 post-solve assessment with the honeypot hit scores
         // strictly higher (100 + 200 = 300) — the honeypot evidence now
         // actually moves the post-solve score.
         $honeypot = $stack['gateway']->clientContextV2(true, null, null);
@@ -284,7 +284,7 @@ final class RiskV2IntegrationTest extends TestCase
         self::assertGreaterThan($v1->score, $v2->score, 'a filled exact decoy field must raise the post-solve score');
         self::assertSame(300, $v2->score);
 
-        // A context WITHOUT the hit scores identically to the v1 path.
+        // A context without the hit scores identically to the v1 path.
         $empty = $stack['gateway']->postSolveDecisionV2('login', '198.51.100.7');
         self::assertNotNull($empty);
         self::assertSame($v1->score, $empty->score, 'postSolveDecisionV2 without evidence is the v1 score');

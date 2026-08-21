@@ -1,11 +1,11 @@
-//! HKDF purpose-key separation.
+//! Purpose-key separation, HKDF-based.
 //!
 //! Every cryptographic purpose derives its own 32-byte key from the single
 //! master secret, so a key compromise in one purpose (challenge signing, IP
 //! binding, result tokens) never leaks the others:
 //!
 //! ```text
-//! PRK        = HKDF-Extract(SHA-256, salt = HKDF_DEPLOY_SALT, ikm = master)
+//! PRK        = HKDF-Extract(SHA-256, salt = "kiwicaptcha/deploy-salt/v1", ikm = master)
 //! K_challenge = HKDF-Expand(PRK, "kiwi/v2/challenge-sign", 32)
 //! K_ip_bind   = HKDF-Expand(PRK, "kiwi/v2/ip-bind", 32)
 //! K_result    = HKDF-Expand(PRK, "kiwi/v2/result-token", 32)
@@ -35,16 +35,16 @@
 use hkdf::Hkdf;
 use sha2::Sha256;
 
-/// The public (non-secret) deployment salt for the HKDF extraction step —
-/// domain separation shared with the PHP core; the secrecy comes from the
-/// master secret, never from this string.
+/// The public (non-secret) deployment salt for the HKDF-based extraction
+/// step — domain separation shared with the PHP core; the secrecy comes from
+/// the master secret, never from this string.
 pub const HKDF_DEPLOY_SALT: &[u8] = b"kiwicaptcha/deploy-salt/v1";
 
-/// HKDF info label for the challenge-signing purpose key.
+/// Info label for the challenge-signing purpose key.
 pub const INFO_CHALLENGE_SIGN: &[u8] = b"kiwi/v2/challenge-sign";
-/// HKDF info label for the IP-binding purpose key.
+/// Info label for the IP-binding purpose key.
 pub const INFO_IP_BIND: &[u8] = b"kiwi/v2/ip-bind";
-/// HKDF info label for the result/solution-token purpose key.
+/// Info label for the result/solution-token purpose key.
 pub const INFO_RESULT_TOKEN: &[u8] = b"kiwi/v2/result-token";
 /// Prefix of the tenant-root info label: `"kiwi/v2/tenant/" + tenant_id`.
 pub const INFO_TENANT_ROOT_PREFIX: &[u8] = b"kiwi/v2/tenant/";
@@ -85,7 +85,7 @@ impl DerivedKeys {
                 root_info.extend_from_slice(tenant_id.as_bytes());
                 let tenant_root = expand(&prk, &root_info);
                 // The tenant root acts as a new key material: re-extract with
-                // an empty salt (PHP `hash_hkdf(..., salt: '')`) so the three
+                // an empty salt (PHP's `hash_hkdf` with `salt: ''`) so the three
                 // purpose keys are independent of both the master PRK and
                 // each other.
                 let prk_t = Hkdf::<Sha256>::new(None, &tenant_root);
@@ -132,8 +132,8 @@ mod tests {
 
     const MASTER: &str = "0123456789abcdef0123456789abcdef";
 
-    // Byte-exact vectors computed with the reference construction (Python
-    // hmac-based HKDF-SHA256 and PHP hash_hkdf agree on these) — the
+    // Byte-exact vectors computed with the reference construction — Python's
+    // hmac-based hkdf-sha256 and PHP hash_hkdf agree on these — the
     // cross-language lock-in: any deviation breaks interop.
     const K_CHALLENGE_HEX: &str =
         "1d5be54d8682c4a6951c62306dd2f3b910366fddd48c45e5a4cc57222565c7bb";

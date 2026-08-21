@@ -20,17 +20,17 @@ use Symfony\Component\HttpFoundation\JsonResponse;
 use Symfony\Component\HttpFoundation\Request;
 
 /**
- * REAL-REDIS matrix of the UNCOMMITTED-RESULT recovery (the defect shape):
- * the atomic pending→consumed transition EXECUTES on the real Redis
- * storage and the operation identity lands atomically with the state flip,
- * but the reply is lost BEFORE the derivation/commit — consumed_result
- * stays null forever for the ordinary verifier. A same-key retry takes
- * over the expired lease and the takeover gate proves the identity (the
- * consumed record's OWN operation identity equals the retry's
- * fingerprint): the derivation is RESUMED and committed via
- * Verifier::resumeConsumedOperation(). Every negative tail — a different
- * UUID, a different backend secret, a no-key first redemption, a changed
- * remoteip, admission exhaustion — must NEVER resume.
+ * real-redis matrix of the uncommitted-result recovery: the atomic
+ * pending->consumed transition runs on the real Redis storage with the
+ * operation identity landing atomically with the state flip, but the
+ * reply is lost before the derivation/commit, so consumed_result stays
+ * null. A same-key retry takes over the expired lease and the takeover
+ * gate proves the identity (the consumed record's own operation identity
+ * equals the retry's fingerprint): the derivation is resumed and
+ * committed via Verifier::resumeConsumedOperation(). Every negative tail
+ * — a different UUID, a different backend secret, a no-key first
+ * redemption, a changed remoteip, admission exhaustion — must never
+ * resume.
  */
 final class RealRedisSiteVerifyRecoveryTest extends TestCase
 {
@@ -54,7 +54,7 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
     }
 
     /**
-     * The "lost reply" seam: consumeWithOperationIdentity() DELEGATES to
+     * The "lost reply" seam: consumeWithOperationIdentity() delegates to
      * the real Redis storage — the transition executes and the identity
      * lands atomically with the state flip — and the response is then
      * lost. Everything else delegates.
@@ -88,7 +88,7 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
 
             public function consumeWithOperationIdentity(string $nonce, ?string $operationIdentity): ?\KiwiCaptcha\ConsumedRecord
             {
-                // The transition EXECUTES (the identity lands atomically
+                // The transition executes (the identity lands atomically
                 // with the state flip) — and the response is then lost.
                 $this->inner->consumeWithOperationIdentity($nonce, $operationIdentity);
 
@@ -177,7 +177,7 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
         $idemKey = '{kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuid;
         $probe->del([$idemKey]);
 
-        // A SHORT fixed store lease (1s) keeps the takeover instant; the
+        // A short fixed store lease (1s) keeps the takeover instant; the
         // waiter bound (5s) exceeds it (the construction invariant).
         $store = new RedisSiteVerifyIdempotencyStore($probe, 'kiwicaptcha', 1);
         $lost = $this->lostConsumeReplyStorage($storage);
@@ -199,10 +199,10 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
             );
             self::assertNull($consumed->consumedResult, 'consumed_result stays null — the ordinary verifier would say ConsumeIndeterminate forever');
 
-            // Wait out the 1s lease (Redis TIME is the lease clock).
+            // Wait out the 1s lease (Redis time is the lease clock).
             usleep(2_500_000);
 
-            // The same-key retry takes over and RESUMES the derivation.
+            // The same-key retry takes over and resumes the derivation.
             $retry = new SiteVerifyController(new Verifier($storage), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $storage, null, null, $store, null, 5.0);
             $retryResponse = $retry->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
                 'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
@@ -216,7 +216,7 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
             self::assertSame(true, $after->consumedResult->valid);
 
             // A same-UUID retry now returns the stored canonical bytes
-            // (COMPLETE_SAME) — never a re-derivation.
+            // (complete_same) — never a re-derivation.
             $replay = new SiteVerifyController(new Verifier($storage), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $storage, null, null, $store, null, 5.0);
             $replayResponse = $replay->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
                 'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
@@ -230,7 +230,7 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
     public function testEpochBumpedClaimKeysDifferFromTheStaticEpochKeys(): void
     {
         // The monitor's effective epoch (central min_policy_epoch = 1)
-        // moves the ENTIRE idempotency namespace: the owner's claim, the
+        // moves the entire idempotency namespace: the owner's claim, the
         // consumed operation identity and the retry's takeover all live
         // under the epoch-1 backend identity — the static epoch-0 keys
         // are never created. The lost-reply recovery still works
@@ -249,7 +249,7 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
         $effectiveKey = '{kiwicaptcha}:siteverify-idem:'.$effectiveBackendId.':'.$uuid;
         $probe->del([$effectiveKey, $staticKey]);
 
-        // A SHORT fixed store lease (1s) keeps the takeover instant; the
+        // A short fixed store lease (1s) keeps the takeover instant; the
         // waiter bound (5s) exceeds it (the construction invariant).
         $store = new RedisSiteVerifyIdempotencyStore($probe, 'kiwicaptcha', 1);
         $lost = $this->lostConsumeReplyStorage($storage);
@@ -280,12 +280,12 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
             self::assertNotNull($probe->get($effectiveKey), 'the pending claim must live under the effective-epoch key');
             self::assertNull($probe->get($staticKey), 'the static-epoch key must never be created');
 
-            // Wait out the 1s lease (Redis TIME is the lease clock).
+            // Wait out the 1s lease (Redis time is the lease clock).
             usleep(2_500_000);
 
             // The same-key retry (its own monitor observing the same
-            // central epoch) claims under the SAME effective-epoch key,
-            // takes over and RESUMES the derivation.
+            // central epoch) claims under the same effective-epoch key,
+            // takes over and resumes the derivation.
             $retryVerifier = new Verifier($storage);
             $retryMonitor = new SecurityEpochMonitor($retryVerifier, $policyRedis, 'test-ns', 1);
             $retry = new SiteVerifyController($retryVerifier, self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $storage, null, null, $store, null, 5.0, 0, null, $retryMonitor);
@@ -420,16 +420,16 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
     }
 
     /**
-     * THE adversarial expiry sequence on real Redis: a valid token is
-     * consumed by an owner whose derivation CROSSES the signed expiry —
-     * the ordinary verify() then returns Expired from its post-derive
-     * final revalidation WITHOUT committing a result — and the owner
-     * CRASHES before finalizing its idempotency record. A same-UUID
-     * retry takes over and RESUMES the resultless derivation: the resume
-     * re-checks the signed expiry BEFORE deriving, so the deterministic
-     * Expired outcome is reproduced (timeout-or-duplicate) — NEVER a
-     * post-deadline Valid. Nothing is ever committed, and every further
-     * same-UUID retry reproduces the identical canonical failure.
+     * The adversarial expiry sequence on real Redis: a valid token is
+     * consumed by an owner whose derivation crosses the signed expiry.
+     * The ordinary verify() returns Expired from its post-derive final
+     * revalidation without committing a result, and the owner crashes
+     * before finalizing its idempotency record. A same-UUID retry takes
+     * over and resumes the resultless derivation: the resume re-checks
+     * the signed expiry before deriving, so the deterministic Expired
+     * outcome is reproduced — never a post-deadline Valid. Nothing is
+     * ever committed, and every further same-UUID retry reproduces the
+     * identical failure.
      */
     public function testResultlessResumePastSignedExpiryIsDeterministicallyExpired(): void
     {
@@ -448,13 +448,13 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
         $backendId = hash('sha256', self::SITEVERIFY_SECRET.'|login|0');
         $idemKey = '{kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuid;
         $probe->del([$idemKey]);
-        // A SHORT fixed store lease (1s) keeps the takeover instant; the
+        // A short fixed store lease (1s) keeps the takeover instant; the
         // waiter bound (5s) exceeds it (the construction invariant).
         $store = new RedisSiteVerifyIdempotencyStore($probe, 'kiwicaptcha', 1);
 
-        // The owner's derivation CROSSES the signed expiry: the verifier
+        // The owner's derivation crosses the signed expiry: the verifier
         // clock reads pre-expiry at the cheap phase and post-expiry at
-        // the POST-DERIVE final revalidation — exactly the
+        // the post-derive final revalidation — exactly the
         // Expired-without-commit outcome the ordinary verify() produces
         // when the derivation crosses expiresAt.
         $calls = 0;
@@ -464,7 +464,7 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
         };
         // The finalize-crash decorator: the owner's finalize never lands
         // (process death between the Expired outcome and the claim
-        // finalization) — the entry stays PENDING for the takeover.
+        // finalization) — the entry stays pending for the takeover.
         $crashingStore = new class($store) implements \BelConsulting\KiwiCaptchaBundle\SiteVerify\SiteVerifyIdempotencyStore {
             public function __construct(private readonly \BelConsulting\KiwiCaptchaBundle\SiteVerify\SiteVerifyIdempotencyStore $inner)
             {
@@ -522,9 +522,9 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
             // Wait past the signed expiry (5s TTL) AND the 1s lease.
             sleep(7);
 
-            // The same-key retry takes over and RESUMES: the resultless
-            // resume re-checks the signed expiry BEFORE deriving — the
-            // deterministic Expired outcome, NEVER a post-deadline Valid.
+            // The same-key retry takes over and resumes: the resultless
+            // resume re-checks the signed expiry before deriving — the
+            // deterministic Expired outcome, never a post-deadline Valid.
             $retry = new SiteVerifyController(new Verifier($storage), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $storage, null, null, $store, null, 5.0);
             $retryResponse = $retry->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
                 'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
@@ -681,9 +681,9 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
             self::assertNotNull($storage->consumedState($nonce), 'the lost-reply 503 must come from the EXECUTED transition — the record must be consumed');
             self::assertNull($storage->consumedState($nonce)?->consumedResult, 'consumed_result must be null');
 
-            // Same UUID + changed remoteip: CONFLICT at the claim layer —
+            // Same UUID + changed remoteip: conflict at the claim layer —
             // the fingerprint includes the IP, so the entry is bound to
-            // the ORIGINAL remoteip and the retry can never join.
+            // the original remoteip and the retry can never join.
             $conflict = new SiteVerifyController(new Verifier($storage), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $storage, null, null, $store, null, 5.0);
             $conflictResponse = $conflict->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
                 'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '203.0.113.9', 'idempotency_key' => $uuid,
@@ -709,8 +709,8 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
         $probe->del([$idemKeyB]);
         $store = new RedisSiteVerifyIdempotencyStore($probe, 'kiwicaptcha', 1);
 
-        // The no-key path uses the PLAIN consume: the transition executes
-        // WITHOUT any identity — and the reply is lost.
+        // The no-key path uses the plain consume: the transition executes
+        // without any identity — and the reply is lost.
         $lostNoKey = new class($storage) implements \BelConsulting\KiwiCaptchaBundle\SiteVerify\SiteVerifyRecoveryCapableStorageInterface {
             public function __construct(private readonly \KiwiCaptcha\AtomicStorageInterface $inner)
             {
@@ -810,9 +810,9 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
             );
             self::assertNull($consumed->consumedResult, 'precondition: nothing committed yet');
 
-            // The retry resumes with a SATURATED admission gate: the
+            // The retry resumes with a saturated admission gate: the
             // resumed Argon derivation is refused (CapacityExceeded ->
-            // 503 internal-error) WITHOUT committing or finalizing.
+            // 503 internal-error) without committing or finalizing.
             usleep(2_500_000);
             $gate = new \BelConsulting\KiwiCaptchaBundle\Security\InProcessArgonGate(1);
             $outsideLease = $gate->acquire();
@@ -827,7 +827,7 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
             self::assertNull($store->stored($backendId, $uuid), 'the admission rejection must NOT finalize');
 
             // Capacity freed: the next same-key retry resumes to the
-            // ORIGINAL success.
+            // original success.
             usleep(2_500_000);
             $gate->release($outsideLease);
             $retry = new SiteVerifyController(new Verifier($storage, $gate), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $storage, null, null, $store, null, 5.0);
@@ -871,7 +871,7 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
             );
             self::assertNull($consumed->consumedResult, 'precondition: nothing committed yet');
 
-            // The retry's RESUME hits a lost COMMIT reply: the commit
+            // The retry's resume hits a lost commit reply: the commit
             // executes on real Redis and the reply is then lost — the
             // read-after-failed-commit resolves the stored result.
             $lostCommit = new class($storage) implements \BelConsulting\KiwiCaptchaBundle\SiteVerify\SiteVerifyRecoveryCapableStorageInterface {
@@ -906,7 +906,7 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
 
                 public function commitResult(string $nonce, bool $valid, ?string $binding): bool
                 {
-                    // The commit EXECUTES (the result lands) — and the
+                    // The commit executes (the result lands) — and the
                     // reply is then lost.
                     $result = $this->inner->commitResult($nonce, $valid, $binding);
 
@@ -971,7 +971,7 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
             self::assertSame(true, $retryABody['success'] ?? null, 'recovery attempt A resumes and commits: '.(string) $retryAResponse->getContent());
 
             // Attempt B — a second verifier over the same real store: the
-            // committed result resolves the SAME outcome (fast path, no
+            // committed result resolves the same outcome (fast path, no
             // re-derivation), and the claim layer returns the identical
             // stored bytes.
             $direct = (new Verifier($storage))->resumeConsumedOperation($token, self::SECRET, $fingerprint, 'login', '127.0.0.1');

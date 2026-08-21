@@ -10,7 +10,7 @@ import { fileURLToPath } from 'node:url';
 //
 // This file is canonical at packages/kiwicaptcha-wasm/tests/browser/specs/
 // and MUST be copied into the public repo's tests/browser/specs/ during
-// sync. The asset paths below resolve in BOTH layouts (public repo:
+// sync. The asset paths below resolve in both layouts (public repo:
 // tests/browser/specs -> ../../../packages/kiwicaptcha-wasm/assets;
 // wasm package: tests/browser/specs -> ../../../assets).
 
@@ -37,7 +37,7 @@ function workerSource() {
 
 /// A widget page served from the test origin (127.0.0.1:8085) so
 /// window.location.origin resolves — the driver refuses cross-origin
-/// challenge endpoints BEFORE any fetch, so a page on another origin could
+/// challenge endpoints before any fetch, so a page on another origin could
 /// never exercise that check.
 async function serveWidgetPage(page, attrs) {
   const glue = fs.readFileSync(assetPath('kiwicaptcha-wasm.js'), 'utf8');
@@ -108,7 +108,7 @@ test.describe('KiwiCaptcha postMessage boundary', () => {
     expect(src).toMatch(/msg\.v !== 1/);
     expect(src).toMatch(/typeof msg\.counter !== "number"/);
     expect(src).toMatch(/typeof msg\.reason !== "string"/);
-    // Worker side (embedded KIWI_WORKER_SRC + standalone asset): the solve
+    // Worker side (embedded kiwi_worker_src + standalone asset): the solve
     // request must be a v1 object with the full numeric/string field set.
     expect(src).toMatch(/m\.v !== 1 \|\| m\.type !== "solve"/);
     expect(worker).toMatch(/m\.v !== 1 \|\| m\.type !== "solve"/);
@@ -119,7 +119,7 @@ test.describe('KiwiCaptcha postMessage boundary', () => {
   test('the worker ignores versionless or unknown messages (runtime)', async ({ page }) => {
     await page.goto('/');
     // The worker is created by the driver from the standalone asset; run the
-    // SAME worker source in isolation and verify the onmessage schema guard:
+    // same worker source in isolation and verify the onmessage schema guard:
     // messages without the version field or with an unknown type must never
     // produce a reply (the pre-guard code would have replied "failed").
     // The worker's own startup "ready" handshake is expected and filtered
@@ -475,7 +475,7 @@ test.describe('KiwiCaptcha no wasm-downgrade fallback', () => {
     // the driver (from the container/widget attributes only) and once in the
     // embedded worker source (from the solve request). No other declaration.
     expect(src.match(/var algorithm\s*=/g) ?? []).toHaveLength(2);
-    // The ONLY hard-coded algorithm assignment in the entire file is the
+    // The only hard-coded algorithm assignment in the entire file is the
     // profile normalization itself (pinned by both assertions
     // below) — no failure path may assign a different, weaker algorithm.
     expect(src.match(/algorithm\s*=\s*["']/g) ?? []).toHaveLength(1);
@@ -486,12 +486,12 @@ test.describe('KiwiCaptcha no wasm-downgrade fallback', () => {
     // Only the two server-offered profiles are selectable — anything else is
     // normalized to the default; the client can never invent parameters.
     expect(src).toMatch(/algorithm !== "sha256" && algorithm !== "argon2id"/);
-    // Solver selection is driven ONLY by the server's response algorithm —
+    // Solver selection is driven only by the server's response algorithm —
     // never by a client capability probe (no navigator capability gating).
     expect(src).toMatch(/\(data\.algorithm \|\| "sha256"\) === "argon2id"/);
     expect(src, 'no capability probe may gate the algorithm choice').not.toMatch(/navigator\.[\w.]*[Cc]apab/);
     // A server-side downgrade (argon2id requested, weaker returned) is a
-    // FAILED challenge, never accepted and never solved.
+    // failed challenge, never accepted and never solved.
     expect(src).toMatch(/Challenge downgraded/);
     expect(src).toMatch(/\(data\.algorithm \|\| "sha256"\) !== "argon2id"/);
   });
@@ -519,7 +519,7 @@ test.describe('KiwiCaptcha no wasm-downgrade fallback', () => {
     // ?csp=strict blocks wasm compilation AND blob workers (script-src
     // without blob:/wasm-unsafe-eval), so the argon2id challenge cannot be
     // solved at all — there is no pure-JS argon2id fallback. The driver must
-    // fail (bounded retries, then idle), and EVERY challenge request must
+    // fail (bounded retries, then idle), and every challenge request must
     // still ask for argon2id: never a downgrade to sha256.
     const bodies = [];
     await page.route('**/challenge', async (route) => {
@@ -587,7 +587,7 @@ test.describe('KiwiCaptcha challenge fetch timeout', () => {
 test.describe('KiwiCaptcha host-header independence', () => {
   test('same-origin enforcement uses window.location.origin only — never location.host/hostname or a Host header (static source assertion)', () => {
     const src = driverSource();
-    // The endpoint check compares ORIGINS (the page's own scheme+host+port),
+    // The endpoint check compares origins (the page's own scheme+host+port),
     // never a request Host header — a Host header is attacker-influenced,
     // window.location is not.
     expect(src).toMatch(/url\.origin !== window\.location\.origin/);

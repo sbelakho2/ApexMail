@@ -58,7 +58,7 @@ final class ProcessEmergencyCapTest extends TestCase
 
     public function testStampsAreMonotonicNanoseconds(): void
     {
-        // The window runs on hrtime(true) NANOSECONDS (monotonic clock): a
+        // The window runs on hrtime(true) nanoseconds (monotonic clock): a
         // wall-clock jump backwards can never extend the window, and a
         // jump forwards can never hold it open early.
         $limiter = new ProcessEmergencyCap(processPerSecond: 100, warmupRampSecs: 0);

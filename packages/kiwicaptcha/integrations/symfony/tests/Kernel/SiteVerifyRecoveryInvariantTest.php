@@ -13,26 +13,26 @@ use Symfony\Component\DependencyInjection\Definition;
 
 /**
  * Siteverify crash-recovery ordering invariant (enforced at container
- * compile time WHEN risk.siteverify_secrets is configured):
+ * compile time when risk.siteverify_secrets is configured):
  *
  *   max verification window < Siteverify lease (60s) < waiter bound (90s)
  *                            <= retained-state recovery retention
  *
- * The controller constructor enforces only waiter > lease; the Argon
+ * The controller constructor enforces only waiter > lease. The Argon
  * admission lease (argon2_lease_ms) and the retained consumed-state
- * retention margin (risk.redis.ttl_margin_secs) complete the ordering. A
- * configuration that breaks it makes crash recovery impossible — refused
- * at compile time. Signed token expiry is IRRELEVANT to the
+ * retention margin (risk.redis.ttl_margin_secs) complete the ordering;
+ * a broken configuration is refused at compile time because it makes
+ * crash recovery impossible. Signed token expiry is irrelevant to the
  * reconstruction, so short-lived Siteverify profiles (e.g. 30s TTLs) are
- * fully supported. Siteverify idempotency ALSO requires a recovery-capable
- * storage (SiteVerifyRecoveryCapableStorageInterface — the bundled
+ * fully supported. Siteverify idempotency also requires a
+ * recovery-capable storage
+ * (SiteVerifyRecoveryCapableStorageInterface — the bundled
  * AtomicStorageInterface + ConsumedStateReadableInterface +
- * OperationIdentityAwareStorageInterface combination): custom atomic
- * storages without the identity-aware consume capability are refused,
- * because the takeover path could never prove that a claim is the nonce's
- * original logical operation (reconstruction would silently refuse
- * everything). Without siteverify_secrets the native behavior stays
- * unrestricted.
+ * OperationIdentityAwareStorageInterface combination). Custom atomic
+ * storages without the identity-aware consume capability are refused:
+ * the takeover path could never prove that a claim is the nonce's
+ * original logical operation. Without siteverify_secrets the native
+ * behavior stays unrestricted.
  */
 final class SiteVerifyRecoveryInvariantTest extends TestCase
 {
@@ -80,8 +80,8 @@ final class SiteVerifyRecoveryInvariantTest extends TestCase
     public function testNativeConfigWithPerSitekeyMinDurationAboveTtlIsRefused(): void
     {
         // The per-sitekey min_duration_ms < ttl_secs * 1000 relation is
-        // intrinsic to ISSUANCE — it is validated even when Siteverify is
-        // DISABLED.
+        // intrinsic to issuance — it is validated even when Siteverify is
+        // disabled.
         $this->expectException(\LogicException::class);
         $this->expectExceptionMessage('min_duration_ms');
         $this->load([
@@ -142,8 +142,8 @@ final class SiteVerifyRecoveryInvariantTest extends TestCase
 
     public function testSiteverifyEnabledWithAtomicStorageMissingConsumedStateIsRefused(): void
     {
-        // A custom ATOMIC storage WITHOUT the consumed-state capability
-        // (KiwiCaptcha\ConsumedStateReadableInterface) is REFUSED for
+        // A custom atomic storage without the consumed-state capability
+        // (KiwiCaptcha\ConsumedStateReadableInterface) is refused for
         // Siteverify idempotency: crash recovery reads the retained
         // consumed state and is unavailable without it. Ordinary
         // verification remains compatible with any StorageInterface.
@@ -161,8 +161,8 @@ final class SiteVerifyRecoveryInvariantTest extends TestCase
 
     public function testSiteverifyEnabledWithAtomicConsumedStateStorageMissingIdentityCapabilityIsRefused(): void
     {
-        // A custom storage that is ATOMIC + consumed-state readable but
-        // WITHOUT the identity-aware consume capability is REFUSED for
+        // A custom storage that is atomic + consumed-state readable but
+        // without the identity-aware consume capability is refused for
         // Siteverify idempotency: the takeover path compares the consumed
         // record's OWN operation identity against the claiming
         // fingerprint, and a storage that cannot record the identity
@@ -198,7 +198,7 @@ final class SiteVerifyRecoveryInvariantTest extends TestCase
         self::assertTrue($container->hasDefinition('kiwi_captcha.config'));
     }
 
-    /** A custom AtomicStorageInterface WITHOUT the consumed-state capability. */
+    /** A custom AtomicStorageInterface without the consumed-state capability. */
     private function atomicWithoutConsumedStateClass(): string
     {
         return get_class(new class implements \KiwiCaptcha\AtomicStorageInterface {
@@ -227,7 +227,7 @@ final class SiteVerifyRecoveryInvariantTest extends TestCase
         });
     }
 
-    /** A custom ATOMIC + consumed-state readable storage WITHOUT the identity-aware consume. */
+    /** A custom atomic + consumed-state readable storage without the identity-aware consume. */
     private function atomicWithConsumedStateWithoutIdentityClass(): string
     {
         return get_class(new class implements \KiwiCaptcha\AtomicStorageInterface, \KiwiCaptcha\ConsumedStateReadableInterface {

@@ -5,48 +5,50 @@ declare(strict_types=1);
 namespace KiwiCaptcha;
 
 /**
- * Issues KiwiCaptcha challenges — byte-for-byte compatible with the Rust
+ * Issues KiwiCaptcha challenges, byte-for-byte compatible with the Rust
  * crate's `issue_challenge`.
  *
  * Protocol v2 (default issuance, `protocol_version` 2):
  *   nonce      = base64(32 random bytes)
  *   salt       = base64(16 random bytes)
- *   binding_tag = HMAC-SHA256 over the canonical IP (see
- *                {@see self::bindingTag()}) — nonce-bound, so the stored
- *                binding is never a stable IP-derived identifier
+ *   binding_tag = HMAC-SHA256 over the canonical IP, see
+ *                {@see self::bindingTag()}; nonce-bound, so the stored
+ *                binding is never a stable IP-derived identifier.
  *   canonical  = "v2|{nonce}|{scope}|{binding_tag}|{issued_at}|{expires_at}|
  *                {algorithm}|{m_kib}|{t}|{p}|{target_bits}|{salt}|
  *                {min_duration_ms}|{region}|{policy_version}|
- *                {request_binding}|{issuer}|{kid}" — region, request_binding
- *                and issuer render as the empty segment when unset,
- *                policy_version as the configured security-policy epoch,
- *                kid as the configured signing key id
- *                — the FINAL canonical field
- *   signature  = hex(hmac_sha256(K_challenge, canonical)) — HKDF-derived
- *                purpose key ({@see DerivedKeys}); the master
- *                secret is never used directly as the signing key
- *   challenge  = base64(canonical) . "." . signature
- *   prefix     = "{challenge}|{salt}|"
- *   target     = effective difficulty for the configured algorithm
- *   min_duration_ms = configured override or derived from difficulty
+ *                {request_binding}|{issuer}|{kid}". Region,
+ *                request_binding and issuer render as the empty segment
+ *                when unset; policy_version as the configured
+ *                security-policy epoch; kid as the configured signing
+ *                key id, the final canonical field.
+ *   signature  = hex(H), where H = hmac_sha256(K_challenge, canonical),
+ *                an HKDF-derived purpose key, see {@see DerivedKeys}.
+ *                The master secret is never used directly as the signing
+ *                key.
+ *   challenge  = base64(canonical) . "." . signature.
+ *   prefix     = "{challenge}|{salt}|".
+ *   target     = effective difficulty for the configured algorithm.
+ *   min_duration_ms = configured override or derived from difficulty.
  *
  * The nonce-bound binding tag is keyed by the HKDF-derived K_ip_bind
- * purpose key (never the master secret). The record additionally carries a
- * region (deployment metadata) that IS part of the v2 canonical payload —
- * it is signed into the record like every other immutable v2 parameter
- * (see {@see self::canonicalPayload()}) — authenticated and therefore
- * client-decodable from the challenge's canonical payload, but never
- * separately exposed as a top-level response property.
+ * purpose key (never the master secret). The record additionally carries
+ * a region (deployment metadata) that is part of the v2 canonical
+ * payload, so it is signed into the record like every other immutable v2
+ * parameter, see {@see self::canonicalPayload()}. The region is
+ * authenticated and therefore client-decodable from the challenge's
+ * canonical payload, but never separately exposed as a top-level
+ * response property.
  *
  * Legacy v1 issuance (`protocol_version` 1, payload
- * `"{nonce}|{scope}|{ip_hash}|{issued_at}"`) is not produced anymore, but
- * the v1 helpers remain: {@see self::hashIp()} computes the legacy IP hash
- * and {@see self::signPayload()} the legacy master-key signature, so v1
- * records (and the verifier's v1 path) keep working during the migration
- * window — byte-identical to the Rust crate's v1 path.
+ * `"{nonce}|{scope}|{ip_hash}|{issued_at}"`) is not produced anymore.
+ * The v1 helpers remain: {@see self::hashIp()} computes the legacy IP
+ * hash and {@see self::signPayload()} the legacy master-key signature,
+ * so v1 records and the verifier's v1 path keep working during the
+ * migration window, byte-identical to the Rust crate's v1 path.
  *
  * The stored record additionally carries `issued_at_ns` (server-side
- * high-resolution issuance time) — never signed, never sent to the client.
+ * high-resolution issuance time), never signed, never sent to the client.
  */
 final class Issuer
 {
@@ -59,9 +61,9 @@ final class Issuer
          * Deployment region bound to every issued record (e.g. "eu").
          * Null = region-unbound. The record's `region` JSON key is always
          * present (null when unbound) for parity with the Rust schema; a
-         * verifier configured with an expected region rejects records whose
-         * region does not match exactly. Must match the narrow identifier
-         * alphabet — at most 64 bytes of [A-Za-z0-9._:-].
+         * verifier configured with an expected region rejects records
+         * whose region does not match exactly. Must match the narrow
+         * identifier alphabet, at most 64 bytes of [A-Za-z0-9._:-].
          */
         private readonly ?string $region = null,
     ) {
@@ -135,8 +137,8 @@ final class Issuer
         $nonce = base64_encode(random_bytes(32));
         $salt = base64_encode(random_bytes(16));
 
-        // Binding mode: 'none' issues challenges with an EMPTY binding tag
-        // (maximum privacy — no client-derived identifier at all); the
+        // Binding mode: 'none' issues challenges with an empty binding tag
+        // (maximum privacy, no client-derived identifier at all); the
         // verifier skips the binding check for empty tags.
         $bindingTag = $this->config->bindingMode === \KiwiCaptcha\BindingMode::None
             ? ''
@@ -187,11 +189,10 @@ final class Issuer
             prefix: $prefix,
             challenge: $challenge,
             minDurationMs: $minDurationMs,
-            // issuedAtNs = epoch MICROseconds since Unix epoch (wall clock,
-            // hrtime(true) is monotonic and per-host so it must never be
-            // persisted to shared storage — see README "server timing").
-            // The name/JSON key stay issuedAtNs for ChallengeRecord
-            // serialization stability.
+            // issuedAtNs = epoch microseconds since Unix epoch (wall clock;
+            // hrtime(true) is monotonic and per-host, so it must never be
+            // persisted to shared storage). The name/JSON key stay
+            // issuedAtNs for ChallengeRecord serialization stability.
             issuedAtNs: (int) (microtime(true) * 1_000_000),
             protocolVersion: 2,
             region: $this->region,
@@ -221,17 +222,18 @@ final class Issuer
     /**
      * Issue a challenge from an adaptive-risk difficulty profile.
      *
-     * Builds a Config clone from the profile (the issuer's own Config is
-     * NEVER mutated): algorithm, m_kib, t, p, target_bits and
-     * argon2_target_bits come from the profile (argon2_target_bits = the
-     * profile's targetBits for Argon2id), while ttlSecs and minDurationMs
-     * stay owned by the issuer Config. The profile is validated first
-     * ({@see ChallengeProfile::validate()}); an invalid profile throws
-     * \InvalidArgumentException before anything is issued.
+     * Builds a Config clone from the profile; the issuer's own Config is
+     * never mutated. Algorithm, m_kib, t, p, target_bits and
+     * argon2_target_bits come from the profile (argon2_target_bits equals
+     * the profile's targetBits for Argon2id), while ttlSecs and
+     * minDurationMs stay owned by the issuer Config. The profile is
+     * validated first, see {@see ChallengeProfile::validate()}; an
+     * invalid profile throws \InvalidArgumentException before anything is
+     * issued.
      *
-     * Delegates to the normal {@see self::issue()} path, so the wire format,
-     * signing, and storage are IDENTICAL to a regular issue — only the
-     * parameters differ.
+     * Delegates to the normal {@see self::issue()} path, so the wire
+     * format, signing, and storage are identical to a regular issue; only
+     * the parameters differ.
      *
      * @throws \InvalidArgumentException when the profile is invalid (or the
      *                                   scope is invalid, per issue())
@@ -304,14 +306,14 @@ final class Issuer
     /**
      * Protocol v2 nonce-bound IP binding tag.
      *
-     * HMAC-SHA256 over the CANONICAL form of the client IP, keyed by the
-     * HKDF-derived IP-binding purpose key (K_ip_bind —
-     * {@see DerivedKeys}; never the master secret itself) and bound to the
-     * challenge nonce — so the stored binding is unique per challenge and
+     * HMAC-SHA256 over the canonical form of the client IP, keyed by the
+     * HKDF-derived IP-binding purpose key (K_ip_bind, see
+     * {@see DerivedKeys}; never the master secret itself) and bound to
+     * the challenge nonce. The stored binding is unique per challenge and
      * never a stable identifier that follows the client across requests.
-     * IPv4-mapped IPv6 addresses (`::ffff:a.b.c.d`) are normalized to their
-     * 4-byte IPv4 form so both spellings of the same address produce the
-     * same tag.
+     * IPv4-mapped IPv6 addresses (`::ffff:a.b.c.d`) are normalized to
+     * their 4-byte IPv4 form so both spellings of the same address
+     * produce the same tag.
      *
      * Message layout:
      *   "kiwicaptcha/ip-bind/v2\0" . nonce . "\0" . family . canonical_bytes
@@ -359,22 +361,22 @@ final class Issuer
     }
 
     /**
-     * Canonical protocol v2 payload — the exact byte string that is signed
+     * Canonical protocol v2 payload: the exact byte string that is signed
      * and base64-encoded into the challenge. Shared with the verifier so
      * issuance and verification can never drift apart.
      *
-     * Canonical v2 layout, byte-identical to the Rust
-     * crate's `canonical_signing_input_v2`:
+     * The v2 layout is byte-identical to the Rust crate's
+     * `canonical_signing_input_v2`:
      *
      *     v2|nonce|scope|binding_tag|issued_at|expires_at|algorithm|m_kib|t|
      *       p|target_bits|salt|min_duration_ms|region|policy_version|
      *       request_binding|issuer|kid
      *
-     * with `region`, `request_binding` and `issuer` rendering as the EMPTY
-     * segment when unset — so a null region + policy 1 + null binding +
-     * null issuer + kid 1 ends the canonical with `|0||1|||1`. `kid` is
-     * the FINAL field, appended AFTER `issuer`; it is ALWAYS
-     * present (the configured signing key id, default 1).
+     * `region`, `request_binding` and `issuer` render as the empty segment
+     * when unset. A null region + policy 1 + null binding + null issuer +
+     * kid 1 ends the canonical with `|0||1|||1`. `kid` is the final
+     * field, appended after `issuer`; it is always present (the
+     * configured signing key id, default 1).
      */
     public static function canonicalPayload(
         string $nonce,
@@ -428,11 +430,11 @@ final class Issuer
     }
 
     /**
-     * Legacy v1 signature: hex HMAC-SHA256 of the v1 canonical payload with
-     * the MASTER secret used directly as the key — byte-identical to the
-     * Rust crate's v1 path (the historical format; v1 is only kept for the
-     * migration window). Protocol v2 signatures use the HKDF-derived
-     * challenge key via {@see self::signPayloadV2()}.
+     * Legacy v1 signature: hex HMAC-SHA256 of the v1 canonical payload
+     * with the master secret used directly as the key, byte-identical to
+     * the Rust crate's v1 path. This is the historical format; v1 is
+     * only kept for the migration window. Protocol v2 signatures use the
+     * HKDF-derived challenge key via {@see self::signPayloadV2()}.
      */
     public static function signPayload(string $canonicalPayload, string $secretKey): string
     {
@@ -441,10 +443,10 @@ final class Issuer
 
     /**
      * Protocol v2 signature: hex HMAC-SHA256 of the canonical v2 payload
-     * keyed by the HKDF-derived challenge-signing purpose key (K_challenge,
-     * {@see DerivedKeys}; the master secret is never used
-     * directly as the signing key). Byte-identical to the Rust crate's
-     * `sign_canonical_v2`.
+     * keyed by the HKDF-derived challenge-signing purpose key
+     * (K_challenge). See {@see DerivedKeys}. The master secret is never
+     * used directly as the signing key. Byte-identical to the Rust
+     * crate's `sign_canonical_v2`.
      */
     public static function signPayloadV2(string $canonicalPayload, string $secretKey): string
     {
@@ -454,8 +456,9 @@ final class Issuer
     private function effectiveTargetBits(): int
     {
         // Defensive clamp: Config already rejects out-of-range values at
-        // construction, but a hand-rolled ChallengeRecord (or a future config
-        // path) must never reach the solver with an unsolvable difficulty.
+        // construction, but a hand-rolled ChallengeRecord (or a future
+        // config path) must not reach the solver with an unsolvable
+        // difficulty.
         return match ($this->config->algorithm) {
             PoWAlgorithm::Sha256 => min($this->config->targetBits, Config::MAX_SHA_TARGET_BITS),
             PoWAlgorithm::Argon2id => min($this->config->argon2TargetBits, Config::MAX_ARGON2_TARGET_BITS),

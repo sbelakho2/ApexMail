@@ -3,7 +3,7 @@
 //! One pipeline turns a [`RiskContext`] into a [`RiskDecision`]:
 //! emergency cap (one per-process window; the distributed Redis source
 //! limiter handles per-source limits) → observation (epoch-scoped ephemeral
-//! pseudonyms) → circuit breaker → state store (canonical Lua via EVALSHA)
+//! pseudonyms) → circuit breaker → state store (canonical Lua via evalsha)
 //! → scorer (with calibration bias) → policy → top contributor reasons.
 //! Backend failure degrades instead of failing the request.
 //!
@@ -75,7 +75,7 @@ pub enum RiskError {
     /// applied (callers treat calibration as best-effort).
     #[error("calibration backend failure: {0}")]
     Calibration(String),
-    /// The risk state backend could not serve the ALWAYS-ON outcome
+    /// The risk state backend could not serve the always-on outcome
     /// ledger operation (register/confirm/correct without calibration).
     #[error("risk state backend failure: {0}")]
     Store(String),
@@ -100,7 +100,7 @@ pub enum RiskError {
 /// Every [`RiskDecision`] carries the revision it was computed under
 /// (`model_revision`, exposed in the decision's public JSON — bounded,
 /// unlike the internal `decision_id`), so consumers can detect mixed-model
-/// fleets during a rollout. A model revision that MATERIALLY affects
+/// fleets during a rollout. A model revision that materially affects
 /// security requires a `policy_version` bump in the operator policy
 /// snapshot (see [`crate::policy::RiskPolicy`]).
 pub const RISK_MODEL_REVISION: u32 = 17;
@@ -111,7 +111,7 @@ pub const RISK_MODEL_REVISION: u32 = 17;
 /// (policy overrides first, then top contributor reasons). `decision_id`
 /// identifies the decision for outcome calibration (see
 /// [`RiskEngine::record_feedback`]); `model_revision` is the
-/// [`RISK_MODEL_REVISION`] generation the decision was computed under
+/// current model revision generation the decision was computed under
 /// (public JSON, bounded).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RiskDecision {
@@ -124,7 +124,7 @@ pub struct RiskDecision {
     pub retry_after_ms: Option<u32>,
     pub band: u8,
     /// Random 16-byte hex id; every decision registers under it — the
-    /// ALWAYS-ON outcome ledger (and, with calibration attached, the
+    /// always-on outcome ledger (and, with calibration attached, the
     /// calibration receipt) for ConfirmedLegitimate/ConfirmedAbuse.
     pub decision_id: String,
 }
@@ -170,7 +170,7 @@ pub struct EventReceipt {
     pub signals: SignalVector,
 }
 
-/// Raw saturation values passed to the Lua script, in its ARGV order
+/// Raw saturation values passed to the Lua script, in its argv order
 /// (src_fast, src_slow, issue, bad, mal, rep, action, switch, global,
 /// trust, principal). The defaults mirror the PHP implementation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -207,7 +207,7 @@ impl Default for Saturations {
 }
 
 impl Saturations {
-    /// The saturations in the Lua ARGV order (indices 8..18 of ARGV).
+    /// The saturations in the Lua argv order (indices 8..18).
     pub fn to_arg_order(&self) -> [u32; 11] {
         [
             self.src_fast,
@@ -226,34 +226,34 @@ impl Saturations {
 }
 
 /// In-process emergency guard: a fixed-window cap of `process_per_second`
-/// observations per second PER PROCESS (default 10000), enforced BEFORE any
+/// observations per second per process (default 10000), enforced before any
 /// state backend is touched.
 ///
-/// This is deliberately a PER-PROCESS cap (a `VecDeque` of timestamps in
+/// This is deliberately a per-process cap (a `VecDeque` of timestamps in
 /// this process's memory); no cross-process synchronization is performed.
 /// It is the last line of defense when the Redis/state controls fail — it
 /// bounds how much work one process can push at a degraded backend so a
 /// burst cannot saturate this process's Redis connection. Per-source (and
-/// per-identity) throttling belongs to the DISTRIBUTED keyed layer: the
+/// per-identity) throttling belongs to the distributed keyed layer: the
 /// Redis source velocity channels (`source_fast`/`source_slow` in risk-v1)
 /// and the policy's per-source overrides. When the window is saturated the
 /// engine denies immediately (HardRateLimit) instead of spending time/state
 /// on the request.
 ///
-/// WARM-UP RAMP: after every restart/autoscale the process
+/// Warm-up ramp: after every restart/autoscale the process
 /// must not start with a full burst — the effective cap ramps linearly
 /// from a floor of `max(1, process_per_second / 10)` to the full cap over
 /// the first `warmup_ramp_secs` seconds of the process's life:
 ///
 /// ```text
-/// effective_cap = floor(process_per_second * min(1, elapsed / ramp))
-///                 floored at max(1, process_per_second / 10)
+/// effective_cap = process_per_second × min(1, elapsed / ramp), floored
+///                 at max(1, process_per_second / 10)
 /// ```
 ///
 /// `elapsed` is measured from `start` on the monotonic `Instant` clock, so
 /// the ramp is immune to wall-clock jumps. `warmup_ramp_secs = 0` disables
-/// the ramp (full cap from the first call — the pre-audit behavior). The
-/// ramp only lowers the admission rate during startup; the DISTRIBUTED
+/// the ramp (full cap from the first call — the pre-ramp behavior). The
+/// ramp only lowers the admission rate during startup; the distributed
 /// keyed limits remain authoritative — it never raises any limit beyond
 /// the configured `process_per_second`.
 pub struct ProcessEmergencyCap {
@@ -340,7 +340,7 @@ impl ProcessEmergencyCap {
 
     /// True when the process may proceed within the current window. Also
     /// marks the current moment as consumed. Expired entries are dequeued
-    /// from the FRONT (amortized O(1) per admission).
+    /// from the front, in amortized O(1) per admission.
     pub fn allow(&self) -> bool {
         let now = self.start.elapsed().as_secs_f64();
         let cutoff = now - 1.0;
@@ -374,15 +374,15 @@ impl ProcessEmergencyCap {
 /// keys feed the identity factory) — the engine itself uses the derived
 /// [`RiskIdentityFactory`].
 ///
-/// The store bounds include the OPTIONAL risk-v2 capability traits
-/// ([`SessionContextTagStore`] + [`SessionTlsTagStore`]): their DEFAULT
-/// methods report no record surface (`Ok(None)`), so a v1 store without
+/// The store bounds include the optional risk-v2 capability traits
+/// [`SessionContextTagStore`] + [`SessionTlsTagStore`]: their default
+/// methods report no record surface, `Ok(None)`, so a v1 store without
 /// the capabilities still satisfies the bounds and the engine degrades the
 /// session-first-tag signals to neutral (consistent) — exactly the
 /// backend-miss semantics.
 ///
-/// OPT-IN for third-party stores: a store implementing only
-/// [`RiskStateStore`] must add the two EMPTY capability impls
+/// Opt-in for third-party stores: a store implementing only
+/// [`RiskStateStore`] must add the two empty capability impls
 /// (`impl SessionContextTagStore for MyStore {}` and
 /// `impl SessionTlsTagStore for MyStore {}`) to opt in — the default
 /// methods then provide the neutral v2 behavior. The built-in Redis store
@@ -477,7 +477,7 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
 
     /// Attaches an outcome-feedback calibration store: every decision
     /// registers atomically (receipt + sampled denominator + outcome
-    /// ledger — the ledger is ALWAYS ON, so confirmed outcomes work
+    /// ledger — the ledger is always on, so confirmed outcomes work
     /// identically without calibration), the scope bias is applied to the
     /// score, and confirmed outcomes consume their receipts. All failures
     /// are silent.
@@ -503,12 +503,12 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
 
     /// Assesses ONE PreIssue request and returns a [`RiskDecision`].
     ///
-    /// The emergency cap is checked FIRST (the single per-process window);
+    /// The emergency cap is checked first (the single per-process window);
     /// on a cap hit the engine returns a HardRateLimit decision without
     /// touching the store. `idempotency_key` becomes the event_id (dedupe
     /// key) via [`normalize_idempotency_key`]; `None` draws a random 16-byte
     /// hex id. Every decision gets a fresh `decision_id` and registers its
-    /// ALWAYS-ON outcome ledger (with calibration attached, the calibration
+    /// always-on outcome ledger (with calibration attached, the calibration
     /// receipt + sampled denominator atomically with it).
     ///
     /// # Errors
@@ -530,7 +530,7 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
     /// semantics are unchanged — with an empty `v2` context the decision is
     /// byte-identical to the v1 path. `v2_weights` is the operator-tunable
     /// weights override for the additive risk-v2 factors; `None` uses the
-    /// DEFAULT weights (identical scores to today).
+    /// default weights (identical scores to today).
     ///
     /// # Errors
     ///
@@ -584,7 +584,7 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
         self.assess_pre_issue(ctx, idempotency_key)
     }
 
-    /// Re-assesses a request WITHOUT any emergency-cap check: identical
+    /// Re-assesses a request without any emergency-cap check: identical
     /// pipeline to [`RiskEngine::assess_pre_issue`] (observation, breaker,
     /// store, scorer with calibration bias, policy, receipt) minus the
     /// limiter gate — used for follow-up assessments of an already-admitted
@@ -606,7 +606,7 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
     /// plus the additive risk-v2 evidence factors from `v2` (honeypot
     /// evidence, session client-context consistency, trusted-edge TLS
     /// consistency). `v2_weights` is the operator-tunable weights override
-    /// for the additive risk-v2 factors; `None` uses the DEFAULT weights
+    /// for the additive risk-v2 factors; `None` uses the default weights
     /// (identical scores to today).
     ///
     /// # Errors
@@ -680,7 +680,7 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
                 let mut base = self.policy.base_risk(ctx.scope);
                 if let Some(calibration) = &self.calibration {
                     // Bounded automatic calibration: clamp(base + bias,
-                    // 0, 1000) BEFORE band mapping (same sign, same clamp
+                    // 0, 1000) before band mapping (same sign, same clamp
                     // as PHP).
                     let bias = calibration.bias_for_scope(ctx.scope, now_ms as i64);
                     base = (base as i32 + bias).clamp(0, 1000) as u16;
@@ -691,7 +691,7 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
                 // session-first-tag record read that degrades to
                 // "consistent" on any backend miss — probabilistic evidence
                 // never breaks an assessment). The v2 weights are the
-                // operator override when given, else the DEFAULT weights
+                // operator override when given, else the default weights
                 // (byte-identical scores to today).
                 let v2_signals = v2
                     .map(|v2ctx| self.derive_v2_signals(v2ctx, observation.session_id, ctx.event));
@@ -727,14 +727,14 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
     /// - `session_inconsistency` = 1000 when the session's first-seen
     ///   client-context tag differs from the current tag; 0 when the tag is
     ///   absent (first request), the session is absent, the record read
-    ///   fails (neutral degradation), or the store lacks the OPTIONAL
-    ///   [`SessionContextTagStore`] capability (the default `Ok(None)`
-    ///   degrades exactly like a backend miss);
+    ///   fails (neutral degradation), or the store lacks the optional
+    ///   [`SessionContextTagStore`] capability — the default `Ok(None)`
+    ///   degrades exactly like a backend miss;
     /// - `tls_inconsistency` = 1000 when the session's first-seen
     ///   trusted-edge TLS classification tag differs from the current tag;
     ///   0 when the tag is absent (first request), the session is absent,
     ///   the tag exceeds the 64-char bound (treated as absent), the record
-    ///   read fails (neutral degradation), or the store lacks the OPTIONAL
+    ///   read fails (neutral degradation), or the store lacks the optional
     ///   [`SessionTlsTagStore`] capability.
     fn derive_v2_signals(
         &self,
@@ -773,15 +773,15 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
     }
 
     /// Outcome feedback path (e.g. a post-solve protected action): stores
-    /// the event and returns an [`EventReceipt`]. NEVER runs the limiter
-    /// and NEVER calls [`RiskEngine::assess_pre_issue`].
+    /// the event and returns an [`EventReceipt`]. Never runs the limiter
+    /// and never calls [`RiskEngine::assess_pre_issue`].
     ///
-    /// CONFIRMATION EVENTS (ConfirmedLegitimate/ConfirmedAbuse) ARE
-    /// REJECTED with [`RiskError::ConfirmationApiRequired`]: they carry an
+    /// Confirmation events (ConfirmedLegitimate/ConfirmedAbuse) are
+    /// rejected with [`RiskError::ConfirmationApiRequired`]: they carry an
     /// outcome for an assessed decision and must go through
     /// [`RiskEngine::confirmed_legitimate`] / [`RiskEngine::confirmed_abuse`]
-    /// (the wrappers require the decision_id the ALWAYS-ON outcome ledger
-    /// needs and confirm it BEFORE booking the reputation event).
+    /// (the wrappers require the decision_id the always-on outcome ledger
+    /// needs and confirm it before booking the reputation event).
     ///
     /// # Errors
     ///
@@ -826,11 +826,11 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
         if confirmed {
             if let Some(receipt_id) = decision_id.filter(|d| !d.is_empty()) {
                 let legitimate = event == RiskEventKind::ConfirmedLegitimate;
-                // FIRST the atomic ledger confirmation (calibrator when
-                // attached — its confirm.lua flips the ALWAYS-ON ledger —
+                // First the atomic ledger confirmation (calibrator when
+                // attached — its confirm.lua flips the always-on ledger —
                 // else the calibration-independent store script).
-                // REPUTATION GATING: the reputation event is booked only on
-                // the FIRST confirmation (status 1 or 2); status 0
+                // Reputation gating: the reputation event is booked only on
+                // the first confirmation (status 1 or 2); status 0
                 // (missing/already consumed) and backend errors book
                 // nothing — the receipt/ledger survives an error, so a
                 // retry applies the outcome exactly once instead of
@@ -866,18 +866,18 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
     }
 
     /// Confirms the outcome of an assessed decision: ONE atomic
-    /// ledger operation that flips the decision's PENDING entry exactly
+    /// ledger operation that flips the decision's pending entry exactly
     /// once. With calibration attached the calibrator's confirm script also
-    /// consumes the receipt and records the exact score into the DECISION-
-    /// TIME bucket (or discards an unsampled receipt); WITHOUT calibration
-    /// the calibration-independent store script flips the ALWAYS-ON ledger
+    /// consumes the receipt and records the exact score into the decision-
+    /// time bucket (or discards an unsampled receipt); without calibration
+    /// the calibration-independent store script flips the always-on ledger
     /// alone — ConfirmedLegitimate/ConfirmedAbuse work identically in both
     /// configurations.
     ///
-    /// Returns the SHARED accepted-outcome status (wire contract with PHP):
+    /// Returns the shared accepted-outcome status (wire contract with PHP):
     /// `0` nothing consumed (missing / already confirmed / corrupt /
-    /// unsampled-discard), `1` FIRST confirmation with calibration
-    /// recorded, `2` FIRST confirmation, deliberately unsampled. Only
+    /// unsampled-discard), `1` first confirmation with calibration
+    /// recorded, `2` first confirmation, deliberately unsampled. Only
     /// statuses 1 and 2 authorize the first-party reputation event (see
     /// [`RiskEngine::record_feedback`]); the reputation event itself is
     /// booked separately. `weight` is the inverse sampling probability for
@@ -908,17 +908,17 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
         }
     }
 
-    /// Compensating-state correction: flips a decision's ALWAYS-ON outcome
+    /// Compensating-state correction: flips a decision's always-on outcome
     /// ledger entry L <-> A — the corrected outcome is authoritative for
     /// future events while the prior ephemeral reputation pressure decays
     /// naturally (no synthetic identities are involved; the ledger itself
     /// is the once-only authority). With calibration attached the
-    /// calibrator's correction script also REVERSES the original bucket
+    /// calibrator's correction script also reverses the original bucket
     /// contribution (exact recorded weight, clamped at zero) and adds the
     /// corrected one; without calibration the calibration-independent
     /// store script flips the ledger alone.
     ///
-    /// `legitimate` is the CORRECTED outcome (a first confirmation of
+    /// `legitimate` is the corrected outcome (a first confirmation of
     /// `legitimate = true` is corrected with `legitimate = false` and vice
     /// versa).
     ///
@@ -963,7 +963,7 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
     }
 
     /// Records a confirmed-legitimate outcome. `decision_id` is the id of
-    /// the assessed decision (required — the ALWAYS-ON outcome ledger is
+    /// the assessed decision (required — the always-on outcome ledger is
     /// confirmed under it; with calibration the receipt is consumed too).
     /// `sampling_probability_ppm` is the server-side sampling probability
     /// in parts per million: weighted sampling derives the confirmation
@@ -996,7 +996,7 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
     }
 
     /// Records a confirmed-abuse outcome. `decision_id` is the id of the
-    /// assessed decision (required — the ALWAYS-ON outcome ledger is
+    /// assessed decision (required — the always-on outcome ledger is
     /// confirmed under it; with calibration the receipt is consumed too).
     /// `sampling_probability_ppm` is the server-side sampling probability
     /// in parts per million: weighted sampling derives the confirmation
@@ -1050,7 +1050,7 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
         )
     }
 
-    /// Records a deployment-capacity hit (event 16): raises ONLY the
+    /// Records a deployment-capacity hit (event 16): raises only the
     /// global pressure (never the visitor's source/session/principal
     /// reputation) so an overloaded deployment is not blamed on individual
     /// traffic. The context's `event` field must be `GlobalCapacityHit`.
@@ -1067,7 +1067,7 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
         self.record_feedback(RiskEventKind::GlobalCapacityHit, ctx, idempotency_key, None)
     }
 
-    /// Records a risk-denied outcome (event 17): a NO-OP in the state
+    /// Records a risk-denied outcome (event 17): a no-op in the state
     /// script — a decision that already denied must not be double-counted,
     /// this only books the idempotency receipt. The context's `event` field
     /// must be `RiskDenied`.
@@ -1096,10 +1096,10 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
         let session_id = ctx.session_id.map(|s| self.identity.session_id(s));
         let principal_id = ctx.principal_id.map(|p| self.identity.principal_id(p));
         // Canonical idempotency normalization shared with PHP: verbatim keys
-        // become the lowercase hex of
-        // HMAC-SHA256(event_key, pack('N', scope) . chr(event) . key) —
-        // domain-separated per scope and event kind; empty/None draw a
-        // random 16-byte id, and keys over 4096 bytes are rejected.
+        // become the lowercase hex of the hmac-sha256 MAC over event_key,
+        // pack('N', scope), chr(event) and key — domain-separated per scope
+        // and event kind; empty/None draw a random 16-byte id, and keys
+        // over 4096 bytes are rejected.
         let event_id = normalize_idempotency_key(
             idempotency_key.as_deref(),
             ctx.scope,
@@ -1151,18 +1151,18 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
         decision.reasons = out;
     }
 
-    /// Assigns the decision_id and registers the decision with its EXACT
+    /// Assigns the decision_id and registers the decision with its exact
     /// risk score (silently on failure — never breaks issuance). The
-    /// OUTCOME LEDGER IS ALWAYS ON and independent of calibration:
+    /// outcome ledger is always on and independent of calibration:
     ///
     /// - calibration attached → `record_receipt` (register_decision.lua):
-    ///   receipt + the sampled decision-time denominator + the PENDING
+    ///   receipt + the sampled decision-time denominator + the pending
     ///   outcome ledger in ONE atomic script invocation;
     /// - no calibration → `store.register_outcome` (outcome_register.lua):
-    ///   the PENDING outcome ledger alone.
+    ///   the pending outcome ledger alone.
     ///
     /// `decision_hour = now_ms / 3_600_000` anchors the decision to its
-    /// hour (confirmed outcomes are bucketed by DECISION time).
+    /// hour (confirmed outcomes are bucketed by decision time).
     fn finalize_decision(&self, scope: u32, mut decision: RiskDecision) -> RiskDecision {
         let mut id = [0u8; 16];
         thread_rng().fill_bytes(&mut id);
@@ -1279,9 +1279,9 @@ mod tests {
         )
     }
 
-    /// In-memory ALWAYS-ON outcome ledger (models outcome_register.lua /
+    /// In-memory always-on outcome ledger (models outcome_register.lua /
     /// outcome_confirm.lua / outcome_correct.lua exactly): an entry is
-    /// PENDING (`None`) once registered, flips exactly once on confirm, and
+    /// pending (`None`) once registered, flips exactly once on confirm, and
     /// flips again on correction unless it already carries the target
     /// outcome.
     #[derive(Default)]
@@ -1431,7 +1431,7 @@ mod tests {
     }
 
     // The v1 test stores declare NO session-first-tag record surface: the
-    // DEFAULT capability methods report `Ok(None)` and the engine degrades
+    // default capability methods report `Ok(None)` and the engine degrades
     // the v2 consistency signals to neutral, exactly like a backend miss.
     impl SessionContextTagStore for MockStore {}
     impl SessionTlsTagStore for MockStore {}
@@ -1648,7 +1648,7 @@ mod tests {
             "a lone honeypot hit must never deny"
         );
 
-        // Through the SAME engine the decision escalates (Allow -> Sha16)
+        // Through the same engine the decision escalates (Allow -> Sha16)
         // instead of staying flat: the honeypot evidence moved the profile.
         let escalated = engine
             .assess_pre_issue_v2(context(), &v2_context(true, None, None), None, None)
@@ -1685,9 +1685,9 @@ mod tests {
         }
     }
 
-    /// Session client-context consistency: a CONSISTENT tag (the session's
-    /// first-seen tag) is neutral; a CHANGED tag raises the aggregate; an
-    /// ABSENT tag (first request) is neutral.
+    /// Session client-context consistency: a consistent tag (the session's
+    /// first-seen tag) is neutral; a changed tag raises the aggregate; an
+    /// absent tag (first request) is neutral.
     #[test]
     fn v2_session_client_context_consistency() {
         let engine = RiskEngine::new(V2FirstTagStore::default(), classifier(), policy(), keys());
@@ -1759,9 +1759,9 @@ mod tests {
         assert_eq!(no_tag.score, 100, "a session without a tag stays neutral");
     }
 
-    /// Trusted-edge TLS consistency: a CONSISTENT tag (the session's
-    /// first-seen TLS classification) is neutral; a CHANGED tag raises the
-    /// aggregate; an ABSENT tag (first request) is neutral.
+    /// Trusted-edge TLS consistency: a consistent tag (the session's
+    /// first-seen TLS classification) is neutral; a changed tag raises the
+    /// aggregate; an absent tag (first request) is neutral.
     #[test]
     fn v2_tls_consistency() {
         let engine = RiskEngine::new(V2FirstTagStore::default(), classifier(), policy(), keys());
@@ -1883,13 +1883,13 @@ mod tests {
     }
 
     /// The v2 weights override tunes the additive factors: `None` uses the
-    /// DEFAULT weights (identical scores to today); an override changes
+    /// default weights (identical scores to today); an override changes
     /// only the weighted contribution.
     #[test]
     fn v2_weights_override_tunes_the_additive_factors() {
         let engine = RiskEngine::new(V2FirstTagStore::default(), classifier(), policy(), keys());
 
-        // Null override: the DEFAULT weights apply (100 + 1000*200/1000 = 300).
+        // Null override: the default weights apply (100 + 1000*200/1000 = 300).
         let default = engine
             .assess_pre_issue_v2(context(), &v2_context(true, None, None), None, None)
             .unwrap();
@@ -1942,7 +1942,7 @@ mod tests {
 
     /// Engine-level wiring: the engine passes its per-process
     /// scope-action hysteresis map into the policy, so an oscillating
-    /// boundary score (449/451/449…) yields a STABLE action instead of a
+    /// boundary score (449/451/449…) yields a stable action instead of a
     /// flip-flopping challenge profile.
     #[test]
     fn scope_action_hysteresis_stabilizes_oscillating_boundary_scores() {
@@ -2014,7 +2014,7 @@ mod tests {
         );
         assert_eq!(captured[0].event_id.len(), 64);
 
-        // The same caller key under a DIFFERENT event kind (e.g. a feedback
+        // The same caller key under a different event kind (e.g. a feedback
         // wrapper) must never collide with the PreIssue dedupe id.
         let engine2 = RiskEngine::new(
             CapturingStore(Mutex::new(Vec::new()), OutcomeLedger::default()),
@@ -2067,7 +2067,7 @@ mod tests {
 
     #[test]
     fn emergency_limiter_denies_with_retry_after() {
-        // Ramp disabled: the pre-audit full-burst window semantics.
+        // Ramp disabled: the original full-burst window semantics.
         let limiter = ProcessEmergencyCap::with_capacity_and_ramp(100, 0.0);
         for _ in 0..100 {
             assert!(limiter.allow());
@@ -2206,7 +2206,7 @@ mod tests {
             "the limiter gate must fire before the store"
         );
 
-        // ...but reassess NEVER consults the cap: the same saturated engine
+        // ...but reassess never consults the cap: the same saturated engine
         // still runs the full pipeline and returns a real decision.
         let decision = engine.reassess(context(), None).unwrap();
         assert!(!decision.has_reason(RiskReason::HardRateLimit));
@@ -2307,7 +2307,7 @@ mod tests {
         );
         assert!(!receipt.is_duplicate);
 
-        // Confirmed* events are REJECTED by record_feedback: they carry an
+        // Confirmed* events are rejected by record_feedback: they carry an
         // outcome for an assessed decision and must go through the
         // confirmed_* wrappers (which require the decision_id).
         assert_eq!(
@@ -2336,7 +2336,7 @@ mod tests {
         assert_eq!(events, vec![RiskEventKind::ProtectedActionFailure]);
 
         // The confirmed_* wrappers bypass the guard: they confirm the
-        // ALWAYS-ON outcome ledger FIRST (status 1 = first confirmation,
+        // always-on outcome ledger first (status 1 = first confirmation,
         // reputation eligible) and then book the reputation event.
         engine.store.register_outcome("d-fb-1", 1, 1, 100).unwrap();
         engine.store.register_outcome("d-fb-2", 1, 1, 100).unwrap();
@@ -2543,7 +2543,7 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push((decision_id.to_string(), legitimate, weight));
-            // The mock models the real receipt lifecycle: the FIRST confirm
+            // The mock models the real receipt lifecycle: the first confirm
             // for a decision returns the configured status (1/2), every
             // later confirm sees the receipt consumed and returns 0.
             let status = if self
@@ -2569,7 +2569,7 @@ mod tests {
             _weight: Option<f64>,
         ) -> Result<bool, crate::calibration::CalibrationError> {
             // Models the ledger flip: the first correction to a target
-            // outcome applies, a repeat to the SAME outcome does not.
+            // outcome applies, a repeat to the same outcome does not.
             let mut corrected = self.corrected.lock().unwrap();
             if corrected.contains(&(decision_id.to_string(), legitimate)) {
                 return Ok(false);
@@ -2617,7 +2617,7 @@ mod tests {
         assert_eq!(
             receipts[0].6,
             (crate::now_ms() / 3_600_000) as i64,
-            "the receipt carries the DECISION hour"
+            "the receipt carries the decision hour"
         );
         assert_eq!(receipts[0].7, 1.0, "registration weight is 1.0");
     }
@@ -2641,7 +2641,7 @@ mod tests {
             .confirmed_legitimate(ctx, None, "decision-x", None)
             .unwrap();
         assert!(!receipt.is_duplicate);
-        // FIRST the atomic confirm (legitimate, default weight 1.0)...
+        // First the atomic confirm (legitimate, default weight 1.0)...
         let confirmed = cal.confirmed.lock().unwrap();
         assert_eq!(confirmed.len(), 1);
         assert_eq!(
@@ -2674,7 +2674,7 @@ mod tests {
             .unwrap();
         // The calibrator was still asked to confirm...
         assert_eq!(cal.confirmed.lock().unwrap().len(), 1);
-        // ...but the state store was NEVER touched: a retry can no longer
+        // ...but the state store was never touched: a retry can no longer
         // amplify ConfirmedAbuse.
         assert_eq!(engine.store.calls.load(Ordering::Relaxed), 0);
         assert!(receipt.is_duplicate);
@@ -2703,7 +2703,7 @@ mod tests {
             cal.confirmed.lock().unwrap()[0],
             ("decision-z".to_string(), false, Some(10.0))
         );
-        // Without a calibration store the ALWAYS-ON ledger is flipped by
+        // Without a calibration store the always-on ledger is flipped by
         // the store: an unknown decision is status 0 (never an error).
         let plain = RiskEngine::new(
             MockStore::new(SignalVector::zero(), 0),
@@ -2744,7 +2744,7 @@ mod tests {
             engine.confirmed_abuse(ctx(RiskEventKind::ConfirmedAbuse), None, "", None),
             Err(RiskError::EmptyDecisionId)
         );
-        // An UNREGISTERED decision cannot be confirmed: status 0 -> the
+        // An unregistered decision cannot be confirmed: status 0 -> the
         // reputation event is NOT booked (the receipt reports a no-op).
         let receipt = engine
             .confirmed_legitimate(
@@ -2771,7 +2771,7 @@ mod tests {
     #[test]
     fn first_confirmation_gates_reputation_and_retries_cannot_amplify() {
         let store = CapturingStore(Mutex::new(Vec::new()), OutcomeLedger::default());
-        // The mock models a live receipt: the FIRST confirm returns status 1
+        // The mock models a live receipt: the first confirm returns status 1
         // (recorded), every retry returns 0 (already consumed).
         let cal = static_calibration(0, 1);
         let engine =
@@ -2805,7 +2805,7 @@ mod tests {
             assert_eq!(captured[0].event, RiskEventKind::ConfirmedAbuse);
         }
 
-        // RETRY of the same decision: status 0 -> the reputation event must
+        // Retry of the same decision: status 0 -> the reputation event must
         // NOT be booked again (retries can no longer amplify).
         let receipt = engine
             .confirmed_abuse(
@@ -2827,7 +2827,7 @@ mod tests {
     #[test]
     fn status_two_confirmation_mutates_reputation_once_without_calibration_feed() {
         let store = CapturingStore(Mutex::new(Vec::new()), OutcomeLedger::default());
-        // Status 2 = FIRST confirmation, deliberately unsampled: the
+        // Status 2 = first confirmation, deliberately unsampled: the
         // reputation event is authorized exactly once, calibration is
         // untouched (the calibration.rs suite asserts the bucket stays
         // empty for status 2).
@@ -2877,7 +2877,7 @@ mod tests {
             .lock()
             .unwrap()
             .contains(&("decision-c".to_string(), true)));
-        // ...and a repeat to the SAME outcome is a no-op (the ledger
+        // ...and a repeat to the same outcome is a no-op (the ledger
         // already carries it). NO reputation event is ever booked — the
         // correction never touches the state store.
         assert!(!engine.confirm_correction("decision-c", true, None).unwrap());
@@ -2895,9 +2895,9 @@ mod tests {
 
     #[test]
     fn no_calibration_confirmed_outcomes_work_through_the_store_ledger() {
-        // THE ARCHITECTURE: the outcome ledger is ALWAYS ON and independent
+        // The architecture: the outcome ledger is always on and independent
         // of calibration. Without a calibration store the engine registers
-        // the PENDING ledger at decision time and the confirmed* wrappers
+        // the pending ledger at decision time and the confirmed* wrappers
         // flip it through the store: ConfirmedLegitimate/ConfirmedAbuse
         // work identically with or without calibration.
         let store = MockStore::new(SignalVector::zero(), 0);
@@ -2914,7 +2914,7 @@ mod tests {
             )
         };
 
-        // Decision time: the store registers the PENDING ledger entry.
+        // Decision time: the store registers the pending ledger entry.
         let decision = engine
             .assess_pre_issue(context(), Some("nocal-1".to_string()))
             .unwrap();
@@ -2955,7 +2955,7 @@ mod tests {
             !engine.confirm_correction(&id, true, None).unwrap(),
             "a ledger already carrying the target outcome must not flip"
         );
-        // A resolved (non-PENDING) ledger is exactly-once: confirming the
+        // A resolved (non-pending) ledger is exactly-once: confirming the
         // corrected outcome again is a no-op, never a second reputation
         // event.
         let receipt = engine
@@ -3032,7 +3032,7 @@ mod tests {
         );
         let engine = RiskEngine::new(store, classifier(), policy(), keys());
 
-        // Decision time registers the PENDING ledger (no calibration!).
+        // Decision time registers the pending ledger (no calibration!).
         let decision = engine
             .assess_pre_issue(context(), Some("led-e2e".to_string()))
             .unwrap();
@@ -3093,13 +3093,13 @@ mod tests {
             .unwrap());
     }
 
-    // ── End-to-end with the Redis store (skipped unless RISK_REDIS_URL) ──
-
+    // ── End-to-end with the Redis store (skipped unless the Redis test
+    // URL is set) ──────────────────────────────────────────────────────
     #[test]
     fn process_cap_caps_admissions_per_process() {
         // In-process fixed-window cap: 5 admissions fit the window, the 6th
         // and 7th must be denied with HardRateLimit. Needs Redis for the
-        // store backend; skipped unless RISK_REDIS_URL is set.
+        // store backend; skipped unless the Redis test URL is set.
         let Some(raw_url) = std::env::var("RISK_REDIS_URL")
             .ok()
             .filter(|u| !u.is_empty())

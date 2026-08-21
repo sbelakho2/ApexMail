@@ -208,7 +208,7 @@ final class RiskV2EngineTest extends TestCase
     {
         $engine = $this->engine($this->zeroStore());
 
-        // Null override: the DEFAULT weights apply (100 + 1000*200/1000 = 300).
+        // Null override: the default weights apply (100 + 1000*200/1000 = 300).
         $default = $engine->assessPreIssueV2($this->context(), $this->v2(honeypotHit: true), null, null);
         self::assertSame(300, $default->score, 'a null weights override must produce the default score');
 

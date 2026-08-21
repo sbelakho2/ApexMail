@@ -118,7 +118,7 @@ final class TwigRuntimeTest extends TestCase
     {
         [$env, $runtime] = $this->runtime();
         $html = $runtime->renderWidget($env, []);
-        // The driver script always mentions the attribute; the CONTAINER
+        // The driver script always mentions the attribute; the container
         // must not carry it when no binding is configured.
         self::assertStringContainsString('data-kiwi-telemetry="off">', $html, 'no binding configured: the container must not render data-kiwi-request-binding');
 
@@ -148,7 +148,7 @@ final class TwigRuntimeTest extends TestCase
     // ── Backend-originated binding ────────────────────────────────────────
 
     /**
-     * The widget's rendered container carries ONLY the
+     * The widget's rendered container carries only the
      * SERVER-provided binding — the value comes from the form option /
      * runtime configuration (a flow_id stored server-side), never from the
      * client. With a binding configured, the container carries exactly one
@@ -179,9 +179,9 @@ final class TwigRuntimeTest extends TestCase
     }
 
     /**
-     * The widget DRIVER never generates a transaction binding
+     * The widget driver never generates a transaction binding
      * itself — no crypto.randomUUID / getRandomValues / Math.random binding
-     * synthesis. The ONLY source of the binding is the container attribute
+     * synthesis. The only source of the binding is the container attribute
      * the server rendered (backend-originated mode), so a client can never
      * mint a binding the backend did not issue.
      */
@@ -195,7 +195,7 @@ final class TwigRuntimeTest extends TestCase
         self::assertStringNotContainsString('getRandomValues', $driver, 'the driver must never generate bindings with crypto.getRandomValues');
         // Math.random exists exactly twice — the per-widget
         // data-kiwi-instance debugging marker and the per-widget hCaptcha
-        // response-key marker. It must NEVER appear in the binding path:
+        // response-key marker. It must never appear in the binding path:
         // the binding is assigned from the container attribute only
         // (asserted above).
         self::assertSame(2, substr_count($driver, 'Math.random'), 'Math.random must be limited to the instance-id and response-key markers — bindings are never synthesized client-side');

@@ -16,12 +16,13 @@ use KiwiCaptcha\Tests\Fixtures\Vectors;
 use PHPUnit\Framework\TestCase;
 
 /**
- * Security-policy epoch and application transaction binding:
- * the issued record carries `policy_version` (Config, default
- * 1) and `request_binding` (issue-time nonce); both are part of the signed
- * v2 canonical payload; a verifier configured with an expected policy epoch
- * rejects records issued under a different epoch (WrongPolicyVersion), and
- * a VALID outcome exposes the consumed record's request binding.
+ * Security-policy epoch and application transaction binding: the issued
+ * record carries `policy_version` (Config, default 1) and
+ * `request_binding` (issue-time nonce); both are part of the signed v2
+ * canonical payload. A verifier configured with an expected policy
+ * epoch rejects records issued under a different epoch
+ * (WrongPolicyVersion), and a valid outcome exposes the consumed
+ * record's request binding.
  */
 final class SecurityPolicyTest extends TestCase
 {
@@ -144,7 +145,7 @@ final class SecurityPolicyTest extends TestCase
             'the v2 signature covers policy_version and request_binding',
         );
 
-        // Round trip through the verifier recomputes the SAME canonical.
+        // Round trip through the verifier recomputes the same canonical.
         $verifier = new Verifier($storage, now: static fn (): int => self::ISSUED_AT);
         $outcome = $verifier->verify(
             $token,

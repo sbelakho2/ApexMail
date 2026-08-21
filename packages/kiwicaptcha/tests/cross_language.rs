@@ -1,7 +1,7 @@
-//! CI cross-language harness: loads a PHP-ISSUED record (KC_PHP_RECORD env),
-//! solves it with the Rust solver, and verifies it with verify_solution.
-//! Skips (returns) when the env var is unset so local `cargo test` stays
-//! hermetic.
+//! CI cross-language harness: loads a PHP-issued record (the PHP job's
+//! record env var), solves it with the Rust solver, and verifies it with
+//! verify_solution. Skips (returns) when the env var is unset so local
+//! `cargo test` stays hermetic.
 
 use kiwicaptcha::verify::{
     solve_for_test, verify_solution, VerifyContext, VerifyError, VerifyOutcome,
@@ -84,9 +84,10 @@ fn rust_verifies_php_issued_record() {
 
 #[test]
 fn rust_issues_record_for_php() {
-    // Reverse direction: Rust issues a record (KC_RUST_ALGO=sha256|argon2id),
-    // writes the language-neutral JSON to KC_RUST_RECORD for the PHP job to
-    // solve + verify. Skips when the env var is unset.
+    // Reverse direction: Rust issues a record and writes the
+    // language-neutral JSON for the PHP job to solve + verify. The
+    // algorithm and the output path come from env vars; skips when the
+    // output env var is unset.
     let Ok(path) = std::env::var("KC_RUST_RECORD") else {
         eprintln!("KC_RUST_RECORD unset — reverse cross-language test skipped");
         return;
@@ -157,7 +158,7 @@ fn rust_issues_record_for_php() {
 }
 
 /// Four-way real-Redis runtime-state interoperability: PHP and
-/// Rust must operate on the SAME Redis records with the SAME runtime
+/// Rust must operate on the same Redis records with the same runtime
 /// envelope (state marker + consumed_result + operation_identity). Runs
 /// only when a Redis URL is provided and the PHP core's autoloader is
 /// reachable from this crate.

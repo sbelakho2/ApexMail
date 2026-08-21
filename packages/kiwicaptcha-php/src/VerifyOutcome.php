@@ -7,17 +7,17 @@ namespace KiwiCaptcha;
 /**
  * Result of a solution verification.
  *
- * A VALID outcome exposes the decoded solution token's nonce — the
- * canonical replay id (jti) — via {@see self::nonce()}; the bundle surfaces
- * it so the consuming application can correlate accepted proofs. Null for
- * every non-valid outcome (including MalformedToken, where no nonce could
- * be decoded).
+ * A valid outcome exposes the decoded solution token's nonce, the
+ * canonical replay id (jti), via {@see self::nonce()}; the bundle
+ * surfaces it so the consuming application can correlate accepted
+ * proofs. Null for every non-valid outcome (including MalformedToken,
+ * where no nonce could be decoded).
  *
- * A VALID outcome also exposes the consumed record's application-supplied
- * transaction binding via {@see self::requestBinding()} — the
- * host application generated this nonce at issuance and must present it
- * again on the final protected POST, correlating the CAPTCHA result with
- * the exact application transaction.
+ * A valid outcome also exposes the consumed record's application-supplied
+ * transaction binding via {@see self::requestBinding()}. The host
+ * application generated this nonce at issuance and must present it again
+ * on the final protected POST, correlating the result with the exact
+ * application transaction.
  */
 final class VerifyOutcome
 {

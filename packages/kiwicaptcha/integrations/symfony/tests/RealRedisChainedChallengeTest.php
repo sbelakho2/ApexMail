@@ -32,20 +32,20 @@ use PHPUnit\Framework\TestCase;
 use Symfony\Component\HttpFoundation\Request;
 
 /**
- * REAL-REDIS integration tests of the transactional chained-challenge
+ * real-redis integration tests of the transactional chained-challenge
  * state machine (CI service container: redis on 127.0.0.1:6399).
  *
  * Skipped unless a Redis answers at tcp://127.0.0.1:6399. Exercises the
  * atomicity the fakes cannot prove:
- *  - the obligation create-or-get (ONE Lua over the chain + obligation
- *    keys — a repeated stage-1 token returns the SAME chain, a stale
- *    mapping is compare-deleted and repaired),
- *  - the SHORT owner-scoped reservation lease (busy vs expired-lease
- *    takeover),
- *  - the markIssued LOST-REPLY: the real Lua runs, the reply is thrown
- *    away, a RECONNECTED reader confirms the durable issued state,
- *  - markVerified + the atomic obligation deletion,
- *  - rearm (issued -> available, nonce-pinned),
+ *  - the obligation create-or-get (one Lua over the chain + obligation
+ *    keys — a repeated stage-1 token returns the same chain, a stale
+ *    mapping is compare-deleted and repaired).
+ *  - the short owner-scoped reservation lease (busy vs expired-lease
+ *    takeover).
+ *  - the markIssued lost-reply (the real Lua runs, the reply is thrown
+ *    away, a reconnected reader confirms the durable issued state).
+ *  - markVerified with the atomic obligation deletion.
+ *  - rearm (issued -> available, nonce-pinned).
  *  - the auto-resume read (findOpenRequirement without a ticket).
  */
 final class RealRedisChainedChallengeTest extends TestCase
@@ -137,7 +137,7 @@ final class RealRedisChainedChallengeTest extends TestCase
     }
 
     /**
-     * A DETERMINISTIC Kiwi-shaped stage-2 nonce for a literal seed (the
+     * A deterministic Kiwi-shaped stage-2 nonce for a literal seed (the
      * strict v2 decode requires the Kiwi base64 nonce shape for
      * stage2Nonce, so the tests never use arbitrary strings).
      */
@@ -160,7 +160,7 @@ final class RealRedisChainedChallengeTest extends TestCase
         self::assertMatchesRegularExpression('/^[0-9a-f]{64}$/D', $obligationId, 'the obligation id is the bounded pseudonymous HMAC');
         self::assertSame($first->chainId, (string) $this->client->get(sprintf('{kiwi:%s}:chain-obligation:%s', self::NAMESPACE, $obligationId)));
 
-        // A STRONGER reassessment raises the floor (never lowers).
+        // A stronger reassessment raises the floor (never lowers).
         $raised = $service->requireStage2($this->nonce(), 'login', 'txn-alpha', 1, RiskAction::Argon64, $expiry);
         self::assertSame($first->chainId, $raised->chainId);
         self::assertSame(RiskAction::Argon64, $raised->requiredAction);
@@ -202,14 +202,14 @@ final class RealRedisChainedChallengeTest extends TestCase
         self::assertLessThanOrEqual(time() + 15, (int) $state->leaseUntil, 'the lease is bounded by the SHORT reservation lease');
 
         // Expire the lease directly (the record TTL stays): the next
-        // reserving owner TAKES OVER.
+        // reserving owner takes over.
         $recordKey = sprintf('{kiwi:%s}:chain:%s', self::NAMESPACE, $requirement->chainId);
         $record = json_decode((string) $this->client->get($recordKey), true, 8, JSON_THROW_ON_ERROR);
         $record['leaseUntil'] = time() - 10;
         $this->client->set($recordKey, (string) json_encode($record, JSON_THROW_ON_ERROR), 'EX', max(1, (int) $this->client->ttl($recordKey)));
         self::assertSame(ChainReservationResult::TakenOver, $service->reserveStage2($requirement->chainId, 'owner-b'), 'an expired lease is taken over');
 
-        // A chain record WITHOUT an expiry is corrupted state: fail
+        // A chain record without an expiry is corrupted state: fail
         // closed ('missing'), never manufacture a lifetime.
         $recordKey = sprintf('{kiwi:%s}:chain:%s', self::NAMESPACE, $requirement->chainId);
         $this->client->persist($recordKey);
@@ -223,8 +223,8 @@ final class RealRedisChainedChallengeTest extends TestCase
         $requirement = $service->requireStage2($this->nonce(), 'login', '', 1, RiskAction::Argon32, time() + 300);
 
         self::assertSame(ChainReservationResult::Available, $service->reserveStage2($requirement->chainId, 'owner-a'));
-        // The real Lua runs and the reply is LOST (thrown away): the
-        // durable state must be readable by a RECONNECTED client.
+        // The real Lua runs and the reply is lost (thrown away): the
+        // durable state must be readable by a reconnected client.
         $result = $store->markIssued($requirement->chainId, 'owner-a', $this->stageNonce('stage2-nonce'));
         self::assertSame('issued_new', $result);
 
@@ -260,7 +260,7 @@ final class RealRedisChainedChallengeTest extends TestCase
         self::assertSame('verified', $service->requirementFor($requirement->chainId)?->state, 'the terminal record is kept until its TTL');
         self::assertNull($service->findOpenRequirement('login', 'txn-verified', 1), 'no open obligation remains');
 
-        // The compare-delete guard: an obligation repointed at ANOTHER
+        // The compare-delete guard: an obligation repointed at another
         // chain must never be unlinked by a stale verified transition.
         $other = $service->requireStage2($this->nonce(), 'login', 'txn-other', 1, RiskAction::Argon32, $expiry);
         $this->client->set($obligationKey, $other->chainId);
@@ -323,8 +323,8 @@ final class RealRedisChainedChallengeTest extends TestCase
         $expiry = time() + 300;
         $controller = $this->controller($store, $storage);
 
-        // A TERMINAL step_up_required chain: the challenge request for the
-        // same transaction answers the terminal STEP_UP_REQUIRED — never a
+        // A terminal step_up_required chain: the challenge request for the
+        // same transaction answers the terminal step_UP_required — never a
         // new stage-1, never a stage-2 challenge.
         $stepUp = $service->requireStage2($this->nonce(), 'login', '', 1, RiskAction::Argon32, $expiry);
         $stepUpTicket = $service->ticketFor($stepUp->chainId, $expiry);
@@ -339,7 +339,7 @@ final class RealRedisChainedChallengeTest extends TestCase
         self::assertSame('step_up_required', $service->requirementFor($stepUp->chainId)?->state, 'the terminal state survives the request');
         self::assertSame($stepUp->chainId, $service->findOpenRequirement('login', '', 1)?->chainId, 'the obligation survives the request');
 
-        // A TERMINAL denied chain: the challenge request for the same
+        // A terminal denied chain: the challenge request for the same
         // transaction answers the terminal risk-denied response.
         $denied = $service->requireStage2($this->nonce(), 'login', 'txn-denied-c', 1, RiskAction::Argon32, $expiry);
         $deniedTicket = $service->ticketFor($denied->chainId, $expiry);
@@ -372,7 +372,7 @@ final class RealRedisChainedChallengeTest extends TestCase
         self::assertSame(200, $first->getStatusCode(), sprintf('the stage-2 issuance must succeed: %s', (string) $first->getContent()));
         $nonce = json_decode((string) $first->getContent(), true)['nonce'];
 
-        // Consumed+VALID WITHOUT a committed disposition: the retryable
+        // Consumed+valid without a committed disposition: the retryable
         // 503 — the core's consumed result alone never clears the
         // obligation.
         $storage->consume($nonce);
@@ -382,7 +382,7 @@ final class RealRedisChainedChallengeTest extends TestCase
         self::assertSame('issued', $service->requirementFor($requirement->chainId)?->state, 'the chain stays issued');
         self::assertNotNull($service->findOpenRequirement('login', '', 1), 'the obligation survives the crash window');
 
-        // The PASS disposition is committed: the retry VERIFIES the chain
+        // The pass disposition is committed: the retry verifies the chain
         // and the obligation is deleted.
         $dispositions->claim($nonce, 'disposition-owner', 300);
         $dispositions->finalize($nonce, 'disposition-owner', new \BelConsulting\KiwiCaptchaBundle\Risk\PostSolveDisposition(\BelConsulting\KiwiCaptchaBundle\Risk\PostSolveDispositionKind::Pass));
@@ -401,17 +401,17 @@ final class RealRedisChainedChallengeTest extends TestCase
         self::assertSame(ChainReservationResult::Available, $service->reserveStage2($requirement->chainId, 'owner-a'));
         self::assertSame(ChainIssuedResult::IssuedNew, $service->markIssued($requirement->chainId, 'owner-a', $this->stageNonce('stage2-nonce')));
 
-        // A DIFFERENT expected nonce is an atomic no-op.
+        // A different expected nonce is an atomic no-op.
         self::assertFalse($service->rearmIssued($requirement->chainId, $this->stageNonce('other-nonce')));
         self::assertSame('issued', $service->requirementFor($requirement->chainId)?->state);
 
-        // The EXACT nonce rearms to available for a fresh stage-2 mint.
+        // The exact nonce rearms to available for a fresh stage-2 mint.
         self::assertTrue($service->rearmIssued($requirement->chainId, $this->stageNonce('stage2-nonce')));
         $state = $service->requirementFor($requirement->chainId);
         self::assertSame('available', $state?->state);
         self::assertNull($state?->stage2Nonce);
 
-        // AUTO-RESUME read: findOpenRequirement without any ticket finds
+        // auto-resume read: findOpenRequirement without any ticket finds
         // the open chain of the transaction.
         $auto = $service->findOpenRequirement('login', 'txn-rearm', 1);
         self::assertNotNull($auto);
@@ -421,7 +421,7 @@ final class RealRedisChainedChallengeTest extends TestCase
 
     public function testArrayAndRedisObserveOneMachine(): void
     {
-        // The same transition sequence on BOTH stores produces the SAME
+        // The same transition sequence on both stores produces the same
         // typed results (the in-memory store mirrors the Redis Lua).
         $redisStore = $this->store();
         $arrayStore = new ArrayChainedChallengeStateStore();
@@ -441,18 +441,18 @@ final class RealRedisChainedChallengeTest extends TestCase
 
     public function testTransactionTerminalizationDenyAndStepUpAreDurable(): void
     {
-        // The NONCE-AGNOSTIC transaction terminalizations over REAL
-        // Redis: the Lua transitions an OPEN obligation (available) ->
-        // denied/step_up_required WITHOUT any stage-2 nonce — the
-        // obligation mapping KEPT, the chainId + original expiry
-        // preserved, the terminal record durable across a RECONNECTED
+        // The nonce-agnostic transaction terminalizations over real
+        // Redis: the Lua transitions an open obligation (available) ->
+        // denied/step_up_required without any stage-2 nonce — the
+        // obligation mapping kept, the chainId + original expiry
+        // preserved, the terminal record durable across a reconnected
         // reader (the strict decode accepts the terminal state with a
-        // NULL stage-2 nonce).
+        // null stage-2 nonce).
         $store = $this->store();
         $service = $this->service($store);
         $expiry = time() + 300;
 
-        // DENY: available -> denied.
+        // deny: available -> denied.
         $denied = $service->requireStage2($this->nonce(), 'login', 'txn-tdeny', 1, RiskAction::Sha18, $expiry);
         $deniedObligationId = $service->obligationIdFor('login', 'txn-tdeny', 1);
         self::assertSame(ChainVerifiedResult::DeniedNew, $service->markTransactionDenied($denied->chainId, $deniedObligationId));
@@ -471,7 +471,7 @@ final class RealRedisChainedChallengeTest extends TestCase
         self::assertSame(ChainIssuedResult::Conflict, $service->markIssued($denied->chainId, 'owner-b', $this->stageNonce('stage2-nonce')), 'markIssued on a terminal state is a conflict');
         self::assertSame('denied', $service->requirementFor($denied->chainId)?->state, 'the terminal state survives');
 
-        // STEP-UP: available -> step_up_required.
+        // step-up: available -> step_up_required.
         $stepUp = $service->requireStage2($this->nonce(), 'login', 'txn-tstepup', 1, RiskAction::Sha18, $expiry);
         $stepUpObligationId = $service->obligationIdFor('login', 'txn-tstepup', 1);
         self::assertSame(ChainVerifiedResult::StepUpRequiredNew, $service->markTransactionStepUpRequired($stepUp->chainId, $stepUpObligationId));
@@ -488,9 +488,9 @@ final class RealRedisChainedChallengeTest extends TestCase
 
     public function testTransactionTerminalizationPreservesAnIssuedNonceAndAnswersAlreadyVerified(): void
     {
-        // The terminalization PRESERVES the exact stage-2 nonce of an
-        // ISSUED chain (the terminal state carries an OPTIONAL nonce — a
-        // valid Kiwi nonce when one exists), and a VERIFIED chain
+        // The terminalization preserves the exact stage-2 nonce of an
+        // issued chain (the terminal state carries an optional nonce — a
+        // valid Kiwi nonce when one exists), and a verified chain
         // answers 'already_verified' (the transaction already ended via
         // Pass — its obligation is gone).
         $store = $this->store();
@@ -521,7 +521,7 @@ final class RealRedisChainedChallengeTest extends TestCase
 
     public function testTransactionTerminalizationRacesReservationAndMarkVerified(): void
     {
-        // The atomic races over REAL Redis, both orders of each pair:
+        // The atomic races over real Redis, both orders of each pair:
         // terminalization vs reservation (reserved-then-terminalized ->
         // terminal; terminalized-then-reserve -> the terminal result) and
         // terminalization vs markVerified (verified-then-terminalized ->
@@ -532,7 +532,7 @@ final class RealRedisChainedChallengeTest extends TestCase
         $expiry = time() + 300;
         $nonce = $this->stageNonce('stage2-nonce');
 
-        // Reservation FIRST, terminalization second: the terminalization
+        // Reservation first, terminalization second: the terminalization
         // wins against the in-flight reservation.
         $a = $service->requireStage2($this->nonce(), 'login', 'txn-race-a', 1, RiskAction::Sha18, $expiry);
         $aObligationId = $service->obligationIdFor('login', 'txn-race-a', 1);
@@ -542,14 +542,14 @@ final class RealRedisChainedChallengeTest extends TestCase
         self::assertNull($service->requirementFor($a->chainId)?->owner, 'the reservation fields are cleared');
         self::assertSame(ChainReservationResult::Denied, $service->reserveStage2($a->chainId, 'owner-b'), 'the reserve on the terminalized chain answers the terminal result');
 
-        // Terminalization FIRST, reservation second: the reserve answers
+        // Terminalization first, reservation second: the reserve answers
         // the terminal result (never available).
         $b = $service->requireStage2($this->nonce(), 'login', 'txn-race-b', 1, RiskAction::Sha18, $expiry);
         $bObligationId = $service->obligationIdFor('login', 'txn-race-b', 1);
         self::assertSame(ChainVerifiedResult::StepUpRequiredNew, $service->markTransactionStepUpRequired($b->chainId, $bObligationId));
         self::assertSame(ChainReservationResult::StepUpRequired, $service->reserveStage2($b->chainId, 'owner-a'), 'a reserve on the terminalized chain returns the terminal result');
 
-        // markVerified FIRST, terminalization second: already_verified.
+        // markVerified first, terminalization second: already_verified.
         $c = $service->requireStage2($this->nonce(), 'login', 'txn-race-c', 1, RiskAction::Sha18, $expiry);
         $cObligationId = $service->obligationIdFor('login', 'txn-race-c', 1);
         self::assertSame(ChainReservationResult::Available, $service->reserveStage2($c->chainId, 'owner-a'));
@@ -557,7 +557,7 @@ final class RealRedisChainedChallengeTest extends TestCase
         self::assertSame(ChainVerifiedResult::VerifiedNew, $service->markVerified($c->chainId, $nonce));
         self::assertSame(ChainVerifiedResult::AlreadyVerified, $service->markTransactionDenied($c->chainId, $cObligationId), 'the terminalization on a verified chain answers already_verified');
 
-        // Terminalization FIRST, markVerified second: conflict.
+        // Terminalization first, markVerified second: conflict.
         $d = $service->requireStage2($this->nonce(), 'login', 'txn-race-d', 1, RiskAction::Sha18, $expiry);
         $dObligationId = $service->obligationIdFor('login', 'txn-race-d', 1);
         self::assertSame(ChainReservationResult::Available, $service->reserveStage2($d->chainId, 'owner-a'));
@@ -569,9 +569,9 @@ final class RealRedisChainedChallengeTest extends TestCase
 
     public function testTransactionTerminalizationParityArrayAndRedis(): void
     {
-        // The NONCE-AGNOSTIC terminalizations observe ONE machine: the
+        // The nonce-agnostic terminalizations observe ONE machine: the
         // same sequence on the Redis Lua and the in-memory mirror
-        // produces the SAME typed results and the SAME final records.
+        // produces the same typed results and the same final records.
         $redisStore = $this->store();
         $arrayStore = new ArrayChainedChallengeStateStore();
         $expiry = time() + 300;
@@ -594,21 +594,21 @@ final class RealRedisChainedChallengeTest extends TestCase
 
     public function testIssuedStage2NonceStaysTerminalAfterAnotherTokensTransactionTerminalization(): void
     {
-        // THE CRITICAL SCENARIO over REAL Redis: the chain is ISSUED(S);
+        // THE critical scenario over real Redis: the chain is issued(S);
         // the obligation-bound transaction terminalization (a fresh
-        // Deny/StepUp of a DIFFERENT token of the same transaction) makes
-        // it TERMINAL PRESERVING the exact stage-2 nonce S; the stage-2
-        // PASS transition for the EXACT nonce S is then refused
+        // Deny/StepUp of a different token of the same transaction) makes
+        // it terminal preserving the exact stage-2 nonce S; the stage-2
+        // pass transition for the exact nonce S is then refused
         // (conflict — a terminal denial can never be flipped by a Pass,
         // the stage-2 503 loop is impossible), the terminal transition
-        // for the exact nonce is IDEMPOTENT (denied_same — never a
+        // for the exact nonce is idempotent (denied_same — never a
         // conflict) and the reserve answers the terminal result.
         $store = $this->store();
         $service = $this->service($store);
         $expiry = time() + 300;
         $nonce = $this->stageNonce('stage2-nonce');
 
-        // DENY: issued(S) -> denied(S) by the transaction terminalization.
+        // deny: issued(S) -> denied(S) by the transaction terminalization.
         $denied = $service->requireStage2($this->nonce(), 'login', 'txn-critical-deny', 1, RiskAction::Sha18, $expiry);
         $deniedObligationId = $service->obligationIdFor('login', 'txn-critical-deny', 1);
         self::assertSame(ChainReservationResult::Available, $service->reserveStage2($denied->chainId, 'owner-a'));
@@ -620,7 +620,7 @@ final class RealRedisChainedChallengeTest extends TestCase
         self::assertSame(ChainVerifiedResult::DeniedSame, $service->markDenied($denied->chainId, $nonce), 'the terminal Deny is idempotent for the EXACT nonce');
         self::assertSame(ChainReservationResult::Denied, $service->reserveStage2($denied->chainId, 'owner-b'), 'the reserve answers the TERMINAL denied state');
 
-        // STEP-UP mirror: issued(S) -> step_up_required(S).
+        // step-up mirror: issued(S) -> step_up_required(S).
         $stepUp = $service->requireStage2($this->nonce(), 'login', 'txn-critical-stepup', 1, RiskAction::Sha18, $expiry);
         $stepUpObligationId = $service->obligationIdFor('login', 'txn-critical-stepup', 1);
         self::assertSame(ChainReservationResult::Available, $service->reserveStage2($stepUp->chainId, 'owner-a'));
@@ -634,12 +634,12 @@ final class RealRedisChainedChallengeTest extends TestCase
 
     public function testObligationBoundTerminalizationRefusesAStaleChainIdOverRedis(): void
     {
-        // The OBLIGATION-BOUND terminalization over REAL Redis: the Lua
-        // verifies over BOTH keys — the obligation mapping STILL points
-        // at the chain AND the chain record STILL agrees on the
+        // The obligation-bound terminalization over real Redis: the Lua
+        // verifies over both keys — the obligation mapping still points
+        // at the chain AND the chain record still agrees on the
         // obligation id. A stale chainId (the obligation moved to a
         // different chain) answers 'obligation_moved' (Conflict at the
-        // service) and NOTHING is transitioned; the happy path (the
+        // service) and nothing is transitioned; the happy path (the
         // mapping intact) transitions.
         $store = $this->store();
         $service = $this->service($store);
@@ -650,13 +650,13 @@ final class RealRedisChainedChallengeTest extends TestCase
         $obligationId = $service->obligationIdFor('login', 'txn-stale', 1);
         self::assertSame($requirement->chainId, (string) $this->client->get(sprintf('{kiwi:%s}:chain-obligation:%s', self::NAMESPACE, $obligationId)), 'the obligation maps the chain');
 
-        // The obligation MOVES to a fresh chain (a re-created chain of
+        // The obligation moves to a fresh chain (a re-created chain of
         // the same transaction) while the stale chain record survives.
         $fresh = $service->requireStage2($this->nonce(), 'login', 'txn-stale-2', 1, RiskAction::Sha18, $expiry);
         $store->createWithObligation($fresh->chainId, $obligationId, $this->nonce(), 'login', 'txn-stale', 'sha18', 1, 300);
 
         // The stale-chainId terminalization is refused atomically:
-        // NOTHING transitioned, the mapping untouched.
+        // nothing transitioned, the mapping untouched.
         self::assertSame('obligation_moved', $store->markTransactionDenied($requirement->chainId, $obligationId), 'a stale chainId (the obligation moved) is refused at the store');
         self::assertSame('available', $service->requirementFor($requirement->chainId)?->state, 'the stale chain is untouched');
         self::assertSame($fresh->chainId, (string) $this->client->get(sprintf('{kiwi:%s}:chain-obligation:%s', self::NAMESPACE, $obligationId)), 'the obligation mapping is untouched');
@@ -666,7 +666,7 @@ final class RealRedisChainedChallengeTest extends TestCase
         self::assertSame(ChainVerifiedResult::DeniedNew, $service->markTransactionDenied($fresh->chainId, $obligationId), 'the happy path transitions');
         self::assertSame('denied', $service->requirementFor($fresh->chainId)?->state);
 
-        // The RECORD-AGREES guard: an obligation id the chain record does
+        // The record-agrees guard: an obligation id the chain record does
         // NOT carry is refused too.
         $other = $service->requireStage2($this->nonce(), 'login', 'txn-stale-3', 1, RiskAction::Sha18, $expiry);
         $otherObligationId = $service->obligationIdFor('login', 'txn-stale-3', 1);

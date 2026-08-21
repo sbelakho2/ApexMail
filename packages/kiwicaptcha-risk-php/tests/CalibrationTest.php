@@ -12,18 +12,19 @@ use Predis\Response\ServerException;
 use PHPUnit\Framework\TestCase;
 
 /**
- * Redis-backed calibration tests (EXACT-score CLASS-NORMALIZED semantics of
- * the canonical calibration.lua + register_decision.lua/confirm.lua/
- * correction.lua/sampling_metrics.lua: fp_mean = legit_score_sum/legit_count,
- * fn_mean = (abuse_count*1000 - abuse_score_sum)/abuse_count, error =
+ * Redis-backed calibration tests of the canonical calibration.lua plus
+ * register_decision.lua/confirm.lua/correction.lua/sampling_metrics.lua.
+ * The semantics: fp_mean = legit_score_sum/legit_count, fn_mean =
+ * (abuse_count*1000 - abuse_score_sum)/abuse_count, error =
  * fn_mean*fn_cost - fp_mean*fp_cost, raw = trunc(error*2/10) clamped
- * ±maxAdjustment; proportional rate limiter over milli-points clocked by
- * Redis TIME; PER-SCOPE random-sample RESOLUTION GATE over the 24-bucket
- * sample_total/sample_resolved window; receipts carry score + sampled +
- * decision_hour and are created ATOMICALLY with the sample denominator and
- * the PENDING outcome-ledger entry by register_decision.lua, consumed
- * EXACTLY ONCE by the atomic confirm script with the SHARED status 0/1/2).
- * AggregateCalibrator cases are skipped unless RISK_REDIS_URL is set.
+ * ±maxAdjustment. Also covered: a proportional rate limiter over
+ * milli-points clocked by Redis time, and a per-scope random-sample
+ * resolution gate over the 24-bucket sample_total/sample_resolved window.
+ * Receipts carry score + sampled + decision_hour and are created
+ * atomically with the sample denominator and the pending outcome-ledger
+ * entry by register_decision.lua, consumed exactly once by the atomic
+ * confirm script with the shared status 0/1/2. AggregateCalibrator cases
+ * are skipped unless the Redis test URL is set.
  */
 final class CalibrationTest extends TestCase
 {
@@ -56,10 +57,10 @@ final class CalibrationTest extends TestCase
     }
 
     /**
-     * Records n confirmed outcomes at an EXACT score through the full
+     * Records n confirmed outcomes at an exact score through the full
      * register_decision.lua -> confirm.lua path (each confirmation must
-     * return status 1 — the FIRST confirmation). The receipts are booked
-     * as SAMPLED so the sample counters follow the outcomes.
+     * return status 1, the first confirmation). The receipts are booked
+     * as sampled so the sample counters follow the outcomes.
      */
     private function recordOutcomes(AggregateCalibrator $c, int $n, int $score, bool $legit, int $scope = 1, string $prefix = 'd'): void
     {
@@ -81,10 +82,10 @@ final class CalibrationTest extends TestCase
     }
 
     /**
-     * A fixed synthetic timestamp inside the CURRENT hour (buckets are
+     * A fixed synthetic timestamp inside the current hour (buckets are
      * hourly), so biasForScope calls never shift the bucket window away
      * from the recorded hour. The timestamp is epoch math only — the
-     * script's rate-limit clock is Redis TIME.
+     * script's rate-limit clock is Redis time.
      */
     private function t0(): int
     {
@@ -119,10 +120,10 @@ final class CalibrationTest extends TestCase
     }
 
     /**
-     * Seeds the rate-limit state {kiwi:<ns>}:cal:state:<scope> so the NEXT
+     * Seeds the rate-limit state {kiwi:<ns>}:cal:state:<scope> so the next
      * biasForScope call sees a proportional allowance for exactly
-     * $elapsedMs: bias_mp = $biasMp, ts = real Redis TIME - $elapsedMs.
-     * The script derives its elapsed from Redis TIME, so the seeded window
+     * $elapsedMs: bias_mp = $biasMp, ts = real Redis time - $elapsedMs.
+     * The script derives its elapsed from Redis time, so the seeded window
      * is exact to within a couple of ms (sub-milli-point at the default
      * maxChangePerMinute — safe for integer floor stability).
      */
@@ -141,13 +142,13 @@ final class CalibrationTest extends TestCase
 
     public function testExactScoreLegitHighPushesBiasDownAndIsBounded(): void
     {
-        // 100 legit @ EXACT score 900: fp_mean = 900 -> error = -900*1.0
+        // 100 legit @ exact score 900: fp_mean = 900 -> error = -900*1.0
         // -> raw = -180 -> clamped to -maxAdjustment.
         $c = $this->scoreCalibrator();
         $this->recordOutcomes($c, 100, 900, true, 1, 'ex-legit');
         $t = $this->t0();
         // The first call ever seeds the rate-limit state (bias_mp = 0 /
-        // ts = Redis TIME) BEFORE the threshold check and returns 0 — a
+        // ts = Redis time) before the threshold check and returns 0 — a
         // fresh scope can never jump straight to ±maxAdjustment.
         self::assertSame(0, $c->biasForScope(1, $t));
         // The proportional ramp allows 10 points/minute: the seeded window
@@ -162,7 +163,7 @@ final class CalibrationTest extends TestCase
 
     public function testExactScoreAbuseLowPushesBiasUpAndIsBounded(): void
     {
-        // 100 abuse @ EXACT score 100: fn_mean = (100000-10000)/100 = 900
+        // 100 abuse @ exact score 100: fn_mean = (100000-10000)/100 = 900
         // -> error = 900*2.0 = 1800 -> raw = 360 -> clamped to
         // +maxAdjustment.
         $c = $this->scoreCalibrator();
@@ -218,7 +219,7 @@ final class CalibrationTest extends TestCase
 
     public function testClassNormalizedBiasScoreSensitive(): void
     {
-        // CLASS-NORMALIZED (volume-independent): 75 abuse + 25 legit @
+        // Class-normalized (volume-independent): 75 abuse + 25 legit @
         // exact score 500 -> fn_mean = 500, fp_mean = 500, error =
         // 500*2.0 - 500*1.0 = 500 -> raw = 100 (5 min at
         // maxChangePerMinute 10).
@@ -232,7 +233,7 @@ final class CalibrationTest extends TestCase
         self::assertSame(100, $c->biasForScope(1, $t));
 
         // Volume parity: 55 abuse + 45 legit at the same scores have the
-        // SAME means (class normalization removes label-volume dominance).
+        // Same means (class normalization removes label-volume dominance).
         $c = $this->scoreCalibrator();
         $this->recordOutcomes($c, 55, 500, false, 1, 'mix2-a');
         $this->recordOutcomes($c, 45, 500, true, 1, 'mix2-l');
@@ -301,8 +302,8 @@ final class CalibrationTest extends TestCase
 
     public function testBelowThresholdMovesTowardZeroAtAllowedRate(): void
     {
-        // Below min_samples the TARGET is 0, but the stored bias moves
-        // toward 0 THROUGH the proportional rate limiter — a sample count
+        // Below min_samples the target is 0, but the stored bias moves
+        // toward 0 through the proportional rate limiter — a sample count
         // that dips below the threshold can never snap +150 → 0 instantly.
         $c = $this->scoreCalibrator();
         $this->recordOutcomes($c, 99, 100, false, 3, 'decay');
@@ -429,7 +430,7 @@ final class CalibrationTest extends TestCase
         self::assertGreaterThan(0, $yes, '50% ppm must eventually sample');
         self::assertGreaterThan(0, $no, '50% ppm must eventually skip');
 
-        // sample() is PURE: no singleton counters are touched —
+        // sample() is pure: no singleton counters are touched —
         // the denominator is booked atomically with the receipt.
         $client = $this->requireClient();
         $r = new AggregateCalibrator($client, namespace: 'spure' . bin2hex(random_bytes(4)), samplingMode: 'random_sample', samplingProbabilityPpm: 1_000_000);
@@ -453,7 +454,7 @@ final class CalibrationTest extends TestCase
             $c->samplingMetrics(1, $now),
         );
 
-        // Three SAMPLED receipts: the denominator is booked atomically with
+        // Three sampled receipts: the denominator is booked atomically with
         // each receipt (no markSampled — no singleton counters).
         for ($i = 0; $i < 3; $i++) {
             $c->recordReceipt("smet-{$i}", 1, 1, RiskAction::Sha20, 100, 1, $hour);
@@ -468,14 +469,14 @@ final class CalibrationTest extends TestCase
         self::assertSame(1 / 3, $metrics['resolutionRatio']);
         self::assertSame(2, $metrics['sampledExpired'], 'sampledExpired = max(0, total - resolved) — includes in-flight receipts');
 
-        // An UNSAMPLED receipt (sampled=0) books NO denominator and is
-        // consumed with status 2 WITHOUT resolving.
+        // An unsampled receipt (sampled=0) books no denominator and is
+        // consumed with status 2 without resolving.
         $c->recordReceipt('smet-unsampled', 1, 1, RiskAction::Sha20, 100, 0, $hour);
         self::assertSame(2, $c->confirmOutcome('smet-unsampled', true));
         self::assertSame(3, $c->samplingMetrics(1, $now)['sampledTotal'], 'an unsampled decision never books the denominator');
         self::assertSame(1, $c->samplingMetrics(1, $now)['sampledResolved']);
 
-        // Metrics are PER-SCOPE: scope 2 (with one sampled receipt) does
+        // Metrics are per-scope: scope 2 (with one sampled receipt) does
         // not see scope 1's window.
         $c->recordReceipt('smet-other', 2, 1, RiskAction::Sha20, 100, 1, $hour);
         $other = $c->samplingMetrics(2, $now);
@@ -490,7 +491,7 @@ final class CalibrationTest extends TestCase
         $c = new AggregateCalibrator($this->requireClient(), namespace: 'rs' . bin2hex(random_bytes(4)), samplingMode: 'random_sample', samplingProbabilityPpm: 1_000_000);
         $ns = $c->namespace();
         $hour = $this->decisionHour();
-        // Unsampled: status 2 — the receipt is CONSUMED (never calibrated,
+        // Unsampled: status 2 — the receipt is consumed (never calibrated,
         // the label can never select itself into the population).
         $c->recordReceipt('rs-unsampled', 1, 1, RiskAction::Sha20, 100, 0, $hour);
         self::assertSame(2, $c->confirmOutcome('rs-unsampled', false), 'an unsampled decision must be consumed with status 2, never recorded');
@@ -537,7 +538,7 @@ final class CalibrationTest extends TestCase
         $ns = $c->namespace();
         $c->recordReceipt('wgn-1', 1, 1, RiskAction::Sha20, 100, 0, $this->decisionHour());
 
-        // A PHP-side validation error: weighted mode REQUIRES the
+        // A PHP-side validation error: weighted mode requires the
         // inverse-sampling weight — the script never runs and the receipt
         // survives (a retry with the weight applies exactly once).
         try {
@@ -590,7 +591,7 @@ final class CalibrationTest extends TestCase
         self::assertSame(0, $c->confirmOutcome('corrupt-2', false));
         self::assertSame('not-json', (string) $this->client->get("{kiwi:{$ns}}:cal:receipt:corrupt-2"), 'the pre-read must not delete the receipt');
 
-        // FIRST confirmation -> status 1; the retry -> status 0 (the
+        // First confirmation -> status 1; the retry -> status 0 (the
         // outcome-ledger CAS is the exactly-once authority).
         $c->recordReceipt('once-1', 7, 4, RiskAction::Argon16, 500, 1, $this->decisionHour());
         self::assertSame(1, $c->confirmOutcome('once-1', true), 'the first confirmation is status 1');
@@ -616,7 +617,7 @@ final class CalibrationTest extends TestCase
         $this->recordOutcomes($c, 100, 100, false, 3, 'roc');
         $t = $this->t0();
 
-        // First call ever seeds bias_mp = 0 / ts = Redis TIME before the
+        // First call ever seeds bias_mp = 0 / ts = Redis time before the
         // threshold check: the initial bias is 0, never ±maxAdjustment.
         self::assertSame(0, $c->biasForScope(3, $t));
 
@@ -647,8 +648,8 @@ final class CalibrationTest extends TestCase
         self::assertSame(150, $c->biasForScope(3, $t));
 
         // The window is now balanced (100 legit @ 100 + 100 abuse @ 950 in
-        // a FRESH scope: fp_mean 100, fn_mean 50 -> error = 50*2 - 100*1
-        // = 0): the target is 0, but the bias may only move DOWN by the
+        // a fresh scope: fp_mean 100, fn_mean 50 -> error = 50*2 - 100*1
+        // = 0): the target is 0, but the bias may only move down by the
         // proportional allowance (6 points over the seeded minute) — never
         // jump straight to 0.
         $this->recordOutcomes($c, 100, 100, true, 4, 'roc');
@@ -682,7 +683,7 @@ final class CalibrationTest extends TestCase
         self::assertSame(0, $c->biasForScope(1, $this->nowMs()));
         self::assertSame($before + 1, $client->commands);
 
-        // A fresh outcome for the SAME scope invalidates its cached bias:
+        // A fresh outcome for the same scope invalidates its cached bias:
         // the next read must hit Redis again. The confirm itself is the
         // bucket pre-read GET + the atomic script.
         $c->recordReceipt('inv-fresh', 1, 1, RiskAction::Sha20, 100, 1, $this->decisionHour());
@@ -690,7 +691,7 @@ final class CalibrationTest extends TestCase
         $c->biasForScope(1, $this->nowMs());
         self::assertSame($before + 5, $client->commands, 'confirmOutcome() must invalidate the confirmed scope cache');
 
-        // A fresh outcome for ANOTHER scope must not invalidate this one.
+        // A fresh outcome for another scope must not invalidate this one.
         $c->recordReceipt('inv-other', 2, 1, RiskAction::Sha20, 100, 1, $this->decisionHour());
         $c->confirmOutcome('inv-other', false);
         $c->biasForScope(1, $this->nowMs());
@@ -700,9 +701,9 @@ final class CalibrationTest extends TestCase
     public function testResolutionGateIsPerScopeWindow(): void
     {
         // random_sample mode with the default minimumResolutionRatio 0.80:
-        // the gate compares the PER-SCOPE 24-bucket sample totals — two
+        // the gate compares the per-scope 24-bucket sample totals — two
         // scopes with different resolution ratios gate independently (the
-        // lifetime singleton counters are GONE).
+        // lifetime singleton counters are gone).
         $c = new AggregateCalibrator(
             $this->requireClient(),
             namespace: 'gate' . bin2hex(random_bytes(4)),
@@ -715,7 +716,7 @@ final class CalibrationTest extends TestCase
         $hour = intdiv($t, 3_600_000);
 
         // Scope 1: 100 sampled abuse @ 100, ALL resolved -> ratio 1.0,
-        // gate OPEN -> the bias moves to the raw (150 with full allowance).
+        // gate open -> the bias moves to the raw (150 with full allowance).
         $this->recordOutcomes($c, 100, 100, false, 1, 'gate');
         self::assertSame('100', (string) $client->hget($this->bucket($c, 1), 'sample_total'));
         self::assertSame('100', (string) $client->hget($this->bucket($c, 1), 'sample_resolved'));
@@ -724,8 +725,8 @@ final class CalibrationTest extends TestCase
         self::assertSame(150, $c->biasForScope(1, $t), 'a fully-resolved scope must move');
 
         // Scope 2: 100 sampled abuse @ 100, only 79 resolved -> ratio 0.79
-        // < 0.80, gate CLOSED -> the target stays 0 even with full
-        // movement allowance (a DIFFERENT scope's resolution cannot open
+        // < 0.80, gate closed -> the target stays 0 even with full
+        // movement allowance (a different scope's resolution cannot open
         // this window).
         $this->recordOutcomes($c, 100, 100, false, 2, 'gate2');
         $client->hset($this->bucket($c, 2, $hour), 'sample_resolved', 79);
@@ -818,7 +819,7 @@ final class CalibrationTest extends TestCase
         self::assertGreaterThan(0, $ttl);
         self::assertLessThanOrEqual(60, $ttl);
 
-        // The default is the RECEIPT_TTL_SECS constant (300).
+        // The default is the receipt TTL constant (300).
         $d = $this->calibrator();
         $d->recordReceipt('receipt-ttl-2', 1, 5, RiskAction::Sha20, 500, 1, $this->decisionHour());
         $ttl = (int) $this->client->ttl("{kiwi:{$d->namespace()}}:cal:receipt:receipt-ttl-2");
@@ -856,9 +857,9 @@ final class CalibrationTest extends TestCase
 
     public function testRegisterIsAtomicWithReceiptAndDenominator(): void
     {
-        // register_decision.lua creates the receipt, the sampled-TOTAL
-        // denominator and the PENDING ledger entry in ONE invocation: a
-        // duplicate registration returns false and can NEVER double-book
+        // register_decision.lua creates the receipt, the sampled-total
+        // denominator and the pending ledger entry in one invocation: a
+        // duplicate registration returns false and can never double-book
         // the denominator (no orphaned counters).
         $c = $this->calibrator();
         $client = $this->requireClient();
@@ -870,18 +871,18 @@ final class CalibrationTest extends TestCase
         self::assertSame('1', (string) $client->hget($bucketKey, 'sample_total'));
         self::assertNotNull($client->get("{kiwi:{$ns}}:cal:receipt:atomic-reg"), 'the receipt exists');
 
-        // The SAME decision again: nothing is registered, the denominator
+        // The same decision again: nothing is registered, the denominator
         // is NOT incremented — a sample can never be counted without its
         // receipt.
         self::assertFalse($c->recordReceipt('atomic-reg', 7, 4, RiskAction::Argon16, 100, 1, $hour), 'a duplicate registration is refused');
         self::assertSame('1', (string) $client->hget($bucketKey, 'sample_total'), 'the denominator must be booked exactly once');
 
-        // An UNSAMPLED registration never touches the bucket at all.
+        // An unsampled registration never touches the bucket at all.
         self::assertTrue($c->recordReceipt('atomic-reg-unsampled', 7, 4, RiskAction::Argon16, 100, 0, $hour));
         self::assertSame('1', (string) $client->hget($bucketKey, 'sample_total'), 'an unsampled decision books no denominator');
         self::assertNull($client->hget($bucketKey, 'sample_resolved'), 'nothing resolves at registration');
 
-        // Every registered decision has a PENDING outcome-ledger entry.
+        // Every registered decision has a pending outcome-ledger entry.
         $ledger = json_decode((string) $client->get("{kiwi:{$ns}}:outcome:atomic-reg"), true);
         self::assertSame('P', $ledger['o'], 'the ledger entry is PENDING at registration');
         self::assertSame(7, $ledger['scope']);
@@ -892,7 +893,7 @@ final class CalibrationTest extends TestCase
     public function testDecisionHourBucketing(): void
     {
         // A decision made at hour H is bucketed at H — a confirmation
-        // HOURS later must land in the DECISION-time bucket, never in the
+        // hours later must land in the decision-time bucket, never in the
         // confirmation-time bucket. (random_sample mode so the resolution
         // counter is exercised too.)
         $client = $this->requireClient();
@@ -943,7 +944,7 @@ final class CalibrationTest extends TestCase
     public function testConcurrentDoubleConfirmRecordsExactlyOnce(): void
     {
         // The Lua script executes atomically, so sequential confirms from
-        // two INDEPENDENT calibrator instances are equivalent to
+        // two independent calibrator instances are equivalent to
         // concurrent ones: whoever runs the script first records; the
         // other finds the receipt gone and the ledger already flipped.
         $ns = 'cc' . bin2hex(random_bytes(4));
@@ -969,7 +970,7 @@ final class CalibrationTest extends TestCase
         $hour = $this->decisionHour();
         $bucketKey = "{kiwi:{$ns}}:cal:1:{$hour}";
 
-        // Invalid mode -> error reply BEFORE the DEL: the receipt survives.
+        // Invalid mode -> error reply before the DEL: the receipt survives.
         $c->recordReceipt('val-mode', 1, 1, RiskAction::Sha20, 100, 1, $hour);
         $keys = [
             "{kiwi:{$ns}}:cal:receipt:val-mode",
@@ -1013,7 +1014,7 @@ final class CalibrationTest extends TestCase
     public function testCorrectionReversesBucketCounts(): void
     {
         // An abuse confirmation at score 500 is corrected to legitimate:
-        // the original contribution is REVERSED with the exact recorded
+        // the original contribution is reversed with the exact recorded
         // weight (abuse_count -1, abuse_score_sum -500, clamped at zero)
         // and the corrected contribution added (legit_count +1,
         // legit_score_sum +500). The ledger flips A -> L.
@@ -1036,7 +1037,7 @@ final class CalibrationTest extends TestCase
         $ledger = json_decode((string) $client->get("{kiwi:{$ns}}:outcome:corr-1"), true);
         self::assertSame('L', $ledger['o'], 'the ledger flips to the corrected outcome');
 
-        // Flipping BACK (legitimate -> abuse) reverses the legit
+        // Flipping back (legitimate -> abuse) reverses the legit
         // contribution and restores the abuse one.
         self::assertTrue($c->correctOutcome('corr-1', false));
         self::assertSame('0', (string) $client->hget($bucketKey, 'legit_count'));
@@ -1053,7 +1054,7 @@ final class CalibrationTest extends TestCase
 
     public function testCorrectionWithWeightAppliesRecordedWeight(): void
     {
-        // The reversal uses the EXACT weight recorded by the first
+        // The reversal uses the exact weight recorded by the first
         // confirmation (ledger.w), and the correction is re-weighted with
         // the supplied weight.
         $c = new AggregateCalibrator($this->requireClient(), namespace: 'corw' . bin2hex(random_bytes(4)), samplingMode: 'weighted');

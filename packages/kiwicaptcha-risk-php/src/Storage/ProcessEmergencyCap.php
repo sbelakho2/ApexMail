@@ -6,44 +6,44 @@ namespace KiwiCaptcha\Risk\Storage;
 
 /**
  * Per-process emergency cap: a single fixed-window limiter of
- * `processPerSecond` observations per second per process, enforced BEFORE
+ * `processPerSecond` observations per second per process, enforced before
  * any state backend is touched.
  *
- * This is a per-PROCESS admission cap, NOT a per-source limit: it bounds
+ * This is a per-process admission cap, not a per-source limit: it bounds
  * how much work a single process may push at the state backend so a burst
  * cannot saturate this process's Redis connection. Per-source (and
  * per-identity) limits are the distributed keyed layer's job (the
  * source_fast/source_slow velocity in risk-v1 plus the keyed rate limiter
  * the caller feeds back through SourceRateLimitHit).
  *
- * Timestamps live in an SplQueue as hrtime(true) NANOSECONDS (monotonic
+ * Timestamps live in an SplQueue as hrtime(true) nanoseconds (monotonic
  * clock — a wall-clock jump can never hold the window open or reopen it
- * early); expired entries are dequeued from the FRONT in O(1) amortized
- * time, so a saturated window never degrades into an O(n) scan (no
- * `$denied` bookkeeping — it contributed nothing and made the limiter
- * CPU-amplifying under flood).
+ * early). Expired entries are dequeued from the front in O(1) amortized
+ * time, so a saturated window never degrades into an O(n) scan; the
+ * `$denied` bookkeeping was removed because it made the limiter
+ * CPU-amplifying under flood.
  *
  * The contract is deliberately per-process (timestamps in this process's
  * memory); no cross-process synchronization is performed. When the window
  * is saturated the engine denies immediately (HardRateLimit) instead of
  * spending time/state on the request.
  *
- * WARM-UP RAMP: after every restart/autoscale the process
- * must not start with a full burst — the effective cap ramps linearly
- * from a floor of `max(1, processPerSecond / 10)` to the full cap over
- * the first `warmupRampSecs` seconds of the process's life:
+ * Warm-up ramp: after every restart/autoscale the process must not
+ * start with a full burst. The effective cap ramps linearly from a floor
+ * of `max(1, processPerSecond / 10)` to the full cap over the first
+ * `warmupRampSecs` seconds of the process's life. The formula:
  *
- *   effective_cap = floor(processPerSecond * min(1, elapsed / warmupRampSecs))
- *                   floored at max(1, processPerSecond / 10)
+ *   effective_cap = processPerSecond * min(1, elapsed / warmupRampSecs),
+ *                   floored at max(1, processPerSecond / 10).
  *
- * elapsed is measured on the SAME monotonic hrtime clock as the window,
+ * elapsed is measured on the same monotonic hrtime clock as the window,
  * so the ramp is immune to wall-clock jumps (a jump can neither extend
  * the ramp nor finish it early). `warmupRampSecs = 0` disables the ramp
- * (the full cap applies from the first call — the pre-audit behavior).
- * The ramp only lowers the admission rate during startup; the DISTRIBUTED
- * keyed limits (source_fast/source_slow velocity in risk-v1 plus the
- * caller's per-source rate limiter) remain authoritative — the ramp
- * never raises any limit beyond the configured processPerSecond.
+ * (the full cap applies from the first call). The ramp only lowers the
+ * admission rate during startup; the distributed keyed limits
+ * (source_fast/source_slow velocity in risk-v1 plus the caller's
+ * per-source rate limiter) remain authoritative — the ramp never raises
+ * any limit beyond the configured processPerSecond.
  */
 final class ProcessEmergencyCap
 {
@@ -108,8 +108,8 @@ final class ProcessEmergencyCap
      * The cap in force at $nowNs: the full processPerSecond after the
      * warm-up ramp, and during the ramp a linear interpolation from the
      * floor of max(1, processPerSecond / 10). Monotonic in elapsed, so
-     * the queue can never hold more than the full cap (O(1) amortized
-     * prune is preserved).
+     * the queue can never hold more than the full cap; the O(1) amortized
+     * prune is preserved.
      */
     private function effectiveCap(int $nowNs): int
     {

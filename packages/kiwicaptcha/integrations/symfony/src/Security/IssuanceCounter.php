@@ -9,15 +9,15 @@ namespace BelConsulting\KiwiCaptchaBundle\Security;
  *
  * The challenge controller calls {@see record()} for every minted challenge;
  * the provider reads the current second's counter to compute issuance
- * headroom (max(0, process_per_second - rate)). The key
+ * headroom as max(0, process_per_second - rate). The key
  * {kiwi:<namespace>}:issuance:<unix-second> shares the risk store's hash-tag
  * family (Cluster safe) and is expired after 1 s so the signal always
- * reflects the LIVE per-second rate without a cleanup job.
+ * reflects the live per-second rate without a cleanup job.
  *
- * The increment + expiry are ONE atomic Lua script (INCR + EXPIRE in a
- * single round trip): the counter can never persist past its second without
- * its TTL (a lost EXPIRE would leave a stale bucket that fabricates
- * artificial scarcity), and a concurrent reader can never observe the
+ * The increment + expiry are one atomic Lua script (INCR + EXPIRE in a
+ * single round trip). The counter can never persist past its second without
+ * its TTL: a lost EXPIRE would leave a stale bucket that fabricates
+ * artificial scarcity, and a concurrent reader can never observe the
  * INCR-ed value with a missing TTL.
  *
  * The counter is pure telemetry for the risk policy's capacity-denial path:

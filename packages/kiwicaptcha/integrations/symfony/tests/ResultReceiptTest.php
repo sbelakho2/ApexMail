@@ -18,15 +18,14 @@ use Symfony\Component\Validator\ConstraintValidatorFactory;
 use Symfony\Component\Validator\Validation;
 
 /**
- * Asymmetric result receipts: the result verification is
- * CENTRAL-ONLY (the HMAC secret never leaves the server — no third party can
- * re-derive a result). The OPTIONAL Ed25519 receipt signer exports VALID
- * verification results as {jti, tenant, action, request_binding, issued_at,
- * expires_at, issuer} receipts — the full replay-critical set signed from
- * the CONSUMED record — that customers verify with the PUBLIC key — never
- * the private seed. Signature verification alone is NOT sufficient for
- * single-use actions: the integrator must atomically record the jti
- * (verify_and_consume).
+ * Asymmetric result receipts: the result verification is central-only
+ * (the HMAC secret never leaves the server — no third party can re-derive
+ * a result). The optional Ed25519 receipt signer exports valid
+ * verification results as {jti, tenant, action, request_binding,
+ * issued_at, expires_at, issuer} receipts, signed from the consumed
+ * record and verified with the public key (never the private seed).
+ * Signature verification alone is not sufficient for single-use actions:
+ * the integrator must atomically record the jti (verify_and_consume).
  */
 final class ResultReceiptTest extends TestCase
 {
@@ -60,7 +59,7 @@ final class ResultReceiptTest extends TestCase
 
         $stack = new RequestStack();
         $stack->push(JsonRequest::create('/', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7']));
-        // The receipt is signed from the CONSUMED RECORD, so
+        // The receipt is signed from the consumed record, so
         // the validator needs the challenge storage wired — exactly as the
         // extension wires it.
         $validator = new KiwiCaptchaValidator($verifier, $stack, self::SECRET, receiptSigner: $signer, storage: $storage);
@@ -88,7 +87,7 @@ final class ResultReceiptTest extends TestCase
         self::assertNotNull($payload, 'a valid verification must produce a signed receipt');
         self::assertNotNull($signature);
 
-        // The payload carries the FULL replay-critical set from the consumed
+        // The payload carries the full replay-critical set from the consumed
         // record: jti, tenant (scope), action (PoW algorithm),
         // request_binding, issued_at / expires_at (epoch ms), issuer.
         $receipt = json_decode($payload, true);
@@ -103,7 +102,7 @@ final class ResultReceiptTest extends TestCase
         self::assertArrayHasKey('issuer', $receipt, 'the receipt must carry the issuer field (null when unset)');
         self::assertNull($receipt['issuer']);
 
-        // CUSTOMERS verify with the PUBLIC key — never the private seed.
+        // customers verify with the public key — never the private seed.
         $publicKey = base64_decode($signer->publicKeyBase64(), true);
         self::assertNotFalse($publicKey);
         self::assertTrue(
@@ -156,7 +155,7 @@ final class ResultReceiptTest extends TestCase
             );
         }
 
-        // A tampered SIGNATURE fails too (valid length, altered bytes).
+        // A tampered signature fails too (valid length, altered bytes).
         $badSignature = base64_encode(str_repeat("\x01", 64));
         self::assertFalse(
             sodium_crypto_sign_verify_detached(base64_decode($badSignature, true), $payload, $publicKey)
@@ -207,7 +206,7 @@ final class ResultReceiptTest extends TestCase
                 self::assertTrue(true);
             }
         }
-        // The empty string is treated as DISABLED (same as null), never an
+        // The empty string is treated as disabled (same as null), never an
         // error.
         self::assertFalse((new ResultReceiptSigner(''))->enabled());
     }

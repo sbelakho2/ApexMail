@@ -15,12 +15,11 @@ use PHPUnit\Framework\TestCase;
  * ($requirement->expiresAt), never the caller-requested $expiresAt. On
  * the fresh path (no open chain) the requested expiry seeds the chain
  * creation, so a new chain's requirement expiry equals the requested
- * expiry; on the existing path (an open chain of the same transaction)
- * the requirement keeps its original expiry — the signed ticket can
- * never outlive the chain state, and repeated ticket() calls against the
- * same obligation return byte-identical tickets regardless of the
- * requested expiry (the state store retains the original expiry, so the
- * re-signed ticket must reproduce it exactly).
+ * expiry. On the existing path (an open chain of the same transaction)
+ * the requirement keeps its original expiry. Repeated ticket() calls
+ * against the same obligation return byte-identical tickets regardless
+ * of the requested expiry, because the state store retains the original
+ * expiry and the re-signed ticket must reproduce it.
  */
 final class ChainedTicketDeterminismTest extends TestCase
 {

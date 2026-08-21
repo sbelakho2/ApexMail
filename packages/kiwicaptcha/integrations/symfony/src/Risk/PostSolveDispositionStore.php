@@ -28,30 +28,37 @@ interface PostSolveDispositionStore
      * Atomically claim the right to compute the nonce's disposition.
      *
      * @return 'claimed'|'pending'|'taken_over'|'complete'
-     *         claimed      — the caller holds a fresh claim (missing -> pending(me));
-     *         pending      — pending with a live owner (me or another) — busy;
-     *         taken_over   — the caller took over an expired-lease claim (pending(me));
+     *         claimed      — the caller holds a fresh claim
+     *                       (missing -> pending(me)).
+     *         pending      — pending with a live owner (me or another),
+     *                       busy.
+     *         taken_over   — the caller took over an expired-lease claim
+     *                       (pending(me)).
      *         complete     — the final disposition is already persisted.
      *
-     * @param string      $nonce       the verified challenge nonce (random security state)
-     * @param string      $owner       a fresh random owner token of this claim
-     * @param int         $ttlSeconds  the record TTL (the lease is a fixed short bound)
-     * @param string|null $decisionKey the full nonce -> decision mapping key
-     *                                 ({kiwi:<ns>}:decision:<nonce> — the same
-     *                                 hash-tagged key the gateway pairs the
-     *                                 handle under). The mapping is consumed
-     *                                 atomically (delete-on-read, at most one
-     *                                 winner) only when the claim creates the
-     *                                 missing pending record, and the paired
-     *                                 decision id is persisted in that record
-     *                                 in the same transition; a complete, busy
-     *                                 or takeover claim never touches the
+     * @param string      $nonce       the verified challenge nonce (random
+     *                                 security state).
+     * @param string      $owner       a fresh random owner token of this
+     *                                 claim.
+     * @param int         $ttlSeconds  the record TTL (the lease is a fixed
+     *                                 short bound).
+     * @param string|null $decisionKey the full nonce -> decision mapping
+     *                                 key ({kiwi:<ns>}:decision:<nonce>, the
+     *                                 same hash-tagged key the gateway pairs
+     *                                 the handle under). The mapping is
+     *                                 consumed atomically (delete-on-read,
+     *                                 at most one winner) only when the
+     *                                 claim creates the missing pending
+     *                                 record, and the paired decision id is
+     *                                 persisted in that record in the same
+     *                                 transition. A complete, busy or
+     *                                 takeover claim never touches the
      *                                 mapping key, and a takeover keeps the
      *                                 original handle, so a
      *                                 crash-taken-over computation completes
      *                                 with the first owner's decision id.
      *                                 null = no decision mapping (the
-     *                                 records carry null)
+     *                                 records carry null).
      *
      * @throws \Throwable when the store is unavailable (fail closed)
      */

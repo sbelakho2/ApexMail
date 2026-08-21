@@ -138,10 +138,10 @@ final class ConfigTest extends TestCase
 
     public function testTargetBitsBounds(): void
     {
-        // targetBits above the browser-solvable ceiling (MAX_SHA_TARGET_BITS
-        // = 20) is rejected: the wasm solver caps at 20 bits (~99.1% solve
-        // probability at 20 vs ~25.9% at 24), so higher values would be
-        // unsolvable for legit clients.
+        // targetBits above the browser-solvable ceiling (20) is rejected:
+        // the wasm solver caps at 20 bits (~99.1% solve probability at 20
+        // vs ~25.9% at 24), so higher values would be unsolvable for legit
+        // clients.
         $this->expectException(\InvalidArgumentException::class);
         $this->expectExceptionMessage('1..20');
 
@@ -170,9 +170,9 @@ final class ConfigTest extends TestCase
 
     public function testTargetBits0IsRejected(): void
     {
-        // 0 bits means "no work at all" — indistinguishable from an
-        // uninitialized misconfiguration, so it is rejected since protocol
-        // v2 (the valid range is 1..MAX_SHA_TARGET_BITS).
+        // 0 bits means "no work at all", indistinguishable from an
+        // uninitialized misconfiguration, so it is rejected since
+        // protocol v2 (the valid range is 1..20).
         $this->expectException(\InvalidArgumentException::class);
         $this->expectExceptionMessage('1..20');
 
@@ -273,9 +273,9 @@ final class ConfigTest extends TestCase
 
     public function testArgonTimeCostAboveProtocolCeilingIsRejected(): void
     {
-        // Issuance caps t at Config::MAX_ARGON_T (6) — the browser solver
-        // ceiling; the verifier's absolute process ceiling (MAX_ARGON_TIME
-        // 16) is a separate, wider bound for signed records.
+        // Issuance caps t at 6, the browser solver ceiling; the
+        // verifier's absolute process ceiling (16) is a separate, wider
+        // bound for signed records.
         $this->expectException(\InvalidArgumentException::class);
         new \KiwiCaptcha\Config(
             secretKey: '0123456789abcdef0123456789abcdef',

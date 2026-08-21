@@ -7,16 +7,16 @@ namespace KiwiCaptcha;
 /**
  * Configuration for the challenge issuer.
  *
- * Mirrors the Rust crate's `ChallengeConfig` so both implementations produce
- * byte-identical challenges and verify them identically.
+ * Mirrors the Rust crate's `ChallengeConfig` so both implementations
+ * produce byte-identical challenges and verify them identically.
  *
  * Argon2id parameter sets are validated against KiwiCaptcha's intentional
- * protocol profile: `t >= 3 && p == 1` (modern libsodium can represent
- * t >= 1 with OPSLIMIT_MIN=1, so the t >= 3 rule is NOT a libsodium
- * limitation — it is the profile KiwiCaptcha issues and verifies, with
- * p == 1 reflecting libsodium's raw Argon2id interface). Parameter sets
- * outside the profile are rejected at construction — issuing them would
- * produce challenges that can never verify in PHP.
+ * protocol profile: `t >= 3 && p == 1`. Modern libsodium can represent
+ * t >= 1 with its minimum opslimit, so the t >= 3 rule is not a
+ * libsodium limitation; it is the profile KiwiCaptcha issues and
+ * verifies, with p == 1 reflecting libsodium's raw Argon2id interface.
+ * Parameter sets outside the profile are rejected at construction;
+ * issuing them would produce challenges that can never verify in PHP.
  */
 enum BindingMode: string
 {
@@ -30,11 +30,10 @@ enum BindingMode: string
 final class Config
 {
     /**
-     * Hard ceiling for SHA-256 target bits. The browser/wasm solver caps at
-     * 20 bits (MAX_SHA_HASHES = 5,000,000; Rust SOLVER_MAX_TARGET_BITS = 20;
-     * ~99.1% solve probability at 20, ~25.9% at 24), so higher difficulties
-     * would be unsolvable for legit clients and are rejected at
-     * construction.
+     * Hard ceiling for SHA-256 target bits. The browser/wasm solver caps
+     * at 20 bits (5,000,000 hashes; ~99.1% solve probability at 20,
+     * ~25.9% at 24), so higher difficulties would be unsolvable for
+     * legit clients and are rejected at construction.
      */
     public const MAX_SHA_TARGET_BITS = 20;
 
@@ -42,20 +41,19 @@ final class Config
     public const MAX_ARGON2_TARGET_BITS = 10;
 
     /**
-     * Absolute protocol difficulty floor for a STORED record's target bits
-     * : validation rejects 0 — "no work at all" cannot be
+     * Absolute protocol difficulty floor for a stored record's target
+     * bits: validation rejects 0, since "no work at all" cannot be
      * distinguished from an uninitialized misconfiguration.
      */
     public const MIN_DIFFICULTY = 1;
 
     /**
-     * Absolute protocol difficulty ceiling for a STORED record's target
-     * bits — the SOLVER ceiling shared by both algorithms:
-     * the verifier's validate_record guard accepts 1..MAX_DIFFICULTY for
-     * SHA-256 AND Argon2id records, so the leading-zero comparison is only
-     * ever run against a bounded, validated difficulty. (Issuance keeps
-     * the narrower per-algorithm ceilings: MAX_SHA_TARGET_BITS and
-     * MAX_ARGON2_TARGET_BITS.)
+     * Absolute protocol difficulty ceiling for a stored record's target
+     * bits, the solver ceiling shared by both algorithms. The verifier's
+     * validate_record guard accepts 1..20 for SHA-256 and Argon2id
+     * records, so the leading-zero comparison is only ever run against a
+     * bounded, validated difficulty. Issuance keeps the narrower
+     * per-algorithm ceilings (20 and 10).
      */
     public const MAX_DIFFICULTY = 20;
 
@@ -68,12 +66,12 @@ final class Config
     public const MAX_TTL_SECS = 300;
 
     /**
-     * Ceiling for Argon2id time cost at ISSUANCE (browser-solver policy):
+     * Ceiling for Argon2id time cost at issuance (browser-solver policy):
      * the browser solver caps at 6, so higher values would be unsolvable
      * for legit clients and issuance refuses them. This is distinct from
-     * the verifier's structural ceiling (Verifier::MAX_ARGON_TIME = 16) —
-     * a signed record with t in 7..=16 passes the verifier's structural
-     * gates but is never issued.
+     * the verifier's structural ceiling of 16 passes: a signed record
+     * with t in 7..16 passes the verifier's structural gates but is
+     * never issued.
      */
     public const MAX_ARGON_T = 6;
 
@@ -83,8 +81,8 @@ final class Config
      * @param int      $mKib                Argon2id memory cost in KiB (0 for SHA-256).
      * @param int      $t                   Argon2id time cost.
      * @param int      $p                   Argon2id parallelism.
-     * @param int      $targetBits          Leading zero bits for SHA-256 challenges (1..MAX_SHA_TARGET_BITS).
-     * @param int      $argon2TargetBits    Leading zero bits for Argon2id challenges (1..MAX_ARGON2_TARGET_BITS).
+     * @param int      $targetBits          Leading zero bits for SHA-256 challenges (1..20).
+     * @param int      $argon2TargetBits    Leading zero bits for Argon2id challenges (1..10).
      * @param int      $ttlSecs             Challenge lifetime in seconds.
      * @param int|null $minDurationMs       Minimum solve duration (null = derive from difficulty).
      * @param int      $solverMaxHashes     Solver cap used by the widget (informational).
@@ -93,10 +91,10 @@ final class Config
      *                                      ChallengeConfig.policy_version). The verifier
      *                                      rejects records issued under a different epoch
      *                                      (WrongPolicyVersion). Cosmetic configuration
-     *                                      changes must NOT bump it.
+     *                                      changes must not bump it.
      * @param string|null $issuer           Deployment identity stamped into every issued
      *                                      record (mirrors Rust
-     *                                      ChallengeConfig.issuer) — e.g. "dev", "staging",
+     *                                      ChallengeConfig.issuer), e.g. "dev", "staging",
      *                                      "prod". A verifier configured with an expected
      *                                      issuer rejects records issued by a different
      *                                      deployment (WrongIssuer): a compartment that
@@ -104,11 +102,11 @@ final class Config
      *                                      Null (default) stamps an unbound record.
      * @param int      $kid                 Signing key id stamped into every issued record
      *                                      (mirrors Rust ChallengeConfig.kid,
-     *                                      default 1) and signed as the FINAL v2 canonical
+     *                                      default 1) and signed as the final v2 canonical
      *                                      field (`|<kid>`). The verifier selects the
      *                                      signature secret per kid via `secretsByKid`
      *                                      (UnknownKid when the record's kid is unknown or
-     *                                      ahead of the newest configured kid — the
+     *                                      ahead of the newest configured kid, the
      *                                      rollback/forward guard).
      */
     public function __construct(

@@ -8,9 +8,10 @@ use KiwiCaptcha\Risk\RiskKeys;
 use PHPUnit\Framework\TestCase;
 
 /**
- * HKDF identity keys with master = 0x42 x 32. The hex values below were
- * computed independently with a reference script and MUST agree with the
- * Rust implementation (Hkdf::<Sha256>::new(Some(b"kiwicaptcha-risk-v1"), ..)).
+ * hkdf-sha256 identity keys with master = 0x42 x 32. The hex values below
+ * were computed independently with a reference script and MUST agree with
+ * the Rust implementation: Hkdf::<Sha256>::new with the salt
+ * b"kiwicaptcha-risk-v1".
  */
 final class RiskKeysTest extends TestCase
 {

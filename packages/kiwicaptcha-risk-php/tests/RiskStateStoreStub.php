@@ -12,12 +12,12 @@ use KiwiCaptcha\Risk\Storage\SessionTlsTagStoreInterface;
 
 /**
  * Shared store stub for the engine tests: the outcome-ledger methods are
- * RECORDING stubs (default first-confirmation status 1) so the
+ * recording stubs (default first-confirmation status 1) so the
  * headline contract — ConfirmedLegitimate/ConfirmedAbuse work identically
  * with or without calibration — is exercised against the ledger, never
  * against silent no-ops. Anonymous test classes extend it and override
  * observe() (and optionally the ledger behavior via the public hooks).
- * The stub implements the OPTIONAL risk-v2 session-first-tag capability
+ * The stub implements the optional risk-v2 session-first-tag capability
  * interfaces so the v2 engine tests keep exercising the record surface.
  */
 abstract class RiskStateStoreStub implements RiskStateStoreInterface, SessionContextTagStoreInterface, SessionTlsTagStoreInterface
@@ -53,7 +53,7 @@ abstract class RiskStateStoreStub implements RiskStateStoreInterface, SessionCon
     }
 
     /**
-     * In-memory SET NX semantics: the FIRST tag a session pseudonym
+     * In-memory SET NX semantics: the first tag a session pseudonym
      * presents is recorded and returned forever.
      */
     public function sessionFirstContextTag(string $sessionId, string $tag): ?string
@@ -63,7 +63,7 @@ abstract class RiskStateStoreStub implements RiskStateStoreInterface, SessionCon
 
     /**
      * In-memory SET NX semantics for the trusted-edge TLS record: the
-     * FIRST tag a session pseudonym presents is recorded and returned
+     * first tag a session pseudonym presents is recorded and returned
      * forever.
      */
     public function sessionFirstTlsTag(string $sessionId, string $tag): ?string

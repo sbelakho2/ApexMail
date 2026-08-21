@@ -10,7 +10,7 @@ use PHPUnit\Framework\TestCase;
 
 final class SolutionTokenTest extends TestCase
 {
-    /** base64_encode(str_repeat('a', 32)) — a well-formed 44-char nonce. */
+    /** base64_encode of str_repeat('a', 32); a well-formed 44-char nonce. */
     private const NONCE = 'YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWE=';
 
     public function testRoundTrip(): void
@@ -78,9 +78,10 @@ final class SolutionTokenTest extends TestCase
 
     public function testRejectsCounterAtSolverMaximum(): void
     {
-        // The JS solver searches counter < 5,000,000 (5M attempts), so the
-        // largest legitimate counter is 4,999,999 — exactly 5,000,000 was
-        // never minted by a real solve (off-by-one parity with Rust).
+        // The JS solver searches counter < 5,000,000 (5M attempts), so
+        // the largest legitimate counter is 4,999,999; exactly 5,000,000
+        // was never minted by a real solve (off-by-one parity with
+        // Rust).
         $this->expectException(DecodeError::class);
         SolutionToken::decode(base64_encode(self::NONCE.'.5000000.100.{}'));
     }
@@ -115,7 +116,7 @@ final class SolutionTokenTest extends TestCase
 
     public function testRejectsNonObjectTelemetry(): void
     {
-        // Wire parity with Rust: telemetry must be a JSON OBJECT.
+        // Wire parity with Rust: telemetry must be a JSON object.
         $rejected = 0;
         foreach (['[]', '"hello"', '123', 'true', 'null'] as $bad) {
             try {
@@ -157,7 +158,7 @@ final class SolutionTokenTest extends TestCase
 
     public function testRejectsMegabyteTokenByLengthCapBeforeAnyDecode(): void
     {
-        // The 32,768-byte length cap is checked BEFORE
+        // The 32,768-byte length cap is checked before
         // base64_decode — a 1 MB token must be rejected by the cap with no
         // huge decoded allocation behind it. A decode-before-cap regression
         // would materialize ~750 KB of plaintext here.
@@ -172,9 +173,9 @@ final class SolutionTokenTest extends TestCase
 
     public function testDeeplyNestedTelemetryJsonFailsCleanly(): void
     {
-        // json_decode runs at the default depth (512). A
-        // telemetry segment nested far beyond it must fail cleanly with a
-        // typed DecodeError — never a stack exhaustion or an untyped
+        // json_decode runs at the default depth (512). A telemetry
+        // segment nested far beyond it must fail cleanly with a typed
+        // DecodeError, never a stack exhaustion or an untyped
         // JsonException escaping the parse path.
         $this->expectException(DecodeError::class);
 

@@ -19,9 +19,9 @@ use Twig\Environment;
  * 'off' under strict privacy mode) and is rendered as data-kiwi-telemetry on
  * the widget container; it stays overridable per render call. The coarse
  * risk-v2 client-context opt-in (risk.client_context) is rendered as
- * data-kiwi-risk-context="coarse" on the widget container when enabled —
- * the driver sends the coarse capability tag only under that attribute —
- * and stays overridable per render call (default false).
+ * data-kiwi-risk-context="coarse" on the widget container when enabled,
+ * since the driver sends the coarse capability tag only under that
+ * attribute, and stays overridable per render call (default false).
  */
 final class KiwiCaptchaRuntime
 {
@@ -74,17 +74,17 @@ final class KiwiCaptchaRuntime
     }
 
     /**
-     * The EXPLICIT `frame-ancestors` CSP directive for the widget PAGE:
+     * The explicit `frame-ancestors` CSP directive for the widget page:
      * the space-separated allowlisted origins
-     * (risk.challenge_origin_allowlist) — always explicit, never
+     * (risk.challenge_origin_allowlist), always explicit, never
      * default-src inheritance. Returns null when the allowlist is empty
      * (no CSP promise to make).
      *
      * The application should append this directive to the Content-Security-
-     * Policy header of every page that embeds the widget (frame-ancestors
+     * Policy header of every page that embeds the widget: frame-ancestors
      * is ignored inside <meta> tags, so the header is the only delivery
-     * that works — the challenge ENDPOINT itself emits the header
-     * automatically). The value already includes the directive name:
+     * that works, and the challenge endpoint itself emits the header
+     * automatically. The value already includes the directive name:
      *
      *     Content-Security-Policy: default-src 'self'; <?= $runtime->cspFrameAncestors() ?>
      */
@@ -114,7 +114,7 @@ final class KiwiCaptchaRuntime
             // risk.client_context; the app may pass a dynamic per-render
             // override). Without the attribute the driver sends no
             // client_context. Under privacy_mode "strict" the attribute
-            // is NEVER rendered — not even via the per-render override
+            // is never rendered, not even via the per-render override
             // (the compile-time refusal covers the configured value; this
             // closes the render-time bypass).
             'risk_client_context' => $this->privacyStrict ? false : ($context['risk_client_context'] ?? $this->riskClientContext),

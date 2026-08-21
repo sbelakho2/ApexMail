@@ -136,13 +136,12 @@ final class Configuration implements ConfigurationInterface
                     // profile rules (t >= 3, p == 1, m_kib >= 8 * p) are
                     // enforced by KiwiCaptcha\Config when the extension builds
                     // it, so this tree must not duplicate those protocol
-                    // constraints (see the difficulty_bits comment). The
-                    // issuance-side ceiling (Config::MAX_ARGON_T = 6) is the
-                    // browser-solver cap; the verifier's structural ceiling
-                    // is Verifier::MAX_ARGON_TIME = 16 (a signed record with
-                    // t in 7..16 passes the structural gates but is never
-                    // issued), so the tree refuses the issuance ceiling at
-                    // configuration time.
+                    // constraints. The issuance-side ceiling
+                    // (Config::MAX_ARGON_T = 6) is the browser-solver cap;
+                    // the verifier's structural ceiling is 16 (a signed
+                    // record with t in 7..16 passes the structural gates but
+                    // is never issued), so the tree refuses the issuance
+                    // ceiling at configuration time.
                     ->defaultValue(3)
                     ->min(1)
                     ->max(Config::MAX_ARGON_T)
@@ -155,17 +154,17 @@ final class Configuration implements ConfigurationInterface
                     ->info('Leading zero bits for SHA-256 challenges (default 20).')
                     ->defaultValue(20)
                     ->min(1)
-                    // Do NOT re-derive the protocol ceiling here: the single
-                    // source of truth is KiwiCaptcha\Config::MAX_SHA_TARGET_BITS
-                    // (20 — the wasm solver cannot go higher), so the tree can
-                    // never drift from the core's constraint.
+                    // Do not re-derive the protocol ceiling here: the single
+                    // source of truth is KiwiCaptcha\Config (20, the wasm
+                    // solver cannot go higher), so the tree can never drift
+                    // from the core's constraint.
                     ->max(Config::MAX_SHA_TARGET_BITS)
                 ->end()
                 ->integerNode('argon2_difficulty_bits')
                     ->info('Leading zero bits for Argon2id challenges (default 8, max 10).')
                     ->defaultValue(8)
                     ->min(1)
-                    // Same ceiling as the core's MAX_ARGON2_TARGET_BITS (10).
+                    // Same ceiling as the core's Argon2id target-bits max.
                     ->max(10)
                 ->end()
                 ->integerNode('challenge_ttl_secs')

@@ -9,11 +9,11 @@ use KiwiCaptcha\VerificationAdmissionGate;
 /**
  * In-process Argon2id admission gate (token-set based).
  *
- * Caps concurrent Argon2id verifications within the CURRENT PHP process via a
- * static set of live lease tokens, implementing the core's
+ * Caps concurrent Argon2id verifications within the current PHP process via
+ * a static set of live lease tokens, implementing the core's
  * {@see \KiwiCaptcha\VerificationAdmissionGate}: acquire() returns an opaque
- * token, release() removes exactly that token — a stale or double release is
- * a no-op and can never remove a newer lease.
+ * token and release() removes exactly that token. A stale or double release
+ * is a no-op that can never remove a newer lease.
  *
  * LIMITATION (documented): PHP-FPM workers are separate processes with no
  * shared memory, so this bounds concurrency per worker, not per deployment.

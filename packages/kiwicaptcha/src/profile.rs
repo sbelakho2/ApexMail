@@ -11,10 +11,9 @@
 //! [`ChallengeProfile::validate`] enforces the exact bounds issuance (and
 //! the PHP `ChallengeProfile`) enforce, so a profile can never mint a
 //! challenge the verifier would reject:
-//! - SHA-256: `target_bits` within `1..=SOLVER_MAX_TARGET_BITS` (20).
-//! - Argon2id: `target_bits` within `1..=SOLVER_MAX_ARGON2_TARGET_BITS`
-//!   (10), `t` within `3..=MAX_ARGON_T` (6), `p == 1`, and
-//!   `m_kib` within `8..=SOLVER_MAX_ARGON2_M_KIB` (65536).
+//! - SHA-256: `target_bits` within `1..=20`.
+//! - Argon2id: `target_bits` within `1..=10`, `t` within `3..=6`,
+//!   `p == 1`, and `m_kib` within `8..=65536`.
 
 use crate::challenge::{
     PoWAlgorithm, MAX_ARGON_T, SOLVER_MAX_ARGON2_M_KIB, SOLVER_MAX_ARGON2_TARGET_BITS,
@@ -45,25 +44,25 @@ pub struct ChallengeProfile {
 /// Reasons a [`ChallengeProfile`] is invalid.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum ProfileError {
-    /// SHA-256 difficulty must be `1..=SOLVER_MAX_TARGET_BITS` (20) — 0
+    /// SHA-256 difficulty must be `1..=20` — 0
     /// means "no work at all" and values above the ceiling can never be
     /// solved by the widget.
     #[error("SHA-256 target bits must be within 1..=20 (got {0})")]
     InvalidShaTargetBits(u8),
-    /// Argon2id difficulty must be `1..=SOLVER_MAX_ARGON2_TARGET_BITS` (10).
+    /// Argon2id difficulty must be `1..=10`.
     #[error("Argon2id target bits must be within 1..=10 (got {0})")]
     InvalidArgonTargetBits(u8),
-    /// Argon2id time cost must be `3..=MAX_ARGON_T` (6) — the protocol
+    /// Argon2id time cost must be `3..=6` — the protocol
     /// profile requires `t >= 3` (libsodium-representable) and caps at 6,
     /// the browser-solver ceiling (distinct from the verifier's structural
-    /// ceiling, `MAX_ARGON_TIME` = 16).
+    /// ceiling of 16).
     #[error("Argon2id time cost t must be within 3..=6 (got {0})")]
     InvalidArgonT(u32),
     /// Argon2id parallelism must be exactly 1 — libsodium (PHP) only
     /// supports `p == 1`, so other values could never verify.
     #[error("Argon2id parallelism p must be 1 (got {0})")]
     InvalidArgonP(u32),
-    /// Argon2id memory must be `8..=SOLVER_MAX_ARGON2_M_KIB` (65536).
+    /// Argon2id memory must be `8..=65536`.
     #[error("Argon2id memory m_kib must be within 8..=65536 (got {0})")]
     InvalidArgonMKib(u32),
 }

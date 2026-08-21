@@ -188,8 +188,8 @@ final class ValidatorTest extends TestCase
 
     /**
      * With a degraded=sha20 scope the degraded fallback applies a PoW
-     * action the solved sha-8 challenge does NOT satisfy under the
-     * configured ladders: a stronger PoW requirement must never silently
+     * action the solved sha-8 challenge does not satisfy under the
+     * configured ladders. A stronger PoW requirement must never silently
      * disappear — with chaining unavailable (no binding authority) it is
      * terminal StepUp, never a silent pass with zero adaptive friction.
      */
@@ -937,11 +937,11 @@ final class ValidatorTest extends TestCase
     }
 
     /**
-     * (a) the full stored-result retry — first verification
-     * succeeds (consume transition + derive + committed result); a lost
-     * response makes the client re-submit the same token with the same
-     * binding: the retry resolves from the stored result — the same success
-     * (jti + binding exposed) with NO second consume, NO second derive.
+     * (a) the full stored-result retry: first verification succeeds
+     * (consume transition + derive + committed result); a lost response
+     * makes the client re-submit the same token with the same binding.
+     * The retry resolves from the stored result — the same success (jti
+     * + binding exposed) with no second consume and no second derive.
      *
      * Requires the current core (consumed-state record fields + the
      * stored-result re-verify path); skipped until it is vendored.
@@ -2258,7 +2258,7 @@ final class ValidatorTest extends TestCase
         self::assertNull($read->disposition?->chainExpiresAt, 'a legacy v1 record carries no expiry bound — not corrupt');
 
         // The signing takes the expiry from the exact chain X's record
-        // (requirementFor(X)).
+        // (via requirementFor).
         [$engine] = $this->dispositionEngine($this->verifier, $risk['gateway'], $store, chainTickets: $chainService, resolver: $resolver, bindingAuthority: $this->bindingAuthority());
         $meta = $engine->getMetadataFor($dto::class);
         $meta->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
@@ -2430,8 +2430,7 @@ final class ValidatorTest extends TestCase
      * A full stage-2 chain for the validator-level disposition tests: the
      * stage-1 chain_required solve opens the chain, then the chain is
      * issued directly (reserve + markIssued) with the nonce of a real
-     * issued challenge (the strict v2 schema requires the Kiwi base64
-     * nonce shape).
+     * issued challenge.
      *
      * @return array{chainService: ChainedChallengeTicketService, chainId: string, stage2: \KiwiCaptcha\Challenge, token1: string}
      */
@@ -2953,7 +2952,7 @@ final class ValidatorTest extends TestCase
             $metaStore = null;
             if ($assessment === 'none') {
                 // post_solve_check=false AND the chain marker: NO
-                // reassessment would run at all (the defect's case (a)).
+                // reassessment would run at all (the defect's case a).
                 $metaStore = new \BelConsulting\KiwiCaptchaBundle\SiteVerify\ArraySiteVerifyMetadataStore();
                 $metaStore->store($nonceS, new \BelConsulting\KiwiCaptchaBundle\SiteVerify\SiteVerifyMetadata(null, null, 'login', $chainId, 2), 300);
             }

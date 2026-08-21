@@ -11,18 +11,19 @@ use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\FakePredisClient;
 use PHPUnit\Framework\TestCase;
 
 /**
- * Live resource-pressure provider: remaining Redis admission-semaphore slots
- * (argonCapacity) and real per-second issuance headroom as the REMAINING
- * FRACTION of the deployment-wide resource_capacity.issuance_per_second
- * (issuanceCapacity, fixed-point 0..1000: 100% remaining -> 1000, 50% ->
- * 500, 10% -> 100, 0% -> 0). The whole snapshot() is cached in-process for
- * ~100 ms so the hot path does at most one Redis read per 100 ms. The two
- * dimensions are asymmetric on an unobservable source: an unavailable
- * issuance COUNTER reports the nominal 1000 (never fabricate artificial
- * scarcity), while an UNKNOWN argon-gate usage reports 0 (conservative —
- * never fabricate headroom for a memory resource that cannot be measured).
- * Risk-backend health is NOT a snapshot field anymore: the engine's degraded
- * mode consumes the shared circuit breaker directly.
+ * Live resource-pressure provider: remaining Redis admission-semaphore
+ * slots (argonCapacity) and real per-second issuance headroom as the
+ * remaining fraction of the deployment-wide
+ * resource_capacity.issuance_per_second (issuanceCapacity, fixed-point
+ * 0..1000: 100% remaining -> 1000, 50% -> 500, 10% -> 100, 0% -> 0).
+ * The whole snapshot() is cached in-process for ~100 ms, so the hot
+ * path does at most one Redis read per 100 ms. The two dimensions are
+ * asymmetric on an unobservable source: an unavailable issuance counter
+ * reports the nominal 1000 (never fabricate artificial scarcity), while
+ * an unknown argon-gate usage reports 0 (never fabricate headroom for a
+ * memory resource that cannot be measured). Risk-backend health is not
+ * a snapshot field anymore: the engine's degraded mode consumes the
+ * shared circuit breaker directly.
  */
 final class RedisRiskHealthProviderTest extends TestCase
 {
@@ -76,7 +77,7 @@ final class RedisRiskHealthProviderTest extends TestCase
 
     public function testArgonCapacityConservativeZeroWhenBackendUnknown(): void
     {
-        // A wired semaphore whose live-usage read FAILS (backend unknown)
+        // A wired semaphore whose live-usage read fails (backend unknown)
         // must report 0 (saturated) — never nominal: the policy escalates
         // Argon to Sha20/StepUp instead of admitting memory-hard work on a
         // gate that cannot be measured.
@@ -149,7 +150,7 @@ final class RedisRiskHealthProviderTest extends TestCase
 
     public function testIssuanceCapacityOnTheDefaultDeploymentDenominator(): void
     {
-        // The audit boundary pair on the DEFAULT resource_capacity
+        // The audit boundary pair on the default resource_capacity
         // denominator (20000): rate 0 -> full headroom; rate 19000 -> 50.
         $client = $this->requirePredis();
         $provider = fn (): RedisRiskHealthProvider => new RedisRiskHealthProvider(null, $client, '{kiwi:d1}:issuance:');
@@ -182,7 +183,7 @@ final class RedisRiskHealthProviderTest extends TestCase
     {
         // The whole snapshot() is cached in-process for ~100 ms: two
         // snapshots inside the budget perform only ONE Redis read (the
-        // issuance-rate GET), not a PING + semaphore query per call.
+        // issuance-rate GET), not a ping + semaphore query per call.
         $client = $this->requirePredis();
         $provider = new RedisRiskHealthProvider(null, $client, '{kiwi:t}:issuance:', 1000);
 

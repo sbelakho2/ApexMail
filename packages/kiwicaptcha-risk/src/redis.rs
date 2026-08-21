@@ -3,13 +3,13 @@
 //! The script is the shared cross-language asset, embedded verbatim from
 //! this package's `resources/risk-v1.lua` (a copy of
 //! `<repo-root>/protocol/risk-v1/risk-v1.lua`) and executed via
-//! `redis::Script` (EVALSHA with an automatic NOSCRIPT fallback inside
+//! `redis::Script` (evalsha with an automatic noscript fallback inside
 //! `ScriptInvocation::invoke`, sha cached in the store's `Script`).
 //!
 //! All keys carry the hash tag `{kiwi:<namespace>}` so the script is
-//! Cluster safe. Source/subnet keys are EPOCH-SCOPED: the observation
+//! Cluster safe. Source/subnet keys are epoch-scoped: the observation
 //! carries three per-epoch pseudonyms (prev/current/next) and each key
-//! uses the pseudonym HMAC'd with ITS OWN epoch. The Lua's `network_risk`
+//! uses the pseudonym HMAC'd with its own epoch. The Lua's `network_risk`
 //! slot (always 0) is overridden with the observation's classifier-derived
 //! network risk; `principal_credit` is parsed from reply slot 12 and
 //! `is_duplicate` from slot 15.
@@ -38,23 +38,23 @@ use ::redis as redis_crate;
 pub const SCRIPT: &str = include_str!("../resources/risk-v1.lua");
 
 /// The canonical outcome-ledger scripts (shared verbatim with PHP
-/// `protocol/risk-v1/outcome_*.lua`): the ALWAYS-ON, calibration-
+/// `protocol/risk-v1/outcome_*.lua`): the always-on, calibration-
 /// independent ledger. With calibration disabled the store registers a
-/// PENDING ledger entry per decision and flips it exactly once on
+/// pending ledger entry per decision and flips it exactly once on
 /// confirmation; with calibration enabled the register_decision/confirm/
 /// correction scripts do the same inside the calibration namespace.
 pub const OUTCOME_REGISTER_LUA: &str = include_str!("../resources/outcome_register.lua");
 pub const OUTCOME_CONFIRM_LUA: &str = include_str!("../resources/outcome_confirm.lua");
 pub const OUTCOME_CORRECT_LUA: &str = include_str!("../resources/outcome_correct.lua");
 
-/// Default raw saturations in Lua ARGV order:
+/// Default raw saturations in Lua argv order:
 /// src_fast, src_slow, issue, bad, mal, rep, action, switch, global,
 /// trust, principal.
 pub const DEFAULT_SATURATIONS: [u32; 11] = [
     8000, 100000, 6000, 4000, 3000, 2000, 6000, 10000, 70000, 10000, 10000,
 ];
 
-/// Default outcome-ledger TTL (seconds): the PENDING/L/A ledger entries
+/// Default outcome-ledger TTL (seconds): the pending/L/A ledger entries
 /// expire after 24 h (configurable via
 /// [`RedisRiskStateStore::with_options`]).
 pub const DEFAULT_OUTCOME_TTL_SECS: u64 = 86_400;
@@ -173,7 +173,7 @@ impl RedisRiskStateStore {
     }
 
     /// Builds a store with explicit knobs (`outcome_ttl_secs` is the
-    /// ALWAYS-ON outcome-ledger lifetime, default 86400 s).
+    /// always-on outcome-ledger lifetime, default 86400 s).
     ///
     /// # Panics
     ///
@@ -203,7 +203,7 @@ impl RedisRiskStateStore {
 
     /// Override the connection/command timeouts: the
     /// production fail-fast consts (5 ms / 10 ms) stay the defaults; tests
-    /// exercising LONG real-time sequences (storms, TTL expiry) use
+    /// exercising long real-time sequences (storms, TTL expiry) use
     /// generous timeouts so CI scheduling jitter can never produce a
     /// spurious `Timeout` — the tight-timeout behavior is a production
     /// tuning knob, not a test oracle.
@@ -248,9 +248,9 @@ impl RedisRiskStateStore {
         self.pool.slots.len()
     }
 
-    /// The FULL key set for one observation, in the Lua KEYS order.
+    /// The full key set for one observation, in the Lua keys order.
     ///
-    /// Source keys use the observation's EPOCH-SCOPED pseudonyms:
+    /// Source keys use the observation's epoch-scoped pseudonyms:
     /// `src:<source_epoch>:<source_id>`,
     /// `src:<source_epoch-1>:<source_id_prev>`,
     /// `src:<source_epoch+1>:<source_id_next>` (same for `net`). All keys
@@ -316,7 +316,7 @@ impl RedisRiskStateStore {
         );
         Self::assert_same_slot(&keys)?;
 
-        // The full 22-value ARGV contract, in order.
+        // The full 22-value argv contract, in order.
         let mut args: Vec<String> = Vec::with_capacity(22);
         args.push(o.event.as_u8().to_string());
         args.push(o.scope.to_string());
@@ -383,16 +383,16 @@ impl RedisRiskStateStore {
         })
     }
 
-    /// The outcome-ledger key for one decision — the SAME canonical key
+    /// The outcome-ledger key for one decision — the same canonical key
     /// the calibration scripts use (`{kiwi:<ns>}:outcome:<decision_id>`),
-    /// so the ALWAYS-ON ledger is one key layout whether calibration is
+    /// so the always-on ledger is one key layout whether calibration is
     /// enabled or disabled. Public so tests (and tooling) can inspect the
     /// ledger entries.
     pub fn outcome_ledger_key(&self, decision_id: &str) -> String {
         format!("{{kiwi:{}}}:outcome:{decision_id}", self.namespace)
     }
 
-    /// CRC-16/XMODEM (poly 0x1021, init 0): `"123456789"` -> `0x31C3`,
+    /// CRC-16/xmodem (poly 0x1021, init 0): `"123456789"` -> `0x31C3`,
     /// and `slot("foo") = crc16("foo") & 0x3FFF = 12182` per the Redis
     /// Cluster docs.
     pub fn crc16(data: &[u8]) -> u16 {
@@ -472,7 +472,7 @@ impl RiskStateStore for RedisRiskStateStore {
         decision_hour: i64,
         score: u32,
     ) -> Result<bool, RiskStoreError> {
-        // outcome_register.lua: SET NX EX a PENDING ledger entry
+        // outcome_register.lua: SET NX EX a pending ledger entry
         // {"o":"P","scope","hour","score","w":1}. Returns 1 when created,
         // 0 when the decision_id is already registered.
         let key = self.outcome_ledger_key(decision_id);
@@ -492,7 +492,7 @@ impl RiskStateStore for RedisRiskStateStore {
     }
 
     fn confirm_outcome(&self, decision_id: &str, legitimate: bool) -> Result<u8, RiskStoreError> {
-        // outcome_confirm.lua: PENDING -> L/A exactly once.
+        // outcome_confirm.lua: pending -> L/A exactly once.
         let key = self.outcome_ledger_key(decision_id);
         let mut conn_guard = self.pool.acquire(&self.client)?;
         let conn = conn_guard
@@ -533,12 +533,12 @@ impl RiskStateStore for RedisRiskStateStore {
     }
 }
 
-/// The risk-v2 session client-context capability: records the FIRST tag a
+/// The risk-v2 session client-context capability: records the first tag a
 /// session ever presents (SET NX, first write wins) under the session TTL.
 impl SessionContextTagStore for RedisRiskStateStore {
     /// The risk-v2 session client-context record
     /// (`{kiwi:<ns>}:risk:ctx:<session-pseudonym-hex>`): SET NX with the
-    /// session TTL (first write wins = the FIRST tag the session ever
+    /// session TTL (first write wins = the first tag the session ever
     /// presented), then return the recorded tag. The record is keyed by the
     /// session pseudonym only — the raw cookie value never appears in
     /// Redis — and shares the hash tag with the risk-v1 state keys, so it
@@ -569,13 +569,13 @@ impl SessionContextTagStore for RedisRiskStateStore {
     }
 }
 
-/// The risk-v2 session trusted-edge TLS capability: records the FIRST
+/// The risk-v2 session trusted-edge TLS capability: records the first
 /// coarse TLS classification a session ever presents (SET NX, first write
 /// wins) under the session TTL.
 impl SessionTlsTagStore for RedisRiskStateStore {
     /// The risk-v2 session trusted-edge TLS record
     /// (`{kiwi:<ns>}:risk:tls:<session-pseudonym-hex>`): SET NX with the
-    /// session TTL (first write wins = the FIRST coarse, server-attested
+    /// session TTL (first write wins = the first coarse, server-attested
     /// TLS classification the session ever presented), then return the
     /// recorded tag. Mirrors the `session_first_context_tag` machinery
     /// exactly under its own key: keyed by the session pseudonym only —
@@ -736,7 +736,7 @@ mod tests {
         assert!(RedisRiskStateStore::assert_same_slot(&no_tag).is_err());
     }
 
-    // ── Redis-backed tests (skipped unless RISK_REDIS_URL is set) ──
+    // ── Redis-backed tests (skipped unless the Redis test URL is set) ──
 
     #[test]
     fn single_event() {
@@ -772,7 +772,7 @@ mod tests {
         assert!(!first.is_duplicate);
 
         // Same event_id again: duplicate no-op, current signals returned.
-        // The channels leak by REAL elapsed time (rf 250/s, rs 20/s), so
+        // The channels leak by real elapsed time (rf 250/s, rs 20/s), so
         // sequential calls can floor one unit lower on a slow runner.
         let duplicate = store.observe(&observation(&id, 0, T0, 0)).unwrap();
         assert!(duplicate.is_duplicate);
@@ -787,7 +787,7 @@ mod tests {
             duplicate.vector.source_slow
         );
 
-        // A distinct event must observe the state from a SINGLE increment
+        // A distinct event must observe the state from a single increment
         // (two events, minus the small real-elapsed decay).
         let third = store.observe(&observation(&event_id(8), 0, T0, 0)).unwrap();
         assert!(!third.is_duplicate);
@@ -818,8 +818,8 @@ mod tests {
     }
 
     /// The risk-v2 session client-context record: SET NX first-write-wins
-    /// with the SESSION TTL — the first tag a session presents is recorded
-    /// and returned forever, a later different tag still yields the FIRST
+    /// with the session TTL — the first tag a session presents is recorded
+    /// and returned forever, a later different tag still yields the first
     /// one (the engine derives the inconsistency signal from that).
     #[test]
     fn session_first_context_tag_records_the_first_tag_with_the_session_ttl() {
@@ -838,7 +838,7 @@ mod tests {
         let again = store.session_first_context_tag(&session_id, "aa").unwrap();
         assert_eq!(again.as_deref(), Some("aa"));
 
-        // A DIFFERENT tag: the FIRST tag wins (the inconsistency signal
+        // A different tag: the first tag wins (the inconsistency signal
         // derives from this comparison).
         let changed = store.session_first_context_tag(&session_id, "bb").unwrap();
         assert_eq!(
@@ -861,16 +861,16 @@ mod tests {
             "the record must expire with the session TTL (got {ttl})"
         );
 
-        // A DIFFERENT session has its own record.
+        // A different session has its own record.
         let other = [0x2bu8; 16];
         let other_first = store.session_first_context_tag(&other, "zz").unwrap();
         assert_eq!(other_first.as_deref(), Some("zz"));
     }
 
     /// The risk-v2 session trusted-edge TLS record: SET NX first-write-wins
-    /// with the SESSION TTL — the first coarse TLS classification a session
+    /// with the session TTL — the first coarse TLS classification a session
     /// presents is recorded and returned forever, a later different tag
-    /// still yields the FIRST one (the engine derives the tls_inconsistency
+    /// still yields the first one (the engine derives the tls_inconsistency
     /// signal from that). Mirrors the session_first_context_tag machinery
     /// exactly under its own key.
     #[test]
@@ -894,7 +894,7 @@ mod tests {
             .unwrap();
         assert_eq!(again.as_deref(), Some("tls13|http2"));
 
-        // A DIFFERENT tag: the FIRST tag wins (the tls_inconsistency signal
+        // A different tag: the first tag wins (the tls_inconsistency signal
         // derives from this comparison).
         let changed = store
             .session_first_tls_tag(&session_id, "tls12|http1")
@@ -919,7 +919,7 @@ mod tests {
             "the record must expire with the session TTL (got {ttl})"
         );
 
-        // A DIFFERENT session has its own record.
+        // A different session has its own record.
         let other = [0x8du8; 16];
         let other_first = store.session_first_tls_tag(&other, "tls13|h3").unwrap();
         assert_eq!(other_first.as_deref(), Some("tls13|h3"));
@@ -941,7 +941,7 @@ mod tests {
         }
         assert_eq!(vector.source_fast, 1000);
         // source_slow leaks at 20/s against 100_000 raw: the sequential
-        // storm decays a few raw units of REAL elapsed time, so the floor
+        // storm decays a few raw units of real elapsed time, so the floor
         // can sit at 999; anything below 990 would mean lost increments.
         assert!(
             (990..=1000).contains(&vector.source_slow),
@@ -967,7 +967,7 @@ mod tests {
         // L4 >= 900 (raw gp scaled by sat_global 70000). Each PreIssue adds
         // 2000 raw (rf 1000 + rs 1000): 20 events -> gp 40000 -> 571 (L2);
         // 32 events -> gp 64000 -> 914 (L4). Leak: rf 250/s, rs 20/s. The
-        // rate-limit clock is Redis TIME, so the cooldown deadline is
+        // rate-limit clock is Redis time, so the cooldown deadline is
         // asserted against the real clock, not an injected one.
         let big = store(60_000, "big");
         for i in 1..=20u64 {
@@ -984,12 +984,12 @@ mod tests {
             "the 60 s cooldown must be armed at the ratchet time + 60000 (got {cool}, t0 {t0})"
         );
 
-        // The DROP after the hysteresis window needs a real ~2.1 s sleep
-        // (the script derives its clock from Redis TIME): a SHORT window of
+        // The drop after the hysteresis window needs a real ~2.1 s sleep
+        // (the script derives its clock from Redis time): a short window of
         // 2 s and a saturation that makes 5 events reach L4 (10000 raw ->
         // 909). RiskDenied probes add NO pressure, so the decay is pure.
         let mut sats = DEFAULT_SATURATIONS;
-        sats[8] = 11_000; // sat_global (ARGV[16])
+        sats[8] = 11_000; // sat_global (argv[16])
         let tiny = RedisRiskStateStore::with_options(
             client(),
             &unique_namespace("tiny"),
@@ -1018,7 +1018,7 @@ mod tests {
         );
 
         // Inside the window (+1 s): gp 10000 - ~270 = ~9730 -> 884 — below
-        // the L4 ENTER (900), still above the L4 EXIT (850) — the hold
+        // the L4 enter (900), still above the L4 exit (850) — the hold
         // applies and the deadline is untouched.
         std::thread::sleep(Duration::from_millis(1000));
         tiny.observe(&settle(90)).unwrap();
@@ -1059,7 +1059,7 @@ mod tests {
         assert_eq!(store.confirm_outcome("led-unknown", true).unwrap(), 0);
         assert!(!store.correct_outcome("led-unknown", false).unwrap());
 
-        // Register: PENDING ledger created once.
+        // Register: pending ledger created once.
         assert!(store.register_outcome("led-1", 7, hour, 900).unwrap());
         assert!(
             !store.register_outcome("led-1", 7, hour, 900).unwrap(),
@@ -1093,7 +1093,7 @@ mod tests {
         let value: serde_json::Value = serde_json::from_str(&raw).expect("json");
         assert_eq!(value["o"], "L");
 
-        // A PENDING entry can be corrected too (never confirmed yet).
+        // A pending entry can be corrected too (never confirmed yet).
         assert!(store.register_outcome("led-2", 7, hour, 100).unwrap());
         assert!(store.correct_outcome("led-2", false).unwrap());
         let raw: String = conn.get(store.outcome_ledger_key("led-2")).expect("get");
@@ -1186,7 +1186,7 @@ mod tests {
         for i in 0..10u64 {
             store.observe(&observation(&event_id(i), 0, T0, 0)).unwrap();
         }
-        // Half 2: 10 events one epoch LATER, whose current pseudonym is the
+        // Half 2: 10 events one epoch later, whose current pseudonym is the
         // probe's NEXT-epoch boundary key.
         for i in 10..20u64 {
             let mut o = observation(&event_id(i), 0, T0, 0);
@@ -1195,7 +1195,7 @@ mod tests {
             store.observe(&o).unwrap();
         }
         // The probe (current pseudonym, epoch E) reads prev (0) + current
-        // (10 events) + next (10 events): the split burst SUMS to 20 events
+        // (10 events) + next (10 events): the split burst sums to 20 events
         // (20000 raw) instead of maxing to one half.
         let vector = store
             .observe(&observation(&event_id(100), 0, T0, 0))
@@ -1211,7 +1211,7 @@ mod tests {
             eprintln!("skipping Redis test: RISK_REDIS_URL not set");
             return;
         };
-        // Distinct saturations so the principal's HIGHER bad/mal pressure
+        // Distinct saturations so the principal's higher bad/mal pressure
         // shows through the max4 dimension (source ConfirmedAbuse adds
         // 5000/2500; the principal adds 6000/3000).
         let mut sats = DEFAULT_SATURATIONS;
@@ -1230,7 +1230,7 @@ mod tests {
         );
 
         // ConfirmedAbuse with a principal: bad_proof/malformed take the
-        // PRINCIPAL dimension (max over source/session/principal), and no
+        // principal dimension (max over source/session/principal), and no
         // trust exists anywhere.
         let mut o = observation(&event_id(1), 0, T0, 0);
         o.event = RiskEventKind::ConfirmedAbuse;
@@ -1250,7 +1250,7 @@ mod tests {
         assert_eq!(without.bad_proof, 83); // 5000 * 1000 / 60000
         assert_eq!(without.malformed, 41); // 2500 * 1000 / 60000
 
-        // trust_credit NEVER includes principal trust (source+session only)
+        // trust_credit never includes principal trust (source+session only)
         // while principal_credit is the principal's own trust: the two
         // channels are disjoint (no double subtraction).
         let mut a = observation(&event_id(3), 0, T0, 0);

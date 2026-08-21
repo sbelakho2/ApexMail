@@ -5,25 +5,26 @@ declare(strict_types=1);
 namespace KiwiCaptcha\Risk;
 
 /**
- * Per-process, bounded, TTL'd map of the LAST score-selected action per
- * scope, giving the SCOPE action selection enter/exit hysteresis: a score hovering at a band boundary (449/451/449…) can no longer flip the
+ * Per-process, bounded, TTL'd map of the last score-selected action per
+ * scope, giving the scope action selection enter/exit hysteresis: a score
+ * hovering at a band boundary (449/451/449…) can no longer flip the
  * challenge profile on every request.
  *
  * Rules (byte-identical on the Rust side):
- *   - thresholds reuse the plain band boundaries: ENTER[i] = upper[i] + 10,
- *     EXIT[i] = lower[i] − 10;
- *   - with a previous ladder action at band i the action escalates to band
- *     i+1 only when score >= ENTER[i], de-escalates to band i−1 only when
- *     score < EXIT[i], and otherwise STAYS in band i;
- *   - a fresh scope (no previous action, or an expired entry) uses the
- *     plain band mapping;
- *   - the hard actions (StepUp/Deny) are NOT hysteresis-affected: when the
- *     previous or the plain action is StepUp/Deny the plain mapping wins;
- *   - entries expire after TTL_MS (300 s); the map is bounded at
- *     MAX_SCOPES (1024), the least-recently-used entry evicted when a NEW scope arrives
- *     at capacity (expired entries are purged first).
+ *   - thresholds reuse the plain band boundaries: enter[i] = upper[i] + 10
+ *     and exit[i] = lower[i] − 10.
+ *   - With a previous ladder action at band i the action escalates to band
+ *     i+1 only when score >= enter[i], de-escalates to band i−1 only when
+ *     score < exit[i], and otherwise stays in band i.
+ *   - A fresh scope (no previous action, or an expired entry) uses the
+ *     plain band mapping.
+ *   - The hard actions (StepUp/Deny) are NOT hysteresis-affected: when the
+ *     previous or the plain action is StepUp/Deny the plain mapping wins.
+ *   - Entries expire after TTL_MS (300 s); the map is bounded at 1024
+ *     scopes, the least-recently-used entry evicted when a new scope
+ *     arrives at capacity (expired entries are purged first).
  *
- * The map is intentionally PER-PROCESS (the engine service is a per-worker
+ * The map is intentionally per-process (the engine service is a per-worker
  * singleton, so the instance lives for the worker's lifetime): multi-worker
  * deployments may see slight per-process differences — an acceptable
  * UX-smoothing trade-off. The authoritative global state stays in Redis.
@@ -73,7 +74,7 @@ final class ScopeActionHysteresis
 
     /**
      * Selects the scope's action with enter/exit hysteresis and remembers
-     * the selection as the scope's new LAST ACTION (the score-selected
+     * the selection as the scope's new last action (the score-selected
      * action — a later Deny/StepUp hard override never poisons the
      * profile).
      */

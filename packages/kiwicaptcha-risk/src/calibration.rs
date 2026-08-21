@@ -2,36 +2,36 @@
 //! legitimate (post-hoc, e.g. from support flags) and produces a bounded
 //! bias adjustment per scope, added to the raw risk score.
 //!
-//! The store is Redis-backed and BOUNDED (identical design to PHP):
+//! The store is Redis-backed and bounded (identical design to PHP):
 //!
 //! - Hourly aggregate buckets `{kiwi:<ns>}:cal:<scope>:<hour>` (hour =
 //!   `now_ms / 3600000`, integer) — a hash of flat fields
 //!   `legit_count` / `legit_score_sum` / `abuse_count` / `abuse_score_sum`
-//!   (EXACT scores, not band-quantized) PLUS the sample counters
+//!   (exact scores, not band-quantized) plus the sample counters
 //!   `sample_total` / `sample_resolved` — written by
-//!   `HINCRBYFLOAT` + `EXPIRE 48h`. At most 24 keys per scope are ever read.
-//!   The sample counters live in the SAME scope/hour buckets as the
+//!   hincrbyfloat + expire 48h. At most 24 keys per scope are ever read.
+//!   The sample counters live in the same scope/hour buckets as the
 //!   observations, so scope, window, label population and resolution
 //!   population are exactly one cohort (no namespace-wide
 //!   singleton counters).
-//! - Decision receipts `{kiwi:<ns>}:cal:receipt:<decision_id>` — a STRING
+//! - Decision receipts `{kiwi:<ns>}:cal:receipt:<decision_id>` — a string
 //!   JSON `{"scope":..,"band":..,"action":"..","decision_hour":..,"score":..,
-//!   "sampled":0|1}`, EXPIRE `receipt_ttl_secs`, consumed ONCE by the atomic
+//!   "sampled":0|1}`, expire `receipt_ttl_secs`, consumed once by the atomic
 //!   confirm script.
 //! - Outcome-ledger entries `{kiwi:<ns>}:outcome:<decision_id>` — a
-//!   STRING JSON `{"o":"P|L|A","scope","hour","score","w"}` with EXPIRE
-//!   `outcome_ttl_secs` (default 86400 s). THE OUTCOME LEDGER IS ALWAYS ON
+//!   string JSON `{"o":"P|L|A","scope","hour","score","w"}` with expire
+//!   `outcome_ttl_secs` (default 86400 s). The outcome ledger is always on
 //!   and independent of calibration: with calibration enabled it is created
 //!   atomically by `register_decision.lua` at decision time; with
-//!   calibration disabled the state store registers the SAME key layout
+//!   calibration disabled the state store registers the same key layout
 //!   (`outcome_register.lua`). ConfirmedLegitimate/ConfirmedAbuse therefore
 //!   work identically in both configurations.
 //!
-//! Bias (byte-identical integer math with PHP, ALL i64 truncating division,
-//! executed inside ONE canonical Lua invocation — the script at
+//! Bias (byte-identical integer math with PHP, i64 truncating division,
+//! executed inside one canonical Lua invocation — the script at
 //! `resources/calibration.lua`, shared verbatim with PHP):
 //!
-//! CLASS-NORMALIZED exact score calibration (volume-independent): each
+//! Class-normalized exact score calibration (volume-independent): each
 //! confirmed observation carries its original risk score (0..1000):
 //!
 //! ```text
@@ -47,62 +47,62 @@
 //! `false_positive_cost` / `false_negative_cost` knobs price false
 //! positives against false negatives explicitly (defaults 1.0 / 2.0). A
 //! perfectly separating classifier contributes ~zero pressure when the
-//! costs are equal; abuse predicted at low risk pushes the bias UP,
-//! legitimate traffic predicted at high risk pushes it DOWN. The target is
+//! costs are equal; abuse predicted at low risk pushes the bias up,
+//! legitimate traffic predicted at high risk pushes it down. The target is
 //! 0 below `min_samples` (default 1000).
 //!
-//! RANDOM-SAMPLE RESOLUTION GATE (mode 1 only): while
-//! `sample_total >= min_samples` AND `sample_resolved < sample_total ×
-//! minimum_resolution_ratio` (default 0.80), the target is SUSPENDED at 0 —
+//! Random-sample resolution gate (mode 1 only): while
+//! `sample_total >= min_samples` and `sample_resolved < sample_total ×
+//! minimum_resolution_ratio` (default 0.80), the target is suspended at 0 —
 //! the label-reporting process must demonstrably resolve a minimum
 //! fraction of the server-selected sample before the model may move. The
-//! counters are summed from the SAME 24 hourly buckets per scope (the
-//! `sample_total` is HINCRBYed by `register_decision.lua` at DECISION time
-//! for sampled decisions, `sample_resolved` by `confirm.lua` on a sampled
-//! confirmation — both ATOMICALLY with the receipt/ledger work).
+//! counters are summed from the same 24 hourly buckets per scope (the
+//! `sample_total` is incremented by `register_decision.lua` at decision
+//! time for sampled decisions, `sample_resolved` by `confirm.lua` on a
+//! sampled confirmation — both atomically with the receipt/ledger work).
 //!
-//! The rate limiter is PROPORTIONAL to elapsed time and applies to the
-//! PATH, not just the target: internal bias is stored in MILLI-POINTS at
+//! The rate limiter is proportional to elapsed time and applies to the
+//! path, not just the target: internal bias is stored in milli-points at
 //! `{kiwi:<ns>}:cal:state:<scope>` (1 point = 1000 units) and
 //! `allowed = max_change_per_minute × 1000 × elapsed_ms / 60000`. The
-//! FIRST call ever seeds bias_mp = 0 / ts = now BEFORE the sample threshold
-//! is evaluated; `ts` is refreshed on EVERY call (below threshold too) so a
+//! first call ever seeds bias_mp = 0 / ts = now before the sample threshold
+//! is evaluated; `ts` is refreshed on every call (below threshold too) so a
 //! long quiet period cannot accumulate movement allowance; below the
 //! threshold the stored bias still moves toward 0 through the same rate
 //! limiter (never an instant snap) — all atomically in the one script. The
-//! rate-limit clock is Redis TIME (the script derives `now` itself), so
+//! rate-limit clock is Redis time (the script derives `now` itself), so
 //! app-node clock skew cannot move the shared state.
 //!
-//! DECISION REGISTRATION is ATOMIC via `resources/register_decision.lua`
-//! (one script invocation: SET NX the receipt + create the PENDING outcome
-//! ledger + HINCRBY the decision-time bucket's sample_total when sampled) —
+//! Decision registration is atomic via `resources/register_decision.lua`
+//! (one script invocation: SET NX the receipt + create the pending outcome
+//! ledger + hincrby the decision-time bucket's sample_total when sampled) —
 //! a sample can never be counted without its receipt (no permanently
 //! orphaned denominators), and a decision always has an outcome-ledger
 //! entry regardless of whether calibration is enabled.
 //!
-//! Confirmation is ATOMIC via `resources/confirm.lua` (one script
+//! Confirmation is atomic via `resources/confirm.lua` (one script
 //! invocation: GET receipt → validate mode/weight/scope/hour → DEL →
-//! ledger CAS PENDING->L/A → HINCRBYFLOAT into the DECISION-TIME bucket →
-//! EXPIRE): there is no crash window between consuming the receipt and
-//! recording the outcome, and ALL arguments are validated BEFORE the
+//! ledger CAS pending->L/A → hincrbyfloat into the decision-time bucket →
+//! expire): there is no crash window between consuming the receipt and
+//! recording the outcome, and all arguments are validated before the
 //! receipt is deleted (an invalid mode/weight is an error reply that
 //! leaves the receipt untouched). Confirmed outcomes are bucketed by when
-//! the DECISION was made (`receipt.decision_hour`), never by confirmation
-//! time. The script returns a SHARED status: 0 = missing / already
-//! confirmed / corrupt receipt; 1 = FIRST confirmation and calibration
-//! recorded; 2 = FIRST confirmation but deliberately unsampled
+//! the decision was made (`receipt.decision_hour`), never by confirmation
+//! time. The script returns a shared status: 0 = missing / already
+//! confirmed / corrupt receipt; 1 = first confirmation and calibration
+//! recorded; 2 = first confirmation but deliberately unsampled
 //! (random-sample mode: the decision was not in the server-selected
-//! sample, so it does NOT enter calibration — but the confirmation is
+//! sample, so it does not enter calibration — but the confirmation is
 //! still consumed and the caller may apply first-party reputation exactly
 //! once). In random-sample mode an unsampled decision is discarded
 //! (deleted, never counted) so a label can never select itself into the
 //! calibration population; weighted mode applies the caller's inverse
-//! sampling probability as a float weight (and REQUIRES it: a weighted
+//! sampling probability as a float weight (and requires it: a weighted
 //! confirm without a weight is a typed error, never a silent 1.0).
 //!
-//! Correction is ATOMIC via `resources/correction.lua` (one script
-//! invocation: GET the outcome ledger → validate scope/hour → REVERSE the
-//! original contribution with the EXACT recorded weight (ledger.w, clamped
+//! Correction is atomic via `resources/correction.lua` (one script
+//! invocation: GET the outcome ledger → validate scope/hour → reverse the
+//! original contribution with the exact recorded weight (ledger.w, clamped
 //! at zero) → add the corrected contribution → flip the ledger). If the
 //! decision-time bucket already expired the ledger still flips — the
 //! corrected outcome is authoritative for future events while the prior
@@ -111,14 +111,14 @@
 //! identities are involved: the ledger itself is the once-only authority.
 //!
 //! `bias_for_scope` caches the per-scope result in-process for 30 s (bounded
-//! to ~1024 scopes, oldest evicted): cache hits make ZERO Redis calls (0 is
+//! to ~1024 scopes, oldest evicted): cache hits make zero Redis calls (0 is
 //! cached too). Recording a confirmed outcome (status 1 or 2) invalidates
 //! the scope's entry so the next assessment re-aggregates. The engine
-//! applies `clamp(base + bias, 0, 1000)` BEFORE band mapping.
+//! applies `clamp(base + bias, 0, 1000)` before band mapping.
 //!
 //! `sampling_metrics` runs `resources/sampling_metrics.lua` (one
-//! invocation: 24 HGETALLs summing `sample_total` / `sample_resolved` for
-//! one scope) and derives `resolution_ratio = resolved / total` (0 when
+//! invocation: 24 hgetall calls summing `sample_total` / `sample_resolved`
+//! for one scope) and derives `resolution_ratio = resolved / total` (0 when
 //! total is 0) and `sampled_expired = max(0, total − resolved)` — the
 //! latter includes receipts still in flight (registered, not yet
 //! resolved).
@@ -180,7 +180,7 @@ pub enum SamplingMode {
 }
 
 impl SamplingMode {
-    /// The ARGV[1] wire int shared with `resources/confirm.lua`.
+    /// The argv[1] wire int shared with `resources/confirm.lua`.
     fn as_int(self) -> u8 {
         match self {
             SamplingMode::Complete => 0,
@@ -192,16 +192,16 @@ impl SamplingMode {
 
 /// Outcome-feedback calibration store.
 pub trait CalibrationStore: Send + Sync {
-    /// Registers one issued decision ATOMICALLY
-    /// (`resources/register_decision.lua`): a STRING receipt JSON
+    /// Registers one issued decision atomically
+    /// (`resources/register_decision.lua`): a string receipt JSON
     /// `{"scope":..,"band":..,"action":"..","decision_hour":..,"score":..,
-    /// "sampled":0|1}` with EXPIRE `receipt_ttl_secs`, a PENDING outcome
-    /// ledger entry (EXPIRE `outcome_ttl_secs`) and — when `sampled` — the
-    /// decision-time bucket's `sample_total` denominator, all in ONE script
+    /// "sampled":0|1}` with expire `receipt_ttl_secs`, a pending outcome
+    /// ledger entry (expire `outcome_ttl_secs`) and — when `sampled` — the
+    /// decision-time bucket's `sample_total` denominator, all in one script
     /// invocation (a sample can never be counted without its receipt).
-    /// `score` is the decision's EXACT risk score (0..1000); `sampled` is
+    /// `score` is the decision's exact risk score (0..1000); `sampled` is
     /// the [`CalibrationStore::sample`] flag; `decision_hour` is
-    /// `now_ms / 3_600_000` (the DECISION's hour — confirmed outcomes are
+    /// `now_ms / 3_600_000` (the decision's hour — confirmed outcomes are
     /// bucketed by decision time); `weight` is 1.0 at registration (the
     /// confirmation records the actual inverse-sampling weight).
     ///
@@ -220,30 +220,30 @@ pub trait CalibrationStore: Send + Sync {
         weight: f64,
     ) -> Result<bool, CalibrationError>;
 
-    /// Confirms the outcome of one decision ATOMICALLY (one canonical Lua
+    /// Confirms the outcome of one decision atomically (one canonical Lua
     /// invocation — `resources/confirm.lua`): consumes the receipt, flips
-    /// the outcome ledger PENDING->L/A exactly once and records the exact
-    /// score into the DECISION-TIME hourly bucket, or discards an unsampled
+    /// the outcome ledger pending->L/A exactly once and records the exact
+    /// score into the decision-time hourly bucket, or discards an unsampled
     /// receipt in random-sample mode.
     ///
-    /// Returns the SHARED accepted-outcome status (wire contract with PHP):
+    /// Returns the shared accepted-outcome status (wire contract with PHP):
     ///
     /// - `0` — nothing consumed: receipt missing, already confirmed,
     ///   corrupt, or (mode 1) discarded as deliberately unsampled.
-    /// - `1` — FIRST confirmation; the exact score was recorded into the
+    /// - `1` — first confirmation; the exact score was recorded into the
     ///   decision-time scope bucket (+ the sampled-resolved counter in
     ///   random-sample mode).
-    /// - `2` — FIRST confirmation; deliberately unsampled in random-sample
+    /// - `2` — first confirmation; deliberately unsampled in random-sample
     ///   mode (consumed, never calibrated, resolved counter untouched).
     ///
     /// Statuses 1 and 2 both mean "first confirmation" — the caller may
     /// apply the first-party reputation event exactly once (engine
     /// contract); status 0 must NOT book any reputation event (a retry
-    /// must never amplify). `weight` is the HINCRBYFLOAT weight (the
+    /// must never amplify). `weight` is the hincrbyfloat weight (the
     /// inverse sampling probability in weighted mode). In weighted mode a
     /// missing weight is [`CalibrationError::WeightRequired`] — never a
     /// silent 1.0. Any backend failure — including a Lua error reply for an
-    /// invalid mode or weight, which happens BEFORE the receipt is deleted
+    /// invalid mode or weight, which happens before the receipt is deleted
     /// — is an error (the engine treats calibration as best-effort).
     fn confirm_outcome(
         &self,
@@ -252,12 +252,12 @@ pub trait CalibrationStore: Send + Sync {
         weight: Option<f64>,
     ) -> Result<u8, CalibrationError>;
 
-    /// Corrects a decision's outcome ATOMICALLY (one canonical Lua
+    /// Corrects a decision's outcome atomically (one canonical Lua
     /// invocation — `resources/correction.lua`): flips the outcome ledger
-    /// L <-> A and REVERSES the original bucket contribution (exact
+    /// L <-> A and reverses the original bucket contribution (exact
     /// recorded weight `ledger.w`, clamped at zero) before adding the
     /// corrected contribution — or flips the ledger alone when the
-    /// decision-time bucket already expired. `legitimate` is the CORRECTED
+    /// decision-time bucket already expired. `legitimate` is the corrected
     /// outcome. Returns `Ok(true)` when the correction was applied,
     /// `Ok(false)` when the decision is unknown or already carries the
     /// target outcome.
@@ -270,7 +270,7 @@ pub trait CalibrationStore: Send + Sync {
 
     /// The sampling flag stamped on every new receipt: Complete/Weighted
     /// always sample; RandomSample samples with probability
-    /// `sampling_probability_ppm / 1_000_000`. PURE (no side effects): the
+    /// `sampling_probability_ppm / 1_000_000`. Pure (no side effects): the
     /// sample denominator is booked atomically by
     /// [`CalibrationStore::record_receipt`].
     fn sample(&self) -> bool;
@@ -305,9 +305,9 @@ pub trait CalibrationStore: Send + Sync {
 }
 
 /// Redis-backed bounded aggregator implementing the calibration contract.
-/// Scope HMAC key: the raw scope must NEVER appear in Redis
+/// Scope HMAC key: the raw scope must never appear in Redis
 /// keys — an attacker can manufacture unbounded distinct scopes. Derived
-/// with HKDF info `kiwi/v2/scope-rate`, identical to the PHP side.
+/// with hkdf info `kiwi/v2/scope-rate`, identical to the PHP side.
 pub struct RedisCalibrationStore {
     client: redis::Client,
     namespace: String,
@@ -379,7 +379,7 @@ impl BiasCache {
     }
 }
 
-/// The CANONICAL calibration script, shared verbatim with PHP
+/// The canonical calibration script, shared verbatim with PHP
 /// (`protocol/risk-v1/calibration.lua`). One invocation replaces the
 /// two-script round trip: it aggregates the 24 hourly buckets (including
 /// their per-bucket sample counters), seeds and refreshes the rate-limit
@@ -387,26 +387,26 @@ impl BiasCache {
 /// returns the final integer bias in points.
 const CALIBRATION_LUA: &str = include_str!("../resources/calibration.lua");
 
-/// The CANONICAL atomic confirm script, shared verbatim with PHP
+/// The canonical atomic confirm script, shared verbatim with PHP
 /// (`protocol/risk-v1/confirm.lua`). One invocation consumes the receipt
 /// (DEL), flips the outcome ledger and records the exact score into the
-/// DECISION-TIME bucket (HINCRBYFLOAT + EXPIRE) — or discards an unsampled
+/// decision-time bucket (hincrbyfloat + expire) — or discards an unsampled
 /// receipt in random-sample mode.
 const CONFIRM_LUA: &str = include_str!("../resources/confirm.lua");
 
-/// The CANONICAL atomic decision-registration script, shared verbatim with
+/// The canonical atomic decision-registration script, shared verbatim with
 /// PHP (`protocol/risk-v1/register_decision.lua`): receipt (SET NX EX) +
-/// PENDING outcome ledger + the sampled decision-time denominator in ONE
+/// pending outcome ledger + the sampled decision-time denominator in one
 /// invocation.
 const REGISTER_DECISION_LUA: &str = include_str!("../resources/register_decision.lua");
 
-/// The CANONICAL atomic correction script, shared verbatim with PHP
+/// The canonical atomic correction script, shared verbatim with PHP
 /// (`protocol/risk-v1/correction.lua`): flips the outcome ledger and
 /// reverses/redoes the bucket contribution with the exact recorded weight.
 const CORRECTION_LUA: &str = include_str!("../resources/correction.lua");
 
-/// The CANONICAL sampling-metrics script, shared verbatim with PHP
-/// (`protocol/risk-v1/sampling_metrics.lua`): 24 HGETALLs summing the
+/// The canonical sampling-metrics script, shared verbatim with PHP
+/// (`protocol/risk-v1/sampling_metrics.lua`): 24 hgetall calls summing the
 /// scope's sample counters.
 const SAMPLING_METRICS_LUA: &str = include_str!("../resources/sampling_metrics.lua");
 
@@ -452,10 +452,10 @@ impl RedisCalibrationStore {
     /// # Panics
     ///
     /// Panics if the namespace is empty or contains `{`/`}`.
-    /// Derive the scope HMAC key: HKDF-SHA256, info
+    /// Derive the scope HMAC key: hkdf-sha256, info
     /// `kiwi/v2/scope-rate`, 32 bytes — identical to the PHP side.
     pub fn derive_scope_hmac_key(master: &[u8]) -> [u8; 32] {
-        // HKDF-SHA256(master, salt, info) matching the PHP hash_hkdf call
+        // hkdf-sha256(master, salt, info) matching the PHP hash_hkdf call
         let hk = hkdf::Hkdf::<Sha256>::new(Some(b"kiwicaptcha/deploy-salt/v1"), master);
         let mut out = [0u8; 32];
         hk.expand(b"kiwi/v2/scope-rate", &mut out)
@@ -544,7 +544,7 @@ impl RedisCalibrationStore {
     /// cost/resolution knobs: `minimum_resolution_ratio` (0..1,
     /// default 0.80 — 0 disables the random-sample resolution gate),
     /// `false_positive_cost` (default 1.0) and `false_negative_cost`
-    /// (default 2.0). `outcome_ttl_secs` is the ALWAYS-ON outcome-ledger
+    /// (default 2.0). `outcome_ttl_secs` is the always-on outcome-ledger
     /// lifetime (default 86400 s).
     ///
     /// # Panics
@@ -634,9 +634,9 @@ impl RedisCalibrationStore {
             .insert(scope, bias, now);
     }
 
-    /// Seeds an EXPLICIT hourly bucket with one exact-score observation
+    /// Seeds an explicit hourly bucket with one exact-score observation
     /// (flat fields `legit_count` / `legit_score_sum` /
-    /// `abuse_count` / `abuse_score_sum`, `HINCRBYFLOAT` + `EXPIRE 48h` —
+    /// `abuse_count` / `abuse_score_sum`, hincrbyfloat + expire 48h —
     /// the exact wire shape `resources/confirm.lua` produces; `now_ms`
     /// injected so tests can pin the hour). Ops/tests seeding: the
     /// production confirm path is [`CalibrationStore::confirm_outcome`].
@@ -712,9 +712,9 @@ impl RedisCalibrationStore {
         format!("{{kiwi:{}}}:cal:receipt:{decision_id}", self.namespace)
     }
 
-    /// The outcome-ledger key for one decision — the SAME canonical key the
+    /// The outcome-ledger key for one decision — the same canonical key the
     /// calibration-independent store path uses (`outcome_register.lua` /
-    /// `outcome_confirm.lua` / `outcome_correct.lua`), so the ALWAYS-ON
+    /// `outcome_confirm.lua` / `outcome_correct.lua`), so the always-on
     /// ledger is one key layout whether calibration is enabled or disabled.
     /// Public so tests (and tooling) can inspect the ledger entries.
     pub fn outcome_ledger_key(&self, decision_id: &str) -> String {
@@ -739,13 +739,13 @@ fn backend(e: redis::RedisError) -> CalibrationError {
     CalibrationError::Backend(e.to_string())
 }
 
-/// Maps a raw calibration.lua reply to a BOUNDED integer bias (audit
-/// #109). The canonical script guards its own output (a non-finite
-/// final_mp maps to +max_adjustment*1000 inside the Lua), so the reply is
-/// always a finite integer within ±max_adjustment; this defense-in-depth
-/// clamp keeps the i32 conversion bounded even if a future script variant
-/// regresses — the bias can never be NaN (i64 cannot be NaN) and never
-/// lower-risk-than-max beyond the configured clamp.
+/// Maps a raw calibration.lua reply to a bounded integer bias. The
+/// canonical script guards its own output (a non-finite final_mp maps to
+/// +max_adjustment*1000 inside the Lua), so the reply is always a finite
+/// integer within ±max_adjustment; this defense-in-depth clamp keeps the
+/// i32 conversion bounded even if a future script variant regresses — the
+/// bias can never be NaN (i64 cannot be NaN) and never lower-risk-than-max
+/// beyond the configured clamp.
 fn bounded_bias(bias: i64, max_adjustment: i32) -> i32 {
     bias.clamp(-(max_adjustment as i64), max_adjustment as i64) as i32
 }
@@ -753,7 +753,7 @@ fn bounded_bias(bias: i64, max_adjustment: i32) -> i32 {
 impl CalibrationStore for RedisCalibrationStore {
     fn bias_for_scope(&self, scope: u32, now_ms: i64) -> i32 {
         let now = Instant::now();
-        // Cache hit (including a cached 0): ZERO Redis calls.
+        // Cache hit (including a cached 0): no Redis calls.
         if let Some(cached) = self
             .cache
             .lock()
@@ -768,11 +768,11 @@ impl CalibrationStore for RedisCalibrationStore {
         };
         let conn = guard.as_mut().expect("connection set by connection()");
 
-        // HOT PATH: ONE canonical script invocation. Keys are the 24 hourly
+        // Hot path: one canonical script invocation. Keys are the 24 hourly
         // buckets + the rate-limit state (the sample counters live
-        // INSIDE the buckets, so there are no singleton counter keys);
-        // ARGV is now_ms (informational — the script's rate-limit clock is
-        // Redis TIME), min_samples, max_adjustment, max_change_per_minute,
+        // inside the buckets, so there are no singleton counter keys);
+        // argv is now_ms (informational — the script's rate-limit clock is
+        // Redis time), min_samples, max_adjustment, max_change_per_minute,
         // minimum_resolution_ratio (float), sampling mode (0/1/2),
         // false_positive_cost, false_negative_cost. The script aggregates,
         // seeds/refreshes the milli-point state, applies the proportional
@@ -829,13 +829,13 @@ impl CalibrationStore for RedisCalibrationStore {
         })?;
 
         // ONE canonical script invocation (register_decision.lua): SET NX EX
-        // the receipt + create the PENDING outcome ledger + HINCRBY the
+        // the receipt + create the pending outcome ledger + hincrby the
         // decision-time bucket's sample_total when sampled — a sample can
         // never be counted without its receipt (no permanently orphaned
         // denominators), and a decision always has an outcome-ledger entry.
         // Wire format shared with PHP: receipt JSON
         // {"scope":..,"band":..,"action":"..","decision_hour":..,"score":..,
-        // "sampled":0|1} with EXPIRE `receipt_ttl_secs`.
+        // "sampled":0|1} with expire `receipt_ttl_secs`.
         let json = serde_json::json!({
             "scope": scope,
             "band": band,
@@ -868,9 +868,9 @@ impl CalibrationStore for RedisCalibrationStore {
         legitimate: bool,
         weight: Option<f64>,
     ) -> Result<u8, CalibrationError> {
-        // Weighted sampling REQUIRES the caller's inverse sampling
+        // Weighted sampling requires the caller's inverse sampling
         // probability: a missing weight would silently bias the population,
-        // so it is a TYPED error, never a silent 1.0.
+        // so it is a typed error, never a silent 1.0.
         if self.mode == SamplingMode::Weighted && weight.is_none() {
             return Err(CalibrationError::WeightRequired(decision_id.to_string()));
         }
@@ -880,9 +880,9 @@ impl CalibrationStore for RedisCalibrationStore {
             CalibrationError::Backend("calibration connection vanished".to_string())
         })?;
 
-        // Key discovery: the DECISION-TIME bucket and the outcome ledger
+        // Key discovery: the decision-time bucket and the outcome ledger
         // keys need the receipt's scope + decision_hour, which only the
-        // receipt itself carries. The pre-read GET is NON-destructive — the
+        // receipt itself carries. The pre-read GET is non-destructive — the
         // confirm script re-checks the receipt under the same key, so a
         // concurrent consumption simply yields status 0 (the outcome is
         // recorded exactly once) and a receipt deleted in between is a
@@ -911,15 +911,15 @@ impl CalibrationStore for RedisCalibrationStore {
         let ledger_key = self.outcome_ledger_key(decision_id);
 
         // ONE canonical script invocation: GET receipt -> validate mode +
-        // weight + scope/hour -> DEL -> ledger CAS PENDING->L/A -> (discard
-        // or) HINCRBYFLOAT the exact score into the DECISION-TIME bucket +
-        // EXPIRE -> (random-sample) HINCRBY the resolved counter. KEYS =
-        // receipt, decision-time bucket, outcome ledger; ARGV = mode int,
+        // weight + scope/hour -> DEL -> ledger CAS pending->L/A -> (discard
+        // or) hincrbyfloat the exact score into the decision-time bucket +
+        // expire -> (random-sample) hincrby the resolved counter. Keys =
+        // receipt, decision-time bucket, outcome ledger; argv = mode int,
         // weight (decimal string; "1" outside weighted mode), legitimate
         // 1/0, bucket TTL, outcome TTL, expected scope, expected
-        // decision_hour. Returns the SHARED status: 0 none consumed,
+        // decision_hour. Returns the shared status: 0 none consumed,
         // 1 recorded, 2 consumed-but-unsampled. Invalid mode/weight ->
-        // error_reply BEFORE any state change, so the receipt survives a
+        // error_reply before any state change, so the receipt survives a
         // validation failure.
         let mut invoke = self.confirm_script.prepare_invoke();
         invoke.key(receipt_key.as_str());
@@ -934,7 +934,7 @@ impl CalibrationStore for RedisCalibrationStore {
         invoke.arg(decision_hour.to_string());
         let status: i64 = invoke.invoke(conn).map_err(backend)?;
         if status == 1 || status == 2 {
-            // A FIRST confirmation (status 1 or 2) invalidates the scope's
+            // A first confirmation (status 1 or 2) invalidates the scope's
             // cached bias so the next assessment re-aggregates — status 2
             // is a consumed outcome too (unsampled: no calibration, but the
             // cache entry would otherwise go stale relative to the sample
@@ -960,8 +960,8 @@ impl CalibrationStore for RedisCalibrationStore {
             CalibrationError::Backend("calibration connection vanished".to_string())
         })?;
 
-        // Key discovery: the DECISION-TIME bucket needs the ledger's scope
-        // + hour. The pre-read GET is NON-destructive — correction.lua
+        // Key discovery: the decision-time bucket needs the ledger's scope
+        // + hour. The pre-read GET is non-destructive — correction.lua
         // re-checks the ledger under the same key.
         let raw: Option<String> = redis::cmd("GET")
             .arg(&ledger_key)
@@ -986,10 +986,10 @@ impl CalibrationStore for RedisCalibrationStore {
         let bucket_key = self.bucket_key(scope, hour);
 
         // ONE canonical script invocation (correction.lua): validate
-        // scope/hour/outcome/weight -> REVERSE the original contribution
+        // scope/hour/outcome/weight -> reverse the original contribution
         // with the exact recorded weight (ledger.w, clamped at zero) -> add
-        // the corrected contribution -> flip the ledger. KEYS = ledger,
-        // decision-time bucket; ARGV = new outcome ('L'/'A'), weight
+        // the corrected contribution -> flip the ledger. Keys = ledger,
+        // decision-time bucket; argv = new outcome ('L'/'A'), weight
         // (decimal string), bucket TTL, outcome TTL, expected scope,
         // expected decision_hour. Returns 1 when applied, 0 when unknown or
         // already carrying the target outcome.
@@ -1026,7 +1026,7 @@ impl CalibrationStore for RedisCalibrationStore {
         })?;
 
         // ONE canonical script invocation (sampling_metrics.lua): 24
-        // HGETALLs summing the scope's sample counters. ARGV[1] is
+        // hgetall calls summing the scope's sample counters. argv[1] is
         // now_ms (informational).
         let hour = now_ms / 3_600_000;
         let mut keys: Vec<String> = Vec::with_capacity(Self::BUCKET_WINDOW_HOURS as usize);
@@ -1116,7 +1116,7 @@ mod tests {
         )
     }
 
-    /// A fresh store (cold in-process cache) over an EXISTING namespace:
+    /// A fresh store (cold in-process cache) over an existing namespace:
     /// forces a re-aggregation against the persisted Redis state.
     fn store_on(
         namespace: &str,
@@ -1163,9 +1163,9 @@ mod tests {
         )
     }
 
-    /// A store with every knob explicit over an EXISTING namespace (cold
-    /// cache): re-aggregates the persisted Redis state with the SAME knobs
-    /// the seeding store used (gate thresholds, costs and mode are ARGV,
+    /// A store with every knob explicit over an existing namespace (cold
+    /// cache): re-aggregates the persisted Redis state with the same knobs
+    /// the seeding store used (gate thresholds, costs and mode are argv,
     /// so a mismatched cold store would compute a different bias).
     #[allow(clippy::too_many_arguments)]
     fn store_full_on(
@@ -1259,7 +1259,7 @@ mod tests {
         now() / 3_600_000
     }
 
-    /// Registers a receipt through the ATOMIC production path
+    /// Registers a receipt through the atomic production path
     /// (register_decision.lua) with the current decision hour and weight
     /// 1.0.
     fn register(
@@ -1284,7 +1284,7 @@ mod tests {
             .unwrap());
     }
 
-    /// The Redis TIME clock in epoch milliseconds — the distributed clock
+    /// The Redis time clock in epoch milliseconds — the distributed clock
     /// authority the calibration script derives its rate-limit window from.
     fn redis_time_ms(conn: &mut redis::Connection) -> i64 {
         let t: Vec<i64> = redis::cmd("TIME").query(conn).expect("TIME");
@@ -1292,7 +1292,7 @@ mod tests {
     }
 
     /// Local epoch ms for bucket-hour selection (the Rust side computes the
-    /// hourly window; the script's rate-limit clock is Redis TIME).
+    /// hourly window; the script's rate-limit clock is Redis time).
     fn now() -> i64 {
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -1302,7 +1302,7 @@ mod tests {
 
     /// Seeds the state for every scope of a store (each first call returns
     /// 0 and stamps ts = Redis now); the callers then sleep and query with
-    /// a COLD store so the proportional allowance has real elapsed time.
+    /// a cold store so the proportional allowance has real elapsed time.
     fn seed_all(store: &RedisCalibrationStore, scopes: &[u32]) {
         for &scope in scopes {
             assert_eq!(
@@ -1327,7 +1327,7 @@ mod tests {
         };
         // Huge max_change_per_minute: the proportional allowance never
         // binds, so the raw class-normalized formula is observable. Every
-        // scope's FIRST call seeds the state (bias_mp = 0, ts = Redis now)
+        // scope's first call seeds the state (bias_mp = 0, ts = Redis now)
         // and returns 0; after a short real sleep the raw value is reached
         // in full.
         let s = store_limits("bias", 1, 150, 100_000);
@@ -1337,10 +1337,10 @@ mod tests {
         // -> raw 20 (the cost-knob test shows 1/1 costs zero it out).
         fill(&s, 1, 100, 10, 0, now());
         fill(&s, 1, 900, 0, 10, now());
-        // Abuse predicted at LOW score (100): under-predicted threat ->
+        // Abuse predicted at low score (100): under-predicted threat ->
         // fn_mean = 900 -> error 1800 -> raw 360 -> clamped 150.
         fill(&s, 2, 100, 0, 10, now());
-        // Legit traffic predicted at HIGH score (900): over-predicted ->
+        // Legit traffic predicted at high score (900): over-predicted ->
         // fp_mean = 900 -> error -900 -> raw -180 -> clamped -150.
         fill(&s, 3, 900, 10, 0, now());
         // Class normalization kills label-volume dominance: 60 legit@900
@@ -1430,7 +1430,7 @@ mod tests {
         let ns = s.namespace().to_string();
         let mut conn = client().get_connection().expect("connection");
 
-        // Abuse predicted at LOW score (raw target +150): the first call
+        // Abuse predicted at low score (raw target +150): the first call
         // seeds bias_mp = 0 / ts = now, so the raw is clamped against a
         // zero allowance; with mpm 60 the bias then grows at exactly one
         // point per real second — never an instant jump to 150.
@@ -1446,9 +1446,9 @@ mod tests {
             "the allowance must bind: raw 150, served ~2-3 points"
         );
 
-        // Legit traffic predicted at HIGH score (10 legit@900 + 10
+        // Legit traffic predicted at high score (10 legit@900 + 10
         // abuse@900 -> fp 900, fn 100 -> target -140): the same rate moves
-        // DOWN, proving the direction follows the raw target.
+        // down, proving the direction follows the raw target.
         fill(&s, 22, 900, 10, 0, now());
         fill(&s, 22, 900, 0, 10, now());
         assert_eq!(s.bias_for_scope(22, now()), 0);
@@ -1487,8 +1487,8 @@ mod tests {
             "above the threshold the bias accumulates at the allowed rate"
         );
 
-        // Step 2: a below-threshold VIEW (min 1_000_000) back-to-back: the
-        // TARGET is 0, but the stored bias is UNCHANGED (the elapsed
+        // Step 2: a below-threshold view (min 1_000_000) back-to-back: the
+        // target is 0, but the stored bias is unchanged (the elapsed
         // allowance is ~0) — it decays through the rate limiter, never an
         // instant snap to 0.
         let below = store_on(&ns, 1_000_000, 150, 60);
@@ -1543,7 +1543,7 @@ mod tests {
         // is not used).
         assert_eq!(s.script_calls(), 1);
 
-        // Cache hit: the second call issues ZERO scripts.
+        // Cache hit: the second call issues no scripts.
         assert_eq!(s.bias_for_scope(7, now()), 0);
         assert_eq!(s.script_calls(), 1);
 
@@ -1596,7 +1596,7 @@ mod tests {
 
         // A fresh outcome (record_at) drops the scope's cache entry: the
         // next call re-invokes the script. 90 legit@900 are added to the
-        // SAME hour: fp_mean = (9000 + 81000) / 180 = 500, fn_mean 900 ->
+        // same hour: fp_mean = (9000 + 81000) / 180 = 500, fn_mean 900 ->
         // error 1300 -> raw 260 -> clamped 150 (after the sleep the huge
         // allowance serves it in full).
         for _ in 0..90 {
@@ -1638,7 +1638,7 @@ mod tests {
         assert_eq!(s.script_calls(), 1);
 
         // A confirm on the same scope drops the cache entry: the next call
-        // MUST re-invoke the script, which serves the aggregate in full
+        // must re-invoke the script, which serves the aggregate in full
         // (10 abuse@100 -> 150; the state was seeded at the first call, so
         // after the sleep the allowance is huge).
         register(&s, "c-1", 7, 4, 100, true);
@@ -1651,7 +1651,7 @@ mod tests {
             "confirm_outcome must invalidate the cached bias"
         );
 
-        // The confirmed exact score feeds the bias in the DECISION hour: a
+        // The confirmed exact score feeds the bias in the decision hour: a
         // fresh scope (fresh state) seeded at the real now, queried after a
         // real sleep by the same store (the confirm already dropped the
         // cache) -> full raw 180 -> clamped 150.
@@ -1827,8 +1827,8 @@ mod tests {
         let s = store_mode("rand", SamplingMode::RandomSample, 0);
         assert!(!s.sample(), "ppm 0 never samples");
 
-        // Unsampled: consumed with status 2 (receipt deleted, NO bucket
-        // fields, no resolved-counter increment) — a FIRST confirmation
+        // Unsampled: consumed with status 2 (receipt deleted, no bucket
+        // fields, no resolved-counter increment) — a first confirmation
         // that never enters calibration.
         register(&s, "d-unsampled", 7, 4, 900, false);
         assert_eq!(
@@ -1935,7 +1935,7 @@ mod tests {
         };
         let s = make();
         register(&s, "race-1", 7, 4, 500, true);
-        // Two INDEPENDENT stores on the same namespace: no shared
+        // Two independent stores on the same namespace: no shared
         // connection, so the race exercises the script's atomicity (the
         // GET+DEL+increment has no crash window; the loser sees no receipt
         // and reports status 0).
@@ -1975,7 +1975,7 @@ mod tests {
                 2.0,
             )
         };
-        // Wire ints shared with PHP (confirm.lua ARGV[1]).
+        // Wire ints shared with PHP (confirm.lua argv[1]).
         assert_eq!(SamplingMode::Complete.as_int(), 0);
         assert_eq!(SamplingMode::RandomSample.as_int(), 1);
         assert_eq!(SamplingMode::Weighted.as_int(), 2);
@@ -1999,7 +1999,7 @@ mod tests {
         let ledger = ledger_key(&ns, "cv-1");
         let script = redis::Script::new(CONFIRM_LUA);
 
-        // Invalid mode: the script must error BEFORE the receipt is
+        // Invalid mode: the script must error before the receipt is
         // deleted.
         register(&s, "cv-1", 7, 4, 900, true);
         let mut inv = script.prepare_invoke();
@@ -2100,7 +2100,7 @@ mod tests {
         fill(&s, 10, 100, 0, 10, now());
 
         // Scope 9: 10 sampled decisions registered, 7 resolved — 0.70 < 0.80
-        // -> the gate HOLDS the bias at 0.
+        // -> the gate holds the bias at 0.
         for i in 0..10 {
             register(&s, &format!("g9-{i}"), 9, 4, 100, true);
         }
@@ -2124,7 +2124,7 @@ mod tests {
         );
 
         // Scope 10: 10 sampled decisions registered, 8 resolved — 0.80 >=
-        // 0.80 -> the gate OPENS for this scope in the SAME namespace.
+        // 0.80 -> the gate opens for this scope in the same namespace.
         for i in 0..10 {
             register(&s, &format!("g10-{i}"), 10, 4, 100, true);
         }
@@ -2143,7 +2143,7 @@ mod tests {
             "scope 10 books its own denominators"
         );
 
-        // The gate HOLD is elapsed-independent (the target is 0), so this
+        // The gate hold is elapsed-independent (the target is 0), so this
         // query also refreshes the rate-limit ts...
         let hold = store_full_on(
             &ns,
@@ -2162,7 +2162,7 @@ mod tests {
             0,
             "resolved/total below the ratio must suspend the bias"
         );
-        // Scope 10's gate is ALREADY open (8/10 resolved): this first call
+        // Scope 10's gate is already open (8/10 resolved): this first call
         // seeds its rate-limit state (raw 150 target, zero allowance -> 0),
         // so the post-sleep allowance has real elapsed time to serve.
         assert_eq!(
@@ -2231,7 +2231,7 @@ mod tests {
         let ns = s.namespace().to_string();
         // 10 abuse@100 -> raw 150 target.
         fill(&s, 10, 100, 0, 10, now());
-        // Only 5 sampled decisions: the per-scope total stays BELOW
+        // Only 5 sampled decisions: the per-scope total stays below
         // min_samples, so the resolution gate is skipped entirely.
         for i in 0..5 {
             register(&s, &format!("g2-{i}"), 10, 4, 100, true);
@@ -2279,7 +2279,7 @@ mod tests {
         );
         fill(&d, 1, 250, 10, 0, now());
         fill(&d, 1, 900, 0, 10, now());
-        // fn-heavy pricing (fp 3.0, fn 1.0): the SAME data -> error =
+        // fn-heavy pricing (fp 3.0, fn 1.0): the same data -> error =
         // 100*1 - 250*3 = -650 -> raw -130 (false positives cost 3x).
         let c = store_full(
             "costc",
@@ -2296,7 +2296,7 @@ mod tests {
         fill(&c, 2, 250, 10, 0, now());
         fill(&c, 2, 900, 0, 10, now());
         // Equal costs (1.0/1.0): a perfectly separating classifier
-        // (legit@100 + abuse@900) contributes EXACTLY zero pressure.
+        // (legit@100 + abuse@900) contributes exactly zero pressure.
         let e = store_full(
             "coste",
             1,
@@ -2379,7 +2379,7 @@ mod tests {
         let ns = s.namespace().to_string();
         let mut conn = client().get_connection().expect("connection");
 
-        // ONE script invocation books the receipt, the PENDING outcome
+        // ONE script invocation books the receipt, the pending outcome
         // ledger AND the sample denominator together.
         assert!(s
             .record_receipt("ra-1", 7, 4, RiskAction::Argon16, 900, true, hour(), 1.0)
@@ -2443,7 +2443,7 @@ mod tests {
         let old_hour = hour() - 2;
 
         // The decision was made TWO hours ago: the confirmation must land in
-        // the DECISION-TIME bucket, never the confirmation-time one.
+        // the decision-time bucket, never the confirmation-time one.
         assert!(s
             .record_receipt("dh-1", 7, 4, RiskAction::Argon16, 900, true, old_hour, 1.0,)
             .unwrap());
@@ -2492,7 +2492,7 @@ mod tests {
         assert_eq!(hget_f64(&mut conn, &key, "legit_count"), 2.0);
         assert_eq!(hget_f64(&mut conn, &key, "legit_score_sum"), 1800.0);
 
-        // Correct to abuse with weight 3.0: the ORIGINAL contribution is
+        // Correct to abuse with weight 3.0: the original contribution is
         // reversed with the exact recorded weight (2.0, clamped at zero)
         // and the corrected one is added (3.0) — the ledger flips to A.
         assert!(s.correct_outcome("cor-1", false, Some(3.0)).unwrap());
@@ -2509,7 +2509,7 @@ mod tests {
         assert_eq!(value["o"], "A");
         assert_eq!(value["w"], 3.0);
 
-        // Correcting again to the SAME outcome is a no-op.
+        // Correcting again to the same outcome is a no-op.
         assert!(
             !s.correct_outcome("cor-1", false, Some(3.0)).unwrap(),
             "a ledger already carrying the target outcome must not flip"
@@ -2595,13 +2595,13 @@ mod tests {
         assert!((m8.resolution_ratio - 0.6).abs() < 1e-9);
     }
 
-    // ── NON-FINITE RISK GUARDS ───────────────────────────────────────────
+    // ── non-finite risk guards ───────────────────────────────────────────
     // Every float boundary in the scoring/calibration path must produce a
-    // BOUNDED integer output — never NaN, never lower-risk-than-max. The
+    // bounded integer output — never NaN, never lower-risk-than-max. The
     // canonical calibration.lua guards its own output (non-finite final_mp
     // -> +max_adjustment*1000) and `bounded_bias` clamps the reply on the
-    // Rust side; these cases exercise the FULL guard chain (corrupted
-    // state -> Lua guard -> bounded integer reply -> Rust clamp). The SCORE
+    // Rust side; these cases exercise the full guard chain (corrupted
+    // state -> Lua guard -> bounded integer reply -> Rust clamp). The score
     // itself is pure integer math (`score::score`, saturating u16) — no
     // float boundary exists there.
 
@@ -2640,7 +2640,7 @@ mod tests {
         }
     }
 
-    /// Seeds a corrupted flat field via raw HSET ("1e999" — Redis 7.4+ Lua
+    /// Seeds a corrupted flat field via raw hset ("1e999" — Redis 7.4+ Lua
     /// tonumber parses it as +Inf, the value Lua 5.1's errno check would
     /// have rejected).
     fn hset_corrupt(conn: &mut redis::Connection, key: &str, field: &str, value: &str) {
@@ -2678,7 +2678,7 @@ mod tests {
             150,
             "NaN must fail HIGH to +max_adjustment (never 0)"
         );
-        // A COLD store re-aggregates the same corrupted state: stable.
+        // A cold store re-aggregates the same corrupted state: stable.
         assert_eq!(
             store_on(s.namespace(), 1, 150, 100_000).bias_for_scope(1, now()),
             150,
@@ -2724,9 +2724,9 @@ mod tests {
         );
     }
 
-    /// Integration: corrupted rate-limit STATE (bias_mp = "1e999" -> +Inf)
+    /// Integration: corrupted rate-limit state (bias_mp = "1e999" -> +Inf)
     /// drags final_mp to +Inf through the lower clamp even when the target
-    /// is 0 — the Lua guard must fail HIGH to +max_adjustment, never
+    /// is 0 — the Lua guard must fail high to +max_adjustment, never
     /// return the target 0.
     #[test]
     fn corrupted_state_inf_never_maps_to_zero() {
@@ -2782,7 +2782,7 @@ mod tests {
             .query::<()>(&mut conn)
             .expect("hset extremes");
         let maxed = s.sampling_metrics(4, now()).unwrap();
-        // The canonical script clamps corrupted totals at MAX_SAMPLE_COUNTER
+        // The canonical script clamps corrupted totals at max_sample_counter
         // (1e9) — the reply must never carry an out-of-range i64.
         assert_eq!(maxed.sampled_total, 1_000_000_000);
         assert_eq!(maxed.resolution_ratio, 1.0);
@@ -2800,7 +2800,7 @@ mod tests {
         assert_eq!(s.sampling_metrics(4, now()).unwrap().resolution_ratio, 0.0);
     }
 
-    /// (c) The SCORE is pure integer math (saturating u16 weighted
+    /// (c) The score is pure integer math (saturating u16 weighted
     /// products, i32 accumulation) — no float boundary; extreme inputs
     /// always produce a bounded 0..=1000 score.
     #[test]

@@ -9,13 +9,13 @@ use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\FakePredisClient;
 use PHPUnit\Framework\TestCase;
 
 /**
- * Rollback-resistant readiness: /health/live is ALWAYS 200
- * while the process runs (never tied to saturation); /health/ready is 200
- * only when the signing keys are configured, the security Redis answers a
- * (cached, debounced) PING, and the CENTRAL security-policy state
- * ({kiwi:<ns>}:security-policy) is compatible — min_protocol_version <= 2
- * AND min_policy_epoch <= the configured risk.policy_version; an absent key
- * leaves the binary's own configuration authoritative.
+ * Rollback-resistant readiness: /health/live is always 200 while the
+ * process runs (never tied to saturation). /health/ready is 200 only
+ * when the signing keys are configured, the security Redis answers a
+ * (cached, debounced) ping, and the central security-policy state
+ * ({kiwi:<ns>}:security-policy) is compatible — min_protocol_version
+ * <= 2 and min_policy_epoch <= the configured risk.policy_version. An
+ * absent key leaves the binary's own configuration authoritative.
  */
 final class KiwiHealthControllerTest extends TestCase
 {
@@ -149,13 +149,13 @@ final class KiwiHealthControllerTest extends TestCase
         // Healthy: probe succeeds, readiness OK.
         self::assertSame(200, $controller->ready()->getStatusCode());
 
-        // The Redis starts timing out: the FIRST failure is debounced for
+        // The Redis starts timing out: the first failure is debounced for
         // one cache window — readiness holds (transient blip absorbed).
         $client->pingFails = true;
         $now[0] += 1100;
         self::assertSame(200, $controller->ready()->getStatusCode(), 'a single transient probe timeout must NOT fail readiness');
 
-        // A SECOND consecutive failure (after the debounce window) flips.
+        // A second consecutive failure (after the debounce window) flips.
         $now[0] += 1100;
         self::assertSame(503, $controller->ready()->getStatusCode(), 'two consecutive probe failures must fail readiness');
 

@@ -12,24 +12,23 @@ use Predis\Client;
 use PHPUnit\Framework\TestCase;
 
 /**
- * NON-FINITE RISK GUARDS: every float boundary in the
- * scoring/calibration path must produce a BOUNDED integer output — never
- * NaN, never lower-risk-than-max.
+ * Non-finite risk guards: every float boundary in the scoring and
+ * calibration path must produce a bounded integer output, never NaN
+ * and never lower-risk-than-max.
  *
- * Boundaries audited:
- *   (a) the PHP calibrator's bias conversion (float → int): NaN/±Inf from
- *       a corrupted bucket value must map to +maxAdjustment (fail high,
- *       never 0 — a plain `(int)` cast maps both NaN and Inf to 0);
- *   (b) the resolution-ratio division (resolved/total): total 0 → 0.0;
- *       the ratio is integer-division-derived (always finite) with a
- *       defensive non-finite guard;
- *   (c) the SCORE is pure integer math (intdiv in RiskScorer) — there is
- *       no float boundary; verified + documented here.
+ * Boundaries audited: (a) the PHP calibrator's bias conversion (float ->
+ * int). NaN/±Inf from a corrupted bucket value must map to
+ * +maxAdjustment, failing high and never returning 0, since a plain
+ * `(int)` cast maps both NaN and Inf to 0. (b) The resolution-ratio
+ * division (resolved/total): total 0 -> 0.0. The ratio is
+ * integer-division-derived (always finite) with a defensive non-finite
+ * guard. (c) The score is pure integer math (intdiv in RiskScorer), so
+ * there is no float boundary; verified and documented here.
  *
  * The canonical calibration.lua guards its own output (non-finite
  * final_mp → +max_adjustment*1000), so these Redis cases exercise the
- * FULL guard chain (corrupted state → Lua guard → bounded integer reply →
- * PHP conversion clamp).
+ * full guard chain: corrupted state → Lua guard → bounded integer
+ * reply → PHP conversion clamp.
  */
 final class NonFiniteBiasTest extends TestCase
 {
@@ -108,10 +107,11 @@ final class NonFiniteBiasTest extends TestCase
     }
 
     /**
-     * (a) Integration: a corrupted bucket value ("1e999" — Lua 5.1
-     * tonumber = +Inf) makes fp_mean = Inf/Inf = NaN; the Lua guard maps
-     * the NaN final_mp to +max_adjustment*1000 and the PHP conversion
-     * yields exactly +maxAdjustment — never 0, never an eval error.
+     * (a) Integration: a corrupted bucket value ("1e999", which Lua 5.1
+     * tonumber reads as +Inf) makes fp_mean = Inf/Inf = NaN. The Lua
+     * guard maps the NaN final_mp to +max_adjustment*1000 and the PHP
+     * conversion yields exactly +maxAdjustment, never 0 and never an
+     * eval error.
      */
     public function testCorruptedBucketNaNPathsFailHighToPlusMaxAdjustment(): void
     {
@@ -155,10 +155,10 @@ final class NonFiniteBiasTest extends TestCase
     }
 
     /**
-     * (a) Integration: corrupted rate-limit STATE (bias_mp = "1e999" ->
+     * (a) Integration: corrupted rate-limit state (bias_mp = "1e999" ->
      * +Inf) drags final_mp to +Inf through the lower clamp even when the
-     * target is 0 (below minSamples) — the Lua guard must fail HIGH to
-     * +maxAdjustment, never return the target 0.
+     * target is 0 (below minSamples). The Lua guard must fail high to
+     * +maxAdjustment, never returning the target 0.
      */
     public function testCorruptedStateInfNeverMapsToZero(): void
     {
@@ -192,8 +192,8 @@ final class NonFiniteBiasTest extends TestCase
         $client->hset($key, 'sample_total', (string) PHP_INT_MAX);
         $client->hset($key, 'sample_resolved', (string) PHP_INT_MAX);
         $metrics = $c->samplingMetrics($scope, $this->nowMs());
-        // The canonical script clamps corrupted totals at MAX_SAMPLE_COUNTER
-        // (1e9) — the int cast of an out-of-range float is UB pre-PHP-8.5.
+        // The canonical script clamps corrupted totals at 1e9; the int
+        // cast of an out-of-range float is undefined before PHP 8.5.
         self::assertSame(1_000_000_000, $metrics['sampledTotal']);
         self::assertSame(1.0, $metrics['resolutionRatio']);
         self::assertTrue(is_finite($metrics['resolutionRatio']), 'the ratio must never be NaN/Inf');
@@ -204,9 +204,10 @@ final class NonFiniteBiasTest extends TestCase
     }
 
     /**
-     * (c) The SCORE is integer math (intdiv) — there is no float boundary
-     * in the scorer. Verified: extreme signal vectors always produce an
-     * int score in 0..1000 (never NaN — PHP ints cannot be NaN).
+     * (c) The score is integer math (intdiv), so there is no float
+     * boundary in the scorer. Verified: extreme signal vectors always
+     * produce an int score in 0..1000 (never NaN, since PHP ints cannot
+     * be NaN).
      */
     public function testScoreIsPureIntegerMathWithNoFloatBoundary(): void
     {

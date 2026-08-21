@@ -7,12 +7,12 @@ namespace BelConsulting\KiwiCaptchaBundle\Risk;
 use KiwiCaptcha\Risk\RiskAction;
 
 /**
- * The open-chain REQUIREMENT of one transaction — the typed surface the
+ * The open-chain requirement of one transaction, the typed surface the
  * stage-2 issuance and the disposition layer consume. The state is the
  * machine state of the chain: available | reserved | issued | verified |
- * step_up_required | denied. (Legacy 'completed' records — the historical
- * name of the terminal-with-nonce state — are reported as 'issued':
- * semantically identical.)
+ * step_up_required | denied. Legacy 'completed' records, the historical
+ * name of the terminal-with-nonce state, are reported as 'issued':
+ * semantically identical.
  */
 final class ChainRequirement
 {
@@ -20,7 +20,7 @@ final class ChainRequirement
         public readonly string $chainId,
         public readonly string $stage1Nonce,
         public readonly string $scope,
-        /** The AUTHORITATIVE transaction binding ('' = the transaction is unbound). */
+        /** The authoritative transaction binding ('' = the transaction is unbound). */
         public readonly string $requestBinding,
         public readonly int $policyVersion,
         public readonly RiskAction $requiredAction,

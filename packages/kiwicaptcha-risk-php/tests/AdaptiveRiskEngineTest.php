@@ -420,7 +420,7 @@ final class AdaptiveRiskEngineTest extends TestCase
     /**
      * Engine-level wiring: the engine passes its per-process
      * scope-action hysteresis map into the policy, so an oscillating
-     * boundary score (449/451/449…) yields a STABLE action instead of a
+     * boundary score (449/451/449…) yields a stable action instead of a
      * flip-flopping challenge profile.
      */
     public function testScopeActionHysteresisStabilizesBoundaryScore(): void
@@ -597,8 +597,8 @@ final class AdaptiveRiskEngineTest extends TestCase
             'the receipt must carry the EXACT score, the assessment-time sampling flag and the decision hour'
         );
 
-        // confirmedAbuse: FIRST the calibrator's atomic confirm (receipt
-        // consumed exactly once), THEN the reputation event.
+        // confirmedAbuse: the calibrator's atomic confirm runs first
+        // (receipt consumed exactly once), then the reputation event.
         $engine->confirmedAbuse($this->context(event: RiskEventKind::ConfirmedAbuse), $decision->decisionId);
         self::assertSame([[$decision->decisionId, false, null]], $confirmed, 'the atomic confirm must run first (legitimate=false)');
         self::assertSame([RiskEventKind::PreIssue, RiskEventKind::ConfirmedAbuse], $observedEvents, 'the reputation event must still be recorded');
@@ -625,11 +625,11 @@ final class AdaptiveRiskEngineTest extends TestCase
 
     public function testConfirmedFeedbackGatesReputationOnStatus(): void
     {
-        // REPUTATION GATING: the reputation event is booked ONLY on a FIRST
-        // confirmation (status 1 or 2). Status 0 (already confirmed /
-        // missing / backend failure) returns a duplicate-marked receipt
-        // with zero signals and NO observation — a webhook retry can never
-        // amplify a ConfirmedAbuse.
+        // The reputation event is booked only on a first confirmation
+        // (status 1 or 2). Status 0 (already confirmed / missing / backend
+        // failure) returns a duplicate-marked receipt with zero signals
+        // and no observation, so a webhook retry cannot amplify a
+        // ConfirmedAbuse.
         $run = function (int $status): array {
             $confirmed = [];
             $observedEvents = [];
@@ -779,13 +779,14 @@ final class AdaptiveRiskEngineTest extends TestCase
     }
 
     /**
-     * THE OUTCOME LEDGER IS ALWAYS ON and independent of
-     * calibration — ConfirmedLegitimate/ConfirmedAbuse work IDENTICALLY with
-     * calibration disabled. Every decision registers a PENDING ledger entry
-     * at assessment time (store->registerOutcome without calibration); the
-     * first confirmation flips the ledger exactly once (status 1) and
-     * records the reputation event; a retry finds the ledger already
-     * confirmed (status 0) and is a duplicate-marked no-op.
+     * The outcome ledger is always on and independent of calibration:
+     * ConfirmedLegitimate/ConfirmedAbuse behave identically with
+     * calibration disabled. Every decision registers a pending ledger
+     * entry at assessment time (store->registerOutcome without
+     * calibration). The first confirmation flips the ledger exactly once
+     * (status 1) and records the reputation event; a retry finds the
+     * ledger already confirmed (status 0) and is a duplicate-marked
+     * no-op.
      */
     public function testConfirmedWorksWithoutCalibration(): void
     {
@@ -816,7 +817,7 @@ final class AdaptiveRiskEngineTest extends TestCase
         };
         $engine = $this->engine($store);
 
-        // Assessment registers the PENDING ledger entry in the store.
+        // Assessment registers the pending ledger entry in the store.
         $decision = $engine->assess($this->context());
         $hour = intdiv((int) floor(microtime(true) * 1000), 3_600_000);
         self::assertSame(
@@ -825,15 +826,15 @@ final class AdaptiveRiskEngineTest extends TestCase
             'without calibration the decision still registers its PENDING ledger entry (scope + decision hour + score)'
         );
 
-        // FIRST confirmation: ledger CAS flips once, the reputation event
-        // is recorded — identical to the calibration-enabled path.
+        // First confirmation: the ledger CAS flips once and the reputation
+        // event is recorded, identical to the calibration-enabled path.
         $receipt = $engine->confirmedAbuse($this->context(event: RiskEventKind::ConfirmedAbuse), $decision->decisionId);
         self::assertFalse($receipt->isDuplicate, 'the FIRST confirmation records the reputation event without calibration');
         self::assertSame(['confirm', $decision->decisionId, false], $store->ledgerCalls[1], 'the store ledger CAS runs first');
         self::assertSame([RiskEventKind::PreIssue, RiskEventKind::ConfirmedAbuse], $observedEvents);
 
-        // RETRY: the ledger is already confirmed -> status 0 -> a
-        // duplicate-marked no-op — webhook retries can never amplify.
+        // A retry finds the ledger already confirmed (status 0) and is a
+        // duplicate-marked no-op, so webhook retries cannot amplify.
         $retry = $engine->confirmedAbuse($this->context(event: RiskEventKind::ConfirmedAbuse), $decision->decisionId);
         self::assertTrue($retry->isDuplicate, 'a retried confirmation is marked duplicate (ledger already confirmed)');
         self::assertSame(SignalVector::zero()->toArray(), $retry->signals->toArray());
@@ -960,8 +961,8 @@ final class AdaptiveRiskEngineTest extends TestCase
         self::assertTrue($engine->confirmCorrection('decision-d', false));
         self::assertSame([['decision-c', true], ['decision-d', false]], $corrected);
 
-        // WITHOUT a calibration store the correction runs the STORE's
-        // outcome_correct.lua (ledger flip — the always-on authority).
+        // Without a calibration store the correction runs the store's
+        // outcome_correct.lua (the ledger flip is the always-on authority).
         $plainStore = new class extends RiskStateStoreStub {
             public function observe(RiskObservation $observation): SignalVector
             {
@@ -1151,13 +1152,13 @@ final class AdaptiveRiskEngineTest extends TestCase
     }
 
     /**
-     * END-TO-END reputation gating against REAL Redis (skipped without
-     * RISK_REDIS_URL): the first confirmation (status 1) records the
-     * reputation event into the source state; a retry (status 0) returns
-     * the duplicate-marked receipt and leaves the state untouched — a
-     * webhook retry can never amplify ConfirmedAbuse (+5000 bad). A
-     * deliberately unsampled first confirmation (status 2) still mutates
-     * reputation exactly once.
+     * End-to-end reputation gating against real Redis, skipped when no
+     * Redis URL is configured. The first confirmation (status 1) records
+     * the reputation event into the source state; a retry (status 0)
+     * returns the duplicate-marked receipt and leaves the state
+     * untouched, so a webhook retry cannot amplify ConfirmedAbuse (+5000
+     * bad). A deliberately unsampled first confirmation (status 2) still
+     * mutates reputation exactly once.
      */
     public function testReputationGatingIsOncePerDecisionWithRedis(): void
     {
@@ -1197,14 +1198,14 @@ final class AdaptiveRiskEngineTest extends TestCase
         $badAfter = (int) ($client->hget($sourceKey, 'bad') ?? 0);
         self::assertGreaterThanOrEqual($badBefore + 5000, $badAfter, 'ConfirmedAbuse must add bad +5000 to the source state');
 
-        // Retry of the SAME decision: status 0 -> duplicate-marked no-op,
-        // NO second reputation event.
+        // Retry of the same decision: status 0 -> duplicate-marked no-op,
+        // no second reputation event.
         $retry = $engine->confirmedAbuse($ctx, $decision->decisionId);
         self::assertTrue($retry->isDuplicate, 'a retried confirmation is marked duplicate (status 0)');
         self::assertSame(SignalVector::zero()->toArray(), $retry->signals->toArray(), 'the retry receipt carries zero signals');
         self::assertSame($badAfter, (int) ($client->hget($sourceKey, 'bad') ?? 0), 'a retry must never amplify ConfirmedAbuse');
 
-        // A deliberately UNSAMPLED first confirmation (status 2) still
+        // A deliberately unsampled first confirmation (status 2) still
         // mutates reputation exactly once (and never calibrates).
         $ns2 = 'gt2' . bin2hex(random_bytes(4));
         $store2 = new RedisRiskStateStore($client, namespace: $ns2);

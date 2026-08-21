@@ -5,11 +5,11 @@ declare(strict_types=1);
 namespace BelConsulting\KiwiCaptchaBundle\SiteVerify;
 
 /**
- * The SINGLE place that knows the Redis-client-specific `eval()` calling
+ * The single place that knows the Redis-client-specific `eval()` calling
  * convention — phpredis and Predis pack the arguments differently:
  *
  * - phpredis (\Redis): `eval(script, [key, ...args], numKeys)` — keys and
- *   script arguments share ONE array; numKeys is the THIRD parameter.
+ *   script arguments share one array; numKeys is the third parameter.
  * - Predis: `eval(script, numKeys, key, ...args)`.
  *
  * Mirrors the convention in the core RedisStorage

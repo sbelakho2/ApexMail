@@ -1,9 +1,9 @@
-//! End-to-end quick-start mirroring the root README:
+//! End-to-end quick-start mirroring the project's quick-start docs:
 //! issue a low-difficulty challenge → construct a solution → verify it →
-//! assert `VerifyOutcome::Valid`. CI RUNS this example (`cargo test
+//! assert `VerifyOutcome::Valid`. CI runs this example (`cargo test
 //! --example quickstart`), so the documented flow is proven to work, not
-//! merely to compile. It is the single source of truth for the README's
-//! quick-start snippets — change the API here and the docs together.
+//! merely to compile. It is the single source of truth for the quick-start
+//! snippets — change the API here and the docs together.
 //!
 //! Run with: `cargo run --example quickstart` (or `cargo test --example
 //! quickstart` — the test wrapper asserts the exact `Valid` outcome).
@@ -40,10 +40,10 @@ fn config() -> ChallengeConfig {
 
 fn quickstart() -> Result<(), String> {
     let config = config();
-    let now_ns = now_epoch_micros(); // EPOCH MICROSECONDS (shared with PHP)
+    let now_ns = now_epoch_micros(); // epoch microseconds (shared with PHP)
     let now_unix = (now_ns / 1_000_000) as u64;
 
-    // 1. ISSUE: sign a challenge bound to the client IP.
+    // 1. Issue: sign a challenge bound to the client IP.
     let issued = issue_challenge(
         &config,
         "login",
@@ -55,7 +55,7 @@ fn quickstart() -> Result<(), String> {
     )
     .map_err(|e| format!("issuance failed: {e}"))?;
 
-    // 2. SOLVE (what the browser widget does): brute-force a counter that
+    // 2. Solve (what the browser widget does): brute-force a counter that
     //    meets the difficulty, then pack the solution token.
     let counter =
         solve_for_test(&issued.record).ok_or("no counter met the difficulty (too high?)")?;
@@ -68,8 +68,8 @@ fn quickstart() -> Result<(), String> {
     let raw = token.encode();
     let decoded = SolutionToken::decode(&raw).map_err(|e| format!("token decode failed: {e}"))?;
 
-    // 3. VERIFY: single-key deployment — secrets_by_kid/revoked_kids are
-    //    None (a Some(empty_map) would reject kid 1 as unknown); telemetry
+    // 3. Verify: single-key deployment — secrets_by_kid/revoked_kids are
+    //    None (an empty map would reject kid 1 as unknown); telemetry
     //    enforcement is OFF because the default widget sends none.
     let mut record = issued.record;
     let mut ctx = VerifyContext {
@@ -114,6 +114,6 @@ fn main() {
 
 #[test]
 fn quickstart_reaches_verify_outcome_valid() {
-    // CI asserts BEHAVIOR, not merely syntax.
+    // CI asserts behavior, not just syntax.
     quickstart().expect("the documented quick-start must end in VerifyOutcome::Valid");
 }

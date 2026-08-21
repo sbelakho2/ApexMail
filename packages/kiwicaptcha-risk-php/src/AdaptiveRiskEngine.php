@@ -18,33 +18,35 @@ use KiwiCaptcha\Risk\Storage\SessionTlsTagStoreInterface;
  * Adaptive risk engine: assesses one request and returns a RiskDecision.
  *
  * Pipeline: emergency limiter (single per-process window, before any state
- * backend) -> observation -> circuit breaker -> state store (EVALSHA) ->
+ * backend) -> observation -> circuit breaker -> state store (evalsha) ->
  * scorer -> policy (with the per-process scope-action hysteresis map:
  * enter/exit smoothing of the score band selection) -> decision.
  * Backend failure degrades instead of failing the request.
  *
- * assessPreIssue() is the PRE-ISSUE path (emergency limiter + request
- * velocity + decision); reassess() is the POST-SOLVE recheck (identical
- * pipeline WITHOUT any limiter gate — a solved challenge is never denied
- * by the emergency caps); record_feedback() is the FEEDBACK path (no
- * limiter, no decision — a plain EventReceipt). record() is a deprecated
- * alias of record_feedback, assess() a deprecated alias of assessPreIssue.
-     * The risk-v2 variants (assessPreIssueV2/reassessV2) run the identical
-     * pipeline plus the additive risk-v2 evidence factors (honeypot/decoy
-     * evidence, session client-context consistency, trusted-edge TLS
-     * consistency) — probabilistic evidence only, never a security gate,
-     * never a change to the risk-v1 state contract. The v2 entry points
-     * accept an optional operator-tunable RiskV2Weights override; null
-     * uses the DEFAULT weights (byte-identical scores to today).
+ * assessPreIssue() is the pre-issue path (emergency limiter + request
+ * velocity + decision). reassess() is the post-solve recheck: the same
+ * pipeline without any limiter gate, so a solved challenge is never denied
+ * by the emergency caps. record_feedback() is the feedback path with no
+ * limiter and no decision, just a plain EventReceipt. record() is a
+ * deprecated alias of record_feedback, assess() a deprecated alias of
+ * assessPreIssue.
  *
- * Every entry point NORMALIZES the caller-supplied idempotency key before
+ * The risk-v2 variants (assessPreIssueV2/reassessV2) run the identical
+ * pipeline plus the additive risk-v2 evidence factors (honeypot/decoy
+ * evidence, session client-context consistency, trusted-edge TLS
+ * consistency) — probabilistic evidence only, never a security gate,
+ * never a change to the risk-v1 state contract. The v2 entry points
+ * accept an optional operator-tunable RiskV2Weights override; null uses
+ * the default weights (byte-identical scores to today).
+ *
+ * Every entry point normalizes the caller-supplied idempotency key before
  * it is used as the Redis dedupe suffix: HMAC-SHA256 keyed by the
- * master-derived EVENT key, domain-separated by the event kind and scope
- * (a null/empty key becomes a fresh random 32-hex id). The store only ever
- * receives the normalized 64-hex value — the caller's raw key never
- * appears in Redis, and low-entropy keys are not dictionary-recoverable
- * (the HMAC key is derived from the deployment master, not from the
- * caller-supplied input).
+ * master-derived event key, domain-separated by the event kind and scope
+ * (a null/empty key becomes a fresh random 32-hex id). The store only
+ * ever receives the normalized 64-hex value, so the caller's raw key
+ * never appears in Redis, and low-entropy keys are not
+ * dictionary-recoverable (the HMAC key is derived from the deployment
+ * master, not from the caller-supplied input).
  *
  * enableGlobalPressure=false zeroes the global-pressure signal, the global
  * level and the cooldown deadline after observe(), so the policy can never
@@ -108,14 +110,14 @@ final class AdaptiveRiskEngine
     }
 
     /**
-     * PRE-ISSUE assessment: emergency limiter (single per-process window)
+     * Pre-issue assessment: emergency limiter (single per-process window)
      * -> PreIssue observation -> store -> scorer -> policy.
      *
-     * @param string|null $idempotencyKey caller-supplied event_id; NORMALIZED
+     * @param string|null $idempotencyKey caller-supplied event_id; normalized
      *                                    (HMAC-SHA256 keyed by the event key,
      *                                    domain-separated by event+scope)
-     *                                    before use as the dedupe suffix —
-     *                                    retries with the same key hash
+     *                                    before use as the dedupe suffix.
+     *                                    Retries with the same key hash
      *                                    identically and are deduped by the
      *                                    Lua; null/empty = fresh random
      *                                    16-byte hex
@@ -132,11 +134,11 @@ final class AdaptiveRiskEngine
      * The risk-v1 contract semantics are unchanged — with an empty $v2
      * context the decision is identical to the v1 path.
      *
-     * @param string|null $idempotencyKey caller-supplied event_id; NORMALIZED
+     * @param string|null $idempotencyKey caller-supplied event_id; normalized
      *                                    as in assessPreIssue
      * @param RiskV2Weights|null $v2Weights operator-tunable weights for the
      *                                      additive risk-v2 factors; null
-     *                                      uses the DEFAULT weights
+     *                                      uses the default weights
      *                                      (identical scores to today)
      */
     public function assessPreIssueV2(RiskContext $c, RiskV2Context $v2, ?string $idempotencyKey = null, ?RiskV2Weights $v2Weights = null): RiskDecision
@@ -168,14 +170,14 @@ final class AdaptiveRiskEngine
     }
 
     /**
-     * POST-SOLVE reassessment: identical pipeline to assessPreIssue
+     * Post-solve reassessment: identical pipeline to assessPreIssue
      * (observation with the context's event -> store -> scorer -> policy ->
-     * calibration -> reasons -> decision receipt) but WITHOUT any emergency
-     * limiter check — the admission caps apply only to pre-issue challenge
+     * calibration -> reasons -> decision receipt) but without any emergency
+     * limiter check. The admission caps apply only to pre-issue challenge
      * assessments, never to the recheck of a challenge the caller already
      * solved.
      *
-     * @param string|null $idempotencyKey caller-supplied event_id; NORMALIZED
+     * @param string|null $idempotencyKey caller-supplied event_id; normalized
      *                                    (HMAC-SHA256, event+scope domain
      *                                    separated) as in assessPreIssue
      */
@@ -189,11 +191,11 @@ final class AdaptiveRiskEngine
      * additive risk-v2 evidence factors from $v2 (honeypot evidence,
      * session client-context consistency, trusted-edge TLS consistency).
      *
-     * @param string|null $idempotencyKey caller-supplied event_id; NORMALIZED
+     * @param string|null $idempotencyKey caller-supplied event_id; normalized
      *                                    as in reassess
      * @param RiskV2Weights|null $v2Weights operator-tunable weights for the
      *                                      additive risk-v2 factors; null
-     *                                      uses the DEFAULT weights
+     *                                      uses the default weights
      *                                      (identical scores to today)
      */
     public function reassessV2(RiskContext $c, RiskV2Context $v2, ?string $idempotencyKey = null, ?RiskV2Weights $v2Weights = null): RiskDecision
@@ -241,7 +243,7 @@ final class AdaptiveRiskEngine
 
         $base = $this->policy->baseRisk($c->scope);
         if ($this->calibration !== null) {
-            // Bounded automatic calibration: adjust ONLY the scope bias
+            // Bounded automatic calibration: adjust only the scope bias
             // (clamped to the calibrator's maxAdjustment, rate-limited,
             // cached 30 s) from the Redis aggregate score-bucket statistics;
             // never rewrite weights autonomously. A failing calibration
@@ -258,7 +260,7 @@ final class AdaptiveRiskEngine
         // derived from the v2 context (a session-first-tag record read that
         // degrades to "consistent" on any backend miss — probabilistic
         // evidence never breaks an assessment). The v2 weights are the
-        // operator override when given, else the DEFAULT weights (byte-
+        // operator override when given, else the default weights (byte-
         // identical scores to today).
         $v2Signals = $v2 !== null ? $this->buildV2Signals($v2, $c, $observation) : null;
         $score = $v2Signals !== null
@@ -283,29 +285,30 @@ final class AdaptiveRiskEngine
     }
 
     /**
-     * Outcome feedback path (e.g. a post-solve protected action). NEVER
-     * runs the emergency limiter and NEVER produces a decision: the
+     * Outcome feedback path (e.g. a post-solve protected action). Never
+     * runs the emergency limiter and never produces a decision: the
      * observation is stored and the current signals returned as an
      * EventReceipt. Store failures are silent (zero signals, not a
      * duplicate).
      *
-     * CONFIRMATION EVENTS ARE REJECTED: ConfirmedLegitimate and
+     * Confirmation events are rejected: ConfirmedLegitimate and
      * ConfirmedAbuse must be routed through confirmedLegitimate()/
-     * confirmedAbuse() (or confirmOutcome()), which first run the
+     * confirmedAbuse() or confirmOutcome(), which first run the
      * always-on outcome ledger exactly once and then record the reputation
      * event through the internal feedback path. A plain feedback call for
      * a confirmation event would bypass the ledger's exactly-once CAS.
      *
      * @throws \LogicException when $event is ConfirmedLegitimate or
-     *                         ConfirmedAbuse (use confirmed* instead)
-     * @param string|null $idempotencyKey caller-supplied event_id; NORMALIZED
+     *                         ConfirmedAbuse (use confirmed* instead).
+     * @param string|null $idempotencyKey caller-supplied event_id; normalized
      *                                    (HMAC-SHA256, event+scope domain
      *                                    separated) before use as the dedupe
-     *                                    suffix; null/empty = fresh random id
+     *                                    suffix; null/empty = fresh random
+     *                                    id.
      * @param string|null $decisionId     accepted for backward
      *                                    compatibility; the confirmation is
      *                                    handled by confirmedLegitimate()/
-     *                                    confirmedAbuse() via confirmOutcome()
+     *                                    confirmedAbuse() via confirmOutcome().
      */
     public function record_feedback(RiskEventKind $event, RiskContext $c, ?string $idempotencyKey = null, ?string $decisionId = null): EventReceipt
     {
@@ -317,8 +320,8 @@ final class AdaptiveRiskEngine
 
     /**
      * The internal feedback path behind record_feedback(): the plain
-     * observation -> store -> EventReceipt flow WITHOUT the confirmation-
-     * event guard — only the confirmed* methods may reach it (the outcome
+     * observation -> store -> EventReceipt flow without the confirmation-
+     * event guard. Only the confirmed* methods may reach it (the outcome
      * ledger has already authorized the event exactly once).
      */
     private function emitFeedback(RiskEventKind $event, RiskContext $c, ?string $idempotencyKey = null): EventReceipt
@@ -360,24 +363,25 @@ final class AdaptiveRiskEngine
 
     /**
      * Best-effort atomic outcome confirmation: consumes the decision's
-     * receipt EXACTLY ONCE (single canonical confirm.lua script with
+     * receipt exactly once (single canonical confirm.lua script with
      * calibration; the store's outcome_confirm.lua ledger CAS without) and
-     * records the outcome against the ORIGINAL decision's scope bucket.
-     * The OUTCOME LEDGER IS ALWAYS ON and independent of calibration:
+     * records the outcome against the original decision's scope bucket.
+     * The outcome ledger is always on and independent of calibration:
      * ConfirmedLegitimate/ConfirmedAbuse work identically with or without
-     * calibration — with calibration the ledger + calibration are recorded
-     * by the calibrator's script; without calibration the store flips the
-     * ledger only (status is never 2 without a receipt).
+     * calibration. With calibration the ledger and the calibration are
+     * recorded by the calibrator's script; without calibration the store
+     * flips the ledger only (status is never 2 without a receipt).
      *
-     * Returns the SHARED accepted-outcome status (wire contract with the
-     * Rust mirror): 0 = nothing consumed (missing / already confirmed /
-     * corrupt / backend failure), 1 = FIRST confirmation with calibration
-     * recorded, 2 = FIRST confirmation deliberately unsampled (only when
-     * calibration is enabled). Statuses 1 and 2 authorize the first-party
-     * reputation event exactly once; status 0 must never book one (a
-     * webhook retry must never amplify). Never throws for backend failures
-     * — they surface as status 0 and the receipt survives, so a retry
-     * applies the outcome exactly once.
+     * Returns the shared accepted-outcome status, wire contract with the
+     * Rust mirror. Status 0 = nothing consumed (missing / already
+     * confirmed / corrupt / backend failure). Status 1 = first
+     * confirmation with calibration recorded. Status 2 = first
+     * confirmation deliberately unsampled (only when calibration is
+     * enabled). Statuses 1 and 2 authorize the first-party reputation
+     * event exactly once; status 0 must never book one, so a webhook
+     * retry can never amplify. Never throws for backend failures; they
+     * surface as status 0 and the receipt survives, so a retry applies
+     * the outcome exactly once.
      *
      * @throws \InvalidArgumentException when the calibration sampling mode
      *                                   is 'weighted' and $weight is null
@@ -403,16 +407,16 @@ final class AdaptiveRiskEngine
     }
 
     /**
-     * Confirmed-legitimate outcome: REQUIRES the id of the decision being
-     * confirmed so the outcome is recorded against the ORIGINAL decision's
-     * scope bucket. FIRST runs the always-on outcome-ledger confirmation
-     * (ledger CAS PENDING -> LEGITIMATE exactly once, with or without
-     * calibration), THEN — and only when the confirmation is the FIRST one
-     * (status 1 or 2) — records the ConfirmedLegitimate reputation event.
-     * REPUTATION GATING: a status-0 outcome (ledger already consumed /
+     * Confirmed-legitimate outcome: requires the id of the decision being
+     * confirmed so the outcome is recorded against the original decision's
+     * scope bucket. First runs the always-on outcome-ledger confirmation
+     * (ledger CAS pending -> legitimate exactly once, with or without
+     * calibration), then, only when the confirmation is the first one
+     * (status 1 or 2), records the ConfirmedLegitimate reputation event.
+     * Reputation gating: a status-0 outcome (ledger already consumed /
      * missing / backend failure) is a no-op returning an EventReceipt
-     * marked isDuplicate with zero signals and NO observation — one real-
-     * world outcome produces at most ONE reputation mutation, so webhook
+     * marked isDuplicate with zero signals and no observation. One real-
+     * world outcome produces at most one reputation mutation, so webhook
      * retries can never amplify.
      *
      * $samplingProbabilityPpm (1..1_000_000) is the application-supplied
@@ -435,16 +439,16 @@ final class AdaptiveRiskEngine
     }
 
     /**
-     * Confirmed-abuse outcome: REQUIRES the id of the decision being
-     * confirmed so the outcome is recorded against the ORIGINAL decision's
-     * scope bucket. FIRST runs the always-on outcome-ledger confirmation
-     * (ledger CAS PENDING -> ABUSE exactly once, with or without
-     * calibration), THEN — and only when the confirmation is the FIRST one
-     * (status 1 or 2) — records the ConfirmedAbuse reputation event.
-     * REPUTATION GATING: a status-0 outcome (ledger already consumed /
+     * Confirmed-abuse outcome: requires the id of the decision being
+     * confirmed so the outcome is recorded against the original decision's
+     * scope bucket. First runs the always-on outcome-ledger confirmation
+     * (ledger CAS pending -> abuse exactly once, with or without
+     * calibration), then, only when the confirmation is the first one
+     * (status 1 or 2), records the ConfirmedAbuse reputation event.
+     * Reputation gating: a status-0 outcome (ledger already consumed /
      * missing / backend failure) is a no-op returning an EventReceipt
-     * marked isDuplicate with zero signals and NO observation — one real-
-     * world outcome produces at most ONE reputation mutation, so webhook
+     * marked isDuplicate with zero signals and no observation. One real-
+     * world outcome produces at most one reputation mutation, so webhook
      * retries can never re-penalize the source with repeated +6000
      * ConfirmedAbuse.
      *
@@ -470,14 +474,14 @@ final class AdaptiveRiskEngine
     /**
      * Corrects a prior label via the canonical correction.lua (with
      * calibration) or the store's outcome_correct.lua (without): flips the
-     * always-on outcome ledger L <-> A — the corrected outcome is
+     * always-on outcome ledger L <-> A. The corrected outcome is
      * authoritative for future events; ephemeral reputation pressure is
      * left to decay naturally (no synthetic identities are involved).
-     * With calibration the correction ALSO reverses the original bucket
+     * With calibration the correction also reverses the original bucket
      * contribution (exact recorded weight, clamped at zero) and adds the
      * corrected contribution.
      *
-     * $legitimate mirrors the (mistaken) FIRST confirmed outcome — a first
+     * $legitimate mirrors the (mistaken) first confirmed outcome — a first
      * confirmation of legitimate=true (trust) is corrected to abuse and
      * vice versa. Returns true when the correction was applied
      * (best-effort — a state-backend failure is silent and the retry may
@@ -553,22 +557,22 @@ final class AdaptiveRiskEngine
     }
 
     /**
-     * Derives the bounded risk-v2 signal vector from the v2 context:
+     * Derives the bounded risk-v2 signal vector from the v2 context.
      *
      * - honeypot = 1000 when the context reports a honeypot hit OR the
-     *   current observation is one of the honeypot event kinds (ANY of the
-     *   three derives the signal — probabilistic evidence, never a gate);
+     *   current observation is one of the honeypot event kinds. Any of the
+     *   three derives the signal; probabilistic evidence, never a gate.
      * - sessionInconsistency = 1000 when the session's first-seen
-     *   client-context tag differs from the current tag; 0 when the tag is
-     *   absent (first request), the session is absent, the record read
-     *   fails (neutral degradation), or the store lacks the OPTIONAL
-     *   SessionContextTagStoreInterface capability (a 1.x store without
-     *   the record surface degrades exactly like a backend miss);
+     *   client-context tag differs from the current tag. It is 0 when the
+     *   tag is absent (first request), the session is absent, or the
+     *   record read fails (neutral degradation). A store lacking the
+     *   optional SessionContextTagStoreInterface capability degrades
+     *   exactly like a backend miss.
      * - tlsInconsistency = 1000 when the session's first-seen trusted-edge
-     *   TLS classification tag differs from the current tag; 0 when the tag
-     *   is absent (first request), the session is absent, the tag exceeds
-     *   the 64-char bound (treated as absent), the record read fails
-     *   (neutral degradation), or the store lacks the OPTIONAL
+     *   TLS classification tag differs from the current tag. It is 0 when
+     *   the tag is absent (first request), the session is absent, the tag
+     *   exceeds the 64-char bound (treated as absent), the record read
+     *   fails (neutral degradation), or the store lacks the optional
      *   SessionTlsTagStoreInterface capability.
      */
     private function buildV2Signals(RiskV2Context $v2, RiskContext $c, RiskObservation $observation): RiskV2Signals
@@ -641,14 +645,14 @@ final class AdaptiveRiskEngine
     /**
      * Normalizes a caller-supplied idempotency key before it is used as a
      * Redis key suffix: HMAC-SHA256 of the domain-separated message
-     * (pack('N', scope) . chr(event) . input), keyed by the master-derived
-     * EVENT key — 64 lowercase hex chars. Domain separation (event kind +
-     * scope) means the same raw key dedupes independently per event/scope,
-     * and the HMAC (not a bare sha256) means low-entropy keys are not
-     * dictionary-recoverable from the Redis dedupe keys; the caller's raw
-     * key never appears verbatim in Redis. null/empty -> a fresh random
-     * 32-hex id; longer than 4096 bytes -> InvalidArgumentException. Rust
-     * mirrors this exactly.
+     * pack('N', scope) . chr(event) . input, keyed by the master-derived
+     * event key, giving 64 lowercase hex chars. Domain separation (event
+     * kind + scope) means the same raw key dedupes independently per
+     * event/scope, and the HMAC (not a bare sha256) means low-entropy keys
+     * are not dictionary-recoverable from the Redis dedupe keys. The
+     * caller's raw key never appears verbatim in Redis. null/empty gives
+     * a fresh random 32-hex id; longer than 4096 bytes throws
+     * InvalidArgumentException. Rust mirrors this exactly.
      */
     private function normalizeEventId(RiskEventKind $event, int $scope, ?string $input): string
     {
@@ -684,18 +688,17 @@ final class AdaptiveRiskEngine
     }
 
     /**
-     * Registers one decision in the ALWAYS-ON outcome ledger (the 
-     * exactly-once authority for later confirmed outcomes):
-     *   - with calibration: the canonical register_decision.lua creates the
-     *     receipt (with the assessment-time sampling flag), the sampled
-     *     TOTAL denominator (when sampled) and the PENDING ledger entry
-     *     ATOMICALLY;
-     *   - without calibration: the store's outcome_register.lua creates the
-     *     PENDING ledger entry only.
-     * The sampled flag = sample() (PURE — the denominator is booked
-     * atomically by the script); true when calibration is null. decisionHour
-     * anchors the outcome to the hour the DECISION was made. Failures are
-     * silent — registration never breaks issuance.
+     * Registers one decision in the always-on outcome ledger, the
+     * exactly-once authority for later confirmed outcomes. With
+     * calibration, the canonical register_decision.lua creates the receipt
+     * (with the assessment-time sampling flag), the sampled total
+     * denominator (when sampled) and the pending ledger entry, all
+     * atomically. Without calibration, the store's outcome_register.lua
+     * creates the pending ledger entry only.
+     * The sampled flag is sample() (pure; the denominator is booked
+     * atomically by the script) and true when calibration is null.
+     * decisionHour anchors the outcome to the hour the decision was made.
+     * Failures are silent, so registration never breaks issuance.
      */
     private function registerDecisionOutcome(int $scope, RiskDecision $decision, int $nowMs): void
     {

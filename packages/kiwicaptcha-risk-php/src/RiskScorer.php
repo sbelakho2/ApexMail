@@ -7,7 +7,7 @@ namespace KiwiCaptcha\Risk;
 /**
  * Fixed-point risk scorer, byte-identical with the cross-language contract:
  *
- *   weighted(v, w) = (v * w) / 1000   (integer division)
+ *   weighted(v, w) = (v * w) / 1000   (integer division).
  *   score(base, s, w) = base
  *       + weighted(source_fast) + weighted(source_slow) + weighted(subnet_fast)
  *       + weighted(issue_debt) + weighted(bad_proof) + weighted(malformed)
@@ -16,11 +16,11 @@ namespace KiwiCaptcha\Risk;
  *       - weighted(trust_credit) - weighted(principal_credit)
  *   clamped to [0, 1000].
  *
- * The SCORE is pure integer math (intdiv) — there is NO float boundary in
- * the scorer (no NaN/Inf can enter; the score is always a
- * bounded int in 0..1000). The only floats in the risk path live in the
- * calibration boundary, which is guarded separately (AggregateCalibrator
- * + calibration.lua).
+ * The score is pure integer math (intdiv) with no float boundary in the
+ * scorer: no NaN/Inf can enter, and the score is always a bounded int in
+ * 0..1000. The only floats in the risk path live in the calibration
+ * boundary, which is guarded separately (AggregateCalibrator +
+ * calibration.lua).
  */
 final class RiskScorer
 {
@@ -50,11 +50,12 @@ final class RiskScorer
     }
 
     /**
-     * Risk-v2 scoring: the risk-v1 score PLUS the weighted risk-v2 evidence
-     * factors (honeypot, session client-context inconsistency, trusted-edge
-     * TLS inconsistency), clamped to 0..1000. With zero risk-v2 signals
-     * this is EXACTLY score() — the v1 contract semantics (the 13 signals
-     * and their weights) are unchanged; the v2 factors are purely additive.
+     * Risk-v2 scoring: the risk-v1 score plus the weighted risk-v2
+     * evidence factors (honeypot, session client-context inconsistency,
+     * trusted-edge TLS inconsistency), clamped to 0..1000. With zero
+     * risk-v2 signals this is exactly score(); the v1 contract semantics
+     * (the 13 signals and their weights) are unchanged, and the v2
+     * factors are purely additive.
      */
     public function scoreV2(int $base, SignalVector $s, RiskWeights $w, RiskV2Signals $v2, RiskV2Weights $w2): int
     {

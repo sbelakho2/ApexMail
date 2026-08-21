@@ -8,98 +8,100 @@ use KiwiCaptcha\Risk\RiskAction;
 use Predis\Client;
 
 /**
- * Aggregate calibrator: REDIS-BACKED bounded exact-score calibration.
+ * Aggregate calibrator: Redis-backed bounded exact-score calibration.
  *
  * Buckets are hourly hashes keyed {kiwi:<ns>}:cal:<scope>:<hour> with
  * fields legit_count / legit_score_sum / abuse_count / abuse_score_sum /
- * sample_total / sample_resolved (EXACT scores, not band-quantized),
- * written ONLY by the canonical register_decision.lua / confirm.lua /
- * correction.lua scripts — at most 24 keys per scope, so the aggregate
- * state is bounded and shared across processes. No in-process samples, no
+ * sample_total / sample_resolved (exact scores, not band-quantized),
+ * written by the canonical register_decision.lua / confirm.lua /
+ * correction.lua scripts. At most 24 keys per scope keep the aggregate
+ * state bounded and shared across processes. No in-process samples, no
  * pruning loops.
  *
  * Bias is derived from the last 24 hourly buckets (calibration.lua,
- * CLASS-NORMALIZED exact-score semantics):
- *   fp_mean = legit_score_sum / legit_count        (0 when none)
- *   fn_mean = (abuse_count*1000 - abuse_score_sum) / abuse_count
- *   error   = fn_mean * falseNegativeCost - fp_mean * falsePositiveCost
- *   raw     = trunc(error * 2 / 10), clamped ±maxAdjustment
- * below minSamples the TARGET is 0. Class normalization removes
+ * class-normalized exact-score semantics). Below minSamples the target
+ * is 0.
+ *   fp_mean = legit_score_sum / legit_count        (0 when none).
+ *   fn_mean = (abuse_count*1000 - abuse_score_sum) / abuse_count.
+ *   error   = fn_mean * falseNegativeCost - fp_mean * falsePositiveCost.
+ *   raw     = trunc(error * 2 / 10), clamped ±maxAdjustment. Class normalization removes
  * label-volume dominance; the fp/fn cost knobs price false positives
- * against false negatives explicitly. The whole read (24 HGETALLs) plus
- * the rate-of-change clamp plus the state write runs in ONE Lua script
- * (single round trip); the clamp is atomic (read prev -> clamp -> write)
- * so concurrent processes never race.
+ * against false negatives explicitly. The whole read (24 hgetall calls)
+ * plus the rate-of-change clamp plus the state write runs in one Lua
+ * script (single round trip); the clamp is atomic (read prev -> clamp ->
+ * write) so concurrent processes never race.
  *
- * RANDOM-SAMPLE RESOLUTION GATE: the counters live in the SAME
+ * Random-sample resolution gate: the counters live in the same
  * scope/hour buckets as the observations (sample_total / sample_resolved
  * hash fields), so scope, window, label population and resolution
- * population are exactly ONE cohort. In random_sample mode the bias target
- * stays 0 while the PER-SCOPE 24-bucket sample_total >= minSamples AND
- * sample_resolved < sample_total * minimumResolutionRatio — the
+ * population are exactly one cohort. In random_sample mode the bias target
+ * stays 0 while the per-scope 24-bucket sample_total >= minSamples and
+ * sample_resolved < sample_total * minimumResolutionRatio; the
  * label-reporting process must demonstrably resolve a minimum fraction of
- * the server-selected sample before the model may move. The TOTAL is
- * booked ATOMICALLY with the receipt by register_decision.lua (HINCRBY
- * sample_total when sampled — a sample can never be counted without its
- * receipt); the RESOLVED counter is INCRed by confirm.lua on a status-1
- * confirmation.
+ * the server-selected sample before the model may move. The total is
+ * booked atomically with the receipt by register_decision.lua (hincrby
+ * sample_total when sampled; a sample can never be counted without its
+ * receipt), and the resolved counter is incremented by confirm.lua on a
+ * status-1 confirmation.
  *
- * THE OUTCOME LEDGER IS ALWAYS ON and independent of calibration:
- * register_decision.lua creates the PENDING ledger entry
+ * The outcome ledger is always on and independent of calibration.
+ * register_decision.lua creates the pending ledger entry
  * ({kiwi:<ns>}:cal:ledger:<decision_id>, JSON {"o":"P","scope","hour","score","w"})
- * ATOMICALLY with the receipt and denominator; confirm.lua performs the
- * ledger CAS PENDING -> LEGITIMATE/ABUSE exactly once and — as the
- * downstream observer — records the calibration bucket contribution;
+ * atomically with the receipt and denominator. confirm.lua performs the
+ * ledger CAS pending -> legitimate/abuse exactly once and, as the
+ * downstream observer, records the calibration bucket contribution.
  * correction.lua flips the ledger L <-> A and reverses/redoes the bucket
  * contribution. Confirmed outcomes work identically with or without
- * calibration; with calibration disabled the STORE writes the same ledger
+ * calibration; with calibration disabled the store writes the same ledger
  * (outcome_register/outcome_confirm/outcome_correct.lua) under the same
  * key.
  *
  * Rate of change: the previous bias and its timestamp live in the hash
- * {kiwi:<ns>}:cal:state:<scope> (fields bias_mp/ts, bias in MILLI-POINTS
- * so the allowance is proportional to the elapsed time):
- *   allowed = maxChangePerMinute * 1000 * elapsedMs / 60000
- *   bias    = clamp(raw, prevBias - allowed, prevBias + allowed)
- * The clock is Redis TIME (the script derives `now` itself; the ARGV[1]
+ * {kiwi:<ns>}:cal:state:<scope>, with bias in milli-points (fields
+ * bias_mp/ts) so the allowance is proportional to the elapsed time.
+ *   allowed = maxChangePerMinute * 1000 * elapsedMs / 60000, and
+ *   bias    = clamp(raw, prevBias - allowed, prevBias + allowed).
+ * The clock is Redis time (the script derives `now` itself; the argv[1]
  * nowMs slot is informational), so the allowance follows the distributed
  * clock authority, never app-node skew. The first call ever seeds
- * bias_mp = 0 / ts = now BEFORE the threshold check, so a fresh scope can
- * never jump straight to ±maxAdjustment; the timestamp is refreshed on
- * EVERY call (below threshold too), so a long below-threshold period
+ * bias_mp = 0 / ts = now before the threshold check, so a fresh scope can
+ * never jump straight to ±maxAdjustment. The timestamp is refreshed on
+ * every call (below threshold too), so a long below-threshold period
  * cannot accumulate movement allowance. Below the threshold the returned
- * bias is 0 but the stored bias_mp still moves toward 0 through the SAME
+ * bias is 0 but the stored bias_mp still moves toward 0 through the same
  * rate limiter (never an instant snap).
  *
  * The final bias is cached in-process per scope for 30 s (bounded to
- * 1024 scopes, oldest evicted first); cache hits never touch Redis — the
+ * 1024 scopes, oldest evicted first); cache hits never touch Redis; the
  * 0-below-threshold result is cached too. confirmOutcome() invalidates the
- * cached entry for the confirmed scope on status 1 or 2 (both are FIRST
- * confirmations; status 2 is a consumed outcome too — the cache would
+ * cached entry for the confirmed scope on status 1 or 2 (both are first
+ * confirmations; status 2 is a consumed outcome too, so the cache would
  * otherwise go stale relative to the namespace counters the gate reads).
  *
- * Receipts pair a decision_id with its scope/band/action/score/sampled so
- * a later confirmed outcome (legit/abuse) is recorded against the ORIGINAL
- * decision's DECISION-TIME scope bucket: {kiwi:<ns>}:cal:receipt:<decision_id>
- * holds the JSON string
+ * Receipts pair a decision_id with its scope/band/action/score/sampled,
+ * so a later confirmed outcome (legit/abuse) is recorded against the
+ * original decision's decision-time scope bucket.
+ * {kiwi:<ns>}:cal:receipt:<decision_id> holds the JSON string
  * {"scope":..,"band":..,"action":"..","decision_hour":..,"score":..,"sampled":0|1}
- * with EXPIRE 300 s, created ATOMICALLY by register_decision.lua and
- * consumed EXACTLY ONCE, atomically, by the canonical confirm.lua script
- * (GET -> validate mode/weight/scope/hour -> DEL -> ledger CAS ->
- * HINCRBYFLOAT -> EXPIRE in one round trip — no crash window between
- * reading and incrementing; argument validation happens BEFORE any change,
- * so an invalid mode/weight leaves the receipt intact). In random_sample
- * mode an unsampled decision (sampled == 0) is CONSUMED with status 2 —
- * never recorded, so the label can never select itself into the
- * population.
+ * with expire 300 s, created atomically by register_decision.lua and
+ * consumed exactly once by the canonical confirm.lua script. The confirm
+ * flow is GET -> validate mode/weight/scope/hour -> DEL -> ledger CAS ->
+ * hincrbyfloat -> expire in one round trip, with no crash window between
+ * reading and incrementing. Argument validation happens before any
+ * change, so an invalid mode/weight leaves the receipt intact. In
+ * random_sample mode an unsampled decision (sampled == 0) is consumed
+ * with status 2 and never recorded, so the label can never select itself
+ * into the population.
  *
- * confirmOutcome() returns the SHARED accepted-outcome status (wire
- * contract with the Rust mirror): 0 = nothing consumed (missing / already
- * confirmed / corrupt), 1 = FIRST confirmation recorded (calibration +
- * resolved counter in random_sample mode), 2 = FIRST confirmation,
- * deliberately unsampled (consumed, no calibration). Statuses 1 and 2
- * both mean "first confirmation" — the engine books the first-party
- * reputation event exactly once; status 0 must not book any.
+ * confirmOutcome() returns the shared accepted-outcome status, wire
+ * contract with the Rust mirror. Status 0 = nothing consumed (missing,
+ * already confirmed, or corrupt). Status 1 = first confirmation
+ * recorded (calibration plus the resolved counter in random_sample
+ * mode). Status 2 = first confirmation, deliberately unsampled
+ * (consumed, no calibration).
+ * Statuses 1 and 2 both mean "first confirmation"; the engine books the
+ * first-party reputation event exactly once, and status 0 must not book
+ * any.
  */
 final class AggregateCalibrator implements CalibrationStore
 {
@@ -123,71 +125,55 @@ final class AggregateCalibrator implements CalibrationStore
      * dirname(__DIR__, 2) . '/resources/' and loaded at construction like
      * RedisRiskStateStore loads risk-v1.lua.
      *
-     * calibration.lua — one atomic read->clamp->write:
-     *   KEYS[1..24]  hourly score buckets (hash, fields legit_count /
-     *                legit_score_sum / abuse_count / abuse_score_sum /
-     *                sample_total / sample_resolved)
-     *   KEYS[25]     rate-limit state (hash, fields bias_mp/ts)
-     *   ARGV[1]      now (epoch ms — informational; the script's rate-limit
-     *                clock is Redis TIME)
-     *   ARGV[2]      minSamples
-     *   ARGV[3]      maxAdjustment (points)
-     *   ARGV[4]      maxChangePerMinute (points/minute)
-     *   ARGV[5]      minimumResolutionRatio (float 0..1; 0 disables the gate)
-     *   ARGV[6]      sampling mode (0 complete | 1 random_sample | 2 weighted)
-     *   ARGV[7]      falsePositiveCost (float)
-     *   ARGV[8]      falseNegativeCost (float)
-     *   Returns the final integer bias (points).
+     * The canonical cross-language scripts, bundled with this package at
+     * resources/ (self-contained, no monorepo paths), resolved via
+     * dirname(__DIR__, 2) . '/resources/' and loaded at construction like
+     * RedisRiskStateStore loads risk-v1.lua.
      *
-     * register_decision.lua — receipt + sample denominator + PENDING
-     * ledger entry in ONE atomic invocation:
-     *   KEYS[1]      receipt (STRING JSON)
-     *   KEYS[2]      decision-time calibration bucket for (scope, hour)
-     *   KEYS[3]      outcome ledger entry (STRING JSON)
-     *   ARGV[1]      receipt JSON
-     *   ARGV[2]      receipt TTL (seconds)
-     *   ARGV[3]      sampled (1/0)
-     *   ARGV[4]      bucket TTL (seconds)
-     *   ARGV[5]      outcome ledger TTL (seconds)
-     *   ARGV[6]      scope
-     *   ARGV[7]      decision_hour
-     *   ARGV[8]      score
-     *   ARGV[9]      weight (1.0 at registration)
-     *   Returns 1 when registered, 0 when the decision_id already exists.
+     * calibration.lua, one atomic read->clamp->write. Keys 1..24 are the
+     * hourly score buckets (hash fields legit_count / legit_score_sum /
+     * abuse_count / abuse_score_sum / sample_total / sample_resolved),
+     * and key 25 is the rate-limit state (fields bias_mp/ts). Its argv
+     * is now (epoch ms; informational, the script's rate-limit clock is
+     * Redis time), minSamples, maxAdjustment (points), maxChangePerMinute
+     * (points/minute), minimumResolutionRatio (float 0..1; 0 disables the
+     * gate), sampling mode (0 complete | 1 random_sample | 2 weighted),
+     * falsePositiveCost and falseNegativeCost (floats). It returns the
+     * final integer bias in points.
      *
-     * confirm.lua — one atomic consume-and-record (argument validation
-     * BEFORE any deletion or state change; the ledger is the exactly-once
-     * authority, calibration is a downstream observer of the same script):
-     *   KEYS[1]      receipt (STRING JSON)
-     *   KEYS[2]      DECISION-TIME calibration bucket (receipt.scope,
-     *                receipt.decision_hour)
-     *   KEYS[3]      outcome ledger entry (STRING JSON)
-     *   ARGV[1]      mode (0 complete | 1 random_sample | 2 weighted)
-     *   ARGV[2]      weight (float; required and validated when mode == 2)
-     *   ARGV[3]      legitimate (0/1)
-     *   ARGV[4]      bucket TTL (seconds)
-     *   ARGV[5]      outcome ledger TTL (seconds)
-     *   ARGV[6]      expected scope
-     *   ARGV[7]      expected decision_hour
-     *   Returns the shared status: 0 missing/already confirmed, 1 first
-     *   confirmation recorded, 2 first confirmation deliberately unsampled.
+     * register_decision.lua creates the receipt (string JSON), the
+     * decision-time calibration bucket for (scope, hour) and the pending
+     * outcome-ledger entry in one atomic invocation. Its argv is the
+     * receipt JSON, receipt TTL (seconds), sampled (1/0), bucket TTL
+     * (seconds), outcome-ledger TTL (seconds), scope, decision_hour,
+     * score and weight (1.0 at registration). It returns 1 when
+     * registered, 0 when the decision_id already exists.
      *
-     * correction.lua — flip the ledger + reverse/redo the bucket
-     * contribution in one atomic invocation:
-     *   KEYS[1]      outcome ledger entry (STRING JSON)
-     *   KEYS[2]      DECISION-TIME calibration bucket (ledger.scope,
-     *                ledger.hour)
-     *   ARGV[1]      new outcome ('L'/'A')
-     *   ARGV[2]      weight (decimal string; validated)
-     *   ARGV[3]      bucket TTL (seconds)
-     *   ARGV[4]      outcome ledger TTL (seconds)
-     *   ARGV[5]      expected scope
-     *   ARGV[6]      expected decision_hour
-     *   Returns 1 when applied, 0 when unknown/expired/already target.
+     * confirm.lua performs one atomic consume-and-record with argument
+     * validation before any deletion or state change; the ledger is the
+     * exactly-once authority, calibration is a downstream observer of the
+     * same script. Keys are the receipt (string JSON), the decision-time
+     * calibration bucket (receipt.scope, receipt.decision_hour) and the
+     * outcome-ledger entry (string JSON). Its argv is mode (0 complete |
+     * 1 random_sample | 2 weighted), weight (float; required and
+     * validated when mode == 2), legitimate (0/1), bucket TTL (seconds),
+     * outcome-ledger TTL (seconds), expected scope and expected
+     * decision_hour. It returns the shared status: 0 missing/already
+     * confirmed, 1 first confirmation recorded, 2 first confirmation
+     * deliberately unsampled.
      *
-     * sampling_metrics.lua — per-scope sampling statistics:
-     *   KEYS[1..24]  hourly score buckets (hash)
-     *   Returns {total, resolved} — the 24-bucket window sums.
+     * correction.lua flips the ledger and reverses/redoes the bucket
+     * contribution in one atomic invocation. Keys are the outcome-ledger
+     * entry (string JSON) and the decision-time calibration bucket
+     * (ledger.scope, ledger.hour). Its argv is the new outcome ('L'/'A'),
+     * weight (decimal string; validated), bucket TTL (seconds),
+     * outcome-ledger TTL (seconds), expected scope and expected
+     * decision_hour. It returns 1 when applied, 0 when
+     * unknown/expired/already target.
+     *
+     * sampling_metrics.lua computes per-scope sampling statistics: keys
+     * 1..24 are the hourly score buckets (hash) and it returns
+     * {total, resolved}, the 24-bucket window sums.
      */
     private readonly string $calibrationScript;
 
@@ -266,16 +252,16 @@ final class AggregateCalibrator implements CalibrationStore
     }
 
     /**
-     * The always-on outcome ledger key shared with the store
-     * (RedisRiskStateStore::ledgerKey()): {kiwi:<ns>}:cal:ledger:<decisionId>.
+     * The always-on outcome ledger key shared with the store:
+     * RedisRiskStateStore::ledgerKey() is {kiwi:<ns>}:cal:ledger:<decisionId>.
      * With calibration enabled register_decision.lua / confirm.lua /
      * correction.lua own it; with calibration disabled the store's
      * outcome_*.lua scripts write the same key.
      */
     /**
-     * Canonical HMAC-scoped calibration key component: the raw
-     * scope must NEVER appear in Redis keys — an attacker can manufacture
-     * unbounded distinct scopes. K_scope = hash_hkdf('sha256', master, 32,
+     * Canonical HMAC-scoped calibration key component: the raw scope must
+     * never appear in Redis keys — an attacker can manufacture unbounded
+     * distinct scopes. K_scope = hash_hkdf('sha256', master, 32,
      * 'kiwi/v2/scope-rate'), identical to the bundle's ScopeIssuanceCap.
      */
     public function scopeKey(int $scope): string
@@ -292,7 +278,7 @@ final class AggregateCalibrator implements CalibrationStore
 
     public static function deriveScopeHmacKey(string $master): string
     {
-        // Salt fixed for cross-language parity with the Rust HKDF.
+        // Salt fixed for cross-language parity with the Rust hkdf.
         return hash_hkdf('sha256', $master, 32, 'kiwi/v2/scope-rate', 'kiwicaptcha/deploy-salt/v1');
     }
 
@@ -303,11 +289,11 @@ final class AggregateCalibrator implements CalibrationStore
 
     /**
      * The assessment-time sampling decision: 'complete' and 'weighted'
-     * always sample (in weighted mode the HOST governs the rate via the
+     * always sample (in weighted mode the host governs the rate via the
      * weight it supplies at confirmation); 'random_sample' samples with
-     * probability samplingProbabilityPpm / 1_000_000. PURE — no side
-     * effects: the sampled-TOTAL denominator is booked ATOMICALLY with the
-     * receipt by recordReceipt()/register_decision.lua (HINCRBY
+     * probability samplingProbabilityPpm / 1_000_000. Pure, no side
+     * effects: the sampled-total denominator is booked atomically with the
+     * receipt by recordReceipt()/register_decision.lua (hincrby
      * sample_total in the decision-hour bucket when sampled).
      */
     public function sample(): bool
@@ -319,12 +305,12 @@ final class AggregateCalibrator implements CalibrationStore
     }
 
     /**
-     * Registers the decision ATOMICALLY via the canonical
+     * Registers the decision atomically via the canonical
      * register_decision.lua: the receipt (JSON
      * {"scope","band","action","decision_hour","score","sampled"}), the
-     * sampled-TOTAL denominator (HINCRBY sample_total in the decision-hour
-     * bucket when sampled) and the PENDING outcome-ledger entry are created
-     * in ONE invocation — a sample can never be counted without its receipt
+     * sampled-total denominator (hincrby sample_total in the decision-hour
+     * bucket when sampled) and the pending outcome-ledger entry are created
+     * in one invocation. A sample can never be counted without its receipt
      * (no permanently orphaned denominators), and a decision always has an
      * outcome-ledger entry regardless of calibration.
      *
@@ -364,24 +350,23 @@ final class AggregateCalibrator implements CalibrationStore
     }
 
     /**
-     * Atomically consumes the receipt and records the outcome in ONE
-     * canonical confirm.lua script (no crash window between GETDEL and the
-     * bucket increment). The bucket is the DECISION-TIME hour of the
-     * receipt's scope (receipt.decision_hour — confirmed outcomes are
-     * bucketed by when the DECISION was made, never by confirmation time);
-     * the pre-read only derives the bucket key — the script itself
-     * re-validates the receipt scope/hour atomically.
+     * Atomically consumes the receipt and records the outcome in one
+     * canonical confirm.lua script, with no crash window between the
+     * getdel and the bucket increment. The bucket is the decision-time
+     * hour of the receipt's scope (receipt.decision_hour; confirmed
+     * outcomes are bucketed by when the decision was made, never by
+     * confirmation time). The pre-read only derives the bucket key; the
+     * script itself re-validates the receipt scope/hour atomically.
      *
-     * Returns the SHARED accepted-outcome status (wire contract with the
-     * Rust mirror):
-     *   0 = nothing consumed (receipt missing / already confirmed / corrupt)
-     *   1 = FIRST confirmation; calibration recorded (+ the sampled-resolved
-     *       counter in random_sample mode)
-     *   2 = FIRST confirmation; deliberately unsampled in random_sample
-     *       mode (consumed, no calibration, no counter)
-     * Status 1 and 2 both invalidate the scope's cached bias (a status-2
-     * outcome is consumed too — the cache would otherwise go stale relative
-     * to the namespace counters the resolution gate reads).
+     * Returns the shared accepted-outcome status, wire contract with the
+     * Rust mirror. Status 0 = nothing consumed (receipt missing / already
+     * confirmed / corrupt). Status 1 = first confirmation; calibration
+     * recorded (+ the sampled-resolved counter in random_sample mode).
+     * Status 2 = first confirmation; deliberately unsampled in
+     * random_sample mode (consumed, no calibration, no counter).
+     * Status 1 and 2 both invalidate the scope's cached bias; a status-2
+     * outcome is consumed too, so the cache would otherwise go stale
+     * relative to the namespace counters the resolution gate reads.
      *
      * @throws \InvalidArgumentException when the sampling mode is 'weighted'
      *                                   and $weight is null (weighted mode
@@ -431,7 +416,7 @@ final class AggregateCalibrator implements CalibrationStore
         );
 
         if ($status !== 0) {
-            // A FIRST confirmation (status 1 or 2) invalidates the cached
+            // A first confirmation (status 1 or 2) invalidates the cached
             // bias for this scope so a fresh outcome is visible immediately
             // (Rust parity).
             unset($this->biasCache[$scope]);
@@ -441,14 +426,14 @@ final class AggregateCalibrator implements CalibrationStore
 
     /**
      * Corrects a confirmed outcome via the canonical
-     * correction.lua: flips the ledger L <-> A, REVERSES the original
+     * correction.lua: flips the ledger L <-> A, reverses the original
      * bucket contribution (exact recorded weight, clamped at zero) and adds
-     * the corrected contribution — the decision-time bucket key is derived
-     * from the ledger's own scope/hour (the pre-read only derives the key;
-     * the script re-validates ledger.scope/hour atomically). The corrected
-     * outcome is authoritative for future events; if the decision-time
-     * bucket already expired, the ledger still flips and the prior ephemeral
-     * reputation pressure decays naturally.
+     * the corrected contribution. The decision-time bucket key is derived
+     * from the ledger's own scope/hour; the pre-read only derives the key,
+     * and the script re-validates ledger.scope/hour atomically. The
+     * corrected outcome is authoritative for future events. If the
+     * decision-time bucket already expired, the ledger still flips and the
+     * prior ephemeral reputation pressure decays naturally.
      *
      * @return bool true when the correction was applied, false when the
      *              decision is unknown/expired or already carries the
@@ -507,7 +492,7 @@ final class AggregateCalibrator implements CalibrationStore
         $total = (int) ($result[0] ?? 0);
         $resolved = (int) ($result[1] ?? 0);
         // (float) cast: PHP 8.5 division returns exact INT results. The
-        // inputs are integers, so the ratio is ALWAYS finite; the
+        // inputs are integers, so the ratio is always finite; the
         // is_finite() guard is defensive and maps a
         // never-occurring non-finite ratio to 0.0 — the resolution gate
         // stays suspended (fail-closed for bias movement).
@@ -572,15 +557,15 @@ final class AggregateCalibrator implements CalibrationStore
     }
 
     /**
-     * Maps the raw calibration.lua reply to a BOUNDED integer bias.
-     * The canonical script guards its own output (a
-     * non-finite final_mp maps to +max_adjustment*1000 inside the Lua),
-     * so a well-behaved Redis never sends a non-finite value here — this
-     * is the defense-in-depth conversion boundary on the PHP side:
+     * Maps the raw calibration.lua reply to a bounded integer bias.
+     * The canonical script guards its own output: a non-finite final_mp
+     * maps to +max_adjustment*1000 inside the Lua, so a well-behaved
+     * Redis never sends a non-finite value here. This is the
+     * defense-in-depth conversion boundary on the PHP side.
      *
-     *   - NaN / ±Inf  -> +maxAdjustment  (fail HIGH: never 0, never
-     *     lower-risk-than-max; `(int)` alone would map both to 0)
-     *   - anything    -> clamped to ±maxAdjustment (bounded int output)
+     *   - NaN / ±Inf -> +maxAdjustment; fail high, since `(int)` alone
+     *     would map both to 0
+     *   - anything -> clamped to ±maxAdjustment, a bounded int output
      *
      * @param float|int|string $raw the raw script reply
      */
@@ -588,7 +573,7 @@ final class AggregateCalibrator implements CalibrationStore
     {
         if (is_float($raw)) {
             if (!is_finite($raw)) {
-                return $maxAdjustment; // NaN/±Inf: fail HIGH, never 0
+                return $maxAdjustment; // NaN/±Inf: fail high, never 0
             }
             // Out-of-range finite floats (e.g. 1e300) warn on an int cast
             // (PHP 8.5) — clamp directly; the bounded return holds anyway.

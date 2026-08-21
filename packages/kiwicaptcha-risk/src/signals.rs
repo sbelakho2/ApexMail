@@ -1,4 +1,4 @@
-//! The 13 fixed-point signal fields (each 0..1000), in the EXACT contract
+//! The 13 fixed-point signal fields (each 0..1000), in the exact contract
 //! order, plus the fixed-point normalizer used by the state script.
 
 use serde::{Deserialize, Serialize};
@@ -51,12 +51,12 @@ impl SignalVector {
     }
 }
 
-/// The ADDITIVE risk-v2 signal fields (each 0..1000), in a fixed order.
+/// The additive risk-v2 signal fields (each 0..1000), in a fixed order.
 ///
 /// These are a separate surface from the 13 risk-v1 contract fields: they
 /// are derived from the risk-v2 context (honeypot evidence, session
 /// client-context consistency, trusted-edge TLS consistency) at assessment
-/// time and NEVER mutate the risk-v1 state script or the v1
+/// time and never mutate the risk-v1 state script or the v1
 /// [`SignalVector`]. Both crates use the identical field names and
 /// fixed-point semantics (PHP mirror: honeypot, sessionInconsistency,
 /// tlsInconsistency).

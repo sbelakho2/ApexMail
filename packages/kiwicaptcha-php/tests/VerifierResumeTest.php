@@ -21,22 +21,22 @@ use KiwiCaptcha\Tests\Fixtures\Vectors;
 use PHPUnit\Framework\TestCase;
 
 /**
- * CONSUMED-OPERATION RESUME (resumeConsumedOperation): the narrowly
+ * Consumed-operation resume (resumeConsumedOperation): the narrowly
  * authorized crash-recovery path for the Siteverify takeover. The atomic
  * pending→consumed transition landed and recorded the logical-operation
- * identity, but the derivation/commit reply was lost — consumed_result
+ * identity, but the derivation/commit reply was lost; consumed_result
  * stays null forever for the ordinary verifier (ConsumeIndeterminate).
- * A caller that has PROVEN the retained consumed record's exact operation
- * identity belongs to this logical operation may RESUME the derivation,
- * revalidate every immutable security property exactly like the ordinary
- * verify path, and commit the deterministic outcome. A RESULTLESS resume
- * re-checks the signed expiry against the current clock BEFORE deriving
- * and AGAIN after the derivation, before the commit — the same
- * acceptance boundary as ordinary verification: past the signed deadline
- * it fails closed with Expired and commits nothing, deterministically on
- * every retry — only the committed-result recovery is expiry-exempt (a
- * committed result was durably recorded only after the original final
- * expiry check passed).
+ * A caller that has proven the retained consumed record's exact
+ * operation identity belongs to this logical operation may resume the
+ * derivation, revalidate every immutable security property exactly like
+ * the ordinary verify path, and commit the deterministic outcome. A
+ * resultless resume re-checks the signed expiry against the current
+ * clock before deriving and again after the derivation, before the
+ * commit: the same acceptance boundary as ordinary verification. Past
+ * the signed deadline it fails closed with Expired and commits nothing,
+ * deterministically on every retry. Only the committed-result recovery
+ * is expiry-exempt, since a committed result was durably recorded only
+ * after the original final expiry check passed.
  */
 final class VerifierResumeTest extends TestCase
 {
@@ -87,9 +87,10 @@ final class VerifierResumeTest extends TestCase
 
     /**
      * An Argon2id record issued under the given policy epoch / region /
-     * issuer with the given TTL, already solved: the argon admission gate
-     * is the ONLY seam between the resume's pre-derive revalidation and
-     * its commit, so the mid-derivation rotation / clock tests drive it.
+     * issuer with the given TTL, already solved. The argon admission gate
+     * is the only seam between the resume's pre-derive revalidation and
+     * its commit, so the mid-derivation rotation and clock tests drive
+     * it.
      *
      * @return array{0: ArrayStorage, 1: ChallengeRecord, 2: string}
      */
@@ -130,8 +131,8 @@ final class VerifierResumeTest extends TestCase
 
     /**
      * An admission gate that runs $onAcquire when the resume's Argon
-     * admission happens — AFTER the pre-derive revalidation and BEFORE
-     * the commit, exactly the rotation window the post-derive re-check
+     * admission happens, after the pre-derive revalidation and before
+     * the commit: exactly the rotation window the post-derive re-check
      * must observe.
      */
     private function rotatingGate(\Closure $onAcquire): VerificationAdmissionGate
@@ -157,13 +158,14 @@ final class VerifierResumeTest extends TestCase
     // ── The lost-reply storage seam ─────────────────────────────────────
 
     /**
-     * A storage whose atomic consumeWithOperationIdentity() DELEGATES —
-     * the pending→consumed transition REALLY executes and the identity
-     * lands atomically with the state flip — and THEN throws: the
-     * lost-reply seam (the wire failure that produces ConsumeIndeterminate
-     * even though the transition landed). commitResult() can be armed the
-     * same way: the commit REALLY lands and the reply is then lost,
-     * exercising the resume's read-after-failed-commit path.
+     * A storage whose atomic consumeWithOperationIdentity() delegates:
+     * the pending→consumed transition really executes and the identity
+     * lands atomically with the state flip, and then it throws. This is
+     * the lost-reply seam (the wire failure that produces
+     * ConsumeIndeterminate even though the transition landed).
+     * commitResult() can be armed the same way: the commit really lands
+     * and the reply is then lost, exercising the resume's
+     * read-after-failed-commit path.
      */
     private static function lostReplyStorage(ArrayStorage $inner, bool $consumeReplyLost, bool $commitReplyLost = false): AtomicStorageInterface
     {
@@ -197,8 +199,8 @@ final class VerifierResumeTest extends TestCase
 
             public function consumeWithOperationIdentity(string $nonce, ?string $operationIdentity): ?ConsumedRecord
             {
-                // The transition EXECUTES first — the identity lands
-                // atomically with the state flip — and the reply is then
+                // The transition executes first: the identity lands
+                // atomically with the state flip, and the reply is then
                 // lost.
                 $result = $this->inner->consumeWithOperationIdentity($nonce, $operationIdentity);
                 if ($this->consumeReplyLost) {
@@ -210,8 +212,8 @@ final class VerifierResumeTest extends TestCase
 
             public function commitResult(string $nonce, bool $valid, ?string $binding): bool
             {
-                // The commit EXECUTES first — the deterministic result
-                // lands — and the reply is then lost.
+                // The commit executes first: the deterministic result
+                // lands, and the reply is then lost.
                 $result = $this->inner->commitResult($nonce, $valid, $binding);
                 if ($this->commitReplyLost) {
                     throw new \RuntimeException('commit reply lost after the commit');
@@ -231,18 +233,18 @@ final class VerifierResumeTest extends TestCase
 
     public function testValidShaResumeSucceedsAndCommits(): void
     {
-        // The original attempt's consume reply is lost AFTER the
+        // The original attempt's consume reply is lost after the
         // transition landed (the identity is recorded atomically): the
-        // record is consumed-without-result — the ordinary verifier says
-        // ConsumeIndeterminate forever. The identity-proven resume derives
-        // and COMMITS the deterministic outcome.
+        // record is consumed-without-result, so the ordinary verifier
+        // says ConsumeIndeterminate forever. The identity-proven resume
+        // derives and commits the deterministic outcome.
         [$inner, $record, $token] = $this->issueAndSolve();
         $storage = self::lostReplyStorage($inner, true);
         $verifier = new Verifier($storage, now: static fn (): int => self::ISSUED_AT);
 
-        // The original attempt: the identity-bearing consume EXECUTES (the
-        // transition lands, the identity is recorded atomically) and the
-        // reply is lost — the verifier surfaces ConsumeIndeterminate.
+        // The original attempt: the identity-bearing consume executes
+        // (the transition lands, the identity is recorded atomically) and
+        // the reply is lost; the verifier surfaces ConsumeIndeterminate.
         $original = $verifier->verify($token, Vectors::SECRET, 'login', self::CLIENT_IP, nowNs: $record->issuedAtNs + 1_000_000, operationIdentity: $this->identity('a'));
         self::assertSame(VerifyError::ConsumeIndeterminate, $original->error, 'the lost consume reply must surface as ConsumeIndeterminate');
         $consumed = $inner->consumedState($record->nonce);
@@ -282,7 +284,7 @@ final class VerifierResumeTest extends TestCase
         self::assertNotNull($after?->consumedResult, 'the resume must COMMIT the invalid outcome too');
         self::assertFalse($after->consumedResult->valid);
 
-        // Deterministic: a second resume returns the SAME stored failure
+        // Deterministic: a second resume returns the same stored failure
         // without re-deriving.
         $replay = $verifier->resumeConsumedOperation($wrongToken, Vectors::SECRET, $this->identity('a'), 'login', self::CLIENT_IP);
         self::assertSame(VerifyError::InsufficientWork, $replay->error, 'a retry must replay the committed invalid outcome');
@@ -329,7 +331,7 @@ final class VerifierResumeTest extends TestCase
     public function testArgonResumeNeverBypassesAdmission(): void
     {
         // Argon admission applies to the resumed derivation: a saturated
-        // gate rejects with CapacityExceeded WITHOUT committing (a later
+        // gate rejects with CapacityExceeded without committing (a later
         // retry can resume once capacity is available), and a released
         // slot lets the resume through.
         $storage = new ArrayStorage();
@@ -394,21 +396,22 @@ final class VerifierResumeTest extends TestCase
 
     public function testResultlessResumePastSignedExpiryIsDeterministicallyExpired(): void
     {
-        // A RESULTLESS resume has no durable success marker: the original
-        // attempt's derivation crossed the signed deadline and verify()
-        // returned Expired WITHOUT committing. Re-deriving after expiry
-        // could turn that same logical redemption into a post-deadline
-        // Valid — the resume therefore re-checks the signed expiry BEFORE
-        // the derivation and fails closed: invalid(Expired), nothing
-        // derived, nothing committed, deterministically on every retry.
+        // A resultless resume has no durable success marker: the
+        // original attempt's derivation crossed the signed deadline and
+        // verify() returned Expired without committing. Re-deriving after
+        // expiry could turn that same logical redemption into a
+        // post-deadline Valid, so the resume re-checks the signed expiry
+        // before the derivation and fails closed: invalid(Expired),
+        // nothing derived, nothing committed, deterministically on every
+        // retry.
         [$inner, $record, $token] = $this->issueAndSolve();
         $storage = self::lostReplyStorage($inner, true);
         $farFuture = static fn (): int => self::ISSUED_AT + 10_000;
         $verifier = new Verifier($storage, now: $farFuture);
         $inner->consumeWithOperationIdentity($record->nonce, $this->identity('late'));
 
-        // Control: a FRESH pending record from the same issuer, verified
-        // at the same far-future clock, is Expired — the clock really is
+        // Control: a fresh pending record from the same issuer, verified
+        // at the same far-future clock, is Expired; the clock really is
         // past the signed lifetime.
         $fresh = new ArrayStorage();
         $issuer = new Issuer(new Config(secretKey: Vectors::SECRET, targetBits: 8, ttlSecs: 120, minDurationMs: 0), $fresh, now: static fn (): int => self::ISSUED_AT);
@@ -423,7 +426,7 @@ final class VerifierResumeTest extends TestCase
         self::assertNull($after?->consumedResult, 'the expired resultless resume must NOT commit anything');
 
         // Deterministic: a second resume derives nothing and stays
-        // Expired — the same logical redemption can never become Valid
+        // Expired; the same logical redemption can never become Valid
         // after the signed deadline.
         $replay = $verifier->resumeConsumedOperation($token, Vectors::SECRET, $this->identity('late'), 'login', self::CLIENT_IP);
         self::assertSame(VerifyError::Expired, $replay->error, 'a second resume after the signed expiry must be Expired again');
@@ -432,13 +435,13 @@ final class VerifierResumeTest extends TestCase
 
     public function testResultlessResumeExpiringDuringDerivationIsDeterministicallyExpired(): void
     {
-        // The recovery starts BEFORE the signed deadline but finishes
-        // AFTER it — a derivation longer than the remaining lifetime. The
+        // The recovery starts before the signed deadline but finishes
+        // after it, a derivation longer than the remaining lifetime. The
         // pre-derive expiry gate passes (~1 second of lifetime left at
         // resume start), then the admission path advances the clock past
-        // expiresAt DURING the expensive derivation (the same gate seam
-        // the mid-derivation rotation tests drive): the post-derive
-        // re-read must commit Expired — the same acceptance boundary as
+        // expiresAt during the expensive derivation (the same gate seam
+        // the mid-derivation rotation tests drive). The post-derive
+        // re-read must commit Expired, the same acceptance boundary as
         // the ordinary verifier, never a post-deadline Valid.
         [$storage, $record, $token] = $this->issueAndSolveArgon(ttlSecs: 1);
         $storage->consumeWithOperationIdentity($record->nonce, $this->identity('expire-mid-derive'));
@@ -450,7 +453,7 @@ final class VerifierResumeTest extends TestCase
         $gate = $this->rotatingGate(static function () use (&$clock): void {
             // The admission lands between the pre-derive expiry gate and
             // the post-derive re-read: the clock advances past the
-            // record's signed expiry (ISSUED_AT + 1).
+            // record's signed expiry (issued_at + 1).
             $clock = self::ISSUED_AT + 10;
         });
         $verifier = new Verifier($storage, $gate, now: $now);
@@ -470,10 +473,10 @@ final class VerifierResumeTest extends TestCase
 
     public function testResultlessResumeNearExpiryWithoutMidDeriveClockAdvanceStillCommitsValid(): void
     {
-        // Control for the post-derive expiry re-read: the SAME setup
+        // Control for the post-derive expiry re-read: the same setup
         // (signed expiry ~1 second in the future at resume start, gate
-        // present) WITHOUT the mid-derive clock advance commits Valid —
-        // the clock advance inside the derivation is the only difference
+        // present) without the mid-derive clock advance commits Valid.
+        // The clock advance inside the derivation is the only difference
         // between the Expired outcome above and this one.
         [$storage, $record, $token] = $this->issueAndSolveArgon(ttlSecs: 1);
         $storage->consumeWithOperationIdentity($record->nonce, $this->identity('near-expiry-valid'));
@@ -495,8 +498,8 @@ final class VerifierResumeTest extends TestCase
 
     public function testCommittedResultRecoveryPastSignedExpiryStillSucceeds(): void
     {
-        // The committed-result path is the ONLY expiry-exempt recovery: a
-        // committed result was durably recorded only after the original
+        // The committed-result path is the only expiry-exempt recovery:
+        // a committed result was durably recorded only after the original
         // final expiry check passed, so recovering it after the signed
         // expiry remains correct — the exact deterministic outcome the
         // original logical redemption received.
@@ -540,7 +543,7 @@ final class VerifierResumeTest extends TestCase
         $outcome = $verifier->resumeConsumedOperation($neverStored, Vectors::SECRET, $this->identity('a'), 'login', self::CLIENT_IP);
         self::assertSame(VerifyError::ConsumeIndeterminate, $outcome->error, 'a nonce with no consumed record must be refused');
 
-        // A still-PENDING record is equally refused (consumedState is
+        // A still-pending record is equally refused (consumedState is
         // defined for consumed records only).
         $pending = new ArrayStorage();
         $issuer = new Issuer(new Config(secretKey: Vectors::SECRET, targetBits: 8, ttlSecs: 120, minDurationMs: 0), $pending);
@@ -637,7 +640,7 @@ final class VerifierResumeTest extends TestCase
 
     public function testCommitReplyLostReadsBackTheWinnersResult(): void
     {
-        // The commit reply is lost AFTER the commit lands: the resume's
+        // The commit reply is lost after the commit lands: the resume's
         // read-after-failed-commit resolves the winner's stored result
         // instead of failing.
         [$inner, $record, $token] = $this->issueAndSolve();
@@ -711,7 +714,7 @@ final class VerifierResumeTest extends TestCase
     {
         // Two verifier instances (two processes over one shared store)
         // resume the same consumed operation: the first derives and
-        // commits, the second resolves the SAME stored outcome — one
+        // commits; the second resolves the same stored outcome. One
         // deterministic retained result, never two derivations' worth of
         // divergence.
         [$inner, $record, $token] = $this->issueAndSolve();
@@ -735,7 +738,7 @@ final class VerifierResumeTest extends TestCase
     public function testOrdinaryVerifyStillIndeterminateForConsumedWithoutResult(): void
     {
         // Native replay security is unaffected: the ordinary verify() on
-        // the consumed-without-result record STILL returns
+        // the consumed-without-result record still returns
         // ConsumeIndeterminate — only the identity-proven resume path can
         // derive.
         [$inner, $record, $token] = $this->issueAndSolve();
@@ -748,14 +751,14 @@ final class VerifierResumeTest extends TestCase
         self::assertTrue($resume->isOk(), 'only the identity-proven resume derives');
     }
 
-    // ── POST-DERIVE FINAL REVALIDATION (CURRENT expectations) ──────────
+    // ── Post-derive final revalidation (current expectations) ─────────
 
     public function testPolicyEpochRotationBetweenPreDeriveCheckAndCommitRefusesTheResume(): void
     {
-        // The expected policy epoch rotates BETWEEN the pre-derive
+        // The expected policy epoch rotates between the pre-derive
         // revalidation (which passed with the pre-rotation expectation)
-        // and the commit: the POST-DERIVE re-check reads the CURRENT
-        // expected epoch and refuses WrongPolicyVersion — nothing is
+        // and the commit; the post-derive re-check reads the current
+        // expected epoch and refuses WrongPolicyVersion. Nothing is
         // committed, so a later same-identity resume with a matching
         // expectation can still run.
         [$storage, $record, $token] = $this->issueAndSolveArgon(policyVersion: 2);
@@ -806,7 +809,7 @@ final class VerifierResumeTest extends TestCase
 
     public function testRotationToMatchingExpectationsMidResumeStillCommits(): void
     {
-        // Control: a rotation that lands on MATCHING values must not
+        // Control: a rotation that lands on matching values must not
         // reject — the resumed derivation commits as today.
         [$storage, $record, $token] = $this->issueAndSolveArgon(policyVersion: 2, issuer: 'prod');
         $storage->consumeWithOperationIdentity($record->nonce, $this->identity('rotate-match'));

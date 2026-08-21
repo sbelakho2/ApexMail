@@ -9,9 +9,9 @@ use KiwiCaptcha\Risk\RiskAction;
 /**
  * In-memory chained-challenge state store for tests/dev (single-process
  * semantics), mirroring the Redis store's transactional v2 machine exactly:
- * the same obligation-anchored transitions and the same ALL-OR-NOTHING
- * strict v2 decode ({@see MalformedChainedChallengeStateException} — a
- * corrupt record never becomes a defaulted one). It runs on a
+ * the same obligation-anchored transitions and the same all-or-nothing
+ * strict v2 decode, see {@see MalformedChainedChallengeStateException}: a
+ * corrupt record never becomes a defaulted one. It runs on a
  * caller-provided clock so TTL and lease expiry are enforceable (mirroring
  * redis TIME). The full state machine is documented in
  * docs/chained-challenges.md.
@@ -42,7 +42,7 @@ final class ArrayChainedChallengeStateStore implements TransactionalChainedChall
 
     /**
      * @param \Closure|null $now test seam: returns the current unix
-     *                           seconds (defaults to microtime(true))
+     *                           seconds (defaults to microtime(true)).
      */
     public function __construct(private readonly ?\Closure $now = null)
     {
@@ -55,8 +55,8 @@ final class ArrayChainedChallengeStateStore implements TransactionalChainedChall
 
     public function create(string $chainId, string $stage1Nonce, string $scope, int $ttlSecs, ?string $requestBinding = null, ?string $requiredAction = null, int $policyVersion = 1): void
     {
-        // The deprecated legacy path is NOT transaction-anchored (it
-        // carries no obligation id): the record carries a DERIVED
+        // The deprecated legacy path is not transaction-anchored, it
+        // carries no obligation id: the record carries a derived
         // placeholder obligation id (never a real transaction mapping —
         // hash of the random chain id, no obligation entry is written), so
         // the strict v2 decode stays satisfied.
@@ -120,7 +120,7 @@ final class ArrayChainedChallengeStateStore implements TransactionalChainedChall
             $record = $this->records[$existing] ?? null;
             if ($record !== null && $record['expiresAt'] > $this->clock()) {
                 // The obligation exists: return the existing chain id,
-                // RAISING the required rank/action when the new
+                // raising the required rank/action when the new
                 // reassessment is stronger (never lower).
                 if ($requiredRank > $record['requiredRank']) {
                     $this->records[$existing]['requiredRank'] = $requiredRank;
@@ -282,7 +282,7 @@ final class ArrayChainedChallengeStateStore implements TransactionalChainedChall
             return 'conflict';
         }
         $this->records[$chainId]['state'] = 'verified';
-        // The VERIFIED transition clears the obligation mapping ONLY
+        // The verified transition clears the obligation mapping only
         // while it still points at this chain (a re-created chain of the
         // same transaction must never be unlinked by a stale delete).
         if (($this->obligations[(string) $record['obligationId']] ?? null) === $chainId) {
@@ -305,7 +305,7 @@ final class ArrayChainedChallengeStateStore implements TransactionalChainedChall
             return 'conflict';
         }
         $this->records[$chainId]['state'] = 'step_up_required';
-        // The STEP-UP transition KEEPS the obligation mapping: the
+        // The step-up transition keeps the obligation mapping: the
         // transaction stays bound to the step-up requirement, so a later
         // challenge request for the same transaction re-encounters the
         // terminal state (never a new stage-1).
@@ -326,7 +326,7 @@ final class ArrayChainedChallengeStateStore implements TransactionalChainedChall
             return 'conflict';
         }
         $this->records[$chainId]['state'] = 'denied';
-        // The DENIED transition KEEPS the obligation mapping: the
+        // The denied transition keeps the obligation mapping: the
         // transaction stays bound to its final denial, so a later
         // challenge request for the same transaction re-encounters the
         // terminal state (never a new stage-1).
@@ -343,19 +343,19 @@ final class ArrayChainedChallengeStateStore implements TransactionalChainedChall
         if ($record === null) {
             return 'missing';
         }
-        // OBLIGATION-BOUND (the mirror of the Redis Lua — atomic over
-        // BOTH keys): the chain record must STILL agree on the
-        // obligation id AND the obligation mapping must STILL point at
-        // this chain — otherwise the transaction's chain moved and
-        // NOTHING is transitioned (fail closed).
+        // Obligation-bound (the mirror of the Redis Lua, atomic over
+        // both keys): the chain record must still agree on the
+        // obligation id and the obligation mapping must still point at
+        // this chain; otherwise the transaction's chain moved and
+        // nothing is transitioned (fail closed).
         if ($record['obligationId'] !== $obligationId) {
             return 'obligation_moved';
         }
         $mapped = $this->obligations[$obligationId] ?? null;
         if ($mapped === null) {
-            // The obligation mapping is GONE while the chain survives —
+            // The obligation mapping is gone while the chain survives:
             // the transaction already ended (the mapping is deleted
-            // atomically at verification): there is no chain left to
+            // atomically at verification), so there is no chain left to
             // terminalize.
             return 'already_completed';
         }
@@ -379,11 +379,11 @@ final class ArrayChainedChallengeStateStore implements TransactionalChainedChall
         // owner/leaseUntil null).
         $this->records[$chainId]['owner'] = null;
         $this->records[$chainId]['leaseUntil'] = null;
-        // The stage2Nonce field is PRESERVED: the exact stage-2 nonce
+        // The stage2Nonce field is preserved: the exact stage-2 nonce
         // when one exists (issued/completed), null otherwise
-        // (available/reserved) — the terminal state carries an OPTIONAL
+        // (available/reserved); the terminal state carries an optional
         // stage-2 nonce.
-        // The DENIED transition KEEPS the obligation mapping: the
+        // The denied transition keeps the obligation mapping: the
         // transaction stays bound to its final denial, so a later
         // challenge request for the same transaction re-encounters the
         // terminal state (never a new stage-1).
@@ -436,11 +436,11 @@ final class ArrayChainedChallengeStateStore implements TransactionalChainedChall
         // owner/leaseUntil null).
         $this->records[$chainId]['owner'] = null;
         $this->records[$chainId]['leaseUntil'] = null;
-        // The stage2Nonce field is PRESERVED: the exact stage-2 nonce
+        // The stage2Nonce field is preserved: the exact stage-2 nonce
         // when one exists (issued/completed), null otherwise
-        // (available/reserved) — the terminal state carries an OPTIONAL
+        // (available/reserved); the terminal state carries an optional
         // stage-2 nonce.
-        // The STEP-UP transition KEEPS the obligation mapping: the
+        // The step-up transition keeps the obligation mapping: the
         // transaction stays bound to the step-up requirement, so a later
         // challenge request for the same transaction re-encounters the
         // terminal state (never a new stage-1).
@@ -490,7 +490,7 @@ final class ArrayChainedChallengeStateStore implements TransactionalChainedChall
     }
 
     /**
-     * The LIVE record of a chain: absent -> null, CORRUPT -> the strict
+     * The live record of a chain: absent -> null, corrupt -> the strict
      * v2 decode throws (fail closed — a corrupt server record can never
      * be transitioned into valid state), expired -> null (the record is
      * cleaned up).
@@ -514,9 +514,10 @@ final class ArrayChainedChallengeStateStore implements TransactionalChainedChall
     }
 
     /**
-     * The SHORT reservation lease deadline: min(reservation lease, the
-     * record's OWN remaining TTL) — the whole record expires with the
-     * signed ticket, so the lease can never outlive the chain.
+     * The short reservation lease deadline: the smaller of the
+     * reservation lease and the record's own remaining TTL. The whole
+     * record expires with the signed ticket, so the lease can never
+     * outlive the chain.
      *
      * @param array<string, mixed> $record
      */
@@ -532,11 +533,11 @@ final class ArrayChainedChallengeStateStore implements TransactionalChainedChall
     }
 
     /**
-     * The strict v2 decode — ALL-OR-NOTHING, IDENTICAL to the Redis
+     * The strict v2 decode, all-or-nothing, identical to the Redis
      * store's decode: a missing/malformed field or a state-invariant
-     * violation throws {@see MalformedChainedChallengeStateException}
-     * (NEVER defaults: a corrupt requiredAction must never become '',
-     * policyVersion never 1, chainDepth never 2, state never available).
+     * violation throws {@see MalformedChainedChallengeStateException},
+     * never defaults: a corrupt requiredAction must never become '',
+     * policyVersion never 1, chainDepth never 2, state never available.
      *
      * @param array<string, mixed> $rec
      *
@@ -595,11 +596,11 @@ final class ArrayChainedChallengeStateStore implements TransactionalChainedChall
                 throw new MalformedChainedChallengeStateException('chain record stage2Nonce must be a Kiwi base64 nonce in the issued/verified states');
             }
         } elseif ($state === 'step_up_required' || $state === 'denied') {
-            // The terminal states carry an OPTIONAL stage-2 nonce: the
+            // The terminal states carry an optional stage-2 nonce: the
             // exact stage-2 nonce when the chain was issued before the
             // terminal transition, null when the transaction was
-            // terminalized WITHOUT the exact stage-2 nonce (the
-            // NONCE-AGNOSTIC markTransactionDenied() /
+            // terminalized without the exact stage-2 nonce (the
+            // nonce-agnostic markTransactionDenied() /
             // markTransactionStepUpRequired() terminalizations of an
             // open obligation). A non-null value must still be a valid
             // Kiwi nonce.

@@ -12,8 +12,8 @@ use Symfony\Bundle\FrameworkBundle\KernelBrowser;
 use Symfony\Component\DependencyInjection\ContainerInterface;
 
 /**
- * The hardening config options must reach the REAL wired services: issuance
- * rate limiting enforced at the challenge endpoint (shared PSR-6 pool
+ * The hardening config options must reach the real wired services: issuance
+ * rate limiting enforced at the challenge endpoint (shared psr-6 pool
  * configured) and the Argon2id admission gate wired into the core Verifier.
  */
 final class HardeningWiringTest extends TestCase
@@ -34,7 +34,7 @@ final class HardeningWiringTest extends TestCase
     public function testRateLimitEnforcedThroughRealKernel(): void
     {
         // Default KernelBrowser reboots the kernel per request (like separate
-        // PHP-FPM workers), which would wipe the in-memory pool state; a
+        // php-fpm workers), which would wipe the in-memory pool state; a
         // single worker is the scenario the in-memory limiter guards.
         $client = new KernelBrowser(self::$kernel);
         $client->disableReboot();
@@ -52,7 +52,7 @@ final class HardeningWiringTest extends TestCase
     public function testArgon2ModeWiresInProcessGateIntoTheVerifier(): void
     {
         // HardenedTestKernel has argon2id + no Redis client: the extension
-        // must wire the InProcessArgonGate into the CORE verifier (the
+        // must wire the InProcessArgonGate into the core verifier (the
         // bundle's ThrottledVerifier wrapper no longer exists — the core
         // takes the gate natively).
         $verifier = $this->container()->get('kiwi_captcha.verifier');
@@ -68,9 +68,9 @@ final class HardeningWiringTest extends TestCase
 
     public function testSha256ModeStillWiresGateWhenCapConfigured(): void
     {
-        // The gate is created whenever the cap is > 0 — REGARDLESS of the
+        // The gate is created whenever the cap is > 0 — regardless of the
         // locally configured issuance algorithm: the verifier consults it
-        // based on the STORED record, and a SHA-issuing service may receive
+        // based on the stored record, and a SHA-issuing service may receive
         // solutions for Argon records written by another (e.g. Rust) service
         // sharing the storage. No cost for SHA verifications: the gate is
         // only consulted when the record says Argon2id.

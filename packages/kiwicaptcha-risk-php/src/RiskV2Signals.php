@@ -5,12 +5,12 @@ declare(strict_types=1);
 namespace KiwiCaptcha\Risk;
 
 /**
- * The ADDITIVE risk-v2 signal fields (each 0..1000), in a fixed order.
+ * The additive risk-v2 signal fields (each 0..1000), in a fixed order.
  *
  * These are a separate surface from the 13 risk-v1 contract fields: they
  * are derived from the risk-v2 context (honeypot evidence, session
  * client-context consistency, trusted-edge TLS consistency) at assessment
- * time and NEVER mutate the risk-v1 state script or the v1 SignalVector.
+ * time and never mutate the risk-v1 state script or the v1 SignalVector.
  * Both crates use the identical field names and fixed-point semantics
  * (Rust mirror: honeypot, session_inconsistency, tls_inconsistency).
  */

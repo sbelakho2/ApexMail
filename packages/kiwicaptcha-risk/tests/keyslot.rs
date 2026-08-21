@@ -1,6 +1,6 @@
-//! Redis Cluster key layout: the store's FULL key set for one observation
+//! Redis Cluster key layout: the store's full key set for one observation
 //! must hash to a single slot (shared `{kiwi:<ns>}` hash tag), and the
-//! CRC-16/XMODEM implementation must match the Redis Cluster reference
+//! crc-16/xmodem implementation must match the Redis Cluster reference
 //! vectors. Pure — no Redis needed.
 
 mod common;
@@ -57,7 +57,7 @@ fn full_observation_key_set_is_single_slot() {
     for key in &keys {
         assert!(key.starts_with(&tag), "key {key} must carry the {tag} tag");
     }
-    // The current-epoch key carries the CURRENT pseudonym; the ±1 keys
+    // The current-epoch key carries the current pseudonym; the ±1 keys
     // carry the epoch-scoped prev/next pseudonyms (never the current one).
     assert!(keys
         .iter()
@@ -126,12 +126,12 @@ fn hash_tag(key: &str) -> Option<&str> {
     Some(&key[open + 1..close])
 }
 
-/// Server-authoritative slot via CLUSTER KEYSLOT when the instance serves
-/// it; otherwise (standalone Redis 7 refuses the CLUSTER command with
-/// "cluster support disabled") the canonical CRC-16/XMODEM slot
-/// computation — the exact algorithm Redis Cluster uses for hash tags
-/// (slot = crc16(tag) & 0x3FFF), pinned against the reference vectors
-/// above.
+/// Server-authoritative slot via the Redis cluster keyslot command when
+/// the instance serves it; otherwise (standalone Redis 7 refuses the
+/// cluster command with "cluster support disabled") the canonical
+/// crc-16/xmodem slot computation — the exact algorithm Redis Cluster
+/// uses for hash tags: slot = crc16 of the tag, masked by 0x3FFF, pinned
+/// against the reference vectors above.
 fn slot_of(con: &mut redis::Connection, key: &str) -> i64 {
     match redis::cmd("CLUSTER")
         .arg("KEYSLOT")
@@ -147,10 +147,10 @@ fn slot_of(con: &mut redis::Connection, key: &str) -> i64 {
     }
 }
 
-/// Every canonical script's key set must hash to ONE cluster
-/// slot (the {kiwi:<ns>} tag). Real Redis (skipped unless RISK_REDIS_URL):
-/// per script, the keys are built EXACTLY as the production code builds
-/// them and all slots must be equal.
+/// Every canonical script's key set must hash to one cluster
+/// slot (the {kiwi:<ns>} tag). Real Redis (skipped unless the Redis test
+/// URL is set): per script, the keys are built exactly as the production
+/// code builds them and all slots must be equal.
 #[test]
 fn every_canonical_script_key_set_is_single_slot() {
     let Some(url) = common::redis_url() else {

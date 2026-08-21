@@ -20,43 +20,43 @@ use BelConsulting\KiwiCaptchaBundle\SiteVerify\RedisEval;
  * survives at least as long as the consumed core result can be replayed;
  * the per-call claim TTL applies when no configured TTL is given.
  *
- * The claim is ONE atomic Lua state machine (missing -> pending(me,
- * lease); pending+me -> 'pending'; pending+other+live -> 'pending' (busy);
- * pending+other+expired -> takeover -> 'taken_over'; complete ->
- * 'complete'): at most one owner computes a nonce's disposition. The
- * machine reads the existing state before touching anything else — a
+ * The claim is one atomic Lua state machine, missing -> pending(me,
+ * lease), pending+me -> 'pending', pending+other+live -> 'pending' (busy),
+ * pending+other+expired -> takeover -> 'taken_over', complete ->
+ * 'complete', so at most one owner computes a nonce's disposition. The
+ * machine reads the existing state before touching anything else: a
  * complete claim, a busy claim and a takeover never touch the nonce ->
- * decision mapping key; only the missing path consumes it (getdel inside
- * the script — at most one winner) and persists the paired decision id
- * in the pending record in the same transition: a fallible read before
- * the claim can never lose the original handle, a caller that does not
- * become owner never consumes the mapping, and an owner crash after the
- * claim can never lose it either. The short fixed lease (15 s) bounds
- * the in-flight window — never the record TTL. The finalize is atomic
- * too: pending(me) -> complete, refused for a non-owner or a non-pending
- * record, so a crash-taken-over computation can never overwrite a
- * completed disposition and a replayed proof reproduces the persisted
- * final disposition. The pending record carries the original decision
- * handle the first owner's claim consumed; a takeover keeps it — a
- * completed disposition survives the crash of its first owner with the
- * original decision id.
+ * decision mapping key. Only the missing path consumes it (getdel inside
+ * the script, at most one winner) and persists the paired decision id
+ * in the pending record in the same transition, so a fallible read
+ * before the claim can never lose the original handle, a caller that
+ * does not become owner never consumes the mapping, and an owner crash
+ * after the claim can never lose it either. The short fixed lease (15 s)
+ * bounds the in-flight window, never the record TTL. The finalize is
+ * atomic too: pending(me) -> complete, refused for a non-owner or a
+ * non-pending record, so a crash-taken-over computation can never
+ * overwrite a completed disposition and a replayed proof reproduces the
+ * persisted final disposition. The pending record carries the original
+ * decision handle the first owner's claim consumed; a takeover keeps it,
+ * so a completed disposition survives the crash of its first owner with
+ * the original decision id.
  *
- * Every record is decoded all-or-nothing against the strict schema
- * ({@see self::decodeRecord()}): a missing/malformed field or a
+ * Every record is decoded all-or-nothing against the strict schema, see
+ * {@see self::decodeRecord()}: a missing/malformed field or a
  * state-invariant violation throws
- * {@see MalformedPostSolveDispositionException} — never a defaulted
+ * {@see MalformedPostSolveDispositionException}, never a defaulted
  * record (an unknown state never becomes pending, a corrupt kind never
  * Pass, a missing disposition never a silent pass, a ChainRequired
  * record without its chain_expires_at bound never a ticket). The decoder
- * accepts both schema versions 1 and 2: new writes are v1 (chain_required
- * carries chain_expires_at — a shape an earlier release already reads),
- * while a v1 chain_required record without chain_expires_at is a legacy
- * record — its carried expiry is null and the signing falls back to the
- * exact chain record's server-held bound (never corrupt); any other v1
- * violation stays corrupt, and a v2 chain_required record requires a
- * positive chain_expires_at (the forward-looking v2 acceptance). The
- * same decode runs on the in-memory store, so Array and Redis observe
- * one machine.
+ * accepts both schema versions 1 and 2: new writes are v1, where
+ * chain_required carries chain_expires_at, a shape an earlier release
+ * already reads, while a v1 chain_required record without
+ * chain_expires_at is a legacy record: its carried expiry is null and
+ * the signing falls back to the exact chain record's server-held bound
+ * (never corrupt). Any other v1 violation stays corrupt, and a v2
+ * chain_required record requires a positive chain_expires_at (the
+ * forward-looking v2 acceptance). The same decode runs on the in-memory
+ * store, so Array and Redis observe one machine.
  */
 final class RedisPostSolveDispositionStore implements PostSolveDispositionStore
 {
@@ -70,21 +70,24 @@ final class RedisPostSolveDispositionStore implements PostSolveDispositionStore
 
     /**
      * Single-Lua claim: one atomic transition per nonce.
-     *   keys[1] = {kiwi:<ns>}:postsolve:<nonce>
-     *   keys[2] = the nonce -> decision mapping key ({kiwi:<ns>}:decision:<nonce>),
-     *             '' = none (no decision transfer)
-     *   argv[1] = owner token, argv[2] = lease seconds, argv[3] = record TTL
+     *   keys[1] = {kiwi:<ns>}:postsolve:<nonce>.
+     *   keys[2] = the nonce -> decision mapping key
+     *             ({kiwi:<ns>}:decision:<nonce>), '' = none (no decision
+     *             transfer).
+     *   argv[1] = owner token, argv[2] = lease seconds, argv[3] = record
+     *             TTL.
      * Returns 'claimed' | 'pending' | 'taken_over' | 'complete'.
      * The existing state is read first and answered without touching the
      * decision key: complete -> 'complete'; pending+live other owner ->
-     * 'pending'; an expired-lease takeover -> 'taken_over' (the existing
-     * record's decision_id is preserved — a takeover never GETDELs a
-     * fresh mapping). only the missing path consumes the mapping (getdel,
-     * atomic with the creation — at most one winner) and persists the
-     * paired decision id in the pending record in the same transition: a
-     * fallible read before the claim can never lose the original handle,
-     * a caller that does not become owner never consumes the mapping,
-     * and an owner crash after the claim can never lose it either.
+     * 'pending'; an expired-lease takeover -> 'taken_over', where the
+     * existing record's decision_id is preserved since a takeover never
+     * GETDELs a fresh mapping. Only the missing path consumes the mapping
+     * (getdel, atomic with the creation, at most one winner) and persists
+     * the paired decision id in the pending record in the same
+     * transition: a fallible read before the claim can never lose the
+     * original handle, a caller that does not become owner never consumes
+     * the mapping, and an owner crash after the claim can never lose it
+     * either.
      */
     private const CLAIM_LUA = <<<'LUA'
 -- Post-solve disposition claim: single-writer per nonce.
@@ -271,24 +274,23 @@ LUA;
     }
 
     /**
-     * The strict decode — all-or-nothing: a missing/malformed field or a
+     * The strict decode, all-or-nothing: a missing/malformed field or a
      * state-invariant violation throws
-     * {@see MalformedPostSolveDispositionException} (never defaults: an
+     * {@see MalformedPostSolveDispositionException}, never defaults: an
      * unknown state never becomes pending, a corrupt kind never Pass, a
      * missing disposition never a silent pass, a ChainRequired record
-     * without its chain_expires_at bound never a ticket). Validates:
-     * schema version 1 or 2 (the compatibility window — v2 carries the
-     * strict chain_expires_at requirement, v1 additionally accepts a
-     * legacy chain_required record without chain_expires_at, whose
+     * without its chain_expires_at bound never a ticket. Validates:
+     * schema version 1 or 2 (the compatibility window, where v2 carries
+     * the strict chain_expires_at requirement and v1 additionally accepts
+     * a legacy chain_required record without chain_expires_at whose
      * carried expiry is null; every other rule is identical for both
-     * versions); the exact state enum (pending|complete — nothing
-     * else); a non-empty string owner and an integer lease_until
-     * required in pending and null in complete; the disposition field
-     * required (with a valid kind enum and well-shaped
-     * decision_id/chain_id, plus the chain_expires_at integer required
-     * on the ChainRequired kind — v1 legacy excepted — and null outside
-     * it) in complete and null in pending; a non-empty string-or-null
-     * decision handle in both states.
+     * versions); the exact state enum (pending|complete, nothing else);
+     * a non-empty string owner and an integer lease_until required in
+     * pending and null in complete; the disposition field required (with
+     * a valid kind enum and well-shaped decision_id/chain_id, plus the
+     * chain_expires_at integer required on the ChainRequired kind, v1
+     * legacy excepted, and null outside it) in complete and null in
+     * pending; a non-empty string-or-null decision handle in both states.
      *
      * @return array<string, mixed> the validated record
      *

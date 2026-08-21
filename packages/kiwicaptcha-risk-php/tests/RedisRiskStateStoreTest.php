@@ -13,16 +13,16 @@ use Predis\Client;
 use PHPUnit\Framework\TestCase;
 
 /**
- * Redis-backed store tests. Skipped unless RISK_REDIS_URL is set
+ * Redis-backed store tests. Skipped unless the Redis test URL is set
  * (e.g. tcp://127.0.0.1:6399 with `docker run -d -p 6399:6379 redis:7-alpine`).
  *
- * The risk-v1 Lua derives `now` from Redis TIME (ARGV[3] now_ms is
- * informational — wire compat only), so expectations that depend on decay
- * are derived from REAL elapsed time (bracketed TIME measurements around
- * the observations) instead of injected timestamps. The Lua executes
- * atomically, so sequential calls in one process are equivalent to
- * concurrent ones for state semantics; the store asserts that all keys
- * share one Redis Cluster slot.
+ * The risk-v1 Lua derives `now` from Redis time (argv[3] now_ms is
+ * informational, wire compat only), so expectations that depend on
+ * decay are derived from real elapsed time (bracketed time
+ * measurements around the observations) instead of injected
+ * timestamps. The Lua executes atomically, so sequential calls in one
+ * process are equivalent to concurrent ones for state semantics; the
+ * store asserts that all keys share one Redis Cluster slot.
  */
 final class RedisRiskStateStoreTest extends TestCase
 {
@@ -76,7 +76,7 @@ final class RedisRiskStateStoreTest extends TestCase
         );
     }
 
-    /** The Redis server clock in epoch milliseconds (TIME is the script's clock authority). */
+    /** The Redis server clock in epoch milliseconds (time is the script's clock authority). */
     private function redisNowMs(): int
     {
         $t = $this->client->time();
@@ -85,10 +85,10 @@ final class RedisRiskStateStoreTest extends TestCase
 
     /**
      * The possible normalized value of `raw` after the real elapsed window
-     * bracketed by [minElapsedMs, maxElapsedMs] (TIME measured around the
+     * bracketed by [minElapsedMs, maxElapsedMs] (time measured around the
      * observations): leak = floor(elapsed*rate/1000), leaked = max(0, raw -
      * leak), value = floor(leaked*1000/sat). The Lua computes its elapsed
-     * from Redis TIME inside the script, which always falls inside the
+     * from Redis time inside the script, which always falls inside the
      * bracket, so the true value is within the returned [min, max] range.
      *
      * @return array{0: int, 1: int} [min, max]
@@ -117,7 +117,7 @@ final class RedisRiskStateStoreTest extends TestCase
 
     public function testPrincipalCreditIsReal(): void
     {
-        // AuthenticationSuccess (10) against a PRESENT principal: +1500 raw
+        // AuthenticationSuccess (10) against a present principal: +1500 raw
         // source trust and +2000 raw principal trust. The trust split means
         // NO double subtraction: trust_credit covers source+session only
         // (1500 -> 150), principal_credit is the principal's own (2000 -> 200).
@@ -134,7 +134,7 @@ final class RedisRiskStateStoreTest extends TestCase
         self::assertSame(200, $vector->principalCredit);
         self::assertSame(150, $vector->trustCredit); // source trust only, never the principal's
 
-        // SolveSuccess (3) against a PRESENT session on a FRESH store:
+        // SolveSuccess (3) against a present session on a fresh store:
         // session trust +150 -> 150*1000/10000 = 15.
         $store = $this->store();
         $vector = $store->observe($this->observation(
@@ -159,12 +159,12 @@ final class RedisRiskStateStoreTest extends TestCase
     public function testRotatedEpochPseudonymsSumNotMax(): void
     {
         // A burst split across an epoch boundary: the first request writes
-        // epoch 12345's bucket, the second (at epoch 12346) writes the NEXT
-        // epoch and reads 12345 as its PREV bucket. v3 SUMs the rotated
+        // epoch 12345's bucket, the second (at epoch 12346) writes the next
+        // epoch and reads 12345 as its prev bucket. v3 SUMs the rotated
         // pseudonyms of one identity (2000 raw rf), so the second
         // observation sees ~250 sourceFast — under a max it would be 125.
-        // The first bucket has decayed by the REAL elapsed time between the
-        // two script executions (Redis TIME), so the expectation is derived
+        // The first bucket has decayed by the real elapsed time between the
+        // two script executions (Redis time), so the expectation is derived
         // from the bracketed elapsed.
         $store = $this->store();
         $tBeforeFirst = $this->redisNowMs();
@@ -239,8 +239,8 @@ final class RedisRiskStateStoreTest extends TestCase
 
     public function testSourceAndSessionMaxNotSum(): void
     {
-        // One PreIssue increments BOTH the source and the session velocity.
-        // They are DIFFERENT identity dimensions observing the same request,
+        // One PreIssue increments both the source and the session velocity.
+        // They are different identity dimensions observing the same request,
         // so the aggregate MAXes — never double-counts.
         $store = $this->store();
         $vector = $store->observe($this->observation(
@@ -285,7 +285,7 @@ final class RedisRiskStateStoreTest extends TestCase
         self::assertSame(125, $first->sourceFast);
         self::assertFalse($store->lastIsDuplicate());
 
-        // Duplicate: state NOT applied again, but the CURRENT (real-time
+        // Duplicate: state NOT applied again, but the current (real-time
         // decayed) signals ARE returned with is_duplicate = 1.
         $tAfterFirst = $this->redisNowMs();
         $tBeforeDup = $this->redisNowMs();
@@ -303,7 +303,7 @@ final class RedisRiskStateStoreTest extends TestCase
         self::assertLessThanOrEqual($max, $duplicate->sourceFast);
         self::assertGreaterThanOrEqual(124, $duplicate->sourceFast, 'ms-scale real elapsed cannot decay a fresh burst below 124');
 
-        // A distinct event observes the state from a SINGLE increment
+        // A distinct event observes the state from a single increment
         // (2000 raw minus the real decay of the first bucket).
         $tBeforeThird = $this->redisNowMs();
         $third = $store->observe($this->observation(str_repeat('8', 32)));
@@ -348,7 +348,7 @@ final class RedisRiskStateStoreTest extends TestCase
     public function testSourceRateLimitHitIsSourceSessionOnly(): void
     {
         // Event 15 (SourceRateLimitHit) must add bad pressure to
-        // source/session ONLY — never subnet, global, or principal state
+        // source/session only — never subnet, global, or principal state
         // (a per-source limit is not deployment overload and must not
         // raise the global attack level for all visitors).
         $store = $this->store();
@@ -368,7 +368,7 @@ final class RedisRiskStateStoreTest extends TestCase
         self::assertSame(0, $feedback->globalPressure);
         self::assertSame(0, $store->lastGlobalLevel());
 
-        // Control: a PreIssue DOES raise global pressure.
+        // Control: a PreIssue does raise global pressure.
         $preissue = $store->observe($this->observation(str_repeat('2', 64), event: RiskEventKind::PreIssue));
         self::assertGreaterThan(0, $preissue->globalPressure);
     }
@@ -386,7 +386,7 @@ final class RedisRiskStateStoreTest extends TestCase
         $tAfterStorm = $this->redisNowMs();
         self::assertSame(4, $big->lastGlobalLevel(), '32 events must reach level 4');
 
-        // The cooldown is ARMED by the level ratchet: Redis TIME at the last
+        // The cooldown is armed by the level ratchet: Redis time at the last
         // rise + the hysteresis window (never the injected now_ms).
         self::assertGreaterThanOrEqual($tBeforeStorm + 60_000, $big->lastCooldownUntilMs());
         self::assertLessThanOrEqual($tAfterStorm + 60_000, $big->lastCooldownUntilMs());
@@ -397,7 +397,7 @@ final class RedisRiskStateStoreTest extends TestCase
         self::assertSame(4, $big->lastGlobalLevel(), 'level holds while the pressure target is still 4');
         self::assertLessThanOrEqual($tAfterStorm + 60_000, $big->lastCooldownUntilMs());
 
-        // DROP TEST (short hysteresis + REAL sleep): with a 2000 ms window,
+        // Drop test (short hysteresis + real sleep): with a 2000 ms window,
         // a ~17 s real sleep lets the pressure decay below the L4 exit
         // threshold (exit[4] = 850; rf leak 250/s + rs leak 20/s:
         // 914 - (270 raw/s * ~17 s) -> ~848) and the expired window then
@@ -469,7 +469,7 @@ final class RedisRiskStateStoreTest extends TestCase
         $hour = intdiv((int) floor(microtime(true) * 1000), 3_600_000);
         $ledgerKey = "{kiwi:{$ns}}:outcome:dec-1";
 
-        // Register: the PENDING entry carries scope/hour/score.
+        // Register: the pending entry carries scope/hour/score.
         self::assertTrue($store->registerOutcome('dec-1', 7, $hour, 500));
         $ledger = json_decode((string) $this->client->get($ledgerKey), true);
         self::assertSame('P', $ledger['o']);
@@ -506,7 +506,7 @@ final class RedisRiskStateStoreTest extends TestCase
         self::assertGreaterThan(0, $ttl);
         self::assertLessThanOrEqual(3600, $ttl, 'the outcome ledger TTL comes from the constructor knob');
 
-        // The default is the DEFAULT_OUTCOME_TTL_SECS constant.
+        // The default is the outcome TTL constant (86400).
         $default = $this->store();
         self::assertTrue($default->registerOutcome('ttl-dec-2', 1, intdiv((int) floor(microtime(true) * 1000), 3_600_000), 100));
         $ttl = (int) $this->client->ttl($default->ledgerKey('ttl-dec-2'));
@@ -526,7 +526,7 @@ final class RedisRiskStateStoreTest extends TestCase
             sourceIdNext: str_repeat('c', 32), // never written: stays zero
             subnetEpoch: 12345,
             subnetIdPrev: str_repeat('d', 32),
-            subnetId: str_repeat('e', 32), // the SHARED /64-style network aggregate
+            subnetId: str_repeat('e', 32), // the shared /64-style network aggregate
             subnetIdNext: str_repeat('f', 32),
             sessionId: null,
             principalId: null,
@@ -537,11 +537,10 @@ final class RedisRiskStateStoreTest extends TestCase
     }
 
     /**
-     * POISONED SOURCE ABSOLUTE CAP: hundreds of invalid
-     * proofs (plus request velocity and replay pressure) saturate the
-     * channels; the score clamps at 1000 and the policy action reaches
-     * Deny — but NEVER exceeds either, so there is no unbounded punishment
-     * mode.
+     * Poisoned-source absolute cap: hundreds of invalid proofs (plus
+     * request velocity and replay pressure) saturate the channels; the
+     * score clamps at 1000 and the policy action reaches Deny but never
+     * exceeds either, so there is no unbounded punishment mode.
      */
     public function testPoisonedSourceReachesTheCapButNeverExceedsIt(): void
     {
@@ -586,10 +585,10 @@ final class RedisRiskStateStoreTest extends TestCase
     }
 
     /**
-     * /64-STYLE NETWORK AGGREGATE WEAK PER-SIGNAL EFFECT:
-     * many bad proofs across many IPs in ONE network saturate the shared
-     * network channel, but the network signal stays bounded at 1000 and
-     * the exact-IP signals of a single attacker dominate its score.
+     * /64-style network aggregate weak per-signal effect: many bad proofs
+     * across many IPs in one network saturate the shared network channel,
+     * but the network signal stays bounded at 1000 and the exact-IP
+     * signals of a single attacker dominate its score.
      */
     public function testNetworkAggregateRisesBoundedWhileExactIpDominates(): void
     {
@@ -598,7 +597,7 @@ final class RedisRiskStateStoreTest extends TestCase
         $weights = new \KiwiCaptcha\Risk\RiskWeights();
 
         // 200 distinct sources (IPs) in one network: each sends one request
-        // with one invalid proof into the SHARED subnet pseudonym.
+        // with one invalid proof into the shared subnet pseudonym.
         $i = 0;
         for ($ip = 1; $ip <= 200; $ip++) {
             $source = sprintf('%032x', $ip);
@@ -637,9 +636,9 @@ final class RedisRiskStateStoreTest extends TestCase
 
     /**
      * The risk-v2 session client-context record: SET NX first-write-wins
-     * with the SESSION TTL — the first tag a session presents is recorded
-     * and returned forever, a later different tag still yields the FIRST
-     * one (the engine derives the inconsistency signal from that).
+     * with the session TTL. The first tag a session presents is recorded
+     * and returned forever; a later different tag still yields the first
+     * one, from which the engine derives the inconsistency signal.
      */
     public function testSessionFirstContextTagRecordsTheFirstTagWithTheSessionTtl(): void
     {
@@ -652,7 +651,7 @@ final class RedisRiskStateStoreTest extends TestCase
         // Same tag again: the recorded first tag is returned unchanged.
         self::assertSame('aa', $store->sessionFirstContextTag($sessionId, 'aa'));
 
-        // A DIFFERENT tag: the FIRST tag wins (the inconsistency signal
+        // A different tag: the first tag wins (the inconsistency signal
         // derives from this comparison).
         self::assertSame('aa', $store->sessionFirstContextTag($sessionId, 'bb'), 'the first-seen tag must win');
 
@@ -663,17 +662,17 @@ final class RedisRiskStateStoreTest extends TestCase
         self::assertGreaterThan(0, $ttl, 'the record must expire with the session TTL');
         self::assertLessThanOrEqual(1800, $ttl);
 
-        // A DIFFERENT session has its own record.
+        // A different session has its own record.
         self::assertSame('zz', $store->sessionFirstContextTag(str_repeat('2b', 16), 'zz'));
     }
 
     /**
      * The risk-v2 session trusted-edge TLS record: SET NX first-write-wins
-     * with the SESSION TTL — the first coarse TLS classification a session
-     * presents is recorded and returned forever, a later different tag
-     * still yields the FIRST one (the engine derives the tls_inconsistency
-     * signal from that). Mirrors the session_first_context_tag machinery
-     * exactly under its own key.
+     * with the session TTL. The first coarse TLS classification a session
+     * presents is recorded and returned forever; a later different tag
+     * still yields the first one, from which the engine derives the
+     * tls_inconsistency signal. Mirrors the session_first_context_tag
+     * machinery exactly under its own key.
      */
     public function testSessionFirstTlsTagRecordsTheFirstTagWithTheSessionTtl(): void
     {
@@ -686,8 +685,8 @@ final class RedisRiskStateStoreTest extends TestCase
         // Same tag again: the recorded first tag is returned unchanged.
         self::assertSame('tls13|http2', $store->sessionFirstTlsTag($sessionId, 'tls13|http2'));
 
-        // A DIFFERENT tag: the FIRST tag wins (the tls_inconsistency signal
-        // derives from this comparison).
+        // A different tag: the first tag wins (the tls_inconsistency
+        // signal derives from this comparison).
         self::assertSame('tls13|http2', $store->sessionFirstTlsTag($sessionId, 'tls12|http1'), 'the first-seen TLS tag must win');
 
         // The record carries the session TTL (1800 s), like the risk-v1
@@ -697,7 +696,7 @@ final class RedisRiskStateStoreTest extends TestCase
         self::assertGreaterThan(0, $ttl, 'the record must expire with the session TTL');
         self::assertLessThanOrEqual(1800, $ttl);
 
-        // A DIFFERENT session has its own record.
+        // A different session has its own record.
         self::assertSame('tls13|h3', $store->sessionFirstTlsTag(str_repeat('8d', 16), 'tls13|h3'));
     }
 }

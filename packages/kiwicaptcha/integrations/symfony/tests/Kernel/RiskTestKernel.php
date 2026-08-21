@@ -5,11 +5,11 @@ declare(strict_types=1);
 namespace BelConsulting\KiwiCaptchaBundle\Tests\Kernel;
 
 /**
- * Kernel with the adaptive risk engine ENABLED and a fake Predis client as
- * risk.redis_service. The fake does not speak the risk-v1 EVALSHA protocol,
- * so the engine takes its degraded path (store failure -> circuit breaker ->
- * degraded decisions) — which is exactly what this kernel exercises: risk
- * wiring must NEVER break issuance, even when the risk backend is down.
+ * Kernel with the adaptive risk engine enabled and a fake Predis client
+ * as risk.redis_service. The fake does not speak the risk-v1 evalsha
+ * protocol, so the engine takes its degraded path (store failure ->
+ * circuit breaker -> degraded decisions) — risk wiring must never break
+ * issuance even when the risk backend is down.
  */
 final class RiskTestKernel extends TestKernel
 {

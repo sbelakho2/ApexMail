@@ -5,13 +5,13 @@ declare(strict_types=1);
 namespace KiwiCaptcha;
 
 /**
- * Optional capability for storages that can READ the retained consumed
- * state of a record WITHOUT any state transition. Not part of
+ * Optional capability for storages that can read the retained consumed
+ * state of a record without any state transition. Not part of
  * {@see StorageInterface}: third-party adapters are not required to
  * implement it (PSR-6 pools, for example, cannot offer it).
  *
  * Used by the idempotent consumed-outcome recovery: after the signed
- * challenge has expired, the retained consumed record + its committed
+ * challenge has expired, the retained consumed record and its committed
  * deterministic result must still be readable to reproduce the original
  * outcome.
  */

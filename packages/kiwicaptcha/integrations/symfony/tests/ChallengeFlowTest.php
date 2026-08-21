@@ -111,7 +111,7 @@ final class ChallengeFlowTest extends TestCase
         self::assertTrue($outcome->isOk(), sprintf('expected valid, got %s', $outcome->code()));
 
         // Retry semantics: an identical replay in the same
-        // context returns the SAME stored result without re-deriving.
+        // context returns the same stored result without re-deriving.
         $replay = $verifier->verify($token, self::SECRET, 'login', '198.51.100.7');
         self::assertTrue($replay->isOk(), 'same-context replay must return the stored result');
         self::assertTrue($replay->fromStoredResult, 'the replay must come from the stored result, not a second derivation');
@@ -400,7 +400,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
     }
 
     /**
-     * The FULL origin-normalization list. Structured
+     * The full origin-normalization list. Structured
      * normalization compares (scheme, host, effective port) with the host
      * lowercased, trailing dots stripped and IDN converted to punycode
      * (when ext-intl is available).
@@ -458,7 +458,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
 
     public function testEnforceOriginRejectsMissingAndNullOrigins(): void
     {
-        // enforce_origin with an EMPTY allowlist: the Origin is required but
+        // enforce_origin with an empty allowlist: the Origin is required but
         // anything non-null is accepted (no allowlist to match).
         $controller = new ChallengeController($this->issuer(), null, false, null, null, null, null, [], false, null, null, true);
 
@@ -474,7 +474,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         $response = $controller->challenge(JsonRequest::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7', 'HTTP_ORIGIN' => 'https://anything.example'], '{"scope":"login"}'));
         self::assertSame(200, $response->getStatusCode());
 
-        // With an allowlist, the required Origin must ALSO be allowlisted.
+        // With an allowlist, the required Origin must also be allowlisted.
         $strict = new ChallengeController($this->issuer(), null, false, null, null, null, null, ['https://app.example.com'], false, null, null, true);
         $response = $strict->challenge(JsonRequest::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7', 'HTTP_ORIGIN' => 'https://other.example'], '{"scope":"login"}'));
         self::assertSame(403, $response->getStatusCode(), 'enforced + allowlisted: a non-allowlisted Origin must be rejected');
@@ -525,7 +525,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
 
     /**
      * Scope/tenant identifiers and request bindings are
-     * validated against `[A-Za-z0-9._:-]+` with the 128-char ceiling BEFORE
+     * validated against `[A-Za-z0-9._:-]+` with the 128-char ceiling before
      * they reach the issuer — separator, control and out-of-charset bytes
      * can never be signed into a challenge record.
      */
@@ -567,7 +567,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         $data = json_decode((string) $response->getContent(), true);
         self::assertSame('static-binding', $storage->find($data['nonce'])?->requestBinding, 'the configured static binding must apply when the request sends none');
 
-        // The request's own field WINS over the static default.
+        // The request's own field wins over the static default.
         $response = $controller->challenge(JsonRequest::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], '{"scope":"login","request_binding":"per-request"}'));
         $data = json_decode((string) $response->getContent(), true);
         self::assertSame('per-request', $storage->find($data['nonce'])?->requestBinding, 'the per-request binding overrides the static default');
@@ -599,7 +599,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         self::assertCount(3, $records->getValue($storage), 'the refused issuance must discard its minted record');
         self::assertSame(3, $client->counters['{kiwi:flow-test}:outstanding:'.hash_hmac('sha256', Issuer::canonicalIpFamily('198.51.100.7'), RiskKeys::fromMaster(self::SECRET)->event)], 'the per-source counter is bounded by the cap');
 
-        // A DIFFERENT source is unaffected (per-source counters are keyed on
+        // A different source is unaffected (per-source counters are keyed on
         // the HMAC of the canonical IP).
         $response = $controller->challenge(JsonRequest::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.8'], '{"scope":"login"}'));
         self::assertSame(200, $response->getStatusCode(), 'a fresh source must not be blocked by another source\'s cap');
@@ -639,7 +639,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
     }
 
     /**
-     * An OPTIONS preflight ALONE never authorizes — it is a
+     * An OPTIONS preflight alone never authorizes — it is a
      * non-POST method and gets 405 with no challenge stored, no CORS
      * headers, no state written.
      */
@@ -774,7 +774,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         $badEncoding = $controller->challenge(JsonRequest::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7', 'HTTP_CONTENT_ENCODING' => 'gzip'], '{"scope":"login"}'));
         self::assertNull($badEncoding->headers->get('Access-Control-Allow-Origin'), 'a 415 must not echo ACAO');
 
-        // The origin checks run on EVERY response regardless of any CORS
+        // The origin checks run on every response regardless of any CORS
         // configuration: the allowlisted controller still rejects a
         // non-allowlisted origin on every path.
         $allowlisted = new ChallengeController($this->issuer(), null, false, null, null, null, null, ['https://app.example.com']);
@@ -810,7 +810,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
     // ── Host-context hardening ──────────────────────────────────────────
 
     /**
-     * public_base_url comes from SERVER CONFIG: a forged Host header can
+     * public_base_url comes from server config: a forged Host header can
      * never shift the expected same-origin ("Host: evil.example" + "Origin:
      * https://evil.example" must stay cross-origin).
      */
@@ -875,8 +875,8 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
     }
 
     /**
-     * A saturated PROCESS-LOCAL emergency cap denies BEFORE any
-     * Redis issuance limiter — the fake Redis client sees ZERO calls.
+     * A saturated process-local emergency cap denies before any
+     * Redis issuance limiter — the fake Redis client sees zero calls.
      */
     public function testSaturatedProcessCapDeniesBeforeAnyRedisWrite(): void
     {
@@ -908,7 +908,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         self::assertSame(200, $controller->challenge(JsonRequest::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], '{"scope":"login"}'))->getStatusCode());
         self::assertNotSame([], $client->calls, 'with process budget available the Redis limiter runs');
 
-        // The second issuance hits the per-client Redis cap (429 RATE_LIMITED).
+        // The second issuance hits the per-client Redis cap (429 rate_limited).
         $response = $controller->challenge(JsonRequest::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], '{"scope":"login"}'));
         self::assertSame(429, $response->getStatusCode());
         self::assertSame('RATE_LIMITED', json_decode((string) $response->getContent(), true)['error']['code']);
@@ -927,10 +927,10 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
     }
 
     /**
-     * A request carrying BOTH Content-Length and
+     * A request carrying both Content-Length and
      * Transfer-Encoding is request-smuggling ambiguity (intermediaries will
-     * frame the body differently) — refused with 400 FRAMING_REJECTED
-     * BEFORE any body is read.
+     * frame the body differently) — refused with 400 framing_rejected
+     * before any body is read.
      */
     public function testContentLengthPlusTransferEncodingIs400FramingRejected(): void
     {
@@ -945,8 +945,8 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
     }
 
     /**
-     * A DUPLICATE Content-Length (two values) is equally
-     * ambiguous — refused with 400 FRAMING_REJECTED.
+     * A duplicate Content-Length (two values) is equally
+     * ambiguous — refused with 400 framing_rejected.
      */
     public function testDuplicateContentLengthIs400FramingRejected(): void
     {
@@ -961,7 +961,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
     }
 
     /**
-     * A SINGLE Content-Length is the normal framing — the
+     * A single Content-Length is the normal framing — the
      * endpoint must keep issuing.
      */
     public function testSingleContentLengthStillIssues(): void
@@ -975,9 +975,9 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
     }
 
     /**
-     * The framing check runs FIRST — before the content-type /
+     * The framing check runs first — before the content-type /
      * content-encoding checks (a framing-ambiguous request with a wrong
-     * content type still gets FRAMING_REJECTED, never 415).
+     * content type still gets framing_rejected, never 415).
      */
     public function testFramingRejectionPrecedesBodyChecks(): void
     {
@@ -991,10 +991,9 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
     }
 
     /**
-     * A duplicate Content-Length reaches the controller as TWO
-     * raw header values (Symfony's HeaderBag keeps every value) — the
-     * detection is count-based, not value-based (two IDENTICAL values are
-     * still a duplicate framing).
+     * A duplicate Content-Length reaches the controller as two raw header
+     * values (Symfony's HeaderBag keeps every value); the detection is
+     * count-based, so two identical values are still duplicate framing.
      */
     public function testIdenticalDuplicateContentLengthStillRejected(): void
     {
@@ -1012,7 +1011,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
      * NO client-visible identifier confers any privileged
      * capability. The challenge endpoint accepts no client-supplied
      * identifier AT ALL — a payload carrying a "site_key", "secret" or
-     * "api_key" field is an unknown-field probe (422 UNKNOWN_FIELDS), and
+     * "api_key" field is an unknown-field probe (422 unknown_fields), and
      * the endpoint succeeds without any privileged identifier (a plain
      * {"scope":"login"} POST — {@see testChallengeControllerIssuesValidChallenge}).
      */
@@ -1025,17 +1024,17 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
             self::assertSame('UNKNOWN_FIELDS', json_decode((string) $response->getContent(), true)['error']['code']);
         }
 
-        // The same request WITHOUT any identifier succeeds — the endpoint is
+        // The same request without any identifier succeeds — the endpoint is
         // fully public, keyed on nothing client-supplied.
         $response = $controller->challenge(JsonRequest::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], '{"scope":"login"}'));
         self::assertSame(200, $response->getStatusCode());
     }
 
     /**
-     * No ADMIN endpoint keys off a client-supplied identifier.
-     * The bundle's route surface is exactly challenge + health (both
-     * fully public by design) — there is no control-plane route that could
-     * be reached with a client-provided credential.
+     * No admin endpoint keys off a client-supplied identifier: the route
+     * surface is exactly challenge + health (both fully public), so no
+     * control-plane route can be reached with a client-provided
+     * credential.
      */
     public function testNoAdminEndpointExistsForKeyingOffAClientIdentifier(): void
     {
@@ -1064,10 +1063,10 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
     // ── Canonical request targets ───────────────────────────────────────
 
     /**
-     * The RAW REQUEST_URI must equal the canonical path — no
+     * The RAW request_URI must equal the canonical path — no
      * empty segments (`//`, trailing `/`), no dot segments (`/./`,
      * `/../`), no percent-encoded bytes (`/%76hallenge`, `%2F`, `%5C`).
-     * The full list gets 404 CANONICAL_PATH_REQUIRED before ANY
+     * The full list gets 404 canonical_path_required before ANY
      * handling (no challenge is ever minted for a noncanonical target).
      */
     public function testNonCanonicalRequestTargetsAre404BeforeAnyHandling(): void
@@ -1104,10 +1103,10 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
     }
 
     /**
-     * The canonicality check runs BEFORE the method check — a
-     * noncanonical GET is still 404 CANONICAL_PATH_REQUIRED, never 405 —
-     * and BEFORE the query check (a canonical path with a query string
-     * still gets the query rejection 422, not the canonical 404).
+     * The canonicality check runs before the method and query checks: a
+     * noncanonical GET is still 404 canonical_path_required, and a
+     * canonical path with a query string still gets the 422 query
+     * rejection.
      */
     public function testCanonicalityPrecedesMethodAndQueryChecks(): void
     {
@@ -1117,8 +1116,8 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         self::assertSame(404, $response->getStatusCode(), 'a noncanonical target is 404 regardless of method');
         self::assertSame('CANONICAL_PATH_REQUIRED', json_decode((string) $response->getContent(), true)['error']['code']);
 
-        // The query string is excluded from the path scan; a CANONICAL path
-        // with a query keeps the documented 422 QUERY_PARAMETERS_NOT_ALLOWED.
+        // The query string is excluded from the path scan; a canonical path
+        // with a query keeps the documented 422 query_parameters_NOT_allowed.
         $response = $controller->challenge(JsonRequest::create('/kiwi-captcha/challenge?debug=1', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], '{"scope":"login"}'));
         self::assertSame(422, $response->getStatusCode());
         self::assertSame('QUERY_PARAMETERS_NOT_ALLOWED', json_decode((string) $response->getContent(), true)['error']['code']);
@@ -1128,11 +1127,10 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
 
     /**
      * Origin, Forwarded, X-Forwarded-For and X-Real-IP are
-     * security-singular — a duplicate occurrence is parser ambiguity
-     * (intermediaries disagree on which value is authoritative) and gets
-     * 400 DUPLICATE_HEADER before any header-derived identity is trusted.
-     * The count is value-agnostic: two IDENTICAL values are still a
-     * duplicate.
+     * security-singular: a duplicate occurrence is parser ambiguity and
+     * gets 400 duplicate_header before any header-derived identity is
+     * trusted. The count is value-agnostic — two identical values are
+     * still a duplicate.
      */
     public function testDuplicateSecurityHeadersAre400(): void
     {
@@ -1157,7 +1155,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         }
         self::assertSame([], $this->storedRecords($storage), 'a duplicate-header request must never reach issuance');
 
-        // Each SINGLE occurrence is the normal case — the endpoint keeps
+        // Each single occurrence is the normal case — the endpoint keeps
         // issuing (a browser always sends exactly one Origin, a trusted
         // proxy exactly one forwarding chain). The single-Origin control
         // uses the request's own origin so the same-origin check passes.
@@ -1169,11 +1167,11 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
     }
 
     /**
-     * The duplicate-header check is a WIRE-LEVEL check — it
+     * The duplicate-header check is a wire-level check — it
      * runs with the framing checks, before any body is read; a request with
      * a duplicate Origin AND a wrong content type still gets
-     * DUPLICATE_HEADER (never 415). Framing ambiguity stays first (a
-     * duplicate Origin + CL+TE is FRAMING_REJECTED).
+     * duplicate_header (never 415). Framing ambiguity stays first (a
+     * duplicate Origin + CL+TE is framing_rejected).
      */
     public function testDuplicateHeaderCheckPrecedesBodyChecks(): void
     {
@@ -1187,8 +1185,8 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         self::assertSame(400, $response->getStatusCode());
         self::assertSame('DUPLICATE_HEADER', json_decode((string) $response->getContent(), true)['error']['code']);
 
-        // Framing ambiguity is checked FIRST (it is the deepest wire-level
-        // ambiguity): a duplicate Origin plus CL+TE stays FRAMING_REJECTED.
+        // Framing ambiguity is checked first (it is the deepest wire-level
+        // ambiguity): a duplicate Origin plus CL+TE stays framing_rejected.
         $request = $this->framingRequest(['content-length' => '13', 'transfer-encoding' => 'chunked']);
         $request->headers->set('origin', 'https://a.example', false);
         $request->headers->set('origin', 'https://b.example', false);
@@ -1200,11 +1198,10 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
     // ── Scoped syntactic rejection before shared infrastructure ─────────
 
     /**
-     * A syntactically INVALID scope (bad charset, > 128 bytes)
-     * is rejected locally at 422 with ZERO Redis operations — the
-     * identifier-charset check runs BEFORE the rate limiter, the risk
-     * engine, the scope cap and the outstanding counters, so a malformed
-     * identifier never touches shared infrastructure.
+     * A syntactically invalid scope (bad charset, > 128 bytes) is
+     * rejected locally at 422 with zero Redis operations: the
+     * identifier-charset check runs before the rate limiter, the risk
+     * engine, the scope cap and the outstanding counters.
      */
     public function testInvalidScopeIsRejectedWithZeroRedisOperations(): void
     {
@@ -1226,7 +1223,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
             self::assertSame([], $client->calls, 'a syntactically invalid scope must be rejected with ZERO Redis operations');
         }
 
-        // Control: a VALID scope flows into the Redis limiter (the check is
+        // Control: a valid scope flows into the Redis limiter (the check is
         // not skipping Redis for everything).
         $response = $controller->challenge(JsonRequest::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], '{"scope":"login"}'));
         self::assertSame(200, $response->getStatusCode());
@@ -1234,9 +1231,9 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
     }
 
     /**
-     * EVERY unresolvable scope — risk disabled, or unknown
+     * every unresolvable scope — risk disabled, or unknown
      * in baseline/reject mode — maps to the single reserved
-     * UNKNOWN_QUOTA_ID bucket. An attacker can never mint fresh quota
+     * unknown_quota_ID bucket. An attacker can never mint fresh quota
      * windows by inventing scope names, in ANY configuration (no HMAC
      * fallback namespace in the controller path).
      */
@@ -1245,7 +1242,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         $client = new FakePredisClient();
         $scopeCap = new ScopeIssuanceCap($client, '{kiwi:reserved}:issuance:', 1, ScopeIssuanceCap::deriveScopeHmacKey(self::SECRET), fn (): int => 1_800_000_000);
 
-        // Risk DISABLED (no RiskGateway): the cap still keys on the
+        // Risk disabled (no RiskGateway): the cap still keys on the
         // reserved server-owned id, not on per-name HMAC namespaces.
         $controller = new ChallengeController($this->issuer(), scopeIssuanceCap: $scopeCap);
         self::assertSame(200, $controller->challenge(JsonRequest::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], '{"scope":"foo1"}'))->getStatusCode());
@@ -1267,11 +1264,11 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
     }
 
     /**
-     * When the Redis durability barrier cannot be met at
-     * issuance (replica lag/failure), the challenge is NOT handed out — the
-     * controller maps the expected operational failure to a private/
-     * no-store 503 SERVICE_UNAVAILABLE with an opaque client message (the
-     * replication detail is server-log only), never a generic 500.
+     * When the Redis durability barrier cannot be met at issuance
+     * (replica lag/failure), the challenge is not handed out: the
+     * controller maps the failure to a private/no-store 503
+     * service_unavailable with an opaque client message, never a generic
+     * 500.
      */
     public function testReplicaWaitFailureAtIssuanceReturns503(): void
     {
@@ -1323,12 +1320,11 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
     }
 
     /**
-     * With risk.allowed_scopes configured, the per-scope
-     * quota operates over a SERVER-OWNED namespace — a scope outside the
-     * allowlist is refused with 422 SCOPE_NOT_ALLOWED BEFORE the risk
-     * assessment and the quota checks (zero Redis operations), so an
-     * attacker can never mint fresh per-scope quota windows by inventing
-     * scope names.
+     * With risk.allowed_scopes configured, the per-scope quota operates
+     * over a server-owned namespace: a scope outside the allowlist is
+     * refused with 422 scope_NOT_allowed before the risk assessment and
+     * the quota checks (zero Redis operations). An attacker cannot mint
+     * fresh quota windows by inventing scope names.
      */
     public function testScopeOutsideServerAllowlistIsRefusedBeforeAnyQuota(): void
     {
@@ -1344,9 +1340,9 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         $response = $controller->challenge(JsonRequest::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], '{"scope":"login"}'));
         self::assertSame(200, $response->getStatusCode());
 
-        // A disallowed scope is refused before ANY Redis access — no quota
-        // window is ever created for it (attacker-chosen scope names can
-        // never mint counters in the server-owned namespace).
+        // A disallowed scope is refused before any Redis access — no quota
+        // window is ever created for it, so attacker-chosen scope names can
+        // never mint counters in the server-owned namespace.
         $client->calls = [];
         foreach (['foo1', 'foo2', 'admin_login' /* configured but not allowlisted */] as $scope) {
             $response = $controller->challenge(JsonRequest::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], json_encode(['scope' => $scope])));
@@ -1364,9 +1360,9 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
 
     /**
      * The challenge-issuance sequence runs every quota check
-     * BEFORE the challenge state is created — local cap, issuer limiter,
+     * before the challenge state is created — local cap, issuer limiter,
      * scope cap and outstanding counters all precede the storage write.
-     * The FakePredis call ORDER pins the limit/incr keys BEFORE the
+     * The FakePredis call order pins the limit/incr keys before the
      * challenge SET key.
      */
     public function testAdmissionQuotaChecksPrecedeChallengeStateCreation(): void
@@ -1453,7 +1449,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
                 sprintf('the quota-check EVAL on %s must run BEFORE the challenge SET key', $firstKey)
             );
             // The scope-cap and outstanding keys are the {kiwi:...} family
-            // (Cluster safe) and carry ONLY keyed pseudonyms — never the
+            // (Cluster safe) and carry only keyed pseudonyms — never the
             // raw scope or IP.
             if (str_contains($firstKey, ':issuance:')) {
                 $sawScopeCap = true;
@@ -1471,7 +1467,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
 
     /**
      * With the configured TTL wired, a refused outstanding
-     * admission happens BEFORE the challenge is minted — the 4th issuance
+     * admission happens before the challenge is minted — the 4th issuance
      * beyond the per-source cap never creates challenge state at all.
      */
     public function testPreMintOutstandingRefusalNeverMints(): void
@@ -1497,9 +1493,9 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
 
     /**
      * The raw challenge JSON is scanned for duplicate object
-     * keys BEFORE decoding — {"scope":"login","scope":"signup"} is a
-     * parser-ambiguity probe (json_decode would silently keep the LAST
-     * value; intermediaries may disagree) and gets 422 DUPLICATE_FIELD.
+     * keys before decoding — {"scope":"login","scope":"signup"} is a
+     * parser-ambiguity probe (json_decode would silently keep the last
+     * value; intermediaries may disagree) and gets 422 duplicate_field.
      * Nested objects are scanned recursively.
      */
     public function testDuplicateJsonKeysAre422(): void
@@ -1522,8 +1518,8 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
 
         // Clean documents — top-level documented fields only (the endpoint
         // accepts exactly scope/algorithm/request_binding; nested payload
-        // objects are unknown-field probes regardless of their internals,
-        // and the duplicate scan runs BEFORE that check) — keep working.
+        // objects are unknown-field probes regardless of their internals) —
+        // keep working.
         foreach ([
             '{"scope":"login"}',
             ' { "scope" : "login" , "algorithm" : "sha256" } ',
@@ -1536,7 +1532,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
     }
 
     /**
-     * Duplicate detection compares SEMANTIC keys — the
+     * Duplicate detection compares semantic keys — the
      * escape-spelling bypass ({"scope":...,"\u0073cope":...}) must be a
      * duplicate too: json_decode canonicalizes both spellings into one
      * logical key, so the scanner has to as well (a raw-textual comparison
@@ -1565,7 +1561,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
             self::assertSame('DUPLICATE_FIELD', json_decode((string) $response->getContent(), true)['error']['code'], $why);
         }
 
-        // Escape-spelled CLEAN documents must keep issuing (the decode is
+        // Escape-spelled clean documents must keep issuing (the decode is
         // not over-eager: distinct semantic keys are NOT duplicates).
         foreach ([
             '{"\\u0073cope":"login"}',
@@ -1578,7 +1574,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
 
         // Distinct semantic keys spelled with escapes are NOT duplicates —
         // the endpoint proceeds past the scanner and then rejects the
-        // undocumented keys with UNKNOWN_FIELDS (proving the scanner did
+        // undocumented keys with unknown_fields (proving the scanner did
         // not false-positive on the escapes).
         foreach ([
             '{"a\\u0021":"login"}',
@@ -1595,7 +1591,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
      * The challenge body is capped at 8 KiB — a declared
      * oversized Content-Length is refused before any body is read, and the
      * actual read length is capped too (chunked uploads can skip a truthful
-     * Content-Length). Both paths return 413 BODY_TOO_LARGE, never reach
+     * Content-Length). Both paths return 413 body_TOO_large, never reach
      * the duplicate scan or the risk admission.
      */
     public function testOversizedChallengeBodyIs413(): void
@@ -1675,8 +1671,8 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
     public function testPerSitekeyBindingOptionIsRemoved(): void
     {
         // A per-sitekey "binding" option cannot be
-        // enforced (the core binds by the GLOBAL binding_mode only) — it is
-        // REMOVED, and configuring it must be refused by the config tree
+        // enforced (the core binds by the global binding_mode only) — it is
+        // removed, and configuring it must be refused by the config tree
         // (never a misleading "required" promise).
         $container = new ContainerBuilder();
         $container->setParameter('kernel.environment', 'test');
@@ -1705,7 +1701,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         $decodedPrefix = base64_decode((string) (explode('.', $data['prefix'])[0] ?? ''), true);
         self::assertStringContainsString('commerce_high_value', (string) $decodedPrefix, 'the challenge must be issued under the SERVER-resolved scope');
 
-        // Unknown action -> REJECTED (never silently mapped).
+        // Unknown action -> rejected (never silently mapped).
         $rejected = $controller->challenge(JsonRequest::create('/kiwi-captcha/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], '{"scope":"6Lc_v3_checkout","action":"admin","sitekey":"6Lc_v3_checkout"}'));
         self::assertSame(422, $rejected->getStatusCode());
         $rejectedBody = json_decode((string) $rejected->getContent(), true);
@@ -1715,12 +1711,11 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
     // ── Per-sitekey challenge lifetime (Turnstile-migration TTL override) ─
 
     /**
-     * A sitekey policy with ttl_secs issues the challenge with THAT
+     * A sitekey policy with ttl_secs issues the challenge with that
      * lifetime instead of the issuer/global default: the response carries
-     * the override and the STORED record's lifetime (expires_at -
-     * issued_at) is the override too — the signed lifetime drives every
-     * TTL derived from the challenge (metadata sidecar, post-mint
-     * admission).
+     * the override and the stored record's lifetime (expires_at -
+     * issued_at) is the override too, driving every TTL derived from the
+     * challenge.
      */
     public function testSitekeyTtlOverrideIssuesWithThePerSitekeyLifetime(): void
     {
@@ -1757,7 +1752,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
     }
 
     /**
-     * The config tree bounds ttl_secs to 1..Config::MAX_TTL_SECS (300) —
+     * The config tree bounds ttl_secs to 1..Config::MAX_TTL_secs (300) —
      * a value above the ceiling is refused at configuration time, never
      * minted.
      */

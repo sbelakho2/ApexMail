@@ -1,4 +1,4 @@
-//! TRUST-BOUNDARY PROPERTY TEST (mirror of the PHP
+//! Trust-boundary property test (mirror of the PHP
 //! RiskPropertyTest).
 //!
 //! The SignalVector carries NO client-visible fields: every one of its 13
@@ -6,23 +6,23 @@
 //! classifier's network-risk side channel), so "perturbing client-
 //! controlled inputs of a vector" is impossible — the vector-level
 //! property holds trivially (monotonicity of every field is already
-//! covered by fuzz.rs). The REAL boundary is the engine: RiskContext
+//! covered by fuzz.rs). The real boundary is the engine: RiskContext
 //! fields (scope, source_ip, session_id, principal_id, idempotency key,
 //! event) are client-visible.
 //!
-//! The invariant: for IDENTICAL server state, assess() with client-
-//! supplied session/principal/idempotency fields NEVER yields a score
+//! The invariant: for identical server state, assess() with client-
+//! supplied session/principal/idempotency fields never yields a score
 //! lower than the same assessment without them. Subtlety: different IPs
 //! produce different pseudonyms with different state, so the property is
-//! constrained to IDENTICAL server state — fresh keys per iteration (two
-//! FRESH namespaces: baseline vs varied, bit-identical empty state). With
+//! constrained to identical server state — fresh keys per iteration (two
+//! fresh namespaces: baseline vs varied, bit-identical empty state). With
 //! empty state the Lua's aggregation (risk-v1.lua: source/session/
 //! principal dimensions MAX into the signal channels — they never
 //! subtract) leaves every signal unchanged when a fresh session/principal
 //! is added, so the invariant must hold; the 500 randomized iterations
 //! below pin it.
 //!
-//! Redis-gated (skipped unless RISK_REDIS_URL is set).
+//! Redis-gated (skipped unless the Redis test URL is set).
 
 mod common;
 
@@ -133,7 +133,7 @@ fn signal_vector_has_no_client_controlled_fields() {
 }
 
 /// Engine-level trust-boundary invariant, 500 randomized iterations
-/// against real Redis (skipped without RISK_REDIS_URL).
+/// against real Redis (skipped without the Redis test URL).
 #[test]
 fn client_supplied_identity_fields_never_lower_the_score() {
     let Some(_url) = common::redis_url() else {
@@ -150,9 +150,9 @@ fn client_supplied_identity_fields_never_lower_the_score() {
         let principal = random_value(&mut state, "prin");
         let idem = random_value(&mut state, "idem");
 
-        // Two FRESH namespaces = bit-identical EMPTY server state: the
+        // Two fresh namespaces = bit-identical empty server state: the
         // score is a pure function of the state, and the varied context
-        // differs from the baseline ONLY in the client-supplied fields.
+        // differs from the baseline only in the client-supplied fields.
         let baseline_store =
             RedisRiskStateStore::new(client.clone(), &common::unique_namespace("propb"));
         let varied_store =

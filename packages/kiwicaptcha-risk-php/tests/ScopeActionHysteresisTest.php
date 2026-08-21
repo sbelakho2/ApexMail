@@ -14,17 +14,18 @@ use KiwiCaptcha\Risk\SignalVector;
 use PHPUnit\Framework\TestCase;
 
 /**
- * SCOPE ACTION HYSTERESIS.
+ * Scope action hysteresis.
  *
  * The policy's fixed score bands must not oscillate at their boundaries:
  * a score hovering at a threshold (449/451/449…) would flip the challenge
- * profile on every request. The engine keeps a per-process, bounded, TTL'd
- * map of the LAST action per scope; the band selection escalates to the
- * next band only at ENTER = upper + 10 and de-escalates only below
- * EXIT = lower − 10, staying in the current band in between. Fresh scopes
- * and the hard actions (StepUp/Deny) use the plain mapping. (The audit's
- * 49/51 example falls entirely inside the Allow band [0,150) — the
- * equivalent boundary-oscillation test uses 449/451 at the 450 edge.)
+ * profile on every request. The engine keeps a per-process, bounded,
+ * TTL'd map of the last action per scope. The band selection escalates
+ * to the next band only at enter = upper + 10 and de-escalates only
+ * below exit = lower − 10, staying in the current band in between.
+ * Fresh scopes and the hard actions (StepUp/Deny) use the plain
+ * mapping. (The audit's 49/51 example falls entirely inside the Allow
+ * band [0,150), so the equivalent boundary-oscillation test uses
+ * 449/451 at the 450 edge.)
  */
 final class ScopeActionHysteresisTest extends TestCase
 {
@@ -70,10 +71,10 @@ final class ScopeActionHysteresisTest extends TestCase
         }
         self::assertSame([RiskAction::Allow, RiskAction::Allow, RiskAction::Allow, RiskAction::Allow], $actions);
 
-        // The REAL boundary oscillation (the 450 edge): 449 is Sha18,
-        // 451 would be Sha20 under the plain mapping — the previous action
-        // must hold Sha18 (451 < ENTER[Sha18] = 460) so the profile NEVER
-        // flips.
+        // The real boundary oscillation (the 450 edge): 449 is Sha18 and
+        // 451 would be Sha20 under the plain mapping. The previous action
+        // must hold Sha18 (451 < the Sha18 enter threshold of 460), so the
+        // profile never flips.
         $h2 = new ScopeActionHysteresis();
         $actions = [];
         foreach ([449, 451, 449, 451, 449, 451] as $i => $score) {
@@ -93,17 +94,18 @@ final class ScopeActionHysteresisTest extends TestCase
         $now = self::T0;
 
         // 449 -> Sha18; a brief tick to 455 (plain Sha20) is still inside
-        // [EXIT[Sha18]=290, ENTER[Sha18]=460): held.
+        // the Sha18 band (exit 290, enter 460), so it is held.
         self::assertSame(RiskAction::Sha18, $this->decide($policy, $h, 1, 449, $now++)->action);
         self::assertSame(RiskAction::Sha18, $this->decide($policy, $h, 1, 455, $now++)->action);
-        // Sustained crossing: 480 >= ENTER[Sha18]=460 -> Sha20, then held.
+        // Sustained crossing: 480 >= the Sha18 enter threshold (460) ->
+        // Sha20, then held.
         self::assertSame(RiskAction::Sha20, $this->decide($policy, $h, 1, 480, $now++)->action);
         self::assertSame(RiskAction::Sha20, $this->decide($policy, $h, 1, 480, $now++)->action);
-        // Still inside [EXIT[Sha20]=440, ENTER[Sha20]=610): held even at
-        // 590 (plain Argon16) — escalation needs a sustained crossing.
+        // Still inside the Sha20 band (exit 440, enter 610): held even at
+        // 590 (plain Argon16), since escalation needs a sustained crossing.
         self::assertSame(RiskAction::Sha20, $this->decide($policy, $h, 1, 590, $now++)->action);
         self::assertSame(RiskAction::Sha20, $this->decide($policy, $h, 1, 590, $now++)->action);
-        // 620 >= ENTER[Sha20]=610 -> Argon16, then held.
+        // 620 >= the Sha20 enter threshold (610) -> Argon16, then held.
         self::assertSame(RiskAction::Argon16, $this->decide($policy, $h, 1, 620, $now++)->action);
         self::assertSame(RiskAction::Argon16, $this->decide($policy, $h, 1, 620, $now++)->action);
     }
@@ -114,15 +116,16 @@ final class ScopeActionHysteresisTest extends TestCase
         $h = new ScopeActionHysteresis();
         $now = self::T0;
 
-        // Climb to Sha20 (480), then drop: 441 is still >= EXIT[Sha20]=440
-        // -> held; 439 < 440 -> Sha18; 250 < EXIT[Sha18]=290 -> Sha16, then
-        // held (250 >= EXIT[Sha16]=140).
+        // Climb to Sha20 (480), then drop: 441 is still >= the Sha20 exit
+        // threshold (440) and is held; 439 < 440 -> Sha18; 250 < the Sha18
+        // exit threshold (290) -> Sha16, then held (250 >= the Sha16 exit
+        // threshold of 140).
         self::assertSame(RiskAction::Sha20, $this->decide($policy, $h, 1, 480, $now++)->action);
         self::assertSame(RiskAction::Sha20, $this->decide($policy, $h, 1, 441, $now++)->action);
         self::assertSame(RiskAction::Sha18, $this->decide($policy, $h, 1, 439, $now++)->action);
         self::assertSame(RiskAction::Sha16, $this->decide($policy, $h, 1, 250, $now++)->action);
         self::assertSame(RiskAction::Sha16, $this->decide($policy, $h, 1, 250, $now++)->action);
-        // Below EXIT[Sha16]=140 -> Allow.
+        // Below the Sha16 exit threshold (140) -> Allow.
         self::assertSame(RiskAction::Allow, $this->decide($policy, $h, 1, 100, $now++)->action);
     }
 
@@ -147,8 +150,9 @@ final class ScopeActionHysteresisTest extends TestCase
         $h = new ScopeActionHysteresis();
         $now = self::T0;
 
-        // Deny (plain, score 980) then a 500: the previous action is Deny —
-        // NOT hysteresis-affected, the plain mapping applies (Sha20).
+        // Deny (plain, score 980) then a 500: the previous action is Deny,
+        // which is not hysteresis-affected, so the plain mapping applies
+        // (Sha20).
         self::assertSame(RiskAction::Deny, $this->decide($policy, $h, 1, 980, $now++)->action);
         self::assertSame(RiskAction::Sha20, $this->decide($policy, $h, 1, 500, $now++)->action);
 
@@ -156,8 +160,8 @@ final class ScopeActionHysteresisTest extends TestCase
         self::assertSame(RiskAction::StepUp, $this->decide($policy, $h, 1, 930, $now++)->action);
         self::assertSame(RiskAction::Sha20, $this->decide($policy, $h, 1, 500, $now++)->action);
 
-        // A ladder previous action with a HARD plain action: the hard
-        // action wins immediately (never held in the lower band).
+        // A ladder previous action with a hard plain action: the hard
+        // action wins immediately and is never held in the lower band.
         self::assertSame(RiskAction::Sha20, $this->decide($policy, $h, 1, 500, $now++)->action);
         self::assertSame(RiskAction::Deny, $this->decide($policy, $h, 1, 980, $now++)->action);
         self::assertSame(RiskAction::StepUp, $this->decide($policy, $h, 1, 930, $now++)->action);
@@ -194,7 +198,7 @@ final class ScopeActionHysteresisTest extends TestCase
         self::assertNull($h->lastAction(1, self::T0 + ScopeActionHysteresis::TTL_MS + 1), 'an entry past TTL must expire');
         self::assertSame(0, $h->count(), 'expired entries are evicted on access');
 
-        // An expired entry also resets the SELECTION: the scope is fresh
+        // An expired entry also resets the selection: the scope is fresh
         // again and uses the plain mapping.
         $h->select(1, 449, RiskAction::actionForScore(449), self::T0);
         self::assertSame(
@@ -219,7 +223,7 @@ final class ScopeActionHysteresisTest extends TestCase
         self::assertNull($h->lastAction(1, $now + 100_000), 'the least-recently-used entry must be evicted');
         self::assertNotNull($h->lastAction(ScopeActionHysteresis::MAX_SCOPES + 1, $now + 100_000));
 
-        // Updates to EXISTING scopes never evict.
+        // Updates to existing scopes never evict.
         $h->remember(2, RiskAction::Sha20, $now + 100_001);
         self::assertSame(ScopeActionHysteresis::MAX_SCOPES, $h->count());
         self::assertSame(RiskAction::Sha20, $h->lastAction(2, $now + 100_001));
@@ -243,12 +247,12 @@ final class ScopeActionHysteresisTest extends TestCase
 
 
     /**
-     * Deterministic logical-clock boundary test for the
-     * COOLDOWN hold gate (the real-Redis cooldown integration test can
-     * legitimately zero-assert if the process is suspended across the
-     * whole interval — this pure-function test pins the exact edges).
-     * The gate: cooldown denial applies only while
-     * nowMs < cooldownUntilMs AND globalLevel >= 4.
+     * Deterministic logical-clock boundary test for the cooldown hold
+     * gate (the real-Redis cooldown integration test can legitimately
+     * zero-assert if the process is suspended across the whole interval;
+     * this pure-function test pins the exact edges). The gate: cooldown
+     * denial applies only while nowMs < cooldownUntilMs and globalLevel
+     * >= 4.
      */
     public function testCooldownHoldBoundariesCooldownMinusOneThroughPlusOne(): void
     {

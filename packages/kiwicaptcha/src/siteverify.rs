@@ -1,15 +1,15 @@
 //! Provider-compatible Siteverify helper.
 //!
-//! Incumbent CAPTCHA backends call a provider "siteverify" endpoint with
+//! Incumbent captcha backends call a provider "siteverify" endpoint with
 //! `response` + `secret` (+ optional `remoteip`) and expect provider-shaped
 //! JSON: `success`, `challenge_ts`, `hostname`, `error-codes`. This module
-//! provides the response DTO and the mapping from the CORE verify outcome —
-//! the SAME atomic verifier the native path uses; there is no second
+//! provides the response DTO and the mapping from the core verify outcome —
+//! the same atomic verifier the native path uses; there is no second
 //! verification implementation, and the deterministic consumed-result
 //! machinery makes safe verification retries free.
 //!
-//! Server-side contract (documented in SECURITY.md): the compatibility
-//! secret authenticates SERVER-TO-SERVER use. `remoteip` is only honored
+//! Server-side contract (documented in the security guide): the compatibility
+//! secret authenticates server-to-server use. `remoteip` is only honored
 //! after the caller presented the secret; a browser never sees it. The
 //! verifier itself remains authoritative (TTL, scope/region/issuer/policy
 //! expectations, nonce-bound IP binding, timing floor, Argon ceilings,
@@ -33,7 +33,7 @@ pub struct SiteverifyResponse {
 /// Build the provider-shaped response from the core outcome and (for a
 /// valid outcome) the consumed record's server-side metadata. `record`
 /// comes from the storage lookup by the outcome's nonce — the consumed
-/// record is RETAINED until TTL, so its `issued_at`/`hostname` are
+/// record is retained until TTL, so its `issued_at`/`hostname` are
 /// available after verification.
 pub fn siteverify_response(
     outcome: &VerifyOutcome,
@@ -58,8 +58,8 @@ pub fn siteverify_response(
 /// Provider-style error codes (reCAPTCHA-compatible vocabulary); the
 /// precise core reason stays in the server logs.
 ///
-/// EXHAUSTIVE by contract: every [`VerifyError`] variant is matched with no
-/// wildcard, so adding a variant FAILS the build until its provider
+/// exhaustive by contract: every [`VerifyError`] variant is matched with no
+/// wildcard, so adding a variant fails the build until its provider
 /// semantics are decided here:
 /// - `Expired` — an already-validated token past its lifetime:
 ///   `timeout-or-duplicate`;
@@ -69,7 +69,7 @@ pub fn siteverify_response(
 ///   with no proven-duplicate context: the atomic consume's response was
 ///   lost, so the token may still be redeemable — an idempotent caller
 ///   retries, and a non-idempotent caller treats the token as unknown;
-/// - everything else — an invalid SOLUTION, challenge, or identity
+/// - everything else — an invalid solution, challenge, or identity
 ///   (`BadSignature`, `TooFast`, `IpMismatch`, `MissingClientIp`,
 ///   `CounterTooLarge`, `WrongScope`, `WrongRegion`, `WrongIssuer`,
 ///   `WrongPolicyVersion`, `UnknownKid`, `TooManyAttempts`,
@@ -139,7 +139,7 @@ mod tests {
         assert_eq!(format_unix_ts(1_752_632_400), "2025-07-16T02:20:00Z");
     }
 
-    /// EVERY variant of the core VerifyError enum must map to its exact
+    /// Every variant of the core VerifyError enum must map to its exact
     /// provider string — the table below is the single source of truth and
     /// `map_error` itself is exhaustive (no wildcard), so a new variant
     /// fails compilation until its provider semantics are decided here AND

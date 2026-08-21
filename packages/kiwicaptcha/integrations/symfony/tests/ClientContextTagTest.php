@@ -9,9 +9,9 @@ use PHPUnit\Framework\TestCase;
 
 /**
  * The risk-v2 client-context tag: bounded, deterministic within
- * (deployment, session, descriptor) and STABLE across time — the same
+ * (deployment, session, descriptor) and stable across time — the same
  * session reporting the same coarse capabilities produces the identical
- * tag whenever it is computed, so the session's first tag stays the
+ * tag whenever it is computed. The session's first tag stays the
  * comparison baseline for its whole lifetime. A changed session,
  * deployment or descriptor always yields a different tag, so the tag can
  * never become a stable device identifier.
@@ -32,7 +32,7 @@ final class ClientContextTagTest extends TestCase
 
     public function testTagIsStableAcrossTime(): void
     {
-        // Same session + same descriptor: the tag must be IDENTICAL at any
+        // Same session + same descriptor: the tag must be identical at any
         // computation time — a session spanning an hour boundary (e.g.
         // created at 12:50 and reused at 13:05) must NOT be flagged as
         // inconsistent by an epoch re-key.

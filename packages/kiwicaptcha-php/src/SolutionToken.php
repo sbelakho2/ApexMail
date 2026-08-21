@@ -22,10 +22,9 @@ final class SolutionToken
     }
 
     /**
-     * The browser/wasm solver caps at 5,000,000 hashes (Rust
-     * SOLVER_MAX_TARGET_BITS / MAX_SHA_HASHES), so a counter above it cannot
-     * come from a legit solve. 5,000,000 is 7 digits — the length bound
-     * rejects absurdly long digit strings before the (PHP_INT_MAX-clamped)
+     * The browser/wasm solver caps at 5,000,000 hashes, so a counter
+     * above it cannot come from a legit solve. 5,000,000 is 7 digits;
+     * the length bound rejects absurdly long digit strings before the
      * integer cast could hide them.
      */
     private const MAX_SOLVER_COUNTER = 5_000_000;
@@ -54,9 +53,9 @@ final class SolutionToken
             $this->nonce,
             $this->counter,
             $this->durationMs,
-            // The telemetry segment must ALWAYS be a JSON object (decode
-            // requires it): the (object) cast makes an empty array encode as
-            // {} and an assoc array as {"k":v,...} — never [].
+            // The telemetry segment must always be a JSON object (decode
+            // requires it): the (object) cast makes an empty array encode
+            // as {} and an assoc array as {"k":v,...}, never [].
             (string) json_encode((object) $this->telemetry, JSON_UNESCAPED_SLASHES)
         );
 
@@ -74,12 +73,12 @@ final class SolutionToken
             throw DecodeError::malformed();
         }
 
-        // Strict canonical base64: base64_decode in strict mode
-        // rejects every character outside the standard alphabet (including
-        // base64url '-'/'_' and whitespace) and the canonical re-encode
-        // check rejects any non-canonical padding (unpadded, over-padded, or
-        // non-zero trailing bits) — exactly one canonical byte representation
-        // of the plaintext can decode.
+        // Strict canonical base64: base64_decode in strict mode rejects
+        // every character outside the standard alphabet (including
+        // base64url '-'/'_' and whitespace), and the canonical re-encode
+        // check rejects any non-canonical padding (unpadded, over-padded,
+        // or non-zero trailing bits). Exactly one canonical byte
+        // representation of the plaintext can decode.
         $plain = base64_decode($raw, true);
         if ($plain === false) {
             throw DecodeError::invalidBase64();
@@ -88,8 +87,8 @@ final class SolutionToken
         if (base64_encode($plain) !== $raw) {
             throw DecodeError::invalidBase64();
         }
-        // PCRE is always available in PHP 8.1 (no undeclared mbstring
-        // dependency): /u makes the match fail on invalid UTF-8.
+        // The regex engine is always available in PHP 8.1 (no undeclared
+        // mbstring dependency); /u makes the match fail on invalid UTF-8.
         if (preg_match('//u', $plain) !== 1) {
             throw DecodeError::invalidUtf8();
         }
@@ -112,9 +111,10 @@ final class SolutionToken
         if ($counterStr === '' || !ctype_digit($counterStr)) {
             throw DecodeError::invalidCounter();
         }
-        // Counter bound: the JS solver searches counter < MAX_SHA_HASHES
-        // (5,000,000 attempts), so the largest counter it can ever produce is
-        // 4,999,999 — anything >= 5,000,000 was not minted by a real solve.
+        // Counter bound: the JS solver searches counter < 5,000,000
+        // attempts, so the largest counter it can ever produce is
+        // 4,999,999; anything >= 5,000,000 was not minted by a real
+        // solve.
         if (\strlen($counterStr) > 7 || (int) $counterStr >= self::MAX_SOLVER_COUNTER) {
             throw DecodeError::counterExceedsSolverMaximum();
         }
@@ -131,9 +131,10 @@ final class SolutionToken
         }
         $durationMs = (int) $durationStr;
 
-        // Telemetry must be a JSON OBJECT in both implementations ({} for an
-        // off widget, {v,mode,me,ke,...} otherwise). json_decode OBJECT mode
-        // distinguishes {} from []/"x"/123/null — array mode cannot.
+        // Telemetry must be a JSON object in both implementations ({} for
+        // an off widget, {v,mode,me,ke,...} otherwise). json_decode in
+        // object mode distinguishes {} from []/"x"/123/null; array mode
+        // cannot.
         $telemetry = json_decode($telemetryStr, false);
         if (!\is_object($telemetry)) {
             throw DecodeError::malformed();

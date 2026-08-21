@@ -12,18 +12,15 @@ use Symfony\Component\DependencyInjection\ContainerBuilder;
 use Symfony\Component\DependencyInjection\Definition;
 
 /**
- * Storage safety contract:
- *  - the default ArrayStorage is in-memory only: a challenge issued in
- *    request A can never be verified in request B under PHP-FPM — refused
- *    in any non-test/non-dev environment;
- *  - production verification REQUIRES an atomic backend
- *    (KiwiCaptcha\AtomicStorageInterface); non-atomic storage is only
- *    possible through the explicitly-named allow_best_effort_storage: true
- *    escape hatch;
- *  - Siteverify's one-success provider contract requires an atomic backend
- *    REGARDLESS of the override — Siteverify + Psr6Storage is refused at
- *    container compile time (the documented PSR-6 race would let two
- *    concurrent requests both win).
+ * Storage safety contract: the default ArrayStorage is in-memory only
+ * (a challenge issued in request A can never be verified in request B
+ * under php-fpm) and is refused in any non-test/non-dev environment.
+ * Production verification requires an atomic backend
+ * (KiwiCaptcha\AtomicStorageInterface); non-atomic storage is only
+ * possible through the explicitly-named allow_best_effort_storage: true
+ * escape hatch. Siteverify's one-success provider contract requires an
+ * atomic backend regardless of the override — Siteverify + Psr6Storage
+ * is refused at container compile time.
  */
 final class ProdArrayStorageGuardTest extends TestCase
 {

@@ -17,14 +17,14 @@ use KiwiCaptcha\Verifier;
 use PHPUnit\Framework\TestCase;
 
 /**
- * REAL-REDIS integration tests (CI service container: redis:7).
+ * real-redis integration tests (CI service container: redis:7).
  *
- * Skipped unless KC_REDIS_URL is set (e.g. tcp://127.0.0.1:6379). Exercises
- * the concurrency guarantees that fakes cannot prove:
- *  - GETDEL atomic single-use: 50 parallel consumers, exactly one winner
- *  - tokenized leases: cap enforcement + stale-release safety (cap 1)
- *  - rate limiter: per-client + global caps, window expiry
- *  - one-shot verification end-to-end (valid, then replay -> RecordNotFound)
+ * Skipped unless KC_redis_URL is set (e.g. tcp://127.0.0.1:6379).
+ * Exercises the concurrency guarantees that fakes cannot prove: getdel
+ * atomic single-use (50 parallel consumers, one winner), tokenized
+ * leases (cap enforcement + stale-release safety) and the rate limiter
+ * (per-client + global caps, window expiry). One-shot verification
+ * end-to-end (valid, then replay -> RecordNotFound).
  */
 final class RealRedisIntegrationTest extends TestCase
 {
@@ -103,7 +103,7 @@ final class RealRedisIntegrationTest extends TestCase
         self::assertSame(4, $acquired, '100 parallel acquires must never exceed the cap');
 
         // Stale-release safety with cap 1: acquire A, emulate full lease
-        // expiry, acquire B; releasing the STALE token A must not remove B.
+        // expiry, acquire B; releasing the stale token A must not remove B.
         $sem1 = new RedisAdmissionSemaphore($this->client, 1, 'ci-stale');
         $oldToken = $sem1->acquire();
         self::assertNotNull($oldToken);
@@ -157,10 +157,10 @@ final class RealRedisIntegrationTest extends TestCase
 
     public function testRotatedGlobalLimitIsSharedAcrossClients(): void
     {
-        // REGRESSION (release blocker): with rotation ENABLED (the default
+        // regression (release blocker): with rotation enabled (the default
         // 3600s), the global budget must still be deployment-wide — the
         // global key contains no client identity and must never be rotated.
-        // Three DIFFERENT clients with globalMax 2: the third is rejected.
+        // Three different clients with globalMax 2: the third is rejected.
         $limiter = new IssuanceRateLimiter(
             maxChallenges: 100,
             windowSecs: 60,
@@ -207,7 +207,7 @@ final class RealRedisIntegrationTest extends TestCase
         $secret = '0123456789abcdef0123456789abcdef';
         $outstanding = new OutstandingChallenges($this->client, '{kiwi:ci}:outstanding:', RiskKeys::fromMaster($secret), 3, 100, 5);
 
-        // Three issuances admitted (EXPIRE = ttl + margin), the 4th refused.
+        // Three issuances admitted (expire = ttl + margin), the 4th refused.
         self::assertSame(1, $outstanding->issue('198.51.100.7', 60));
         self::assertSame(1, $outstanding->issue('198.51.100.7', 60));
         self::assertSame(1, $outstanding->issue('198.51.100.7', 60));
@@ -228,7 +228,7 @@ final class RealRedisIntegrationTest extends TestCase
         $outstanding->solved('198.51.100.7');
         self::assertSame('0', (string) $this->client->get($sourceKey), 'the decrement must never drive the counter negative');
 
-        // The GLOBAL counter is never decremented by solves (expires only).
+        // The global counter is never decremented by solves (expires only).
         self::assertSame('3', (string) $this->client->get('{kiwi:ci}:outstanding:global'));
 
         // The cap frees when the counter drops: a new issuance is admitted.
@@ -244,7 +244,7 @@ final class RealRedisIntegrationTest extends TestCase
         self::assertNotNull($token, 'the only lease is granted');
 
         // Saturated acquires: counted up to maxWaiters (2), refused beyond
-        // WITHOUT queueing (the overflow entry is removed in the same Lua),
+        // without queueing (the overflow entry is removed in the same Lua),
         // so the waiters counter is bounded.
         for ($i = 0; $i < 10; $i++) {
             self::assertNull($sem->acquire());
@@ -272,7 +272,7 @@ final class RealRedisIntegrationTest extends TestCase
         self::assertSame('2', (string) $this->client->zcard($scopeKey), 'the per-scope set holds exactly its budget');
         self::assertNotNull($sem->acquire('signup'), 'a second scope acquires within its own budget');
 
-        // Release removes the lease from BOTH sets (no TTL wait for the
+        // Release removes the lease from both sets (no TTL wait for the
         // scope budget).
         $tokens = [];
         for ($i = 0; $i < 2; $i++) {
@@ -297,7 +297,7 @@ final class RealRedisIntegrationTest extends TestCase
 
     public function testReadinessPolicyGateAgainstRealRedis(): void
     {
-        // A FRESH controller per probe: the ~1s in-process policy cache is
+        // A fresh controller per probe: the ~1s in-process policy cache is
         // per instance, so each mutation below is observed immediately.
         $controller = fn (): \BelConsulting\KiwiCaptchaBundle\Controller\KiwiHealthController => new \BelConsulting\KiwiCaptchaBundle\Controller\KiwiHealthController(
             '0123456789abcdef0123456789abcdef',

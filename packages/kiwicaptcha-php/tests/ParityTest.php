@@ -114,9 +114,9 @@ final class ParityTest extends TestCase
 
     public function testReplayReturnsTheCommittedStoredOutcome(): void
     {
-        // The record is consumed but KEPT until its TTL, and the
-        // deterministic result is committed — a replay of the same token
-        // returns the SAME Valid outcome without re-deriving (the bundle
+        // The record is consumed but kept until its TTL, and the
+        // deterministic result is committed; a replay of the same token
+        // returns the same Valid outcome without re-deriving (the bundle
         // dedupes same-binding retries at the validator).
         $storage = new ArrayStorage();
         $storage->store($this->recordFromVector(Vectors::SHA));
@@ -134,11 +134,11 @@ final class ParityTest extends TestCase
     {
         $storage = new ArrayStorage();
         $record = $this->recordFromVector(Vectors::SHA);
-        // Tamper with the signature embedded in the challenge string (flip
-        // the first hex nibble, invalidating the HMAC). The prefix is
-        // rebuilt consistently (prefix = challenge|salt|), so the record
-        // still passes structural validation and the tampering is caught by
-        // the constant-time signature re-check.
+        // Tamper with the signature embedded in the challenge string
+        // (flip the first hex nibble, invalidating the HMAC). The prefix
+        // is rebuilt consistently (prefix = challenge|salt|), so the
+        // record still passes structural validation and the tampering is
+        // caught by the constant-time signature re-check.
         $challenge = $record->challenge;
         $pos = strrpos($challenge, '.');
         self::assertNotFalse($pos);
@@ -292,10 +292,10 @@ final class ParityTest extends TestCase
 
     public function testArgon2WithBelowCeilingParamsRejectsAsUnsupported(): void
     {
-        // t=1 sits below the absolute process ceiling (MIN_ARGON_TIME=3,
-        // The record is SIGNED with the shared secret, so the
-        // verifier authenticates the parameters first and reports
-        // UnsupportedArgon2Params (not MalformedRecord) — no Argon2
+        // t=1 sits below the absolute process ceiling (the minimum time
+        // cost is 3). The record is signed with the shared secret, so
+        // the verifier authenticates the parameters first and reports
+        // UnsupportedArgon2Params (not MalformedRecord); no Argon2
         // computation is attempted.
         $config = new \KiwiCaptcha\Config(
             secretKey: Vectors::SECRET,
@@ -313,8 +313,9 @@ final class ParityTest extends TestCase
         $challenge = $issuer->issue('login', '198.51.100.77');
 
         // Swap in Argon2id t=1 parameters below the verifier's absolute
-        // ceiling: the signature is rebuilt consistently over the same v1
-        // payload so the record is authentic and the ceiling check fires.
+        // ceiling: the signature is rebuilt consistently over the same
+        // v1 payload so the record is authentic and the ceiling check
+        // fires.
         $ipHash = Issuer::hashIp('198.51.100.77', Vectors::SECRET);
         $v1Payload = sprintf('%s|%s|%s|%d', $challenge->nonce, 'login', $ipHash, Vectors::NOW);
         $v1Challenge = base64_encode($v1Payload).'.'.Issuer::signPayload($v1Payload, Vectors::SECRET);
@@ -340,9 +341,10 @@ final class ParityTest extends TestCase
         $storage->store($record);
         $verifier = new Verifier($storage, now: static fn (): int => Vectors::NOW, acceptLegacyV1: true);
 
-        // The record is structurally consistent and SIGNED with the shared
-        // secret; the ceiling check (t=1 < MIN_ARGON_TIME=3) rejects it
-        // before any token counter can reach the proof phase.
+        // The record is structurally consistent and signed with the
+        // shared secret; the ceiling check (t=1 below the minimum time
+        // cost of 3) rejects it before any token counter can reach the
+        // proof phase.
         $token = \KiwiCaptcha\SolutionToken::create($challenge->nonce, 1, 5000, [])->encode();
         $outcome = $verifier->verify($token, Vectors::SECRET, 'login', '198.51.100.77');
         self::assertSame(VerifyError::UnsupportedArgon2Params, $outcome->error);

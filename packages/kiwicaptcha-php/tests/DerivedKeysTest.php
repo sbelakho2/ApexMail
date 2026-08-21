@@ -9,12 +9,12 @@ use KiwiCaptcha\Tests\Fixtures\Vectors;
 use PHPUnit\Framework\TestCase;
 
 /**
- * HKDF purpose-key separation.
+ * Purpose-key separation.
  *
  * Byte-exact lock-in against the Rust crate's reference vectors
- * (packages/kiwicaptcha/src/keys.rs): the SAME master derives the SAME
- * purpose keys in both languages — any deviation breaks the cross-language
- * verify/issue interop.
+ * (packages/kiwicaptcha/src/keys.rs): the same master derives the same
+ * purpose keys in both languages; any deviation breaks the
+ * cross-language verify/issue interop.
  */
 final class DerivedKeysTest extends TestCase
 {
@@ -70,7 +70,8 @@ final class DerivedKeysTest extends TestCase
     public function testTenantRootMatchesTheRustReferenceVector(): void
     {
         // The tenant root itself is not exposed; re-derive it with the
-        // documented construction (keys.rs) and lock it to the Rust vector.
+        // documented construction (keys.rs) and lock it to the Rust
+        // vector.
         $root = self::hkdf(
             Vectors::SECRET,
             DerivedKeys::INFO_TENANT_ROOT_PREFIX.'t1',
@@ -78,8 +79,8 @@ final class DerivedKeysTest extends TestCase
         );
         self::assertSame(self::TENANT_T1_ROOT_HEX, bin2hex($root));
 
-        // The t1 purpose keys are derived UNDER the tenant root (empty-salt
-        // re-extract, exactly like the Rust from_master(Some("t1")) path).
+        // The t1 purpose keys are derived under the tenant root
+        // (empty-salt re-extract, exactly like Rust's t1 tenant path).
         $t1 = DerivedKeys::fromMaster(Vectors::SECRET, 't1');
         self::assertSame(
             self::hkdf($root, DerivedKeys::INFO_CHALLENGE_SIGN, ''),

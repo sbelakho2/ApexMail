@@ -26,79 +26,80 @@ use Symfony\Component\HttpFoundation\RequestStack;
 /**
  * Bundle-side facade over the adaptive risk engine.
  *
- * Builds the risk-v1 context (scope id, source/subnet/session pseudonyms via
- * the engine's identity derivation, network flags, live resource pressure)
- * for the challenge controller's PRE-ISSUE assessment and feeds the engine's
- * POST-SOLVE outcome signals, maps decisions to challenge profiles, and logs
- * decisions without ever logging an IP, cookie value, principal or decision
- * id.
+ * Builds the risk-v1 context (scope id, source/subnet/session pseudonyms
+ * via the engine's identity derivation, network flags, live resource
+ * pressure) for the challenge controller's pre-issue assessment, feeds
+ * the engine's post-solve outcome signals, and maps decisions to
+ * challenge profiles. Decisions are logged without ever logging an IP,
+ * cookie value, principal or decision id.
  *
  * All engine calls go through the contract surface:
- *  - `assessPreIssue(ctx, idempotencyKey)` for the PRE-ISSUE decision
- *    (emergency limiter + observation + decision);
- *  - `reassess(ctx, idempotencyKey)` for the POST-SOLVE decision (fresh
- *    decision WITHOUT consuming the emergency admission budget — a low
- *    limiter cap must never deny a valid solve);
+ *  - `assessPreIssue(ctx, idempotencyKey)` for the pre-issue decision
+ *    (emergency limiter + observation + decision).
+ *  - `reassess(ctx, idempotencyKey)` for the post-solve decision: a fresh
+ *    decision without consuming the emergency admission budget, so a low
+ *    limiter cap can never deny a valid solve.
  *  - `record_feedback(event, ctx, idempotencyKey, decisionId)` for outcome
  *    signals (no limits, no decision), so decision ids flow end-to-end and
  *    the calibration receipts keyed on them are consumed. The engine
- *    REFUSES ConfirmedLegitimate / ConfirmedAbuse through record_feedback
- *    (LogicException) — confirmed outcomes are APPLICATION signals only:
- *    the gateway never derives them from its own decisions and routes them
+ *    refuses ConfirmedLegitimate / ConfirmedAbuse through record_feedback
+ *    (LogicException): confirmed outcomes are application signals only.
+ *    The gateway never derives them from its own decisions and routes them
  *    exclusively through the engine's first-class confirmedLegitimate() /
  *    confirmedAbuse() (the engine requires a decision id for them and
  *    throws InvalidArgumentException without one).
  *
- * CONFIRMATION SPLIT: outcome confirmation is two deliberately separate
- * paths —
- *  - {@see confirmDecisionOutcome()} is CALIBRATION-ONLY: a decision id +
- *    outcome (and optionally the inverse sampling probability for weighted
- *    calibration), no network identity, no scope. It targets DELAYED
- *    confirmations (email confirmation, fraud review, chargeback,
- *    moderation) where the original request context is long gone, and
- *    delegates to the engine's confirmOutcome (atomic canonical confirm.lua:
- *    consume the receipt + record the score-weighted outcome in ONE script).
+ * Confirmation split: outcome confirmation is two deliberately separate
+ * paths:
+ *  - {@see confirmDecisionOutcome()} is calibration-only: a decision id
+ *    plus an outcome (and optionally the inverse sampling probability for
+ *    weighted calibration), with no network identity and no scope. It
+ *    targets delayed confirmations (email confirmation, fraud review,
+ *    chargeback, moderation) where the original request context is long
+ *    gone, and delegates to the engine's confirmOutcome (the atomic
+ *    canonical confirm.lua consumes the receipt and records the
+ *    score-weighted outcome in one script).
  *  - {@see recordConfirmedReputation()} (and the confirmedLegitimate /
- *    confirmedAbuse wrappers) is the CONTEXT-FUL path: when the
- *    source/session/principal context IS available, the engine confirms the
+ *    confirmedAbuse wrappers) is the context-ful path: when the
+ *    source/session/principal context is available, the engine confirms the
  *    decision atomically (ledger-based once-only) and then records the
  *    reputation event against the source/session/principal pseudonyms.
  *    The optional $samplingProbabilityPpm (inverse sampling probability,
  *    parts per million) flows through to the engine's confirmed* methods
- *    (weight = 1_000_000/ppm for weighted calibration; null in weighted
- *    mode makes the calibrator throw InvalidArgumentException — the
- *    gateway lets that enforcement surface).
- *
+ *    (weight = 1_000_000/ppm for weighted calibration). Null in weighted
+ *    mode makes the calibrator throw InvalidArgumentException, and the
+ *    gateway lets that enforcement surface.
  *  - {@see samplingMetrics()} exposes the calibrator's sampling-resolution
  *    counters (zeros when calibration is disabled).
  *
- * Every FEEDBACK path is guarded against unknown scopes: when the scope is
+ * Every feedback path is guarded against unknown scopes: when the scope is
  * not configured and unknown_scope.mode is "reject"/"baseline" (the engine
- * declines to evaluate), the signal is skipped with a debug log — feedback
- * must never crash the request path.
+ * declines to evaluate), the signal is skipped with a debug log, so
+ * feedback never crashes the request path.
  *
  * Resource pressure comes from the injected provider
  * ({@see ResourcePressureProviderInterface}); without one every dimension is
  * nominal (1000 = no pressure).
  *
- * PRINCIPAL reputation: when a {@see PrincipalResolverInterface} service is
- * wired (and a RequestStack is available), the RAW principal of the current
- * request flows into EVERY context built here — pre-issue, post-solve and
- * all feedback signals — so the engine's principal counter is exercised. The
+ * Principal reputation: when a {@see PrincipalResolverInterface} service is
+ * wired (and a RequestStack is available), the raw principal of the current
+ * request flows into every context built here, pre-issue, post-solve and
+ * all feedback signals, so the engine's principal counter is exercised. The
  * raw principal exists only in process memory; the engine's
  * RiskIdentityFactory HMAC-pseudonymizes it before Redis storage.
  *
- * DECISION HANDLES: {@see preIssue()} and {@see postSolveDecision()} record
- * the decision id of the current request via {@see setCurrentDecisionId()}
- * (request-local — the RequestStack main request's `_kiwi_risk_decision_id`
- * attribute, read via {@see currentDecisionId()}, so a long-running worker
- * can never leak one request's decision into the next). For cross-request
- * confirmation the controller pairs the minted challenge nonce to the
- * decision id via {@see attachDecisionForNonce()} — a short-lived
- * server-side mapping in the risk Redis ({kiwi:<ns>}:decision:<nonce>, TTL =
- * risk.nonce_to_decision_ttl_secs, default 300) consumed once with GETDEL
- * via {@see resolveDecisionForNonce()}. The mapping carries ONLY the
- * decision id — no IP, no identity.
+ * Decision handles: {@see preIssue()} and {@see postSolveDecision()} record
+ * the decision id of the current request via {@see setCurrentDecisionId()}.
+ * It is request-local (the RequestStack main request's
+ * `_kiwi_risk_decision_id` attribute, read via {@see currentDecisionId()}),
+ * so a long-running worker can never leak one request's decision into the
+ * next. For cross-request confirmation the controller pairs the minted
+ * challenge nonce to the decision id via {@see attachDecisionForNonce()}: a
+ * short-lived server-side mapping in the risk Redis
+ * ({kiwi:<ns>}:decision:<nonce>, TTL = risk.nonce_to_decision_ttl_secs,
+ * default 300) consumed once with GETDEL via
+ * {@see resolveDecisionForNonce()}. The mapping carries only the decision
+ * id, no IP and no identity.
  */
 final class RiskGateway
 {
@@ -106,21 +107,21 @@ final class RiskGateway
     private const DECISION_ATTRIBUTE = '_kiwi_risk_decision_id';
 
     /**
-     * @param array<string, int>                  $scopeIds         application scope string => risk-v1 int scope
-     * @param array<string, bool>                 $postSolveScopes  application scope string => post_solve_check flag
-     * @param 'reject'|'baseline'|'minimum'       $unknownScopeMode behavior for scopes absent from $scopeIds
-     * @param int|null                            $unknownScopeId   synthetic policy scope id used in 'minimum' mode
+     * @param array<string, int>                  $scopeIds         application scope string => risk-v1 int scope.
+     * @param array<string, bool>                 $postSolveScopes  application scope string => post_solve_check flag.
+     * @param 'reject'|'baseline'|'minimum'       $unknownScopeMode behavior for scopes absent from $scopeIds.
+     * @param int|null                            $unknownScopeId   synthetic policy scope id used in 'minimum' mode.
      * @param string                              $decisionKeyPrefix full nonce->decision key prefix including the
-     *                                                               hash tag, e.g. "{kiwi:prod}:decision:"
+     *                                                               hash tag, e.g. "{kiwi:prod}:decision:".
  * @param int                                 $decisionTtlSecs  TTL of the nonce->decision mapping
  *                                                               (risk.nonce_to_decision_ttl_secs,
- *                                                               default 300 s)
+ *                                                               default 300 s).
  * @param RiskPolicy|null                     $policy           the risk-v1 policy, required for
  *                                                               {@see degradedDecisionForScope()} (the extension
- *                                                               wires it automatically)
+ *                                                               wires it automatically).
  * @param CalibrationStore|null               $calibration      the calibration store, wired only when
  *                                                               risk.calibration.enabled (drives
- *                                                               {@see samplingMetrics()})
+ *                                                               {@see samplingMetrics()}).
  */
     public function __construct(
         private readonly AdaptiveRiskEngine $engine,
@@ -143,8 +144,8 @@ final class RiskGateway
         /**
          * The operator-configured risk-v2 additive weights
          * (risk.v2.*, wired by the extension). Null keeps the contract
-         * DEFAULT weights (identical scores to today); a caller-explicit
-         * $v2Weights argument on preIssue/postSolveDecisionV2 always wins.
+         * default weights (identical scores); a caller-explicit $v2Weights
+         * argument on preIssue/postSolveDecisionV2 always wins.
          */
         private readonly ?RiskV2Weights $v2Weights = null,
     ) {
@@ -160,11 +161,11 @@ final class RiskGateway
     }
 
     /**
-     * Whether the process-local emergency window is CURRENTLY
-     * saturated — the cheap local admission step the challenge controller
-     * runs BEFORE any Redis issuance limiter. NON-CONSUMING
-     * ({@see ProcessEmergencyCap::isOpen()}): the controller never marks an
-     * allowance here, so the engine's own consuming check inside
+     * Whether the process-local emergency window is currently saturated:
+     * the cheap local admission step the challenge controller runs before
+     * any Redis issuance limiter. Non-consuming, see
+     * {@see ProcessEmergencyCap::isOpen()}: the controller never marks
+     * an allowance here, so the engine's own consuming check inside
      * assessPreIssue() stays the single consumer of the budget (no
      * double-counting). Returns false when no cap is wired (risk disabled).
      */
@@ -195,8 +196,8 @@ final class RiskGateway
         }
 
         // 'reject' and 'baseline' modes: the adaptive engine declines to
-        // evaluate unknown scopes. 'reject' surfaces as a TRUE rejection
-        // (the controller returns the risk-denied 429); 'baseline' lets the
+        // evaluate unknown scopes. 'reject' surfaces as a rejection (the
+        // controller returns the risk-denied 429); 'baseline' lets the
         // controller fall back to the default challenge profile.
         throw new UnknownScopeException(sprintf(
             'Risk scope "%s" is not configured and unknown_scope.mode is "%s" — the adaptive engine declines to evaluate it',
@@ -206,7 +207,7 @@ final class RiskGateway
     }
 
     /**
-     * Whether a VALID solve of this scope must pass the post-solve
+     * Whether a valid solve of this scope must pass the post-solve
      * re-assessment. Null scope = an accept-any-scope constraint, which
      * never demands a post-solve re-assessment (the per-scope table is
      * keyed by the issued scope).
@@ -246,25 +247,26 @@ final class RiskGateway
     }
 
     /**
-     * PRE-ISSUE assessment: one observation (event PreIssue) + decision via
-     * {@see AdaptiveRiskEngine::assessPreIssue()} (emergency limiter +
-     * observation + decision). The decision id is recorded on the
-     * request-local decision context ({@see setCurrentDecisionId()}).
+     * Pre-issue assessment: one observation (event PreIssue) plus a
+     * decision via {@see AdaptiveRiskEngine::assessPreIssue()} (emergency
+     * limiter + observation + decision). The decision id is recorded on
+     * the request-local decision context, see
+     * {@see setCurrentDecisionId()}.
      *
-     * The optional risk-v2 context ({@see clientContextV2()}) feeds the
+     * The optional risk-v2 context, see {@see clientContextV2()}, feeds the
      * additive evidence factors (honeypot/decoy evidence, session
      * client-context consistency, trusted-edge TLS consistency) into the
-     * assessment — probabilistic evidence only, NEVER a security gate.
-     * The optional risk-v2 weights override ({@see RiskV2Weights}) tunes
-     * those additive factors; null uses the CONFIGURED weights
-     * (risk.v2.*; itself defaulting to the contract DEFAULT weights —
-     * identical scores to today).
+     * assessment. This is probabilistic evidence only, never a security
+     * gate. The optional risk-v2 weights override ({@see RiskV2Weights})
+     * tunes those additive factors; null uses the configured weights
+     * (risk.v2.*, itself defaulting to the contract defaults, so scores
+     * are identical to the unset config).
      *
-     * @throws UnknownScopeException   when the scope is unknown in 'reject'/'baseline' mode
+     * @throws UnknownScopeException   when the scope is unknown in 'reject'/'baseline' mode.
      * @throws \InvalidArgumentException when the client IP is not a valid
      *                                   IPv4/IPv6 address (the caller treats
      *                                   this as "no risk signal" and applies
-     *                                   the degraded decision)
+     *                                   the degraded decision).
      */
     public function preIssue(string $scope, string $ip, ?string $session, ?string $idempotencyKey = null, ?RiskV2Context $v2 = null, ?RiskV2Weights $v2Weights = null): RiskDecision
     {
@@ -272,7 +274,7 @@ final class RiskGateway
             scope: $this->scopeId($scope),
             sourceIp: $ip,
             // The engine derives the keyed session pseudonym itself
-            // (buildObservation) — pass the raw cookie value.
+            // (buildObservation); pass the raw cookie value.
             sessionId: $session,
             principalId: $this->resolvePrincipal($scope),
             event: RiskEventKind::PreIssue,
@@ -289,23 +291,24 @@ final class RiskGateway
     }
 
     /**
-     * POST-SOLVE decision: a fresh assessment with the SolveSuccess event
-     * via {@see AdaptiveRiskEngine::reassess()} — a full decision WITHOUT
+     * Post-solve decision: a fresh assessment with the SolveSuccess event
+     * via {@see AdaptiveRiskEngine::reassess()}. A full decision without
      * consuming the emergency admission budget, so a low limiter cap can
-     * never deny a valid solve. A materially changed security context (e.g.
-     * a global attack storm while the client was solving) can still demand
-     * DENY or STEP-UP even after a valid proof. The decision id is recorded
-     * on the request-local decision context ({@see setCurrentDecisionId()}).
+     * never deny a valid solve. A materially changed security context
+     * (e.g. a global attack storm while the client was solving) can still
+     * demand Deny or StepUp even after a valid proof. The decision id is
+     * recorded on the request-local decision context, see
+     * {@see setCurrentDecisionId()}.
      *
-     * The outcome is NOT fed back by the gateway: ConfirmedLegitimate /
-     * ConfirmedAbuse are application-only signals (they require a decision
-     * id), so the caller decides whether the solve really was a success and
+     * The outcome is not fed back by the gateway: ConfirmedLegitimate and
+     * ConfirmedAbuse are application-only signals that require a decision
+     * id. The caller decides whether the solve really was a success and
      * records the confirmation itself with the returned decision id.
      *
      * @return RiskDecision|null the post-solve decision, or null when the
      *                           scope is unknown and the engine declines to
-     *                           evaluate (feedback paths must never crash on
-     *                           unknown scopes)
+     *                           evaluate (feedback paths must never crash
+     *                           on unknown scopes).
      */
     public function postSolveDecision(string $scope, string $ip, ?string $session = null, ?string $principal = null, ?string $idempotencyKey = null): ?RiskDecision
     {
@@ -330,21 +333,21 @@ final class RiskGateway
     }
 
     /**
-     * POST-SOLVE decision with the risk-v2 additive evidence: identical to
-     * {@see postSolveDecision()} (fresh SolveSuccess assessment WITHOUT
+     * Post-solve decision with the risk-v2 additive evidence: identical to
+     * {@see postSolveDecision()} (fresh SolveSuccess assessment without
      * consuming the emergency admission budget) but routed through the
      * engine's reassessV2 with the given risk-v2 context (honeypot/decoy
      * evidence, session client-context consistency, trusted-edge TLS
      * consistency). The v2 weights are the caller-explicit override when
-     * given, else the CONFIGURED weights (risk.v2.*; themselves the
-     * contract defaults when unset — an empty context scores identically
+     * given, else the configured weights (risk.v2.*, themselves the
+     * contract defaults when unset; an empty context scores identically
      * to the v1 path). The decision id is recorded on the request-local
-     * decision context ({@see setCurrentDecisionId()}).
+     * decision context, see {@see setCurrentDecisionId()}.
      *
      * @return RiskDecision|null the post-solve decision, or null when the
      *                           scope is unknown and the engine declines to
-     *                           evaluate (feedback paths must never crash on
-     *                           unknown scopes)
+     *                           evaluate (feedback paths must never crash
+     *                           on unknown scopes).
      */
     public function postSolveDecisionV2(string $scope, string $ip, ?string $session = null, ?string $principal = null, ?string $idempotencyKey = null, ?RiskV2Context $v2 = null, ?RiskV2Weights $v2Weights = null): ?RiskDecision
     {
@@ -372,10 +375,10 @@ final class RiskGateway
 
     /**
      * The risk-v2 client-context tag for the current request: a bounded,
-     * ephemeral base36 tag derived from the coarse capability descriptor
-     * ({@see ClientContextTag::derive()}), keyed to the deployment
-     * namespace and the continuity session — never a stable device
-     * identifier. The tag is STABLE for the session's whole lifetime (no
+     * ephemeral base36 tag derived from the coarse capability descriptor,
+     * see {@see ClientContextTag::derive()}, keyed to the deployment
+     * namespace and the continuity session, never a stable device
+     * identifier. The tag is stable for the session's whole lifetime (no
      * hourly re-key), so the session's first tag stays the comparison
      * baseline. Null when there is no session or no descriptor (no
      * consistency signal is derived).
@@ -392,10 +395,10 @@ final class RiskGateway
     /**
      * The risk-v2 context for one request: honeypot evidence plus the
      * ephemeral client-context tag and the trusted-edge TLS classification
-     * tag (coarse, server-attested by trusted proxy/CDN infrastructure —
-     * the engine only ever stores the ephemeral classification as the
-     * session's first-seen record, never a raw fingerprint database).
-     * Returns null when the request carries NO risk-v2 evidence at all
+     * tag (coarse, server-attested by trusted proxy/CDN infrastructure).
+     * The engine only ever stores the ephemeral classification as the
+     * session's first-seen record, never a raw fingerprint database.
+     * Returns null when the request carries no risk-v2 evidence at all
      * (the assessment then stays on the pure risk-v1 path).
      */
     public function clientContextV2(bool $honeypotHit, ?string $session, ?string $descriptor, ?string $tlsTag = null): ?RiskV2Context
@@ -414,15 +417,15 @@ final class RiskGateway
 
     /**
      * Risk-v2 honeypot/decoy evidence feedback: records one of the three
-     * honeypot event kinds ({@see RiskEventKind::isHoneypot()}) through the
-     * engine's feedback path — the event rides the same observation
+     * honeypot event kinds, see {@see RiskEventKind::isHoneypot()}, through
+     * the engine's feedback path. The event rides the same observation
      * pipeline as every other evidence signal (dedupe receipt; the state
-     * script treats it as a no-op, the honeypot signal itself is scored
-     * from the risk-v2 context of the assessment). NEVER a security gate:
-     * this only books probabilistic evidence.
+     * script treats it as a no-op, and the honeypot signal itself is
+     * scored from the risk-v2 context of the assessment). Never a
+     * security gate: this only books probabilistic evidence.
      *
      * @throws \InvalidArgumentException when $kind is not one of the three
-     *                                   honeypot/decoy event kinds
+     *                                   honeypot/decoy event kinds.
      */
     public function honeypotEvidence(RiskEventKind $kind, string $scope, string $ip, ?string $session = null, ?string $idempotencyKey = null, ?string $decisionId = null): ?EventReceipt
     {
@@ -443,11 +446,12 @@ final class RiskGateway
     }
 
     /**
-     * POST-SOLVE feedback: the outcome of a verification attempt, mapped to
-     * its risk-v1 event kind ({@see RiskFeedback}). Infrastructure failures
-     * are mapped to null and skipped — never recorded as client abuse. An
-     * unparseable client IP is not a risk signal and is skipped too (the
-     * engine's identity derivation requires a valid IPv4/IPv6 address).
+     * Post-solve feedback: the outcome of a verification attempt, mapped
+     * to its risk-v1 event kind ({@see RiskFeedback}). Infrastructure
+     * failures are mapped to null and skipped, never recorded as client
+     * abuse. An unparseable client IP is not a risk signal and is skipped
+     * too (the engine's identity derivation requires a valid IPv4/IPv6
+     * address).
      */
     public function solveOutcome(string $scope, string $ip, ?string $session, ?VerifyError $error, ?string $decisionId = null): void
     {
@@ -459,40 +463,41 @@ final class RiskGateway
     }
 
     /**
-     * CALIBRATION-ONLY confirmation of a decision outcome — no network
-     * identity, no scope, no session: the target of DELAYED confirmations
-     * (email confirmation, fraud review, chargeback, moderation) where the
-     * original request's source/session/principal context is long gone.
-     * Confirms the decision against its outcome ledger atomically via the
-     * engine's confirmOutcome (the canonical confirm.lua: ledger check +
-     * consume receipt + record the score-weighted outcome in ONE script).
+     * Calibration-only confirmation of a decision outcome, with no network
+     * identity, no scope and no session: the target of delayed
+     * confirmations (email confirmation, fraud review, chargeback,
+     * moderation) where the original request's source/session/principal
+     * context is long gone. Confirms the decision against its outcome
+     * ledger atomically via the engine's confirmOutcome (the canonical
+     * confirm.lua checks the ledger, consumes the receipt and records the
+     * score-weighted outcome in one script).
      *
      * Sampling contract: with the calibration mode 'random_sample', Kiwi
      * sampled the decision at assessment time (the receipt carries a
-     * "sampled" flag) and an unsampled receipt is discarded — the label can
-     * never select itself into the calibration population. With mode
+     * "sampled" flag) and an unsampled receipt is discarded, so the label
+     * can never select itself into the calibration population. With mode
      * 'weighted', the application supplies the inverse sampling probability
-     * $samplingProbabilityPpm (parts per million, 1..1_000_000); the gateway
-     * converts it to weight = 1_000_000/ppm so labels with known selection
-     * bias are re-weighted into the population. Never requires an IP (there
-     * is nothing to attribute a delayed confirmation to — it is a pure
-     * calibration signal).
+     * $samplingProbabilityPpm (parts per million, 1..1_000_000), and the
+     * gateway converts it to weight = 1_000_000/ppm so labels with known
+     * selection bias are re-weighted into the population. An IP is never
+     * required: there is nothing to attribute a delayed confirmation to,
+     * since it is a pure calibration signal.
      *
      * @return int the engine's shared accepted-outcome status:
      *             0 = missing / already confirmed / corrupt receipt (the
-     *                 application can treat it as a no-op — a webhook retry
-     *                 of an already-confirmed decision is harmless);
-     *             1 = FIRST confirmation; the calibration outcome was
-     *                 recorded;
-     *             2 = FIRST confirmation; deliberately unsampled
+     *                 application can treat it as a no-op: a webhook retry
+     *                 of an already-confirmed decision is harmless).
+     *             1 = first confirmation; the calibration outcome was
+     *                 recorded.
+     *             2 = first confirmation, deliberately unsampled
      *                 (random_sample mode: the decision was not in the
-     *                 server-selected sample, so it does NOT enter
-     *                 calibration — but the confirmation is still consumed
+     *                 server-selected sample, so it does not enter
+     *                 calibration, but the confirmation is still consumed
      *                 and the caller may apply first-party reputation
      *                 exactly once).
      *
      * @throws \InvalidArgumentException when $samplingProbabilityPpm is
-     *                                   outside 1..1_000_000
+     *                                   outside 1..1_000_000.
      */
     public function confirmDecisionOutcome(string $decisionId, bool $legitimate, ?int $samplingProbabilityPpm = null): int
     {
@@ -511,30 +516,32 @@ final class RiskGateway
     }
 
     /**
-     * CORRECTION of a confirmed outcome (e.g. a chargeback
-     * verdict or moderation appeal flipped the label): the engine's
-     * compensating-state API — records the corrected class at most once
+     * Correction of a confirmed outcome (e.g. a chargeback verdict or
+     * moderation appeal flipped the label): the engine's
+     * compensating-state API. Records the corrected class at most once
      * per decision, guarded by the outcome ledger (status flipped to 2;
-     * the ledger TTL = calibration.outcome_receipt_ttl_secs, and the
-     * receipt itself is already consumed by the first confirmation, so the
-     * ledger is the only gate). WORKS WITHOUT CALIBRATION — the once-only
-     * guard lives in the state store; with a calibration store attached
-     * the correction additionally reverses the recorded bucket counts.
-     * Calibration aggregates keep the FIRST confirmed outcome; a
+     * the ledger TTL = calibration.outcome_receipt_ttl_secs). The
+     * receipt itself is already consumed by the first confirmation, so
+     * the ledger is the only gate. Works without calibration: the
+     * once-only
+     * guard
+     * lives in the state store; with a calibration store attached the
+     * correction additionally reverses the recorded bucket counts.
+     * Calibration aggregates keep the first confirmed outcome, and a
      * correction compensates reputation and returns the buckets to the
      * pre-confirmation state.
      *
-     * Same weight mapping as {@see confirmDecisionOutcome()}
-     * ($samplingProbabilityPpm is the inverse sampling probability in parts
-     * per million, converted to weight = 1_000_000/ppm) and the same
-     * one-shot contract: a second correction of the same decision returns
-     * false (no-op — retries can never double-compensate).
+     * Same weight mapping as {@see confirmDecisionOutcome()}: the
+     * $samplingProbabilityPpm is the inverse sampling probability in parts
+     * per million, converted to weight = 1_000_000/ppm. Same one-shot
+     * contract: a second correction of the same decision returns false
+     * (no-op, so retries can never double-compensate).
      *
      * @return bool whether the compensation was applied (false = already
-     *               corrected / ledger missing)
+     *               corrected / ledger missing).
      *
      * @throws \InvalidArgumentException when $samplingProbabilityPpm is
-     *                                   outside 1..1_000_000
+     *                                   outside 1..1_000_000.
      */
     public function confirmCorrection(string $decisionId, bool $legitimate, ?int $samplingProbabilityPpm = null): bool
     {
@@ -553,31 +560,31 @@ final class RiskGateway
     }
 
     /**
-     * Confirmed-legitimate signal (APPLICATION-only, e.g. from post-hoc
-     * account checks): the context-ful reputation path — used when the
-     * source/session/principal context IS still available. Routes through
+     * Confirmed-legitimate signal, application-only (e.g. from post-hoc
+     * account checks): the context-ful reputation path, used when the
+     * source/session/principal context is still available. Routes through
      * {@see recordConfirmedReputation()}: the engine confirms the decision
      * atomically against its outcome ledger (consuming the calibration
      * receipt when one exists), then records the ConfirmedLegitimate
-     * reputation event. The decision id is REQUIRED by the engine contract
-     * — it throws InvalidArgumentException without one, and the gateway
-     * lets that enforcement surface.
+     * reputation event. The decision id is required by the engine
+     * contract; it throws InvalidArgumentException without one, and the
+     * gateway lets that enforcement surface.
      *
      * $samplingProbabilityPpm (parts per million, 1..1_000_000) is the
-     * INVERSE sampling probability for weighted calibration: it is passed
+     * inverse sampling probability for weighted calibration. It is passed
      * to the engine's confirmedLegitimate (which converts it to
      * weight = 1_000_000/ppm), so labels with known selection bias are
-     * re-weighted into the population. null in weighted mode reaches the
-     * calibrator as a null weight, which weighted mode refuses — the
-     * InvalidArgumentException PROPAGATES (documented behavior).
+     * re-weighted into the population. Null in weighted mode reaches the
+     * calibrator as a null weight, which weighted mode refuses; the
+     * InvalidArgumentException propagates (documented behavior).
      *
      * @throws \InvalidArgumentException when the engine requires a decisionId
-     *                                   for confirmed events and none is given
+     *                                   for confirmed events and none is given.
      * @throws \InvalidArgumentException when $samplingProbabilityPpm is
-     *                                   outside 1..1_000_000
+     *                                   outside 1..1_000_000.
      * @throws \InvalidArgumentException when the calibration mode is
      *                                   'weighted' and $samplingProbabilityPpm
-     *                                   is null (propagated from the engine)
+     *                                   is null (propagated from the engine).
      */
     public function confirmedLegitimate(string $scope, string $ip, ?string $session = null, ?string $idempotencyKey = null, ?string $decisionId = null, ?int $samplingProbabilityPpm = null): ?EventReceipt
     {
@@ -585,31 +592,31 @@ final class RiskGateway
     }
 
     /**
-     * Confirmed-abuse signal (APPLICATION-only, e.g. from post-hoc account
-     * checks): the context-ful reputation path — used when the
-     * source/session/principal context IS still available. Routes through
+     * Confirmed-abuse signal, application-only (e.g. from post-hoc account
+     * checks): the context-ful reputation path, used when the
+     * source/session/principal context is still available. Routes through
      * {@see recordConfirmedReputation()}: the engine confirms the decision
      * atomically against its outcome ledger (consuming the calibration
      * receipt when one exists), then records the ConfirmedAbuse reputation
-     * event. The decision id is REQUIRED by the engine contract — it
+     * event. The decision id is required by the engine contract; it
      * throws InvalidArgumentException without one, and the gateway lets
      * that enforcement surface.
      *
      * $samplingProbabilityPpm (parts per million, 1..1_000_000) is the
-     * INVERSE sampling probability for weighted calibration: it is passed
+     * inverse sampling probability for weighted calibration. It is passed
      * to the engine's confirmedAbuse (which converts it to
      * weight = 1_000_000/ppm), so labels with known selection bias are
-     * re-weighted into the population. null in weighted mode reaches the
-     * calibrator as a null weight, which weighted mode refuses — the
-     * InvalidArgumentException PROPAGATES (documented behavior).
+     * re-weighted into the population. Null in weighted mode reaches the
+     * calibrator as a null weight, which weighted mode refuses; the
+     * InvalidArgumentException propagates (documented behavior).
      *
      * @throws \InvalidArgumentException when the engine requires a decisionId
-     *                                   for confirmed events and none is given
+     *                                   for confirmed events and none is given.
      * @throws \InvalidArgumentException when $samplingProbabilityPpm is
-     *                                   outside 1..1_000_000
+     *                                   outside 1..1_000_000.
      * @throws \InvalidArgumentException when the calibration mode is
      *                                   'weighted' and $samplingProbabilityPpm
-     *                                   is null (propagated from the engine)
+     *                                   is null (propagated from the engine).
      */
     public function confirmedAbuse(string $scope, string $ip, ?string $session = null, ?string $idempotencyKey = null, ?string $decisionId = null, ?int $samplingProbabilityPpm = null): ?EventReceipt
     {
@@ -618,29 +625,30 @@ final class RiskGateway
 
     /**
      * Context-ful confirmed-outcome path (legitimate/abuse): used when the
-     * request's source/session/principal context IS available — the engine
-     * confirms the decision atomically against its outcome ledger (the
-     * once-only gate; with a calibration store the receipt is consumed and
-     * the score-weighted outcome recorded in the same script) and then
-     * records the reputation event (source/session/principal signals) via
-     * the engine's first-class confirmed* methods. Unlike the
-     * calibration-only {@see confirmDecisionOutcome()}, an unparseable
-     * client IP has nothing to attribute the reputation event to and the
-     * signal is skipped (null).
+     * request's source/session/principal context is available. The engine
+     * confirms the decision atomically against its outcome ledger, the
+     * once-only gate: with a calibration store the receipt is consumed
+     * and the score-weighted outcome recorded in the same script. It
+     * then records the reputation event (source/session/principal
+     * signals) via the engine's first-class confirmed* methods. Unlike
+     * the calibration-only path, see {@see confirmDecisionOutcome()}, an
+     * unparseable client IP has nothing to attribute the reputation event
+     * to, so the signal is skipped (null).
      *
      * $samplingProbabilityPpm (parts per million, 1..1_000_000) is the
-     * INVERSE sampling probability for weighted calibration (weight =
-     * 1_000_000/ppm), passed through to the engine's confirmed* methods.
-     * null in weighted mode makes the engine's confirmOutcome throw an
-     * InvalidArgumentException — the gateway lets it propagate.
+     * inverse sampling probability for weighted calibration
+     * (weight = 1_000_000/ppm), passed through to the engine's confirmed*
+     * methods. Null in weighted mode makes the engine's confirmOutcome
+     * throw an InvalidArgumentException, and the gateway lets it
+     * propagate.
      *
      * @throws \InvalidArgumentException when the engine requires a decisionId
-     *                                   for confirmed events and none is given
+     *                                   for confirmed events and none is given.
      * @throws \InvalidArgumentException when $samplingProbabilityPpm is
-     *                                   outside 1..1_000_000
+     *                                   outside 1..1_000_000.
      * @throws \InvalidArgumentException when the calibration mode is
      *                                   'weighted' and $samplingProbabilityPpm
-     *                                   is null (propagated from the engine)
+     *                                   is null (propagated from the engine).
      */
     public function recordConfirmedReputation(bool $legitimate, string $scope, string $ip, ?string $session = null, ?string $idempotencyKey = null, ?string $decisionId = null, ?int $samplingProbabilityPpm = null): ?EventReceipt
     {
@@ -668,11 +676,12 @@ final class RiskGateway
             resources: $this->resources(),
         );
 
-        // Route through the engine's first-class confirmation methods so the
-        // package enforces the decisionId requirement (InvalidArgumentException
-        // without it) and the once-only outcome ledger — the gateway never
-        // infers confirmations itself. The ppm is passed through so the
-        // engine can convert it to the weighted-calibration weight.
+        // Route through the engine's first-class confirmation methods so
+        // the package enforces the decisionId requirement
+        // (InvalidArgumentException without it) and the once-only outcome
+        // ledger; the gateway never infers confirmations itself. The ppm
+        // is passed through so the engine can convert it to the
+        // weighted-calibration weight.
         return $legitimate
             ? $this->engine->confirmedLegitimate($context, $decisionId, $idempotencyKey, $samplingProbabilityPpm)
             : $this->engine->confirmedAbuse($context, $decisionId, $idempotencyKey, $samplingProbabilityPpm);
@@ -709,7 +718,7 @@ final class RiskGateway
     /**
      * Server-derived signal: a rate limit (issuer hard limit or risk denial)
      * turned the request away. Records RiskEventKind::RateLimitHit; the
-     * controller calls this BEFORE returning 429 so the risk state learns
+     * controller calls this before returning 429 so the risk state learns
      * the source was refused.
      *
      * Prefer the attributed signals over this generic one:
@@ -723,15 +732,15 @@ final class RiskGateway
     }
 
     /**
-     * Server-derived signal: the issuer's PER-CLIENT rate limit turned the
-     * request away. Records RiskEventKind::SourceRateLimitHit (bad +3000 on
-     * the source/session reputation). The scope is the already-resolved
+     * Server-derived signal: the issuer's per-client rate limit turned the
+     * request away. Records RiskEventKind::SourceRateLimitHit (bad +3000
+     * on the source/session reputation). The scope is the already-resolved
      * risk-v1 int scope id (refusal paths run before any principal
      * resolution, so no principal signal is attached). An unparseable
      * client IP has nothing to attribute the signal to and is skipped.
      *
      * @return EventReceipt|null null when the signal was skipped (invalid
-     *                           client IP)
+     *                           client IP).
      */
     public function sourceRateLimitHit(int $scope, string $ip, ?string $sessionId = null, ?string $idempotencyKey = null): ?EventReceipt
     {
@@ -747,11 +756,11 @@ final class RiskGateway
     }
 
     /**
-     * Server-derived signal: the DEPLOYMENT-GLOBAL issuance cap turned the
-     * request away. Records RiskEventKind::GlobalCapacityHit — global-only
-     * bad pressure (the canonical risk-v1 Lua raises the global attack
-     * pressure and NEVER touches the source/session/principal reputation:
-     * deployment overload must not contaminate an individual visitor).
+     * Server-derived signal: the deployment-global issuance cap turned the
+     * request away. Records RiskEventKind::GlobalCapacityHit, global-only
+     * bad pressure: the canonical risk-v1 Lua raises the global attack
+     * pressure and never touches the source/session/principal reputation,
+     * so deployment overload cannot contaminate an individual visitor.
      *
      * No source IP is needed: the event is identity-neutral, so the context
      * is built with the identity-neutral unspecified address (0.0.0.0) and
@@ -772,11 +781,11 @@ final class RiskGateway
 
     /**
      * Server-derived signal: the risk engine itself already denied this
-     * request (RiskEventKind::RiskDenied — a deliberate no-op in the
+     * request (RiskEventKind::RiskDenied, a deliberate no-op in the
      * canonical Lua, so a decision that already scored the evidence is
-     * never double-counted). The controller does NOT call this on its Deny
-     * path; it exists for applications that refuse a request based on a
-     * risk decision OUTSIDE the challenge flow.
+     * never double-counted). The controller does not call this on its
+     * Deny path; it exists for applications that refuse a request based on
+     * a risk decision outside the challenge flow.
      */
     public function riskDenied(int $scope, string $ip, ?string $sessionId = null, ?string $idempotencyKey = null): ?EventReceipt
     {
@@ -841,16 +850,16 @@ final class RiskGateway
     }
 
     /**
-     * The challenge profile a risk ACTION demands — the SAME mapping the
-     * pre-issue decisions flow through ({@see decisionProfile()} delegates
-     * here). The stage-2 chain controller uses it to enforce the ticket's
-     * signed required action: the effective action (the STRONGER of the
-     * required action and the current pre-issue action) flows through this
-     * mapping, so the issued profile is at least as strong as the chain
-     * promised.
+     * The challenge profile a risk action demands, the same mapping the
+     * pre-issue decisions flow through; {@see decisionProfile()} delegates
+     * here. The stage-2 chain controller uses it to enforce the ticket's
+     * signed required action. The effective action, the stronger of the
+     * required action and the current pre-issue action, flows through
+     * this mapping, so the issued profile is at least as strong as the
+     * chain promised.
      *
      * @throws \LogicException for StepUp (controller-level application
-     *                         step-up, never a challenge profile)
+     *                         step-up, never a challenge profile).
      */
     public function profileForAction(RiskAction $action): ?ChallengeProfile
     {
@@ -858,16 +867,16 @@ final class RiskGateway
     }
 
     /**
-     * The DEGRADED decision for a scope: the policy's degraded action
-     * (clamped to the scope minimum; the global floor sits at the idle
-     * level 0 = Allow because a no-signal fallback consults no store state),
-     * WITHOUT touching the state store or the emergency limiter. Used when
+     * The degraded decision for a scope: the policy's degraded action,
+     * clamped to the scope minimum, with the global floor at the idle
+     * level 0 = Allow since a no-signal fallback consults no store state.
+     * Does not touch the state store or the emergency limiter. Used when
      * no usable risk signal exists (e.g. an unparseable client IP from a
-     * misconfigured proxy) so the configured degraded floor always applies
-     * and issuance can never silently drop below it.
+     * misconfigured proxy), so the configured degraded floor always
+     * applies and issuance can never silently drop below it.
      *
      * @throws \LogicException when the policy is not wired (the extension
-     *                         wires it automatically)
+     *                         wires it automatically).
      */
     public function degradedDecisionForScope(int $scope): RiskDecision
     {
@@ -879,12 +888,13 @@ final class RiskGateway
     }
 
     /**
-     * The FULL nonce -> decision mapping key ({kiwi:<ns>}:decision:<nonce>)
-     * — the same hash-tagged key the gateway's decision handle lives
-     * under. READ-ONLY accessor: the disposition store's claim consumes
-     * the mapping ATOMICALLY with the pending record write (GETDEL inside
-     * the claim's Lua), so a fallible chain-state read before the claim
-     * can never lose the original handle.
+     * The full nonce -> decision mapping key
+     * ({kiwi:<ns>}:decision:<nonce>), the same hash-tagged key the
+     * gateway's decision handle lives under. Read-only accessor: the
+     * disposition store's claim consumes the mapping atomically with the
+     * pending record write (GETDEL inside the claim's Lua), so a fallible
+     * chain-state read before the claim can never lose the original
+     * handle.
      */
     public function decisionKeyFor(string $nonce): string
     {
@@ -893,11 +903,11 @@ final class RiskGateway
 
     /**
      * Pair a challenge nonce to its decision id in the risk Redis:
-     * {kiwi:<ns>}:decision:<nonce> holds the JSON string {"decision_id": ...}
-     * with the risk.nonce_to_decision_ttl_secs TTL (default 300 s) —
-     * independent of the outcome lifetime. Server-side handle only — the
-     * mapping carries NO IP and NO identity, and a Redis failure is silent
-     * (the mapping must never break issuance).
+     * {kiwi:<ns>}:decision:<nonce> holds the JSON string
+     * {"decision_id": ...} with the risk.nonce_to_decision_ttl_secs TTL
+     * (default 300 s), independent of the outcome lifetime. Server-side
+     * handle only: the mapping carries no IP and no identity, and a Redis
+     * failure is silent (the mapping must never break issuance).
      */
     public function attachDecisionForNonce(string $nonce, string $decisionId): void
     {
@@ -946,12 +956,12 @@ final class RiskGateway
 
     /**
      * Sampling-resolution metrics of the random_sample calibration gate:
-     * the namespace-wide sampled-decision TOTAL and RESOLVED counters, the
-     * resolution ratio (resolved/total; 0.0 when total is 0) and the
+     * the namespace-wide sampled-decision total and resolved counters,
+     * the resolution ratio (resolved/total; 0.0 when total is 0) and the
      * sampled-but-unresolved remainder (sampledExpired = total - resolved,
      * floored at 0). Delegates to the calibrator; when calibration is
-     * disabled (or in complete/weighted mode — the counters are never
-     * touched there) every value is zero.
+     * disabled (or in complete/weighted mode, where the counters are
+     * never touched) every value is zero.
      *
      * @return array{sampledTotal: int, sampledResolved: int, resolutionRatio: float, sampledExpired: int}
      */
@@ -965,24 +975,25 @@ final class RiskGateway
     }
 
     /**
-     * One feedback event through {@see AdaptiveRiskEngine::record_feedback()}.
+     * One feedback event through
+     * {@see AdaptiveRiskEngine::record_feedback()}.
      *
      * Never throws for unavailable signals:
      *  - an unknown scope (reject/baseline modes) skips the signal with a
-     *    debug log — feedback paths must never crash on unknown scopes;
-     *  - an unparseable client IP has nothing to attribute the signal to and
-     *    is skipped.
+     *    debug log, so feedback paths never crash on unknown scopes.
+     *  - An unparseable client IP has nothing to attribute the signal to
+     *    and is skipped.
      *
-     * Engine exceptions are deliberately NOT swallowed here: the engine's
-     * InvalidArgumentException for confirmed events without a decisionId is
-     * contract enforcement and must reach the application caller. (The
+     * Engine exceptions are deliberately not swallowed here: the engine's
+     * InvalidArgumentException for confirmed events without a decisionId
+     * is contract enforcement and must reach the application caller. The
      * engine also refuses ConfirmedLegitimate / ConfirmedAbuse through
-     * record_feedback with a LogicException — the gateway never routes
-     * confirmed events through this path; they go through
-     * {@see recordConfirmedReputation()} exclusively.)
+     * record_feedback with a LogicException; the gateway never routes
+     * confirmed events through this path, since they go through
+     * {@see recordConfirmedReputation()} exclusively.
      *
      * @return EventReceipt|null null when the signal was skipped (unknown
-     *                           scope or invalid client IP)
+     *                           scope or invalid client IP).
      */
     private function recordFeedback(RiskEventKind $event, string $scope, string $ip, ?string $session, ?string $idempotencyKey, ?string $decisionId): ?EventReceipt
     {
@@ -1012,10 +1023,10 @@ final class RiskGateway
     }
 
     /**
-     * The RAW principal of the current request (process memory only), or
+     * The raw principal of the current request (process memory only), or
      * null when no resolver is wired, no request is in scope, or the
-     * resolver declines. The engine HMAC-pseudonymizes the raw value before
-     * Redis storage.
+     * resolver declines. The engine HMAC-pseudonymizes the raw value
+     * before Redis storage.
      */
     private function resolvePrincipal(string $scope): ?string
     {
@@ -1047,15 +1058,15 @@ final class RiskGateway
     }
 
     /**
-     * Decision logging for operators. The decision id is
-     * deliberately NOT included (it is an internal handle that pairs
-     * calibration receipts — logging it would let log analysis correlate
-     * decisions across requests); decision ids are only ever carried in
-     * process memory or the short-lived server-side nonce mapping. No
-     * bearer material is ever logged here or anywhere else in the bundle:
-     * no challenge token, solution, result token, HMAC pseudonym, client IP,
-     * cookie value or principal — the context is score/action/band/reasons
-     * only (bounded, low cardinality).
+     * Decision logging for operators. The decision id is deliberately not
+     * included: it is an internal handle that pairs calibration receipts,
+     * and logging it would let log analysis correlate decisions across
+     * requests. Decision ids are only ever carried in process memory or
+     * the short-lived server-side nonce mapping. No bearer material is
+     * ever logged here or anywhere else in the bundle: no challenge token,
+     * solution, result token, HMAC pseudonym, client IP, cookie value or
+     * principal. The context is score/action/band/reasons only (bounded,
+     * low cardinality).
      */
     private function logDecision(string $scope, RiskDecision $decision): void
     {

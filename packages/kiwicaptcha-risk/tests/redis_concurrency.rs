@@ -1,4 +1,5 @@
-//! Redis concurrency guarantees (real Redis, skipped unless RISK_REDIS_URL):
+//! Redis concurrency guarantees (real Redis, skipped unless the Redis
+//! test URL is set):
 //! the canonical Lua script runs atomically, so concurrent observations with
 //! unique event_ids never lose increments, concurrent duplicates increment
 //! exactly once (duplicates are no-ops returning the current signals with
@@ -65,11 +66,11 @@ fn redis_now_ms() -> u64 {
     (t[0] * 1000 + t[1] / 1000) as u64
 }
 
-/// Wait until the REDIS CLOCK reaches `target_ms`,
-/// polling it instead of wall-clock sleeping. A CI scheduling pause can
-/// only make us wait LONGER — an observation is never pushed across a
-/// timing boundary by assuming wall-clock sleep == Redis execution time.
-/// Generous 30 s ceiling so a stalled server fails loudly, not hangingly.
+/// Wait until the Redis clock reaches `target_ms`, polling it instead
+/// of wall-clock sleeping. A CI scheduling pause can only make us wait
+/// longer — an observation is never pushed across a timing boundary by
+/// assuming wall-clock sleep == Redis execution time. Generous 30 s
+/// ceiling so a stalled server fails loudly, not hangingly.
 fn wait_until_redis_ms(target_ms: u64) {
     let deadline = std::time::Instant::now() + Duration::from_secs(30);
     while redis_now_ms() < target_ms {
@@ -119,8 +120,8 @@ fn storm(
     })
 }
 
-/// A single observation with a fresh event_id AFTER a storm: its vector
-/// reflects the COMPLETE storm state (thread replies are per-execution
+/// A single observation with a fresh event_id after a storm: its vector
+/// reflects the complete storm state (thread replies are per-execution
 /// snapshots, so they cannot be trusted as the final state).
 fn probe(
     store: &RedisRiskStateStore,
@@ -219,7 +220,7 @@ fn hundred_concurrent_subnet_events_lose_nothing() {
         return;
     };
     let store = store();
-    // All 100 threads hit the SAME subnet pseudonym (the shared /24 masked
+    // All 100 threads hit the same subnet pseudonym (the shared /24 masked
     // network); the source id is irrelevant to the subnet channel.
     let results = storm(
         &store,
@@ -252,7 +253,7 @@ fn hundred_concurrent_global_events_reach_top_without_negatives() {
         return;
     };
     let store = store();
-    // The global hash is namespace-wide: every thread hits the SAME key.
+    // The global hash is namespace-wide: every thread hits the same key.
     let results = storm(
         &store,
         RiskEventKind::PreIssue,
@@ -310,7 +311,7 @@ fn no_expired_state_resurrection_after_ttl() {
         return;
     };
     // Tiny state TTL (2 s): after it passes, a new event must start from a
-    // FRESH state, not the pre-expiry counters.
+    // fresh state, not the pre-expiry counters.
     let store = store_with(2, 60_000, DEFAULT_SATURATIONS);
 
     for i in 0..HUNDRED {
@@ -330,7 +331,7 @@ fn no_expired_state_resurrection_after_ttl() {
     // The source counters are saturated at 1000 while the key lives.
     assert_eq!(store.last_global_level(), 4);
 
-    // Wait for the REDIS clock (which stamps the key's
+    // Wait for the Redis clock (which stamps the key's
     // TTL) to pass 3 s — comfortably beyond the 2 s state TTL — instead
     // of wall-clock sleeping. Polling makes the expiry deterministic
     // under any scheduling jitter.
@@ -365,7 +366,7 @@ fn source_rate_limit_hit_is_source_session_only() {
         return;
     };
     // Event 15 (SourceRateLimitHit) must add bad pressure to source/session
-    // ONLY — never subnet, global, or principal state (a per-source limit
+    // only — never subnet, global, or principal state (a per-source limit
     // is not deployment overload and must not raise the global attack
     // level for all visitors).
     let store = store();
@@ -395,7 +396,7 @@ fn source_rate_limit_hit_is_source_session_only() {
     assert_eq!(feedback.vector.global_pressure, 0);
     assert_eq!(store.last_global_level(), 0);
 
-    // Control: a PreIssue DOES raise global pressure.
+    // Control: a PreIssue does raise global pressure.
     let preissue = store
         .observe(&common::observation(
             RiskEventKind::PreIssue,
@@ -417,12 +418,12 @@ fn global_level_enters_hysteresis_hold_after_storm() {
         eprintln!("skipping redis concurrency test: RISK_REDIS_URL not set");
         return;
     };
-    // A SHORT hysteresis window (2 s) and sat_global 11_000: 5 concurrent
+    // A short hysteresis window (2 s) and sat_global 11_000: 5 concurrent
     // events ratchet gp to 10000 -> normalized 909 -> level 4 and arm the
-    // cooldown. The rate-limit clock is Redis TIME, so the hold and the
-    // drop after the window are exercised with REAL ~1 s / ~2.1 s sleeps.
+    // cooldown. The rate-limit clock is Redis time, so the hold and the
+    // drop after the window are exercised with real ~1 s / ~2.1 s sleeps.
     let mut sats = DEFAULT_SATURATIONS;
-    sats[8] = 11_000; // sat_global (ARGV[16])
+    sats[8] = 11_000; // sat_global (argv[16])
     let store = store_with(1800, 2000, sats);
     let mut conn = client().get_connection().expect("connection");
     let t: Vec<i64> = redis::cmd("TIME").query(&mut conn).expect("TIME");
@@ -465,12 +466,12 @@ fn global_level_enters_hysteresis_hold_after_storm() {
     );
 
     // Inside the window: poll the Redis clock to ~1 s past the ratchet
-    // (the deadline is ratchet + 2000 ms), then probe REPEATEDLY while the
+    // (the deadline is ratchet + 2000 ms), then probe repeatedly while the
     // server clock stays inside the window (every
     // iteration asserts the hold and each probe carries a unique event id
     // so the dedupe never swallows one). Residual edge (
     // honestly documented): if the test process is suspended for the
-    // ENTIRE remaining window between the initial wait and the first
+    // entire remaining window between the initial wait and the first
     // probe, the loop can enter after `cool` and execute zero in-window
     // assertions — the drop phase below always runs; a fully
     // deterministic logical-clock unit test of the hysteresis state
@@ -520,9 +521,9 @@ fn duplicate_event_id_increments_exactly_once_across_threads() {
     let storm_store = Arc::new(store());
     let duplicate_id = common::event_id(77);
 
-    // 100 REAL threads race the SAME event_id from a common barrier: the
-    // Lua's GET-then-SET dedupe is atomic, so exactly ONE call may
-    // increment; the rest are duplicate no-ops that return the CURRENT
+    // 100 real threads race the same event_id from a common barrier: the
+    // Lua's GET-then-SET dedupe is atomic, so exactly one call may
+    // increment; the rest are duplicate no-ops that return the current
     // signals with is_duplicate=true. (The previous
     // version ran the loop sequentially and proved only sequential
     // dedupe; the named concurrency property is now actually exercised.)
@@ -563,8 +564,8 @@ fn duplicate_event_id_increments_exactly_once_across_threads() {
                 "the winner sees a fresh single increment"
             );
         }
-        // Every caller sees ~ONE event worth of current signals: duplicates
-        // are no-ops, not errors (the rf channel leaks 250/s of REAL time,
+        // Every caller sees ~one event worth of current signals: duplicates
+        // are no-ops, not errors (the rf channel leaks 250/s of real time,
         // so the floor may drop a unit on slow runners).
         assert!(
             (100..=125).contains(&observed.vector.source_fast),
@@ -640,10 +641,10 @@ fn audit_policy() -> RiskPolicy {
     .expect("audit policy parses")
 }
 
-/// POISONED SOURCE ABSOLUTE CAP: hundreds of invalid
-/// proofs (plus request velocity and replay pressure) saturate the
-/// channels; the score clamps at 1000 and the policy action reaches Deny —
-/// but NEVER exceeds either, so there is no unbounded punishment mode.
+/// Poisoned-source absolute cap: hundreds of invalid proofs (plus
+/// request velocity and replay pressure) saturate the channels; the score
+/// clamps at 1000 and the policy action reaches Deny — but never exceeds
+/// either, so there is no unbounded punishment mode.
 #[test]
 fn poisoned_source_reaches_the_cap_but_never_exceeds_it() {
     let Some(_url) = common::redis_url() else {
@@ -733,10 +734,10 @@ fn poisoned_source_reaches_the_cap_but_never_exceeds_it() {
     assert_eq!(decision.action.rank(), RiskAction::Deny.rank());
 }
 
-/// /64-STYLE NETWORK AGGREGATE WEAK PER-SIGNAL EFFECT:
-/// many bad proofs across many IPs in ONE network saturate the shared
-/// network channel, but the network signal stays bounded at 1000 and the
-/// exact-IP signals of a single attacker dominate its score.
+/// /64-style network aggregate weak per-signal effect: many bad proofs
+/// across many IPs in one network saturate the shared network channel,
+/// but the network signal stays bounded at 1000 and the exact-IP signals
+/// of a single attacker dominate its score.
 #[test]
 fn network_aggregate_rises_bounded_while_exact_ip_dominates() {
     let Some(_url) = common::redis_url() else {
@@ -748,7 +749,7 @@ fn network_aggregate_rises_bounded_while_exact_ip_dominates() {
     let weights = RiskWeights::default();
 
     // 200 distinct sources (IPs) in one network: each sends one request
-    // with one invalid proof into the SHARED subnet pseudonym.
+    // with one invalid proof into the shared subnet pseudonym.
     let mut n = 0u64;
     for ip in 1..=200u32 {
         let source = hex::encode([ip as u8; 16]);

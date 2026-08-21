@@ -12,15 +12,14 @@ use PHPUnit\Framework\TestCase;
 
 /**
  * The Redis-backed chain state store's Lua state machine, exercised
- * against an in-memory Redis fake that emulates the EXACT command surface
- * the store uses (GET / SET with the EX options array / TTL / TIME /
- * EVAL with the chain scripts interpreted by marker). Covers the
- * transaction-obligation create-or-get, the owner-scoped SHORT
- * reservation lease (redis TIME + min(lease, remaining TTL)), the
- * idempotent issued transition, the TERMINAL verified transition with
- * the atomic obligation deletion, the nonce-pinned rearm and the
- * owner-gated release — the production concurrency path of the
- * chained-challenge state machine.
+ * against an in-memory Redis fake emulating the store's command surface
+ * (GET / SET with the EX options array / TTL / time / eval with the
+ * chain scripts interpreted by marker). Covers the transaction-obligation
+ * create-or-get, the owner-scoped short reservation lease (redis time +
+ * min(lease, remaining TTL)), the idempotent issued transition, the
+ * terminal verified transition with the atomic obligation deletion, the
+ * nonce-pinned rearm and the owner-gated release. This is the production
+ * concurrency path of the chained-challenge state machine.
  */
 final class RedisChainedChallengeStateStoreTest extends TestCase
 {
@@ -59,7 +58,7 @@ final class RedisChainedChallengeStateStoreTest extends TestCase
         self::assertSame($chainId, $store->obligationChainId($service->obligationIdFor('login', 'tx-binding', 1)));
 
         // The plain read sees the full server-held v2 record in the
-        // AVAILABLE state.
+        // available state.
         $state = $store->read($chainId);
         self::assertIsArray($state);
         self::assertSame('available', $state['state']);
@@ -73,8 +72,8 @@ final class RedisChainedChallengeStateStoreTest extends TestCase
         self::assertNull($state['leaseUntil']);
         self::assertNull($state['stage2Nonce']);
 
-        // Owner-scoped reservation with the SHORT fixed lease: available ->
-        // reserved(me, now + min(15, remaining TTL)).
+        // Owner-scoped reservation with the short fixed lease: available ->
+        // reserved with a lease of now + min(15, remaining TTL).
         self::assertSame('available', $store->reserve($chainId, 'owner-a', 15));
         self::assertSame('retry', $store->reserve($chainId, 'owner-a', 15), 'reserve by the SAME owner is a retry');
         self::assertSame('busy', $store->reserve($chainId, 'owner-b', 15), 'reserve by another owner with a live lease is busy');
@@ -198,13 +197,13 @@ final class RedisChainedChallengeStateStoreTest extends TestCase
 /**
  * In-memory stand-in for Predis\Client with exactly the command surface
  * the Redis chain state store uses: GET / SET (with the EX options-array
- * form) / TTL / TIME / EVAL. The EVAL interpreter runs the store's chain
- * scripts by their marker comments with the SAME semantics as the Lua
- * (obligation create-or-get with rank raising + stale-mapping repair, the
- * owner-scoped SHORT lease from TIME + min(lease, remaining TTL) with
- * KEEPTTL, the idempotent issued transition, the TERMINAL verified
- * transition with the atomic obligation deletion, the nonce-pinned rearm
- * and the owner-gated release). The clock advances through
+ * form) / TTL / time / eval. The eval interpreter runs the store's chain
+ * scripts by their marker comments: obligation create-or-get with rank
+ * raising and stale-mapping repair, the owner-scoped short lease from
+ * time + min(lease, remaining TTL) with keepttl, and the idempotent
+ * issued transition. The terminal verified transition deletes the
+ * obligation atomically; the nonce-pinned rearm and the owner-gated
+ * release complete the surface. The clock advances through
  * {@see self::setTimeMs()} so the lease expiry is enforceable.
  */
 final class ChainRedisFake extends \Predis\Client
@@ -212,7 +211,7 @@ final class ChainRedisFake extends \Predis\Client
     /** @var array<string, string> plain strings (the chain/obligation records) */
     public array $strings = [];
 
-    /** @var array<string, int> EXPIRE deadlines in ms */
+    /** @var array<string, int> expire deadlines in ms */
     public array $expirations = [];
 
     private float $clockMs = 1_000_000.0;

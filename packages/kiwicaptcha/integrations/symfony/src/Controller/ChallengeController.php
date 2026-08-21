@@ -26,28 +26,26 @@ use Symfony\Component\HttpFoundation\Request;
 use Symfony\Component\HttpFoundation\Response;
 
 /**
- * Issues a new captcha challenge for the widget. The route is registered
- * by {@see \BelConsulting\KiwiCaptchaBundle\Routing\KiwiCaptchaRouteLoader}
- * with the bundle's configured `route_prefix` (bundle controllers are never
- * scanned for attribute routes). The request pipeline is fail-closed and
- * ordered: path canonicality, narrow HTTP, singular security headers,
- * bounded body, duplicate-key scan, origin checks, admission and risk
- * controls run before any challenge is minted; every response is a private
- * JSON document ({@see self::privateJson()}). The full pipeline is
- * documented in docs/security-hardening.md and docs/chained-challenges.md.
+ * Issues a new captcha challenge for the widget. The route is registered by
+ * {@see \BelConsulting\KiwiCaptchaBundle\Routing\KiwiCaptchaRouteLoader} with
+ * the bundle's configured `route_prefix` (bundle controllers are never
+ * scanned for attribute routes). The pipeline is fail-closed and ordered:
+ * path canonicality, narrow HTTP, singular security headers, bounded body,
+ * duplicate-key scan, origin checks, admission and risk controls run before
+ * any challenge is minted; every response is a private JSON document; see
+ * {@see self::privateJson()}.
  */
 final class ChallengeController
 {
     /**
-     * The bundle's identifier charset: scope/tenant identifiers and
-     * request bindings may only carry these characters (1..128 — the
-     * ceiling is embedded in the pattern). Stricter than the core's "no '|'"
-     * shape rule — an identifier outside the charset is refused before it
+     * The identifier charset for scopes and request bindings; the 1..128
+     * ceiling is embedded in the pattern. Stricter than the core's "no '|'"
+     * shape rule, so an identifier outside the charset is refused before it
      * can be signed into a challenge.
      */
     private const IDENTIFIER_PATTERN = '/^[A-Za-z0-9._:-]{1,128}$/D';
 
-    /** The ONLY JSON fields the challenge POST accepts. */
+    /** The JSON fields the challenge POST accepts. */
     private const ACCEPTED_PAYLOAD_FIELDS = ['scope', 'algorithm', 'request_binding', 'action', 'cdata', 'sitekey', 'decoy_field', 'honeypot', 'client_context', 'chain_ticket'];
 
     /** Turnstile-compatible shapes, per Cloudflare's docs. */
@@ -55,91 +53,68 @@ final class ChallengeController
     private const CDATA_PATTERN = '/^[a-z0-9_-]{1,255}$/i';
 
     /**
-     * The risk-v2 decoy markers: a server-issued decoy (honeypot) field
-     * name echoed back by the widget, and the coarse capability descriptor
-     * for the client-context tag. Both are bounded scalar strings — the
-     * decoy name is the loose identifier shape, the capability descriptor
-     * is the compact [a-z0-9+_:-] alphabet, and the honeypot VALUE is any
-     * non-empty string bounded at 256 bytes (a bot's filler, evidence only).
+     * The risk-v2 decoy markers: a server-issued honeypot field name, the
+     * coarse capability descriptor for the client-context tag, and the
+     * honeypot value bounded at 256 bytes (a bot's filler, evidence only).
      */
     private const DECOY_FIELD_PATTERN = '/^[A-Za-z0-9_-]{1,64}$/D';
     private const CLIENT_CONTEXT_PATTERN = '/^[a-z0-9+_,=:-]{1,64}$/D';
     private const MAX_HONEYPOT_VALUE_BYTES = 256;
 
     /**
-     * The one-shot chain ticket presented by a stage-2 challenge request
-     * (risk.chaining): base64url([version, chainId, expiresAt]) "."
-     * base64url(HMAC-SHA256), bounded to the accepted shape. The ticket's
-     * signature and expiry are validated by the
-     * ChainedChallengeTicketService, and the SERVER-HELD chain state
-     * (read from the state store) owns the scope, policy epoch, chain
-     * depth, request binding and required action; a ticket-bearing
-     * request is NEVER downgraded to an unchained issuance.
+     * The one-shot chain ticket presented by a stage-2 request:
+     * base64url([version, chainId, expiresAt]) "." base64url(HMAC-SHA256).
+     * The ChainedChallengeTicketService validates the signature and expiry;
+     * the server-held chain state owns the scope, policy epoch, chain
+     * depth, request binding and required action, so a ticket-bearing
+     * request is never downgraded to an unchained issuance.
      */
     private const CHAIN_TICKET_PATTERN = '/^[A-Za-z0-9._:-]{1,256}$/D';
 
     /**
-     * The ABSOLUTE floor for a stage-2 mint, seconds: the core Config
-     * floor — a challenge TTL must be >= 1 second (the issuer refuses
-     * anything shorter as malformed), so a chain with less than one
-     * second of life left cannot hold a valid stage-2 challenge at all.
-     * The PRACTICAL minimum remaining lifetime is higher — the configured
-     * minimum solve duration plus {@see self::STAGE2_SOLVER_MARGIN_SECS}
-     * ({@see self::stage2MinimumRemaining()}) — and this constant is only
-     * the lower bound that practical minimum never drops below.
+     * The floor for a stage-2 mint, seconds: the core refuses any challenge
+     * TTL under one second, so a chain with less life left cannot hold a
+     * valid stage-2 challenge at all. The practical minimum is higher; see
+     * {@see self::stage2MinimumRemaining()}. This constant is only the
+     * lower bound that practical minimum never drops below.
      */
     private const MIN_STAGE2_REMAINING_SECS = 1;
 
     /**
-     * Solver + transport headroom for the practical stage-2 minimum
-     * remaining lifetime, seconds: the minted challenge must be SOLVABLE
-     * within its clipped lifetime — the browser solver takes time (a
-     * high-difficulty SHA-256 / Argon2id solve), the solve must travel
-     * back, and verification must land before the clipped TTL expires. A
-     * stage-2 chain with only the core floor (1 second) of life left
-     * would mint a challenge that is technically valid but operationally
-     * unusable, so the margin guarantees a usable solve window.
+     * Solver and transport headroom for the practical stage-2 minimum
+     * remaining lifetime: the minted challenge must be solvable within its
+     * clipped TTL, including the solve time and the round trip back.
      */
     private const STAGE2_SOLVER_MARGIN_SECS = 5;
 
     /**
-     * The bounded trusted-edge TLS classification tag the configured
-     * header may carry (risk.trusted_tls_header): 1-64 characters of
-     * [a-z0-9_+:|:-] — the SAME bound and charset as the cross-language
-     * risk-v2 contract (the crate bounds the TLS tag at 64 characters
-     * and documents the pipe-separated shape like "tls13|http2"). A
-     * malformed value is IGNORED (the request is assessed without a TLS
-     * tag), never rejected — the tag is probabilistic evidence, not a
-     * gate.
+     * The trusted-edge TLS classification tag: 1-64 characters of
+     * [a-z0-9_+:|:-], the same bound and charset as the risk-v2 contract.
+     * A malformed value is ignored, never rejected: the tag is
+     * probabilistic evidence, not a gate.
      */
     private const TRUSTED_TLS_TAG_PATTERN = '/^[a-z0-9_+:|:-]{1,64}$/i';
 
     /**
-     * The server-issued decoy field name in the challenge response: a
-     * bounded, per-issuance name derived from the challenge nonce, which
-     * the widget renders as a hidden honeypot field. A bot that fills it
-     * echoes the name back in a later challenge request (decoy_field /
-     * honeypot entries), which the risk-v2 surface records as honeypot
-     * evidence — never a security gate.
+     * The server-issued decoy field name, a bounded per-issuance value
+     * derived from the challenge nonce. The widget renders it as a hidden
+     * honeypot field; a bot that fills it echoes it back as honeypot
+     * evidence.
      */
     private const DECOY_FIELD_PREFIX = 'decoy_';
 
     /**
-     * SECURITY-SINGULAR headers: each of these carries client identity or
-     * forwarding trust and MUST appear at most once — a duplicate is
-     * parser-ambiguity (different intermediaries will pick different
-     * values) and gets 400 DUPLICATE_HEADER before any header-derived
-     * identity is trusted.
+     * Headers carrying client identity or forwarding trust: each must
+     * appear at most once, since intermediaries pick different values on
+     * duplicates. A duplicate gets 400 DUPLICATE_HEADER before any
+     * header-derived identity is trusted.
      */
     private const SECURITY_SINGULAR_HEADERS = ['origin', 'forwarded', 'x-forwarded-for', 'x-real-ip'];
 
     /**
-     * Hard ceiling for the challenge request body: the challenge language
-     * is tiny (scope/algorithm/request_binding), so 8 KiB is extremely
-     * generous — everything beyond it is refused before the duplicate
-     * scan / JSON decode / risk admission consume anything. Edge
-     * deployments should mirror this in the proxy (client_max_body_size
-     * etc.) so oversized bytes never reach PHP at all.
+     * Hard ceiling for the challenge request body: the language is tiny, so
+     * 8 KiB is generous. Everything beyond it is refused before the
+     * duplicate scan, JSON decode or risk admission consume anything.
      */
     private const MAX_CHALLENGE_BODY_BYTES = 8192;
 
@@ -175,19 +150,17 @@ final class ChallengeController
         /** Lazily-built TTL-variant issuers (per-sitekey override), keyed by TTL. */
         private array $ttlOverrideIssuers = [],
         /**
-         * One-shot chain-ticket service for stage-2 issuance
-         * (risk.chaining; null = chaining disabled — a ticket-bearing
-         * request is then refused, never downgraded).
+         * One-shot chain-ticket service for stage-2 issuance; null =
+         * chaining disabled (a ticket-bearing request is then refused).
          */
         private readonly ?\BelConsulting\KiwiCaptchaBundle\Risk\ChainedChallengeTicketService $chainTickets = null,
         /**
-         * The AUTHORITATIVE transaction-binding resolver
-         * (risk.request_binding_authority; null = the legacy
-         * static/attribute binding applies). When configured, the
-         * transaction binding is resolved ONLY through the authority
-         * (resolve($request, $scope, $presented)) — a client-supplied
-         * request_binding is a HINT the authority accepts or refuses,
-         * NEVER a value the server signs unexamined.
+         * Transaction-binding resolver (risk.request_binding_authority);
+         * null = the legacy static/attribute binding applies. When
+         * configured, the binding is resolved only through the authority,
+         * calling resolve($request, $scope, $presented): a client-supplied
+         * request_binding is a hint the authority accepts or refuses,
+         * never a value the server signs unexamined.
          */
         private readonly ?\BelConsulting\KiwiCaptchaBundle\Risk\RequestBindingAuthorityInterface $bindingAuthority = null,
         /**
@@ -197,10 +170,9 @@ final class ChallengeController
         private readonly ?string $trustedTlsHeader = null,
         /**
          * CIDRs (or exact IPs) of the trusted edge proxies whose
-         * TLS-classification header is honored (risk.trusted_tls_proxies).
-         * The header is read ONLY when the DIRECT peer (REMOTE_ADDR — the
-         * immediate connection) is inside this list; from every other peer
-         * the header is ignored. Empty = the header is never read.
+         * TLS-classification header is honored. The header is read only
+         * when the direct peer is inside this list; from every other peer
+         * it is ignored.
          */
         private readonly array $trustedTlsProxies = [],
         /**
@@ -209,14 +181,12 @@ final class ChallengeController
          */
         private readonly int $policyVersion = 1,
         /**
-         * The durable post-solve disposition store (the SAME nonce-keyed
-         * store the validator finalizes): a consumed-valid stage-2
-         * challenge is NEVER terminal from the core's consumed result
-         * alone — the controller reads the final disposition and only
-         * then transitions the chain (Pass -> markVerified, StepUp ->
-         * markStepUpRequired, Deny -> markDenied). Null = the
-         * disposition cannot be read — a consumed-valid stage-2 fails
-         * closed with the retryable 503 (never clears the obligation).
+         * The durable post-solve disposition store: a consumed-valid
+         * stage-2 challenge is not terminal from the core's consumed
+         * result alone. The controller reads the final disposition and
+         * only then transitions the chain (Pass -> markVerified, StepUp
+         * -> markStepUpRequired, Deny -> markDenied). Null = a
+         * consumed-valid stage-2 fails closed with the retryable 503.
          */
         private readonly ?\BelConsulting\KiwiCaptchaBundle\Risk\PostSolveDispositionStore $postSolveDispositionStore = null,
         /**
@@ -230,17 +200,11 @@ final class ChallengeController
 
     public function challenge(Request $request): JsonResponse
     {
-        // PATH CANONICALITY: the RAW REQUEST_URI must be the canonical
-        // request target — no `//` (empty segment), no `/.` /
-        // `/..` (dot segments), no percent-encoded bytes (the canonical
-        // target is a fixed ASCII path — ANY `%` in the path is an
-        // encoding probe: `/%76hallenge`, `%2F`, `%5C`...), no trailing
-        // slash, no backslashes. The check compares the RAW URI, never a
-        // normalized route: a noncanonical target gets 404
-        // CANONICAL_PATH_REQUIRED (the typed target does not exist on this
-        // server — the bundle never redirects, rewrites or normalizes it)
-        // BEFORE any handling. The proxy stack must reach the same decision
-        // at the edge (README — "Canonical request targets").
+        // Path canonicality: the raw request URI must be the canonical
+        // target, with no empty segments, dot segments, percent-encoded
+        // bytes, trailing slash or backslashes. A noncanonical target gets
+        // 404 CANONICAL_PATH_REQUIRED before any handling; the proxy stack
+        // should reach the same decision at the edge.
         if (!$this->isCanonicalRequestTarget((string) $request->getRequestUri())) {
             return $this->privateJson(
                 ['error' => ['code' => 'CANONICAL_PATH_REQUIRED', 'message' => 'The request target must be the canonical path (no empty, dot or percent-encoded segments).']],
@@ -248,11 +212,10 @@ final class ChallengeController
             );
         }
 
-        // NARROW HTTP: the endpoint is POST-only — at the CONTROLLER level
-        // too (the route already restricts the method, but a direct
-        // invocation must behave identically). An OPTIONS preflight is a
-        // non-POST method: 405 — a preflight ALONE never authorizes
-        // anything.
+        // Narrow HTTP: the endpoint is POST-only, enforced here too (the
+        // route already restricts the method, but a direct invocation must
+        // behave identically). An OPTIONS preflight is a non-POST method
+        // and gets 405.
         if ($request->getMethod() !== 'POST') {
             $response = $this->privateJson(
                 ['error' => ['code' => 'METHOD_NOT_ALLOWED', 'message' => 'The challenge endpoint accepts POST requests only.']],
@@ -263,14 +226,12 @@ final class ChallengeController
             return $response;
         }
 
-        // HTTP FRAMING: a request carrying BOTH Content-Length
-        // and Transfer-Encoding — or a DUPLICATE Content-Length — is
-        // request-smuggling ambiguity: different intermediaries will frame
-        // the body differently, so the endpoint refuses before any body is
-        // read. Symfony's HeaderBag keeps every raw header value
-        // (headers->all()), so a crafted duplicate survives into the
-        // controller; at the wire level the proxy guidance (README) rejects
-        // the ambiguity first.
+        // HTTP framing: a request carrying both Content-Length and
+        // Transfer-Encoding, or a duplicate Content-Length, is
+        // request-smuggling ambiguity: intermediaries will frame the body
+        // differently, so the endpoint refuses before any body is read.
+        // Symfony's HeaderBag keeps every raw header value, so a crafted
+        // duplicate survives into the controller.
         $contentLengths = $request->headers->all('content-length');
         $transferEncodings = $request->headers->all('transfer-encoding');
         if (\count($contentLengths) > 1 || ($contentLengths !== [] && $transferEncodings !== [])) {
@@ -280,15 +241,12 @@ final class ChallengeController
             );
         }
 
-        // BODY CEILING: the challenge language is tiny —
-        // real requests are tens to a few hundred bytes — so a giant body
-        // is pure memory/CPU spend BEFORE the shared risk/Redis admission
-        // controls. An oversized DECLARED Content-Length is rejected before
-        // any body is read (413), and the ACTUAL read length is capped too:
-        // chunked uploads can avoid a truthful Content-Length, so the
-        // post-read check is the authoritative one (the README's edge
-        // guidance adds the matching limit in nginx/Apache/Envoy so the
-        // bytes never reach PHP at all).
+        // Body ceiling: the challenge language is tiny, so a giant body is
+        // pure memory and CPU spend before the shared risk and Redis
+        // admission controls. An oversized declared Content-Length is
+        // rejected before any body is read (413); the actual read length
+        // is capped too, since chunked uploads can skip a truthful
+        // Content-Length.
         $declaredLengths = $request->headers->all('content-length');
         foreach ($declaredLengths as $declared) {
             if (\is_string($declared) && (int) $declared > self::MAX_CHALLENGE_BODY_BYTES) {
@@ -298,15 +256,12 @@ final class ChallengeController
                 );
             }
         }
-        // DUPLICATE SECURITY-SINGULAR HEADERS: Origin,
-        // Forwarded, X-Forwarded-For and X-Real-IP are identity/trust
-        // inputs — a duplicate occurrence is parser ambiguity (one
-        // intermediary trusts the first value, another the last, and the
-        // same-origin check and the client-IP resolution would disagree).
-        // Refused with 400 DUPLICATE_HEADER before any header-derived
-        // identity is trusted; the client-IP resolver treats a duplicate as
-        // ambiguous and is never reached with one. The count is
-        // value-agnostic: two IDENTICAL values are still a duplicate.
+        // Duplicate security-singular headers: Origin, Forwarded,
+        // X-Forwarded-For and X-Real-IP are identity and trust inputs, and
+        // a duplicate occurrence is parser ambiguity (one intermediary
+        // trusts the first value, another the last). Refused with a 400
+        // before any header-derived identity is trusted; two identical
+        // values still count as a duplicate.
         foreach (self::SECURITY_SINGULAR_HEADERS as $headerName) {
             if (\count($request->headers->all($headerName)) > 1) {
                 return $this->privateJson(
@@ -316,11 +271,10 @@ final class ChallengeController
             }
         }
 
-        // NO DECOMPRESSION BOMBS: a request body that was
-        // compressed on the wire must not be transparently decompressed by a
-        // downstream layer into unbounded memory — any Content-Encoding other
-        // than identity is refused BEFORE the body is read. identity (or an
-        // absent header) is the only accepted encoding.
+        // No decompression bombs: a compressed wire body must not be
+        // decompressed by a downstream layer into unbounded memory. Any
+        // Content-Encoding other than identity is refused before the body
+        // is read.
         foreach ($request->headers->all('content-encoding') as $encoding) {
             if (strtolower((string) $encoding) !== 'identity') {
                 return $this->privateJson(
@@ -330,14 +284,13 @@ final class ChallengeController
             }
         }
 
-        // NARROW HTTP: the challenge POST is a JSON document —
-        // form-encoded and multipart bodies are refused before anything is
-        // read (no CSRF-form smuggling, no HTML-form replay through the
-        // endpoint). A PRESENT Content-Type must be application/json (an
-        // optional charset parameter is tolerated); an ABSENT header (curl
-        // -d, legacy clients) is accepted — the body still has to parse as
-        // a strict JSON object with only the documented fields, so nothing
-        // is smuggled in. The widget sends exactly application/json.
+        // Narrow HTTP: the challenge POST is a JSON document. Form-encoded
+        // and multipart bodies are refused before anything is read (no
+        // CSRF-form smuggling, no HTML-form replay). A present Content-Type
+        // must be application/json (an optional charset parameter is
+        // tolerated); an absent header is accepted, since the body still
+        // has to parse as a strict JSON object with only the documented
+        // fields. The widget sends exactly application/json.
         $contentType = strtolower(trim(explode(';', (string) $request->headers->get('Content-Type', ''), 2)[0]));
         if ($contentType !== '' && $contentType !== 'application/json') {
             return $this->privateJson(
@@ -346,13 +299,10 @@ final class ChallengeController
             );
         }
 
-        // BODY READ: the input is consumed as a STREAM
-        // with a hard cap — at most MAX+1 bytes are ever materialized, so
-        // a gigantic chunked request cannot force PHP/Symfony to buffer
-        // the full body before the 413. Every header-level check (framing,
-        // security-singular headers, Content-Encoding, Content-Type,
-        // declared Content-Length) ran BEFORE this read; the duplicate-key
-        // scan and the strict decode below operate on the capped string.
+        // Body read: the input is consumed as a stream with a hard cap, so
+        // at most MAX+1 bytes are ever materialized and a gigantic chunked
+        // request cannot force PHP or Symfony to buffer the full body
+        // before the 413. All header-level checks ran before this read.
         $requestBody = $this->readBoundedBody($request);
         if (\strlen($requestBody) > self::MAX_CHALLENGE_BODY_BYTES) {
             return $this->privateJson(
@@ -361,9 +311,9 @@ final class ChallengeController
             );
         }
 
-        // QUERY-PARAM HARDENING: the endpoint accepts NO query
-        // parameters — ?debug=1, ?algorithm=sha256 overrides, ?skip_pow=1
-        // and friends are probes and get 422 before any state is touched.
+        // Query-parameter hardening: the endpoint accepts no query
+        // parameters; ?debug=1 and friends are probes and get 422 before
+        // any state is touched.
         if ($request->query->count() > 0) {
             return $this->privateJson(
                 ['error' => ['code' => 'QUERY_PARAMETERS_NOT_ALLOWED', 'message' => 'The challenge endpoint accepts no query parameters.']],
@@ -371,14 +321,12 @@ final class ChallengeController
             );
         }
 
-        // SECURITY-STATE STALENESS: the security-epoch monitor
-        // tracks the last successful central policy read; once
-        // now > last_success + risk.security_epoch_max_stale_secs the
-        // central policy may have moved (an emergency revocation could have
-        // landed while this node could not read) — issuance is refused with
-        // 503 SERVICE_UNAVAILABLE (deliberate constrained degradation; the
-        // README documents the availability trade-off: within the window
-        // the cached max keeps serving, past it the endpoint fails closed).
+        // Security-state staleness: once now > last_success +
+        // risk.security_epoch_max_stale_secs, the central policy may have
+        // moved (an emergency revocation could have landed while this node
+        // could not read), so issuance is refused with 503
+        // SERVICE_UNAVAILABLE. Within the window the cached max keeps
+        // serving.
         if ($this->epochMonitor !== null) {
             $this->epochMonitor->refresh();
             if ($this->epochMonitor->isStale()) {
@@ -397,20 +345,13 @@ final class ChallengeController
         }
 
         // Origin laundering defense: when an origin allowlist is
-        // configured, the challenge POST MUST be attributable to one of the
+        // configured, the challenge POST must be attributable to one of the
         // allowlisted origins (Origin header, or the Referer origin as
-        // fallback). The comparison is STRUCTURED NORMALIZATION —
-        // scheme/host/effective-port, host lowercased, default ports
-        // normalized, trailing dots stripped, IDN converted to punycode when
-        // ext-intl is available, IPv6 literals kept bracketed. With
-        // enforce_origin, a request WITHOUT a usable Origin
-        // header — or carrying the literal "null" origin (opaque/sandboxed)
-        // — is rejected outright, before the allowlist is even consulted.
-        // A launderer framing a victim's browser into fetching this endpoint
-        // has no way to control the Origin of a cross-site request; raw HTTP
-        // bots that never send the header are rejected too (when enforced).
-        // Refused BEFORE any state is written, rate-limit budget or CAPTCHA
-        // issuance.
+        // fallback). The comparison is a structured normalization of
+        // scheme, host and effective port. With enforce_origin, a request
+        // without a usable Origin header, or carrying the literal "null"
+        // origin, is rejected before the allowlist is consulted. Refused
+        // before any state is written.
         $origin = $request->headers->get('Origin');
         if ($this->enforceOrigin && ($origin === null || $origin === '' || $origin === 'null')) {
             return $this->privateJson(
@@ -425,10 +366,10 @@ final class ChallengeController
             );
         }
 
-        // Fetch Metadata signal (defense-in-depth only): a browser
-        // laundering a victim into a cross-site challenge request sends
-        // Sec-Fetch-Site: cross-site. Raw HTTP bots lack the header entirely
-        // and are unaffected. Rejected before any state is written.
+        // Fetch Metadata signal (defense in depth): a browser laundering a
+        // victim into a cross-site challenge request sends Sec-Fetch-Site:
+        // cross-site. Raw HTTP bots lack the header entirely. Rejected
+        // before any state is written.
         if ($this->enforceFetchMetadata) {
             $fetchSite = $request->headers->get('Sec-Fetch-Site');
             if ($fetchSite !== null && $fetchSite !== '' && strtolower($fetchSite) === 'cross-site') {
@@ -439,14 +380,14 @@ final class ChallengeController
             }
         }
 
-        // Trusted client-IP policy: the canonical IP comes from
-        // the configured mode (risk.client_ip_mode). In 'direct' mode
-        // forwarding headers are ALWAYS ignored (socket peer only); in
+        // Trusted client-IP policy: the canonical IP comes from the
+        // configured mode (risk.client_ip_mode). In 'direct' mode
+        // forwarding headers are ignored (socket peer only); in
         // 'symfony_trusted_proxies' mode Symfony's trusted-proxy machinery
         // ignores them from untrusted peers. An ambiguous double-forwarding
-        // from a trusted peer is either logged or — when
-        // risk.reject_ambiguous_forwarding is true — rejected with 400
-        // AMBIGUOUS_FORWARDING before any state is written.
+        // from a trusted peer is logged, or rejected with 400
+        // AMBIGUOUS_FORWARDING when risk.reject_ambiguous_forwarding is
+        // true, before any state is written.
         try {
             $clientIp = $this->clientIpResolver !== null
                 ? $this->clientIpResolver->resolve($request)
@@ -458,15 +399,14 @@ final class ChallengeController
             );
         }
 
-        // DUPLICATE JSON KEYS: json_decode silently keeps the
-        // LAST occurrence of a repeated object key — two different
-        // intermediaries parsing the same document could disagree on the
-        // effective value ({"scope":"login","scope":"signup"} is a
-        // parser-ambiguity probe). The RAW body is scanned with a recursive
-        // duplicate-key detector BEFORE decoding; a duplicate at any depth
-        // gets 422 DUPLICATE_FIELD. The scanner is defensive: on a document
-        // it cannot walk it returns null and the strict json_decode below
-        // handles the malformed document (422 INVALID_JSON).
+        // Duplicate JSON keys: json_decode silently keeps the last
+        // occurrence of a repeated object key, and intermediaries could
+        // disagree on the effective value ({"scope":"login","scope":"signup"}
+        // is a parser-ambiguity probe). The raw body is scanned with a
+        // recursive duplicate-key detector before decoding; a duplicate at
+        // any depth gets 422 DUPLICATE_FIELD. On a document it cannot walk,
+        // the scanner returns null and the strict json_decode below handles
+        // the malformed document.
         $duplicateKey = $this->scanForDuplicateJsonKey($requestBody);
         if ($duplicateKey !== null) {
             return $this->privateJson(
@@ -475,13 +415,12 @@ final class ChallengeController
             );
         }
 
-        // The challenge POST is a JSON OBJECT with exactly the documented
-        // fields: scope, algorithm (accepted for
-        // forward-compatibility, the issued algorithm always comes from the
-        // server), request_binding. Unknown fields are debug/override probes
-        // and get 422 — the endpoint never silently ignores extra control
-        // surface. A non-object document is refused too (an empty JSON
-        // object {} is valid — the fields are optional).
+        // The challenge POST is a JSON object with exactly the documented
+        // fields: scope, algorithm (accepted for forward-compatibility, the
+        // issued algorithm always comes from the server), request_binding.
+        // Unknown fields are debug or override probes and get 422. A
+        // non-object document is refused too; an empty JSON object {} is
+        // valid, since the fields are optional.
         $decoded = json_decode($requestBody, false);
         if (!$decoded instanceof \stdClass) {
             return $this->privateJson(
@@ -515,13 +454,12 @@ final class ChallengeController
                 Response::HTTP_UNPROCESSABLE_ENTITY,
             );
         }
-        // RISK-V2 DECOY MARKERS: the request may carry the server-issued
-        // decoy field name (decoy_field) and/or the filled honeypot value
-        // (honeypot) echoed back by the widget, plus the coarse capability
-        // descriptor (client_context) for the client-context tag. All are
-        // BOUNDED scalars — a malformed marker is refused like any other
-        // malformed field, and the markers themselves are probabilistic
-        // risk evidence (fed to the risk gateway), NEVER a security gate.
+        // Risk-v2 decoy markers: the request may carry the server-issued
+        // decoy field name (decoy_field), the filled honeypot value
+        // (honeypot), and the coarse capability descriptor (client_context)
+        // echoed back by the widget. All are bounded scalars; a malformed
+        // marker is refused like any other malformed field. The markers are
+        // probabilistic risk evidence, never a security gate.
         $decoyField = isset($payload['decoy_field']) && $payload['decoy_field'] !== '' ? (string) $payload['decoy_field'] : null;
         $honeypotValue = isset($payload['honeypot']) && $payload['honeypot'] !== '' ? (string) $payload['honeypot'] : null;
         $clientContext = isset($payload['client_context']) && $payload['client_context'] !== '' ? (string) $payload['client_context'] : null;
@@ -553,9 +491,9 @@ final class ChallengeController
         $honeypotHit = $decoyField !== null || $honeypotValue !== null;
         $scope = isset($payload['scope']) ? (string) $payload['scope'] : 'default';
 
-        // Provider-compatible challenge metadata is validated
-        // HERE, at issuance — provider shapes, bounded, so a malformed
-        // action/cData can never be persisted or returned.
+        // Provider-compatible challenge metadata is validated here at
+        // issuance, so a malformed action or cdata is never persisted or
+        // returned.
         $action = isset($payload['action']) && $payload['action'] !== '' ? (string) $payload['action'] : null;
         $cdata = isset($payload['cdata']) && $payload['cdata'] !== '' ? (string) $payload['cdata'] : null;
         if ($action !== null && !preg_match(self::ACTION_PATTERN, $action)) {
@@ -571,14 +509,12 @@ final class ChallengeController
             );
         }
 
-        // IDENTIFIER VALIDATION: scope/tenant identifiers and
-        // request bindings must match `[A-Za-z0-9._:-]+` with the 128-char
-        // ceiling BEFORE they reach the issuer — a malformed identifier can
-        // never be signed into a challenge, and separator/control bytes can
-        // never smuggle into stored records or the canonical payload. The
-        // verification side enforces equality between the record's signed
-        // values and what the form POST carries, so a challenge minted under
-        // a valid identifier is never redeemable under a different one.
+        // Identifier validation: scopes and request bindings must match
+        // `[A-Za-z0-9._:-]+` with the 128-char ceiling before they reach
+        // the issuer. The verification side enforces equality between the
+        // record's signed values and what the form POST carries, so a
+        // challenge minted under a valid identifier is never redeemable
+        // under a different one.
         if (!preg_match(self::IDENTIFIER_PATTERN, $scope)) {
             return $this->privateJson(
                 ['error' => ['code' => 'INVALID_SCOPE', 'message' => 'The scope must be 1-128 characters of [A-Za-z0-9._:-].']],
@@ -586,25 +522,21 @@ final class ChallengeController
             );
         }
 
-        // SERVER-OWNED v3-style (sitekey, action)
-        // resolution. When the request carries a sitekey that has a
-        // configured policy, the security scope is resolved from the
-        // (sitekey, action) pair: the browser NEVER gets to choose
-        // protected scope names. Unknown actions are REJECTED (never
-        // silently mapped to a default). Binding is governed by the global
-        // binding_mode only — the client can never request the weaker
-        // unbound mode.
+        // Server-owned (sitekey, action) resolution: when the request
+        // carries a sitekey with a configured policy, the security scope is
+        // resolved from the (sitekey, action) pair. The browser never gets
+        // to choose protected scope names; unknown actions are rejected,
+        // never silently mapped to a default. Binding follows the global
+        // binding_mode only.
         $sitekey = isset($payload['sitekey']) && $payload['sitekey'] !== '' ? (string) $payload['sitekey'] : null;
         $sitekeyTtlSecs = null;
         if ($sitekey !== null && isset($this->sitekeyPolicy[$sitekey])) {
             $policy = $this->sitekeyPolicy[$sitekey];
-            // PER-SITEKEY CHALLENGE LIFETIME: the
-            // provider-migration TTL override (risk.sitekeys.<sitekey>.ttl_secs,
-            // bounded 1..300 by the config tree — 300 for close Turnstile
-            // token-lifetime parity). When configured, the challenge is
-            // issued with this lifetime instead of the global
-            // challenge_ttl_secs; a sitekey without ttl_secs keeps the
-            // global default.
+            // Per-sitekey challenge lifetime: the provider-migration TTL
+            // override (risk.sitekeys.<sitekey>.ttl_secs, bounded 1..300 by
+            // the config tree). When configured, the challenge is issued
+            // with this lifetime instead of the global challenge_ttl_secs;
+            // a sitekey without ttl_secs keeps the global default.
             $sitekeyTtlSecs = ($policy['ttl_secs'] ?? null) !== null ? (int) $policy['ttl_secs'] : null;
             $actionKey = $action ?? '';
             if ($actionKey !== '' && isset($policy['actions'][$actionKey])) {
@@ -619,24 +551,20 @@ final class ChallengeController
             }
         }
 
-        // MIGRATION SITEKEY ALIAS: a public sitekey is optional
-        // legacy metadata, never a secret. When the client sends a
-        // configured sitekey (a server-maintained alias map), the scope is
-        // resolved from the SERVER-OWNED mapping — an attacker-supplied
-        // sitekey can never reduce a route's minimum security policy: an
+        // Migration sitekey alias: a public sitekey is optional legacy
+        // metadata, never a secret. When the client sends a configured
+        // sitekey, the scope is resolved from the server-owned mapping; an
         // unknown sitekey simply stays a scope name subject to the
         // allowed_scopes gate and the risk assessment below.
         if (isset($this->sitekeyAllowlist[$scope])) {
             $scope = $this->sitekeyAllowlist[$scope];
         }
 
-        // SERVER-OWNED SCOPE ALLOWLIST: when
-        // risk.allowed_scopes is configured, issuance is refused for any
-        // scope outside the server-defined set BEFORE the risk assessment
-        // and the quota checks. This is the trust boundary that makes the
-        // per-scope issuance cap an independent security bound: the quota
-        // namespace is the server-owned allowlist, never the unbounded
-        // attacker-chosen scope dimension.
+        // Server-owned scope allowlist: when risk.allowed_scopes is
+        // configured, issuance is refused for any scope outside the
+        // server-defined set before the risk assessment and the quota
+        // checks. This keeps the per-scope issuance cap an independent
+        // security bound.
         if ($this->allowedScopes !== [] && !\in_array($scope, $this->allowedScopes, true)) {
             return $this->privateJson(
                 ['error' => ['code' => 'SCOPE_NOT_ALLOWED', 'message' => 'This scope is not enabled for challenge issuance.']],
@@ -644,21 +572,15 @@ final class ChallengeController
             );
         }
 
-        // Transaction binding: the widget sends the
-        // request_binding field it carries (data-kiwi-request-binding); when
-        // absent, the configured static risk.request_binding applies. With a
-        // request_binding_authority configured, the AUTHORITATIVE binding is
-        // resolved ONLY through the authority — the client-presented value is
-        // a HINT the authority accepts or refuses, NEVER a string the server
-        // signs unexamined (a binding the authority cannot confirm for this
-        // transaction is refused with 422 INVALID_REQUEST_BINDING BEFORE any
-        // state is touched). Without the authority the existing
-        // static/attribute behavior is unchanged: the value is validated
-        // here (1..128 bytes, the identifier charset — the same shape rule
-        // as the scope) BEFORE it reaches the issuer, so a malformed
-        // binding can never be signed into a challenge; the verification
-        // side enforces equality between the record's signed binding and
-        // the binding the form POST carries.
+        // Transaction binding: the widget sends the request_binding field
+        // it carries (data-kiwi-request-binding); when absent, the
+        // configured static risk.request_binding applies. With a
+        // request_binding_authority, the binding is resolved only through
+        // the authority, and a binding it cannot confirm for this
+        // transaction is refused with 422 INVALID_REQUEST_BINDING before
+        // any state is touched. Without the authority, the value is
+        // validated here (1..128 bytes, the identifier charset) before it
+        // reaches the issuer.
         $presentedBinding = isset($payload['request_binding']) && $payload['request_binding'] !== null
             ? (string) $payload['request_binding']
             : null;
@@ -666,10 +588,10 @@ final class ChallengeController
             try {
                 $requestBinding = $this->bindingAuthority->resolve($request, $scope, $presentedBinding);
             } catch (\InvalidArgumentException $e) {
-                // The authority refused the presented binding for this
-                // transaction (a client-changed binding is a transaction
-                // mismatch) — refused before any state is touched; the
-                // detail goes to the server log only.
+                // The authority refused the presented binding: a
+                // client-changed binding is a transaction mismatch.
+                // Refused before any state is touched; the detail goes to
+                // the server log only.
                 error_log(sprintf('kiwicaptcha: request binding authority refused the presented binding: %s', $e->getMessage()));
 
                 return $this->privateJson(
@@ -701,47 +623,44 @@ final class ChallengeController
             }
         }
 
-        // The continuity session is read up front (pure, no side effects) so
-        // the rate-limit-hit feedback can attribute the refusal to the same
-        // session signal the risk engine would key on. Minting stays in the
-        // risk block — a rate-limited request never receives a cookie.
+        // The continuity session is read up front (pure, no side effects)
+        // so the rate-limit-hit feedback attributes the refusal to the same
+        // session signal the risk engine would key on. A rate-limited
+        // request never receives a cookie.
         $riskSession = $this->continuityCookie?->read($request);
         $mintedCookie = false;
 
-        // CHAIN-TICKET / OPEN-CHAIN GATE (stage-2 issuance, risk.chaining)
-        // — the TRANSACTION-OBLIGATION redesign: the chain + its obligation
-        // mapping ({kiwi:<ns>}:chain-obligation:<obligationId> -> chainId,
-        // keyed on the bounded pseudonymous obligation id of the
-        // (policy-epoch, scope, AUTHORITATIVE request-binding) triple —
-        // NEVER a raw binding in a Redis key) were created atomically at
-        // the CHAIN_REQUIRED stage, so a client cannot restart the
-        // transaction at stage 1 by discarding the ticket. The gate runs
-        // BEFORE any admission control touches a counter — an invalid,
-        // forged, foreign or expired ticket never consumes rate-limit
-        // budget, risk state, scope-cap quota or an outstanding slot:
-        //   - a PRESENTED ticket is validated (signature/expiry/structure)
-        //     and REQUIRED to match the current transaction's open
-        //     obligation — a malicious different ticket gets 422;
-        //   - a request WITHOUT a ticket but WITH an open obligation
-        //     AUTO-RESUMES the chain (never issue stage 1);
-        //   - no obligation -> the ordinary stage-1 flow.
-        // The stage-2 state is then validated, the issued stage-2
-        // challenge inspected (recover / rearm / verify as the consumed
-        // state demands) and the chain claimed with the SHORT
-        // owner-scoped reservation; 'busy' (another owner's live lease)
-        // gets the retryable in-progress 503 and NEVER enters the
-        // pipeline, 'missing' is refused here too, before any counter
-        // moves. Every refusal or failure AFTER the reservation releases
-        // it with the owner token (the ticket is reusable — the chain is
-        // not burned); a durably issued issuance transitions the state to
-        // issued(stage2Nonce) exactly once, and only a VERIFIED stage-2
-        // completes the chain (the obligation is cleared atomically).
-        // The stage-2 MINT is additionally bounded by the chain's
-        // REMAINING lifetime: the issued TTL is clipped to
-        // min(configured TTL, expiresAt - now), and a chain with less
-        // than 1 second of life left refuses the mint with the
-        // expired-chain response — the obligation is never re-extended
-        // to fit a challenge.
+        // Chain-ticket / open-chain gate (stage-2 issuance, risk.chaining):
+        // the chain and its obligation mapping ({kiwi:<ns>}:chain-obligation:
+        // <obligationId> -> chainId, keyed on the bounded pseudonymous
+        // obligation id of the policy-epoch/scope/binding triple) were
+        // created atomically at the CHAIN_REQUIRED stage, so a client cannot
+        // restart the transaction at stage 1 by discarding the ticket. The
+        // gate runs before any admission control touches a counter, so an
+        // invalid, forged, foreign or expired ticket never consumes
+        // rate-limit budget, risk state, scope-cap quota or an outstanding
+        // slot:
+        //   - a presented ticket is validated (signature, expiry, structure)
+        //     and must match the current transaction's open obligation;
+        //   - a request without a ticket but with an open obligation
+        //     auto-resumes the chain (never issue stage 1);
+        //   - no obligation means the ordinary stage-1 flow.
+        // The stage-2 state is then validated, the issued stage-2 challenge
+        // inspected (recover, rearm or verify as the consumed state demands)
+        // and the chain claimed with a short owner-scoped reservation.
+        // 'busy' (another owner's live lease) gets the retryable in-progress
+        // 503 and never enters the pipeline; 'missing' is refused here too,
+        // before any counter moves. Every refusal or failure after the
+        // reservation releases it with the owner token, so the ticket is
+        // reusable and the chain is not burned; a durable issuance
+        // transitions the state to issued(stage2Nonce) exactly once, and
+        // only a verified stage-2 completes the chain (the obligation is
+        // cleared atomically). The stage-2 mint is additionally bounded by
+        // the chain's remaining lifetime: the issued TTL is clipped to
+        // min(configured TTL, expiresAt - now), and a chain with less than
+        // 1 second of life left refuses the mint with the expired-chain
+        // response, so the obligation is never re-extended to fit a
+        // challenge.
         $chainId = null;
         $chainOwner = null;
         $chainRequirement = null;
@@ -759,8 +678,8 @@ final class ChallengeController
             if ($this->risk === null) {
                 // Chaining requires the risk gateway (the extension wires
                 // both together): the ticket's required strength cannot be
-                // mapped to a challenge profile without it — fail closed,
-                // never downgrade a chain to the default profile.
+                // mapped to a challenge profile without it, so this fails
+                // closed.
                 return $this->privateJson(
                     ['error' => ['code' => 'SERVICE_UNAVAILABLE', 'message' => 'Challenge issuance is temporarily unavailable. Try again later.']],
                     Response::HTTP_SERVICE_UNAVAILABLE,
@@ -769,17 +688,15 @@ final class ChallengeController
                     $mintedCookie,
                 );
             }
-            // OPEN-CHAIN READ: the obligation of THIS transaction (policy
-            // epoch + scope + authoritative binding — the unbound
-            // transaction is the '' binding) — a plain read, no
-            // transition.
+            // Open-chain read: the obligation of this transaction (policy
+            // epoch + scope + authoritative binding; the unbound
+            // transaction is the '' binding). A plain read, no transition.
             try {
                 $chainRequirement = $this->chainTickets->findOpenRequirement($scope, $requestBinding ?? '', $this->policyVersion);
             } catch (\BelConsulting\KiwiCaptchaBundle\Risk\MalformedChainedChallengeStateException $e) {
-                // The chain record is CORRUPT server state: a stage-2
-                // issuance cannot be authorized — fail closed with the
-                // retryable 503 (the detail goes to the server log only,
-                // never to the client).
+                // The chain record is corrupt server state: a stage-2
+                // issuance cannot be authorized. Fail closed with the
+                // retryable 503; the detail goes to the server log only.
                 error_log(sprintf('kiwicaptcha: malformed chain state: %s', $e->getMessage()));
 
                 return $this->privateJson(
@@ -790,9 +707,8 @@ final class ChallengeController
                     $mintedCookie,
                 );
             } catch (\Throwable $e) {
-                // The chain state backend is unavailable: a stage-2
-                // issuance cannot be authorized — fail closed (the detail
-                // goes to the server log only).
+                // The chain state backend is unavailable: fail closed. The
+                // detail goes to the server log only.
                 error_log(sprintf('kiwicaptcha: chain obligation read failed: %s', $e->getMessage()));
 
                 return $this->privateJson(
@@ -807,9 +723,8 @@ final class ChallengeController
                 try {
                     $chainTicketPayload = $this->chainTickets->verify($chainTicket);
                 } catch (\Throwable $e) {
-                    // The ticket cannot be verified: a stage-2 issuance
-                    // cannot be authorized — fail closed (the detail goes
-                    // to the server log only).
+                    // The ticket cannot be verified: fail closed. The
+                    // detail goes to the server log only.
                     error_log(sprintf('kiwicaptcha: chain ticket verification failed: %s', $e->getMessage()));
 
                     return $this->privateJson(
@@ -829,16 +744,15 @@ final class ChallengeController
                         $mintedCookie,
                     );
                 }
-                // OBLIGATION MATCH: the ticket's chain must BE the open
-                // chain of the current transaction — a signed ticket for a
-                // DIFFERENT transaction (a different authoritative binding
-                // or scope computes a different obligation id) is a
-                // malicious/foreign ticket and gets 422. The exception is
-                // a TERMINAL chain (verified / legacy completed): its
-                // obligation was cleared at verification, so the chain is
-                // read DIRECTLY and the identity fields (scope, policy
-                // epoch, authoritative binding) are re-checked against the
-                // record.
+                // Obligation match: the ticket's chain must be the open
+                // chain of the current transaction; a signed ticket for a
+                // different transaction (a different authoritative binding
+                // or scope computes a different obligation id) is a foreign
+                // ticket and gets 422. The exception is a terminal chain
+                // (verified / legacy completed): its obligation was cleared
+                // at verification, so the chain is read directly and the
+                // identity fields (scope, policy epoch, authoritative
+                // binding) are re-checked against the record.
                 if ($chainRequirement === null || $chainRequirement->chainId !== (string) $chainTicketPayload['chainId']) {
                     try {
                         $direct = $this->chainTickets->requirementFor((string) $chainTicketPayload['chainId']);
@@ -880,17 +794,16 @@ final class ChallengeController
                 }
                 $chainId = (string) $chainTicketPayload['chainId'];
             } elseif ($chainRequirement !== null) {
-                // AUTO-RESUME: no ticket presented, but an open obligation
-                // exists for this transaction — the chain resumes at stage
-                // 2 (a lost/cleared ticket never downgrades the flow to an
-                // unchained stage-1 issuance).
+                // Auto-resume: no ticket presented but an open obligation
+                // exists for this transaction, so the chain resumes at
+                // stage 2. A lost or cleared ticket never downgrades the
+                // flow to an unchained stage-1 issuance.
                 $chainId = $chainRequirement->chainId;
             }
             if ($chainId !== null) {
                 // The owner token: a random per-request handle that scopes
-                // the reservation — only THIS request may release or issue
-                // its own reservation; every other owner's reservation is
-                // untouchable.
+                // the reservation. Only this request may release or issue
+                // its own reservation.
                 $chainOwner = bin2hex(random_bytes(16));
                 $stageTwo = $this->prepareStageTwo($chainId, $chainOwner, $chainRequirement, $request, $riskSession, $mintedCookie);
                 if ($stageTwo !== null) {
@@ -899,17 +812,16 @@ final class ChallengeController
             }
         }
 
-        // LOCAL ADMISSION BEFORE REDIS: the process-local
-        // emergency window (risk.hard_limits.process_per_second) is checked
-        // BEFORE any Redis issuance limiter — a saturated window refuses
-        // immediately with the 429 risk-denied response (same shape as the
-        // engine's HardRateLimit denial, retry_after_ms 1000) without a
-        // single Redis round trip. The check is NON-CONSUMING
+        // Local admission before Redis: the process-local emergency window
+        // (risk.hard_limits.process_per_second) is checked before any Redis
+        // issuance limiter, so a saturated window refuses immediately with
+        // the 429 risk-denied response (same shape as the engine's
+        // HardRateLimit denial, retry_after_ms 1000) without a single Redis
+        // round trip. The check is non-consuming
         // (RiskGateway::emergencyCapSaturated -> ProcessEmergencyCap::isOpen):
         // the engine's own consuming allow() inside assessPreIssue() below
         // remains the single consumer of the per-process budget, so a
-        // request admitted here can still be denied there — never
-        // double-counted.
+        // request admitted here can still be denied there.
         if ($this->risk !== null && $this->risk->emergencyCapSaturated()) {
             $this->releaseChain($chainId, $chainOwner);
 
@@ -930,13 +842,11 @@ final class ChallengeController
             $rate = $this->rateLimiter->check($clientIp);
             if ($rate !== 1) {
                 // Attribute the refusal: a per-client 429 records
-                // SourceRateLimitHit (bad on the source/session reputation);
-                // the deployment-global 429 records GlobalCapacityHit —
-                // identity-neutral, the global-only bad pressure never
-                // contaminates this visitor's source reputation. Unknown
-                // scopes (reject/baseline modes) are skipped silently: the
-                // engine declines to evaluate them, so there is no
-                // reputation to attribute to.
+                // SourceRateLimitHit (bad on the source or session
+                // reputation); the deployment-global 429 records
+                // GlobalCapacityHit, which is identity-neutral. Unknown
+                // scopes (reject/baseline modes) are skipped silently,
+                // since there is no reputation to attribute to.
                 $scopeId = $this->riskScopeId($scope);
                 if ($scopeId !== null) {
                     if ($rate === -1) {
@@ -960,13 +870,12 @@ final class ChallengeController
             }
         }
 
-        // Adaptive risk: read (or mint) the continuity session, assess the
-        // source BEFORE any challenge is written, and act on the decision.
+        // Adaptive risk: read or mint the continuity session, assess the
+        // source before any challenge is written, and act on the decision.
         // A store outage (the engine degrades internally) never blocks
         // issuance. An invalid client IP (no usable risk signal, e.g. a
-        // misconfigured proxy) applies the scope's configured DEGRADED
-        // decision — the default profile is only issued when the degraded
-        // action allows it. An unknown scope depends on unknown_scope.mode:
+        // misconfigured proxy) applies the scope's configured degraded
+        // decision. An unknown scope depends on unknown_scope.mode:
         // 'minimum' (default) assesses it under the synthetic sha20 policy,
         // 'baseline' issues the default profile, 'reject' returns the
         // risk-denied 429 without issuing.
@@ -978,17 +887,15 @@ final class ChallengeController
                 $mintedCookie = $riskSession !== null;
             }
 
-            // TRUSTED-EDGE TLS TAG: when risk.trusted_tls_header is
-            // configured AND the DIRECT peer (REMOTE_ADDR) is inside
-            // risk.trusted_tls_proxies, ONLY that header is read and its
-            // value is validated against the bounded pattern (a malformed
-            // value — including a DUPLICATE header, which is parser
-            // ambiguity — is IGNORED: the request is assessed without a
-            // TLS tag, never rejected). The header is trusted ONLY from an
-            // explicitly trusted reverse proxy/CDN that strips
-            // client-supplied values — the direct peer must be the trusted
-            // proxy itself; from every other peer the header is ignored;
-            // only the coarse classification is stored.
+            // Trusted-edge TLS tag: when risk.trusted_tls_header is
+            // configured and the direct peer is inside
+            // risk.trusted_tls_proxies, that header is read and validated
+            // against the bounded pattern. A malformed value, including a
+            // duplicate header, is ignored, never rejected: the request is
+            // assessed without a TLS tag. The header is trusted only from
+            // an explicitly trusted reverse proxy or CDN that strips
+            // client-supplied values; from every other peer it is ignored.
+            // Only the coarse classification is stored.
             $tlsTag = null;
             if ($this->trustedTlsHeader !== null && $this->tlsPeerIsTrusted($request)) {
                 $rawTls = $request->headers->get($this->trustedTlsHeader);
@@ -1000,10 +907,10 @@ final class ChallengeController
                 }
             }
 
-            // Risk-v2 evidence: honeypot/decoy markers, the coarse
+            // Risk-v2 evidence: honeypot and decoy markers, the coarse
             // client-context descriptor and the trusted-edge TLS
-            // classification ride the assessment as probabilistic evidence —
-            // NEVER a security gate.
+            // classification ride the assessment as probabilistic evidence,
+            // never a security gate.
             $v2 = $this->risk->clientContextV2($honeypotHit, $riskSession, $clientContext, $tlsTag);
 
             try {
@@ -1011,12 +918,11 @@ final class ChallengeController
                 $riskAssessed = true;
             } catch (UnknownScopeException) {
                 if ($this->risk->unknownScopeMode() === 'reject') {
-                    // TRUE rejection: no challenge, same response as a Deny
+                    // Reject mode: no challenge, same response as a Deny
                     // decision (429 RISK_DENIED), no baseline fallback. No
-                    // risk feedback is recorded: the engine declined to
-                    // evaluate the scope, so there is no evidence to
-                    // double-count and no reputation to attribute to. The
-                    // reserved chain is released — the ticket stays usable.
+                    // risk feedback is recorded, since the engine declined
+                    // to evaluate the scope. The reserved chain is
+                    // released; the ticket stays usable.
                     $this->releaseChain($chainId, $chainOwner);
 
                     return $this->privateJson(
@@ -1027,26 +933,23 @@ final class ChallengeController
                         $mintedCookie,
                     );
                 }
-                // 'baseline' mode: the adaptive engine declines — issue the
-                // default profile.
+                // 'baseline' mode: the adaptive engine declines, so issue
+                // the default profile.
                 $decision = null;
             } catch (\InvalidArgumentException) {
                 // No usable risk signal (e.g. an unparseable client IP from
-                // a misconfigured proxy): apply the configured DEGRADED
-                // decision for the scope — never silently drop to the
-                // baseline profile below the degraded floor.
+                // a misconfigured proxy): apply the scope's configured
+                // degraded decision.
                 $decision = $this->risk->degradedDecisionForScope($this->risk->scopeId($scope));
                 $riskAssessed = true;
             }
 
             if ($decision !== null) {
                 if ($honeypotHit) {
-                    // Feed the honeypot evidence event into the risk
-                    // gateway (mirroring the challengeIssued feedback path):
-                    // the decoy marker is booked as probabilistic risk
-                    // evidence. This NEVER gates issuance — the evidence
-                    // already rode the assessment above; this only records
-                    // the event kind for the risk state.
+                    // Book the honeypot evidence event into the risk
+                    // gateway, mirroring the challengeIssued feedback path.
+                    // Evidence only: a recording failure never gates or
+                    // breaks issuance.
                     try {
                         $this->risk->honeypotEvidence(
                             $decoyField !== null ? RiskEventKind::DecoyFieldSubmitted : RiskEventKind::HoneypotTriggered,
@@ -1057,29 +960,30 @@ final class ChallengeController
                             $decision->decisionId,
                         );
                     } catch (\Throwable) {
-                        // Evidence only — a recording failure never gates
-                        // or breaks issuance (mirrors the validator's
+                        // Evidence only: a recording failure never gates or
+                        // breaks issuance (mirrors the validator's
                         // form-submission counterpart).
                     }
                 }
 
-                // CHAIN FLOOR (stage-2): the issued profile is driven by
-                // the STRONGER of the server-held state's REQUIRED action
-                // and the current pre-issue decision — a transient risk
+                // Chain floor (stage-2): the issued profile is driven by
+                // the stronger of the server-held state's required action
+                // and the current pre-issue decision, so a transient risk
                 // decay can never downgrade the stage the chain promised
                 // (e.g. a chain demanding Argon32 is still issued as
                 // Argon32 when the pre-issue assessment currently says
-                // Sha18). StepUp and Deny stay terminal: when the
-                // effective action is StepUp, the application step-up
-                // answers (403) and the reservation is released; a Deny
-                // stays the risk-denied 429 with the same release.
+                // Sha18). StepUp and Deny stay terminal: when the effective
+                // action is StepUp, the application step-up answers (403)
+                // and the reservation is released; a Deny stays the
+                // risk-denied 429 with the same release.
                 $effectiveAction = $chainRequirement !== null
                     ? $this->effectiveChainAction($decision->action, $chainRequirement->requiredAction->value)
                     : $decision->action;
                 if ($effectiveAction === RiskAction::StepUp) {
                     // Step-up is application-defined (verified email link,
-                    // passkey, existing session, TOTP...): KiwiCaptcha only
-                    // says "PoW alone is insufficient for this request".
+                    // passkey, existing session, and so on): KiwiCaptcha
+                    // only says "PoW alone is insufficient for this
+                    // request".
                     $this->releaseChain($chainId, $chainOwner);
 
                     return $this->privateJson(
@@ -1093,8 +997,8 @@ final class ChallengeController
 
                 if ($effectiveAction === RiskAction::Deny) {
                     // The denial already scored the evidence (the pre-issue
-                    // assessment + decision) — no additional rate-limit
-                    // event is recorded.
+                    // assessment plus the decision), so no additional
+                    // rate-limit event is recorded.
                     $body = ['error' => ['code' => 'RISK_DENIED', 'message' => 'Challenge issuance denied by the adaptive risk engine. Try again later.']];
                     if ($decision->retryAfterMs !== null) {
                         $body['error']['retry_after_ms'] = $decision->retryAfterMs;
@@ -1105,59 +1009,42 @@ final class ChallengeController
                 }
                 $profile = $this->risk->profileForAction($effectiveAction);
             } elseif ($chainRequirement !== null) {
-                // No pre-issue decision (the engine declined / degraded):
-                // the server-held state's REQUIRED action is still the
-                // floor — the stage-2 issuance can never be weaker than
-                // what the chain promised. (The validator never writes
-                // StepUp/Deny into the state — those are terminal
-                // application-level actions — so this always maps to a
-                // challenge profile.)
+                // No pre-issue decision (the engine declined or degraded):
+                // the server-held state's required action is still the
+                // floor, so the stage-2 issuance can never be weaker than
+                // what the chain promised.
                 $profile = $this->risk->profileForAction($chainRequirement->requiredAction);
             }
         }
 
-        // PER-SCOPE ISSUANCE CAP: when
+        // Per-scope issuance cap: when
         // risk.max_challenges_per_scope_per_minute is configured, the
         // atomic {kiwi:<ns>}:issuance:<scopeIdentity>:<minute> fixed-window
         // counter (INCR + EXPIRE 60 in one Lua script) refuses 429
-        // SCOPE_LIMITED beyond the cap — the public site key + claimed
-        // origin can no longer create unlimited billed verification work
-        // per scope. The check CONSUMES the slot it admits (a denial below
-        // is not double-counted). The quota keys on the SERVER-OWNED scope
-        // identity: the risk policy's canonical scope id (the configured
-        // risk.scopes.<name>.id, or the shared synthetic unknown-scope id
-        // in 'minimum' mode) — the raw scope string is NEVER a Redis key
-        // component and, when risk.allowed_scopes is
+        // SCOPE_LIMITED beyond the cap. The check consumes the slot it
+        // admits, so a denial below is not double-counted. The quota keys
+        // on the server-owned scope identity (the risk policy's canonical
+        // scope id), never on the raw scope string; when allowed_scopes is
         // configured, the quota namespace is bounded by the server-owned
-        // set (HMAC-only keying hides attacker-controlled
-        // BYTES, it does not bound cardinality). A Redis failure propagates
-        // (fail closed: no challenge without a checked scope bound).
-        // The quota keys on the SERVER-OWNED scope identity ALWAYS:
-        // configured scopes use their stable id; every scope
-        // the risk policy cannot resolve — unknown scopes in ANY mode,
-        // including risk-disabled deployments — collapses into the single
-        // reserved UNKNOWN_QUOTA_ID bucket. An attacker can never mint a
-        // fresh quota window by inventing scope names, in any
-        // configuration. (The 'reject'/'baseline' risk assessment still
-        // runs BEFORE this check and answers first for unknown scopes.)
+        // set (HMAC-only keying hides attacker-controlled bytes, it does
+        // not bound cardinality). A Redis failure propagates: fail closed.
         $canonicalScopeId = ScopeIssuanceCap::UNKNOWN_QUOTA_ID;
         if ($this->risk !== null) {
             try {
                 $canonicalScopeId = $this->risk->scopeId($scope);
             } catch (UnknownScopeException) {
-                // Unresolvable scope: shares the reserved unknown bucket —
-                // never a per-name HMAC namespace.
+                // Unresolvable scope: shares the reserved unknown bucket.
             }
         }
         if ($this->scopeIssuanceCap !== null) {
             try {
                 $allowed = $this->scopeIssuanceCap->allow($scope, $canonicalScopeId);
             } catch (\Exception $e) {
-                // The cap FAILS CLOSED when the Redis
-                // server clock is unavailable — no quota proof means no
-                // challenge issuance (503, private envelope; the detail
-                // goes to the server log only). Never silently fall back
-                // to per-host wall clocks around window boundaries.
+                // The cap fails closed when the Redis server clock is
+                // unavailable: no quota proof means no challenge issuance
+                // (503, private envelope; the detail goes to the server log
+                // only). Never silently fall back to per-host wall clocks
+                // around window boundaries.
                 error_log(sprintf('kiwicaptcha: scope issuance cap clock unavailable: %s', $e->getMessage()));
                 $this->releaseChain($chainId, $chainOwner);
 
@@ -1182,50 +1069,34 @@ final class ChallengeController
             }
         }
 
-        // ANTI-STOCKPILING PRE-MINT ADMISSION: when the
-        // effective challenge TTL is known (the configured global
-        // challenge_ttl_secs, or a per-sitekey ttl_secs override), the
-        // bounded outstanding counters are admitted BEFORE the challenge
-        // state is created —
-        // the challenge-issuance sequence is local cap -> issuer limiter ->
-        // risk assessment -> scope cap -> outstanding counters -> mint +
-        // store, so every quota check runs before the storage write (the
-        // FakePredis call ORDER test pins the limit/incr keys before the
-        // challenge SET key). ONE atomic Lua checks BOTH caps before
-        // incrementing (per-source + global, EXPIRE = challenge lifetime +
-        // ttl margin — the effective TTL equals the lifetime the issuer
-        // signs: the global default or the per-sitekey override, profiles
-        // never change it — and on the stage-2 path it is additionally
-        // clipped to the chain's remaining lifetime below, so the slot
-        // never outlives the obligation that authorized the mint). A
-        // refused admission never mints
-        // anything. A Redis failure propagates (fail closed: no challenge
-        // without a checked stockpile bound).
+        // Anti-stockpiling pre-mint admission: when the effective challenge
+        // TTL is known (the configured global challenge_ttl_secs, or a
+        // per-sitekey ttl_secs override), the bounded outstanding counters
+        // are admitted before the challenge state is created. The issuance
+        // sequence is local cap -> issuer limiter -> risk assessment ->
+        // scope cap -> outstanding counters -> mint + store, so every quota
+        // check runs before the storage write. One atomic Lua checks both
+        // caps before incrementing (per-source + global, EXPIRE = challenge
+        // lifetime + ttl margin; profiles never change the signed
+        // lifetime). A refused admission never mints anything; a Redis
+        // failure propagates (fail closed).
         $ttlSecs = $sitekeyTtlSecs ?? $this->challengeTtlSecs;
         if ($chainId !== null && $chainRequirement !== null) {
-            // STAGE-2 TTL CLIP: the chain obligation is the ABSOLUTE
-            // ceiling of the stage-2 challenge lifetime — a challenge
+            // Stage-2 TTL clip: the chain obligation is the absolute
+            // ceiling of the stage-2 challenge lifetime, since a challenge
             // minted with the full configured TTL could stay
             // cryptographically valid after the chain state that
-            // authorized it has expired (findOpenRequirement then
-            // returns nothing while the private metadata still
-            // identifies the nonce as stage 2). The minted TTL is
-            // clipped to min(configured TTL, expiresAt - now) — the
-            // requirement's signed ABSOLUTE expiry — BEFORE the
-            // outstanding admission and the mint, so the signed
-            // lifetime, the admitted slot and the metadata sidecar all
-            // stay inside the chain's lifetime.
+            // authorized it expired. The minted TTL is clipped to
+            // min(configured TTL, expiresAt - now), the requirement's
+            // signed absolute expiry, before the outstanding admission and
+            // the mint.
             //
-            // INSUFFICIENT REMAINING LIFETIME: when less than the
-            // PRACTICAL minimum challenge lifetime remains
-            // ({@see self::stage2MinimumRemaining()} — the configured
-            // minimum solve duration plus the solver/transport headroom,
-            // never below the core Config floor of 1 second), the chain
-            // cannot hold a usable stage-2 challenge: the ticket is
-            // treated as EXPIRED — the same response as an
-            // expired/missing chain — the reservation is released, and
-            // the chain is NEVER re-created or re-signed with a fresh
-            // expiry.
+            // Insufficient remaining lifetime: when less than the practical
+            // minimum challenge lifetime remains, the chain cannot hold a
+            // usable stage-2 challenge; see
+            // {@see self::stage2MinimumRemaining()}. The ticket is treated
+            // as expired, the reservation is released, and the chain is
+            // never re-created or re-signed with a fresh expiry.
             $remaining = $chainRequirement->expiresAt - $this->now();
             if ($remaining < $this->stage2MinimumRemaining()) {
                 $this->releaseChain($chainId, $chainOwner);
@@ -1240,16 +1111,15 @@ final class ChallengeController
             }
             $ttlSecs = min($ttlSecs ?? $this->issuer->config()->ttlSecs, $remaining);
         }
-        // OUTSTANDING-ADMISSION BOOKKEEPING: the slot is HELD from the
-        // moment the counters admit the challenge until the challenge is
-        // successfully HANDED OFF. Every PROVEN-not-handed-out failure
-        // after this point returns the slot AND releases the reservation
-        // through the SINGLE cleanup primitive
-        // ({@see self::rollbackIssuanceAttempt()} —
-        // OutstandingChallenges::abortedBeforeHandoff); an INDETERMINATE
-        // failure (the chain state cannot be read after a thrown
-        // issuance transition — the challenge may be the authoritative
-        // issued stage-2) must NOT roll back.
+        // Outstanding-admission bookkeeping: the slot is held from the
+        // moment the counters admit the challenge until it is successfully
+        // handed off. Every proven-not-handed-out failure after this point
+        // returns the slot and releases the reservation through the single
+        // cleanup primitive, {@see self::rollbackIssuanceAttempt()} ->
+        // OutstandingChallenges::abortedBeforeHandoff; an indeterminate
+        // failure (the chain state cannot be read after a thrown issuance
+        // transition, so the challenge may be the authoritative issued
+        // stage-2) must not roll back.
         $outstandingAdmissionHeld = false;
         if ($this->outstanding !== null && $ttlSecs !== null) {
             $admitted = $this->outstanding->issue($clientIp, $ttlSecs);
@@ -1268,35 +1138,30 @@ final class ChallengeController
         }
 
         try {
-            // The record carries server-owned issuance metadata
-            // (Siteverify `hostname`); never signed, never sent. The value
-            // comes from the SERVER-CONFIGURED public_base_url — a forged
-            // Host header can never influence the reported hostname (the
-            // same trust rule as the Origin check). Without
-            // public_base_url the hostname stays null rather than trusting
-            // the request Host.
+            // The record carries server-owned issuance metadata (Siteverify
+            // `hostname`), never signed, never sent. The value comes from
+            // the server-configured public_base_url, so a forged Host
+            // header can never influence the reported hostname; without
+            // public_base_url the hostname stays null.
             $hostname = $this->publicBaseUrl !== null
                 ? parse_url($this->publicBaseUrl, PHP_URL_HOST) ?: null
                 : null;
-            // Issuance always uses the
-            // canonical client IP. A per-sitekey ttl_secs override mints
-            // through a TTL-variant issuer ({@see self::issuerForTtl()}) so
-            // the SIGNED lifetime carries the override — and with it every
-            // TTL derived from the issued challenge (the metadata sidecar
-            // below, the post-mint admission).
+            // Issuance always uses the canonical client IP. A per-sitekey
+            // ttl_secs override mints through a TTL-variant issuer,
+            // {@see self::issuerForTtl()}, so the signed lifetime carries
+            // the override.
             $issuer = $this->issuerForTtl($ttlSecs);
             $challenge = $profile !== null
                 ? $issuer->issueWithProfile($scope, $clientIp, $profile, requestBinding: $requestBinding, hostname: $hostname)
                 : $issuer->issue($scope, $clientIp, $requestBinding, $hostname);
-            // CHAIN STAGE BINDING: the ticket holder must never re-run the
-            // SAME stage — the newly minted challenge nonce must DIFFER
-            // from the chain's verified stage-1 nonce (server-held in the
-            // state record). The nonces are server-minted random values,
-            // so a collision is astronomically unlikely; this is the
-            // fail-closed invariant check. The minted record is discarded,
-            // the admitted outstanding slot is returned, the reservation
-            // is released and the request refused like any other invalid
-            // ticket.
+            // Chain stage binding: the newly minted challenge nonce must
+            // differ from the chain's verified stage-1 nonce (server-held
+            // in the state record). The nonces are server-minted random
+            // values, so a collision is astronomically unlikely; this is a
+            // fail-closed invariant check. On a match the minted record is
+            // discarded, the admitted outstanding slot is returned, the
+            // reservation is released and the request refused like any
+            // other invalid ticket.
             if ($chainRequirement !== null && $challenge->nonce === $chainRequirement->stage1Nonce) {
                 $this->discardChallenge($challenge);
                 $this->rollbackIssuanceAttempt($outstandingAdmissionHeld, $clientIp, $chainId, $chainOwner);
@@ -1310,12 +1175,10 @@ final class ChallengeController
                 );
             }
         } catch (\InvalidArgumentException $e) {
-            // A mint/issuance fault classified as a client-side invalid
-            // argument: the challenge was PROVEN not handed out — the
+            // A mint or issuance fault classified as a client-side invalid
+            // argument: the challenge was proven not handed out, so the
             // admitted outstanding slot is returned and the reservation
-            // released (the single proven-not-handed-off cleanup
-            // primitive, so the accounting never depends on which
-            // exception type fires).
+            // released.
             $this->rollbackIssuanceAttempt($outstandingAdmissionHeld, $clientIp, $chainId, $chainOwner);
 
             return $this->privateJson(
@@ -1326,15 +1189,13 @@ final class ChallengeController
                 $mintedCookie,
             );
         } catch (ReplicaWaitException $e) {
-            // Durability barrier failure: the
-            // configured wait_replicas threshold could not be met, so the
-            // challenge was NOT handed out — fail closed. This is an
-            // OPERATIONAL condition (replica lag / topology), not a client
-            // fault: 503 SERVICE_UNAVAILABLE with the private/no-store
-            // envelope and an opaque message; the replication detail goes
-            // to the server log only. The admitted outstanding slot is
-            // returned and the reserved chain is released — the ticket is
-            // reusable (the chain is not burned).
+            // Durability barrier failure: the configured wait_replicas
+            // threshold could not be met, so the challenge was not handed
+            // out. This is an operational condition (replica lag or
+            // topology), not a client fault: 503 with the private/no-store
+            // envelope and an opaque message. The admitted outstanding
+            // slot is returned and the reserved chain is released, so the
+            // ticket is reusable.
             error_log(sprintf('kiwicaptcha: challenge issuance failed the replica-wait barrier: %s', $e->getMessage()));
             $this->rollbackIssuanceAttempt($outstandingAdmissionHeld, $clientIp, $chainId, $chainOwner);
 
@@ -1347,17 +1208,16 @@ final class ChallengeController
             );
         }
 
-        // Anti-stockpiling POST-MINT FALLBACK: a direct
-        // controller construction WITHOUT any known challenge lifetime
-        // (no wired global TTL and no per-sitekey override) admits the
-        // minted record with its ACTUAL lifetime AFTER issuance; a refusal
-        // here is a RACE the pre-issuance checks did not see (concurrent
+        // Anti-stockpiling post-mint fallback: a direct controller
+        // construction without any known challenge lifetime (no wired
+        // global TTL and no per-sitekey override) admits the minted record
+        // with its actual lifetime after issuance. A refusal here is a
+        // race the pre-issuance checks did not see (concurrent
         // issuances): the minted record is discarded best-effort and the
-        // request gets the same 429 risk-denied response — a challenge is
-        // NEVER handed out when its stockpile admission failed. Production
-        // wiring always provides the TTL (the extension passes
-        // challenge_ttl_secs), so the pre-mint path above is the deployment
-        // behavior.
+        // request gets the same 429 risk-denied response, so a challenge
+        // is never handed out when its stockpile admission failed.
+        // Production wiring always provides the TTL, so the pre-mint path
+        // above is the deployment behavior.
         if ($this->outstanding !== null && $ttlSecs === null) {
             $admitted = $this->outstanding->issue($clientIp, max(1, $challenge->ttlSecs));
             if ($admitted !== 1) {
@@ -1375,22 +1235,20 @@ final class ChallengeController
             $outstandingAdmissionHeld = true;
         }
 
-        // Provider-compatible challenge metadata (action /
-        // cData) is bound to the nonce AT ISSUANCE, server-side. If the
-        // metadata was explicitly supplied and the sidecar CANNOT persist
-        // it, the minted challenge is discarded and the request fails 503
-        // — a token whose verification would return no action/cData must
-        // never be handed out (ambiguous compatibility behavior). The
-        // sidecar retention (max(60, ttl) + 60) derives from the ISSUED
-        // challenge's actual ttlSecs, so a per-sitekey ttl_secs override
-        // extends the metadata lifetime with the token's real validity.
+        // Provider-compatible challenge metadata (action / cData) is bound
+        // to the nonce at issuance, server-side. If the sidecar cannot
+        // persist it, the minted challenge is discarded and the request
+        // fails 503, since a token whose verification would return no
+        // action or cdata must never be handed out. The sidecar retention
+        // of max(60, ttl) + 60 derives from the issued challenge's actual
+        // ttlSecs.
         //
-        // CHAIN IDENTITY: a stage-2 issuance STAMPS the chain id + depth
-        // into the PRIVATE chainId/chainDepth metadata fields (never into
-        // cdata — the application's own cdata is preserved untouched, so
-        // the Siteverify response keeps returning the app's value). The
+        // Chain identity: a stage-2 issuance stamps the chain id and depth
+        // into the private chainId/chainDepth metadata fields, never into
+        // cdata, so the application's own cdata is preserved untouched and
+        // the Siteverify response keeps returning the app's value. The
         // validator reads the metadata chainId at stage-2 verification and
-        // refuses to open a THIRD stage: the chain ends at stage 2.
+        // refuses to open a third stage: the chain ends at stage 2.
         if (($action !== null || $cdata !== null || $chainId !== null) && $this->metadataStore !== null) {
             try {
                 $this->metadataStore->store(
@@ -1419,23 +1277,22 @@ final class ChallengeController
             }
         }
 
-        // CHAIN ISSUANCE (stage-2 ONLY) + RISK SIGNALS: the durable
+        // Chain issuance (stage-2 only) and risk signals: the durable
         // issuance (challenge record + metadata identity) is transitioned
-        // through the IDEMPOTENT owner-scoped markIssued (reserved(me) ->
-        // issued(stage2Nonce) — a state TRANSITION, never a delete: the
-        // issued record lets a retry RECOVER the issued challenge instead
-        // of re-minting). The LOST-REPLY handling: after a THROWN
-        // transition the chain state is READ — issued/verified with the
-        // current nonce means the operation succeeded (continue), still
-        // reserved by me means it never ran (retry once); when the state
-        // cannot be read the outcome is INDETERMINATE — the minted
-        // challenge is RETAINED (never delete state that may be
+        // through the idempotent owner-scoped markIssued transition,
+        // reserved(me) -> issued(stage2Nonce), so a retry can recover the
+        // issued challenge instead of re-minting. Lost-reply handling:
+        // after a thrown transition the chain state is read; issued or
+        // verified with the current nonce means the operation succeeded
+        // (continue), still reserved by me means it never ran (retry once). When the
+        // state cannot be read the outcome is indeterminate: the minted
+        // challenge is retained (never delete state that may be
         // authoritative; the record expires naturally if unreferenced),
-        // the reservation is NOT released and the outstanding slot is NOT
-        // rolled back. Only a POSITIVELY established non-issuance
-        // discards the challenge, releases and rolls back. Any other
-        // post-admission failure (the risk signals below) rolls the slot
-        // back and fails closed.
+        // the reservation is not released and the outstanding slot is not
+        // rolled back. Only a positively established non-issuance discards
+        // the challenge, releases and rolls back; any other post-admission
+        // failure (the risk signals below) rolls the slot back and fails
+        // closed.
         try {
             if ($chainId !== null) {
                 $chainResponse = $this->markStage2Issued($challenge, $chainId, $chainOwner, $clientIp, $outstandingAdmissionHeld);
@@ -1448,7 +1305,7 @@ final class ChallengeController
             // issuance-rate signal (resource-pressure headroom), the risk
             // issue-debt signal, and pair the challenge nonce to the
             // decision id so a later solve can be confirmed back to the
-            // ORIGINAL decision (short-lived server-side mapping, TTL =
+            // original decision (short-lived server-side mapping, TTL =
             // risk.nonce_to_decision_ttl_secs).
             $this->issuanceCounter?->record();
             if ($this->risk !== null && $riskAssessed && $decision !== null) {
@@ -1457,40 +1314,39 @@ final class ChallengeController
             }
         } catch (\Throwable $e) {
             // Any other post-admission issuance exception: the challenge
-            // was PROVEN not handed out — the admitted outstanding slot
-            // is returned and the chain reservation released (the single
-            // proven-not-handed-off cleanup primitive), then the failure
-            // propagates (the caller maps it to the closed response).
+            // was proven not handed out, so the admitted outstanding slot
+            // is returned and the chain reservation released; then the
+            // failure propagates (the caller maps it to the closed
+            // response).
             $this->rollbackIssuanceAttempt($outstandingAdmissionHeld, $clientIp, $chainId, $chainOwner);
             throw $e;
         }
 
-        // RISK-V2 DECOY FIELD: when the adaptive risk engine is enabled,
-        // the issuance response carries the server-issued decoy (honeypot)
-        // field name so the widget can render a hidden honeypot field — a
-        // bot that fills it echoes the marker back in a later challenge
-        // request, which the risk-v2 surface feeds as honeypot evidence.
-        // The name is a bounded per-issuance value; the response shape is
-        // otherwise unchanged (no behavioral change to issuance).
+        // Risk-v2 decoy field: when the adaptive risk engine is enabled,
+        // the issuance response carries the server-issued decoy field name
+        // so the widget can render a hidden honeypot field; a bot that
+        // fills it echoes the marker back in a later challenge request,
+        // which the risk-v2 surface feeds as honeypot evidence. The name
+        // is a bounded per-issuance value.
         $challengeData = $challenge->toArray();
         if ($this->risk !== null) {
-            // Deterministic per issuance (the nonce is base64, so the name
-            // is derived via sha256 to stay in the [0-9a-f] alphabet).
+            // Deterministic per issuance: the nonce is base64, so the name
+            // is derived via sha256 to stay in the [0-9a-f] alphabet.
             $challengeData['decoy_field'] = self::DECOY_FIELD_PREFIX.substr(hash('sha256', $challenge->nonce), 0, 8);
         }
 
-        // HANDOFF: the challenge is durably issued + stored, the metadata
-        // identity persisted, and (stage 2) the chain durably
-        // transitioned to issued(stage2Nonce) — the outstanding slot is
-        // now the CLIENT's responsibility and is NOT rolled back.
+        // Handoff: the challenge is durably issued and stored, the metadata
+        // identity persisted, and (stage 2) the chain durably transitioned
+        // to issued(stage2Nonce). The outstanding slot is now the client's
+        // responsibility and is not rolled back.
         $outstandingAdmissionHeld = false;
 
         return $this->privateJson($challengeData, Response::HTTP_OK, $request, $riskSession, $mintedCookie);
     }
 
     /**
-     * The controller clock for the stage-2 remaining-lifetime clip
-     * ({@see self::stage2MinimumRemaining()}): the injected clock when
+     * The controller clock for the stage-2 remaining-lifetime clip; see
+     * {@see self::stage2MinimumRemaining()}. The injected clock when
      * provided, time() otherwise.
      */
     private function now(): int
@@ -1499,21 +1355,16 @@ final class ChallengeController
     }
 
     /**
-     * The PRACTICAL minimum remaining chain lifetime a stage-2 mint may
-     * consume, seconds: the deployment's configured minimum solve
-     * duration (min_duration_ms — the value that applies to the stage-2
-     * challenge profile, since every issuer variant the controller mints
-     * with carries the same min_duration_ms; 0 when unset) converted to
-     * whole seconds rounded UP — a 1500 ms floor is 2 seconds — plus the
-     * solver + transport headroom ({@see self::STAGE2_SOLVER_MARGIN_SECS}).
-     * The minted challenge must be SOLVABLE within its clipped lifetime:
-     * a clipped TTL that does not cover its own minimum solve duration
-     * and the solve round-trip is operationally unusable, and the core
-     * Config also REFUSES to construct a challenge whose TTL is not
-     * strictly longer than min_duration_ms — a deployment with an
-     * explicit minimum floor would otherwise fail with a confusing late
-     * issuance error instead of the deliberate expired-ticket refusal.
-     * The core Config's absolute floor (>= 1 second,
+     * The practical minimum remaining chain lifetime a stage-2 mint may
+     * consume, seconds. The deployment's configured minimum solve duration
+     * (min_duration_ms, 0 when unset) is converted to whole seconds rounded
+     * up, then the solver and transport headroom,
+     * {@see self::STAGE2_SOLVER_MARGIN_SECS}, is added.
+     *
+     * A clipped TTL that does not cover its own minimum solve duration and
+     * the solve round-trip is operationally unusable; the core Config also
+     * refuses to construct a challenge whose TTL is not strictly longer
+     * than min_duration_ms. The core Config's floor (>= 1 second,
      * {@see self::MIN_STAGE2_REMAINING_SECS}) is the lower bound.
      */
     private function stage2MinimumRemaining(): int
@@ -1529,10 +1380,10 @@ final class ChallengeController
     /**
      * The issuer to mint with for a given challenge lifetime: the wired
      * issuer when $ttlSecs is null or equals its Config's TTL, otherwise a
-     * TTL-variant issuer built once per TTL ({@see self::buildTtlVariantIssuer()})
-     * — the core signs the lifetime from the issuer Config, so the
-     * per-sitekey override (risk.sitekeys.<sitekey>.ttl_secs) requires a
-     * variant issuer.
+     * TTL-variant issuer built once per TTL,
+     * {@see self::buildTtlVariantIssuer()}. The core signs the lifetime
+     * from the issuer Config, so the per-sitekey override
+     * (risk.sitekeys.<sitekey>.ttl_secs) requires a variant issuer.
      */
     private function issuerForTtl(?int $ttlSecs): Issuer
     {
@@ -1557,15 +1408,14 @@ final class ChallengeController
     }
 
     /**
-     * Best-effort release of a RESERVED chain after a refused or failed
-     * stage-2 issuance, with the reservation OWNER token: the ticket
-     * stays reusable — the chain is not burned. A release by a NON-owner
-     * — or on a chain that is no longer in the reserved state — is an
-     * atomic no-op (a failing request can never free another owner's
-     * live reservation), and a release failure is harmless: the
-     * reservation expires with the chain TTL. The caller must NOT release
-     * for an INDETERMINATE markIssued outcome (the state could not be
-     * read — the chain may be durably issued by this very request).
+     * Best-effort release of a reserved chain after a refused or failed
+     * stage-2 issuance, with the reservation owner token: the ticket stays
+     * reusable, so the chain is not burned. A release by a non-owner, or
+     * on a chain that is no longer in the reserved state, is an atomic
+     * no-op; a release failure is harmless, since the reservation expires
+     * with the chain TTL. The caller must not release for an indeterminate
+     * markIssued outcome (the chain may be durably issued by this very
+     * request).
      */
     private function releaseChain(?string $chainId, ?string $chainOwner): void
     {
@@ -1580,15 +1430,13 @@ final class ChallengeController
     }
 
     /**
-     * Return an ADMITTED outstanding slot when the challenge was PROVEN
-     * never handed out (OutstandingChallenges::abortedBeforeHandoff — the
+     * Return an admitted outstanding slot when the challenge was proven
+     * never handed out (OutstandingChallenges::abortedBeforeHandoff: the
      * per-source counter is decremented best-effort, floored at 0; the
-     * GLOBAL counter decays by EXPIRE: deployment-wide pressure, never a
-     * literal count). Composed by {@see self::rollbackIssuanceAttempt()}
-     * — the single proven-not-handed-off cleanup primitive. The caller
-     * must NOT roll back for an INDETERMINATE failure (the chain state
-     * cannot be read after a thrown issuance transition — the challenge
-     * may be the authoritative issued stage-2).
+     * global counter decays by EXPIRE). Composed by
+     * {@see self::rollbackIssuanceAttempt()}, the single
+     * proven-not-handed-off cleanup primitive. The caller must not roll
+     * back for an indeterminate failure.
      */
     private function rollbackOutstandingAdmission(bool $held, string $clientIp): void
     {
@@ -1603,15 +1451,16 @@ final class ChallengeController
     }
 
     /**
-     * THE PROVEN-NOT-HANDED-OFF ISSUANCE CLEANUP PRIMITIVE: every exit
-     * AFTER the outstanding admission that POSITIVELY established the
-     * challenge was never handed off returns the admitted slot
-     * ({@see self::rollbackOutstandingAdmission()}) AND releases the
-     * chain reservation ({@see self::releaseChain()}) through THIS single
-     * helper — a future failure path cannot accidentally omit one half of
-     * the resource accounting. The INDETERMINATE case (the chain state
-     * cannot be read after a thrown issuance transition — the challenge
-     * may be the authoritative issued stage-2) must NOT use this helper.
+     * The proven-not-handed-off issuance cleanup primitive. Every exit
+     * after the outstanding admission that positively established the
+     * challenge was never handed off returns the admitted slot via
+     * {@see self::rollbackOutstandingAdmission()} and releases the chain
+     * reservation via {@see self::releaseChain()}. Both go through this
+     * single helper, so a future failure path cannot accidentally omit one
+     * half of the resource accounting. The indeterminate case must not use
+     * this helper: the chain state cannot be read after a thrown issuance
+     * transition, so the challenge may be the authoritative issued
+     * stage-2.
      */
     private function rollbackIssuanceAttempt(bool $outstandingAdmissionHeld, string $clientIp, ?string $chainId, ?string $chainOwner): void
     {
@@ -1620,29 +1469,29 @@ final class ChallengeController
     }
 
     /**
-     * STAGE-2 STATE ENTRY (the chain gate, step 7): validate the chain
-     * state, inspect the issued stage-2 challenge (recover / rearm /
-     * verify as the consumed state demands — see
-     * {@see self::inspectIssuedStage2()}), then claim the SHORT
-     * owner-scoped reservation. Returns a response when the request must
-     * NOT proceed into the issuance pipeline (the recovery of the
-     * already-issued challenge — byte-identical, no re-mint, no
-     * re-admission — the retryable in-progress 503, the indeterminate
-     * consumed-state 503, the missing-chain 422), or null when the
-     * pipeline may proceed with the reservation held (and $requirement
-     * refreshed for the re-dispatch after a state race).
+     * Stage-2 state entry (the chain gate): validate the chain state,
+     * inspect the issued stage-2 challenge (recover, rearm or verify as
+     * the consumed state demands, see {@see self::inspectIssuedStage2()}),
+     * then claim a short owner-scoped reservation.
+     *
+     * Returns a response when the request must not proceed into the
+     * issuance pipeline: the recovery of the already-issued challenge is
+     * byte-identical with no re-mint and no re-admission; the retryable
+     * 503s and the missing-chain 422 also return responses. Returns null
+     * when the pipeline may proceed with the reservation held and
+     * $requirement refreshed for the re-dispatch after a state race.
      */
     private function prepareStageTwo(string $chainId, string $chainOwner, ?\BelConsulting\KiwiCaptchaBundle\Risk\ChainRequirement &$requirement, Request $request, ?string $riskSession, bool $mintedCookie): ?JsonResponse
     {
         for ($i = 0; $i < 3; $i++) {
             $state = $requirement?->state ?? 'available';
             if ($state === 'verified') {
-                // TERMINAL VERIFIED RECOVERY: the chain completed durably
-                // (the obligation was cleared atomically with the
-                // verified transition) — a retry recovers the already-
-                // issued challenge, with NO re-mint, NO re-admission. A
-                // missing challenge record despite 'verified' is a
-                // storage anomaly — the retryable 503.
+                // Terminal verified recovery: the chain completed durably
+                // (the obligation was cleared atomically with the verified
+                // transition), so a retry recovers the already-issued
+                // challenge with no re-mint and no re-admission. A missing
+                // challenge record despite 'verified' is a storage
+                // anomaly: the retryable 503.
                 $recovered = $this->recoverIssuedResponse($requirement?->stage2Nonce, $request, $riskSession, $mintedCookie);
                 if ($recovered !== null) {
                     return $recovered;
@@ -1661,16 +1510,16 @@ final class ChallengeController
                 if ($inspection !== null) {
                     return $inspection;
                 }
-                // The chain was REARMED (the issued challenge is
-                // missing/expired or its committed result was INVALID):
-                // the reservation + fresh stage-2 mint below issue a NEW
-                // stage-2 challenge at the SAME OR STRONGER floor —
-                // NEVER a stage-1.
+                // The chain was rearmed (the issued challenge is missing or
+                // expired, or its committed result was invalid): the
+                // reservation plus the fresh stage-2 mint below issue a new
+                // stage-2 challenge at the same or stronger floor, never a
+                // stage-1.
             }
             if ($state === 'step_up_required') {
-                // TERMINAL STEP-UP: the transaction is bound to its final
-                // step-up disposition (the obligation mapping was KEPT) —
-                // no challenge issuance, ever. A later request for the
+                // Terminal step-up: the transaction is bound to its final
+                // step-up disposition (the obligation mapping was kept), so
+                // no challenge issuance can follow. A later request for the
                 // same transaction re-encounters this terminal state.
                 return $this->privateJson(
                     ['error' => ['code' => 'STEP_UP_REQUIRED', 'message' => 'Additional verification is required for this request.']],
@@ -1681,9 +1530,9 @@ final class ChallengeController
                 );
             }
             if ($state === 'denied') {
-                // TERMINAL DENIAL: the transaction is bound to its final
-                // denial disposition (the obligation mapping was KEPT) —
-                // no challenge issuance, ever. A later request for the
+                // Terminal denial: the transaction is bound to its final
+                // denial disposition (the obligation mapping was kept), so
+                // no challenge issuance can follow. A later request for the
                 // same transaction re-encounters this terminal state.
                 return $this->privateJson(
                     ['error' => ['code' => 'RISK_DENIED', 'message' => 'Challenge issuance denied by the adaptive risk engine. Try again later.']],
@@ -1699,12 +1548,12 @@ final class ChallengeController
                 case \BelConsulting\KiwiCaptchaBundle\Risk\ChainReservationResult::Retry:
                     return null;
                 case \BelConsulting\KiwiCaptchaBundle\Risk\ChainReservationResult::Busy:
-                    // Another request holds the LIVE reservation for this
-                    // chain: the issuance pipeline is NEVER entered — the
-                    // duplicate work (risk, quota, outstanding, mint,
-                    // metadata, accounting) cannot be amplified by one
-                    // ticket. The retryable 503 lets the client poll
-                    // until the owning request completes.
+                    // Another request holds the live reservation for this
+                    // chain, so the issuance pipeline is never entered: one
+                    // ticket cannot amplify the duplicate work (risk,
+                    // quota, outstanding, mint, metadata, accounting). The
+                    // retryable 503 lets the client poll until the owning
+                    // request completes.
                     return $this->privateJson(
                         ['error' => ['code' => 'SERVICE_UNAVAILABLE', 'message' => 'A challenge for this chain ticket is already in progress. Try again later.']],
                         Response::HTTP_SERVICE_UNAVAILABLE,
@@ -1717,10 +1566,10 @@ final class ChallengeController
                 case \BelConsulting\KiwiCaptchaBundle\Risk\ChainReservationResult::StepUpRequired:
                 case \BelConsulting\KiwiCaptchaBundle\Risk\ChainReservationResult::Denied:
                     // The state moved between the read and the reserve
-                    // (another request transitioned the chain): re-read
-                    // the requirement and re-dispatch once (bounded).
-                    // The TERMINAL step_up_required/denied answers land in
-                    // their terminal response branches above — never an
+                    // (another request transitioned the chain): re-read the
+                    // requirement and re-dispatch once (bounded). The
+                    // terminal step_up_required and denied answers land in
+                    // their terminal response branches above, never an
                     // issuance.
                     try {
                         $requirement = $this->chainTickets->requirementFor($chainId);
@@ -1746,8 +1595,8 @@ final class ChallengeController
                     }
                     continue 2;
                 default:
-                    // ChainReservationResult::Missing — the chain state is
-                    // absent/expired.
+                    // ChainReservationResult::Missing: the chain state is
+                    // absent or expired.
                     return $this->privateJson(
                         ['error' => ['code' => 'INVALID_METADATA', 'message' => 'The chain ticket is invalid, expired or already consumed.']],
                         Response::HTTP_UNPROCESSABLE_ENTITY,
@@ -1768,40 +1617,38 @@ final class ChallengeController
     }
 
     /**
-     * INSPECT the already-issued stage-2 challenge of an ISSUED chain
-     * (the chain gate) and decide the recovery:
+     * Inspect the already-issued stage-2 challenge of an issued chain (the
+     * chain gate) and decide the recovery.
      *
-     *  - pending + valid record -> RECOVER the exact issuance response
-     *    (the response may have been lost — the retry gets the SAME
-     *    challenge, no re-mint, no re-admission),
-     *  - missing/expired record -> REARM the chain (issued(nonce) ->
-     *    available, pinned to the exact expected nonce) so the pipeline
-     *    mints a FRESH stage-2 challenge (NEVER a stage-1),
-     *  - consumed + committed VALID -> the core's consumed result is
-     *    NEVER terminal by itself: the nonce's FINAL disposition is read
-     *    from the post-solve disposition store (the validator finalized
-     *    it BEFORE the application saw the outcome) — Pass ->
-     *    markVerified (the chain ends; the obligation is cleared
-     *    atomically) + the same challenge is recovered, StepUp ->
-     *    markStepUpRequired (the obligation is KEPT) + the terminal
-     *    STEP_UP_REQUIRED response, Deny -> markDenied (the obligation is
-     *    KEPT) + the terminal risk-denied response, missing/pending ->
-     *    the retryable 503 (the final disposition was never durably
-     *    established — never clear the obligation),
-     *  - consumed + committed INVALID -> rearm (subject to the
-     *    rate/outstanding/admission pipeline below),
-     *  - consumed + NO committed result -> INDETERMINATE — the retryable
-     *    temporary_unavailable (NEVER rearm while the first request may
-     *    have been consumed successfully).
+     *  - pending + valid record -> recover the exact issuance response.
+     *    The response may have been lost; the retry gets the same
+     *    challenge, with no re-mint and no re-admission.
+     *  - missing/expired record -> rearm the chain: issued(nonce) ->
+     *    available, pinned to the exact expected nonce, so the pipeline
+     *    mints a fresh stage-2 challenge, never a stage-1.
+     *  - consumed + committed valid -> the core's consumed result is not
+     *    terminal by itself. The nonce's final disposition is read from
+     *    the post-solve disposition store; the validator finalized it
+     *    before the application saw the outcome. Pass -> markVerified
+     *    (the chain ends; the obligation is cleared atomically) plus the
+     *    same challenge is recovered. StepUp -> markStepUpRequired (the
+     *    obligation is kept) plus the terminal step-up response. Deny ->
+     *    markDenied (the obligation is kept) plus the terminal risk-denied
+     *    response. Missing or pending -> the retryable 503.
+     *  - consumed + committed invalid -> rearm, subject to the rate,
+     *    outstanding and admission pipeline below.
+     *  - consumed + no committed result -> indeterminate: the retryable
+     *    temporary_unavailable. Never rearm while the first request may
+     *    have been consumed successfully.
      *
-     * Returns null when the chain was REARMED (the pipeline proceeds to
-     * the reservation + mint).
+     * Returns null when the chain was rearmed and the pipeline proceeds to
+     * the reservation and mint.
      */
     private function inspectIssuedStage2(string $chainId, string $stage2Nonce, Request $request, ?string $riskSession, bool $mintedCookie): ?JsonResponse
     {
         if ($this->storage === null) {
-            // No challenge storage to inspect: the issued challenge's
-            // state cannot be established — fail closed (retryable).
+            // No challenge storage to inspect: the issued challenge's state
+            // cannot be established, so fail closed (retryable).
             return $this->privateJson(
                 ['error' => ['code' => 'SERVICE_UNAVAILABLE', 'message' => 'Challenge issuance is temporarily unavailable. Try again later.']],
                 Response::HTTP_SERVICE_UNAVAILABLE,
@@ -1824,7 +1671,7 @@ final class ChallengeController
             );
         }
         if ($record === null) {
-            // The issued challenge record is MISSING (expired or never
+            // The issued challenge record is missing (expired or never
             // durably stored): rearm the chain for a fresh stage-2 mint.
             try {
                 $rearmed = $this->chainTickets->rearmIssued($chainId, $stage2Nonce);
@@ -1841,7 +1688,7 @@ final class ChallengeController
             }
             if (!$rearmed) {
                 // A different transition won the race between the read and
-                // the rearm (the exact expected nonce pins it) — the
+                // the rearm (the exact expected nonce pins it): the
                 // retryable 503.
                 return $this->privateJson(
                     ['error' => ['code' => 'SERVICE_UNAVAILABLE', 'message' => 'Challenge issuance is temporarily unavailable. Try again later.']],
@@ -1858,14 +1705,14 @@ final class ChallengeController
             ? $this->storage->consumedState($stage2Nonce)
             : null;
         if ($consumed === null) {
-            // PENDING: the issued challenge is still live — RECOVER the
-            // EXACT issuance response (no re-mint, no re-admission).
+            // Pending: the issued challenge is still live, so recover the
+            // exact issuance response (no re-mint, no re-admission).
             return $this->privateJson($this->rebuildIssuanceResponse($record), Response::HTTP_OK, $request, $riskSession, $mintedCookie);
         }
         $result = $consumed->consumedResult;
         if ($result === null) {
-            // Consumed WITHOUT a committed result: INDETERMINATE — the
-            // first request may have been consumed successfully. NEVER
+            // Consumed without a committed result: indeterminate, since the
+            // first request may have been consumed successfully. Never
             // rearm; the retryable 503.
             return $this->privateJson(
                 ['error' => ['code' => 'SERVICE_UNAVAILABLE', 'message' => 'Challenge issuance is temporarily unavailable. Try again later.']],
@@ -1876,14 +1723,14 @@ final class ChallengeController
             );
         }
         if ($result->valid) {
-            // The stage was cryptographically SOLVED — but the core's
-            // consumed result NEVER decides transaction terminality alone:
-            // the nonce's FINAL disposition (the validator finalized it
-            // durably BEFORE the application saw the outcome) drives the
-            // chain transition. A missing/pending disposition means the
+            // The stage was cryptographically solved, but the core's
+            // consumed result never decides transaction terminality alone:
+            // the nonce's final disposition (the validator finalized it
+            // durably before the application saw the outcome) drives the
+            // chain transition. A missing or pending disposition means the
             // final disposition was never durably established (the
-            // validator died between the core commit and the finalize) —
-            // the retryable 503, and the obligation is NEVER cleared.
+            // validator died between the core commit and the finalize):
+            // the retryable 503, and the obligation is never cleared.
             $disposition = null;
             if ($this->postSolveDispositionStore !== null) {
                 try {
@@ -1902,9 +1749,9 @@ final class ChallengeController
                 $disposition = $dispositionRecord?->disposition;
             }
             if ($disposition === null) {
-                // No disposition store wired, or the record is
-                // absent/expired/pending — the final disposition was never
-                // durably established: never clear the obligation.
+                // No disposition store wired, or the record is absent,
+                // expired or pending: the final disposition was never
+                // durably established, so the obligation is never cleared.
                 return $this->privateJson(
                     ['error' => ['code' => 'SERVICE_UNAVAILABLE', 'message' => 'Challenge issuance is temporarily unavailable. Try again later.']],
                     Response::HTTP_SERVICE_UNAVAILABLE,
@@ -1915,7 +1762,7 @@ final class ChallengeController
             }
             switch ($disposition->kind) {
                 case \BelConsulting\KiwiCaptchaBundle\Risk\PostSolveDispositionKind::Pass:
-                    // The FINAL disposition is PASS: transition to
+                    // The final disposition is Pass: transition to
                     // verified (idempotent; the obligation is cleared
                     // atomically only while it still points at this
                     // chain) instead of re-issuing, then recover the same
@@ -1923,8 +1770,8 @@ final class ChallengeController
                     try {
                         $terminal = $this->chainTickets->markVerified($chainId, $stage2Nonce);
                     } catch (\Throwable $e) {
-                        // LOST REPLY: read the state + confirm the exact
-                        // nonce; do NOT return a final pass while the
+                        // Lost reply: read the state and confirm the exact
+                        // nonce; do not return a final pass while the
                         // obligation may be uncleared.
                         error_log(sprintf('kiwicaptcha: chain verification transition failed: %s', $e->getMessage()));
                         try {
@@ -1946,7 +1793,7 @@ final class ChallengeController
                     if ($terminal === \BelConsulting\KiwiCaptchaBundle\Risk\ChainVerifiedResult::Conflict
                         || $terminal === \BelConsulting\KiwiCaptchaBundle\Risk\ChainVerifiedResult::Missing
                     ) {
-                        // The chain moved under the transition — the
+                        // The chain moved under the transition: the
                         // retryable 503 (the client retries against the
                         // current state).
                         return $this->privateJson(
@@ -1960,11 +1807,11 @@ final class ChallengeController
 
                     return $this->privateJson($this->rebuildIssuanceResponse($record), Response::HTTP_OK, $request, $riskSession, $mintedCookie);
                 case \BelConsulting\KiwiCaptchaBundle\Risk\PostSolveDispositionKind::StepUp:
-                    // The FINAL disposition is STEP-UP: transition to the
-                    // TERMINAL step_up_required (the obligation mapping is
-                    // KEPT — the transaction stays bound to the step-up
-                    // requirement) and answer the terminal
-                    // STEP_UP_REQUIRED — no challenge issuance, ever.
+                    // The final disposition is StepUp: transition to the
+                    // terminal step_up_required (the obligation mapping is
+                    // kept, so the transaction stays bound to the step-up
+                    // requirement) and answer the terminal step-up
+                    // response. No challenge issuance can follow.
                     try {
                         $terminal = $this->chainTickets->markStepUpRequired($chainId, $stage2Nonce);
                     } catch (\Throwable $e) {
@@ -2005,11 +1852,11 @@ final class ChallengeController
                         $mintedCookie,
                     );
                 case \BelConsulting\KiwiCaptchaBundle\Risk\PostSolveDispositionKind::Deny:
-                    // The FINAL disposition is DENY: transition to the
-                    // TERMINAL denied (the obligation mapping is KEPT —
+                    // The final disposition is Deny: transition to the
+                    // terminal denied (the obligation mapping is kept, so
                     // the transaction stays bound to its final denial) and
-                    // answer the terminal risk-denied response — no
-                    // challenge issuance, ever.
+                    // answer the terminal risk-denied response. No
+                    // challenge issuance can follow.
                     try {
                         $terminal = $this->chainTickets->markDenied($chainId, $stage2Nonce);
                     } catch (\Throwable $e) {
@@ -2051,8 +1898,9 @@ final class ChallengeController
                     );
                 default:
                     // ChainRequired (or any other kind) is impossible for a
-                    // stage-2 nonce — a stage-2 challenge never opens a
-                    // third stage. Corrupt/unexpected state: fail closed.
+                    // stage-2 nonce: a stage-2 challenge never opens a
+                    // third stage. Corrupt or unexpected state: fail
+                    // closed.
                     return $this->privateJson(
                         ['error' => ['code' => 'SERVICE_UNAVAILABLE', 'message' => 'Challenge issuance is temporarily unavailable. Try again later.']],
                         Response::HTTP_SERVICE_UNAVAILABLE,
@@ -2062,7 +1910,7 @@ final class ChallengeController
                     );
             }
         }
-        // Committed INVALID: rearm (subject to the rate/outstanding/
+        // Committed invalid: rearm (subject to the rate, outstanding and
         // admission pipeline below).
         try {
             $rearmed = $this->chainTickets->rearmIssued($chainId, $stage2Nonce);
@@ -2091,18 +1939,16 @@ final class ChallengeController
     }
 
     /**
-     * RECOVERY of an ISSUED/VERIFIED chain (the terminal states): the
-     * original stage-2 issuance already ran durably (challenge record +
-     * metadata identity), so the retry READS the issued challenge record
-     * (storage find by the state's stage2Nonce) and rebuilds the EXACT
-     * issuance response the original request returned — nonce/prefix/
-     * salt/algorithm/targetBits/ttl/minDurationMs plus the deterministic
-     * decoy_field when the risk engine is enabled — with NO re-mint, NO
-     * re-admission, NO re-consume. An issued/verified state NEVER allows
-     * a second mint.
+     * Recovery of an issued or verified chain (the terminal states). The
+     * original stage-2 issuance already ran durably (challenge record plus
+     * metadata identity). The retry reads the issued challenge record
+     * (storage find by the state's stage2Nonce) and rebuilds the exact
+     * issuance response the original request returned, with no re-mint, no
+     * re-admission and no re-consume. An issued or verified state never
+     * allows a second mint.
      *
      * Returns null when the chain's challenge record cannot be found (a
-     * storage anomaly — the caller answers the retryable 503).
+     * storage anomaly; the caller answers the retryable 503).
      */
     private function recoverIssuedResponse(?string $stage2Nonce, Request $request, ?string $riskSession, bool $mintedCookie): ?JsonResponse
     {
@@ -2122,20 +1968,22 @@ final class ChallengeController
     }
 
     /**
-     * STAGE-2 ONLY: the IDEMPOTENT owner-scoped issuance transition
-     * reserved(me) -> issued(stage2Nonce) with the LOST-REPLY recovery.
-     * Returns null when the issuance is durably confirmed (the pipeline
-     * continues to the risk signals + handoff), or a response for every
-     * other outcome:
+     * Stage-2 only: the idempotent owner-scoped issuance transition
+     * reserved(me) -> issued(stage2Nonce), with lost-reply recovery.
      *
-     *  - a THROWN transition reads the chain state FIRST: issued/verified
-     *    with the current nonce -> the operation SUCCEEDED (continue);
-     *    still reserved by me -> the transition never ran (retry once);
-     *    the state cannot be read -> INDETERMINATE: the minted challenge
-     *    is RETAINED (never delete state that may be authoritative — it
-     *    expires naturally if unreferenced), the reservation is NOT
-     *    released and the outstanding slot is NOT rolled back (503);
-     *  - 'conflict'/'not_owner'/'missing' -> POSITIVELY not issued with
+     * Returns null when the issuance is durably confirmed (the pipeline
+     * continues to the risk signals and handoff). Every other outcome
+     * returns a response:
+     *
+     *  - a thrown transition reads the chain state first. Issued or
+     *    verified with the current nonce means the operation succeeded
+     *    (continue); still reserved by me means the transition never ran
+     *    (retry once). When the state cannot be read the outcome is
+     *    indeterminate: the minted challenge is retained (never delete
+     *    state that may be authoritative; it expires naturally if
+     *    unreferenced), and the reservation and outstanding slot are not
+     *    rolled back (503).
+     *  - 'conflict'/'not_owner'/'missing' -> positively not issued with
      *    this nonce: the minted record is discarded, the slot returned,
      *    the reservation released (503).
      */
@@ -2144,7 +1992,7 @@ final class ChallengeController
         try {
             $result = $this->chainTickets->markIssued($chainId, $chainOwner, $challenge->nonce);
         } catch (\Throwable $e) {
-            // LOST REPLY: the transition MAY have happened — read the
+            // Lost reply: the transition may have happened, so read the
             // chain state before touching anything.
             error_log(sprintf('kiwicaptcha: chain issuance transition failed: %s', $e->getMessage()));
             try {
@@ -2153,35 +2001,35 @@ final class ChallengeController
                 $current = null;
             }
             if ($current === null) {
-                // INDETERMINATE: retain the minted challenge, do NOT
-                // release the reservation, do NOT roll back the
-                // outstanding slot (the challenge may be the
-                // authoritative issued stage-2).
+                // Indeterminate: retain the minted challenge and do not
+                // release the reservation or roll back the outstanding
+                // slot, since the challenge may be the authoritative
+                // issued stage-2.
                 return $this->privateJson(
                     ['error' => ['code' => 'SERVICE_UNAVAILABLE', 'message' => 'Challenge issuance is temporarily unavailable. Try again later.']],
                     Response::HTTP_SERVICE_UNAVAILABLE,
                 );
             }
             if (($current->state === 'issued' || $current->state === 'verified') && $current->stage2Nonce === $challenge->nonce) {
-                // The transition succeeded before the throw — continue.
+                // The transition succeeded before the throw, so continue.
                 return null;
             }
             if ($current->state === 'reserved' && $current->owner === $chainOwner) {
-                // Still reserved by me: the transition never ran — retry
+                // Still reserved by me: the transition never ran, so retry
                 // once.
                 try {
                     $result = $this->chainTickets->markIssued($chainId, $chainOwner, $challenge->nonce);
                 } catch (\Throwable) {
-                    // The retry cannot be confirmed either — indeterminate
-                    // again: retain.
+                    // The retry cannot be confirmed either: indeterminate
+                    // again, retain.
                     return $this->privateJson(
                         ['error' => ['code' => 'SERVICE_UNAVAILABLE', 'message' => 'Challenge issuance is temporarily unavailable. Try again later.']],
                         Response::HTTP_SERVICE_UNAVAILABLE,
                     );
                 }
             } else {
-                // POSITIVELY not issued by this request (rearmed, owned
-                // elsewhere, or vanished): discard + release + roll back.
+                // Positively not issued by this request (rearmed, owned
+                // elsewhere, or vanished): discard, release and roll back.
                 $this->discardChallenge($challenge);
                 $this->rollbackIssuanceAttempt($outstandingAdmissionHeld, $clientIp, $chainId, $chainOwner);
 
@@ -2199,12 +2047,12 @@ final class ChallengeController
             case \BelConsulting\KiwiCaptchaBundle\Risk\ChainIssuedResult::Conflict:
             case \BelConsulting\KiwiCaptchaBundle\Risk\ChainIssuedResult::NotOwner:
             case \BelConsulting\KiwiCaptchaBundle\Risk\ChainIssuedResult::Missing:
-                // POSITIVELY not issued with this nonce (the chain holds a
+                // Positively not issued with this nonce (the chain holds a
                 // different one, is owned elsewhere, or vanished): the
-                // minted record is discarded (a completed chain NEVER
-                // allows a second mint: the client retries the ticket and
-                // RECOVERS the challenge that was durably issued), the
-                // slot is returned, the reservation is released.
+                // minted record is discarded, since a completed chain never
+                // allows a second mint (the client retries the ticket and
+                // recovers the challenge that was durably issued). The slot
+                // is returned and the reservation released.
                 $this->discardChallenge($challenge);
                 $this->rollbackIssuanceAttempt($outstandingAdmissionHeld, $clientIp, $chainId, $chainOwner);
 
@@ -2216,12 +2064,12 @@ final class ChallengeController
     }
 
     /**
-     * Rebuild the EXACT issuance response of an already-issued stage-2
-     * challenge from its stored record: the same key set and order the
-     * original Challenge::toArray() produced (nonce, challenge, salt,
-     * algorithm, mKib, t, p, targetBits, ttlSecs, minDurationMs, prefix)
-     * plus the deterministic decoy_field when the risk engine is enabled
-     * — byte-identical with the original response.
+     * Rebuild the exact issuance response of an already-issued stage-2
+     * challenge from its stored record. The key set and order are the
+     * same the original Challenge::toArray() produced (nonce, challenge,
+     * salt, algorithm, mKib, t, p, targetBits, ttlSecs, minDurationMs,
+     * prefix), plus the deterministic decoy_field when the risk engine is
+     * enabled. Byte-identical with the original response.
      *
      * @param array<string, mixed> $recordData a ChallengeRecord's toArray()
      */
@@ -2242,8 +2090,8 @@ final class ChallengeController
             'prefix' => $data['prefix'],
         ];
         if ($this->risk !== null) {
-            // Deterministic per issuance (the nonce is base64, so the name
-            // is derived via sha256 to stay in the [0-9a-f] alphabet).
+            // Deterministic per issuance: the nonce is base64, so the name
+            // is derived via sha256 to stay in the [0-9a-f] alphabet.
             $response['decoy_field'] = self::DECOY_FIELD_PREFIX.substr(hash('sha256', $data['nonce']), 0, 8);
         }
 
@@ -2251,11 +2099,11 @@ final class ChallengeController
     }
 
     /**
-     * Whether the DIRECT peer of the request (REMOTE_ADDR — the immediate
+     * Whether the direct peer of the request (REMOTE_ADDR, the immediate
      * connection, never a forwarded header) is inside the configured
      * risk.trusted_tls_proxies CIDRs. The trusted-edge TLS header is read
-     * ONLY from such a peer: the direct peer must be the trusted
-     * proxy/CDN itself — from every other peer the header is ignored.
+     * only from such a peer: the direct peer must be the trusted proxy or
+     * CDN itself.
      */
     private function tlsPeerIsTrusted(Request $request): bool
     {
@@ -2273,11 +2121,11 @@ final class ChallengeController
     }
 
     /**
-     * The EFFECTIVE stage-2 action: the STRONGER of the chain ticket's
+     * The effective stage-2 action: the stronger of the chain ticket's
      * signed required action and the current pre-issue decision action.
-     * The required action is never StepUp/Deny (the ticket format
-     * excludes them — see ChainedChallengeTicketService::verify()), so a
-     * StepUp/Deny effective action can only come from the current
+     * The required action is never StepUp or Deny (the ticket format
+     * excludes them, see ChainedChallengeTicketService::verify()), so a
+     * StepUp or Deny effective action can only come from the current
      * decision and stays terminal.
      */
     private function effectiveChainAction(RiskAction $decisionAction, string $requiredAction): RiskAction
@@ -2288,38 +2136,32 @@ final class ChallengeController
     }
 
     /**
-     * A TTL-variant Issuer: a clone of the wired issuer's Config with
-     * ONLY ttlSecs replaced, issued against the SAME storage (the
-     * extension wires the identical storage reference into the controller
-     * and the issuer), replicating the wired issuer's clock and region —
-     * so a region-bound deployment (risk.region) keeps its signed region
-     * on overridden-TTL challenges and the verifier's expected-region
-     * check still passes.
+     * A TTL-variant Issuer: a clone of the wired issuer's Config with only
+     * ttlSecs replaced, issued against the same storage as the wired
+     * issuer and replicating its clock and region. A region-bound
+     * deployment (risk.region) keeps its signed region on overridden-TTL
+     * challenges, so the verifier's expected-region check still passes.
      *
      * @throws \LogicException when the controller has no storage wired
      *                         (the extension always wires one)
      */
     private function buildTtlVariantIssuer(int $ttlSecs): Issuer
     {
-        // The public Issuer::withTtl() API clones the config with only
-        // ttlSecs replaced and carries the storage, clock and region
-        // directly — no reflection into private state.
         return $this->issuer->withTtl($ttlSecs);
     }
 
     /**
-     * Same-origin check for the challenge endpoint. Requests WITHOUT an
+     * Same-origin check for the challenge endpoint. Requests without an
      * Origin header (same-origin navigation, curl, non-browser clients)
-     * are allowed — a browser cross-site POST always carries one. When
-     * present, the Origin must match the EXPECTED origin, which comes
-     * from SERVER CONFIG (public_base_url) when configured — a forged
-     * Host header can never shift the expected origin ("Host:
-     * evil.example" + "Origin: https://evil.example" must stay
-     * cross-origin). Comparison uses the same STRUCTURED NORMALIZATION
-     * as the allowlist ({@see self::normalizeOrigin()}); without
-     * public_base_url the expected origin is derived from the request's
-     * own scheme+host (fine for localhost/dev; production deployments
-     * behind shared infrastructure should set public_base_url).
+     * are allowed; a browser cross-site POST always carries one. When
+     * present, the Origin must match the expected origin, which comes from
+     * server config (public_base_url) when configured, so a forged Host
+     * header can never shift the expected origin. The comparison uses the
+     * same structured normalization as the allowlist,
+     * {@see self::normalizeOrigin()}; without public_base_url the
+     * expected origin is derived from the request's own scheme and host
+     * (fine for localhost and dev; production deployments behind shared
+     * infrastructure should set public_base_url).
      */
     private function isSameOrigin(Request $request): bool
     {
@@ -2342,29 +2184,26 @@ final class ChallengeController
 
     /**
      * Origin laundering defense: the request must carry an Origin header
-     * (or a Referer whose URL yields an origin) whose NORMALIZED
-     * scheme+host+port matches one allowlisted origin. Comparison is
-     * component-wise over the STRUCTURED normalization of both sides
-     * ({@see self::normalizeOrigin()}), so "https://app.example.com"
-     * matches its default-port, punycode, and trailing-dot spellings —
-     * but never a different port, scheme, or host. With enforce_origin,
-     * a request without a usable Origin is rejected BEFORE the Referer
-     * fallback — the strict mode never trusts a Referer the browser
-     * would not attach to a cross-site fetch.
+     * (or a Referer whose URL yields an origin) whose normalized scheme,
+     * host and port match one allowlisted origin. Comparison is
+     * component-wise over the structured normalization of both sides,
+     * {@see self::normalizeOrigin()}, so "https://app.example.com"
+     * matches its default-port, punycode and trailing-dot spellings, but
+     * never a different port, scheme or host. With enforce_origin, a
+     * request without a usable Origin is rejected before the Referer
+     * fallback.
      */
     private function originIsAllowlisted(Request $request): bool
     {
         $origin = $request->headers->get('Origin');
         if ($origin === null || $origin === '' || $origin === 'null') {
             if ($this->enforceOrigin) {
-                // With enforce_origin, a request without a usable
-                // Origin is rejected BEFORE the Referer fallback — the
-                // strict mode never trusts a Referer the browser would not
-                // attach to a cross-site fetch.
+                // With enforce_origin, a request without a usable Origin is
+                // rejected before the Referer fallback.
                 return false;
             }
-            // Referer-origin fallback: the scheme+host+port of the Referer
-            // URL (no path, no query).
+            // Referer-origin fallback: the scheme, host and port of the
+            // Referer URL (no path, no query).
             $referer = $request->headers->get('Referer');
             if ($referer === null || $referer === '') {
                 return false;
@@ -2395,16 +2234,15 @@ final class ChallengeController
     }
 
     /**
-     * Parse and NORMALIZE an origin string into its exact comparison
-     * components: a canonical "{scheme}://{host}:{port}" string
-     * with
-     *  - scheme lowercased,
-     *  - host lowercased, trailing dot stripped, IDN converted to punycode
-     *    (idn_to_ascii when ext-intl is available), IPv6 literals kept
-     *    bracketed exactly as parse_url returns them,
-     *  - the effective port: an absent port defaults per scheme (https 443,
-     *    http 80 — "exact scheme/host/port" treats an explicit default port
-     *    as equal); any other scheme is not an origin.
+     * Parse and normalize an origin string into its exact comparison
+     * components: a canonical "{scheme}://{host}:{port}" string.
+     *  - Scheme is lowercased.
+     *  - Host is lowercased, its trailing dot stripped, and IDN converted
+     *    to punycode (idn_to_ascii when ext-intl is available); IPv6
+     *    literals are kept bracketed exactly as parse_url returns them.
+     *  - The effective port: an absent port defaults per scheme (https
+     *    443, http 80, so an explicit default port compares equal). Any
+     *    other scheme is not an origin.
      *
      * @throws nothing — malformed origins return null
      */
@@ -2424,14 +2262,15 @@ final class ChallengeController
 
         $host = strtolower((string) $parts['host']);
         // A trailing dot is DNS-equivalent to the bare name ("example.com."
-        // and "example.com" are the same host) — strip it before comparing.
+        // and "example.com" are the same host), so strip it before
+        // comparing.
         $host = rtrim($host, '.');
         if ($host === '') {
             return null;
         }
-        // IDN -> punycode (ext-intl): "bücher.example" and
-        // "xn--bcher-kva.example" are the same DNS name. The conversion is
-        // skipped when ext-intl is absent (ASCII origins are unaffected).
+        // IDN to punycode (ext-intl): "bücher.example" and
+        // "xn--bcher-kva.example" are the same DNS name. Skipped when
+        // ext-intl is absent.
         if (\function_exists('idn_to_ascii')) {
             $ascii = idn_to_ascii($host, IDNA_DEFAULT, INTL_IDNA_VARIANT_UTS46);
             if (\is_string($ascii) && $ascii !== '') {
@@ -2444,8 +2283,8 @@ final class ChallengeController
 
     /**
      * The risk-v1 int scope id for a scope string, or null when the scope
-     * is unknown in reject/baseline mode (the engine declines to evaluate —
-     * there is no reputation to attribute a refusal to).
+     * is unknown in reject or baseline mode (the engine declines to
+     * evaluate, so there is no reputation to attribute a refusal to).
      */
     private function riskScopeId(string $scope): ?int
     {
@@ -2460,15 +2299,14 @@ final class ChallengeController
     }
 
     /**
-     * PATH CANONICALITY: whether the RAW request target is the canonical
-     * path — checked over the raw REQUEST_URI, never a normalized route.
-     * Rejects any EMPTY segment (`//`, and a TRAILING slash `/challenge/`),
-     * any DOT segment (`/.`, `/./`, `/..`, `/../`), any percent-encoded
-     * byte (`%` — the canonical target is a fixed ASCII path, so
-     * `/%76hallenge`, `%2F`, `%5C`, `%2e%2e` are all encoding probes), and
-     * any backslash (`\` — a Windows path separator on some stacks). Only
-     * the PATH component is inspected (the query string is rejected
-     * separately with 422 QUERY_PARAMETERS_NOT_ALLOWED).
+     * Path canonicality: whether the raw request target is the canonical
+     * path, checked over the raw request URI, never a normalized route.
+     * Rejects any empty segment (`//` and a trailing slash), any dot
+     * segment (`/.`, `/./`, `/..`, `/../`), any percent-encoded byte
+     * (the canonical target is a fixed ASCII path, so `/%76hallenge`,
+     * `%2F`, `%5C` and `%2e%2e` are encoding probes), and any backslash.
+     * Only the path component is inspected; the query string is rejected
+     * separately with a 422.
      */
     private function isCanonicalRequestTarget(string $rawRequestUri): bool
     {
@@ -2480,8 +2318,8 @@ final class ChallengeController
         if (str_contains($path, '%') || str_contains($path, '\\')) {
             return false;
         }
-        // The empty element before a LEADING slash is the absolute-path
-        // marker, not a segment — every other empty segment (a `//` in the
+        // The empty element before a leading slash is the absolute-path
+        // marker, not a segment; every other empty segment (a `//` in the
         // middle, or the trailing `/` of "/challenge/") is noncanonical.
         $segments = explode('/', $path);
         $start = $path !== '' && $path[0] === '/' ? 1 : 0;
@@ -2497,12 +2335,11 @@ final class ChallengeController
     /**
      * Read the challenge request body with a hard byte cap: the input
      * stream is consumed for at most MAX+1 bytes, so an oversized chunked
-     * body is refused by the caller's length check WITHOUT ever being
-     * materialized in full — the bounded read is the authoritative
-     * protection (a declared Content-Length was already checked before the
-     * stream was touched, but chunked uploads can skip a truthful one).
-     * When Symfony hands back a buffered stream (tests, already-consumed
-     * input) the read is still bounded.
+     * body is refused by the caller's length check without ever being
+     * materialized in full. A declared Content-Length was already checked
+     * before the stream was touched, but chunked uploads can skip a
+     * truthful one. When Symfony hands back a buffered stream (tests,
+     * already-consumed input), the read is still bounded.
      */
     private function readBoundedBody(Request $request): string
     {
@@ -2515,17 +2352,16 @@ final class ChallengeController
     }
 
     /**
-     * DUPLICATE JSON KEY SCANNER: a small recursive walk over the RAW
-     * JSON document that reports the FIRST object key seen more than once
-     * at the same level — json_decode silently keeps the LAST occurrence,
-     * which is exactly the parser-ambiguity the endpoint must refuse
+     * Duplicate JSON key scanner: a small recursive walk over the raw JSON
+     * document that reports the first object key seen more than once at
+     * the same level. json_decode silently keeps the last occurrence,
+     * which is exactly the parser ambiguity the endpoint must refuse
      * ({"scope":"a","scope":"b"} parses differently across
      * intermediaries). Nested objects are scanned recursively. Returns
-     * the duplicated key (for the error message), or null when the
-     * document is clean or cannot be walked (a malformed document is
-     * handled by the strict json_decode check that follows — 422
-     * INVALID_JSON). The scanner is deliberately small and defensive: it
-     * only needs to be CORRECT on documents json_decode already accepts.
+     * the duplicated key for the error message, or null when the document
+     * is clean or cannot be walked (a malformed document is handled by
+     * the strict json_decode check that follows). The scanner only needs
+     * to be correct on documents json_decode already accepts.
      */
     private function scanForDuplicateJsonKey(string $json): ?string
     {
@@ -2545,19 +2381,18 @@ final class ChallengeController
      * Recursive JSON walker used by the duplicate-key scan. Consumes one
      * value starting at $offset and returns nothing; throws
      * {@see DuplicateJsonKeyException} on the first duplicated object key
-     * and {@see MalformedJsonWalkException} on anything it cannot walk
-     * (both are internal control flow — the walker never validates the
-     * document, it only scans it).
+     * and {@see MalformedJsonWalkException} on anything it cannot walk.
+     * Both are internal control flow: the walker never validates the
+     * document, it only scans it.
      *
      * @param int $offset position in the raw JSON string (by reference)
      */
     private function scanJsonValue(string $json, int &$offset, int $depth): void
     {
         if ($depth > self::MAX_JSON_SCAN_DEPTH) {
-            // Depth bomb: a pathological nesting cannot
-            // consume unbounded stack — beyond the cap the document is
-            // "not walkable" and the strict json_decode below (which has
-            // its own depth guard) rejects it.
+            // Depth bomb: beyond the cap the document is "not walkable",
+            // and the strict json_decode below (which has its own depth
+            // guard) rejects it.
             throw new MalformedJsonWalkException();
         }
         $length = \strlen($json);
@@ -2650,17 +2485,16 @@ final class ChallengeController
 
     /**
      * Consume one JSON string starting at $offset (which must point at the
-     * opening quote) and return its DECODED content — escape sequences
+     * opening quote) and return its decoded content, escape sequences
      * resolved to the actual characters. Duplicate detection compares
-     * SEMANTIC keys: {"a":1,"\u0061":2} is ONE key
-     * spelled twice, exactly the parser-ambiguity the scan refuses
-     * (json_decode canonicalizes both spellings into the same key). The
-     * JSON string grammar is decoded with json_decode itself (the
-     * surrogate-safe canonical decoder): \uXXXX pairs, \" \\ \/ \b \f \n
-     * \r \t and every mixed form land on their real characters. null when
-     * the string cannot be walked or its content is not decodable (a
-     * malformed document — the strict json_decode check that follows
-     * returns 422 INVALID_JSON).
+     * semantic keys: {"a":1,"\u0061":2} is one key spelled twice, exactly
+     * the parser ambiguity the scan refuses (json_decode canonicalizes
+     * both spellings into the same key). The JSON string grammar is
+     * decoded with json_decode itself, the surrogate-safe canonical
+     * decoder: \" \\ \/ \b \f \n \r \t and every mixed form land on
+     * their real characters. null when the string cannot be walked or its
+     * content is not decodable (a malformed document; the strict
+     * json_decode check that follows rejects it).
      *
      * @param int $offset position in the raw JSON string (by reference)
      */
@@ -2689,9 +2523,9 @@ final class ChallengeController
                 if ($offset >= $length) {
                     return null;
                 }
-                // Skip the escaped character (\" \\ \/ \b \f \n \r \t
-                // \uXXXX — a bare skip covers all of them; the exact
-                // decode above canonicalizes them).
+                // Skip the escaped character (\" \\ \/ \b \f \n \r \t:
+                // a bare skip covers all of them; the exact decode above
+                // canonicalizes them).
                 $offset++;
             }
         }
@@ -2714,19 +2548,18 @@ final class ChallengeController
     /**
      * All challenge responses share the private-document headers:
      * Cache-Control no-store, Pragma no-cache, Referrer-Policy no-referrer,
-     * X-Content-Type-Options nosniff — challenge bytes and client identity
-     * must never be cached, mirrored, or sniffed. When
+     * X-Content-Type-Options nosniff, so challenge bytes and client
+     * identity are never cached, mirrored or sniffed. When
      * risk.challenge_origin_allowlist is non-empty, every response also
-     * carries an EXPLICIT `Content-Security-Policy: frame-ancestors
-     * <allowlisted origins, space-separated>` — never inherited from
-     * default-src, so the allowlist is exactly the framing contract of the
-     * challenge endpoint (an empty allowlist emits no CSP header). The
-     * bundle emits NO CORS headers at all: CORS is not authorization; the
-     * origin checks are, and they run on every response regardless. When
-     * a NEW risk continuity session was minted for this request, the
-     * cookie is attached here — on every response path (success, deny,
-     * 422), so the session the assessment keyed on is what the client
-     * carries.
+     * carries an explicit Content-Security-Policy frame-ancestors header
+     * listing the allowlisted origins, never inherited from default-src,
+     * so the allowlist is exactly the framing contract of the challenge
+     * endpoint (an empty allowlist emits no CSP header). The bundle emits
+     * no CORS headers: CORS is not authorization; the origin checks are,
+     * and they run on every response regardless. When a new risk
+     * continuity session was minted for this request, the cookie is
+     * attached here, on every response path, so the session the
+     * assessment keyed on is what the client carries.
      *
      * @param array<string, mixed> $data
      */
@@ -2751,10 +2584,10 @@ final class ChallengeController
 }
 
 /**
- * @internal control-flow sentinel of the duplicate-JSON-key scan:
- *           thrown when the walker finds an object key it already
- *           saw at the same level. Carries the raw key for the error
- *           message. Never escapes the controller.
+ * @internal control-flow sentinel of the duplicate-JSON-key scan: thrown
+ *           when the walker finds an object key it already saw at the same
+ *           level. Carries the raw key for the error message. Never
+ *           escapes the controller.
  */
 final class DuplicateJsonKeyException extends \RuntimeException
 {
@@ -2765,11 +2598,10 @@ final class DuplicateJsonKeyException extends \RuntimeException
 }
 
 /**
- * @internal control-flow sentinel of the duplicate-JSON-key scan:
- *           thrown when the walker cannot advance through the
- *           document. The strict json_decode check handles the malformed
- *           body afterwards (422 INVALID_JSON). Never escapes the
- *           controller.
+ * @internal control-flow sentinel of the duplicate-JSON-key scan: thrown
+ *           when the walker cannot advance through the document. The strict
+ *           json_decode check handles the malformed body afterwards. Never
+ *           escapes the controller.
  */
 final class MalformedJsonWalkException extends \RuntimeException
 {

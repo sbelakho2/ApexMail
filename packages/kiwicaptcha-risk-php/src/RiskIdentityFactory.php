@@ -54,7 +54,7 @@ final class RiskIdentityFactory
     /**
      * 128-bit ephemeral pseudonym (hex, 32 chars): first 16 bytes of the
      * HMAC-SHA256 described in the contract. Epoch is encoded as an 8-byte
-     * big-endian unsigned integer (pack('J')).
+     * big-endian unsigned integer via pack('J').
      */
     public function pseudonym(string $key, string $context, int $epoch, string $material): string
     {
@@ -112,8 +112,8 @@ final class RiskIdentityFactory
     }
 
     /**
-     * Source pseudonym for an EXPLICIT epoch (same canonical HMAC
-     * construction as sourceId(), with the epoch passed in): the epoch±1
+     * Source pseudonym for an explicit epoch (same canonical HMAC
+     * construction as sourceId(), with the epoch passed in). The epoch±1
      * boundary keys must use their own epochs' pseudonyms, never the
      * current-epoch one.
      */
@@ -123,7 +123,7 @@ final class RiskIdentityFactory
     }
 
     /**
-     * Subnet pseudonym for an EXPLICIT epoch (same canonical HMAC
+     * Subnet pseudonym for an explicit epoch (same canonical HMAC
      * construction as subnetId(), with the epoch passed in).
      */
     public function subnetIdForEpoch(RiskContext $c, int $epoch): string

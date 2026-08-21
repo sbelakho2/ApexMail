@@ -16,9 +16,9 @@ use PHPUnit\Framework\TestCase;
 
 /**
  * Security-hardening behaviour of the verifier: server-measured minimum
- * duration (client-reported duration is no longer trusted), opt-in telemetry
- * enforcement, and the one-shot consume-on-verify model (a wrong candidate
- * burns the challenge — there is no maxAttempts).
+ * duration (client-reported duration is no longer trusted), opt-in
+ * telemetry enforcement, and the one-shot consume-on-verify model (a
+ * wrong candidate burns the challenge; there is no maxAttempts).
  */
 final class VerifierHardeningTest extends TestCase
 {
@@ -51,11 +51,11 @@ final class VerifierHardeningTest extends TestCase
 
     /**
      * The issuer now signs protocol v2 challenges; these tests exercise
-     * timing/telemetry/one-shot behaviour, which is version-independent, so
-     * swap the issued record for a v1-signed equivalent over the SAME
-     * nonce/salt. The prefix is rebuilt (prefix = challenge|salt|) to stay
-     * structurally consistent with the v1 challenge — the caller re-solves
-     * the proof against the returned record's prefix.
+     * timing/telemetry/one-shot behaviour, which is version-independent,
+     * so swap the issued record for a v1-signed equivalent over the same
+     * nonce/salt. The prefix is rebuilt (prefix = challenge|salt|) to
+     * stay structurally consistent with the v1 challenge; the caller
+     * re-solves the proof against the returned record's prefix.
      */
     private function asV1Record(ChallengeRecord $record): ChallengeRecord
     {
@@ -162,8 +162,8 @@ final class VerifierHardeningTest extends TestCase
 
     public function testReceiptBeforeIssuanceWithinSkewToleranceSkipsFloor(): void
     {
-        // The verifying host's clock is 1s BEHIND the issuing host's:
-        // elapsed would be -1s (unmeasurable). Within the 5s skew
+        // The verifying host's clock is 1s behind the issuing host's:
+        // elapsed would be -1s (unmeasurable), within the 5s skew
         // tolerance, so the floor check is skipped and the solve passes.
         $storage = new ArrayStorage();
         [$record, $token] = $this->issueAndSolve($storage, minDurationMs: 1000);
@@ -182,7 +182,7 @@ final class VerifierHardeningTest extends TestCase
 
     public function testSkewAtExactToleranceBoundaryPasses(): void
     {
-        // Receipt exactly 5s before issuance sits at the SKEW_TOLERANCE_US
+        // Receipt exactly 5s before issuance sits at the skew tolerance
         // boundary: elapsed is clamped to "unmeasurable", floor skipped.
         $storage = new ArrayStorage();
         [$record, $token] = $this->issueAndSolve($storage, minDurationMs: 1000);
@@ -229,8 +229,8 @@ final class VerifierHardeningTest extends TestCase
 
     public function testSkewBeyondToleranceRejectsAsTooFast(): void
     {
-        // Receipt 6s before issuance exceeds the 5s tolerance: physically
-        // impossible, rejected as TooFast.
+        // Receipt 6s before issuance exceeds the 5s tolerance:
+        // physically impossible, rejected as TooFast.
         $storage = new ArrayStorage();
         [$record, $token] = $this->issueAndSolve($storage, minDurationMs: 1000);
 
@@ -249,9 +249,9 @@ final class VerifierHardeningTest extends TestCase
     public function testRecordWithoutIssuedAtNsIsMalformed(): void
     {
         // The client-duration fallback is gone: a record without a
-        // server-side issued_at_ns cannot be timed and is rejected outright
-        // (MalformedRecord) instead of trusting the forgeable client
-        // duration. The malformed record is burned.
+        // server-side issued_at_ns cannot be timed and is rejected
+        // outright (MalformedRecord) instead of trusting the forgeable
+        // client duration. The malformed record is burned.
         $storage = new ArrayStorage();
         [$record, $token] = $this->issueAndSolve($storage, minDurationMs: 1000);
 
@@ -405,19 +405,20 @@ final class VerifierHardeningTest extends TestCase
     }
 
     /**
-     * Consume-on-verify: a wrong candidate burns the challenge —
-     * the record transitions to consumed and the deterministic invalid
-     * outcome is committed, so the second (correct) verify sees the SAME
-     * InsufficientWork instead of re-deriving the proof.
+     * Consume-on-verify: a wrong candidate burns the challenge. The
+     * record transitions to consumed and the deterministic invalid
+     * outcome is committed, so the second (correct) verify sees the
+     * same InsufficientWork instead of re-deriving the proof.
      */
     public function testWrongCandidateBurnsTheChallenge(): void
     {
         $storage = new ArrayStorage();
         [$record, $token] = $this->issueAndSolve($storage, minDurationMs: 0);
 
-        // The wrong counter must be PROVABLY wrong: at the issued difficulty
-        // a random counter coincidentally meets the target with p=1/2^bits
-        // (a flake seen in CI). Search upward until the hash provably misses.
+        // The wrong counter must be provably wrong: at the issued
+        // difficulty a random counter coincidentally meets the target
+        // with p=1/2^bits (a flake seen in CI). Search upward until the
+        // hash provably misses.
         $wrongCounter = 1;
         $saltBytes = base64_decode($record->salt, true);
         while (Verifier::leadingZeroBits(hash('sha256', $record->prefix.$wrongCounter.$saltBytes, true)) >= $record->targetBits) {
@@ -434,10 +435,10 @@ final class VerifierHardeningTest extends TestCase
     }
 
     /**
-     * Consume-on-verify: a FIRST verify that succeeds consumes
-     * the record and commits the deterministic valid outcome, so a replay
-     * returns the SAME Valid without re-deriving — the attempt bound IS the
-     * single-use record (there is no maxAttempts parameter).
+     * Consume-on-verify: a first verify that succeeds consumes the
+     * record and commits the deterministic valid outcome, so a replay
+     * returns the same Valid without re-deriving. The attempt bound is
+     * the single-use record; there is no maxAttempts parameter.
      */
     public function testSuccessfulVerifyReplaysTheCommittedOutcome(): void
     {
@@ -469,8 +470,9 @@ final class VerifierHardeningTest extends TestCase
         [$record] = $this->issueAndSolve($storage, minDurationMs: 0);
 
         self::assertGreaterThan(0, $record->issuedAtNs);
-        // issuedAtNs is WALL-CLOCK epoch microseconds (not per-host monotonic
-        // nanoseconds): it must be in the recent past of this host's clock.
+        // issuedAtNs is wall-clock epoch microseconds (not per-host
+        // monotonic nanoseconds): it must be in the recent past of this
+        // host's clock.
         $nowUs = (int) (microtime(true) * 1_000_000);
         self::assertLessThanOrEqual($nowUs, $record->issuedAtNs, 'issuance must precede the assertion instant');
         self::assertGreaterThan($nowUs - 5_000_000, $record->issuedAtNs, 'issuance must be within the recent past');

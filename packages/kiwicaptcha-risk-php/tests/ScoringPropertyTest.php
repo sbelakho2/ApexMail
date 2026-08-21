@@ -18,7 +18,7 @@ use PHPUnit\Framework\TestCase;
  *
  * Encoding: 10,000 vectors; each scored with base 100 and the contract
  * default weights; scores concatenated as unsigned big-endian 16-bit
- * (pack('n')); sha256 of the 20,000 bytes.
+ * integers via pack('n'); sha256 of the 20,000 bytes.
  */
 final class ScoringPropertyTest extends TestCase
 {
@@ -131,7 +131,7 @@ final class ScoringPropertyTest extends TestCase
     }
 
     /**
-     * ASYMMETRIC TRUST: the exact-IP (source) signals must
+     * Asymmetric trust: the exact-IP (source) signals must
      * outweigh the subnet (network) signals in the scorer weights, so one
      * attacker IP is always punished harder than the /64 aggregate it
      * shares. Pinned on the contract defaults; a future symmetric-weight
@@ -169,9 +169,9 @@ final class ScoringPropertyTest extends TestCase
     }
 
     /**
-     * ABSOLUTE USER-VISIBLE CAP: the score is clamped to
+     * Absolute user-visible cap: the score is clamped to
      * 0..1000, so a poisoned source (every signal at saturation) reaches
-     * the cap but can NEVER exceed it — there is no unbounded punishment
+     * the cap but can never exceed it; there is no unbounded punishment
      * mode.
      */
     public function testSaturatedSourceReachesTheCapButNeverExceedsIt(): void

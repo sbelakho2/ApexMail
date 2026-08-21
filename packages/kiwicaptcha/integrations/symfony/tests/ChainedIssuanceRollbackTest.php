@@ -29,17 +29,15 @@ use PHPUnit\Framework\TestCase;
 use Symfony\Component\HttpFoundation\Request;
 
 /**
- * The PROVEN-NOT-HANDED-OFF rollback symmetry: once the outstanding
- * admission succeeds, EVERY exit that positively established the
- * challenge was never handed off must return the admitted slot AND
- * release the chain reservation through the controller's SINGLE cleanup
- * primitive (rollbackIssuanceAttempt) — the resource accounting must
- * never depend on which exception type fires (the InvalidArgumentException
- * path returned the reservation but leaked the admitted slot). The
- * successful handoff keeps the slot, and the INDETERMINATE
- * case (the chain state cannot be read after a thrown issuance
- * transition — the challenge may be the authoritative issued stage-2)
- * keeps its existing no-rollback behavior.
+ * The proven-not-handed-off rollback symmetry: once the outstanding
+ * admission succeeds, every exit that positively established the
+ * challenge was never handed off must return the admitted slot and
+ * release the chain reservation (rollbackIssuanceAttempt). The resource
+ * accounting must never depend on which exception type fires — the
+ * InvalidArgumentException path returned the reservation but leaked the
+ * admitted slot. The successful handoff keeps the slot, and the
+ * indeterminate case (the chain state cannot be read after a thrown
+ * issuance transition) keeps its existing no-rollback behavior.
  */
 final class ChainedIssuanceRollbackTest extends TestCase
 {
@@ -147,9 +145,9 @@ final class ChainedIssuanceRollbackTest extends TestCase
         $chainService = $this->chainService(new ArrayChainedChallengeStateStore());
         ['chainId' => $chainId, 'ticket' => $ticket] = $this->openChain($chainService);
 
-        // The mint (AFTER the outstanding admission succeeded) fails with
+        // The mint (after the outstanding admission succeeded) fails with
         // \InvalidArgumentException — the exception type the controller
-        // maps to the 422 INVALID_SCOPE response.
+        // maps to the 422 invalid_scope response.
         $mint->mintError = new \InvalidArgumentException('simulated invalid-argument mint failure');
         $risk = $this->riskStack();
         $controller = $this->chainController($mint, $chainService, $risk, outstanding: $outstanding);
@@ -158,10 +156,10 @@ final class ChainedIssuanceRollbackTest extends TestCase
         self::assertSame(422, $response->getStatusCode(), sprintf('an InvalidArgumentException mint failure is the 422 INVALID_SCOPE response: %s', (string) $response->getContent()));
         self::assertStringContainsString('INVALID_SCOPE', (string) $response->getContent());
 
-        // BOTH halves of the proven-not-handed-off accounting returned to
+        // both halves of the proven-not-handed-off accounting returned to
         // their state: the admitted slot is returned (the per-source
-        // counter is back at 0 — the GLOBAL counter is never decremented,
-        // it decays by EXPIRE) and the chain reservation is released (the
+        // counter is back at 0 — the global counter is never decremented,
+        // it decays by expire) and the chain reservation is released (the
         // chain is available/reserved-free again — the ticket stays
         // reusable).
         self::assertSame(0, $client->counters[$this->sourceKey()] ?? 0, 'the admitted outstanding slot is returned — the per-source counter is back to its prior state');
@@ -172,7 +170,7 @@ final class ChainedIssuanceRollbackTest extends TestCase
         self::assertNull($requirement->owner, 'the released chain is reserved-free');
         self::assertSame(0, \count((new \ReflectionObject($storage))->getProperty('records')->getValue($storage)), 'no challenge record may exist for a mint that failed');
 
-        // The SAME ticket still works end-to-end once the mint recovers —
+        // The same ticket still works end-to-end once the mint recovers —
         // the failure never burned the chain.
         $mint->mintError = null;
         $retry = $controller->challenge($this->challengeRequest(json_encode(['scope' => 'login', 'chain_ticket' => $ticket, 'request_binding' => 'txn-alpha'], JSON_THROW_ON_ERROR)));
@@ -235,16 +233,16 @@ final class ChainedIssuanceRollbackTest extends TestCase
         $indeterminate = new RollbackLostReplyChainStore($innerStore, throwAfterIssued: true);
         $chainService = $this->chainService($indeterminate);
         ['chainId' => $chainId, 'ticket' => $ticket] = $this->openChain($chainService);
-        // From here on the chain state is UNREADABLE: the issuance
-        // transition throws AND the recovery read fails — INDETERMINATE.
+        // From here on the chain state is unreadable: the issuance
+        // transition throws AND the recovery read fails — indeterminate.
         $indeterminate->readThrows = true;
 
         $risk = $this->riskStack();
         $controller = $this->chainController($storage, $chainService, $risk, outstanding: $outstanding);
 
-        // markIssued THROWS and the state CANNOT be read: INDETERMINATE —
+        // markIssued throws and the state cannot be read: indeterminate —
         // the challenge may be the authoritative issued stage-2. The
-        // minted challenge is RETAINED, the slot is NOT rolled back and
+        // minted challenge is retained, the slot is NOT rolled back and
         // the reservation is NOT released.
         $response = $controller->challenge($this->challengeRequest(json_encode(['scope' => 'login', 'chain_ticket' => $ticket, 'request_binding' => 'txn-alpha'], JSON_THROW_ON_ERROR)));
         self::assertSame(503, $response->getStatusCode(), 'an indeterminate chain issuance is the retryable 503');
@@ -260,11 +258,12 @@ final class ChainedIssuanceRollbackTest extends TestCase
 }
 
 /**
- * A storage whose MINT (store()) throws the configured exception on
- * demand — the failure-injection seam for the post-admission issuance
- * failure paths (the exception type is caller-controlled, so a single
- * fixture exercises the InvalidArgumentException and the ReplicaWait
- * paths). Every other operation delegates to the wrapped storage.
+ * A storage whose mint step throws the configured exception on demand
+ * — the store() call itself — the failure-injection seam for the
+ * post-admission issuance failure paths. The exception type is
+ * caller-controlled, so a single fixture exercises the
+ * InvalidArgumentException and the ReplicaWait paths. Every other
+ * operation delegates to the wrapped storage.
  */
 final class ThrowingMintStorage implements StorageInterface
 {
@@ -304,13 +303,13 @@ final class ThrowingMintStorage implements StorageInterface
 }
 
 /**
- * A transactional chain-state decorator that runs the REAL issuance
- * transition and THEN throws (a lost reply), and can additionally make
- * the recovery read fail (the INDETERMINATE outcome).
+ * A transactional chain-state decorator that runs the real issuance
+ * transition and then throws (a lost reply), and can additionally make
+ * the recovery read fail (the indeterminate outcome).
  */
 final class RollbackLostReplyChainStore implements TransactionalChainedChallengeStateStore
 {
-    /** Whether the recovery read throws (the INDETERMINATE outcome). */
+    /** Whether the recovery read throws (the indeterminate outcome). */
     public bool $readThrows = false;
 
     public function __construct(
@@ -342,7 +341,7 @@ final class RollbackLostReplyChainStore implements TransactionalChainedChallenge
     public function read(string $chainId): ?array
     {
         $record = $this->inner->read($chainId);
-        // The INDETERMINATE seam: after the issuance transition the record
+        // The indeterminate seam: after the issuance transition the record
         // is issued — the recovery read of such a record fails.
         if ($this->readThrows && $record !== null && \in_array($record['state'], ['issued', 'verified', 'step_up_required', 'denied'], true)) {
             throw new \RuntimeException('simulated chain state read outage');
@@ -414,14 +413,14 @@ final class RollbackLostReplyChainStore implements TransactionalChainedChallenge
 
 /**
  * A minimal in-memory stand-in for Predis\Client covering exactly the
- * outstanding-challenge scripts this test exercises: the atomic ISSUE
- * (both caps -> INCR both + EXPIRE), the best-effort SOLVE and the
- * ABORTED-BEFORE-HANDOFF rollback (DECR floored at 0). The counters are
+ * outstanding-challenge scripts this test exercises: the atomic issue
+ * (both caps -> incr both + expire), the best-effort solve and the
+ * aborted-before-handoff rollback (decr floored at 0). The counters are
  * observable for the slot assertions.
  */
 final class RollbackFakeRedis extends \Predis\Client
 {
-    /** @var array<string, int> plain INCR counters */
+    /** @var array<string, int> plain incr counters */
     public array $counters = [];
 
     public function __construct()
@@ -440,10 +439,10 @@ final class RollbackFakeRedis extends \Predis\Client
         $rest = \array_slice($arguments, 2 + $numKeys);
 
         if (str_contains($script, 'Outstanding challenge issuance')) {
-            // OutstandingChallenges::issue: KEYS[1] per-source counter,
-            // KEYS[2] global counter; ARGV[1] source cap, ARGV[2] global
-            // cap, ARGV[3] TTL seconds. GET both caps -> refuse 0/-1
-            // BEFORE anything is written -> INCR both.
+            // OutstandingChallenges::issue: keys[1] per-source counter,
+            // keys[2] global counter; argv[1] source cap, argv[2] global
+            // cap, argv[3] TTL seconds. GET both caps -> refuse 0/-1
+            // before anything is written -> incr both.
             $source = (string) $keys[0];
             $global = (string) $keys[1];
             if (($this->counters[$source] ?? 0) >= (int) $rest[0]) {
@@ -460,7 +459,7 @@ final class RollbackFakeRedis extends \Predis\Client
 
         if (str_contains($script, 'Outstanding challenge solve') || str_contains($script, 'Outstanding challenge aborted')) {
             // OutstandingChallenges::solved / ::abortedBeforeHandoff:
-            // KEYS[1] per-source counter; best-effort DECR floored at 0.
+            // keys[1] per-source counter; best-effort decr floored at 0.
             $key = (string) $keys[0];
             $v = $this->counters[$key] ?? 0;
             if ($v > 0) {

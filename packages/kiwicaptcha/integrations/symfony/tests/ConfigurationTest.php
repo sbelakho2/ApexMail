@@ -13,7 +13,7 @@ use Symfony\Component\Config\Definition\Processor;
 /**
  * The bundle's config tree must not contradict the core's protocol
  * constraints: difficulty_bits is bounded by the core's
- * Config::MAX_SHA_TARGET_BITS (20) so the bundle can never allow issuing an
+ * Config::MAX_SHA_target_bits (20) so the bundle can never allow issuing an
  * unsolvable challenge.
  */
 final class ConfigurationTest extends TestCase
@@ -74,7 +74,7 @@ final class ConfigurationTest extends TestCase
         self::assertSame(1, $processed['argon_t']);
         self::assertSame(1, $processed['argon_p']);
 
-        // The core's CONDITIONAL Argon2id profile rules (t >= 3, p == 1,
+        // The core's conditional Argon2id profile rules (t >= 3, p == 1,
         // m_kib >= 8 * p) are enforced by KiwiCaptcha\Config when the
         // extension builds it — the tree intentionally does not duplicate
         // them (see the Configuration comments). Prove the boundary cases
@@ -128,7 +128,7 @@ final class ConfigurationTest extends TestCase
 
     public function testChallengeTtlAboveProtocolCeilingIsRejectedByTree(): void
     {
-        // The verifier declares lifetimes > MAX_TTL_SECS malformed; the
+        // The verifier declares lifetimes > MAX_TTL_secs malformed; the
         // config tree must refuse them at configuration time.
         $this->expectException(\Symfony\Component\Config\Definition\Exception\InvalidConfigurationException::class);
         $this->process(['challenge_ttl_secs' => 301]);
@@ -364,8 +364,8 @@ final class ConfigurationTest extends TestCase
 
     public function testReservationLeaseSecsBoundsAreEnforced(): void
     {
-        // The SHORT lease is bounded 5..60 AND strictly smaller than the
-        // chain lifetime (it is a SHORT claim, never the chain lifetime).
+        // The short lease is bounded 5..60 AND strictly smaller than the
+        // chain lifetime (it is a short claim, never the chain lifetime).
         foreach ([4, 61] as $bad) {
             try {
                 $this->process(['risk' => ['chaining' => ['reservation_lease_secs' => $bad]]]);
@@ -401,7 +401,7 @@ final class ConfigurationTest extends TestCase
     {
         // chaining.enabled=true requires risk.enabled=true AND a non-null
         // risk.request_binding_authority — the chain is a server-side
-        // transaction obligation anchored on the AUTHORITATIVE binding;
+        // transaction obligation anchored on the authoritative binding;
         // the refusal names both requirements at compile time.
         try {
             $this->process(['risk' => ['chaining' => ['enabled' => true]]]);

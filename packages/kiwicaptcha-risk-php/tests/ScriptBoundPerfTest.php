@@ -9,14 +9,14 @@ use Predis\Client;
 use PHPUnit\Framework\TestCase;
 
 /**
- * SLOW-SCRIPT GUARD (a guard, NOT a benchmark): the
- * verification-path scripts (risk-v1.lua + the calibration read) must run
- * well under a generous bound when the state is at its MAXIMUM allowed
- * size (every key carrying its full bounded field set — 12 flat fields
- * per risk state hash, 6 fields per calibration bucket, all 24 buckets +
- * state present). The asserted bound is a generous 50 ms AVERAGE over 100
- * runs so CI noise can never flake it; typical means are sub-millisecond.
- * Skipped unless RISK_REDIS_URL is set.
+ * Slow-script guard (a guard, not a benchmark): the verification-path
+ * scripts (risk-v1.lua + the calibration read) must run well under a
+ * generous bound when the state is at its maximum allowed size. Every
+ * key carries its full bounded field set: 12 flat fields per risk
+ * state hash, 6 fields per calibration bucket, and all 24 buckets plus
+ * state present. The asserted bound is a generous 50 ms average over
+ * 100 runs so CI noise cannot flake it; typical means are
+ * sub-millisecond. Skipped unless a Redis URL is configured.
  */
 final class ScriptBoundPerfTest extends TestCase
 {
@@ -61,7 +61,7 @@ final class ScriptBoundPerfTest extends TestCase
         return (int) floor(microtime(true) * 1000);
     }
 
-    /** The 12 STATE_FIELDS of the risk state hashes at their maximum. */
+    /** The 12 state fields of the risk state hashes at their maximum. */
     private function seedRiskState(string $key, Client $client, int $now): void
     {
         $client->hset($key, 'ts', (string) $now);
@@ -84,9 +84,10 @@ final class ScriptBoundPerfTest extends TestCase
     }
 
     /**
-     * risk-v1.lua under MAXIMUM state (all 10 keys present with all 12
-     * fields, full event path — session/principal present, dedupe miss):
-     * 100 runs must average under the generous 50 ms guard.
+     * risk-v1.lua under maximum state (all 10 keys present with all 12
+     * fields and the full event path, session and principal present,
+     * dedupe miss): 100 runs must average under the generous 50 ms
+     * guard.
      */
     public function testRiskV1AverageStaysUnderBudgetAtMaximumState(): void
     {
@@ -143,8 +144,8 @@ final class ScriptBoundPerfTest extends TestCase
     }
 
     /**
-     * calibration.lua under MAXIMUM state (24 buckets × 6 fields + rate
-     * state): 100 runs must average under the generous 50 ms guard.
+     * calibration.lua under maximum state (24 buckets × 6 fields plus
+     * rate state): 100 runs must average under the generous 50 ms guard.
      */
     public function testCalibrationAverageStaysUnderBudgetAtMaximumState(): void
     {

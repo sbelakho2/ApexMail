@@ -8,7 +8,7 @@ use Symfony\Component\Config\Loader\LoaderInterface;
 use Symfony\Component\DependencyInjection\ContainerBuilder;
 
 /**
- * Kernel with the IMPOSSIBLE combination (standard mode): telemetry off +
+ * Kernel with the impossible combination (standard mode): telemetry off +
  * enforce_telemetry true. The extension must refuse to compile — an off
  * widget sends empty telemetry and enforcement rejects it, so every
  * legitimate solve would fail.

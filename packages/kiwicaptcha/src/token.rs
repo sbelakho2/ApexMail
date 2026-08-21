@@ -63,7 +63,7 @@ pub const MAX_DURATION_MS: u64 = 3_600_000;
 /// [`SolutionToken::decode`]. The canonical wire form of a
 /// legitimate token is a few hundred bytes (32-byte nonce + counter +
 /// duration + a small telemetry object); 32 KiB is far beyond any of them.
-/// The bound is enforced BEFORE the base64 decode, so an oversized token is
+/// The bound is enforced before the base64 decode, so an oversized token is
 /// rejected with [`DecodeError::TooLarge`] without spending any work on —
 /// or allocating for — a decode of attacker-supplied bytes.
 pub const MAX_TOKEN_RAW_BYTES: usize = 32_768;
@@ -101,7 +101,7 @@ impl SolutionToken {
         if raw.len() > MAX_TOKEN_RAW_BYTES {
             return Err(DecodeError::TooLarge);
         }
-        // Strict canonical decode: the input must be EXACTLY the
+        // Strict canonical decode: the input must be exactly the
         // canonical padded standard-base64 encoding of the decoded bytes.
         // Any deviation — url-safe alphabet, missing/loose padding, trailing
         // bits, surrounding whitespace — re-encodes to a different string, so
@@ -139,8 +139,8 @@ impl SolutionToken {
             .parse()
             .map_err(|_| DecodeError::InvalidCounter)?;
         // The counter must be within what any solver can produce: the JS
-        // solver searches counter < SOLVER_MAX_HASHES (5,000,000 attempts),
-        // so the largest legitimate counter is 4,999,999 — anything >= 5M
+        // solver searches counters below the solver maximum (5,000,000
+        // attempts), so the largest legitimate counter is 4,999,999 — anything >= 5M
         // was not minted by a real solve (matches PHP exactly).
         if counter >= crate::challenge::SOLVER_MAX_HASHES {
             return Err(DecodeError::InvalidCounter);
@@ -156,7 +156,7 @@ impl SolutionToken {
         }
         let telemetry: serde_json::Value =
             serde_json::from_str(telemetry_str).map_err(|_| DecodeError::Malformed)?;
-        // Telemetry must be a JSON OBJECT in both implementations ({} for an
+        // Telemetry must be a JSON object in both implementations ({} for an
         // off widget, {v,mode,me,ke,...} otherwise) — arrays, strings,
         // numbers, booleans and null are not part of the wire language.
         if !telemetry.is_object() {
@@ -251,7 +251,7 @@ mod tests {
 
     #[test]
     fn decode_rejects_megabyte_token_by_length_cap() {
-        // A 1 MB token is rejected by the length cap BEFORE any
+        // A 1 MB token is rejected by the length cap before any
         // base64 decode — no large allocation, no decode work, and no panic.
         let mega = "A".repeat(1_000_000);
         assert!(
@@ -262,7 +262,7 @@ mod tests {
 
     #[test]
     fn decode_rejects_recursively_nested_telemetry() {
-        // The telemetry JSON parse respects serde_json's DEFAULT
+        // The telemetry JSON parse respects serde_json's default
         // recursion limit (the crate never disables it) — a telemetry object
         // nested deeper than the limit is rejected with Malformed (a clean
         // error), never a stack overflow. 200 levels exceed the 128-level
@@ -288,10 +288,10 @@ mod tests {
 
     #[test]
     fn decode_rejects_counter_at_and_beyond_solver_max() {
-        // The JS solver searches counter < SOLVER_MAX_HASHES (5,000,000
-        // attempts), so the largest legitimate counter is 4,999,999 — the
-        // cap value itself is never minted by a real solve (off-by-one
-        // parity with PHP).
+        // The JS solver searches counters below the solver maximum
+        // (5,000,000 attempts), so the largest legitimate counter is
+        // 4,999,999 — the cap value itself is never minted by a real solve
+        // (off-by-one parity with PHP).
         for counter in [
             crate::challenge::SOLVER_MAX_HASHES,
             crate::challenge::SOLVER_MAX_HASHES + 1,
@@ -456,7 +456,7 @@ mod tests {
     fn decode_rejects_url_safe_base64_variants() {
         let encoded = valid_token().encode();
         // The chosen nonce guarantees the decoded payload itself contains
-        // both '+' and '/', and the OUTER token is standard base64: any
+        // both '+' and '/', and the outer token is standard base64: any
         // '-'/'_' character is outside the standard alphabet, so swapping
         // one in must break the decode.
         let swapped = encoded.replacen(&encoded[0..1], "-", 1);

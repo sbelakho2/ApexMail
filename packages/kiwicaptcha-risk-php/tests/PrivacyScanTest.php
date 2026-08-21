@@ -16,16 +16,17 @@ use Predis\Client;
 use PHPUnit\Framework\TestCase;
 
 /**
- * Redis privacy guarantees (real Redis, skipped unless RISK_REDIS_URL):
- * issuing observations derived from a single IP, a User-Agent string, a
- * principal id and an email must leave NO raw personal data in Redis —
- * keys, hash values and metadata contain only HMAC pseudonyms and numeric
- * counters.
+ * Redis privacy guarantees (real Redis, skipped when no Redis URL is
+ * configured). Issuing observations derived from a single IP, a
+ * User-Agent string, a principal id and an email must leave no raw
+ * personal data in Redis: keys, hash values and metadata contain only
+ * HMAC pseudonyms and numeric counters.
  *
  * The scan pattern is namespace-scoped ({kiwi:<ns>}:*): the contract's
- * hash-tagged keys do not start with a bare `kiwi:` prefix, so the literal
- * MATCH 'kiwi:*' glob matches nothing; the namespace-scoped pattern is the
- * strict equivalent and stays isolated from parallel test processes.
+ * hash-tagged keys do not start with a bare `kiwi:` prefix, so the
+ * literal match 'kiwi:*' glob matches nothing; the namespace-scoped
+ * pattern is the strict equivalent and stays isolated from parallel
+ * test processes.
  *
  * Session/principal state IS persisted when the observation carries them
  * (has_session/has_principal = 1) — under their keyed HMAC pseudonyms, so
@@ -89,7 +90,7 @@ final class PrivacyScanTest extends TestCase
             $store->observe($observation);
         }
 
-        // SCAN the namespace: every key, then every hash field/value.
+        // Scan the namespace: every key, then every hash field/value.
         $keys = [];
         $cursor = '0';
         do {

@@ -7,7 +7,7 @@ namespace KiwiCaptcha\Risk;
 /**
  * 13 weight fields, same names/order as SignalVector.
  *
- * DEFAULT weights are the contract defaults (identical to fixtures.json).
+ * The default weights are the contract defaults (identical to fixtures.json).
  */
 final class RiskWeights
 {

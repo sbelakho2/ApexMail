@@ -7,18 +7,19 @@ namespace BelConsulting\KiwiCaptchaBundle\Risk;
 use KiwiCaptcha\Risk\RiskAction;
 
 /**
- * Signs and verifies one-shot CHAIN TICKETS and drives the transactional
+ * Signs and verifies one-shot chain tickets and drives the transactional
  * chained-challenge machine (risk.chaining). A chain ticket is the
- * client-carrying half of a chain — base64url([1, chainId, expiresAt]) "."
- * base64url(hmac_sha256(body, secret, true)) — while everything else is
- * SERVER-HELD in the obligation-anchored state record, so a client can
+ * client-carrying half of a chain: the base64url of [1, chainId,
+ * expiresAt], a dot, and the base64url of the raw
+ * hmac_sha256(body, secret, true) digest. Everything else is
+ * server-held in the obligation-anchored state record, so a client can
  * never alter it, skip a stage, or extend its own validity. The ticket
  * format and the full state machine are documented in
  * docs/chained-challenges.md.
  */
 final class ChainedChallengeTicketService
 {
-    /** The ONLY ticket format version this service issues/accepts. */
+    /** The ticket format version this service issues and accepts. */
     private const TICKET_VERSION = 1;
 
     /** The chain id alphabet (base64url of 16 random bytes). */
@@ -27,7 +28,7 @@ final class ChainedChallengeTicketService
     /** The wire bound shared with the controller's accepted pattern. */
     private const MAX_TICKET_BYTES = 256;
 
-    /** The chainable PoW actions (Sha16..Argon64 — never StepUp/Deny). */
+    /** The chainable PoW actions (Sha16..Argon64, never StepUp/Deny). */
     private const CHAINABLE_ACTIONS = [RiskAction::Sha16, RiskAction::Sha18, RiskAction::Sha20, RiskAction::Argon16, RiskAction::Argon32, RiskAction::Argon64];
 
     /**
@@ -35,16 +36,16 @@ final class ChainedChallengeTicketService
      *                                                                     obligation-anchored
      *                                                                     chain
      *                                                                     state
-     *                                                                     store
+     *                                                                     store.
      * @param int $ttlSecs                the chain lifetime
      *                                    (risk.chaining.ttl_secs, bounded
      *                                    30..3600 by the config tree)
-     * @param int $reservationLeaseSecs   the SHORT owner-scoped
+     * @param int $reservationLeaseSecs   the short owner-scoped
      *                                    reservation lease
      *                                    (risk.chaining.reservation_lease_secs,
      *                                    bounded 5..60 and < ttl_secs by
-     *                                    the config tree — a crashed
-     *                                    owner blocks retries for seconds)
+     *                                    the config tree; a crashed owner
+     *                                    blocks retries for seconds).
      * @param RequestBindingAuthorityInterface|null $bindingAuthority the
      *                                    deployment's authoritative
      *                                    transaction-binding resolver
@@ -68,13 +69,13 @@ final class ChainedChallengeTicketService
     /**
      * The bounded pseudonymous transaction-obligation id:
      * hmac_sha256("chain-obligation\0{policyVersion}\0{scope}\0{binding}",
-     * chainSecret) — the transaction anchor of a chain. NEVER a raw
+     * chainSecret), the transaction anchor of a chain. Never a raw
      * binding in a Redis key; the policy version participates so an
      * old-policy chain never blocks a new-policy flow. The same id is
      * computed at stage-1 issuance (the verified record's authoritative
      * binding) and at stage-2 resumption (the re-resolved authoritative
-     * binding), so the obligation index matches exactly when — and only
-     * when — the transaction is the same.
+     * binding), so the obligation index matches exactly when the
+     * transaction is the same.
      */
     public function obligationIdFor(string $scope, string $requestBinding, int $policyVersion): string
     {
@@ -82,23 +83,23 @@ final class ChainedChallengeTicketService
     }
 
     /**
-     * The OPEN-CHAIN REQUIREMENT of the current transaction: compute the
+     * The open-chain requirement of the current transaction: compute the
      * obligation id of (scope, authoritative binding, policy version),
      * read the obligation -> the chain record and return the typed
      * requirement, or null when no open obligation exists (the ordinary
-     * stage-1 flow). A VERIFIED chain never returns here — its obligation
-     * was cleared atomically at verification — while a chain in the
-     * TERMINAL step_up_required/denied state does: its obligation mapping
+     * stage-1 flow). A verified chain never returns here, since its
+     * obligation was cleared atomically at verification. A chain in the
+     * terminal step_up_required/denied state does: its obligation mapping
      * is kept, so the controller answers the terminal response instead of
      * issuing (never a new stage-1).
      *
      * @throws MalformedChainedChallengeStateException when the chain
      *                                                 record violates the
      *                                                 strict v2 schema
-     *                                                 (fail closed — the
+     *                                                 (fail closed; the
      *                                                 caller answers
-     *                                                 temporary-unavailable)
-     * @throws \Throwable on backend failure — the caller fails closed
+     *                                                 temporary-unavailable).
+     * @throws \Throwable on backend failure: the caller fails closed.
      */
     public function findOpenRequirement(string $scope, string $requestBinding, int $policyVersion): ?ChainRequirement
     {
@@ -111,33 +112,34 @@ final class ChainedChallengeTicketService
     }
 
     /**
-     * Stage-1 issuance entry: ATOMICALLY create-or-get the transaction's
-     * chain + obligation mapping (ONE script over the two keys) and
-     * return the typed requirement — no obligation -> the chain is
+     * Stage-1 issuance entry: atomically create-or-get the transaction's
+     * chain and obligation mapping (one script over the two keys) and
+     * return the typed requirement. With no obligation the chain is
      * created (state available, v2 schema) with the obligation (same
-     * TTL); the obligation exists -> the EXISTING chain is returned (a
-     * repeated stage-1 token of the same transaction gets the SAME
-     * chain; a stronger reassessment only ever RAISES the required
-     * rank/action, never lowers); the obligation points at a
-     * missing/corrupt chain -> the stale mapping is compare-deleted and
-     * the chain created fresh (the atomic retry).
+     * TTL). With an existing obligation the existing chain is returned: a
+     * repeated stage-1 token of the same transaction gets the same chain,
+     * and a stronger reassessment only ever raises the required
+     * rank/action, never lowers. When the obligation points at a missing
+     * or corrupt chain, the stale mapping is compare-deleted and the
+     * chain created fresh (the atomic retry).
      *
-     * @param RiskAction $requiredAction the reassessed action — a
+     * @param RiskAction $requiredAction the reassessed action, a
      *                                   chainable PoW action (Sha16..
-     *                                   Argon64); StepUp/Deny are
+     *                                   Argon64). StepUp/Deny are
      *                                   terminal application-level
-     *                                   actions and NEVER chainable
-     *                                   (\InvalidArgumentException)
+     *                                   actions and never chainable
+     *                                   (\InvalidArgumentException).
      * @param int        $expiresAt      the absolute chain expiry (unix
-     *                                   seconds) — the SAME value the
+     *                                   seconds), the same value the
      *                                   ticket will carry; the chain
-     *                                   record + obligation TTL match it
+     *                                   record and obligation TTL match
+     *                                   it.
      *
      * @throws \InvalidArgumentException on a non-chainable action or a
-     *                                   non-future expiry
-     * @throws \Throwable                on backend failure — the caller
+     *                                   non-future expiry.
+     * @throws \Throwable                on backend failure: the caller
      *                                   fails closed (no ticket without a
-     *                                   server-held chain state)
+     *                                   server-held chain state).
      */
     public function requireStage2(string $stage1Nonce, string $scope, string $requestBinding, int $policyVersion, RiskAction $requiredAction, int $expiresAt): ChainRequirement
     {
@@ -164,7 +166,7 @@ final class ChainedChallengeTicketService
         $requirement = $this->requirementFor($chainId);
         if ($requirement === null) {
             // The chain vanished between the create and the read (an
-            // expired clock boundary) — fail closed, never a silent
+            // expired clock boundary): fail closed, never a silent
             // stage-1 issuance.
             throw new \RuntimeException('the chain state could not be confirmed after creation');
         }
@@ -173,7 +175,7 @@ final class ChainedChallengeTicketService
     }
 
     /**
-     * Reconstruct the EXACT deterministic ticket of a chain: the body
+     * Reconstruct the exact deterministic ticket of a chain. The body
      * [version, chainId, expiresAt] is deterministic, so the signed
      * ticket is byte-identical for the same (chainId, expiresAt).
      */
@@ -189,26 +191,26 @@ final class ChainedChallengeTicketService
      * Returns the signed ticket, or null when the signed ticket would
      * exceed the accepted 256-byte wire bound.
      *
-     * THE SIGNED-EXPIRY INVARIANT: the ticket is ALWAYS signed from the
-     * server-held requirement's ACTUAL expiry ($requirement->expiresAt),
-     * never the caller-requested $expiresAt. On the FRESH path the
+     * The signed-expiry invariant: the ticket is always signed from the
+     * server-held requirement's actual expiry ($requirement->expiresAt),
+     * never the caller-requested $expiresAt. On the fresh path the
      * requested expiry seeds the chain creation (requireStage2), so a new
-     * chain's requirement expiry equals the requested expiry; on the
-     * EXISTING path (an open chain of the same transaction) the
-     * requirement keeps its ORIGINAL expiry — the signed ticket can never
-     * outlive the chain state, and repeated calls against the same
+     * chain's requirement expiry equals the requested expiry. On the
+     * existing path (an open chain of the same transaction) the
+     * requirement keeps its original expiry, so the signed ticket can
+     * never outlive the chain state. Repeated calls against the same
      * obligation produce byte-identical tickets regardless of the
      * requested expiry.
      *
      * @param int|null $expiresAt the requested absolute chain expiry (unix
-     *                            seconds; defaults to now + ttl_secs) —
-     *                            SEEDS the chain creation on the fresh
-     *                            path; the signed expiry is ALWAYS the
-     *                            requirement's ACTUAL server-held expiry
+     *                            seconds; defaults to now + ttl_secs).
+     *                            Seeds the chain creation on the fresh
+     *                            path; the signed expiry is always the
+     *                            requirement's actual server-held expiry.
      *
-     * @throws \InvalidArgumentException on a non-chainable action
-     * @throws \Throwable                on backend failure — the caller
-     *                                   fails closed
+     * @throws \InvalidArgumentException on a non-chainable action.
+     * @throws \Throwable                on backend failure: the caller
+     *                                   fails closed.
      */
     public function ticket(string $stage1Nonce, string $scope, string $requestBinding, int $policyVersion, RiskAction $requiredAction, ?int $expiresAt = null): ?string
     {
@@ -223,19 +225,19 @@ final class ChainedChallengeTicketService
     }
 
     /**
-     * PLAIN read of the chain state behind a chain id: the typed
-     * requirement, or null when the chain is absent/expired. Used for the
-     * direct verification of a ticket whose obligation is already cleared
-     * (a TERMINAL verified chain), for the lost-reply confirmation of the
-     * issuance/verification transitions, and as the validator's
-     * by-chain-id LIVENESS check when it re-signs a CHAIN_REQUIRED
-     * ticket (the signing expiry comes from the disposition-carried
-     * bound — never the obligation lookup).
+     * Plain read of the chain state behind a chain id: the typed
+     * requirement, or null when the chain is absent/expired. Used for
+     * the direct verification of a ticket whose obligation is already
+     * cleared (a terminal verified chain) and for the lost-reply
+     * confirmation of the issuance/verification transitions. Also the
+     * validator's by-chain-id liveness check when it re-signs a
+     * CHAIN_REQUIRED ticket, whose signing expiry comes from the
+     * disposition-carried bound, never the obligation lookup.
      *
      * @throws MalformedChainedChallengeStateException when the record
      *                                                 violates the strict
-     *                                                 v2 schema
-     * @throws \Throwable on backend failure — the caller fails closed
+     *                                                 v2 schema.
+     * @throws \Throwable on backend failure: the caller fails closed.
      */
     public function requirementFor(string $chainId): ?ChainRequirement
     {
@@ -289,21 +291,23 @@ final class ChainedChallengeTicketService
     }
 
     /**
-     * RESERVE the chain for ONE owner with the SHORT configured lease
+     * Reserve the chain for one owner with the short configured lease
      * (risk.chaining.reservation_lease_secs, bounded by the record's own
-     * remaining TTL). Results: 'available' (available -> reserved(me)),
-     * 'retry' (already reserved by me), 'busy' (another owner's live
-     * lease — the retryable in-progress 503, the caller must NOT enter
-     * the issuance pipeline), 'taken_over' (the other owner's lease
-     * expired), 'issued'/'verified' (already issued — recover, never
-     * re-mint), the TERMINAL 'step_up_required'/'denied' (already ended
-     * in its final disposition — never issue), 'missing' (absent/expired).
+     * remaining TTL). Results: 'available' when available ->
+     * reserved(me). 'retry' when already reserved by me. 'busy' when
+     * another owner holds a live lease; the retryable in-progress 503
+     * applies and the caller must not enter the issuance pipeline.
+     * 'taken_over' when the other owner's lease expired. 'issued' and
+     * 'verified' when already issued (recover, never re-mint). The
+     * terminal 'step_up_required'/'denied' when already ended in its
+     * final disposition (never issue). 'missing' when absent or
+     * expired.
      *
      * @throws MalformedChainedChallengeStateException when the record
      *                                                 violates the strict
-     *                                                 v2 schema
-     * @throws \Throwable on backend failure — the caller fails closed (the
-     *                    one-shot state cannot be confirmed)
+     *                                                 v2 schema.
+     * @throws \Throwable on backend failure: the caller fails closed (the
+     *                    one-shot state cannot be confirmed).
      */
     public function reserveStage2(string $chainId, string $ownerToken): ChainReservationResult
     {
@@ -324,11 +328,11 @@ final class ChainedChallengeTicketService
 
     /**
      * Release a reservation (the reservation owner's retry path): the
-     * chain returns to the available state so a refused or failed issuance
-     * never burns the ticket. A release by a NON-owner is an atomic no-op
-     * — a failing request can never free another owner's live
-     * reservation. Best-effort — the reservation also expires with the
-     * chain TTL.
+     * chain returns to the available state so a refused or failed
+     * issuance never burns the ticket. A release by a non-owner is an
+     * atomic no-op, so a failing request can never free another owner's
+     * live reservation. Best-effort: the reservation also expires with
+     * the chain TTL.
      */
     public function release(string $chainId, string $ownerToken): void
     {
@@ -336,21 +340,21 @@ final class ChainedChallengeTicketService
     }
 
     /**
-     * IDEMPOTENT issuance of a durably stored stage-2 challenge: the
-     * owner-scoped transition reserved(me) -> issued(stage2Nonce) — a
-     * state TRANSITION, never a delete (the issued record keeps its TTL
-     * so a retry recovers the issued challenge). Results:
-     * 'issued_new' (first transition), 'issued_same' (same-nonce retry),
+     * Idempotent issuance of a durably stored stage-2 challenge: the
+     * owner-scoped transition reserved(me) -> issued(stage2Nonce). A
+     * state transition, never a delete: the issued record keeps its TTL
+     * so a retry recovers the issued challenge. Results: 'issued_new'
+     * (first transition), 'issued_same' (same-nonce retry),
      * 'verified_same' (already verified with the same nonce), 'conflict'
-     * (issued/verified with a DIFFERENT nonce), 'not_owner' (not
+     * (issued/verified with a different nonce), 'not_owner' (not
      * reserved by this owner), 'missing' (absent).
      *
      * @throws MalformedChainedChallengeStateException when the record
      *                                                 violates the strict
-     *                                                 v2 schema
-     * @throws \Throwable on backend failure — the caller must apply the
+     *                                                 v2 schema.
+     * @throws \Throwable on backend failure: the caller must apply the
      *                    lost-reply recovery (read the state; never
-     *                    delete state that may be authoritative)
+     *                    delete state that may be authoritative).
      */
     public function markIssued(string $chainId, string $ownerToken, string $stage2Nonce): ChainIssuedResult
     {
@@ -367,22 +371,22 @@ final class ChainedChallengeTicketService
     }
 
     /**
-     * TERMINAL verification of a solved stage-2 challenge: issued(
-     * stage2Nonce) -> verified(stage2Nonce), ATOMICALLY deleting the
-     * obligation mapping ONLY if it still points at this chainId (the
+     * Terminal verification of a solved stage-2 challenge: issued(
+     * stage2Nonce) -> verified(stage2Nonce), atomically deleting the
+     * obligation mapping only if it still points at this chainId (the
      * terminal verified chain record is kept until its TTL). Idempotent:
      * 'verified_same' on a same-nonce retry, 'conflict' on a different
      * nonce, 'missing' when the chain is absent. A lost reply is
-     * recoverable by READING the state and confirming the exact nonce —
-     * the obligation deletion is atomic with the transition, so a
+     * recoverable by reading the state and confirming the exact nonce.
+     * The obligation deletion is atomic with the transition, so a
      * verified state with the nonce means the transaction's obligation is
-     * cleared; the caller must NOT return a final pass while the
+     * cleared; the caller must not return a final pass while the
      * obligation may be uncleared.
      *
      * @throws MalformedChainedChallengeStateException when the record
      *                                                 violates the strict
-     *                                                 v2 schema
-     * @throws \Throwable on backend failure
+     *                                                 v2 schema.
+     * @throws \Throwable on backend failure.
      */
     public function markVerified(string $chainId, string $stage2Nonce): ChainVerifiedResult
     {
@@ -397,22 +401,21 @@ final class ChainedChallengeTicketService
     }
 
     /**
-     * TERMINAL step-up transition of a solved stage-2 challenge whose
-     * FINAL disposition is STEP_UP: issued(stage2Nonce) ->
-     * step_up_required(stage2Nonce) (KEEPTTL). The obligation mapping is
-     * KEPT: the transaction stays bound to the step-up requirement, so a
-     * later challenge request for the same transaction re-encounters the
-     * terminal state (never a new stage-1). Idempotent:
-     * 'step_up_required_same' on a same-nonce retry, 'conflict' on a
-     * different nonce, 'missing' when the chain is absent. A lost reply
-     * is recoverable by READING the state and confirming the exact nonce
-     * — the caller must NOT answer a final step-up while the chain may
-     * still be issued.
+     * Terminal step-up transition of a solved stage-2 challenge whose
+     * final disposition is StepUp: issued(stage2Nonce) ->
+     * step_up_required(stage2Nonce), KEEPTTL. The obligation mapping is
+     * kept, so the transaction stays bound to the step-up requirement and
+     * a later challenge request re-encounters the terminal state (never
+     * a new stage-1). Idempotent: 'step_up_required_same' on a same-nonce
+     * retry, 'conflict' on a different nonce, 'missing' when the chain
+     * is absent. A lost reply is recoverable by reading the state and
+     * confirming the exact nonce; the caller must not answer a final
+     * step-up while the chain may still be issued.
      *
      * @throws MalformedChainedChallengeStateException when the record
      *                                                 violates the strict
-     *                                                 v2 schema
-     * @throws \Throwable on backend failure
+     *                                                 v2 schema.
+     * @throws \Throwable on backend failure.
      */
     public function markStepUpRequired(string $chainId, string $stage2Nonce): ChainVerifiedResult
     {
@@ -427,21 +430,21 @@ final class ChainedChallengeTicketService
     }
 
     /**
-     * TERMINAL denial transition of a solved stage-2 challenge whose
-     * FINAL disposition is DENY: issued(stage2Nonce) -> denied(
-     * stage2Nonce) (KEEPTTL). The obligation mapping is KEPT: the
-     * transaction stays bound to its final denial, so a later challenge
-     * request for the same transaction re-encounters the terminal state
-     * (never a new stage-1). Idempotent: 'denied_same' on a same-nonce
-     * retry, 'conflict' on a different nonce, 'missing' when the chain is
-     * absent. A lost reply is recoverable by READING the state and
-     * confirming the exact nonce — the caller must NOT answer a final
-     * denial while the chain may still be issued.
+     * Terminal denial transition of a solved stage-2 challenge whose
+     * final disposition is Deny: issued(stage2Nonce) -> denied(
+     * stage2Nonce), KEEPTTL. The obligation mapping is kept, so the
+     * transaction stays bound to its final denial and a later challenge
+     * request re-encounters the terminal state (never a new stage-1).
+     * Idempotent: 'denied_same' on a same-nonce retry, 'conflict' on a
+     * different nonce, 'missing' when the chain is absent. A lost reply
+     * is recoverable by reading the state and confirming the exact
+     * nonce; the caller must not answer a final denial while the chain
+     * may still be issued.
      *
      * @throws MalformedChainedChallengeStateException when the record
      *                                                 violates the strict
-     *                                                 v2 schema
-     * @throws \Throwable on backend failure
+     *                                                 v2 schema.
+     * @throws \Throwable on backend failure.
      */
     public function markDenied(string $chainId, string $stage2Nonce): ChainVerifiedResult
     {
@@ -456,33 +459,34 @@ final class ChainedChallengeTicketService
     }
 
     /**
-     * OBLIGATION-BOUND NONCE-AGNOSTIC TERMINALIZATION of an OPEN
-     * obligation — the transaction-level denial: available|reserved|
-     * issued -> denied (KEEPTTL — the record keeps its OWN remaining
-     * TTL). The transition is ATOMIC over the chain record + the
-     * obligation mapping (one hash tag): the mapping must still point at
-     * this chain AND the record must still agree on the obligation id,
-     * or the transition is refused (Conflict — the caller re-reads the
-     * requirement and terminalizes the CURRENT chain). The obligation
-     * mapping is KEPT: the transaction stays bound to its final denial
+     * Obligation-bound, nonce-agnostic terminalization of an open
+     * obligation, the transaction-level denial: available|reserved|
+     * issued -> denied, KEEPTTL (the record keeps its own remaining
+     * TTL). The transition is atomic over the chain record plus the
+     * obligation mapping (one hash tag). The mapping must still point at
+     * this chain and the record must still agree on the obligation id,
+     * or the transition is refused (Conflict; the caller re-reads the
+     * requirement and terminalizes the current chain). The obligation
+     * mapping is kept, so the transaction stays bound to its final denial
      * for the rest of its lifetime (never a new stage-1, never a chain
-     * the stage-2 path could clear), and the EXACT stage-2 nonce is NOT
-     * required — a fresh Deny of ANY verified nonce of the obligated
-     * transaction makes the denial durable, keyed by the chain/obligation
-     * identity. Idempotent: 'denied_same', 'conflict' on the OTHER
-     * terminal disposition (a terminal state can never be flipped),
-     * 'already_verified'/'already_completed' (the transaction already
-     * ended via Pass — the obligation is gone), 'missing' (absent).
+     * the stage-2 path could clear). The exact stage-2 nonce is not
+     * required: a fresh Deny of any verified nonce of the obligated
+     * transaction makes the denial durable, keyed by the
+     * chain/obligation identity. Idempotent: 'denied_same'; 'conflict'
+     * on the other terminal disposition (a terminal state can never be
+     * flipped); 'already_verified'/'already_completed' (the transaction
+     * already ended via Pass, so the obligation is gone); 'missing'
+     * (absent).
      *
      * @param string $obligationId the transaction's obligation id (the
      *                             exact 64-lowercase-hex id the chain was
-     *                             created under — the obligation key the
-     *                             transition verifies)
+     *                             created under; the obligation key the
+     *                             transition verifies).
      *
      * @throws MalformedChainedChallengeStateException when the record
      *                                                 violates the strict
-     *                                                 v2 schema
-     * @throws \Throwable on backend failure
+     *                                                 v2 schema.
+     * @throws \Throwable on backend failure.
      */
     public function markTransactionDenied(string $chainId, string $obligationId): ChainVerifiedResult
     {
@@ -498,34 +502,34 @@ final class ChainedChallengeTicketService
     }
 
     /**
-     * OBLIGATION-BOUND NONCE-AGNOSTIC TERMINALIZATION of an OPEN
-     * obligation — the transaction-level step-up: available|reserved|
-     * issued -> step_up_required (KEEPTTL — the record keeps its OWN
-     * remaining TTL). The transition is ATOMIC over the chain record +
-     * the obligation mapping (one hash tag): the mapping must still
-     * point at this chain AND the record must still agree on the
-     * obligation id, or the transition is refused (Conflict — the caller
-     * re-reads the requirement and terminalizes the CURRENT chain). The
-     * obligation mapping is KEPT: the transaction stays bound to the
+     * Obligation-bound, nonce-agnostic terminalization of an open
+     * obligation, the transaction-level step-up: available|reserved|
+     * issued -> step_up_required, KEEPTTL (the record keeps its own
+     * remaining TTL). The transition is atomic over the chain record plus
+     * the obligation mapping (one hash tag). The mapping must still
+     * point at this chain and the record must still agree on the
+     * obligation id, or the transition is refused (Conflict; the caller
+     * re-reads the requirement and terminalizes the current chain). The
+     * obligation mapping is kept, so the transaction stays bound to the
      * step-up requirement for the rest of its lifetime (never a new
-     * stage-1, never a chain the stage-2 path could clear), and the
-     * EXACT stage-2 nonce is NOT required — a fresh StepUp of ANY
-     * verified nonce of the obligated transaction makes the step-up
-     * durable, keyed by the chain/obligation identity. Idempotent:
-     * 'step_up_required_same', 'conflict' on the OTHER terminal
-     * disposition (a terminal state can never be flipped),
+     * stage-1, never a chain the stage-2 path could clear). The exact
+     * stage-2 nonce is not required: a fresh StepUp of any verified
+     * nonce of the obligated transaction makes the step-up durable,
+     * keyed by the chain/obligation identity. Idempotent:
+     * 'step_up_required_same'; 'conflict' on the other terminal
+     * disposition (a terminal state can never be flipped);
      * 'already_verified'/'already_completed' (the transaction already
-     * ended via Pass — the obligation is gone), 'missing' (absent).
+     * ended via Pass, so the obligation is gone); 'missing' (absent).
      *
      * @param string $obligationId the transaction's obligation id (the
      *                             exact 64-lowercase-hex id the chain was
-     *                             created under — the obligation key the
-     *                             transition verifies)
+     *                             created under; the obligation key the
+     *                             transition verifies).
      *
      * @throws MalformedChainedChallengeStateException when the record
      *                                                 violates the strict
-     *                                                 v2 schema
-     * @throws \Throwable on backend failure
+     *                                                 v2 schema.
+     * @throws \Throwable on backend failure.
      */
     public function markTransactionStepUpRequired(string $chainId, string $obligationId): ChainVerifiedResult
     {
@@ -541,16 +545,16 @@ final class ChainedChallengeTicketService
     }
 
     /**
-     * REARM an issued chain for a FRESH stage-2 mint: issued(
-     * expectedStage2Nonce) -> available, ATOMICALLY (a different nonce or
-     * any other state is an atomic no-op — false). The controller then
-     * reserves + mints a NEW stage-2 challenge at the SAME OR STRONGER
-     * floor — NEVER a stage-1.
+     * Rearm an issued chain for a fresh stage-2 mint: issued(
+     * expectedStage2Nonce) -> available, atomically (a different nonce or
+     * any other state is an atomic no-op, false). The controller then
+     * reserves and mints a new stage-2 challenge at the same or stronger
+     * floor, never a stage-1.
      *
      * @throws MalformedChainedChallengeStateException when the record
      *                                                 violates the strict
-     *                                                 v2 schema
-     * @throws \Throwable on backend failure
+     *                                                 v2 schema.
+     * @throws \Throwable on backend failure.
      */
     public function rearmIssued(string $chainId, string $expectedStage2Nonce): bool
     {
@@ -558,24 +562,24 @@ final class ChainedChallengeTicketService
     }
 
     /**
-     * @deprecated use requireStage2() + ticketFor() (or ticket()) — the
+     * @deprecated use requireStage2() + ticketFor(), or ticket(), the
      *             obligation-anchored stage-1 issuance entry. Retained
      *             for source compatibility; the transaction semantics are
      *             identical (a repeated stage-1 verification of the same
-     *             transaction returns the SAME chain).
+     *             transaction returns the same chain).
      *
      * Returns null when the signed ticket would exceed the accepted
      * 256-byte shape bound or when the chain state could not be persisted
-     * (backend failure — the caller fails closed).
+     * (backend failure; the caller fails closed).
      *
      * @param string      $requiredAction the reassessed RiskAction's value
      *                                    (a chainable PoW action Sha16..
      *                                    Argon64; StepUp/Deny are terminal
      *                                    application-level actions and
-     *                                    never chainable)
+     *                                    never chainable).
      * @param string|null $requestBinding the authoritative request binding
      *                                    (null when the transaction is
-     *                                    unbound)
+     *                                    unbound).
      */
     public function issue(string $stage1Nonce, string $scope, int $policyVersion, string $requiredAction, ?string $requestBinding = null): ?string
     {
@@ -587,7 +591,7 @@ final class ChainedChallengeTicketService
     }
 
     /**
-     * @deprecated use findOpenRequirement()/requirementFor() — the plain
+     * @deprecated use findOpenRequirement()/requirementFor(), the plain
      *             read of the server-held chain state behind a verified
      *             ticket.
      *
@@ -595,8 +599,8 @@ final class ChainedChallengeTicketService
      *
      * @throws MalformedChainedChallengeStateException when the record
      *                                                 violates the strict
-     *                                                 v2 schema
-     * @throws \Throwable on backend failure — the caller fails closed
+     *                                                 v2 schema.
+     * @throws \Throwable on backend failure: the caller fails closed.
      */
     public function read(string $ticket): ?array
     {
@@ -609,11 +613,11 @@ final class ChainedChallengeTicketService
     }
 
     /**
-     * @deprecated use reserveStage2() — the owner-scoped reservation
+     * @deprecated use reserveStage2(), the owner-scoped reservation
      *             behind a verified ticket.
      *
-     * @throws \Throwable on backend failure — the caller fails closed (the
-     *                    one-shot state cannot be confirmed)
+     * @throws \Throwable on backend failure: the caller fails closed (the
+     *                    one-shot state cannot be confirmed).
      */
     public function reserve(string $ticket, string $ownerToken): string
     {
@@ -626,9 +630,9 @@ final class ChainedChallengeTicketService
     }
 
     /**
-     * @deprecated use markIssued() — the TERMINAL legacy completion
-     *             (reserved(me) -> completed(stage2Nonce), the historical
-     *             name of the issued state). Returns the completed
+     * @deprecated use markIssued(), the terminal legacy completion,
+     *             reserved(me) -> completed(stage2Nonce), the historical
+     *             name of the issued state. Returns the completed
      *             record, or null when the transition was refused.
      *
      * @return array{stage1Nonce: string, scope: string, requestBinding: ?string, requiredAction: string, requiredRank: int, policyVersion: int, chainDepth: int, state: 'completed', owner: ?string, leaseUntil: ?int, stage2Nonce: string, obligationId: string, expiresAt: int}|null
@@ -641,7 +645,7 @@ final class ChainedChallengeTicketService
     /**
      * Map a strictly-decoded chain record to the typed requirement. A
      * legacy 'completed' record is the historical name of the
-     * terminal-with-nonce state — reported as 'issued' (semantically
+     * terminal-with-nonce state, reported as 'issued' (semantically
      * identical).
      *
      * @param array{stage1Nonce: string, scope: string, requestBinding: ?string, requiredAction: string, requiredRank: int, policyVersion: int, chainDepth: int, state: 'available'|'reserved'|'issued'|'verified'|'step_up_required'|'denied'|'completed', owner: ?string, leaseUntil: ?int, stage2Nonce: ?string, obligationId: string, expiresAt: int} $record
@@ -671,8 +675,8 @@ final class ChainedChallengeTicketService
     }
 
     /**
-     * The RAW 32-byte HMAC-SHA256 digest, base64url-encoded (43 chars —
-     * vs 64 for the hex digest): the compact signature keeps the signed
+     * The raw 32-byte HMAC-SHA256 digest, base64url-encoded (43 chars,
+     * vs 64 for the hex digest). The compact signature keeps the signed
      * ticket inside the accepted 256-byte wire bound. The verify side
      * compares the same encoding constant-time (hash_equals).
      */
@@ -685,8 +689,8 @@ final class ChainedChallengeTicketService
     {
         // The compact JSON-array body keeps the signed ticket at ~60
         // bytes: the three signed fields in order [version, chainId,
-        // expiresAt]. No scope/binding/action in the ticket payload — the
-        // server-held state owns them.
+        // expiresAt]. No scope, binding or action in the ticket payload:
+        // the server-held state owns them.
         $body = (string) json_encode($payload, JSON_THROW_ON_ERROR);
 
         return rtrim(strtr(base64_encode($body), '+/', '-_'), '=');

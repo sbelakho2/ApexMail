@@ -12,23 +12,23 @@ use Predis\Response\ServerException;
 /**
  * Redis-backed risk state store running the canonical risk-v1 Lua script.
  *
- * The script is the cross-language shared asset BUNDLED with this package
- * at resources/risk-v1.lua (self-contained — no monorepo paths), resolved
+ * The script is the cross-language shared asset bundled with this package
+ * at resources/risk-v1.lua (self-contained, no monorepo paths), resolved
  * via dirname(__DIR__, 2) . '/resources/risk-v1.lua' and loaded with
- * EVALSHA (NOSCRIPT fallback to EVAL + SCRIPT LOAD, sha cached). The
+ * evalsha (noscript fallback to eval + script load, sha cached). The
  * monorepo copy (protocol/risk-v1/risk.lua) is obsolete.
  *
  * All keys carry the hash tag {kiwi:<namespace>} so the script is Cluster
  * safe. The Lua's network_risk slot (always 0) is overridden with the
  * observation's classifier-derived network risk; principal_credit is the
- * REAL Lua value (no longer hardcoded 0); the duplicate flag (result[15])
- * is exposed via lastIsDuplicate(). Source/subnet keys use the
- * epoch-parameterized pseudonyms carried on the observation (each epoch's
- * key uses its OWN epoch's pseudonym, never the current-epoch one).
+ * real Lua value; the duplicate flag (result[15]) is exposed via
+ * lastIsDuplicate(). Source/subnet keys use the epoch-parameterized
+ * pseudonyms carried on the observation (each epoch's key uses its own
+ * epoch's pseudonym, never the current-epoch one).
  *
  * Timeouts: the predis Client is caller-supplied; createClient() builds
  * one with a 5 ms connection timeout and 10 ms read/write timeout. Predis
- * expresses both in SECONDS, and practical timeouts may be rounded up by
+ * expresses both in seconds, and practical timeouts may be rounded up by
  * the platform — treat these as best-effort fail-fast values, not hard
  * deadlines.
  */
@@ -63,7 +63,7 @@ final class RedisRiskStateStore implements RiskStateStoreInterface, SessionConte
     /**
      * @param string   $namespace       deployment namespace used in the hash tag {kiwi:<namespace>}
      * @param int      $hysteresisMs    global level hysteresis window
-     * @param array<string, int> $saturations raw saturation values keyed src_fast..principal (Lua ARGV order)
+     * @param array<string, int> $saturations raw saturation values keyed src_fast..principal (Lua argv order)
      */
     public function __construct(
         private readonly Client $client,
@@ -139,9 +139,9 @@ final class RedisRiskStateStore implements RiskStateStoreInterface, SessionConte
     /**
      * The outcome ledger key shared with the calibrator's register_decision /
      * confirm / correction scripts: {kiwi:<ns>}:cal:ledger:<decisionId>.
-     * The ledger is ALWAYS ON (calibration-independent): with calibration
+     * The ledger is always on (calibration-independent): with calibration
      * enabled the calibrator writes it inside register_decision.lua; with
-     * calibration disabled the store writes it here — one key, one
+     * calibration disabled the store writes it here. One key, one
      * exactly-once authority.
      */
     public function ledgerKey(string $decisionId): string
@@ -182,7 +182,7 @@ final class RedisRiskStateStore implements RiskStateStoreInterface, SessionConte
     /**
      * The risk-v2 session client-context record
      * ({kiwi:<ns>}:risk:ctx:<session-pseudonym>): SET NX with the session
-     * TTL (first write wins = the FIRST tag the session ever presented),
+     * TTL (first write wins = the first tag the session ever presented),
      * then return the recorded tag. The record is keyed by the session
      * pseudonym only — the raw cookie value never appears in Redis — and
      * shares the hash tag with the risk-v1 state keys, so it is Cluster
@@ -207,10 +207,10 @@ final class RedisRiskStateStore implements RiskStateStoreInterface, SessionConte
     /**
      * The risk-v2 session trusted-edge TLS record
      * ({kiwi:<ns>}:risk:tls:<session-pseudonym>): SET NX with the session
-     * TTL (first write wins = the FIRST coarse, server-attested TLS
+     * TTL (first write wins = the first coarse, server-attested TLS
      * classification the session ever presented), then return the recorded
-     * tag. Mirrors the session_first_context_tag machinery exactly (the
-     * Rust mirror names the record `session_first_tls_tag`): keyed by the
+     * tag. Mirrors the session_first_context_tag machinery exactly; the
+     * Rust mirror names the record `session_first_tls_tag`. Keyed by the
      * session pseudonym only — the raw cookie value never appears in Redis
      * — and shares the hash tag with the risk-v1 state keys, so it is
      * Cluster safe.
@@ -308,12 +308,12 @@ final class RedisRiskStateStore implements RiskStateStoreInterface, SessionConte
     }
 
     /**
-     * EVALSHA with NOSCRIPT fallback (EVAL + SCRIPT LOAD, sha cached).
+     * evalsha with noscript fallback (eval + script load, sha cached).
      *
      * @param list<string> $keys
      * @param list<int|string> $args
      * @return array<int|string>|int|string
-     * @throws RiskStoreException on any non-NOSCRIPT redis failure
+     * @throws RiskStoreException on any non-noscript redis failure
      */
     private function runScript(array $keys, array $args, ?string $script = null)
     {
@@ -339,7 +339,7 @@ final class RedisRiskStateStore implements RiskStateStoreInterface, SessionConte
         }
     }
 
-    /** Cached SHA1 of a script (SCRIPT LOAD once per script per process). */
+    /** Cached sha1 of a script (script load once per script per process). */
     private function shaOf(string $script): string
     {
         if ($script === $this->script && $this->scriptSha !== null) {
@@ -402,7 +402,7 @@ final class RedisRiskStateStore implements RiskStateStoreInterface, SessionConte
         }
     }
 
-    /** CRC-16/XMODEM (poly 0x1021, init 0); "123456789" -> 0x31C3. */
+    /** CRC-16/xmodem (poly 0x1021, init 0); "123456789" -> 0x31C3. */
     public static function crc16(string $data): int
     {
         $crc = 0;

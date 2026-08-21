@@ -6,7 +6,7 @@
 //! `score(base, s, w) = base + Σ weighted(positive signals) - weighted(trust)
 //! - weighted(principal)`, clamped to [0, 1000] with saturating arithmetic.
 //!
-//! The SCORE is pure integer math (u16/u32/i32): NaN/Inf cannot enter, and
+//! The score is pure integer math (u16/u32/i32): NaN/Inf cannot enter, and
 //! the output is always a bounded u16 in 0..=1000. The only floats in the
 //! risk path live in the calibration boundary, which is guarded separately
 //! (calibration.lua + `bounded_bias`).
@@ -83,7 +83,7 @@ pub fn score(base: u16, s: &SignalVector, w: &RiskWeights) -> u16 {
     risk.clamp(0, 1000) as u16
 }
 
-/// The 3 ADDITIVE risk-v2 weight fields, same names/order as
+/// The 3 additive risk-v2 weight fields, same names/order as
 /// [`crate::signals::RiskV2Signals`].
 ///
 /// The risk-v1 contract weights ([`RiskWeights`]) are untouched — these are
@@ -114,11 +114,11 @@ impl Default for RiskV2Weights {
     }
 }
 
-/// Risk-v2 scoring: the risk-v1 score PLUS the weighted risk-v2 evidence
+/// Risk-v2 scoring: the risk-v1 score plus the weighted risk-v2 evidence
 /// factors (honeypot, session client-context inconsistency, trusted-edge
 /// TLS inconsistency), clamped to 0..=1000.
 ///
-/// With zero risk-v2 signals this is EXACTLY [`score`] — the v1 contract
+/// With zero risk-v2 signals this is exactly [`score`] — the v1 contract
 /// semantics (the 13 signals and their weights) are unchanged; the v2
 /// factors are purely additive.
 pub fn score_v2(
@@ -172,7 +172,7 @@ pub fn contributors(s: &SignalVector, w: &RiskWeights) -> Vec<(RiskReason, u32)>
 }
 
 /// The top-4 contributor reasons: sorted by contribution descending (ties
-/// keep SignalVector order), capped at 4. This NEVER changes the score —
+/// keep SignalVector order), capped at 4. This never changes the score —
 /// it only explains it.
 pub fn top_contributor_reasons(s: &SignalVector, w: &RiskWeights) -> Vec<RiskReason> {
     let mut contributions = contributors(s, w);
@@ -461,7 +461,7 @@ mod tests {
         }
     }
 
-    /// ASYMMETRIC TRUST: the exact-IP (source) signals must
+    /// Asymmetric trust: the exact-IP (source) signals must
     /// outweigh the subnet (network) signals in the scorer weights, so one
     /// attacker IP is always punished harder than the /64 aggregate it
     /// shares. Pinned on the contract defaults; a future symmetric-weight
@@ -477,7 +477,7 @@ mod tests {
             w.bad_proof > w.subnet_fast,
             "bad_proof (exact-IP invalid proofs) must outweigh the subnet effect"
         );
-        // The CONTRIBUTION-level asymmetry: for the same signal value the
+        // The contribution-level asymmetry: for the same signal value the
         // exact-IP channel contributes strictly more score than the subnet
         // aggregate channel.
         let source_only = SignalVector {
@@ -494,9 +494,9 @@ mod tests {
         );
     }
 
-    /// ABSOLUTE USER-VISIBLE CAP: the score is clamped to
+    /// Absolute user-visible cap: the score is clamped to
     /// 0..1000, so a poisoned source (every signal at saturation) reaches
-    /// the cap but can NEVER exceed it — there is no unbounded punishment
+    /// the cap but can never exceed it — there is no unbounded punishment
     /// mode.
     #[test]
     fn saturated_source_reaches_the_cap_but_never_exceeds_it() {
@@ -555,7 +555,7 @@ mod tests {
         assert_eq!(after, 300);
     }
 
-    /// A honeypot hit with an otherwise-clean vector stays BELOW the Deny
+    /// A honeypot hit with an otherwise-clean vector stays below the Deny
     /// band: it raises the aggregate (stronger profiles are selected) but
     /// never hard-denies alone.
     #[test]
@@ -587,7 +587,7 @@ mod tests {
         let w = RiskWeights::default();
         let w2 = RiskV2Weights::default();
         // bad_proof 1000 (220) + issue_debt 1000 (150) + global_pressure
-        // 1000 (170) + source_fast 900 (171) = 711; base 100 -> 811 WITHOUT
+        // 1000 (170) + source_fast 900 (171) = 711; base 100 -> 811 without
         // the honeypot factor (Argon32, no hard-deny thresholds hit).
         let elevated = SignalVector {
             bad_proof: 1000,
@@ -616,7 +616,7 @@ mod tests {
         assert_eq!(after, 1000);
     }
 
-    /// Consistent client context is NEUTRAL: a zero session-inconsistency
+    /// Consistent client context is neutral: a zero session-inconsistency
     /// signal contributes nothing.
     #[test]
     fn consistent_client_context_is_neutral() {
@@ -631,7 +631,7 @@ mod tests {
         );
     }
 
-    /// A CHANGED client-context tag raises the aggregate: 100 + 120 = 220.
+    /// A changed client-context tag raises the aggregate: 100 + 120 = 220.
     #[test]
     fn changed_client_context_raises_the_aggregate() {
         let w = RiskWeights::default();
@@ -654,7 +654,7 @@ mod tests {
         assert_eq!(after, 220);
     }
 
-    /// ABSENT client-context tag (first request) is NEUTRAL: no record
+    /// Absent client-context tag (first request) is neutral: no record
     /// exists yet, so no inconsistency signal is produced.
     #[test]
     fn absent_client_context_is_neutral() {
@@ -667,7 +667,7 @@ mod tests {
         );
     }
 
-    /// The DEFAULT risk-v2 weights match the cross-language contract
+    /// The default risk-v2 weights match the cross-language contract
     /// (byte-identical with the PHP mirror).
     #[test]
     fn default_v2_weights_match_the_cross_language_contract() {
@@ -677,7 +677,7 @@ mod tests {
         assert_eq!(w2.tls, 80);
     }
 
-    /// Consistent trusted-edge TLS classification is NEUTRAL: a zero
+    /// Consistent trusted-edge TLS classification is neutral: a zero
     /// tls_inconsistency signal contributes nothing.
     #[test]
     fn consistent_tls_tag_is_neutral() {
@@ -692,7 +692,7 @@ mod tests {
         );
     }
 
-    /// A CHANGED trusted-edge TLS tag raises the aggregate: 100 + 80 = 180.
+    /// A changed trusted-edge TLS tag raises the aggregate: 100 + 80 = 180.
     #[test]
     fn changed_tls_tag_raises_the_aggregate() {
         let w = RiskWeights::default();
@@ -712,7 +712,7 @@ mod tests {
         assert_eq!(after, 180);
     }
 
-    /// ABSENT trusted-edge TLS tag (first request) is NEUTRAL: no record
+    /// Absent trusted-edge TLS tag (first request) is neutral: no record
     /// exists yet, so no inconsistency signal is produced.
     #[test]
     fn absent_tls_tag_is_neutral() {
@@ -725,7 +725,7 @@ mod tests {
         );
     }
 
-    /// The risk-v2 factors are PURELY additive: with zero v2 signals the
+    /// The risk-v2 factors are purely additive: with zero v2 signals the
     /// v2 scoring is byte-identical to the v1 score on the 10k parity
     /// stream.
     #[test]

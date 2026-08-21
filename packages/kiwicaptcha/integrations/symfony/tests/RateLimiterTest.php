@@ -17,7 +17,7 @@ use Symfony\Component\HttpFoundation\Request;
 
 /**
  * Per-IP issuance rate limiting: a sliding window per client IP (in-memory
- * single-process by default, or a PSR-6 pool for shared multi-process state),
+ * single-process by default, or a psr-6 pool for shared multi-process state),
  * enforced at the challenge endpoint with HTTP 429.
  */
 final class RateLimiterTest extends TestCase
@@ -115,7 +115,7 @@ final class RateLimiterTest extends TestCase
         $limiter->allow('198.51.100.7');
 
         // The shared cache key is 'kr_' + 60 hex of the peppered HMAC — 63
-        // chars total, within the 64-character PSR-6 portability floor (the
+        // chars total, within the 64-character psr-6 portability floor (the
         // previous 'kiwi_rate_' + 64 hex = 74 chars exceeded it).
         foreach (array_keys($pool->getValues()) as $key) {
             self::assertMatchesRegularExpression(
@@ -130,8 +130,8 @@ final class RateLimiterTest extends TestCase
 
     public function testCanonicalIpPseudonymUnifiesEquivalentSpellings(): void
     {
-        // The pseudonym is derived from CANONICAL IP BYTES: two textual
-        // spellings of the same address must produce the SAME HMAC identity,
+        // The pseudonym is derived from canonical IP bytes: two textual
+        // spellings of the same address must produce the same HMAC identity,
         // and IPv4-mapped IPv6 must equal the plain IPv4 form.
         $pool = new ArrayAdapter();
         $limiter = new IssuanceRateLimiter(1, 60, $pool, null, 'pepper');
@@ -156,7 +156,7 @@ final class RateLimiterTest extends TestCase
     public function testGlobalOnlyModeCreatesNoClientKeys(): void
     {
         // maxChallenges = 0 disables the per-client control: with Redis, only
-        // the deployment-global ZSET may exist — no client pseudonym at all.
+        // the deployment-global zset may exist — no client pseudonym at all.
         $client = new FakePredisClient();
         $limiter = new IssuanceRateLimiter(0, 60, redis: $client, globalMax: 2, namespace: 'global-only', pepper: 'p');
         self::assertSame(1, $limiter->check('203.0.113.1'));
@@ -202,7 +202,7 @@ final class RateLimiterTest extends TestCase
 
     public function testSharedWindowIsSlidingNotFixed(): void
     {
-        // The PSR-6 path must implement a true sliding window too — the
+        // The psr-6 path must implement a true sliding window too — the
         // [window_start, hits] fixed bucket would allow boundary bursts to
         // double the rate.
         $pool = new ArrayAdapter();
@@ -322,7 +322,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         self::assertSame(1, $limiter->check('198.51.100.7'));
         self::assertSame(1, $limiter->check('198.51.100.8'));
 
-        // The global window is full: a THIRD identity is blocked by the
+        // The global window is full: a third identity is blocked by the
         // deployment-wide cap, not its own.
         self::assertSame(-1, $limiter->check('198.51.100.9'));
 
@@ -358,7 +358,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         // the previous-epoch hits still count within the window, so only 3
         // of the pre-rotation budget carry over and the cap still holds
         // until the window slides.
-        $clock = 1_000_100.0; // exactly at the epoch boundary (floor(1000100/100) = 10001)
+        $clock = 1_000_100.0; // exactly at the epoch boundary: floor(1000100/100) = 10001
         // 1_000_100 / 100 = 10001 (not 11) — use an explicit small rotation
         // for deterministic math: rotation 100, epoch = floor(now/100).
         self::assertSame(0, $limiter->check('203.0.113.7'), 'previous-epoch hits still count inside the window');
@@ -366,9 +366,9 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
 
     public function testRotatedGlobalLimitIsSharedAcrossClients(): void
     {
-        // REGRESSION (release blocker): with rotation ENABLED, the global
+        // regression (release blocker): with rotation enabled, the global
         // budget must still be deployment-wide — the global key contains no
-        // client identity and must never be rotated. Three DIFFERENT
+        // client identity and must never be rotated. Three different
         // clients with globalMax 2: the third is rejected.
         $client = new FakePredisClient();
         $client->setTimeMs(1_700_000_000_000);
@@ -390,7 +390,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
 
     public function testRotatedPsr6DenialRetainsState(): void
     {
-        // REGRESSION: the rotated PSR-6 fallback must NOT clear the window
+        // regression: the rotated psr-6 fallback must NOT clear the window
         // on denial — clearing lets a denied request reset the state and
         // pass on the next call (deterministic every-other-request bypass).
         $pool = new \Symfony\Component\Cache\Adapter\ArrayAdapter();
@@ -416,8 +416,8 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
     {
         $client = new FakePredisClient();
         $clockSecs = 10_000.0;
-        // The fake Redis server clock must advance IN SYNC with the
-        // limiter's clock: the Lua TIME read drives the pruning.
+        // The fake Redis server clock must advance IN sync with the
+        // limiter's clock: the Lua time read drives the pruning.
         $client->setTimeMs((int) ($clockSecs * 1000));
         $limiter = new IssuanceRateLimiter(
             maxChallenges: 2,
@@ -449,7 +449,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         self::assertSame(1, $limiter->check('198.51.100.7'));
         self::assertSame(0, $limiter->check('198.51.100.7'));
 
-        // Advance the REDIS server clock past the window: the hit is pruned.
+        // Advance the redis server clock past the window: the hit is pruned.
         $client->setTimeMs($client->timeMs() + 61_000);
 
         self::assertSame(1, $limiter->check('198.51.100.7'));
@@ -463,7 +463,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         $limiter = new IssuanceRateLimiter(5, 60, null, null, $pepper, $client, 5, 'deployment-x');
         $limiter->check('198.51.100.7');
 
-        // The identity is the peppered HMAC of the CANONICAL IP BYTES
+        // The identity is the peppered HMAC of the canonical IP bytes
         // (inet_pton with IPv4-mapped normalization) — the same
         // canonicalization used for challenge binding.
         $identity = hash_hmac('sha256', \KiwiCaptcha\Issuer::canonicalIpFamily('198.51.100.7'), $pepper);

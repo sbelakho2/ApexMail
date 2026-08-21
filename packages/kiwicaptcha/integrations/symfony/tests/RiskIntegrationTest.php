@@ -177,9 +177,9 @@ final class RiskIntegrationTest extends TestCase
         $response = $stack['controller']->challenge($this->challengeRequest());
         self::assertSame(200, $response->getStatusCode(), 'a risk backend outage must never break issuance (degraded allow)');
 
-        // The PRE-ISSUE assessment degraded (store failure -> degraded
+        // The pre-issue assessment degraded (store failure -> degraded
         // allow); the post-issue feedback (record_feedback) degrades
-        // SILENTLY (zero signals, no decision, no metric) — one degraded
+        // silently (zero signals, no decision, no metric) — one degraded
         // decision per request.
         $metrics = $stack['gateway']->metricsSnapshot();
         self::assertSame(1, $metrics['counters']['degraded:store'] ?? 0);
@@ -248,9 +248,9 @@ final class RiskIntegrationTest extends TestCase
     public function testProfileResolverEscalatesWithinAlgorithmFamily(): void
     {
         // SHA app, floor 8: sha actions escalate; argon actions map to the
-        // FIXED-ENVELOPE ladder: ALL THREE share the
+        // fixed-envelope ladder: ALL three share the
         // server-controlled memory envelope (default 16384 KiB, t=3, p=1) —
-        // risk escalates the TARGET DIFFICULTY (expected nonce search space
+        // risk escalates the target difficulty (expected nonce search space
         // 1/4/8), never the server verification cost — regardless of the
         // app algorithm: the core's issueWithProfile accepts a profile
         // directly.
@@ -273,7 +273,7 @@ final class RiskIntegrationTest extends TestCase
         self::assertSame(16384, $argon64?->mKib, 'Argon64 must NOT raise the memory (fixed envelope)');
         self::assertSame(8, $argon64?->targetBits, 'Argon64 escalates the target difficulty to 8');
         // StepUp is application-defined and handled by the controller
-        // (403 STEP_UP_REQUIRED) — it must NEVER map to a challenge profile.
+        // (403 step_UP_required) — it must never map to a challenge profile.
         try {
             $resolver->profileFor(RiskAction::StepUp);
             self::fail('StepUp must not map to a profile');
@@ -304,8 +304,8 @@ final class RiskIntegrationTest extends TestCase
     }
 
     /**
-     * Core invariant: the SERVER verification cost ceiling is
-     * risk-INDEPENDENT. Even the MAXIMUM adaptive escalation (Argon64) keeps
+     * Core invariant: the server verification cost ceiling is
+     * risk-independent. Even the maximum adaptive escalation (Argon64) keeps
      * the memory at the fixed envelope — risk only raises the expected nonce
      * search space, which stays within the widget-solvable ceiling (target
      * bits <= 20).
@@ -330,7 +330,7 @@ final class RiskIntegrationTest extends TestCase
             self::assertLessThanOrEqual(20, $profile?->targetBits ?? 0);
         }
 
-        // The ladder needs EXACTLY 3 rungs.
+        // The ladder needs exactly 3 rungs.
         try {
             new RiskProfileResolver(PoWAlgorithm::Sha256, 8, 16384, [1, 4]);
             self::fail('a 2-entry ladder must be refused');
@@ -416,7 +416,7 @@ final class RiskIntegrationTest extends TestCase
         self::assertSame('minimum', $risk['unknown_scope']['mode']);
         self::assertSame('strict', $risk['continuity_cookie']['samesite'], 'samesite is defined exactly once, default strict');
         self::assertTrue($risk['continuity_cookie']['http_only']);
-        // The FIXED Argon2id verification-memory envelope and the
+        // The fixed Argon2id verification-memory envelope and the
         // target-difficulty escalation ladder.
         self::assertSame(16384, $risk['argon_verification_memory_kib'], 'the adaptive Argon memory envelope defaults to 16384 KiB');
         self::assertSame([1, 4, 8], $risk['argon_escalation_target_bits'], 'the default Argon target-bits ladder is [1, 4, 8]');
@@ -455,8 +455,8 @@ final class RiskIntegrationTest extends TestCase
         ]])['risk'];
 
         self::assertSame([2, 6, 10], $process(['argon_escalation_target_bits' => [2, 6, 10]])['argon_escalation_target_bits']);
-        // COMPILE-TIME LADDER VALIDATION: the rungs must satisfy
-        // 1 <= rung1 < rung2 < rung3 <= Config::MAX_ARGON2_TARGET_BITS —
+        // compile-time ladder validation: the rungs must satisfy
+        // 1 <= rung1 < rung2 < rung3 <= Config::MAX_argon2_target_bits —
         // a non-monotone ladder or a rung above the core's Argon2id
         // widget ceiling is refused at configuration time (never deferred
         // to an issuance-time profile refusal).
@@ -470,7 +470,7 @@ final class RiskIntegrationTest extends TestCase
                 self::assertTrue(true);
             }
         }
-        // Each rung within 1..Config::MAX_ARGON2_TARGET_BITS, strictly
+        // Each rung within 1..Config::MAX_argon2_target_bits, strictly
         // increasing.
         foreach ([[0, 4, 8], [1, 4, Config::MAX_ARGON2_TARGET_BITS + 1], [20, 20, 20], [1, 4, 4], [5, 5, 10]] as $bad) {
             try {
@@ -582,7 +582,7 @@ final class RiskIntegrationTest extends TestCase
         $controller = $container->get(ChallengeController::class);
         self::assertInstanceOf(ChallengeController::class, $controller);
 
-        // The fake Redis does not speak the risk-v1 EVALSHA protocol -> the
+        // The fake Redis does not speak the risk-v1 evalsha protocol -> the
         // engine degrades (store failure -> degraded allow) and issuance
         // still succeeds, cookie included.
         $request = JsonRequest::create('/kiwi-captcha/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], '{"scope":"login"}');
@@ -647,7 +647,7 @@ final class RiskIntegrationTest extends TestCase
             self::assertSame('sha256', $data['algorithm']);
             $targets[] = $data['targetBits'];
         }
-        // Repeated issuance must NEVER weaken below the issued floor: the
+        // Repeated issuance must never weaken below the issued floor: the
         // first request is idle (default 8), subsequent requests escalate
         // monotonically (never below 8, never above the sha ceiling 20).
         self::assertGreaterThanOrEqual(8, $targets[0]);
@@ -679,9 +679,9 @@ final class RiskIntegrationTest extends TestCase
 
     public function testUnknownScopeRejectModeDeniesWithoutIssuing(): void
     {
-        // unknown_scope.mode=reject: TRUE rejection — the controller returns
-        // the risk-denied 429 (same as a Deny decision) WITHOUT issuing any
-        // challenge and WITHOUT falling back to a baseline profile. The
+        // unknown_scope.mode=reject: true rejection — the controller returns
+        // the risk-denied 429 (same as a Deny decision) without issuing any
+        // challenge and without falling back to a baseline profile. The
         // rateLimitHit feedback for the refusal is skipped inside the
         // gateway (unknown scope — never an exception).
         $issuer = new Issuer(new Config(secretKey: self::SECRET, targetBits: 8, ttlSecs: 120), new ArrayStorage());
@@ -713,7 +713,7 @@ final class RiskIntegrationTest extends TestCase
     {
         // unknown_scope.mode=baseline (the default): the gateway throws
         // UnknownScopeException, the controller catches it and issues the
-        // DEFAULT challenge profile — the adaptive engine is never touched.
+        // default challenge profile — the adaptive engine is never touched.
         $issuer = new Issuer(new Config(secretKey: self::SECRET, targetBits: 8, ttlSecs: 120), new ArrayStorage());
         $keys = RiskKeys::fromMaster(self::SECRET);
         $identityFactory = new RiskIdentityFactory($keys);
@@ -789,8 +789,8 @@ final class RiskIntegrationTest extends TestCase
 
     /**
      * A misconfigured proxy (unparseable client IP = no usable risk signal)
-     * must apply the scope's configured DEGRADED action — a degraded=deny
-     * scope still returns 429 RISK_DENIED, never a silent baseline drop.
+     * must apply the scope's configured degraded action — a degraded=deny
+     * scope still returns 429 risk_denied, never a silent baseline drop.
      */
     public function testInvalidClientIpAppliesConfiguredDegradedAction(): void
     {
@@ -818,7 +818,7 @@ final class RiskIntegrationTest extends TestCase
     }
 
     /**
-     * The degraded decision for a scope must come from the POLICY only —
+     * The degraded decision for a scope must come from the policy only —
      * neither the state store nor the emergency limiter may be touched, so a
      * saturated process window or a backend outage can never distort the
      * configured degraded floor.
@@ -882,7 +882,7 @@ final class RiskIntegrationTest extends TestCase
     }
 
     /**
-     * The decision context is REQUEST-LOCAL: a long-running worker serving
+     * The decision context is request-local: a long-running worker serving
      * two sequential requests must never leak request 1's decision id into
      * request 2 (a fresh Request with empty attributes, the way the kernel
      * pushes one per request, reads back null).
@@ -909,7 +909,7 @@ final class RiskIntegrationTest extends TestCase
         $decision1 = $gateway->preIssue('login', '198.51.100.7', null);
         self::assertSame($decision1->decisionId, $gateway->currentDecisionId(), 'request 1 sees its own decision id');
 
-        // The kernel swaps the main request: request 2 is a FRESH Request
+        // The kernel swaps the main request: request 2 is a fresh Request
         // with empty attributes — request 1's id must be invisible.
         $stack->pop();
         $second = JsonRequest::create('/challenge', 'POST');
@@ -930,7 +930,7 @@ final class RiskIntegrationTest extends TestCase
     /**
      * The nonce -> decision mapping: JSON {"decision_id": ...} at
      * {kiwi:<ns>}:decision:<nonce> with the risk.nonce_to_decision_ttl_secs
-     * TTL (default 300), consumed once via GETDEL (at most one winner).
+     * TTL (default 300), consumed once via getdel (at most one winner).
      */
     public function testNonceToDecisionMappingRoundTripsWithTtlAndConsumesOnce(): void
     {
@@ -977,7 +977,7 @@ final class RiskIntegrationTest extends TestCase
     /**
      * The controller pairs the minted challenge nonce to the pre-issue
      * decision id right after a successful preIssue, so a later solve can be
-     * confirmed back to the ORIGINAL decision.
+     * confirmed back to the original decision.
      */
     public function testControllerAttachesNonceToDecisionMappingAfterPreIssue(): void
     {
@@ -1026,7 +1026,7 @@ final class RiskIntegrationTest extends TestCase
     }
 
     /**
-     * A wired principal resolver must flow the RAW principal into EVERY
+     * A wired principal resolver must flow the RAW principal into every
      * engine context (pre-issue AND feedback signals); the engine
      * HMAC-pseudonymizes it, so the recorded observation carries the derived
      * pseudonym, never the raw value.
@@ -1077,8 +1077,8 @@ final class RiskIntegrationTest extends TestCase
 
     /**
      * reassess() must NOT consume the emergency admission budget: a
-     * saturated process window denies PRE-ISSUE assessments but can never
-     * deny a valid POST-SOLVE re-assessment.
+     * saturated process window denies pre-issue assessments but can never
+     * deny a valid post-solve re-assessment.
      */
     public function testLowLimiterCapNeverDeniesPostSolve(): void
     {
@@ -1111,9 +1111,9 @@ final class RiskIntegrationTest extends TestCase
 
     public function testPostSolveCheckDenyRejectsValidSolve(): void
     {
-        // post_solve_check scope: a VALID solve whose SolveSuccess
+        // post_solve_check scope: a valid solve whose SolveSuccess
         // re-assessment denies must fail the validation with the distinct
-        // POST_SOLVE_REJECTED_ERROR. The gateway does NOT self-train: the
+        // POST_solve_rejected_error. The gateway does NOT self-train: the
         // post-solve outcome is NOT recorded as ConfirmedAbuse by the
         // bundle (confirmation is an application-only signal that requires
         // a decision id), so the only observation is the SolveSuccess
@@ -1164,7 +1164,7 @@ final class RiskIntegrationTest extends TestCase
 
     public function testPostSolveCheckPassRecordsPlainSolveSuccess(): void
     {
-        // A VALID solve on a post_solve_check scope whose re-assessment
+        // A valid solve on a post_solve_check scope whose re-assessment
         // allows must pass validation. The outcome is recorded as the plain
         // SolveSuccess signal — the gateway no longer self-confirms as
         // ConfirmedLegitimate (application-only signal, requires a decision
@@ -1240,10 +1240,10 @@ final class RiskIntegrationTest extends TestCase
 
     public function testPostSolveStepUpFailsValidationWithStepUpError(): void
     {
-        // post_solve_check scope: a VALID solve whose SolveSuccess
+        // post_solve_check scope: a valid solve whose SolveSuccess
         // re-assessment escalates to StepUp (an Argon band action while
         // Argon capacity is saturated) must fail the validation with the
-        // distinct POST_SOLVE_STEP_UP_REQUIRED error — the application
+        // distinct POST_solve_step_UP_required error — the application
         // routes the user to MFA/passkey/email confirmation instead of a
         // silent re-solve loop.
         // Score: base 100 + source_fast 900 (171) + subnet_fast 1000 (80) +
@@ -1295,10 +1295,10 @@ final class RiskIntegrationTest extends TestCase
     }
 
     /**
-     * confirmedLegitimate / confirmedAbuse REQUIRE the decisionId: the
+     * confirmedLegitimate / confirmedAbuse require the decisionId: the
      * engine enforces it with InvalidArgumentException and the gateway lets
      * that enforcement surface (application-only signals, never inferred by
-     * the bundle). With a decisionId the FIRST confirmation (status 1)
+     * the bundle). With a decisionId the first confirmation (status 1)
      * books the reputation event exactly once.
      */
     public function testConfirmedSignalsRequireDecisionId(): void
@@ -1359,13 +1359,11 @@ final class RiskIntegrationTest extends TestCase
     }
 
     /**
-     * recordConfirmedReputation is the CONTEXT-FUL path: with a valid
+     * recordConfirmedReputation is the context-ful path: with a valid
      * source/session context the engine confirms the decision atomically
      * (status 1/2 — the first confirmation) and records the reputation
-     * event (the observation carries the source/session/principal signals);
-     * without a usable client IP there is nothing to attribute the
-     * reputation event to and the signal is skipped (null) — never an
-     * exception.
+     * event carrying the source/session/principal signals. Without a
+     * usable client IP the signal is skipped (null) — never an exception.
      */
     public function testRecordConfirmedReputationStillUpdatesReputation(): void
     {
@@ -1415,7 +1413,7 @@ final class RiskIntegrationTest extends TestCase
     }
 
     /**
-     * confirmDecisionOutcome is the CALIBRATION-ONLY path: a decision id +
+     * confirmDecisionOutcome is the calibration-only path: a decision id +
      * outcome is enough — no scope, no session and NO network identity.
      * The engine's atomic confirm consumes the receipt and records the
      * score-weighted outcome in one canonical confirm.lua script.
@@ -1472,7 +1470,7 @@ final class RiskIntegrationTest extends TestCase
 
     /**
      * confirmDecisionOutcome with $samplingProbabilityPpm supplies the
-     * INVERSE sampling probability (weighted mode): weight = 1_000_000/ppm,
+     * inverse sampling probability (weighted mode): weight = 1_000_000/ppm,
      * so a label known to be 50% likely to be reported is weighted 2.0.
      */
     public function testConfirmDecisionOutcomeWeightedModeConvertsPpmToWeight(): void
@@ -1532,15 +1530,16 @@ final class RiskIntegrationTest extends TestCase
     }
 
     /**
-     * WEIGHTED MODE THROUGH THE CONTEXT-FUL API: confirmedLegitimate /
+     * Weighted mode through the context-ful API: confirmedLegitimate /
      * confirmedAbuse / recordConfirmedReputation accept the same optional
      * $samplingProbabilityPpm (inverse sampling probability, 1..1_000_000)
      * and pass it to the engine's confirmed* methods, which convert it to
-     * weight = 1_000_000/ppm — so a context-ful confirmation in weighted
-     * mode re-weights the label into the calibration population exactly
-     * like confirmDecisionOutcome. A null ppm in weighted mode makes the
-     * engine throw InvalidArgumentException (the label cannot be re-weighted
-     * without its inverse probability) — the gateway lets it PROPAGATE.
+     * weight = 1_000_000/ppm. A context-ful confirmation thus re-weights
+     * the label into the calibration population exactly like
+     * confirmDecisionOutcome. A null ppm in weighted mode makes the
+     * engine throw InvalidArgumentException (the label cannot be
+     * re-weighted without its inverse probability) — the gateway lets it
+     * propagate.
      */
     public function testConfirmedContextfulApiWeightedModeMapsPpmAndPropagatesNullPpm(): void
     {
@@ -1586,14 +1585,14 @@ final class RiskIntegrationTest extends TestCase
         self::assertSame(1.0, $client->hashes[$bucket]['legit_count'] ?? null, 'ppm = 1000000 is the identity weight');
         self::assertSame(50.0, $client->hashes[$bucket]['legit_score_sum'] ?? null);
 
-        // recordConfirmedReputation passes the ppm through as well.
+        // recordConfirmedReputation passes the ppm through as well
         $calibrator->recordReceipt('dec-ctx-3', 1, 0, RiskAction::Allow, 100, 1, 172800, 1.0);
         $gateway->recordConfirmedReputation(false, 'login', '198.51.100.7', null, null, 'dec-ctx-3', 250_000);
         self::assertSame(6.0, $client->hashes[$bucket]['abuse_count'] ?? null, 'weight = 2.0 (500000 ppm) + 4.0 (250000 ppm) — every context-ful confirmation re-weights its label');
 
-        // NULL ppm in weighted mode: the engine's confirmOutcome refuses a
+        // null ppm in weighted mode: the engine's confirmOutcome refuses a
         // null weight with InvalidArgumentException — the gateway lets it
-        // PROPAGATE (documented behavior).
+        // propagate (documented behavior).
         $calibrator->recordReceipt('dec-ctx-null', 1, 0, RiskAction::Allow, 100, 1, 172800, 1.0);
         try {
             $gateway->confirmedAbuse('login', '198.51.100.7', null, null, 'dec-ctx-null');
@@ -1662,11 +1661,11 @@ final class RiskIntegrationTest extends TestCase
         );
 
         // Two decisions were sampled at assessment time (the calibrator's
-        // sample() books the TOTAL counter — one INCR per sampled
+        // sample call books the total counter — one incr per sampled
         // decision); one of them was confirmed. The counters are booked
-        // deterministically here (sample() itself is probabilistic). The
+        // deterministically here (sample itself is probabilistic). The
         // counters live in the scope/hour buckets, so the sample
-        // receipts are registered at the CURRENT hour to sit inside the
+        // receipts are registered at the current hour to sit inside the
         // 24-hour metrics window.
         $currentHour = intdiv((int) floor(microtime(true) * 1000), 3_600_000);
         $calibrator->recordReceipt('met-1', 1, 0, RiskAction::Allow, 100, 1, $currentHour, 1.0);
@@ -1680,7 +1679,7 @@ final class RiskIntegrationTest extends TestCase
         self::assertSame(0.5, $metrics['resolutionRatio'], 'resolution = resolved/total = 1/2');
         self::assertSame(1, $metrics['sampledExpired'], 'sampledExpired = total - resolved');
 
-        // complete/weighted modes never touch the counters -> zeros.
+        // complete/weighted modes never touch the counters -> zeros
         $complete = new AggregateCalibrator(new FakePredisClient(), 'cal-metrics-complete', samplingMode: 'complete');
         $engineComplete = new AdaptiveRiskEngine(
             new FakeRiskStateStore(),
@@ -1705,12 +1704,12 @@ final class RiskIntegrationTest extends TestCase
     }
 
     /**
-     * random_sample calibration: the receipt carries the assessment-time
-     * "sampled" flag; an UNSAMPLED confirmation is CONSUMED with status 2
-     * (deliberately not recorded — the label can never select itself into
-     * the calibration population; the caller may still apply first-party
-     * reputation exactly once), while a sampled confirmation is recorded
-     * with status 1.
+     * random_sample calibration: an unsampled confirmation is consumed
+     * with status 2, deliberately not recorded — the label can never
+     * select itself into the calibration population, and the caller may
+     * still apply first-party reputation exactly once. A sampled
+     * confirmation is recorded with status 1, keyed by the receipt's
+     * assessment-time "sampled" flag.
      */
     public function testConfirmDecisionOutcomeRandomSampleDiscardsUnsampledReceipts(): void
     {
@@ -1747,7 +1746,7 @@ final class RiskIntegrationTest extends TestCase
         self::assertArrayNotHasKey("{kiwi:cal-sample}:cal:1:{$hour}", $client->hashes, 'an unsampled outcome must never reach the aggregates');
 
         // Sampled receipt: recorded with status 1 (and the sampled-decision
-        // RESOLVED counter of the resolution gate is INCRed exactly once).
+        // resolved counter of the resolution gate is INCRed exactly once).
         $calibrator->recordReceipt('sampled', 1, 0, RiskAction::Allow, 100, 1, 172800, 1.0);
         self::assertSame(1, $gateway->confirmDecisionOutcome('sampled', true), 'a sampled confirmation is recorded with status 1');
         self::assertSame(1.0, $client->hashes["{kiwi:cal-sample}:cal:1:{$hour}"]['legit_count'] ?? null);
@@ -1755,14 +1754,14 @@ final class RiskIntegrationTest extends TestCase
     }
 
     /**
-     * confirmCorrection: an application-level label CORRECTION of a
+     * confirmCorrection: an application-level label correction of a
      * decision (e.g. a fraud-review appeal or chargeback verdict flipped
-     * the class). Maps $samplingProbabilityPpm to the engine weight exactly
-     * like confirmDecisionOutcome (weight = 1_000_000/ppm). The engine's
-     * compensating-state API is guarded by the OUTCOME LEDGER: the first
-     * correction flips the ledger (1 -> 2) and REVERSES the recorded
-     * bucket counts; the second correction of the same decision is a no-op
-     * (false) — retries can never double-compensate, and the calibration
+     * the class). Maps $samplingProbabilityPpm to the engine weight
+     * exactly like confirmDecisionOutcome (weight = 1_000_000/ppm). The
+     * outcome ledger guards the compensating-state API: the first
+     * correction flips the ledger (1 -> 2) and reverses the recorded
+     * bucket counts. The second correction of the same decision is a
+     * no-op — retries can never double-compensate, and the calibration
      * aggregates return to the pre-confirmation state.
      */
     public function testConfirmCorrectionIsOnceOnlyAndReversesBuckets(): void
@@ -1800,7 +1799,7 @@ final class RiskIntegrationTest extends TestCase
         self::assertSame(100.0, $client->hashes[$bucket]['legit_score_sum'] ?? null);
 
         // First correction: the ledger flips to 2 and the recorded bucket
-        // deltas are reversed EXACTLY.
+        // deltas are reversed exactly.
         self::assertTrue($gateway->confirmCorrection('corr-1', false), 'the first correction applies the compensation');
         $ledger = json_decode($client->strings['{kiwi:cal-corr}:outcome:corr-1'], true);
         self::assertSame('A', $ledger['o'], 'the outcome ledger is flipped to the corrected outcome (abuse)');
@@ -1808,7 +1807,7 @@ final class RiskIntegrationTest extends TestCase
         self::assertSame(0.0, $client->hashes[$bucket]['legit_score_sum'] ?? null, 'the reversal returns legit_score_sum to 0');
 
         // Same-target corrections are no-ops (the ledger already carries
-        // the corrected outcome); a correction back to the OPPOSITE
+        // the corrected outcome); a correction back to the opposite
         // outcome is a new explicit correction (each flip reverses the
         // bucket deltas again).
         self::assertFalse($gateway->confirmCorrection('corr-1', false), 'a correction to the current outcome is a no-op (false)');
@@ -1841,7 +1840,7 @@ final class RiskIntegrationTest extends TestCase
     }
 
     /**
-     * confirmCorrection WORKS WITHOUT CALIBRATION: the once-only guard is
+     * confirmCorrection works without calibration: the once-only guard is
      * the state store's outcome ledger (registered at assessment time), so
      * a correction of a decision is applied at most once even when no
      * calibration store is attached.
@@ -1882,8 +1881,8 @@ final class RiskIntegrationTest extends TestCase
 
     /**
      * The context-ful reputation path and the calibration-only path compose:
-     * recordConfirmedReputation confirms the receipt ATOMICALLY (same
-     * confirm.lua) and THEN records the reputation event.
+     * recordConfirmedReputation confirms the receipt atomically (same
+     * confirm.lua) and then records the reputation event.
      */
     public function testRecordConfirmedReputationConfirmsAndRecordsReputation(): void
     {
@@ -1922,11 +1921,11 @@ final class RiskIntegrationTest extends TestCase
     }
 
     /**
-     * Webhook retries must NOT amplify reputation: the engine gates the
-     * reputation event on the confirm status (1/2 -> event; 0 -> none), so
-     * re-delivering the same confirmation of the same decision records the
-     * event AT MOST ONCE — a retried ConfirmedAbuse can never re-penalize
-     * the source.
+     * Webhook retries must not amplify reputation: the engine gates the
+     * reputation event on the confirm status (1/2 -> event; 0 -> none).
+     * Re-delivering the same confirmation of the same decision records
+     * the event at most once — a retried ConfirmedAbuse can never
+     * re-penalize the source.
      */
     public function testConfirmedReputationRetryDoesNotAmplify(): void
     {
@@ -2036,7 +2035,7 @@ final class RiskIntegrationTest extends TestCase
 
     public function testRiskDenied429DoesNotDoubleCount(): void
     {
-        // A Deny decision returns 429 RISK_DENIED. The denial already scored
+        // A Deny decision returns 429 risk_denied. The denial already scored
         // the evidence (PreIssue assessment + decision), so NO further
         // rate-limit event may be recorded — double-counting removed.
         $stack = $this->stack(new FakeRiskStateStore(SignalVector::fromArray(['replay' => 700])));
@@ -2051,7 +2050,7 @@ final class RiskIntegrationTest extends TestCase
     public function testSourceRateLimitHitRecordedOnIssuerRateLimit429(): void
     {
         // The issuer's hard rate limit (per-client) returns 429 and the
-        // refusal is recorded as SourceRateLimitHit feedback BEFORE the
+        // refusal is recorded as SourceRateLimitHit feedback before the
         // response (per-source attribution; the global 429 uses
         // GlobalCapacityHit instead).
         $issuer = new Issuer(new Config(secretKey: self::SECRET, targetBits: 8, ttlSecs: 120), new ArrayStorage());
@@ -2084,7 +2083,7 @@ final class RiskIntegrationTest extends TestCase
 
     public function testGlobalCapacityHitRecordedOnGlobalRateLimit429(): void
     {
-        // The deployment-global cap returns 429 GLOBAL_RATE_LIMITED and the
+        // The deployment-global cap returns 429 global_rate_limited and the
         // refusal is recorded as GlobalCapacityHit — identity-neutral: the
         // canonical risk-v1 Lua adds global-only bad pressure and never
         // contaminates the visitor's source/session reputation.
@@ -2122,8 +2121,8 @@ final class RiskIntegrationTest extends TestCase
     public function testIssuanceCounterIncrementsOnEveryIssuedChallenge(): void
     {
         // Every minted challenge increments the atomic per-second issuance
-        // counter (one Lua script: INCR + EXPIRE 1 — the TTL can never be
-        // lost, so the signal always reflects the LIVE second) that the
+        // counter (one Lua script: incr + expire 1 — the TTL can never be
+        // lost, so the signal always reflects the live second) that the
         // resource-pressure provider reads for issuanceCapacity.
         $client = new FakePredisClient();
         $counter = new IssuanceCounter($client, '{kiwi:test}:issuance:');
@@ -2169,7 +2168,7 @@ final class RiskIntegrationTest extends TestCase
 
         // The GlobalCapacityHit observation is identity-neutral: its source
         // pseudonym is derived from the unspecified-address sentinel (the
-        // canonical Lua mutates ONLY the global state for event 16).
+        // canonical Lua mutates only the global state for event 16).
         $identityFactory = new RiskIdentityFactory(RiskKeys::fromMaster(self::SECRET));
         self::assertSame(1, $stack['store']->observations[1]->scope);
         self::assertSame($identityFactory->sessionId('sess-1'), $stack['store']->observations[1]->sessionId, 'the session signal is still carried');
@@ -2202,11 +2201,11 @@ final class RiskIntegrationTest extends TestCase
     }
 
     /**
-     * NONCE -> DECISION CONSUMPTION (no post_solve_check): after a VALID
-     * solve the validator decodes the bounded solution token, CONSUMES the
-     * nonce -> decision handle (GETDEL), and sets the ORIGINAL pre-issue
-     * decision id as the request's current decision id — so the application
-     * can confirm this challenge's original decision.
+     * nonce -> decision consumption (no post_solve_check): after a valid
+     * solve the validator decodes the bounded solution token and consumes
+     * the nonce -> decision handle (getdel). It sets the original
+     * pre-issue decision id as the request's current decision id, so the
+     * application can confirm this challenge's original decision.
      */
     public function testValidatorConsumesNonceMappingAndConfirmsPreIssueDecision(): void
     {
@@ -2243,7 +2242,7 @@ final class RiskIntegrationTest extends TestCase
         $preIssue = $gateway->preIssue('login', '198.51.100.7', null);
         $gateway->attachDecisionForNonce($challenge->nonce, $preIssue->decisionId);
 
-        // The verification request is a FRESH request (empty attributes).
+        // The verification request is a fresh request (empty attributes).
         $request = JsonRequest::create('/', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7']);
         $stack->push($request);
         $validator = new KiwiCaptchaValidator($verifier, $stack, self::SECRET, false, $gateway);
@@ -2267,9 +2266,9 @@ final class RiskIntegrationTest extends TestCase
     }
 
     /**
-     * NONCE -> DECISION CONSUMPTION (post_solve_check scope): the stale
-     * mapping is still consumed (cleanup — it can never confirm against a
-     * stale decision), and the fresh POST-SOLVE decision becomes the
+     * nonce -> decision consumption (post_solve_check scope): the stale
+     * mapping is still consumed as cleanup — it can never confirm against
+     * a stale decision — and the fresh post-solve decision becomes the
      * current confirmation target.
      */
     public function testValidatorPostSolveScopeConsumesOldMappingAndTargetsPostSolveDecision(): void
@@ -2329,7 +2328,7 @@ final class RiskIntegrationTest extends TestCase
 
         // The stale mapping was consumed for cleanup and discarded.
         self::assertArrayNotHasKey('{kiwi:t}:decision:'.$challenge->nonce, $client->strings, 'the stale mapping must be consumed even on post_solve_check scopes');
-        // The fresh POST-SOLVE decision is the current confirmation target —
+        // The fresh post-solve decision is the current confirmation target —
         // never the stale pre-issue decision.
         $confirmationTarget = $gateway->currentDecisionId();
         self::assertNotNull($confirmationTarget, 'the post-solve decision must become the confirmation target');
@@ -2341,7 +2340,7 @@ final class RiskIntegrationTest extends TestCase
     /**
      * Real-Redis verification of the canonical risk-v1 Lua semantics for
      * GlobalCapacityHit: the global-only bad pressure raises the global
-     * state and NEVER touches the visitor's source reputation.
+     * state and never touches the visitor's source reputation.
      */
     public function testRealRedisGlobalCapacityHitIsIdentityNeutral(): void
     {

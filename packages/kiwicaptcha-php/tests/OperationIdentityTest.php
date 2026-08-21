@@ -14,18 +14,18 @@ use KiwiCaptcha\Tests\Fixtures\FakePredisClient;
 use PHPUnit\Framework\TestCase;
 
 /**
- * The operation-identity validation contract on the SHARED seam: every
- * storage implementing OperationIdentityAwareStorageInterface routes the
- * identity through OperationIdentity::validate(), so Redis, PSR-6 and the
- * array backend behave IDENTICALLY — a malformed identity (over-long, or
- * containing `%` / any non-alphabet character) is REJECTED with
- * InvalidArgumentException BEFORE the transition executes and the record
- * is left untouched; a valid identity (hex fingerprints, base64url,
- * UUIDs, HMAC digests — all `[A-Za-z0-9_-]`, 1..128 bytes) is recorded;
- * the null identity path stays unchanged. The narrow alphabet exists
- * because the identity is JSON-encoded and spliced into the Redis consume
- * Lua's string.gsub REPLACEMENT string, where `%` is the
- * replacement-template escape — the validated alphabet excludes it (and
+ * The operation-identity validation contract on the shared seam: every
+ * storage implementing OperationIdentityAwareStorageInterface routes
+ * the identity through OperationIdentity::validate(), so Redis, PSR-6
+ * and the array backend behave identically. A malformed identity
+ * (over-long, or containing `%` or any non-alphabet character) is
+ * rejected with InvalidArgumentException before the transition executes
+ * and the record is left untouched. A valid identity (hex fingerprints,
+ * base64url, UUIDs, HMAC digests, all `[A-Za-z0-9_-]`, 1..128 bytes) is
+ * recorded; the null identity path stays unchanged. The narrow alphabet
+ * exists because the identity is JSON-encoded and spliced into the
+ * Redis consume Lua's string.gsub replacement string, where `%` is the
+ * replacement-template escape; the validated alphabet excludes it (and
  * every other gsub-special character) by construction.
  */
 final class OperationIdentityTest extends TestCase
@@ -114,7 +114,7 @@ final class OperationIdentityTest extends TestCase
             self::assertSame(self::VALID_HEX, $consumed->operationIdentity, "the winner exposes the identity it recorded on $name");
             if ($storage instanceof Psr6Storage) {
                 // Psr6Storage::consumedState() is unavailable by design
-                // (PSR-6 pools expose no atomic read-only inspection) —
+                // (PSR-6 pools expose no atomic read-only inspection);
                 // the identity read-back is asserted through the consumed
                 // transition response instead.
                 continue;

@@ -8,8 +8,8 @@ namespace KiwiCaptcha\Risk\Tests;
  * Deterministic LCG vector generator for the 10k parity anchor and the
  * monotonicity property tests.
  *
- *   x_{n+1} = (x_n * 6364136223846793005 + 1442695040888963407) mod 2^64
- *   seed 42; values = (x >> 11) % 1001
+ *   x_{n+1} = (x_n * 6364136223846793005 + 1442695040888963407) mod 2^64.
+ *   Seed 42; values = (x >> 11) % 1001
  *
  * The state is kept as (hi, lo) 32-bit halves so the arithmetic is exact on
  * PHP's signed 64-bit ints; the multiplication is folded mod 2^64 with

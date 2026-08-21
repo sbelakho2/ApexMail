@@ -9,24 +9,24 @@ namespace BelConsulting\KiwiCaptchaBundle\Risk;
  * signal.
  *
  * The tag is a bounded base36 string over ~10 bits derived from a small
- * capability descriptor ({@see ClientContextTag::derive()}) — deliberately
- * coarse: no canvas/audio/font-list/GPU fingerprinting, no stable device
- * identifier. The derivation is KEYED to the deployment namespace and the
- * continuity session, so the same capability combination yields a different
- * tag per deployment and per session: the tag can never be used to
- * correlate a device across deployments or sessions. The tag is STABLE for
- * the whole lifetime of one continuity session — the session's first tag
- * is the comparison baseline — so a session created just before an hour
- * boundary is not flagged as inconsistent at the next request. The engine
- * only ever compares tags WITHIN one session to detect a CHANGED coarse
- * context (an inconsistency signal) — a changed tag is probabilistic risk
- * evidence, never a security gate.
+ * capability descriptor, see {@see ClientContextTag::derive()}, and is
+ * deliberately coarse: no canvas/audio/font-list/GPU fingerprinting, no
+ * stable device identifier. The derivation is keyed to the deployment
+ * namespace and the continuity session, so the same capability combination
+ * yields a different tag per deployment and per session: the tag can never
+ * be used to correlate a device across deployments or sessions. The tag is
+ * stable for the whole lifetime of one continuity session, the session's
+ * first tag being the comparison baseline, so a session created just
+ * before an hour boundary is not flagged as inconsistent at the next
+ * request. The engine only ever compares tags within one session to
+ * detect a changed coarse context (an inconsistency signal); a changed
+ * tag is probabilistic risk evidence, never a security gate.
  *
  * Privacy contract: the descriptor is the coarse, bounded capability string
  * the widget reports (viewport class, touch capability, language family,
- * timezone offset class); the tag is its keyed hash — never a raw
+ * timezone offset class); the tag is its keyed hash, never a raw
  * fingerprint, never the descriptor itself. The session is a fresh random
- * per-session identity, so the tag is already fresh per session — removing
+ * per-session identity, so the tag is already fresh per session: removing
  * the hourly epoch from the derivation does not link requests across
  * sessions.
  */
@@ -38,13 +38,13 @@ final class ClientContextTag
     private const BASE36 = '0123456789abcdefghijklmnopqrstuvwxyz';
 
     /**
-     * Derives the bounded tag: base36 of the TOP `BITS` bits of
+     * Derives the bounded tag: base36 of the top `BITS` bits of
      * sha256(deployment | session | descriptor).
      *
-     * Deterministic within (deployment, session, descriptor) — there is NO
+     * Deterministic within (deployment, session, descriptor) — there is no
      * time input, so the tag is identical whenever it is computed for the
      * same continuity session and the same coarse capabilities: the
-     * session's FIRST tag stays the baseline for its whole lifetime.
+     * session's first tag stays the baseline for its whole lifetime.
      * Changing the session or the descriptor produces a different tag.
      */
     public static function derive(string $deployment, string $session, string $descriptor): string

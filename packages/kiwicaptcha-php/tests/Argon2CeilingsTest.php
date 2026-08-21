@@ -16,20 +16,21 @@ use KiwiCaptcha\Tests\Fixtures\Vectors;
 use PHPUnit\Framework\TestCase;
 
 /**
- * Hard Argon2id verifier ceilings: the verifier validates the
- * SIGNED parameters against the absolute process limits AFTER signature
- * authentication and BEFORE any allocation/computation — out-of-range
- * records are rejected with UnsupportedArgon2Params and the memory-hard
- * hash never runs.
+ * Hard Argon2id verifier ceilings: the verifier validates the signed
+ * parameters against the absolute process limits after signature
+ * authentication and before any allocation or computation. Out-of-range
+ * records are rejected with UnsupportedArgon2Params, and the
+ * memory-hard hash never runs.
  */
 final class Argon2CeilingsTest extends TestCase
 {
     private const ISSUED_AT = 1_800_000_000;
 
     /**
-     * A SIGNED protocol-v2 Argon2id record with the given parameters (all
-     * other fields structurally valid). The v2 signature authenticates the
-     * parameters, so the ceiling check — not the signature check — decides.
+     * A signed protocol-v2 Argon2id record with the given parameters
+     * (all other fields structurally valid). The v2 signature
+     * authenticates the parameters, so the ceiling check, not the
+     * signature check, decides.
      */
     private function signedArgonRecord(int $mKib, int $t, int $p, int $targetBits = 4): ChallengeRecord
     {
@@ -97,10 +98,11 @@ final class Argon2CeilingsTest extends TestCase
 
     public function testMemoryBelowMinimumRejectedWithoutComputation(): void
     {
-        // m_kib=1 < MIN_ARGON_MEMORY_KIB (8). The record is SIGNED, so the
-        // signature authenticates before the ceiling check rejects it — and
-        // the admission gate (consulted only later, at the computation
-        // phase) is never reached: no Argon2 work happens.
+        // m_kib=1 is below the 8 KiB memory ceiling. The record is
+        // signed, so the signature authenticates before the ceiling check
+        // rejects it, and the admission gate (consulted only later, at
+        // the computation phase) is never reached: no Argon2 work
+        // happens.
         $record = $this->signedArgonRecord(mKib: 1, t: 3, p: 1);
         $storage = new ArrayStorage();
         $storage->store($record);
@@ -116,7 +118,7 @@ final class Argon2CeilingsTest extends TestCase
 
     public function testMemoryAboveMaximumRejectedWithoutComputation(): void
     {
-        // m_kib=131072 > MAX_ARGON_MEMORY_KIB (65536): allocating 128 MiB
+        // m_kib=131072 exceeds the 65536 KiB ceiling: allocating 128 MiB
         // per hash is beyond the process ceiling.
         $record = $this->signedArgonRecord(mKib: 131072, t: 3, p: 1);
         $storage = new ArrayStorage();
@@ -148,7 +150,8 @@ final class Argon2CeilingsTest extends TestCase
 
     public function testTimeAboveMaximumRejectedWithoutComputation(): void
     {
-        // t=32 > MAX_ARGON_TIME (16): a single hash would run 32 passes.
+        // t=32 exceeds the 16-pass ceiling: a single hash would run 32
+        // passes.
         $record = $this->signedArgonRecord(mKib: 8, t: 32, p: 1);
         $storage = new ArrayStorage();
         $storage->store($record);
@@ -164,11 +167,11 @@ final class Argon2CeilingsTest extends TestCase
 
     public function testParallelismOutsideSodiumRepresentationRejected(): void
     {
-        // p=4 is WITHIN the ceilings (MIN..MAX_PARALLELISM 1..4) but the
-        // libsodium-backed verifier can only compute p == 1 — the proof
-        // phase reports UnsupportedArgon2Params (authentic-but-unsupported),
-        // never verifying wrong bytes. The gate IS consulted (the cheap
-        // ceiling check passed) but the hash itself never runs.
+        // p=4 is within the ceilings (1..4) but the libsodium-backed
+        // verifier can only compute p == 1; the proof phase reports
+        // UnsupportedArgon2Params (authentic but unsupported), never
+        // verifying wrong bytes. The gate is consulted (the cheap ceiling
+        // check passed) but the hash itself never runs.
         $record = $this->signedArgonRecord(mKib: 8, t: 3, p: 4);
         $storage = new ArrayStorage();
         $storage->store($record);
@@ -220,8 +223,8 @@ final class Argon2CeilingsTest extends TestCase
 
     public function testMaxTimeBoundaryPassesTheCeilings(): void
     {
-        // t=16 sits exactly AT MAX_ARGON_TIME: the ceiling check must pass
-        // and the computation phase must run (gate acquired).
+        // t=16 sits exactly at the 16-pass ceiling: the ceiling check
+        // must pass and the computation phase must run (gate acquired).
         $record = $this->signedArgonRecord(mKib: 8, t: 16, p: 1, targetBits: 1);
         $storage = new ArrayStorage();
         $storage->store($record);
@@ -236,9 +239,9 @@ final class Argon2CeilingsTest extends TestCase
 
     public function testMaxMemoryBoundaryPassesTheCeilings(): void
     {
-        // m_kib=65536 sits exactly AT MAX_ARGON_MEMORY_KIB (64 MiB, the
-        // browser-solvable ceiling): the ceiling check passes and the hash
-        // runs (one 192 MiB Argon2id pass — fast).
+        // m_kib=65536 sits exactly at the 65536 KiB ceiling (64 MiB, the
+        // browser-solvable ceiling): the ceiling check passes and the
+        // hash runs (one 192 MiB Argon2id pass, fast).
         $record = $this->signedArgonRecord(mKib: 65536, t: 3, p: 1, targetBits: 1);
         $storage = new ArrayStorage();
         $storage->store($record);
@@ -277,7 +280,7 @@ final class Argon2CeilingsTest extends TestCase
         $gate = $this->countingGate();
 
         // Garbage signature: the SHA record with absurd argon params must
-        // fail at the SIGNATURE check — the argon ceilings never apply.
+        // fail at the signature check; the argon ceilings never apply.
         $verifier = new Verifier($storage, $gate, now: static fn (): int => self::ISSUED_AT);
         $outcome = $verifier->verify($this->tokenFor($record->nonce, 0), Vectors::SECRET);
 

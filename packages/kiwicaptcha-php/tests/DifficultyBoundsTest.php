@@ -17,13 +17,12 @@ use KiwiCaptcha\Tests\Fixtures\Vectors;
 use PHPUnit\Framework\TestCase;
 
 /**
- * Protocol difficulty bounds: the explicit constants
- * MIN_DIFFICULTY = 1 and MAX_DIFFICULTY = 20 (the solver ceiling) guard
- * the verifier's validate_record for BOTH algorithms — a stored record
- * whose target_bits is outside 1..20 is malformed, and the check runs
- * BEFORE any hash computation (the leading-zero comparison only ever sees
- * a validated difficulty). 0, 21, 256 and 65535 are rejected; 1 and 20 are
- * accepted.
+ * Protocol difficulty bounds: the explicit constants 1 (floor) and 20
+ * (the solver ceiling) guard the verifier's validate_record for both
+ * algorithms. A stored record whose target_bits is outside 1..20 is
+ * malformed, and the check runs before any hash computation; the
+ * leading-zero comparison only ever sees a validated difficulty. 0, 21,
+ * 256 and 65535 are rejected; 1 and 20 are accepted.
  */
 final class DifficultyBoundsTest extends TestCase
 {
@@ -48,11 +47,11 @@ final class DifficultyBoundsTest extends TestCase
     }
 
     /**
-     * A SIGNED protocol-v2 record (any algorithm) carrying the given
-     * target_bits with a structurally consistent challenge/prefix. Because
-     * the record is properly signed, a rejection at MalformedRecord can
-     * only come from validate_record — the difficulty guard — never from
-     * the signature check.
+     * A signed protocol-v2 record (any algorithm) carrying the given
+     * target_bits with a structurally consistent challenge/prefix.
+     * Because the record is properly signed, a rejection at
+     * MalformedRecord can only come from validate_record, the difficulty
+     * guard, not from the signature check.
      */
     private function signedRecord(PoWAlgorithm $algorithm, int $targetBits, int $mKib = 0, int $t = 1): ChallengeRecord
     {
@@ -126,9 +125,9 @@ final class DifficultyBoundsTest extends TestCase
      */
     public function testArgon2TargetBitsOutOfRangeRejectedBeforeAnyHashComputation(int $bits): void
     {
-        // The record is SIGNED and structurally consistent: the ONLY reason
-        // for MalformedRecord is the difficulty guard firing — and the
-        // counting gate proves no Argon2 hash was ever attempted.
+        // The record is signed and structurally consistent: the only
+        // reason for MalformedRecord is the difficulty guard firing, and
+        // the counting gate proves no Argon2 hash was ever attempted.
         $record = $this->signedRecord(PoWAlgorithm::Argon2id, $bits, mKib: 8, t: 3);
         $storage = new ArrayStorage();
         $storage->store($record);
@@ -156,8 +155,8 @@ final class DifficultyBoundsTest extends TestCase
      */
     public function testShaTargetBitsAtTheBoundsPassValidation(int $bits): void
     {
-        // A SIGNED record at the boundary: validate_record ACCEPTS it (1 and
-        // 20), so the flow reaches the signature check — a tampered
+        // A signed record at the boundary: validate_record accepts it (1
+        // and 20), so the flow reaches the signature check; a tampered
         // signature yields BadSignature, never MalformedRecord.
         $record = $this->signedRecord(PoWAlgorithm::Sha256, $bits);
         $storage = new ArrayStorage();
@@ -173,9 +172,9 @@ final class DifficultyBoundsTest extends TestCase
             p: $record->p,
             targetBits: $record->targetBits,
             salt: $record->salt,
-            // The tampered challenge carries a REBUILT consistent prefix
-            // (prefix = challenge|salt|), so the only failing check is the
-            // signature re-check.
+            // The tampered challenge carries a rebuilt consistent prefix
+            // (prefix = challenge|salt|), so the only failing check is
+            // the signature re-check.
             prefix: 'tampered|'.$record->salt.'|',
             challenge: 'tampered',
             minDurationMs: $record->minDurationMs,
@@ -194,10 +193,10 @@ final class DifficultyBoundsTest extends TestCase
      */
     public function testArgon2TargetBitsAtTheBoundsPassValidation(int $bits): void
     {
-        // Same boundary proof for Argon2id: the difficulty guard accepts 1
-        // and 20, so a tampered signature fails as BadSignature — and the
-        // admission gate is never consulted (the signature check precedes
-        // the computation phase).
+        // Same boundary proof for Argon2id: the difficulty guard accepts
+        // 1 and 20, so a tampered signature fails as BadSignature, and
+        // the admission gate is never consulted (the signature check
+        // precedes the computation phase).
         $record = $this->signedRecord(PoWAlgorithm::Argon2id, $bits, mKib: 8, t: 3);
         $storage = new ArrayStorage();
         $storage->store(new ChallengeRecord(
@@ -237,8 +236,8 @@ final class DifficultyBoundsTest extends TestCase
 
     public function testShaTargetBitsOneVerifiesEndToEnd(): void
     {
-        // The full proof at the MINIMUM boundary: validate -> signature ->
-        // consume -> derive -> leading-zero comparison against the stored
+        // The full proof at the minimum boundary: validate, signature,
+        // consume, derive, leading-zero comparison against the stored
         // 1-bit difficulty.
         $record = $this->signedRecord(PoWAlgorithm::Sha256, 1);
         $storage = new ArrayStorage();
@@ -300,8 +299,8 @@ final class DifficultyBoundsTest extends TestCase
     public function testLeadingZeroComparisonIsSafeAtTheSolverCeiling(): void
     {
         // A properly signed 20-bit SHA record: the comparison runs (one
-        // cheap hash) and reports InsufficientWork for a provably-wrong
-        // counter — proving the guard admitted the ceiling and the
+        // cheap hash) and reports InsufficientWork for a provably wrong
+        // counter, proving the guard admitted the ceiling and the
         // comparison itself is bounded and safe.
         $record = $this->signedRecord(PoWAlgorithm::Sha256, 20);
         $storage = new ArrayStorage();

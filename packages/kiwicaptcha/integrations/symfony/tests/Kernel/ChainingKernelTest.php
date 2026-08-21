@@ -12,10 +12,10 @@ use PHPUnit\Framework\TestCase;
 use Symfony\Component\DependencyInjection\ContainerInterface;
 
 /**
- * The chaining config options compile and reach the REAL wired services:
- * the kernel boots with risk.chaining enabled, the ticket service + Redis
- * state store exist, and BOTH the challenge controller and the validator
- * carry the injected chain service + the configured TLS header.
+ * The chaining config options compile and reach the real wired services:
+ * the kernel boots with risk.chaining enabled, the ticket service and
+ * Redis state store exist, and the challenge controller and validator
+ * carry the injected chain service and TLS header.
  */
 final class ChainingKernelTest extends TestCase
 {
@@ -61,7 +61,7 @@ final class ChainingKernelTest extends TestCase
         self::assertSame($this->container()->get('kiwi_captcha.risk.resolver'), $resolver, 'the resolver is the SAME service the risk gateway maps actions with');
         self::assertSame($authority, $this->property($validator, 'bindingAuthority'), 'the validator carries the SAME wired authority service');
 
-        // The controller carries the SAME post-solve disposition store the
+        // The controller carries the same post-solve disposition store the
         // validator finalizes: a consumed-valid stage-2 challenge is never
         // terminal from the core's consumed result alone.
         $disposition = $this->property($controller, 'postSolveDispositionStore');

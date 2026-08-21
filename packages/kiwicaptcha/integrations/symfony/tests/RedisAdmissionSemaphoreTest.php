@@ -16,11 +16,11 @@ use KiwiCaptcha\VerifyError;
 use PHPUnit\Framework\TestCase;
 
 /**
- * Redis-backed Argon2id admission gate — the audit's TOKENIZED-LEASE design.
+ * Redis-backed Argon2id admission gate — the audit's tokenized-lease design.
  *
  * Each acquire() mints a unique lease token stored as a sorted-set member
- * scored at its expiry; release() removes EXACTLY that token. Expired leases
- * are reaped by the acquire script (ZREMRANGEBYSCORE up to the server time),
+ * scored at its expiry; release() removes exactly that token. Expired leases
+ * are reaped by the acquire script (zremrangebyscore up to the server time),
  * and a stale release can never remove a newer lease. Exercised against an
  * in-memory Predis stand-in emulating the Lua scripts with a configurable
  * server clock.
@@ -91,7 +91,7 @@ final class RedisAdmissionSemaphoreTest extends TestCase
         $a = $semaphore->acquire();
         self::assertSame(1, $this->leases($client));
 
-        // The lease expires after LEASE_MS: advancing the server clock past
+        // The lease expires after lease_MS: advancing the server clock past
         // it makes the next acquire prune it before admitting.
         $client->setTimeMs($client->timeMs() + self::LEASE_MS + 1);
 
@@ -116,7 +116,7 @@ final class RedisAdmissionSemaphoreTest extends TestCase
         self::assertIsString($tokenB);
         self::assertSame(1, $this->leases($client));
 
-        // The STALE release of the expired token A must be a no-op: it can
+        // The stale release of the expired token A must be a no-op: it can
         // never remove B's live lease.
         $semaphore->release($tokenA);
         self::assertSame(1, $this->leases($client), 'stale release must not remove the new lease (B)');
@@ -223,9 +223,9 @@ final class RedisAdmissionSemaphoreTest extends TestCase
 
     public function testUsageIsAtomicLiveAndReapsExpiredLeases(): void
     {
-        // usage() must be ATOMIC-LIVE: ONE Lua script (TIME -> prune ->
-        // ZCARD), so an expired-but-unreaped lease is counted exactly as the
-        // next acquire would count it — ZCARD alone would overcount while a
+        // usage() must be atomic-live: ONE Lua script (time -> prune ->
+        // zcard), so an expired-but-unreaped lease is counted exactly as the
+        // next acquire would count it — zcard alone would overcount while a
         // crashed worker's lease sits un-reaped between acquires.
         $client = $this->requirePredis();
         $semaphore = new RedisAdmissionSemaphore($client, 1, 'usage-live');
@@ -387,7 +387,7 @@ final class RedisAdmissionSemaphoreTest extends TestCase
         self::assertNull($semaphore->acquire('login'), 'the 3rd login acquire must be refused by the PER-SCOPE budget');
         self::assertSame(2, $client->zcard($this->scopeKey('login', 'scope-fair')), 'the scope set holds exactly its budget');
 
-        // A DIFFERENT scope still acquires within its own budget — one
+        // A different scope still acquires within its own budget — one
         // scope's fullness never starves the others.
         self::assertIsString($semaphore->acquire('signup'), 'a second scope must acquire within its own budget');
         self::assertIsString($semaphore->acquire('signup'));
@@ -401,7 +401,7 @@ final class RedisAdmissionSemaphoreTest extends TestCase
         $client = $this->requirePredis();
         $semaphore = new RedisAdmissionSemaphore($client, 3, 'scope-global', self::LEASE_MS, 64, 10);
 
-        // Per-scope budgets (10) are generous; the GLOBAL cap (3) is the
+        // Per-scope budgets (10) are generous; the global cap (3) is the
         // deployment-wide invariant and must bind first.
         self::assertIsString($semaphore->acquire('a'));
         self::assertIsString($semaphore->acquire('a'));

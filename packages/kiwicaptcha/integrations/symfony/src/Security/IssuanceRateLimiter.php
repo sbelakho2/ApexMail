@@ -7,7 +7,7 @@ namespace BelConsulting\KiwiCaptchaBundle\Security;
 use Psr\Cache\CacheItemPoolInterface;
 
 /**
- * Rate limiter for challenge issuance: per-client-IP AND deployment-global.
+ * Rate limiter for challenge issuance: per-client-IP and deployment-global.
  *
  * Deployment hardening: challenge issuance must be rate-limited, otherwise an
  * attacker can mint unlimited challenges and drive unbounded aggregate
@@ -17,34 +17,34 @@ use Psr\Cache\CacheItemPoolInterface;
  * Three backends, in priority order:
  *
  *  1. Redis (atomic, cross-worker): when a Redis client is available, a
- *     single Lua script implements the audit's atomic sliding window for BOTH
+ *     single Lua script implements the audit's atomic sliding window for both
  *     the per-client ZSET and the deployment-global ZSET. `TIME` (the Redis
  *     server clock) drives the window, so all PHP-FPM workers share one
- *     consistent window and the enforcement is a GATE, not a bound.
+ *     consistent window and the enforcement is a gate, not a bound.
  *  2. PSR-6 pool (shared, best-effort): when a shared pool is configured but
  *     no Redis client exists, the per-client window is kept in the pool. A
  *     PSR-6 pool cannot express an atomic read-modify-write, so concurrent
  *     requests may briefly exceed the limit — a bound, not a gate.
  *  3. In-memory (per-process): single-worker fallback.
  *
- * PRIVACY: raw client IPs are never stored. Every key (Redis, PSR-6 and
- * in-memory) is a peppered HMAC of the IP — `hash_hmac('sha256', $ip,
- * $pepper)` — where the pepper defaults to the bundle secret key
+ * Privacy: raw client IPs are never stored. Every key (Redis, PSR-6 and
+ * in-memory) is a peppered HMAC of the IP, `hash_hmac('sha256', $ip,
+ * $pepper)`, where the pepper defaults to the bundle secret key
  * (`rate_limit_pepper` overrides it). The same HMAC is used by all backends
  * so they agree on the same identity.
  *
  * True sliding window (all backends): the state is a set of hit
- * timestamps/members pruned to `[now - window, now]` on every check — no
- * fixed [window_start, hits] bucket, so a burst straddling a window boundary
- * can never double the allowed rate.
+ * timestamps/members pruned to `[now - window, now]` on every check, with
+ * no fixed [window_start, hits] bucket. A burst straddling a window
+ * boundary can never double the allowed rate.
  *
  * Results: {@see self::check()} returns 1 (allowed), 0 (per-client limit
- * reached) or -1 (GLOBAL limit reached). {@see self::allow()} is the boolean
+ * reached) or -1 (global limit reached). {@see self::allow()} is the boolean
  * view for callers that do not distinguish.
  */
 final class IssuanceRateLimiter
 {
-    // PSR-6 only REQUIRES keys up to 64 chars: 'kr_' + 60 hex = 63 chars.
+    // PSR-6 only requires keys up to 64 chars: 'kr_' + 60 hex = 63 chars.
     // The identity is already a keyed 256-bit HMAC, so truncating to 240
     // bits is more than sufficient.
     private const CACHE_KEY_PREFIX = 'kr_';
@@ -53,7 +53,7 @@ final class IssuanceRateLimiter
      * PSR-6 cache key for a client identity: 'kr_' + the first 60 hex chars
      * of the identity (which is already a keyed 256-bit HMAC — truncating to
      * 240 bits is more than sufficient). Total: 63 characters, within the
-     * 64-character floor that PSR-6 REQUIRES implementations to support.
+     * 64-character floor that PSR-6 requires implementations to support.
      */
     private static function cacheKey(string $identity): string
     {
@@ -62,14 +62,14 @@ final class IssuanceRateLimiter
 
     /**
      * Atomic per-client + global sliding window (exact audit semantics):
-     *   KEYS[1]  = per-client ZSET
-     *   KEYS[2]  = global ZSET
-     *   ARGV[1]  = per-client max
-     *   ARGV[2]  = global max
-     *   ARGV[3]  = window in ms
-     *   ARGV[4]  = unique request id (shared member in both ZSETs)
+     *   KEYS[1]  = per-client ZSET.
+     *   KEYS[2]  = global ZSET.
+     *   ARGV[1]  = per-client max.
+     *   ARGV[2]  = global max.
+     *   ARGV[3]  = window in ms.
+     *   ARGV[4]  = unique request id (shared member in both ZSETs).
      * Returns 1 when allowed, 0 when the per-client cap is full, -1 when the
-     * GLOBAL cap is full (both checked after pruning expired hits).
+     * global cap is full (both checked after pruning expired hits).
      */
     private const LIMIT_SCRIPT = <<<'LUA'
 local time = redis.call('TIME')
@@ -88,15 +88,15 @@ LUA;
 
     /**
      * Epoch-rotated variant of LIMIT_SCRIPT (3 keys): KEYS[1] = previous
-     * client pseudonym, KEYS[2] = current client pseudonym, KEYS[3] = ONE
-     * STABLE deployment-global ZSET (no client identity — it must never be
-     * rotated, or the "global" budget would silently become per-client).
-     * The client identity is HMAC(secret, "kiwi-rate-v2|epoch|canonical-ip"),
-     * so the same IP yields a DIFFERENT keyed pseudonym in every epoch — an
-     * observer of old Redis snapshots cannot correlate one IP across time
-     * periods. Checking the previous-epoch key keeps the per-client sliding
-     * window exact across a rotation boundary. The global budget is shared
-     * by ALL clients regardless of epoch.
+     * client pseudonym, KEYS[2] = current client pseudonym, KEYS[3] = one
+     * stable deployment-global ZSET with no client identity, which must
+     * never be rotated or the global budget would silently become
+     * per-client. The client identity is HMAC(secret, "kiwi-rate-v2|epoch|
+     * canonical-ip"), so the same IP yields a different keyed pseudonym in
+     * every epoch: an observer of old Redis snapshots cannot correlate one
+     * IP across time periods. Checking the previous-epoch key keeps the
+     * per-client sliding window exact across a rotation boundary. The
+     * global budget is shared by all clients regardless of epoch.
      */
     private const LIMIT_SCRIPT_ROTATED = <<<'LUA'
 local time = redis.call('TIME')
@@ -119,18 +119,18 @@ LUA;
     private array $hits = [];
 
     /**
-     * @param int                        $maxChallenges 0 disables the per-client limit
-     * @param int                        $windowSecs    sliding-window size in seconds
-     * @param CacheItemPoolInterface|null $pool          shared multi-process state
-     * @param \Closure|null              $now           epoch-seconds clock override for tests
-     * @param string                     $pepper        HMAC pepper for client identities
-     * @param \Redis|\Predis\Client|null $redis         when set, the ATOMIC Redis backend
-     *                                                  is used (per-client + global)
+     * @param int                        $maxChallenges 0 disables the per-client limit.
+     * @param int                        $windowSecs    sliding-window size in seconds.
+     * @param CacheItemPoolInterface|null $pool          shared multi-process state.
+     * @param \Closure|null              $now           epoch-seconds clock override for tests.
+     * @param string                     $pepper        HMAC pepper for client identities.
+     * @param \Redis|\Predis\Client|null $redis         when set, the atomic Redis backend
+     *                                                  is used (per-client + global).
      * @param int                        $globalMax     0 disables the global limit
-     *                                                  (enforced in the Redis backend)
+     *                                                  (enforced in the Redis backend).
      * @param string                     $namespace     deployment discriminator for the
      *                                                  Redis keys (sanitized to
-     *                                                  [A-Za-z0-9_.-])
+     *                                                  [A-Za-z0-9_.-]).
      */
     public function __construct(
         private readonly int $maxChallenges,
@@ -168,7 +168,7 @@ LUA;
     }
 
     /**
-     * @return int 1 = allowed, 0 = per-client limit reached, -1 = GLOBAL
+     * @return int 1 = allowed, 0 = per-client limit reached, -1 = global
      *             limit reached
      */
     public function check(string $clientIp): int
@@ -179,10 +179,10 @@ LUA;
         // An unknown client IP must never bypass the limit: bucket it with
         // the other unidentifiable clients instead (conservative, shared
         // budget). The IP itself is never used as a key — only the HMAC.
-        // The identity is derived from CANONICAL IP BYTES (inet_pton with
+        // The identity is derived from canonical IP bytes (inet_pton with
         // IPv4-mapped-IPv6 normalization), so two textual spellings of the
         // same address (e.g. "2001:db8::1" vs "2001:0db8:0:0:0:0:0:1")
-        // produce the SAME pseudonym — matching the challenge binding tag.
+        // produce the same pseudonym — matching the challenge binding tag.
         if ($clientIp === '') {
             $identity = 'unknown';
         } else {
@@ -195,17 +195,18 @@ LUA;
 
         if ($this->rateLimitRotationSecs > 0) {
             // Epoch-rotated pseudonym: HMAC(pepper, "kiwi-rate-v2|epoch|
-            // canonical-ip"). The current AND previous epoch identities are
-            // both checked so the sliding window stays exact across a
+            // canonical-ip"). The current and previous epoch identities
+            // are both checked so the sliding window stays exact across a
             // rotation boundary; new hits are written to the current epoch
-            // only. The same IP therefore yields different keys in different
-            // epochs — no correlation across time periods from Redis keys.
+            // only. The same IP therefore yields different keys in
+            // different epochs, so no correlation across time periods can
+            // be derived from Redis keys.
             //
-            // The epoch is derived from the REDIS SERVER clock when Redis is
-            // the backend (a single TIME read): the Lua window pruning uses
-            // Redis TIME, so using the same clock for the epoch keeps both
-            // domains consistent around rotation boundaries even when an
-            // application host's wall clock drifts.
+            // The epoch is derived from the Redis server clock when Redis
+            // is the backend (a single TIME read): the Lua window pruning
+            // uses Redis TIME, so using the same clock for the epoch keeps
+            // both domains consistent around rotation boundaries even when
+            // an application host's wall clock drifts.
             if ($this->redis !== null) {
                 $now = $this->redisTimeSecs();
             } else {
@@ -229,7 +230,7 @@ LUA;
         if ($this->redis !== null) {
             if ($this->maxChallenges <= 0) {
                 // Global-only: no client key or pseudonym is created at all
-                // (data minimization — per-client control is explicitly
+                // (data minimization: per-client control is explicitly
                 // disabled, so no client identifier should exist).
                 return $this->checkRedisGlobalOnly();
             }
@@ -249,9 +250,10 @@ LUA;
 
     private function checkRedisRotated(string $identityPrev, string $identityCur): int
     {
-        // Only the CLIENT keys are epoch-rotated. The global key contains NO
-        // client identity and is shared by every client — rotating it would
-        // silently turn the deployment-wide budget into per-client budgets.
+        // Only the client keys are epoch-rotated. The global key contains
+        // no client identity and is shared by every client — rotating it
+        // would silently turn the deployment-wide budget into per-client
+        // budgets.
         $clientPrev = 'kiwi:rl:client:'.$this->namespace.':'.$identityPrev;
         $clientCur = 'kiwi:rl:client:'.$this->namespace.':'.$identityCur;
         $global = 'kiwi:rl:global:'.$this->namespace;
@@ -271,8 +273,8 @@ LUA;
     }
 
     /**
-     * Atomic global-only window: ONE stable deployment-global ZSET and
-     * nothing else — used when the per-client limit is disabled, so no
+     * Atomic global-only window: one stable deployment-global ZSET and
+     * nothing else, used when the per-client limit is disabled, so no
      * client pseudonym ever exists in Redis.
      */
     private const LIMIT_SCRIPT_GLOBAL_ONLY = <<<'LUA'
@@ -343,7 +345,7 @@ LUA;
         $curHits = $this->prune($this->timestamps(\is_array($itemCur->isHit() ? $itemCur->get() : null) ? $itemCur->get() : []), $now);
 
         if (\count($prevHits) + \count($curHits) >= $this->maxChallenges) {
-            // RETAIN the pruned state on denial — clearing it would let a
+            // Retain the pruned state on denial — clearing it would let a
             // denied request reset the window and pass on the next call
             // (a deterministic every-other-request bypass).
             $itemPrev->set(['t' => $prevHits]);
@@ -465,8 +467,8 @@ LUA;
 
     /**
      * Read the Redis server clock (seconds since epoch). TIME is atomic and
-     * shared by all workers — the rotation epoch and the Lua window pruning
-     * must use the SAME clock so an application-host clock drift cannot
+     * shared by all workers: the rotation epoch and the Lua window pruning
+     * must use the same clock so an application-host clock drift cannot
      * select a mismatched epoch right at a rotation boundary.
      */
     private function redisTimeSecs(): float

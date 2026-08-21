@@ -5,18 +5,18 @@ declare(strict_types=1);
 namespace KiwiCaptcha;
 
 /**
- * Read-only recovery of the retained CONSUMED outcome of a token.
+ * Read-only recovery of the retained consumed outcome of a token.
  *
- * SECURITY CONTRACT — read before using: this is NOT a verification
- * retry API. It performs NO signature, expiry, scope, IP, region, issuer
- * or policy checks and NO fresh derivation. It only reads the retained
- * consumed record and its committed deterministic result, and it is
- * therefore usable ONLY by a caller that has INDEPENDENTLY proven the
- * exact idempotency identity (same backend + idempotency key + response
- * hash + remote-IP fingerprint) against the pre-existing entry — the
- * Siteverify takeover path is the only intended caller. An ordinary
- * replay without that proof must go through {@see Verifier::verify()},
- * which maps a consumed token to the duplicate vocabulary.
+ * This is not a verification retry API. It performs no signature,
+ * expiry, scope, IP, region, issuer or policy checks and no fresh
+ * derivation. It only reads the retained consumed record and its
+ * committed deterministic result. It is therefore usable only by a
+ * caller that has independently proven the exact idempotency identity
+ * (same backend plus idempotency key plus response hash plus remote-IP
+ * fingerprint) against the pre-existing entry; the Siteverify takeover
+ * path is the only intended caller. An ordinary replay without that
+ * proof must go through {@see Verifier::verify()}, which maps a
+ * consumed token to the duplicate vocabulary.
  *
  * The retained evidence is readable even after the signed challenge has
  * expired (the storage's retention horizon covers the recovery window),
@@ -44,7 +44,7 @@ final class ConsumedOutcomeRecovery
             return null;
         }
         if ($consumed->consumedResult === null) {
-            // Crash between consume and commit — intrinsically ambiguous.
+            // Crash between consume and commit: intrinsically ambiguous.
             return null;
         }
 

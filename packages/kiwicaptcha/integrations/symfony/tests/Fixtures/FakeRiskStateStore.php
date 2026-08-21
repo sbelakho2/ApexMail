@@ -15,7 +15,7 @@ use KiwiCaptcha\Risk\Storage\SessionTlsTagStoreInterface;
  * In-memory risk state store for the adaptive-risk integration tests: returns
  * a caller-controlled SignalVector and records every observation, so tests
  * can drive decisions (allow/deny/escalation) and assert the engine's
- * PRE-ISSUE / POST-SOLVE event feed without Redis.
+ * pre-issue / post-solve event feed without Redis.
  */
 final class FakeRiskStateStore implements RiskStateStoreInterface, SessionContextTagStoreInterface, SessionTlsTagStoreInterface
 {
@@ -83,7 +83,7 @@ final class FakeRiskStateStore implements RiskStateStoreInterface, SessionContex
     }
 
     /**
-     * In-memory SET NX semantics: the FIRST risk-v2 client-context tag a
+     * In-memory SET NX semantics: the first risk-v2 client-context tag a
      * session pseudonym presents is recorded and returned forever (the
      * engine derives the session-consistency signal from the comparison).
      *
@@ -97,7 +97,7 @@ final class FakeRiskStateStore implements RiskStateStoreInterface, SessionContex
     }
 
     /**
-     * In-memory SET NX semantics: the FIRST risk-v2 trusted-edge TLS tag a
+     * In-memory SET NX semantics: the first risk-v2 trusted-edge TLS tag a
      * session pseudonym presents is recorded and returned forever (the
      * engine derives the tls_inconsistency signal from the comparison).
      *

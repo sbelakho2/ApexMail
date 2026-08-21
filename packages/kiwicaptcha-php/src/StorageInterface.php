@@ -7,24 +7,24 @@ namespace KiwiCaptcha;
 /**
  * Persistence for issued challenges.
  *
- * `consume()` is a one-shot TRANSITION: it marks the record
- * consumed and KEEPS it until its TTL — replay protection is the consumed
- * marker, not absence. The returned {@see ConsumedRecord} distinguishes the
- * winner of the transition (`consumedNow`) from a retry on an
- * already-consumed record (`consumedBefore`, with the deterministic
- * `consumedResult` when it was committed before a crash).
+ * `consume()` is a one-shot transition: it marks the record consumed and
+ * keeps it until its TTL; replay protection is the consumed marker, not
+ * absence. The returned {@see ConsumedRecord} distinguishes the winner of
+ * the transition (`consumedNow`) from a retry on an already-consumed
+ * record (`consumedBefore`, with the deterministic `consumedResult` when
+ * it was committed before a crash).
  *
- * Implementations MAY be non-atomic under concurrency: two racing requests
- * can both observe the pending state before either marks it consumed.
- * Implementations that guarantee STRICT single-use (exactly one caller wins
- * `consumedNow`, even under concurrency) implement
+ * Implementations may be non-atomic under concurrency: two racing
+ * requests can both observe the pending state before either marks it
+ * consumed. Implementations that guarantee strict single-use (exactly
+ * one caller wins `consumedNow`, even under concurrency) implement
  * {@see AtomicStorageInterface}.
  */
 interface StorageInterface
 {
     /**
      * Store a challenge record, replacing any existing record with the same
-     * nonce. The record is stored in its PENDING state.
+     * nonce. The record is stored in its pending state.
      */
     public function store(ChallengeRecord $record): void;
 
@@ -45,9 +45,9 @@ interface StorageInterface
     /**
      * Commit the deterministic verification result of a consumed record.
      * Only succeeds (returns true) when the record exists, is in the
-     * CONSUMED state, and has no committed result yet (atomic in the Redis
-     * backend; best-effort elsewhere). The verifier calls this
-     * best-effort — a failure must never change the verification outcome.
+     * consumed state, and has no committed result yet (atomic in the
+     * Redis backend; best-effort elsewhere). The verifier calls this
+     * best-effort; a failure must not change the verification outcome.
      */
     public function commitResult(string $nonce, bool $valid, ?string $binding): bool;
 

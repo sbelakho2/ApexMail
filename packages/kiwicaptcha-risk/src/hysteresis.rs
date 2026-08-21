@@ -1,24 +1,24 @@
-//! Per-process, bounded, TTL'd map of the LAST score-selected action per
-//! scope, giving the SCOPE action selection enter/exit hysteresis: a score
+//! Per-process, bounded, TTL'd map of the last score-selected action per
+//! scope, giving the scope action selection enter/exit hysteresis: a score
 //! hovering at a band boundary (449/451/449…) can no
 //! longer flip the challenge profile on every request.
 //!
 //! Rules (byte-identical with the PHP `ScopeActionHysteresis`):
-//!   - thresholds reuse the plain band boundaries: `ENTER[i] = upper[i] +
-//!     10`, `EXIT[i] = lower[i] − 10`;
+//!   - thresholds reuse the plain band boundaries: `enter[i] = upper[i] +
+//!     10`, `exit[i] = lower[i] − 10`;
 //!   - with a previous ladder action at band `i` the action escalates to
-//!     band `i+1` only when `score >= ENTER[i]`, de-escalates to band
-//!     `i−1` only when `score < EXIT[i]`, and otherwise STAYS in band `i`;
+//!     band `i+1` only when `score >= enter[i]`, de-escalates to band
+//!     `i−1` only when `score < exit[i]`, and otherwise stays in band `i`;
 //!   - a fresh scope (no previous action, or an expired entry) uses the
 //!     plain band mapping;
 //!   - the hard actions (StepUp/Deny) are NOT hysteresis-affected: when
 //!     the previous or the plain action is StepUp/Deny the plain mapping
 //!     wins;
 //!   - entries expire after [`TTL_MS`] (300 s); the map is bounded at
-//!     [`MAX_SCOPES`] (1024), the least-recently-used entry evicted when a NEW scope
-//!     arrives at capacity (expired entries are purged first).
+//!     1024 entries, the least-recently-used entry evicted when a new
+//!     scope arrives at capacity (expired entries are purged first).
 //!
-//! The map is intentionally PER-PROCESS (one engine per process in server
+//! The map is intentionally per-process (one engine per process in server
 //! deployments): multi-worker deployments may see slight per-process
 //! differences — an acceptable UX-smoothing trade-off. The authoritative
 //! global state stays in Redis.
@@ -78,7 +78,7 @@ impl ScopeActionHysteresis {
     }
 
     /// Selects the scope's action with enter/exit hysteresis and remembers
-    /// the selection as the scope's new LAST ACTION (the score-selected
+    /// the selection as the scope's new last action (the score-selected
     /// action — a later Deny/StepUp hard override never poisons the
     /// profile).
     pub fn select(&self, scope: u32, score: u16, plain: RiskAction, now_ms: u64) -> RiskAction {
@@ -193,9 +193,9 @@ mod tests {
             );
         }
 
-        // The REAL boundary oscillation (the 450 edge): 449 is Sha18,
+        // The real boundary oscillation (the 450 edge): 449 is Sha18,
         // 451 would be Sha20 under the plain mapping — the previous action
-        // must hold Sha18 (451 < ENTER[Sha18] = 460) so the profile NEVER
+        // must hold Sha18 (451 < enter[Sha18] = 460) so the profile never
         // flips.
         let h = ScopeActionHysteresis::new();
         for (i, score) in [449u16, 451, 449, 451, 449, 451].iter().enumerate() {
@@ -217,17 +217,17 @@ mod tests {
         let h = ScopeActionHysteresis::new();
         let mut now = T0;
         // 449 -> Sha18; a brief tick to 455 (plain Sha20) is still inside
-        // [EXIT[Sha18]=290, ENTER[Sha18]=460): held.
+        // [exit[Sha18]=290, enter[Sha18]=460): held.
         assert_eq!(h.select(1, 449, RiskAction::Sha18, now), RiskAction::Sha18);
         now += 1;
         assert_eq!(h.select(1, 455, RiskAction::Sha20, now), RiskAction::Sha18);
         now += 1;
-        // Sustained crossing: 480 >= ENTER[Sha18]=460 -> Sha20, then held.
+        // Sustained crossing: 480 >= enter[Sha18]=460 -> Sha20, then held.
         assert_eq!(h.select(1, 480, RiskAction::Sha20, now), RiskAction::Sha20);
         now += 1;
         assert_eq!(h.select(1, 480, RiskAction::Sha20, now), RiskAction::Sha20);
         now += 1;
-        // Still inside [EXIT[Sha20]=440, ENTER[Sha20]=610): held even at
+        // Still inside [exit[Sha20]=440, enter[Sha20]=610): held even at
         // 590 (plain Argon16) — escalation needs a sustained crossing.
         assert_eq!(
             h.select(1, 590, RiskAction::Argon16, now),
@@ -239,7 +239,7 @@ mod tests {
             RiskAction::Sha20
         );
         now += 1;
-        // 620 >= ENTER[Sha20]=610 -> Argon16, then held.
+        // 620 >= enter[Sha20]=610 -> Argon16, then held.
         assert_eq!(
             h.select(1, 620, RiskAction::Argon16, now),
             RiskAction::Argon16
@@ -255,9 +255,9 @@ mod tests {
     fn sustained_drop_exits_the_higher_action() {
         let h = ScopeActionHysteresis::new();
         let mut now = T0;
-        // Climb to Sha20 (480), then drop: 441 is still >= EXIT[Sha20]=440
-        // -> held; 439 < 440 -> Sha18; 250 < EXIT[Sha18]=290 -> Sha16, then
-        // held (250 >= EXIT[Sha16]=140).
+        // Climb to Sha20 (480), then drop: 441 is still >= exit[Sha20]=440
+        // -> held; 439 < 440 -> Sha18; 250 < exit[Sha18]=290 -> Sha16, then
+        // held (250 >= exit[Sha16]=140).
         assert_eq!(h.select(1, 480, RiskAction::Sha20, now), RiskAction::Sha20);
         now += 1;
         assert_eq!(h.select(1, 441, RiskAction::Sha20, now), RiskAction::Sha20);
@@ -268,7 +268,7 @@ mod tests {
         now += 1;
         assert_eq!(h.select(1, 250, RiskAction::Sha16, now), RiskAction::Sha16);
         now += 1;
-        // Below EXIT[Sha16]=140 -> Allow.
+        // Below exit[Sha16]=140 -> Allow.
         assert_eq!(h.select(1, 100, RiskAction::Allow, now), RiskAction::Allow);
     }
 
@@ -303,7 +303,7 @@ mod tests {
         now += 1;
         assert_eq!(h.select(1, 500, RiskAction::Sha20, now), RiskAction::Sha20);
         now += 1;
-        // A ladder previous action with a HARD plain action: the hard
+        // A ladder previous action with a hard plain action: the hard
         // action wins immediately (never held in the lower band).
         assert_eq!(h.select(1, 500, RiskAction::Sha20, now), RiskAction::Sha20);
         now += 1;
