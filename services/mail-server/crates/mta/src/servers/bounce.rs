@@ -19,10 +19,17 @@ use uuid::Uuid;
 
 use crate::config::BounceConfig;
 
-use super::util::{read_line_capped, LineRead, MAX_COMMAND_LINE, MAX_DATA_LINE};
+use super::util::{
+    is_strict_end_of_data, line_content, read_line_capped, LineRead, MAX_COMMAND_LINE,
+    MAX_DATA_LINE,
+};
 
 /// Per-line timeout while receiving bounce DATA.
 const DATA_LINE_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// Total deadline for receiving one bounce DATA payload (slow-loris
+/// protection, mirrors the inbound server's 10-minute cap).
+const DATA_TOTAL_TIMEOUT: Duration = Duration::from_secs(600);
 
 // #142:Pre-compiled regex for RFC 3463 enhanced status codes
 static BOUNCE_STATUS_RE: LazyLock<Option<regex::Regex>> =
@@ -153,7 +160,7 @@ impl BounceServer {
                     let _ = write_line(&mut stream, "500 5.5.2 Line too long\r\n").await;
                     continue;
                 }
-                Ok(Ok(LineRead::Line(l))) => line = l,
+                Ok(Ok(LineRead::Line(l, _))) => line = l,
             }
 
             let cmd = line.trim().to_uppercase();
@@ -216,10 +223,22 @@ impl BounceServer {
                 // truncated payload that must never be processed.
                 let mut terminated = false;
                 let mut timed_out = false;
+                // E-9:total DATA deadline so a slow client cannot drip-feed
+                // lines forever (each line gets at most DATA_LINE_TIMEOUT but
+                // the whole payload at most DATA_TOTAL_TIMEOUT).
+                let deadline = std::time::Instant::now() + DATA_TOTAL_TIMEOUT;
                 loop {
                     line.clear();
+                    let remaining = deadline
+                        .checked_duration_since(std::time::Instant::now())
+                        .unwrap_or(Duration::ZERO);
+                    if remaining.is_zero() {
+                        timed_out = true;
+                        break;
+                    }
+                    let per_line = remaining.min(DATA_LINE_TIMEOUT);
                     match tokio::time::timeout(
-                        DATA_LINE_TIMEOUT,
+                        per_line,
                         read_line_capped(&mut stream, MAX_DATA_LINE),
                     )
                     .await
@@ -234,16 +253,19 @@ impl BounceServer {
                             // part of a payload we are willing to store.
                             too_large = true;
                         }
-                        Ok(Ok(LineRead::Line(l))) => {
+                        Ok(Ok(LineRead::Line(l, term))) => {
                             line = l;
-                            if line.trim() == "." {
+                            // RFC 5321 strict: end-of-data is exactly "." with
+                            // a CRLF terminator (bare-LF "." is body data).
+                            if is_strict_end_of_data(&line, term) {
                                 terminated = true;
                                 break;
                             }
+                            let content = line_content(&line, term);
                             if !too_large
                                 && !append_data_line(
                                     &mut message,
-                                    &line,
+                                    content,
                                     self.config.max_message_size,
                                 )
                             {
@@ -251,8 +273,15 @@ impl BounceServer {
                                 // Drain the remainder without buffering it.
                                 loop {
                                     line.clear();
+                                    let remaining = deadline
+                                        .checked_duration_since(std::time::Instant::now())
+                                        .unwrap_or(Duration::ZERO);
+                                    if remaining.is_zero() {
+                                        timed_out = true;
+                                        break;
+                                    }
                                     match tokio::time::timeout(
-                                        DATA_LINE_TIMEOUT,
+                                        remaining.min(DATA_LINE_TIMEOUT),
                                         read_line_capped(&mut stream, MAX_DATA_LINE),
                                     )
                                     .await
@@ -263,8 +292,8 @@ impl BounceServer {
                                         }
                                         Ok(Ok(LineRead::Eof)) | Ok(Err(_)) => break,
                                         Ok(Ok(LineRead::TooLong)) => {}
-                                        Ok(Ok(LineRead::Line(dl))) => {
-                                            if dl.trim() == "." {
+                                        Ok(Ok(LineRead::Line(dl, dterm))) => {
+                                            if is_strict_end_of_data(&dl, dterm) {
                                                 break;
                                             }
                                         }
@@ -719,21 +748,27 @@ fn is_valid_email_addr(addr: &str) -> bool {
     !local.is_empty() && !domain.is_empty() && !domain.starts_with('.') && !domain.ends_with('.')
 }
 
-/// Append one DATA line to the message buffer, honoring dot-unstuffing.
+/// Append one DATA body line (terminator already stripped) to the message
+/// buffer, honoring RFC 5321 §4.5.2 dot-unstuffing (exactly ONE leading dot
+/// removed) and normalizing the stored terminator to CRLF — a bare-LF body
+/// line must never be stored or relayed with a bare LF.
 ///
 /// Returns `false` (leaving the buffer untouched) when the line would push
 /// the message past `max_size` — the caller must then reject with `552` and
 /// drain the remainder (H10).
-pub(crate) fn append_data_line(message: &mut BytesMut, line: &str, max_size: usize) -> bool {
-    let body = if line.starts_with("..") {
-        &line[1..]
-    } else {
-        line
-    };
-    if message.len().saturating_add(body.len()) > max_size {
+pub(crate) fn append_data_line(message: &mut BytesMut, content: &str, max_size: usize) -> bool {
+    let body = super::util::unstuff_dot_line(content);
+    // +2 for the normalized CRLF terminator.
+    if message
+        .len()
+        .saturating_add(body.len())
+        .saturating_add(2)
+        > max_size
+    {
         return false;
     }
     message.extend_from_slice(body.as_bytes());
+    message.extend_from_slice(b"\r\n");
     true
 }
 
@@ -1100,20 +1135,32 @@ mod tests {
 
     #[test]
     fn test_append_data_line_caps_size() {
+        // NOTE: updated with the smuggling fix — append_data_line now takes
+        // the line CONTENT (terminator stripped), unstuffs exactly ONE
+        // leading dot, and always appends a normalized CRLF terminator.
         let mut message = BytesMut::new();
-        assert!(append_data_line(&mut message, "line one\r\n", 24));
-        assert!(append_data_line(&mut message, "..unstuff me\r\n", 24));
+        assert!(append_data_line(&mut message, "line one", 23));
+        assert!(append_data_line(&mut message, "..unstuff me", 23));
         assert_eq!(message.as_ref(), b"line one\r\n.unstuff me\r\n");
-        // Appending exactly up to the cap is allowed.
-        assert!(append_data_line(&mut message, "x", 24));
-        assert_eq!(message.as_ref(), b"line one\r\n.unstuff me\r\nx");
+        // Appending exactly up to the cap is allowed (23 = 10 + 13, CRLFs included).
+        assert_eq!(message.len(), 23);
         // A line that would exceed the cap is rejected wholesale (message unchanged).
-        assert!(!append_data_line(&mut message, "y", 24));
-        assert_eq!(message.as_ref(), b"line one\r\n.unstuff me\r\nx");
+        assert!(!append_data_line(&mut message, "x", 23));
+        assert_eq!(message.as_ref(), b"line one\r\n.unstuff me\r\n");
         // A single line larger than the whole budget is rejected too.
         let mut m2 = BytesMut::new();
-        assert!(!append_data_line(&mut m2, "y".repeat(25).as_str(), 24));
+        assert!(!append_data_line(&mut m2, "y".repeat(25).as_str(), 23));
         assert!(m2.is_empty());
+    }
+
+    #[test]
+    fn test_append_data_line_unstuffs_exactly_one_dot() {
+        // RFC 5321 §4.5.2 round-trips: the sender doubles a leading dot.
+        let mut message = BytesMut::new();
+        assert!(append_data_line(&mut message, "..foo", 1024)); // stuffed ".foo"
+        assert!(append_data_line(&mut message, "..", 1024)); // stuffed "."
+        assert!(append_data_line(&mut message, "plain", 1024));
+        assert_eq!(message.as_ref(), b".foo\r\n.\r\nplain\r\n");
     }
 
     #[test]
@@ -1177,5 +1224,153 @@ mod tests {
         assert!(connection_allowed(9, 10));
         assert!(!connection_allowed(10, 10));
         assert!(!connection_allowed(11, 10));
+    }
+
+    // ── B: full-session smuggling test (real TCP, DB unreachable) ──────────
+
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+    use tokio::net::{TcpListener, TcpStream};
+
+    fn test_bounce_server() -> BounceServer {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .acquire_timeout(Duration::from_secs(1))
+            .connect_lazy("postgres://127.0.0.1:1/mta_test")
+            .expect("lazy pool construction cannot fail with a well-formed URL");
+        let redis = deadpool_redis::Config::from_url("redis://127.0.0.1:1")
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .expect("lazy redis pool construction");
+        let config = BounceConfig {
+            enabled: true,
+            host: "127.0.0.1".into(),
+            port: 0,
+            hostname: "bounce.test".into(),
+            verp_domain: "bounces.apexmail.ee".into(),
+            verp_sanitize: true,
+            max_message_size: 1024 * 1024,
+            max_connections_per_ip: 10,
+            max_messages_per_connection: 100,
+            max_messages_per_ip_per_hour: 2000,
+        };
+        BounceServer::new(config, pool, redis, "bounce.test".into())
+    }
+
+    async fn read_reply(
+        reader: &mut tokio::io::BufReader<tokio::net::tcp::OwnedReadHalf>,
+    ) -> String {
+        let mut line = String::new();
+        tokio::time::timeout(Duration::from_secs(5), reader.read_line(&mut line))
+            .await
+            .expect("reply must arrive within 5s")
+            .expect("read must not fail");
+        line
+    }
+
+    #[tokio::test]
+    async fn bounce_data_is_terminated_only_by_a_crlf_dot() {
+        let server = std::sync::Arc::new(test_bounce_server());
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let srv = server.clone();
+        let task = tokio::spawn(async move {
+            let (socket, peer) = listener.accept().await.unwrap();
+            srv.handle_session(socket, peer).await;
+        });
+
+        let tcp = TcpStream::connect(addr).await.unwrap();
+        let (reader, mut writer) = tcp.into_split();
+        let mut reader = tokio::io::BufReader::new(reader);
+
+        assert!(read_reply(&mut reader).await.starts_with("220"));
+
+        writer.write_all(b"EHLO client.example\r\n").await.unwrap();
+        assert!(read_reply(&mut reader).await.starts_with("250"));
+
+        writer.write_all(b"MAIL FROM:<>\r\n").await.unwrap();
+        assert!(read_reply(&mut reader).await.starts_with("250"));
+
+        writer
+            .write_all(b"RCPT TO:<bounces+msg123=example.com=user@bounces.apexmail.ee>\r\n")
+            .await
+            .unwrap();
+        assert!(read_reply(&mut reader).await.starts_with("250"));
+
+        writer.write_all(b"DATA\r\n").await.unwrap();
+        assert!(read_reply(&mut reader).await.starts_with("354"));
+
+        // Smuggling payload: a bare-LF "." line followed by what should be a
+        // smuggled command, then more body, then the REAL terminator. If the
+        // server treated ".\n" as end-of-data, "QUIT" would be parsed as a
+        // command (221 + connection close) before we ever sent the real
+        // terminator.
+        writer
+            .write_all(b"Subject: bounce\r\n.\nQUIT\r\ntail\r\n.\r\n")
+            .await
+            .unwrap();
+
+        // Exactly one response follows the payload: the bounce hits the
+        // (unreachable) DB and must yield 451 — never a 221 from a smuggled
+        // QUIT, and never a 250 for a truncated message.
+        let resp = read_reply(&mut reader).await;
+        assert!(
+            resp.starts_with("451"),
+            "post-DATA reply must be the 451 from process_bounce, got {resp:?}"
+        );
+
+        // The session is still alive and command-synchronized: QUIT now gets 221.
+        writer.write_all(b"QUIT\r\n").await.unwrap();
+        let resp = read_reply(&mut reader).await;
+        assert!(resp.starts_with("221"), "session still synchronized: {resp:?}");
+
+        tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .expect("session task must finish")
+            .expect("session task must not panic");
+    }
+
+    #[tokio::test]
+    async fn bounce_padded_dot_line_stays_body_data() {
+        let server = std::sync::Arc::new(test_bounce_server());
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let srv = server.clone();
+        let task = tokio::spawn(async move {
+            let (socket, peer) = listener.accept().await.unwrap();
+            srv.handle_session(socket, peer).await;
+        });
+
+        let tcp = TcpStream::connect(addr).await.unwrap();
+        let (reader, mut writer) = tcp.into_split();
+        let mut reader = tokio::io::BufReader::new(reader);
+        let _ = read_reply(&mut reader).await; // greeting
+
+        writer.write_all(b"EHLO client.example\r\n").await.unwrap();
+        let _ = read_reply(&mut reader).await;
+        writer.write_all(b"MAIL FROM:<>\r\n").await.unwrap();
+        let _ = read_reply(&mut reader).await;
+        writer
+            .write_all(b"RCPT TO:<bounce@bounces.apexmail.ee>\r\n")
+            .await
+            .unwrap();
+        let _ = read_reply(&mut reader).await;
+        writer.write_all(b"DATA\r\n").await.unwrap();
+        assert!(read_reply(&mut reader).await.starts_with("354"));
+
+        // " ." / " . " must NOT terminate DATA (the old trim() check did).
+        writer.write_all(b"body\r\n .\r\n . \r\n.\r\n").await.unwrap();
+
+        let resp = read_reply(&mut reader).await;
+        assert!(
+            resp.starts_with("451"),
+            "padded dots are body data; the reply must be process_bounce's 451, got {resp:?}"
+        );
+
+        writer.write_all(b"QUIT\r\n").await.unwrap();
+        let resp = read_reply(&mut reader).await;
+        assert!(resp.starts_with("221"), "session still synchronized: {resp:?}");
+
+        tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .expect("session task must finish")
+            .expect("session task must not panic");
     }
 }

@@ -51,6 +51,11 @@ pub struct DnsCache {
     cache: Cache<String, CachedEntry>,
     negative_cache: Cache<String, ()>,
     consistency_lock: RwLock<()>,
+    /// E-2:live index of DKIM keys (`dkim:{selector}._domainkey.{domain}`).
+    /// moka does not expose key iteration, so keys are tracked here to make
+    /// `invalidate_by_domain_suffix` a REAL invalidation instead of the old
+    /// selector-less no-op (stale DKIM public keys survived domain rotation).
+    dkim_keys: RwLock<std::collections::HashSet<String>>,
     default_positive_ttl: Duration,
     max_positive_ttl: Duration,
 }
@@ -81,6 +86,7 @@ impl DnsCache {
             cache,
             negative_cache,
             consistency_lock: RwLock::new(()),
+            dkim_keys: RwLock::new(std::collections::HashSet::new()),
             default_positive_ttl,
             max_positive_ttl,
         }
@@ -123,6 +129,7 @@ impl DnsCache {
             ttl_secs = effective_ttl.as_secs(),
             "DNS cache insert"
         );
+        self.track_dkim_key(&key);
         self.negative_cache.invalidate(&key);
         self.cache.insert(
             key,
@@ -142,6 +149,7 @@ impl DnsCache {
         let _guard = self.consistency_lock.write();
         let key = key.into();
         debug!(key, "DNS negative cache insert");
+        self.track_dkim_key(&key);
         self.cache.invalidate(&key);
         self.negative_cache.insert(key, ());
     }
@@ -149,21 +157,54 @@ impl DnsCache {
     /// Remove a cached entry.
     pub fn invalidate(&self, key: &str) {
         let _guard = self.consistency_lock.write();
+        self.untrack_dkim_key(key);
         self.cache.invalidate(key);
         self.negative_cache.invalidate(key);
     }
 
-    /// #184:Invalidate all entries whose key contains the given substring.
-    /// Used for DKIM keys stored as `dkim:{selector}._domainkey.{domain}`.
+    /// E-2:really invalidate every DKIM entry for a domain. Keys are stored
+    /// as `dkim:{selector}._domainkey.{domain}`; every tracked key that
+    /// carries the `_domainkey.` marker and ends with `.{domain}` (including
+    /// selectors published under subdomains) is dropped from both caches.
+    /// Previously this invalidated a selector-less key nobody ever wrote,
+    /// so stale DKIM public keys survived a domain key rotation.
     pub fn invalidate_by_domain_suffix(&self, domain: &str) {
         let _guard = self.consistency_lock.write();
-        let suffix = format!("._domainkey.{domain}");
-        // Moka doesn't expose key iteration, so we rely on in-memory
-        // tracking. For now, since DKIM entries have short TTLs,
-        // just clear the negative cache for the domain and rely on
-        // natural TTL expiry for positive DKIM cache entries.
-        // Callers that know the selector should invalidate directly.
-        self.negative_cache.invalidate(&format!("dkim:{suffix}"));
+        let suffix = format!(".{domain}");
+        let mut dkim = self.dkim_keys.write();
+        let mut invalidated = 0usize;
+        dkim.retain(|key| {
+            if key.contains("._domainkey.") && key.ends_with(&suffix) {
+                self.cache.invalidate(key);
+                self.negative_cache.invalidate(key);
+                invalidated += 1;
+                debug!(key, domain, "Invalidated DKIM cache entry by domain suffix");
+                false
+            } else {
+                true
+            }
+        });
+        // Defensive: the old (broken) selector-less form, if anything ever
+        // wrote it directly.
+        self.negative_cache
+            .invalidate(&format!("dkim:._domainkey.{domain}"));
+        if invalidated == 0 {
+            debug!(domain, "No DKIM cache entries to invalidate for domain");
+        }
+    }
+
+    /// Track a DKIM-shaped key for suffix invalidation (E-2).
+    fn track_dkim_key(&self, key: &str) {
+        if key.starts_with("dkim:") {
+            self.dkim_keys.write().insert(key.to_string());
+        }
+    }
+
+    /// Stop tracking a key that was explicitly invalidated.
+    fn untrack_dkim_key(&self, key: &str) {
+        if key.starts_with("dkim:") {
+            self.dkim_keys.write().remove(key);
+        }
     }
 
     /// Number of entries in the positive cache.
@@ -181,6 +222,7 @@ impl DnsCache {
         let _guard = self.consistency_lock.write();
         self.cache.invalidate_all();
         self.negative_cache.invalidate_all();
+        self.dkim_keys.write().clear();
     }
 }
 
@@ -315,5 +357,112 @@ mod tests {
             "expected at most 2 entries accessible after LRU eviction, got {}",
             found.len()
         );
+    }
+
+    // ── E-2: real DKIM invalidation by domain suffix ───────────────────────
+
+    #[test]
+    fn dkim_positive_entries_are_invalidated_by_domain_suffix() {
+        let cache = DnsCache::default_cache();
+        cache.insert(
+            "dkim:sel1._domainkey.example.com",
+            vec!["v=DKIM1; k=rsa; p=AAA".into()],
+        );
+        cache.insert(
+            "dkim:sel2._domainkey.example.com",
+            vec!["v=DKIM1; k=rsa; p=BBB".into()],
+        );
+        cache.insert(
+            "dkim:sel1._domainkey.sub.example.com",
+            vec!["v=DKIM1; k=rsa; p=DDD".into()],
+        );
+        cache.insert(
+            "dkim:sel1._domainkey.other.com",
+            vec!["v=DKIM1; k=rsa; p=CCC".into()],
+        );
+        cache.insert("mx:example.com", vec!["10 mx.example.com".into()]);
+
+        cache.invalidate_by_domain_suffix("example.com");
+
+        assert!(
+            cache.get("dkim:sel1._domainkey.example.com").is_none(),
+            "selector keys for the domain must be invalidated"
+        );
+        assert!(cache.get("dkim:sel2._domainkey.example.com").is_none());
+        assert!(
+            cache.get("dkim:sel1._domainkey.sub.example.com").is_none(),
+            "selectors under subdomains of the domain are invalidated too"
+        );
+        // Other domains and non-DKIM keys survive the suffix pass.
+        assert!(matches!(
+            cache.get("dkim:sel1._domainkey.other.com"),
+            Some(CachedResult::Records(_))
+        ));
+        assert!(matches!(
+            cache.get("mx:example.com"),
+            Some(CachedResult::Records(_))
+        ));
+    }
+
+    #[test]
+    fn dkim_negative_entries_are_invalidated_by_domain_suffix() {
+        let cache = DnsCache::default_cache();
+        cache.insert_negative("dkim:selX._domainkey.example.com");
+        assert!(matches!(
+            cache.get("dkim:selX._domainkey.example.com"),
+            Some(CachedResult::NxDomain)
+        ));
+
+        cache.invalidate_by_domain_suffix("example.com");
+        assert!(
+            cache.get("dkim:selX._domainkey.example.com").is_none(),
+            "a negative-cached DKIM miss must not survive domain invalidation"
+        );
+    }
+
+    #[test]
+    fn suffix_invalidation_is_not_spoofed_by_similar_domains() {
+        let cache = DnsCache::default_cache();
+        cache.insert(
+            "dkim:sel._domainkey.evil-example.com",
+            vec!["v=DKIM1; k=rsa; p=X".into()],
+        );
+        cache.invalidate_by_domain_suffix("example.com");
+        assert!(
+            matches!(
+                cache.get("dkim:sel._domainkey.evil-example.com"),
+                Some(CachedResult::Records(_))
+            ),
+            "'evil-example.com' must not match the '.example.com' suffix"
+        );
+    }
+
+    #[test]
+    fn explicit_invalidate_untracks_dkim_key() {
+        let cache = DnsCache::default_cache();
+        cache.insert(
+            "dkim:sel._domainkey.example.com",
+            vec!["v=DKIM1; k=rsa; p=A".into()],
+        );
+        cache.invalidate("dkim:sel._domainkey.example.com");
+        // Already gone directly; the suffix pass must not resurrect anything.
+        cache.invalidate_by_domain_suffix("example.com");
+        assert!(cache.get("dkim:sel._domainkey.example.com").is_none());
+    }
+
+    #[test]
+    fn clear_resets_dkim_tracking() {
+        let cache = DnsCache::default_cache();
+        cache.insert(
+            "dkim:sel._domainkey.example.com",
+            vec!["v=DKIM1; k=rsa; p=A".into()],
+        );
+        cache.clear();
+        cache.insert("mx:example.com", vec!["10 mx".into()]);
+        cache.invalidate_by_domain_suffix("example.com");
+        assert!(matches!(
+            cache.get("mx:example.com"),
+            Some(CachedResult::Records(_))
+        ));
     }
 }

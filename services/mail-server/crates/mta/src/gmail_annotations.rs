@@ -265,16 +265,47 @@ impl GmailAnnotationsService {
             json["potentialAction"] = act;
         }
 
-        // #154:Log an error instead of silently returning empty on serialization failure
-        serde_json::to_string_pretty(&json).unwrap_or_else(|e| {
-            tracing::error!(error = %e, "Failed to serialize Gmail annotation JSON-LD");
-            String::new()
-        })
+        // E-5:script-safe serialization. serde_json does NOT escape `<`, `>`,
+        // `&`, U+2028 or U+2029 inside string literals, but this JSON is
+        // embedded in a <script> block — an org name like
+        // `</script><img src=x onerror=alert(1)>` used to break out of the
+        // script context (XSS). Post-process the serialized JSON so those
+        // characters are always emitted as JSON unicode escapes.
+        match serde_json::to_string_pretty(&json) {
+            Ok(serialized) => escape_json_for_script(&serialized),
+            // #154:Log an error instead of silently returning empty on serialization failure
+            Err(e) => {
+                tracing::error!(error = %e, "Failed to serialize Gmail annotation JSON-LD");
+                String::new()
+            }
+        }
     }
 
     fn build_html(&self, json_ld: &str) -> String {
         format!("<script type=\"application/ld+json\">\n{json_ld}\n</script>")
     }
+}
+
+/// E-5:escape a serialized JSON document for safe embedding inside an HTML
+/// `<script>` element. Replacements are JSON-legal unicode escapes (inside
+/// string literals) and never appear in JSON structure:
+///   `<` → `\u003c`, `>` → `\u003e`, `&` → `\u0026`,
+///   U+2028 → `\u2028`, U+2029 → `\u2029`
+/// The escape texts themselves contain none of the replaced characters, so a
+/// single left-to-right pass is confluent (no double-escaping).
+fn escape_json_for_script(json: &str) -> String {
+    let mut out = String::with_capacity(json.len());
+    for ch in json.chars() {
+        match ch {
+            '<' => out.push_str("\\u003c"),
+            '>' => out.push_str("\\u003e"),
+            '&' => out.push_str("\\u0026"),
+            '\u{2028}' => out.push_str("\\u2028"),
+            '\u{2029}' => out.push_str("\\u2029"),
+            other => out.push(other),
+        }
+    }
+    out
 }
 
 /// #153:HTML-escape user-provided text to prevent XSS in badge output.
@@ -421,5 +452,71 @@ mod tests {
         assert_eq!(recs.logo.min_width, 48);
         assert_eq!(recs.featured.min_width, 538);
         assert_eq!(recs.product.min_width, 116);
+    }
+
+    // ── E-5: </script> breakout in the JSON-LD block ────────────────────────
+
+    #[test]
+    fn script_breakout_payload_cannot_leave_the_script_context() {
+        let svc = GmailAnnotationsService::new();
+        let config = GmailAnnotationConfig {
+            logo_url: None,
+            featured_image_url: None,
+            deal: Some(DealBadge {
+                discount_code: None,
+                description: "20% off".into(),
+                start_date: None,
+                end_date: None,
+            }),
+            products: vec![],
+            go_to_action: None,
+            organization: Some("</script><img src=x onerror=alert(1)>".into()),
+        };
+
+        let result = svc.generate_annotations(&config);
+        // No literal `</script>` may appear inside the JSON-LD payload.
+        assert!(
+            !result.json_ld.contains("</script>"),
+            "JSON-LD must not contain a literal </script>: {}",
+            result.json_ld
+        );
+        // The dangerous characters are unicode-escaped instead.
+        assert!(result.json_ld.contains("\\u003c"));
+        assert!(result.json_ld.contains("\\u003e"));
+        // The surrounding HTML still has exactly the two structural tags.
+        assert_eq!(result.html.matches("</script>").count(), 1);
+        // And the payload still parses as JSON after unescaping.
+        let parsed: serde_json::Value = serde_json::from_str(&result.json_ld)
+            .expect("escaped JSON-LD must remain valid JSON");
+        assert_eq!(
+            parsed["provider"]["name"],
+            "</script><img src=x onerror=alert(1)>"
+        );
+    }
+
+    #[test]
+    fn json_ld_escapes_ampersand_and_line_separators() {
+        // `&` breaks out of some HTML parser contexts; U+2028/U+2029 are
+        // valid JSON but terminate JS string literals in older engines.
+        let escaped = escape_json_for_script("a & b\u{2028}\u{2029} <c>");
+        assert_eq!(escaped, "a \\u0026 b\\u2028\\u2029 \\u003cc\\u003e");
+        // Structural JSON characters are untouched.
+        assert_eq!(escape_json_for_script(r#"{"k": [1, 2]}"#), r#"{"k": [1, 2]}"#);
+    }
+
+    #[test]
+    fn preview_badge_escapes_xss_payload() {
+        let svc = GmailAnnotationsService::new();
+        let deal = DealBadge {
+            discount_code: Some("<script>alert(1)</script>".into()),
+            description: "<b>bold</b> & scary".into(),
+            start_date: None,
+            end_date: None,
+        };
+        let badge = svc.generate_preview_badge(&deal);
+        assert!(!badge.contains("<script>"), "badge must escape script tags: {badge}");
+        assert!(!badge.contains("<b>"), "badge must escape HTML: {badge}");
+        assert!(badge.contains("&lt;b&gt;bold&lt;/b&gt; &amp; scary"));
+        assert!(badge.contains("&lt;script&gt;"));
     }
 }

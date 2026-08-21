@@ -65,7 +65,12 @@ const DEFAULT_SMTP_MX_CACHE_TTL_SECS: u64 = 300;
 const DEFAULT_SMTP_CONNECTION_TIMEOUT_SECONDS: u64 = 30;
 const DEFAULT_SMTP_POOL_ACQUISITION_TIMEOUT_SECONDS: u64 = 10;
 const DEFAULT_MAX_SMTP_RESPONSE_LINE: usize = 1_000;
-const PRODUCTION_ENV_VARS: &[&str] = &["NODE_ENV", "APP_ENV", "APEXMAIL_ENV", "ENVIRONMENT"];
+/// E-11:explicit, documented escape hatch for plaintext outbound SMTP. The
+/// old behaviour keyed STARTTLS enforcement off NODE_ENV-family variables —
+/// a mis-set (or unset) env name silently downgraded transport security.
+/// `require_starttls = true` now means true regardless of environment
+/// variables; only setting ALLOW_PLAINTEXT_SMTP=1|true|yes disables it.
+const ALLOW_PLAINTEXT_SMTP_ENV: &str = "ALLOW_PLAINTEXT_SMTP";
 
 fn default_connection_pool_size() -> usize {
     env::var("SMTP_CONNECTION_POOL_SIZE")
@@ -82,7 +87,10 @@ impl Default for SmtpSenderConfig {
             timeout_seconds: DEFAULT_SMTP_TIMEOUT_SECONDS,
             max_retries: DEFAULT_SMTP_MAX_RETRIES,
             retry_delay_seconds: DEFAULT_SMTP_RETRY_DELAY_SECONDS,
-            require_starttls: true,
+            // E-11:STARTTLS is enforced by default and means it — the
+            // NODE_ENV-family sniffing is gone. The ONLY way to send
+            // plaintext is the explicit ALLOW_PLAINTEXT_SMTP escape hatch.
+            require_starttls: !plaintext_smtp_allowed(),
             connection_pool_size: default_connection_pool_size(),
             mx_cache_ttl_secs: default_mx_cache_ttl_secs(),
             connection_timeout_seconds: DEFAULT_SMTP_CONNECTION_TIMEOUT_SECONDS,
@@ -118,32 +126,14 @@ fn default_mx_cache_ttl_secs() -> u64 {
         .unwrap_or(DEFAULT_SMTP_MX_CACHE_TTL_SECS)
 }
 
-fn runtime_is_production() -> bool {
-    PRODUCTION_ENV_VARS.iter().any(|key| {
-        env::var(key)
-            .ok()
-            .as_deref()
-            .map(is_production_environment_name)
-            .unwrap_or(false)
-    })
-}
-
-fn is_production_environment_name(environment: &str) -> bool {
-    matches!(
-        environment.trim().to_ascii_lowercase().as_str(),
-        "production" | "prod"
-    )
-}
-
-fn enforce_production_starttls(
-    mut config: SmtpSenderConfig,
-    is_production: bool,
-) -> SmtpSenderConfig {
-    if is_production && !config.require_starttls {
-        warn!("SMTP require_starttls=false ignored in production; enforcing STARTTLS");
-        config.require_starttls = true;
-    }
-    config
+/// E-11:the ONLY switch that permits plaintext outbound SMTP (documented
+/// escape hatch for operators with an authenticated smarthop). Default:
+/// false — STARTTLS is required everywhere, in every environment name.
+fn plaintext_smtp_allowed() -> bool {
+    env::var(ALLOW_PLAINTEXT_SMTP_ENV)
+        .ok()
+        .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+        .unwrap_or(false)
 }
 
 /// Direct SMTP Sender - Enterprise-Grade Infrastructure
@@ -319,7 +309,12 @@ impl SmtpSender {
         config: SmtpSenderConfig,
         dkim_signer: Option<DkimSigner>,
     ) -> Self {
-        let config = enforce_production_starttls(config, runtime_is_production());
+        if !config.require_starttls {
+            warn!(
+                env = ALLOW_PLAINTEXT_SMTP_ENV,
+                "SMTP require_starttls is disabled; plaintext outbound relay permitted (explicit operator opt-out)"
+            );
+        }
         let resolver =
             TokioAsyncResolver::tokio(ResolverConfig::default(), ResolverOpts::default());
         let mx_cache_ttl_secs = config.mx_cache_ttl_secs;
@@ -765,7 +760,9 @@ impl SmtpSender {
         let mail_from = format!("MAIL FROM:<{}>\r\n", sanitized_from);
         stream.write_all(mail_from.as_bytes()).await?;
         response.clear();
-        read_smtp_line_timeout(stream, &mut response, timeout_duration).await?;
+        // E-7:read the FULL (possibly multiline) reply — a single-line read
+        // desynced the stream on "250-foo\r\n250 bar\r\n" replies.
+        read_smtp_reply(stream, &mut response, timeout_duration).await?;
         if !response.starts_with("250") {
             return Err(anyhow!("MAIL FROM failed: {}", response.trim()));
         }
@@ -779,7 +776,7 @@ impl SmtpSender {
             let rcpt_to = format!("RCPT TO:<{}>\r\n", sanitized_rcpt);
             stream.write_all(rcpt_to.as_bytes()).await?;
             response.clear();
-            read_smtp_line_timeout(stream, &mut response, timeout_duration).await?;
+            read_smtp_reply(stream, &mut response, timeout_duration).await?;
             if response.starts_with("250") {
                 accepted.push(recipient.clone());
             } else {
@@ -793,7 +790,7 @@ impl SmtpSender {
             stream.write_all(b"RSET\r\n").await?;
             response.clear();
             if let Err(error) =
-                read_smtp_line_timeout(stream, &mut response, timeout_duration).await
+                read_smtp_reply(stream, &mut response, timeout_duration).await
             {
                 warn!(error = %error, "Failed to read SMTP response after RSET");
             }
@@ -809,7 +806,7 @@ impl SmtpSender {
         // DATA
         stream.write_all(b"DATA\r\n").await?;
         response.clear();
-        read_smtp_line_timeout(stream, &mut response, timeout_duration).await?;
+        read_smtp_reply(stream, &mut response, timeout_duration).await?;
         if !response.starts_with("354") {
             return Err(anyhow!("DATA failed: {}", response.trim()));
         }
@@ -819,10 +816,16 @@ impl SmtpSender {
         let stuffed = dot_stuff_message(message);
         stream.write_all(&stuffed).await?;
 
-        // End of message
-        stream.write_all(b"\r\n.\r\n").await?;
+        // End of message — E-8:only prepend the CRLF when the message does
+        // not already end with one; a blanket "\r\n.\r\n" after a
+        // CRLF-terminated body injected an extra blank line into the
+        // relayed message.
+        if needs_trailing_crlf(&stuffed) {
+            stream.write_all(b"\r\n").await?;
+        }
+        stream.write_all(b".\r\n").await?;
         response.clear();
-        read_smtp_line_timeout(stream, &mut response, timeout_duration).await?;
+        read_smtp_reply(stream, &mut response, timeout_duration).await?;
         if !response.starts_with("250") {
             return Err(anyhow!("Message rejected: {}", response.trim()));
         }
@@ -1397,6 +1400,56 @@ where
     Err(anyhow!("EHLO response too long"))
 }
 
+/// E-7:read one COMPLETE SMTP reply, including all `-`-continued lines, for
+/// command responses (MAIL FROM / RCPT TO / DATA). Returns the FIRST line —
+/// per RFC 5321 §4.2.1 every line of a multiline reply carries the same
+/// code, so the first line's code governs — after draining every
+/// continuation line so the stream stays in sync. Reading a single line
+/// here used to desynchronize the session whenever a server answered
+/// multiline (e.g. "250-2.1.0 sender OK\r\n250 2.1.5 recipient OK\r\n").
+async fn read_smtp_reply<S>(stream: &mut S, response: &mut String, timeout_duration: Duration) -> Result<usize>
+where
+    S: AsyncRead + Unpin,
+{
+    let mut first: Option<String> = None;
+    for _ in 0..MAX_EHLO_LINES {
+        response.clear();
+        let read = read_smtp_line_timeout(stream, response, timeout_duration).await?;
+        if read == 0 {
+            return Err(anyhow!("SMTP connection closed mid-reply"));
+        }
+        let line = response.clone();
+        if first.is_none() {
+            if line.len() < 4 {
+                return Err(anyhow!("Malformed SMTP reply: {}", line.trim()));
+            }
+            let separator = line.chars().nth(3).unwrap_or(' ');
+            if separator != '-' && separator != ' ' {
+                return Err(anyhow!("Malformed SMTP reply: {}", line.trim()));
+            }
+            first = Some(line.clone());
+            if separator == ' ' {
+                response.clear();
+                response.push_str(&line);
+                return Ok(line.len());
+            }
+        } else if line.len() >= 4 && line.chars().nth(3) == Some(' ') {
+            // Final line of the multiline reply.
+            response.clear();
+            response.push_str(first.as_deref().unwrap_or(&line));
+            return Ok(line.len());
+        }
+    }
+    Err(anyhow!("SMTP reply too long"))
+}
+
+/// E-8:whether the DATA terminator needs a leading CRLF. A message that
+/// already ends with <CRLF> must NOT get another one — the extra blank line
+/// corrupted the relayed body.
+fn needs_trailing_crlf(message: &[u8]) -> bool {
+    !message.ends_with(b"\r\n")
+}
+
 fn dot_stuff_message(message: &[u8]) -> Vec<u8> {
     let mut stuffed = Vec::with_capacity(message.len() + 16);
     let mut start_of_line = true;
@@ -1488,33 +1541,117 @@ mod tests {
 
     #[test]
     #[allow(clippy::field_reassign_with_default)]
-    fn production_starttls_policy_forces_disabled_config() {
-        let mut config = SmtpSenderConfig::default();
-        config.require_starttls = false;
-
-        let config = enforce_production_starttls(config, true);
-
+    fn require_starttls_default_is_enforced_regardless_of_environment() {
+        // E-11:`require_starttls = true` means true — no NODE_ENV-family
+        // sniffing can downgrade it (the old enforce_production_starttls
+        // layer was removed together with its tests, which asserted that a
+        // non-production env var could disable STARTTLS).
+        let config = SmtpSenderConfig::default();
         assert!(config.require_starttls);
     }
 
+    /// Env access is process-global: serialize tests that touch the escape
+    /// hatch (same pattern as the mail-proto token tests).
+    static PLAINTEXT_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
-    #[allow(clippy::field_reassign_with_default)]
-    fn non_production_starttls_policy_preserves_disabled_config() {
-        let mut config = SmtpSenderConfig::default();
-        config.require_starttls = false;
+    fn allow_plaintext_smtp_is_the_only_escape_hatch() {
+        let _guard = PLAINTEXT_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let previous = env::var(ALLOW_PLAINTEXT_SMTP_ENV).ok();
 
-        let config = enforce_production_starttls(config, false);
+        for value in ["1", "true", "YES", " True "] {
+            env::set_var(ALLOW_PLAINTEXT_SMTP_ENV, value);
+            assert!(
+                !SmtpSenderConfig::default().require_starttls,
+                "ALLOW_PLAINTEXT_SMTP={value:?} must explicitly disable STARTTLS"
+            );
+        }
+        for value in ["0", "false", "no", ""] {
+            env::set_var(ALLOW_PLAINTEXT_SMTP_ENV, value);
+            assert!(
+                SmtpSenderConfig::default().require_starttls,
+                "ALLOW_PLAINTEXT_SMTP={value:?} must NOT disable STARTTLS"
+            );
+        }
 
-        assert!(!config.require_starttls);
+        match previous {
+            Some(value) => env::set_var(ALLOW_PLAINTEXT_SMTP_ENV, value),
+            None => env::remove_var(ALLOW_PLAINTEXT_SMTP_ENV),
+        }
     }
 
     #[test]
-    fn production_environment_names_are_detected() {
-        assert!(is_production_environment_name("production"));
-        assert!(is_production_environment_name("prod"));
-        assert!(is_production_environment_name(" PROD "));
-        assert!(!is_production_environment_name("staging"));
-        assert!(!is_production_environment_name("development"));
+    fn multiline_smtp_reply_is_fully_consumed() {
+        // E-7:a multiline reply must be drained completely; the returned
+        // first line carries the governing code.
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
+                let (client, server) = tokio::io::duplex(4096);
+                let mut writer = client;
+                writer
+                    .write_all(b"250-2.1.0 sender OK\r\n250-2.1.5 queued\r\n250 final line\r\n")
+                    .await
+                    .unwrap();
+                let mut reader = BufReader::new(server);
+                let mut response = String::new();
+                let read =
+                    read_smtp_reply(&mut reader, &mut response, Duration::from_secs(5)).await;
+                assert!(read.is_ok(), "multiline reply must parse: {read:?}");
+                assert!(
+                    response.starts_with("250-2.1.0"),
+                    "first line governs: {response:?}"
+                );
+
+                // The NEXT reply must not be desynchronized: feed one more
+                // reply and read it cleanly.
+                writer.write_all(b"550 no such user\r\n").await.unwrap();
+                let mut response = String::new();
+                read_smtp_reply(&mut reader, &mut response, Duration::from_secs(5))
+                    .await
+                    .expect("second reply must parse");
+                assert!(response.starts_with("550"), "second reply: {response:?}");
+                // Nothing left buffered.
+                let mut scratch = [0u8; 64];
+                let n = tokio::time::timeout(Duration::from_millis(100), reader.read(&mut scratch))
+                    .await
+                    .map_or(0, |r| r.unwrap_or(0));
+                assert_eq!(n, 0, "stream fully drained, got {n} leftover bytes");
+            });
+    }
+
+    #[test]
+    fn single_line_smtp_reply_passes_through() {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                use tokio::io::{AsyncWriteExt, BufReader};
+                let (client, server) = tokio::io::duplex(1024);
+                let mut writer = client;
+                writer.write_all(b"354 go ahead\r\n").await.unwrap();
+                let mut reader = BufReader::new(server);
+                let mut response = String::new();
+                read_smtp_reply(&mut reader, &mut response, Duration::from_secs(5))
+                    .await
+                    .expect("single-line reply must parse");
+                assert!(response.starts_with("354"), "reply: {response:?}");
+            });
+    }
+
+    #[test]
+    fn data_terminator_only_adds_crlf_when_missing() {
+        // E-8:a message already ending in CRLF must not receive a second one.
+        assert!(!needs_trailing_crlf(b"From: x\r\nbody line\r\n"));
+        assert!(!needs_trailing_crlf(b"\r\n"));
+        // A message without a trailing CRLF (or ending in a bare LF) gets one.
+        assert!(needs_trailing_crlf(b"From: x\r\nbody"));
+        assert!(needs_trailing_crlf(b"ends with bare lf\n"));
+        assert!(needs_trailing_crlf(b""));
     }
 
     #[test]

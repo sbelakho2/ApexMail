@@ -244,6 +244,51 @@ impl RateWindow {
     }
 }
 
+/// D:outcome of a delivery attempt from the queue processor's point of view.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum DeliveryOutcome {
+    /// Every recipient was accepted — the row may be marked sent.
+    Delivered,
+    /// At least one recipient was accepted AND at least one was (typically
+    /// 4xx) rejected: the row must be requeued for exactly `rejected`.
+    PartiallyDelivered { rejected: Vec<String> },
+}
+
+/// D:pure classification of an SmtpSendResult that already passed the
+/// "all recipients rejected" error path: any leftover rejected recipient
+/// makes this a partial delivery that MUST NOT be marked sent.
+fn classify_partial_acceptance(result: &crate::smtp_sender::SmtpSendResult) -> DeliveryOutcome {
+    if result.rejected.is_empty() {
+        DeliveryOutcome::Delivered
+    } else {
+        DeliveryOutcome::PartiallyDelivered {
+            rejected: result.rejected.clone(),
+        }
+    }
+}
+
+/// E-10:true when `text` contains a standalone SMTP 4xx reply code: a
+/// 3-digit run starting with '4' that is at the start of the string (or
+/// preceded by a non-digit) AND followed by a non-digit. Digits embedded in
+/// longer runs or identifiers ("R4521X", "v14523", "invoice-4521") do not
+/// count — the old token split misclassified such permanent errors as
+/// retryable, deferring them until max_attempts.
+fn contains_smtp_4xx_code(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    for i in 0..bytes.len() {
+        if bytes[i] == b'4'
+            && i + 2 < bytes.len()
+            && bytes[i + 1].is_ascii_digit()
+            && bytes[i + 2].is_ascii_digit()
+            && (i == 0 || !bytes[i - 1].is_ascii_digit())
+            && (i + 3 == bytes.len() || !bytes[i + 3].is_ascii_digit())
+        {
+            return true;
+        }
+    }
+    false
+}
+
 /// Email queue manager
 pub struct EmailQueue {
     pool: PgPool,
@@ -342,12 +387,12 @@ impl EmailQueue {
         {
             return true;
         }
-        // Generic SMTP 4xx reply codes (e.g. "452 4.3.1 try later later")
-        // as standalone 3-digit tokens anywhere in the message.
-        lower
-            .split(|c: char| !(c.is_ascii_digit() || c == '.'))
-            .filter(|token| token.len() == 3)
-            .any(|token| token.starts_with('4'))
+        // E-10:proper SMTP 4xx status extraction — a standalone 3-digit code
+        // starting with 4 counts only when it is NOT embedded in a longer
+        // digit run (start-of-string or preceded by a non-digit, AND followed
+        // by a non-digit), so identifiers like "R452X-invoice-14521" or
+        // "v14523" no longer misclassify a permanent error as retryable.
+        contains_smtp_4xx_code(&lower)
     }
 
     /// Deterministic advisory-lock key for a tenant (RS-H-05).
@@ -815,6 +860,100 @@ impl EmailQueue {
         Ok(())
     }
 
+    /// D:requeue a partially-delivered row for exactly the rejected
+    /// recipients. The accepted recipients are done; the row's
+    /// `to_addresses` is narrowed to the rejected set and scheduled for
+    /// retry (attempts+1). When attempts are exhausted the row fails
+    /// permanently with the rejected recipients preserved on it.
+    async fn requeue_rejected_recipients(&self, id: &Uuid, rejected: &[String]) -> Result<()> {
+        let email = timeout(
+            Duration::from_secs(30),
+            sqlx::query("SELECT attempts, max_attempts FROM email_queue WHERE id = $1")
+                .bind(id)
+                .fetch_one(&self.pool),
+        )
+        .await
+        .map_err(|_| anyhow::anyhow!("requeue_rejected SELECT timed out after 30s"))??;
+
+        let attempts: i32 = email.get("attempts");
+        let max_attempts: i32 = email.get("max_attempts");
+        let new_attempts = attempts + 1;
+        let error = format!(
+            "partial acceptance: rejected recipients kept for retry: {}",
+            rejected.join(", ")
+        );
+
+        if new_attempts < max_attempts {
+            let delay = if self.config.retry_delays.is_empty() {
+                Duration::from_secs(DEFAULT_QUEUE_EMPTY_RETRY_FALLBACK_SECS)
+            } else {
+                let delay_index = (new_attempts - 1).max(0) as usize;
+                let delay_index = delay_index.min(self.config.retry_delays.len() - 1);
+                self.config.retry_delays[delay_index]
+            };
+            let chrono_delay = chrono::Duration::from_std(delay)
+                .unwrap_or_else(|_| chrono::Duration::seconds(300));
+            let next_retry = Utc::now() + chrono_delay;
+
+            timeout(
+                Duration::from_secs(30),
+                sqlx::query(
+                    r#"
+                    UPDATE email_queue
+                    SET status = 'deferred', to_addresses = $2, attempts = $3,
+                        last_error = $4, next_retry_at = $5, locked_until = NULL,
+                        updated_at = NOW()
+                    WHERE id = $1
+                "#,
+                )
+                .bind(id)
+                .bind(rejected)
+                .bind(new_attempts)
+                .bind(&error)
+                .bind(next_retry)
+                .execute(&self.pool),
+            )
+            .await
+            .map_err(|_| anyhow::anyhow!("requeue_rejected UPDATE timed out after 30s"))??;
+
+            warn!(
+                email_id = %id,
+                rejected = rejected.len(),
+                attempts = new_attempts,
+                next_retry = %next_retry,
+                "Partial acceptance: row requeued for the rejected recipients only"
+            );
+        } else {
+            timeout(
+                Duration::from_secs(30),
+                sqlx::query(
+                    r#"
+                    UPDATE email_queue
+                    SET status = 'failed', to_addresses = $2, attempts = $3,
+                        last_error = $4, locked_until = NULL, updated_at = NOW()
+                    WHERE id = $1
+                "#,
+                )
+                .bind(id)
+                .bind(rejected)
+                .bind(new_attempts)
+                .bind(&error)
+                .execute(&self.pool),
+            )
+            .await
+            .map_err(|_| anyhow::anyhow!("requeue_rejected FAIL UPDATE timed out after 30s"))??;
+
+            error!(
+                email_id = %id,
+                rejected = ?rejected,
+                attempts = new_attempts,
+                "Rejected recipients exhausted their attempts; row failed with them preserved"
+            );
+        }
+
+        Ok(())
+    }
+
     /// Get queued email by ID
     pub async fn get_email(&self, id: &Uuid) -> Result<Option<QueuedEmail>> {
         let row = timeout(
@@ -1159,7 +1298,7 @@ impl EmailQueue {
     }
 
     /// Process a single email
-    async fn process_email(&self, email: &QueuedEmail) -> Result<()> {
+    async fn process_email(&self, email: &QueuedEmail) -> Result<DeliveryOutcome> {
         // Per-provider reputation throttle: if our deliverability signal says
         // "back off Gmail", roll the dice and possibly defer this message.
         // Multiple recipients only need one to trigger the throttle (worst case).
@@ -1233,7 +1372,11 @@ impl EmailQueue {
             ));
         }
 
-        Ok(())
+        // D:partial acceptance (some RCPTs accepted, some temp-rejected) must
+        // NOT be treated as full success — the rejected recipients would be
+        // silently dropped with the row marked sent. Classify so the caller
+        // requeues the row for exactly the rejected recipients.
+        Ok(classify_partial_acceptance(&result))
     }
 
     /// Start the queue processor
@@ -1401,7 +1544,7 @@ impl EmailQueue {
 
         for (email_id, result) in results {
             match result {
-                Ok(()) => {
+                Ok(DeliveryOutcome::Delivered) => {
                     // A failure marking ONE email as sent must not abort the
                     // whole results loop (which would strand every remaining
                     // row of the batch in 'processing' until lease expiry).
@@ -1410,6 +1553,19 @@ impl EmailQueue {
                             email_id = %email_id,
                             error = %e,
                             "Failed to mark email as sent (lease/reaper will recover the row)"
+                        );
+                    }
+                }
+                Ok(DeliveryOutcome::PartiallyDelivered { rejected }) => {
+                    // D:some recipients were accepted and some rejected — keep
+                    // the row deliverable for ONLY the rejected recipients
+                    // (attempts+1, bounded by max_attempts). No data path may
+                    // mark 4xx-rejected recipients as sent.
+                    if let Err(e) = self.requeue_rejected_recipients(&email_id, &rejected).await {
+                        error!(
+                            email_id = %email_id,
+                            error = %e,
+                            "Failed to requeue rejected recipients (lease/reaper will recover the row)"
                         );
                     }
                 }
@@ -2073,5 +2229,93 @@ mod tests {
         }
         assert!(window.is_unlimited());
         assert!(window.check("k"));
+    }
+
+    // -----------------------------------------------------------------------
+    // D: partial RCPT acceptance must never be full success
+    // -----------------------------------------------------------------------
+
+    use crate::smtp_sender::SmtpSendResult;
+
+    fn send_result(success: bool, accepted: Vec<&str>, rejected: Vec<&str>) -> SmtpSendResult {
+        SmtpSendResult {
+            success,
+            message_id: "<test@example.com>".into(),
+            response: "250 OK".into(),
+            accepted: accepted.into_iter().map(String::from).collect(),
+            rejected: rejected.into_iter().map(String::from).collect(),
+        }
+    }
+
+    #[test]
+    fn partial_acceptance_is_not_full_success() {
+        // 1 accepted + 1 temp-rejected: the row must stay deliverable for the
+        // rejected recipient (previously it was marked sent and the 4xx'd
+        // recipient silently dropped).
+        let result = send_result(
+            true,
+            vec!["ok@example.com"],
+            vec!["tempfail@example.com"],
+        );
+        assert_eq!(
+            classify_partial_acceptance(&result),
+            DeliveryOutcome::PartiallyDelivered {
+                rejected: vec!["tempfail@example.com".to_string()]
+            }
+        );
+    }
+
+    #[test]
+    fn full_acceptance_is_delivered() {
+        let result = send_result(true, vec!["a@example.com", "b@example.com"], vec![]);
+        assert_eq!(classify_partial_acceptance(&result), DeliveryOutcome::Delivered);
+    }
+
+    #[test]
+    fn partial_acceptance_keeps_every_rejected_recipient() {
+        let result = send_result(
+            true,
+            vec!["ok@example.com"],
+            vec!["r1@example.com", "r2@example.com", "r3@example.com"],
+        );
+        match classify_partial_acceptance(&result) {
+            DeliveryOutcome::PartiallyDelivered { rejected } => {
+                assert_eq!(rejected.len(), 3, "no rejected recipient may be dropped");
+                assert!(rejected.contains(&"r2@example.com".to_string()));
+            }
+            other => panic!("expected PartiallyDelivered, got {other:?}"),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // E-10: SMTP 4xx status extraction boundaries
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn smtp_4xx_code_requires_digit_boundaries() {
+        assert!(contains_smtp_4xx_code("452 4.3.1 try later"));
+        assert!(contains_smtp_4xx_code("error 421 occurred"));
+        assert!(contains_smtp_4xx_code("450"));
+        // Embedded in longer digit runs / identifiers → NOT a status code.
+        assert!(!contains_smtp_4xx_code("invoice-14521 paid"));
+        assert!(!contains_smtp_4xx_code("v14523 build"));
+        assert!(!contains_smtp_4xx_code("id=45211"));
+        assert!(!contains_smtp_4xx_code("550 5.1.1 user unknown"));
+        assert!(!contains_smtp_4xx_code("no digits at all"));
+    }
+
+    #[test]
+    fn temporary_error_classification_keeps_boundary_rule() {
+        // Real 4xx reply codes still classify as temporary…
+        assert!(EmailQueue::is_temporary_error(
+            "Message rejected: 452 out of memory"
+        ));
+        assert!(EmailQueue::is_temporary_error("RCPT failed: 431 busy"));
+        // …while digit-suffixed identifiers no longer do.
+        assert!(!EmailQueue::is_temporary_error("hard reject for invoice 45212"));
+        // 5xx codes must not be misclassified.
+        assert!(!EmailQueue::is_temporary_error(
+            "all recipients rejected: a@b.com (response: 550 no such user)"
+        ));
     }
 }

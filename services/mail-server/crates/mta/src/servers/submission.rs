@@ -20,7 +20,10 @@ use uuid::Uuid;
 use crate::auth::{verify_against_dummy, AuthError, AuthFailTracker};
 use crate::config::{RateLimitConfig, SubmissionConfig};
 
-use super::util::{read_line_capped, LineRead, MAX_COMMAND_LINE, MAX_DATA_LINE};
+use super::util::{
+    is_strict_end_of_data, line_content, read_line_capped, unstuff_dot_line, LineRead,
+    MAX_COMMAND_LINE, MAX_DATA_LINE,
+};
 
 /// Per-read timeout for AUTH challenge/response lines (a silent client must
 /// not hold the session forever).
@@ -32,6 +35,22 @@ const DATA_TOTAL_TIMEOUT: Duration = Duration::from_secs(600);
 /// Per-line timeout while receiving message DATA.
 const DATA_LINE_TIMEOUT: Duration = Duration::from_secs(300);
 
+/// Outcome of reading one DATA payload (see
+/// [`SubmissionServer::read_data_message`]).
+#[derive(Debug)]
+enum ReadDataOutcome {
+    /// A complete message terminated by strict `<CRLF>.<CRLF>`; body lines
+    /// are dot-unstuffed and CRLF-normalized. The final line's CRLF belongs
+    /// to the terminator and is not part of the payload.
+    Message(Vec<u8>),
+    /// A line exceeded the per-line cap or the message exceeded the size cap.
+    TooLarge,
+    /// Total or per-line deadline exceeded.
+    TimedOut,
+    /// Client disconnected / stream failed mid-DATA: partial payload discarded.
+    Aborted,
+}
+
 /// Outcome of persisting a submitted message.
 enum QueueOutcome {
     /// The message was inserted into `email_queue`.
@@ -42,6 +61,10 @@ enum QueueOutcome {
     /// The sender belongs to the tenant but does not satisfy the unified
     /// current-domain readiness contract for the selected transport.
     SenderNotReady,
+    /// Every recipient is on the tenant suppression list — refused with
+    /// `550 5.1.1` (CAN-SPAM: the SMTP path must not bypass the list the
+    /// REST send path enforces).
+    RecipientSuppressed,
 }
 
 pub struct SubmissionServer {
@@ -190,7 +213,7 @@ impl SubmissionServer {
                     let _ = write_line(stream, "500 5.5.2 Line too long\r\n").await;
                     continue;
                 }
-                Ok(Ok(LineRead::Line(l))) => line = l,
+                Ok(Ok(LineRead::Line(l, _))) => line = l,
                 Ok(Err(e)) => {
                     debug!(error = %e, peer = %peer, "Read error");
                     break;
@@ -206,7 +229,14 @@ impl SubmissionServer {
 
             if cmd.starts_with("EHLO") || cmd.starts_with("HELO") {
                 helo_seen = true;
-                let host = line.split_whitespace().nth(1).unwrap_or("unknown");
+                // E-3:validate the EHLO argument before echoing it back —
+                // an unvalidated argument used to be reflected verbatim into
+                // the greeting (CRLF/control payloads included).
+                let host = line
+                    .split_whitespace()
+                    .nth(1)
+                    .filter(|host| super::inbound::is_valid_helo_hostname(host))
+                    .unwrap_or("unknown");
                 let mut caps = format!("250-{} Hello {}\r\n", self.config.hostname, host);
                 caps.push_str(&format!("250-SIZE {}\r\n", self.config.max_message_size));
                 if allow_starttls && !already_tls {
@@ -296,145 +326,87 @@ impl SubmissionServer {
                     let _ = write_line(stream, "354 Start mail input; end with <CRLF>.<CRLF>\r\n")
                         .await;
 
-                    // Receive the message body with:
-                    //  - a total deadline (slow-loris protection),
-                    //  - a per-line timeout,
-                    //  - an overall size cap enforced BEFORE buffering (552),
-                    //  - dot-unstuffing, and no queueing of partial DATA on
-                    //    client disconnect.
-                    let mut data = Vec::new();
-                    let mut buf = String::new();
-                    let mut too_large = false;
-                    let mut timed_out = false;
-                    let mut terminated = false;
-                    let deadline = Instant::now() + DATA_TOTAL_TIMEOUT;
-                    loop {
-                        buf.clear();
-                        let remaining = deadline
-                            .checked_duration_since(Instant::now())
-                            .unwrap_or(Duration::ZERO);
-                        if remaining.is_zero() {
-                            timed_out = true;
+                    match self.read_data_message(stream).await {
+                        ReadDataOutcome::TimedOut => {
+                            let _ =
+                                write_line(stream, "421 4.4.2 Data timeout exceeded\r\n").await;
                             break;
                         }
-                        let per_line = remaining.min(DATA_LINE_TIMEOUT);
-                        match tokio::time::timeout(
-                            per_line,
-                            read_line_capped(stream, MAX_DATA_LINE),
-                        )
-                        .await
-                        {
-                            Err(_) => {
-                                timed_out = true;
-                                break;
-                            }
-                            Ok(Ok(LineRead::Eof)) | Ok(Err(_)) => {
-                                break; // client disconnected / stream error mid-DATA
-                            }
-                            Ok(Ok(LineRead::TooLong)) => {
-                                // A single line over the per-line cap cannot be
-                                // part of a message we are willing to store; the
-                                // line itself was drained, keep reading so the
-                                // session stays synchronised and can be refused
-                                // with 552.
-                                too_large = true;
-                                data.clear();
-                            }
-                            Ok(Ok(LineRead::Line(l))) => {
-                                buf = l;
-                                if buf.trim_end_matches(['\r', '\n']) == "." {
-                                    terminated = true;
-                                    break;
-                                }
-                                if too_large {
-                                    // Drain the rest without buffering.
-                                    continue;
-                                }
-                                // RFC 5321 §4.5.2: un-stuff transparently-doubled dots.
-                                let data_slice = if let Some(rest) = buf.strip_prefix("..") {
-                                    rest
-                                } else {
-                                    &buf[..]
-                                };
-                                if data.len() + data_slice.len() > self.config.max_message_size {
-                                    too_large = true;
-                                    data.clear();
-                                } else {
-                                    data.extend_from_slice(data_slice.as_bytes());
-                                }
-                            }
+                        ReadDataOutcome::Aborted => {
+                            // Client disconnected / stream failed mid-DATA: the
+                            // partial payload is discarded and never queued.
+                            break;
                         }
-                    }
-
-                    if timed_out {
-                        let _ = write_line(stream, "421 4.4.2 Data timeout exceeded\r\n").await;
-                        break;
-                    }
-
-                    if too_large {
-                        // RFC 5321 §4.5.3.2: message exceeds the SIZE limit.
-                        let _ = write_line(stream, "552 5.3.4 Message too large\r\n").await;
-                        mail_from = None;
-                        rcpt_to.clear();
-                        continue;
-                    }
-
-                    if terminated {
-                        if data.last() == Some(&b'\n') {
-                            data.pop();
-                            if data.last() == Some(&b'\r') {
-                                data.pop();
-                            }
+                        ReadDataOutcome::TooLarge => {
+                            // RFC 5321 §4.5.3.2: message exceeds the SIZE limit.
+                            let _ = write_line(stream, "552 5.3.4 Message too large\r\n").await;
+                            mail_from = None;
+                            rcpt_to.clear();
+                            continue;
                         }
-                        let data_str = String::from_utf8_lossy(&data);
-                        let msg_id = Uuid::new_v4().to_string();
-                        match self
-                            .queue_message(
-                                &auth_email,
-                                mail_from.as_deref().unwrap_or(""),
-                                &rcpt_to,
-                                &data_str,
-                                &msg_id,
-                            )
-                            .await
-                        {
-                            Ok(QueueOutcome::Queued) => {
-                                message_count += 1;
-                                let _ =
-                                    write_line(stream, &format!("250 OK id={}\r\n", msg_id)).await;
-                                if message_count >= self.rate_limit.max_messages_per_connection {
+                        ReadDataOutcome::Message(data) => {
+                            let data_str = String::from_utf8_lossy(&data);
+                            let msg_id = Uuid::new_v4().to_string();
+                            match self
+                                .queue_message(
+                                    &auth_email,
+                                    mail_from.as_deref().unwrap_or(""),
+                                    &rcpt_to,
+                                    &data_str,
+                                    &msg_id,
+                                )
+                                .await
+                            {
+                                Ok(QueueOutcome::Queued) => {
+                                    message_count += 1;
                                     let _ = write_line(
                                         stream,
-                                        "421 4.7.0 Too many messages, closing connection\r\n",
+                                        &format!("250 OK id={}\r\n", msg_id),
                                     )
                                     .await;
-                                    break;
+                                    if message_count
+                                        >= self.rate_limit.max_messages_per_connection
+                                    {
+                                        let _ = write_line(
+                                            stream,
+                                            "421 4.7.0 Too many messages, closing connection\r\n",
+                                        )
+                                        .await;
+                                        break;
+                                    }
+                                }
+                                Ok(QueueOutcome::SenderNotOwned) => {
+                                    // MAIL FROM domain is not owned by the
+                                    // authenticated account's tenant.
+                                    let _ = write_line(
+                                        stream,
+                                        "550 5.7.1 sender address not owned by account\r\n",
+                                    )
+                                    .await;
+                                }
+                                Ok(QueueOutcome::SenderNotReady) => {
+                                    let _ = write_line(
+                                        stream,
+                                        "550 5.7.1 sender domain is not verified and ready for delivery\r\n",
+                                    )
+                                    .await;
+                                }
+                                Ok(QueueOutcome::RecipientSuppressed) => {
+                                    let _ = write_line(
+                                        stream,
+                                        "550 5.1.1 recipient address suppressed\r\n",
+                                    )
+                                    .await;
+                                }
+                                Err(_) => {
+                                    let _ =
+                                        write_line(stream, "451 4.3.0 Requested action aborted\r\n")
+                                            .await;
                                 }
                             }
-                            Ok(QueueOutcome::SenderNotOwned) => {
-                                // MAIL FROM domain is not owned by the
-                                // authenticated account's tenant.
-                                let _ = write_line(
-                                    stream,
-                                    "550 5.7.1 sender address not owned by account\r\n",
-                                )
-                                .await;
-                            }
-                            Ok(QueueOutcome::SenderNotReady) => {
-                                let _ = write_line(
-                                    stream,
-                                    "550 5.7.1 sender domain is not verified and ready for delivery\r\n",
-                                )
-                                .await;
-                            }
-                            Err(_) => {
-                                let _ =
-                                    write_line(stream, "451 4.3.0 Requested action aborted\r\n")
-                                        .await;
-                            }
+                            mail_from = None;
+                            rcpt_to.clear();
                         }
-                        mail_from = None;
-                        rcpt_to.clear();
                     }
                 }
             } else if cmd.starts_with("RSET") {
@@ -464,6 +436,80 @@ impl SubmissionServer {
             "Submission session ended"
         );
         (false, message_count)
+    }
+
+    /// Read one DATA payload. Protections applied while reading:
+    ///
+    ///  - a total deadline (slow-loris protection) plus a per-line timeout
+    ///    and a per-line length cap,
+    ///  - the overall size cap is enforced BEFORE buffering (552),
+    ///  - end-of-data is ONLY a line that is exactly `.` terminated by CRLF
+    ///    (RFC 5321 §4.1.1.5 strict — a bare-LF `".\n"` line is body data,
+    ///    closing the SMTP-smuggling window),
+    ///  - RFC 5321 §4.5.2 dot-unstuffing removes exactly ONE leading dot,
+    ///  - every stored body line is CRLF-normalized (a bare-LF body line is
+    ///    never relayed), and
+    ///  - a truncated payload (client disconnect mid-DATA) is discarded.
+    async fn read_data_message<S: AsyncRead + AsyncWrite + Unpin>(
+        &self,
+        stream: &mut BufStream<S>,
+    ) -> ReadDataOutcome {
+        let mut data = Vec::new();
+        let mut line = String::new();
+        let mut too_large = false;
+        let deadline = Instant::now() + DATA_TOTAL_TIMEOUT;
+        loop {
+            line.clear();
+            let remaining = deadline
+                .checked_duration_since(Instant::now())
+                .unwrap_or(Duration::ZERO);
+            if remaining.is_zero() {
+                return ReadDataOutcome::TimedOut;
+            }
+            let per_line = remaining.min(DATA_LINE_TIMEOUT);
+            match tokio::time::timeout(per_line, read_line_capped(stream, MAX_DATA_LINE)).await {
+                Err(_) => return ReadDataOutcome::TimedOut,
+                Ok(Ok(LineRead::Eof)) | Ok(Err(_)) => return ReadDataOutcome::Aborted,
+                Ok(Ok(LineRead::TooLong)) => {
+                    // A single line over the per-line cap cannot be part of a
+                    // message we are willing to store; the line itself was
+                    // drained, keep reading (without buffering) until the
+                    // terminator so the session stays synchronised and can be
+                    // refused with 552.
+                    too_large = true;
+                    data.clear();
+                }
+                Ok(Ok(LineRead::Line(l, term))) => {
+                    line = l;
+                    if is_strict_end_of_data(&line, term) {
+                        if too_large {
+                            return ReadDataOutcome::TooLarge;
+                        }
+                        // The final CRLF belongs to the <CRLF>.<CRLF>
+                        // terminator, not to the message content.
+                        if data.last() == Some(&b'\n') {
+                            data.pop();
+                            if data.last() == Some(&b'\r') {
+                                data.pop();
+                            }
+                        }
+                        return ReadDataOutcome::Message(data);
+                    }
+                    if too_large {
+                        // Drain the rest without buffering.
+                        continue;
+                    }
+                    let data_slice = unstuff_dot_line(line_content(&line, term));
+                    if data.len() + data_slice.len() + 2 > self.config.max_message_size {
+                        too_large = true;
+                        data.clear();
+                    } else {
+                        data.extend_from_slice(data_slice.as_bytes());
+                        data.extend_from_slice(b"\r\n");
+                    }
+                }
+            }
+        }
     }
 
     /// `AUTH LOGIN` two-step (plus optional inline username): prompt for
@@ -595,7 +641,7 @@ impl SubmissionServer {
         )
         .await
         {
-            Ok(Ok(LineRead::Line(l))) => Some(l),
+            Ok(Ok(LineRead::Line(l, _))) => Some(l),
             Ok(Ok(LineRead::TooLong)) => {
                 let _ = write_line(stream, "500 5.5.2 Line too long\r\n").await;
                 None
@@ -720,10 +766,13 @@ impl SubmissionServer {
             .unwrap_or_else(|| body_part.to_string());
 
         // subject is NOT NULL in email_queue (max length 998 per CHECK).
+        // E-4:the mail_parser value is NOT pre-truncated (only the header
+        // fallback is), so a >998-char subject failed the INSERT with a
+        // permanent 451. Truncate char-safely on every path.
         let subject = if subject.is_empty() {
             "(no subject)".to_string()
         } else {
-            subject
+            truncate_subject_chars(&subject, MAX_SUBJECT_CHARS)
         };
 
         let mut tx = self.pool.begin().await.map_err(|_| ())?;
@@ -738,6 +787,41 @@ impl SubmissionServer {
                 .await
                 .map_err(|_| ())?
                 .flatten();
+
+        // CAN-SPAM (F): the REST send path refuses suppressed recipients
+        // before queueing; the SMTP submission path must not be a bypass.
+        // Canonicalize (trim + lowercase) exactly like the api-server check
+        // and drop suppressed recipients from the queued row. A lookup
+        // failure surfaces as Err(()) → 451 so the client retries rather
+        // than silently delivering to a suppressed address.
+        let rcpt_to: Vec<String> = match tenant_id.as_deref() {
+            Some(tenant) => {
+                let canonical = canonical_recipients(rcpt_to);
+                let suppressed: Vec<String> =
+                    sqlx::query_scalar(
+                        "SELECT LOWER(email) FROM suppressions WHERE tenant_id = $1 AND LOWER(email) = ANY($2)",
+                    )
+                    .bind(tenant)
+                    .bind(&canonical)
+                    .fetch_all(&mut *tx)
+                    .await
+                    .map_err(|_| ())?;
+                if !suppressed.is_empty() {
+                    for dropped in &suppressed {
+                        warn!(
+                            recipient = %mail_common::pii::redact_email(dropped),
+                            "Submission recipient is suppressed; dropping from queue"
+                        );
+                    }
+                }
+                let allowed = filter_suppressed_recipients(rcpt_to, &suppressed);
+                if allowed.is_empty() {
+                    return Ok(QueueOutcome::RecipientSuppressed);
+                }
+                allowed
+            }
+            None => rcpt_to.to_vec(),
+        };
 
         // Resolve the sender's domain while holding a share lock through queue
         // insertion. This matches the API's authorization predicate and
@@ -810,7 +894,7 @@ impl SubmissionServer {
         )
         .bind(message_uuid)
         .bind(mail_from)
-        .bind(rcpt_to)
+        .bind(&rcpt_to)
         .bind(&subject)
         .bind(headers_part)
         .bind(&text_body)
@@ -887,7 +971,7 @@ fn extract_address(line: &str) -> String {
 /// Validate an envelope address against the same rules `email_queue` enforces
 /// (`chk_email_queue_from_address`): no whitespace, one `@`, a non-empty local
 /// part, and a non-empty domain containing at least one dot.
-fn is_valid_envelope_address(addr: &str) -> bool {
+pub(crate) fn is_valid_envelope_address(addr: &str) -> bool {
     if addr.is_empty() || addr.chars().any(char::is_whitespace) {
         return false;
     }
@@ -930,8 +1014,42 @@ fn extract_subject(headers: &str) -> String {
         "(no subject)".to_string()
     } else {
         // chk_email_queue_subject_length: char_length(subject) <= 998
-        subject.chars().take(998).collect()
+        truncate_subject_chars(&subject, MAX_SUBJECT_CHARS)
     }
+}
+
+/// `email_queue` CHECK constraint: char_length(subject) <= 998.
+const MAX_SUBJECT_CHARS: usize = 998;
+
+/// Truncate to at most `max_chars` CHARACTERS (never splitting a multi-byte
+/// character). The DB CHECK is char_length-based; a byte-oriented slice on a
+/// multibyte subject would panic at the char boundary.
+fn truncate_subject_chars(subject: &str, max_chars: usize) -> String {
+    if subject.chars().count() <= max_chars {
+        subject.to_string()
+    } else {
+        subject.chars().take(max_chars).collect()
+    }
+}
+
+/// Canonicalize recipient addresses for the suppression lookup (same shape
+/// as the api-server's `canonical_email`: trim + lowercase).
+fn canonical_recipients(rcpt_to: &[String]) -> Vec<String> {
+    rcpt_to
+        .iter()
+        .map(|r| r.trim().to_ascii_lowercase())
+        .collect()
+}
+
+/// Keep only recipients NOT present in the (lowercased) suppressed set.
+fn filter_suppressed_recipients(rcpt_to: &[String], suppressed: &[String]) -> Vec<String> {
+    let suppressed: std::collections::HashSet<&str> =
+        suppressed.iter().map(|s| s.as_str()).collect();
+    rcpt_to
+        .iter()
+        .filter(|r| !suppressed.contains(r.trim().to_ascii_lowercase().as_str()))
+        .cloned()
+        .collect()
 }
 
 async fn write_line<S: AsyncWrite + Unpin>(sink: &mut S, line: &str) -> std::io::Result<()> {
@@ -1411,5 +1529,237 @@ mod tests {
             ],
         )
         .await;
+    }
+
+    // ── B / E-3 / E-4 / F: smuggling, EHLO echo, subject cap, suppression ───
+
+    /// Drive read_data_message over a duplex stream by writing the given raw
+    /// bytes; the client half stays open so a premature EOF cannot truncate
+    /// DATA before the payload's own terminator arrives.
+    async fn drive_data(server: &SubmissionServer, payload: &[u8]) -> ReadDataOutcome {
+        let (client, server_side) = tokio::io::duplex(64 * 1024);
+        let mut writer = client;
+        writer.write_all(payload).await.unwrap();
+        writer.flush().await.unwrap();
+        let mut stream = BufStream::new(server_side);
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(10),
+            server.read_data_message(&mut stream),
+        )
+        .await
+        .expect("read_data_message must terminate");
+        drop(writer);
+        outcome
+    }
+
+    #[tokio::test]
+    async fn bare_lf_dot_does_not_terminate_data() {
+        let server = test_server(None);
+        // A bare-LF "." line must be stored as body data (un-stuffed to an
+        // empty line per RFC 5321 §4.5.2); only <CRLF>.<CRLF> terminates. A
+        // smuggled QUIT line after it stays body data too.
+        let payload = b"Subject: t\r\n\
+                        .\n\
+                        QUIT\r\n\
+                        tail\r\n\
+                        .\r\n";
+        match drive_data(&server, payload).await {
+            ReadDataOutcome::Message(data) => {
+                let text = String::from_utf8_lossy(&data);
+                // The bare-LF dot became an empty body line (dot stripped) —
+                // it did NOT terminate DATA.
+                assert!(
+                    text.starts_with("Subject: t\r\n\r\n"),
+                    "bare-LF dot line is body data (unstuffed to empty): {text:?}"
+                );
+                assert!(
+                    text.contains("QUIT\r\n"),
+                    "line after the bare-LF dot stays body data: {text:?}"
+                );
+                assert!(text.ends_with("tail"), "final CRLF belongs to terminator: {text:?}");
+            }
+            other => panic!("expected Message, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn space_padded_dot_lines_stay_body_data() {
+        let server = test_server(None);
+        // " ." / ". " / " . " must NOT terminate DATA (the old trim() check did).
+        let payload = b"Subject: t\r\n .\r\n. \r\n . \r\n..\r\n.\r\n";
+        match drive_data(&server, payload).await {
+            ReadDataOutcome::Message(data) => {
+                let text = String::from_utf8_lossy(&data);
+                assert!(text.contains(" .\r\n"), "leading-space dot kept: {text:?}");
+                assert!(text.contains(" . \r\n"), "padded dot kept: {text:?}");
+                // ". " unstuffs to " " (exactly one dot removed); ".." (a
+                // stuffed single dot) unstuffs to "." and stays body.
+                assert!(text.contains(" \r\n."), "dot-space and stuffed-dot semantics: {text:?}");
+                assert!(text.ends_with('.'), "last body line is the unstuffed '..': {text:?}");
+            }
+            other => panic!("expected Message, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn dot_stuffing_round_trip_is_exact() {
+        let server = test_server(None);
+        // Sender-stuffed "..foo" → stored ".foo"; stuffed ".." → stored ".".
+        // The final CRLF belongs to the <CRLF>.<CRLF> terminator, so the last
+        // stored line has no trailing CRLF (re-sending adds it back).
+        let payload = b"..foo\r\n..\r\n.\r\n";
+        match drive_data(&server, payload).await {
+            ReadDataOutcome::Message(data) => {
+                assert_eq!(data.as_slice(), b".foo\r\n.".as_slice());
+            }
+            other => panic!("expected Message, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn lf_only_body_lines_are_stored_with_crlf() {
+        let server = test_server(None);
+        // LF-only client line endings must be normalized to CRLF so the
+        // relayed message cannot re-open the smuggling window downstream.
+        let payload = b"Subject: t\nfirst\nsecond\n.\r\n";
+        match drive_data(&server, payload).await {
+            ReadDataOutcome::Message(data) => {
+                assert_eq!(data.as_slice(), b"Subject: t\r\nfirst\r\nsecond".as_slice());
+            }
+            other => panic!("expected Message, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn truncated_data_payload_is_aborted_not_queued() {
+        let server = test_server(None);
+        // Client disconnects mid-DATA without the terminator: the partial
+        // payload must be discarded (Aborted), never queued.
+        let (client, server_side) = tokio::io::duplex(4096);
+        let mut writer = client;
+        writer.write_all(b"Subject: half\r\nbody-so-far\r\n").await.unwrap();
+        writer.flush().await.unwrap();
+        drop(writer);
+        let mut stream = BufStream::new(server_side);
+        let outcome = server.read_data_message(&mut stream).await;
+        assert!(matches!(outcome, ReadDataOutcome::Aborted));
+    }
+
+    #[tokio::test]
+    async fn oversized_message_is_refused_with_toolarge() {
+        // max_message_size of 64 bytes: exceeding it must come back TooLarge
+        // (never buffered wholesale), with the payload still drained.
+        let pool = PgPoolOptions::new()
+            .acquire_timeout(Duration::from_secs(1))
+            .connect_lazy("postgres://127.0.0.1:1/mta_test")
+            .unwrap();
+        let config = SubmissionConfig {
+            enabled: true,
+            host: "127.0.0.1".into(),
+            port: 587,
+            hostname: "submission.test".into(),
+            max_message_size: 64,
+            max_recipients: 100,
+            auth_required: true,
+        };
+        let rate_limit = RateLimitConfig {
+            enabled: true,
+            max_connections_per_ip: 10,
+            max_messages_per_connection: 100,
+            max_recipients_per_message: 100,
+        };
+        let small = SubmissionServer::new(config, rate_limit, pool, None);
+        let big_line = "x".repeat(80);
+        let payload = format!("{big_line}\r\n.\r\n").into_bytes();
+        let outcome = drive_data(&small, &payload).await;
+        assert!(
+            matches!(outcome, ReadDataOutcome::TooLarge),
+            "expected TooLarge, got {outcome:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn ehlo_argument_is_validated_before_echoing() {
+        // E-3: an invalid EHLO argument must not be reflected verbatim.
+        let server = Arc::new(test_server(None));
+        let (client, server_side) = tokio::io::duplex(8 * 1024);
+        let task = tokio::spawn(async move {
+            let mut server_buf = BufStream::new(server_side);
+            server
+                .run_session_loop(&mut server_buf, test_peer(3), false, true)
+                .await
+        });
+        let mut client_buf = BufStream::new(client);
+        client_buf
+            .write_all(b"EHLO bad\x01host and junk\r\n")
+            .await
+            .unwrap();
+        client_buf.flush().await.unwrap();
+        let resp = read_smtp_response(&mut client_buf).await;
+        assert!(
+            resp.contains("unknown") && !resp.contains("bad\x01host"),
+            "invalid EHLO arg must be replaced with 'unknown': {resp:?}"
+        );
+        // A valid hostname is still echoed.
+        client_buf.write_all(b"EHLO client.example\r\n").await.unwrap();
+        client_buf.flush().await.unwrap();
+        let resp = read_smtp_response(&mut client_buf).await;
+        assert!(resp.contains("client.example"), "valid host echoed: {resp:?}");
+        client_buf.write_all(b"QUIT\r\n").await.unwrap();
+        client_buf.flush().await.unwrap();
+        let _ = read_smtp_response(&mut client_buf).await;
+        drop(client_buf);
+        let _ = tokio::time::timeout(Duration::from_secs(5), task).await;
+    }
+
+    // ── E-4: subject char cap ───────────────────────────────────────────────
+
+    #[test]
+    fn subject_truncation_is_char_safe_and_caps_at_998() {
+        let ascii = "a".repeat(1200);
+        assert_eq!(truncate_subject_chars(&ascii, MAX_SUBJECT_CHARS).chars().count(), 998);
+
+        // Multibyte: never splits a character.
+        let multibyte = "\u{f6}".repeat(600); // 1200 bytes, 600 chars
+        let truncated = truncate_subject_chars(&multibyte, MAX_SUBJECT_CHARS);
+        assert!(truncated.chars().count() <= 998);
+        assert!(truncated.chars().all(|c| c == '\u{f6}'));
+
+        // Short subjects pass through unchanged.
+        assert_eq!(truncate_subject_chars("hello", MAX_SUBJECT_CHARS), "hello");
+    }
+
+    #[test]
+    fn extract_subject_truncates_to_998_chars() {
+        let headers = format!("Subject: {}\r\n", "s".repeat(1500));
+        assert_eq!(extract_subject(&headers).chars().count(), 998);
+    }
+
+    // ── F: suppression filtering (pure logic; the query mirrors api-server) ──
+
+    #[test]
+    fn canonical_recipients_trims_and_lowercases() {
+        let rcpt = vec!["  Alice@Example.COM ".to_string(), "bob@example.com".into()];
+        assert_eq!(
+            canonical_recipients(&rcpt),
+            vec!["alice@example.com", "bob@example.com"]
+        );
+    }
+
+    #[test]
+    fn filter_suppressed_recipients_drops_only_suppressed() {
+        let rcpt = vec![
+            "alice@example.com".to_string(),
+            "BOB@example.com".to_string(),
+            "carol@example.com".to_string(),
+        ];
+        let suppressed = vec!["bob@example.com".to_string()];
+        let allowed = filter_suppressed_recipients(&rcpt, &suppressed);
+        assert_eq!(allowed, vec!["alice@example.com", "carol@example.com"]);
+        // All suppressed → empty queue payload (caller returns 550 5.1.1).
+        let all = filter_suppressed_recipients(&rcpt[..1], &["alice@example.com".to_string()]);
+        assert!(all.is_empty());
+        // Empty suppression list keeps everything.
+        assert_eq!(filter_suppressed_recipients(&rcpt, &[]), rcpt);
     }
 }

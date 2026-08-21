@@ -24,11 +24,18 @@ use trust_dns_resolver::TokioAsyncResolver;
 use uuid::Uuid;
 
 use super::bounce::{append_data_line, connection_allowed, ConnGuard};
-use super::util::{read_line_capped, LineRead, MAX_COMMAND_LINE, MAX_DATA_LINE};
+use super::util::{
+    is_strict_end_of_data, line_content, read_line_capped, LineRead, MAX_COMMAND_LINE,
+    MAX_DATA_LINE,
+};
 use crate::config::FeedbackConfig;
 
 /// Per-line timeout while receiving ARF complaint DATA.
 const DATA_LINE_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// Total deadline for receiving one ARF complaint payload (slow-loris
+/// protection, mirrors the inbound server's 10-minute cap).
+const DATA_TOTAL_TIMEOUT: Duration = Duration::from_secs(600);
 
 // #148:Shared DNS resolver – avoids creating a new one per rDNS verification call
 static FBL_RESOLVER: LazyLock<TokioAsyncResolver> =
@@ -198,7 +205,7 @@ impl FeedbackLoopServer {
                     let _ = write_line(&mut stream, "500 5.5.2 Line too long\r\n").await;
                     continue;
                 }
-                Ok(Ok(LineRead::Line(l))) => line = l,
+                Ok(Ok(LineRead::Line(l, _))) => line = l,
             }
 
             let cmd = line.trim().to_uppercase();
@@ -254,10 +261,21 @@ impl FeedbackLoopServer {
                 // truncated payload that must never be processed.
                 let mut terminated = false;
                 let mut timed_out = false;
+                // E-9:total DATA deadline so a slow client cannot drip-feed
+                // lines forever.
+                let deadline = std::time::Instant::now() + DATA_TOTAL_TIMEOUT;
                 loop {
                     line.clear();
+                    let remaining = deadline
+                        .checked_duration_since(std::time::Instant::now())
+                        .unwrap_or(Duration::ZERO);
+                    if remaining.is_zero() {
+                        timed_out = true;
+                        break;
+                    }
+                    let per_line = remaining.min(DATA_LINE_TIMEOUT);
                     match tokio::time::timeout(
-                        DATA_LINE_TIMEOUT,
+                        per_line,
                         read_line_capped(&mut stream, MAX_DATA_LINE),
                     )
                     .await
@@ -272,22 +290,36 @@ impl FeedbackLoopServer {
                             // part of a payload we are willing to store.
                             too_large = true;
                         }
-                        Ok(Ok(LineRead::Line(l))) => {
+                        Ok(Ok(LineRead::Line(l, term))) => {
                             line = l;
-                            if line.trim() == "." {
+                            // RFC 5321 strict: end-of-data is exactly "." with
+                            // a CRLF terminator (bare-LF "." is body data).
+                            if is_strict_end_of_data(&line, term) {
                                 terminated = true;
                                 break;
                             }
+                            let content = line_content(&line, term);
                             // M57: enforce max_arf_size *while* reading so the
                             // payload is never fully buffered before rejection.
                             if !too_large
-                                && !append_data_line(&mut message, &line, self.config.max_arf_size)
+                                && !append_data_line(
+                                    &mut message,
+                                    content,
+                                    self.config.max_arf_size,
+                                )
                             {
                                 too_large = true;
                                 loop {
                                     line.clear();
+                                    let remaining = deadline
+                                        .checked_duration_since(std::time::Instant::now())
+                                        .unwrap_or(Duration::ZERO);
+                                    if remaining.is_zero() {
+                                        timed_out = true;
+                                        break;
+                                    }
                                     match tokio::time::timeout(
-                                        DATA_LINE_TIMEOUT,
+                                        remaining.min(DATA_LINE_TIMEOUT),
                                         read_line_capped(&mut stream, MAX_DATA_LINE),
                                     )
                                     .await
@@ -298,8 +330,8 @@ impl FeedbackLoopServer {
                                         }
                                         Ok(Ok(LineRead::Eof)) | Ok(Err(_)) => break,
                                         Ok(Ok(LineRead::TooLong)) => {}
-                                        Ok(Ok(LineRead::Line(dl))) => {
-                                            if dl.trim() == "." {
+                                        Ok(Ok(LineRead::Line(dl, dterm))) => {
+                                            if is_strict_end_of_data(&dl, dterm) {
                                                 break;
                                             }
                                         }

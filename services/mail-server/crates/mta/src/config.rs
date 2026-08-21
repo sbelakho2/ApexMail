@@ -189,7 +189,11 @@ pub struct EmailAuthConfig {
     pub require_spf: bool,
     #[serde(default)]
     pub require_dkim: bool,
-    #[serde(default)]
+    /// C:DMARC enforcement defaults ON (p=reject → reject, p=quarantine →
+    /// quarantine, p=none → deliver with header). require_spf/require_dkim
+    /// stay off by default — they are inputs to the DMARC evaluation, not
+    /// standalone gates. Operators opt out explicitly with ENFORCE_DMARC=false.
+    #[serde(default = "default_true")]
     pub enforce_dmarc: bool,
     #[serde(default = "default_true")]
     pub allow_soft_fail: bool,
@@ -371,7 +375,7 @@ impl_default!(
     Self {
         require_spf: false,
         require_dkim: false,
-        enforce_dmarc: false,
+        enforce_dmarc: true,
         allow_soft_fail: true,
         trusted_relays: Vec::new(),
         spf_cache_max_entries: default_spf_cache_max_entries(),
@@ -601,7 +605,7 @@ impl MtaConfig {
             email_auth: EmailAuthConfig {
                 require_spf: parse_bool_env("REQUIRE_SPF", false),
                 require_dkim: parse_bool_env("REQUIRE_DKIM", false),
-                enforce_dmarc: parse_bool_env("ENFORCE_DMARC", false),
+                enforce_dmarc: parse_bool_env("ENFORCE_DMARC", true),
                 allow_soft_fail: parse_bool_env("ALLOW_SOFT_FAIL", true),
                 trusted_relays: std::env::var("TRUSTED_RELAYS")
                     .ok()
@@ -796,4 +800,42 @@ fn parse_u32_env(name: &str, default: u32) -> u32 {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(default)
+}
+
+// ── tests ──────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn email_auth_defaults_enforce_dmarc() {
+        // C:DMARC enforcement must default ON; SPF/DKIM stay inputs to the
+        // DMARC evaluation rather than standalone default gates.
+        let config = EmailAuthConfig::default();
+        assert!(config.enforce_dmarc, "enforce_dmarc must default to true");
+        assert!(!config.require_spf);
+        assert!(!config.require_dkim);
+        assert!(config.allow_soft_fail);
+    }
+
+    #[test]
+    fn email_auth_serde_default_enforces_dmarc() {
+        // A config file that omits enforce_dmarc must also get `true` (the
+        // serde field default, not `false`).
+        let config: EmailAuthConfig = serde_json::from_str("{}").unwrap();
+        assert!(config.enforce_dmarc);
+    }
+
+    #[test]
+    fn email_auth_serde_explicit_false_still_disables() {
+        // Operators keep an explicit opt-out.
+        let config: EmailAuthConfig = serde_json::from_str("{\"enforce_dmarc\": false}").unwrap();
+        assert!(!config.enforce_dmarc);
+    }
+
+    #[test]
+    fn mta_config_default_carries_enforced_dmarc() {
+        assert!(MtaConfig::default().email_auth.enforce_dmarc);
+    }
 }

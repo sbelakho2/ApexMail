@@ -32,7 +32,10 @@ use mail_proto::{
 };
 use tonic::transport::Channel;
 
-use super::util::{read_line_capped, LineRead, MAX_COMMAND_LINE, MAX_DATA_LINE};
+use super::util::{
+    is_strict_end_of_data, line_content, read_line_capped, unstuff_dot_line, LineRead,
+    MAX_COMMAND_LINE, MAX_DATA_LINE,
+};
 
 // Shared resolver to avoid allocating a new DNS client per PTR verification.
 static INBOUND_RDNS_RESOLVER: LazyLock<TokioAsyncResolver> =
@@ -300,7 +303,7 @@ impl InboundServer {
                     let _ = write_line_buf(stream, "500 5.5.2 Line too long\r\n").await;
                     continue;
                 }
-                Ok(Ok(LineRead::Line(l))) => line = l,
+                Ok(Ok(LineRead::Line(l, _))) => line = l,
                 Ok(Err(e)) => {
                     debug!(error = %e, "Read error");
                     break;
@@ -377,24 +380,30 @@ impl InboundServer {
                             too_large = true;
                             message.clear();
                         }
-                        Ok(Ok(LineRead::Line(l))) => {
+                        Ok(Ok(LineRead::Line(l, term))) => {
                             line = l;
-                            if line.trim() == "." {
+                            // RFC 5321 §4.1.1.5: DATA ends ONLY on a line that
+                            // is exactly "." with a CRLF terminator. A bare-LF
+                            // "." line is body data (SMTP smuggling defence).
+                            if is_strict_end_of_data(&line, term) {
                                 terminated = true;
                                 break;
                             }
                             // #141:Check size BEFORE extending to prevent temporary overallocation
                             if !too_large {
-                                let data_slice = if line.starts_with("..") {
-                                    &line[1..]
-                                } else {
-                                    &line[..]
-                                };
-                                if message.len() + data_slice.len() > self.config.max_message_size {
+                                // Strip the line's actual terminator, un-stuff
+                                // exactly one leading dot (RFC 5321 §4.5.2),
+                                // and store the line with a normalized CRLF so
+                                // a bare-LF body line is never relayed onward.
+                                let data_slice = unstuff_dot_line(line_content(&line, term));
+                                if message.len() + data_slice.len() + 2
+                                    > self.config.max_message_size
+                                {
                                     too_large = true;
                                     message.clear();
                                 } else {
                                     message.extend_from_slice(data_slice.as_bytes());
+                                    message.extend_from_slice(b"\r\n");
                                 }
                             }
                         }
@@ -568,6 +577,15 @@ impl InboundServer {
                 return "550 Reverse DNS lookup required\r\n".into();
             }
             let addr = extract_address(raw_line);
+            // E-6:an unvalidated reverse-path used to be echoed into
+            // downstream rows (inbound_messages.mail_from). The null sender
+            // <> is legal on port 25 (bounces); any non-empty address must
+            // satisfy the same syntax rules the submission server enforces.
+            if !addr.is_empty()
+                && !super::submission::is_valid_envelope_address(&addr)
+            {
+                return "501 5.1.7 Malformed reverse-path\r\n".into();
+            }
             // RFC 5321 §4.1.4: a MAIL FROM implicitly resets any prior
             // transaction's recipients — a new reverse-path starts a new
             // transaction.
@@ -641,6 +659,13 @@ impl InboundServer {
                 info!(id = %message_id, "Message quarantined");
             }
             crate::auth::MessageDisposition::Accept => {}
+            crate::auth::MessageDisposition::TempFail => {
+                // C:the DMARC policy lookup transiently failed with no
+                // passing SPF/DKIM — answer 451 (via the generic temporary
+                // failure reply) so the sender retries instead of
+                // fail-open accepting a potentially spoofed message.
+                anyhow::bail!("Message temporarily rejected: DMARC policy lookup failed");
+            }
         }
 
         // 2. Detect VERP reply. Exact local-part prefix match: a substring
@@ -1071,7 +1096,7 @@ fn parse_helo_hostname(raw_line: &str) -> Option<&str> {
     }
 }
 
-fn is_valid_helo_hostname(host: &str) -> bool {
+pub(crate) fn is_valid_helo_hostname(host: &str) -> bool {
     if host.is_empty() || host.len() > 255 || !host.is_ascii() {
         return false;
     }
@@ -1573,6 +1598,38 @@ mod tests {
     fn test_format_data_response_ok_includes_id() {
         let resp = format_data_response(&Ok("abc-123".into()));
         assert_eq!(resp, "250 OK id=abc-123\r\n");
+    }
+
+    // ── E-6: inbound MAIL FROM reverse-path validation ─────────────────────
+
+    #[tokio::test]
+    async fn inbound_mail_from_with_invalid_address_is_refused_501() {
+        let (server, mut ctx) = test_inbound(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))).await;
+        // Private IP → PTR verification is exempt, so the syntax check is the
+        // only gate: a whitespace-containing reverse-path must be refused.
+        for bad in ["MAIL FROM:<bad address@example.com>", "MAIL FROM:<nodomain>"] {
+            let resp = server.handle_command("MAIL FROM", bad, &mut ctx, false).await;
+            assert!(
+                resp.starts_with("501"),
+                "invalid reverse-path must be refused with 501, got {resp:?} for {bad:?}"
+            );
+            assert!(ctx.mail_from.is_none(), "no reverse-path stored for {bad:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn inbound_mail_from_accepts_valid_and_null_reverse_path() {
+        let (server, mut ctx) = test_inbound(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))).await;
+        // The null sender <> is legal on port 25 (bounces/DSNs).
+        let resp = server.handle_command("MAIL FROM", "MAIL FROM:<>\r\n", &mut ctx, false).await;
+        assert!(resp.starts_with("250"), "null sender must be accepted: {resp:?}");
+        assert_eq!(ctx.mail_from.as_deref(), Some(""));
+
+        let resp = server
+            .handle_command("MAIL FROM", "MAIL FROM:<user@example.com>\r\n", &mut ctx, false)
+            .await;
+        assert!(resp.starts_with("250"), "valid sender must be accepted: {resp:?}");
+        assert_eq!(ctx.mail_from.as_deref(), Some("user@example.com"));
     }
 
     // ── FIX-H (M28): bounded mailstore RPCs ───────────────────────────────

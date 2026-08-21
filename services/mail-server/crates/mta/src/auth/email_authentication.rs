@@ -66,6 +66,11 @@ pub enum MessageDisposition {
     Accept,
     Quarantine,
     Reject,
+    /// The DMARC policy lookup transiently failed AND neither SPF nor DKIM
+    /// passed — the message cannot be authenticated right now. The SMTP
+    /// session must answer with a temporary failure (451) so the sender
+    /// retries, instead of fail-open accepting a potentially spoofed message.
+    TempFail,
 }
 
 // ── verdict enums ──────────────────────────────────────────────────────────────
@@ -156,6 +161,10 @@ enum DmarcLookup {
     Record(DmarcRecord),
     /// A `v=DMARC1` record that failed to parse — RFC 7489 §6.6.3 permerror.
     PermError,
+    /// The lookup itself failed transiently (timeout, SERVFAIL, network) —
+    /// NOT the same as "no record published" (NXDOMAIN/NODATA). Consumers
+    /// must not treat this as a published `p=none`.
+    TempError,
 }
 
 // ── authenticator ──────────────────────────────────────────────────────────────
@@ -269,34 +278,10 @@ impl EmailAuthenticator {
         })
     }
 
-    /// Decide whether to accept, quarantine or reject based on authentication + config.
+    /// Decide whether to accept, quarantine, reject, or tempfail based on
+    /// authentication + config.
     pub fn should_accept(&self, results: &AuthenticationResults) -> MessageDisposition {
-        // SPF hard fail + strict
-        if self.config.require_spf && results.spf.result == SpfVerdict::Fail {
-            return MessageDisposition::Reject;
-        }
-
-        // DKIM required but none passed
-        if self.config.require_dkim && !results.dkim.iter().any(|d| d.result == DkimVerdict::Pass) {
-            return MessageDisposition::Reject;
-        }
-
-        // DMARC enforcement
-        if self.config.enforce_dmarc && results.dmarc.result == DmarcVerdict::Fail {
-            return match results.dmarc.policy {
-                DmarcPolicy::Reject => MessageDisposition::Reject,
-                DmarcPolicy::Quarantine => MessageDisposition::Quarantine,
-                DmarcPolicy::None => {
-                    if self.config.allow_soft_fail {
-                        MessageDisposition::Accept
-                    } else {
-                        MessageDisposition::Quarantine
-                    }
-                }
-            };
-        }
-
-        MessageDisposition::Accept
+        disposition_for(&self.config, results)
     }
 
     // ── internal checks ────────────────────────────────────────────────────────
@@ -402,7 +387,11 @@ impl EmailAuthenticator {
             other => other,
         };
 
-        self.dmarc_cache.insert(domain.to_string(), lookup);
+        // Transient failures are NOT cached: a 5-minute cached TempError
+        // would turn a blip into a persistent failure window.
+        if lookup != DmarcLookup::TempError {
+            self.dmarc_cache.insert(domain.to_string(), lookup);
+        }
         lookup
     }
 
@@ -426,7 +415,24 @@ impl EmailAuthenticator {
                     DmarcLookup::None
                 }
             }
-            Err(_) => DmarcLookup::None,
+            // C:NXDOMAIN / NODATA arrive as NoRecordsFound — that is a
+            // definitive "no record published" (→ None). Any other error
+            // (timeout, SERVFAIL, network) is transient and must surface as
+            // TempError so the caller can tempfail instead of treating the
+            // domain as p=none (fail-open).
+            Err(err) => match err.kind() {
+                trust_dns_resolver::error::ResolveErrorKind::NoRecordsFound { .. } => {
+                    DmarcLookup::None
+                }
+                other => {
+                    tracing::debug!(
+                        domain,
+                        error = %other,
+                        "DMARC policy lookup transiently failed"
+                    );
+                    DmarcLookup::TempError
+                }
+            },
         }
     }
 
@@ -470,6 +476,53 @@ impl EmailAuthenticator {
 }
 
 // ── mapping helpers ────────────────────────────────────────────────────────────
+
+/// Pure disposition decision (extracted from
+/// [`EmailAuthenticator::should_accept`] so the policy matrix is testable
+/// without a DNS resolver).
+fn disposition_for(
+    config: &EmailAuthConfig,
+    results: &AuthenticationResults,
+) -> MessageDisposition {
+    // SPF hard fail + strict
+    if config.require_spf && results.spf.result == SpfVerdict::Fail {
+        return MessageDisposition::Reject;
+    }
+
+    // DKIM required but none passed
+    if config.require_dkim && !results.dkim.iter().any(|d| d.result == DkimVerdict::Pass) {
+        return MessageDisposition::Reject;
+    }
+
+    // C:DMARC lookup transiently failed (timeout/SERVFAIL — distinct from
+    // NXDOMAIN) while NEITHER SPF nor DKIM passed. The message cannot be
+    // authenticated: tempfail (451) so the sender retries, instead of
+    // fail-open accepting a potentially spoofed message.
+    if config.enforce_dmarc
+        && results.dmarc.result == DmarcVerdict::TempError
+        && results.spf.result != SpfVerdict::Pass
+        && !results.dkim.iter().any(|d| d.result == DkimVerdict::Pass)
+    {
+        return MessageDisposition::TempFail;
+    }
+
+    // DMARC enforcement
+    if config.enforce_dmarc && results.dmarc.result == DmarcVerdict::Fail {
+        return match results.dmarc.policy {
+            DmarcPolicy::Reject => MessageDisposition::Reject,
+            DmarcPolicy::Quarantine => MessageDisposition::Quarantine,
+            DmarcPolicy::None => {
+                if config.allow_soft_fail {
+                    MessageDisposition::Accept
+                } else {
+                    MessageDisposition::Quarantine
+                }
+            }
+        };
+    }
+
+    MessageDisposition::Accept
+}
 
 fn map_spf_result(r: &SpfResult) -> SpfVerdict {
     match r {
@@ -685,6 +738,16 @@ fn evaluate_dmarc(
         ),
         DmarcLookup::PermError => (
             DmarcVerdict::PermError,
+            DmarcPolicy::None,
+            DmarcAlignment {
+                spf: false,
+                dkim: false,
+            },
+        ),
+        // C:the lookup itself failed transiently — never conflated with a
+        // published p=none.
+        DmarcLookup::TempError => (
+            DmarcVerdict::TempError,
             DmarcPolicy::None,
             DmarcAlignment {
                 spf: false,
@@ -1074,6 +1137,152 @@ mod tests {
         );
         assert_eq!(dmarc.result, DmarcVerdict::PermError);
         assert_eq!(dmarc.policy, DmarcPolicy::None);
+    }
+
+    #[test]
+    fn test_dmarc_temperror_is_distinct_from_no_record() {
+        // C:a transient lookup failure must surface as TempError, never as
+        // the "no record published" None (which downstream treats as p=none).
+        let dmarc = evaluate_dmarc(
+            "victim.com",
+            "evil.com",
+            &spf_outcome(SpfVerdict::Fail, "evil.com"),
+            &[],
+            DmarcLookup::TempError,
+        );
+        assert_eq!(dmarc.result, DmarcVerdict::TempError);
+        assert_eq!(dmarc.policy, DmarcPolicy::None);
+    }
+
+    // ── C:disposition matrix incl. DMARC tempfail ─────────────────────────
+
+    fn results_with(
+        spf: SpfVerdict,
+        dkim: DkimVerdict,
+        dmarc: DmarcVerdict,
+        policy: DmarcPolicy,
+    ) -> AuthenticationResults {
+        AuthenticationResults {
+            spf: spf_outcome(spf, "example.com"),
+            dkim: vec![dkim_outcome(dkim, "example.com")],
+            dmarc: DmarcOutcome {
+                result: dmarc,
+                domain: "example.com".into(),
+                policy,
+                alignment: DmarcAlignment {
+                    spf: false,
+                    dkim: false,
+                },
+            },
+            auth_results_header: String::new(),
+        }
+    }
+
+    fn enforced_config() -> EmailAuthConfig {
+        EmailAuthConfig {
+            require_spf: false,
+            require_dkim: false,
+            enforce_dmarc: true,
+            allow_soft_fail: true,
+            trusted_relays: Vec::new(),
+            spf_cache_max_entries: 1000,
+        }
+    }
+
+    #[test]
+    fn dmarc_temperror_with_failed_spf_and_dkim_tempfails() {
+        let results = results_with(
+            SpfVerdict::Fail,
+            DkimVerdict::Fail,
+            DmarcVerdict::TempError,
+            DmarcPolicy::None,
+        );
+        assert_eq!(
+            disposition_for(&enforced_config(), &results),
+            MessageDisposition::TempFail,
+            "transient DMARC failure with no passing auth must tempfail, not accept"
+        );
+    }
+
+    #[test]
+    fn dmarc_temperror_with_passing_spf_accepts() {
+        let results = results_with(
+            SpfVerdict::Pass,
+            DkimVerdict::None,
+            DmarcVerdict::TempError,
+            DmarcPolicy::None,
+        );
+        assert_eq!(
+            disposition_for(&enforced_config(), &results),
+            MessageDisposition::Accept,
+            "a passing SPF means the message is authenticated despite the DMARC lookup blip"
+        );
+    }
+
+    #[test]
+    fn dmarc_temperror_with_passing_dkim_accepts() {
+        let results = results_with(
+            SpfVerdict::Fail,
+            DkimVerdict::Pass,
+            DmarcVerdict::TempError,
+            DmarcPolicy::None,
+        );
+        assert_eq!(
+            disposition_for(&enforced_config(), &results),
+            MessageDisposition::Accept
+        );
+    }
+
+    #[test]
+    fn dmarc_temperror_when_enforcement_disabled_accepts() {
+        // Operator opt-out (ENFORCE_DMARC=false) keeps today's fail-open
+        // behaviour explicitly.
+        let mut config = enforced_config();
+        config.enforce_dmarc = false;
+        let results = results_with(
+            SpfVerdict::Fail,
+            DkimVerdict::Fail,
+            DmarcVerdict::TempError,
+            DmarcPolicy::None,
+        );
+        assert_eq!(disposition_for(&config, &results), MessageDisposition::Accept);
+    }
+
+    #[test]
+    fn dmarc_enforcement_matrix_reject_and_quarantine() {
+        let results = results_with(
+            SpfVerdict::Fail,
+            DkimVerdict::Fail,
+            DmarcVerdict::Fail,
+            DmarcPolicy::Reject,
+        );
+        assert_eq!(
+            disposition_for(&enforced_config(), &results),
+            MessageDisposition::Reject
+        );
+
+        let results = results_with(
+            SpfVerdict::Fail,
+            DkimVerdict::Fail,
+            DmarcVerdict::Fail,
+            DmarcPolicy::Quarantine,
+        );
+        assert_eq!(
+            disposition_for(&enforced_config(), &results),
+            MessageDisposition::Quarantine
+        );
+
+        // p=none with allow_soft_fail → deliver (with the header).
+        let results = results_with(
+            SpfVerdict::Fail,
+            DkimVerdict::Fail,
+            DmarcVerdict::Fail,
+            DmarcPolicy::None,
+        );
+        assert_eq!(
+            disposition_for(&enforced_config(), &results),
+            MessageDisposition::Accept
+        );
     }
 
     #[test]

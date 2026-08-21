@@ -63,10 +63,12 @@ impl CachedDnsResolver {
                 self.cache.insert_with_ttl(&cache_key, cached, result.ttl);
                 Ok(result.records)
             }
-            Err(e) => {
-                self.cache.insert_negative(&cache_key);
-                Err(e)
-            }
+            // E-1:transient lookup errors (timeout, SERVFAIL, network) are
+            // NEVER negative-cached — a cached failure turned a blip into a
+            // full negative-TTL window in which deliverability checks said
+            // "no records". Propagate the error so the caller can retry;
+            // only definitive NXDOMAIN/NoRecords results are cached.
+            Err(e) => Err(e),
         }
     }
 
@@ -220,5 +222,62 @@ mod tests {
             resolver.clear_cache();
             assert_eq!(resolver.cache_size(), 0);
         }
+    }
+
+    // ── E-1: transient lookup errors are never negative-cached ────────────
+
+    #[tokio::test]
+    async fn mx_lookup_errors_are_not_cached() {
+        // Point the resolver at an unreachable nameserver with a short
+        // timeout so the lookup fails transiently (timeout / io error —
+        // NOT an NXDOMAIN). The failure must propagate and leave the cache
+        // EMPTY: the old code negative-cached the error, making every
+        // deliverability check for that domain fail for a full negative-TTL
+        // window after a single network blip.
+        let config = crate::config::DnsConfig {
+            nameservers: vec!["127.0.0.1:1".to_string()],
+            query_timeout_ms: 50,
+            retries: 0,
+            ..crate::config::DnsConfig::default()
+        };
+        let resolver = CachedDnsResolver::new(&config).expect("resolver construction");
+
+        let outcome = resolver.mx("example.com").await;
+        assert!(outcome.is_err(), "unreachable nameserver must yield an error");
+        assert!(
+            resolver.cache_size() == 0,
+            "transient errors must not be cached (positive or negative)"
+        );
+
+        // A second attempt still consults the (still-failing) resolver
+        // instead of being short-circuited by a cached failure.
+        let outcome = resolver.mx("example.com").await;
+        assert!(outcome.is_err());
+        assert!(resolver.cache_size() == 0);
+    }
+
+    // ── E-2: invalidate_domain reaches DKIM selector keys ─────────────────
+
+    #[test]
+    fn invalidate_domain_invalidates_dkim_selector_keys() {
+        let resolver = CachedDnsResolver::default_resolver().expect("resolver construction");
+        resolver.cache.insert(
+            "dkim:sel1._domainkey.example.com",
+            vec!["v=DKIM1; k=rsa; p=OLD".into()],
+        );
+        resolver
+            .cache
+            .insert("mx:example.com", vec!["10 mx.example.com".into()]);
+
+        resolver.invalidate_domain("example.com");
+
+        assert!(
+            resolver.cache.get("dkim:sel1._domainkey.example.com").is_none(),
+            "DKIM selector keys must be invalidated with the domain"
+        );
+        assert!(
+            resolver.cache.get("mx:example.com").is_none(),
+            "plain domain keys must be invalidated as before"
+        );
     }
 }
