@@ -3,9 +3,9 @@
 47 .github/workflows/release.yml
 2 .github/workflows/sync-assets.yml
 0 README.md
-4 SECURITY.md
+0 SECURITY.md
 4 packages/kiwicaptcha-php/CHANGELOG.md
-1 packages/kiwicaptcha-php/README.md
+0 packages/kiwicaptcha-php/README.md
 0 packages/kiwicaptcha-php/src/AtomicStorageInterface.php
 0 packages/kiwicaptcha-php/src/Challenge.php
 0 packages/kiwicaptcha-php/src/ChallengeProfile.php
@@ -161,7 +161,7 @@
 1 packages/kiwicaptcha-wasm/tools/sri-hashes.mjs
 1 packages/kiwicaptcha/README.md
 0 packages/kiwicaptcha/examples/quickstart.rs
-31 packages/kiwicaptcha/integrations/symfony/README.md
+27 packages/kiwicaptcha/integrations/symfony/README.md
 65 packages/kiwicaptcha/integrations/symfony/Resources/ACCESSIBILITY.md
 115 packages/kiwicaptcha/integrations/symfony/Resources/public/kiwicaptcha-wasm.js
 116 packages/kiwicaptcha/integrations/symfony/Resources/public/widget-driver.js
@@ -332,4 +332,4 @@
 0 tests/browser/specs/risk-v2.spec.mjs
 2 tests/browser/specs/security.spec.mjs
 1 tests/browser/specs/widget.spec.mjs
-TOTAL 985
+TOTAL 976

@@ -137,6 +137,11 @@ product_root_readme() {
 # CI installs gawk so enforcement is deterministic.
 AWK_BIN="$(command -v gawk 2>/dev/null || command -v awk)"
 
+# The sentence normalization (tolower, punctuation stripping) and the
+# duplicate aggregation must be byte-deterministic across machines, so
+# every awk run happens under a fixed C locale regardless of the host.
+export LC_ALL=C LC_CTYPE=C LANG=C
+
 tmpd=$(mktemp -d "${TMPDIR:-/tmp}/docs-lint.XXXXXX") || exit 0
 trap 'rm -rf "$tmpd"' EXIT HUP INT TERM
 

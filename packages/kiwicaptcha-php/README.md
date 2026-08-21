@@ -292,24 +292,24 @@ package.
 
 ## Limitations
 
-1. Proof of computation, not proof of human. KiwiCaptcha verifies that a
-   client spent CPU time, not that a human did. Any automated client that
-   pays the same cost passes. It protects against mass signups,
-   credential-stuffing economics, scraping, and endpoint flooding; combine
-   it with first-party server evidence (rate/reputation, passkeys, email
+- Proof of computation, not humanness. The verifier proves that a
+   client spent CPU time; an automated client that spends the same work
+   also passes. It protects against mass signups, credential-stuffing
+   economics, scraping, and endpoint flooding; combine it with
+   first-party server evidence (rate/reputation, passkeys, email
    verification) for high-value operations. Do not add fingerprinting to
    "prove" humanity; it is forgeable and sacrifices privacy.
-2. Telemetry is client-controlled and forgeable. Whatever the widget
+- Telemetry is client-controlled and forgeable. Whatever the widget
    reports, a custom client can omit or fake. Telemetry is a
    supplementary signal; rely on server-side abuse signals
    (per-account/IP-HMAC/network velocity, PoW success ratios, concurrent
    unsolved challenges) and keep telemetry off by default.
-3. IP binding is best-effort and mode-dependent. `none` disables it
+- IP binding is best-effort and mode-dependent. `none` disables it
    (purest privacy); `bound` uses a nonce-bound HMAC (no stable
    identifier, breaks under IP churn). IPs legitimately change behind
    NAT/proxies, so a strict binding would reject real users. It is a
    relay mitigation; operators can disable the check entirely.
-4. Server-side timing needs a trusted clock, and is only a heuristic.
+- Server-side timing needs a trusted clock, and is only a heuristic.
    The minimum-duration floor is measured by your server. A fast bot can
    always wait before submitting (it still pays the full PoW cost per
    attempt), and a valid solution can occur at counter 0. The server
@@ -318,7 +318,7 @@ package.
    synchronized clocks. A 5s skew tolerance
    (`Verifier::SKEW_TOLERANCE_US`) keeps slightly unsynced hosts passing
    verification while the proof-of-work check still applies.
-5. The WASM solver and its JS fallback are open source. An attacker can
+- The WASM solver and its JS fallback are open source. An attacker can
    always write their own solver (or reuse the source). The value is the
    cost per attempt, not the impossibility of solving: they still cannot
    predict the nonce, salt, secret, or signed parameters, and must still
