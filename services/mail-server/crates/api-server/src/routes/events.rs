@@ -347,7 +347,7 @@ mod tests {
         let now = Utc::now();
         let err = resolve_stats_window(
             &stats_query(Some(now), Some(now - chrono::Duration::days(1))),
-            || now - chrono::Duration::days(30),
+            || Utc::now() - chrono::Duration::days(30),
         )
         .expect_err("from > to must be a 400");
         assert!(matches!(err, ApiError::BadRequest(_)));
@@ -362,7 +362,7 @@ mod tests {
                 Some(now - chrono::Duration::days(93)),
                 Some(now),
             ),
-            || now - chrono::Duration::days(30),
+            || Utc::now() - chrono::Duration::days(30),
         )
         .expect_err("over-long range must be a 400");
         match err {
@@ -378,14 +378,14 @@ mod tests {
                 Some(now - chrono::Duration::days(92)),
                 Some(now),
             ),
-            || now - chrono::Duration::days(30),
+            || Utc::now() - chrono::Duration::days(30),
         )
         .is_ok());
 
         // Inverted + huge (from in the future) is rejected as inverted first.
         let err = resolve_stats_window(
             &stats_query(Some(now + chrono::Duration::days(400)), Some(now)),
-            || now - chrono::Duration::days(30),
+            || Utc::now() - chrono::Duration::days(30),
         )
         .unwrap_err();
         assert!(matches!(err, ApiError::BadRequest(_)));
