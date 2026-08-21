@@ -8,6 +8,7 @@
 
 #![deny(unsafe_code)]
 pub mod compiler;
+pub mod font;
 pub mod routes;
 pub mod world;
 

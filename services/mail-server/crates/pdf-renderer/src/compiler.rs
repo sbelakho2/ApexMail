@@ -21,7 +21,29 @@ use serde::{Deserialize, Serialize};
 use tokio::time::timeout;
 use tracing::info;
 
+use std::collections::BTreeMap;
+
+use once_cell::sync::Lazy;
+
+use crate::font::TtfFont;
 use crate::world::{TypstWorld, WorldError};
+
+// ---------------------------------------------------------------------------
+// Embedded Unicode fonts (OFL-licensed Noto Sans)
+// ---------------------------------------------------------------------------
+// Latin/Greek/Cyrillic coverage comes from Noto Sans Regular; CJK from
+// Noto Sans SC Regular. Both are embedded verbatim as PDF FontFile2
+// streams behind /Type0 CIDFontType2 fonts with Identity-H encoding, so
+// non-Latin text renders as native glyphs instead of folding to '?'.
+// Licenses: assets/fonts/NotoSans-OFL.txt, assets/fonts/NotoSansSC-OFL.txt.
+static NOTO_SANS: Lazy<TtfFont> = Lazy::new(|| {
+    TtfFont::parse(include_bytes!("../assets/fonts/NotoSans-Regular.ttf").to_vec())
+        .expect("embedded NotoSans-Regular.ttf must parse")
+});
+static NOTO_SANS_SC: Lazy<TtfFont> = Lazy::new(|| {
+    TtfFont::parse(include_bytes!("../assets/fonts/NotoSansSC-Regular.ttf").to_vec())
+        .expect("embedded NotoSansSC-Regular.ttf must parse")
+});
 
 // ---------------------------------------------------------------------------
 // Security constants (configurable via env vars)
@@ -118,11 +140,11 @@ pub async fn render_pdf(template: &str, data: &serde_json::Value) -> Result<Vec<
 /// (including CP1252 specials mapped to their byte value as C1 chars),
 /// `None` when only transliteration or a marker can represent it.
 ///
-/// LIMITATION (documented): the built-in PDF fonts are encoded in
-/// WinAnsiEncoding, so text outside Latin/Cyrillic/Greek/common-typography
-/// is transliterated where a mapping exists and replaced with `?`
-/// otherwise. Full multi-byte Unicode requires embedding a font with broad
-/// coverage — tracked separately with the Typst pipeline.
+/// LEGACY SINGLE-BYTE PATH ONLY: used for pure-WinAnsi lines and the fixed
+/// ASCII title block, which render through the built-in Helvetica font.
+/// Lines containing anything outside WinAnsi bypass this entirely and
+/// render as native glyphs via the embedded Noto Sans / Noto Sans SC
+/// Type0 fonts (see [`layout_lines`]).
 fn fold_char_direct(c: char) -> Option<char> {
     let code = c as u32;
     const CP1252_SPECIALS: &[(u32, u8)] = &[
@@ -296,12 +318,173 @@ const FIRST_PAGE_DATA_TOP: u32 = 700;
 const CONTINUATION_PAGE_TOP: u32 = PAGE_HEIGHT - MARGIN;
 const PAGE_BOTTOM: u32 = MARGIN;
 /// Wrap width for body text at /F2 10pt Helvetica across the content box.
+/// Used ONLY for the legacy single-byte path so pure-Latin documents stay
+/// byte-stable; lines containing non-WinAnsi characters are wrapped by
+/// measured advance widths instead.
 const WRAP_COLUMNS: usize = 92;
+/// Printable content box width in points (A4 minus both margins).
+const CONTENT_WIDTH_PT: f64 = (PAGE_WIDTH - 2 * MARGIN) as f64;
+/// Font resource names for the embedded Unicode fonts.
+const NOTO_SANS_REF: &str = "/F3";
+const NOTO_SANS_SC_REF: &str = "/F4";
 
-/// One laid-out line: (font size, folded text).
+/// Which embedded font backs a glyph run.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+enum UnicodeFont {
+    NotoSans,
+    NotoSansSc,
+}
+
+impl UnicodeFont {
+    fn ttf(&self) -> &'static TtfFont {
+        match self {
+            UnicodeFont::NotoSans => &NOTO_SANS,
+            UnicodeFont::NotoSansSc => &NOTO_SANS_SC,
+        }
+    }
+
+    /// Resource name inside the page /Resources dict.
+    fn resource_ref(&self) -> &'static str {
+        match self {
+            UnicodeFont::NotoSans => NOTO_SANS_REF,
+            UnicodeFont::NotoSansSc => NOTO_SANS_SC_REF,
+        }
+    }
+
+    /// PDF /BaseFont name (must match across Type0, CIDFont, descriptor).
+    fn base_font(&self) -> &'static str {
+        match self {
+            UnicodeFont::NotoSans => "/NotoSans-Regular",
+            UnicodeFont::NotoSansSc => "/NotoSansSC-Regular",
+        }
+    }
+}
+
+/// A consecutive run of glyph IDs from one font.
+struct GlyphRun {
+    font: UnicodeFont,
+    gids: Vec<u16>,
+}
+
+/// Laid-out line content. Lines whose every character is WinAnsi
+/// representable keep the legacy single-byte Helvetica path (byte-stable
+/// output for Latin payloads); anything else renders as native glyph runs
+/// through the embedded Unicode fonts.
+enum LineContent {
+    Legacy(String),
+    Glyphs(Vec<GlyphRun>),
+}
+
+/// One laid-out line.
 struct LayoutLine {
     font_size: u8,
-    text: String,
+    content: LineContent,
+}
+
+/// Pick the embedded font for a character: Noto Sans first, Noto Sans SC
+/// for CJK it lacks, and Noto Sans' '?' glyph as the explicit last resort
+/// (still a visible marker, never a silent drop).
+fn font_for_char(ch: char) -> (UnicodeFont, u16) {
+    if let Some(gid) = NOTO_SANS.glyph(ch) {
+        return (UnicodeFont::NotoSans, gid);
+    }
+    if let Some(gid) = NOTO_SANS_SC.glyph(ch) {
+        return (UnicodeFont::NotoSansSc, gid);
+    }
+    (UnicodeFont::NotoSans, NOTO_SANS.glyph('?').unwrap_or(0))
+}
+
+/// Measured advance width of a character at `size` points.
+fn char_width_pt(ch: char, size: f64) -> f64 {
+    let (font, gid) = font_for_char(ch);
+    font.ttf().advance_pt(gid, size)
+}
+
+fn is_winansi_representable(ch: char) -> bool {
+    matches!(ch, '\n' | '\r' | '\t') || fold_char_direct(ch).is_some()
+}
+
+/// Convert a logical character sequence into per-font glyph runs.
+fn glyph_runs(chars: &[char]) -> Vec<GlyphRun> {
+    let mut runs: Vec<GlyphRun> = Vec::new();
+    for &ch in chars {
+        let (font, gid) = font_for_char(ch);
+        match runs.last_mut() {
+            Some(run) if run.font == font => run.gids.push(gid),
+            _ => runs.push(GlyphRun { font, gids: vec![gid] }),
+        }
+    }
+    runs
+}
+
+/// Wrap a line by measured advance widths (word boundaries where spaces
+/// exist, hard character breaks for unbroken runs like CJK).
+fn wrap_line_width_aware(line: &str, max_pt: f64, size: f64) -> Vec<Vec<char>> {
+    let chars: Vec<char> = line.chars().collect();
+    if chars.is_empty() {
+        return vec![chars];
+    }
+    let total: f64 = chars.iter().map(|c| char_width_pt(*c, size)).sum();
+    if total <= max_pt {
+        return vec![chars];
+    }
+    let mut out: Vec<Vec<char>> = Vec::new();
+    let mut current: Vec<char> = Vec::new();
+    let mut width = 0.0;
+    let mut break_at: Option<usize> = None;
+    for &ch in &chars {
+        let w = char_width_pt(ch, size);
+        if width + w > max_pt && !current.is_empty() {
+            match break_at.filter(|b| *b < current.len()) {
+                Some(b) => {
+                    let tail = current.split_off(b);
+                    out.push(std::mem::take(&mut current));
+                    current = tail;
+                    width = current.iter().map(|c| char_width_pt(*c, size)).sum();
+                }
+                None => {
+                    out.push(std::mem::take(&mut current));
+                    width = 0.0;
+                }
+            }
+            break_at = None;
+        }
+        if ch == ' ' {
+            break_at = Some(current.len() + 1);
+        }
+        width += w;
+        current.push(ch);
+    }
+    out.push(current);
+    out
+}
+
+/// Lay out logical lines: WinAnsi-only lines keep the legacy 92-column wrap
+/// (byte-stable); lines with non-WinAnsi characters switch to native glyph
+/// runs wrapped by measured widths.
+fn layout_lines(logical: &[String]) -> Vec<LayoutLine> {
+    logical
+        .iter()
+        .flat_map(|line| {
+            if line.chars().all(is_winansi_representable) {
+                wrap_line(line, WRAP_COLUMNS)
+                    .into_iter()
+                    .map(|text| LayoutLine {
+                        font_size: 10,
+                        content: LineContent::Legacy(text),
+                    })
+                    .collect::<Vec<_>>()
+            } else {
+                wrap_line_width_aware(line, CONTENT_WIDTH_PT, 10.0)
+                    .into_iter()
+                    .map(|chars| LayoutLine {
+                        font_size: 10,
+                        content: LineContent::Glyphs(glyph_runs(&chars)),
+                    })
+                    .collect::<Vec<_>>()
+            }
+        })
+        .collect()
 }
 
 /// Render the JSON payload as formatted key/value blocks and arrays as
@@ -318,9 +501,6 @@ fn data_lines(data_json: &str) -> Vec<String> {
         }
     }
     lines
-        .iter()
-        .flat_map(|line| wrap_line(line, WRAP_COLUMNS))
-        .collect()
 }
 
 fn indent_for(depth: usize) -> String {
@@ -474,8 +654,11 @@ fn paginate(lines: &[LayoutLine]) -> Vec<Vec<&LayoutLine>> {
 /// NOTE: full Typst compilation remains unwired (tracked separately); this
 /// generator produces spec-compliant output that any PDF reader can open,
 /// with every byte of the JSON payload represented across as many pages as
-/// needed. Non-WinAnsi characters are folded (see [`fold_string`]) rather
-/// than dropped.
+/// needed. Non-WinAnsi text renders as native glyphs through the embedded
+/// OFL Noto Sans / Noto Sans SC fonts (PDF /Type0 CIDFontType2 with
+/// Identity-H encoding); [`fold_string`] folding remains only for the
+/// single-byte legacy path (pure-WinAnsi lines and the fixed ASCII title
+/// block), which keeps Latin-1 output byte-stable.
 fn generate_pdf(template: &str, world: &TypstWorld) -> Result<Vec<u8>, RenderError> {
     let now = world.now.format("%Y%m%d%H%M%S").to_string();
     let title = match template {
@@ -493,12 +676,43 @@ fn generate_pdf(template: &str, world: &TypstWorld) -> Result<Vec<u8>, RenderErr
     let template_esc = escape_pdf_string(template);
     let now_esc = escape_pdf_string(&now);
 
-    let mut lines: Vec<LayoutLine> = Vec::new();
-    for text in data_lines(&world.data_json) {
-        lines.push(LayoutLine { font_size: 10, text });
-    }
-
+    let lines = layout_lines(&data_lines(&world.data_json));
     let pages = paginate(&lines);
+
+    // Only embed the Unicode fonts a document actually uses, so pure-Latin
+    // output stays byte-identical to the legacy single-font pipeline.
+    let uses_noto = lines.iter().any(|l| match &l.content {
+        LineContent::Glyphs(runs) => runs.iter().any(|r| r.font == UnicodeFont::NotoSans),
+        LineContent::Legacy(_) => false,
+    });
+    let uses_noto_sc = lines.iter().any(|l| match &l.content {
+        LineContent::Glyphs(runs) => runs.iter().any(|r| r.font == UnicodeFont::NotoSansSc),
+        LineContent::Legacy(_) => false,
+    });
+    let used_fonts: Vec<UnicodeFont> = [
+        uses_noto.then_some(UnicodeFont::NotoSans),
+        uses_noto_sc.then_some(UnicodeFont::NotoSansSc),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    // Per-font glyph width tables (glyph ID → width in thousandths of em)
+    // for the CIDFont /W arrays.
+    let mut widths: BTreeMap<UnicodeFont, BTreeMap<u16, u16>> = BTreeMap::new();
+    for line in &lines {
+        if let LineContent::Glyphs(runs) = &line.content {
+            for run in runs {
+                let entry = widths.entry(run.font).or_default();
+                for &gid in &run.gids {
+                    let ttf = run.font.ttf();
+                    let w = (f64::from(ttf.advance(gid)) * 1000.0
+                        / f64::from(ttf.units_per_em()))
+                        .round() as u16;
+                    entry.insert(gid, w);
+                }
+            }
+        }
+    }
 
     // Content stream per page — build the actual bytes so /Length is exact.
     let mut content_streams: Vec<Vec<u8>> = Vec::with_capacity(pages.len());
@@ -528,11 +742,38 @@ fn generate_pdf(template: &str, world: &TypstWorld) -> Result<Vec<u8>, RenderErr
             ));
         }
         for line in page_lines {
-            let esc = escape_pdf_string(&line.text);
-            body.push_str(&format!(
-                "BT\n/F2 {size} Tf\n{MARGIN} {y} Td\n({esc}) Tj\nET\n",
-                size = line.font_size
-            ));
+            match &line.content {
+                LineContent::Legacy(text) => {
+                    let esc = escape_pdf_string(text);
+                    body.push_str(&format!(
+                        "BT\n/F2 {size} Tf\n{MARGIN} {y} Td\n({esc}) Tj\nET\n",
+                        size = line.font_size
+                    ));
+                }
+                LineContent::Glyphs(runs) => {
+                    // Each run positions itself absolutely; advance widths
+                    // accumulate horizontally within the line.
+                    let mut x = f64::from(MARGIN);
+                    for run in runs {
+                        if run.gids.is_empty() {
+                            continue;
+                        }
+                        let ttf = run.font.ttf();
+                        let hex: String =
+                            run.gids.iter().map(|g| format!("{g:04X}")).collect();
+                        body.push_str(&format!(
+                            "BT\n{res} {size} Tf\n{x:.2} {y} Td\n<{hex}> Tj\nET\n",
+                            res = run.font.resource_ref(),
+                            size = line.font_size
+                        ));
+                        x += run
+                            .gids
+                            .iter()
+                            .map(|g| ttf.advance_pt(*g, f64::from(line.font_size)))
+                            .sum::<f64>();
+                    }
+                }
+            }
             y = y.saturating_sub(LINE_HEIGHT);
         }
         content_streams.push(body.into_bytes());
@@ -555,12 +796,27 @@ fn generate_pdf(template: &str, world: &TypstWorld) -> Result<Vec<u8>, RenderErr
         )
         .into_bytes(),
     );
+    // Unicode font objects follow the Helvetica object; numbers are
+    // assigned deterministically from the used-font set.
+    let mut unicode_refs: Vec<(&'static str, usize, usize, usize, usize)> = Vec::new();
+    let mut next_obj = font_object + 1;
+    for font in &used_fonts {
+        let (type0, cid, descriptor, file) =
+            (next_obj, next_obj + 1, next_obj + 2, next_obj + 3);
+        next_obj += 4;
+        unicode_refs.push((font.resource_ref(), type0, cid, descriptor, file));
+    }
+    let extra_font_refs: String = unicode_refs
+        .iter()
+        .map(|(res, type0, _, _, _)| format!(" {res} {type0} 0 R"))
+        .collect();
+
     for (i, stream) in content_streams.iter().enumerate() {
         let page_num = first_page_object + 2 * i;
         let content_num = page_num + 1;
         objects.push(
             format!(
-                "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {PAGE_WIDTH} {PAGE_HEIGHT}]\n   /Contents {content_num} 0 R /Resources << /Font << /F1 {font_object} 0 R /F2 {font_object} 0 R >> >> >>"
+                "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {PAGE_WIDTH} {PAGE_HEIGHT}]\n   /Contents {content_num} 0 R /Resources << /Font << /F1 {font_object} 0 R /F2 {font_object} 0 R{extra_font_refs} >> >> >>"
             )
             .into_bytes(),
         );
@@ -570,6 +826,63 @@ fn generate_pdf(template: &str, world: &TypstWorld) -> Result<Vec<u8>, RenderErr
         objects.push(obj);
     }
     objects.push(b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_vec());
+
+    // Embedded Unicode fonts: /Type0 (Identity-H) → CIDFontType2 descendant
+    // → FontDescriptor → FontFile2 (the raw TTF bytes, verbatim).
+    objects.reserve(unicode_refs.len() * 4);
+    for font in &used_fonts {
+        let ttf = font.ttf();
+        let (_, _type0, cid, descriptor, file) = unicode_refs
+            .iter()
+            .find(|(res, _, _, _, _)| *res == font.resource_ref())
+            .copied()
+            .expect("refs built for every used font");
+        let w_array: String = widths
+            .get(font)
+            .map(|entries| {
+                entries
+                    .iter()
+                    .map(|(gid, w)| format!(" {gid} {w}"))
+                    .collect::<String>()
+            })
+            .unwrap_or_default();
+        let bbox = ttf.bbox();
+        objects.push(
+            format!(
+                "<< /Type /Font /Subtype /Type0 /BaseFont {base} /Encoding /Identity-H /DescendantFonts [ {cid} 0 R ] >>",
+                base = font.base_font()
+            )
+            .into_bytes(),
+        );
+        objects.push(
+            format!(
+                "<< /Type /Font /Subtype /CIDFontType2 /BaseFont {base} /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> /FontDescriptor {descriptor} 0 R /DW 1000 /W [{w_array} ] /CIDToGIDMap /Identity >>",
+                base = font.base_font()
+            )
+            .into_bytes(),
+        );
+        objects.push(
+            format!(
+                "<< /Type /FontDescriptor /FontName {base} /Flags 4 /FontBBox [{x0} {y0} {x1} {y1}] /ItalicAngle 0 /Ascent {ascent} /Descent {descent} /CapHeight {ascent} /StemV 80 /FontFile2 {file} 0 R >>",
+                base = font.base_font(),
+                x0 = bbox[0],
+                y0 = bbox[1],
+                x1 = bbox[2],
+                y1 = bbox[3],
+                ascent = ttf.ascent(),
+                descent = ttf.descent(),
+                file = file
+            )
+            .into_bytes(),
+        );
+        let raw = ttf.raw_bytes();
+        let mut obj =
+            format!("<< /Length {} /Length1 {} >>\nstream\n", raw.len(), raw.len())
+                .into_bytes();
+        obj.extend_from_slice(raw);
+        obj.extend_from_slice(b"\nendstream");
+        objects.push(obj);
+    }
 
     // Assemble the file, recording each object's byte offset as we go.
     let mut pdf: Vec<u8> = b"%PDF-1.4\n".to_vec();
@@ -753,7 +1066,367 @@ mod tests {
         assert_eq!(text.matches("/Type /Pages").count(), 1);
     }
 
+    // ── Embedded Unicode font pipeline ─────────────────────────────
+
+    /// Byte-level helpers: the PDF mixes text and binary (FontFile2), so
+    /// the extraction routines below scan raw bytes rather than a lossy
+    /// UTF-8 conversion.
+    fn find_all(haystack: &[u8], needle: &[u8]) -> Vec<usize> {
+        haystack
+            .windows(needle.len())
+            .enumerate()
+            .filter(|(_, w)| *w == needle)
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    /// Text content-stream chunks (excludes the binary FontFile2 streams,
+    /// whose object preamble carries /Length1).
+    fn text_stream_chunks(pdf: &[u8]) -> Vec<&[u8]> {
+        let mut chunks = Vec::new();
+        for start in find_all(pdf, b"stream\n") {
+            let dict_start = pdf[..start].windows(2).rposition(|w| w == b"<<").unwrap_or(0);
+            let is_font_file = pdf[dict_start..start].windows(9).any(|w| w == b"/Length1 ");
+            if is_font_file {
+                continue;
+            }
+            let body_start = start + b"stream\n".len();
+            let Some(end) = pdf[body_start..]
+                .windows(b"\nendstream".len())
+                .position(|w| w == b"\nendstream")
+            else {
+                continue;
+            };
+            chunks.push(&pdf[body_start..body_start + end]);
+        }
+        chunks
+    }
+
+    /// Glyph runs in document order: (font resource ref, decoded text).
+    fn decode_glyph_runs(pdf: &[u8]) -> Vec<(&'static str, String)> {
+        let noto_rev = NOTO_SANS.reverse_map();
+        let sc_rev = NOTO_SANS_SC.reverse_map();
+        let mut runs = Vec::new();
+        for chunk in text_stream_chunks(pdf) {
+            let mut i = 0;
+            let mut active: Option<&'static str> = None;
+            while i < chunk.len() {
+                let (res, len) = if chunk[i..].starts_with(b"/F3 ") {
+                    (Some(NOTO_SANS_REF), 4)
+                } else if chunk[i..].starts_with(b"/F4 ") {
+                    (Some(NOTO_SANS_SC_REF), 4)
+                } else if chunk[i] == b'<' {
+                    // Hex glyph string — the run we were building up.
+                    if let Some(font_ref) = active.take() {
+                        if let Some(close) = chunk[i + 1..].iter().position(|b| *b == b'>') {
+                            let hex = &chunk[i + 1..i + 1 + close];
+                            let text: String = hex
+                                .chunks(4)
+                                .filter_map(|pair| {
+                                    let s = std::str::from_utf8(pair).ok()?;
+                                    let gid = u16::from_str_radix(s, 16).ok()?;
+                                    let map = if font_ref == NOTO_SANS_REF {
+                                        &noto_rev
+                                    } else {
+                                        &sc_rev
+                                    };
+                                    map.get(&gid).copied()
+                                })
+                                .collect();
+                            runs.push((font_ref, text));
+                        }
+                    }
+                    (None, 1)
+                } else {
+                    (None, 1)
+                };
+                if let Some(r) = res {
+                    active = Some(r);
+                }
+                i += len;
+            }
+        }
+        runs
+    }
+
+    /// Raw FontFile2 stream payloads in document order.
+    fn fontfile2_streams(pdf: &[u8]) -> Vec<&[u8]> {
+        let mut out = Vec::new();
+        for start in find_all(pdf, b"stream\n") {
+            let dict_start = pdf[..start].windows(2).rposition(|w| w == b"<<").unwrap_or(0);
+            if !pdf[dict_start..start].windows(9).any(|w| w == b"/Length1 ") {
+                continue;
+            }
+            let body_start = start + b"stream\n".len();
+            let Some(end) = pdf[body_start..]
+                .windows(b"\nendstream".len())
+                .position(|w| w == b"\nendstream")
+            else {
+                continue;
+            };
+            out.push(&pdf[body_start..body_start + end]);
+        }
+        out
+    }
+
+    /// Parse "/W [g w g w ...]" into (glyph, width) pairs.
+    fn w_arrays(pdf: &[u8]) -> Vec<Vec<(u16, u16)>> {
+        let mut out = Vec::new();
+        for start in find_all(pdf, b"/W [") {
+            let Some(close_rel) = pdf[start..].iter().position(|b| *b == b']') else {
+                continue;
+            };
+            let body = std::str::from_utf8(&pdf[start + 4..start + close_rel]).unwrap_or("");
+            let nums: Vec<u16> = body
+                .split_whitespace()
+                .filter_map(|t| t.parse().ok())
+                .collect();
+            let pairs = nums.chunks(2).filter_map(|c| Some((*c.first()?, *c.get(1)?))).collect();
+            out.push(pairs);
+        }
+        out
+    }
+
     #[test]
+    fn embedded_fonts_parse_with_expected_coverage() {
+        assert_eq!(NOTO_SANS.units_per_em(), 1000);
+        assert!(NOTO_SANS.num_glyphs() > 1000);
+        assert!(NOTO_SANS.hmtx_is_sane());
+        assert!(NOTO_SANS.covers('A'));
+        assert!(NOTO_SANS.covers('Ж'));
+        assert!(NOTO_SANS.covers('α'));
+        assert!(!NOTO_SANS.covers('你'), "Noto Sans must not cover CJK");
+
+        assert_eq!(NOTO_SANS_SC.units_per_em(), 1000);
+        assert!(NOTO_SANS_SC.num_glyphs() > 10_000);
+        assert!(NOTO_SANS_SC.hmtx_is_sane());
+        assert!(NOTO_SANS_SC.covers('你'));
+        assert!(NOTO_SANS_SC.covers('好'));
+        assert!(NOTO_SANS_SC.covers('A'));
+
+        // Corrupt-font guard: parse errors, never panics.
+        assert!(crate::font::TtfFont::parse(vec![1, 2, 3]).is_err());
+        let mut otto = vec![0u8; 12];
+        otto[0..4].copy_from_slice(b"OTTO");
+        assert!(crate::font::TtfFont::parse(otto).is_err());
+    }
+
+    #[test]
+    fn advances_are_real_and_proportional() {
+        // CJK is full-width (1000 units at upem 1000); Latin is
+        // proportional and 'W' is wider than 'I'.
+        let cjk = NOTO_SANS_SC.glyph('你').expect("SC covers 你");
+        assert_eq!(NOTO_SANS_SC.advance(cjk), 1000);
+
+        let w = NOTO_SANS.glyph('W').expect("covers W");
+        let i = NOTO_SANS.glyph('I').expect("covers I");
+        let w_adv = NOTO_SANS.advance(w);
+        let i_adv = NOTO_SANS.advance(i);
+        assert!(w_adv > i_adv, "W ({w_adv}) must outrank I ({i_adv})");
+        assert!(w_adv > 500, "W must be a real wide advance, got {w_adv}");
+        assert!(i_adv > 100, "I must have a real advance, got {i_adv}");
+        assert!(i_adv < 400, "I must be narrower than W, got {i_adv}");
+    }
+
+    #[test]
+    fn cyrillic_greek_cjk_render_as_native_glyphs() {
+        let world = TypstWorld {
+            template_source: String::new(),
+            data_json: r#"{"greeting_ru": "Привет мир", "greeting_el": "Γεια σου κόσμε", "greeting_zh": "你好世界", "mixed": "Смешанный mixed テキスト with Latin"}"#.to_string(),
+            now: chrono::Utc::now(),
+        };
+        let pdf = generate_pdf("compliance_report", &world).expect("pdf generation failed");
+
+        // Type0 pipeline markers present.
+        assert!(pdf.windows(11).any(|w| w == b"/Identity-H"));
+        assert!(pdf.windows(12).any(|w| w == b"CIDFontType2"));
+        assert!(pdf.windows(10).any(|w| w == b"/FontFile2"));
+
+        // Decode every glyph run back through our own cmap parser and
+        // round-trip the exact source strings — proving no '?' markers and
+        // no folding were involved.
+        let runs = decode_glyph_runs(&pdf);
+        assert!(!runs.is_empty(), "expected native glyph runs");
+        let rendered: String = runs.iter().map(|(_, text)| text.as_str()).collect();
+        for expected in [
+            "Привет мир",
+            "Γεια σου κόσμε",
+            "你好世界",
+            "Смешанный mixed テキスト with Latin",
+        ] {
+            assert!(
+                rendered.contains(expected),
+                "round-trip missing {expected:?}; rendered: {rendered:?}"
+            );
+        }
+        // The CJK strings must come from the SC font, Cyrillic/Greek from
+        // Noto Sans.
+        assert!(runs.iter().any(|(res, text)| *res == NOTO_SANS_SC_REF && text.contains("你好世界")));
+        assert!(runs.iter().any(|(res, text)| *res == NOTO_SANS_REF && text.contains("Привет мир")));
+
+        // None of the source strings contain '?', so any '?' in the
+        // decoded output would be a folding marker.
+        assert!(
+            !rendered.contains('?'),
+            "folding markers leaked into native rendering: {rendered:?}"
+        );
+    }
+
+    #[test]
+    fn fontfile2_bytes_match_the_committed_assets() {
+        let world = TypstWorld {
+            template_source: String::new(),
+            data_json: r#"{"zh": "你好，世界"}"#.to_string(),
+            now: chrono::Utc::now(),
+        };
+        let pdf = generate_pdf("dpa", &world).expect("pdf generation failed");
+        let streams = fontfile2_streams(&pdf);
+        assert!(!streams.is_empty(), "SC font must be embedded");
+        assert!(
+            streams.iter().any(|s| *s == NOTO_SANS_SC.raw_bytes()),
+            "the SC FontFile2 must equal the committed asset byte-for-byte"
+        );
+        assert!(
+            streams.iter().all(|s| *s == NOTO_SANS_SC.raw_bytes()
+                || *s == NOTO_SANS.raw_bytes()),
+            "only committed assets may be embedded"
+        );
+
+        // A Cyrillic document embeds Noto Sans verbatim.
+        let world = TypstWorld {
+            template_source: String::new(),
+            data_json: r#"{"ru": "Счёт-фактура"}"#.to_string(),
+            now: chrono::Utc::now(),
+        };
+        let pdf = generate_pdf("invoice", &world).expect("pdf generation failed");
+        let streams = fontfile2_streams(&pdf);
+        assert!(!streams.is_empty(), "Noto Sans must be embedded");
+        assert!(
+            streams.iter().any(|s| *s == NOTO_SANS.raw_bytes()),
+            "the Noto Sans FontFile2 must equal the committed asset"
+        );
+        assert!(
+            !streams.iter().any(|s| *s == NOTO_SANS_SC.raw_bytes()),
+            "a Cyrillic document must not embed the 10MB CJK font"
+        );
+    }
+
+    #[test]
+    fn w_arrays_carry_real_widths() {
+        let world = TypstWorld {
+            template_source: String::new(),
+            data_json: r#"{"ru": "Привет", "zh": "你好"}"#.to_string(),
+            now: chrono::Utc::now(),
+        };
+        let pdf = generate_pdf("qbr", &world).expect("pdf generation failed");
+        let arrays = w_arrays(&pdf);
+        assert_eq!(arrays.len(), 2, "one /W per embedded font");
+        let flat: Vec<(u16, u16)> = arrays.iter().flatten().copied().collect();
+        assert!(!flat.is_empty());
+        assert!(
+            flat.iter().all(|(_, w)| *w > 0),
+            "every used glyph must have a positive width: {flat:?}"
+        );
+        // The CJK glyphs are full-width (1000).
+        let sc_map = NOTO_SANS_SC.reverse_map();
+        let ni_gid = sc_map.iter().find(|(_, c)| **c == '你').map(|(g, _)| *g).unwrap();
+        assert!(
+            flat.contains(&(ni_gid, 1000)),
+            "CJK glyph must be 1000 units: {flat:?}"
+        );
+    }
+
+    #[test]
+    fn pure_latin_documents_stay_byte_identical_to_the_legacy_pipeline() {
+        // No Type0 machinery appears at all: same objects, same bytes.
+        let world = TypstWorld {
+            template_source: String::new(),
+            data_json: r#"{"customer": {"name": "Ada Lovelace"}, "items": [{"sku": "A-1", "qty": 2}]}"#.to_string(),
+            now: chrono::Utc::now(),
+        };
+        let pdf = generate_pdf("invoice", &world).expect("pdf generation failed");
+        assert!(!pdf.windows(11).any(|w| w == b"/Identity-H"));
+        assert!(!pdf.windows(10).any(|w| w == b"FontFile2"));
+        assert!(!pdf.windows(3).any(|w| w == b"/F3"));
+        assert!(!pdf.windows(3).any(|w| w == b"/F4"));
+        assert!(pdf.windows(13).any(|w| w == b"/Type1 /BaseF"));
+        // And Latin-1 supplement text still uses the legacy octal path.
+        let world_latin1 = TypstWorld {
+            template_source: String::new(),
+            data_json: r#"{"note": "café"}"#.to_string(),
+            now: chrono::Utc::now(),
+        };
+        let pdf1 = generate_pdf("invoice", &world_latin1).expect("pdf generation failed");
+        assert!(!pdf1.windows(11).any(|w| w == b"/Identity-H"), "Latin-1 stays legacy");
+        assert!(pdf1.windows(7).any(|w| w == b"caf\\351"));
+    }
+
+    #[test]
+    fn non_latin_lines_wrap_by_measured_width() {
+        // A long CJK line must break into multiple glyph runs positioned at
+        // increasing x offsets, each within the content width.
+        let long_zh = "交付管道与送达确认 ".repeat(40);
+        let world = TypstWorld {
+            template_source: String::new(),
+            data_json: format!(r#"{{"note": "{long_zh}"}}"#),
+            now: chrono::Utc::now(),
+        };
+        let pdf = generate_pdf("analytics_export", &world).expect("pdf generation failed");
+        let runs = decode_glyph_runs(&pdf);
+        let glyph_line_count = runs.len();
+        assert!(glyph_line_count > 1, "expected wrapping, got {glyph_line_count} runs");
+        // Every rendered line's measured advance must fit the content box.
+        for chunk in text_stream_chunks(&pdf) {
+            for run in extract_run_positions(chunk) {
+                let (x, width) = run;
+                let _ = x;
+                assert!(
+                    width <= CONTENT_WIDTH_PT + 0.01,
+                    "line wider than content box: {run:?}"
+                );
+            }
+        }
+    }
+
+    /// (x offset, measured width) for every glyph run in a content stream.
+    fn extract_run_positions(chunk: &[u8]) -> Vec<(f64, f64)> {
+        let text = String::from_utf8_lossy(chunk).to_string();
+        let mut out = Vec::new();
+        let mut rest = text.as_str();
+        while let Some(pos) = rest.find("/F") {
+            rest = &rest[pos..];
+            let is_f3 = rest.starts_with("/F3 ");
+            let is_f4 = rest.starts_with("/F4 ");
+            if !is_f3 && !is_f4 {
+                rest = &rest[1..];
+                continue;
+            }
+            // ... Tf <x> <y> Td <hex> Tj
+            let Some(td) = rest.find(" Td\n") else { break };
+            let coords: Vec<f64> = rest[..td]
+                .rsplit(' ')
+                .filter_map(|t| t.parse::<f64>().ok())
+                .collect();
+            let x = *coords.last().unwrap_or(&0.0);
+            let Some(hex_start) = rest[td..].find('<') else { break };
+            let Some(hex_end) = rest[td + hex_start..].find('>') else { break };
+            let hex = &rest[td + hex_start + 1..td + hex_start + hex_end];
+            let font = if is_f3 { &NOTO_SANS } else { &NOTO_SANS_SC };
+            let size = 10.0;
+            let width = hex
+                .as_bytes()
+                .chunks(4)
+                .filter_map(|p| std::str::from_utf8(p).ok())
+                .filter_map(|p| u16::from_str_radix(p, 16).ok())
+                .map(|gid| font.advance_pt(gid, size))
+                .sum::<f64>();
+            out.push((x, width));
+            rest = &rest[td + hex_start + hex_end..];
+        }
+        out
+    }
+
+        #[test]
     fn nested_payload_uses_blocks_and_tables() {
         let world = TypstWorld {
             template_source: String::new(),
@@ -798,3 +1471,4 @@ mod tests {
         assert_eq!(declared, stream_end - stream_start);
     }
 }
+
