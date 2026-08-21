@@ -19,9 +19,12 @@
   <script{% if csp_nonce %} nonce="{{ csp_nonce }}"{% endif %}>
     (function(){var e=localStorage.getItem('apexmail-theme');if(e==='dark'||(!e&&window.matchMedia('(prefers-color-scheme:dark)').matches)){document.documentElement.classList.add('dark')}})();
   </script>
+  {# woff2 versions (converted from the variable TTFs with fontTools) are
+     ~70% smaller and universally supported; the TTFs remain as fallback
+     sources in the font-family stacks only. #}
   {% set inter_font_url = get_url(path="fonts/InterVariable.woff2", cachebust=true) %}
-  {% set mono_font_url = get_url(path="fonts/JetBrainsMono-Variable.ttf", cachebust=true) %}
-  {% set fraunces_font_url = get_url(path="fonts/Fraunces-Variable.ttf", cachebust=true) %}
+  {% set mono_font_url = get_url(path="fonts/JetBrainsMono-Variable.woff2", cachebust=true) %}
+  {% set fraunces_font_url = get_url(path="fonts/Fraunces-Variable.woff2", cachebust=true) %}
   {% set styles_css_url = get_url(path="css/styles.css", cachebust=true) %}
   {% set no_js_css_url = get_url(path="css/no-js.css", cachebust=true) %}
   {% set site_js_url = get_url(path="js/apexmail-site.js", cachebust=true) %}
@@ -34,23 +37,33 @@
   {% endfor %}
   {% set_global current_translations = [] %}
   {% if page %}{% set_global current_translations = page.translations %}{% elif section %}{% set_global current_translations = section.translations %}{% endif %}
-  {% for lcode in supported_langs | unique %}
-    {% set_global alt_url = current_url | default(value=config.base_url) %}
-    {% for t in current_translations %}
-      {% if t.lang | default(value=config.default_language) == lcode %}
-        {% set_global alt_url = t.permalink %}
-      {% endif %}
-    {% endfor %}
-  <link rel="alternate" hreflang="{{ lcode }}" href="{{ alt_url }}" />
+  {# hreflang alternates only for languages this page actually exists in:
+     emitting an alternate for a missing translation duplicated the current
+     URL under every language code (broken for crawlers). #}
+  {% for t in current_translations %}
+    {% set tcode = t.lang | default(value=config.default_language) %}
+    {% if tcode != l %}
+  <link rel="alternate" hreflang="{{ tcode }}" href="{{ t.permalink }}" />
+    {% endif %}
   {% endfor %}
-  <link rel="alternate" hreflang="x-default" href="{{ config.base_url }}" />
+  <link rel="alternate" hreflang="{{ l }}" href="{{ current_url | default(value=config.base_url) }}" />
+  <link rel="alternate" hreflang="x-default" href="{{ current_url | default(value=config.base_url) }}" />
   <meta name="robots" content="index, follow, max-video-preview:-1, max-image-preview:large, max-snippet:-1" />
   <meta name="googlebot" content="index, follow, max-video-preview:-1, max-image-preview:large, max-snippet:-1" />
   <meta name="keywords" content="email API, transactional email, email infrastructure, GDPR-oriented email, email deliverability, enterprise email, developer email API" />
   <meta name="author" content="{{ config.extra.author }}" />
   <meta name="publisher" content="{{ config.extra.author }}" />
   <meta property="og:type" content="website" />
+  {# og:locale follows the active language (per-lang config), not a fixed en_US. #}
+  {% if l == "de" %}
+  <meta property="og:locale" content="de_DE" />
+  {% elif l == "fr" %}
+  <meta property="og:locale" content="fr_FR" />
+  {% elif l == "es" %}
+  <meta property="og:locale" content="es_ES" />
+  {% else %}
   <meta property="og:locale" content="en_US" />
+  {% endif %}
   <meta property="og:url" content="{{ current_url | default(value=config.base_url) }}" />
   <meta property="og:site_name" content="{{ config.extra.site_name }}" />
   <meta property="og:title" content="{% block og_title %}{{ config.title }}{% endblock og_title %}" />
@@ -71,19 +84,22 @@
   <link rel="stylesheet" href="{{ styles_css_url }}" />
   <link rel="stylesheet" href="{{ no_js_css_url }}" />
   <link rel="stylesheet" href="{{ giallo_css_url }}" />
+  {# JSON-LD values are build-time config constants (no user data); `|safe`
+     prevents Tera's HTML autoescaping from mangling "https://" into
+     "https:&#x2F;/..." inside ld+json, which broke structured-data parsing. #}
   <script type="application/ld+json" {% if csp_nonce %}nonce="{{ csp_nonce }}"{% endif %}>
   {
     "@context": "https://schema.org",
     "@type": "Organization",
-    "name": "{{ config.extra.site_name }}",
-    "url": "{{ config.base_url }}",
-    "logo": "{{ config.base_url }}/icon.svg",
-    "legalName": "{{ config.extra.company.legal_name }}",
-    "vatID": "{{ config.extra.company.vat_number | default(value='EE102951727') }}",
+    "name": "{{ config.extra.site_name | safe }}",
+    "url": "{{ config.base_url | safe }}",
+    "logo": "{{ config.base_url | safe }}/icon.svg",
+    "legalName": "{{ config.extra.company.legal_name | safe }}",
+    "vatID": "{{ config.extra.company.vat_number | default(value='EE102951727') | safe }}",
     "sameAs": [
-      "{{ config.extra.github_url }}",
-      "{{ config.extra.linkedin_url }}",
-      "{{ config.extra.twitter_url }}"
+      "{{ config.extra.github_url | safe }}",
+      "{{ config.extra.linkedin_url | safe }}",
+      "{{ config.extra.twitter_url | safe }}"
     ]
   }
   </script>

@@ -9,7 +9,7 @@
   X-Content-Type-Options: nosniff
   Referrer-Policy: strict-origin-when-cross-origin
   Strict-Transport-Security: max-age=63072000; includeSubDomains; preload
-  Content-Security-Policy: default-src 'self'; base-uri 'self'; frame-ancestors 'none'; object-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https://apexmail.ee; font-src 'self' data:; connect-src 'self' https://api.apexmail.ee https://status.apexmail.ee; frame-src 'none'; form-action 'self'; upgrade-insecure-requests
+  Content-Security-Policy: default-src 'self'; base-uri 'self'; frame-ancestors 'none'; object-src 'none'; script-src 'self' 'sha256-1FLfnGXmFr3t9VJvn34TiPhSgSGSEZCOrxY4i6ocxE4=' 'sha256-GVAZ8bD74FZ4L4WY60Imfs4SqzcHjM/Z/07i0eA5R5w='; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https://apexmail.ee; font-src 'self' data:; connect-src 'self' https://api.apexmail.ee https://status.apexmail.ee; frame-src 'none'; form-action 'self'; upgrade-insecure-requests
   Permissions-Policy: camera=(), microphone=(), geolocation=(), payment=(), usb=()
 
 /fonts/*

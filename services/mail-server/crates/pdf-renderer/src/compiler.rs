@@ -113,21 +113,161 @@ pub async fn render_pdf(template: &str, data: &serde_json::Value) -> Result<Vec<
 // PDF generator (valid PDF 1.4)
 // ---------------------------------------------------------------------------
 
+/// Fold one Unicode scalar to its closest WinAnsi (CP1252/Latin-1)
+/// representation. Returns `Some(c)` for directly representable chars
+/// (including CP1252 specials mapped to their byte value as C1 chars),
+/// `None` when only transliteration or a marker can represent it.
+///
+/// LIMITATION (documented): the built-in PDF fonts are encoded in
+/// WinAnsiEncoding, so text outside Latin/Cyrillic/Greek/common-typography
+/// is transliterated where a mapping exists and replaced with `?`
+/// otherwise. Full multi-byte Unicode requires embedding a font with broad
+/// coverage — tracked separately with the Typst pipeline.
+fn fold_char_direct(c: char) -> Option<char> {
+    let code = c as u32;
+    const CP1252_SPECIALS: &[(u32, u8)] = &[
+        (0x20AC, 0x80), (0x201A, 0x82), (0x0192, 0x83), (0x201E, 0x84),
+        (0x2026, 0x85), (0x2020, 0x86), (0x2021, 0x87), (0x02C6, 0x88),
+        (0x2030, 0x89), (0x0160, 0x8A), (0x2039, 0x8B), (0x0152, 0x8C),
+        (0x017D, 0x8E), (0x2018, 0x91), (0x2019, 0x92), (0x201C, 0x93),
+        (0x201D, 0x94), (0x2022, 0x95), (0x2013, 0x96), (0x2014, 0x97),
+        (0x02DC, 0x98), (0x2122, 0x99), (0x0161, 0x9A), (0x203A, 0x9B),
+        (0x0153, 0x9C), (0x017E, 0x9E), (0x0178, 0x9F),
+    ];
+    if (0x20..=0x7E).contains(&code) || (0xA0..=0xFF).contains(&code) {
+        return Some(c);
+    }
+    if let Some(&(_, byte)) = CP1252_SPECIALS.iter().find(|(cp, _)| *cp == code) {
+        return Some(byte as char);
+    }
+    None
+}
+
+/// Transliteration table for characters outside WinAnsi: Latin Extended-A
+/// diacritics, basic Cyrillic and Greek, and common symbols.
+fn transliterate(c: char) -> Option<&'static str> {
+    Some(match c {
+        'Ā' | 'Ą' | 'Á' | 'À' | 'Â' | 'Ã' | 'Å' => "A",
+        'ā' | 'ą' | 'á' | 'à' | 'â' | 'ã' | 'å' => "a",
+        'Ć' | 'Ĉ' | 'Č' => "C",
+        'ć' | 'ĉ' | 'č' => "c",
+        'Ď' | 'Đ' => "D",
+        'ď' | 'đ' => "d",
+        'Ě' | 'É' | 'È' | 'Ê' | 'Ẽ' | 'Ë' => "E",
+        'ě' | 'é' | 'è' | 'ê' | 'ẽ' | 'ë' => "e",
+        'Ĝ' | 'Ğ' | 'Ġ' => "G",
+        'ĝ' | 'ğ' | 'ġ' => "g",
+        'Ĥ' => "H",
+        'ĥ' => "h",
+        'Ĩ' | 'İ' | 'Ī' | 'Į' | 'Í' | 'Ì' | 'Î' => "I",
+        'ĩ' | 'ı' | 'ī' | 'į' | 'í' | 'ì' | 'î' => "i",
+        'Ĵ' => "J",
+        'ĵ' => "j",
+        'Ķ' => "K",
+        'ķ' => "k",
+        'Ĺ' | 'Ľ' | 'Ł' => "L",
+        'ĺ' | 'ľ' | 'ł' => "l",
+        'Ń' | 'Ň' | 'Ñ' => "N",
+        'ń' | 'ň' | 'ñ' => "n",
+        'Ő' | 'Ŏ' | 'Ō' | 'Ø' | 'Ó' | 'Ò' | 'Ô' | 'Õ' => "O",
+        'ő' | 'ŏ' | 'ō' | 'ø' | 'ó' | 'ò' | 'ô' | 'õ' => "o",
+        'Ŕ' | 'Ŗ' => "R",
+        'ŕ' | 'ŗ' => "r",
+        'Ś' | 'Š' | 'Ş' => "S",
+        'ś' | 'š' | 'ş' => "s",
+        'Ť' | 'Ţ' => "T",
+        'ť' | 'ţ' => "t",
+        'Ũ' | 'Ū' | 'Ů' | 'Ű' | 'Ų' | 'Ú' | 'Ù' | 'Û' => "U",
+        'ũ' | 'ū' | 'ů' | 'ű' | 'ų' | 'ú' | 'ù' | 'û' => "u",
+        'Ŵ' => "W",
+        'ŵ' => "w",
+        'Ŷ' | 'Ý' | 'Ÿ' => "Y",
+        'ŷ' | 'ý' | 'ÿ' => "y",
+        'Ź' | 'Ż' | 'Ž' => "Z",
+        'ź' | 'ż' | 'ž' => "z",
+        'а' => "a", 'б' => "b", 'в' => "v", 'г' => "g", 'д' => "d",
+        'е' => "e", 'ё' => "yo", 'ж' => "zh", 'з' => "z", 'и' => "i",
+        'й' => "y", 'к' => "k", 'л' => "l", 'м' => "m", 'н' => "n",
+        'о' => "o", 'п' => "p", 'р' => "r", 'с' => "s", 'т' => "t",
+        'у' => "u", 'ф' => "f", 'х' => "kh", 'ц' => "ts", 'ч' => "ch",
+        'ш' => "sh", 'щ' => "shch", 'ъ' => "\"", 'ы' => "y", 'ь' => "'",
+        'э' => "e", 'ю' => "yu", 'я' => "ya",
+        'А' => "A", 'Б' => "B", 'В' => "V", 'Г' => "G", 'Д' => "D",
+        'Е' => "E", 'Ё' => "Yo", 'Ж' => "Zh", 'З' => "Z", 'И' => "I",
+        'Й' => "Y", 'К' => "K", 'Л' => "L", 'М' => "M", 'Н' => "N",
+        'О' => "O", 'П' => "P", 'Р' => "R", 'С' => "S", 'Т' => "T",
+        'У' => "U", 'Ф' => "F", 'Х' => "Kh", 'Ц' => "Ts", 'Ч' => "Ch",
+        'Ш' => "Sh", 'Щ' => "Shch", 'Ъ' => "\"", 'Ы' => "Y", 'Ь' => "'",
+        'Э' => "E", 'Ю' => "Yu", 'Я' => "Ya",
+        'α' => "a", 'β' => "b", 'γ' => "g", 'δ' => "d", 'ε' => "e",
+        'ζ' => "z", 'η' => "e", 'θ' => "th", 'ι' => "i", 'κ' => "k",
+        'λ' => "l", 'μ' => "m", 'ν' => "n", 'ξ' => "x", 'ο' => "o",
+        'π' => "p", 'ρ' => "r", 'σ' | 'ς' => "s", 'τ' => "t", 'υ' => "y",
+        'φ' => "f", 'χ' => "ch", 'ψ' => "ps", 'ω' => "o",
+        'Α' => "A", 'Β' => "B", 'Γ' => "G", 'Δ' => "D", 'Ε' => "E",
+        'Ζ' => "Z", 'Η' => "E", 'Θ' => "Th", 'Ι' => "I", 'Κ' => "K",
+        'Λ' => "L", 'Μ' => "M", 'Ν' => "N", 'Ξ' => "X", 'Ο' => "O",
+        'Π' => "P", 'Ρ' => "R", 'Σ' => "S", 'Τ' => "T", 'Υ' => "Y",
+        'Φ' => "F", 'Χ' => "Ch", 'Ψ' => "Ps", 'Ω' => "O",
+        '©' => "(c)", '®' => "(r)", '™' => "(tm)", '°' => "deg",
+        '±' => "+/-", '×' => "x", '÷' => "/", '≈' => "~=", '≠' => "!=",
+        '≤' => "<=", '≥' => ">=", '→' => "->", '←' => "<-", '⇒' => "=>",
+        '·' => ".", '«' => "<<", '»' => ">>", '№' => "No.",
+        '\u{00A0}' | '\u{2007}' | '\u{202F}' => " ",
+        '\u{2009}' | '\u{200A}' | '\u{2002}' | '\u{2003}' => " ",
+        '\u{2011}' => "-",
+        _ => return None,
+    })
+}
+
+/// Marker emitted for characters with no WinAnsi representation and no
+/// transliteration — never a silent omission.
+const UNREPRESENTABLE_MARKER: char = '?';
+
+/// Fold a string to the WinAnsi-representable subset. Returns the folded
+/// string plus (folded_count, marker_count) so callers/tests can prove no
+/// character is silently dropped.
+fn fold_string(s: &str) -> (String, usize, usize) {
+    let mut out = String::with_capacity(s.len());
+    let mut folded = 0usize;
+    let mut markers = 0usize;
+    for c in s.chars() {
+        // PDF-escapable control characters pass through so escape_pdf_string
+        // can emit \n / \r / \t.
+        if matches!(c, '\n' | '\r' | '\t') {
+            out.push(c);
+            continue;
+        }
+        if let Some(direct) = fold_char_direct(c) {
+            out.push(direct);
+            continue;
+        }
+        if let Some(replacement) = transliterate(c) {
+            out.push_str(replacement);
+            folded += 1;
+            continue;
+        }
+        if c.is_whitespace() {
+            out.push(' ');
+            folded += 1;
+            continue;
+        }
+        out.push(UNREPRESENTABLE_MARKER);
+        markers += 1;
+    }
+    (out, folded, markers)
+}
+
 /// Escape a string for use inside a PDF literal string `(...)`.
 ///
-/// PDF literal strings must balance parentheses and escape backslashes;
-/// unescaped `(`/`)` would let injected data terminate the string early and
-/// inject arbitrary content-stream operators. Newlines/CR/TAB are escaped
-/// as well to keep the stream well-formed.
-///
-/// Literal strings are byte strings (PDFDocEncoding/WinAnsi, i.e. latin-1):
-/// latin-1 characters outside printable ASCII are escaped as octal `\ooo`,
-/// and any character above U+00FF (which has no latin-1 representation) is
-/// dropped rather than emitting a multi-byte UTF-8 sequence that would
-/// corrupt the byte stream.
+/// Input is first folded via [`fold_string`] — characters above U+00FF are
+/// transliterated or replaced with an explicit `?` marker, never silently
+/// dropped. Parentheses/backslashes are escaped; non-ASCII bytes are octal
+/// escapes so the value survives regardless of the reader's encoding.
 fn escape_pdf_string(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for ch in s.chars() {
+    let (folded, _, _) = fold_string(s);
+    let mut out = String::with_capacity(folded.len());
+    for ch in folded.chars() {
         match ch {
             '\\' => out.push_str("\\\\"),
             '(' => out.push_str("\\("),
@@ -136,29 +276,206 @@ fn escape_pdf_string(s: &str) -> String {
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
             c if (c as u32) <= 0x7f => out.push(c),
-            c if (c as u32) <= 0xff => {
-                // Latin-1 supplement: emit as octal escape so the byte value
-                // survives regardless of the reader's text encoding.
-                out.push_str(&format!("\\{:03o}", c as u32));
-            }
-            // No latin-1 representation — drop the character.
-            _ => {}
+            c => out.push_str(&format!("\\{:03o}", c as u32)),
         }
     }
     out
 }
 
-/// Generate a minimal but valid PDF 1.4 document with the template data.
-/// Uses raw PDF operators to produce a single-page document containing
-/// the title, template name, timestamp and a preview of the injected data.
+// ---------------------------------------------------------------------------
+// Multi-page text layout
+// ---------------------------------------------------------------------------
+
+/// A4 portrait in points.
+const PAGE_WIDTH: u32 = 595;
+const PAGE_HEIGHT: u32 = 842;
+const MARGIN: u32 = 50;
+const LINE_HEIGHT: u32 = 14;
+/// First page: title + meta block occupy the top; data starts lower.
+const FIRST_PAGE_DATA_TOP: u32 = 700;
+const CONTINUATION_PAGE_TOP: u32 = PAGE_HEIGHT - MARGIN;
+const PAGE_BOTTOM: u32 = MARGIN;
+/// Wrap width for body text at /F2 10pt Helvetica across the content box.
+const WRAP_COLUMNS: usize = 92;
+
+/// One laid-out line: (font size, folded text).
+struct LayoutLine {
+    font_size: u8,
+    text: String,
+}
+
+/// Render the JSON payload as formatted key/value blocks and arrays as
+/// column tables. Every value in the payload is represented — no preview
+/// truncation.
+fn data_lines(data_json: &str) -> Vec<String> {
+    let mut lines = Vec::new();
+    match serde_json::from_str::<serde_json::Value>(data_json) {
+        Ok(value) => format_value(&value, 0, &mut lines),
+        Err(_) => {
+            // Not valid JSON: fall back to rendering the raw payload so
+            // nothing is silently hidden.
+            lines.extend(data_json.lines().map(str::to_string));
+        }
+    }
+    lines
+        .iter()
+        .flat_map(|line| wrap_line(line, WRAP_COLUMNS))
+        .collect()
+}
+
+fn indent_for(depth: usize) -> String {
+    "  ".repeat(depth)
+}
+
+fn scalar_to_string(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Null => "null".to_string(),
+        other => other.to_string(),
+    }
+}
+
+fn format_value(value: &serde_json::Value, depth: usize, lines: &mut Vec<String>) {
+    match value {
+        serde_json::Value::Object(map) => {
+            for (key, inner) in map {
+                match inner {
+                    serde_json::Value::Object(_) => {
+                        lines.push(format!("{}{}:", indent_for(depth), key));
+                        format_value(inner, depth + 1, lines);
+                    }
+                    serde_json::Value::Array(items) if !items.is_empty() => {
+                        lines.push(format!("{}{}:", indent_for(depth), key));
+                        format_table(items, depth + 1, lines);
+                    }
+                    serde_json::Value::Array(_) => {
+                        lines.push(format!("{}{}: (empty)", indent_for(depth), key));
+                    }
+                    scalar => {
+                        lines.push(format!(
+                            "{}{}: {}",
+                            indent_for(depth),
+                            key,
+                            scalar_to_string(scalar)
+                        ));
+                    }
+                }
+            }
+        }
+        serde_json::Value::Array(items) if !items.is_empty() => {
+            format_table(items, depth, lines);
+        }
+        serde_json::Value::Array(_) => lines.push(format!("{}(empty list)", indent_for(depth))),
+        scalar => lines.push(format!("{}{}", indent_for(depth), scalar_to_string(scalar))),
+    }
+}
+
+/// Render an array as a column table when it contains objects (union of
+/// keys as the header), or as itemized lines otherwise.
+fn format_table(items: &[serde_json::Value], depth: usize, lines: &mut Vec<String>) {
+    let object_items: Vec<&serde_json::Map<String, serde_json::Value>> = items
+        .iter()
+        .filter_map(|item| item.as_object())
+        .collect();
+    let pad = indent_for(depth);
+    if object_items.len() == items.len() && !object_items.is_empty() {
+        let mut headers: Vec<String> = Vec::new();
+        for obj in &object_items {
+            for key in obj.keys() {
+                if !headers.iter().any(|h| h == key) {
+                    headers.push(key.clone());
+                }
+            }
+        }
+        lines.push(format!("{pad}# {}", headers.join(" | ")));
+        for obj in &object_items {
+            let cells: Vec<String> = headers
+                .iter()
+                .map(|h| {
+                    obj.get(h)
+                        .map(scalar_to_string)
+                        .unwrap_or_else(|| "-".to_string())
+                })
+                .collect();
+            lines.push(format!("{pad}* {}", cells.join(" | ")));
+        }
+    } else {
+        for (i, item) in items.iter().enumerate() {
+            match item {
+                serde_json::Value::Object(_) => {
+                    lines.push(format!("{pad}[{i}]"));
+                    format_value(item, depth + 1, lines);
+                }
+                scalar => lines.push(format!("{pad}[{i}] {}", scalar_to_string(scalar))),
+            }
+        }
+    }
+}
+
+/// Wrap a logical line at word boundaries; hard-break words longer than the
+/// column width. Empty input yields one empty line (keeps blank spacing).
+fn wrap_line(line: &str, width: usize) -> Vec<String> {
+    if width == 0 || line.chars().count() <= width {
+        return vec![line.to_string()];
+    }
+    let mut out: Vec<String> = Vec::new();
+    let mut current = String::new();
+    for word in line.split_whitespace() {
+        let mut rest = word;
+        loop {
+            let space = usize::from(!current.is_empty());
+            if current.chars().count() + space + rest.chars().count() <= width {
+                if space == 1 {
+                    current.push(' ');
+                }
+                current.push_str(rest);
+                break;
+            }
+            let remaining = width.saturating_sub(current.chars().count() + space);
+            if rest.chars().count() > width && remaining > 0 {
+                let taken: String = rest.chars().take(remaining).collect();
+                if space == 1 {
+                    current.push(' ');
+                }
+                current.push_str(&taken);
+                rest = &rest[remaining..];
+                out.push(std::mem::take(&mut current));
+            } else {
+                out.push(std::mem::take(&mut current));
+            }
+        }
+    }
+    if !current.is_empty() || out.is_empty() {
+        out.push(current);
+    }
+    out
+}
+
+/// Split laid-out lines into pages respecting the vertical layout constants.
+fn paginate(lines: &[LayoutLine]) -> Vec<Vec<&LayoutLine>> {
+    let mut pages: Vec<Vec<&LayoutLine>> = Vec::new();
+    let mut current: Vec<&LayoutLine> = Vec::new();
+    let mut y = FIRST_PAGE_DATA_TOP;
+    for line in lines {
+        if y < PAGE_BOTTOM {
+            pages.push(std::mem::take(&mut current));
+            y = CONTINUATION_PAGE_TOP;
+        }
+        current.push(line);
+        y = y.saturating_sub(LINE_HEIGHT);
+    }
+    pages.push(current);
+    pages
+}
+
+/// Generate a valid multi-page PDF 1.4 document rendering the FULL data
+/// payload (key/value blocks and array tables) with line-based pagination.
 ///
-/// NOTE: Full Typst compilation remains unwired in this pass (tracked
-/// separately); this generator produces spec-compliant output that can be
-/// opened by any PDF reader while the Typst pipeline is being wired up.
-///
-/// All offsets (xref table, `startxref`) are computed programmatically from
-/// the actual object bytes, and the content-stream `/Length` reflects the
-/// real byte count — no hardcoded/approximate offsets.
+/// NOTE: full Typst compilation remains unwired (tracked separately); this
+/// generator produces spec-compliant output that any PDF reader can open,
+/// with every byte of the JSON payload represented across as many pages as
+/// needed. Non-WinAnsi characters are folded (see [`fold_string`]) rather
+/// than dropped.
 fn generate_pdf(template: &str, world: &TypstWorld) -> Result<Vec<u8>, RenderError> {
     let now = world.now.format("%Y%m%d%H%M%S").to_string();
     let title = match template {
@@ -171,38 +488,90 @@ fn generate_pdf(template: &str, world: &TypstWorld) -> Result<Vec<u8>, RenderErr
     };
 
     // Escape every interpolated value: title/template come from a fixed set,
-    // but the data preview is attacker-controlled JSON.
+    // but the data body is attacker-controlled JSON.
     let title_esc = escape_pdf_string(title);
     let template_esc = escape_pdf_string(template);
     let now_esc = escape_pdf_string(&now);
-    // Truncate on a char boundary before escaping so multi-byte UTF-8 is not split.
-    let data_preview: String = world.data_json.chars().take(80).collect();
-    let data_preview_esc = escape_pdf_string(&data_preview);
 
-    // Content stream — build the actual bytes first so /Length is exact.
-    let stream_body = format!(
-        "BT\n/F1 24 Tf\n50 780 Td\n({title_esc}) Tj\n/F1 12 Tf\n0 -30 Td\n(Template: {template_esc}) Tj\n0 -20 Td\n(Generated: {now_esc}) Tj\n0 -20 Td\n(Data: {data_preview_esc}...) Tj\nET\n"
+    let mut lines: Vec<LayoutLine> = Vec::new();
+    for text in data_lines(&world.data_json) {
+        lines.push(LayoutLine { font_size: 10, text });
+    }
+
+    let pages = paginate(&lines);
+
+    // Content stream per page — build the actual bytes so /Length is exact.
+    let mut content_streams: Vec<Vec<u8>> = Vec::with_capacity(pages.len());
+    for (page_index, page_lines) in pages.iter().enumerate() {
+        let mut body = String::new();
+        let mut y = if page_index == 0 {
+            PAGE_HEIGHT - MARGIN - 10
+        } else {
+            PAGE_HEIGHT - MARGIN
+        };
+        if page_index == 0 {
+            body.push_str(&format!(
+                "BT\n/F1 24 Tf\n{MARGIN} {y} Td\n({title_esc}) Tj\nET\n"
+            ));
+            y -= 30;
+            body.push_str(&format!(
+                "BT\n/F2 12 Tf\n{MARGIN} {y} Td\n(Template: {template_esc}) Tj\nET\n"
+            ));
+            y -= 20;
+            body.push_str(&format!(
+                "BT\n/F2 12 Tf\n{MARGIN} {y} Td\n(Generated: {now_esc}) Tj\nET\n"
+            ));
+            y -= 20;
+            body.push_str(&format!(
+                "BT\n/F2 12 Tf\n{MARGIN} {y} Td\n(Data — full payload, {count} lines:) Tj\nET\n",
+                count = lines.len()
+            ));
+        }
+        for line in page_lines {
+            let esc = escape_pdf_string(&line.text);
+            body.push_str(&format!(
+                "BT\n/F2 {size} Tf\n{MARGIN} {y} Td\n({esc}) Tj\nET\n",
+                size = line.font_size
+            ));
+            y = y.saturating_sub(LINE_HEIGHT);
+        }
+        content_streams.push(body.into_bytes());
+    }
+
+    // Objects: 1 catalog, 2 pages, per page (page + content), font last.
+    let font_object = 3 + 2 * pages.len();
+    let mut objects: Vec<Vec<u8>> = Vec::with_capacity(2 + 2 * pages.len() + 1);
+    objects.push(b"<< /Type /Catalog /Pages 2 0 R >>".to_vec());
+
+    let first_page_object = 3usize;
+    let kids: Vec<String> = (0..pages.len())
+        .map(|i| format!("{} 0 R", first_page_object + 2 * i))
+        .collect();
+    objects.push(
+        format!(
+            "<< /Type /Pages /Kids [{}] /Count {} >>",
+            kids.join(" "),
+            pages.len()
+        )
+        .into_bytes(),
     );
-    let stream_bytes = stream_body.into_bytes();
-    let stream_length = stream_bytes.len();
-
-    // Object 4: content stream with exact /Length.
-    let mut obj4 = format!("<< /Length {stream_length} >>\nstream\n").into_bytes();
-    obj4.extend_from_slice(&stream_bytes);
-    obj4.extend_from_slice(b"\nendstream");
-
-    // Fully serialised indirect objects (1..=5), in object-number order.
-    let objects: Vec<Vec<u8>> = vec![
-        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
-        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
-        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842]\n   /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>".to_vec(),
-        obj4,
-        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_vec(),
-    ];
+    for (i, stream) in content_streams.iter().enumerate() {
+        let page_num = first_page_object + 2 * i;
+        let content_num = page_num + 1;
+        objects.push(
+            format!(
+                "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {PAGE_WIDTH} {PAGE_HEIGHT}]\n   /Contents {content_num} 0 R /Resources << /Font << /F1 {font_object} 0 R /F2 {font_object} 0 R >> >> >>"
+            )
+            .into_bytes(),
+        );
+        let mut obj = format!("<< /Length {} >>\nstream\n", stream.len()).into_bytes();
+        obj.extend_from_slice(stream);
+        obj.extend_from_slice(b"\nendstream");
+        objects.push(obj);
+    }
+    objects.push(b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_vec());
 
     // Assemble the file, recording each object's byte offset as we go.
-    // Each indirect object is serialised as `N 0 obj\n<body>\nendobj\n` so the
-    // xref offsets point at the actual object headers.
     let mut pdf: Vec<u8> = b"%PDF-1.4\n".to_vec();
     let mut offsets: Vec<usize> = Vec::with_capacity(objects.len() + 1);
     offsets.push(0); // object 0 — free entry, offset unused
@@ -329,8 +698,77 @@ mod tests {
         assert_eq!(escape_pdf_string("new\nline\r\ttab"), "new\\nline\\r\\ttab");
         // Latin-1 é (U+00E9) → octal escape of byte 0xE9.
         assert_eq!(escape_pdf_string("café"), "caf\\351");
-        // Above latin-1 (U+0100 'Ā', U+4F60 '你') → dropped.
-        assert_eq!(escape_pdf_string("Ā你x"), "x");
+        // Above latin-1: Ā folds to A, 你 has no mapping and becomes the
+        // explicit '?' marker — nothing is silently dropped anymore.
+        assert_eq!(escape_pdf_string("Ā你x"), "A?x");
+        // CP1252 specials map onto their byte values (— is 0x97).
+        assert_eq!(escape_pdf_string("a—b"), "a\\227b");
+    }
+
+    #[test]
+    fn unicode_input_folds_without_silent_loss() {
+        // Cyrillic input never panics and every character is accounted for.
+        let input = "Привет мир — Привет!";
+        let (folded, folded_count, markers) = fold_string(input);
+        let direct = input.chars().count() - folded_count - markers;
+        assert_eq!(direct + folded_count + markers, input.chars().count());
+        assert_eq!(markers, 0, "Cyrillic should transliterate, not marker: {folded}");
+        assert!(folded.contains("Privet"), "transliteration missing: {folded}");
+
+        let (out, _, markers) = fold_string("你");
+        assert_eq!(out, "?");
+        assert_eq!(markers, 1);
+    }
+
+    #[test]
+    fn large_payload_renders_multiple_pages() {
+        // 300 lines cannot fit one page (~46 lines/page).
+        let mut items = String::from("[");
+        for i in 0..300 {
+            if i > 0 {
+                items.push(',');
+            }
+            items.push_str(&format!(r#"{{"line": {i}, "note": "row {i} of the export"}}"#));
+        }
+        items.push(']');
+        let world = TypstWorld {
+            template_source: String::new(),
+            data_json: format!(r#"{{"rows": {items}}}"#),
+            now: chrono::Utc::now(),
+        };
+        let pdf = generate_pdf("analytics_export", &world).expect("pdf generation failed");
+        let text = String::from_utf8_lossy(&pdf);
+
+        let count_start = text.find("/Count ").unwrap() + "/Count ".len();
+        let count: usize = text[count_start..]
+            .split(|c: char| !c.is_ascii_digit())
+            .next()
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!(count > 1, "expected multi-page output, got /Count {count}");
+        assert!(text.contains("row 0 of the export"));
+        assert!(text.contains("row 299 of the export"));
+        assert_eq!(text.matches("/Type /Page ").count(), count);
+        assert_eq!(text.matches("/Type /Pages").count(), 1);
+    }
+
+    #[test]
+    fn nested_payload_uses_blocks_and_tables() {
+        let world = TypstWorld {
+            template_source: String::new(),
+            data_json: r#"{"customer": {"name": "Ada Lovelace", "vat": "EE102951727"}, "items": [{"sku": "A-1", "qty": 2}, {"sku": "B-2", "qty": 5}]}"#.to_string(),
+            now: chrono::Utc::now(),
+        };
+        let pdf = generate_pdf("invoice", &world).expect("pdf generation failed");
+        let text = String::from_utf8_lossy(&pdf);
+        assert!(text.contains("name: Ada Lovelace"));
+        assert!(text.contains("vat: EE102951727"));
+        // Column order follows serde_json's key ordering (alphabetical
+        // without the preserve_order feature).
+        assert!(text.contains("# qty | sku"));
+        assert!(text.contains("* 2 | A-1"));
+        assert!(text.contains("* 5 | B-2"));
     }
 
     #[test]

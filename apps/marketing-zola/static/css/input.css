@@ -24,7 +24,7 @@
 
 @font-face {
   font-family: 'JetBrains Mono Variable';
-  src: url('/fonts/JetBrainsMono-Variable.ttf') format('truetype');
+  src: url('/fonts/JetBrainsMono-Variable.woff2') format('woff2');
   font-weight: 100 800;
   font-style: normal;
   font-display: swap;
@@ -32,7 +32,7 @@
 
 @font-face {
   font-family: 'JetBrains Mono Variable';
-  src: url('/fonts/JetBrainsMono-Italic-Variable.ttf') format('truetype');
+  src: url('/fonts/JetBrainsMono-Italic-Variable.woff2') format('woff2');
   font-weight: 100 800;
   font-style: italic;
   font-display: swap;
@@ -40,7 +40,7 @@
 
 @font-face {
   font-family: 'Fraunces Variable';
-  src: url('/fonts/Fraunces-Variable.ttf') format('truetype');
+  src: url('/fonts/Fraunces-Variable.woff2') format('woff2');
   font-weight: 100 900;
   font-style: normal;
   font-display: swap;
@@ -48,7 +48,7 @@
 
 @font-face {
   font-family: 'Fraunces Variable';
-  src: url('/fonts/Fraunces-Italic-Variable.ttf') format('truetype');
+  src: url('/fonts/Fraunces-Italic-Variable.woff2') format('woff2');
   font-weight: 100 900;
   font-style: italic;
   font-display: swap;

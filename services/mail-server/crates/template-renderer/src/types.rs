@@ -124,6 +124,11 @@ pub struct RenderOptions {
     pub minify: bool,
     /// Subject line (may contain {{ variable }} placeholders)
     pub subject: Option<String>,
+    /// Fallback substituted for missing merge fields. `None` (the default)
+    /// renders the empty string; substitutions are reported in
+    /// `RenderResult.warnings`.
+    #[serde(default)]
+    pub missing_field_fallback: Option<String>,
 }
 
 fn default_true() -> bool {
@@ -136,6 +141,11 @@ pub struct RenderResult {
     pub plaintext: Option<String>,
     pub subject: Option<String>,
     pub metadata: RenderMetadata,
+    /// Non-fatal render warnings — one entry per missing merge field.
+    /// Additive (`#[serde(default)]`) so older serialized results still
+    /// deserialize.
+    #[serde(default)]
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -511,6 +521,14 @@ mod tests {
         assert!(opts.generate_plaintext);
         assert!(!opts.minify);
         assert!(opts.subject.is_none());
+        assert_eq!(opts.missing_field_fallback, None);
+    }
+
+    #[test]
+    fn test_render_options_accepts_missing_field_fallback() {
+        let opts: RenderOptions =
+            serde_json::from_str(r#"{"props": {}, "missing_field_fallback": "—"}"#).unwrap();
+        assert_eq!(opts.missing_field_fallback.as_deref(), Some("—"));
     }
 
     #[test]
@@ -556,12 +574,21 @@ mod tests {
                 plaintext_size_bytes: Some(5),
                 cached: false,
             },
+            warnings: Vec::new(),
         };
         let json = serde_json::to_string(&result).unwrap();
         let de: RenderResult = serde_json::from_str(&json).unwrap();
         assert_eq!(de.html, "<h1>Hello</h1>");
         assert_eq!(de.metadata.render_time_ms, 5);
         assert!(!de.metadata.cached);
+        assert!(de.warnings.is_empty());
+    }
+
+    #[test]
+    fn test_render_result_deserializes_without_warnings_field() {
+        let json = r#"{"html":"<p>x</p>","plaintext":null,"subject":null,"metadata":{"render_time_ms":1,"html_size_bytes":6,"plaintext_size_bytes":null,"cached":false}}"#;
+        let de: RenderResult = serde_json::from_str(json).unwrap();
+        assert!(de.warnings.is_empty());
     }
 
     #[test]

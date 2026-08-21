@@ -235,8 +235,9 @@ pub fn render_sparkline(values: &[f64], width: u32, height: u32, color: &str) ->
     let bottom = h - padding;
     let last_x = padding + chart_w;
 
+    let last = values[values.len() - 1];
     format!(
-        r##"<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}" role="img" aria-hidden="true"><path d="{path} L{last_x:.1},{bottom:.1} L{padding:.1},{bottom:.1} Z" style="fill: {color}" fill-opacity="0.12" /><path d="{path}" fill="none" style="stroke: {color}" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" /></svg>"##,
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}" role="img" aria-label="Trend across {n} points, latest value {last:.1}"><path d="{path} L{last_x:.1},{bottom:.1} L{padding:.1},{bottom:.1} Z" style="fill: {color}" fill-opacity="0.12" /><path d="{path}" fill="none" style="stroke: {color}" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" /></svg>"##,
     )
 }
 

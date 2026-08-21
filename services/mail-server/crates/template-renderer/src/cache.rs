@@ -56,6 +56,7 @@ mod tests {
                 plaintext_size_bytes: None,
                 cached: false,
             },
+            warnings: Vec::new(),
         }
     }
 

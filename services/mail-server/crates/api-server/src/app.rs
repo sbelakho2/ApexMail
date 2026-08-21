@@ -440,7 +440,12 @@ pub fn build_app(state: AppState) -> Router {
 
     let public = Router::<AppState>::new()
         .route("/assets/globals.css", get(browser_globals_css))
+        .route("/assets/console.js", get(browser_console_js))
         .route("/verify-email", get(browser_verify_email_page))
+        // Permanent redirects for the legacy /legal/* paths (previously
+        // interim HTML meta-refresh pages served by ui-foundation).
+        .route("/legal/terms", get(legal_terms_redirect))
+        .route("/legal/privacy", get(legal_privacy_redirect))
         .nest("/health", routes::health::router())
         .nest("/v1/ses", routes::ses_notifications::router())
         .merge(marketing_assets)
@@ -942,6 +947,35 @@ async fn browser_globals_css() -> impl IntoResponse {
             HeaderValue::from_static("text/css; charset=utf-8"),
         )],
         ui_foundation::GLOBALS_CSS,
+    )
+}
+
+/// Serve the console hydration script. Both root layouts emit
+/// `<script src="/assets/console.js" defer>`; `KNOWN_SCRIPT_SRCS` already
+/// allowlists that same-origin source for CSP nonce stamping.
+async fn browser_console_js() -> impl IntoResponse {
+    (
+        [(
+            CONTENT_TYPE,
+            HeaderValue::from_static("application/javascript; charset=utf-8"),
+        )],
+        ui_foundation::CONSOLE_JS,
+    )
+}
+
+// ─── Legacy /legal/* permanent redirects ───────────────────────
+
+async fn legal_terms_redirect() -> impl IntoResponse {
+    (
+        StatusCode::MOVED_PERMANENTLY,
+        [(header::LOCATION, "/terms")],
+    )
+}
+
+async fn legal_privacy_redirect() -> impl IntoResponse {
+    (
+        StatusCode::MOVED_PERMANENTLY,
+        [(header::LOCATION, "/privacy")],
     )
 }
 
@@ -1663,6 +1697,48 @@ mod tests {
         let compact_body = body.replace(' ', "");
         assert!(compact_body.contains(":root{"));
         assert!(compact_body.contains("font-family:var(--font-sans)"));
+    }
+
+    #[tokio::test]
+    async fn serves_console_js_asset() {
+        let response = test_app()
+            .await
+            .oneshot(
+                Request::builder()
+                    .uri("/assets/console.js")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get(CONTENT_TYPE).unwrap(),
+            "application/javascript; charset=utf-8"
+        );
+
+        let body = response_body_string(response).await;
+        assert!(!body.trim().is_empty(), "console.js must not be empty");
+    }
+
+    #[tokio::test]
+    async fn legacy_legal_paths_redirect_permanently() {
+        for (legacy, canonical) in [("/legal/terms", "/terms"), ("/legal/privacy", "/privacy")] {
+            let response = test_app()
+                .await
+                .oneshot(
+                    Request::builder()
+                        .uri(legacy)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+
+            assert_eq!(response.status(), StatusCode::MOVED_PERMANENTLY);
+            assert_eq!(response.headers().get(header::LOCATION).unwrap(), canonical);
+        }
     }
 
     #[test]

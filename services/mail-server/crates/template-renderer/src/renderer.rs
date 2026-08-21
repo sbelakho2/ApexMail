@@ -55,11 +55,12 @@ impl TemplateRenderer {
         };
 
         // Resolve subject placeholders (plain text — no HTML escaping; the
-        // subject is a header value, not markup).
-        let subject = options
-            .subject
-            .as_ref()
-            .map(|s| transpiler::resolve_placeholders_plain(s, &options.props));
+        // subject is a header value, not markup). Missing fields follow the
+        // same fallback policy as the body.
+        let fallback = options.missing_field_fallback.as_deref().unwrap_or("");
+        let subject = options.subject.as_ref().map(|s| {
+            transpiler::resolve_placeholders_plain_reported(s, &options.props, fallback).html
+        });
 
         let elapsed = start.elapsed();
 
@@ -73,6 +74,7 @@ impl TemplateRenderer {
                 plaintext_size_bytes: plaintext.as_ref().map(|p| p.len()),
                 cached: false,
             },
+            warnings: sandbox_result.warnings,
         })
     }
 
@@ -277,6 +279,7 @@ mod tests {
             generate_plaintext: true,
             minify: false,
             subject: None,
+            missing_field_fallback: None,
         };
         let result = sandbox.execute(source, &opts).unwrap();
         assert_eq!(result.html, "<h1>Hello</h1><p>World</p>");
@@ -292,6 +295,7 @@ mod tests {
             generate_plaintext: false,
             minify: false,
             subject: Some("Hello {{ name }}!".to_string()),
+            missing_field_fallback: None,
         };
         let result = sandbox.execute(source, &opts).unwrap();
         assert_eq!(result.html, "<p>Hi</p>");

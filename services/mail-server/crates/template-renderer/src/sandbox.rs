@@ -45,13 +45,21 @@ impl Sandbox {
         // 3. Check timeout
         self.check_timeout(start)?;
 
-        // 4. Render HTML by resolving placeholders in original source
-        let html = transpiler::resolve_placeholders(source, &options.props);
+        // 4. Render HTML by resolving placeholders in original source.
+        //    Missing merge fields resolve to the configured fallback
+        //    (empty string by default) and are reported as warnings.
+        let fallback = options
+            .missing_field_fallback
+            .clone()
+            .unwrap_or_default();
+        let outcome = transpiler::resolve_placeholders_reported(source, &options.props, &fallback);
+        let mut warnings = outcome.warnings;
+        let html = outcome.html;
 
         // 5. Check timeout again
         self.check_timeout(start)?;
 
-        // 6. Minify if requested
+        // 6. Minify if requested (whitespace-sensitive tags are preserved)
         let html = if options.minify {
             minify_html(&html)
         } else {
@@ -66,6 +74,23 @@ impl Sandbox {
             });
         }
 
+        // 8. Memory budget: the live allocation during a render is dominated
+        //    by the source plus the rendered output, so cap their combined
+        //    size at `max_memory_bytes` (previously declared but unenforced).
+        if source.len() + html.len() > self.config.max_memory_bytes {
+            return Err(TemplateError::OutputTooLarge {
+                size: source.len() + html.len(),
+                max: self.config.max_memory_bytes,
+            });
+        }
+
+        // Subject resolution reports the same missing-field warnings.
+        if let Some(subject) = options.subject.as_ref() {
+            let subject_outcome =
+                transpiler::resolve_placeholders_plain_reported(subject, &options.props, &fallback);
+            warnings.extend(subject_outcome.warnings);
+        }
+
         let elapsed = start.elapsed();
         info!(
             elapsed_ms = elapsed.as_millis(),
@@ -75,6 +100,7 @@ impl Sandbox {
 
         Ok(SandboxResult {
             html,
+            warnings,
             transpiled,
             execution_time: elapsed,
         })
@@ -101,12 +127,76 @@ impl Sandbox {
 #[derive(Debug)]
 pub struct SandboxResult {
     pub html: String,
+    /// Non-fatal warnings (missing merge fields, …) surfaced to the render API.
+    pub warnings: Vec<String>,
     pub transpiled: TranspiledTemplate,
     pub execution_time: Duration,
 }
 
+/// Whitespace-sensitive elements whose content must never be minified.
+const WHITESPACE_SENSITIVE_TAGS: &[&str] = &["pre", "textarea", "code"];
+
 /// Basic HTML minification — removes excess whitespace between tags.
+///
+/// Content inside `<pre>`, `<textarea>`, and `<code>` is copied verbatim:
+/// collapsing whitespace there corrupts code samples and preformatted email
+/// blocks that renderers and tests compare byte-for-byte.
 fn minify_html(html: &str) -> String {
+    let mut result = String::with_capacity(html.len());
+    let mut rest = html;
+    while let Some(open_pos) = find_sensitive_boundary(rest, false) {
+        // Minify everything before the protected region, keep the open tag.
+        let (head, tail) = rest.split_at(open_pos);
+        result.push_str(&minify_html_unprotected(head));
+        let open_tag_end = tail
+            .find('>')
+            .map(|gt| gt + 1)
+            .expect("an opening-tag match implies '>' follows");
+        result.push_str(&tail[..open_tag_end]);
+        rest = &tail[open_tag_end..];
+        // Copy the protected content (and its close tag) verbatim.
+        match find_sensitive_boundary(rest, true) {
+            Some(close_start) => {
+                let close_end = rest[close_start..]
+                    .find('>')
+                    .map(|gt| close_start + gt + 1)
+                    .unwrap_or(rest.len());
+                result.push_str(&rest[..close_end]);
+                rest = &rest[close_end..];
+            }
+            None => {
+                // Unbalanced — copy the remainder verbatim (fail safe).
+                result.push_str(rest);
+                return result;
+            }
+        }
+    }
+    result.push_str(&minify_html_unprotected(rest));
+    result
+}
+
+/// Locate the next whitespace-sensitive tag boundary. With `closing_only`,
+/// only close tags (`</pre` …) qualify; otherwise open tags (`<pre` followed
+/// by `>`, whitespace, or `/`) qualify. `<pretty>` must NOT match `<pre`.
+fn find_sensitive_boundary(html: &str, closing_only: bool) -> Option<usize> {
+    let lower = html.to_ascii_lowercase();
+    WHITESPACE_SENSITIVE_TAGS
+        .iter()
+        .filter_map(|tag| {
+            let needle = if closing_only {
+                format!("</{tag}")
+            } else {
+                format!("<{tag}")
+            };
+            lower.match_indices(&needle).find_map(|(pos, _)| {
+                let after = lower[pos + needle.len()..].chars().next()?;
+                (after == '>' || after.is_whitespace() || after == '/').then_some(pos)
+            })
+        })
+        .min()
+}
+
+fn minify_html_unprotected(html: &str) -> String {
     let mut result = String::with_capacity(html.len());
     let mut in_tag = false;
     let mut last_was_space = false;
@@ -168,6 +258,7 @@ mod tests {
             generate_plaintext: true,
             minify: false,
             subject: None,
+            missing_field_fallback: None,
         };
         let result = sandbox.execute(source, &opts).unwrap();
         assert_eq!(result.html, "<h1>Welcome</h1><p>Hello World</p>");
@@ -188,6 +279,7 @@ mod tests {
             generate_plaintext: false,
             minify: false,
             subject: None,
+            missing_field_fallback: None,
         };
         let err = sandbox.execute(&source, &opts).unwrap_err();
         assert!(matches!(err, TemplateError::SourceTooLarge { .. }));
@@ -207,6 +299,7 @@ mod tests {
             generate_plaintext: false,
             minify: false,
             subject: None,
+            missing_field_fallback: None,
         };
         let err = sandbox.execute(source, &opts).unwrap_err();
         assert!(matches!(err, TemplateError::OutputTooLarge { .. }));
@@ -221,6 +314,7 @@ mod tests {
             generate_plaintext: false,
             minify: false,
             subject: None,
+            missing_field_fallback: None,
         };
         let err = sandbox.execute(source, &opts).unwrap_err();
         assert!(matches!(err, TemplateError::ForbiddenModule { .. }));
@@ -235,6 +329,7 @@ mod tests {
             generate_plaintext: false,
             minify: true,
             subject: None,
+            missing_field_fallback: None,
         };
         let result = sandbox.execute(source, &opts).unwrap();
         assert!(!result.html.contains('\n'));
@@ -266,8 +361,79 @@ mod tests {
             generate_plaintext: true,
             minify: false,
             subject: Some("Hello {{ name }}".to_string()),
+            missing_field_fallback: None,
         };
         let result = sandbox.execute(source, &opts).unwrap();
         assert_eq!(result.html, "<div>Content</div>");
+    }
+
+    #[test]
+    fn test_sandbox_reports_missing_merge_fields() {
+        let sandbox = test_sandbox();
+        let source = "<p>Hello {{ user.name }}</p>";
+        let opts = RenderOptions {
+            props: serde_json::json!({}),
+            generate_plaintext: false,
+            minify: false,
+            subject: None,
+            missing_field_fallback: None,
+        };
+        let result = sandbox.execute(source, &opts).unwrap();
+        assert_eq!(result.html, "<p>Hello </p>");
+        assert_eq!(result.warnings.len(), 1);
+        assert!(result.warnings[0].contains("user.name"));
+
+        let opts = RenderOptions {
+            missing_field_fallback: Some("customer".to_string()),
+            ..opts
+        };
+        let result = sandbox.execute(source, &opts).unwrap();
+        assert_eq!(result.html, "<p>Hello customer</p>");
+        assert_eq!(result.warnings.len(), 1);
+    }
+
+    #[test]
+    fn test_minify_preserves_pre_textarea_code_content() {
+        let html = "<div>\n  <pre>  line one\n    line two  </pre>\n  <p> wrap  me </p>\n  <code>x  =  1</code>\n  <textarea>  keep\n  me  </textarea>\n</div>";
+        let result = minify_html(html);
+        assert!(result.contains("<pre>  line one\n    line two  </pre>"), "{result}");
+        assert!(result.contains("<code>x  =  1</code>"), "{result}");
+        assert!(result.contains("<textarea>  keep\n  me  </textarea>"), "{result}");
+        assert!(result.contains("<p> wrap me </p>"), "{result}");
+        assert!(!result.contains("</pre>\n  <p>"), "{result}");
+    }
+
+    #[test]
+    fn test_minify_does_not_confuse_similar_tag_names() {
+        let html = "<div>\n  <pretty>  a  b  </pretty>\n</div>";
+        let result = minify_html(html);
+        assert!(result.contains("<pretty> a b </pretty>"), "{result}");
+    }
+
+    #[test]
+    fn test_sandbox_enforces_memory_budget() {
+        let sandbox = Sandbox::new(SandboxConfig {
+            timeout_ms: 5000,
+            max_memory_bytes: 100,
+            max_source_length: 512 * 1024,
+            max_output_length: 2 * 1024 * 1024,
+        });
+        let source = "<p>padding padding padding padding padding padding padding</p>";
+        let opts = RenderOptions {
+            props: serde_json::json!({}),
+            generate_plaintext: false,
+            minify: false,
+            subject: None,
+            missing_field_fallback: None,
+        };
+        let err = sandbox.execute(source, &opts).unwrap_err();
+        assert!(matches!(err, TemplateError::OutputTooLarge { .. }));
+        let sandbox = Sandbox::new(SandboxConfig {
+            timeout_ms: 5000,
+            max_memory_bytes: 512,
+            max_source_length: 512 * 1024,
+            max_output_length: 2 * 1024 * 1024,
+        });
+        assert!(sandbox.execute("<p>ok</p>", &opts).is_ok());
     }
 }

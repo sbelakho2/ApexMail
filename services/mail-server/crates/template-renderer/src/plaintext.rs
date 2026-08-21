@@ -9,7 +9,7 @@ use std::sync::LazyLock;
 // ─── Regex patterns ────────────────────────────────────────────
 
 static BLOCK_TAGS: LazyLock<Option<Regex>> = LazyLock::new(|| {
-    Regex::new(r"(?i)</?(p|div|br|h[1-6]|li|tr|table|hr|blockquote)\b[^>]*>").ok()
+    Regex::new(r"(?i)</?(p|div|br|h[1-6]|li|tr|td|th|table|hr|blockquote)\b[^>]*>").ok()
 });
 
 // #202:Use (?is) flags so `.*?` can match across line breaks in multi-line <a> tags
@@ -241,5 +241,13 @@ mod tests {
         assert!(result.contains("Line 1"));
         assert!(result.contains("Line 2"));
         assert!(result.contains("Line 3"));
+    }
+
+    #[test]
+    fn test_table_cells_break_lines() {
+        let result = html_to_plaintext("<table><tr><td>Alpha</td><td>Beta</td></tr></table>");
+        assert!(result.contains("Alpha"));
+        assert!(result.contains("Beta"));
+        assert!(!result.contains("AlphaBeta"), "{result}");
     }
 }

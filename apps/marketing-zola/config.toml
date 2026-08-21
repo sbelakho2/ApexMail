@@ -49,7 +49,7 @@ anchors = "on"
 [extra]
 site_name = "ApexMail"
 author = "Bel Consulting OÜ"
-og_image = "/images/og-image.svg"
+og_image = "/images/og-image.png"
 twitter_handle = "@apexmail"
 twitter_url = "https://twitter.com/apexmail"
 linkedin_url = "https://linkedin.com/company/apexmail"

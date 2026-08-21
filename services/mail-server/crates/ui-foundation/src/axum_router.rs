@@ -464,6 +464,11 @@ fn render_web(path: &str, query: Option<&str>, csrf_secret: Option<&str>) -> Opt
             params.message.as_deref(),
         ),
         "/dashboard" => leptos_views::web_dashboard_page(),
+        // Legacy /legal/* paths are 301-style redirects to the canonical
+        // marketing routes (kept so external links and old bookmarks keep
+        // working). The page both meta-refreshes and carries rel=canonical.
+        "/legal/terms" => legal_redirect_page("/terms"),
+        "/legal/privacy" => legal_redirect_page("/privacy"),
         "/campaigns" => leptos_views::web_campaigns_page(),
         "/campaigns/new" => leptos_views::web_campaigns_new_page(),
         "/contacts" => leptos_views::web_contacts_page(),
@@ -492,8 +497,33 @@ fn render_web(path: &str, query: Option<&str>, csrf_secret: Option<&str>) -> Opt
         }
         p if p.starts_with("/campaigns/") => leptos_views::web_campaign_detail_page(),
         p if p.starts_with("/inbox-placement/") => leptos_views::web_inbox_placement_detail_page(),
+        // /lists/{id} and /lists/{id}/edit — previously dead links (404).
+        p if p.starts_with("/lists/") && p.ends_with("/edit") => {
+            leptos_views::web_list_edit_page()
+        }
+        p if p.starts_with("/lists/new") => leptos_views::web_lists_new_page(),
+        p if p.starts_with("/lists/") => leptos_views::web_list_detail_page(),
         _ => return None,
     })
+}
+
+/// Minimal HTML redirect page for legacy URL aliases. Uses an immediate
+/// meta refresh plus rel=canonical (and a visible link for non-HTML UAs);
+/// served as a normal 200 page because the render pipeline returns HTML.
+fn legal_redirect_page(target: &str) -> String {
+    format!(
+        "<!DOCTYPE html>\
+<html lang=\"en\">\
+<head><meta charset=\"utf-8\"><title>Moved</title>\
+<meta http-equiv=\"refresh\" content=\"0; url={target}\">\
+<link rel=\"canonical\" href=\"{target}\">\
+</head>\
+<body><main class=\"min-h-screen flex flex-col items-center justify-center gap-4 p-8 text-center\">\
+<h1 class=\"text-2xl font-bold\">This page has moved</h1>\
+<p class=\"text-sm\">The canonical location is <a class=\"font-bold underline\" href=\"{target}\">{target}</a>.</p>\
+</main></body>\
+</html>"
+    )
 }
 
 fn render_control_plane(path: &str, csrf_secret: Option<&str>) -> Option<String> {
@@ -763,6 +793,36 @@ mod tests {
     }
 
     #[test]
+    fn list_detail_and_edit_routes_resolve() {
+        let detail = render_route("web", "/lists/l_vip")
+            .expect("/lists/{id} should render the list detail page");
+        assert!(detail.contains("List Detail"));
+        assert!(detail.contains("data-page=\"list-detail\""));
+
+        let edit = render_route("web", "/lists/l_vip/edit")
+            .expect("/lists/{id}/edit should render the list edit page");
+        assert!(edit.contains("Edit List"));
+        assert!(edit.contains("data-api-action=\"/v1/lists/current\""));
+        assert!(edit.contains("data-api-method=\"PUT\""));
+    }
+
+    #[test]
+    fn legacy_legal_paths_redirect_to_canonical_marketing_routes() {
+        let terms = render_route("web", "/legal/terms")
+            .expect("/legal/terms should render a redirect page");
+        assert!(terms.contains("http-equiv=\"refresh\""));
+        assert!(terms.contains("url=/terms"));
+        assert!(terms.contains("rel=\"canonical\" href=\"/terms\""));
+
+        let privacy = render_route("web", "/legal/privacy")
+            .expect("/legal/privacy should render a redirect page");
+        assert!(privacy.contains("url=/privacy"));
+
+        // Unknown /legal/* aliases must NOT resolve.
+        assert!(render_route("web", "/legal/unknown").is_none());
+    }
+
+    #[test]
     fn unknown_paths_are_not_rendered() {
         let unknown = [
             ("web", "/definitely-not-a-page"),
@@ -859,9 +919,13 @@ mod tests {
                     let opening_tag = script.split('>').next().unwrap_or_default();
                     let is_json_ld = opening_tag.contains("type=application/ld+json")
                         || opening_tag.contains("type=\"application/ld+json\"");
-                    let is_allowed_marketing_js = opening_tag
-                        .contains("src=\"/js/apexmail-site.js")
-                        && opening_tag.contains("defer");
+                    // External marketing scripts (Zola build output, served
+                    // same-origin under /js/ with a cachebust query).
+                    let is_allowed_marketing_js = opening_tag.contains("defer")
+                        && (opening_tag.contains("src=\"/js/apexmail-site.js")
+                            || opening_tag.contains("src=\"/js/api-explorer.js")
+                            || opening_tag
+                                .contains("src=\"/js/pricing-calculator.js"));
                     // Inline theme bootstrap + toggle script emitted by ALL root
                     // layouts (marketing, web, control-plane) via theme_script().
                     // Reads the theme localStorage key to prevent FOUC, and

@@ -70,7 +70,7 @@ pub fn web_root_layout(child_html: &str) -> String {
 {theme_script}\
 <link rel=\"stylesheet\" href=\"/assets/globals.css\">\
 </head>\
-    <body class=\"{body_classes}\"><a href=\"#app-main\" class=\"sr-only focus:not-sr-only focus:absolute focus:left-4 focus:top-4 focus:z-50 focus:rounded-sm focus:bg-card focus:px-4 focus:py-2 focus:text-sm focus:font-bold focus:text-surface-950 focus:border focus:border-surface-950\">Skip to content</a><main id=\"app-main\" class=\"min-h-screen bg-background\">{child_html}</main></body>\
+    <body class=\"{body_classes}\"><a href=\"#app-main\" class=\"sr-only focus:not-sr-only focus:absolute focus:left-4 focus:top-4 focus:z-50 focus:rounded-sm focus:bg-card focus:px-4 focus:py-2 focus:text-sm focus:font-bold focus:text-surface-950 focus:border focus:border-surface-950\">Skip to content</a><main id=\"app-main\" class=\"min-h-screen bg-background\">{child_html}</main><script src=\"/assets/console.js\" defer></script></body>\
 </html>",
         html_classes = WEB_ROOT_HTML_CLASSES,
         body_classes = WEB_ROOT_BODY_CLASSES,
@@ -91,7 +91,7 @@ pub fn control_plane_root_layout(child_html: &str) -> String {
 {theme_script}\
 <link rel=\"stylesheet\" href=\"/assets/globals.css\">\
 </head>\
-<body class=\"antialiased bg-background text-surface-950\">{child_html}</body>\
+<body class=\"antialiased bg-background text-surface-950\">{child_html}<script src=\"/assets/console.js\" defer></script></body>\
 </html>",
         theme_script = theme_script(),
         child_html = child_html,
@@ -179,7 +179,8 @@ pub fn web_dashboard_layout(child_html: &str, current_path: &str) -> String {
             unread_count: 0,
             avatar_fallback: "AM",
             mobile_menu_open: false,
-        },
+                    user_context: None,
+},
         impersonation_banner: None,
         toast_surface: Some(ToastSurface { toasts: Vec::new() }),
         current_path,
@@ -471,6 +472,7 @@ pub fn control_plane_home_page() -> String {
                 <p class="text-[11px] font-bold uppercase tracking-[0.28em] text-primary">Operator Command Center</p>
                 <h1 class="mt-3 text-3xl font-bold tracking-tight text-surface-950 sm:text-4xl">Control Plane</h1>
                 <p class="mt-4 max-w-3xl text-sm leading-6 text-surface-600">ApexMail administration and monitoring across trust evidence, tenant readiness, incident response, and expansion pipeline. This command deck is tuned for fast escalation, not static reporting.</p>
+                <p class="mt-2"><span data-sample-data class="inline-flex items-center rounded-sm border border-surface-300 bg-surface-100 px-2 py-0.5 text-[10px] font-bold uppercase tracking-[0.18em] text-surface-600">Sample data</span></p>
                 <div class="mt-6 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
                     <article class="rounded-sm border border-surface-200 bg-surface-50 p-4">
                         <p class="text-[10px] font-bold uppercase tracking-[0.22em] text-surface-400">Tenants armed</p>
@@ -673,6 +675,7 @@ pub fn control_plane_sales_page() -> String {
                 <div>
                     <p class="text-[11px] font-bold uppercase tracking-[0.32em] text-primary">Revenue Command Deck</p>
                     <h1 class="mt-3 text-4xl font-bold tracking-tight text-white">Operator console: Sales Cockpit</h1>
+                    <span data-sample-data class="mt-3 inline-flex items-center rounded-sm border border-brand-400/40 bg-brand-500/15 px-2 py-0.5 text-[10px] font-bold uppercase tracking-[0.18em] text-brand-100">Sample data</span>
                     <p class="mt-3 max-w-3xl text-sm leading-6 text-surface-300">Operator console for discovery, outreach, and autopilot approvals. This is a triage-first operating surface for enterprise expansion where operators qualify, approve, and launch outreach from one deterministic command flow via <code class="rounded bg-black/30 px-1.5 py-0.5 text-brand-100">/v1/admin/sales/*</code>.</p>
                     <div class="mt-5 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
                         <article class="rounded-sm border border-white/10 bg-black/25 p-4">
@@ -991,10 +994,10 @@ fn web_auth_social_footer(agreement_prefix: &str) -> String {
 <div class=\"relative flex justify-center text-[10px] uppercase font-bold tracking-[0.2em]\"><span class=\"bg-white px-4 text-surface-400\">Or continue with</span></div>\
 </div>\
 <div class=\"flex flex-col gap-3\">\
-<button type=\"button\" aria-label=\"Continue with Google\" class=\"flex items-center justify-center gap-3 px-4 py-3 rounded-md border border-surface-200 bg-white hover:bg-surface-50 transition-all shadow-sm active:scale-[0.98]\">{google}<span class=\"text-sm font-semibold text-surface-950\">Google</span></button>\
-<button type=\"button\" aria-label=\"Continue with GitHub\" class=\"flex items-center justify-center gap-3 px-4 py-3 rounded-md border border-surface-200 bg-white hover:bg-surface-50 transition-all shadow-sm active:scale-[0.98]\">{github}<span class=\"text-sm font-semibold text-surface-950\">GitHub</span></button>\
+<a href=\"/v1/auth/sso/google\" aria-label=\"Continue with Google\" class=\"flex items-center justify-center gap-3 px-4 py-3 rounded-md border border-surface-200 bg-white hover:bg-surface-50 transition-all shadow-sm active:scale-[0.98]\">{google}<span class=\"text-sm font-semibold text-surface-950\">Google</span></a>\
+<a href=\"/v1/auth/sso/github\" aria-label=\"Continue with GitHub\" class=\"flex items-center justify-center gap-3 px-4 py-3 rounded-md border border-surface-200 bg-white hover:bg-surface-50 transition-all shadow-sm active:scale-[0.98]\">{github}<span class=\"text-sm font-semibold text-surface-950\">GitHub</span></a>\
 </div>\
-<p class=\"mt-6 text-center text-[11px] text-surface-500 font-medium leading-relaxed px-4\">{agreement_prefix} <a href=\"/legal/terms\" class=\"text-primary font-bold hover:underline\">Terms of Service</a> and <a href=\"/legal/privacy\" class=\"text-primary font-bold hover:underline\">Privacy Policy</a>.</p></div>",
+<p class=\"mt-6 text-center text-[11px] text-surface-500 font-medium leading-relaxed px-4\">{agreement_prefix} <a href=\"/terms\" class=\"text-primary font-bold hover:underline\">Terms of Service</a> and <a href=\"/privacy\" class=\"text-primary font-bold hover:underline\">Privacy Policy</a>.</p></div>",
         google = web_auth_google_icon(),
         github = web_auth_github_icon(),
     )
@@ -1540,7 +1543,7 @@ pub fn web_dashboard_page() -> String {
 </div>\
 <div class=\"grid grid-cols-1 md:grid-cols-2 gap-6\">\
 <article class=\"bg-white rounded-2xl border border-surface-200/60 p-8 shadow-sm\">\
-<h3 class=\"text-xs font-bold text-surface-400 uppercase tracking-[0.2em] mb-6\">Delivery Health</h3>\
+<h3 class=\"text-xs font-bold text-surface-400 uppercase tracking-[0.2em] mb-6\">Delivery Health <span class=\"ml-2 rounded-sm border border-surface-300 bg-surface-100 px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-widest text-surface-600\" data-sample-data>Sample data</span></h3>\
 <div class=\"flex items-center gap-3\">\
 <span class=\"text-3xl font-bold text-success-600\">99.9%</span>\
 <span class=\"text-xs font-bold text-surface-400\">success rate</span>\
@@ -1634,30 +1637,30 @@ pub fn web_campaigns_page() -> String {
         status_filter, sort_filter,
     );
     let select_all = Checkbox {
+        aria_label: Some("Select all campaigns"),
         checked: true,
         variant: "default",
         size: "default",
         indeterminate: false,
         disabled: false,
-        aria_label: None,
     }
     .render_html();
     let spring_checkbox = Checkbox {
+        aria_label: Some("Select Spring Winback campaign"),
         checked: true,
         variant: "default",
         size: "default",
         indeterminate: false,
         disabled: false,
-        aria_label: None,
     }
     .render_html();
     let launch_checkbox = Checkbox {
+        aria_label: Some("Select Launch Announcement campaign"),
         checked: true,
         variant: "default",
         size: "default",
         indeterminate: false,
         disabled: false,
-        aria_label: None,
     }
     .render_html();
     let spring_status = StatusIndicator { status: "draft" }.render_html();
@@ -1847,39 +1850,39 @@ pub fn web_contacts_page() -> String {
         status_filter, segment_filter,
     );
     let select_all = Checkbox {
+        aria_label: Some("Select all contacts"),
         checked: true,
         variant: "default",
         size: "default",
         indeterminate: false,
         disabled: false,
-        aria_label: None,
     }
     .render_html();
     let row_one_checkbox = Checkbox {
+        aria_label: Some("Select contact row one"),
         checked: true,
         variant: "default",
         size: "default",
         indeterminate: false,
         disabled: false,
-        aria_label: None,
     }
     .render_html();
     let row_two_checkbox = Checkbox {
+        aria_label: Some("Select contact row two"),
         checked: true,
         variant: "default",
         size: "default",
         indeterminate: false,
         disabled: false,
-        aria_label: None,
     }
     .render_html();
     let row_three_checkbox = Checkbox {
+        aria_label: Some("Select contact row three"),
         checked: false,
         variant: "default",
         size: "default",
         indeterminate: false,
         disabled: false,
-        aria_label: None,
     }
     .render_html();
     let subscriber_status = StatusIndicator {
@@ -2123,6 +2126,77 @@ pub fn web_lists_page() -> String {
 }
 
 /// New list page.
+/// List detail page. `/lists/{id}` previously 404'd from the "Open" link.
+/// Metrics are labeled as loaded-on-demand placeholders (the console.js
+/// placement binder pattern); the edit/delete actions are real.
+pub fn web_list_detail_page() -> String {
+    format!(
+        "<div class=\"space-y-6\" data-page=\"list-detail\">\
+<nav aria-label=\"Breadcrumb\" class=\"mb-2\"><ol class=\"flex items-center gap-2 text-sm text-surface-500\">\
+<li><a href=\"/lists\" class=\"hover:text-surface-900 transition-colors\">Lists</a></li>\
+<li class=\"text-surface-300\">/</li>\
+<li class=\"text-surface-900 font-medium\">List Detail</li></ol></nav>\
+<div class=\"flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between\">\
+<div><h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\" data-bind=\"list.name\">List</h1>\
+<p class=\"text-sm text-muted-foreground\">Subscribers and settings for this list.</p></div>\
+<div class=\"flex flex-col gap-3 sm:flex-row\">\
+<a href=\"/lists/current/edit\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold border border-input bg-background hover:bg-accent h-12 px-6 py-3\">Edit</a>\
+<button type=\"button\" data-alert-dialog-target=\"list-detail-delete\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold bg-destructive text-destructive-foreground hover:bg-destructive/90 h-12 px-6 py-3\">Delete List</button>\
+</div></div>\
+<div class=\"grid gap-6 md:grid-cols-3\">\
+<div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium\"><h3 class=\"text-sm font-medium text-muted-foreground\">Subscribers</h3><p class=\"text-2xl font-bold text-surface-950 tracking-tight\" data-bind=\"list.subscriber_count\">—</p></div>\
+<div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium\"><h3 class=\"text-sm font-medium text-muted-foreground\">Subscribed</h3><p class=\"text-2xl font-bold text-surface-950 tracking-tight\" data-bind=\"list.subscribed_count\">—</p></div>\
+<div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium\"><h3 class=\"text-sm font-medium text-muted-foreground\">Unsubscribed</h3><p class=\"text-2xl font-bold text-surface-950 tracking-tight\" data-bind=\"list.unsubscribed_count\">—</p></div>\
+</div></div>"
+    )
+}
+
+/// List edit page: real form against `PUT /v1/lists/{id}` via the
+/// data-api-form bridge (console.js honors data-api-method).
+pub fn web_list_edit_page() -> String {
+    format!(
+        "<div class=\"max-w-2xl\" data-page=\"list-edit\">\
+<h1 class=\"text-2xl font-bold text-surface-950 tracking-tight mb-6\">Edit List</h1>\
+<form class=\"space-y-6\" data-api-form data-api-action=\"/v1/lists/current\" data-api-method=\"PUT\" data-redirect=\"/lists\">\
+<div class=\"space-y-2\">{name_label}{name_input}</div>\
+<div class=\"flex flex-col gap-3 sm:flex-row\">{save_button}</div>\
+</form></div>",
+        name_label = Label {
+            text: "List Name",
+            variant: "default",
+            size: "default",
+            required: true,
+            optional: false
+        }
+        .render_html(),
+        name_input = Input {
+            input_type: "text",
+            variant: "default",
+            size: "default",
+            placeholder: "e.g. Newsletter Subscribers",
+            value: "",
+            left_icon: None,
+            right_icon: None,
+            error: None,
+            disabled: false,
+            autocomplete: None,
+            required: true,
+            name: Some("name"),
+        }
+        .render_html(),
+        save_button = Button {
+            variant: "default",
+            size: "default",
+            label: "Save Changes",
+            disabled: false,
+            loading: false,
+            left_icon: None,
+            right_icon: None
+        }
+        .render_html(),
+    )
+}
+
 pub fn web_lists_new_page() -> String {
     format!(
         "<div class=\"max-w-2xl\">\
@@ -2310,7 +2384,7 @@ pub fn web_inbox_placement_new_page() -> String {
 </div>",
         form = Card {
             title: "Test configuration",
-            body: "<form data-form=\"placement-test-create\" action=\"/v1/inbox-placement/tests\" method=\"post\" class=\"space-y-4\">\
+            body: "<form data-form=\"placement-test-create\" data-api-form data-api-action=\"/v1/inbox-placement/tests\" data-redirect=\"/inbox-placement\" action=\"/v1/inbox-placement/tests\" method=\"post\" class=\"space-y-4\">\
 <div><label for=\"placement-name\" class=\"block text-sm font-medium text-surface-700\">Test name</label>\
 <input id=\"placement-name\" name=\"name\" type=\"text\" required maxlength=\"120\" class=\"mt-1 w-full rounded-sm border-surface-300 focus:border-primary focus:ring-primary text-sm\" placeholder=\"Q1 onboarding sequence — variant A\" /></div>\
 <div class=\"grid gap-4 md:grid-cols-2\">\
@@ -2636,8 +2710,12 @@ pub fn web_settings_api_keys_page() -> String {
     };
     format!(
         "<div class=\"space-y-6\">\
-<div class=\"flex items-center justify-between\"><h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">API Keys</h1>\
-<button class=\"inline-flex items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold transition-all bg-primary text-white hover:bg-brand-700 h-12 px-6 py-3\">Create API Key</button></div>\
+<div class=\"flex items-center justify-between\"><h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">API Keys</h1></div>\
+<form class=\"flex flex-col gap-3 sm:flex-row sm:items-end\" data-api-form data-api-action=\"/v1/auth/api-keys\" data-redirect=\"/settings/api-keys\">\
+<div class=\"flex-1 space-y-2\"><label class=\"text-xs font-bold text-surface-900\" for=\"api-key-name\">Key name</label>\
+<input id=\"api-key-name\" name=\"name\" type=\"text\" required maxlength=\"100\" class=\"w-full px-4 py-3 rounded-sm border border-surface-200 focus:border-primary outline-none transition-all bg-background text-sm font-medium text-surface-950\" placeholder=\"Production sender\" /></div>\
+<button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold transition-all bg-primary text-white hover:bg-brand-700 h-12 px-6 py-3\">Create API Key</button>\
+</form>\
 {loading}{table}{empty}</div>",
         loading = render_table_loading_state("Loading API keys", "api", 4),
         table = table.render_html(),
@@ -2671,8 +2749,14 @@ pub fn web_settings_team_page() -> String {
     };
     format!(
         "<div class=\"space-y-6\">\
-<div class=\"flex items-center justify-between\"><h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Team</h1>\
-<button class=\"inline-flex items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold transition-all bg-primary text-white hover:bg-brand-700 h-12 px-6 py-3\">Invite Member</button></div>\
+<div class=\"flex items-center justify-between\"><h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Team</h1></div>\
+<form class=\"flex flex-col gap-3 sm:flex-row sm:items-end\" data-api-form data-api-action=\"/v1/scim/Users\" data-redirect=\"/settings/team\">\
+<div class=\"flex-1 space-y-2\"><label class=\"text-xs font-bold text-surface-900\" for=\"invite-email\">Email</label>\
+<input id=\"invite-email\" name=\"userName\" type=\"email\" required class=\"w-full px-4 py-3 rounded-sm border border-surface-200 focus:border-primary outline-none transition-all bg-background text-sm font-medium text-surface-950\" placeholder=\"teammate@company.com\" /></div>\
+<div class=\"flex-1 space-y-2\"><label class=\"text-xs font-bold text-surface-900\" for=\"invite-role\">Role</label>\
+<select id=\"invite-role\" name=\"role\" class=\"w-full px-4 py-3 rounded-sm border border-surface-200 focus:border-primary outline-none transition-all bg-background text-sm font-medium text-surface-950\"><option value=\"member\">Member</option><option value=\"admin\">Admin</option></select></div>\
+<button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold transition-all bg-primary text-white hover:bg-brand-700 h-12 px-6 py-3\">Invite Member</button>\
+</form>\
 {loading}{table}{empty}</div>",
         loading = render_table_loading_state("Loading team members", "api", 4),
         table = table.render_html(),
@@ -2691,7 +2775,11 @@ pub fn web_settings_billing_page() -> String {
 <h3 class=\"text-lg font-bold mb-2\">Current Plan</h3>\
 <p class=\"text-sm text-muted-foreground\">Free Tier</p>\
 <p class=\"text-3xl font-bold mt-4\">$0<span class=\"text-sm font-normal text-muted-foreground\">/month</span></p>\
-<button class=\"mt-4 inline-flex items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold transition-all bg-primary text-white hover:bg-brand-700 h-12 px-6 py-3\">Upgrade Plan</button>\
+<form class=\"mt-4\" data-api-form data-api-action=\"/v1/billing/checkout\" data-redirect=\"/settings/billing\">\
+<label class=\"block text-xs font-bold text-surface-900 mb-2\" for=\"upgrade-plan\">Plan</label>\
+<select id=\"upgrade-plan\" name=\"plan\" class=\"w-full max-w-xs px-4 py-3 rounded-sm border border-surface-200 focus:border-primary outline-none transition-all bg-background text-sm font-medium text-surface-950\"><option value=\"starter\">Starter — €25/mo</option><option value=\"pro\">Pro — €65/mo</option><option value=\"growth\">Growth — €150/mo</option><option value=\"scale\">Scale — €350/mo</option></select>\
+<button type=\"submit\" class=\"mt-3 inline-flex items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold transition-all bg-primary text-white hover:bg-brand-700 h-12 px-6 py-3\">Upgrade Plan</button>\
+</form>\
 </div>\
 <div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium\">\
 <h3 class=\"text-lg font-bold mb-4\">Payment Method</h3>\
@@ -2704,7 +2792,7 @@ pub fn web_settings_billing_page() -> String {
 <p class=\"text-xs text-surface-500\">Add a credit card or ACH to enable paid plans</p>\
 </div>\
 <div class=\"flex flex-col gap-2\">\
-<button class=\"inline-flex items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold transition-all border border-surface-300 text-surface-700 hover:bg-surface-100 h-10 px-4 py-2\">Add Payment Method</button>\
+<form data-api-form data-api-action=\"/v1/billing/portal\" data-redirect=\"/settings/billing\" class=\"inline\"><button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold transition-all border border-surface-300 text-surface-700 hover:bg-surface-100 h-10 px-4 py-2\">Add Payment Method</button></form>\
 </div>\
 </div>\
 <div class=\"mt-4 rounded-sm border border-dashed border-surface-300 p-4\" data-payment-methods-list hidden>\
@@ -2760,8 +2848,15 @@ pub fn web_settings_webhooks_page() -> String {
     };
     format!(
         "<div class=\"space-y-6\">\
-<div class=\"flex items-center justify-between\"><h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Webhooks</h1>\
-<button class=\"inline-flex items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold transition-all bg-primary text-white hover:bg-brand-700 h-12 px-6 py-3\">Add Webhook</button></div>\
+<div class=\"flex items-center justify-between\"><h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Webhooks</h1></div>\
+<form class=\"flex flex-col gap-3 sm:flex-row sm:items-end\" data-api-form data-api-action=\"/v1/webhooks\" data-redirect=\"/settings/webhooks\">\
+<div class=\"flex-1 space-y-2\"><label class=\"text-xs font-bold text-surface-900\" for=\"webhook-url\">Endpoint URL</label>\
+<input id=\"webhook-url\" name=\"url\" type=\"url\" required class=\"w-full px-4 py-3 rounded-sm border border-surface-200 focus:border-primary outline-none transition-all bg-background text-sm font-medium text-surface-950\" placeholder=\"https://example.com/hooks/apexmail\" /></div>\
+<label class=\"inline-flex items-center gap-2 text-xs font-bold text-surface-900\"><input type=\"checkbox\" name=\"events\" value=\"message.sent\" checked class=\"rounded border-surface-300\" /> Sent</label>\
+<label class=\"inline-flex items-center gap-2 text-xs font-bold text-surface-900\"><input type=\"checkbox\" name=\"events\" value=\"message.bounced\" checked class=\"rounded border-surface-300\" /> Bounced</label>\
+<label class=\"inline-flex items-center gap-2 text-xs font-bold text-surface-900\"><input type=\"checkbox\" name=\"events\" value=\"message.complained\" class=\"rounded border-surface-300\" /> Complained</label>\
+<button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold transition-all bg-primary text-white hover:bg-brand-700 h-12 px-6 py-3\">Add Webhook</button>\
+</form>\
 {loading}{table}{empty}</div>",
         loading = render_table_loading_state("Loading webhooks", "api", 4),
         table = table.render_html(),
@@ -2774,14 +2869,14 @@ pub fn web_settings_profile_page() -> String {
     format!(
         "<div class=\"max-w-2xl space-y-6\">\
 <h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Profile</h1>\
-<form class=\"space-y-6\">\
+<form class=\"space-y-6\" data-api-form data-api-action=\"/v1/account/profile\" data-redirect=\"/settings/profile\">\
 <div class=\"space-y-2\">{name_label}{name_input}</div>\
 <div class=\"space-y-2\">{email_label}{email_input}</div>\
 <div class=\"flex gap-3\">{save_button}</div>\
 </form>\
 <div class=\"border-t pt-6\">\
 <h3 class=\"text-lg font-bold text-surface-900 mb-4\">Change Password</h3>\
-<form class=\"space-y-4\">\
+<form class=\"space-y-4\" data-api-form data-api-action=\"/v1/auth/change-password\" data-redirect=\"/settings/profile\">\
 <div class=\"space-y-2\">{current_label}{current_input}</div>\
 <div class=\"space-y-2\">{new_label}{new_input}</div>\
 <div class=\"flex gap-3\">{update_button}</div>\
@@ -2806,7 +2901,7 @@ pub fn web_settings_profile_page() -> String {
             disabled: false,
             autocomplete: None,
             required: true,
-            name: None,
+            name: Some("name"),
         }
         .render_html(),
         email_label = Label {
@@ -2829,7 +2924,7 @@ pub fn web_settings_profile_page() -> String {
             disabled: true,
             autocomplete: None,
             required: true,
-            name: None,
+            name: Some("email"),
         }
         .render_html(),
         save_button = Button {
@@ -2862,7 +2957,7 @@ pub fn web_settings_profile_page() -> String {
             disabled: false,
             autocomplete: None,
             required: true,
-            name: None,
+            name: Some("current_password"),
         }
         .render_html(),
         new_label = Label {
@@ -2885,7 +2980,7 @@ pub fn web_settings_profile_page() -> String {
             disabled: false,
             autocomplete: None,
             required: true,
-            name: None,
+            name: Some("new_password"),
         }
         .render_html(),
         update_button = Button {
@@ -3013,9 +3108,11 @@ fn render_cp_collection_page(
         action_label: action.map(|(label, _)| label),
     }
     .render_html();
+    // Single overflow container: the table renders on mobile too (scrolls
+    // horizontally) instead of being swapped for a bare empty state; the
+    // empty state stays available below the table.
     let body = format!(
-        "<div class=\"hidden md:block\">{}{}</div><div class=\"md:hidden\">{}</div>",
-        loading, table_html, empty
+        "<div class=\"w-full\"><div class=\"w-full overflow-x-auto\">{loading}{table_html}</div>{empty}</div>",
     );
     format!(
         "<div class=\"space-y-8\">\
@@ -3627,7 +3724,7 @@ pub fn control_plane_settings_page() -> String {
 pub fn control_plane_security_page() -> String {
     "<div class=\"space-y-6\">\
 <h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Security Settings</h1>\
-<div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium\">\
+<div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8\">\
 <h3 class=\"text-xs font-bold uppercase tracking-widest text-surface-400 mb-6\">MFA Configuration</h3>\
 <div id=\"mfa-status\" class=\"mb-4\">\
 <p class=\"text-sm text-surface-500\">Loading MFA status…</p>\
@@ -3636,7 +3733,7 @@ pub fn control_plane_security_page() -> String {
 <p class=\"text-sm text-surface-700 mb-4\">\
 Scan the QR code below with your authenticator app (e.g. Google Authenticator, Authy, 1Password).\
 </p>\
-<div id=\"mfa-qr-container\" class=\"flex justify-center mb-6\">\
+<div id=\"mfa-qr-container\" class=\"flex flex-col items-center gap-4 mb-6\">\
 <div id=\"mfa-qr-placeholder\" \
 class=\"w-48 h-48 bg-surface-100 border-2 border-dashed border-surface-300 rounded-lg flex items-center justify-center\">\
 <svg class=\"w-12 h-12 text-surface-400\" fill=\"none\" stroke=\"currentColor\" viewBox=\"0 0 24 24\">\
@@ -3644,14 +3741,27 @@ class=\"w-48 h-48 bg-surface-100 border-2 border-dashed border-surface-300 round
 d=\"M12 4v1m6 11h2m-6 0h-2v4m0-11v3m0 0h.01M12 12h4.01M16 20h4M4 12h4m12 0h.01M5 8h2a1 1 0 001-1V5a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1zm12 0h2a1 1 0 001-1V5a1 1 0 00-1-1h-2a1 1 0 00-1 1v2a1 1 0 001 1zM5 20h2a1 1 0 001-1v-2a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1z\"/>\
 </svg>\
 </div>\
-<img id=\"mfa-qr-image\" class=\"hidden w-48 h-48 rounded-lg border border-surface-200\" alt=\"MFA QR Code\"/>\
+<canvas id=\"mfa-qr-canvas\" class=\"hidden w-48 h-48 rounded-lg border border-surface-200\" width=\"200\" height=\"200\" role=\"img\" aria-label=\"MFA QR code for your authenticator app\"></canvas>\
+<div id=\"mfa-qr-fallback\" class=\"hidden w-full max-w-md text-left\">\
+<p class=\"text-xs font-bold uppercase tracking-widest text-surface-400 mb-2\">No canvas? Enter this manually</p>\
+<p class=\"text-xs text-surface-600 mb-1\">Secret key</p>\
+<div class=\"flex items-center gap-2 mb-3\">\
+<code id=\"mfa-secret-text\" data-copy-value=\"\" class=\"flex-1 font-mono text-sm bg-surface-50 border border-surface-200 rounded px-3 py-2 break-all select-text text-surface-800\"></code>\
+<button type=\"button\" data-copy-target=\"mfa-secret-text\" class=\"rounded-md border border-surface-200 bg-white px-3 py-2 text-xs font-bold text-surface-700 hover:bg-surface-50\">Copy</button>\
+</div>\
+<p class=\"text-xs text-surface-600 mb-1\">otpauth URI (paste into apps that support it)</p>\
+<div class=\"flex items-center gap-2\">\
+<code id=\"mfa-otpauth-text\" data-copy-value=\"\" class=\"flex-1 font-mono text-xs bg-surface-50 border border-surface-200 rounded px-3 py-2 break-all select-text text-surface-800\"></code>\
+<button type=\"button\" data-copy-target=\"mfa-otpauth-text\" class=\"rounded-md border border-surface-200 bg-white px-3 py-2 text-xs font-bold text-surface-700 hover:bg-surface-50\">Copy</button>\
+</div>\
+</div>\
 </div>\
 <div id=\"mfa-verify-section\" class=\"hidden\">\
 <label for=\"mfa-code\" class=\"block text-xs font-bold uppercase tracking-widest text-surface-500 mb-2\">\
 Enter the 6-digit code from your authenticator app\
 </label>\
 <div class=\"flex gap-3\">\
-<input id=\"mfa-code\" type=\"text\" inputmode=\"numeric\" pattern=\"[0-9]{{6}}\" maxlength=\"6\"\
+<input id=\"mfa-code\" type=\"text\" inputmode=\"numeric\" pattern=\"[0-9]{6}\" maxlength=\"6\"\
 class=\"flex-1 rounded-md border border-surface-300 bg-background px-3 py-2 text-sm \
 placeholder-surface-400 focus:border-primary-500 focus:outline-none focus:ring-1 focus:ring-primary-500\"\
 placeholder=\"000000\" autocomplete=\"one-time-code\"/>\
@@ -3690,134 +3800,154 @@ hover:bg-primary-700 focus:outline-none focus:ring-2 focus:ring-primary-500 focu
 </div>\
 </div>\
 <script>\
-(function(){{\
+(function(){\
 let mfaChallengeToken = null;\
 let mfaSecret = null;\
 \
-function $(id) {{ return document.getElementById(id); }}\
+function $(id) { return document.getElementById(id); }\
 \
-async function apiFetch(path, options) {{\
-const resp = await fetch(path, {{\
-...options,\
-headers: {{\
-'Content-Type': 'application/json',\
-...(options.headers || {{}}),\
-}},\
-credentials: 'same-origin',\
-}});\
-if (!resp.ok) {{\
-const body = await resp.json().catch(() => ({{}}));\
-const msg = body.error || body.message || `Request failed (${{resp.status}})`;\
-throw new Error(msg);\
-}}\
-return resp.json();\
-}}\
-\
-async function checkMfaStatus() {{\
-try {{\
-const data = await apiFetch('/v1/auth/mfa/status', {{ method: 'GET' }});\
-if (data.mfaEnabled) {{\
-$('mfa-status').innerHTML = '<div class=\"flex items-center gap-2 text-green-700\">' +\
+// Static (constant) status blocks are safe to set via innerHTML; any\
+// server-derived message is attached with textContent below so untrusted\
+// text can never become markup.\
+const STATUS_ENABLED = '<div class=\"flex items-center gap-2 text-green-700\">' +\
 '<svg class=\"w-5 h-5\" fill=\"none\" stroke=\"currentColor\" viewBox=\"0 0 24 24\">' +\
 '<path stroke-linecap=\"round\" stroke-linejoin=\"round\" stroke-width=\"2\" d=\"M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z\"/>' +\
 '</svg>' +\
 '<span class=\"text-sm font-semibold\">MFA is enabled</span>' +\
-'</div>' +\
-'<p class=\"text-xs text-surface-500 mt-1\">Multi-factor authentication is active for your account.</p>';\
-}} else {{\
-let warning = '';\
-if (data.roleRequiresMfa) {{\
-warning = '<p class=\"text-xs text-amber-600 mt-1\">Your role requires MFA. Please set it up now.</p>';\
-}}\
-$('mfa-status').innerHTML = '<div class=\"flex items-center gap-2 text-amber-700\">' +\
+'</div><p class=\"text-xs text-surface-500 mt-1\">Multi-factor authentication is active for your account.</p>';\
+const STATUS_DISABLED = '<div class=\"flex items-center gap-2 text-amber-700\">' +\
 '<svg class=\"w-5 h-5\" fill=\"none\" stroke=\"currentColor\" viewBox=\"0 0 24 24\">' +\
 '<path stroke-linecap=\"round\" stroke-linejoin=\"round\" stroke-width=\"2\" d=\"M12 15v2m0 0v2m0-2h2m-2 0H10m9.9-4A8 8 0 1112 4a8 8 0 017.9 8z\"/>' +\
 '</svg>' +\
 '<span class=\"text-sm font-semibold\">MFA is not enabled</span>' +\
-'</div>' + warning;\
-$('mfa-start-setup-btn').classList.remove('hidden');\
-}}\
-}} catch (e) {{\
-$('mfa-status').innerHTML = \
-'<p class=\"text-xs text-red-600\">Failed to load MFA status: ' + e.message + '</p>';\
-}}\
-}}\
+'</div>';\
+const ROLE_WARNING = '<p class=\"text-xs text-amber-600 mt-1\">Your role requires MFA. Please set it up now.</p>';\
 \
-async function startMfaSetup() {{\
+function setStatus(html, dynamicMessage) {\
+const box = $('mfa-status');\
+box.innerHTML = html;\
+if (dynamicMessage) {\
+const p = document.createElement('p');\
+p.className = 'text-xs text-red-600 mt-1';\
+p.textContent = dynamicMessage;\
+box.appendChild(p);\
+}\
+}\
+\
+async function apiFetch(path, options) {\
+const resp = await fetch(path, {\
+...options,\
+headers: {\
+'Content-Type': 'application/json',\
+...(options.headers || {}),\
+},\
+credentials: 'same-origin',\
+});\
+if (!resp.ok) {\
+const body = await resp.json().catch(() => ({}));\
+const msg = body.error || body.message || 'Request failed (' + resp.status + ')';\
+throw new Error(typeof msg === 'string' ? msg : JSON.stringify(msg));\
+}\
+return resp.json();\
+}\
+\
+async function checkMfaStatus() {\
+try {\
+const data = await apiFetch('/v1/auth/mfa/status', { method: 'GET' });\
+if (data.mfaEnabled) {\
+setStatus(STATUS_ENABLED);\
+} else {\
+setStatus(data.roleRequiresMfa ? STATUS_DISABLED + ROLE_WARNING : STATUS_DISABLED);\
+$('mfa-start-setup-btn').classList.remove('hidden');\
+}\
+} catch (e) {\
+setStatus('', 'Failed to load MFA status: ' + e.message);\
+}\
+}\
+\
+async function startMfaSetup() {\
 const btn = $('mfa-start-setup-btn');\
 btn.disabled = true;\
 btn.textContent = 'Setting up…';\
-try {{\
-const data = await apiFetch('/v1/auth/mfa/setup', {{ method: 'POST' }});\
+try {\
+const data = await apiFetch('/v1/auth/mfa/setup', { method: 'POST' });\
 mfaChallengeToken = data.challengeToken;\
 mfaSecret = data.secret;\
-const qrImg = $('mfa-qr-image');\
-qrImg.src = 'https://chart.googleapis.com/chart?chs=200x200&cht=qr&chl=' + encodeURIComponent(data.otpauthUrl) + '&choe=UTF-8';\
-qrImg.classList.remove('hidden');\
+\
+// Render the QR LOCALLY (canvas via /assets/console.js). The TOTP secret\
+// must never be sent to a third-party chart/QR service.\
+const canvas = $('mfa-qr-canvas');\
+const renderer = window.ApexMailConsole && window.ApexMailConsole.qrToCanvas;\
+const drew = renderer ? renderer(canvas, data.otpauthUrl, { scale: 5 }) : false;\
+if (drew) {\
+canvas.classList.remove('hidden');\
 $('mfa-qr-placeholder').classList.add('hidden');\
+}\
+\
+// Text fallback (always populated — canvas support is not guaranteed).\
+$('mfa-secret-text').textContent = data.secret || '';\
+$('mfa-secret-text').setAttribute('data-copy-value', data.secret || '');\
+$('mfa-otpauth-text').textContent = data.otpauthUrl || '';\
+$('mfa-otpauth-text').setAttribute('data-copy-value', data.otpauthUrl || '');\
+$('mfa-qr-fallback').classList.remove('hidden');\
+\
 $('mfa-setup-panel').classList.remove('hidden');\
 $('mfa-verify-section').classList.remove('hidden');\
 btn.classList.add('hidden');\
-}} catch (e) {{\
+} catch (e) {\
 $('mfa-setup-error').textContent = e.message;\
 $('mfa-setup-error').classList.remove('hidden');\
-}} finally {{\
+} finally {\
 btn.disabled = false;\
 btn.textContent = 'Set up MFA';\
-}}\
-}}\
+}\
+}\
 \
-async function confirmMfaSetup() {{\
+async function confirmMfaSetup() {\
 const code = $('mfa-code').value.replace(/\\s/g, '');\
-if (code.length !== 6 || !/^[0-9]+$/.test(code)) {{\
+if (code.length !== 6 || !/^[0-9]+$/.test(code)) {\
 $('mfa-setup-error').textContent = 'Please enter a valid 6-digit code.';\
 $('mfa-setup-error').classList.remove('hidden');\
 return;\
-}}\
+}\
 const btn = $('mfa-verify-btn');\
 btn.disabled = true;\
 btn.textContent = 'Verifying…';\
-try {{\
-const data = await apiFetch('/v1/auth/mfa/confirm-setup', {{\
+try {\
+const data = await apiFetch('/v1/auth/mfa/confirm-setup', {\
 method: 'POST',\
-body: JSON.stringify({{ challengeToken: mfaChallengeToken, mfaCode: code }}),\
-}});\
+body: JSON.stringify({ challengeToken: mfaChallengeToken, mfaCode: code }),\
+});\
 $('mfa-setup-panel').classList.add('hidden');\
-$('mfa-status').innerHTML = \
-'<div class=\"flex items-center gap-2 text-green-700\">' +\
-'<svg class=\"w-5 h-5\" fill=\"none\" stroke=\"currentColor\" viewBox=\"0 0 24 24\">' +\
-'<path stroke-linecap=\"round\" stroke-linejoin=\"round\" stroke-width=\"2\" d=\"M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z\"/>' +\
-'</svg>' +\
-'<span class=\"text-sm font-semibold\">MFA is enabled</span>' +\
-'</div>';\
+$('mfa-status').innerHTML = STATUS_ENABLED;\
 const codesPanel = $('mfa-recovery-codes-panel');\
 const codesList = $('mfa-recovery-codes-list');\
 codesList.innerHTML = '';\
-if (data.recoveryCodes) {{\
-data.recoveryCodes.forEach(function(code) {{\
+if (data.recoveryCodes) {\
+data.recoveryCodes.forEach(function(code) {\
 const el = document.createElement('div');\
 el.className = 'font-mono text-sm bg-surface-50 border border-surface-200 rounded px-3 py-2 text-center text-surface-800';\
 el.textContent = code;\
 codesList.appendChild(el);\
-}});\
-}}\
+});\
+}\
 codesPanel.classList.remove('hidden');\
-}} catch (e) {{\
+} catch (e) {\
 $('mfa-setup-error').textContent = e.message;\
 $('mfa-setup-error').classList.remove('hidden');\
-}} finally {{\
+} finally {\
 btn.disabled = false;\
 btn.textContent = 'Verify & Enable';\
-}}\
-}}\
+}\
+}\
 \
 $('mfa-start-setup-btn').addEventListener('click', startMfaSetup);\
 $('mfa-verify-btn').addEventListener('click', confirmMfaSetup);\
-$('mfa-codes-done-btn').addEventListener('click', function() {{\
+$('mfa-codes-done-btn').addEventListener('click', function() {\
 $('mfa-recovery-codes-panel').classList.add('hidden');\
-}});\
+});\
 checkMfaStatus();\
-}})();\
+})();\
 </script>\
 </div>".to_string()
 }
@@ -3837,14 +3967,40 @@ pub fn marketing_home_page() -> String {
 }
 
 pub fn marketing_pricing_page() -> String {
-    "<section class=\"py-20 px-4\"><div class=\"max-w-7xl mx-auto\">\
+    // Mirrors apps/marketing-zola/data/pricing.json (the same catalog the
+    // Zola pricing page renders from): six plans, EUR, per-month prices.
+    // Previously this fallback showed 3 invented USD plans that contradicted
+    // the marketing site.
+    let plans: &[(&str, &str, &str, &str)] = &[
+        ("Free", "€0", "30,000 emails/month", ""),
+        ("Starter", "€25", "50,000 emails/month · €0.40 per extra 1,000", ""),
+        ("Pro", "€65", "150,000 emails/month · €0.40 per extra 1,000", "border-2 border-primary"),
+        ("Growth", "€150", "500,000 emails/month · €0.40 per extra 1,000", ""),
+        ("Scale", "€350", "2,000,000 emails/month · priority support", ""),
+        ("Enterprise", "€3,000", "5,000,000 emails/month on annual contracts", ""),
+    ];
+    let cards = plans
+        .iter()
+        .map(|(name, price, volume, accent)| {
+            let badge = if *name == "Pro" {
+                "<div class=\"absolute -top-3 left-1/2 -translate-x-1/2 bg-primary text-white text-xs font-bold px-3 py-1 rounded-sm\">Popular</div>"
+            } else {
+                ""
+            };
+            format!(
+                "<div class=\"relative rounded-sm {accent} border bg-card p-8\">{badge}<h3 class=\"text-lg font-bold\">{name}</h3><p class=\"text-3xl font-bold mt-4\">{price}<span class=\"text-sm font-normal text-surface-500\">/mo</span></p><p class=\"text-sm text-surface-500 mt-2\">{volume}</p></div>"
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("");
+    format!(
+        "<section class=\"py-20 px-4\"><div class=\"max-w-7xl mx-auto\">\
 <div class=\"text-center mb-16\"><h1 class=\"text-4xl font-bold text-surface-900\">Simple, transparent pricing</h1>\
-<p class=\"mt-4 text-lg text-surface-600\">Start free, scale as you grow</p></div>\
-<div class=\"grid md:grid-cols-3 gap-8 max-w-5xl mx-auto\">\
-<div class=\"rounded-sm border bg-card p-8\"><h3 class=\"text-lg font-bold\">Free</h3><p class=\"text-3xl font-bold mt-4\">$0<span class=\"text-sm font-normal text-surface-500\">/mo</span></p><p class=\"text-sm text-surface-500 mt-2\">30,000 emails/month</p></div>\
-<div class=\"rounded-sm border-2 border-primary bg-card p-8 relative\"><div class=\"absolute -top-3 left-1/2 -translate-x-1/2 bg-primary text-white text-xs font-bold px-3 py-1 rounded-sm\">Popular</div><h3 class=\"text-lg font-bold\">Pro</h3><p class=\"text-3xl font-bold mt-4\">$65<span class=\"text-sm font-normal text-surface-500\">/mo</span></p><p class=\"text-sm text-surface-500 mt-2\">150,000 emails/month</p></div>\
-<div class=\"rounded-sm border bg-card p-8\"><h3 class=\"text-lg font-bold\">Enterprise</h3><p class=\"text-3xl font-bold mt-4\">$3,000<span class=\"text-sm font-normal text-surface-500\">/mo</span></p><p class=\"text-sm text-surface-500 mt-2\">5,000,000 emails/month on annual contracts</p></div>\
-</div></div></section>".to_string()
+<p class=\"mt-4 text-lg text-surface-600\">Start free, scale as you grow. All prices in EUR, VAT excluded.</p></div>\
+<div class=\"grid md:grid-cols-3 gap-8 max-w-5xl mx-auto\">{cards}</div>\
+<p class=\"mt-10 text-center text-sm text-surface-500\">Dedicated IPs €30/mo on eligible plans. See the <a class=\"text-primary font-bold hover:underline\" href=\"/pricing/calculator\">pricing calculator</a> for usage-based estimates.</p>\
+</div></section>"
+    )
 }
 
 pub fn marketing_pricing_calculator_page() -> String {
@@ -4103,6 +4259,136 @@ mod tests {
         assert!(html.contains("<title>ApexMail Control Plane</title>"));
         assert!(html.contains("<body class=\"antialiased bg-background text-surface-950\">"));
         assert!(html.contains("<p>test</p>"));
+    }
+
+    /// Settings actions must be real data-api-form forms against the live
+    /// API endpoints (previously inert buttons).
+    #[test]
+    fn settings_pages_wire_actions_to_real_endpoints() {
+        let keys = web_settings_api_keys_page();
+        assert!(keys.contains("data-api-action=\"/v1/auth/api-keys\""));
+        assert!(keys.contains("name=\"name\""));
+
+        let team = web_settings_team_page();
+        assert!(team.contains("data-api-action=\"/v1/scim/Users\""));
+
+        let webhooks = web_settings_webhooks_page();
+        assert!(webhooks.contains("data-api-action=\"/v1/webhooks\""));
+        assert!(webhooks.contains("name=\"events\""));
+
+        let billing = web_settings_billing_page();
+        assert!(billing.contains("data-api-action=\"/v1/billing/checkout\""));
+        assert!(billing.contains("data-api-action=\"/v1/billing/portal\""));
+
+        let profile = web_settings_profile_page();
+        assert!(profile.contains("data-api-action=\"/v1/auth/change-password\""));
+        assert!(profile.contains("name=\"current_password\""));
+        assert!(profile.contains("name=\"new_password\""));
+        assert!(profile.contains("name=\"name\""));
+        assert!(profile.contains("name=\"email\""));
+    }
+
+    /// The fallback pricing page must mirror the marketing catalog (six
+    /// plans, EUR) — previously it invented three USD plans.
+    #[test]
+    fn fallback_pricing_matches_marketing_catalog() {
+        let html = marketing_pricing_page();
+        for expected in ["€0", "€25", "€65", "€150", "€350", "€3,000"] {
+            assert!(html.contains(expected), "missing EUR price {expected}");
+        }
+        assert!(!html.contains("$0"), "no USD prices");
+        assert!(!html.contains("$65"));
+        assert!(html.contains("Starter"));
+        assert!(html.contains("Growth"));
+        assert!(html.contains("Scale"));
+        assert!(html.contains("Enterprise"));
+    }
+
+    /// Fabricated KPIs must never present as live data.
+    #[test]
+    fn fabricated_kpis_carry_sample_data_badges() {
+        assert!(control_plane_sales_page().contains("data-sample-data"));
+        assert!(web_dashboard_page().contains("data-sample-data"));
+        assert!(control_plane_home_page().contains("data-sample-data"));
+    }
+
+    /// SSO buttons link to the real OAuth endpoints.
+    #[test]
+    fn social_buttons_link_to_sso_endpoints() {
+        let signup = web_signup_page("t");
+        assert!(signup.contains("href=\"/v1/auth/sso/google\""));
+        assert!(signup.contains("href=\"/v1/auth/sso/github\""));
+        let login = web_login_page("t");
+        assert!(login.contains("href=\"/v1/auth/sso/google\""));
+    }
+
+    /// Legal links point at the canonical marketing routes.
+    #[test]
+    fn auth_footer_links_to_canonical_legal_routes() {
+        let signup = web_signup_page("t");
+        assert!(signup.contains("href=\"/terms\""));
+        assert!(signup.contains("href=\"/privacy\""));
+        assert!(!signup.contains("/legal/"));
+    }
+
+    /// The placement create form submits through the JSON bridge.
+    #[test]
+    fn placement_create_form_uses_api_bridge() {
+        let html = web_inbox_placement_new_page();
+        assert!(html.contains("data-api-form"));
+        assert!(html.contains("data-api-action=\"/v1/inbox-placement/tests\""));
+    }
+
+    /// The external hydration script must be referenced (deferred) by both
+    /// root layouts so data-* behaviors actually run in the browser.
+    #[test]
+    fn root_layouts_reference_console_js() {
+        for html in [
+            web_root_layout("<p>test</p>"),
+            control_plane_root_layout("<p>test</p>"),
+        ] {
+            assert!(
+                html.contains("<script src=\"/assets/console.js\" defer></script>"),
+                "root layout missing the /assets/console.js script tag"
+            );
+        }
+    }
+
+    /// The MFA setup flow must never leak the TOTP secret to a third-party
+    /// QR service: the QR is rendered locally on a <canvas> via
+    /// /assets/console.js, and a copyable secret + otpauth text fallback
+    /// exists for clients without canvas.
+    #[test]
+    fn mfa_page_renders_qr_locally_with_text_fallback() {
+        let html = control_plane_security_page();
+        assert!(!html.contains("chart.googleapis.com"), "third-party QR service leaked");
+        assert!(!html.contains("googleapis"), "any googleapis reference is forbidden here");
+        assert!(html.contains("id=\"mfa-qr-canvas\""), "local canvas QR missing");
+        assert!(html.contains("ApexMailConsole"), "script must use the local QR renderer");
+        assert!(html.contains("qrToCanvas"), "qrToCanvas call missing");
+        // Text fallback with copy buttons must exist regardless of canvas.
+        assert!(html.contains("id=\"mfa-secret-text\""));
+        assert!(html.contains("id=\"mfa-otpauth-text\""));
+        assert!(html.contains("data-copy-target=\"mfa-secret-text\""));
+        assert!(html.contains("data-copy-target=\"mfa-otpauth-text\""));
+        // Server-derived messages go through textContent, never innerHTML
+        // string concatenation with dynamic values.
+        assert!(html.contains("p.textContent = dynamicMessage"));
+        assert!(
+            !html.contains("' + e.message + '"),
+            "dynamic error text must not be concatenated into innerHTML"
+        );
+    }
+
+    /// The security page string is a plain literal (not a format! string),
+    /// so the old `{{` escapes emitted broken JavaScript and a broken
+    /// `[0-9]{{6}}` pattern attribute. Both must be gone.
+    #[test]
+    fn mfa_script_has_no_format_brace_artifacts() {
+        let html = control_plane_security_page();
+        assert!(!html.contains("(function(){{"));
+        assert!(!html.contains("{{}}"));
+        assert!(html.contains("pattern=\"[0-9]{6}\""));
     }
 
     // ─── Web page parity ────────────────────────────────────

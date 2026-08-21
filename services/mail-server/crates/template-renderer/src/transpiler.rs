@@ -31,24 +31,58 @@ static IMPORT_RE: LazyLock<Regex> = LazyLock::new(|| {
 });
 
 static PLACEHOLDER_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"\{\{\s*([a-zA-Z_][a-zA-Z0-9_.]*)\s*\}\}")
+    // Keys may contain dashes (e.g. `contact.first-name`) alongside dots.
+    Regex::new(r"\{\{\s*([a-zA-Z_][a-zA-Z0-9_.-]*)\s*\}\}")
         .expect("PLACEHOLDER_RE: invalid regex pattern - this is a bug")
 });
 
-/// Matches double-quoted `href`/`src` attribute values (the serializer and
-/// templates in this crate emit double quotes).
+/// Matches `href`/`src` attribute values in ALL quoting styles —
+/// double-quoted, single-quoted, and unquoted. Sanitizing only one style let
+/// `href='javascript:…'` or `href=javascript:…` slip through untouched.
 static URL_ATTR_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"(?i)\b(href|src)\s*=\s*"([^"]*)""#)
+    Regex::new(r#"(?i)\b(href|src)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]*))"#)
         .expect("URL_ATTR_RE: invalid regex pattern - this is a bug")
 });
 
+/// `<meta http-equiv="refresh" …>` — stripped from rendered output because a
+/// prop-injected refresh URL is a redirect/open-redirect vector.
+static META_REFRESH_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"(?is)<meta\b[^>]*http-equiv\s*=\s*["']?refresh["']?[^>]*>"#)
+        .expect("META_REFRESH_RE: invalid regex pattern - this is a bug")
+});
+
+/// `<link rel="stylesheet" href="…">` — remote stylesheet hosts must be in
+/// [`ALLOWED_STYLESHEET_HOSTS`]; everything else is stripped.
+static STYLESHEET_LINK_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"(?is)<link\b[^>]*rel\s*=\s*["']?stylesheet["']?[^>]*>"#)
+        .expect("STYLESHEET_LINK_RE: invalid regex pattern - this is a bug")
+});
+
+static LINK_HREF_ATTR_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"(?is)href\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]*))"#)
+        .expect("LINK_HREF_ATTR_RE: invalid regex pattern - this is a bug")
+});
+
+/// Remote hosts permitted to serve stylesheets. Empty by default: email
+/// clients block remote CSS anyway; same-origin/relative URLs only.
+pub const ALLOWED_STYLESHEET_HOSTS: &[&str] = &[];
+
+/// Dangerous-code patterns. The former blanket `\bprocess\b` hard-fail
+/// rejected ordinary prose ("We process payments securely"); these forms are
+/// anchored to code/template-syntax contexts. The same list backs
+/// `transpile()` and `validate_source()` (both hard-fail).
 static DANGEROUS_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
     vec![
         Regex::new(r"(?i)\beval\s*\(").expect("DANGEROUS_PATTERNS[0]: invalid regex"),
         Regex::new(r"(?i)\bFunction\s*\(").expect("DANGEROUS_PATTERNS[1]: invalid regex"),
-        Regex::new(r"(?i)\bprocess\b").expect("DANGEROUS_PATTERNS[2]: invalid regex"),
-        Regex::new(r"(?i)\b__proto__\b").expect("DANGEROUS_PATTERNS[3]: invalid regex"),
-        Regex::new(r"(?i)\bconstructor\b\s*\[").expect("DANGEROUS_PATTERNS[4]: invalid regex"),
+        Regex::new(r"(?i)\{\{\s*process\s*\}\}")
+            .expect("DANGEROUS_PATTERNS[2]: invalid regex"),
+        Regex::new(r"(?i)\bprocess\s*[(.]").expect("DANGEROUS_PATTERNS[3]: invalid regex"),
+        Regex::new(r"(?i)(::|->)\s*process\b").expect("DANGEROUS_PATTERNS[4]: invalid regex"),
+        Regex::new(r#"(?i)require\s*\(\s*['"]process['"]\s*\)"#)
+            .expect("DANGEROUS_PATTERNS[5]: invalid regex"),
+        Regex::new(r"(?i)\b__proto__\b").expect("DANGEROUS_PATTERNS[6]: invalid regex"),
+        Regex::new(r"(?i)\bconstructor\b\s*\[").expect("DANGEROUS_PATTERNS[7]: invalid regex"),
     ]
 });
 
@@ -89,14 +123,19 @@ pub fn validate_source(source: &str, max_length: usize) -> ValidationResult {
         }
     }
 
-    // Check for dangerous patterns
+    // Check for dangerous patterns — hard-fail here too (same list as
+    // `transpile()`), so validation and transpilation never disagree.
     for pat in DANGEROUS_PATTERNS.iter() {
         if let Some(m) = pat.find(source) {
-            warnings.push(format!(
-                "Potentially dangerous pattern at offset {}: {}",
-                m.start(),
-                m.as_str()
-            ));
+            errors.push(ValidationError {
+                message: format!(
+                    "Potentially dangerous pattern at offset {}: {}",
+                    m.start(),
+                    m.as_str()
+                ),
+                line: find_line_number(source, m.start()),
+                column: None,
+            });
         }
     }
 
@@ -195,18 +234,57 @@ pub fn transpile(
 ///   substitution so props can never inject markup. Only props whose leaf
 ///   key ends with `_html` (explicitly-trusted pre-rendered fragments) are
 ///   substituted raw.
-/// - After substitution, every `href`/`src` attribute value is checked:
-///   only `http:`/`https:` schemes (and scheme-less relative URLs) are
-///   allowed; anything else (`javascript:`, `data:`, `vbscript:`, …) is
-///   neutralized to `#`.
+/// - After substitution, every `href`/`src` attribute value is checked in
+///   ALL quoting styles: only `http:`/`https:` schemes (and scheme-less
+///   relative URLs) are allowed; anything else is neutralized to `#`.
+/// - `<meta http-equiv=refresh>` and remote `<link rel=stylesheet>` are
+///   stripped.
+///
+/// Missing merge fields resolve to the empty string (see
+/// [`resolve_placeholders_reported`] for a configurable fallback).
 pub fn resolve_placeholders(html: &str, props: &serde_json::Value) -> String {
+    resolve_placeholders_reported(html, props, "").html
+}
+
+/// Outcome of placeholder resolution: the substituted HTML plus one warning
+/// per missing merge field.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolveOutcome {
+    pub html: String,
+    pub warnings: Vec<String>,
+}
+
+/// [`resolve_placeholders`] with a configurable missing-field fallback and a
+/// warnings list.
+pub fn resolve_placeholders_reported(
+    html: &str,
+    props: &serde_json::Value,
+    missing_fallback: &str,
+) -> ResolveOutcome {
+    let mut warnings: Vec<String> = Vec::new();
     let substituted = PLACEHOLDER_RE
         .replace_all(html, |caps: &regex::Captures| {
             let key = &caps[1];
-            resolve_prop(props, key)
+            match resolve_prop(props, key) {
+                Some(value) => value,
+                None => {
+                    if warnings
+                        .last()
+                        .is_none_or(|w| !w.contains(&format!("'{key}'")))
+                    {
+                        warnings.push(format!(
+                            "Missing merge field '{key}' replaced with fallback"
+                        ));
+                    }
+                    escape_html(missing_fallback)
+                }
+            }
         })
         .into_owned();
-    sanitize_url_attributes(&substituted)
+    ResolveOutcome {
+        html: sanitize_rendered_html(&substituted),
+        warnings,
+    }
 }
 
 /// Resolve placeholders WITHOUT HTML escaping or URL sanitization.
@@ -214,12 +292,39 @@ pub fn resolve_placeholders(html: &str, props: &serde_json::Value) -> String {
 /// Only for non-HTML contexts (e.g. the plain-text subject line) where
 /// escaping would corrupt the output.
 pub fn resolve_placeholders_plain(text: &str, props: &serde_json::Value) -> String {
-    PLACEHOLDER_RE
+    resolve_placeholders_plain_reported(text, props, "").html
+}
+
+/// Plain-text variant of [`resolve_placeholders_reported`].
+pub fn resolve_placeholders_plain_reported(
+    text: &str,
+    props: &serde_json::Value,
+    missing_fallback: &str,
+) -> ResolveOutcome {
+    let mut warnings: Vec<String> = Vec::new();
+    let html = PLACEHOLDER_RE
         .replace_all(text, |caps: &regex::Captures| {
             let key = &caps[1];
-            resolve_prop_raw(props, key)
+            match resolve_prop_raw(props, key) {
+                Some(value) => value,
+                None => {
+                    if warnings
+                        .last()
+                        .is_none_or(|w| !w.contains(&format!("'{key}'")))
+                    {
+                        warnings.push(format!(
+                            "Missing merge field '{key}' replaced with fallback"
+                        ));
+                    }
+                    missing_fallback.to_string()
+                }
+            }
         })
-        .into_owned()
+        .into_owned();
+    ResolveOutcome {
+        html,
+        warnings,
+    }
 }
 
 // ─── Internal helpers ──────────────────────────────────────────
@@ -249,52 +354,124 @@ fn is_trusted_html_path(path: &str) -> bool {
 }
 
 /// Resolve a prop to its raw string value (no escaping).
-fn resolve_prop_raw(props: &serde_json::Value, path: &str) -> String {
+/// Returns `None` when the path is missing so callers apply their fallback
+/// policy instead of shipping the literal `{{ path }}` text.
+fn resolve_prop_raw(props: &serde_json::Value, path: &str) -> Option<String> {
     let parts: Vec<&str> = path.split('.').collect();
     let mut current = props;
     for part in parts {
         match current.get(part) {
             Some(v) => current = v,
-            None => return format!("{{{{ {} }}}}", path), // keep original placeholder
+            None => return None,
         }
     }
     match current {
-        serde_json::Value::String(s) => s.clone(),
-        serde_json::Value::Null => String::new(),
-        other => other.to_string(),
+        serde_json::Value::String(s) => Some(s.clone()),
+        serde_json::Value::Null => Some(String::new()),
+        other => Some(other.to_string()),
     }
 }
 
 /// Resolve a prop for interpolation into HTML: escaped unless trusted.
-fn resolve_prop(props: &serde_json::Value, path: &str) -> String {
-    let raw = resolve_prop_raw(props, path);
-    if is_trusted_html_path(path) {
-        raw
-    } else {
-        escape_html(&raw)
-    }
+fn resolve_prop(props: &serde_json::Value, path: &str) -> Option<String> {
+    resolve_prop_raw(props, path).map(|raw| {
+        if is_trusted_html_path(path) {
+            raw
+        } else {
+            escape_html(&raw)
+        }
+    })
 }
 
-/// Neutralize dangerous URL schemes in href/src attributes
-/// (applied post-substitution so prop-injected URLs are covered too).
+/// Neutralize dangerous URL schemes in href/src attributes and strip unsafe
+/// `meta`/`link` directives (applied post-substitution so prop-injected
+/// URLs are covered too).
+fn sanitize_rendered_html(html: &str) -> String {
+    let sanitized_urls = sanitize_url_attributes(html);
+    strip_unsafe_directives(&sanitized_urls)
+}
+
 fn sanitize_url_attributes(html: &str) -> String {
     URL_ATTR_RE
         .replace_all(html, |caps: &regex::Captures| {
+            let whole = &caps[0];
             let attr = &caps[1];
-            let value = &caps[2];
+            let value = caps
+                .get(2)
+                .or_else(|| caps.get(3))
+                .or_else(|| caps.get(4))
+                .map(|m| m.as_str())
+                .unwrap_or("");
             let sanitized = sanitize_url(value);
             if sanitized == value {
-                caps[0].to_string()
+                whole.to_string()
             } else {
+                // Always re-emit with double quotes so the output stays
+                // unambiguous.
                 format!("{attr}=\"{sanitized}\"")
             }
         })
         .into_owned()
 }
 
+/// Strip `<meta http-equiv=refresh>` (open-redirect vector) and
+/// `<link rel=stylesheet>` whose host is not in [`ALLOWED_STYLESHEET_HOSTS`].
+fn strip_unsafe_directives(html: &str) -> String {
+    let without_refresh = META_REFRESH_RE.replace_all(html, "").into_owned();
+    if !STYLESHEET_LINK_RE.is_match(&without_refresh) {
+        return without_refresh;
+    }
+    STYLESHEET_LINK_RE
+        .replace_all(&without_refresh, |caps: &regex::Captures| {
+            let tag = caps.get(0).map(|m| m.as_str()).unwrap_or_default();
+            let href = LINK_HREF_ATTR_RE
+                .captures(tag)
+                .and_then(|c| {
+                    c.get(1)
+                        .or_else(|| c.get(2))
+                        .or_else(|| c.get(3))
+                        .map(|m| m.as_str().to_string())
+                })
+                .unwrap_or_default();
+            if stylesheet_href_allowed(&href) {
+                tag.to_string()
+            } else {
+                String::new()
+            }
+        })
+        .into_owned()
+}
+
+/// Relative or same-origin stylesheet URLs pass; absolute URLs must have an
+/// allowlisted host.
+fn stylesheet_href_allowed(href: &str) -> bool {
+    let trimmed = href.trim();
+    if trimmed.starts_with("//") {
+        return false;
+    }
+    let Some(rest) = trimmed
+        .strip_prefix("https://")
+        .or_else(|| trimmed.strip_prefix("http://"))
+    else {
+        return true;
+    };
+    let host = rest.split(['/', '?', '#']).next().unwrap_or("").to_ascii_lowercase();
+    ALLOWED_STYLESHEET_HOSTS.iter().any(|allowed| host == *allowed)
+}
+
 /// Allow only http/https schemes (or scheme-less relative URLs).
-fn sanitize_url(value: &str) -> &str {
-    let trimmed = value.trim();
+///
+/// Browsers ignore ASCII control characters and tabs/newlines/CRs anywhere
+/// in a URL (`java\tscript:` parses as `javascript:`), and HTML entities can
+/// encode those same characters (`jav&#x09;ascript:`), so both are decoded /
+/// stripped before the scheme check.
+fn sanitize_url(value: &str) -> String {
+    let decoded = decode_url_control_entities(value);
+    let stripped: String = decoded
+        .chars()
+        .filter(|c| !matches!(c, '\t' | '\n' | '\r' | '\x00'..='\x20' | '\x7f'))
+        .collect();
+    let trimmed = stripped.trim().to_string();
     if let Some(colon) = trimmed.find(':') {
         let scheme = &trimmed[..colon];
         let looks_like_scheme = scheme
@@ -311,11 +488,45 @@ fn sanitize_url(value: &str) -> &str {
                     url = %trimmed,
                     "Rejected href/src with disallowed scheme; neutralized to '#'"
                 );
-                return "#";
+                return "#".to_string();
             }
         }
     }
     trimmed
+}
+
+/// Decode numeric HTML entities that denote whitespace/control characters
+/// (`&#x09;`, `&#9;`, `&#x0A;`, …) so the scheme check sees what the browser
+/// will see after entity decoding.
+fn decode_url_control_entities(value: &str) -> String {
+    static CONTROL_ENTITY_RE: LazyLock<Regex> = LazyLock::new(|| {
+        // Numeric references may omit the trailing semicolon (browsers still
+        // decode them, with a parse error); named ones require it.
+        Regex::new(r"(?i)&#(x[0-9a-fA-F]+|[0-9]+);?|&(Tab|NewLine|CR);")
+            .expect("CONTROL_ENTITY_RE: invalid regex")
+    });
+    CONTROL_ENTITY_RE
+        .replace_all(value, |caps: &regex::Captures| {
+            let code = if let Some(named) = caps.get(2).map(|m| m.as_str()) {
+                match named.to_ascii_lowercase().as_str() {
+                    "tab" => Some(0x09),
+                    "newline" => Some(0x0a),
+                    _ => Some(0x0d),
+                }
+            } else {
+                let body = &caps[1];
+                if let Some(hex) = body.strip_prefix('x').or_else(|| body.strip_prefix('X')) {
+                    u32::from_str_radix(hex, 16).ok()
+                } else {
+                    body.parse::<u32>().ok()
+                }
+            };
+            match code.and_then(char::from_u32) {
+                Some(c) if (c as u32) <= 0x20 || c as u32 == 0x7f => c.to_string(),
+                _ => caps[0].to_string(),
+            }
+        })
+        .into_owned()
 }
 
 /// Validate every node in the AST against the element and attribute allowlists.
@@ -585,11 +796,183 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_missing_prop_keeps_placeholder() {
+    fn test_resolve_missing_prop_uses_empty_fallback_and_warns() {
+        // Updated from the previous contract (missing key → literal
+        // "{{ missing }}" shipped to recipients).
         let html = "Hello {{ missing }}";
         let props = serde_json::json!({});
-        let result = resolve_placeholders(html, &props);
-        assert_eq!(result, "Hello {{ missing }}");
+        let outcome = resolve_placeholders_reported(html, &props, "");
+        assert_eq!(outcome.html, "Hello ");
+        assert_eq!(outcome.warnings, vec!["Missing merge field 'missing' replaced with fallback"]);
+    }
+
+    #[test]
+    fn test_resolve_missing_prop_configurable_fallback() {
+        let props = serde_json::json!({});
+        let outcome = resolve_placeholders_reported("Hi {{ user.name }}", &props, "there");
+        assert_eq!(outcome.html, "Hi there");
+        assert_eq!(outcome.warnings.len(), 1);
+        assert!(outcome.warnings[0].contains("user.name"));
+
+        let plain = resolve_placeholders_plain_reported("Hey {{ nick }}", &props, "friend");
+        assert_eq!(plain.html, "Hey friend");
+        assert_eq!(plain.warnings.len(), 1);
+    }
+
+    #[test]
+    fn test_dashed_merge_field_keys_resolve() {
+        let html = "<p>{{ contact.first-name }}</p>";
+        let props = serde_json::json!({"contact": {"first-name": "Ada"}});
+        assert_eq!(resolve_placeholders(html, &props), "<p>Ada</p>");
+    }
+
+    #[test]
+    fn test_prose_word_process_is_allowed() {
+        let source = "<p>We process payments securely.</p>";
+        assert!(validate_source(source, 4096).valid);
+        let outcome = resolve_placeholders_reported(source, &serde_json::json!({}), "");
+        assert_eq!(outcome.html, source);
+    }
+
+    #[test]
+    fn test_template_syntax_process_still_rejected() {
+        for source in [
+            "<p>{{ process }}</p>",
+            "<p>{{process}}</p>",
+            "<div>process()</div>",
+            "<div>process.exit(1)</div>",
+            "<div>Foo::process()</div>",
+            "<div>foo->process()</div>",
+            "<div>require('process')</div>",
+        ] {
+            assert!(
+                validate_source(source, 4096)
+                    .errors
+                    .iter()
+                    .any(|e| e.message.contains("dangerous pattern")),
+                "validate_source should hard-fail on {source}"
+            );
+            // `require('process')` trips the import allowlist first
+            // (ForbiddenModule); the rest are InvalidSyntax.
+            assert!(
+                transpile(source, 4096).is_err(),
+                "transpile should hard-fail on {source}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_and_transpile_agree_on_dangerous_patterns() {
+        let sources = [
+            "<p>eval('x')</p>",
+            "<p>Function('x')</p>",
+            "<p>{{ process }}</p>",
+            "<p>ok</p>",
+            "<p>processing payments is our business</p>",
+            "<p>__proto__</p>",
+        ];
+        for source in sources {
+            let valid = validate_source(source, 4096).valid;
+            let transpiles = transpile(source, 4096).is_ok();
+            assert_eq!(
+                valid, transpiles,
+                "validate_source({source}) = {valid} but transpile = {transpiles}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_javascript_url_single_quoted_rejected() {
+        let html = r#"<a href='javascript:alert(1)'>x</a>"#;
+        let result = resolve_placeholders(html, &serde_json::json!({}));
+        assert!(!result.contains("javascript"), "{result}");
+        assert!(result.contains("<a href=\"#\">x</a>"), "{result}");
+    }
+
+    #[test]
+    fn test_javascript_url_unquoted_rejected() {
+        let html = r#"<a href=javascript:alert(1)>x</a>"#;
+        let result = resolve_placeholders(html, &serde_json::json!({}));
+        assert!(!result.contains("javascript"), "{result}");
+        assert!(result.contains("<a href=\"#\">x</a>"), "{result}");
+    }
+
+    #[test]
+    fn test_vbscript_data_schemes_in_all_quotes_rejected() {
+        for html in [
+            r#"<a href="vbscript:msgbox(1)">x</a>"#,
+            r#"<a href='vbscript:msgbox(1)'>x</a>"#,
+            r#"<a href=vbscript:msgbox(1)>x</a>"#,
+            r#"<img src="data:text/html,<script>alert(1)</script>">"#,
+            r#"<img src='data:text/html,x'>"#,
+        ] {
+            let result = resolve_placeholders(html, &serde_json::json!({}));
+            let lower = result.to_ascii_lowercase();
+            assert!(
+                !lower.contains("javascript:")
+                    && !lower.contains("vbscript:")
+                    && !result.contains("data:text/html"),
+                "{html} was not neutralized: {result}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_entity_encoded_control_chars_in_scheme_rejected() {
+        for html in [
+            r#"<a href="jav&#x09;ascript:alert(1)">x</a>"#,
+            r#"<a href="jav&#9;ascript:alert(1)">x</a>"#,
+            r#"<a href="jav&#x09ascript:alert(1)">x</a>"#,
+            r#"<a href="jav&Tab;ascript:alert(1)">x</a>"#,
+            r#"<a href="&#x0A;javascript:alert(1)">x</a>"#,
+            r#"<a href="  javascript:alert(1)">x</a>"#,
+        ] {
+            let result = resolve_placeholders(html, &serde_json::json!({}));
+            assert!(
+                !result.to_ascii_lowercase().replace("&#x09;", "").contains("javascript:"),
+                "{html} bypassed the scheme check: {result}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_https_url_passes_in_all_quoting_styles() {
+        for html in [
+            r#"<a href="https://ok.example/x">x</a>"#,
+            r#"<a href='https://ok.example/x'>x</a>"#,
+            r#"<a href=https://ok.example/x>x</a>"#,
+        ] {
+            let result = resolve_placeholders(html, &serde_json::json!({}));
+            assert!(result.contains("https://ok.example/x"), "{html} -> {result}");
+        }
+    }
+
+    #[test]
+    fn test_meta_refresh_stripped() {
+        let html = r#"<div><meta http-equiv="refresh" content="0;url=https://evil.example"></div>"#;
+        let result = resolve_placeholders(html, &serde_json::json!({}));
+        assert!(!result.to_ascii_lowercase().contains("refresh"), "{result}");
+        assert!(!result.contains("evil.example"), "{result}");
+        assert!(result.contains("<div></div>"), "{result}");
+    }
+
+    #[test]
+    fn test_remote_stylesheet_stripped_but_relative_kept() {
+        let remote = r#"<head><link rel="stylesheet" href="https://evil.example/x.css"></head>"#;
+        let result = resolve_placeholders(remote, &serde_json::json!({}));
+        assert!(!result.contains("evil.example"), "{result}");
+
+        let proto_relative = r#"<head><link rel="stylesheet" href="//evil.example/x.css"></head>"#;
+        assert!(!resolve_placeholders(proto_relative, &serde_json::json!({})).contains("evil"));
+
+        let relative = r#"<head><link rel="stylesheet" href="/css/x.css"></head>"#;
+        assert!(resolve_placeholders(relative, &serde_json::json!({})).contains("/css/x.css"));
+
+        let icon = r#"<head><link rel="icon" href="https://cdn.example/icon.svg"></head>"#;
+        assert!(
+            resolve_placeholders(icon, &serde_json::json!({})).contains("cdn.example"),
+            "icon link should survive"
+        );
     }
 
     #[test]

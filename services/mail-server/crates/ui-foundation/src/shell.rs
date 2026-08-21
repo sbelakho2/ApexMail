@@ -159,21 +159,46 @@ pub fn shell_source_catalog() -> [(&'static str, &'static str); 7] {
     ]
 }
 
+/// Session identity rendered in the shell header. `None` falls back to a
+/// neutral plan label and omits the identity block; callers with an
+/// authenticated session pass the real operator identity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UserContext<'a> {
+    pub display_name: &'a str,
+    pub email: &'a str,
+    pub plan_label: &'a str,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ShellHeader<'a> {
     pub search_query: &'a str,
     pub unread_count: usize,
     pub avatar_fallback: &'a str,
     pub mobile_menu_open: bool,
+    pub user_context: Option<UserContext<'a>>,
 }
 
 impl<'a> ShellHeader<'a> {
     pub fn render_html(&self) -> String {
         let theme_icon = shell_icon("moon", "h-4 w-4");
         let safe_avatar = html_escape(self.avatar_fallback);
+        let user = self.user_context.as_ref();
+        let display_name = html_escape(user.map_or("ApexMail User", |u| u.display_name));
+        let email = html_escape(user.map_or("", |u| u.email));
+        let plan_label = html_escape(user.map_or("Free Plan — 30K / mo", |u| u.plan_label));
+        let identity_block = if user.is_some() {
+            format!(
+                "<div class=\"text-right hidden sm:block\">\
+                    <p class=\"text-xs font-semibold text-surface-950\">{display_name}</p>\
+                    <p class=\"text-[10px] font-medium text-surface-500\">{email}</p>\
+                </div>"
+            )
+        } else {
+            String::new()
+        };
 
         format!(
-            "<header class=\"apex-console-header sticky top-0 z-20 flex h-16 items-center justify-between border-b border-surface-200/60 bg-white px-8\">\
+            "<header class=\"apex-console-header sticky top-0 z-20 flex h-16 items-center justify-between border-b border-surface-200/60 bg-card px-8\">\
                 <div class=\"flex items-center gap-4\">\
                     <button type=\"button\" class=\"md:hidden inline-flex h-10 w-10 items-center justify-center rounded-lg text-surface-500 hover:bg-surface-50 hover:text-surface-950 transition-colors\" aria-label=\"{menu_label} navigation menu\" aria-expanded=\"{expanded}\" aria-controls=\"mobile-sidebar\" data-mobile-menu-breakpoint=\"md\" data-shortcut=\"mod+b\">{menu_icon}</button>\
                     <div class=\"relative hidden md:block\">\
@@ -185,17 +210,14 @@ impl<'a> ShellHeader<'a> {
                     </div>\
                 </div>\
                 <div class=\"flex items-center gap-4\">\
-                    <div class=\"flex items-center gap-1 pr-4 border-r border-surface-100\">\
-                        <span class=\"text-[10px] font-semibold tracking-wide text-surface-400\">Free Plan — 30K / mo</span>\
+                    <div class=\"flex items-center gap-1 pr-4 border-r border-surface-100\" data-plan-label>\
+                        <span class=\"text-[10px] font-semibold tracking-wide text-surface-400\">{plan_label}</span>\
                     </div>\
                     <button type=\"button\" aria-label=\"Toggle dark mode\" data-theme-toggle=\"true\" class=\"inline-flex h-9 w-9 items-center justify-center rounded-lg text-surface-400 hover:bg-surface-50 hover:text-surface-950 transition-colors\">\
                         {theme_icon}\
                     </button>\
                     <div class=\"flex items-center gap-3 pl-2\">\
-                        <div class=\"text-right hidden sm:block\">\
-                            <p class=\"text-xs font-semibold text-surface-950\">Engineering</p>\
-                            <p class=\"text-[10px] font-medium text-surface-500\">admin@apexmail.ee</p>\
-                        </div>\
+                        {identity_block}\
                         <div class=\"apex-avatar relative flex shrink-0 h-9 w-9 rounded-full bg-primary/10 border border-primary/20 items-center justify-center\" role=\"button\" aria-label=\"User menu\" tabindex=\"0\">\
                             <span class=\"text-primary font-semibold text-xs tracking-tighter\">{avatar}</span>\
                         </div>\
@@ -207,6 +229,8 @@ impl<'a> ShellHeader<'a> {
             expanded = if self.mobile_menu_open { "true" } else { "false" },
             theme_icon = theme_icon,
             avatar = safe_avatar,
+            plan_label = plan_label,
+            identity_block = identity_block,
         )
     }
 }
@@ -235,7 +259,7 @@ impl<'a> ImpersonationBanner<'a> {
         let safe_operator = html_escape(self.operator_name);
         let safe_time = html_escape(self.time_remaining);
         format!(
-            "<div class=\"fixed top-0 left-0 right-0 z-[100] bg-primary text-white border-b border-brand-700\" role=\"alert\" aria-live=\"polite\"><div class=\"max-w-7xl mx-auto px-6 py-2\"><div class=\"flex items-center justify-between\"><div class=\"flex items-center gap-6\"><div class=\"flex items-center gap-2 bg-white/10 px-2 py-0.5 rounded-full\"><span class=\"text-[10px] font-semibold uppercase tracking-[0.1em]\">Impersonation Active</span></div><div class=\"flex items-center gap-2 text-[11px] font-semibold tracking-tight\"><span class=\"opacity-70\">Tenant:</span><span class=\"bg-white/10 px-1.5 py-0.5 rounded-md\">{}</span></div><div class=\"hidden md:flex items-center gap-2 text-[11px] font-semibold tracking-tight\"><span class=\"opacity-70\">Operator:</span><span>{}</span></div></div><div class=\"flex items-center gap-6\">{}<div class=\"flex items-center gap-2 text-[11px] font-semibold tracking-tight\"><span class=\"opacity-70\">Expires:</span><span class=\"font-mono bg-white/20 px-1.5 py-0.5 rounded-md\">{}</span></div><button class=\"px-3 py-1 bg-white text-primary rounded-md text-[11px] font-semibold hover:bg-surface-50 transition-colors\">{}</button></div></div></div></div>",
+            "<div class=\"fixed top-0 left-0 right-0 z-[100] bg-primary text-white border-b border-brand-700\" role=\"alert\" aria-live=\"polite\"><div class=\"max-w-7xl mx-auto px-6 py-2\"><div class=\"flex items-center justify-between\"><div class=\"flex items-center gap-6\"><div class=\"flex items-center gap-2 bg-white/10 px-2 py-0.5 rounded-full\"><span class=\"text-[10px] font-semibold uppercase tracking-[0.1em]\">Impersonation Active</span></div><div class=\"flex items-center gap-2 text-[11px] font-semibold tracking-tight\"><span class=\"opacity-70\">Tenant:</span><span class=\"bg-white/10 px-1.5 py-0.5 rounded-md\">{}</span></div><div class=\"hidden md:flex items-center gap-2 text-[11px] font-semibold tracking-tight\"><span class=\"opacity-70\">Operator:</span><span>{}</span></div></div><div class=\"flex items-center gap-6\">{}<div class=\"flex items-center gap-2 text-[11px] font-semibold tracking-tight\"><span class=\"opacity-70\">Expires:</span><span class=\"font-mono bg-white/20 px-1.5 py-0.5 rounded-md\">{}</span></div><form method=\"POST\" action=\"/v1/auth/impersonate/end\" data-api-form data-redirect=\"/cp\" class=\"inline\"><button type=\"submit\" class=\"px-3 py-1 bg-white text-primary rounded-md text-[11px] font-semibold hover:bg-surface-50 transition-colors\">{}</button></form></div></div></div></div>",
             safe_tenant,
             safe_operator,
             error,
@@ -310,7 +334,7 @@ impl<'a> WebDashboardShell<'a> {
         let sidebar_content = render_web_sidebar(self.current_path);
         let mobile_script = mobile_menu_script();
         let mobile_sidebar = format!(
-            "<div id=\"mobile-sidebar\" role=\"navigation\" aria-label=\"Mobile navigation\" data-mobile-menu-breakpoint=\"md\" data-close-on-escape=\"true\" tabindex=\"-1\" class=\"fixed inset-y-0 left-0 z-50 w-[min(20rem,calc(100vw-2rem))] md:hidden transition-transform duration-300{mobile_sidebar_translate}\"><aside class=\"h-full bg-white\">{sidebar_content}</aside></div>"
+            "<div id=\"mobile-sidebar\" role=\"navigation\" aria-label=\"Mobile navigation\" data-mobile-menu-breakpoint=\"md\" data-close-on-escape=\"true\" tabindex=\"-1\" class=\"fixed inset-y-0 left-0 z-50 w-[min(20rem,calc(100vw-2rem))] md:hidden transition-transform duration-300{mobile_sidebar_translate}\"><aside class=\"h-full bg-card\">{sidebar_content}</aside></div>"
         );
 
         format!(
@@ -390,11 +414,11 @@ impl<'a> ControlPlaneShell<'a> {
                 {sidebar_content}\
             </aside>\
             <div id=\"control-plane-mobile-sidebar\" role=\"navigation\" aria-label=\"Control plane mobile navigation\" data-mobile-menu-breakpoint=\"md\" data-close-on-escape=\"true\" tabindex=\"-1\" class=\"md:hidden fixed left-0 top-0 h-screen z-50 transition-transform duration-300 -translate-x-full\">\
-                <aside class=\"h-full w-[min(20rem,calc(100vw-2rem))] bg-white\">{sidebar_content}</aside>\
+                <aside class=\"h-full w-[min(20rem,calc(100vw-2rem))] bg-card\">{sidebar_content}</aside>\
             </div>\
             <div class=\"flex-1 flex flex-col min-h-screen ml-0 md:ml-64\">\
                 {banner_markup}\
-                <header class=\"h-16 border-b border-surface-200/60 bg-white flex items-center justify-between px-8 sticky top-0 z-20\">\
+                <header class=\"h-16 border-b border-surface-200/60 bg-card flex items-center justify-between px-8 sticky top-0 z-20\">\
                     <div class=\"flex items-center gap-4\">\
                         <button type=\"button\" class=\"md:hidden inline-flex h-10 w-10 items-center justify-center rounded-lg text-surface-500 hover:bg-surface-50 hover:text-surface-950 transition-colors\" aria-label=\"{menu_label} navigation menu\" aria-expanded=\"{expanded}\" aria-controls=\"control-plane-mobile-sidebar\" data-mobile-menu-breakpoint=\"md\">{menu_icon}</button>\
                         <div class=\"flex items-baseline gap-3 min-w-0\">\
@@ -575,7 +599,7 @@ fn render_web_sidebar(current_path: &str) -> String {
     );
 
     format!(
-        "<div class=\"apex-console-sidebar flex flex-col h-full bg-white text-surface-900 border-r border-surface-200/60 transition-all w-64\">\
+        "<div class=\"apex-console-sidebar flex flex-col h-full bg-card text-surface-900 border-r border-surface-200/60 transition-all w-64\">\
          <div class=\"p-6 mb-4\"><div class=\"flex items-center gap-2\">\
          <span class=\"apex-sidebar-brand text-xl font-bold tracking-tighter transition-all hover:opacity-80\"><span class=\"text-primary\">Apex</span><span class=\"text-surface-950\">Mail</span></span></div></div>\
          <nav class=\"flex-1 overflow-y-auto\" data-sidebar=\"primary\" aria-label=\"Primary sidebar navigation\">{}</nav>\
@@ -602,7 +626,7 @@ fn render_cp_sidebar(current_path: &str) -> String {
     );
 
     format!(
-        "<div class=\"apex-cp-sidebar flex flex-col h-full bg-white text-surface-900 border-r border-surface-200/60 w-64\">\
+        "<div class=\"apex-cp-sidebar flex flex-col h-full bg-card text-surface-900 border-r border-surface-200/60 w-64\">\
          <div class=\"p-6 mb-4\"><div class=\"flex flex-col gap-0.5\">\
          <span class=\"apex-sidebar-brand text-xl font-bold tracking-tighter\"><span class=\"text-primary\">Apex</span><span class=\"text-surface-950\">Mail</span></span>\
          <span class=\"text-[11px] font-semibold uppercase tracking-[0.1em] text-surface-400\">Operations</span></div></div>\
@@ -646,11 +670,67 @@ mod tests {
     }
 
     #[test]
+    fn header_renders_session_user_context_when_provided() {
+        let header = ShellHeader {
+            search_query: "",
+            unread_count: 0,
+            avatar_fallback: "AM",
+            mobile_menu_open: false,
+            user_context: Some(UserContext {
+                display_name: "Ops Team",
+                email: "ops@tenant.example",
+                plan_label: "Scale Plan",
+            }),
+        }
+        .render_html();
+        assert!(header.contains("Ops Team"));
+        assert!(header.contains("ops@tenant.example"));
+        assert!(header.contains("Scale Plan"));
+        assert!(!header.contains("Engineering"));
+        assert!(!header.contains("admin@apexmail.ee"));
+
+        // Without a session the neutral plan label renders and no identity
+        // block is emitted.
+        let anon = ShellHeader {
+            user_context: None,
+            ..ShellHeader {
+                search_query: "",
+                unread_count: 0,
+                avatar_fallback: "AM",
+                mobile_menu_open: false,
+                user_context: None,
+            }
+        }
+        .render_html();
+        assert!(anon.contains("Free Plan"));
+        assert!(!anon.contains("data-user-email"));
+    }
+
+    /// The Terminate button must POST to the real impersonation end
+    /// endpoint (previously a no-op button).
+    #[test]
+    fn impersonation_banner_terminate_posts_to_end_endpoint() {
+        let banner = ImpersonationBanner {
+            tenant_id: "t_1",
+            operator_name: "Op",
+            time_remaining: "00:45",
+            end_session_error: None,
+            ending_session: false,
+        }
+        .render_html();
+        assert!(banner.contains("action=\"/v1/auth/impersonate/end\""));
+        assert!(banner.contains("method=\"POST\""));
+        assert!(banner.contains("data-api-form"));
+        assert!(banner.contains("Terminate"));
+    }
+
+    #[test]
     fn renders_header_banner_and_toast_surface() {
         let header = ShellHeader {
             search_query: "campaigns",
             unread_count: 3,
             avatar_fallback: "AM",
+            user_context: None,
             mobile_menu_open: false,
         }
         .render_html();
@@ -694,6 +774,7 @@ mod tests {
                 search_query: "reports",
                 unread_count: 1,
                 avatar_fallback: "AR",
+                user_context: None,
                 mobile_menu_open: true,
             },
             impersonation_banner: Some(ImpersonationBanner {
@@ -767,6 +848,7 @@ mod tests {
             search_query: xss_payload,
             unread_count: 0,
             avatar_fallback: "AM",
+            user_context: None,
             mobile_menu_open: false,
         }
         .render_html();
@@ -784,6 +866,7 @@ mod tests {
             unread_count: 0,
             avatar_fallback: xss_payload,
             mobile_menu_open: false,
+            user_context: None,
         }
         .render_html();
         assert!(
@@ -932,6 +1015,7 @@ mod tests {
                 search_query: "",
                 unread_count: 0,
                 avatar_fallback: "AM",
+                user_context: None,
                 mobile_menu_open: false,
             },
             impersonation_banner: None,
@@ -954,6 +1038,7 @@ mod tests {
                 search_query: "",
                 unread_count: 0,
                 avatar_fallback: "AM",
+                user_context: None,
                 mobile_menu_open: true,
             },
             impersonation_banner: None,
@@ -977,6 +1062,7 @@ mod tests {
                 search_query: "",
                 unread_count: 0,
                 avatar_fallback: "AM",
+                user_context: None,
                 mobile_menu_open: false,
             },
             impersonation_banner: None,

@@ -1,5 +1,50 @@
 use crate::icons::{render_icon, IconRenderOptions};
 
+/// Escape HTML special characters in attribute/text interpolation.
+fn html_escape(text: &str) -> String {
+    let mut escaped = String::with_capacity(text.len());
+    for c in text.chars() {
+        match c {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            '"' => escaped.push_str("&quot;"),
+            '\'' => escaped.push_str("&#x27;"),
+            _ => escaped.push(c),
+        }
+    }
+    escaped
+}
+
+/// Deterministic per-title dialog id: renders must be byte-identical
+/// between calls (migration determinism contract), so a global counter is
+/// not usable. Two dialogs on one page share an id only if their titles are
+/// identical — titles are page-distinct ("Delete campaign?" vs "Delete
+/// list?"), and a same-title pair is still addressed via distinct wrapper
+/// ids from the page markup.
+fn next_dialog_id() -> String {
+    "apex-dialog".to_string()
+}
+
+fn dialog_id_for(title: &str) -> String {
+    let slug: String = title
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let trimmed = slug.trim_matches('-').to_string();
+    if trimmed.is_empty() {
+        "apex-dialog".to_string()
+    } else {
+        format!("apex-dialog-{trimmed}")
+    }
+}
+
 fn primitive_icon(name: &str, class_name: &str) -> String {
     render_icon(
         name,
@@ -494,8 +539,8 @@ impl<'a> Select<'a> {
                     };
                     let disabled = if option.disabled { " data-disabled=\"true\"" } else { "" };
                     format!(
-                        "<div id=\"select-option-{}\" class=\"relative flex w-full cursor-default select-none items-center rounded-md py-3 pl-8 pr-2 text-sm outline-none hover:bg-surface-50 focus:bg-surface-100 focus:text-surface-900 data-[disabled]:pointer-events-none data-[disabled]:opacity-50 min-h-[44px]\" role=\"option\" aria-selected=\"{}\"{}>{}<span>{}</span></div>",
-                        i, option.selected,
+                        "<div id=\"select-option-{}\" data-value=\"{}\" class=\"relative flex w-full cursor-default select-none items-center rounded-md py-3 pl-8 pr-2 text-sm outline-none hover:bg-surface-50 focus:bg-surface-100 focus:text-surface-900 data-[disabled]:pointer-events-none data-[disabled]:opacity-50 min-h-[44px]\" role=\"option\" aria-selected=\"{}\"{}>{}<span>{}</span></div>",
+                        i, option.value, option.selected,
                         disabled,
                         selected,
                         option.label,
@@ -504,11 +549,39 @@ impl<'a> Select<'a> {
                 .collect::<Vec<_>>()
                 .join("");
             format!(
-                "<div id=\"{}\" class=\"relative z-50 max-h-106 min-w-[8rem] overflow-hidden rounded-lg border bg-popover text-popover-foreground border-border/60 data-[state=open]:animate-in\" role=\"listbox\"><div class=\"p-1\">{}</div></div>",
-                listbox_id, items,
+                "<div id=\"{}\" class=\"relative z-50 max-h-106 min-w-[8rem] overflow-hidden rounded-lg border bg-popover text-popover-foreground border-border/60 data-[state=open]:animate-in\" role=\"listbox\"{}><div class=\"p-1\">{}</div></div>",
+                listbox_id,
+                if self.open { "" } else { " hidden" },
+                items,
             )
         } else {
-            String::new()
+            // Options are always in the DOM (hidden when closed) so the
+            // console.js combobox toggle can open any select client-side.
+            let items = self
+                .options
+                .iter()
+                .enumerate()
+                .map(|(i, option)| {
+                    let selected = if option.selected {
+                        format!("<span class=\"absolute left-2 flex h-3.5 w-3.5 items-center justify-center\">{}</span>", primitive_icon("check", "h-3.5 w-3.5"))
+                    } else {
+                        String::new()
+                    };
+                    let disabled = if option.disabled { " data-disabled=\"true\"" } else { "" };
+                    format!(
+                        "<div id=\"select-option-{}\" data-value=\"{}\" class=\"relative flex w-full cursor-default select-none items-center rounded-md py-3 pl-8 pr-2 text-sm outline-none hover:bg-surface-50 focus:bg-surface-100 focus:text-surface-900 data-[disabled]:pointer-events-none data-[disabled]:opacity-50 min-h-[44px]\" role=\"option\" aria-selected=\"{}\"{}>{}<span>{}</span></div>",
+                        i, option.value, option.selected,
+                        disabled,
+                        selected,
+                        option.label,
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("");
+            format!(
+                "<div id=\"{}\" class=\"relative z-50 max-h-106 min-w-[8rem] overflow-hidden rounded-lg border bg-popover text-popover-foreground border-border/60 data-[state=open]:animate-in\" role=\"listbox\" hidden><div class=\"p-1\">{}</div></div>",
+                listbox_id, items,
+            )
         };
 
         let trigger_keyboard_attrs = if self.open {
@@ -621,12 +694,13 @@ impl<'a> RadioGroup<'a> {
                 ""
             };
             let state = if checked { "checked" } else { "unchecked" };
+            let option_id = format!("{}-option-{i}", self.name);
             format!(
-                "<div class=\"flex items-center space-x-2\"><button type=\"button\" role=\"radio\" aria-checked=\"{}\" tabindex=\"{}\" data-value=\"{}\" data-state=\"{}\" class=\"aspect-square rounded-full border ring-offset-background focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/20 focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 {} {}\"{}>{}</button><label class=\"text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70\">{}</label></div>",
-                checked, tabindex, item.value, state,
+                "<div class=\"flex items-center space-x-2\"><button type=\"button\" id=\"{}\" role=\"radio\" aria-checked=\"{}\" tabindex=\"{}\" data-value=\"{}\" data-state=\"{}\" class=\"aspect-square rounded-full border ring-offset-background focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/20 focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 {} {}\"{}>{}</button><label for=\"{}\" class=\"text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70\">{}</label></div>",
+                option_id, checked, tabindex, item.value, state,
                 radio_variant_class(self.variant),
                 radio_size_class(self.size),
-                disabled, indicator, item.label,
+                disabled, indicator, &option_id, item.label,
             )
         }).collect::<Vec<_>>().join("");
 
@@ -786,7 +860,16 @@ pub struct Avatar<'a> {
 
 impl<'a> Avatar<'a> {
     pub fn render_html(&self) -> String {
-        let image = self.image_url.map(|src| format!("<img src=\"{}\" alt=\"{}\" class=\"aspect-square h-full w-full object-cover\" />", src, self.label)).unwrap_or_default();
+        let image = self
+            .image_url
+            .map(|src| {
+                format!(
+                    "<img src=\"{}\" alt=\"{}\" class=\"aspect-square h-full w-full object-cover\" />",
+                    html_escape(src),
+                    html_escape(self.label)
+                )
+            })
+            .unwrap_or_default();
         let fallback = if self.image_url.is_none() {
             format!("<span class=\"flex h-full w-full items-center justify-center bg-surface-100 text-surface-600 font-semibold text-xs uppercase tracking-wide\">{}</span>", self.fallback)
         } else {
@@ -796,7 +879,7 @@ impl<'a> Avatar<'a> {
             "<div class=\"relative flex shrink-0 overflow-hidden rounded-full border border-surface-200 {} {}\" aria-label=\"{}\">{}{}</div>",
             avatar_size_class(self.size),
             avatar_status_class(self.status),
-            self.label,
+            html_escape(self.label),
             image,
             fallback,
         )
@@ -942,6 +1025,9 @@ pub struct Dialog<'a> {
 
 impl<'a> Dialog<'a> {
     pub fn render_html(&self) -> String {
+        // Unique per render: two dialogs on one page must not share the same
+        // id (aria-labelledby would point at the first one for both).
+        let dialog_id = dialog_id_for(self.title);
         let description = self
             .description
             .map(|value| format!("<p class=\"text-sm text-muted-foreground\">{}</p>", value))
@@ -952,7 +1038,7 @@ impl<'a> Dialog<'a> {
             format!("<button data-dialog-close data-focus-initial=\"true\" class=\"absolute right-4 top-4 rounded-md opacity-70 ring-offset-background transition-opacity hover:opacity-100 focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2\" aria-label=\"Close\">{}<span class=\"sr-only\">Close</span></button>", primitive_icon("x", "h-4 w-4"))
         };
         format!(
-            "<div class=\"fixed inset-0 z-50 bg-black/40 backdrop-blur-sm data-[state=open]:animate-in\"></div><div role=\"dialog\" aria-modal=\"true\" aria-labelledby=\"dialog-title-id\" tabindex=\"-1\" data-focus-trap=\"true\" data-escape-dismiss=\"true\" data-initial-focus=\"[data-focus-initial]\" class=\"fixed left-[50%] top-[50%] z-50 grid w-full translate-x-[-50%] translate-y-[-50%] gap-4 border bg-background p-6 duration-200 sm:rounded-lg {} {}\"><div class=\"flex flex-col space-y-1.5 text-center sm:text-left\"><h2 id=\"dialog-title-id\" class=\"text-lg font-bold leading-none tracking-tight\">{}</h2>{}</div><div>{}</div>{}</div>",
+            "<div class=\"fixed inset-0 z-50 bg-black/40 backdrop-blur-sm data-[state=open]:animate-in\"></div><div role=\"dialog\" aria-modal=\"true\" aria-labelledby=\"{dialog_id}\" tabindex=\"-1\" data-focus-trap=\"true\" data-escape-dismiss=\"true\" data-initial-focus=\"[data-focus-initial]\" class=\"fixed left-[50%] top-[50%] z-50 grid w-full translate-x-[-50%] translate-y-[-50%] gap-4 border bg-background p-6 duration-200 sm:rounded-lg {} {}\"><div class=\"flex flex-col space-y-1.5 text-center sm:text-left\"><h2 id=\"{dialog_id}\" class=\"text-lg font-bold leading-none tracking-tight\">{}</h2>{}</div><div>{}</div>{}</div>",
             dialog_size_class(self.size),
             dialog_variant_class(self.variant),
             self.title,
@@ -975,6 +1061,7 @@ pub struct AlertDialog<'a> {
 
 impl<'a> AlertDialog<'a> {
     pub fn render_html(&self) -> String {
+        let alert_id = dialog_id_for(self.title);
         let initial_focus = if self.dialog_type == "confirm" {
             "[data-alert-dialog-cancel]"
         } else {
@@ -989,7 +1076,7 @@ impl<'a> AlertDialog<'a> {
             String::new()
         };
         format!(
-            "<div class=\"fixed inset-0 z-[200] flex items-center justify-center bg-black/50 backdrop-blur-sm\"><div class=\"bg-card border border-border rounded-lg p-6 max-w-md w-full mx-4 animate-in fade-in zoom-in-95 duration-200\" role=\"alertdialog\" aria-modal=\"true\" aria-labelledby=\"dialog-title\" aria-describedby=\"dialog-message\" tabindex=\"-1\" data-focus-trap=\"true\" data-escape-dismiss=\"true\" data-initial-focus=\"{}\"><h2 id=\"dialog-title\" class=\"text-lg font-bold text-foreground mb-2\">{}</h2><p id=\"dialog-message\" class=\"text-sm text-muted-foreground mb-6\">{}</p><div class=\"flex justify-end gap-3\">{}<button data-alert-dialog-confirm class=\"px-4 py-2 rounded-md text-sm font-medium transition-colors {}\">{}</button></div></div></div>",
+            "<div class=\"fixed inset-0 z-[200] flex items-center justify-center bg-black/50 backdrop-blur-sm\"><div class=\"bg-card border border-border rounded-lg p-6 max-w-md w-full mx-4 animate-in fade-in zoom-in-95 duration-200\" role=\"alertdialog\" aria-modal=\"true\" aria-labelledby=\"{alert_id}-title\" aria-describedby=\"{alert_id}-message\" tabindex=\"-1\" data-focus-trap=\"true\" data-escape-dismiss=\"true\" data-initial-focus=\"{}\"><h2 id=\"{alert_id}-title\" class=\"text-lg font-bold text-foreground mb-2\">{}</h2><p id=\"{alert_id}-message\" class=\"text-sm text-muted-foreground mb-6\">{}</p><div class=\"flex justify-end gap-3\">{}<button data-alert-dialog-confirm class=\"px-4 py-2 rounded-md text-sm font-medium transition-colors {}\">{}</button></div></div></div>",
             initial_focus,
             self.title,
             self.message,
@@ -2921,6 +3008,96 @@ mod tests {
         }
         .render_html();
         assert!(warning.contains("border-warning/35 bg-warning/20"));
+    }
+
+    #[test]
+    fn closed_select_still_ships_option_dom_with_values() {
+        let html = Select {
+            placeholder: "Select plan",
+            value_label: Some("Starter"),
+            variant: "default",
+            size: "default",
+            open: false,
+            options: vec![SelectOption {
+                value: "starter",
+                label: "Starter",
+                disabled: false,
+                selected: true,
+            }],
+            name: Some("plan"),
+        }
+        .render_html();
+        // The listbox is present but hidden so console.js can toggle it.
+        assert!(html.contains("role=\"listbox\""));
+        assert!(html.contains("hidden"));
+        assert!(html.contains("data-value=\"starter\""));
+        assert!(html.contains("data-open=\"false\""));
+    }
+
+    #[test]
+    fn radio_items_have_label_for_id_wiring() {
+        let html = RadioGroup {
+            name: "plan",
+            selected: "pro",
+            variant: "default",
+            size: "default",
+            orientation: "vertical",
+            items: vec![
+                RadioGroupItem { value: "starter", label: "Starter", disabled: false },
+                RadioGroupItem { value: "pro", label: "Pro", disabled: false },
+            ],
+        }
+        .render_html();
+        assert!(html.contains("id=\"plan-option-0\""));
+        assert!(html.contains("id=\"plan-option-1\""));
+        assert!(html.contains("for=\"plan-option-1\""));
+        assert!(html.contains("aria-labelledby=\"plan-option-1\"") || html.contains("for=\"plan-option-1\""));
+    }
+
+    #[test]
+    fn avatar_escapes_image_url_and_label() {
+        let html = Avatar {
+            label: "Alt\"><script>alert(1)</script>",
+            image_url: Some("https://x.example/a.png?u=1\"><script>alert(2)</script>"),
+            fallback: "AB",
+            size: "default",
+            status: "none",
+        }
+        .render_html();
+        assert!(!html.contains("<script>"), "{html}");
+        assert!(html.contains("&quot;"));
+    }
+
+    #[test]
+    fn dialog_ids_are_unique_per_title_and_deterministic() {
+        let a = Dialog {
+            title: "Delete campaign?",
+            description: None,
+            body: "",
+            size: "default",
+            variant: "default",
+            hide_close_button: false,
+        }
+        .render_html();
+        let b = Dialog {
+            title: "Delete list?",
+            description: None,
+            body: "",
+            size: "default",
+            variant: "default",
+            hide_close_button: false,
+        }
+        .render_html();
+        assert!(a.contains("id=\"apex-dialog-delete-campaign\""));
+        assert!(b.contains("id=\"apex-dialog-delete-list\""));
+        assert_eq!(a, Dialog {
+            title: "Delete campaign?",
+            description: None,
+            body: "",
+            size: "default",
+            variant: "default",
+            hide_close_button: false,
+        }.render_html());
     }
 
     #[test]

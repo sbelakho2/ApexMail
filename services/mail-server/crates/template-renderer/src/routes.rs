@@ -90,6 +90,9 @@ struct RenderRequest {
     #[serde(default)]
     minify: bool,
     subject: Option<String>,
+    /// Fallback substituted for missing merge fields (default: empty string).
+    #[serde(default)]
+    missing_field_fallback: Option<String>,
 }
 
 fn default_true() -> bool {
@@ -113,6 +116,7 @@ async fn render_handler(
         generate_plaintext: req.generate_plaintext,
         minify: req.minify,
         subject: req.subject,
+        missing_field_fallback: req.missing_field_fallback.clone(),
     };
 
     match state.sandbox.execute(&req.source, &opts) {
@@ -123,10 +127,14 @@ async fn render_handler(
                 None
             };
 
-            let subject = opts
-                .subject
-                .as_ref()
-                .map(|s| transpiler::resolve_placeholders_plain(s, &opts.props));
+            let subject = opts.subject.as_ref().map(|s| {
+                transpiler::resolve_placeholders_plain_reported(
+                    s,
+                    &opts.props,
+                    opts.missing_field_fallback.as_deref().unwrap_or(""),
+                )
+                .html
+            });
 
             let render_result = RenderResult {
                 html: result.html.clone(),
@@ -138,6 +146,7 @@ async fn render_handler(
                     plaintext_size_bytes: plaintext.as_ref().map(|p| p.len()),
                     cached: false,
                 },
+                warnings: result.warnings,
             };
 
             (
