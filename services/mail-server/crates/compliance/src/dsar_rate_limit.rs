@@ -65,45 +65,66 @@ impl DsarRateLimiter {
         }
     }
 
-    /// Check submission rate limits for a DSAR request.
+    /// Check submission rate limits for a DSAR request (read-only — the
+    /// quota is only consumed on success via
+    /// [`DsarRateLimiter::record_submission_success`]).
     ///
     /// Enforces both per-user (email) and per-tenant limits.
     /// Returns `DsarRateLimitStatus::Allowed` if neither limit is exceeded.
     pub async fn check_submission(&self, email: &str, tenant_id: &str) -> DsarRateLimitStatus {
-        let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
-
         // ── User-level limit (1 per 24h) ───────────────────────────────
-        let user_key = format!("dsar:user:{}:{}", hash_email(email), today);
         let user_rl = self
-            .check_key(
-                &user_key,
+            .peek_key(
+                &self.user_key(email),
                 self.config.per_user,
+                RateLimitKind::User,
                 self.config.user_window_secs,
             )
             .await;
-        if let DsarRateLimitStatus::UserRateLimited { retry_after } = user_rl {
-            return DsarRateLimitStatus::UserRateLimited { retry_after };
+        if !matches!(user_rl, DsarRateLimitStatus::Allowed) {
+            return user_rl;
         }
 
         // ── Tenant-level limit (100 per 24h) ───────────────────────────
-        let tenant_key = format!("dsar:tenant:{}:{}", tenant_id, today);
         let tenant_rl = self
-            .check_key(
-                &tenant_key,
+            .peek_key(
+                &self.tenant_key(tenant_id),
                 self.config.per_tenant,
+                RateLimitKind::Tenant,
                 self.config.tenant_window_secs,
             )
             .await;
-        if let DsarRateLimitStatus::TenantRateLimited { retry_after } = tenant_rl {
-            return DsarRateLimitStatus::TenantRateLimited { retry_after };
+        if !matches!(tenant_rl, DsarRateLimitStatus::Allowed) {
+            return tenant_rl;
         }
 
         DsarRateLimitStatus::Allowed
     }
 
+    /// L1: consume one submission slot — call only AFTER the submission has
+    /// been durably accepted, so failed/invalid submissions do not burn the
+    /// subject's daily quota.
+    pub async fn record_submission_success(&self, email: &str, tenant_id: &str) {
+        if let Err(e) = self
+            .consume_key(&self.user_key(email), self.config.user_window_secs)
+            .await
+        {
+            warn!(error = %e, "Failed to record DSAR user submission quota");
+        }
+        if let Err(e) = self
+            .consume_key(&self.tenant_key(tenant_id), self.config.tenant_window_secs)
+            .await
+        {
+            warn!(error = %e, "Failed to record DSAR tenant submission quota");
+        }
+    }
+
     /// Check verification rate limit for a DSAR verification attempt.
     ///
     /// Enforces per-token-hash limit (5 attempts per token per hour).
+    /// D: the attempt is CONSUMED here (even failed attempts count — this is
+    /// the brute-force guard), and an exceeded limit is reported as
+    /// `VerificationRateLimited` so the verify handler cannot swallow it.
     pub async fn check_verification(&self, token_hash: &str) -> DsarRateLimitStatus {
         let key = format!(
             "dsar:verify:{}:{}",
@@ -111,82 +132,188 @@ impl DsarRateLimiter {
             chrono::Utc::now().format("%Y-%m-%d-%H")
         );
 
-        self.check_key(
+        self.check_and_consume_key(
             &key,
             self.config.verify_attempts,
+            RateLimitKind::Verification,
             self.config.verify_window_secs,
         )
         .await
     }
 
-    // ── Internal key check ─────────────────────────────────────────────
+    // ── Internal key operations ─────────────────────────────────────
 
-    /// Check a single rate limit key.
-    ///
-    /// Uses Redis INCR + EXPIRE (atomic) when available, otherwise falls back
-    /// to the in-memory `moka` cache.
-    async fn check_key(&self, key: &str, max_count: u32, window_secs: u64) -> DsarRateLimitStatus {
-        if let Some(redis) = &self.redis {
-            match self.check_redis(redis, key, max_count, window_secs).await {
-                Ok(status) => return status,
-                Err(e) => {
-                    warn!(error = %e, "Redis rate limit check failed; falling back to in-memory");
-                }
-            }
-        }
-
-        // In-memory fallback
-        self.check_in_memory(key, max_count, window_secs)
+    fn user_key(&self, email: &str) -> String {
+        let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+        format!("dsar:user:{}:{}", hash_email(email), today)
     }
 
-    /// Check rate limit via Redis INCR + EXPIRE.
-    async fn check_redis(
+    fn tenant_key(&self, tenant_id: &str) -> String {
+        let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+        format!("dsar:tenant:{}:{}", tenant_id, today)
+    }
+
+    /// Read-only check: does the key exceed `max_count`? Never mutates.
+    async fn peek_key(
         &self,
-        redis: &RedisPool,
         key: &str,
         max_count: u32,
+        kind: RateLimitKind,
         window_secs: u64,
-    ) -> Result<DsarRateLimitStatus, String> {
-        let mut conn = redis.get().await.map_err(|e| e.to_string())?;
-        let result: Result<u32, _> = redis::cmd("INCR")
-            .arg(key)
-            .query_async(&mut *conn)
-            .await
-            .map_err(|e| e.to_string());
-
-        match result {
-            Ok(count) => {
-                // Set TTL on first increment
-                if count == 1 {
-                    let _: Result<(), _> = redis::cmd("EXPIRE")
+    ) -> DsarRateLimitStatus {
+        if let Some(redis) = &self.redis {
+            let conn = redis.get().await;
+            match conn {
+                Ok(mut conn) => {
+                    match redis::cmd("GET")
                         .arg(key)
-                        .arg(window_secs as i64)
-                        .query_async(&mut *conn)
+                        .query_async::<Option<u32>>(&mut *conn)
                         .await
-                        .map_err(|e| warn!("Failed to set Redis TTL for {key}: {e}"));
+                    {
+                        Ok(Some(count)) if count >= max_count => {
+                            return exceeded(kind, window_secs);
+                        }
+                        Ok(_) => return DsarRateLimitStatus::Allowed,
+                        Err(e) => {
+                            warn!(error = %e, "Redis rate limit peek failed; falling back to in-memory");
+                        }
+                    }
                 }
-
-                if count > max_count {
-                    return Ok(DsarRateLimitStatus::UserRateLimited {
-                        retry_after: Duration::from_secs(window_secs),
-                    });
+                Err(e) => {
+                    warn!(error = %e, "Redis rate limit peek failed; falling back to in-memory");
                 }
-                Ok(DsarRateLimitStatus::Allowed)
             }
-            Err(e) => Err(e),
         }
+        self.peek_in_memory(key, max_count, kind)
     }
 
-    /// Check rate limit using in-memory moka cache fallback.
-    fn check_in_memory(&self, key: &str, max_count: u32, _window_secs: u64) -> DsarRateLimitStatus {
+    /// Increment the key's counter, establishing the window TTL if missing.
+    async fn consume_key(&self, key: &str, window_secs: u64) -> Result<(), String> {
+        if let Some(redis) = &self.redis {
+            let mut conn = redis.get().await.map_err(|e| e.to_string())?;
+            let _: u32 = redis::cmd("INCR")
+                .arg(key)
+                .query_async(&mut *conn)
+                .await
+                .map_err(|e| e.to_string())?;
+            // L1: set the TTL whenever it is missing (not only when INCR
+            // returns 1 — a lost EXPIRE after a crash used to leave a
+            // permanent counter).
+            let ttl: i64 = redis::cmd("TTL")
+                .arg(key)
+                .query_async(&mut *conn)
+                .await
+                .map_err(|e| e.to_string())?;
+            if ttl < 0 {
+                if let Err(e) = redis::cmd("EXPIRE")
+                    .arg(key)
+                    .arg(window_secs as i64)
+                    .query_async::<()>(&mut *conn)
+                    .await
+                {
+                    warn!("Failed to set Redis TTL for {key}: {e}");
+                }
+            }
+            return Ok(());
+        }
+        let count = self.in_memory.get(key).unwrap_or(0);
+        self.in_memory.insert(key.to_string(), count + 1);
+        Ok(())
+    }
+
+    /// Check-and-consume (used for verification attempts — every attempt,
+    /// successful or not, consumes quota).
+    async fn check_and_consume_key(
+        &self,
+        key: &str,
+        max_count: u32,
+        kind: RateLimitKind,
+        window_secs: u64,
+    ) -> DsarRateLimitStatus {
+        if let Some(redis) = &self.redis {
+            let mut conn = match redis.get().await {
+                Ok(c) => c,
+                Err(e) => {
+                    warn!(error = %e, "Redis rate limit check failed; falling back to in-memory");
+                    return self.check_and_consume_in_memory(key, max_count, kind);
+                }
+            };
+            let count: u32 = match redis::cmd("INCR")
+                .arg(key)
+                .query_async(&mut *conn)
+                .await
+            {
+                Ok(c) => c,
+                Err(e) => {
+                    warn!(error = %e, "Redis rate limit INCR failed; falling back to in-memory");
+                    return self.check_and_consume_in_memory(key, max_count, kind);
+                }
+            };
+            // L1: establish the TTL whenever missing.
+            let ttl: i64 = redis::cmd("TTL")
+                .arg(key)
+                .query_async(&mut *conn)
+                .await
+                .unwrap_or(-1);
+            if ttl < 0 {
+                let _: Result<(), _> = redis::cmd("EXPIRE")
+                    .arg(key)
+                    .arg(window_secs as i64)
+                    .query_async(&mut *conn)
+                    .await;
+            }
+            if count > max_count {
+                return exceeded(kind, window_secs);
+            }
+            return DsarRateLimitStatus::Allowed;
+        }
+
+        self.check_and_consume_in_memory(key, max_count, kind)
+    }
+
+    /// Read-only in-memory check.
+    fn peek_in_memory(&self, key: &str, max_count: u32, kind: RateLimitKind) -> DsarRateLimitStatus {
         let count = self.in_memory.get(key).unwrap_or(0);
         if count >= max_count {
-            return DsarRateLimitStatus::UserRateLimited {
-                retry_after: Duration::from_secs(3600),
-            };
+            return exceeded(kind, 3600);
+        }
+        DsarRateLimitStatus::Allowed
+    }
+
+    /// Check-and-consume in-memory (verification attempts).
+    fn check_and_consume_in_memory(
+        &self,
+        key: &str,
+        max_count: u32,
+        kind: RateLimitKind,
+    ) -> DsarRateLimitStatus {
+        let count = self.in_memory.get(key).unwrap_or(0);
+        if count >= max_count {
+            return exceeded(kind, 3600);
         }
         self.in_memory.insert(key.to_string(), count + 1);
         DsarRateLimitStatus::Allowed
+    }
+}
+
+/// Which limit a key belongs to — D: exceeded keys must surface as the
+/// variant the handlers actually enforce (previously every exceeded key was
+/// reported as `UserRateLimited`, which the verification handler swallowed).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RateLimitKind {
+    User,
+    Tenant,
+    Verification,
+}
+
+fn exceeded(kind: RateLimitKind, window_secs: u64) -> DsarRateLimitStatus {
+    let retry_after = Duration::from_secs(window_secs.max(1));
+    match kind {
+        RateLimitKind::User => DsarRateLimitStatus::UserRateLimited { retry_after },
+        RateLimitKind::Tenant => DsarRateLimitStatus::TenantRateLimited { retry_after },
+        RateLimitKind::Verification => {
+            DsarRateLimitStatus::VerificationRateLimited { retry_after }
+        }
     }
 }
 
@@ -218,27 +345,127 @@ mod tests {
         assert_ne!(h1, h2);
     }
 
-    #[test]
-    fn test_in_memory_rate_limiting() {
-        let config = DsarRateLimitConfig {
+    // NOTE: the in-memory rate-limit test previously asserted the OLD
+    // behavior where a submission check consumed quota immediately
+    // (INCR-before-success). It was updated to the fixed L1 contract:
+    // checks are read-only; quota is consumed only on success.
+
+    fn test_config() -> DsarRateLimitConfig {
+        DsarRateLimitConfig {
             per_user: 1,
             user_window_secs: 86400,
             per_tenant: 100,
             tenant_window_secs: 86400,
             verify_attempts: 5,
             verify_window_secs: 3600,
-        };
-        let limiter = DsarRateLimiter::new(config, None);
+        }
+    }
 
-        // First check should be allowed
-        let status = limiter.check_in_memory("dsar:user:test:2026-05-14", 1, 86400);
-        assert!(matches!(status, DsarRateLimitStatus::Allowed));
+    #[test]
+    fn test_in_memory_rate_limiting() {
+        let limiter = DsarRateLimiter::new(test_config(), None);
+        let key = "dsar:user:test:2026-05-14";
 
-        // Second check should be rate-limited
-        let status = limiter.check_in_memory("dsar:user:test:2026-05-14", 1, 86400);
+        // Peek does not consume quota.
+        assert!(matches!(
+            limiter.peek_in_memory(key, 1, RateLimitKind::User),
+            DsarRateLimitStatus::Allowed
+        ));
+        assert!(matches!(
+            limiter.peek_in_memory(key, 1, RateLimitKind::User),
+            DsarRateLimitStatus::Allowed
+        ));
+
+        // After a successful submission consumes the slot, further checks
+        // are rate-limited.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        rt.block_on(limiter.consume_key(key, 86400)).unwrap();
+        assert!(matches!(
+            limiter.peek_in_memory(key, 1, RateLimitKind::User),
+            DsarRateLimitStatus::UserRateLimited { .. }
+        ));
+    }
+
+    /// L1: failed submissions must not burn the subject's quota.
+    #[tokio::test]
+    async fn test_submission_quota_only_consumed_on_success() {
+        let limiter = DsarRateLimiter::new(test_config(), None);
+        let email = "user@example.com";
+        let tenant = "t1";
+
+        // Several (failed) submission attempts — all still allowed.
+        for _ in 0..5 {
+            let status = limiter.check_submission(email, tenant).await;
+            assert!(matches!(status, DsarRateLimitStatus::Allowed));
+        }
+
+        // One successful submission consumes the single per-user slot.
+        limiter.record_submission_success(email, tenant).await;
+        let status = limiter.check_submission(email, tenant).await;
         assert!(matches!(
             status,
             DsarRateLimitStatus::UserRateLimited { .. }
+        ));
+    }
+
+    /// D: the 6th verification attempt within the window is rejected with
+    /// the VerificationRateLimited variant (the one the handler enforces).
+    #[tokio::test]
+    async fn test_verification_attempts_rate_limited_with_correct_variant() {
+        let limiter = DsarRateLimiter::new(test_config(), None);
+        let token_hash = "abc123";
+
+        for attempt in 1..=5 {
+            let status = limiter.check_verification(token_hash).await;
+            assert!(
+                matches!(status, DsarRateLimitStatus::Allowed),
+                "attempt {attempt} should be allowed"
+            );
+        }
+        let status = limiter.check_verification(token_hash).await;
+        assert!(matches!(
+            status,
+            DsarRateLimitStatus::VerificationRateLimited { .. }
+        ));
+    }
+
+    /// D/L1: window reset — once the in-memory entry expires (evicted), the
+    /// same subject can submit again.
+    #[tokio::test]
+    async fn test_rate_limit_resets_after_window() {
+        let limiter = DsarRateLimiter::new(test_config(), None);
+        let email = "reset@example.com";
+        limiter.record_submission_success(email, "t1").await;
+        assert!(matches!(
+            limiter.check_submission(email, "t1").await,
+            DsarRateLimitStatus::UserRateLimited { .. }
+        ));
+
+        // Simulate the window elapsing by evicting the counter (the Redis
+        // path relies on the key TTL for the same effect).
+        limiter.in_memory.invalidate(&limiter.user_key(email));
+        assert!(matches!(
+            limiter.check_submission(email, "t1").await,
+            DsarRateLimitStatus::Allowed
+        ));
+    }
+
+    /// D: exceeded limits surface as the variant matching their kind.
+    #[test]
+    fn test_exceeded_kind_mapping() {
+        assert!(matches!(
+            exceeded(RateLimitKind::User, 60),
+            DsarRateLimitStatus::UserRateLimited { .. }
+        ));
+        assert!(matches!(
+            exceeded(RateLimitKind::Tenant, 60),
+            DsarRateLimitStatus::TenantRateLimited { .. }
+        ));
+        assert!(matches!(
+            exceeded(RateLimitKind::Verification, 60),
+            DsarRateLimitStatus::VerificationRateLimited { .. }
         ));
     }
 

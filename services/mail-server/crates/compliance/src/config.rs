@@ -171,11 +171,14 @@ impl ComplianceConfig {
                     "SECURITY: COMPLIANCE_AUTH_TOKEN missing in production; generated an ephemeral runtime token (redacted)"
                 );
             }
+            // I-4: an auto-generated audit signing key silently invalidates the
+            // hash-chain signatures on every restart. Either the key is
+            // provided, or it is generated ONCE and persisted to
+            // AUDIT_SIGNING_KEY_FILE; without a file path the service refuses
+            // to start in production (fail fast, documented).
             if audit_signing_key.trim().is_empty() {
-                audit_signing_key = format!("auto-audit-signing-key-{}", Uuid::new_v4());
-                tracing::warn!(
-                    "SECURITY: AUDIT_SIGNING_KEY missing in production; generated an ephemeral runtime key (redacted)"
-                );
+                let key_file = env_or("AUDIT_SIGNING_KEY_FILE", "");
+                audit_signing_key = resolve_audit_signing_key(&key_file);
             }
             if secrets_encryption_key.trim().is_empty() {
                 secrets_encryption_key = format!("auto-secrets-key-{}", Uuid::new_v4());
@@ -253,7 +256,10 @@ impl ComplianceConfig {
                 deletion_grace_period_days: env_i64("GDPR_DELETION_GRACE_PERIOD", 30),
                 request_expiration_days: env_i64("GDPR_REQUEST_EXPIRATION_DAYS", 30),
                 export_expiration_days: env_i64("GDPR_EXPORT_EXPIRATION_DAYS", 7),
-                export_base_url: env_or("GDPR_EXPORT_BASE_URL", "https://exports.apexmail.ee"),
+                // G: default to the compliance service's own host (same as
+                // verify_base_url) — exports are served by this crate's
+                // GET /gdpr/exports/{id} route, not a third-party bucket.
+                export_base_url: env_or("GDPR_EXPORT_BASE_URL", "https://gdpr.apexmail.ee"),
                 verify_base_url: env_or("GDPR_VERIFY_BASE_URL", "https://gdpr.apexmail.ee"),
                 consent_signing_key: env_or("CONSENT_SIGNING_KEY", ""),
                 access_request_max_messages: env_i64("GDPR_ACCESS_MAX_MESSAGES", 10_000),
@@ -287,6 +293,52 @@ impl ComplianceConfig {
 
 fn env_or(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_string())
+}
+
+/// I-4: resolve the audit signing key when `AUDIT_SIGNING_KEY` is unset in
+/// production.
+///
+/// - `key_file` provided and readable with content → reuse the persisted key.
+/// - `key_file` provided but empty/absent → generate once and persist, so the
+///   key survives restarts (a per-restart key invalidates every archived
+///   chain signature).
+/// - No `key_file` → refuse to start (fail fast): returning an ephemeral key
+///   here would silently break audit-chain verification after each restart.
+fn resolve_audit_signing_key(key_file: &str) -> String {
+    if key_file.trim().is_empty() {
+        panic!(
+            "AUDIT_SIGNING_KEY is not set in production and no AUDIT_SIGNING_KEY_FILE is \
+             configured. An auto-generated key would invalidate audit chain signatures on \
+             every restart. Set AUDIT_SIGNING_KEY, or set AUDIT_SIGNING_KEY_FILE so the \
+             generated key can be persisted and reused."
+        );
+    }
+
+    match std::fs::read_to_string(key_file) {
+        Ok(existing) if !existing.trim().is_empty() => {
+            tracing::warn!(
+                file = key_file,
+                "AUDIT_SIGNING_KEY missing in production; loaded persisted key from file"
+            );
+            existing.trim().to_string()
+        }
+        _ => {
+            let generated = format!("auto-audit-signing-key-{}", Uuid::new_v4());
+            match std::fs::write(key_file, &generated) {
+                Ok(()) => {
+                    tracing::warn!(
+                        file = key_file,
+                        "AUDIT_SIGNING_KEY missing in production; generated and persisted a new key"
+                    );
+                    generated
+                }
+                Err(e) => panic!(
+                    "AUDIT_SIGNING_KEY is not set and the generated key could not be \
+                     persisted to AUDIT_SIGNING_KEY_FILE ({key_file}): {e}"
+                ),
+            }
+        }
+    }
 }
 
 fn env_f64(key: &str, default: f64) -> f64 {
@@ -324,5 +376,44 @@ mod tests {
         assert_eq!(cfg.dsar_rate_limit.user_window_secs, 86400);
         assert_eq!(cfg.dsar_rate_limit.tenant_window_secs, 86400);
         assert_eq!(cfg.dsar_rate_limit.verify_window_secs, 3600);
+    }
+
+    // ── I-4: audit signing key persistence ─────────────────────
+
+    fn temp_key_file(name: &str) -> std::path::PathBuf {
+        let mut path = std::env::temp_dir();
+        path.push(format!(
+            "{}-{}",
+            name,
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        path
+    }
+
+    /// A generated key is persisted and REUSED on the next start — the key
+    /// must be stable across restarts for archived chain signatures to stay
+    /// verifiable.
+    #[test]
+    fn test_audit_signing_key_generated_then_reused() {
+        let path = temp_key_file("audit-key-persist-test");
+        let _ = std::fs::remove_file(&path);
+
+        let first = resolve_audit_signing_key(path.to_str().unwrap());
+        assert!(!first.trim().is_empty());
+        assert!(path.exists(), "key must be persisted to the file");
+
+        let second = resolve_audit_signing_key(path.to_str().unwrap());
+        assert_eq!(first, second, "persisted key must be reused, not regenerated");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Without a key file, production must fail fast instead of silently
+    /// generating an ephemeral key.
+    #[test]
+    #[should_panic(expected = "AUDIT_SIGNING_KEY")]
+    fn test_audit_signing_key_fails_fast_without_file() {
+        let _ = resolve_audit_signing_key("");
     }
 }

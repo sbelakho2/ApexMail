@@ -214,6 +214,14 @@ async fn run_cron_jobs(state: Arc<AppState>) {
     loop {
         tokio::select! {
                     _ = gdpr_ticker.tick() => {
+                        // F: recover entries stranded in the processing list
+                        // by crashed workers (older than 5 minutes) before
+                        // processing a new batch.
+                        match state.gdpr.recover_stuck_processing(300).await {
+                            Ok(n) if n > 0 => info!(count = n, "Recovered stuck GDPR queue entries"),
+                            Err(e) => error!(error = %e, "GDPR queue recovery sweep failed"),
+                            _ => {}
+                        }
                         match state.gdpr.process_queue_batch(10).await {
                             Ok(results) if !results.is_empty() => {
                                 info!(count = results.len(), "Processed GDPR queue batch");

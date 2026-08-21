@@ -419,14 +419,18 @@ pub struct AuditLogEntry {
 pub enum AuditOutcome {
     Success,
     Failure,
+    /// Access was denied (distinct from an operational failure).
+    Denied,
 }
 
 impl std::fmt::Display for AuditOutcome {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Success => f.write_str("success"),
-            Self::Failure => f.write_str("failure"),
-        }
+        let s = match self {
+            Self::Success => "success",
+            Self::Failure => "failure",
+            Self::Denied => "denied",
+        };
+        f.write_str(s)
     }
 }
 
@@ -547,6 +551,15 @@ pub enum RequestStatus {
     Completed,
     Rejected,
     Expired,
+    /// Rectification (Art. 16) requires human review — never auto-completed.
+    PendingManualReview,
+    /// A processing attempt failed; the request is queued for retry.
+    Retrying,
+    /// Retries exhausted or unrecoverable error — needs operator attention.
+    Failed,
+    /// Some data stores were erased/anonymized but others failed or were
+    /// skipped; the certificate lists the exact per-store outcomes.
+    Partial,
 }
 
 impl std::fmt::Display for RequestStatus {
@@ -558,6 +571,10 @@ impl std::fmt::Display for RequestStatus {
             Self::Completed => "completed",
             Self::Rejected => "rejected",
             Self::Expired => "expired",
+            Self::PendingManualReview => "pending_manual_review",
+            Self::Retrying => "retrying",
+            Self::Failed => "failed",
+            Self::Partial => "partial",
         };
         f.write_str(s)
     }
@@ -587,6 +604,9 @@ pub struct DataSubjectRequest {
     pub tenant_id: String,
     pub request_type: DataSubjectRequestType,
     pub email: String,
+    /// C-2: never serialized — the token hash must not leak through API
+    /// responses; it lives only in the DB for verification.
+    #[serde(skip)]
     pub verification_token_hash: String,
     pub verified: bool,
     pub verified_at: Option<DateTime<Utc>>,
@@ -607,6 +627,51 @@ pub struct DataSubjectRequestResult {
     pub deletion_confirmation: Option<serde_json::Value>,
     pub modified_records: Option<i64>,
     pub rejection_reason: Option<String>,
+    /// True when some data stores were skipped (e.g. absent in this
+    /// deployment) or failed — the request is `partial`, not `completed`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub partial: Option<bool>,
+    /// True when the result requires human follow-up (rectification review).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub review_required: bool,
+}
+
+impl Default for DataSubjectRequestResult {
+    fn default() -> Self {
+        Self {
+            data: None,
+            export_url: None,
+            export_expires_at: None,
+            deleted_records: None,
+            deletion_confirmation: None,
+            modified_records: None,
+            rejection_reason: None,
+            partial: None,
+            review_required: false,
+        }
+    }
+}
+
+/// API response for submitting a data-subject request.
+///
+/// C-2: carries neither the verification token nor its hash. The token must
+/// reach the data subject through a delivery channel, never the HTTP response.
+/// `token_delivered: false` tells ops that delivery is still manual.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DataSubjectRequestResponse {
+    pub id: String,
+    pub tenant_id: String,
+    pub request_type: DataSubjectRequestType,
+    pub email: String,
+    pub status: RequestStatus,
+    pub requested_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+    /// Instructions the caller must convey to the data subject.
+    pub verification: serde_json::Value,
+    /// Whether the verification token was delivered out-of-band by this
+    /// service. This crate has no mailer, so this is always `false` and a
+    /// redacted notice is logged for ops.
+    pub token_delivered: bool,
 }
 
 // ─── Secret Management ─────────────────────────────────────────
@@ -779,6 +844,68 @@ mod tests {
             "pending_verification"
         );
         assert_eq!(RequestStatus::Completed.to_string(), "completed");
+        assert_eq!(
+            RequestStatus::PendingManualReview.to_string(),
+            "pending_manual_review"
+        );
+        assert_eq!(RequestStatus::Retrying.to_string(), "retrying");
+        assert_eq!(RequestStatus::Failed.to_string(), "failed");
+        assert_eq!(RequestStatus::Partial.to_string(), "partial");
+    }
+
+    /// C-2: `DataSubjectRequest` must never serialize the token hash.
+    #[test]
+    fn test_data_subject_request_hides_token_hash() {
+        let req = DataSubjectRequest {
+            id: "r1".into(),
+            tenant_id: "t1".into(),
+            request_type: DataSubjectRequestType::Erasure,
+            email: "user@example.com".into(),
+            verification_token_hash: "secret-hash".into(),
+            verified: false,
+            verified_at: None,
+            status: RequestStatus::PendingVerification,
+            requested_at: Utc::now(),
+            processed_at: None,
+            completed_at: None,
+            expires_at: Utc::now(),
+            result: None,
+        };
+        let json = serde_json::to_value(&req).unwrap();
+        assert!(
+            json.get("verification_token_hash").is_none(),
+            "token hash leaked in DataSubjectRequest JSON: {json}"
+        );
+    }
+
+    /// C-2: the submit-response DTO carries no token and no token hash.
+    #[test]
+    fn test_submit_response_has_no_token_material() {
+        let resp = DataSubjectRequestResponse {
+            id: "r1".into(),
+            tenant_id: "t1".into(),
+            request_type: DataSubjectRequestType::Access,
+            email: "user@example.com".into(),
+            status: RequestStatus::PendingVerification,
+            requested_at: Utc::now(),
+            expires_at: Utc::now(),
+            verification: serde_json::json!({"method": "manual"}),
+            token_delivered: false,
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(!json.contains("token_hash"));
+        assert!(!json.contains("verification_token"));
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["token_delivered"], false);
+        assert_eq!(parsed["id"], "r1");
+    }
+
+    #[test]
+    fn test_audit_outcome_denied_display() {
+        assert_eq!(AuditOutcome::Denied.to_string(), "denied");
+        let parsed: AuditOutcome =
+            serde_json::from_value(serde_json::json!("denied")).unwrap();
+        assert_eq!(parsed, AuditOutcome::Denied);
     }
 
     #[test]

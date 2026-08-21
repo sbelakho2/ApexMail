@@ -95,7 +95,7 @@ impl ConsentExpiryJob {
             info!(
                 id = %consent.id,
                 tenant_id = %consent.tenant_id,
-                email = %consent.email,
+                email = %mail_common::pii::redact_email(&consent.email),
                 consent_type = %consent.consent_type,
                 "Consent auto-revoked (expired)"
             );
@@ -125,7 +125,7 @@ impl ConsentExpiryJob {
                 if cascade_result.rows_affected() > 0 {
                     info!(
                         tenant_id = %consent.tenant_id,
-                        email = %consent.email,
+                        email = %mail_common::pii::redact_email(&consent.email),
                         cascade_type = cascade_type,
                         "Consent cascaded (auto-revoked from expired marketing)"
                     );

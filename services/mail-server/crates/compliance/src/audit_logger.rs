@@ -31,6 +31,10 @@ pub struct AuditLogger {
     signing_key: Vec<u8>,
     /// In-memory cache of last hash per chain key. Primary source:/// Redis `audit:lasthash:{key}`, falling back to DB.
     last_hashes: RwLock<HashMap<String, String>>,
+    /// E-1: per-chain append locks. Held across the read-last-hash → INSERT →
+    /// cache-update sequence so concurrent `log()` calls cannot fork the hash
+    /// chain by reading the same `previous_hash`.
+    chain_locks: tokio::sync::Mutex<HashMap<String, std::sync::Arc<tokio::sync::Mutex<()>>>>,
 }
 
 impl AuditLogger {
@@ -41,7 +45,17 @@ impl AuditLogger {
             config,
             signing_key,
             last_hashes: RwLock::new(HashMap::new()),
+            chain_locks: tokio::sync::Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Get (or create) the append lock for a chain.
+    async fn chain_lock(&self, chain_key: &str) -> std::sync::Arc<tokio::sync::Mutex<()>> {
+        let mut locks = self.chain_locks.lock().await;
+        locks
+            .entry(chain_key.to_string())
+            .or_insert_with(|| std::sync::Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
     }
 
     /// Initialize by loading last hashes from DB.
@@ -91,6 +105,12 @@ impl AuditLogger {
         let id = Uuid::new_v4().to_string();
         let timestamp = Utc::now();
         let chain_key = ctx.tenant_id.clone().unwrap_or_else(|| "global".into());
+
+        // E-1: serialize chain appends per chain — read-last-hash, INSERT and
+        // cache update happen under the lock so two concurrent log() calls
+        // can never build on the same previous_hash (chain fork).
+        let lock = self.chain_lock(&chain_key).await;
+        let _chain_guard = lock.lock().await;
 
         let previous_hash = {
             let map = self.last_hashes.read().await;
@@ -308,7 +328,9 @@ impl AuditLogger {
             "SELECT id, tenant_id, user_id, session_id, action, resource, resource_id,
                     details, ip_address, user_agent, outcome, error_message,
                     timestamp, hash, previous_hash, signature
-             FROM audit_logs
+             FROM (SELECT * FROM audit_logs
+                   UNION ALL
+                   SELECT * FROM audit_logs_archive) entries
              WHERE ($1::text IS NULL OR tenant_id = $1)
                AND ($2::text IS NULL OR user_id = $2)
                AND ($3::text IS NULL OR action = $3)
@@ -337,7 +359,10 @@ impl AuditLogger {
 
     async fn count_entries_simple(&self, q: &AuditLogQuery) -> Result<i64, String> {
         let (count,): (i64,) = sqlx::query_as(
-            "SELECT COUNT(*) FROM audit_logs
+            "SELECT COUNT(*) FROM (
+               SELECT * FROM audit_logs
+               UNION ALL
+               SELECT * FROM audit_logs_archive) entries
              WHERE ($1::text IS NULL OR tenant_id = $1)
                AND ($2::text IS NULL OR user_id = $2)
                AND ($3::text IS NULL OR action = $3)
@@ -359,7 +384,7 @@ impl AuditLogger {
         Ok(count)
     }
 
-    /// Get a single entry by ID.
+    /// Get a single entry by ID (live table first, then the archive).
     pub async fn get_entry(&self, id: &str) -> Result<Option<AuditLogEntry>, String> {
         let row: Option<AuditRow> = sqlx::query_as(
             "SELECT id, tenant_id, user_id, session_id, action, resource, resource_id,
@@ -372,7 +397,22 @@ impl AuditLogger {
         .await
         .map_err(|e| format!("DB error: {e}"))?;
 
-        match row {
+        if row.is_some() {
+            return row.map(|r| r.into_entry()).transpose();
+        }
+
+        let archived: Option<AuditRow> = sqlx::query_as(
+            "SELECT id, tenant_id, user_id, session_id, action, resource, resource_id,
+                    details, ip_address, user_agent, outcome, error_message,
+                    timestamp, hash, previous_hash, signature
+             FROM audit_logs_archive WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_optional(&self.db)
+        .await
+        .map_err(|e| format!("DB error: {e}"))?;
+
+        match archived {
             Some(r) => Ok(Some(r.into_entry()?)),
             None => Ok(None),
         }
@@ -463,6 +503,9 @@ impl AuditLogger {
     }
 
     /// Verify chain from DB for optional tenant scope.
+    ///
+    /// E-2: verification spans BOTH the live table and the archive — archived
+    /// rows used to vanish from verification after archival.
     pub async fn verify_chain(
         &self,
         tenant_id: Option<&str>,
@@ -473,7 +516,9 @@ impl AuditLogger {
             "SELECT id, tenant_id, user_id, session_id, action, resource, resource_id,
                     details, ip_address, user_agent, outcome, error_message,
                     timestamp, hash, previous_hash, signature
-             FROM audit_logs
+             FROM (SELECT * FROM audit_logs
+                   UNION ALL
+                   SELECT * FROM audit_logs_archive) entries
              WHERE ($1::text IS NULL OR tenant_id = $1)
                AND ($2::timestamptz IS NULL OR timestamp >= $2)
                AND ($3::timestamptz IS NULL OR timestamp <= $3)
@@ -555,7 +600,10 @@ impl AuditLogger {
 
     pub async fn get_stats(&self, tenant_id: Option<&str>) -> Result<serde_json::Value, String> {
         let (total,): (i64,) = sqlx::query_as(
-            "SELECT COUNT(*) FROM audit_logs
+            "SELECT COUNT(*) FROM (
+               SELECT * FROM audit_logs
+               UNION ALL
+               SELECT * FROM audit_logs_archive) entries
              WHERE ($1::text IS NULL OR tenant_id = $1)",
         )
         .bind(tenant_id)
@@ -564,7 +612,10 @@ impl AuditLogger {
         .map_err(|e| format!("DB error: {e}"))?;
 
         let by_action: Vec<(String, i64)> = sqlx::query_as(
-            "SELECT action, COUNT(*) FROM audit_logs
+            "SELECT action, COUNT(*) FROM (
+               SELECT * FROM audit_logs
+               UNION ALL
+               SELECT * FROM audit_logs_archive) entries
              WHERE ($1::text IS NULL OR tenant_id = $1) GROUP BY action",
         )
         .bind(tenant_id)
@@ -573,7 +624,10 @@ impl AuditLogger {
         .map_err(|e| format!("DB error: {e}"))?;
 
         let by_resource: Vec<(String, i64)> = sqlx::query_as(
-            "SELECT resource, COUNT(*) FROM audit_logs
+            "SELECT resource, COUNT(*) FROM (
+               SELECT * FROM audit_logs
+               UNION ALL
+               SELECT * FROM audit_logs_archive) entries
              WHERE ($1::text IS NULL OR tenant_id = $1) GROUP BY resource",
         )
         .bind(tenant_id)
@@ -582,7 +636,10 @@ impl AuditLogger {
         .map_err(|e| format!("DB error: {e}"))?;
 
         let by_outcome: Vec<(String, i64)> = sqlx::query_as(
-            "SELECT outcome, COUNT(*) FROM audit_logs
+            "SELECT outcome, COUNT(*) FROM (
+               SELECT * FROM audit_logs
+               UNION ALL
+               SELECT * FROM audit_logs_archive) entries
              WHERE ($1::text IS NULL OR tenant_id = $1) GROUP BY outcome",
         )
         .bind(tenant_id)
@@ -601,26 +658,45 @@ impl AuditLogger {
     // ── Archival ────────────────────────────────────────────
 
     /// Archive audit logs older than the specified date.
+    ///
+    /// E-2: the copy and the delete happen in ONE transaction, and rows are
+    /// deleted only when they verifiably exist in the archive afterwards.
+    /// Rows that failed to copy (e.g. pre-existing conflicting archive rows)
+    /// are preserved in the live table — they no longer vanish from
+    /// verify/export.
     pub async fn archive(&self, older_than: DateTime<Utc>) -> Result<i64, String> {
-        // Copy to archive
+        let mut tx = self.db.begin().await.map_err(|e| format!("DB error: {e}"))?;
+
         let result = sqlx::query(
             "INSERT INTO audit_logs_archive
              SELECT * FROM audit_logs WHERE timestamp < $1
              ON CONFLICT DO NOTHING",
         )
         .bind(older_than)
-        .execute(&self.db)
+        .execute(&mut *tx)
         .await
         .map_err(|e| format!("DB error: {e}"))?;
 
         let archived = result.rows_affected() as i64;
 
-        // Delete from main table
-        sqlx::query("DELETE FROM audit_logs WHERE timestamp < $1")
-            .bind(older_than)
-            .execute(&self.db)
-            .await
-            .map_err(|e| format!("DB error: {e}"))?;
+        // Delete only rows that verifiably landed in the archive: same id AND
+        // same chain hash. A pre-existing conflicting archive row (different
+        // content) means the copy did NOT verifiably happen for that row —
+        // the live original is preserved.
+        sqlx::query(
+            "DELETE FROM audit_logs a
+             WHERE a.timestamp < $1
+               AND EXISTS (
+                 SELECT 1 FROM audit_logs_archive b
+                 WHERE b.id = a.id AND b.hash = a.hash
+               )",
+        )
+        .bind(older_than)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| format!("DB error: {e}"))?;
+
+        tx.commit().await.map_err(|e| format!("DB error: {e}"))?;
 
         info!(archived, "Audit logs archived");
         Ok(archived)

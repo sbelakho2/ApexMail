@@ -133,6 +133,9 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/gdpr/initiate-doi", post(gdpr_initiate_doi))
         .route("/gdpr/confirm-doi", post(gdpr_confirm_doi))
         .route("/gdpr/stats", get(gdpr_stats))
+        // G: real download route for stored access exports (export_url
+        // points here via export_base_url).
+        .route("/gdpr/exports/{id}", get(gdpr_download_export))
         // SOC2 / HIPAA / Trust Portal
         .merge(crate::admin_routes::admin_router())
         .merge(crate::admin_routes::public_trust_router())
@@ -182,15 +185,21 @@ pub(crate) fn verify_bearer(
     }
 }
 
-/// Extract the caller identity from request headers.
-/// Uses the `X-User-Id` header when present, falling back to the configured
-/// service account name. This replaces hardcoded "api-user" references.
+/// Extract the caller identity from request headers as UNTRUSTED metadata.
+///
+/// E-3: `X-User-Id` is client-supplied and trivially spoofable. It is never
+/// an authenticated actor: authentication is the service Bearer token
+/// (verified by `verify_bearer` before any handler reaches this point), and
+/// the claimed id is stored with an explicit `claimed_user_id:` prefix so it
+/// cannot be mistaken for an authoritative actor in audit trails or access
+/// logs.
 fn extract_caller_id(headers: &HeaderMap, _config: &ComplianceConfig) -> String {
     headers
         .get("X-User-Id")
         .and_then(|v| v.to_str().ok())
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
+        .map(|claimed| format!("claimed_user_id:{claimed}"))
         .unwrap_or_else(|| "api-user".to_string())
 }
 
@@ -424,7 +433,8 @@ async fn audit_create(
     let outcome = match outcome_str {
         "success" => AuditOutcome::Success,
         "failure" => AuditOutcome::Failure,
-        "denied" => AuditOutcome::Failure,
+        // I-5: access-denied is now distinguishable from operational failure.
+        "denied" => AuditOutcome::Denied,
         _ => return Err(err_json(StatusCode::BAD_REQUEST, "Invalid outcome")),
     };
 
@@ -843,12 +853,14 @@ async fn gdpr_submit_request(
         .and_then(|v| v.as_str())
         .ok_or_else(|| err_json(StatusCode::BAD_REQUEST, "Missing email"))?;
 
-    // SEC-15: Check DSAR rate limits before processing
+    // SEC-15: Check DSAR rate limits before processing (read-only check —
+    // quota is consumed only after a successful submission, see L1 fix).
     match state
         .dsar_rate_limiter
         .check_submission(email, tenant_id)
         .await
     {
+        DsarRateLimitStatus::Allowed => { /* proceed */ }
         DsarRateLimitStatus::UserRateLimited { retry_after } => {
             return Err((
                 StatusCode::TOO_MANY_REQUESTS,
@@ -869,8 +881,18 @@ async fn gdpr_submit_request(
                 })),
             ));
         }
-        DsarRateLimitStatus::Allowed => { /* proceed */ }
-        _ => {}
+        // D: no variant may be swallowed — an exceeded limit of ANY kind
+        // rejects the submission.
+        DsarRateLimitStatus::VerificationRateLimited { retry_after } => {
+            return Err((
+                StatusCode::TOO_MANY_REQUESTS,
+                Json(serde_json::json!({
+                    "error": "rate_limited",
+                    "message": "Too many DSAR requests. Please try again later.",
+                    "retry_after": retry_after.as_secs(),
+                })),
+            ));
+        }
     }
 
     match state
@@ -878,7 +900,38 @@ async fn gdpr_submit_request(
         .submit_request(tenant_id, request_type, email)
         .await
     {
-        Ok(request) => Ok(created_json(request)),
+        Ok((request, _verification_token)) => {
+            // C: the raw verification token and its hash must NEVER appear in
+            // the HTTP response. This crate has no mailer, so the token is
+            // not delivered out-of-band here: log a redacted notice for ops
+            // and flag `token_delivered: false` so delivery is visibly manual.
+            tracing::warn!(
+                request_id = %request.id,
+                email = %mail_common::pii::redact_email(email),
+                token_delivered = false,
+                "GDPR verification token NOT delivered — no mailer configured in the compliance crate; manual delivery required"
+            );
+            // L1: consume submission quota only on success.
+            state
+                .dsar_rate_limiter
+                .record_submission_success(email, tenant_id)
+                .await;
+            let response = DataSubjectRequestResponse {
+                id: request.id,
+                tenant_id: request.tenant_id,
+                request_type: request.request_type,
+                email: request.email,
+                status: request.status,
+                requested_at: request.requested_at,
+                expires_at: request.expires_at,
+                verification: serde_json::json!({
+                    "method": "token_delivery_pending",
+                    "instructions": "The verification token is delivered to the data subject by the platform operator; it is never returned by this API.",
+                }),
+                token_delivered: false,
+            };
+            Ok(created_json(response))
+        }
         Err(e) => {
             error!("GDPR submit failed: {e}");
             Err(err_json(
@@ -916,6 +969,7 @@ async fn gdpr_verify_request(
         .check_verification(&token_hash)
         .await
     {
+        DsarRateLimitStatus::Allowed => { /* proceed */ }
         DsarRateLimitStatus::VerificationRateLimited { retry_after } => {
             return Err((
                 StatusCode::TOO_MANY_REQUESTS,
@@ -926,8 +980,20 @@ async fn gdpr_verify_request(
                 })),
             ));
         }
-        DsarRateLimitStatus::Allowed => { /* proceed */ }
-        _ => {}
+        // D: previously `_ => {}` swallowed these variants, so an exceeded
+        // key reported as UserRateLimited let verification attempts through
+        // indefinitely (token brute-force). Any exceeded limit now rejects.
+        DsarRateLimitStatus::UserRateLimited { retry_after }
+        | DsarRateLimitStatus::TenantRateLimited { retry_after } => {
+            return Err((
+                StatusCode::TOO_MANY_REQUESTS,
+                Json(serde_json::json!({
+                    "error": "rate_limited",
+                    "message": "Too many verification attempts. Please try again later.",
+                    "retry_after": retry_after.as_secs(),
+                })),
+            ));
+        }
     }
 
     match state.gdpr.verify_request(&request_id, token).await {
@@ -949,6 +1015,15 @@ async fn gdpr_record_consent(
     Json(body): Json<serde_json::Value>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
     verify_bearer(&headers, &state.config).map_err(|(c, m)| err_json(c, m))?;
+    // I-4: a missing CONSENT_SIGNING_KEY must not brick the service — only
+    // this route fails (503), because consent recording without the ability
+    // to sign the proof certificate is non-compliant.
+    if state.config.gdpr.consent_signing_key.trim().is_empty() {
+        return Err(err_json(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Consent signing key not configured (CONSENT_SIGNING_KEY); consent recording is disabled",
+        ));
+    }
     let tenant_id = body
         .get("tenant_id")
         .and_then(|v| v.as_str())
@@ -1051,13 +1126,30 @@ async fn gdpr_get_consent_certificate(
 }
 
 /// GET /gdpr/stats — get GDPR statistics.
+///
+/// I-1: the tenant is threaded from the request (`?tenant_id=` query param or
+/// the X-Tenant-Id header); without either, stats aggregate all tenants.
+/// Previously a literal "" was passed, which matched zero rows and always
+/// reported zeros.
 async fn gdpr_stats(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
     verify_bearer(&headers, &state.config).map_err(|(c, m)| err_json(c, m))?;
+    let tenant_id = params
+        .get("tenant_id")
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            headers
+                .get("X-Tenant-Id")
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+        });
     // L-03: Use GDPR request stats instead of audit log stats
-    match state.gdpr.get_request_stats("").await {
+    match state.gdpr.get_request_stats(tenant_id.as_deref()).await {
         Ok(stats) => Ok(ok_json(stats)),
         Err(e) => {
             error!("Failed to get GDPR stats: {e}");
@@ -1067,6 +1159,64 @@ async fn gdpr_stats(
             ))
         }
     }
+}
+
+/// GET /gdpr/exports/{id} — download a stored GDPR access export.
+///
+/// G: the export_url now points at this crate's own route (config
+/// `export_base_url`), so exports are actually downloadable. Token-gated via
+/// the service Bearer token like every other route; serves the stored export
+/// JSON with a Content-Disposition attachment header.
+pub async fn gdpr_download_export(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    axum::extract::Path(export_id): axum::extract::Path<String>,
+) -> Result<axum::response::Response, (StatusCode, Json<serde_json::Value>)> {
+    verify_bearer(&headers, &state.config).map_err(|(c, m)| err_json(c, m))?;
+
+    let row: Option<(serde_json::Value, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
+        "SELECT data, expires_at FROM gdpr_exports WHERE id = $1",
+    )
+    .bind(&export_id)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| {
+        error!("Failed to fetch GDPR export {export_id}: {e}");
+        err_json(StatusCode::INTERNAL_SERVER_ERROR, "Failed to fetch export")
+    })?;
+
+    let Some((data, expires_at)) = row else {
+        return Err(err_json(StatusCode::NOT_FOUND, "Export not found"));
+    };
+
+    if expires_at < chrono::Utc::now() {
+        return Err(err_json(
+            StatusCode::GONE,
+            "Export has expired",
+        ));
+    }
+
+    let body = serde_json::to_string_pretty(&data)
+        .map_err(|e| {
+            error!("Failed to serialize GDPR export {export_id}: {e}");
+            err_json(StatusCode::INTERNAL_SERVER_ERROR, "Failed to serialize export")
+        })?;
+
+    let mut response = axum::response::Response::new(axum::body::Body::from(body));
+    *response.status_mut() = StatusCode::OK;
+    let headers_mut = response.headers_mut();
+    headers_mut.insert(
+        header::CONTENT_TYPE,
+        header::HeaderValue::from_static("application/json"),
+    );
+    headers_mut.insert(
+        header::CONTENT_DISPOSITION,
+        header::HeaderValue::from_str(&format!(
+            "attachment; filename=\"gdpr-export-{export_id}.json\""
+        ))
+        .map_err(|_| err_json(StatusCode::INTERNAL_SERVER_ERROR, "Invalid export id"))?,
+    );
+    Ok(response)
 }
 
 // ── DOI (Double Opt-In) endpoint bodies ───────────────────────────────────
@@ -2340,6 +2490,116 @@ mod tests {
         let response = rt.block_on(gdpr_confirm_doi(State(state), headers, Json(body)));
         assert_eq!(result_status(response), StatusCode::INTERNAL_SERVER_ERROR);
     }
+
+    // ── 8. GDPR submit / verify / export-download security tests ─────
+
+    /// C: the submit response must not contain the verification token or
+    /// its hash.
+    #[test]
+    fn test_submit_response_dto_leaks_no_token() {
+        let resp = DataSubjectRequestResponse {
+            id: "req-1".into(),
+            tenant_id: "t1".into(),
+            request_type: DataSubjectRequestType::Erasure,
+            email: "user@example.com".into(),
+            status: RequestStatus::PendingVerification,
+            requested_at: chrono::Utc::now(),
+            expires_at: chrono::Utc::now(),
+            verification: serde_json::json!({"method": "token_delivery_pending"}),
+            token_delivered: false,
+        };
+        let body = serde_json::to_string(&serde_json::json!({ "data": resp })).unwrap();
+        assert!(!body.contains("token_hash"));
+        assert!(!body.contains("\"token\""));
+        assert!(body.contains("\"token_delivered\":false"));
+    }
+
+    /// D: the 6th verification attempt within the window is rejected with
+    /// 429 — the fake-DB failures on attempts 1-5 must NOT reset or bypass
+    /// the limit (the old `_ => {}` swallow let these through forever).
+    #[test]
+    fn test_verify_sixth_attempt_is_rate_limited() {
+        let state = test_app_state(); // in-memory limiter, verify_attempts = 5
+        let headers = doi_auth_headers();
+        let rt = test_runtime();
+
+        let mut statuses = Vec::new();
+        for _ in 0..6 {
+            let body = serde_json::json!({ "token": "same-guess-token" });
+            let response = rt.block_on(gdpr_verify_request(
+                State(state.clone()),
+                headers.clone(),
+                axum::extract::Path("req-1".to_string()),
+                Json(body),
+            ));
+            statuses.push(result_status(response));
+        }
+        // Attempts 1-5 pass the rate limit and die on the fake DB (500).
+        for (i, s) in statuses.iter().take(5).enumerate() {
+            assert_eq!(
+                *s,
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "attempt {} should reach the DB layer",
+                i + 1
+            );
+        }
+        // Attempt 6 is rejected by the rate limiter (429), proving failed
+        // attempts consume quota and no variant is swallowed.
+        assert_eq!(statuses[5], StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    /// G: the export download route requires the service token (401 without).
+    #[test]
+    fn test_download_export_requires_auth() {
+        let state = test_app_state();
+        let rt = test_runtime();
+        let response = rt.block_on(gdpr_download_export(
+            State(state),
+            HeaderMap::new(), // no auth header
+            axum::extract::Path("some-export-id".to_string()),
+        ));
+        assert_eq!(response.unwrap_err().0, StatusCode::UNAUTHORIZED);
+    }
+
+    /// G: unknown export id never yields 200 — with the fake pool the DB
+    /// fetch fails, exercising only the wiring (the real 404 path is covered
+    /// by the DB-gated integration tests).
+    #[test]
+    fn test_download_export_unknown_id_is_never_200() {
+        let state = test_app_state();
+        let headers = doi_auth_headers();
+        let rt = test_runtime();
+        let response = rt.block_on(gdpr_download_export(
+            State(state),
+            headers,
+            axum::extract::Path("no-such-export".to_string()),
+        ));
+        let status = match response {
+            Ok(resp) => resp.status(),
+            Err((s, _)) => s,
+        };
+        assert_ne!(status, StatusCode::OK);
+        assert_ne!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    /// I-4: recording consent without a signing key is a 503, not a 500 —
+    /// the rest of the service stays up.
+    #[test]
+    fn test_record_consent_without_signing_key_is_503() {
+        let state = test_app_state(); // test config has empty consent_signing_key
+        let headers = doi_auth_headers();
+        let body = serde_json::json!({
+            "tenant_id": "t1",
+            "subscriber_id": "s1",
+            "consent_type": "marketing",
+            "email": "user@example.com",
+            "granted": true,
+        });
+        let rt = test_runtime();
+        let response = rt.block_on(gdpr_record_consent(State(state), headers, Json(body)));
+        assert_eq!(result_status(response), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
 
     // ── 7. Body deserialisation edge cases ──────────────────────
 

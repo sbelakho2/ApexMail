@@ -307,6 +307,12 @@ impl std::fmt::Display for SuppressionViolation {
 
 /// Check if a recipient is suppressed for a given scope.
 /// Returns the matching suppression or None if the recipient is clear.
+///
+/// Scope precedence: a broader-scoped suppression applies to sends in finer
+/// scopes without requiring exact `scope_id` equality — a Global record blocks
+/// everything, and a Domain record blocks every recipient in that domain.
+/// Exact (scope, scope_id) matching still applies to the intermediate scopes
+/// (Stream, Subaccount, Workspace, Organization).
 pub fn check_suppression(
     recipient: &str,
     scope: SuppressionScope,
@@ -325,23 +331,30 @@ pub fn check_suppression(
     for check_scope in &scope_order {
         if let Some(rec) = records
             .iter()
-            .find(|r| {
-                r.recipient == recipient
-                    && r.scope == *check_scope
-                    && r.scope_id == scope_id
-                    && r.is_active()
+            .find(|r| r.recipient == recipient && r.scope == *check_scope && r.is_active() && {
+                match r.scope {
+                    // Global blocks everything — no scope_id linkage required.
+                    SuppressionScope::Global => true,
+                    // Domain blocks domain sends: the record's scope_id is the
+                    // domain, matched against the recipient's domain.
+                    SuppressionScope::Domain => recipient_domain(recipient)
+                        .map(|d| d.eq_ignore_ascii_case(&r.scope_id))
+                        .unwrap_or(false),
+                    // Intermediate scopes: exact scope + scope_id match.
+                    _ => r.scope == scope && r.scope_id == scope_id,
+                }
             })
         {
             return Some(rec.clone());
         }
     }
 
-    records
-        .iter()
-        .find(|r| {
-            r.recipient == recipient && r.scope == scope && r.scope_id == scope_id && r.is_active()
-        })
-        .cloned()
+    None
+}
+
+/// Extract the lowercase domain part of an email-like recipient address.
+fn recipient_domain(recipient: &str) -> Option<&str> {
+    recipient.rsplit_once('@').map(|(_, domain)| domain)
 }
 
 /// Bulk add suppressions, skipping duplicates.
@@ -563,5 +576,175 @@ mod tests {
         assert!(!SuppressionReason::HardBounce.is_removable());
         assert!(SuppressionReason::Temporary.is_removable());
         assert!(SuppressionReason::CustomerBlock.is_removable());
+    }
+
+    // ── Scope-precedence matrix ────────────────────────────────
+
+    fn make_scoped_record(
+        recipient: &str,
+        reason: SuppressionReason,
+        scope: SuppressionScope,
+        scope_id: &str,
+    ) -> SuppressionRecord {
+        let mut rec = make_record(recipient, reason, scope);
+        rec.scope_id = scope_id.into();
+        rec
+    }
+
+    /// Global suppressions must block sends in any finer scope — the old code
+    /// required scope_id equality on every branch, so a Global record never
+    /// matched a Stream/Workspace/... send.
+    #[test]
+    fn test_global_suppression_matches_finer_scope() {
+        let rec = make_scoped_record(
+            "victim@test.com",
+            SuppressionReason::Complaint,
+            SuppressionScope::Global,
+            "global-root",
+        );
+        for (scope, scope_id) in [
+            (SuppressionScope::Stream, "stream-1"),
+            (SuppressionScope::Subaccount, "sub-1"),
+            (SuppressionScope::Workspace, "ws-1"),
+            (SuppressionScope::Organization, "org-1"),
+            (SuppressionScope::Global, "anything-else"),
+        ] {
+            let result = check_suppression("victim@test.com", scope, scope_id, &[rec.clone()]);
+            assert!(
+                result.is_some(),
+                "Global suppression must match {scope:?} send"
+            );
+        }
+    }
+
+    /// Domain suppressions block sends to any recipient in that domain,
+    /// regardless of the send scope.
+    #[test]
+    fn test_domain_suppression_matches_recipient_domain() {
+        let rec = make_scoped_record(
+            "anyone@evil.com",
+            SuppressionReason::Policy,
+            SuppressionScope::Domain,
+            "evil.com",
+        );
+        // Different local part, finer send scope — still blocked.
+        assert!(check_suppression(
+            "other-user@evil.com",
+            SuppressionScope::Stream,
+            "stream-1",
+            &[rec.clone()]
+        )
+        .is_some());
+        // Domain match must be case-insensitive.
+        assert!(check_suppression(
+            "user@EVIL.com",
+            SuppressionScope::Workspace,
+            "ws-1",
+            &[rec.clone()]
+        )
+        .is_some());
+        // Different domain — not blocked.
+        assert!(check_suppression(
+            "user@good.com",
+            SuppressionScope::Stream,
+            "stream-1",
+            &[rec.clone()]
+        )
+        .is_none());
+    }
+
+    /// Exact (scope, scope_id) matching still applies to intermediate scopes.
+    #[test]
+    fn test_intermediate_scopes_require_exact_match() {
+        let rec = make_scoped_record(
+            "user@test.com",
+            SuppressionReason::Temporary,
+            SuppressionScope::Stream,
+            "stream-1",
+        );
+        assert!(check_suppression(
+            "user@test.com",
+            SuppressionScope::Stream,
+            "stream-1",
+            &[rec.clone()]
+        )
+        .is_some());
+        // Wrong scope_id at the same scope.
+        assert!(check_suppression(
+            "user@test.com",
+            SuppressionScope::Stream,
+            "stream-2",
+            &[rec.clone()]
+        )
+        .is_none());
+        // A Stream record must NOT match a Workspace-context send (a stream
+        // block does not lift/apply to the whole workspace).
+        assert!(check_suppression(
+            "user@test.com",
+            SuppressionScope::Workspace,
+            "stream-1",
+            &[rec.clone()]
+        )
+        .is_none());
+    }
+
+    /// When multiple scopes match, the most specific record wins
+    /// (Domain over Global).
+    #[test]
+    fn test_most_specific_scope_wins() {
+        let domain_rec = make_scoped_record(
+            "user@test.com",
+            SuppressionReason::Policy,
+            SuppressionScope::Domain,
+            "test.com",
+        );
+        let global_rec = make_scoped_record(
+            "user@test.com",
+            SuppressionReason::HardBounce,
+            SuppressionScope::Global,
+            "root",
+        );
+        let result = check_suppression(
+            "user@test.com",
+            SuppressionScope::Stream,
+            "stream-1",
+            &[global_rec, domain_rec],
+        );
+        let matched = result.expect("expected a match");
+        assert_eq!(matched.scope, SuppressionScope::Domain);
+        assert_eq!(matched.reason, SuppressionReason::Policy);
+    }
+
+    /// Inactive (removed/expired) records never match, whatever the scope.
+    #[test]
+    fn test_inactive_records_never_match() {
+        let mut rec = make_scoped_record(
+            "gone@test.com",
+            SuppressionReason::Temporary,
+            SuppressionScope::Global,
+            "root",
+        );
+        rec.removal_history.push(RemovalRecord {
+            id: "r1".into(),
+            removed_by: "admin".into(),
+            removed_at: Utc::now(),
+            reason: "manual".into(),
+            permission_level: "admin".into(),
+            ip_address: None,
+        });
+        assert!(check_suppression(
+            "gone@test.com",
+            SuppressionScope::Stream,
+            "stream-1",
+            &[rec]
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn test_recipient_domain_extraction() {
+        assert_eq!(recipient_domain("a@b.c"), Some("b.c"));
+        assert_eq!(recipient_domain("no-domain"), None);
+        assert_eq!(recipient_domain(""), None);
     }
 }

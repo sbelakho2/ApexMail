@@ -289,8 +289,7 @@ impl ConsentEnforcer {
             )));
         }
 
-        let transactional =
-            is_transactional || is_transactional_email(tags, subject);
+        let transactional = is_transactional_email(is_transactional, tags, subject);
 
         if transactional {
             let has_transactional_bypass = frameworks
@@ -556,8 +555,25 @@ fn is_consent_expired(expires_at: Option<DateTime<Utc>>) -> bool {
     }
 }
 
-pub fn is_transactional_email(tags: &[String], subject: &str) -> bool {
-    let transactional_keywords = [
+/// Classify an email as transactional.
+///
+/// M7: the classification MUST come from an explicit caller declaration
+/// (`declared_transactional`). Keyword heuristics over tags/subjects are no
+/// longer sufficient to bypass consent — a "welcome" tag on a marketing blast
+/// used to silently classify the send as transactional. Default (absent
+/// declaration) is NON-transactional, i.e. consent is required.
+///
+/// The keyword hint is retained only for observability via
+/// [`transactional_keyword_hint`].
+pub fn is_transactional_email(declared_transactional: bool, tags: &[String], subject: &str) -> bool {
+    let _ = (tags, subject);
+    declared_transactional
+}
+
+/// Best-effort keyword hint (observability only — never an authorization
+/// signal). Returns the first keyword found in the tags or subject.
+pub fn transactional_keyword_hint(tags: &[String], subject: &str) -> Option<&'static str> {
+    const TRANSACTIONAL_KEYWORDS: [&str; 25] = [
         "transactional",
         "password",
         "reset",
@@ -585,24 +601,15 @@ pub fn is_transactional_email(tags: &[String], subject: &str) -> bool {
         "auth",
     ];
 
-    for kw in &transactional_keywords {
-        let found_in_tags = tags.iter().any(|t| {
-            let lower = t.to_lowercase();
-            lower.contains(kw) || lower == *kw
-        });
-        if found_in_tags {
-            return true;
+    for kw in TRANSACTIONAL_KEYWORDS {
+        if tags.iter().any(|t| t.to_lowercase().contains(kw)) {
+            return Some(kw);
         }
     }
-
     let subject_lower = subject.to_lowercase();
-    for kw in &transactional_keywords {
-        if subject_lower.contains(kw) {
-            return true;
-        }
-    }
-
-    false
+    TRANSACTIONAL_KEYWORDS
+        .into_iter()
+        .find(|kw| subject_lower.contains(kw))
 }
 
 #[cfg(test)]
@@ -688,22 +695,31 @@ mod tests {
         assert!("unknown".parse::<RegulatoryFramework>().is_err());
     }
 
+    // NOTE: these tests previously asserted that transactional *keywords*
+    // (tags/subject) alone could classify a send as transactional and bypass
+    // consent (M7 finding). They were updated to the fixed contract: only an
+    // explicit caller declaration enables the transactional path.
     #[test]
     fn test_is_transactional_email_tags() {
-        assert!(is_transactional_email(
+        // Keywords alone must NOT classify the email as transactional.
+        assert!(!is_transactional_email(
+            false,
             &["transactional".into()],
             "Newsletter issue #42"
         ));
-        assert!(is_transactional_email(
+        assert!(!is_transactional_email(
+            false,
             &["password-reset".into()],
             "Reset your password"
         ));
-        assert!(is_transactional_email(&["billing".into()], "Your invoice"));
-        assert!(is_transactional_email(
+        assert!(!is_transactional_email(false, &["billing".into()], "Your invoice"));
+        assert!(!is_transactional_email(
+            false,
             &["receipt".into()],
             "Order confirmed"
         ));
         assert!(!is_transactional_email(
+            false,
             &["marketing".into(), "newsletter".into()],
             "Weekly deals"
         ));
@@ -711,17 +727,52 @@ mod tests {
 
     #[test]
     fn test_is_transactional_email_subject() {
-        assert!(is_transactional_email(&[], "Password reset request"));
-        assert!(is_transactional_email(&[], "Your billing receipt"));
-        assert!(is_transactional_email(&[], "Account notification"));
-        assert!(is_transactional_email(&[], "Login verification code"));
-        assert!(!is_transactional_email(&[], "Big sale this weekend!"));
+        assert!(!is_transactional_email(false, &[], "Password reset request"));
+        assert!(!is_transactional_email(false, &[], "Your billing receipt"));
+        assert!(!is_transactional_email(false, &[], "Account notification"));
+        assert!(!is_transactional_email(false, &[], "Login verification code"));
+        assert!(!is_transactional_email(false, &[], "Big sale this weekend!"));
     }
 
     #[test]
     fn test_is_transactional_email_empty() {
-        assert!(!is_transactional_email(&[], ""));
-        assert!(!is_transactional_email(&[], "Hello World"));
+        assert!(!is_transactional_email(false, &[], ""));
+        assert!(!is_transactional_email(false, &[], "Hello World"));
+    }
+
+    /// M7: a 'welcome' tag alone must NOT be transactional — consent required.
+    #[test]
+    fn test_welcome_tag_alone_is_not_transactional() {
+        assert!(!is_transactional_email(
+            false,
+            &["welcome".into()],
+            "Welcome to our newsletter!"
+        ));
+    }
+
+    /// M7: an explicit caller declaration makes the send transactional.
+    #[test]
+    fn test_explicit_declaration_is_transactional() {
+        assert!(is_transactional_email(
+            true,
+            &["welcome".into()],
+            "Welcome to our newsletter!"
+        ));
+        assert!(is_transactional_email(true, &[], ""));
+    }
+
+    /// The keyword hint is observability-only and still detects keywords.
+    #[test]
+    fn test_transactional_keyword_hint() {
+        assert_eq!(
+            transactional_keyword_hint(&["welcome".into()], "Hello"),
+            Some("welcome")
+        );
+        assert_eq!(
+            transactional_keyword_hint(&[], "Password reset request"),
+            Some("password")
+        );
+        assert_eq!(transactional_keyword_hint(&[], "Big sale!"), None);
     }
 
     #[test]
