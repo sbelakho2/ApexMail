@@ -2,10 +2,10 @@
 2 .github/workflows/regenerate-assets.yml
 47 .github/workflows/release.yml
 2 .github/workflows/sync-assets.yml
-14 README.md
+15 README.md
 4 SECURITY.md
 4 packages/kiwicaptcha-php/CHANGELOG.md
-48 packages/kiwicaptcha-php/README.md
+12 packages/kiwicaptcha-php/README.md
 0 packages/kiwicaptcha-php/src/AtomicStorageInterface.php
 0 packages/kiwicaptcha-php/src/Challenge.php
 0 packages/kiwicaptcha-php/src/ChallengeProfile.php
@@ -159,9 +159,9 @@
 22 packages/kiwicaptcha-wasm/tools/embed-worker/src/main.rs
 1 packages/kiwicaptcha-wasm/tools/embed/src/main.rs
 1 packages/kiwicaptcha-wasm/tools/sri-hashes.mjs
-0 packages/kiwicaptcha/README.md
+1 packages/kiwicaptcha/README.md
 0 packages/kiwicaptcha/examples/quickstart.rs
-39 packages/kiwicaptcha/integrations/symfony/README.md
+36 packages/kiwicaptcha/integrations/symfony/README.md
 65 packages/kiwicaptcha/integrations/symfony/Resources/ACCESSIBILITY.md
 115 packages/kiwicaptcha/integrations/symfony/Resources/public/kiwicaptcha-wasm.js
 118 packages/kiwicaptcha/integrations/symfony/Resources/public/widget-driver.js
@@ -332,4 +332,4 @@
 0 tests/browser/specs/risk-v2.spec.mjs
 2 tests/browser/specs/security.spec.mjs
 1 tests/browser/specs/widget.spec.mjs
-TOTAL 1076
+TOTAL 1039
