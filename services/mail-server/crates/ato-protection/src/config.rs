@@ -102,6 +102,15 @@ pub struct AtoConfig {
     /// same process (default:true).
     pub use_process_global_lockout_registry: bool,
 
+    /// Server-side pepper mixed into device-fingerprint hashes.
+    /// Privacy/security improvement:without a pepper, an attacker who
+    /// obtains the stored fingerprint hashes can mount offline
+    /// dictionary attacks over (User-Agent, IP prefix, TLS hash) tuples.
+    /// The pepper must be a per-deployment secret (env
+    /// `ATO_FINGERPRINT_PEPPER`); when unset, a process-random value is
+    /// generated so hashes never collide across deployments.
+    pub fingerprint_pepper: Option<String>,
+
     // ---- Redis Shared Lockout ----
     /// Optional Redis URL for cross-node lockout state sharing.
     /// When set (e.g., `"redis://127.0.0.1:6379"`), lockout events are
@@ -147,6 +156,9 @@ impl Default for AtoConfig {
             lockout_escalation_window_secs: 86400, // 24 hours
             rate_limit_rps: 50,
             use_process_global_lockout_registry: true,
+            fingerprint_pepper: std::env::var("ATO_FINGERPRINT_PEPPER")
+                .ok()
+                .filter(|p| !p.trim().is_empty()),
             redis_lockout_url: None,
             deployment_mode: DeploymentMode::Production,
             allow_single_node_mode: false,

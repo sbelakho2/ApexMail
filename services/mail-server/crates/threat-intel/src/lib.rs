@@ -52,4 +52,11 @@ pub enum ThreatIntelError {
     /// Invalid CIDR notation
     #[error("Invalid CIDR: {0}")]
     InvalidCidr(String),
+
+    /// Blocklist is at its configured capacity
+    #[error("Blocklist is full (max {max_entries} entries)")]
+    BlocklistFull {
+        /// The configured maximum number of entries
+        max_entries: usize,
+    },
 }

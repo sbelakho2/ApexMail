@@ -427,7 +427,7 @@ pub fn ip_is_private_or_reserved(ip: std::net::IpAddr) -> bool {
                 || v4.is_multicast()
                 || v4.is_unspecified()
                 || v4.is_documentation()
-                || v4.is_shared() // 100.64.0.0/10 carrier-grade NAT
+                || (o[0] == 100 && (64..=127).contains(&o[1])) // 100.64.0.0/10 CGNAT
                 || o[0] == 0 // 0.0.0.0/8 "this network"
                 || o[0] >= 240 // 240.0.0.0/4 reserved
         }
@@ -503,8 +503,6 @@ async fn url_blocked_by_ssrf_guard(url_str: &str) -> Option<String> {
 
 #[cfg(feature = "phishing")]
 async fn detonate_url_impl(url: &str) -> DetonationResult {
-    use std::time::Duration;
-
     // Bound concurrent detonations system-wide.
     let _permit = detonation_semaphore()
         .acquire()

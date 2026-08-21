@@ -22,7 +22,13 @@ pub fn haversine_distance(a: &GeoPoint, b: &GeoPoint) -> f64 {
     let lat1 = a.lat.to_radians();
     let lat2 = b.lat.to_radians();
 
-    let a_val = (d_lat / 2.0).sin().powi(2) + lat1.cos() * lat2.cos() * (d_lon / 2.0).sin().powi(2);
+    // Clamp the haversine to [0, 1] before sqrt/asin:for antipodal or
+    // numerically-extreme points the float sum can exceed 1.0, and
+    // asin(x > 1) = NaN, which silently poisoned every downstream
+    // impossible-travel decision with NaN comparisons.
+    let a_val = ((d_lat / 2.0).sin().powi(2)
+        + lat1.cos() * lat2.cos() * (d_lon / 2.0).sin().powi(2))
+        .clamp(0.0, 1.0);
     let c = 2.0 * a_val.sqrt().asin();
 
     EARTH_RADIUS_KM * c
@@ -164,5 +170,19 @@ mod tests {
         };
         let (impossible, _, _) = check_impossible_travel(&a, &b, 0.0, 900.0);
         assert!(!impossible, "Same timestamp, same location = ok");
+    }
+
+    #[test]
+    fn test_antipodal_points_no_nan() {
+        // Antipodal/extreme points previously produced asin(x > 1) = NaN.
+        let a = GeoPoint { lat: 0.0, lon: 0.0 };
+        let b = GeoPoint { lat: 0.0, lon: 180.0 };
+        let d = haversine_distance(&a, &b);
+        assert!(d.is_finite(), "antipodal distance must be finite, got {d}");
+        assert!((d - 20015.0).abs() < 100.0, "half circumference ~20015km, got {d}");
+        // Impossible travel over antipodes must be a decision, not NaN.
+        let (impossible, speed, _) = check_impossible_travel(&a, &b, 3600.0, 500.0);
+        assert!(impossible);
+        assert!(speed.is_finite());
     }
 }

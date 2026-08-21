@@ -50,9 +50,11 @@ impl DomainBlocklist {
     }
 
     /// Look up a domain, checking exact match and parent domain wildcards.
-    /// Parent domain walk is capped at 3 levels to prevent abuse from
-    /// deeply-nested subdomains (e.g., a.b.c.d.e.f.evil.com) which could
-    /// cause excessive DashMap lookups per request.
+    /// The walk climbs toward the registrable parent (e.g.
+    /// `a.b.c.d.evil.com` → … → `evil.com`), stopping once a two-label
+    /// apex (the presumable registrable domain) has been checked.
+    /// The walk is capped at 5 levels to prevent abuse from pathologically
+    /// deep subdomains causing excessive DashMap lookups per request.
     pub fn lookup(&self, domain: &str) -> Option<DomainBlockEntry> {
         let normalized = domain.to_lowercase();
         let normalized = normalized.trim_end_matches('.');
@@ -65,10 +67,10 @@ impl DomainBlocklist {
             }
         }
 
-        // Walk up the domain hierarchy, capped at 3 levels
+        // Walk up the domain hierarchy toward the registrable parent.
         let mut parts = normalized;
         let mut walk_count = 0;
-        const MAX_DOMAIN_WALK: usize = 3;
+        const MAX_DOMAIN_WALK: usize = 5;
         while let Some(dot_pos) = parts.find('.') {
             if walk_count >= MAX_DOMAIN_WALK {
                 break;
@@ -79,6 +81,13 @@ impl DomainBlocklist {
                 if entry.expires_at > now {
                     return Some(entry.clone());
                 }
+            }
+            // Apex heuristic:once the remaining name has two labels
+            // ("evil.com") we have checked the presumable registrable
+            // domain — stop. Multi-part public suffixes (co.uk) may need
+            // one extra level, which the 5-walk cap still permits.
+            if parts.matches('.').count() <= 1 {
+                break;
             }
         }
 
@@ -137,6 +146,44 @@ pub fn parse_domain_list(
                 added_at: now,
                 expires_at: expires,
             }
+        })
+        .collect()
+}
+
+/// Parse a URL-per-line feed (e.g. abuse.ch URLhaus `text` export) and
+/// extract the HOST of each URL as a domain entry. Literal-IP hosts are
+/// skipped (they belong in the IP blocklist).
+pub fn parse_url_list_domains(
+    content: &str,
+    source: &str,
+    category: &str,
+    ttl_secs: u64,
+) -> Vec<DomainBlockEntry> {
+    let now = Utc::now();
+    let expires = now + chrono::Duration::seconds(ttl_secs as i64);
+
+    content
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .filter_map(|line| {
+            let host = crate::ip_blocklist::url_host(line)?;
+            if host.parse::<std::net::Ipv4Addr>().is_ok()
+                || host.parse::<std::net::Ipv6Addr>().is_ok()
+            {
+                return None; // IP literal — IP blocklist territory
+            }
+            if !host.contains('.') {
+                return None;
+            }
+            Some(DomainBlockEntry {
+                domain: host.to_lowercase(),
+                source: source.into(),
+                confidence: 7.0,
+                category: category.into(),
+                added_at: now,
+                expires_at: expires,
+            })
         })
         .collect()
 }
@@ -217,5 +264,30 @@ mod tests {
         let removed = bl.purge_expired();
         assert_eq!(removed, 1);
         assert_eq!(bl.count(), 1);
+    }
+
+    #[test]
+    fn test_deep_subdomain_matches_registrable_parent() {
+        let bl = DomainBlocklist::new(1000);
+        assert!(bl.add("evil.com", make_entry("evil.com")));
+        // 4-label prefix:a.b.c.d.evil.com must reach the evil.com block.
+        assert!(
+            bl.lookup("a.b.c.d.evil.com").is_some(),
+            "deep subdomain must match its registrable parent"
+        );
+        // 5-label prefix:still within the walk cap.
+        assert!(bl.lookup("x.a.b.c.d.evil.com").is_some());
+        // Pathologically deep names beyond the cap do not (bounded work).
+        assert!(bl.lookup("z.y.x.a.b.c.d.evil.com").is_none());
+    }
+
+    #[test]
+    fn test_url_list_domain_extraction() {
+        let content = "https://198.51.100.9/payload.bin\nhttp://bad.example.com/page\nhttp://worse.example.org/x\n";
+        let entries = parse_url_list_domains(content, "urlhaus", "malware", 3600);
+        let domains: Vec<&str> = entries.iter().map(|e| e.domain.as_str()).collect();
+        assert!(!domains.contains(&"198.51.100.9"), "IP literals excluded");
+        assert!(domains.contains(&"bad.example.com"), "got {domains:?}");
+        assert!(domains.contains(&"worse.example.org"), "got {domains:?}");
     }
 }

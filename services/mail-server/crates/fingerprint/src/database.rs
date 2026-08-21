@@ -238,10 +238,18 @@ impl FingerprintDb {
     }
 
     /// Load known fingerprints (browser patterns, known bots, etc.)
+    ///
+    /// Every seed key is a JA4_a component in this crate's own format
+    /// (`protocol + sni + cipher_count + ext_count + alpn`, see
+    /// [`crate::ja4::is_valid_ja4_a`]) — the previous hardcoded keys had
+    /// wrong lengths/alphabets ("t130613h2", "d100200", …) and could never
+    /// match a fingerprint produced by [`crate::ja4::Ja4Fingerprint::compute`].
+    /// A unit test validates the entire seed table against the crate's own
+    /// parser and validator.
     fn load_known_fingerprints(&self) {
-        // Chrome on macOS
+        // Chrome (TLS 1.3, SNI domain, ~18 cipher suites, ~17 extensions, h2)
         self.known.insert(
-            "t130613h2".to_string(), // JA4_a prefix for Chrome TLS 1.3
+            "td1817h2".to_string(),
             FingerprintClassification::benign(
                 ClientIdentity::Browser {
                     name: "Chrome".to_string(),
@@ -251,9 +259,9 @@ impl FingerprintDb {
             ),
         );
 
-        // Firefox
+        // Firefox (TLS 1.3, SNI domain, ~15 cipher suites, ~11 extensions, h2)
         self.known.insert(
-            "t120511h1".to_string(),
+            "td1511h2".to_string(),
             FingerprintClassification::benign(
                 ClientIdentity::Browser {
                     name: "Firefox".to_string(),
@@ -263,9 +271,9 @@ impl FingerprintDb {
             ),
         );
 
-        // Safari
+        // Safari (TLS 1.3, SNI domain, ~16 cipher suites, ~14 extensions, h2)
         self.known.insert(
-            "t130815h2".to_string(),
+            "td1614h2".to_string(),
             FingerprintClassification::benign(
                 ClientIdentity::Browser {
                     name: "Safari".to_string(),
@@ -275,18 +283,23 @@ impl FingerprintDb {
             ),
         );
 
-        // Python requests (commonly used in scripts)
+        // Python requests (TLS 1.2 → 'd', SNI domain, ~9 cipher suites,
+        // ~8 extensions, no ALPN → "00")
         self.known.insert(
-            "d100200".to_string(),
+            "dd090800".to_string(),
             FingerprintClassification::suspicious(
                 "Python requests library",
                 vec!["automation".to_string()],
             ),
         );
 
-        // Known malicious fingerprint patterns
+        // Known malicious fingerprint pattern:minimal attack-tool stack —
+        // TLS 1.2 ('d'), IP-literal SNI ('i', typical of attack tools that
+        // connect by address), 2 cipher suites, 2 extensions, no ALPN.
+        // ('_' as the SNI marker is not usable in seed keys:it collides
+        // with the JA4 field separator and would never round-trip.)
         self.known.insert(
-            "d050300".to_string(),
+            "di020200".to_string(),
             FingerprintClassification::malicious(
                 "Known attack tool fingerprint",
                 vec!["credential_stuffing".to_string(), "bruteforce".to_string()],
@@ -594,5 +607,34 @@ mod tests {
         }
 
         assert_eq!(db.stats().observed_fingerprints, 2);
+    }
+
+    // ── Security-fix regression test ──
+
+    #[test]
+    fn test_seed_keys_parse_and_validate() {
+        // Every hardcoded seed key must be format-valid per the crate's own
+        // JA4 validator AND parseable back through Ja4Fingerprint::parse
+        // (combined into a full fingerprint string). The old seeds
+        // ("t130613h2", "d100200", …) failed both.
+        let db = FingerprintDb::default();
+        assert!(!db.known.is_empty(), "seed table must not be empty");
+        for key in db.known.iter().map(|e| e.key().clone()) {
+            assert!(
+                crate::ja4::is_valid_ja4_a(&key),
+                "seed key {key:?} fails the crate's own JA4_a validator"
+            );
+            // Round-trip through the parser inside a synthetic full string.
+            let synthetic = format!("{key}_abcdef012345_6789abcdef012");
+            let parsed = crate::ja4::Ja4Fingerprint::parse(&synthetic)
+                .unwrap_or_else(|| panic!("seed key {key:?} must parse as a JA4_a component"));
+            assert_eq!(parsed.ja4_a, key);
+        }
+        // The malicious concept survives with a properly formatted key.
+        let malicious = db
+            .known
+            .get("di020200")
+            .expect("attack-tool seed present");
+        assert_eq!(malicious.suspicion, SuspicionLevel::Malicious);
     }
 }

@@ -68,8 +68,20 @@ impl MatchResult {
 /// High-performance multi-pattern matcher.
 /// Uses Aho-Corasick automaton for O(n) matching over any number of patterns.
 /// Immune to ReDoS by construction (no backtracking).
+///
+/// # Build-failure behavior (fail-open for *matching*, not for silence)
+///
+/// If automaton construction fails (e.g. an oversized pattern set exceeding
+/// determinization memory limits), the matcher does NOT silently match
+/// nothing:it falls back to a plain literal-substring scan over the raw
+/// (escaped-by-construction) patterns so detection keeps working, logs the
+/// degradation once, and reports it via [`Self::is_healthy`].
 pub struct PatternMatcher {
     automaton: Option<AhoCorasick>,
+    /// Literal fallback (lowercased NFC patterns + their index) used when
+    /// the automaton could not be built. Matching degrades from O(n) to
+    /// O(patterns × n) but keeps working.
+    fallback: Option<Vec<(String, usize)>>,
     patterns: Vec<PatternEntry>,
 }
 
@@ -80,34 +92,96 @@ struct PatternEntry {
 
 impl PatternMatcher {
     /// Build a matcher from labeled pattern strings.
-    /// Returns `None` if the patterns are invalid (e.g., too many or conflicting).
     pub fn new(patterns: Vec<(String, String)>) -> Self {
         let entries: Vec<PatternEntry> = patterns
             .iter()
             .map(|(_, l)| PatternEntry { label: l.clone() })
             .collect();
 
+        // Patterns are NFC-normalized at BUILD time so an NFD-encoded rule
+        // still matches NFC-normalized input (O-13.2, applied to both
+        // sides of the comparison).
+        let normalized_patterns: Vec<String> = patterns
+            .iter()
+            .map(|(p, _)| {
+                if p.is_ascii() {
+                    p.clone()
+                } else {
+                    let n: String = p.chars().nfc().collect();
+                    if n == *p {
+                        p.clone()
+                    } else {
+                        n
+                    }
+                }
+            })
+            .collect();
+
         let automaton = match AhoCorasickBuilder::new()
             .ascii_case_insensitive(true)
             .match_kind(MatchKind::LeftmostLongest)
-            .build(patterns.iter().map(|(p, _)| p.as_str()))
+            .build(normalized_patterns.iter().map(|p| p.as_str()))
         {
             Ok(automaton) => Some(automaton),
             Err(e) => {
-                // O-13.1: Log the error for diagnostics but do NOT expose it
-                // to external callers via return values.
+                // O-13.1: log for diagnostics, do not expose the error via
+                // return values. Fall back to literal scanning so matching
+                // still works instead of silently matching nothing.
                 tracing::error!(
                     error = %e,
-                    "Failed to build Aho-Corasick automaton from config patterns; using empty matcher"
+                    pattern_count = normalized_patterns.len(),
+                    "Failed to build Aho-Corasick automaton; degrading to literal fallback matching"
                 );
                 None
             }
         };
 
+        let fallback = if automaton.is_some() {
+            None
+        } else {
+            Some(
+                normalized_patterns
+                    .iter()
+                    .enumerate()
+                    .map(|(idx, p)| (p.to_lowercase(), idx))
+                    .collect(),
+            )
+        };
+
         Self {
             automaton,
+            fallback,
             patterns: entries,
         }
+    }
+
+    /// Whether the fast Aho-Corasick automaton is active.
+    /// `false` means the matcher is operating in the (correct but slower)
+    /// literal fallback mode — operators can alert on this.
+    pub fn is_healthy(&self) -> bool {
+        self.automaton.is_some()
+    }
+
+    /// Literal fallback scan used when the automaton could not be built.
+    /// Case-insensitive substring search per pattern (ASCII-lowercase
+    /// comparison), returning `(pattern_index, start, end)` triples.
+    fn find_all_fallback(&self, text_lower: &str) -> Vec<(usize, usize, usize)> {
+        let Some(fallback) = self.fallback.as_ref() else {
+            return Vec::new();
+        };
+        let mut results = Vec::new();
+        for (pattern, idx) in fallback {
+            let pat_len = pattern.len();
+            let mut hay = text_lower;
+            let mut offset = 0usize;
+            while let Some(pos) = hay.find(pattern.as_str()) {
+                results.push((*idx, offset + pos, offset + pos + pat_len));
+                let advance = pos + pat_len.max(1);
+                hay = &hay[advance..];
+                offset += advance;
+            }
+        }
+        results
     }
 
     /// Normalize input text to Unicode NFC form (O-13.2).
@@ -137,24 +211,32 @@ impl PatternMatcher {
     /// Input is NFC-normalized before matching (O-13.2); see
     /// [`MatchResult::normalized`] for the offset coordinate system.
     pub fn find_all(&self, text: &str) -> Vec<MatchResult> {
-        let Some(automaton) = self.automaton.as_ref() else {
-            return Vec::new();
-        };
-
         let normalized = Self::normalize(text);
         let offsets_are_normalized = matches!(normalized, Cow::Owned(_));
 
-        automaton
-            .find_iter(normalized.as_ref())
-            .map(|m| {
-                let entry = &self.patterns[m.pattern().as_usize()];
-                MatchResult::new(
-                    m.pattern().as_usize(),
-                    m.start(),
-                    m.end(),
-                    &entry.label,
-                    offsets_are_normalized,
-                )
+        if let Some(automaton) = self.automaton.as_ref() {
+            return automaton
+                .find_iter(normalized.as_ref())
+                .map(|m| {
+                    let entry = &self.patterns[m.pattern().as_usize()];
+                    MatchResult::new(
+                        m.pattern().as_usize(),
+                        m.start(),
+                        m.end(),
+                        &entry.label,
+                        offsets_are_normalized,
+                    )
+                })
+                .collect();
+        }
+
+        // Fallback literal scan (automaton build failed):keep matching.
+        let text_lower = normalized.as_ref().to_lowercase();
+        self.find_all_fallback(&text_lower)
+            .into_iter()
+            .map(|(idx, start, end)| {
+                let entry = &self.patterns[idx];
+                MatchResult::new(idx, start, end, &entry.label, offsets_are_normalized)
             })
             .collect()
     }
@@ -162,25 +244,25 @@ impl PatternMatcher {
     /// Check if any pattern matches.
     /// Input is NFC-normalized before matching (O-13.2).
     pub fn is_match(&self, text: &str) -> bool {
-        self.automaton
-            .as_ref()
-            .map(|a| {
-                let normalized = Self::normalize(text);
-                a.is_match(normalized.as_ref())
-            })
-            .unwrap_or(false)
+        let normalized = Self::normalize(text);
+        if let Some(a) = self.automaton.as_ref() {
+            return a.is_match(normalized.as_ref());
+        }
+        // Fallback literal scan (automaton build failed):keep matching.
+        let text_lower = normalized.as_ref().to_lowercase();
+        self.find_all_fallback(&text_lower).first().is_some()
     }
 
     /// Count total matches.
     /// Input is NFC-normalized before matching (O-13.2).
     pub fn count_matches(&self, text: &str) -> usize {
-        self.automaton
-            .as_ref()
-            .map(|a| {
-                let normalized = Self::normalize(text);
-                a.find_iter(normalized.as_ref()).count()
-            })
-            .unwrap_or(0)
+        let normalized = Self::normalize(text);
+        if let Some(a) = self.automaton.as_ref() {
+            return a.find_iter(normalized.as_ref()).count();
+        }
+        // Fallback literal scan (automaton build failed):keep counting.
+        let text_lower = normalized.as_ref().to_lowercase();
+        self.find_all_fallback(&text_lower).len()
     }
 
     /// Find first match only.
@@ -377,6 +459,54 @@ mod tests {
         assert!(
             matcher.is_match(&mixed),
             "Mixed input should match NFC pattern"
+        );
+    }
+
+    // ── Security-fix regression tests ──
+
+    #[test]
+    fn test_fallback_matches_literals_when_automaton_unavailable() {
+        // Simulate an automaton build failure (as with an oversized pattern
+        // set) by constructing the degraded state directly. The matcher
+        // must KEEP matching literals instead of silently matching nothing.
+        let matcher = PatternMatcher {
+            automaton: None,
+            fallback: Some(vec![
+                ("googlebot".to_string(), 0),
+                ("curl/".to_string(), 1),
+            ]),
+            patterns: vec![
+                PatternEntry { label: "bot:google".into() },
+                PatternEntry { label: "tool:curl".into() },
+            ],
+        };
+        assert!(!matcher.is_healthy());
+        assert!(matcher.is_match("User-Agent: Googlebot/2.1"));
+        assert!(matcher.is_match("fetch with CURL/7.68"));
+        assert!(!matcher.is_match("plain text"));
+        let results = matcher.find_all("googlebot then googlebot again");
+        assert_eq!(results.len(), 2, "fallback counts repeated occurrences");
+        assert!(results.iter().all(|r| r.label == "bot:google"));
+        assert_eq!(matcher.count_matches("curl/ and curl/ and curl/"), 3);
+    }
+
+    #[test]
+    fn test_healthy_matcher_reports_healthy() {
+        let matcher = test_matcher();
+        assert!(matcher.is_healthy());
+    }
+
+    #[test]
+    fn test_nfd_pattern_matches_nfc_input() {
+        // Patterns are NFC-normalized at build time now:an NFD-encoded
+        // pattern ("e" + combining acute) must match NFC input ("é").
+        let nfd_pattern = "cafe\u{0301}".to_string();
+        let matcher = build_matcher(vec![
+            (&nfd_pattern, "accented"),
+        ]);
+        assert!(
+            matcher.is_match("caf\u{00e9} au lait"),
+            "NFD-built pattern must match NFC input (pattern-side normalization)"
         );
     }
 }

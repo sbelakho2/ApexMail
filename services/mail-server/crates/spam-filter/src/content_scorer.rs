@@ -1233,7 +1233,7 @@ fn spam_phrase_set() -> Option<&'static SpamPhraseSet> {
                 patterns.into_iter().multiunzip();
             let single_word: Vec<bool> = pats
                 .iter()
-                .map(|p: &str| !p.chars().any(char::is_whitespace))
+                .map(|p: &&str| !p.chars().any(char::is_whitespace))
                 .collect();
 
             let automaton = AhoCorasick::builder()

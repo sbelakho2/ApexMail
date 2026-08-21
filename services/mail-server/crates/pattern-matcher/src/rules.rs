@@ -72,21 +72,44 @@ pub struct RuleMatch {
     pub match_end: usize,
 }
 
+/// Default cap on how many occurrences of a single rule contribute to
+/// [`RuleSet::total_score`]. Without a cap, a message repeating one keyword
+/// ("free money" × 500) inflates the score without bound — a cheap
+/// adversarial score-pumping vector.
+pub const DEFAULT_MAX_OCCURRENCES_PER_RULE: usize = 3;
+
 /// A collection of pattern-matching rules.
 pub struct RuleSet {
     rules: Vec<Rule>,
     matcher: PatternMatcher,
+    /// Maximum number of occurrences of any single rule that contribute to
+    /// the aggregate score.
+    max_occurrences_per_rule: usize,
 }
 
 impl RuleSet {
     pub fn new(rules: Vec<Rule>) -> Self {
+        Self::with_occurrence_cap(rules, DEFAULT_MAX_OCCURRENCES_PER_RULE)
+    }
+
+    /// Build a rule set with a custom per-rule occurrence cap for score
+    /// aggregation (`0` counts as the default cap).
+    pub fn with_occurrence_cap(rules: Vec<Rule>, max_occurrences: usize) -> Self {
         let patterns: Vec<(String, String)> = rules
             .iter()
             .map(|r| (r.pattern.clone(), r.id.clone()))
             .collect();
 
         let matcher = PatternMatcher::new(patterns);
-        Self { rules, matcher }
+        Self {
+            rules,
+            matcher,
+            max_occurrences_per_rule: if max_occurrences == 0 {
+                DEFAULT_MAX_OCCURRENCES_PER_RULE
+            } else {
+                max_occurrences
+            },
+        }
     }
 
     /// Evaluate all rules against the input text.
@@ -113,9 +136,22 @@ impl RuleSet {
             .collect()
     }
 
-    /// Calculate total score from all rule matches.
+    /// Calculate total score from all rule matches, capping each rule's
+    /// contribution at `max_occurrences_per_rule` occurrences so repeated
+    /// keywords cannot inflate the aggregate score without bound.
     pub fn total_score(&self, text: &str) -> f64 {
-        self.evaluate(text).iter().map(|m| m.score).sum()
+        let mut per_rule: std::collections::HashMap<String, (f64, usize)> =
+            std::collections::HashMap::new();
+        for m in self.evaluate(text) {
+            let entry = per_rule.entry(m.rule_id.clone()).or_insert((m.score, 0));
+            if entry.1 < self.max_occurrences_per_rule {
+                entry.1 += 1;
+            }
+        }
+        per_rule
+            .into_values()
+            .map(|(score, count)| score * count as f64)
+            .sum()
     }
 
     /// Check if any critical rules match.
@@ -259,5 +295,28 @@ mod tests {
     fn test_category_serialization() {
         let json = serde_json::to_string(&RuleCategory::BotDetection).unwrap();
         assert_eq!(json, r#""bot_detection""#);
+    }
+
+    #[test]
+    fn test_total_score_caps_occurrences_per_rule() {
+        // 10 occurrences of a 3-point rule must contribute 3×3=9 (default
+        // cap 3), not 30 — repeated keywords cannot pump the score.
+        let rs = RuleSet::new(test_rules());
+        let text = "buy now ".repeat(10);
+        assert_eq!(rs.evaluate(&text).len(), 10, "all matches still reported");
+        let score = rs.total_score(&text);
+        assert!(
+            (score - 9.0).abs() < f64::EPSILON,
+            "score must be capped at 3 occurrences (9.0), got {score}"
+        );
+
+        // Custom cap is configurable.
+        let rs = RuleSet::with_occurrence_cap(test_rules(), 5);
+        let score = rs.total_score(&text);
+        assert!((score - 15.0).abs() < f64::EPSILON, "cap 5 → 15.0, got {score}");
+
+        // Cap 0 means "use the default".
+        let rs = RuleSet::with_occurrence_cap(test_rules(), 0);
+        assert_eq!(rs.total_score(&text), 9.0);
     }
 }

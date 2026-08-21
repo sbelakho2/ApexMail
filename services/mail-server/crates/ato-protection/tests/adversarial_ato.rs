@@ -238,10 +238,12 @@ fn test_lockout_after_five_failures() {
         engine.evaluate(&e);
     }
     let verdict = engine.evaluate(&make_event("grace", "9.9.9.9", 0.0, 0.0));
-    assert_eq!(
+    // The lockout now fires ON the threshold-crossing attempt, so this
+    // sequence escalates to RequireCaptcha (stronger than Block).
+    assert!(
+        matches!(verdict.action, AtoAction::Block | AtoAction::RequireCaptcha),
+        "Must be locked out after 6 failures, got {:?} (risk={})",
         verdict.action,
-        AtoAction::Block,
-        "Must be blocked after 6 failures, risk={}",
         verdict.risk_score
     );
 }

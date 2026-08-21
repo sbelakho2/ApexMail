@@ -119,56 +119,151 @@ pub const REDIS_LOCKOUT_AVAILABLE: bool = cfg!(feature = "redis-lockout");
 /// ## Known limitations
 /// - **Blocking I/O**:Redis calls currently use synchronous I/O on the calling
 /// thread. For high-throughput deployments, wrap in `tokio::task::spawn_blocking`.
+/// Error returned when a Redis lockout backend cannot be constructed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LockoutBackendError {
+    /// The configured Redis URL could not be parsed.
+    InvalidUrl(String),
+}
+
+impl std::fmt::Display for LockoutBackendError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LockoutBackendError::InvalidUrl(url) => {
+                write!(f, "invalid Redis URL for RedisLockoutBackend: {url}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for LockoutBackendError {}
+
+/// Redis-backed lockout backend (see module docs above).
 pub struct RedisLockoutBackend {
     /// Redis connection URL (e.g., `redis://127.0.0.1:6379`)
     url: String,
     /// Key prefix for lockout sorted sets (used by the Redis backend impl).
     #[cfg(feature = "redis-lockout")]
     key_prefix: String,
-    /// Redis client (only present when `redis-lockout` feature is enabled)
+    /// Redis client (None when the URL is invalid or the feature is off —
+    /// operations then log-and-degrade instead of panicking).
     #[cfg(feature = "redis-lockout")]
-    client: redis::Client,
+    client: Option<redis::Client>,
+    /// Persistent cached connection. Reused across calls instead of opening
+    /// a fresh TCP connection per operation; dropped (forcing reconnect) on
+    /// any I/O error.
+    #[cfg(feature = "redis-lockout")]
+    conn: std::sync::Mutex<Option<redis::Connection>>,
+    /// Construction error, surfaced via `construction_error()` instead of
+    /// a panic (typed error — see [`LockoutBackendError`]).
+    #[cfg(feature = "redis-lockout")]
+    init_error: Option<LockoutBackendError>,
 }
 
 impl RedisLockoutBackend {
     /// Create a new Redis lockout backend.
+    /// Invalid URLs no longer panic — the backend is created in a degraded
+    /// state and the error is reported via [`Self::construction_error`].
     pub fn new(url: String) -> Self {
-        #[cfg(feature = "redis-lockout")]
-        let client =
-            redis::Client::open(url.as_str()).expect("Invalid Redis URL for RedisLockoutBackend");
-
-        Self {
-            url,
-            #[cfg(feature = "redis-lockout")]
-            key_prefix: "ato:lockout:".into(),
-            #[cfg(feature = "redis-lockout")]
-            client,
-        }
+        Self::with_prefix(url, "ato:lockout:".into())
     }
 
     /// Create with a custom key prefix.
     pub fn with_prefix(url: String, prefix: String) -> Self {
         #[cfg(feature = "redis-lockout")]
-        let client =
-            redis::Client::open(url.as_str()).expect("Invalid Redis URL for RedisLockoutBackend");
+        let client = match redis::Client::open(url.as_str()) {
+            Ok(c) => Some(c),
+            Err(e) => {
+                tracing::error!(
+                    redis_url = %url,
+                    error = %e,
+                    "RedisLockoutBackend: invalid Redis URL — backend degraded to no-op"
+                );
+                None
+            }
+        };
 
         // `prefix` is only consumed by the Redis backend impl; without the
         // feature we discard it explicitly to keep the constructor uniform.
         #[cfg(not(feature = "redis-lockout"))]
         let _ = prefix;
 
-        Self {
-            url,
-            #[cfg(feature = "redis-lockout")]
-            key_prefix: prefix,
-            #[cfg(feature = "redis-lockout")]
-            client,
+        #[cfg(feature = "redis-lockout")]
+        {
+            let init_error = client
+                .is_none()
+                .then(|| LockoutBackendError::InvalidUrl(url.clone()));
+            Self {
+                url,
+                key_prefix: prefix,
+                client,
+                conn: std::sync::Mutex::new(None),
+                init_error,
+            }
         }
+        #[cfg(not(feature = "redis-lockout"))]
+        {
+            Self { url }
+        }
+    }
+
+    /// The construction error, if the Redis URL was invalid.
+    #[cfg(feature = "redis-lockout")]
+    pub fn construction_error(&self) -> Option<&LockoutBackendError> {
+        self.init_error.as_ref()
     }
 
     #[cfg(feature = "redis-lockout")]
     fn key(&self, user_id: &str) -> String {
         format!("{}{}", self.key_prefix, user_id)
+    }
+
+    /// Run `f` with a persistent connection, reconnecting once on failure.
+    /// The connection is cached between calls — previously every lockout
+    /// operation opened a brand-new TCP connection to Redis.
+    #[cfg(feature = "redis-lockout")]
+    fn with_conn<T>(
+        &self,
+        op: &str,
+        f: impl FnOnce(&mut redis::Connection) -> Result<T, redis::RedisError>,
+    ) -> Option<T> {
+        let client = self.client.as_ref()?;
+        let mut guard = match self.conn.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if guard.is_none() {
+            match client.get_connection() {
+                Ok(c) => *guard = Some(c),
+                Err(e) => {
+                    tracing::error!(
+                        redis_url = %self.url,
+                        op = op,
+                        error = %e,
+                        "RedisLockoutBackend: connect failed"
+                    );
+                    return None;
+                }
+            }
+        }
+        let Some(conn) = guard.as_mut() else {
+            return None;
+        };
+        match f(conn) {
+            Ok(v) => Some(v),
+            Err(e) => {
+                // Drop the (probably broken) connection so the next call
+                // reconnects.
+                *guard = None;
+                tracing::error!(
+                    redis_url = %self.url,
+                    op = op,
+                    error = %e,
+                    "RedisLockoutBackend: command failed — connection recycled"
+                );
+                None
+            }
+        }
     }
 
     /// Get the configured Redis URL.
@@ -185,91 +280,46 @@ impl LockoutBackend for RedisLockoutBackend {
         let cutoff = now - window_secs as f64;
         let member = uuid::Uuid::new_v4().to_string();
 
-        match self.client.get_connection() {
-            Ok(mut conn) => {
-                // Remove entries older than the window
-                let _: Result<(), _> = redis::cmd("ZREMRANGEBYSCORE")
-                    .arg(&key)
-                    .arg("-inf")
-                    .arg(cutoff)
-                    .query(&mut conn);
-
-                // Add the new lockout event
-                let _: Result<(), _> = redis::cmd("ZADD")
-                    .arg(&key)
-                    .arg(now)
-                    .arg(&member)
-                    .query(&mut conn);
-
-                // Set TTL on the key
-                let _: Result<(), _> = redis::cmd("EXPIRE")
-                    .arg(&key)
-                    .arg(window_secs)
-                    .query(&mut conn);
-            }
-            Err(e) => {
-                tracing::error!(
-                    user_id = %user_id,
-                    redis_url = %self.url,
-                    error = %e,
-                    "RedisLockoutBackend: failed to get Redis connection for record_lockout"
-                );
-            }
-        }
+        self.with_conn("record_lockout", |conn| {
+            // Remove entries older than the window
+            let _: Result<(), redis::RedisError> = redis::cmd("ZREMRANGEBYSCORE")
+                .arg(&key)
+                .arg("-inf")
+                .arg(cutoff)
+                .query(conn);
+            // Add the new lockout event
+            let _: Result<(), redis::RedisError> = redis::cmd("ZADD")
+                .arg(&key)
+                .arg(now)
+                .arg(&member)
+                .query(conn);
+            // Set TTL on the key
+            redis::cmd("EXPIRE")
+                .arg(&key)
+                .arg(window_secs)
+                .query::<()>(conn)
+        });
     }
 
     fn recent_lockouts(&self, user_id: &str, window_secs: u64) -> u32 {
         let key = self.key(user_id);
         let cutoff = (Utc::now().timestamp() - window_secs as i64) as f64;
 
-        match self.client.get_connection() {
-            Ok(mut conn) => {
-                match redis::cmd("ZCOUNT")
-                    .arg(&key)
-                    .arg(cutoff)
-                    .arg("+inf")
-                    .query::<u32>(&mut conn)
-                {
-                    Ok(count) => count,
-                    Err(e) => {
-                        tracing::error!(
-                            user_id = %user_id,
-                            redis_url = %self.url,
-                            error = %e,
-                            "RedisLockoutBackend: ZCOUNT failed for recent_lockouts"
-                        );
-                        0
-                    }
-                }
-            }
-            Err(e) => {
-                tracing::error!(
-                    user_id = %user_id,
-                    redis_url = %self.url,
-                    error = %e,
-                    "RedisLockoutBackend: failed to get Redis connection for recent_lockouts"
-                );
-                0
-            }
-        }
+        self.with_conn("recent_lockouts", |conn| {
+            redis::cmd("ZCOUNT")
+                .arg(&key)
+                .arg(cutoff)
+                .arg("+inf")
+                .query::<u32>(conn)
+        })
+        .unwrap_or(0)
     }
 
     fn clear(&self, user_id: &str) {
         let key = self.key(user_id);
-
-        match self.client.get_connection() {
-            Ok(mut conn) => {
-                let _: Result<(), _> = redis::cmd("DEL").arg(&key).query(&mut conn);
-            }
-            Err(e) => {
-                tracing::error!(
-                    user_id = %user_id,
-                    redis_url = %self.url,
-                    error = %e,
-                    "RedisLockoutBackend: failed to get Redis connection for clear"
-                );
-            }
-        }
+        self.with_conn("clear", |conn| {
+            redis::cmd("DEL").arg(&key).query::<()>(conn)
+        });
     }
 }
 
@@ -360,5 +410,17 @@ mod tests {
         assert_eq!(backend.recent_lockouts("alice", 3600), 2);
         assert_eq!(backend.recent_lockouts("bob", 3600), 1);
         assert_eq!(backend.recent_lockouts("charlie", 3600), 0);
+    }
+
+    #[test]
+    fn test_invalid_redis_url_does_not_panic() {
+        // The constructor previously `.expect()`-ed on invalid URLs — a
+        // misconfigured env var could panic the whole process at startup.
+        let backend = RedisLockoutBackend::new("not a valid redis url %%%".into());
+        // Degraded, not panicked; contract still honors the trait.
+        backend.record_lockout("user", 60);
+        assert_eq!(backend.recent_lockouts("user", 60), 0);
+        backend.clear("user");
+        assert_eq!(backend.url(), "not a valid redis url %%%");
     }
 }

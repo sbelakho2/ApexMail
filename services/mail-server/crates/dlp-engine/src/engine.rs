@@ -73,17 +73,37 @@ impl DlpEngine {
         // Even for allowlisted domains, run a PII baseline scan so that
         // the result contains the findings (for auditing). The action
         // will still be Allow, but the findings are visible.
+        // Comparison is case-insensitive (both sides run through
+        // canonical_domain) so `Internal.Example.COM` matches an
+        // allowlisted `internal.example.com`.
         let is_allowlisted = recipient_domain
-            .map(|domain| self.config.allowlisted_domains.iter().any(|d| d == domain))
+            .map(|domain| {
+                let canonical = canonical_domain(domain);
+                self.config
+                    .allowlisted_domains
+                    .iter()
+                    .any(|d| canonical_domain(d) == canonical)
+            })
             .unwrap_or(false);
 
-        // Truncate body to max scan size (safe UTF-8 boundary)
-        let scan_text = if body.len() > self.config.max_scan_size {
-            let boundary = body.floor_char_boundary(self.config.max_scan_size);
-            &body[..boundary]
+        // Oversized bodies:scan BOTH the head and the tail (half the budget
+        // each). Scanning only the head allowed senders to push sensitive
+        // content past the truncation point to evade detection entirely.
+        let truncated = body.len() > self.config.max_scan_size;
+        let scan_text: String = if truncated {
+            let half = self.config.max_scan_size / 2;
+            let head_end = body.floor_char_boundary(half);
+            let tail_start = body.ceil_char_boundary(body.len().saturating_sub(half));
+            format!(
+                "{}\n[DLP:content truncated — scanned first and last {} KiB]\n{}",
+                &body[..head_end],
+                half / 1024,
+                &body[tail_start..]
+            )
         } else {
-            body
+            body.to_string()
         };
+        let scan_text = scan_text.as_str();
 
         let mut total_risk = 0.0;
         let mut summary_parts = Vec::with_capacity(16);
@@ -122,12 +142,32 @@ impl DlpEngine {
             ));
         }
 
-        // 3. Content policy scanning
-        let policy_matches =
-            content_policy::scan_content_policy(scan_text, &self.config.confidential_keywords);
+        // 3. Content policy scanning. A build failure is LOUD:it is
+        // counted globally and surfaced in the summary — a disabled content
+        // channel must never look like "no matches".
+        let policy_matches = match content_policy::scan_content_policy(
+            scan_text,
+            &self.config.confidential_keywords,
+        ) {
+            Ok(matches) => matches,
+            Err(build_error) => {
+                content_policy::record_build_failure();
+                summary_parts.push(format!(
+                    "CONTENT POLICY ENGINE UNAVAILABLE (build failed: {build_error})"
+                ));
+                Vec::new()
+            }
+        };
         for pm in &policy_matches {
             total_risk += pm.risk;
             summary_parts.push(format!("Policy: \"{}\"", pm.keyword));
+        }
+
+        if truncated {
+            summary_parts.push(format!(
+                "Content exceeded {} bytes — scanned head and tail only",
+                self.config.max_scan_size
+            ));
         }
 
         if let Some(domain) = recipient_domain {
@@ -415,5 +455,49 @@ mod tests {
         let engine = DlpEngine::with_config(config);
         let verdict = engine.scan("SSN 123-45-6789", Some("partner.example.com"));
         assert_eq!(verdict.action, DlpAction::Audit);
+    }
+
+    #[test]
+    fn test_allowlist_compare_is_case_insensitive() {
+        let config = DlpConfig {
+            allowlisted_domains: vec!["internal.example.com".into()],
+            ..Default::default()
+        };
+        let engine = DlpEngine::with_config(config);
+        // Mixed-case recipient domain must still match the allowlist entry
+        // after canonicalization on BOTH sides.
+        let verdict = engine.scan("SSN: 123-45-6789 CONFIDENTIAL", Some("Internal.Example.COM"));
+        assert_eq!(verdict.action, DlpAction::Allow);
+        // …and a different domain is not allowlisted.
+        let verdict = engine.scan("SSN: 123-45-6789 CONFIDENTIAL", Some("external.example.com"));
+        assert_ne!(verdict.action, DlpAction::Allow);
+    }
+
+    #[test]
+    fn test_oversized_body_scans_head_and_tail() {
+        let config = DlpConfig {
+            max_scan_size: 64 * 1024,
+            ..Default::default()
+        };
+        let engine = DlpEngine::with_config(config);
+
+        // SSN hidden in the TAIL beyond the old head-only truncation point.
+        let filler = "lorem ipsum dolor sit amet ".repeat(4_000);
+        let tail_secret = "SSN tail marker: 123-45-6789";
+        let body = format!("{filler}{tail_secret}");
+        assert!(body.len() > 64 * 1024);
+        let verdict = engine.scan_body(&body);
+        assert!(
+            verdict
+                .pii_findings
+                .iter()
+                .any(|f| f.pii_type == PiiType::Ssn),
+            "PII past the truncation point must still be detected via tail scan"
+        );
+        assert!(
+            verdict.summary.contains("head and tail"),
+            "summary must flag truncated scanning: {}",
+            verdict.summary
+        );
     }
 }

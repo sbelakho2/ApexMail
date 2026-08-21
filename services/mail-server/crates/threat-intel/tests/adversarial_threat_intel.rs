@@ -10,7 +10,6 @@
 //! - Feed refresh task can be spawned without panicking
 
 use chrono::{Duration, Utc};
-use std::net::Ipv4Addr;
 use threat_intel::background_task::{purge_once, FeedRefreshConfig};
 use threat_intel::domain_blocklist::DomainBlockEntry;
 use threat_intel::engine::ThreatAction;
@@ -49,10 +48,9 @@ fn domain_entry(domain: &str, expires_in_secs: i64) -> DomainBlockEntry {
 #[test]
 fn test_blocked_ip_flagged() {
     let engine = ThreatIntelEngine::new();
-    let ip: Ipv4Addr = "198.51.100.1".parse().unwrap();
     engine
         .ip_blocklist()
-        .add_ip(ip, spam_entry("198.51.100.1", 3600));
+        .add_ip_str("198.51.100.1", spam_entry("198.51.100.1", 3600));
 
     let verdict = engine.check_ip("198.51.100.1");
     assert_eq!(
@@ -142,12 +140,11 @@ fn test_cidr_miss_outside_range() {
 #[test]
 fn test_expired_entry_purged_and_no_longer_blocked() {
     let engine = ThreatIntelEngine::new();
-    let ip: Ipv4Addr = "198.51.100.50".parse().unwrap();
 
     // Add entry with TTL already expired (negative seconds)
     engine
         .ip_blocklist()
-        .add_ip(ip, spam_entry("198.51.100.50", -1));
+        .add_ip_str("198.51.100.50", spam_entry("198.51.100.50", -1));
 
     // Before purge:entry may or may not be returned (implementation-dependent)
     // After purge:MUST be removed
@@ -172,10 +169,9 @@ fn test_expired_entry_purged_and_no_longer_blocked() {
 #[test]
 fn test_valid_entry_survives_purge() {
     let engine = ThreatIntelEngine::new();
-    let ip: Ipv4Addr = "198.51.100.77".parse().unwrap();
     engine
         .ip_blocklist()
-        .add_ip(ip, spam_entry("198.51.100.77", 86400)); // expires in 24h
+        .add_ip_str("198.51.100.77", spam_entry("198.51.100.77", 86400)); // expires in 24h
 
     let stats = purge_once(&engine);
     // Nothing expired so removal count should be 0

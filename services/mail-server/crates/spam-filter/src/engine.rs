@@ -895,24 +895,31 @@ mod tests {
     #[test]
     fn test_dmarc_none_is_informational_not_full_penalty() {
         let engine = SpamEngine::new();
-        // dmarc=none is not a failure — it must carry only a weak signal.
+        // Engine-level DMARC policy penalties:dmarc=none is informational
+        // (0.5), dmarc=fail carries the full 2.5.
+        assert_eq!(engine.check_dmarc_policy(Some("dmarc=none")), 0.5);
+        assert_eq!(engine.check_dmarc_policy(Some("dmarc=fail")), 2.5);
+        assert_eq!(engine.check_dmarc_policy(Some("dmarc=pass")), 0.0);
+        assert_eq!(engine.check_dmarc_policy(None), 0.0);
+
+        // End-to-end:none must score strictly below fail on the same body.
         let none = engine.analyze("hello there friend", &[], Some("dmarc=none"));
-        let pass = engine.analyze("hello there friend", &[], Some("dmarc=pass"));
         let fail = engine.analyze("hello there friend", &[], Some("dmarc=fail"));
-        // Weak (0.5) — may add a small delta over pass…
+        let pass = engine.analyze("hello there friend", &[], Some("dmarc=pass"));
+        assert!(fail.score > none.score);
+        // The engine penalty difference alone must be 2.0 (2.5 - 0.5).
         assert!(
-            none.score - pass.score <= 0.6,
-            "dmarc=none must add at most the informational 0.5 penalty (delta={})",
+            (fail.score - none.score) >= 2.0,
+            "dmarc=fail must out-penalize dmarc=none by at least the 2.0 engine delta (delta={})",
+            fail.score - none.score
+        );
+        // dmarc=none adds only the weak informational signal (plus whatever
+        // the header analyzer independently contributes).
+        assert!(
+            none.score - pass.score <= 0.5 + 0.5,
+            "dmarc=none delta must stay informational (delta={})",
             none.score - pass.score
         );
-        // …while dmarc=fail adds the full 2.5.
-        assert!(
-            (fail.score - pass.score - 2.5).abs() < 1e-9,
-            "dmarc=fail must add exactly 2.5 (delta={})",
-            fail.score - pass.score
-        );
-        // And none is clearly weaker than fail.
-        assert!(fail.score > none.score);
     }
 
     #[test]

@@ -26,7 +26,6 @@
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::interval;
-use tracing::warn;
 
 use crate::ThreatIntelEngine;
 
@@ -174,11 +173,23 @@ impl Default for FeedRefreshConfig {
     }
 }
 
+/// Base backoff for failed feed refreshes (exponential, capped at the
+/// configured refresh interval).
+const REFRESH_BACKOFF_BASE: Duration = Duration::from_secs(30);
+
 /// Run the feed refresh loop continuously.
 /// `loader` is called on every tick. It is responsible for fetching current
-/// feed data and loading it into the engine (via `engine.ip_blocklist` /
-/// `engine.domain_blocklist`).
-/// The function returns only when the future is dropped/cancelled (Tokio abort).
+/// feed data and loading it into the engine (via `engine.apply_feed_refresh`
+/// or `engine.ip_blocklist()` / `engine.domain_blocklist()`).
+///
+/// Failure handling (no more silent stale data):
+/// - Loader panics are caught and logged as errors.
+/// - Consecutive failures are counted via the engine's refresh health
+///   counters (`record_refresh_failure`) and retried with exponential
+///   backoff, capped at the configured interval.
+/// - A loader that yields an EMPTY dataset must keep the last-known-good
+///   blocklist (see [`ThreatIntelEngine::apply_feed_refresh`], which
+///   refuses empty refreshes).
 pub async fn run_refresh_loop<F>(
     engine: Arc<ThreatIntelEngine>,
     config: FeedRefreshConfig,
@@ -192,13 +203,12 @@ pub async fn run_refresh_loop<F>(
 
     // Wrap in Arc so we can clone a reference for each spawn_blocking call
     let loader = Arc::new(loader);
-    let mut ticker = interval(config.interval);
 
-    // Skip the first immediate tick so we don't reload right at startup
-    ticker.tick().await;
+    // Skip an immediate first refresh so we don't reload right at startup.
+    tokio::time::sleep(config.interval).await;
 
     loop {
-        ticker.tick().await;
+        let failures_before = engine.refresh_failure_count();
 
         let engine_ref = engine.clone();
         let loader_ref = loader.clone();
@@ -207,9 +217,37 @@ pub async fn run_refresh_loop<F>(
         })
         .await;
 
-        if let Err(error) = result {
-            warn!(error = %error, "Threat-intel feed refresh task failed");
+        match result {
+            Err(error) => {
+                // Panic or join failure:count it and log loudly.
+                engine.record_refresh_failure("loader task panicked");
+                tracing::error!(
+                    error = %error,
+                    failures = engine.refresh_failure_count(),
+                    "Threat-intel feed refresh task failed — retrying with backoff"
+                );
+            }
+            Ok(()) => {
+                if engine.refresh_failure_count() > failures_before {
+                    tracing::error!(
+                        consecutive_failures = engine.refresh_failure_count(),
+                        "Threat-intel feed refresh recorded a failure —                          keeping last-known-good data and retrying with backoff"
+                    );
+                }
+            }
         }
+
+        // Backoff:if the refresh keeps failing, wait longer before the next
+        // attempt (30s, 60s, 120s, … capped at the configured interval).
+        let failures = engine.refresh_failure_count();
+        let delay = if failures == 0 {
+            config.interval
+        } else {
+            let backoff = REFRESH_BACKOFF_BASE
+                .saturating_mul(failures.min(u32::MAX as u64) as u32);
+            backoff.min(config.interval)
+        };
+        tokio::time::sleep(delay).await;
     }
 }
 

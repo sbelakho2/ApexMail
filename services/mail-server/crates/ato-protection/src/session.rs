@@ -46,6 +46,28 @@ pub struct DeviceFingerprint {
     pub user_agent: String,
 }
 
+/// Extract the network prefix used for device correlation.
+/// IPv4 → first three octets (/24); IPv6 → first four hextets (/64, the
+/// standard single-subscriber allocation). The old implementation blindly
+/// split on dots, which mangled IPv6 addresses into a garbage prefix.
+fn ip_network_prefix(ip: &str) -> String {
+    let trimmed = ip.trim();
+    if let Ok(v6) = trimmed.parse::<std::net::Ipv6Addr>() {
+        let seg = v6.segments();
+        return format!("{:x}:{:x}:{:x}:{:x}::/64", seg[0], seg[1], seg[2], seg[3]);
+    }
+    if trimmed.contains(':') {
+        // IPv6-ish but unparseable — fall back to the whole address.
+        return trimmed.to_string();
+    }
+    // IPv4 /24
+    trimmed
+        .splitn(4, '.')
+        .take(3)
+        .collect::<Vec<_>>()
+        .join(".")
+}
+
 impl DeviceFingerprint {
     /// Create a fingerprint from login attributes
     /// The fingerprint is a SHA-256 hash of multiple device characteristics:/// - User-Agent header
@@ -56,20 +78,23 @@ impl DeviceFingerprint {
     /// detect credential stuffing from automated tools even when they
     /// rotate through residential proxy networks.
     pub fn from_event(event: &LoginEvent) -> Self {
+        Self::from_event_with_pepper(event, &[])
+    }
+
+    /// Create a fingerprint salted with a server-side pepper.
+    /// Without a pepper, stored fingerprint hashes are vulnerable to
+    /// offline dictionary attacks over (UA, IP prefix, TLS hash) tuples —
+    /// the pepper must be a per-deployment secret.
+    pub fn from_event_with_pepper(event: &LoginEvent, pepper: &[u8]) -> Self {
         let mut hasher = Sha256::new();
 
         // User-Agent (primary identifier, easily spoofed but indicative)
         hasher.update(event.user_agent.as_bytes());
 
-        // IP prefix (/24): tightened from /16 to defeat credential-stuffing
-        // attacks pivoting across cloud-provider /16 ranges (e.g. AWS) which
-        // could otherwise share the same fingerprint as a legitimate user.
-        let ip_prefix = event
-            .ip_address
-            .splitn(4, '.')
-            .take(3)
-            .collect::<Vec<_>>()
-            .join(".");
+        // IP prefix:IPv4 /24 (tightened from /16 to defeat credential
+        // stuffing pivoting across cloud /16 ranges) or IPv6 /64 — the old
+        // code blindly dot-split IPv6 addresses into a garbage prefix.
+        let ip_prefix = ip_network_prefix(&event.ip_address);
         hasher.update(ip_prefix.as_bytes());
 
         // TLS fingerprint (if available - much harder to spoof)
@@ -77,6 +102,9 @@ impl DeviceFingerprint {
         if let Some(ref tls_fp) = event.tls_fingerprint {
             hasher.update(tls_fp.hash.as_bytes());
         }
+
+        // Server-side pepper
+        hasher.update(pepper);
 
         let hash = hex::encode(hasher.finalize());
         Self {
@@ -90,12 +118,7 @@ impl DeviceFingerprint {
     pub fn from_components(user_agent: &str, ip_address: &str, tls_hash: Option<&str>) -> Self {
         let mut hasher = Sha256::new();
         hasher.update(user_agent.as_bytes());
-        let ip_prefix = ip_address
-            .splitn(4, '.')
-            .take(3)
-            .collect::<Vec<_>>()
-            .join(".");
-        hasher.update(ip_prefix.as_bytes());
+        hasher.update(ip_network_prefix(ip_address).as_bytes());
         if let Some(tls) = tls_hash {
             hasher.update(tls.as_bytes());
         }
@@ -129,8 +152,14 @@ impl UserLoginHistory {
     }
 
     /// Record a login event, returns whether the device is new
-    pub fn record(&mut self, mut event: LoginEvent) -> bool {
-        let fingerprint = DeviceFingerprint::from_event(&event);
+    pub fn record(&mut self, event: LoginEvent) -> bool {
+        self.record_with_pepper(event, &[])
+    }
+
+    /// Record a login event whose device fingerprint is salted with a
+    /// server-side pepper.
+    pub fn record_with_pepper(&mut self, mut event: LoginEvent, pepper: &[u8]) -> bool {
+        let fingerprint = DeviceFingerprint::from_event_with_pepper(&event, pepper);
         let is_new_device = !self
             .known_devices
             .iter()
@@ -202,14 +231,27 @@ impl UserLoginHistory {
 pub struct SessionStore {
     histories: Arc<DashMap<String, UserLoginHistory>>,
     max_entries_per_user: usize,
+    /// Server-side pepper mixed into every device-fingerprint hash.
+    pepper: Arc<Vec<u8>>,
 }
 
 impl SessionStore {
-    /// Create a new session store
+    /// Create a new session store (no pepper).
     pub fn new(max_entries_per_user: usize) -> Self {
         Self {
             histories: Arc::new(DashMap::new()),
             max_entries_per_user,
+            pepper: Arc::new(Vec::new()),
+        }
+    }
+
+    /// Create a session store that salts device fingerprints with a
+    /// server-side pepper (see `AtoConfig::fingerprint_pepper`).
+    pub fn with_pepper(max_entries_per_user: usize, pepper: Option<&str>) -> Self {
+        Self {
+            histories: Arc::new(DashMap::new()),
+            max_entries_per_user,
+            pepper: Arc::new(pepper.map(|p| p.as_bytes().to_vec()).unwrap_or_default()),
         }
     }
 
@@ -219,7 +261,29 @@ impl SessionStore {
             .histories
             .entry(event.user_id.clone())
             .or_insert_with(|| UserLoginHistory::new(self.max_entries_per_user));
-        entry.record(event.clone())
+        entry.record_with_pepper(event.clone(), &self.pepper)
+    }
+
+    /// Atomically record a login event AND count failed attempts in the
+    /// window **including this event**.
+    /// Count+record run under a single DashMap shard lock, closing the
+    /// TOCTOU race where concurrent evaluations each observe "max-1"
+    /// failures and all slip past the lockout threshold.
+    /// Returns `(is_new_device, failures_including_this_event)`.
+    pub fn record_login_counting_failures(
+        &self,
+        event: &LoginEvent,
+        window_secs: u64,
+    ) -> (bool, u32) {
+        let mut entry = self
+            .histories
+            .entry(event.user_id.clone())
+            .or_insert_with(|| UserLoginHistory::new(self.max_entries_per_user));
+        let history = entry.value_mut();
+        let prior_failures = history.recent_failures(window_secs);
+        let is_new = history.record_with_pepper(event.clone(), &self.pepper);
+        let failures = prior_failures + u32::from(!event.success);
+        (is_new, failures)
     }
 
     /// Get user history (cloned snapshot)
@@ -318,5 +382,54 @@ mod tests {
             history.record(event);
         }
         assert_eq!(history.events.len(), 5, "Should cap at max_entries");
+    }
+
+    #[test]
+    fn test_ipv6_same_slash64_not_new_device() {
+        let store = SessionStore::new(100);
+        let e1 = make_event("u6", "2001:db8:1:2::a", true);
+        assert!(store.record_login(&e1), "first login is new");
+        // Same /64, different host bits → same device fingerprint.
+        let mut e2 = make_event("u6", "2001:db8:1:2::ffff", true);
+        e2.user_agent = e1.user_agent.clone();
+        assert!(
+            !store.record_login(&e2),
+            "same UA + same IPv6 /64 must not be a new device"
+        );
+        // Different /64 → new device.
+        let mut e3 = make_event("u6", "2001:db8:1:3::1", true);
+        e3.user_agent = e1.user_agent.clone();
+        assert!(store.record_login(&e3), "different IPv6 /64 is a new device");
+    }
+
+    #[test]
+    fn test_fingerprint_pepper_changes_hash() {
+        let event = make_event("u9", "1.2.3.4", true);
+        let plain = DeviceFingerprint::from_event(&event);
+        let peppered =
+            DeviceFingerprint::from_event_with_pepper(&event, b"deployment-secret");
+        assert_ne!(
+            plain.hash, peppered.hash,
+            "pepper must change the fingerprint hash (offline-dictionary protection)"
+        );
+        // Deterministic with the same pepper.
+        let again = DeviceFingerprint::from_event_with_pepper(&event, b"deployment-secret");
+        assert_eq!(peppered.hash, again.hash);
+    }
+
+    #[test]
+    fn test_record_login_counting_failures_includes_current() {
+        let store = SessionStore::new(100);
+        let mut count = 0;
+        for _ in 0..5 {
+            let (_, failures) =
+                store.record_login_counting_failures(&make_event("u10", "1.2.3.4", false), 300);
+            count = failures;
+        }
+        assert_eq!(count, 5, "5th failing login must count 5 failures incl. itself");
+        // A successful login does not add to the count.
+        let (_, failures) =
+            store.record_login_counting_failures(&make_event("u10", "1.2.3.4", true), 300);
+        assert_eq!(failures, 5);
     }
 }

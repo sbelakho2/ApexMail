@@ -97,8 +97,62 @@ impl TlsFingerprint {
         }
     }
 
-    /// Create from a pre-computed JA4 string (for testing)
+    /// Create from a pre-computed JA4 string.
+    /// The cipher/extension COUNTS and lists are parsed from the string
+    /// components instead of being discarded — previously everything was
+    /// zeroed, which made every parsed fingerprint look like a minimal
+    /// bot stack to `looks_like_bot`.
     pub fn from_ja4_string(ja4: &str) -> Self {
+        let parts: Vec<&str> = ja4.split('_').collect();
+
+        // Part 0 layout: "t" + 2 version chars + flags + 2-digit cipher
+        // count + 2-digit extension count + optional ALPN marker, e.g.
+        // "t13d1516h2" = t13 / d / 15 ciphers / 16 extensions / h2.
+        let header = parts.first().copied().unwrap_or("t12d000000");
+        let tls_version = header.get(0..3).unwrap_or("t12").to_string();
+        let rest = header.get(3..).unwrap_or("");
+        let digit_start = rest.find(|c: char| c.is_ascii_digit()).unwrap_or(0);
+        let counts = &rest[digit_start..];
+        let header_cipher_count = counts
+            .get(0..2)
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(0);
+        let header_ext_count = counts
+            .get(2..4)
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(0);
+
+        // Parts 1..3:cipher list, extension list, signature-algorithm list.
+        let parse_list = |idx: usize| -> Vec<String> {
+            parts
+                .get(idx)
+                .map(|p| {
+                    p.split(',')
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_string)
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        let mut cipher_suites = parse_list(1);
+        let mut extensions = parse_list(2);
+        let signature_algorithms = parse_list(3);
+
+        // Truncated JA4 strings carry the counts in the header but not the
+        // lists. Synthesize placeholder entries (id 0000) so that the
+        // length-based heuristics (`looks_like_bot`, `is_modern_browser`)
+        // still see approximately the right shape.
+        if cipher_suites.is_empty() && header_cipher_count > 0 {
+            for _ in 0..header_cipher_count {
+                cipher_suites.push("0000".to_string());
+            }
+        }
+        if extensions.is_empty() && header_ext_count > 0 {
+            for _ in 0..header_ext_count {
+                extensions.push("0000".to_string());
+            }
+        }
+
         let hash = {
             let mut hasher = Sha256::new();
             hasher.update(ja4.as_bytes());
@@ -107,10 +161,10 @@ impl TlsFingerprint {
 
         Self {
             hash,
-            tls_version: "t12".to_string(),
-            cipher_suites: Vec::new(),
-            extensions: Vec::new(),
-            signature_algorithms: Vec::new(),
+            tls_version,
+            cipher_suites,
+            extensions,
+            signature_algorithms,
             alpn_protocols: Vec::new(),
         }
     }
@@ -394,5 +448,35 @@ mod tests {
         let device = EnhancedDeviceFingerprint::new("Mozilla/5.0 Chrome/120", "10.0.0.50", None);
 
         assert!(!device.has_tls());
+    }
+
+    #[test]
+    fn test_from_ja4_string_parses_counts_not_bot() {
+        // Real Chrome JA4:15 ciphers, 16 extensions — must NOT look like a
+        // bot (previously everything parsed to zero counts and every
+        // fingerprint looked bot-like).
+        let chrome = TlsFingerprint::from_ja4_string(
+            "t13d1516h2_002f,0035,009c,009d,1301,1302,1303,c013,c014,c02b,c02f,c02c,c030,cca9,cca8_0005,000a,000b,000d,0023,4469,0017,001c,002b,002d,0033,fe0d,0012,0015,001b,0029_0403,0804,0401,0503,0805,0501,0806,0601",
+        );
+        assert_eq!(chrome.cipher_suites.len(), 15);
+        assert_eq!(chrome.extensions.len(), 16);
+        assert!(!chrome.looks_like_bot(), "Chrome JA4 must not look like a bot");
+        assert_eq!(chrome.tls_version, "t13");
+    }
+
+    #[test]
+    fn test_from_ja4_string_minimal_client_is_bot() {
+        // Minimal script client:2 ciphers, 2 extensions → bot-like.
+        let bot = TlsFingerprint::from_ja4_string("t13d0202_002f,0035_0005,000a");
+        assert!(bot.looks_like_bot(), "minimal JA4 must look like a bot");
+    }
+
+    #[test]
+    fn test_from_ja4_string_truncated_uses_header_counts() {
+        // Header-only JA4 (no lists):counts come from "d1516h2".
+        let fp = TlsFingerprint::from_ja4_string("t13d1516h2");
+        assert_eq!(fp.cipher_suites.len(), 15, "cipher count from header");
+        assert_eq!(fp.extensions.len(), 16, "extension count from header");
+        assert!(!fp.looks_like_bot());
     }
 }

@@ -97,6 +97,37 @@ fn credit_card_regex() -> Option<&'static Regex> {
     .as_ref()
 }
 
+fn spaced_card_regex() -> Option<&'static Regex> {
+    static RE: OnceLock<Option<Regex>> = OnceLock::new();
+    RE.get_or_init(|| {
+        // Bounded spaced-digit heuristic:13–19 digits with at most one
+        // separator (space, dot, or dash) between each digit. Catches
+        // "4 1 1 1  1 1 1 1…" style spacing that the grouped pattern misses.
+        // Each position is a single optional separator — no nested
+        // quantifiers, so the pattern is linear-time (ReDoS-safe).
+        Regex::new(r"\b\d(?:[ .\-]?\d){12,18}\b").ok()
+    })
+    .as_ref()
+}
+
+/// Normalize text for PII scanning:strip zero-width/invisible characters
+/// (U+200B/C/D, U+FEFF, soft hyphen) that split numbers invisibly, then
+/// apply NFKC so fullwidth digits ("４１１１…") and other compatibility
+/// look-alikes become their ASCII equivalents before the regexes run.
+fn normalize_pii_text(text: &str) -> String {
+    use unicode_normalization::UnicodeNormalization;
+    let stripped: String = text
+        .chars()
+        .filter(|c| {
+            !matches!(
+                c,
+                '\u{200B}' | '\u{200C}' | '\u{200D}' | '\u{FEFF}' | '\u{00AD}'
+            )
+        })
+        .collect();
+    stripped.nfkc().collect()
+}
+
 fn ssn_regex() -> Option<&'static Regex> {
     static RE: OnceLock<Option<Regex>> = OnceLock::new();
     RE.get_or_init(|| {
@@ -348,6 +379,12 @@ pub fn scan_pii_with_context(
 ) -> Vec<PiiMatch> {
     let mut matches = Vec::new();
 
+    // Normalize FIRST:strip invisible characters (which can silently split
+    // card numbers, defeating the patterns) and apply NFKC (fullwidth digit
+    // look-alikes become ASCII). Offsets in the returned matches refer to
+    // the normalized text.
+    let text = &normalize_pii_text(text);
+
     // Credit card detection with Luhn validation
     if detect_cc {
         if let Some(re) = credit_card_regex() {
@@ -356,7 +393,7 @@ pub fn scan_pii_with_context(
                 if luhn_check(candidate) {
                     let base_risk = 8.0;
                     let modifier = if context_aware {
-                        detect_context_modifier(text, m.start())
+                        detect_context_modifier(text, m.start(), m.as_str())
                     } else {
                         None
                     };
@@ -370,6 +407,51 @@ pub fn scan_pii_with_context(
                         context_modifier: modifier,
                     });
                 }
+            }
+        }
+    }
+
+    // Spaced-digit credit card heuristic (bounded, Luhn-validated).
+    // Catches deliberately spaced numbers ("4 1 1 1 1 1 1 1…") that evade
+    // the grouped pattern; overlaps with already-reported cards are skipped.
+    if detect_cc {
+        if let Some(re) = spaced_card_regex() {
+            let taken: Vec<(usize, usize)> = matches
+                .iter()
+                .map(|m| (m.offset, m.offset + 16))
+                .collect();
+            for m in re.find_iter(text) {
+                let candidate = m.as_str();
+                let digit_count = candidate.chars().filter(|c| c.is_ascii_digit()).count();
+                if !(13..=19).contains(&digit_count) {
+                    continue;
+                }
+                if !luhn_check(candidate) {
+                    continue;
+                }
+                // Skip if this span overlaps an already-reported card match.
+                let (start, end) = (m.start(), m.end());
+                if taken
+                    .iter()
+                    .any(|(ts, _te)| start < *_te && end > *ts)
+                {
+                    continue;
+                }
+                let base_risk = 8.0;
+                let modifier = if context_aware {
+                    detect_context_modifier(text, m.start(), m.as_str())
+                } else {
+                    None
+                };
+                let risk = apply_context_modifier(base_risk, modifier);
+                matches.push(PiiMatch {
+                    pii_type: PiiType::CreditCard,
+                    redacted: redact_cc(candidate),
+                    risk,
+                    base_risk,
+                    offset: m.start(),
+                    context_modifier: modifier,
+                });
             }
         }
     }
@@ -388,7 +470,7 @@ pub fn scan_pii_with_context(
                     if area > 0 && area < 900 && area != 666 && group > 0 && serial > 0 {
                         let base_risk = 9.0;
                         let modifier = if context_aware {
-                            detect_context_modifier(text, m.start())
+                            detect_context_modifier(text, m.start(), m.as_str())
                         } else {
                             None
                         };
@@ -413,7 +495,7 @@ pub fn scan_pii_with_context(
             for m in re.find_iter(text) {
                 let base_risk = 1.5;
                 let modifier = if context_aware {
-                    detect_context_modifier(text, m.start())
+                    detect_context_modifier(text, m.start(), m.as_str())
                 } else {
                     None
                 };
@@ -436,7 +518,7 @@ pub fn scan_pii_with_context(
             for m in re.find_iter(text) {
                 let base_risk = 2.0;
                 let modifier = if context_aware {
-                    detect_context_modifier(text, m.start())
+                    detect_context_modifier(text, m.start(), m.as_str())
                 } else {
                     None
                 };
@@ -556,31 +638,58 @@ mod tests {
         );
     }
 
+    // NOTE:these two tests previously asserted the VULNERABLE behavior —
+    // that a bare, UNQUOTED "for example"/"documentation" mention anywhere
+    // in the preceding context slashed PII risk by 75%. Example/documentation
+    // modifiers now require the value itself to be quoted/code-formatted
+    // and the cue to sit immediately before the match; the reduction is
+    // capped at 25%. The tests were updated to the fixed semantics.
+
     #[test]
     fn test_context_example_reduces_risk() {
+        // Unquoted example context must NOT reduce risk (updated behavior).
         let text = "For example, a test card number is 4111111111111111.";
         let results = scan_pii(text, true, false, false, false);
 
         assert!(!results.is_empty(), "Should detect credit card");
         let cc = &results[0];
         assert_eq!(cc.pii_type, PiiType::CreditCard);
+        assert!(
+            cc.context_modifier.is_none(),
+            "unquoted example prose must not reduce risk"
+        );
+        assert_eq!(cc.risk, cc.base_risk);
 
-        // Example context should reduce risk
-        assert!(cc.context_modifier.is_some());
+        // Genuinely quoted sample data right after an example cue IS
+        // reduced — but only by the capped 25%.
+        let quoted = "for example \"4111111111111111\" in docs";
+        let results = scan_pii(quoted, true, false, false, false);
+        let cc = &results[0];
+        assert!(cc.context_modifier.is_some(), "quoted example recognized");
         assert!(cc.risk < cc.base_risk);
+        assert!(cc.risk >= cc.base_risk * 0.75, "reduction capped at 25%");
     }
 
     #[test]
     fn test_context_documentation_reduces_risk() {
+        // Unquoted documentation context must NOT reduce risk (updated
+        // behavior); a quoted documentation sample is reduced by ≤25%.
         let text = "Documentation: SSN format is 123-45-6789.";
         let results = scan_pii(text, false, true, false, false);
 
         assert!(!results.is_empty(), "Should detect SSN");
         let ssn = &results[0];
+        assert!(
+            ssn.context_modifier.is_none(),
+            "unquoted documentation prose must not reduce risk"
+        );
+        assert_eq!(ssn.risk, ssn.base_risk);
 
-        // Documentation context should reduce risk
-        assert!(ssn.context_modifier.is_some());
-        assert!(ssn.risk < ssn.base_risk);
+        let quoted = "documentation sample: \"123-45-6789\" shown";
+        let results = scan_pii(quoted, false, true, false, false);
+        let ssn = &results[0];
+        assert!(ssn.context_modifier.is_some(), "quoted documentation sample recognized");
+        assert!(ssn.risk >= ssn.base_risk * 0.75, "reduction capped at 25%");
     }
 
     #[test]
@@ -661,6 +770,83 @@ mod tests {
         assert!(
             cc.base_risk > 0.0,
             "credit card detection must report a base risk"
+        );
+    }
+
+    // ── Security-fix regression tests ──
+
+    #[test]
+    fn test_heres_card_stays_high_risk() {
+        // The apostrophe in "Here's" used to trip the odd-quote-count
+        // heuristic and slash risk by 75%. It must NOT count as a quote.
+        let text = "Here's my card 4111111111111111 for the order";
+        let matches = scan_pii(text, true, false, false, false);
+        let cc = matches
+            .iter()
+            .find(|m| m.pii_type == PiiType::CreditCard)
+            .expect("card must be detected");
+        assert!(
+            cc.context_modifier.is_none(),
+            "prose apostrophe must not be treated as quoting: {:?}",
+            cc.context_modifier
+        );
+        assert_eq!(cc.risk, cc.base_risk, "risk must not be reduced");
+        assert_eq!(cc.risk, 8.0);
+    }
+
+    #[test]
+    fn test_context_reduction_is_capped_at_25_percent() {
+        // Even genuinely quoted sample data can be reduced by at most 25%
+        // (risk factor 0.75, not the old 0.25).
+        let text = "example card \"4111111111111111\" for docs";
+        let matches = scan_pii(text, true, false, false, false);
+        let cc = matches
+            .iter()
+            .find(|m| m.pii_type == PiiType::CreditCard)
+            .expect("card must be detected");
+        assert!(cc.context_modifier.is_some(), "quoted+example context recognized");
+        assert!(
+            (cc.risk - cc.base_risk * 0.75).abs() < 1e-9,
+            "reduction must be capped at 25%: risk={} base={}",
+            cc.risk,
+            cc.base_risk
+        );
+        assert!(cc.risk >= cc.base_risk * 0.75);
+    }
+
+    #[test]
+    fn test_zero_width_characters_in_card_detected() {
+        // Invisible characters splitting the number must not defeat
+        // detection — normalization strips them before the regexes run.
+        let text = "card 4111\u{200b}1111\u{200b}1111\u{200b}1111 end";
+        let matches = scan_pii(text, true, false, false, false);
+        assert!(
+            matches
+                .iter()
+                .any(|m| m.pii_type == PiiType::CreditCard),
+            "zero-width-split card must be detected"
+        );
+    }
+
+    #[test]
+    fn test_spaced_digits_card_detected() {
+        // "4111 1111 1111 1111" is caught by the grouped pattern; fully
+        // spaced variants need the spaced-digit heuristic.
+        let matches = scan_pii("number 4111 1111 1111 1111 here", true, false, false, false);
+        assert!(matches.iter().any(|m| m.pii_type == PiiType::CreditCard));
+        // Loosely spaced variant (single spaces between every digit).
+        let spaced = "4 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1";
+        let matches = scan_pii(spaced, true, false, false, false);
+        assert!(
+            matches.iter().any(|m| m.pii_type == PiiType::CreditCard),
+            "spaced-digit card must be detected (Luhn-validated)"
+        );
+        // Non-Luhn digit runs of similar length must NOT be flagged.
+        let not_a_card = "1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6";
+        let matches = scan_pii(not_a_card, true, false, false, false);
+        assert!(
+            !matches.iter().any(|m| m.pii_type == PiiType::CreditCard),
+            "Luhn-failing spaced digits must not be flagged"
         );
     }
 }

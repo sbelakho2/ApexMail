@@ -137,13 +137,20 @@ pub struct AtoEngine {
     /// Per-IP call counter for self-protecting rate limit.
     /// Maps IP → mutex-protected `(epoch_second, count)` to enforce `config.rate_limit_rps`.
     ip_call_counts: Arc<DashMap<String, Arc<Mutex<RateLimitWindow>>>>,
+    /// Timestamp guard:over-capacity TLS-history eviction is O(n log n), so
+    /// it runs at most once per cleanup interval instead of on every evaluate.
+    last_tls_capacity_eviction: Mutex<Option<std::time::Instant>>,
 }
+
+/// Minimum interval between over-capacity TLS-history evictions.
+const TLS_EVICTION_MIN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
 
 impl AtoEngine {
     /// Create engine with default config
     pub fn new() -> Self {
         let config = AtoConfig::default();
-        let store = SessionStore::new(config.max_history_per_user);
+        let store =
+            SessionStore::with_pepper(config.max_history_per_user, config.fingerprint_pepper.as_deref());
         let lockout_events = if config.use_process_global_lockout_registry {
             global_lockout_registry()
         } else {
@@ -169,12 +176,14 @@ impl AtoEngine {
             lockout_events,
             lockout_backend,
             ip_call_counts: Arc::new(DashMap::new()),
+            last_tls_capacity_eviction: Mutex::new(None),
         }
     }
 
     /// Create engine with custom config
     pub fn with_config(config: AtoConfig) -> Self {
-        let store = SessionStore::new(config.max_history_per_user);
+        let store =
+            SessionStore::with_pepper(config.max_history_per_user, config.fingerprint_pepper.as_deref());
         let lockout_events = if config.use_process_global_lockout_registry {
             global_lockout_registry()
         } else {
@@ -200,6 +209,7 @@ impl AtoEngine {
             lockout_events,
             lockout_backend,
             ip_call_counts: Arc::new(DashMap::new()),
+            last_tls_capacity_eviction: Mutex::new(None),
         }
     }
 
@@ -254,77 +264,7 @@ impl AtoEngine {
         let mut impossible_travel = false;
         let mut escalated_lockout = false;
 
-        // 1. Check failed attempt lockout with escalation tracking
-        let recent_failures = self
-            .store
-            .recent_failures(&event.user_id, self.config.failed_attempt_window_secs);
-        if recent_failures >= self.config.max_failed_attempts {
-            // This is a lockout event - record it for escalation tracking
-            let now = Utc::now();
-            let escalation_cutoff =
-                now - chrono::Duration::seconds(self.config.lockout_escalation_window_secs as i64);
-
-            // Record via pluggable backend (Redis or in-memory)
-            self.lockout_backend
-                .record_lockout(&event.user_id, self.config.lockout_escalation_window_secs);
-
-            let mut entry = self
-                .lockout_events
-                .entry(event.user_id.clone())
-                .or_default();
-
-            // Clean up old lockout events outside the escalation window
-            entry.retain(|ts| *ts > escalation_cutoff);
-
-            // Record this lockout event in the local DashMap too
-            entry.push(now);
-
-            // Use the higher of local count and backend count for consistency
-            let local_count = entry.len() as u32;
-            let backend_count = self
-                .lockout_backend
-                .recent_lockouts(&event.user_id, self.config.lockout_escalation_window_secs);
-            let lockout_count = local_count.max(backend_count);
-
-            // Check if we should escalate to RequireCaptcha
-            if lockout_count >= self.config.lockout_escalation_threshold {
-                escalated_lockout = true;
-                factors.push(RiskFactor {
-                    id: "LOCKOUT_ESCALATED",
-                    description: format!(
-                        "{} lockout events in {} hours — requires CAPTCHA/admin unlock",
-                        lockout_count,
-                        self.config.lockout_escalation_window_secs / 3600
-                    ),
-                    risk: 10.0,
-                });
-            } else {
-                factors.push(RiskFactor {
-                    id: "LOCKOUT",
-                    description: format!(
-                        "{} failed attempts in {} seconds (max: {}), lockout {}/{}",
-                        recent_failures,
-                        self.config.failed_attempt_window_secs,
-                        self.config.max_failed_attempts,
-                        lockout_count,
-                        self.config.lockout_escalation_threshold
-                    ),
-                    risk: 10.0,
-                });
-            }
-            risk_score += 10.0 * self.config.weight_failures;
-        } else if recent_failures > 0 {
-            let failure_risk =
-                (recent_failures as f64 / self.config.max_failed_attempts as f64) * 5.0;
-            factors.push(RiskFactor {
-                id: "FAILED_ATTEMPTS",
-                description: format!("{} recent failed attempts", recent_failures),
-                risk: failure_risk,
-            });
-            risk_score += failure_risk * self.config.weight_failures;
-        }
-
-        // 2. Impossible travel detection (BEFORE recording the new event)
+        // 1. Impossible travel detection (BEFORE recording the new event)
         if let (Some(lat), Some(lon)) = (event.latitude, event.longitude) {
             if let Some(history) = self.store.get_history(&event.user_id) {
                 if let Some(last) = history.last_successful() {
@@ -386,8 +326,14 @@ impl AtoEngine {
             }
         }
 
-        // 3. Record the event and check device novelty
-        let new_device = self.store.record_login(event);
+        // 2. Atomically record the event, count failures (including this
+        // one), and check device novelty — all under one shard lock. The
+        // old check-then-record sequence allowed N concurrent attempts to
+        // each observe "max-1" failures and all evade the lockout.
+        let (new_device, failure_count) = self
+            .store
+            .record_login_counting_failures(event, self.config.failed_attempt_window_secs);
+
         if new_device {
             factors.push(RiskFactor {
                 id: "NEW_DEVICE",
@@ -395,6 +341,76 @@ impl AtoEngine {
                 risk: 3.0,
             });
             risk_score += 3.0 * self.config.weight_device;
+        }
+
+        // 3. Failed-attempt lockout with escalation tracking.
+        // The failure count now INCLUDES the current attempt, so the
+        // threshold-th failing login itself is locked out.
+        if failure_count >= self.config.max_failed_attempts {
+            // Record via pluggable backend (Redis or in-memory) BEFORE
+            // taking any local map lock — the backend performs I/O and
+            // must never run inside a DashMap shard lock.
+            self.lockout_backend
+                .record_lockout(&event.user_id, self.config.lockout_escalation_window_secs);
+
+            let now = Utc::now();
+            let escalation_cutoff =
+                now - chrono::Duration::seconds(self.config.lockout_escalation_window_secs as i64);
+
+            // Local count under a SHORT lock — dropped before backend I/O.
+            let local_count = {
+                let mut entry = self
+                    .lockout_events
+                    .entry(event.user_id.clone())
+                    .or_default();
+                // Clean up old lockout events outside the escalation window
+                entry.retain(|ts| *ts > escalation_cutoff);
+                entry.push(now);
+                entry.len() as u32
+            };
+
+            // Backend read with NO map lock held.
+            let backend_count = self
+                .lockout_backend
+                .recent_lockouts(&event.user_id, self.config.lockout_escalation_window_secs);
+            let lockout_count = local_count.max(backend_count);
+
+            // Check if we should escalate to RequireCaptcha
+            if lockout_count >= self.config.lockout_escalation_threshold {
+                escalated_lockout = true;
+                factors.push(RiskFactor {
+                    id: "LOCKOUT_ESCALATED",
+                    description: format!(
+                        "{} lockout events in {} hours — requires CAPTCHA/admin unlock",
+                        lockout_count,
+                        self.config.lockout_escalation_window_secs / 3600
+                    ),
+                    risk: 10.0,
+                });
+            } else {
+                factors.push(RiskFactor {
+                    id: "LOCKOUT",
+                    description: format!(
+                        "{} failed attempts in {} seconds (max: {}), lockout {}/{}",
+                        failure_count,
+                        self.config.failed_attempt_window_secs,
+                        self.config.max_failed_attempts,
+                        lockout_count,
+                        self.config.lockout_escalation_threshold
+                    ),
+                    risk: 10.0,
+                });
+            }
+            risk_score += 10.0 * self.config.weight_failures;
+        } else if failure_count > 0 {
+            let failure_risk =
+                (failure_count as f64 / self.config.max_failed_attempts as f64) * 5.0;
+            factors.push(RiskFactor {
+                id: "FAILED_ATTEMPTS",
+                description: format!("{} recent failed attempts", failure_count),
+                risk: failure_risk,
+            });
+            risk_score += failure_risk * self.config.weight_failures;
         }
 
         // 4. Behavioral analysis
@@ -427,7 +443,20 @@ impl AtoEngine {
                 entry.record(tls_fp);
                 fp_risk
             };
-            self.evict_tls_histories_over_capacity();
+            // Rate-limited (at most once per TLS_EVICTION_MIN_INTERVAL):
+            // the eviction is O(n log n) over all tracked users and must
+            // not run on the hot path of every single authentication.
+            {
+                let mut last = self.last_tls_capacity_eviction.lock();
+                let due = last
+                    .map(|t| t.elapsed() >= TLS_EVICTION_MIN_INTERVAL)
+                    .unwrap_or(true);
+                if due {
+                    *last = Some(std::time::Instant::now());
+                    drop(last);
+                    self.evict_tls_histories_over_capacity();
+                }
+            }
             if fp_risk > 0.0 {
                 factors.push(RiskFactor {
                     id: "TLS_FINGERPRINT",
@@ -824,14 +853,17 @@ mod tests {
             fail.success = false;
             engine.evaluate(&fail);
         }
-        // Now a successful attempt should be blocked
+        // Now a successful attempt must be denied. NOTE:the lockout now
+        // fires ON the threshold-crossing attempt, so this sequence records
+        // enough lockout events to escalate — RequireCaptcha (stronger than
+        // Block) is the expected outcome.
         let event = login_event("user1", "1.2.3.4", 40.7128, -74.006);
         let verdict = engine.evaluate(&event);
-        assert_eq!(
-            verdict.action,
-            AtoAction::Block,
-            "Should be blocked after {} failed attempts, risk={:.1}",
+        assert!(
+            matches!(verdict.action, AtoAction::Block | AtoAction::RequireCaptcha),
+            "Should be locked out after {} failed attempts, got {:?} (risk={:.1})",
             6,
+            verdict.action,
             verdict.risk_score
         );
     }
@@ -893,6 +925,10 @@ mod tests {
         engine.evaluate(&login_event_with_tls("user-b", "ja4-b"));
         std::thread::sleep(std::time::Duration::from_millis(2));
         engine.evaluate(&login_event_with_tls("user-c", "ja4-c"));
+        // Hot-path eviction is rate-limited (at most once per
+        // TLS_EVICTION_MIN_INTERVAL); run the deterministic immediate
+        // eviction explicitly, as the background loop would.
+        engine.evict_tls_histories_over_capacity();
 
         assert_eq!(engine.tls_histories.len(), 2);
         assert!(!engine.tls_histories.contains_key("user-a"));
@@ -938,5 +974,55 @@ mod tests {
             .factors
             .iter()
             .any(|factor| factor.id == "RATE_LIMITED"));
+    }
+
+    #[test]
+    fn test_lockout_fires_on_nth_failure_itself() {
+        // TOCTOU fix + count-including-current:with max_failed_attempts=5,
+        // the 5th failing evaluate itself must already carry the lockout
+        // factor (previously the lockout only engaged one attempt later,
+        // and concurrent attempts could all slip past the threshold).
+        let config = AtoConfig {
+            max_failed_attempts: 5,
+            lockout_escalation_threshold: 100, // don't escalate in this test
+            ..AtoConfig::development()
+        };
+        let engine = AtoEngine::with_config(config);
+        let mut last = None;
+        for i in 0..5 {
+            let mut e = login_event("toctou-user", "9.9.9.9", 40.7, -74.0);
+            e.success = false;
+            last = Some(engine.evaluate(&e));
+        }
+        let verdict = last.expect("evaluated");
+        assert!(
+            verdict.factors.iter().any(|f| f.id == "LOCKOUT" || f.id == "LOCKOUT_ESCALATED"),
+            "5th failing attempt must itself be locked out: {:?}",
+            verdict.factors
+        );
+        assert_eq!(verdict.risk_score, 10.0);
+    }
+
+    #[test]
+    fn test_concurrent_failures_all_counted() {
+        // Interleaved failures (as concurrent evaluations would produce)
+        // must all be recorded — the atomic count+record cannot lose any.
+        let engine = AtoEngine::new();
+        let mut events = Vec::new();
+        for _ in 0..5 {
+            let mut e = login_event("race-user", "9.9.9.9", 40.7, -74.0);
+            e.success = false;
+            events.push(e);
+        }
+        // Record them the way concurrent evaluators would (all record,
+        // then a final evaluation observes the full count).
+        for e in &events {
+            engine.store().record_login(e);
+        }
+        assert_eq!(
+            engine.store().recent_failures("race-user", 300),
+            5,
+            "all 5 interleaved failures must be recorded"
+        );
     }
 }

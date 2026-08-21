@@ -298,76 +298,206 @@ fn extract_xml_text_content(xml: &str, out: &mut String) {
     }
 }
 
+/// Maximum decompressed size for any single PDF FlateDecode stream.
+const MAX_PDF_STREAM_BYTES: u64 = 20 * 1024 * 1024;
+
+/// Risk floor applied when a text-bearing attachment yields no extractable
+/// text:contents are unverified, so policy — not a silent Allow — decides.
+const EXTRACTION_FAILED_RISK_FLOOR: f64 = 3.0;
+
 /// Zero-dep PDF text extraction.
 /// Scans for text objects between BT (Begin Text) and ET (End Text) operators
-/// and extracts string operands from Tj and TJ operators. This handles
-/// the most common PDF text representation (literal strings in parentheses).
+/// and extracts string operands from Tj and TJ operators. Handles:
+/// - literal strings in parentheses
+/// - hex strings `<...>`
+/// - FlateDecode-compressed content streams (inflated with flate2)
 fn extract_pdf_text(data: &[u8]) -> (String, bool, String) {
     let content = String::from_utf8_lossy(data);
     let mut text = String::new();
     let mut partial = false;
-
-    // Find text objects
-    let mut remaining = content.as_ref();
     let mut text_objects = 0u32;
 
+    // 1. Scan the raw (uncompressed) content.
+    let mut remaining = content.as_ref();
     while let Some(bt_pos) = remaining.find("BT") {
         let after_bt = &remaining[bt_pos + 2..];
         let et_pos = after_bt.find("ET").unwrap_or(after_bt.len());
         let text_object = &after_bt[..et_pos];
-
-        // Extract strings from Tj/TJ operators (parenthesized strings)
         extract_pdf_strings(text_object, &mut text);
         text_objects += 1;
-
         remaining = &after_bt[et_pos..];
+    }
+
+    // 2. Inflate FlateDecode streams and scan their content too.
+    // PDF text is very often compressed; skipping this missed most modern
+    // PDFs entirely.
+    let mut inflated_streams = 0u32;
+    for stream in find_pdf_streams(data) {
+        if let Some(inflated) = inflate_pdf_stream(&stream) {
+            let decoded = String::from_utf8_lossy(&inflated);
+            let mut rem = decoded.as_ref();
+            while let Some(bt_pos) = rem.find("BT") {
+                let after_bt = &rem[bt_pos + 2..];
+                let et_pos = after_bt.find("ET").unwrap_or(after_bt.len());
+                extract_pdf_strings(&after_bt[..et_pos], &mut text);
+                text_objects += 1;
+                rem = &after_bt[et_pos..];
+            }
+            inflated_streams += 1;
+        }
     }
 
     if text_objects == 0 {
         partial = true;
     }
 
-    let note = format!("PDF: extracted text from {} text objects", text_objects);
+    let note = if inflated_streams > 0 {
+        format!(
+            "PDF: extracted text from {} text objects ({} FlateDecode stream(s))",
+            text_objects, inflated_streams
+        )
+    } else {
+        format!("PDF: extracted text from {} text objects", text_objects)
+    };
     (text, partial, note)
 }
 
-/// Extract parenthesized strings from a PDF text object.
+/// Locate the raw byte payload of every `stream … endstream` object whose
+/// dictionary mentions `/FlateDecode`.
+fn find_pdf_streams(data: &[u8]) -> Vec<&[u8]> {
+    let mut streams = Vec::new();
+    let mut pos = 0;
+    while let Some(rel) = find_subslice(&data[pos..], b"stream") {
+        let stream_kw = pos + rel;
+        // The dictionary precedes the stream keyword; look back for the
+        // object start to inspect the filter.
+        let dict_start = data[..stream_kw]
+            .windows(2)
+            .rposition(|w| w == b"<<")
+            .map(|i| i + 2)
+            .unwrap_or(stream_kw);
+        let dict = &data[dict_start..stream_kw];
+        let is_flate = find_subslice(dict, b"/FlateDecode").is_some();
+
+        // Payload starts after "stream" plus EOL (either \r\n or \n).
+        let mut payload_start = stream_kw + "stream".len();
+        if data.get(payload_start) == Some(&b'\r') {
+            payload_start += 1;
+        }
+        if data.get(payload_start) == Some(&b'\n') {
+            payload_start += 1;
+        }
+
+        if let Some(end_rel) = find_subslice(&data[payload_start..], b"endstream") {
+            let payload_end = payload_start + end_rel;
+            if is_flate && payload_end > payload_start {
+                streams.push(&data[payload_start..payload_end]);
+            }
+            pos = payload_end + "endstream".len();
+        } else {
+            break;
+        }
+    }
+    streams
+}
+
+/// Find a subslice in a haystack (memmem without extra deps).
+fn find_subslice<'a>(haystack: &'a [u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() || haystack.len() < needle.len() {
+        return None;
+    }
+    haystack
+        .windows(needle.len())
+        .position(|w| w == needle)
+}
+
+/// Inflate a PDF FlateDecode stream (zlib format) with a hard output cap.
+fn inflate_pdf_stream(bytes: &[u8]) -> Option<Vec<u8>> {
+    use flate2::read::ZlibDecoder;
+    use std::io::Read;
+
+    let limited = std::io::Read::take(bytes, MAX_PDF_STREAM_BYTES.saturating_add(1));
+    let mut decoder = ZlibDecoder::new(limited);
+    let mut out = Vec::new();
+    decoder.read_to_end(&mut out).ok()?;
+    if out.len() as u64 > MAX_PDF_STREAM_BYTES {
+        return None; // decompression bomb — refuse
+    }
+    Some(out)
+}
+
+/// Extract parenthesized strings and hex strings from a PDF text object.
 fn extract_pdf_strings(text_object: &str, out: &mut String) {
     let mut chars = text_object.chars().peekable();
     while let Some(c) = chars.next() {
-        if c == '(' {
-            // Collect until matching close paren (handle nesting)
-            let mut depth = 1u32;
-            let mut s = String::new();
-            while let Some(nc) = chars.next() {
-                match nc {
-                    '(' => depth += 1,
-                    ')' => {
-                        depth -= 1;
-                        if depth == 0 {
-                            break;
-                        }
-                    }
-                    '\\' => {
-                        // Escape sequence — take next char literally
-                        if let Some(esc) = chars.next() {
-                            match esc {
-                                'n' => s.push('\n'),
-                                'r' => s.push('\r'),
-                                't' => s.push('\t'),
-                                _ => s.push(esc),
+        match c {
+            '(' => {
+                // Collect until matching close paren (handle nesting)
+                let mut depth = 1u32;
+                let mut s = String::new();
+                while let Some(nc) = chars.next() {
+                    match nc {
+                        '(' => depth += 1,
+                        ')' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                break;
                             }
                         }
+                        '\\' => {
+                            // Escape sequence — take next char literally
+                            if let Some(esc) = chars.next() {
+                                match esc {
+                                    'n' => s.push('\n'),
+                                    'r' => s.push('\r'),
+                                    't' => s.push('\t'),
+                                    _ => s.push(esc),
+                                }
+                            }
+                        }
+                        _ => s.push(nc),
                     }
-                    _ => s.push(nc),
+                }
+                if !s.is_empty() {
+                    if !out.is_empty() {
+                        out.push(' ');
+                    }
+                    out.push_str(&s);
                 }
             }
-            if !s.is_empty() {
-                if !out.is_empty() {
-                    out.push(' ');
+            '<' => {
+                // Hex string:<48656C6C6F> — decode hex digit pairs into text.
+                // '<' also opens dictionaries, but a dictionary body never
+                // consists solely of hex digits, so undecodable spans are
+                // skipped harmlessly.
+                let mut hex = String::new();
+                let mut closed = false;
+                while let Some(&nc) = chars.peek() {
+                    chars.next();
+                    if nc == '>' {
+                        closed = true;
+                        break;
+                    }
+                    if nc.is_ascii_hexdigit() {
+                        hex.push(nc);
+                    }
                 }
-                out.push_str(&s);
+                if closed && !hex.is_empty() {
+                    let bytes: Vec<u8> = (0..hex.len() / 2)
+                        .filter_map(|i| {
+                            u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).ok()
+                        })
+                        .collect();
+                    let decoded = String::from_utf8_lossy(&bytes).into_owned();
+                    if !decoded.is_empty() {
+                        if !out.is_empty() {
+                            out.push(' ');
+                        }
+                        out.push_str(&decoded);
+                    }
+                }
             }
+            _ => {}
         }
     }
 }
@@ -455,17 +585,28 @@ impl DlpEngine {
         filename: Option<&str>,
         recipient_domain: Option<&str>,
     ) -> AttachmentVerdict {
-        // Determine file kind
+        // Determine file kind. Container formats (PDF/OOXML/RTF) are
+        // identified by MAGIC BYTES first — extension claims are trivially
+        // spoofed (malicious.pdf that is really a ZIP) and magic bytes are
+        // the only signal tied to the actual bytes.
+        let by_magic = AttachmentKind::from_magic(data);
         let kind = match filename {
             Some(name) => {
-                let by_ext = AttachmentKind::from_filename(name);
-                if by_ext == AttachmentKind::Unknown {
-                    AttachmentKind::from_magic(data)
+                if matches!(
+                    by_magic,
+                    AttachmentKind::Pdf | AttachmentKind::Ooxml | AttachmentKind::Rtf
+                ) {
+                    by_magic
                 } else {
-                    by_ext
+                    let by_ext = AttachmentKind::from_filename(name);
+                    if by_ext == AttachmentKind::Unknown {
+                        by_magic
+                    } else {
+                        by_ext
+                    }
                 }
             }
-            None => AttachmentKind::from_magic(data),
+            None => by_magic,
         };
 
         // Extract text
@@ -474,14 +615,36 @@ impl DlpEngine {
 
         // Run DLP scan on extracted text
         let dlp_verdict = if text.is_empty() {
-            // Nothing to scan — return clean verdict
-            DlpVerdict {
-                risk_score: 0.0,
-                action: DlpAction::Allow,
-                pii_findings: Vec::new(),
-                entropy_findings: Vec::new(),
-                policy_matches: Vec::new(),
-                summary: format!("No text extracted from attachment (kind={:?})", kind),
+            // Text-bearing formats that yield NO extractable text are a
+            // red flag (compressed/obfuscated content our extractor cannot
+            // read). Silently returning Allow here would let PII sail
+            // through inside content we failed to decode — instead apply a
+            // risk floor so policy (thresholds) decides the outcome.
+            if matches!(
+                kind,
+                AttachmentKind::Pdf | AttachmentKind::Ooxml | AttachmentKind::Rtf
+            ) {
+                DlpVerdict {
+                    risk_score: EXTRACTION_FAILED_RISK_FLOOR,
+                    action: DlpAction::Audit,
+                    pii_findings: Vec::new(),
+                    entropy_findings: Vec::new(),
+                    policy_matches: Vec::new(),
+                    summary: format!(
+                        "Attachment text extraction failed for kind={kind:?} — risk floor \
+                         {EXTRACTION_FAILED_RISK_FLOOR} applied, contents unverified ({note})"
+                    ),
+                }
+            } else {
+                // Binary kinds (images etc.) legitimately have no text.
+                DlpVerdict {
+                    risk_score: 0.0,
+                    action: DlpAction::Allow,
+                    pii_findings: Vec::new(),
+                    entropy_findings: Vec::new(),
+                    policy_matches: Vec::new(),
+                    summary: format!("No text extracted from attachment (kind={kind:?})"),
+                }
             }
         } else {
             self.scan(&text, recipient_domain)
@@ -724,5 +887,88 @@ mod tests {
         let (text, _, _) = extract_pdf_text(pdf);
         assert!(text.contains("First object"), "Got: {}", text);
         assert!(text.contains("Second object"), "Got: {}", text);
+    }
+
+    #[test]
+    fn test_pdf_flate_stream_pii_detected() {
+        use flate2::write::ZlibEncoder;
+        use flate2::Compression;
+        use std::io::Write;
+
+        // Build a PDF whose text object lives inside a FlateDecode stream.
+        let inner = b"BT\n(Credit card: 4111 1111 1111 1111 SSN: 123-45-6789) Tj\nET";
+        let mut enc = ZlibEncoder::new(Vec::new(), Compression::default());
+        enc.write_all(inner).unwrap();
+        let compressed = enc.finish().unwrap();
+
+        let mut pdf =
+            b"%PDF-1.4\n1 0 obj\n<< /Length ".to_vec();
+        pdf.extend_from_slice(compressed.len().to_string().as_bytes());
+        pdf.extend_from_slice(b" /Filter /FlateDecode >>\nstream\n");
+        pdf.extend_from_slice(&compressed);
+        pdf.extend_from_slice(b"\nendstream\nendobj\n");
+
+        let engine = DlpEngine::new();
+        let result = engine.scan_attachment(&pdf, Some("invoice.pdf"), None);
+        assert_eq!(result.kind, AttachmentKind::Pdf);
+        assert!(
+            !result.dlp_verdict.pii_findings.is_empty(),
+            "PII inside a FlateDecode stream must be detected (note: {}, text_len {})",
+            result.extraction_note,
+            result.extracted_text_len
+        );
+    }
+
+    #[test]
+    fn test_pdf_hex_string_extraction() {
+        // <...> hex strings inside text objects must be decoded.
+        // "SSN: 123-45-6789" hex-encoded.
+        let hex = "53534e3a203132332d34352d36373839";
+        let pdf = format!("%PDF-1.4\nBT\n<{hex}> Tj\nET");
+        let (text, _partial, _note) = extract_pdf_text(pdf.as_bytes());
+        assert!(
+            text.contains("SSN: 123-45-6789"),
+            "hex string must decode: got {text:?}"
+        );
+    }
+
+    #[test]
+    fn test_pdf_with_no_extractable_text_not_silent_allow() {
+        // A PDF whose text cannot be extracted must NOT come back as a
+        // clean Allow — it carries a risk floor so policy decides.
+        let engine = DlpEngine::new();
+        // Binary junk with a PDF magic and no text objects.
+        let mut pdf = b"%PDF-1.7\n".to_vec();
+        pdf.extend_from_slice(&[0x00, 0x01, 0x02, 0xFF, 0xFE, 0xA3, 0x5B]);
+        let result = engine.scan_attachment(&pdf, Some("doc.pdf"), None);
+        assert_eq!(result.kind, AttachmentKind::Pdf);
+        assert!(
+            result.dlp_verdict.risk_score >= 3.0,
+            "extraction failure must apply a risk floor, got {} ({})",
+            result.dlp_verdict.risk_score,
+            result.dlp_verdict.summary
+        );
+        assert!(
+            result.dlp_verdict.summary.contains("extraction failed"),
+            "summary must be explicit about the failure: {}",
+            result.dlp_verdict.summary
+        );
+        // Binary kinds (images) remain a legitimate Allow with no text.
+        let img = [0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10];
+        let result = engine.scan_attachment(&img, Some("photo.jpg"), None);
+        assert_eq!(result.dlp_verdict.action, DlpAction::Allow);
+    }
+
+    #[test]
+    fn test_kind_detection_prefers_magic_for_containers() {
+        // A ZIP renamed to .pdf must be treated as OOXML (ZIP-based), not PDF.
+        let engine = DlpEngine::new();
+        let zip = b"PK\x03\x04fake-zip-bytes";
+        let result = engine.scan_attachment(zip, Some("innocent.pdf"), None);
+        assert_eq!(
+            result.kind,
+            AttachmentKind::Ooxml,
+            "magic bytes must win over the extension for containers"
+        );
     }
 }

@@ -14,6 +14,7 @@ chrono = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 flate2 = "1.1"
+unicode-normalization = { workspace = true }
 idna = "1"
 mail-common = { path = "../mail-common", optional = true }
 

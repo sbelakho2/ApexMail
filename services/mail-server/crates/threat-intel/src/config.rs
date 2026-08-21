@@ -83,6 +83,13 @@ pub enum FeedFormat {
     JsonIp,
     /// Plain text domain list
     DomainList,
+    /// One URL per line;the host is extracted from each URL (abuse.ch
+    /// URLhaus `text` export). IP-literal hosts go to the IP blocklist,
+    /// domain hosts to the domain blocklist.
+    UrlList,
+    /// Hosts-file format:`<IP> <domain>` per line (ThreatFox hostfile
+    /// export). The IP column is loaded into the IP blocklist.
+    HostsFile,
 }
 
 impl Default for ThreatIntelConfig {
@@ -128,8 +135,11 @@ impl Default for ThreatIntelConfig {
                 },
                 FeedSource {
                     name: "abuse.ch URLhaus".into(),
+                    // URLhaus /downloads/text is one URL per line —
+                    // PlainText would have parsed whole URLs as IPs (all
+                    // failing) and silently loaded nothing.
                     url: "https://urlhaus.abuse.ch/downloads/text/".into(),
-                    format: FeedFormat::PlainText,
+                    format: FeedFormat::UrlList,
                     refresh_interval_secs: 900,
                     enabled: true,
                     trust_score: 8.0,
@@ -137,8 +147,10 @@ impl Default for ThreatIntelConfig {
                 },
                 FeedSource {
                     name: "abuse.ch ThreatFox IOCs".into(),
+                    // ThreatFox hostfile export is `<IP> <domain>` per
+                    // line — a hosts file, not a bare IP list.
                     url: "https://threatfox.abuse.ch/downloads/hostfile/".into(),
-                    format: FeedFormat::PlainText,
+                    format: FeedFormat::HostsFile,
                     refresh_interval_secs: 1800,
                     enabled: true,
                     trust_score: 7.5,
