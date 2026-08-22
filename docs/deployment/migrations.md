@@ -1,4 +1,4 @@
-# Migration lineage decision (2026-08-22)
+# Migration lineage decision (moved from services/mail-server/migrations/README.md — sqlx::migrate! scans that directory at compile time and rejects non-migration files)
 
 **Canonical: this directory.** Applied in every deploy path by the
 **`migrator`** one-shot job (`services/mail-server/crates/migrator`, which

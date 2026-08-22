@@ -176,6 +176,72 @@ final class RedisStorageTest extends TestCase
         self::assertSame([], $waits, 'WAIT must not be issued when waitReplicas is 0');
     }
 
+    public function testPredisClusterClientWithWaitReplicasIsRefusedAtConstruction(): void
+    {
+        // The verified-WAIT barrier is connection-relative: a Redis
+        // CLUSTER aggregate cannot route WAIT (it has no key slot), so
+        // the hardening combination is unusable and is refused at
+        // construction — fail closed, before any write can run — not on
+        // the first durability-critical write.
+        if (!\class_exists(\Predis\Client::class)) {
+            self::markTestSkipped('predis/predis is not installed; cannot test RedisStorage');
+        }
+        $cluster = new \Predis\Connection\Cluster\RedisCluster(
+            new \Predis\Connection\Factory(),
+            new \Predis\Connection\Parameters(),
+        );
+        $client = new \Predis\Client($cluster);
+
+        try {
+            new RedisStorage($client, waitReplicas: 1);
+            self::fail('a Predis Redis Cluster client must be refused when waitReplicas > 0');
+        } catch (\InvalidArgumentException $e) {
+            self::assertStringContainsString('Predis Redis Cluster', $e->getMessage());
+            self::assertStringContainsString('connection-relative', $e->getMessage());
+            self::assertStringContainsString('standalone and Sentinel', $e->getMessage());
+        }
+    }
+
+    public function testPredisClusterClientWithoutWaitReplicasConstructs(): void
+    {
+        // The refusal targets only the verified-WAIT hardening mode: a
+        // cluster client with waitReplicas = 0 never issues WAIT (the
+        // aggregate cannot route it) and constructs normally.
+        if (!\class_exists(\Predis\Client::class)) {
+            self::markTestSkipped('predis/predis is not installed; cannot test RedisStorage');
+        }
+        $cluster = new \Predis\Connection\Cluster\RedisCluster(
+            new \Predis\Connection\Factory(),
+            new \Predis\Connection\Parameters(),
+        );
+        $client = new \Predis\Client($cluster);
+
+        $storage = new RedisStorage($client);
+
+        self::assertInstanceOf(RedisStorage::class, $storage);
+    }
+
+    public function testPredisSentinelAggregateWithWaitReplicasIsAllowed(): void
+    {
+        // The Sentinel replication aggregate is NOT a cluster: it
+        // resolves every command to the current primary's real node
+        // connection, where WAIT is well-defined. The verified barrier
+        // stays supported and construction succeeds.
+        if (!\class_exists(\Predis\Client::class)) {
+            self::markTestSkipped('predis/predis is not installed; cannot test RedisStorage');
+        }
+        $sentinel = new \Predis\Connection\Replication\SentinelReplication(
+            'mymaster',
+            ['tcp://127.0.0.1:26379'],
+            new \Predis\Connection\Factory(),
+        );
+        $client = new \Predis\Client($sentinel);
+
+        $storage = new RedisStorage($client, waitReplicas: 1);
+
+        self::assertInstanceOf(RedisStorage::class, $storage);
+    }
+
     public function testStoreWritesLanguageNeutralJson(): void
     {
         $client = $this->requirePredis();

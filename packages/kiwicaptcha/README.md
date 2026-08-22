@@ -51,12 +51,22 @@ Note on distributed deployments: the in-record `attempts_used` counter is a loca
 │          │                                           │ 7. server-   │
 │          │                                           │    side      │
 │          │                                           │    elapsed   │
-│          │                                           │ 8. re-derive │
-│          │                                           │    hash      │
-│          │                                           │ 9. telemetry │
+│          │                                           │ 8. telemetry │
 │          │                                           │    (opt-in)  │
-│          │                                           │ then consume│
-│ └─────────┘                                           │ (transition) │
+│          │                                           │ 9. atomic    │
+│          │                                           │    pending → │
+│          │                                           │    consumed  │
+│          │                                           │ 10. recheck  │
+│          │                                           │    consumed  │
+│          │                                           │    record    │
+│          │                                           │ 11. derive   │
+│          │                                           │    exactly   │
+│          │                                           │    once      │
+│          │                                           │ 12. commit   │
+│          │                                           │    the       │
+│          │                                           │    determin- │
+│          │                                           │    istic     │
+│ └─────────┘                                           │   result    │
 └───────────────────────────────────────────────────────┴──────────────┘
 ```
 

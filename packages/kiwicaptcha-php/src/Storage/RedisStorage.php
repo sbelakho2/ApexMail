@@ -202,18 +202,33 @@ return 1
 LUA;
 
     /**
+     * The verified-WAIT durability barrier (waitReplicas > 0) is
+     * supported on standalone and Sentinel Redis connections. A Predis
+     * client on a Redis CLUSTER aggregate cannot route WAIT (it is
+     * connection-relative and carries no key slot) and is refused at
+     * construction with waitReplicas > 0 — keep waitReplicas = 0 on a
+     * cluster (or use a standalone/Sentinel connection).
+     *
      * @param int $waitReplicas   when > 0, every durability-critical write
-     *                            (issuance SET, the pending→consumed
-     *                            transition, the result commit, the
-     *                            delete-if-pending deletion) is followed
-     *                            by a Redis WAIT whose acknowledgement count
-     *                            is verified. Fewer than waitReplicas acked
-     *                            replicas raises {@see ReplicaWaitException}
+     *                            (issuance, the pending→consumed
+     *                            transition, the deterministic-result
+     *                            commit, and the terminal delete-if-pending
+     *                            deletion) is followed by a Redis WAIT
+     *                            whose acknowledgement count is verified.
+     *                            Fewer than waitReplicas acked replicas
+     *                            raises {@see ReplicaWaitException}
      *                            (fail closed: the guarantee is
      *                            unconditional, never silently downgraded).
      *                            Async-replication failover can otherwise
      *                            lose a write or resurrect a consumed
-     *                            record from a stale replica.
+     *                            record from a stale replica. Supported
+     *                            topologies: standalone and Sentinel Redis
+     *                            connections. A Predis client on a Redis
+     *                            CLUSTER aggregate with waitReplicas > 0 is
+     *                            refused at construction (WAIT is
+     *                            connection-relative and cannot be routed
+     *                            by slot); keep waitReplicas = 0 on a
+     *                            cluster.
      * @param int $waitTimeoutMs  wait timeout in milliseconds (default 100).
      * @param int $ttlMarginSecs  extra retention on the record beyond token
      *                            validity: TTL = expires_at - now + margin.
@@ -228,6 +243,41 @@ LUA;
         private readonly int $waitTimeoutMs = 100,
         private readonly int $ttlMarginSecs = 0,
     ) {
+        $this->refuseVerifiedWaitOnPredisCluster();
+    }
+
+    /**
+     * Refuse the verified-WAIT hardening on a Predis Redis Cluster client.
+     *
+     * WAIT is connection-relative — it counts replicas of the connection
+     * it is sent on and carries no key — so a Redis CLUSTER aggregate
+     * cannot route it: Predis dispatches every command to a node by key
+     * slot, and a keyless raw WAIT has no slot, so the dispatch throws
+     * instead of reaching any node. A fake-slot workaround would be
+     * unsafe (the aggregate would send WAIT on a node other than the one
+     * that carried the write), so the verified barrier is refused at
+     * construction — fail closed, before any write can run.
+     *
+     * Supported topologies are standalone and Sentinel Redis: the
+     * Sentinel (and master-slave) replication aggregate resolves every
+     * command to the current primary's real node connection, where WAIT
+     * is well-defined. The check targets
+     * {@see \Predis\Connection\Cluster\ClusterInterface} — implemented
+     * only by the cluster aggregates (RedisCluster, PredisCluster, and
+     * any custom cluster aggregate), never by the replication
+     * aggregates — so exactly the cluster case is refused.
+     */
+    private function refuseVerifiedWaitOnPredisCluster(): void
+    {
+        if ($this->waitReplicas <= 0 || !($this->client instanceof \Predis\Client)) {
+            return;
+        }
+        $connection = $this->client->getConnection();
+        if ($connection instanceof \Predis\Connection\Cluster\ClusterInterface) {
+            throw new \InvalidArgumentException(
+                'RedisStorage: verified-WAIT durability (waitReplicas > 0) is not supported on a Predis Redis Cluster client — WAIT is connection-relative and cannot be routed by slot. The verified barrier supports standalone and Sentinel Redis connections; use one of those with waitReplicas > 0, or keep waitReplicas = 0 on a cluster.'
+            );
+        }
     }
 
     public function store(ChallengeRecord $record): void
