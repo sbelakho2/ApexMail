@@ -225,7 +225,9 @@ impl DataIsolationService {
         // whitespace/newlines between the clause keyword and the table name.
         let tenanted_tables = ["emails", "contacts", "templates", "campaigns", "webhooks"];
         let referenced = referenced_tables(&stripped);
-        let touches_tenanted_table = referenced.iter().any(|t| tenanted_tables.contains(&t.as_str()));
+        let touches_tenanted_table = referenced
+            .iter()
+            .any(|t| tenanted_tables.contains(&t.as_str()));
 
         if touches_tenanted_table {
             let has_workspace_predicate = TENANT_PREDICATE_RE
@@ -805,20 +807,17 @@ mod tests {
             &ctx
         ));
         // …and is fine when properly parameterized.
-        assert!(svc.validate_query_access(
-            "SELECT * FROM public.emails WHERE workspace_id = $1",
-            &ctx
-        ));
+        assert!(
+            svc.validate_query_access("SELECT * FROM public.emails WHERE workspace_id = $1", &ctx)
+        );
     }
 
     #[test]
     fn test_validate_query_blocks_newline_obfuscated_table() {
         let svc = loaded_svc();
         let ctx = make_ctx();
-        assert!(!svc.validate_query_access(
-            "SELECT * FROM\n\temails\nWHERE subject LIKE '%test%'",
-            &ctx
-        ));
+        assert!(!svc
+            .validate_query_access("SELECT * FROM\n\temails\nWHERE subject LIKE '%test%'", &ctx));
     }
 
     #[test]
@@ -843,14 +842,10 @@ mod tests {
         let ctx = make_ctx();
         // set_config() is the functional form of SET and bypassed the
         // `SET search_path` regex.
-        assert!(!svc.validate_query_access(
-            "SELECT set_config('search_path', 'public', false)",
-            &ctx
-        ));
-        assert!(!svc.validate_query_access(
-            "SELECT SET_CONFIG ( 'role', 'admin', true )",
-            &ctx
-        ));
+        assert!(
+            !svc.validate_query_access("SELECT set_config('search_path', 'public', false)", &ctx)
+        );
+        assert!(!svc.validate_query_access("SELECT SET_CONFIG ( 'role', 'admin', true )", &ctx));
     }
 
     #[test]
@@ -859,25 +854,16 @@ mod tests {
         let ctx = make_ctx();
         // A literal (non-parameterized) workspace predicate must not satisfy
         // the tenancy requirement.
-        assert!(!svc.validate_query_access(
-            "SELECT * FROM emails WHERE workspace_id = 12345",
-            &ctx
-        ));
+        assert!(!svc.validate_query_access("SELECT * FROM emails WHERE workspace_id = 12345", &ctx));
         // `?` placeholder is an accepted parameterized form.
-        assert!(svc.validate_query_access(
-            "SELECT * FROM emails WHERE workspace_id = ?",
-            &ctx
-        ));
+        assert!(svc.validate_query_access("SELECT * FROM emails WHERE workspace_id = ?", &ctx));
     }
 
     #[test]
     fn test_validate_query_blocks_update_and_join_without_predicate() {
         let svc = loaded_svc();
         let ctx = make_ctx();
-        assert!(!svc.validate_query_access(
-            "UPDATE emails SET subject = $1 WHERE id = $2",
-            &ctx
-        ));
+        assert!(!svc.validate_query_access("UPDATE emails SET subject = $1 WHERE id = $2", &ctx));
         assert!(!svc.validate_query_access(
             "SELECT * FROM contacts c JOIN emails e ON c.id = e.contact_id WHERE c.id = $1",
             &ctx
@@ -916,13 +902,19 @@ mod tests {
     fn test_referenced_tables_handles_qualification_and_whitespace() {
         let tables = referenced_tables("SELECT * FROM\npublic.\"Emails\" e JOIN contacts ON true");
         assert!(tables.contains(&"emails".to_string()), "got: {:?}", tables);
-        assert!(tables.contains(&"contacts".to_string()), "got: {:?}", tables);
+        assert!(
+            tables.contains(&"contacts".to_string()),
+            "got: {:?}",
+            tables
+        );
     }
 
     #[test]
     fn test_rls_statements_include_force() {
         let stmts = rls_statements("\"public\"", "\"emails\"");
-        assert!(stmts.iter().any(|s| s.contains("ENABLE ROW LEVEL SECURITY")));
+        assert!(stmts
+            .iter()
+            .any(|s| s.contains("ENABLE ROW LEVEL SECURITY")));
         assert!(
             stmts.iter().any(|s| s.contains("FORCE ROW LEVEL SECURITY")),
             "FORCE RLS must be issued so the table owner is also subject to policies: {:?}",

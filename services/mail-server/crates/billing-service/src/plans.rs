@@ -571,7 +571,7 @@ pub fn calculate_overage_cost_with_rate(
     ((overage as i128)
         .saturating_mul(safe_rate as i128)
         .saturating_add(999))
-        .div_euclid(1000) as i64
+    .div_euclid(1000) as i64
 }
 
 // ---------------------------------------------------------------------------

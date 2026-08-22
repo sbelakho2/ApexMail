@@ -290,10 +290,7 @@ async fn marketing_spend_cents_since(
             validated_column("created_at")?
         };
         let sql = audit_log_spend_sql(audit_time_col)?;
-        let (rows, cents): (i64, i64) = sqlx::query_as(&sql)
-            .bind(cutoff)
-            .fetch_one(db)
-            .await?;
+        let (rows, cents): (i64, i64) = sqlx::query_as(&sql).bind(cutoff).fetch_one(db).await?;
         return Ok((rows > 0).then_some(cents));
     }
 
@@ -322,25 +319,24 @@ async fn get_revenue(
     let month_starts = recent_month_starts(now, 6);
     let mut notes: Vec<String> = Vec::new();
 
-    let subscriptions = if table_exists(db, "stripe_subscriptions").await
-        && table_exists(db, "plans").await
-    {
-        let has_billing_interval =
-            column_exists(db, "stripe_subscriptions", "billing_interval").await;
-        let cancel_expr = if column_exists(db, "stripe_subscriptions", "canceled_at").await {
-            validated_column("s.canceled_at")?
-        } else {
-            // Hardcoded CASE expression - not from user input, safe from injection
-            "CASE WHEN s.status = 'canceled' THEN s.updated_at ELSE NULL END"
-        };
-        let sql = build_subscription_revenue_sql(has_billing_interval, cancel_expr);
+    let subscriptions =
+        if table_exists(db, "stripe_subscriptions").await && table_exists(db, "plans").await {
+            let has_billing_interval =
+                column_exists(db, "stripe_subscriptions", "billing_interval").await;
+            let cancel_expr = if column_exists(db, "stripe_subscriptions", "canceled_at").await {
+                validated_column("s.canceled_at")?
+            } else {
+                // Hardcoded CASE expression - not from user input, safe from injection
+                "CASE WHEN s.status = 'canceled' THEN s.updated_at ELSE NULL END"
+            };
+            let sql = build_subscription_revenue_sql(has_billing_interval, cancel_expr);
 
-        sqlx::query_as::<_, SubscriptionRevenueRow>(&sql)
-            .fetch_all(db)
-            .await?
-    } else {
-        Vec::new()
-    };
+            sqlx::query_as::<_, SubscriptionRevenueRow>(&sql)
+                .fetch_all(db)
+                .await?
+        } else {
+            Vec::new()
+        };
 
     let tenant_plan_counts: HashMap<String, i64> = if table_exists(db, "tenants").await {
         sqlx::query_as::<_, (String, i64)>(
@@ -594,8 +590,10 @@ mod tests {
 
     #[test]
     fn revenue_subscription_sql_reads_stripe_subscriptions() {
-        let sql =
-            build_subscription_revenue_sql(true, "CASE WHEN s.status = 'canceled' THEN s.updated_at ELSE NULL END");
+        let sql = build_subscription_revenue_sql(
+            true,
+            "CASE WHEN s.status = 'canceled' THEN s.updated_at ELSE NULL END",
+        );
 
         assert!(sql.contains("FROM stripe_subscriptions s"));
         assert!(sql.contains("JOIN tenants t ON t.id = s.tenant_id"));

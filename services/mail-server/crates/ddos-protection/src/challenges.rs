@@ -617,8 +617,8 @@ impl ChallengeManager {
         let expired = now > challenge.expires_at;
         // Hash format matches `decision::PowChallenge::verify`:
         // sha256("<data>:<nonce>") with `difficulty` leading zero bits.
-        let valid = !expired
-            && decision_pow_hash_valid(&challenge.data, challenge.difficulty, &nonce_str);
+        let valid =
+            !expired && decision_pow_hash_valid(&challenge.data, challenge.difficulty, &nonce_str);
 
         let replayed = valid && !self.used_responses.write().insert(response_key, now);
         if replayed {

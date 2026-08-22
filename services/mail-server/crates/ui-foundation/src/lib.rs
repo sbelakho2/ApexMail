@@ -83,16 +83,34 @@ mod tests {
     fn brand_palette_is_red_and_black() {
         for source in [GLOBALS_CSS, GLOBALS_INPUT_CSS] {
             // Deep red brand accent (#dc2626 = 220 38 38).
-            assert!(source.contains("--primary: 220 38 38;"), "primary must be #dc2626");
+            assert!(
+                source.contains("--primary: 220 38 38;"),
+                "primary must be #dc2626"
+            );
             assert!(
                 source.contains("--destructive: 220 38 38;"),
                 "destructive must be #dc2626"
             );
-            assert!(source.contains("--ring: 220 38 38;"), "ring must be #dc2626");
-            assert!(source.contains("--error: 220 38 38;"), "error must be #dc2626");
-            assert!(source.contains("--brand-500: 220 38 38;"), "brand-500 must be #dc2626");
-            assert!(source.contains("--brand-600: 185 28 28;"), "brand-600 must be #b91c1c");
-            assert!(source.contains("--brand-950: 45 10 10;"), "brand-950 must be #2d0a0a");
+            assert!(
+                source.contains("--ring: 220 38 38;"),
+                "ring must be #dc2626"
+            );
+            assert!(
+                source.contains("--error: 220 38 38;"),
+                "error must be #dc2626"
+            );
+            assert!(
+                source.contains("--brand-500: 220 38 38;"),
+                "brand-500 must be #dc2626"
+            );
+            assert!(
+                source.contains("--brand-600: 185 28 28;"),
+                "brand-600 must be #b91c1c"
+            );
+            assert!(
+                source.contains("--brand-950: 45 10 10;"),
+                "brand-950 must be #2d0a0a"
+            );
             // Near-black zinc neutrals.
             assert!(
                 source.contains("--foreground: 9 9 11;"),
@@ -185,13 +203,16 @@ mod tests {
     /// bg-brand-*), proving the served markup carries the red brand.
     #[test]
     fn views_reference_the_brand_tokens() {
-        let dashboard = crate::axum_router::render_route("web", "/dashboard")
-            .expect("web dashboard renders");
+        let dashboard =
+            crate::axum_router::render_route("web", "/dashboard").expect("web dashboard renders");
         assert!(
             dashboard.contains("bg-primary") || dashboard.contains("text-primary"),
             "console views must reference the primary token utilities"
         );
-        assert!(GLOBALS_CSS.contains(".bg-primary"), "globals.css must emit .bg-primary");
+        assert!(
+            GLOBALS_CSS.contains(".bg-primary"),
+            "globals.css must emit .bg-primary"
+        );
         assert!(
             GLOBALS_CSS.contains(".bg-brand-500"),
             "globals.css must emit .bg-brand-500"
@@ -214,7 +235,8 @@ mod tests {
         let home = crate::axum_router::render_route("marketing", "/")
             .expect("marketing home renders (from the zola build output)");
         assert!(
-            home.contains("id=cookie-consent-banner") || home.contains("id=\"cookie-consent-banner\""),
+            home.contains("id=cookie-consent-banner")
+                || home.contains("id=\"cookie-consent-banner\""),
             "banner must be present in the built marketing page"
         );
         assert!(
@@ -235,10 +257,11 @@ mod tests {
         let banner_start = home
             .find("cookie-consent-banner")
             .unwrap_or_else(|| panic!("banner element found"));
-        let banner = &home[banner_start..home[banner_start..]
-            .find("</div></div></div>")
-            .map(|end| banner_start + end + "</div></div></div>".len())
-            .unwrap_or(home.len())];
+        let banner = &home[banner_start
+            ..home[banner_start..]
+                .find("</div></div></div>")
+                .map(|end| banner_start + end + "</div></div></div>".len())
+                .unwrap_or(home.len())];
         assert!(
             !banner.contains("<button"),
             "inert consent buttons must not ship — the zero-JS banner uses links"

@@ -134,8 +134,9 @@ async fn fixture(test_name: &str) -> Option<Fixture> {
         )
         .expect("test dispatch config must be valid"),
     );
-    let manager = CampaignManager::new(50, db.clone())
-        .with_email_dispatcher(dispatcher.clone() as Arc<dyn sales_autopilot::campaigns::CampaignEmailDispatcher>);
+    let manager = CampaignManager::new(50, db.clone()).with_email_dispatcher(
+        dispatcher.clone() as Arc<dyn sales_autopilot::campaigns::CampaignEmailDispatcher>
+    );
     Some(Fixture {
         db,
         tenant_id,
@@ -180,7 +181,10 @@ async fn make_campaign(
     campaign.id
 }
 
-async fn queue_rows_for_campaign(db: &PgPool, campaign_id: Uuid) -> Vec<(String, String, Option<String>)> {
+async fn queue_rows_for_campaign(
+    db: &PgPool,
+    campaign_id: Uuid,
+) -> Vec<(String, String, Option<String>)> {
     sqlx::query_as(
         r#"SELECT "to", status, headers->>'List-Unsubscribe' FROM email_queue
            WHERE metadata->>'campaign_id' = $1 ORDER BY "to""#,
@@ -197,7 +201,9 @@ async fn queue_rows_for_campaign(db: &PgPool, campaign_id: Uuid) -> Vec<(String,
 
 #[tokio::test]
 async fn dispatcher_enqueues_into_platform_pipeline() {
-    let Some(fx) = fixture("dispatch_enqueues").await else { return };
+    let Some(fx) = fixture("dispatch_enqueues").await else {
+        return;
+    };
     let campaign_id = make_campaign(
         &fx,
         "Hi {{first_name}} from {{company}}",
@@ -223,7 +229,10 @@ async fn dispatcher_enqueues_into_platform_pipeline() {
     .await
     .unwrap();
 
-    fx.manager.start_campaign(&fx.tenant_id, campaign_id).await.unwrap();
+    fx.manager
+        .start_campaign(&fx.tenant_id, campaign_id)
+        .await
+        .unwrap();
 
     // `messages` audit rows exist with campaign idempotency keys.
     let message_rows: Vec<(String, String)> = sqlx::query_as(
@@ -236,7 +245,9 @@ async fn dispatcher_enqueues_into_platform_pipeline() {
     .await
     .unwrap();
     assert_eq!(message_rows.len(), 2, "one messages row per recipient");
-    assert!(message_rows.iter().all(|(k, _)| k.starts_with(&format!("sacmp:{campaign_id}:"))));
+    assert!(message_rows
+        .iter()
+        .all(|(k, _)| k.starts_with(&format!("sacmp:{campaign_id}:"))));
     assert!(message_rows.iter().all(|(_, s)| s == "queued"));
 
     // `email_queue` rows: pending, single-recipient, List-Unsubscribe header.
@@ -244,9 +255,17 @@ async fn dispatcher_enqueues_into_platform_pipeline() {
     assert_eq!(queue.len(), 2);
     for (to, status, list_unsub) in &queue {
         assert_eq!(status, "pending", "queue row for {to} must start pending");
-        let link = list_unsub.as_ref().expect("List-Unsubscribe header present");
-        assert!(link.starts_with('<') && link.ends_with('>'), "RFC 2369 angle form: {link}");
-        assert!(link.contains("/u/"), "link points at the unsubscribe endpoint: {link}");
+        let link = list_unsub
+            .as_ref()
+            .expect("List-Unsubscribe header present");
+        assert!(
+            link.starts_with('<') && link.ends_with('>'),
+            "RFC 2369 angle form: {link}"
+        );
+        assert!(
+            link.contains("/u/"),
+            "link points at the unsubscribe endpoint: {link}"
+        );
     }
 
     // List-Unsubscribe-Post one-click header.
@@ -271,12 +290,20 @@ async fn dispatcher_enqueues_into_platform_pipeline() {
     .await
     .unwrap();
     assert!(
-        alice_html.0.contains("&lt;script&gt;alert(&#39;xss&#39;)&lt;/script&gt;"),
+        alice_html
+            .0
+            .contains("&lt;script&gt;alert(&#39;xss&#39;)&lt;/script&gt;"),
         "lead name must be HTML-escaped: {}",
         alice_html.0
     );
-    assert!(!alice_html.0.contains("<script>alert"), "raw script must never appear");
-    assert!(alice_html.0.contains("ACME &amp; Sons"), "company ampersand escaped");
+    assert!(
+        !alice_html.0.contains("<script>alert"),
+        "raw script must never appear"
+    );
+    assert!(
+        alice_html.0.contains("ACME &amp; Sons"),
+        "company ampersand escaped"
+    );
     // CAN-SPAM footer with working unsubscribe link.
     assert!(alice_html.0.contains("Unsubscribe</a>"));
 
@@ -303,14 +330,20 @@ async fn dispatcher_enqueues_into_platform_pipeline() {
     .await
     .unwrap();
     assert_eq!(ledger.len(), 2);
-    assert!(ledger.iter().all(|(_, m)| m.is_some()), "message_id recorded per recipient");
+    assert!(
+        ledger.iter().all(|(_, m)| m.is_some()),
+        "message_id recorded per recipient"
+    );
 
     let sent: (i64,) = sqlx::query_as("SELECT sent FROM sales_campaigns WHERE id = $1")
         .bind(campaign_id)
         .fetch_one(&fx.db)
         .await
         .unwrap();
-    assert_eq!(sent.0, 2, "campaign sent counter advanced inside the enqueue tx");
+    assert_eq!(
+        sent.0, 2,
+        "campaign sent counter advanced inside the enqueue tx"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -319,8 +352,16 @@ async fn dispatcher_enqueues_into_platform_pipeline() {
 
 #[tokio::test]
 async fn platform_suppressions_exclude_recipients() {
-    let Some(fx) = fixture("platform_suppressions").await else { return };
-    let campaign_id = make_campaign(&fx, "s", "<p>x</p>", &["keep@example.com", "bounced@example.com"]).await;
+    let Some(fx) = fixture("platform_suppressions").await else {
+        return;
+    };
+    let campaign_id = make_campaign(
+        &fx,
+        "s",
+        "<p>x</p>",
+        &["keep@example.com", "bounced@example.com"],
+    )
+    .await;
 
     // Hard bounce recorded by the platform worker into `suppressions`
     // (NOT the crate-local sales_unsubscribes — that path is covered by
@@ -336,7 +377,10 @@ async fn platform_suppressions_exclude_recipients() {
     .await
     .unwrap();
 
-    fx.manager.start_campaign(&fx.tenant_id, campaign_id).await.unwrap();
+    fx.manager
+        .start_campaign(&fx.tenant_id, campaign_id)
+        .await
+        .unwrap();
 
     let queue = queue_rows_for_campaign(&fx.db, campaign_id).await;
     assert_eq!(queue.len(), 1, "suppressed recipient excluded: {queue:?}");
@@ -349,11 +393,16 @@ async fn platform_suppressions_exclude_recipients() {
 
 #[tokio::test]
 async fn crash_restart_does_not_double_send() {
-    let Some(fx) = fixture("crash_restart").await else { return };
+    let Some(fx) = fixture("crash_restart").await else {
+        return;
+    };
     let campaign_id = make_campaign(&fx, "s", "<p>x</p>", &["victim@example.com"]).await;
 
     // First dispatch succeeds.
-    fx.manager.start_campaign(&fx.tenant_id, campaign_id).await.unwrap();
+    fx.manager
+        .start_campaign(&fx.tenant_id, campaign_id)
+        .await
+        .unwrap();
     assert_eq!(queue_rows_for_campaign(&fx.db, campaign_id).await.len(), 1);
 
     // Simulate a crash between the ledger write and enqueue of an OLDER
@@ -371,11 +420,15 @@ async fn crash_restart_does_not_double_send() {
     // "Restart": the scheduler picks the recipient up again and dispatches.
     let enqueued = fx
         .dispatcher
-        .dispatch_batch(&fx.tenant_id, campaign_id, &fetch_template_id(&fx, campaign_id).await, &fx
-            .manager
-            .due_recipients(&fx.tenant_id, campaign_id, 100)
-            .await
-            .unwrap())
+        .dispatch_batch(
+            &fx.tenant_id,
+            campaign_id,
+            &fetch_template_id(&fx, campaign_id).await,
+            &fx.manager
+                .due_recipients(&fx.tenant_id, campaign_id, 100)
+                .await
+                .unwrap(),
+        )
         .await
         .unwrap();
 
@@ -392,13 +445,12 @@ async fn crash_restart_does_not_double_send() {
         1,
         "still exactly one queue row"
     );
-    let messages: (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM messages WHERE idempotency_key LIKE $1",
-    )
-    .bind(format!("sacmp:{campaign_id}:%"))
-    .fetch_one(&fx.db)
-    .await
-    .unwrap();
+    let messages: (i64,) =
+        sqlx::query_as("SELECT COUNT(*) FROM messages WHERE idempotency_key LIKE $1")
+            .bind(format!("sacmp:{campaign_id}:%"))
+            .fetch_one(&fx.db)
+            .await
+            .unwrap();
     assert_eq!(messages.0, 1, "still exactly one messages row");
 
     // And the ledger is stamped again, so no infinite retry.
@@ -421,13 +473,12 @@ async fn crash_restart_does_not_double_send() {
 }
 
 async fn fetch_template_id(fx: &Fixture, campaign_id: Uuid) -> String {
-    let (template_id,): (String,) = sqlx::query_as(
-        "SELECT template_id FROM sales_campaigns WHERE id = $1",
-    )
-    .bind(campaign_id)
-    .fetch_one(&fx.db)
-    .await
-    .unwrap();
+    let (template_id,): (String,) =
+        sqlx::query_as("SELECT template_id FROM sales_campaigns WHERE id = $1")
+            .bind(campaign_id)
+            .fetch_one(&fx.db)
+            .await
+            .unwrap();
     template_id
 }
 
@@ -437,7 +488,9 @@ async fn fetch_template_id(fx: &Fixture, campaign_id: Uuid) -> String {
 
 #[tokio::test]
 async fn quota_exhausted_pauses_campaign_with_error_state() {
-    let Some(mut fx) = fixture("quota_exhausted").await else { return };
+    let Some(mut fx) = fixture("quota_exhausted").await else {
+        return;
+    };
     fx.quota = Arc::new(FakeQuotaGateway::with_limit(1));
     fx.dispatcher = Arc::new(
         ProductionCampaignDispatcher::new(
@@ -447,10 +500,18 @@ async fn quota_exhausted_pauses_campaign_with_error_state() {
         )
         .unwrap(),
     );
-    fx.manager = CampaignManager::new(50, fx.db.clone())
-        .with_email_dispatcher(fx.dispatcher.clone() as Arc<dyn sales_autopilot::campaigns::CampaignEmailDispatcher>);
+    fx.manager =
+        CampaignManager::new(50, fx.db.clone())
+            .with_email_dispatcher(fx.dispatcher.clone()
+                as Arc<dyn sales_autopilot::campaigns::CampaignEmailDispatcher>);
 
-    let campaign_id = make_campaign(&fx, "s", "<p>x</p>", &["a@example.com", "b@example.com", "c@example.com"]).await;
+    let campaign_id = make_campaign(
+        &fx,
+        "s",
+        "<p>x</p>",
+        &["a@example.com", "b@example.com", "c@example.com"],
+    )
+    .await;
 
     let err = fx
         .manager
@@ -462,13 +523,12 @@ async fn quota_exhausted_pauses_campaign_with_error_state() {
         "error must name the quota exhaustion: {err}"
     );
 
-    let (status, last_error, sent): (String, Option<String>, i64) = sqlx::query_as(
-        "SELECT status, last_error, sent FROM sales_campaigns WHERE id = $1",
-    )
-    .bind(campaign_id)
-    .fetch_one(&fx.db)
-    .await
-    .unwrap();
+    let (status, last_error, sent): (String, Option<String>, i64) =
+        sqlx::query_as("SELECT status, last_error, sent FROM sales_campaigns WHERE id = $1")
+            .bind(campaign_id)
+            .fetch_one(&fx.db)
+            .await
+            .unwrap();
     assert_eq!(status, "paused", "campaign must pause, not stay active");
     assert!(
         last_error.as_deref().unwrap_or("").contains("quota"),
@@ -493,9 +553,14 @@ async fn quota_exhausted_pauses_campaign_with_error_state() {
         )
         .unwrap(),
     );
-    fx.manager = CampaignManager::new(50, fx.db.clone())
-        .with_email_dispatcher(fx.dispatcher.clone() as Arc<dyn sales_autopilot::campaigns::CampaignEmailDispatcher>);
-    fx.manager.start_campaign(&fx.tenant_id, campaign_id).await.unwrap();
+    fx.manager =
+        CampaignManager::new(50, fx.db.clone())
+            .with_email_dispatcher(fx.dispatcher.clone()
+                as Arc<dyn sales_autopilot::campaigns::CampaignEmailDispatcher>);
+    fx.manager
+        .start_campaign(&fx.tenant_id, campaign_id)
+        .await
+        .unwrap();
     assert_eq!(
         queue_rows_for_campaign(&fx.db, campaign_id).await.len(),
         3,
@@ -509,7 +574,9 @@ async fn quota_exhausted_pauses_campaign_with_error_state() {
 
 #[tokio::test]
 async fn batch_failure_is_retried_without_duplicates() {
-    let Some(mut fx) = fixture("batch_retry").await else { return };
+    let Some(mut fx) = fixture("batch_retry").await else {
+        return;
+    };
     // The SECOND reserve call fails with a transient error: recipient 1 is
     // enqueued, then the batch aborts.
     fx.quota = Arc::new(FakeQuotaGateway::with_transient_failure_at(2));
@@ -521,12 +588,19 @@ async fn batch_failure_is_retried_without_duplicates() {
         )
         .unwrap(),
     );
-    fx.manager = CampaignManager::new(50, fx.db.clone())
-        .with_email_dispatcher(fx.dispatcher.clone() as Arc<dyn sales_autopilot::campaigns::CampaignEmailDispatcher>);
+    fx.manager =
+        CampaignManager::new(50, fx.db.clone())
+            .with_email_dispatcher(fx.dispatcher.clone()
+                as Arc<dyn sales_autopilot::campaigns::CampaignEmailDispatcher>);
 
-    let campaign_id = make_campaign(&fx, "s", "<p>x</p>", &["a@example.com", "b@example.com"]).await;
+    let campaign_id =
+        make_campaign(&fx, "s", "<p>x</p>", &["a@example.com", "b@example.com"]).await;
 
-    let err = fx.manager.start_campaign(&fx.tenant_id, campaign_id).await.unwrap_err();
+    let err = fx
+        .manager
+        .start_campaign(&fx.tenant_id, campaign_id)
+        .await
+        .unwrap_err();
     assert!(
         matches!(err, SalesError::ServiceUnavailable(_)),
         "transient failure surfaces, got {err:?}"
@@ -552,8 +626,10 @@ async fn batch_failure_is_retried_without_duplicates() {
         )
         .unwrap(),
     );
-    fx.manager = CampaignManager::new(50, fx.db.clone())
-        .with_email_dispatcher(fx.dispatcher.clone() as Arc<dyn sales_autopilot::campaigns::CampaignEmailDispatcher>);
+    fx.manager =
+        CampaignManager::new(50, fx.db.clone())
+            .with_email_dispatcher(fx.dispatcher.clone()
+                as Arc<dyn sales_autopilot::campaigns::CampaignEmailDispatcher>);
 
     let template_id = fetch_template_id(&fx, campaign_id).await;
     let enqueued = sales_autopilot::scheduler::process_campaign(
@@ -596,7 +672,9 @@ async fn batch_failure_is_retried_without_duplicates() {
 
 #[tokio::test]
 async fn unverified_sender_domain_refuses_dispatch() {
-    let Some(fx) = fixture("unverified_domain").await else { return };
+    let Some(fx) = fixture("unverified_domain").await else {
+        return;
+    };
     // Tenant has NO verified domain for the sender's domain.
     sqlx::query("DELETE FROM domains WHERE tenant_id = $1")
         .bind(&fx.tenant_id)
@@ -623,7 +701,9 @@ async fn unverified_sender_domain_refuses_dispatch() {
 
 #[tokio::test]
 async fn missing_template_refuses_dispatch() {
-    let Some(fx) = fixture("missing_template").await else { return };
+    let Some(fx) = fixture("missing_template").await else {
+        return;
+    };
     let campaign = fx
         .manager
         .create_campaign(
@@ -657,9 +737,20 @@ async fn missing_template_refuses_dispatch() {
 
 #[tokio::test]
 async fn campaign_stats_reconcile_from_platform_tracking() {
-    let Some(fx) = fixture("stats_reconcile").await else { return };
-    let campaign_id = make_campaign(&fx, "s", "<p>track me</p>", &["a@example.com", "b@example.com"]).await;
-    fx.manager.start_campaign(&fx.tenant_id, campaign_id).await.unwrap();
+    let Some(fx) = fixture("stats_reconcile").await else {
+        return;
+    };
+    let campaign_id = make_campaign(
+        &fx,
+        "s",
+        "<p>track me</p>",
+        &["a@example.com", "b@example.com"],
+    )
+    .await;
+    fx.manager
+        .start_campaign(&fx.tenant_id, campaign_id)
+        .await
+        .unwrap();
 
     // Simulate the tracking service recording an open + a click for
     // recipient a's message.
@@ -672,7 +763,10 @@ async fn campaign_stats_reconcile_from_platform_tracking() {
     .await
     .unwrap();
 
-    fx.manager.reconcile_campaign_stats(campaign_id).await.unwrap();
+    fx.manager
+        .reconcile_campaign_stats(campaign_id)
+        .await
+        .unwrap();
 
     let (opened, clicked, sent): (i64, i64, i64) =
         sqlx::query_as("SELECT opened, clicked, sent FROM sales_campaigns WHERE id = $1")
@@ -691,7 +785,9 @@ async fn campaign_stats_reconcile_from_platform_tracking() {
 
 #[tokio::test]
 async fn dry_run_renders_without_enqueueing() {
-    let Some(fx) = fixture("dry_run").await else { return };
+    let Some(fx) = fixture("dry_run").await else {
+        return;
+    };
     let campaign_id = make_campaign(
         &fx,
         "Hi {{first_name}}",
@@ -718,7 +814,9 @@ async fn dry_run_renders_without_enqueueing() {
     assert_eq!(report["template"]["has_html"], true);
     let preview = report["preview"].as_array().unwrap();
     assert_eq!(preview.len(), 2, "preview renders due recipients only");
-    assert!(preview.iter().all(|p| p["subject"].as_str().unwrap().starts_with("Hi ")));
+    assert!(preview
+        .iter()
+        .all(|p| p["subject"].as_str().unwrap().starts_with("Hi ")));
 
     // Nothing was sent: no queue rows, no ledger stamps.
     assert_eq!(queue_rows_for_campaign(&fx.db, campaign_id).await.len(), 0);
@@ -761,9 +859,9 @@ mod unsub_http {
             .unwrap(),
         );
         let state = AppState {
-            campaigns: CampaignManager::new(50, db.clone()).with_email_dispatcher(
-                dispatcher.clone() as Arc<dyn sales_autopilot::campaigns::CampaignEmailDispatcher>,
-            ),
+            campaigns: CampaignManager::new(50, db.clone())
+                .with_email_dispatcher(dispatcher.clone()
+                    as Arc<dyn sales_autopilot::campaigns::CampaignEmailDispatcher>),
             dispatcher: Some(dispatcher),
             config: SalesConfig {
                 dispatch,
@@ -778,19 +876,26 @@ mod unsub_http {
             calendar: CalendarService::new(db.clone()),
             inbox: InboxManager::new(db.clone()),
             service_token: "test-key".into(),
-            rate_limit_fallback: Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new())),
+            rate_limit_fallback: Arc::new(
+                parking_lot::Mutex::new(std::collections::HashMap::new()),
+            ),
         };
         routes::router(state)
     }
 
     #[tokio::test]
     async fn get_unsubscribe_suppresses_and_renders_page() {
-        let Some(db) = common::test_pool("unsub_get").await else { return };
+        let Some(db) = common::test_pool("unsub_get").await else {
+            return;
+        };
         let tenant_id = common::insert_test_tenant(&db, "unsub-get").await;
         let app = build_app(&db);
 
-        let token =
-            sign_unsubscribe_token_default_ttl("integration-test-unsubscribe-secret-321", &tenant_id, "Opt.Out@Example.com");
+        let token = sign_unsubscribe_token_default_ttl(
+            "integration-test-unsubscribe-secret-321",
+            &tenant_id,
+            "Opt.Out@Example.com",
+        );
         // No auth headers: /u/* is public (HMAC is the authenticator).
         let resp = app
             .clone()
@@ -802,7 +907,9 @@ mod unsub_http {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK, "branded page renders");
-        let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
         let body = String::from_utf8_lossy(&body);
         assert!(body.contains("Unsubscribed"), "branded page: {body}");
 
@@ -822,7 +929,10 @@ mod unsub_http {
         .fetch_one(&db)
         .await
         .unwrap();
-        assert_eq!(platform_sup.0, 1, "mirror into the platform suppression table");
+        assert_eq!(
+            platform_sup.0, 1,
+            "mirror into the platform suppression table"
+        );
 
         // DOUBLE unsubscribe: still 200, still exactly one row each.
         let resp2 = app
@@ -834,32 +944,45 @@ mod unsub_http {
             )
             .await
             .unwrap();
-        assert_eq!(resp2.status(), StatusCode::OK, "second unsubscribe is idempotent");
-        let sales_sup2: (i64,) = sqlx::query_as(
-            "SELECT COUNT(*) FROM sales_unsubscribes WHERE tenant_id = $1",
-        )
-        .bind(&tenant_id)
-        .fetch_one(&db)
-        .await
-        .unwrap();
+        assert_eq!(
+            resp2.status(),
+            StatusCode::OK,
+            "second unsubscribe is idempotent"
+        );
+        let sales_sup2: (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM sales_unsubscribes WHERE tenant_id = $1")
+                .bind(&tenant_id)
+                .fetch_one(&db)
+                .await
+                .unwrap();
         assert_eq!(sales_sup2.0, 1, "no duplicate suppression row");
     }
 
     #[tokio::test]
     async fn get_unsubscribe_redirects_when_configured() {
-        let Some(db) = common::test_pool("unsub_redirect").await else { return };
+        let Some(db) = common::test_pool("unsub_redirect").await else {
+            return;
+        };
         let tenant_id = common::insert_test_tenant(&db, "unsub-redir").await;
         let mut dispatch = common::test_dispatch_config();
         dispatch.unsubscribe_redirect_url = Some("https://brand.example.com/goodbye".into());
         let dispatcher = Arc::new(
-            ProductionCampaignDispatcher::new(dispatch.clone(), db.clone(), Arc::new(FakeQuotaGateway::new())).unwrap(),
+            ProductionCampaignDispatcher::new(
+                dispatch.clone(),
+                db.clone(),
+                Arc::new(FakeQuotaGateway::new()),
+            )
+            .unwrap(),
         );
         let state = AppState {
-            campaigns: CampaignManager::new(50, db.clone()).with_email_dispatcher(
-                dispatcher.clone() as Arc<dyn sales_autopilot::campaigns::CampaignEmailDispatcher>,
-            ),
+            campaigns: CampaignManager::new(50, db.clone())
+                .with_email_dispatcher(dispatcher.clone()
+                    as Arc<dyn sales_autopilot::campaigns::CampaignEmailDispatcher>),
             dispatcher: Some(dispatcher),
-            config: SalesConfig { dispatch, ..SalesConfig::default() },
+            config: SalesConfig {
+                dispatch,
+                ..SalesConfig::default()
+            },
             db: db.clone(),
             redis: deadpool_redis::Config::from_url("redis://127.0.0.1:16379")
                 .create_pool(Some(deadpool_redis::Runtime::Tokio1))
@@ -869,7 +992,9 @@ mod unsub_http {
             calendar: CalendarService::new(db.clone()),
             inbox: InboxManager::new(db.clone()),
             service_token: "test-key".into(),
-            rate_limit_fallback: Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new())),
+            rate_limit_fallback: Arc::new(
+                parking_lot::Mutex::new(std::collections::HashMap::new()),
+            ),
         };
         let app = routes::router(state);
 
@@ -895,7 +1020,9 @@ mod unsub_http {
 
     #[tokio::test]
     async fn invalid_token_is_rejected() {
-        let Some(db) = common::test_pool("unsub_invalid").await else { return };
+        let Some(db) = common::test_pool("unsub_invalid").await else {
+            return;
+        };
         let app = build_app(&db);
 
         // Tampered signature.
@@ -907,7 +1034,14 @@ mod unsub_http {
         );
         // Flip the last character of the signature.
         let last = token.len() - 1;
-        token.replace_range(last.., if token.as_bytes()[last] == b'a' { "b" } else { "a" });
+        token.replace_range(
+            last..,
+            if token.as_bytes()[last] == b'a' {
+                "b"
+            } else {
+                "a"
+            },
+        );
 
         for method_and_body in [
             (axum::http::Method::GET, None),
@@ -917,7 +1051,9 @@ mod unsub_http {
             ),
         ] {
             let (method, body) = method_and_body;
-            let builder = Request::builder().method(method.clone()).uri(format!("/u/{token}"));
+            let builder = Request::builder()
+                .method(method.clone())
+                .uri(format!("/u/{token}"));
             let request = match body {
                 Some(b) => builder
                     .header("content-type", "application/x-www-form-urlencoded")
@@ -925,11 +1061,7 @@ mod unsub_http {
                     .unwrap(),
                 None => builder.body(Body::empty()).unwrap(),
             };
-            let resp = app
-                .clone()
-                .oneshot(request)
-                .await
-                .unwrap();
+            let resp = app.clone().oneshot(request).await.unwrap();
             assert_eq!(
                 resp.status(),
                 StatusCode::BAD_REQUEST,
@@ -949,7 +1081,9 @@ mod unsub_http {
 
     #[tokio::test]
     async fn rfc8058_post_requires_exact_body() {
-        let Some(db) = common::test_pool("unsub_post_body").await else { return };
+        let Some(db) = common::test_pool("unsub_post_body").await else {
+            return;
+        };
         let tenant_id = common::insert_test_tenant(&db, "unsub-post").await;
         let app = build_app(&db);
         let token = sign_unsubscribe_token_default_ttl(
@@ -982,7 +1116,9 @@ mod unsub_http {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
         assert!(String::from_utf8_lossy(&body).contains("\"success\":true"));
 
         let sup: (i64,) = sqlx::query_as(
@@ -996,7 +1132,9 @@ mod unsub_http {
 
     #[tokio::test]
     async fn unsubscribed_recipient_is_excluded_from_next_dispatch() {
-        let Some(db) = common::test_pool("unsub_excluded").await else { return };
+        let Some(db) = common::test_pool("unsub_excluded").await else {
+            return;
+        };
         let tenant_id = common::insert_test_tenant(&db, "unsub-excl").await;
         common::insert_verified_domain(&db, &tenant_id, "example.com").await;
 
@@ -1009,9 +1147,10 @@ mod unsub_http {
             )
             .unwrap(),
         );
-        let manager = CampaignManager::new(50, db.clone()).with_email_dispatcher(
-            dispatcher.clone() as Arc<dyn sales_autopilot::campaigns::CampaignEmailDispatcher>,
-        );
+        let manager =
+            CampaignManager::new(50, db.clone())
+                .with_email_dispatcher(dispatcher.clone()
+                    as Arc<dyn sales_autopilot::campaigns::CampaignEmailDispatcher>);
 
         let template_id =
             common::insert_template(&db, &tenant_id, "s", "<p>x</p>", Some("t")).await;
@@ -1020,7 +1159,11 @@ mod unsub_http {
             .await
             .unwrap();
         manager
-            .add_recipients(&tenant_id, campaign.id, vec!["stay@example.com".into(), "leave@example.com".into()])
+            .add_recipients(
+                &tenant_id,
+                campaign.id,
+                vec!["stay@example.com".into(), "leave@example.com".into()],
+            )
             .await
             .unwrap();
 
@@ -1033,20 +1176,30 @@ mod unsub_http {
         )
         .expect("dispatcher-generated link carries a valid token");
         assert_eq!(data.email, "leave@example.com");
-        ProductionCampaignDispatcher::suppress(&db, &data.tenant_id, &data.email, "unsubscribe-link")
-            .await
-            .unwrap();
-
-        manager.start_campaign(&tenant_id, campaign.id).await.unwrap();
-        let queue: Vec<(String,)> = sqlx::query_as(
-            "SELECT \"to\" FROM email_queue WHERE metadata->>'campaign_id' = $1",
+        ProductionCampaignDispatcher::suppress(
+            &db,
+            &data.tenant_id,
+            &data.email,
+            "unsubscribe-link",
         )
-        .bind(campaign.id.to_string())
-        .fetch_all(&db)
         .await
         .unwrap();
+
+        manager
+            .start_campaign(&tenant_id, campaign.id)
+            .await
+            .unwrap();
+        let queue: Vec<(String,)> =
+            sqlx::query_as("SELECT \"to\" FROM email_queue WHERE metadata->>'campaign_id' = $1")
+                .bind(campaign.id.to_string())
+                .fetch_all(&db)
+                .await
+                .unwrap();
         assert_eq!(queue.len(), 1);
-        assert_eq!(queue[0].0, "stay@example.com", "unsubscribed recipient excluded");
+        assert_eq!(
+            queue[0].0, "stay@example.com",
+            "unsubscribed recipient excluded"
+        );
     }
 }
 
@@ -1067,9 +1220,7 @@ mod reply_http {
         inbox::InboxManager,
     };
 
-    async fn reply_fixture(
-        test_name: &str,
-    ) -> Option<(axum::Router, PgPool, String, Uuid)> {
+    async fn reply_fixture(test_name: &str) -> Option<(axum::Router, PgPool, String, Uuid)> {
         let db = common::test_pool(test_name).await?;
         let tenant_id = common::insert_test_tenant(&db, test_name).await;
         common::insert_verified_domain(&db, &tenant_id, "example.com").await;
@@ -1084,9 +1235,9 @@ mod reply_http {
             .unwrap(),
         );
         let state = AppState {
-            campaigns: CampaignManager::new(50, db.clone()).with_email_dispatcher(
-                dispatcher.clone() as Arc<dyn sales_autopilot::campaigns::CampaignEmailDispatcher>,
-            ),
+            campaigns: CampaignManager::new(50, db.clone())
+                .with_email_dispatcher(dispatcher.clone()
+                    as Arc<dyn sales_autopilot::campaigns::CampaignEmailDispatcher>),
             dispatcher: Some(dispatcher),
             config: SalesConfig {
                 dispatch,
@@ -1101,7 +1252,9 @@ mod reply_http {
             calendar: CalendarService::new(db.clone()),
             inbox: InboxManager::new(db.clone()),
             service_token: "test-key".into(),
-            rate_limit_fallback: Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new())),
+            rate_limit_fallback: Arc::new(
+                parking_lot::Mutex::new(std::collections::HashMap::new()),
+            ),
         };
 
         // One inbound message from a lead.
@@ -1145,9 +1298,7 @@ mod reply_http {
     /// platform pipeline; the replied flag flips atomically.
     #[tokio::test]
     async fn reply_composes_and_enqueues_through_email_queue() {
-        let Some((app, db, tenant_id, inbox_id)) =
-            reply_fixture("reply_happy").await
-        else {
+        let Some((app, db, tenant_id, inbox_id)) = reply_fixture("reply_happy").await else {
             return;
         };
 
@@ -1162,7 +1313,9 @@ mod reply_http {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::ACCEPTED);
         let body: serde_json::Value = serde_json::from_slice(
-            &axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap(),
+            &axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap(),
         )
         .unwrap();
         assert_eq!(body["queued"], true);
@@ -1177,39 +1330,38 @@ mod reply_http {
         assert_eq!(rows[0].1, "Re: Pricing question");
         // The hostile body text is HTML-ESCAPED in the composed part.
         assert!(
-            rows[0].2.contains("&lt;script&gt;alert(&#39;xss&#39;)&lt;/script&gt; &amp; regards"),
+            rows[0]
+                .2
+                .contains("&lt;script&gt;alert(&#39;xss&#39;)&lt;/script&gt; &amp; regards"),
             "reply body must be HTML-escaped: {}",
             rows[0].2
         );
         assert!(!rows[0].2.contains("<script>"));
         // Plain-text part keeps the raw body.
-        let text: (String,) = sqlx::query_as(
-            "SELECT text FROM email_queue WHERE metadata->>'inbox_message_id' = $1",
-        )
-        .bind(inbox_id.to_string())
-        .fetch_one(&db)
-        .await
-        .unwrap();
+        let text: (String,) =
+            sqlx::query_as("SELECT text FROM email_queue WHERE metadata->>'inbox_message_id' = $1")
+                .bind(inbox_id.to_string())
+                .fetch_one(&db)
+                .await
+                .unwrap();
         assert!(text.0.contains("<script>alert('xss')</script>"));
 
         // messages row with the deterministic reply idempotency key.
-        let (key,): (String,) = sqlx::query_as(
-            "SELECT idempotency_key FROM messages WHERE id = $1",
-        )
-        .bind(message_id)
-        .fetch_one(&db)
-        .await
-        .unwrap();
+        let (key,): (String,) =
+            sqlx::query_as("SELECT idempotency_key FROM messages WHERE id = $1")
+                .bind(message_id)
+                .fetch_one(&db)
+                .await
+                .unwrap();
         assert_eq!(key, format!("sareply:{inbox_id}"));
 
         // replied flag stamped.
-        let replied: (bool,) = sqlx::query_as(
-            "SELECT replied FROM sales_inbox_messages WHERE id = $1",
-        )
-        .bind(inbox_id)
-        .fetch_one(&db)
-        .await
-        .unwrap();
+        let replied: (bool,) =
+            sqlx::query_as("SELECT replied FROM sales_inbox_messages WHERE id = $1")
+                .bind(inbox_id)
+                .fetch_one(&db)
+                .await
+                .unwrap();
         assert!(replied.0);
     }
 
@@ -1217,9 +1369,7 @@ mod reply_http {
     /// exactly one queue row, one messages row, no double send.
     #[tokio::test]
     async fn reply_double_post_is_idempotent_no_double_send() {
-        let Some((app, db, tenant_id, inbox_id)) =
-            reply_fixture("reply_double").await
-        else {
+        let Some((app, db, tenant_id, inbox_id)) = reply_fixture("reply_double").await else {
             return;
         };
 
@@ -1241,20 +1391,24 @@ mod reply_http {
             "idempotent replay is a success, not an error"
         );
         let body: serde_json::Value = serde_json::from_slice(
-            &axum::body::to_bytes(second.into_body(), usize::MAX).await.unwrap(),
+            &axum::body::to_bytes(second.into_body(), usize::MAX)
+                .await
+                .unwrap(),
         )
         .unwrap();
-        assert_eq!(body["duplicate"], true, "response flags the duplicate: {body}");
+        assert_eq!(
+            body["duplicate"], true,
+            "response flags the duplicate: {body}"
+        );
         assert_eq!(body["queued"], false);
 
         assert_eq!(reply_queue_rows(&db, inbox_id).await.len(), 1);
-        let messages: (i64,) = sqlx::query_as(
-            "SELECT COUNT(*) FROM messages WHERE idempotency_key = $1",
-        )
-        .bind(format!("sareply:{inbox_id}"))
-        .fetch_one(&db)
-        .await
-        .unwrap();
+        let messages: (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM messages WHERE idempotency_key = $1")
+                .bind(format!("sareply:{inbox_id}"))
+                .fetch_one(&db)
+                .await
+                .unwrap();
         assert_eq!(messages.0, 1, "still exactly one messages row");
     }
 
@@ -1262,9 +1416,7 @@ mod reply_http {
     /// the reply — and the message stays visibly unanswered.
     #[tokio::test]
     async fn reply_to_suppressed_correspondent_refused() {
-        let Some((app, db, tenant_id, inbox_id)) =
-            reply_fixture("reply_suppressed").await
-        else {
+        let Some((app, db, tenant_id, inbox_id)) = reply_fixture("reply_suppressed").await else {
             return;
         };
         sqlx::query(
@@ -1285,13 +1437,12 @@ mod reply_http {
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 
         assert_eq!(reply_queue_rows(&db, inbox_id).await.len(), 0);
-        let replied: (bool,) = sqlx::query_as(
-            "SELECT replied FROM sales_inbox_messages WHERE id = $1",
-        )
-        .bind(inbox_id)
-        .fetch_one(&db)
-        .await
-        .unwrap();
+        let replied: (bool,) =
+            sqlx::query_as("SELECT replied FROM sales_inbox_messages WHERE id = $1")
+                .bind(inbox_id)
+                .fetch_one(&db)
+                .await
+                .unwrap();
         assert!(!replied.0, "failed reply must not flip the replied flag");
     }
 
@@ -1299,8 +1450,7 @@ mod reply_http {
     /// 404 and enqueues nothing.
     #[tokio::test]
     async fn reply_cross_tenant_is_404() {
-        let Some((app, db, _tenant_id, inbox_id)) =
-            reply_fixture("reply_cross_tenant").await
+        let Some((app, db, _tenant_id, inbox_id)) = reply_fixture("reply_cross_tenant").await
         else {
             return;
         };
@@ -1342,9 +1492,7 @@ mod reply_http {
     /// (mirrors the REST send path's domain gate).
     #[tokio::test]
     async fn reply_refused_when_sender_domain_not_ready() {
-        let Some((app, db, tenant_id, inbox_id)) =
-            reply_fixture("reply_no_domain").await
-        else {
+        let Some((app, db, tenant_id, inbox_id)) = reply_fixture("reply_no_domain").await else {
             return;
         };
         sqlx::query("DELETE FROM domains WHERE tenant_id = $1")
@@ -1360,7 +1508,9 @@ mod reply_http {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
         let body: serde_json::Value = serde_json::from_slice(
-            &axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap(),
+            &axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap(),
         )
         .unwrap();
         assert!(
@@ -1368,13 +1518,12 @@ mod reply_http {
             "error names the sender-domain problem: {body}"
         );
         assert_eq!(reply_queue_rows(&db, inbox_id).await.len(), 0);
-        let replied: (bool,) = sqlx::query_as(
-            "SELECT replied FROM sales_inbox_messages WHERE id = $1",
-        )
-        .bind(inbox_id)
-        .fetch_one(&db)
-        .await
-        .unwrap();
+        let replied: (bool,) =
+            sqlx::query_as("SELECT replied FROM sales_inbox_messages WHERE id = $1")
+                .bind(inbox_id)
+                .fetch_one(&db)
+                .await
+                .unwrap();
         assert!(!replied.0);
     }
 
@@ -1382,8 +1531,7 @@ mod reply_http {
     /// block a 1:1 reply — documented decision in enqueue_reply.
     #[tokio::test]
     async fn campaign_optout_does_not_block_personal_reply() {
-        let Some((app, db, tenant_id, inbox_id)) =
-            reply_fixture("reply_campaign_optout").await
+        let Some((app, db, tenant_id, inbox_id)) = reply_fixture("reply_campaign_optout").await
         else {
             return;
         };
@@ -1399,7 +1547,11 @@ mod reply_http {
 
         let resp = app
             .clone()
-            .oneshot(reply_request(inbox_id, &tenant_id, "still answering your question"))
+            .oneshot(reply_request(
+                inbox_id,
+                &tenant_id,
+                "still answering your question",
+            ))
             .await
             .unwrap();
         assert_eq!(

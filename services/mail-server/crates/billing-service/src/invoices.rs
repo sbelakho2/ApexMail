@@ -753,10 +753,7 @@ mod tests {
         let allocated = allocate_vat_across_lines(&[3, 3, 3], 24);
 
         assert_eq!(allocated, vec![1, 1, 0]);
-        assert_eq!(
-            allocated.iter().sum::<i64>(),
-            ((3 + 3 + 3) * 24 + 50) / 100
-        );
+        assert_eq!(allocated.iter().sum::<i64>(), ((3 + 3 + 3) * 24 + 50) / 100);
     }
 
     #[test]
@@ -776,10 +773,7 @@ mod tests {
         // Exact per-line rounding already reconciles — no drift to absorb.
         assert_eq!(
             allocated,
-            vec![
-                (10_000 * 24 + 50) / 100,
-                (5_000 * 24 + 50) / 100
-            ]
+            vec![(10_000 * 24 + 50) / 100, (5_000 * 24 + 50) / 100]
         );
     }
 

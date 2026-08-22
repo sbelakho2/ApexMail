@@ -160,11 +160,10 @@ impl BillingQuotaGateway {
         event_id: Uuid,
         recorded_at: DateTime<Utc>,
     ) -> Result<(), SalesError> {
-        let mut conn = self
-            .redis
-            .get()
-            .await
-            .map_err(|e| SalesError::ServiceUnavailable(format!("quota redis unavailable: {e}")))?;
+        let mut conn =
+            self.redis.get().await.map_err(|e| {
+                SalesError::ServiceUnavailable(format!("quota redis unavailable: {e}"))
+            })?;
         let counter_key = usage_counter_key(tenant_id, recorded_at);
         let dedup_key = usage_dedup_key(event_id);
         let _: () = redis::pipe()
@@ -194,32 +193,27 @@ impl QuotaGateway for BillingQuotaGateway {
 
             // Plan limit resolution (mirror of resolve_plan_limits):
             // unknown tenant ⇒ limit 0 (deny), like the billing service.
-            let row: Option<(String, Option<i64>)> =
-                sqlx::query_as(TENANT_PLAN_LIMITS_SQL)
-                    .bind(&tenant_id)
-                    .fetch_optional(&self.db)
-                    .await
-                    .map_err(|e| {
-                        tracing::error!(error = %e, tenant_id = %tenant_id, "quota plan lookup failed");
-                        SalesError::ServiceUnavailable(
-                            "billing quota enforcement is temporarily unavailable".into(),
-                        )
-                    })?;
+            let row: Option<(String, Option<i64>)> = sqlx::query_as(TENANT_PLAN_LIMITS_SQL)
+                .bind(&tenant_id)
+                .fetch_optional(&self.db)
+                .await
+                .map_err(|e| {
+                    tracing::error!(error = %e, tenant_id = %tenant_id, "quota plan lookup failed");
+                    SalesError::ServiceUnavailable(
+                        "billing quota enforcement is temporarily unavailable".into(),
+                    )
+                })?;
             let limit = match row {
                 Some((_, email_limit)) => email_limit.unwrap_or(FALLBACK_EMAIL_LIMIT),
                 None => 0,
             };
 
-            let mut conn = self
-                .redis
-                .get()
-                .await
-                .map_err(|e| {
-                    tracing::error!(error = %e, tenant_id = %tenant_id, "quota redis unavailable");
-                    SalesError::ServiceUnavailable(
-                        "billing quota enforcement is temporarily unavailable".into(),
-                    )
-                })?;
+            let mut conn = self.redis.get().await.map_err(|e| {
+                tracing::error!(error = %e, tenant_id = %tenant_id, "quota redis unavailable");
+                SalesError::ServiceUnavailable(
+                    "billing quota enforcement is temporarily unavailable".into(),
+                )
+            })?;
 
             // Atomic check-and-increment reservation.
             let new_val: i64 = redis::Script::new(QUOTA_CHECK_AND_INCR_LUA)
@@ -257,8 +251,9 @@ impl QuotaGateway for BillingQuotaGateway {
             .await;
 
             if let Err(e) = persisted {
-                if let Err(rollback_err) =
-                    self.rollback_reservation(&tenant_id, event_id, recorded_at).await
+                if let Err(rollback_err) = self
+                    .rollback_reservation(&tenant_id, event_id, recorded_at)
+                    .await
                 {
                     tracing::error!(error = %rollback_err, "quota reservation leak after metering persist failure");
                 }
@@ -417,11 +412,7 @@ pub fn verify_unsubscribe_token(secret: &str, token: &str) -> Option<Unsubscribe
 /// Convenience: sign a token expiring [`UNSUB_TOKEN_TTL_SECS`] from now. The
 /// recipient address is canonicalized (trim + lowercase) so the token always
 /// matches the suppression stores' canonical form.
-pub fn sign_unsubscribe_token_default_ttl(
-    secret: &str,
-    tenant_id: &str,
-    email: &str,
-) -> String {
+pub fn sign_unsubscribe_token_default_ttl(secret: &str, tenant_id: &str, email: &str) -> String {
     let expires_at = Utc::now().timestamp() + UNSUB_TOKEN_TTL_SECS;
     sign_unsubscribe_token(
         secret,
@@ -746,7 +737,11 @@ impl ProductionCampaignDispatcher {
     /// Construct the production dispatcher. Fails unless the mandatory
     /// configuration is present — an unconfigured deployment must NOT get a
     /// half-working dispatcher (campaign start stays 503).
-    pub fn new(cfg: DispatchConfig, db: PgPool, quota: Arc<dyn QuotaGateway>) -> anyhow::Result<Self> {
+    pub fn new(
+        cfg: DispatchConfig,
+        db: PgPool,
+        quota: Arc<dyn QuotaGateway>,
+    ) -> anyhow::Result<Self> {
         if !cfg.is_configured() {
             anyhow::bail!(
                 "production campaign dispatcher requires SALES_CAMPAIGN_FROM_EMAIL (valid \
@@ -833,7 +828,14 @@ impl ProductionCampaignDispatcher {
         let reservation = self.quota.reserve(tenant_id).await?;
 
         let outcome = self
-            .enqueue_recipient_tx(tenant_id, campaign_id, rendered, recipient_email, unsubscribe_link, &reservation)
+            .enqueue_recipient_tx(
+                tenant_id,
+                campaign_id,
+                rendered,
+                recipient_email,
+                unsubscribe_link,
+                &reservation,
+            )
             .await;
 
         match &outcome {
@@ -992,24 +994,24 @@ impl ProductionCampaignDispatcher {
         //    (sent/bounced), which is what attributes engagement and bounce
         //    side effects back to this campaign.
         sqlx::query(CAMPAIGN_EMAIL_QUEUE_INSERT_SQL)
-        .bind(Uuid::new_v4())
-        .bind(message_id)
-        .bind(tenant_id)
-        .bind(&domain_id)
-        .bind(campaign_id)
-        .bind(&from)
-        .bind(recipient_email)
-        .bind(&rendered.subject)
-        .bind(&rendered.html)
-        .bind(&rendered.text)
-        .bind(&tags)
-        .bind(&metadata)
-        .bind(&headers)
-        .bind(None::<DateTime<Utc>>)
-        .bind(created_at)
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| SalesError::Database(e.to_string()))?;
+            .bind(Uuid::new_v4())
+            .bind(message_id)
+            .bind(tenant_id)
+            .bind(&domain_id)
+            .bind(campaign_id)
+            .bind(&from)
+            .bind(recipient_email)
+            .bind(&rendered.subject)
+            .bind(&rendered.html)
+            .bind(&rendered.text)
+            .bind(&tags)
+            .bind(&metadata)
+            .bind(&headers)
+            .bind(None::<DateTime<Utc>>)
+            .bind(created_at)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| SalesError::Database(e.to_string()))?;
 
         // 5. Campaign send counter — same transaction.
         sqlx::query("UPDATE sales_campaigns SET sent = sent + 1 WHERE id = $1")
@@ -1104,7 +1106,12 @@ impl CampaignEmailDispatcher for ProductionCampaignDispatcher {
     /// HMAC-signed unsubscribe link on this service's public endpoint. The
     /// campaign id is intentionally not embedded: suppression is
     /// tenant-level (a recipient opting out of one campaign opts out of all).
-    fn unsubscribe_link(&self, tenant_id: &str, _campaign_id: Uuid, recipient_email: &str) -> String {
+    fn unsubscribe_link(
+        &self,
+        tenant_id: &str,
+        _campaign_id: Uuid,
+        recipient_email: &str,
+    ) -> String {
         let token = sign_unsubscribe_token_default_ttl(
             &self.cfg.unsubscribe_secret,
             tenant_id,
@@ -1413,8 +1420,8 @@ impl ProductionCampaignDispatcher {
         .map_err(|e| SalesError::Database(e.to_string()))?;
 
         tx.commit()
-        .await
-        .map_err(|e| SalesError::Database(e.to_string()))?;
+            .await
+            .map_err(|e| SalesError::Database(e.to_string()))?;
 
         metrics::counter!("sales_inbox_replies_enqueued_total").increment(1);
         Ok(ReplyOutcome::Enqueued { message_id })
@@ -1523,13 +1530,29 @@ mod tests {
             rendered.subject,
             "Hi &lt;script&gt;alert(1)&lt;/script&gt; — ACME &amp; Sons &lt;b&gt;LLC&lt;/b&gt;"
         );
-        assert!(rendered.html.as_ref().unwrap().contains("&lt;script&gt;alert(1)&lt;/script&gt;"));
+        assert!(rendered
+            .html
+            .as_ref()
+            .unwrap()
+            .contains("&lt;script&gt;alert(1)&lt;/script&gt;"));
         assert!(!rendered.html.as_ref().unwrap().contains("<script>"));
         // Text body keeps raw values (no double-escaping).
-        assert!(rendered.text.as_ref().unwrap().contains("Hello <script>alert(1)</script>"));
+        assert!(rendered
+            .text
+            .as_ref()
+            .unwrap()
+            .contains("Hello <script>alert(1)</script>"));
         // CAN-SPAM footer link present in both bodies.
-        assert!(rendered.html.as_ref().unwrap().contains("https://sales.example/u/token"));
-        assert!(rendered.text.as_ref().unwrap().contains("https://sales.example/u/token"));
+        assert!(rendered
+            .html
+            .as_ref()
+            .unwrap()
+            .contains("https://sales.example/u/token"));
+        assert!(rendered
+            .text
+            .as_ref()
+            .unwrap()
+            .contains("https://sales.example/u/token"));
     }
 
     #[test]
@@ -1569,7 +1592,9 @@ mod tests {
             }),
         };
         assert_eq!(
-            render_for_recipient(&template, &recipient, "S").unwrap().subject,
+            render_for_recipient(&template, &recipient, "S")
+                .unwrap()
+                .subject,
             "Hi Ada"
         );
     }
@@ -1587,7 +1612,9 @@ mod tests {
             lead: None,
         };
         assert_eq!(
-            render_for_recipient(&template, &recipient, "S").unwrap().subject,
+            render_for_recipient(&template, &recipient, "S")
+                .unwrap()
+                .subject,
             "Hi {{not_a_var}}"
         );
     }
@@ -1694,12 +1721,24 @@ mod tests {
 
     #[test]
     fn reply_subject_prefixes_and_does_not_double_prefix() {
-        assert_eq!(compose_reply_subject("Pricing question"), "Re: Pricing question");
-        assert_eq!(compose_reply_subject("RE: Pricing question"), "RE: Pricing question");
-        assert_eq!(compose_reply_subject("re: already replied"), "re: already replied");
+        assert_eq!(
+            compose_reply_subject("Pricing question"),
+            "Re: Pricing question"
+        );
+        assert_eq!(
+            compose_reply_subject("RE: Pricing question"),
+            "RE: Pricing question"
+        );
+        assert_eq!(
+            compose_reply_subject("re: already replied"),
+            "re: already replied"
+        );
         assert_eq!(compose_reply_subject("  Trims me  "), "Re: Trims me");
         // Not a Re: prefix — the colon belongs to the subject text.
-        assert_eq!(compose_reply_subject("Note: something"), "Re: Note: something");
+        assert_eq!(
+            compose_reply_subject("Note: something"),
+            "Re: Note: something"
+        );
     }
 
     #[test]
@@ -1711,7 +1750,8 @@ mod tests {
 
     #[test]
     fn reply_html_escapes_and_splits_paragraphs() {
-        let html = compose_reply_html("Thanks for the demo request!\n\n<script>alert(1)</script> & more");
+        let html =
+            compose_reply_html("Thanks for the demo request!\n\n<script>alert(1)</script> & more");
         assert!(html.contains("<p>Thanks for the demo request!</p>"));
         assert!(
             html.contains("&lt;script&gt;alert(1)&lt;/script&gt; &amp; more"),
@@ -1732,7 +1772,10 @@ mod tests {
         assert_eq!(reply_idempotency_key(id), format!("sareply:{id}"));
         assert!(reply_idempotency_key(id).len() <= 255);
         // Distinct inbox messages never share a key.
-        assert_ne!(reply_idempotency_key(id), reply_idempotency_key(Uuid::new_v4()));
+        assert_ne!(
+            reply_idempotency_key(id),
+            reply_idempotency_key(Uuid::new_v4())
+        );
     }
 
     /// D: campaign attribution — the email_queue insert must set the

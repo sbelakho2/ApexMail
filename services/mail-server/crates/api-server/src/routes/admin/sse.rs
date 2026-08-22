@@ -78,7 +78,8 @@ async fn query_dashboard_snapshot(db: &sqlx::PgPool) -> DashboardSsePayload {
     // The legacy `subscriptions` table has no writer and always read as zero.
     let mrr = if table_exists(db, "stripe_subscriptions").await && table_exists(db, "plans").await {
         let has_billing_interval =
-            crate::routes::helpers::column_exists(db, "stripe_subscriptions", "billing_interval").await;
+            crate::routes::helpers::column_exists(db, "stripe_subscriptions", "billing_interval")
+                .await;
 
         let billing_interval_expr = if has_billing_interval {
             "COALESCE(NULLIF(s.billing_interval, ''), 'monthly')"
@@ -149,17 +150,14 @@ async fn sse_dashboard(
     require_scopes(&auth, &["*"])?;
 
     let db = state.db.clone();
-    let stream = interval_stream(Duration::from_secs(5))
-        .then(move |_| {
-            let db = db.clone();
-            async move {
-                let snapshot = query_dashboard_snapshot(&db).await;
-                let json = serde_json::to_string(&snapshot).unwrap_or_default();
-                Ok(Event::default()
-                    .data(json)
-                    .event("dashboard"))
-            }
-        });
+    let stream = interval_stream(Duration::from_secs(5)).then(move |_| {
+        let db = db.clone();
+        async move {
+            let snapshot = query_dashboard_snapshot(&db).await;
+            let json = serde_json::to_string(&snapshot).unwrap_or_default();
+            Ok(Event::default().data(json).event("dashboard"))
+        }
+    });
 
     Ok(Sse::new(stream).keep_alive(
         KeepAlive::new()
@@ -206,8 +204,8 @@ async fn query_new_alerts(
 
     Ok(rows
         .into_iter()
-        .map(|(id, severity, component, message, timestamp, acknowledged)| {
-            AlertSsePayload {
+        .map(
+            |(id, severity, component, message, timestamp, acknowledged)| AlertSsePayload {
                 id,
                 severity,
                 message,
@@ -218,8 +216,8 @@ async fn query_new_alerts(
                 },
                 timestamp: timestamp.to_rfc3339(),
                 acknowledged,
-            }
-        })
+            },
+        )
         .collect())
 }
 
@@ -257,9 +255,7 @@ async fn sse_alerts(
                     let last_seen = Arc::clone(&last_seen);
                     async move {
                         let mut ls = last_seen.lock().await;
-                        let alerts = query_new_alerts(&db, *ls)
-                            .await
-                            .unwrap_or_default();
+                        let alerts = query_new_alerts(&db, *ls).await.unwrap_or_default();
 
                         if let Some(latest) = alerts
                             .iter()

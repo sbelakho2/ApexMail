@@ -104,8 +104,7 @@ impl GovernorLimiter {
                         // wait from the limiter state instead of a constant.
                         metrics::counter!("rate_limiter_requests_total", "strategy" => "governor_batch", "decision" => "denied").increment(n.get() as u64);
                         metrics::counter!("rate_limiter_blocked_total", "strategy" => "governor_batch").increment(1);
-                        let mut wait =
-                            not_until.wait_time_from(DefaultClock::default().now());
+                        let mut wait = not_until.wait_time_from(DefaultClock::default().now());
                         if let Some(jitter) = self.jitter {
                             wait += jitter;
                         }

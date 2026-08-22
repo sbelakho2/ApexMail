@@ -673,7 +673,10 @@ mod tests {
     fn percentile_is_clamped_to_0_100() {
         // value double the p90 anchor previously extrapolated past 100.
         let p = estimate_percentile(200.0, 25.0, 50.0, 75.0, 90.0);
-        assert!((0.0..=100.0).contains(&p), "percentile must be within 0..=100, got {p}");
+        assert!(
+            (0.0..=100.0).contains(&p),
+            "percentile must be within 0..=100, got {p}"
+        );
         assert!(p > 90.0);
         let low = estimate_percentile(-10.0, 25.0, 50.0, 75.0, 90.0);
         assert!((0.0..=100.0).contains(&low));

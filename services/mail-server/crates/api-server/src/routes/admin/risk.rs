@@ -71,7 +71,7 @@ async fn log_risk_audit(state: &AppState, mutation: &RiskMutation) {
         &state.db,
         entry.tenant_id.as_deref(),
         None,
-        &entry.action,
+        entry.action,
         "risk",
         entry.resource_id.as_deref(),
         entry.metadata,

@@ -49,9 +49,8 @@ type SharedSesClient = std::sync::Arc<aws_sdk_sesv2::Client>;
 /// previously built a fresh `aws_config` SDK stack (credential chain,
 /// HTTP/TLS pool) on every call. The map makes construction a one-off per
 /// region; the `Arc` handle returned per call is a cheap clone.
-static SES_CLIENTS: LazyLock<
-    std::sync::Mutex<std::collections::HashMap<String, SharedSesClient>>,
-> = LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+static SES_CLIENTS: LazyLock<std::sync::Mutex<std::collections::HashMap<String, SharedSesClient>>> =
+    LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
 
 /// Return the process-wide SES client for `region`, constructing it at most
 /// once. Concurrent first callers may both build a client; the loser's entry
@@ -372,7 +371,7 @@ async fn create_domain(
          dkim_public_key, dkim_private_key, dkim_enabled, ses_verified, verified, created_at, updated_at)
          VALUES ($1,$2,$3,'pending',false,false,false,false,false,false,false,$4,$5,$6,true,false,false,$7,$7)",
     )
-    .bind(&id)
+    .bind(id)
     .bind(&auth.tenant_id)
     .bind(&domain_name)
     .bind(&selector)
@@ -540,9 +539,15 @@ pub(crate) async fn verify_domain_for_tenant(
         // Phase 3 — locked, DB-only: re-check currency under the same locks
         // and persist. `None` means the DKIM material rotated concurrently;
         // the loop retries once with fresh material.
-        if let Some(response) =
-            persist_verification(state, tenant_id, id, &row.name, &dkim_material, &observations)
-                .await?
+        if let Some(response) = persist_verification(
+            state,
+            tenant_id,
+            id,
+            &row.name,
+            &dkim_material,
+            &observations,
+        )
+        .await?
         {
             // SCALE-M-05: Invalidate cached domain data on verification
             // status change.

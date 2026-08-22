@@ -29,25 +29,38 @@ use std::path::PathBuf;
 const ENV_NAME: &str = "APX_MARKETING_PUBLIC_DIR";
 
 fn main() {
-    let manifest_dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").expect(
-        "CARGO_MANIFEST_DIR is always set by cargo when running a build script",
-    ));
+    // Declared so `cfg!(marketing_public_built)` in src/lib.rs does not warn
+    // about an unexpected cfg name. The cfg itself is only set below when the
+    // real Zola build output exists.
+    println!("cargo::rustc-check-cfg=cfg(marketing_public_built)");
+    let manifest_dir = PathBuf::from(
+        std::env::var("CARGO_MANIFEST_DIR")
+            .expect("CARGO_MANIFEST_DIR is always set by cargo when running a build script"),
+    );
     let router_src_path = manifest_dir.join("src/axum_router.rs");
     let router_src = fs::read_to_string(&router_src_path)
         .unwrap_or_else(|e| panic!("failed to read {}: {e}", router_src_path.display()));
     println!("cargo:rerun-if-changed={}", router_src_path.display());
 
     // Collect every include path relative to the marketing public dir.
-    let marker = format!("env!(\"{ENV_NAME}\"), \"");
+    // The include sites look like concat!(env!("APX_MARKETING_PUBLIC_DIR"),
+    // "/route/index.html"); rustfmt may lay the concat! arguments out across
+    // lines, so after each env! marker we scan forward through whitespace and
+    // punctuation to the next string literal instead of assuming adjacency.
+    let marker = format!("env!(\"{ENV_NAME}\")");
     let mut relpaths: Vec<String> = Vec::new();
     let mut rest = router_src.as_str();
     while let Some(pos) = rest.find(&marker) {
         let after = &rest[pos + marker.len()..];
-        let end = after
+        let start = after.find('"').unwrap_or_else(|| {
+            panic!("no include path string literal after {ENV_NAME} marker in axum_router.rs")
+        });
+        let path_part = &after[start + 1..];
+        let end = path_part
             .find('"')
             .unwrap_or_else(|| panic!("unterminated include path after marker in axum_router.rs"));
-        relpaths.push(after[..end].to_string());
-        rest = &after[end..];
+        relpaths.push(path_part[..end].to_string());
+        rest = &path_part[end..];
     }
     assert!(
         !relpaths.is_empty(),
@@ -58,9 +71,17 @@ fn main() {
     let ws_root = manifest_dir
         .ancestors()
         .find(|p| p.join("apps/marketing-zola").is_dir())
-        .unwrap_or_else(|| panic!("could not locate apps/marketing-zola above {}", manifest_dir.display()));
+        .unwrap_or_else(|| {
+            panic!(
+                "could not locate apps/marketing-zola above {}",
+                manifest_dir.display()
+            )
+        });
     let public_dir = ws_root.join("apps/marketing-zola/public");
-    println!("cargo:rerun-if-changed={}", public_dir.join("index.html").display());
+    println!(
+        "cargo:rerun-if-changed={}",
+        public_dir.join("index.html").display()
+    );
 
     if public_dir.join("index.html").is_file() {
         // Real build output exists: embed the actual pages, exactly as before.
@@ -75,15 +96,18 @@ fn main() {
     for relpath in &relpaths {
         let target = fallback_root.join(relpath.trim_start_matches('/'));
         if let Some(parent) = target.parent() {
-            fs::create_dir_all(parent).unwrap_or_else(|e| {
-                panic!("failed to create {}: {e}", parent.display())
-            });
+            fs::create_dir_all(parent)
+                .unwrap_or_else(|e| panic!("failed to create {}: {e}", parent.display()));
         }
         let route = relpath
             .trim_end_matches("/index.html")
             .trim_start_matches('/')
             .to_string();
-        let route = if route.is_empty() { "/" } else { &format!("/{route}") };
+        let route = if route.is_empty() {
+            "/"
+        } else {
+            &format!("/{route}")
+        };
         let page = format!(
             "<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n\
              <title>ApexMail — {route}</title>\n</head>\n<body>\n\

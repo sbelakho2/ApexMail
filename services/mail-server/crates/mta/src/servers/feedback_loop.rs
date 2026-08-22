@@ -19,14 +19,16 @@ use tokio::io::{AsyncWriteExt, BufStream};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Notify;
 use tracing::{debug, error, info, warn};
-use trust_dns_resolver::config::{ResolverConfig, ResolverOpts};
-use trust_dns_resolver::TokioAsyncResolver;
+use trust_dns_resolver::config::ResolverConfig;
+use trust_dns_resolver::net::runtime::TokioRuntimeProvider;
+use trust_dns_resolver::{Resolver, TokioResolver};
 use uuid::Uuid;
 
 use super::bounce::{append_data_line, connection_allowed, ConnGuard, MAX_RCPT_PER_TRANSACTION};
 use super::util::{
-    is_strict_end_of_data, line_content_bytes, line_lossy, log_session_summary, log_smtp_reject,
-    read_line_capped, write_reply, LineRead, MAX_COMMAND_LINE, MAX_DATA_LINE,
+    is_mail_from_arg, is_rcpt_to_arg, is_strict_end_of_data, line_content_bytes, line_lossy,
+    log_session_summary, log_smtp_reject, metric_message, read_line_capped, split_verb,
+    write_reply, LineRead, LineTerminator, MAX_COMMAND_LINE, MAX_DATA_LINE,
 };
 use crate::config::FeedbackConfig;
 
@@ -37,9 +39,14 @@ const DATA_LINE_TIMEOUT: Duration = Duration::from_secs(300);
 /// protection, mirrors the inbound server's 10-minute cap).
 const DATA_TOTAL_TIMEOUT: Duration = Duration::from_secs(600);
 
-// #148:Shared DNS resolver – avoids creating a new one per rDNS verification call
-static FBL_RESOLVER: LazyLock<TokioAsyncResolver> =
-    LazyLock::new(|| TokioAsyncResolver::tokio(ResolverConfig::default(), ResolverOpts::default()));
+// #148:Shared DNS resolver – avoids creating a new one per rDNS verification call.
+// trust-dns 0.26: TokioAsyncResolver::tokio is gone; build a TokioResolver
+// (builder defaults already equal ResolverOpts::default()).
+static FBL_RESOLVER: LazyLock<TokioResolver> = LazyLock::new(|| {
+    Resolver::builder_with_config(ResolverConfig::default(), TokioRuntimeProvider::default())
+        .build()
+        .expect("system resolver configuration is always buildable")
+});
 
 // #147:Shared HTTP client with timeout – avoids Client::new fallback without timeout
 static FBL_CLIENT: LazyLock<Option<reqwest::Client>> = LazyLock::new(|| {
@@ -166,14 +173,15 @@ impl FeedbackLoopServer {
         // Verify source via rDNS
         if !self.verify_fbl_source(ip).await {
             let mut s = BufStream::new(socket);
-            log_smtp_reject(
+            log_smtp_reject("fbl", ip, &session_id, "554 5.7.1 Unverified FBL source");
+            let _ = write_reply(
+                &mut s,
                 "fbl",
                 ip,
                 &session_id,
-                "554 5.7.1 Unverified FBL source",
-            );
-            let _ = write_reply(&mut s, "fbl", ip, &session_id, "554 5.7.1 Unverified FBL source\r\n")
-                .await;
+                "554 5.7.1 Unverified FBL source\r\n",
+            )
+            .await;
             log_session_summary(
                 "fbl",
                 ip,
@@ -284,12 +292,27 @@ impl FeedbackLoopServer {
                     .await;
                     break;
                 }
+                Ok(Ok(LineRead::Line(_, LineTerminator::BareLf))) => {
+                    // F-08: a bare-LF COMMAND line is refused (DATA body
+                    // tolerance is unchanged).
+                    let _ = write_reply(
+                        &mut stream,
+                        "fbl",
+                        ip,
+                        &session_id,
+                        "500 5.5.2 Bare LF not allowed\r\n",
+                    )
+                    .await;
+                    continue;
+                }
                 Ok(Ok(LineRead::Line(l, _))) => line = line_lossy(&l),
             }
 
-            let cmd = line.trim().to_uppercase();
+            // F-06: the verb is matched as an exact first token.
+            let (verb_owned, arg) = split_verb(line.trim());
+            let verb = verb_owned.as_str();
 
-            if cmd.starts_with("EHLO") || cmd.starts_with("HELO") {
+            if verb == "EHLO" || verb == "HELO" {
                 // SIZE advertisement equals the enforced cap (RFC 1870): the
                 // 552 enforcement below uses exactly max_arf_size.
                 let caps = format!(
@@ -297,7 +320,7 @@ impl FeedbackLoopServer {
                     self.hostname, self.config.max_arf_size
                 );
                 let _ = write_line(&mut stream, &caps).await;
-            } else if cmd.starts_with("MAIL FROM") {
+            } else if verb == "MAIL" && is_mail_from_arg(arg) {
                 // ARF reports from ISP FBL sources are regular mail with a
                 // real envelope sender — the rDNS/FCrDNS verification is the
                 // source of trust here, not a null sender. We only enforce
@@ -305,7 +328,17 @@ impl FeedbackLoopServer {
                 mail_from_seen = true;
                 rcpt_to.clear();
                 let _ = write_line(&mut stream, "250 2.0.0 Ok\r\n").await;
-            } else if cmd.starts_with("RCPT TO") {
+            } else if verb == "MAIL" {
+                // F-06: "MAIL FROMX:..." is a syntax error, not a MAIL.
+                let _ = write_reply(
+                    &mut stream,
+                    "fbl",
+                    ip,
+                    &session_id,
+                    "501 5.5.4 Syntax: MAIL FROM:<address>\r\n",
+                )
+                .await;
+            } else if verb == "RCPT" && is_rcpt_to_arg(arg) {
                 let addr = extract_addr(&line);
                 if !mail_from_seen {
                     let _ = write_reply(
@@ -363,7 +396,7 @@ impl FeedbackLoopServer {
                     )
                     .await;
                 }
-            } else if cmd.starts_with("DATA") {
+            } else if verb == "DATA" {
                 if !mail_from_seen || rcpt_to.is_empty() {
                     let _ = write_reply(
                         &mut stream,
@@ -536,30 +569,30 @@ impl FeedbackLoopServer {
                 }
                 msgs_this_conn += 1;
                 rcpt_to.clear();
-            } else if cmd.starts_with("QUIT") {
+            } else if verb == "QUIT" {
                 let _ = write_line(&mut stream, "221 2.0.0 Bye\r\n").await;
                 close_reason = "quit";
                 break;
-            } else if cmd.starts_with("RSET") || cmd.starts_with("NOOP") {
-                if cmd.starts_with("RSET") {
+            } else if verb == "RSET" || verb == "NOOP" {
+                if verb == "RSET" {
                     rcpt_to.clear();
                     mail_from_seen = false;
                 }
                 let _ = write_line(&mut stream, "250 2.0.0 Ok\r\n").await;
-            } else if cmd.starts_with("VRFY") || cmd.starts_with("EXPN") {
+            } else if verb == "VRFY" || verb == "EXPN" {
                 // Avoid leaking recipient validity.
                 let _ = write_line(
                     &mut stream,
                     "252 2.5.2 Cannot VRFY user, but will accept message and attempt delivery\r\n",
                 )
                 .await;
-            } else if cmd.starts_with("HELP") {
+            } else if verb == "HELP" {
                 let _ = write_line(
                     &mut stream,
                     "214 2.0.0 Commands: EHLO HELO MAIL RCPT DATA RSET NOOP QUIT; see RFC 5321\r\n",
                 )
                 .await;
-            } else if cmd.starts_with("STARTTLS") {
+            } else if verb == "STARTTLS" {
                 let _ = write_reply(
                     &mut stream,
                     "fbl",
@@ -574,7 +607,7 @@ impl FeedbackLoopServer {
                     "fbl",
                     ip,
                     &session_id,
-                    "502 5.5.1 Command not recognised\r\n",
+                    "500 5.5.2 Command not recognised\r\n",
                 )
                 .await;
             }
@@ -607,8 +640,19 @@ impl FeedbackLoopServer {
         let result = match resolver.reverse_lookup(ip).await {
             Ok(lookup) => {
                 let mut matched_hostname: Option<String> = None;
-                for name in lookup.iter() {
-                    let hostname_str = name.to_string();
+                // trust-dns 0.26 removed typed lookup iteration; extract the
+                // PTR names from the raw answer records.
+                for hostname_str in
+                    lookup
+                        .answers()
+                        .iter()
+                        .filter_map(|record| match &record.data {
+                            trust_dns_resolver::proto::rr::RData::PTR(ptr) => {
+                                Some(ptr.0.to_string())
+                            }
+                            _ => None,
+                        })
+                {
                     let hostname = hostname_str.trim_end_matches('.').to_lowercase();
                     if self
                         .trusted_domains
@@ -799,6 +843,7 @@ impl FeedbackLoopServer {
             feedback_type = %complaint.feedback_type,
             "Complaint processed"
         );
+        metric_message("fbl", "accepted");
 
         Ok(complaint_id.to_string())
     }
@@ -1374,7 +1419,10 @@ Original-Message-ID: <original@example.com>\r\n";
         let _ = fbl_read_reply(&mut reader).await; // greeting
 
         // RCPT before MAIL → 503 5.5.1.
-        writer.write_all(b"RCPT TO:<abuse@fbl.test>\r\n").await.unwrap();
+        writer
+            .write_all(b"RCPT TO:<abuse@fbl.test>\r\n")
+            .await
+            .unwrap();
         assert_eq!(
             fbl_read_reply(&mut reader).await,
             "503 5.5.1 Error: need MAIL command first\r\n"
@@ -1388,7 +1436,10 @@ Original-Message-ID: <original@example.com>\r\n";
         assert_eq!(fbl_read_reply(&mut reader).await, "250 2.0.0 Ok\r\n");
 
         // Not an FBL role mailbox → 550 5.1.1.
-        writer.write_all(b"RCPT TO:<nobody@fbl.test>\r\n").await.unwrap();
+        writer
+            .write_all(b"RCPT TO:<nobody@fbl.test>\r\n")
+            .await
+            .unwrap();
         assert_eq!(
             fbl_read_reply(&mut reader).await,
             "550 5.1.1 Invalid FBL recipient\r\n"
@@ -1405,11 +1456,11 @@ Original-Message-ID: <original@example.com>\r\n";
             "501 5.1.3 Bad recipient address syntax\r\n"
         );
 
-        // Unknown command → 502 5.5.1 (consistent with inbound/submission).
+        // Unknown command → 500 5.5.2 (F-06, consistent with inbound/submission).
         writer.write_all(b"FROBNICATE\r\n").await.unwrap();
         assert_eq!(
             fbl_read_reply(&mut reader).await,
-            "502 5.5.1 Command not recognised\r\n"
+            "500 5.5.2 Command not recognised\r\n"
         );
 
         // STARTTLS is not offered here → 454 4.7.0.
@@ -1488,14 +1539,23 @@ Original-Message-ID: <original@example.com>\r\n";
         let _ = fbl_read_reply(&mut reader).await; // greeting
         writer.write_all(b"EHLO c\r\n").await.unwrap();
         let _ = fbl_read_full_reply(&mut reader).await;
-        writer.write_all(b"MAIL FROM:<fbl@google.com>\r\n").await.unwrap();
+        writer
+            .write_all(b"MAIL FROM:<fbl@google.com>\r\n")
+            .await
+            .unwrap();
         assert!(fbl_read_reply(&mut reader).await.starts_with("250"));
 
         for _ in 0..MAX_RCPT_PER_TRANSACTION {
-            writer.write_all(b"RCPT TO:<abuse@fbl.test>\r\n").await.unwrap();
+            writer
+                .write_all(b"RCPT TO:<abuse@fbl.test>\r\n")
+                .await
+                .unwrap();
             assert!(fbl_read_reply(&mut reader).await.starts_with("250"));
         }
-        writer.write_all(b"RCPT TO:<abuse@fbl.test>\r\n").await.unwrap();
+        writer
+            .write_all(b"RCPT TO:<abuse@fbl.test>\r\n")
+            .await
+            .unwrap();
         assert_eq!(
             fbl_read_reply(&mut reader).await,
             "452 4.5.3 Too many recipients\r\n"
@@ -1546,9 +1606,15 @@ Original-Message-ID: <original@example.com>\r\n";
         let _ = fbl_read_reply(&mut reader).await; // greeting
         writer.write_all(b"EHLO c\r\n").await.unwrap();
         let _ = fbl_read_full_reply(&mut reader).await;
-        writer.write_all(b"MAIL FROM:<fbl@google.com>\r\n").await.unwrap();
+        writer
+            .write_all(b"MAIL FROM:<fbl@google.com>\r\n")
+            .await
+            .unwrap();
         let _ = fbl_read_reply(&mut reader).await;
-        writer.write_all(b"RCPT TO:<abuse@fbl.test>\r\n").await.unwrap();
+        writer
+            .write_all(b"RCPT TO:<abuse@fbl.test>\r\n")
+            .await
+            .unwrap();
         let _ = fbl_read_reply(&mut reader).await;
         writer.write_all(b"DATA\r\n").await.unwrap();
         assert!(fbl_read_reply(&mut reader).await.starts_with("354"));

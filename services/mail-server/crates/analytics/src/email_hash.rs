@@ -113,7 +113,10 @@ mod tests {
         let encoded = recipient_for_analytics_with_key("joanna@example.com", "k");
         // Human-visible part is redacted: local part masked, no raw recipient.
         assert!(encoded.contains("j***@example.com"), "got {encoded}");
-        assert!(!encoded.contains("joanna"), "raw local part must not appear");
+        assert!(
+            !encoded.contains("joanna"),
+            "raw local part must not appear"
+        );
         // Same recipient → same encoding (grouping still works); different
         // recipient → different encoding.
         assert_eq!(

@@ -15,7 +15,7 @@ thiserror = { workspace = true }
 anyhow = { workspace = true }
 urlencoding = { workspace = true }
 once_cell = { workspace = true }
-prometheus = "0.13"
+prometheus = "0.14"
 apexmail-lib = { path = "../apexmail-lib" }
 
 [dev-dependencies]

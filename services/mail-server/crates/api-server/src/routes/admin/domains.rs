@@ -98,7 +98,9 @@ fn transfer_suggestion(owner_ever_verified: bool, dns: &DnsControlEvidence) -> b
 /// A DMARC TXT record publisher signal: any TXT at `_dmarc.<domain>` that
 /// starts with the DMARC version tag.
 fn txt_looks_like_dmarc(txt: &str) -> bool {
-    txt.trim_start().to_ascii_lowercase().starts_with("v=dmarc1")
+    txt.trim_start()
+        .to_ascii_lowercase()
+        .starts_with("v=dmarc1")
 }
 
 /// `pub(crate)` so the control-plane's SSR transfer page reuses the exact
@@ -125,8 +127,16 @@ pub(crate) async fn get_transfer_suggestion(
     .await?
     .ok_or_else(|| ApiError::NotFound("domain not found".into()))?;
 
-    let (id, tenant_id, verified, dkim_verified, dmarc_verified, spf_verified, return_path_verified, dkim_selector) =
-        row;
+    let (
+        id,
+        tenant_id,
+        verified,
+        dkim_verified,
+        dmarc_verified,
+        spf_verified,
+        return_path_verified,
+        dkim_selector,
+    ) = row;
     let owner_ever_verified =
         verified || dkim_verified || dmarc_verified || spf_verified || return_path_verified;
 
@@ -173,23 +183,20 @@ async fn probe_dns_control(
         }
     };
 
-    let public_key: Option<String> = sqlx::query_scalar(
-        "SELECT dkim_public_key FROM domains WHERE name = $1",
-    )
-    .bind(domain)
-    .fetch_optional(db)
-    .await
-    .ok()
-    .flatten();
+    let public_key: Option<String> =
+        sqlx::query_scalar("SELECT dkim_public_key FROM domains WHERE name = $1")
+            .bind(domain)
+            .fetch_optional(db)
+            .await
+            .ok()
+            .flatten();
 
     let mut dkim_published = false;
     if let Some(selector) = dkim_selector.filter(|s| !s.trim().is_empty()) {
         let hostname = format!("{selector}._domainkey.{domain}");
         match dns.lookup_txt(&hostname).await {
             Ok(txts) => {
-                let expected = public_key
-                    .as_deref()
-                    .map(dkim_txt_record_value);
+                let expected = public_key.as_deref().map(dkim_txt_record_value);
                 dkim_published = txts.iter().any(|txt| match &expected {
                     Some(expected) => txt.trim_end_matches('.') == expected,
                     None => !txt.trim().is_empty(),
@@ -293,12 +300,11 @@ pub(crate) async fn admin_transfer_domain(
     }
 
     // The receiving tenant must exist.
-    let target_exists: Option<i64> = sqlx::query_scalar(
-        "SELECT 1 FROM tenants WHERE id = $1::text",
-    )
-    .bind(&body.to_tenant_id)
-    .fetch_optional(&mut *tx)
-    .await?;
+    let target_exists: Option<i64> =
+        sqlx::query_scalar("SELECT 1 FROM tenants WHERE id = $1::text")
+            .bind(&body.to_tenant_id)
+            .fetch_optional(&mut *tx)
+            .await?;
     if target_exists.is_none() {
         return Err(ApiError::NotFound(format!(
             "target tenant {} not found",
@@ -308,11 +314,10 @@ pub(crate) async fn admin_transfer_domain(
 
     // Respect the receiving tenant's sending-domain quota (same semantics as
     // customer domain creation: -1 means unlimited).
-    let domain_count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM domains WHERE tenant_id = $1")
-            .bind(&body.to_tenant_id)
-            .fetch_one(&mut *tx)
-            .await?;
+    let domain_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM domains WHERE tenant_id = $1")
+        .bind(&body.to_tenant_id)
+        .fetch_one(&mut *tx)
+        .await?;
     let max_domains: Option<i64> = sqlx::query_scalar(
         r#"SELECT COALESCE((p.features->>'max_sending_domains')::bigint, -1)
            FROM tenants t JOIN plans p ON t.plan = p.name
@@ -340,13 +345,12 @@ pub(crate) async fn admin_transfer_domain(
     let (selector, public_key, private_key, dkim_rotated) =
         match rebind_dkim_material(&dkim_selector, &dkim_private_key, &old_aad, &new_aad) {
             Some((carried_selector, reencrypted)) => {
-                let public_key: String = sqlx::query_scalar(
-                    "SELECT dkim_public_key FROM domains WHERE id = $1::uuid",
-                )
-                .bind(&domain_id)
-                .fetch_one(&mut *tx)
-                .await
-                .unwrap_or_default();
+                let public_key: String =
+                    sqlx::query_scalar("SELECT dkim_public_key FROM domains WHERE id = $1::uuid")
+                        .bind(&domain_id)
+                        .fetch_one(&mut *tx)
+                        .await
+                        .unwrap_or_default();
                 (carried_selector, public_key, reencrypted, false)
             }
             None => {
@@ -470,10 +474,7 @@ mod tests {
         assert_eq!(expected_confirmation("victim.com"), "transfer victim.com");
         // The handler normalises (trims + lowercases) the domain before the
         // comparison; `expected_confirmation` itself is a pure format helper.
-        assert_eq!(
-            expected_confirmation("Mixed.CASE"),
-            "transfer Mixed.CASE"
-        );
+        assert_eq!(expected_confirmation("Mixed.CASE"), "transfer Mixed.CASE");
     }
 
     #[test]
@@ -490,7 +491,10 @@ mod tests {
 
         // Owner never verified but nobody proved DNS control either.
         assert!(!transfer_suggestion(false, &DnsControlEvidence::NotProven));
-        assert!(!transfer_suggestion(false, &DnsControlEvidence::Unavailable));
+        assert!(!transfer_suggestion(
+            false,
+            &DnsControlEvidence::Unavailable
+        ));
     }
 
     #[test]
@@ -525,16 +529,14 @@ mod tests {
         let aad_new = dkim_private_key_aad("tenant-b", "00000000-0000-0000-0000-0000000000d1");
 
         let key_pair = generate_dkim_keypair().unwrap();
-        let encrypted_old =
-            encrypt_dkim_private_key(&key_pair.private_key_pem, &aad_old).unwrap();
+        let encrypted_old = encrypt_dkim_private_key(&key_pair.private_key_pem, &aad_old).unwrap();
 
         let selector = Some("apexmail2026".to_string());
         let private_key = Some(encrypted_old.clone());
 
         // Round trip: carried over ciphertext decrypts under the new AAD.
         let (carried_selector, rebound) =
-            rebind_dkim_material(&selector, &private_key, &aad_old, &aad_new)
-                .expect("rebinds");
+            rebind_dkim_material(&selector, &private_key, &aad_old, &aad_new).expect("rebinds");
         assert_eq!(carried_selector, "apexmail2026");
         let decrypted = decrypt_dkim_private_key(&rebound, &aad_new).unwrap();
         assert_eq!(decrypted, key_pair.private_key_pem);
@@ -561,7 +563,9 @@ mod tests {
         )
         .expect("legacy row is encrypted");
         assert_eq!(
-            decrypt_dkim_private_key(&legacy, &aad_new).unwrap().to_string(),
+            decrypt_dkim_private_key(&legacy, &aad_new)
+                .unwrap()
+                .to_string(),
             key_pair.private_key_pem.trim().to_string()
         );
 
@@ -678,6 +682,10 @@ mod tests {
         Some(pool)
     }
 
+    /// The DKIM env guard is held for the whole test on purpose: the awaited
+    /// DB and crypto paths below read the process-global key, so it must not
+    /// be mutated concurrently.
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn admin_transfer_moves_the_domain_and_resets_verification() {
         let _guard = dkim_env_guard();
@@ -745,13 +753,9 @@ mod tests {
 
         // Execute the same UPDATE path the handler runs.
         let new_aad = dkim_private_key_aad("tenant-b", &domain_id.to_string());
-        let (_, rebound) = rebind_dkim_material(
-            &Some("sel".into()),
-            &Some(encrypted),
-            &aad,
-            &new_aad,
-        )
-        .expect("key material carries over");
+        let (_, rebound) =
+            rebind_dkim_material(&Some("sel".into()), &Some(encrypted), &aad, &new_aad)
+                .expect("key material carries over");
 
         let mut tx = handler_db.begin().await.unwrap();
         let updated = sqlx::query(
@@ -771,25 +775,23 @@ mod tests {
         tx.commit().await.unwrap();
         assert_eq!(updated.rows_affected(), 1);
 
-        let row: (String, String, bool) = sqlx::query_as(
-            "SELECT tenant_id, status, dkim_verified FROM domains WHERE id = $1",
-        )
-        .bind(domain_id)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+        let row: (String, String, bool) =
+            sqlx::query_as("SELECT tenant_id, status, dkim_verified FROM domains WHERE id = $1")
+                .bind(domain_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
         assert_eq!(row.0, "tenant-b", "domain moved to the verified owner");
         assert_eq!(row.1, "pending");
         assert!(!row.2, "verification resets — new owner re-verifies");
 
         // The carried-over private key decrypts under the NEW tenant AAD.
-        let stored: String = sqlx::query_scalar(
-            "SELECT dkim_private_key FROM domains WHERE id = $1",
-        )
-        .bind(domain_id)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+        let stored: String =
+            sqlx::query_scalar("SELECT dkim_private_key FROM domains WHERE id = $1")
+                .bind(domain_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
         assert_eq!(
             decrypt_dkim_private_key(&stored, &new_aad).unwrap(),
             key_pair.private_key_pem

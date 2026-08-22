@@ -61,11 +61,7 @@ fn ip_network_prefix(ip: &str) -> String {
         return trimmed.to_string();
     }
     // IPv4 /24
-    trimmed
-        .splitn(4, '.')
-        .take(3)
-        .collect::<Vec<_>>()
-        .join(".")
+    trimmed.splitn(4, '.').take(3).collect::<Vec<_>>().join(".")
 }
 
 impl DeviceFingerprint {
@@ -399,15 +395,17 @@ mod tests {
         // Different /64 → new device.
         let mut e3 = make_event("u6", "2001:db8:1:3::1", true);
         e3.user_agent = e1.user_agent.clone();
-        assert!(store.record_login(&e3), "different IPv6 /64 is a new device");
+        assert!(
+            store.record_login(&e3),
+            "different IPv6 /64 is a new device"
+        );
     }
 
     #[test]
     fn test_fingerprint_pepper_changes_hash() {
         let event = make_event("u9", "1.2.3.4", true);
         let plain = DeviceFingerprint::from_event(&event);
-        let peppered =
-            DeviceFingerprint::from_event_with_pepper(&event, b"deployment-secret");
+        let peppered = DeviceFingerprint::from_event_with_pepper(&event, b"deployment-secret");
         assert_ne!(
             plain.hash, peppered.hash,
             "pepper must change the fingerprint hash (offline-dictionary protection)"
@@ -426,7 +424,10 @@ mod tests {
                 store.record_login_counting_failures(&make_event("u10", "1.2.3.4", false), 300);
             count = failures;
         }
-        assert_eq!(count, 5, "5th failing login must count 5 failures incl. itself");
+        assert_eq!(
+            count, 5,
+            "5th failing login must count 5 failures incl. itself"
+        );
         // A successful login does not add to the count.
         let (_, failures) =
             store.record_login_counting_failures(&make_event("u10", "1.2.3.4", true), 300);

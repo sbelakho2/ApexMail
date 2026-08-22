@@ -34,7 +34,7 @@ unicode-normalization = "0.1"
 sha2 = "0.10"
 
 # Metrics
-prometheus = "0.13"
+prometheus = "0.14"
 
 # Utilities
 thiserror = "2.0"

@@ -84,14 +84,12 @@ fn parse_optional_timestamp(raw: &str, field: &str) -> Result<DateTime<Utc>, Api
     DateTime::parse_from_rfc3339(raw)
         .map(|ts| ts.with_timezone(&Utc))
         .map_err(|_| {
-            ApiError::Validation(vec![format!(
-                "{field} must be a valid RFC3339 timestamp"
-            )])
+            ApiError::Validation(vec![format!("{field} must be a valid RFC3339 timestamp")])
         })
 }
 
 fn build_search_query(params: &AuditSearchQuery) -> Result<(String, Vec<String>), ApiError> {
-    let has_fts = params.q.as_ref().map_or(false, |q| !q.trim().is_empty());
+    let has_fts = params.q.as_ref().is_some_and(|q| !q.trim().is_empty());
     let now = Utc::now();
 
     let window_end = params
@@ -108,15 +106,10 @@ fn build_search_query(params: &AuditSearchQuery) -> Result<(String, Vec<String>)
         .unwrap_or(window_end - Duration::days(30));
 
     if window_start > window_end {
-        return Err(ApiError::Validation(vec![
-            "from must be before to".into()
-        ]));
+        return Err(ApiError::Validation(vec!["from must be before to".into()]));
     }
 
-    let mut conditions: Vec<String> = vec![
-        "timestamp >= $1".into(),
-        "timestamp <= $2".into(),
-    ];
+    let mut conditions: Vec<String> = vec!["timestamp >= $1".into(), "timestamp <= $2".into()];
     let mut param_idx = 3u32;
     let mut bind_values: Vec<String> = Vec::new();
 
@@ -170,7 +163,7 @@ fn build_search_query(params: &AuditSearchQuery) -> Result<(String, Vec<String>)
 }
 
 fn build_count_query(params: &AuditSearchQuery) -> Result<(String, Vec<String>), ApiError> {
-    let has_fts = params.q.as_ref().map_or(false, |q| !q.trim().is_empty());
+    let has_fts = params.q.as_ref().is_some_and(|q| !q.trim().is_empty());
     let now = Utc::now();
 
     let window_end = params
@@ -179,17 +172,17 @@ fn build_count_query(params: &AuditSearchQuery) -> Result<(String, Vec<String>),
         .map(|v| parse_optional_timestamp(v, "to"))
         .transpose()?
         .unwrap_or(now);
-    let window_start = params
+    // Kept only for its `?`: an invalid `from` timestamp must fail the
+    // count query exactly like the search query even though the bound
+    // value is not otherwise used here.
+    let _window_start = params
         .from
         .as_deref()
         .map(|v| parse_optional_timestamp(v, "from"))
         .transpose()?
         .unwrap_or(window_end - Duration::days(30));
 
-    let mut conditions: Vec<String> = vec![
-        "timestamp >= $1".into(),
-        "timestamp <= $2".into(),
-    ];
+    let mut conditions: Vec<String> = vec!["timestamp >= $1".into(), "timestamp <= $2".into()];
     let mut param_idx = 3u32;
     let mut bind_values: Vec<String> = Vec::new();
 
@@ -343,7 +336,19 @@ async fn execute_search(
     let results = rows
         .into_iter()
         .map(
-            |(id, ts, action, resource, resource_id, user_id, tenant_id, ip, details, rank, headline)| {
+            |(
+                id,
+                ts,
+                action,
+                resource,
+                resource_id,
+                user_id,
+                tenant_id,
+                ip,
+                details,
+                rank,
+                headline,
+            )| {
                 AuditSearchResult {
                     id,
                     timestamp: ts.to_rfc3339(),
@@ -391,22 +396,19 @@ async fn audit_export(
         .unwrap_or(window_end - Duration::days(30));
     let limit = body.limit.clamp(1, 50_000);
 
-    let mut conditions: Vec<String> = vec![
-        "timestamp >= $1".into(),
-        "timestamp <= $2".into(),
-    ];
+    let mut conditions: Vec<String> = vec!["timestamp >= $1".into(), "timestamp <= $2".into()];
     let mut param_idx = 3u32;
 
-    if let Some(ref tenant_id) = body.tenant_id {
+    if body.tenant_id.is_some() {
         conditions.push(format!("tenant_id = ${param_idx}"));
         param_idx += 1;
     }
-    if let Some(ref action) = body.action {
+    if body.action.is_some() {
         conditions.push(format!("action = ${param_idx}"));
         param_idx += 1;
     }
 
-    let has_fts = body.q.as_ref().map_or(false, |q| !q.trim().is_empty());
+    let has_fts = body.q.as_ref().is_some_and(|q| !q.trim().is_empty());
 
     let sql = if has_fts {
         format!(
@@ -432,7 +434,7 @@ async fn audit_export(
 
     let mut csv_writer = csv::Writer::from_writer(Vec::new());
     csv_writer
-        .write_record(&[
+        .write_record([
             "timestamp",
             "action",
             "resource",
@@ -445,17 +447,20 @@ async fn audit_export(
         ])
         .map_err(|e| ApiError::Internal(e.to_string()))?;
 
-    let rows = sqlx::query_as::<_, (
-        chrono::DateTime<chrono::Utc>,
-        String,
-        String,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        String,
-        Option<String>,
-    )>(&sql)
+    let rows = sqlx::query_as::<
+        _,
+        (
+            chrono::DateTime<chrono::Utc>,
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            String,
+            Option<String>,
+        ),
+    >(&sql)
     .bind(window_start)
     .bind(window_end);
 
@@ -507,15 +512,11 @@ async fn audit_export(
         .into_inner()
         .map_err(|e| ApiError::Internal(e.to_string()))?;
 
-    let filename = format!(
-        "audit_export_{}.csv",
-        Utc::now().format("%Y%m%dT%H%M%SZ")
-    );
+    let filename = format!("audit_export_{}.csv", Utc::now().format("%Y%m%dT%H%M%SZ"));
 
-    let disposition_value = axum::http::HeaderValue::from_str(&format!(
-        "attachment; filename=\"{filename}\""
-    ))
-    .map_err(|e| ApiError::Internal(e.to_string()))?;
+    let disposition_value =
+        axum::http::HeaderValue::from_str(&format!("attachment; filename=\"{filename}\""))
+            .map_err(|e| ApiError::Internal(e.to_string()))?;
 
     let mut response = (
         [(header::CONTENT_TYPE, "text/csv; charset=utf-8")],

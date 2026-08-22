@@ -217,7 +217,11 @@ const EXAMPLE_WINDOW: usize = 48;
 /// Detect context modifier for a PII match based on surrounding text.
 /// `matched` is the matched PII substring itself (used for paired-quote
 /// detection on both sides).
-fn detect_context_modifier(text: &str, match_offset: usize, matched: &str) -> Option<ContextModifier> {
+fn detect_context_modifier(
+    text: &str,
+    match_offset: usize,
+    matched: &str,
+) -> Option<ContextModifier> {
     // Get context before the match, preferring a sentence boundary when one is nearby.
     let raw_window_start = match_offset.saturating_sub(CONTEXT_WINDOW);
     let window_start = text
@@ -416,10 +420,8 @@ pub fn scan_pii_with_context(
     // the grouped pattern; overlaps with already-reported cards are skipped.
     if detect_cc {
         if let Some(re) = spaced_card_regex() {
-            let taken: Vec<(usize, usize)> = matches
-                .iter()
-                .map(|m| (m.offset, m.offset + 16))
-                .collect();
+            let taken: Vec<(usize, usize)> =
+                matches.iter().map(|m| (m.offset, m.offset + 16)).collect();
             for m in re.find_iter(text) {
                 let candidate = m.as_str();
                 let digit_count = candidate.chars().filter(|c| c.is_ascii_digit()).count();
@@ -431,10 +433,7 @@ pub fn scan_pii_with_context(
                 }
                 // Skip if this span overlaps an already-reported card match.
                 let (start, end) = (m.start(), m.end());
-                if taken
-                    .iter()
-                    .any(|(ts, _te)| start < *_te && end > *ts)
-                {
+                if taken.iter().any(|(ts, _te)| start < *_te && end > *ts) {
                     continue;
                 }
                 let base_risk = 8.0;
@@ -688,7 +687,10 @@ mod tests {
         let quoted = "documentation sample: \"123-45-6789\" shown";
         let results = scan_pii(quoted, false, true, false, false);
         let ssn = &results[0];
-        assert!(ssn.context_modifier.is_some(), "quoted documentation sample recognized");
+        assert!(
+            ssn.context_modifier.is_some(),
+            "quoted documentation sample recognized"
+        );
         assert!(ssn.risk >= ssn.base_risk * 0.75, "reduction capped at 25%");
     }
 
@@ -804,7 +806,10 @@ mod tests {
             .iter()
             .find(|m| m.pii_type == PiiType::CreditCard)
             .expect("card must be detected");
-        assert!(cc.context_modifier.is_some(), "quoted+example context recognized");
+        assert!(
+            cc.context_modifier.is_some(),
+            "quoted+example context recognized"
+        );
         assert!(
             (cc.risk - cc.base_risk * 0.75).abs() < 1e-9,
             "reduction must be capped at 25%: risk={} base={}",
@@ -821,9 +826,7 @@ mod tests {
         let text = "card 4111\u{200b}1111\u{200b}1111\u{200b}1111 end";
         let matches = scan_pii(text, true, false, false, false);
         assert!(
-            matches
-                .iter()
-                .any(|m| m.pii_type == PiiType::CreditCard),
+            matches.iter().any(|m| m.pii_type == PiiType::CreditCard),
             "zero-width-split card must be detected"
         );
     }

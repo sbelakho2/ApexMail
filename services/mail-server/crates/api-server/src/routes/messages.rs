@@ -652,7 +652,7 @@ async fn send_message(
         StatusCode::ACCEPTED,
         Json(ApiResponse::success(MessageResponse {
             id: persisted.id,
-            status: persisted.status.into(),
+            status: persisted.status,
             created_at: persisted.created_at.to_rfc3339(),
         })),
     ))
@@ -770,7 +770,7 @@ async fn send_batch(
                 results.push(BatchResult {
                     index: i,
                     id: Some(persisted.id),
-                    status: persisted.status.into(),
+                    status: persisted.status,
                     error: None,
                 });
             }
@@ -1589,7 +1589,7 @@ mod tests {
         apply_tool_migrations(&pool).await;
 
         let tenant_id = insert_test_tenant(&pool, "message-suppression").await;
-        let domain_id = insert_verified_domain(&pool, &tenant_id, "example.com").await;
+        let _domain_id = insert_verified_domain(&pool, &tenant_id, "example.com").await;
 
         sqlx::query(
             "INSERT INTO suppressions (id, tenant_id, email, reason, source, created_at)
@@ -1795,9 +1795,10 @@ mod tests {
 
     #[tokio::test]
     async fn api_messages_validate_send_rejects_crlf_in_recipients() {
-        let Some(pool) =
-            crate::test_db::optional_pg_pool("api_messages_validate_send_rejects_crlf_in_recipients")
-                .await
+        let Some(pool) = crate::test_db::optional_pg_pool(
+            "api_messages_validate_send_rejects_crlf_in_recipients",
+        )
+        .await
         else {
             return;
         };
@@ -1811,7 +1812,8 @@ mod tests {
         let body = SendMessageRequest {
             from: "sender@example.com".into(),
             to: vec![r#""x
-Bcc: victim@example.com"@example.com"#.into()],
+Bcc: victim@example.com"@example.com"#
+                .into()],
             cc: Some(vec!["good@example.com\r\nBcc: evil@example.com".into()]),
             bcc: Some(vec!["nul\0byte@example.com".into()]),
             subject: "CRLF smuggling".into(),

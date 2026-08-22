@@ -84,7 +84,10 @@ fn usd_display_string_round_trips_to_integer_cents() {
             }
             _ => panic!("unexpected rendering {rendered}"),
         };
-        assert_eq!(rebuilt, cents, "display of {cents} cents must invert exactly");
+        assert_eq!(
+            rebuilt, cents,
+            "display of {cents} cents must invert exactly"
+        );
     }
 }
 
@@ -122,11 +125,11 @@ fn payg_millicents_to_cents_is_half_up() {
         let mut remaining = emails_i;
         let mut prev = 0_i128;
         for (up_to, rate) in tiers {
-            let width = (i128::try_from(up_to).unwrap() - prev).max(0);
+            let width = (i128::from(up_to) - prev).max(0);
             let applicable = remaining.min(width);
             exact_millicents += applicable * i128::from(rate);
             remaining -= applicable;
-            prev = i128::try_from(up_to).unwrap();
+            prev = i128::from(up_to);
             if remaining == 0 {
                 break;
             }
@@ -151,11 +154,7 @@ fn vat_round_vat_is_half_up() {
         for rate in [0, 5, 19, 21, 24, 27] {
             assert_eq!(
                 round_vat(amount, rate),
-                i64::try_from(half_up(
-                    i128::from(amount) * i128::from(rate),
-                    100
-                ))
-                .unwrap(),
+                i64::try_from(half_up(i128::from(amount) * i128::from(rate), 100)).unwrap(),
                 "round_vat({amount}, {rate}) must be half-up"
             );
         }
@@ -187,7 +186,11 @@ fn overage_millicents_is_ceiling_per_platform_contract() {
             let overage = i128::from(sent - limit);
             let exact = overage * i128::from(rate);
             let expected = (exact + 999).div_euclid(1000);
-            assert_eq!(i128::from(cost), expected, "sent={sent} limit={limit} rate={rate}");
+            assert_eq!(
+                i128::from(cost),
+                expected,
+                "sent={sent} limit={limit} rate={rate}"
+            );
         }
     }
 }
@@ -218,7 +221,7 @@ fn sla_percent_of_cents_is_half_up_and_integer_only() {
 fn proration_amounts_are_half_up() {
     let mut rng = Rng::new(0x9B1);
     for _ in 0..500 {
-        let price = (rng.below(5_000_00)) as i64;
+        let price = (rng.below(500_000)) as i64;
         let days_in_period = 1 + rng.below(366) as i64;
         let days_remaining = rng.below(days_in_period as u64 + 5) as i64;
         let amount = prorated_amount(price, days_remaining, days_in_period)
@@ -243,7 +246,7 @@ fn vat_line_allocation_reconciles_with_headline_for_random_invoices() {
     for _ in 0..1_000 {
         let line_count = 1 + rng.below(12) as usize;
         let amounts: Vec<i64> = (0..line_count)
-            .map(|_| (rng.below(50_000_00)) as i64)
+            .map(|_| (rng.below(5_000_000)) as i64)
             .collect();
         let rate = [0, 5, 10, 19, 20, 21, 22, 23, 24, 25, 27][rng.below(11) as usize];
 
@@ -377,8 +380,14 @@ fn wallet_ops_conserve_balance_plus_reserved() {
             expected_total += delta;
             history.push(op);
 
-            assert!(wallet.balance >= 0, "case {case}: negative balance after {history:?}");
-            assert!(wallet.reserved >= 0, "case {case}: negative reserved after {history:?}");
+            assert!(
+                wallet.balance >= 0,
+                "case {case}: negative balance after {history:?}"
+            );
+            assert!(
+                wallet.reserved >= 0,
+                "case {case}: negative reserved after {history:?}"
+            );
             assert_eq!(
                 wallet.total(),
                 expected_total,
@@ -400,7 +409,10 @@ fn wallet_bigint_release_clamp_never_wraps() {
     wallet.reserved = 3_000_000_000; // > i32::MAX
     wallet.apply(WalletOp::Release(4_000_000_000));
     assert_eq!(wallet.reserved, 0, "release above reserved clamps to zero");
-    assert_eq!(wallet.balance, 3_000_000_000, "released funds return to balance");
+    assert_eq!(
+        wallet.balance, 3_000_000_000,
+        "released funds return to balance"
+    );
 }
 
 #[test]
@@ -430,8 +442,14 @@ const MONEY_PATH_FILES: &[(&str, &str)] = &[
     ("src/invoices.rs", "src/invoices.rs"),
     ("src/credit_notes.rs", "src/credit_notes.rs"),
     ("src/subscriptions.rs", "src/subscriptions.rs"),
-    ("../billing-common/src/proration.rs", "billing-common/proration.rs"),
-    ("../billing-common/src/vat_rates.rs", "billing-common/vat_rates.rs"),
+    (
+        "../billing-common/src/proration.rs",
+        "billing-common/proration.rs",
+    ),
+    (
+        "../billing-common/src/vat_rates.rs",
+        "billing-common/vat_rates.rs",
+    ),
 ];
 
 #[test]
@@ -452,7 +470,8 @@ fn no_floating_point_in_money_computation_paths() {
             }
             if trimmed.contains("f64") || trimmed.contains("f32") {
                 // Floats are tolerated ONLY inside display formatting.
-                let is_display = trimmed.contains("format!(") || trimmed.contains("format_currency");
+                let is_display =
+                    trimmed.contains("format!(") || trimmed.contains("format_currency");
                 if !is_display {
                     violations.push(format!("{label}:{}: {}", index + 1, trimmed));
                 }
@@ -493,8 +512,17 @@ fn money_types_are_integer_cents_everywhere_in_gate() {
 /// (or narrower) arithmetic — the exact class of bug migration 104 widens
 /// out of the wallet schema.
 const MONEY_IDENTIFIERS: &[&str] = &[
-    "balance", "amount", "cents", "reserved", "price", "vat", "refund", "charge",
-    "wallet", "revenue", "credit_note",
+    "balance",
+    "amount",
+    "cents",
+    "reserved",
+    "price",
+    "vat",
+    "refund",
+    "charge",
+    "wallet",
+    "revenue",
+    "credit_note",
 ];
 
 /// All non-test source files of both billing crates, scanned by the
@@ -503,15 +531,14 @@ const MONEY_IDENTIFIERS: &[&str] = &[
 fn crate_source_files() -> Vec<std::path::PathBuf> {
     let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut files = Vec::new();
-    for base in [
-        manifest.join("src"),
-        manifest.join("../billing-common/src"),
-    ] {
+    for base in [manifest.join("src"), manifest.join("../billing-common/src")] {
         if let Ok(entries) = std::fs::read_dir(&base) {
             for entry in entries.flatten() {
                 let path = entry.path();
                 if path.extension().is_some_and(|extension| extension == "rs")
-                    && path.file_name().is_some_and(|name| name != "money_invariants.rs")
+                    && path
+                        .file_name()
+                        .is_some_and(|name| name != "money_invariants.rs")
                 {
                     files.push(path);
                 }
@@ -593,10 +620,13 @@ fn no_float_to_int_conversions_outside_display() {
             let mentions_float = line.contains("f64") || line.contains("f32");
             let converts_to_int =
                 line.contains("as i64") || line.contains("as i32") || line.contains("as i16");
-            let rounds = line.contains(".round()") || line.contains(".ceil()") || line.contains(".floor()") || line.contains(".trunc()");
-            if (mentions_float && converts_to_int) || (rounds && converts_to_int) {
+            let rounds = line.contains(".round()")
+                || line.contains(".ceil()")
+                || line.contains(".floor()")
+                || line.contains(".trunc()");
+            if (mentions_float || rounds) && converts_to_int {
                 let trimmed = line.trim();
-                if ALLOWED_FLOAT_TO_INT_LINES.iter().any(|allowed| *allowed == trimmed) {
+                if ALLOWED_FLOAT_TO_INT_LINES.contains(&trimmed) {
                     continue;
                 }
                 violations.push(format!("{label}:{}: {}", index + 1, trimmed));

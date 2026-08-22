@@ -665,7 +665,11 @@ impl AuditLogger {
     /// are preserved in the live table — they no longer vanish from
     /// verify/export.
     pub async fn archive(&self, older_than: DateTime<Utc>) -> Result<i64, String> {
-        let mut tx = self.db.begin().await.map_err(|e| format!("DB error: {e}"))?;
+        let mut tx = self
+            .db
+            .begin()
+            .await
+            .map_err(|e| format!("DB error: {e}"))?;
 
         let result = sqlx::query(
             "INSERT INTO audit_logs_archive

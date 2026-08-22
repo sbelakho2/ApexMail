@@ -279,7 +279,9 @@ mod tests {
             "the advance must return the replaced hash for linking"
         );
         assert!(
-            !AUDIT_CHAIN_HEAD_ADVANCE_SQL.to_ascii_uppercase().contains("FOR UPDATE"),
+            !AUDIT_CHAIN_HEAD_ADVANCE_SQL
+                .to_ascii_uppercase()
+                .contains("FOR UPDATE"),
             "the head advance must not take explicit row locks"
         );
 

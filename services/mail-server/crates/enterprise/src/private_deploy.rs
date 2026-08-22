@@ -279,12 +279,7 @@ impl PrivateDeployService {
         // Validate the IP is parseable first (reject hostnames/garbage).
         let parsed: std::net::IpAddr = match ip_address.parse() {
             Ok(ip) => ip,
-            Err(_) => {
-                return Ok(ApiResult::err(
-                    "Invalid IP address",
-                    "INVALID_IP",
-                ))
-            }
+            Err(_) => return Ok(ApiResult::err("Invalid IP address", "INVALID_IP")),
         };
 
         // ip_pool_available.allocated_to is a UUID column — the claiming

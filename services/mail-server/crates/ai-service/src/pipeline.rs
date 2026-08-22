@@ -2,8 +2,8 @@
 //!
 //! Orchestrates the full ApexMail assistant flow:
 //!   1. Planner (Qwen 2.5-1.5B): intent classification → structured JSON plan
-//!   2a. Generator (Qwen 2.5-7B): natural language response, streamed token-by-token
-//!   2b. Tool execution: detects tool_call blocks, executes Rust-calculated results, feeds back to LLM
+//!      2a. Generator (Qwen 2.5-7B): natural language response, streamed token-by-token
+//!      2b. Tool execution: detects tool_call blocks, executes Rust-calculated results, feeds back to LLM
 //!   3. Verifier (Rust): deterministic checks on pricing, safety, DNS, quality
 
 use crate::defense::{self, sanitize_input, sanitize_llm_output, ThreatLevel};

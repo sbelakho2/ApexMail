@@ -881,7 +881,7 @@ pub(crate) async fn invalidate_tenant_user_status_cache(tenant_id: &str, state: 
 /// Tokens without a `typ` claim are pre-discrimination session tokens and
 /// stay valid — hard-requiring the claim would invalidate every live session.
 pub(crate) fn claims_typ_is_session(typ: Option<&str>) -> bool {
-    typ.map_or(true, |token_type| token_type == "session")
+    typ.is_none_or(|token_type| token_type == "session")
 }
 
 async fn authenticate_jwt(token: &str, state: &AppState) -> Result<AuthUser, ApiError> {
@@ -1212,7 +1212,10 @@ mod tests {
             scopes: vec![],
         };
         let debug = format!("{ascii_user:?}");
-        assert!(debug.contains("abcd..8"), "unexpected debug output: {debug}");
+        assert!(
+            debug.contains("abcd..8"),
+            "unexpected debug output: {debug}"
+        );
     }
 
     #[test]

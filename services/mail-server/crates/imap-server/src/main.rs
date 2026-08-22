@@ -195,7 +195,8 @@ type AuthFailureTable = HashMap<(String, String), VecDeque<std::time::Instant>>;
 static AUTH_FAILURES: LazyLock<Arc<Mutex<AuthFailureTable>>> =
     LazyLock::new(|| Arc::new(Mutex::new(HashMap::new())));
 /// Per-IP failure history across all usernames.
-static AUTH_IP_FAILURES: LazyLock<Arc<Mutex<HashMap<String, VecDeque<std::time::Instant>>>>> =
+type AuthIpFailureTable = HashMap<String, VecDeque<std::time::Instant>>;
+static AUTH_IP_FAILURES: LazyLock<Arc<Mutex<AuthIpFailureTable>>> =
     LazyLock::new(|| Arc::new(Mutex::new(HashMap::new())));
 
 fn prune_stale(failures: &mut VecDeque<std::time::Instant>, now: std::time::Instant) {
@@ -286,7 +287,10 @@ fn parse_sequence_set(input: &str) -> Result<Vec<(u64, u64)>> {
     }
     for part in input.split(',') {
         if intervals.len() >= MAX_SEQ_INTERVALS {
-            bail!("Too many intervals in sequence set (max {})", MAX_SEQ_INTERVALS);
+            bail!(
+                "Too many intervals in sequence set (max {})",
+                MAX_SEQ_INTERVALS
+            );
         }
         let part = part.trim();
         if part.is_empty() {
@@ -440,12 +444,7 @@ fn resolve_intervals(
 fn resolve_sequence_set(session: &ImapSession, input: &str, is_uid: bool) -> Result<Vec<u64>> {
     let intervals = parse_sequence_set(input)?;
     let max_uid = session.uid_map.iter().copied().max().unwrap_or(0);
-    resolve_intervals(
-        &intervals,
-        is_uid,
-        &session.uid_map,
-        max_uid,
-    )
+    resolve_intervals(&intervals, is_uid, &session.uid_map, max_uid)
 }
 
 // ── Response formatters ─────────────────────────────────────────────────────
@@ -2357,10 +2356,7 @@ fn collect_search_tokens(args: &str, literals: &[Vec<u8>]) -> Result<Vec<String>
         .map(|t| resolve_token(t, literals))
         .collect();
     if tokens.len() > MAX_SEARCH_TOKENS {
-        bail!(
-            "Too many SEARCH criteria (max {})",
-            MAX_SEARCH_TOKENS
-        );
+        bail!("Too many SEARCH criteria (max {})", MAX_SEARCH_TOKENS);
     }
     Ok(tokens)
 }
@@ -2552,11 +2548,7 @@ async fn handle_search<W: AsyncWrite + Unpin>(
                 // the client knows the search could not be executed (e.g.
                 // encrypted stores cannot search over ciphertext).
                 warn!("mailstore search failed: {}", e);
-                return write_line(
-                    writer,
-                    &tagged_no(tag, &format!("SEARCH failed: {}", e)),
-                )
-                .await;
+                return write_line(writer, &tagged_no(tag, &format!("SEARCH failed: {}", e))).await;
             }
         }
     }
@@ -2887,8 +2879,11 @@ const RENAME_MAX_PAGES: usize = 10_000;
 /// testable against a mock (the real gRPC client cannot be instantiated in
 /// tests).
 trait RenameApi: Send {
-    fn create_mailbox(&mut self, account_id: &str, name: &str)
-        -> futures::future::BoxFuture<'_, anyhow::Result<()>>;
+    fn create_mailbox(
+        &mut self,
+        account_id: &str,
+        name: &str,
+    ) -> futures::future::BoxFuture<'_, anyhow::Result<()>>;
     fn list_page(
         &mut self,
         account_id: &str,
@@ -3038,8 +3033,9 @@ async fn rename_mailbox_flow(
         .await
         .map_err(|e| format!("RENAME failed: could not verify source mailbox: {}", e))?;
     if !remaining.is_empty() {
-        return Err("RENAME failed: rename incomplete, source mailbox still has messages"
-            .to_string());
+        return Err(
+            "RENAME failed: rename incomplete, source mailbox still has messages".to_string(),
+        );
     }
 
     api.delete_mailbox(account_id, old_name)
@@ -4434,8 +4430,7 @@ mod tests {
         );
         // seq * → last message
         assert_eq!(
-            resolve_intervals(&parse_sequence_set("*").unwrap(), false, &uid_map, max_uid)
-                .unwrap(),
+            resolve_intervals(&parse_sequence_set("*").unwrap(), false, &uid_map, max_uid).unwrap(),
             vec![40]
         );
         // seq 2:* → 20,30,40
@@ -4451,8 +4446,7 @@ mod tests {
         );
         // out of range → empty
         assert_eq!(
-            resolve_intervals(&parse_sequence_set("5").unwrap(), false, &uid_map, max_uid)
-                .unwrap(),
+            resolve_intervals(&parse_sequence_set("5").unwrap(), false, &uid_map, max_uid).unwrap(),
             Vec::<u64>::new()
         );
         // overlapping ranges dedup
@@ -4725,7 +4719,7 @@ mod tests {
     async fn read_command_handles_sync_literal_in_login() {
         use tokio::io::AsyncWriteExt;
         let (mut client_io, server_io) = tokio::io::duplex(1 << 16);
-        let (mut server_r, mut server_w) = tokio::io::split(server_io);
+        let (server_r, mut server_w) = tokio::io::split(server_io);
         let mut reader = BufReader::new(server_r);
 
         let client_task = tokio::spawn(async move {
@@ -4765,7 +4759,7 @@ mod tests {
     async fn read_command_handles_literal_plus_and_crlf_inside_data() {
         use tokio::io::AsyncWriteExt;
         let (mut client_io, server_io) = tokio::io::duplex(1 << 16);
-        let (mut server_r, mut server_w) = tokio::io::split(server_io);
+        let (server_r, mut server_w) = tokio::io::split(server_io);
         let mut reader = BufReader::new(server_r);
 
         // LITERAL+ (no continuation) with embedded CRLF in the data.
@@ -4808,7 +4802,7 @@ mod tests {
     async fn read_command_reports_truncated_literal() {
         use tokio::io::AsyncWriteExt;
         let (mut client_io, server_io) = tokio::io::duplex(1 << 16);
-        let (mut server_r, mut server_w) = tokio::io::split(server_io);
+        let (server_r, mut server_w) = tokio::io::split(server_io);
         let mut reader = BufReader::new(server_r);
 
         // Client declares {10} but sends only 3 bytes, then closes.
@@ -4836,7 +4830,7 @@ mod tests {
     async fn read_command_ignores_blank_lines_between_commands() {
         use tokio::io::AsyncWriteExt;
         let (mut client_io, server_io) = tokio::io::duplex(1 << 16);
-        let (mut server_r, mut server_w) = tokio::io::split(server_io);
+        let (server_r, mut server_w) = tokio::io::split(server_io);
         let mut reader = BufReader::new(server_r);
 
         let client_task = tokio::spawn(async move {
@@ -4895,14 +4889,11 @@ mod tests {
             "parse took too long: {:?}",
             elapsed
         );
-        assert!(res
-            .unwrap_err()
-            .to_string()
-            .contains("Too many intervals"));
+        assert!(res.unwrap_err().to_string().contains("Too many intervals"));
 
         // Exactly at the cap is still accepted.
         let at_cap = "1,".repeat(MAX_SEQ_INTERVALS);
-        assert!(parse_sequence_set(&at_cap.trim_end_matches(',')).is_ok());
+        assert!(parse_sequence_set(at_cap.trim_end_matches(',')).is_ok());
     }
 
     #[test]
@@ -5038,11 +5029,14 @@ mod tests {
     async fn read_command_rejects_literal_count_bomb() {
         use tokio::io::AsyncWriteExt;
         let (mut client_io, server_io) = tokio::io::duplex(1 << 16);
-        let (mut server_r, mut server_w) = tokio::io::split(server_io);
+        let (server_r, mut server_w) = tokio::io::split(server_io);
         let mut reader = BufReader::new(server_r);
 
         let client_task = tokio::spawn(async move {
-            client_io.write_all(b"a5 APPEND INBOX {1+}\r\n").await.unwrap();
+            client_io
+                .write_all(b"a5 APPEND INBOX {1+}\r\n")
+                .await
+                .unwrap();
             client_io.write_all(b"x").await.unwrap();
             // 63 more one-byte LITERAL+ literals.
             for _ in 1..MAX_LITERALS_PER_COMMAND {

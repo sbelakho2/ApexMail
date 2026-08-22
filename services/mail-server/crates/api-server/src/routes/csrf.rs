@@ -219,10 +219,7 @@ mod tests {
         let token = mint_csrf_token(secret, &format!("{future}:uuid"));
         match validate_csrf_token(&token, secret) {
             Err(ApiError::Forbidden(message)) => {
-                assert!(
-                    message.contains("future"),
-                    "unexpected message: {message}"
-                );
+                assert!(message.contains("future"), "unexpected message: {message}");
             }
             other => panic!("expected Forbidden, got {other:?}"),
         }

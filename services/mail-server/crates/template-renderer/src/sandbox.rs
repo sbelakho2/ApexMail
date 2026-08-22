@@ -48,10 +48,7 @@ impl Sandbox {
         // 4. Render HTML by resolving placeholders in original source.
         //    Missing merge fields resolve to the configured fallback
         //    (empty string by default) and are reported as warnings.
-        let fallback = options
-            .missing_field_fallback
-            .clone()
-            .unwrap_or_default();
+        let fallback = options.missing_field_fallback.clone().unwrap_or_default();
         let outcome = transpiler::resolve_placeholders_reported(source, &options.props, &fallback);
         let mut warnings = outcome.warnings;
         let html = outcome.html;
@@ -396,9 +393,15 @@ mod tests {
     fn test_minify_preserves_pre_textarea_code_content() {
         let html = "<div>\n  <pre>  line one\n    line two  </pre>\n  <p> wrap  me </p>\n  <code>x  =  1</code>\n  <textarea>  keep\n  me  </textarea>\n</div>";
         let result = minify_html(html);
-        assert!(result.contains("<pre>  line one\n    line two  </pre>"), "{result}");
+        assert!(
+            result.contains("<pre>  line one\n    line two  </pre>"),
+            "{result}"
+        );
         assert!(result.contains("<code>x  =  1</code>"), "{result}");
-        assert!(result.contains("<textarea>  keep\n  me  </textarea>"), "{result}");
+        assert!(
+            result.contains("<textarea>  keep\n  me  </textarea>"),
+            "{result}"
+        );
         assert!(result.contains("<p> wrap me </p>"), "{result}");
         assert!(!result.contains("</pre>\n  <p>"), "{result}");
     }

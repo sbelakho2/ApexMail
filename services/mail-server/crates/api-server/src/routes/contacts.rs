@@ -689,8 +689,7 @@ async fn import_contacts(
     for chunk in valid_rows.chunks(IMPORT_CHUNK_SIZE) {
         let ids: Vec<Uuid> = chunk.iter().map(|_| Uuid::new_v4()).collect();
         let emails: Vec<String> = chunk.iter().map(|(_, email, _)| email.clone()).collect();
-        let names: Vec<Option<String>> =
-            chunk.iter().map(|(_, _, name)| name.clone()).collect();
+        let names: Vec<Option<String>> = chunk.iter().map(|(_, _, name)| name.clone()).collect();
 
         let result = sqlx::query(
             r#"INSERT INTO contacts (id, tenant_id, email, name, status, created_at, updated_at)

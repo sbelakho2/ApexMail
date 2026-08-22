@@ -74,10 +74,7 @@ impl InboxManager {
         {
             return MessageCategory::Unsubscribe;
         }
-        if s.contains("viagra")
-            || s.contains("lottery")
-            || f.contains("noreply")
-        {
+        if s.contains("viagra") || s.contains("lottery") || f.contains("noreply") {
             return MessageCategory::Spam;
         }
         if s.contains("support")
@@ -248,7 +245,11 @@ mod tests {
             "Stop emailing me",
             "I want to opt out of marketing emails",
         ] {
-            let msg = InboxManager::classify_message("t".into(), "user@corp.example".into(), subject.into());
+            let msg = InboxManager::classify_message(
+                "t".into(),
+                "user@corp.example".into(),
+                subject.into(),
+            );
             assert_eq!(
                 msg.category,
                 MessageCategory::Unsubscribe,
@@ -271,7 +272,10 @@ mod tests {
     #[test]
     fn unsubscribe_category_serializes_and_parses() {
         assert_eq!(MessageCategory::Unsubscribe.to_string(), "unsubscribe");
-        assert_eq!(MessageCategory::from_str("unsubscribe"), MessageCategory::Unsubscribe);
+        assert_eq!(
+            MessageCategory::from_str("unsubscribe"),
+            MessageCategory::Unsubscribe
+        );
     }
 
     /// Integration test requiring local Postgres. Run with infrastructure.

@@ -233,7 +233,10 @@ impl RetentionSweeper {
     /// `audit_logger` is used for step 3 (audit trim via `archive()`), so the
     /// sweeper shares the logger's hash-chain state with the rest of the
     /// service instead of keeping a second chain cache.
-    pub async fn run_sweep(&self, audit_logger: &AuditLogger) -> Result<RetentionSweepReport, String> {
+    pub async fn run_sweep(
+        &self,
+        audit_logger: &AuditLogger,
+    ) -> Result<RetentionSweepReport, String> {
         let now = Utc::now();
         let mut categories = Vec::new();
 
@@ -277,10 +280,13 @@ impl RetentionSweeper {
                 .fetch_one(&self.db)
                 .await
                 .unwrap_or(-1);
-        let audit_archived = audit_logger.archive(audit_cutoff).await.unwrap_or_else(|e| {
-            warn!(error = %e, "retention sweep: audit archive failed");
-            -1
-        });
+        let audit_archived = audit_logger
+            .archive(audit_cutoff)
+            .await
+            .unwrap_or_else(|e| {
+                warn!(error = %e, "retention sweep: audit archive failed");
+                -1
+            });
 
         let report = RetentionSweepReport {
             ran_at: now,
@@ -318,21 +324,20 @@ impl RetentionSweeper {
         let table = target.table;
         let ts = target.timestamp_column;
 
-        let considered: i64 = match sqlx::query_scalar(&format!(
-            "SELECT COUNT(*) FROM {table} WHERE {ts} < $1"
-        ))
-        .bind(cutoff)
-        .fetch_one(&self.db)
-        .await
-        {
-            Ok(c) => c,
-            Err(e) if is_missing_store(&e) => {
-                return skipped_result(target, retention_days, cutoff, &e);
-            }
-            Err(e) => {
-                return failed_result(target, retention_days, cutoff, &e);
-            }
-        };
+        let considered: i64 =
+            match sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {table} WHERE {ts} < $1"))
+                .bind(cutoff)
+                .fetch_one(&self.db)
+                .await
+            {
+                Ok(c) => c,
+                Err(e) if is_missing_store(&e) => {
+                    return skipped_result(target, retention_days, cutoff, &e);
+                }
+                Err(e) => {
+                    return failed_result(target, retention_days, cutoff, &e);
+                }
+            };
 
         // Legal holds — consult tenants.legal_hold when the table exists.
         // Fetched once and reused for the skip count and the delete.
@@ -390,9 +395,7 @@ impl RetentionSweeper {
                 status: SweepStatus::Deleted,
                 error: None,
             },
-            Err(e) if is_missing_store(&e) => {
-                skipped_result(target, retention_days, cutoff, &e)
-            }
+            Err(e) if is_missing_store(&e) => skipped_result(target, retention_days, cutoff, &e),
             Err(e) => failed_result(target, retention_days, cutoff, &e),
         }
     }
@@ -492,7 +495,10 @@ mod tests {
     fn test_sweep_targets_cover_the_three_event_stores() {
         let targets = sweep_targets();
         let stores: Vec<&str> = targets.iter().map(|t| t.store).collect();
-        assert_eq!(stores, vec!["message_events", "tracking_events", "engagement_events"]);
+        assert_eq!(
+            stores,
+            vec!["message_events", "tracking_events", "engagement_events"]
+        );
     }
 
     /// Registry durations actually drive the cutoffs — message events use
@@ -502,10 +508,20 @@ mod tests {
     fn test_target_durations_come_from_the_registry() {
         let registry = seed_retention_registry();
         let targets = sweep_targets();
-        let me = targets.iter().find(|t| t.store == "message_events").unwrap();
+        let me = targets
+            .iter()
+            .find(|t| t.store == "message_events")
+            .unwrap();
         assert_eq!(me.retention_days(&registry), Some(30), "RET-007 default");
-        let te = targets.iter().find(|t| t.store == "tracking_events").unwrap();
-        assert_eq!(te.retention_days(&registry), Some(30), "min(RET-009, RET-010)");
+        let te = targets
+            .iter()
+            .find(|t| t.store == "tracking_events")
+            .unwrap();
+        assert_eq!(
+            te.retention_days(&registry),
+            Some(30),
+            "min(RET-009, RET-010)"
+        );
     }
 
     /// If a mapped category's default ever drops, the sweep follows the
@@ -539,16 +555,31 @@ mod tests {
 
         let backups = oos.iter().find(|s| s.store == "backups").unwrap();
         assert_eq!(backups.category_ids, &["RET-021"]);
-        assert_eq!(backups.registry_default_days, vec![30], "RET-021 default is 30d");
+        assert_eq!(
+            backups.registry_default_days,
+            vec![30],
+            "RET-021 default is 30d"
+        );
 
         let blobs = oos.iter().find(|s| s.store == "mailstore_blobs").unwrap();
-        assert_eq!(blobs.registry_default_days, vec![7, 7, 7], "RET-001/006/023 defaults");
+        assert_eq!(
+            blobs.registry_default_days,
+            vec![7, 7, 7],
+            "RET-001/006/023 defaults"
+        );
 
-        let ch = oos.iter().find(|s| s.store == "clickhouse_analytics").unwrap();
+        let ch = oos
+            .iter()
+            .find(|s| s.store == "clickhouse_analytics")
+            .unwrap();
         assert_eq!(ch.registry_default_days, vec![30, 30, 30]);
 
         for s in &oos {
-            assert!(!s.enforcement_note.is_empty(), "note required for {}", s.store);
+            assert!(
+                !s.enforcement_note.is_empty(),
+                "note required for {}",
+                s.store
+            );
             assert_eq!(
                 s.category_ids.len(),
                 s.registry_default_days.len(),

@@ -69,11 +69,7 @@ mod tests {
         source
             .lines()
             .filter_map(|line| line.trim().strip_prefix("pub mod "))
-            .map(|rest| {
-                rest.trim_end_matches(';')
-                    .trim()
-                    .to_string()
-            })
+            .map(|rest| rest.trim_end_matches(';').trim().to_string())
             .filter(|name| !name.is_empty())
             .collect()
     }

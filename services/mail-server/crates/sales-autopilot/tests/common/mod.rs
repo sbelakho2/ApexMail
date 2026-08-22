@@ -120,18 +120,16 @@ async fn provision_fresh_db(base: &url::Url) -> bool {
     ))
     .execute(&admin)
     .await;
-    if let Err(drop_err) =
-        sqlx::query(&format!("DROP DATABASE IF EXISTS {SALES_TEST_DB}"))
-            .execute(&admin)
-            .await
+    if let Err(drop_err) = sqlx::query(&format!("DROP DATABASE IF EXISTS {SALES_TEST_DB}"))
+        .execute(&admin)
+        .await
     {
         eprintln!("DROP failed: {drop_err}");
         return false;
     }
-    if let Err(create_err) =
-        sqlx::query(&format!("CREATE DATABASE {SALES_TEST_DB}"))
-            .execute(&admin)
-            .await
+    if let Err(create_err) = sqlx::query(&format!("CREATE DATABASE {SALES_TEST_DB}"))
+        .execute(&admin)
+        .await
     {
         eprintln!("CREATE failed: {create_err}");
         return false;
@@ -171,9 +169,7 @@ async fn apply_platform_migrations(pool: &PgPool) -> anyhow::Result<()> {
         .filter(|path| {
             path.file_name()
                 .and_then(|name| name.to_str())
-                .map(|name| {
-                    !name.ends_with("_down.sql") && !name.contains("performance_indexes")
-                })
+                .map(|name| !name.ends_with("_down.sql") && !name.contains("performance_indexes"))
                 .unwrap_or(false)
         })
         .collect();
@@ -201,11 +197,9 @@ async fn apply_platform_migrations(pool: &PgPool) -> anyhow::Result<()> {
     // shape so the gated dispatcher tests exercise the real contract. The
     // table is empty at provisioning time; the USING NULL keeps the ALTER
     // safe if a stale row ever survives.
-    sqlx::query(
-        "ALTER TABLE email_queue ALTER COLUMN campaign_id TYPE uuid USING NULL",
-    )
-    .execute(pool)
-    .await?;
+    sqlx::query("ALTER TABLE email_queue ALTER COLUMN campaign_id TYPE uuid USING NULL")
+        .execute(pool)
+        .await?;
     sqlx::query("ALTER TABLE messages ALTER COLUMN campaign_id TYPE uuid USING NULL")
         .execute(pool)
         .await?;

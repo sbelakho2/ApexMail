@@ -149,8 +149,10 @@ impl AtoEngine {
     /// Create engine with default config
     pub fn new() -> Self {
         let config = AtoConfig::default();
-        let store =
-            SessionStore::with_pepper(config.max_history_per_user, config.fingerprint_pepper.as_deref());
+        let store = SessionStore::with_pepper(
+            config.max_history_per_user,
+            config.fingerprint_pepper.as_deref(),
+        );
         let lockout_events = if config.use_process_global_lockout_registry {
             global_lockout_registry()
         } else {
@@ -182,8 +184,10 @@ impl AtoEngine {
 
     /// Create engine with custom config
     pub fn with_config(config: AtoConfig) -> Self {
-        let store =
-            SessionStore::with_pepper(config.max_history_per_user, config.fingerprint_pepper.as_deref());
+        let store = SessionStore::with_pepper(
+            config.max_history_per_user,
+            config.fingerprint_pepper.as_deref(),
+        );
         let lockout_events = if config.use_process_global_lockout_registry {
             global_lockout_registry()
         } else {
@@ -989,14 +993,17 @@ mod tests {
         };
         let engine = AtoEngine::with_config(config);
         let mut last = None;
-        for i in 0..5 {
+        for _i in 0..5 {
             let mut e = login_event("toctou-user", "9.9.9.9", 40.7, -74.0);
             e.success = false;
             last = Some(engine.evaluate(&e));
         }
         let verdict = last.expect("evaluated");
         assert!(
-            verdict.factors.iter().any(|f| f.id == "LOCKOUT" || f.id == "LOCKOUT_ESCALATED"),
+            verdict
+                .factors
+                .iter()
+                .any(|f| f.id == "LOCKOUT" || f.id == "LOCKOUT_ESCALATED"),
             "5th failing attempt must itself be locked out: {:?}",
             verdict.factors
         );

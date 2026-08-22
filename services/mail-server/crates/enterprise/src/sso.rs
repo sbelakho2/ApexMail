@@ -681,8 +681,11 @@ impl SSOService {
                         _ => {}
                     }
                 }
+                // quick-xml 0.41: `unescape()` is gone; Text events are decoded
+                // via `decode()`. Entity references now arrive as separate
+                // `Event::GeneralRef` events, so Text content is entity-free.
                 Ok(Event::Text(ref e)) => {
-                    if let Ok(text) = e.unescape() {
+                    if let Ok(text) = e.decode() {
                         let text_str = text.as_ref();
                         if in_status_code {
                             status_code_value = Some(text_str.to_string());
@@ -1288,8 +1291,10 @@ mod tests {
         let attr_statements: String = attributes.iter().map(|(name, value)| {
             format!(
                 r#"<saml:Attribute Name="{}"><saml:AttributeValue>{}</saml:AttributeValue></saml:Attribute>"#,
-                xml_escape(name),
-                xml_escape(value),
+                // quick-xml 0.41: escape() takes impl Into<Cow<str>>; deref the
+                // &&str tuple fields (0.36's &str parameter auto-derefed them).
+                xml_escape(*name),
+                xml_escape(*value),
             )
         }).collect();
 
@@ -1430,7 +1435,7 @@ mod tests {
                     }
                 }
                 Ok(Event::Text(ref e)) => {
-                    if let Ok(text) = e.unescape() {
+                    if let Ok(text) = e.decode() {
                         let text_str = text.as_ref();
                         if in_status_code {
                             status_code_value = Some(text_str.to_string());
@@ -1557,7 +1562,7 @@ mod tests {
                 }
                 Ok(Event::Text(ref e)) => {
                     if found_issuer {
-                        assert_eq!(e.unescape().unwrap().as_ref(), entity_id);
+                        assert_eq!(e.decode().unwrap().as_ref(), entity_id);
                         found_issuer = false;
                     }
                 }

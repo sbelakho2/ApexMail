@@ -157,7 +157,8 @@ mod tests {
             let body = &s["whsec_".len()..];
             assert_eq!(body.len(), 24, "length preserved: {s}");
             assert!(
-                body.chars().all(|c| c.is_ascii_digit() || c.is_ascii_lowercase()),
+                body.chars()
+                    .all(|c| c.is_ascii_digit() || c.is_ascii_lowercase()),
                 "alphanumeric charset only: {s}"
             );
         }
@@ -171,7 +172,8 @@ mod tests {
             let body = &s["vfy_".len()..];
             assert_eq!(body.len(), 32, "length preserved: {s}");
             assert!(
-                body.chars().all(|c| c.is_ascii_digit() || c.is_ascii_lowercase()),
+                body.chars()
+                    .all(|c| c.is_ascii_digit() || c.is_ascii_lowercase()),
                 "alphanumeric charset only: {s}"
             );
         }

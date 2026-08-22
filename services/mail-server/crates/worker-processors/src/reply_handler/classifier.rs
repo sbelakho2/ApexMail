@@ -379,7 +379,7 @@ pub fn classify(subject: &str, body: &str) -> ClassificationResult {
     };
 
     // Pick the best classification (sort by priority score)
-    scores.sort_by(|a, b| b.1.cmp(&a.1));
+    scores.sort_by_key(|(_, priority, _, _)| std::cmp::Reverse(*priority));
 
     // Extract:classification, _priority, actual_matches, reasoning
     let (classification, actual_matches, reasoning) = scores

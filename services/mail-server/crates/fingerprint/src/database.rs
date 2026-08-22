@@ -631,10 +631,7 @@ mod tests {
             assert_eq!(parsed.ja4_a, key);
         }
         // The malicious concept survives with a properly formatted key.
-        let malicious = db
-            .known
-            .get("di020200")
-            .expect("attack-tool seed present");
+        let malicious = db.known.get("di020200").expect("attack-tool seed present");
         assert_eq!(malicious.suspicion, SuspicionLevel::Malicious);
     }
 }

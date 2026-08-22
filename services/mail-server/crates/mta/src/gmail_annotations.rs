@@ -486,8 +486,8 @@ mod tests {
         // The surrounding HTML still has exactly the two structural tags.
         assert_eq!(result.html.matches("</script>").count(), 1);
         // And the payload still parses as JSON after unescaping.
-        let parsed: serde_json::Value = serde_json::from_str(&result.json_ld)
-            .expect("escaped JSON-LD must remain valid JSON");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&result.json_ld).expect("escaped JSON-LD must remain valid JSON");
         assert_eq!(
             parsed["provider"]["name"],
             "</script><img src=x onerror=alert(1)>"
@@ -501,7 +501,10 @@ mod tests {
         let escaped = escape_json_for_script("a & b\u{2028}\u{2029} <c>");
         assert_eq!(escaped, "a \\u0026 b\\u2028\\u2029 \\u003cc\\u003e");
         // Structural JSON characters are untouched.
-        assert_eq!(escape_json_for_script(r#"{"k": [1, 2]}"#), r#"{"k": [1, 2]}"#);
+        assert_eq!(
+            escape_json_for_script(r#"{"k": [1, 2]}"#),
+            r#"{"k": [1, 2]}"#
+        );
     }
 
     #[test]
@@ -514,7 +517,10 @@ mod tests {
             end_date: None,
         };
         let badge = svc.generate_preview_badge(&deal);
-        assert!(!badge.contains("<script>"), "badge must escape script tags: {badge}");
+        assert!(
+            !badge.contains("<script>"),
+            "badge must escape script tags: {badge}"
+        );
         assert!(!badge.contains("<b>"), "badge must escape HTML: {badge}");
         assert!(badge.contains("&lt;b&gt;bold&lt;/b&gt; &amp; scary"));
         assert!(badge.contains("&lt;script&gt;"));

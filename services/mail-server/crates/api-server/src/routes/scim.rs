@@ -138,9 +138,7 @@ async fn validate_members_in_tenant(
     let mut parsed = Vec::with_capacity(values.len());
     for value in values {
         let user_id = Uuid::parse_str(value).map_err(|_| {
-            ApiError::BadRequest(format!(
-                "invalid member id '{value}': must be a user UUID"
-            ))
+            ApiError::BadRequest(format!("invalid member id '{value}': must be a user UUID"))
         })?;
         parsed.push(user_id);
     }
@@ -161,10 +159,7 @@ async fn validate_members_in_tenant(
             })?;
 
     let found_ids: std::collections::HashSet<Uuid> = found.into_iter().map(|(id,)| id).collect();
-    let invalid_count = parsed
-        .iter()
-        .filter(|id| !found_ids.contains(id))
-        .count();
+    let invalid_count = parsed.iter().filter(|id| !found_ids.contains(id)).count();
 
     if invalid_count > 0 {
         return Err(ApiError::BadRequest(format!(
@@ -698,12 +693,8 @@ async fn patch_group(
                         }
                         // Audit C: added members must belong to the caller's
                         // tenant — same rule as create/update.
-                        let validated = validate_members_in_tenant(
-                            &state.db,
-                            &auth.tenant_id,
-                            &values,
-                        )
-                        .await?;
+                        let validated =
+                            validate_members_in_tenant(&state.db, &auth.tenant_id, &values).await?;
                         for (member, user_id) in members.iter().zip(validated) {
                             let display = member
                                 .get("display")
@@ -1316,8 +1307,9 @@ mod tests {
             let normalized = raw
                 .replace("CREATE UNIQUE INDEX CONCURRENTLY", "CREATE UNIQUE INDEX")
                 .replace("CREATE INDEX CONCURRENTLY", "CREATE INDEX");
-            fs::write(temp_dir.join(file_name), normalized)
-                .unwrap_or_else(|error| panic!("failed to write copied migration {:?}: {error}", path));
+            fs::write(temp_dir.join(file_name), normalized).unwrap_or_else(|error| {
+                panic!("failed to write copied migration {:?}: {error}", path)
+            });
         }
 
         let migrator = Migrator::new(temp_dir.clone())
@@ -1349,7 +1341,10 @@ mod tests {
             .expect_err("garbage member ids must be rejected");
         match parse_error {
             ApiError::BadRequest(message) => {
-                assert!(message.contains("invalid member id"), "unexpected: {message}");
+                assert!(
+                    message.contains("invalid member id"),
+                    "unexpected: {message}"
+                );
             }
             other => panic!("expected BadRequest, got {other:?}"),
         }
@@ -1424,13 +1419,12 @@ mod tests {
 
         // No group row may be written for the failed creation (the handler
         // validates members BEFORE inserting the group).
-        let groups: (i64,) = sqlx::query_as(
-            "SELECT COUNT(*) FROM scim_groups WHERE tenant_id = $1",
-        )
-        .bind(&tenant_a)
-        .fetch_one(&pool)
-        .await
-        .expect("failed to count groups");
+        let groups: (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM scim_groups WHERE tenant_id = $1")
+                .bind(&tenant_a)
+                .fetch_one(&pool)
+                .await
+                .expect("failed to count groups");
         assert_eq!(groups.0, 0, "no group row may exist for a rejected create");
 
         // A same-tenant member validates cleanly.

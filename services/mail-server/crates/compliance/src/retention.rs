@@ -726,10 +726,16 @@ mod tests {
     #[test]
     fn test_zero_retention_allowed_for_content_categories() {
         let r = registry();
-        let content_categories = ["RET-001", "RET-005", "RET-006", "RET-014", "RET-015", "RET-022", "RET-023"];
+        let content_categories = [
+            "RET-001", "RET-005", "RET-006", "RET-014", "RET-015", "RET-022", "RET-023",
+        ];
         for id in content_categories {
             let cat = r.get(id).unwrap_or_else(|| panic!("{} should exist", id));
-            assert!(cat.zero_retention_allowed, "{} should allow zero retention", cat.category_name);
+            assert!(
+                cat.zero_retention_allowed,
+                "{} should allow zero retention",
+                cat.category_name
+            );
         }
     }
 
@@ -741,36 +747,60 @@ mod tests {
 
         let events = r.get("RET-007").unwrap();
         assert!(events.content_retention_separate);
-        assert_ne!(body.default_retention_days, events.default_retention_days,
-            "Content and event retention should differ");
+        assert_ne!(
+            body.default_retention_days, events.default_retention_days,
+            "Content and event retention should differ"
+        );
     }
 
     #[test]
     fn test_plan_limits_enforced() {
         let r = registry();
-        assert!(r.validate_customer_selection("RET-001", "free", 7).is_err(),
-            "Free plan should not allow 7-day message body retention");
-        assert!(r.validate_customer_selection("RET-001", "free", 1).is_ok(),
-            "Free plan should allow 1-day message body retention");
-        assert!(r.validate_customer_selection("RET-001", "enterprise", 365).is_ok(),
-            "Enterprise should allow 365-day message body retention");
-        assert!(r.validate_customer_selection("RET-001", "enterprise", 400).is_err(),
-            "Enterprise should not allow 400-day message body retention");
+        assert!(
+            r.validate_customer_selection("RET-001", "free", 7).is_err(),
+            "Free plan should not allow 7-day message body retention"
+        );
+        assert!(
+            r.validate_customer_selection("RET-001", "free", 1).is_ok(),
+            "Free plan should allow 1-day message body retention"
+        );
+        assert!(
+            r.validate_customer_selection("RET-001", "enterprise", 365)
+                .is_ok(),
+            "Enterprise should allow 365-day message body retention"
+        );
+        assert!(
+            r.validate_customer_selection("RET-001", "enterprise", 400)
+                .is_err(),
+            "Enterprise should not allow 400-day message body retention"
+        );
     }
 
     #[test]
     fn test_suppressions_indefinite_retention() {
         let r = registry();
         let supp = r.get("RET-013").unwrap();
-        assert_eq!(supp.default_retention_days, 0, "Suppressions have indefinite retention (0 = never expire)");
-        assert!(supp.plan_specific_limit.is_none(), "Suppressions should not have plan limits");
+        assert_eq!(
+            supp.default_retention_days, 0,
+            "Suppressions have indefinite retention (0 = never expire)"
+        );
+        assert!(
+            supp.plan_specific_limit.is_none(),
+            "Suppressions should not have plan limits"
+        );
     }
 
     #[test]
     fn test_billing_minimum_retention() {
         let r = registry();
         let billing = r.get("RET-018").unwrap();
-        assert!(billing.default_retention_days >= 2555, "Billing records must be retained at least 7 years");
-        assert!(billing.legal_retention_can_override, "Legal must be able to override billing retention");
+        assert!(
+            billing.default_retention_days >= 2555,
+            "Billing records must be retained at least 7 years"
+        );
+        assert!(
+            billing.legal_retention_can_override,
+            "Legal must be able to override billing retention"
+        );
     }
 }

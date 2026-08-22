@@ -213,7 +213,7 @@ pub fn normalize_endpoint_label(path: &str) -> String {
         if idx > 0 {
             out.push('/');
         }
-        out.push_str(&normalize_segment(seg));
+        out.push_str(normalize_segment(seg));
     }
     truncate_label(&out)
 }
@@ -287,8 +287,14 @@ mod tests {
             normalize_endpoint_label("/users/123e4567-e89b-12d3-a456-426614174000"),
             "/users/{uuid}"
         );
-        assert_eq!(normalize_endpoint_label("/api/v1/users/42"), "/api/v1/users/{id}");
-        assert_eq!(normalize_endpoint_label("/files/deadbeef12345678"), "/files/{hex}");
+        assert_eq!(
+            normalize_endpoint_label("/api/v1/users/42"),
+            "/api/v1/users/{id}"
+        );
+        assert_eq!(
+            normalize_endpoint_label("/files/deadbeef12345678"),
+            "/files/{hex}"
+        );
         assert_eq!(
             normalize_endpoint_label("/search?query=attacker-controlled"),
             "/search"
@@ -301,7 +307,12 @@ mod tests {
         let long = format!("/very-long-route/{}", "a".repeat(200));
         let label = normalize_endpoint_label(&long);
         // long segment → {long}; overall label bounded at 64 chars
-        assert!(label.len() <= MAX_LABEL_LEN, "got {} ({})", label.len(), label);
+        assert!(
+            label.len() <= MAX_LABEL_LEN,
+            "got {} ({})",
+            label.len(),
+            label
+        );
     }
 
     #[test]

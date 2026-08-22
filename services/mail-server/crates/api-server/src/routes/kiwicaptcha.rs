@@ -177,10 +177,11 @@ async fn issue_challenge_handler(
 
     // Validate scope against an allowlist to prevent abuse.
     let scope = body.scope.as_str();
-    if !matches!(scope, "login" | "signup" | "forgot-password" | "reset-password") {
-        return Err(ApiError::Validation(vec![
-            "invalid captcha scope".into(),
-        ]));
+    if !matches!(
+        scope,
+        "login" | "signup" | "forgot-password" | "reset-password"
+    ) {
+        return Err(ApiError::Validation(vec!["invalid captcha scope".into()]));
     }
 
     let client_ip = connect_info
@@ -259,8 +260,9 @@ async fn issue_challenge_handler(
     // auto-tuning (when enabled via config) always sees an idle deployment.
     // request_binding = None: no application transaction is correlated with
     // the challenge at issuance.
-    let issued = kiwicaptcha::issue_challenge(&kc_config, scope, &client_ip, now_unix, now_ns, 0, None)
-        .map_err(|_| ApiError::Internal("failed to issue KiwiCaptcha challenge".into()))?;
+    let issued =
+        kiwicaptcha::issue_challenge(&kc_config, scope, &client_ip, now_unix, now_ns, 0, None)
+            .map_err(|_| ApiError::Internal("failed to issue KiwiCaptcha challenge".into()))?;
 
     // Store the challenge record in Redis, keyed by nonce, with TTL.
     let record_json = serde_json::to_string(&issued.record)
@@ -276,7 +278,9 @@ async fn issue_challenge_handler(
     )
     .await?;
 
-    challenge_cache().lock().put(&ip_hash, scope, issued.clone());
+    challenge_cache()
+        .lock()
+        .put(&ip_hash, scope, issued.clone());
 
     tracing::debug!(
         scope = scope,
@@ -319,8 +323,7 @@ mod tests {
             .expect("pool construction is lazy");
 
         assert_eq!(
-            check_challenge_rate_limit(&pool, "apexmail:kiwi_challenge_rate:hmac:test")
-                .await,
+            check_challenge_rate_limit(&pool, "apexmail:kiwi_challenge_rate:hmac:test").await,
             ChallengeRateLimit::RedisUnavailable,
             "a dead Redis must never silently allow challenge issuance"
         );

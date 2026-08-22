@@ -74,7 +74,7 @@ mod ui_xss {
                 page_title: "Security",
                 page_description: "Security status",
                 current_path: "/cp",
-            csrf_token: "",
+                csrf_token: "",
                 banners: vec![OperationalBanner {
                     tone: "critical",
                     message: payload,

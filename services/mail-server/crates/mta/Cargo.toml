@@ -95,7 +95,7 @@ dotenvy.workspace = true
 # TLS PEM parsing
 rustls-pemfile = "2"
 x509-parser = { version = "0.16", features = ["verify"] }
-quick-xml = "0.36"
+quick-xml = "0.41"
 webpki-roots = "0.26"
 
 # Public suffix list (registrable-domain computation for DMARC, RFC 7489)

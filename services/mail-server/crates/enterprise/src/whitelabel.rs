@@ -516,7 +516,12 @@ impl WhiteLabelService {
 
         // Legacy rows never received a token: issue one now and require the
         // TXT record before verifying.
-        if domain.verification_token.as_deref().unwrap_or("").is_empty() {
+        if domain
+            .verification_token
+            .as_deref()
+            .unwrap_or("")
+            .is_empty()
+        {
             let token = crate::sso::generate_random_token(32);
             sqlx::query("UPDATE ent_whitelabel_domains SET verification_token = $2 WHERE id = $1")
                 .bind(id)
@@ -725,7 +730,8 @@ pub fn txt_records_contain_token(records: &[String], token: &str) -> bool {
 /// Production TXT lookup using the workspace dns-resolver crate
 /// (trust-dns/hickory under the hood).
 async fn default_txt_lookup(host: String) -> Result<Vec<String>, String> {
-    let lookup = apexmail_dns_resolver::DnsLookup::new().map_err(|e| format!("DNS resolver: {e}"))?;
+    let lookup =
+        apexmail_dns_resolver::DnsLookup::new().map_err(|e| format!("DNS resolver: {e}"))?;
     lookup
         .lookup_txt(&host)
         .await

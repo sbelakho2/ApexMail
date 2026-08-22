@@ -621,13 +621,18 @@ mod tests {
         // site.js is gone: every choice must be a real navigation to the
         // /consent endpoint (never an inert type="button").
         let cookie = CookieConsentBanner { visible: true }.render_html();
-        assert!(!cookie.contains("<button"), "inert button survived the no-JS rework");
+        assert!(
+            !cookie.contains("<button"),
+            "inert button survived the no-JS rework"
+        );
         assert!(cookie.contains("href=\"/consent?choice=necessary\""));
         assert!(cookie.contains("href=\"/consent?choice=all\""));
         // Server-side visibility marker the nginx/api-server flip targets.
         assert!(cookie.contains("data-consent-state=\"pending\""));
         // Hidden banner renders nothing.
-        assert!(CookieConsentBanner { visible: false }.render_html().is_empty());
+        assert!(CookieConsentBanner { visible: false }
+            .render_html()
+            .is_empty());
         // The shared cookie name must match the nginx map key
         // ($cookie_apexmail_consent) and the api-server's constant.
         assert_eq!(CONSENT_COOKIE_NAME, "apexmail_consent");

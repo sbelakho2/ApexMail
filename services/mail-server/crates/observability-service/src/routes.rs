@@ -890,5 +890,4 @@ mod tests {
 
         persist_alerts_to_system_alerts(&None, &[alert]).await;
     }
-
 }

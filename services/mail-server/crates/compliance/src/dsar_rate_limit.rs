@@ -238,11 +238,7 @@ impl DsarRateLimiter {
                     return self.check_and_consume_in_memory(key, max_count, kind);
                 }
             };
-            let count: u32 = match redis::cmd("INCR")
-                .arg(key)
-                .query_async(&mut *conn)
-                .await
-            {
+            let count: u32 = match redis::cmd("INCR").arg(key).query_async(&mut *conn).await {
                 Ok(c) => c,
                 Err(e) => {
                     warn!(error = %e, "Redis rate limit INCR failed; falling back to in-memory");
@@ -272,7 +268,12 @@ impl DsarRateLimiter {
     }
 
     /// Read-only in-memory check.
-    fn peek_in_memory(&self, key: &str, max_count: u32, kind: RateLimitKind) -> DsarRateLimitStatus {
+    fn peek_in_memory(
+        &self,
+        key: &str,
+        max_count: u32,
+        kind: RateLimitKind,
+    ) -> DsarRateLimitStatus {
         let count = self.in_memory.get(key).unwrap_or(0);
         if count >= max_count {
             return exceeded(kind, 3600);
@@ -311,9 +312,7 @@ fn exceeded(kind: RateLimitKind, window_secs: u64) -> DsarRateLimitStatus {
     match kind {
         RateLimitKind::User => DsarRateLimitStatus::UserRateLimited { retry_after },
         RateLimitKind::Tenant => DsarRateLimitStatus::TenantRateLimited { retry_after },
-        RateLimitKind::Verification => {
-            DsarRateLimitStatus::VerificationRateLimited { retry_after }
-        }
+        RateLimitKind::Verification => DsarRateLimitStatus::VerificationRateLimited { retry_after },
     }
 }
 

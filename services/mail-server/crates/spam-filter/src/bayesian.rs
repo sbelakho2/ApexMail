@@ -814,7 +814,11 @@ mod tests {
         // Decomposed (NFD) é normalizes to the composed form, matching the
         // composed spelling used during training.
         let decomposed = tokenize("cafe\u{301}");
-        assert!(decomposed.contains(&"caf\u{e9}".to_string()), "got {:?}", decomposed);
+        assert!(
+            decomposed.contains(&"caf\u{e9}".to_string()),
+            "got {:?}",
+            decomposed
+        );
     }
 
     #[test]

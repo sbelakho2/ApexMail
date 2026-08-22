@@ -326,8 +326,7 @@ fn return_path_regex_pattern() -> String {
 impl SelfHostedBounceHandler {
     /// Create a new bounce handler.
     pub fn new(db: PgPool) -> Self {
-        let return_path_regex =
-            Regex::new(&return_path_regex_pattern()).expect("Invalid regex");
+        let return_path_regex = Regex::new(&return_path_regex_pattern()).expect("Invalid regex");
 
         Self {
             db,
@@ -402,7 +401,9 @@ impl SelfHostedBounceHandler {
         // deliverability metrics, or poison the suppression list.
         let queued = self.lookup_queued_message(message_id).await?;
         let suppression_recipient = match verp_bounce_disposition(
-            queued.as_ref().map(|(tenant, recipient)| (tenant.as_str(), recipient.as_str())),
+            queued
+                .as_ref()
+                .map(|(tenant, recipient)| (tenant.as_str(), recipient.as_str())),
             tenant_id,
         ) {
             VerpBounceDisposition::Process(validated_recipient) => validated_recipient,
@@ -961,10 +962,7 @@ mod tests {
             "the delivery-status part must win over planted body lines"
         );
         assert_eq!(bounce_type, BounceType::Hard);
-        assert_eq!(
-            diagnostic.as_deref(),
-            Some("smtp; 550 5.1.1 User unknown")
-        );
+        assert_eq!(diagnostic.as_deref(), Some("smtp; 550 5.1.1 User unknown"));
     }
 
     #[test]
@@ -973,10 +971,8 @@ mod tests {
         let regions = dsn_header_regions(&raw);
 
         assert!(
-            regions
-                .iter()
-                .any(|r| r.contains("message/delivery-status")
-                    && r.contains("Final-Recipient: rfc822; real-recipient@example.com")),
+            regions.iter().any(|r| r.contains("message/delivery-status")
+                && r.contains("Final-Recipient: rfc822; real-recipient@example.com")),
             "the delivery-status part must be a search region"
         );
         for region in &regions {
@@ -1005,7 +1001,10 @@ mod tests {
 
         let (recipient, bounce_type, _category, diagnostic) =
             parse_dsn_email(raw.as_bytes()).unwrap();
-        assert_eq!(recipient, "unknown@unknown.com", "no trusted Final-Recipient");
+        assert_eq!(
+            recipient, "unknown@unknown.com",
+            "no trusted Final-Recipient"
+        );
         assert_eq!(bounce_type, BounceType::Unknown, "planted Status ignored");
         assert_eq!(diagnostic, None, "planted Diagnostic-Code ignored");
     }
@@ -1035,7 +1034,8 @@ mod tests {
 
         // Arbitrary attacker domains must not parse either.
         assert!(
-            re.captures("bounce+tenant-a+msg@returns.attacker.tld").is_none(),
+            re.captures("bounce+tenant-a+msg@returns.attacker.tld")
+                .is_none(),
             "foreign VERP domains must be rejected"
         );
     }
@@ -1248,14 +1248,12 @@ mod tests {
             .expect("legitimate bounce processes");
 
         assert_eq!(bounce_count(&pool).await, 1, "bounce recorded");
-        let suppressed: Option<(String, String)> = sqlx::query_as(
-            "SELECT email, reason FROM suppressions WHERE tenant_id = 'tenant-a'",
-        )
-        .fetch_optional(&pool)
-        .await
-        .unwrap();
-        let (suppressed_email, suppressed_reason) =
-            suppressed.expect("hard bounce suppresses");
+        let suppressed: Option<(String, String)> =
+            sqlx::query_as("SELECT email, reason FROM suppressions WHERE tenant_id = 'tenant-a'")
+                .fetch_optional(&pool)
+                .await
+                .unwrap();
+        let (suppressed_email, suppressed_reason) = suppressed.expect("hard bounce suppresses");
         // The VALIDATED queued recipient is suppressed — never the address
         // planted in the original message body.
         assert_eq!(suppressed_email, "real-recipient@example.com");

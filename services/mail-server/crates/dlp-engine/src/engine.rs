@@ -466,10 +466,16 @@ mod tests {
         let engine = DlpEngine::with_config(config);
         // Mixed-case recipient domain must still match the allowlist entry
         // after canonicalization on BOTH sides.
-        let verdict = engine.scan("SSN: 123-45-6789 CONFIDENTIAL", Some("Internal.Example.COM"));
+        let verdict = engine.scan(
+            "SSN: 123-45-6789 CONFIDENTIAL",
+            Some("Internal.Example.COM"),
+        );
         assert_eq!(verdict.action, DlpAction::Allow);
         // …and a different domain is not allowlisted.
-        let verdict = engine.scan("SSN: 123-45-6789 CONFIDENTIAL", Some("external.example.com"));
+        let verdict = engine.scan(
+            "SSN: 123-45-6789 CONFIDENTIAL",
+            Some("external.example.com"),
+        );
         assert_ne!(verdict.action, DlpAction::Allow);
     }
 

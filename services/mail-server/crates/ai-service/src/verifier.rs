@@ -162,8 +162,7 @@ impl ResponseVerifier {
 
         for (amount, context) in &euros {
             let cents = (amount * 100.0).round() as i64;
-            let is_canonical_price =
-                CANONICAL_PRICES.contains(&(cents / 100)) && cents % 100 == 0;
+            let is_canonical_price = CANONICAL_PRICES.contains(&(cents / 100)) && cents % 100 == 0;
             let is_allowed_total = allowed_totals
                 .iter()
                 .any(|allowed| (*allowed * 100.0).round() as i64 == cents);
@@ -197,8 +196,7 @@ impl ResponseVerifier {
             // Non-canonical email/team/domain volume numbers in plan context.
             let whole = cents / 100;
             if has_plan_or_period_context(context)
-                && whole >= 1_000
-                && whole <= 10_000_000
+                && (1_000..=10_000_000).contains(&whole)
                 && !CANONICAL_EMAIL_LIMITS.contains(&whole)
                 && whole % 5000 == 0
             {
@@ -610,7 +608,8 @@ impl ResponseVerifier {
 /// being rounded to 66) together with a ±60 character context snippet.
 fn extract_euro_matches(text: &str) -> Vec<(f64, String)> {
     static EURO_RE: Lazy<Regex> = Lazy::new(|| {
-        Regex::new(r###"[€$]\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)"###).expect("valid static price regex")
+        Regex::new(r###"[€$]\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)"###)
+            .expect("valid static price regex")
     });
     EURO_RE
         .captures_iter(text)

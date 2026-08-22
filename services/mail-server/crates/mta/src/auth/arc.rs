@@ -773,7 +773,7 @@ mod tests {
             b"Hello world\r\n",
             &test_auth_result(),
             &config,
-            &[set1.clone()],
+            std::slice::from_ref(&set1),
             &lookup,
         )
         .expect("generate set 2");
@@ -809,7 +809,7 @@ mod tests {
             b"Hello world\r\n",
             &test_auth_result(),
             &config,
-            &[set1.clone()],
+            std::slice::from_ref(&set1),
             &lookup,
         )
         .expect("generate set 2");
@@ -886,7 +886,7 @@ mod tests {
             b"Hello world\r\n",
             &test_auth_result(),
             &config,
-            &[set1.clone()],
+            std::slice::from_ref(&set1),
             &lookup,
         )
         .expect("generate set 2");

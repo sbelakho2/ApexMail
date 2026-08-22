@@ -5,8 +5,9 @@
 //! - Protocol-specific analysis
 //! - Payload size scaling
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use ids_engine::{config::IdsConfig, engine::IdsEngine};
+use std::hint::black_box;
 use std::net::{IpAddr, Ipv4Addr};
 
 fn make_engine() -> IdsEngine {

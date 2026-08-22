@@ -21,24 +21,24 @@ pub fn render_bar_chart(data: &[(String, f64)], width: u32, height: u32) -> Stri
     }
 
     let n = data.len();
-    let max_val = data.iter().map(|(_, v)| *v).fold(0.0_f64, f64::max).max(1.0);
+    let max_val = data
+        .iter()
+        .map(|(_, v)| *v)
+        .fold(0.0_f64, f64::max)
+        .max(1.0);
     let padding_left = 48.0;
     let padding_top = 24.0;
     let padding_bottom = 36.0;
     let chart_w = f64::from(width) - padding_left - 16.0;
     let chart_h = f64::from(height) - padding_top - padding_bottom;
     let bar_gap = 4.0;
-    let bar_w = ((chart_w - bar_gap * (n as f64 - 1.0)) / n as f64).max(6.0).min(60.0);
+    let bar_w = ((chart_w - bar_gap * (n as f64 - 1.0)) / n as f64).clamp(6.0, 60.0);
 
-    let mut svg = String::from(concat!(
-        r##"<svg xmlns="http://www.w3.org/2000/svg" width=""##,
-    ));
+    let mut svg = String::from("<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"");
     svg.push_str(&width.to_string());
-    svg.push_str(concat!(r##"" height=""##));
+    svg.push_str("\" height=\"");
     svg.push_str(&height.to_string());
-    svg.push_str(concat!(
-        r##"" viewBox="0 0 "##,
-    ));
+    svg.push_str("\" viewBox=\"0 0 ");
     svg.push_str(&width.to_string());
     svg.push(' ');
     svg.push_str(&height.to_string());
@@ -49,18 +49,18 @@ pub fn render_bar_chart(data: &[(String, f64)], width: u32, height: u32) -> Stri
     // Grid lines
     for i in 0..=3 {
         let y = padding_top + chart_h * (i as f64) / 3.0;
-        svg.push_str(&build_svg_line_h(
-            padding_left,
-            padding_left + chart_w,
-            y,
-        ));
+        svg.push_str(&build_svg_line_h(padding_left, padding_left + chart_w, y));
     }
 
     // Y-axis labels
     for i in 0..=3 {
         let value = max_val * (3.0 - i as f64) / 3.0;
         let y = padding_top + chart_h * (i as f64) / 3.0 + 4.0;
-        svg.push_str(&build_svg_y_label(padding_left - 8.0, y, &format_y_axis(value)));
+        svg.push_str(&build_svg_y_label(
+            padding_left - 8.0,
+            y,
+            &format_y_axis(value),
+        ));
     }
 
     // Bars
@@ -79,7 +79,14 @@ pub fn render_bar_chart(data: &[(String, f64)], width: u32, height: u32) -> Stri
         let vx = x + bar_w / 2.0;
         let vy = y - 6.0;
         let val_str = format_y_axis(*val);
-        svg.push_str(&build_svg_text_center(vx, vy, 10, &val_str, "rgb(var(--muted-foreground))", "600"));
+        svg.push_str(&build_svg_text_center(
+            vx,
+            vy,
+            10,
+            &val_str,
+            "rgb(var(--muted-foreground))",
+            "600",
+        ));
     }
 
     // X-axis line
@@ -94,7 +101,14 @@ pub fn render_bar_chart(data: &[(String, f64)], width: u32, height: u32) -> Stri
         let x = padding_left + i as f64 * (bar_w + bar_gap) + bar_w / 2.0;
         let display_label = truncate_label(label, 8);
         let ty = padding_top + chart_h + 18.0;
-        svg.push_str(&build_svg_text_center(x, ty, 10, &html_escape_svg(&display_label), "rgb(var(--muted-foreground))", "400"));
+        svg.push_str(&build_svg_text_center(
+            x,
+            ty,
+            10,
+            &html_escape_svg(&display_label),
+            "rgb(var(--muted-foreground))",
+            "400",
+        ));
     }
 
     svg.push_str("</svg>");
@@ -115,8 +129,16 @@ pub fn render_line_chart(data: &[(String, f64)], width: u32, height: u32) -> Str
     let chart_h = f64::from(height) - padding_top - padding_bottom;
 
     let n = data.len();
-    let max_val = data.iter().map(|(_, v)| *v).fold(0.0_f64, f64::max).max(1.0);
-    let min_val = data.iter().map(|(_, v)| *v).fold(f64::MAX, f64::min).min(0.0);
+    let max_val = data
+        .iter()
+        .map(|(_, v)| *v)
+        .fold(0.0_f64, f64::max)
+        .max(1.0);
+    let min_val = data
+        .iter()
+        .map(|(_, v)| *v)
+        .fold(f64::MAX, f64::min)
+        .min(0.0);
     let range = (max_val - min_val).max(1.0);
 
     let mut svg = build_svg_open(width, height, "Line chart");
@@ -125,18 +147,18 @@ pub fn render_line_chart(data: &[(String, f64)], width: u32, height: u32) -> Str
     // Grid lines
     for i in 0..=3 {
         let y = padding_top + chart_h * (i as f64) / 3.0;
-        svg.push_str(&build_svg_line_h(
-            padding_left,
-            padding_left + chart_w,
-            y,
-        ));
+        svg.push_str(&build_svg_line_h(padding_left, padding_left + chart_w, y));
     }
 
     // Y-axis labels
     for i in 0..=3 {
         let value = min_val + range * (3.0 - i as f64) / 3.0;
         let y = padding_top + chart_h * (i as f64) / 3.0 + 4.0;
-        svg.push_str(&build_svg_y_label(padding_left - 8.0, y, &format_y_axis(value)));
+        svg.push_str(&build_svg_y_label(
+            padding_left - 8.0,
+            y,
+            &format_y_axis(value),
+        ));
     }
 
     // Build path
@@ -192,7 +214,14 @@ pub fn render_line_chart(data: &[(String, f64)], width: u32, height: u32) -> Str
         let x = padding_left + chart_w * (i as f64 / (n as f64 - 1.0).max(1.0));
         let display_label = truncate_label(label, 6);
         let ty = padding_top + chart_h + 18.0;
-        svg.push_str(&build_svg_text_center(x, ty, 10, &html_escape_svg(&display_label), "rgb(var(--muted-foreground))", "400"));
+        svg.push_str(&build_svg_text_center(
+            x,
+            ty,
+            10,
+            &html_escape_svg(&display_label),
+            "rgb(var(--muted-foreground))",
+            "400",
+        ));
     }
 
     svg.push_str("</svg>");
@@ -284,7 +313,11 @@ pub fn render_pie_chart(data: &[(String, f64)], width: u32, height: u32) -> Stri
         let x2 = cx + outer_r * end_angle.cos();
         let y2 = cy + outer_r * end_angle.sin();
 
-        let large_arc = if slice_angle > std::f64::consts::PI { 1 } else { 0 };
+        let large_arc = if slice_angle > std::f64::consts::PI {
+            1
+        } else {
+            0
+        };
         let color = colors[i % colors.len()];
         let separator_color = "white";
 
@@ -372,7 +405,11 @@ pub fn render_gauge(value: f64, max: f64, width: u32, height: u32) -> String {
         let x2 = cx + end.cos() * r;
         let y2 = cy + end.sin() * r;
         let sweep = end - start;
-        let large = if sweep.abs() > std::f64::consts::PI { 1 } else { 0 };
+        let large = if sweep.abs() > std::f64::consts::PI {
+            1
+        } else {
+            0
+        };
         format!("M{x1:.2},{y1:.2} A{r:.2},{r:.2} 0 {large},1 {x2:.2},{y2:.2}")
     }
 
@@ -416,16 +453,16 @@ pub fn render_gauge(value: f64, max: f64, width: u32, height: u32) -> String {
 }
 
 /// Horizontal bar chart optimized for domain lists etc.
-pub fn render_horizontal_bar_chart(
-    data: &[(String, f64)],
-    width: u32,
-    _height: u32,
-) -> String {
+pub fn render_horizontal_bar_chart(data: &[(String, f64)], width: u32, _height: u32) -> String {
     if data.is_empty() {
         return render_empty_chart(width, 40, "No data");
     }
 
-    let max_val = data.iter().map(|(_, v)| *v).fold(0.0_f64, f64::max).max(1.0);
+    let max_val = data
+        .iter()
+        .map(|(_, v)| *v)
+        .fold(0.0_f64, f64::max)
+        .max(1.0);
     let label_w = 0.38 * f64::from(width);
     let bar_space = f64::from(width) - label_w;
     let bar_h = 22.0;
@@ -497,7 +534,14 @@ fn build_svg_y_label(x: f64, y: f64, text: &str) -> String {
     )
 }
 
-fn build_svg_text_center(x: f64, y: f64, font_size: u8, text: &str, fill: &str, weight: &str) -> String {
+fn build_svg_text_center(
+    x: f64,
+    y: f64,
+    font_size: u8,
+    text: &str,
+    fill: &str,
+    weight: &str,
+) -> String {
     format!(
         r##"<text x="{x:.1}" y="{y:.1}" text-anchor="middle" font-size="{font_size}" font-family="system-ui,sans-serif" font-weight="{weight}" style="fill: {fill}">{text}</text>"##,
     )
@@ -568,7 +612,12 @@ mod tests {
 
     #[test]
     fn sparkline_normal() {
-        let svg = render_sparkline(&[1.0, 2.0, 1.5, 3.0, 2.5], 100, 32, "var(--cp-blue,#3b82f6)");
+        let svg = render_sparkline(
+            &[1.0, 2.0, 1.5, 3.0, 2.5],
+            100,
+            32,
+            "var(--cp-blue,#3b82f6)",
+        );
         assert!(svg.contains("<svg"));
         assert!(svg.contains("<path"));
     }
@@ -600,10 +649,7 @@ mod tests {
 
     #[test]
     fn pie_chart_basic() {
-        let data = vec![
-            ("SES".to_string(), 60.0),
-            ("SMTP".to_string(), 40.0),
-        ];
+        let data = vec![("SES".to_string(), 60.0), ("SMTP".to_string(), 40.0)];
         let svg = render_pie_chart(&data, 300, 300);
         assert!(svg.contains("<svg"));
         assert!(svg.contains("<path"));
@@ -657,13 +703,18 @@ mod tests {
 
         for label in labels {
             let bar = render_bar_chart(&[(label.to_string(), 10.0)], 400, 250);
-            assert!(bar.contains("<svg"), "bar chart panicked or empty for {label}");
+            assert!(
+                bar.contains("<svg"),
+                "bar chart panicked or empty for {label}"
+            );
 
             let line = render_line_chart(&[(label.to_string(), 5.0)], 400, 250);
-            assert!(line.contains("<svg"), "line chart panicked or empty for {label}");
+            assert!(
+                line.contains("<svg"),
+                "line chart panicked or empty for {label}"
+            );
 
-            let horizontal =
-                render_horizontal_bar_chart(&[(label.to_string(), 7.0)], 400, 200);
+            let horizontal = render_horizontal_bar_chart(&[(label.to_string(), 7.0)], 400, 200);
             assert!(
                 horizontal.contains("<svg"),
                 "horizontal chart panicked or empty for {label}"
@@ -674,7 +725,10 @@ mod tests {
     #[test]
     fn truncated_labels_end_with_unicode_ellipsis() {
         let svg = render_bar_chart(&[("Ülemiste järve kampaania".to_string(), 1.0)], 400, 250);
-        assert!(svg.contains("Ülemiste\u{2026}"), "expected char-safe truncation with ellipsis, got: {svg}");
+        assert!(
+            svg.contains("Ülemiste\u{2026}"),
+            "expected char-safe truncation with ellipsis, got: {svg}"
+        );
 
         // Short labels pass through untouched.
         let svg = render_bar_chart(&[("Feb".to_string(), 1.0)], 400, 250);

@@ -1183,7 +1183,10 @@ mod tests {
             result.findings
         );
         assert!(
-            !result.findings.iter().any(|f| f.id.starts_with("EXECUTABLE")),
+            !result
+                .findings
+                .iter()
+                .any(|f| f.id.starts_with("EXECUTABLE")),
             "mid-file MZ must not be treated as an executable"
         );
     }

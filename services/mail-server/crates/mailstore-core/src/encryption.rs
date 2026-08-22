@@ -104,7 +104,7 @@ pub fn decrypt_with_aad(data: &[u8], master_key: &[u8], aad: &[u8]) -> Result<Ve
         if data.len() < 1 + NONCE_SIZE + TAG_SIZE {
             // Too short for v1; could still be a legacy blob.
             if aad.is_empty() && legacy_ok() {
-                return decrypt_layout(&data[..], master_key, 0u8, aad);
+                return decrypt_layout(data, master_key, 0u8, aad);
             }
             return Err(anyhow!(
                 "Ciphertext too short: need at least {} bytes, got {}",
@@ -148,12 +148,7 @@ pub fn decrypt_with_aad(data: &[u8], master_key: &[u8], aad: &[u8]) -> Result<Ve
 
 /// Decrypt a `nonce || ciphertext+tag` layout under the key derived for
 /// `version`, with the given AAD.
-fn decrypt_layout(
-    data: &[u8],
-    master_key: &[u8],
-    version: u8,
-    aad: &[u8],
-) -> Result<Vec<u8>> {
+fn decrypt_layout(data: &[u8], master_key: &[u8], version: u8, aad: &[u8]) -> Result<Vec<u8>> {
     let (nonce, ct) = data.split_at(NONCE_SIZE);
     decrypt_parts(nonce, ct, master_key, version, aad)
 }
@@ -312,7 +307,10 @@ mod tests {
         assert_eq!(decrypted, b"legacy secret");
         // The v1 path still wins for genuine v1 blobs (version byte 0x01).
         let v1 = encrypt_with_aad(b"v1 secret", master_key, &[]).unwrap();
-        assert_eq!(decrypt_with_aad(&v1, master_key, &[]).unwrap(), b"v1 secret");
+        assert_eq!(
+            decrypt_with_aad(&v1, master_key, &[]).unwrap(),
+            b"v1 secret"
+        );
     }
 
     #[test]

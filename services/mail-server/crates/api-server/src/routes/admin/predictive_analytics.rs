@@ -120,7 +120,6 @@ pub struct Anomaly {
 struct InactiveTenantRow {
     tenant_id: String,
     days_inactive: Option<i64>,
-    last_message_at: Option<chrono::DateTime<chrono::Utc>>,
     has_subscription: Option<bool>,
     bounce_rate: Option<f64>,
     recent_count: Option<i64>,
@@ -131,13 +130,6 @@ struct InactiveTenantRow {
 struct VolumeRow {
     date: String,
     volume: i64,
-}
-
-#[derive(sqlx::FromRow)]
-struct CapacityRow {
-    daily: Option<i64>,
-    monthly: Option<i64>,
-    weekly_growth: Option<f64>,
 }
 
 fn parse_window_days(window: &str) -> i64 {
@@ -213,7 +205,10 @@ fn forecast_confidence_interval(daily_volumes: &[i64]) -> String {
         .sum::<f64>()
         / n;
     let cv = variance.sqrt() / mean;
-    format!("±{:.0}% (30-day daily-volume variability)", (cv * 100.0).round())
+    format!(
+        "±{:.0}% (30-day daily-volume variability)",
+        (cv * 100.0).round()
+    )
 }
 
 fn classify_risk(days: i64, has_sub: bool, bounce_rate: f64) -> String {
@@ -307,12 +302,11 @@ async fn get_predictive_analytics(
         .filter(|t| t.risk_level == "medium")
         .count() as i64;
 
-    let total_active: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*)::bigint FROM tenants WHERE status = 'active'",
-    )
-    .fetch_one(db)
-    .await
-    .unwrap_or(1);
+    let total_active: i64 =
+        sqlx::query_scalar("SELECT COUNT(*)::bigint FROM tenants WHERE status = 'active'")
+            .fetch_one(db)
+            .await
+            .unwrap_or(1);
 
     let predicted_churn = if total_active > 0 {
         high_risk as f64 / total_active as f64
@@ -455,7 +449,12 @@ async fn get_predictive_analytics(
                 today_bounce * 100.0,
                 normal_bounce * 100.0
             ),
-            severity: if today_bounce > 0.10 { "critical" } else { "warning" }.into(),
+            severity: if today_bounce > 0.10 {
+                "critical"
+            } else {
+                "warning"
+            }
+            .into(),
             detected_value: format!("{:.2}%", today_bounce * 100.0),
             expected_range: format!("< {:.2}%", normal_bounce * 100.0 * 2.0),
             detected_at: gen_at.clone(),
@@ -493,7 +492,12 @@ async fn get_predictive_analytics(
                 "Queue backlog: {} items pending vs {:.0} average (7-day baseline)",
                 current_queue, normal_queue
             ),
-            severity: if current_queue > 1000 { "critical" } else { "warning" }.into(),
+            severity: if current_queue > 1000 {
+                "critical"
+            } else {
+                "warning"
+            }
+            .into(),
             detected_value: format!("{} items", current_queue),
             expected_range: format!("< {} items", (normal_queue * 3.0) as i64),
             detected_at: gen_at.clone(),
@@ -524,7 +528,12 @@ async fn get_predictive_analytics(
                 "{} paying tenants have zero email activity in the last 30 days",
                 zero_activity_paid
             ),
-            severity: if zero_activity_paid > 5 { "warning" } else { "info" }.into(),
+            severity: if zero_activity_paid > 5 {
+                "warning"
+            } else {
+                "info"
+            }
+            .into(),
             detected_value: format!("{} tenants", zero_activity_paid),
             expected_range: "0 tenants".into(),
             detected_at: gen_at.clone(),
@@ -537,8 +546,8 @@ async fn get_predictive_analytics(
     let daily_volumes: Vec<i64> = trend_30.iter().map(|p| p.volume).collect();
     let forecast = VolumeForecast {
         current_volume: current_monthly,
-        projected_next_week: (current_daily as f64 * 7.0 * (1.0 + weekly_growth.max(-0.5)))
-            .round() as i64,
+        projected_next_week: (current_daily as f64 * 7.0 * (1.0 + weekly_growth.max(-0.5))).round()
+            as i64,
         projected_next_month: projected_30,
         projected_next_quarter: projected_90,
         confidence_interval: forecast_confidence_interval(&daily_volumes),
@@ -553,17 +562,15 @@ async fn get_predictive_analytics(
             top_risk_signals: vec![
                 RiskSignal {
                     signal: "Inactive >30 days".into(),
-                    affected_tenants: at_risk_list
-                        .iter()
-                        .filter(|t| t.days_inactive > 30)
-                        .count() as i64,
-                    severity: if at_risk_list.iter().filter(|t| t.days_inactive > 30).count() > 10
-                    {
-                        "high"
-                    } else {
-                        "medium"
-                    }
-                    .into(),
+                    affected_tenants: at_risk_list.iter().filter(|t| t.days_inactive > 30).count()
+                        as i64,
+                    severity:
+                        if at_risk_list.iter().filter(|t| t.days_inactive > 30).count() > 10 {
+                            "high"
+                        } else {
+                            "medium"
+                        }
+                        .into(),
                 },
                 RiskSignal {
                     signal: "High bounce rate (>5%)".into(),
@@ -670,12 +677,11 @@ async fn get_churn_risk(
         .filter(|t| t.risk_level == "medium")
         .count() as i64;
 
-    let total_active: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*)::bigint FROM tenants WHERE status = 'active'",
-    )
-    .fetch_one(db)
-    .await
-    .unwrap_or(1);
+    let total_active: i64 =
+        sqlx::query_scalar("SELECT COUNT(*)::bigint FROM tenants WHERE status = 'active'")
+            .fetch_one(db)
+            .await
+            .unwrap_or(1);
 
     Ok(Json(ChurnRiskDashboard {
         at_risk_tenants: at_risk_list.len() as i64,
@@ -689,10 +695,8 @@ async fn get_churn_risk(
         top_risk_signals: vec![
             RiskSignal {
                 signal: "Inactive >30 days".into(),
-                affected_tenants: at_risk_list
-                    .iter()
-                    .filter(|t| t.days_inactive > 30)
-                    .count() as i64,
+                affected_tenants: at_risk_list.iter().filter(|t| t.days_inactive > 30).count()
+                    as i64,
                 severity: "high".into(),
             },
             RiskSignal {
@@ -875,7 +879,12 @@ async fn get_anomalies(
                 today_bounce * 100.0,
                 normal_bounce * 100.0
             ),
-            severity: if today_bounce > 0.10 { "critical" } else { "warning" }.into(),
+            severity: if today_bounce > 0.10 {
+                "critical"
+            } else {
+                "warning"
+            }
+            .into(),
             detected_value: format!("{:.2}%", today_bounce * 100.0),
             expected_range: format!("< {:.2}%", normal_bounce * 100.0 * 2.0),
             detected_at: gen_at.clone(),
@@ -913,7 +922,12 @@ async fn get_anomalies(
                 "Queue backlog: {} items pending vs {:.0} average",
                 current_queue, normal_queue
             ),
-            severity: if current_queue > 1000 { "critical" } else { "warning" }.into(),
+            severity: if current_queue > 1000 {
+                "critical"
+            } else {
+                "warning"
+            }
+            .into(),
             detected_value: format!("{} items", current_queue),
             expected_range: format!("< {} items", (normal_queue * 3.0) as i64),
             detected_at: gen_at.clone(),
@@ -1040,7 +1054,10 @@ mod tests {
         // Volatile volumes → a non-zero interval derived from the CV.
         let volatile = forecast_confidence_interval(&[10, 200, 50, 140]);
         assert!(volatile.starts_with("±"), "got {volatile}");
-        assert!(!volatile.contains("±15%"), "must not be the old hardcoded interval");
+        assert!(
+            !volatile.contains("±15%"),
+            "must not be the old hardcoded interval"
+        );
 
         // Too little history → honest "unestimated", not a made-up number.
         assert!(forecast_confidence_interval(&[42]).contains("insufficient"));

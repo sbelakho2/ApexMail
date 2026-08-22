@@ -123,7 +123,7 @@ dashmap = "6.1"
 once_cell = "1.20"
 
 # DNS
-trust-dns-resolver = { package = "hickory-resolver", version = "0.24" }
+trust-dns-resolver = { package = "hickory-resolver", version = "0.26" }
 
 # HTTP Client
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }

@@ -82,42 +82,41 @@ async fn main() -> anyhow::Result<()> {
     // Configured (SALES_CAMPAIGN_FROM_EMAIL + SALES_UNSUBSCRIBE_SECRET)
     // ⇒ real sending through the platform pipeline. Unconfigured ⇒ None ⇒
     // campaign start keeps failing loudly with 503 (fix I-1 preserved).
-    let dispatcher: Option<Arc<ProductionCampaignDispatcher>> =
-        if cfg.dispatch.is_configured() {
-            match ProductionCampaignDispatcher::new(
-                cfg.dispatch.clone(),
-                db.clone(),
-                Arc::new(BillingQuotaGateway::new(db.clone(), redis.clone())),
-            ) {
-                Ok(d) => {
-                    tracing::info!(
-                        from_email = %d.config().from_email,
-                        "production campaign dispatcher configured — campaigns will send through the platform pipeline"
-                    );
-                    Some(Arc::new(d))
-                }
-                Err(e) => {
-                    tracing::error!(
-                        error = %e,
-                        "invalid campaign dispatcher configuration — campaign start will return 503"
-                    );
-                    None
-                }
+    let dispatcher: Option<Arc<ProductionCampaignDispatcher>> = if cfg.dispatch.is_configured() {
+        match ProductionCampaignDispatcher::new(
+            cfg.dispatch.clone(),
+            db.clone(),
+            Arc::new(BillingQuotaGateway::new(db.clone(), redis.clone())),
+        ) {
+            Ok(d) => {
+                tracing::info!(
+                    from_email = %d.config().from_email,
+                    "production campaign dispatcher configured — campaigns will send through the platform pipeline"
+                );
+                Some(Arc::new(d))
             }
-        } else {
-            tracing::warn!(
-                "campaign dispatcher NOT configured (set SALES_CAMPAIGN_FROM_EMAIL and \
+            Err(e) => {
+                tracing::error!(
+                    error = %e,
+                    "invalid campaign dispatcher configuration — campaign start will return 503"
+                );
+                None
+            }
+        }
+    } else {
+        tracing::warn!(
+            "campaign dispatcher NOT configured (set SALES_CAMPAIGN_FROM_EMAIL and \
                  SALES_UNSUBSCRIBE_SECRET to enable campaign sending) — campaign start returns 503"
-            );
-            None
-        };
+        );
+        None
+    };
 
-    let mut campaigns =
-        CampaignManager::new(cfg.max_campaigns, db.clone())
-            .with_dispatch_batch_size(cfg.dispatch.dispatch_batch_size);
+    let mut campaigns = CampaignManager::new(cfg.max_campaigns, db.clone())
+        .with_dispatch_batch_size(cfg.dispatch.dispatch_batch_size);
     if let Some(ref d) = dispatcher {
-        campaigns = campaigns
-            .with_email_dispatcher(d.clone() as Arc<dyn sales_autopilot::campaigns::CampaignEmailDispatcher>);
+        campaigns = campaigns.with_email_dispatcher(
+            d.clone() as Arc<dyn sales_autopilot::campaigns::CampaignEmailDispatcher>
+        );
     }
 
     let state = AppState {

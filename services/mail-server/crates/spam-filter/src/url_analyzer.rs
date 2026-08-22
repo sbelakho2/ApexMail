@@ -438,7 +438,7 @@ pub fn ip_is_private_or_reserved(ip: std::net::IpAddr) -> bool {
                 || v6.is_multicast()
                 || (s[0] & 0xfe00) == 0xfc00 // fc00::/7 unique-local
                 || (s[0] & 0xffc0) == 0xfe80 // fe80::/10 link-local
-                || (s[0] == 0x2001 && (s[1] & 0xfff0) == 0x0db8) // 2001:db8::/32 doc
+                || (s[0] == 0x2001 && s[1] == 0x0db8) // 2001:db8::/32 doc
                 || (s[0] == 0x64 && s[1] == 0xff9b) // 64:ff9b::/96 NAT64
         }
     }
@@ -839,7 +839,7 @@ mod tests {
 
     #[test]
     fn test_ip_is_private_or_reserved_matrix() {
-        let parse = |s: &str| s.parse::<std::net::IpAddr>().unwrap();
+        let parse = |s: &str| s.parse::<std::net::IpAddr>().expect("valid ip literal");
         for blocked in [
             "127.0.0.1",
             "10.0.0.1",
@@ -859,7 +859,12 @@ mod tests {
                 "{blocked} must be blocked by the SSRF guard"
             );
         }
-        for allowed in ["8.8.8.8", "1.1.1.1", "93.184.216.34", "2606:4700:4700::1111"] {
+        for allowed in [
+            "8.8.8.8",
+            "1.1.1.1",
+            "93.184.216.34",
+            "2606:4700:4700::1111",
+        ] {
             assert!(
                 !ip_is_private_or_reserved(parse(allowed)),
                 "{allowed} is public and must not be blocked"
@@ -878,7 +883,10 @@ mod tests {
         ] {
             let result = detonate_url(url).await;
             assert!(
-                result.error.as_deref().is_some_and(|e| e.contains("SSRF guard")),
+                result
+                    .error
+                    .as_deref()
+                    .is_some_and(|e| e.contains("SSRF guard")),
                 "detonation of {url} must be blocked by the SSRF guard, got {:?}",
                 result.error
             );
@@ -889,9 +897,11 @@ mod tests {
     #[cfg(feature = "phishing")]
     #[test]
     fn test_detonation_concurrency_cap_defined() {
-        assert!(
-            MAX_CONCURRENT_DETONATIONS > 0 && MAX_CONCURRENT_DETONATIONS <= 64,
-            "detonation concurrency must be bounded and sane"
-        );
+        const {
+            assert!(
+                MAX_CONCURRENT_DETONATIONS > 0 && MAX_CONCURRENT_DETONATIONS <= 64,
+                "detonation concurrency must be bounded and sane"
+            );
+        }
     }
 }

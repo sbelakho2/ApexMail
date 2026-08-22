@@ -662,7 +662,6 @@ fn parse_ipv6_cidr(cidr: &str) -> Result<(u128, u8), crate::ThreatIntelError> {
     Ok((u128::from(ip), prefix_len))
 }
 
-
 /// Parse a hosts-file style feed where each line is `<IP> <domain>`
 /// (one or more whitespace separators), e.g. the ThreatFox hostfile export.
 /// Lines may carry a `#` comment suffix. Only the IP column is used.
@@ -759,7 +758,10 @@ pub(crate) fn url_host(line: &str) -> Option<&str> {
         .find(|c: char| c == '/' || c == '?' || c.is_whitespace())
         .unwrap_or(rest.len());
     let host_port = &rest[..end];
-    let host = host_port.rsplit_once(':').map(|(h, _)| h).unwrap_or(host_port);
+    let host = host_port
+        .rsplit_once(':')
+        .map(|(h, _)| h)
+        .unwrap_or(host_port);
     let host = host.trim_matches(|c| c == '[' || c == ']');
     if host.is_empty() {
         None
@@ -1066,19 +1068,26 @@ mod tests {
         assert!(bl.add_cidr("::/0", make_entry("::/0")).is_err());
         assert!(bl.add_cidr("::/7", make_entry("::/7")).is_err());
         // Reasonable prefixes still accepted.
-        assert!(bl.add_cidr("2001:db8::/32", make_entry("2001:db8::/32")).is_ok());
+        assert!(bl
+            .add_cidr("2001:db8::/32", make_entry("2001:db8::/32"))
+            .is_ok());
     }
 
     #[test]
     fn test_ipv6_exact_and_cidr_lookup() {
         let bl = Ipv6Blocklist::new(1000);
-        let ip: Ipv6Addr = "2001:db8::1".parse().unwrap();
+        let ip: Ipv6Addr = "2001:db8::1".parse().expect("valid ipv6");
         assert!(bl.add_ip(ip, make_entry("2001:db8::1")));
         assert!(bl.lookup(ip).is_some());
         // CIDR containment
-        assert!(bl.add_cidr("2620:0:2d0::/48", make_entry("2620:0:2d0::/48")).is_ok());
-        let inside: Ipv6Addr = "2620:0:2d0:1::dead".parse().unwrap();
-        assert!(bl.lookup(inside).is_some(), "IPv6 CIDR containment must work");
+        assert!(bl
+            .add_cidr("2620:0:2d0::/48", make_entry("2620:0:2d0::/48"))
+            .is_ok());
+        let inside: Ipv6Addr = "2620:0:2d0:1::dead".parse().expect("valid ipv6");
+        assert!(
+            bl.lookup(inside).is_some(),
+            "IPv6 CIDR containment must work"
+        );
     }
 
     #[test]
@@ -1090,7 +1099,8 @@ mod tests {
             bl.add_cidr(&cidr, make_entry(&cidr)).expect("within cap");
         }
         assert!(
-            bl.add_cidr("10.99.0.0/24", make_entry("10.99.0.0/24")).is_err(),
+            bl.add_cidr("10.99.0.0/24", make_entry("10.99.0.0/24"))
+                .is_err(),
             "CIDR store must respect the capacity cap"
         );
     }

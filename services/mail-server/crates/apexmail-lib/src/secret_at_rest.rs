@@ -142,11 +142,7 @@ fn key_file_candidates() -> Vec<std::path::PathBuf> {
         }
     }
     if let Ok(home) = std::env::var("HOME") {
-        dirs.push(
-            std::path::Path::new(&home)
-                .join(".cache")
-                .join("apexmail"),
-        );
+        dirs.push(std::path::Path::new(&home).join(".cache").join("apexmail"));
     }
     dirs.push(std::path::PathBuf::from("/tmp/apexmail"));
     dirs.into_iter()
@@ -264,7 +260,7 @@ fn load_key() -> Result<Option<Zeroizing<[u8; KEY_SIZE]>>, SecretEncryptionError
         // resolution must fail closed in production.
         return Err(SecretEncryptionError::KeyMissingProduction);
     }
-    Ok(state.key.map(|k| Zeroizing::new(k)))
+    Ok(state.key.map(Zeroizing::new))
 }
 
 /// True when at-rest encryption is active for new writes.
@@ -372,10 +368,7 @@ pub fn decrypt_at_rest(stored: &str, aad: &[u8]) -> Result<String, SecretEncrypt
 /// encryption is currently available — the writer should persist the
 /// returned envelope. Returns `None` when the value is already encrypted or
 /// no key is available.
-pub fn migrate_at_rest(
-    stored: &str,
-    aad: &[u8],
-) -> Result<Option<String>, SecretEncryptionError> {
+pub fn migrate_at_rest(stored: &str, aad: &[u8]) -> Result<Option<String>, SecretEncryptionError> {
     if is_encrypted(stored) {
         return Ok(None);
     }
@@ -473,7 +466,9 @@ mod tests {
         let legacy = "JBSWY3DPEHPK3PXP";
         assert_eq!(decrypt_at_rest(legacy, aad).unwrap(), legacy);
         // ...migrates to an encrypted envelope...
-        let migrated = migrate_at_rest(legacy, aad).unwrap().expect("should migrate");
+        let migrated = migrate_at_rest(legacy, aad)
+            .unwrap()
+            .expect("should migrate");
         assert!(is_encrypted(&migrated));
         assert_ne!(migrated, legacy);
         // ...and the envelope decrypts to the original secret.

@@ -136,10 +136,8 @@ impl ThreatIntelEngine {
             return false;
         }
 
-        let new_ips = UnifiedIpBlocklist::new(
-            self.config.max_ip_entries,
-            self.config.max_ip_entries / 2,
-        );
+        let new_ips =
+            UnifiedIpBlocklist::new(self.config.max_ip_entries, self.config.max_ip_entries / 2);
         for (cidr, entry) in ip_entries {
             if cidr.contains('/') {
                 let _ = new_ips.add_cidr(&cidr, entry);
@@ -341,10 +339,8 @@ impl ThreatIntelEngine {
             (ips.exact_count(), ips.cidr_count())
         };
         let domain_count = self.domain_blocklist.read().count();
-        let ip_load = (ip_counts.0 + ip_counts.1) as f64
-            / self.config.max_ip_entries.max(1) as f64;
-        let domain_load =
-            domain_count as f64 / self.config.max_domain_entries.max(1) as f64;
+        let ip_load = (ip_counts.0 + ip_counts.1) as f64 / self.config.max_ip_entries.max(1) as f64;
+        let domain_load = domain_count as f64 / self.config.max_domain_entries.max(1) as f64;
 
         if ip_load >= threshold || domain_load >= threshold {
             self.purge_expired()
@@ -529,7 +525,9 @@ mod tests {
     #[test]
     fn test_blocked_ip() {
         let engine = ThreatIntelEngine::new();
-        engine.ip_blocklist().add_ip_str("1.2.3.4", ip_entry("1.2.3.4"));
+        engine
+            .ip_blocklist()
+            .add_ip_str("1.2.3.4", ip_entry("1.2.3.4"));
         let verdict = engine.check_ip("1.2.3.4");
         assert_eq!(verdict.action, ThreatAction::Block);
     }
@@ -579,7 +577,9 @@ mod tests {
     #[test]
     fn test_stats() {
         let engine = ThreatIntelEngine::new();
-        engine.ip_blocklist().add_ip_str("1.2.3.4", ip_entry("1.2.3.4"));
+        engine
+            .ip_blocklist()
+            .add_ip_str("1.2.3.4", ip_entry("1.2.3.4"));
         engine
             .ip_blocklist()
             .add_cidr("10.0.0.0/8", ip_entry("10.0.0.0/8"))

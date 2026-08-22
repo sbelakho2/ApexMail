@@ -71,6 +71,12 @@ COPY docs /app/docs
 COPY apps/marketing-zola/public /app/apps/marketing-zola/public
 COPY apps/marketing-zola/static/css /app/apps/marketing-zola/static/css
 
+# BuildKit COPY keeps context mtimes; files older than the cook artifacts
+# would be considered FRESH (skeleton rlibs reused). Touch everything so
+# every workspace member rebuilds from its real sources; the dependency
+# cache from the cook stays fully valid.
+RUN find /app/services/mail-server /app/packages -type f -exec touch {} +
+
 RUN cargo build --release --bin api-server
 
 # Shared builder for non-API runtime targets.
@@ -82,6 +88,9 @@ COPY packages/kiwicaptcha-wasm /app/packages/kiwicaptcha-wasm
 COPY docs /app/docs
 COPY apps/marketing-zola/public /app/apps/marketing-zola/public
 COPY apps/marketing-zola/static/css /app/apps/marketing-zola/static/css
+
+# See api-server-builder: force-rebuild members over the cook skeletons.
+RUN find /app/services/mail-server /app/packages -type f -exec touch {} +
 
 RUN cargo build --release
 

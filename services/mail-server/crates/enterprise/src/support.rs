@@ -83,10 +83,31 @@ pub fn is_valid_ticket_transition(from: &str, to: &str) -> bool {
         return true;
     }
     match from {
-        "new" => matches!(to, "open" | "pending" | "on_hold" | "waiting_customer" | "escalated" | "resolved" | "closed"),
-        "open" | "pending" => matches!(to, "on_hold" | "waiting_customer" | "escalated" | "resolved" | "closed" | "open" | "pending"),
+        "new" => matches!(
+            to,
+            "open"
+                | "pending"
+                | "on_hold"
+                | "waiting_customer"
+                | "escalated"
+                | "resolved"
+                | "closed"
+        ),
+        "open" | "pending" => matches!(
+            to,
+            "on_hold"
+                | "waiting_customer"
+                | "escalated"
+                | "resolved"
+                | "closed"
+                | "open"
+                | "pending"
+        ),
         "on_hold" => matches!(to, "open" | "pending" | "escalated" | "closed" | "resolved"),
-        "waiting_customer" => matches!(to, "open" | "pending" | "on_hold" | "escalated" | "resolved" | "closed"),
+        "waiting_customer" => matches!(
+            to,
+            "open" | "pending" | "on_hold" | "escalated" | "resolved" | "closed"
+        ),
         "escalated" => matches!(to, "open" | "pending" | "on_hold" | "resolved" | "closed"),
         "resolved" => matches!(to, "closed" | "open"),
         "closed" => matches!(to, "open"),
@@ -148,9 +169,7 @@ fn validation_err(message: impl Into<String>) -> Result<ApiResult<SupportTicket>
     Ok(ApiResult::err(message, "VALIDATION"))
 }
 
-fn validation_comment_err(
-    message: impl Into<String>,
-) -> Result<ApiResult<TicketComment>, String> {
+fn validation_comment_err(message: impl Into<String>) -> Result<ApiResult<TicketComment>, String> {
     Ok(ApiResult::err(message, "VALIDATION"))
 }
 
@@ -169,7 +188,10 @@ pub fn is_plausible_email(address: &str) -> bool {
     if parts.len() != 2 {
         return false;
     }
-    !parts[0].is_empty() && parts[1].contains('.') && !parts[1].starts_with('.') && !parts[1].ends_with('.')
+    !parts[0].is_empty()
+        && parts[1].contains('.')
+        && !parts[1].starts_with('.')
+        && !parts[1].ends_with('.')
 }
 
 /// Keyset pagination cursor: `(created_at, id)` of the last row the caller
@@ -191,6 +213,15 @@ impl TicketCursor {
         let id = Uuid::parse_str(id.trim()).map_err(|e| format!("cursor id is not a UUID: {e}"))?;
         Ok(Self { created_at, id })
     }
+}
+
+/// Optional ticket-list refinements: a keyset pagination cursor and a
+/// bounded subject search term. Grouped so `list_tickets_search` stays
+/// within clippy's argument budget.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct TicketListRefinements<'a> {
+    pub cursor: Option<TicketCursor>,
+    pub search: Option<&'a str>,
 }
 
 /// Strip control characters (except tab/newline in bodies) so notification
@@ -496,8 +527,18 @@ impl SupportService {
         offset: i64,
         cursor: Option<TicketCursor>,
     ) -> Result<ApiResult<Vec<SupportTicket>>, String> {
-        self.list_tickets_search(tenant_id, status, priority, limit, offset, cursor, None)
-            .await
+        self.list_tickets_search(
+            tenant_id,
+            status,
+            priority,
+            limit,
+            offset,
+            TicketListRefinements {
+                cursor,
+                search: None,
+            },
+        )
+        .await
     }
 
     /// List tickets with filters, keyset pagination, and an optional bounded
@@ -510,9 +551,9 @@ impl SupportService {
         priority: Option<&str>,
         limit: i64,
         offset: i64,
-        cursor: Option<TicketCursor>,
-        search: Option<&str>,
+        refinements: TicketListRefinements<'_>,
     ) -> Result<ApiResult<Vec<SupportTicket>>, String> {
+        let TicketListRefinements { cursor, search } = refinements;
         if let Some(s) = status {
             if !is_valid_status(s) {
                 return Ok(ApiResult::err(
@@ -559,9 +600,7 @@ impl SupportService {
             priority_param = Some(p.to_string());
         }
         if let Some(term) = search {
-            query.push_str(&format!(
-                " AND subject ILIKE '%' || ${param_idx} || '%'"
-            ));
+            query.push_str(&format!(" AND subject ILIKE '%' || ${param_idx} || '%'"));
             param_idx += 1;
             search_param = Some(escape_like_wildcards(term));
         }
@@ -620,10 +659,7 @@ impl SupportService {
         if let Some(p) = priority {
             if !is_valid_priority(p) {
                 return Ok(ApiResult::err(
-                    format!(
-                        "priority must be one of: {}",
-                        TICKET_PRIORITIES.join(", ")
-                    ),
+                    format!("priority must be one of: {}", TICKET_PRIORITIES.join(", ")),
                     "VALIDATION",
                 ));
             }
@@ -672,10 +708,14 @@ impl SupportService {
                  AND $2 IN ('open', 'pending', 'on_hold', 'escalated', 'resolved', 'closed')
                  THEN $5 ELSE first_response_at END,
              updated_at = $5
-             WHERE id = $1 AND status = $6 RETURNING *"
+             WHERE id = $1 AND status = $6 RETURNING *",
         )
-        .bind(id).bind(status).bind(priority)
-        .bind(assigned_to).bind(now).bind(&current.status)
+        .bind(id)
+        .bind(status)
+        .bind(priority)
+        .bind(assigned_to)
+        .bind(now)
+        .bind(&current.status)
         .fetch_optional(&self.db)
         .await
         .map_err(|e| format!("Update ticket: {e}"))?;
@@ -796,10 +836,7 @@ impl SupportService {
                         .queue_email(
                             Some(&ticket.tenant_id),
                             email,
-                            &format!(
-                                "[ApexMail Support] Update on ticket #{:?}",
-                                ticket.number
-                            ),
+                            &format!("[ApexMail Support] Update on ticket #{:?}", ticket.number),
                             &format!(
                                 "There is a new reply on your ticket \"{}\":\n\n{}",
                                 sanitize_notification_text(&ticket.subject),
@@ -849,7 +886,10 @@ impl SupportService {
     ) -> Result<ApiResult<SupportTicket>, String> {
         let reason_trimmed = reason.trim();
         if reason_trimmed.is_empty() {
-            return Ok(ApiResult::err("escalation reason must not be empty", "VALIDATION"));
+            return Ok(ApiResult::err(
+                "escalation reason must not be empty",
+                "VALIDATION",
+            ));
         }
         if reason.chars().count() > TICKET_REASON_MAX_CHARS {
             return Ok(ApiResult::err(
@@ -1063,12 +1103,10 @@ impl SupportService {
 
     /// Resolve an agent's notification email address (None on unknown agent).
     async fn agent_email(&self, agent_id: Uuid) -> Result<Option<String>, sqlx::Error> {
-        sqlx::query_scalar::<_, String>(
-            "SELECT email FROM ent_support_agents WHERE id = $1",
-        )
-        .bind(agent_id)
-        .fetch_optional(&self.db)
-        .await
+        sqlx::query_scalar::<_, String>("SELECT email FROM ent_support_agents WHERE id = $1")
+            .bind(agent_id)
+            .fetch_optional(&self.db)
+            .await
     }
 
     /// Auto-assign to least loaded agent with optional specialty match
@@ -1195,7 +1233,10 @@ impl SupportService {
         let rules = auto_escalation_thresholds()
             .into_iter()
             .map(|(priority, minutes)| {
-                (priority, TimeDelta::try_minutes(minutes).unwrap_or(TimeDelta::zero()))
+                (
+                    priority,
+                    TimeDelta::try_minutes(minutes).unwrap_or(TimeDelta::zero()),
+                )
             })
             .collect::<Vec<_>>();
 
@@ -1403,9 +1444,13 @@ mod tests {
 
     #[test]
     fn ticket_cursor_parses_rfc3339_and_uuid() {
-        let cursor = TicketCursor::parse("2026-08-21T12:00:00Z,0f0e0d0c-1111-4222-8333-444455556666")
-            .expect("valid cursor");
-        assert_eq!(cursor.id.to_string(), "0f0e0d0c-1111-4222-8333-444455556666");
+        let cursor =
+            TicketCursor::parse("2026-08-21T12:00:00Z,0f0e0d0c-1111-4222-8333-444455556666")
+                .expect("valid cursor");
+        assert_eq!(
+            cursor.id.to_string(),
+            "0f0e0d0c-1111-4222-8333-444455556666"
+        );
         assert_eq!(cursor.created_at.to_rfc3339(), "2026-08-21T12:00:00+00:00");
     }
 

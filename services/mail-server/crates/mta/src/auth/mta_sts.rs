@@ -1,16 +1,29 @@
 //! MTA‑STS – SMTP MTA Strict Transport Security (RFC 8461) + TLSRPT (RFC 8460).
+//!
+//! MAINTAINED-BUT-NOT-WIRED (F-16): nothing in the inbound SMTP path calls
+//! into this module — it is exercised only by its own unit tests. MTA-STS
+//! policy enforcement belongs on the OUTBOUND direct-MX sender (a sending
+//! MTA fetching the recipient domain's policy before connecting), which is
+//! tracked as finding F-16; the inbound receiver role only publishes DNS.
+//! Do not delete: the direct-MX sender (see F-16) builds on this code.
 
 use std::sync::LazyLock;
 
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use tracing::debug;
-use trust_dns_resolver::config::{ResolverConfig, ResolverOpts};
-use trust_dns_resolver::TokioAsyncResolver;
+use trust_dns_resolver::config::ResolverConfig;
+use trust_dns_resolver::net::runtime::TokioRuntimeProvider;
+use trust_dns_resolver::{Resolver, TokioResolver};
 
-// #134:Shared DNS resolver – avoids creating a new resolver per verification call
-static MTA_STS_RESOLVER: LazyLock<TokioAsyncResolver> =
-    LazyLock::new(|| TokioAsyncResolver::tokio(ResolverConfig::default(), ResolverOpts::default()));
+// #134:Shared DNS resolver – avoids creating a new resolver per verification call.
+// trust-dns 0.26: TokioAsyncResolver::tokio is gone; build a TokioResolver
+// (builder defaults already equal ResolverOpts::default()).
+static MTA_STS_RESOLVER: LazyLock<TokioResolver> = LazyLock::new(|| {
+    Resolver::builder_with_config(ResolverConfig::default(), TokioRuntimeProvider::default())
+        .build()
+        .expect("system resolver configuration is always buildable")
+});
 
 // #135:Shared HTTP client with timeout – avoids per-call TLS handshake overhead
 static MTA_STS_CLIENT: LazyLock<Option<Client>> = LazyLock::new(|| {
@@ -81,9 +94,8 @@ pub async fn verify_mta_sts(domain: &str) -> MtaStsVerificationResult {
     // 1. Check DNS TXT record at _mta-sts.<domain>
     let sts_name = format!("_mta-sts.{domain}");
     match resolver.txt_lookup(&sts_name).await {
-        Ok(records) => {
-            for record in records.iter() {
-                let txt = record.to_string();
+        Ok(lookup) => {
+            for txt in txt_record_strings(&lookup) {
                 if txt.starts_with("v=STSv1") {
                     result.dns_record = Some(parse_sts_dns_record(&txt));
                     result.supported = true;
@@ -179,10 +191,9 @@ pub async fn verify_tlsrpt(domain: &str) -> Option<TlsRptRecord> {
     let resolver = &*MTA_STS_RESOLVER;
 
     let name = format!("_smtp._tls.{domain}");
-    let records = resolver.txt_lookup(&name).await.ok()?;
+    let lookup = resolver.txt_lookup(&name).await.ok()?;
 
-    for record in records.iter() {
-        let txt = record.to_string();
+    for txt in txt_record_strings(&lookup) {
         if txt.starts_with("v=TLSRPTv1") {
             return Some(parse_tlsrpt_record(&txt));
         }
@@ -191,6 +202,28 @@ pub async fn verify_tlsrpt(domain: &str) -> Option<TlsRptRecord> {
 }
 
 // ── parsers ────────────────────────────────────────────────────────────────────
+
+/// Flatten a TXT lookup into one String per TXT record.
+///
+/// trust-dns 0.26 removed typed lookup iteration; `txt_lookup` now returns raw
+/// records. Each record's character-string chunks are joined without a
+/// separator (mirroring apexmail-dns-resolver's migrated TXT handling).
+fn txt_record_strings(lookup: &trust_dns_resolver::lookup::Lookup) -> Vec<String> {
+    lookup
+        .answers()
+        .iter()
+        .filter_map(|record| match &record.data {
+            trust_dns_resolver::proto::rr::RData::TXT(txt) => Some(
+                txt.txt_data
+                    .iter()
+                    .map(|d| String::from_utf8_lossy(d).to_string())
+                    .collect::<Vec<_>>()
+                    .join(""),
+            ),
+            _ => None,
+        })
+        .collect()
+}
 
 fn parse_sts_dns_record(txt: &str) -> MtaStsRecord {
     let mut version = String::new();

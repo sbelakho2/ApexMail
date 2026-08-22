@@ -318,9 +318,8 @@ mod tests {
             Some(value) => std::env::set_var(INTERNAL_SERVICE_TOKEN_ENV, value),
             None => std::env::remove_var(INTERNAL_SERVICE_TOKEN_ENV),
         }
-        match previous_file {
-            Some(value) => std::env::set_var(INTERNAL_SERVICE_TOKEN_FILE_ENV, value),
-            None => {}
+        if let Some(value) = previous_file {
+            std::env::set_var(INTERNAL_SERVICE_TOKEN_FILE_ENV, value)
         }
     }
 

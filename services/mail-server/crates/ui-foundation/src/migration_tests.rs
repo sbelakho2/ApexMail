@@ -159,10 +159,10 @@ fn assert_surface_wrapper(route: &ssr::SsrRoute, html: &str) {
             // attribute is inside the opening tag but does not directly follow
             // `<footer`. Verify a footer element whose opening tag carries a
             // class attribute.
-            let footer_has_class = html.find("<footer ").map_or(false, |start| {
+            let footer_has_class = html.find("<footer ").is_some_and(|start| {
                 html[start..]
                     .find('>')
-                    .map_or(false, |end| html[start..start + end].contains("class="))
+                    .is_some_and(|end| html[start..start + end].contains("class="))
             });
             assert!(
                 footer_has_class,
@@ -235,7 +235,8 @@ fn migration_docs_define_rust_ui_and_current_stripe_boundary() {
         "Stripe tool contract no longer documents manual webhook verification ownership"
     );
     assert!(
-        STRIPE_TOOL_CONTRACT_MD.contains("Stripe redirects the customer to the approved return URL"),
+        STRIPE_TOOL_CONTRACT_MD
+            .contains("Stripe redirects the customer to the approved return URL"),
         "Stripe tool contract no longer documents hosted Stripe checkout"
     );
 }
@@ -274,7 +275,8 @@ fn migration_primitives_render_valid_html() {
         disabled: false,
         loading: false,
         left_icon: None,
-        right_icon: None, submit: true,
+        right_icon: None,
+        submit: true,
     };
     let html = btn.render_html();
     assert!(html.contains("<button"), "Button missing <button> tag");
@@ -384,7 +386,8 @@ fn migration_security_data_attributes_present() {
     // MFA input attributes live on the server-rendered challenge page
     // (/login?mfa=1), not on the password step's JS-era hidden div.
     let challenge = leptos_views::web_login_mfa_challenge_page("", "ops@apexmail.ee", "/dashboard");
-    let mfa_input = challenge.contains("inputmode=\"numeric\"") && challenge.contains("maxlength=\"6\"");
+    let mfa_input =
+        challenge.contains("inputmode=\"numeric\"") && challenge.contains("maxlength=\"6\"");
     assert!(mfa_input, "MFA input attributes missing");
 }
 
@@ -396,7 +399,10 @@ fn migration_sidebar_data_attributes_present() {
         "sidebar key missing"
     );
     // Dead JS-era markup purge: the toast store markup is gone.
-    assert!(!html.contains("data-toast-store"), "toast store must not ship");
+    assert!(
+        !html.contains("data-toast-store"),
+        "toast store must not ship"
+    );
     assert!(
         html.contains("aria-label=\"Primary sidebar navigation\""),
         "sidebar aria missing"

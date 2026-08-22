@@ -427,6 +427,9 @@ mod tests {
         assert!(sql.contains("JOIN plans p ON p.name = t.plan"));
         assert!(sql.contains("ROUND(p.price_yearly / 12.0)::bigint"));
         assert!(sql.contains("billing_interval"));
-        assert!(!sql.contains("FROM subscriptions"), "must not read the writerless legacy table");
+        assert!(
+            !sql.contains("FROM subscriptions"),
+            "must not read the writerless legacy table"
+        );
     }
 }

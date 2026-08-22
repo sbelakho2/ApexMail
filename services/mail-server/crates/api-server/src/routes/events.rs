@@ -338,7 +338,12 @@ mod tests {
         })
         .expect("default window must resolve");
         let now = Utc::now();
-        assert!((from - (now - chrono::Duration::days(30))).num_seconds().abs() < 5);
+        assert!(
+            (from - (now - chrono::Duration::days(30)))
+                .num_seconds()
+                .abs()
+                < 5
+        );
         assert!((to - now).num_seconds().abs() < 5);
     }
 
@@ -358,10 +363,7 @@ mod tests {
         let now = Utc::now();
         // 93 days — just over the cap.
         let err = resolve_stats_window(
-            &stats_query(
-                Some(now - chrono::Duration::days(93)),
-                Some(now),
-            ),
+            &stats_query(Some(now - chrono::Duration::days(93)), Some(now)),
             || Utc::now() - chrono::Duration::days(30),
         )
         .expect_err("over-long range must be a 400");
@@ -374,10 +376,7 @@ mod tests {
 
         // Exactly 92 days is allowed.
         assert!(resolve_stats_window(
-            &stats_query(
-                Some(now - chrono::Duration::days(92)),
-                Some(now),
-            ),
+            &stats_query(Some(now - chrono::Duration::days(92)), Some(now),),
             || Utc::now() - chrono::Duration::days(30),
         )
         .is_ok());

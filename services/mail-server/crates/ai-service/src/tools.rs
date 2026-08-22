@@ -24,7 +24,7 @@ pub enum Role {
 }
 
 impl Role {
-    pub fn from_str(s: &str) -> Role {
+    pub fn parse_role(s: &str) -> Role {
         match s.to_lowercase().as_str() {
             "owner" => Role::Owner,
             "admin" => Role::Admin,
@@ -359,11 +359,11 @@ fn compare_plans(params: &serde_json::Value) -> serde_json::Value {
         (Some(pa), Some(pb)) => (pa, pb),
         _ => return serde_json::json!({"error":format!("unknown plan: {a} or {b}")}),
     };
-    let diff = pb_price - pa_price;
+    let diff: i32 = pb_price - pa_price;
     serde_json::json!({
         "plan_a":{"name":a,"price":pa_price},"plan_b":{"name":b,"price":pb_price},
         "price_diff":diff,
-        "label":if diff>0{format!("\u{20ac}{diff} more")}else if diff<0{format!("\u{20ac}{} less", (diff as i32).abs())}else{"Same price".into()}
+        "label":if diff>0{format!("\u{20ac}{diff} more")}else if diff<0{format!("\u{20ac}{} less", diff.abs())}else{"Same price".into()}
     })
 }
 
@@ -412,8 +412,8 @@ fn get_price_diff(params: &serde_json::Value) -> serde_json::Value {
     let get = |n: &str| prices.iter().find(|(nm, _)| *nm == n).map(|p| p.1);
     match (get(a), get(b)) {
         (Some(pa), Some(pb)) => {
-            let d = pb - pa;
-            serde_json::json!({"plan_a":a,"plan_a_price":pa,"plan_b":b,"plan_b_price":pb,"diff":d,"label":if d>0{format!("\u{20ac}{d} more")}else if d<0{format!("\u{20ac}{} less", (d as i32).abs())}else{"Same price".into()}})
+            let d: i32 = pb - pa;
+            serde_json::json!({"plan_a":a,"plan_a_price":pa,"plan_b":b,"plan_b_price":pb,"diff":d,"label":if d>0{format!("\u{20ac}{d} more")}else if d<0{format!("\u{20ac}{} less", d.abs())}else{"Same price".into()}})
         }
         _ => serde_json::json!({"error":format!("unknown plan: {a} or {b}")}),
     }
@@ -772,7 +772,9 @@ mod tests {
 
     #[test]
     fn payg_at_exact_tier_boundaries_has_no_negative_volumes() {
-        for n in [0, 1, 5_000, 10_000, 10_001, 100_000, 100_001, 1_000_000, 1_000_001] {
+        for n in [
+            0, 1, 5_000, 10_000, 10_001, 100_000, 100_001, 1_000_000, 1_000_001,
+        ] {
             let r = calculate_payg(&serde_json::json!({"emails": n}));
             for tier in r["tiers"].as_array().unwrap() {
                 let count = tier["emails_in_tier"].as_i64().unwrap();
@@ -788,7 +790,10 @@ mod tests {
         let r = get_price_diff(&serde_json::json!({"plan_a":"scale","plan_b":"pro"}));
         assert_eq!(r["label"], "\u{20ac}285 less");
         let rendered = serde_json::to_string(&r).unwrap();
-        assert!(!rendered.contains('$'), "euro outputs must not use $ labels");
+        assert!(
+            !rendered.contains('$'),
+            "euro outputs must not use $ labels"
+        );
     }
 
     #[test]
@@ -798,7 +803,10 @@ mod tests {
         );
         let query = r["apexmail_audit_log_query"].as_str().unwrap();
         assert!(query.contains("$1"), "query must use a $1 placeholder");
-        assert!(!query.contains("key'"), "key_id must never be interpolated into SQL");
+        assert!(
+            !query.contains("key'"),
+            "key_id must never be interpolated into SQL"
+        );
     }
     #[test]
     fn dns_tool_refuses_to_invent_static_records() {

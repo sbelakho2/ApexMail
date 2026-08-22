@@ -1078,7 +1078,10 @@ mod tests {
 
         // The storage separator is flattened on disk: no subdirectories and
         // no traversal possible from the key.
-        assert_eq!(export_file_name(&json_key), format!("exports_ten_abc_{job_id}.json"));
+        assert_eq!(
+            export_file_name(&json_key),
+            format!("exports_ten_abc_{job_id}.json")
+        );
         assert!(!export_file_name(&json_key).contains('/'));
         assert_eq!(export_file_name("a/../../etc/passwd"), "a_.._.._etc_passwd");
     }
@@ -1086,17 +1089,24 @@ mod tests {
     /// Serialises tests that mutate the `EXPORT_STORAGE_PATH` process env var.
     static EXPORT_ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+    /// The guard is intentionally held across the awaited store call: the
+    /// env var it protects is read on that path, so dropping it early would
+    /// let concurrent tests race the process-global setting.
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn test_store_export_file_writes_content_with_private_directory() {
         let _guard = EXPORT_ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
 
-        let dir = std::env::temp_dir().join(format!("apexmail-export-test-{}", uuid::Uuid::new_v4()));
+        let dir =
+            std::env::temp_dir().join(format!("apexmail-export-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         std::env::set_var("EXPORT_STORAGE_PATH", &dir);
 
         let key = export_object_key("ten_test", uuid::Uuid::new_v4(), "json");
         let payload = b"{\"rows\":[]}".to_vec();
-        store_export_file(&key, &payload).await.expect("stores export");
+        store_export_file(&key, &payload)
+            .await
+            .expect("stores export");
 
         let file_path = dir.join(export_file_name(&key));
         let stored = tokio::fs::read(&file_path).await.expect("artifact written");

@@ -26,7 +26,7 @@ hex = "0.4"
 url = "2.5"
 idna = "1.0"
 unicode-normalization = { workspace = true }
-prometheus = "0.13"
+prometheus = "0.14"
 thiserror = "2.0"
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1.8", features = ["v4"] }

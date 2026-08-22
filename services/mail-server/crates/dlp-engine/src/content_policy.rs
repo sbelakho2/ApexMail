@@ -51,13 +51,22 @@ fn keywords_hash(keywords: &[String]) -> u64 {
     hasher.finish()
 }
 
+/// Lock the automaton cache, recovering the data from a poisoned lock:
+/// the cache is a pure optimization, so a panic elsewhere in the process
+/// must not take content scanning down with it.
+fn lock_automaton_cache() -> std::sync::MutexGuard<'static, HashMap<u64, Arc<AhoCorasick>>> {
+    automaton_cache()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 /// Compile (or fetch from cache) the automaton for a keyword list.
 /// Returns `Err` with a human-readable reason when the automaton cannot be
 /// built — callers must treat this as "channel unavailable", never as
 /// "no matches".
 fn automaton_for(keywords: &[String]) -> Result<Arc<AhoCorasick>, String> {
     let key = keywords_hash(keywords);
-    if let Some(cached) = automaton_cache().lock().unwrap().get(&key) {
+    if let Some(cached) = lock_automaton_cache().get(&key) {
         return Ok(Arc::clone(cached));
     }
 
@@ -67,7 +76,7 @@ fn automaton_for(keywords: &[String]) -> Result<Arc<AhoCorasick>, String> {
         .map_err(|e| format!("aho-corasick build failed for keyword list: {e}"))?;
     let ac = Arc::new(ac);
     // Bound the cache:keep at most 32 configurations.
-    let mut cache = automaton_cache().lock().unwrap();
+    let mut cache = lock_automaton_cache();
     if cache.len() >= 32 {
         cache.clear();
     }
@@ -78,10 +87,7 @@ fn automaton_for(keywords: &[String]) -> Result<Arc<AhoCorasick>, String> {
 /// Scan content against confidentiality keywords.
 /// Fails loudly with `Err` when the matcher cannot be compiled (the caller
 /// is expected to log and count the outage — never to treat it as "clean").
-pub fn scan_content_policy(
-    text: &str,
-    keywords: &[String],
-) -> Result<Vec<PolicyMatch>, String> {
+pub fn scan_content_policy(text: &str, keywords: &[String]) -> Result<Vec<PolicyMatch>, String> {
     if keywords.is_empty() {
         return Ok(Vec::new());
     }

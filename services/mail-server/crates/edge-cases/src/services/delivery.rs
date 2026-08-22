@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use std::sync::OnceLock;
 use trust_dns_resolver::config::{ResolverConfig, ResolverOpts};
-use trust_dns_resolver::TokioAsyncResolver;
+use trust_dns_resolver::TokioResolver;
 
 use crate::config::{LoopDetectionConfig, RetryConfig, AUTO_SUBMITTED_VALUES};
 
@@ -126,7 +126,7 @@ pub struct RetrySchedule {
 pub struct DeliveryService {
     pool: PgPool,
     redis: deadpool_redis::Pool,
-    resolver: TokioAsyncResolver,
+    resolver: TokioResolver,
     retry_config: RetryConfig,
     loop_config: LoopDetectionConfig,
     mx_cache: Cache<String, Vec<MXRecord>>,
@@ -135,8 +135,14 @@ pub struct DeliveryService {
     auto_responder_subject_patterns: Vec<Regex>,
 }
 
-static DELIVERY_RESOLVER: LazyLock<TokioAsyncResolver> =
-    LazyLock::new(|| TokioAsyncResolver::tokio(ResolverConfig::default(), ResolverOpts::default()));
+static DELIVERY_RESOLVER: LazyLock<TokioResolver> = LazyLock::new(|| {
+    trust_dns_resolver::Resolver::builder_with_config(
+        ResolverConfig::default(),
+        trust_dns_resolver::net::runtime::TokioRuntimeProvider::default(),
+    )
+    .build()
+    .expect("system resolver configuration is always buildable")
+});
 
 impl DeliveryService {
     pub fn new(
@@ -414,11 +420,15 @@ impl DeliveryService {
 
         let mut records: Vec<MXRecord> = match self.resolver.mx_lookup(domain).await {
             Ok(mx) => mx
+                .answers()
                 .iter()
-                .map(|rec| MXRecord {
-                    exchange: rec.exchange().to_string().trim_end_matches('.').to_string(),
-                    priority: rec.preference(),
-                    ttl: None,
+                .filter_map(|r| match &r.data {
+                    trust_dns_resolver::proto::rr::RData::MX(rec) => Some(MXRecord {
+                        exchange: rec.exchange.to_string().trim_end_matches('.').to_string(),
+                        priority: rec.preference,
+                        ttl: None,
+                    }),
+                    _ => None,
                 })
                 .collect(),
             Err(e) => {

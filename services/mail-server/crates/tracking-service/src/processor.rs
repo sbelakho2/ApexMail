@@ -707,7 +707,7 @@ impl EventProcessor {
         // Best-effort secondary store: Postgres is the source of truth, so a
         // ClickHouse failure is logged (never re-enqueues the batch — that
         // would re-run the committed Postgres writes).
-        if let Err(ch_err) = self.write_clickhouse(&events).await {
+        if let Err(ch_err) = self.write_clickhouse(events).await {
             error!(
                 count = events.len(),
                 error = %ch_err,

@@ -327,11 +327,16 @@ fn verify_impersonation_token(
 /// plus a small buffer. A second presentation of the same jti is rejected as
 /// a replay. Fails CLOSED (503) when Redis is unavailable so tokens cannot be
 /// replayed during an outage.
-async fn consume_impersonation_jti(state: &AppState, jti: &str, exp_ms: i64) -> Result<(), ApiError> {
+async fn consume_impersonation_jti(
+    state: &AppState,
+    jti: &str,
+    exp_ms: i64,
+) -> Result<(), ApiError> {
     let now_ms = chrono::Utc::now().timestamp_millis();
     let remaining_ms = (exp_ms - now_ms).max(0);
     // Keep the tombstone slightly longer than the token's own validity.
-    let ttl_secs = ((remaining_ms + 5_000) / 1000).clamp(1, MAX_IMPERSONATION_TOKEN_TTL_MS / 1000 + 5) as u64;
+    let ttl_secs =
+        ((remaining_ms + 5_000) / 1000).clamp(1, MAX_IMPERSONATION_TOKEN_TTL_MS / 1000 + 5) as u64;
 
     let key = format!("apexmail:impersonation_used:{jti}");
     let mut conn = state.redis.get().await.map_err(|error| {
@@ -439,11 +444,7 @@ mod tests {
 
     // ── Audit D: mandatory expiry, expiry enforcement, lifetime cap ──
 
-    fn impersonation_token(
-        secret: &str,
-        exp: Option<i64>,
-        jti: Option<&str>,
-    ) -> String {
+    fn impersonation_token(secret: &str, exp: Option<i64>, jti: Option<&str>) -> String {
         let mut payload = serde_json::json!({
             "type": "impersonation",
             "tenantId": "ten_victim",

@@ -47,7 +47,7 @@ bytes      = { workspace = true }
 aes-gcm    = { workspace = true }
 zeroize    = { workspace = true }
 hex        = { workspace = true }
-quick-xml  = "0.36"
+quick-xml  = "0.41"
 governor   = { workspace = true }
 mail-common = { path = "../mail-common" }
 apexmail-dns-resolver = { path = "../dns-resolver" }

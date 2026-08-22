@@ -181,10 +181,7 @@ pub fn derived_event_id(tenant_id: &str, event_type: &str, day: NaiveDate, sourc
 }
 
 fn day_bounds(day: NaiveDate) -> (chrono::DateTime<Utc>, chrono::DateTime<Utc>) {
-    let start = day
-        .and_hms_opt(0, 0, 0)
-        .unwrap_or_default()
-        .and_utc();
+    let start = day.and_hms_opt(0, 0, 0).unwrap_or_default().and_utc();
     let end = (day + Duration::days(1))
         .and_hms_opt(0, 0, 0)
         .unwrap_or_default()
@@ -194,8 +191,8 @@ fn day_bounds(day: NaiveDate) -> (chrono::DateTime<Utc>, chrono::DateTime<Utc>) 
 
 /// Record one derived daily aggregate idempotently: marker + metering event
 /// + audit entry in a single transaction. Returns `Ok(true)` when the
-/// aggregate was newly recorded, `Ok(false)` when the (tenant, event_type,
-/// day, source) marker already exists.
+///   aggregate was newly recorded, `Ok(false)` when the (tenant, event_type,
+///   day, source) marker already exists.
 async fn record_derived_daily_aggregate(
     pool: &PgPool,
     tenant_id: &str,
@@ -687,15 +684,16 @@ pub async fn reconcile_daily_deliveries(
     // 2. Bounced sends for the day. bounce_analytics_daily (aggregated by
     //    the bounce pipeline) is preferred; when absent for the day, fall
     //    back to counting terminal-bounced queue rows.
-    let bounced_by_tenant: HashMap<String, i64> =
-        match collect_bounce_counts(pool, day).await {
-            Ok(counts) => counts,
-            Err(error) if is_missing_table(&error) => {
-                summary.skipped_sources.push("bounce_analytics_daily".into());
-                HashMap::new()
-            }
-            Err(error) => return Err(format!("bounce collection failed: {error}")),
-        };
+    let bounced_by_tenant: HashMap<String, i64> = match collect_bounce_counts(pool, day).await {
+        Ok(counts) => counts,
+        Err(error) if is_missing_table(&error) => {
+            summary
+                .skipped_sources
+                .push("bounce_analytics_daily".into());
+            HashMap::new()
+        }
+        Err(error) => return Err(format!("bounce collection failed: {error}")),
+    };
 
     // 3. Complaints (FBL) for the day — reported distinctly, NOT deducted
     //    from delivered (a complaint implies the message was delivered).

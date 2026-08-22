@@ -1,6 +1,14 @@
 //! BIMI – Brand Indicators for Message Identification.
 //!
 //! Verifies BIMI DNS records, validates SVG logos, and checks VMC certificates.
+//!
+//! MAINTAINED-BUT-NOT-WIRED (F-16): BIMI verification is a RECEIVER-side
+//! display feature consumed by the end-user mail client, not the SMTP
+//! transport; this MTA stores inbound mail for IMAP retrieval and never
+//! renders brand indicators, so nothing calls into this module beyond its
+//! own unit tests. The direct-MX sender / future receiver hardening tracked
+//! as finding F-16 owns the decision of where verification plugs in.
+//! Do not delete: tracked for the F-16 direct-MX work.
 
 use std::io::Cursor;
 use std::sync::LazyLock;
@@ -10,13 +18,19 @@ use quick_xml::events::Event;
 use quick_xml::Reader;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use trust_dns_resolver::config::{ResolverConfig, ResolverOpts};
-use trust_dns_resolver::TokioAsyncResolver;
+use trust_dns_resolver::config::ResolverConfig;
+use trust_dns_resolver::net::runtime::TokioRuntimeProvider;
+use trust_dns_resolver::{Resolver, TokioResolver};
 use x509_parser::prelude::*;
 
-// #131:Shared DNS resolver – avoids creating a new resolver per verify_bimi call
-static BIMI_RESOLVER: LazyLock<TokioAsyncResolver> =
-    LazyLock::new(|| TokioAsyncResolver::tokio(ResolverConfig::default(), ResolverOpts::default()));
+// #131:Shared DNS resolver – avoids creating a new resolver per verify_bimi call.
+// trust-dns 0.26: TokioAsyncResolver::tokio is gone; build a TokioResolver
+// (builder defaults already equal ResolverOpts::default()).
+static BIMI_RESOLVER: LazyLock<TokioResolver> = LazyLock::new(|| {
+    Resolver::builder_with_config(ResolverConfig::default(), TokioRuntimeProvider::default())
+        .build()
+        .expect("system resolver configuration is always buildable")
+});
 
 // Shared HTTP client for BIMI logo fetching.
 static BIMI_CLIENT: LazyLock<Option<Client>> = LazyLock::new(|| {
@@ -93,11 +107,10 @@ pub async fn verify_bimi(domain: &str, selector: &str) -> BimiVerificationResult
     let resolver = &*BIMI_RESOLVER;
 
     match resolver.txt_lookup(&dmarc_name).await {
-        Ok(records) => {
-            let has_enforcement = records.iter().any(|r| {
-                let txt = r.to_string();
-                txt.contains("p=reject") || txt.contains("p=quarantine")
-            });
+        Ok(lookup) => {
+            let has_enforcement = txt_record_strings(&lookup)
+                .into_iter()
+                .any(|txt| txt.contains("p=reject") || txt.contains("p=quarantine"));
             result.dmarc_valid = has_enforcement;
             if !has_enforcement {
                 result
@@ -113,9 +126,8 @@ pub async fn verify_bimi(domain: &str, selector: &str) -> BimiVerificationResult
     // 2. Look up BIMI record
     let bimi_name = format!("{selector}._bimi.{domain}");
     match resolver.txt_lookup(&bimi_name).await {
-        Ok(records) => {
-            for record in records.iter() {
-                let txt = record.to_string();
+        Ok(lookup) => {
+            for txt in txt_record_strings(&lookup) {
                 if txt.starts_with("v=BIMI1") {
                     let parsed = parse_bimi_record(&txt, selector);
                     result.supported = true;
@@ -412,6 +424,28 @@ pub fn get_bimi_setup_instructions(
     steps.push("6. Test with a BIMI validator tool".into());
 
     steps
+}
+
+/// Flatten a TXT lookup into one String per TXT record.
+///
+/// trust-dns 0.26 removed typed lookup iteration; `txt_lookup` now returns raw
+/// records. Each record's character-string chunks are joined without a
+/// separator (mirroring apexmail-dns-resolver's migrated TXT handling).
+fn txt_record_strings(lookup: &trust_dns_resolver::lookup::Lookup) -> Vec<String> {
+    lookup
+        .answers()
+        .iter()
+        .filter_map(|record| match &record.data {
+            trust_dns_resolver::proto::rr::RData::TXT(txt) => Some(
+                txt.txt_data
+                    .iter()
+                    .map(|d| String::from_utf8_lossy(d).to_string())
+                    .collect::<Vec<_>>()
+                    .join(""),
+            ),
+            _ => None,
+        })
+        .collect()
 }
 
 fn parse_bimi_record(txt: &str, selector: &str) -> BimiRecord {
@@ -766,7 +800,7 @@ mod tests {
         let der = cert.der().to_vec();
 
         assert!(
-            verify_x509_chain(&[der.clone()], &[der]),
+            verify_x509_chain(std::slice::from_ref(&der), std::slice::from_ref(&der)),
             "pinned self-signed root must validate"
         );
     }

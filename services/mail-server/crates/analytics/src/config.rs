@@ -278,10 +278,12 @@ mod tests {
     #[test]
     fn empty_hmac_key_is_rejected_in_production() {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let mut cfg = AnalyticsConfig::default();
         // Satisfy the unrelated validations so the HMAC check is exercised.
-        cfg.database_url = "postgres://u:p@localhost:5432/apexmail".into();
-        cfg.sto_hmac_key = String::new();
+        let cfg = AnalyticsConfig {
+            database_url: "postgres://u:p@localhost:5432/apexmail".into(),
+            sto_hmac_key: String::new(),
+            ..Default::default()
+        };
         let saved = std::env::var("NODE_ENV").ok();
         std::env::set_var("NODE_ENV", "production");
         let result = cfg.validate();

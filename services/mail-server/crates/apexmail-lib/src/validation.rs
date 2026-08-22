@@ -36,9 +36,8 @@ static STANDARD_LOCAL_RE: LazyLock<Option<Regex>> =
 /// so CR/LF/NUL can never appear inside a quoted local part — not even as a
 /// `\<CR>` quoted-pair, which downstream unescaping would turn back into a
 /// raw header separator.
-static QUOTED_LOCAL_RE: LazyLock<Option<Regex>> = LazyLock::new(|| {
-    Regex::new(r#"^"(?:[^"\x00-\x1F\x7F]|\\[^\x00-\x1F\x7F])*"$"#).ok()
-});
+static QUOTED_LOCAL_RE: LazyLock<Option<Regex>> =
+    LazyLock::new(|| Regex::new(r#"^"(?:[^"\x00-\x1F\x7F]|\\[^\x00-\x1F\x7F])*"$"#).ok());
 
 /// Domain part: standard RFC 5322 domain name or domain literal.
 /// - Domain names: letters, digits, hyphens, at least one dot, TLD ≥ 2 chars.

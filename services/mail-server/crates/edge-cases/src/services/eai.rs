@@ -10,7 +10,7 @@ use moka::sync::Cache;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use trust_dns_resolver::config::{ResolverConfig, ResolverOpts};
-use trust_dns_resolver::TokioAsyncResolver;
+use trust_dns_resolver::TokioResolver;
 use unicode_normalization::UnicodeNormalization;
 
 // ── types ──────────────────────────────────────────────────────────────────────
@@ -54,13 +54,19 @@ pub struct ContentNormalization {
 pub struct EAIService {
     pool: PgPool,
     redis: deadpool_redis::Pool,
-    resolver: TokioAsyncResolver,
+    resolver: TokioResolver,
     mx_cache: Cache<String, bool>,
     eai_cache: Cache<String, bool>,
 }
 
-static EAI_RESOLVER: LazyLock<TokioAsyncResolver> =
-    LazyLock::new(|| TokioAsyncResolver::tokio(ResolverConfig::default(), ResolverOpts::default()));
+static EAI_RESOLVER: LazyLock<TokioResolver> = LazyLock::new(|| {
+    trust_dns_resolver::Resolver::builder_with_config(
+        ResolverConfig::default(),
+        trust_dns_resolver::net::runtime::TokioRuntimeProvider::default(),
+    )
+    .build()
+    .expect("system resolver configuration is always buildable")
+});
 
 impl EAIService {
     pub fn new(pool: PgPool, redis: deadpool_redis::Pool) -> Self {
@@ -370,7 +376,10 @@ impl EAIService {
         }
 
         let has_mx = match self.resolver.mx_lookup(domain).await {
-            Ok(mx) => mx.iter().next().is_some(),
+            Ok(mx) => mx
+                .answers()
+                .iter()
+                .any(|r| matches!(&r.data, trust_dns_resolver::proto::rr::RData::MX(_))),
             Err(_) => {
                 // Fallback to A record
                 self.resolver.lookup_ip(domain).await.is_ok()

@@ -102,10 +102,7 @@ pub fn html_entity_decode(input: &str) -> String {
         if chars[i] == '&' {
             // Look for ';' within the entity-length bound (exclusive of '&').
             let lookahead_end = (i + 1 + MAX_ENTITY_CHARS).min(len);
-            if let Some(end) = chars[i + 1..lookahead_end]
-                .iter()
-                .position(|&c| c == ';')
-            {
+            if let Some(end) = chars[i + 1..lookahead_end].iter().position(|&c| c == ';') {
                 let entity: String = chars[i + 1..i + 1 + end].iter().collect();
                 if let Some(decoded) = decode_html_entity(&entity) {
                     result.push(decoded);

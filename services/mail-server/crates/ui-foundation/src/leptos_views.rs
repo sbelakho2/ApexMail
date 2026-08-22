@@ -308,19 +308,16 @@ fn infer_kpi_tone(label: &str, value: &str) -> Option<&'static str> {
 fn render_stat_tile(kpi: &crate::view_data::KpiCardData) -> String {
     let (display_value, raw_title) = format_kpi_value(&kpi.value);
     let tone = infer_kpi_tone(&kpi.label, &kpi.value);
-    let tone_attr = tone.map(|tone| format!(" data-tone=\"{tone}\"")).unwrap_or_default();
+    let tone_attr = tone
+        .map(|tone| format!(" data-tone=\"{tone}\""))
+        .unwrap_or_default();
     let title_attr = raw_title
         .map(|raw| format!(" title=\"{raw}\""))
         .unwrap_or_default();
     let help = kpi
         .hint
         .as_deref()
-        .map(|text| {
-            format!(
-                "<p class=\"apex-cp-stat-help\">{}</p>",
-                html_escape(text)
-            )
-        })
+        .map(|text| format!("<p class=\"apex-cp-stat-help\">{}</p>", html_escape(text)))
         .unwrap_or_default();
     let sparkline = kpi
         .trend
@@ -374,13 +371,10 @@ fn detail_id_under(base_path: &str, prefix: &str) -> bool {
         return false;
     };
     rest.len() == 36
-        && rest
-            .bytes()
-            .enumerate()
-            .all(|(index, byte)| match index {
-                8 | 13 | 18 | 23 => byte == b'-',
-                _ => byte.is_ascii_hexdigit(),
-            })
+        && rest.bytes().enumerate().all(|(index, byte)| match index {
+            8 | 13 | 18 | 23 => byte == b'-',
+            _ => byte.is_ascii_hexdigit(),
+        })
 }
 
 /// The domain detail flow (design report structural #2): DNS records as
@@ -558,7 +552,10 @@ fn domain_transfer_section(data: &ListPageData) -> String {
 /// Per-row control-plane actions (design report #24): alerts acknowledge,
 /// GDPR transitions, tenant lifecycle. Availability derives from the row's
 /// Status cell; ids come from the row id. Returns (column header, cell html).
-fn cp_row_actions(base_path: &str, row: &crate::view_data::DataRowData) -> Option<(String, String)> {
+fn cp_row_actions(
+    base_path: &str,
+    row: &crate::view_data::DataRowData,
+) -> Option<(String, String)> {
     let status = row
         .cells
         .iter()
@@ -592,11 +589,26 @@ fn cp_row_actions(base_path: &str, row: &crate::view_data::DataRowData) -> Optio
             // Forward-only triad: pending → in_progress → completed/rejected.
             let mut buttons: Vec<String> = Vec::new();
             if status == "pending" {
-                buttons.push(gdpr_transition_button(&row.id, "in_progress", "Start", base_path));
+                buttons.push(gdpr_transition_button(
+                    &row.id,
+                    "in_progress",
+                    "Start",
+                    base_path,
+                ));
             }
-            if matches!(status.as_str(), "pending" | "in_progress" | "processing" | "verified") {
-                buttons.push(gdpr_transition_button(&row.id, "completed", "Complete", base_path));
-                buttons.push(gdpr_transition_button(&row.id, "rejected", "Reject", base_path));
+            if matches!(
+                status.as_str(),
+                "pending" | "in_progress" | "processing" | "verified"
+            ) {
+                buttons.push(gdpr_transition_button(
+                    &row.id,
+                    "completed",
+                    "Complete",
+                    base_path,
+                ));
+                buttons.push(gdpr_transition_button(
+                    &row.id, "rejected", "Reject", base_path,
+                ));
             }
             if buttons.is_empty() {
                 None
@@ -706,9 +718,7 @@ pub fn data_list_page(data: &ListPageData, noun: &str) -> String {
             .map(render_stat_tile)
             .collect::<Vec<_>>()
             .join("");
-        format!(
-            "<div class=\"grid gap-4 sm:grid-cols-2 lg:grid-cols-4\">{cards}</div>"
-        )
+        format!("<div class=\"grid gap-4 sm:grid-cols-2 lg:grid-cols-4\">{cards}</div>")
     };
 
     // CP chrome (design report structural #14): operator pages get the
@@ -724,7 +734,9 @@ pub fn data_list_page(data: &ListPageData, noun: &str) -> String {
     };
 
     // Native GET filter form: search input + selects + Apply/Clear.
-    let filters_html = if (data.search_label.is_empty() && data.filters.is_empty()) || is_campaign_detail {
+    let filters_html = if (data.search_label.is_empty() && data.filters.is_empty())
+        || is_campaign_detail
+    {
         String::new()
     } else {
         let selects = data
@@ -777,129 +789,151 @@ pub fn data_list_page(data: &ListPageData, noun: &str) -> String {
 
     let table_section = if let Some(detail) = detail_section {
         // Detail flow: stat tiles above + the flow-specific section.
-        format!("{detail}")
+        detail.to_string()
     } else {
         match &data.table {
-        None => String::new(),
-        Some(table) if table.rows.is_empty() && !is_transfer => {
-            // Honest empty state: visible, with the page's own copy.
-            format!(
-                "<section data-view-state=\"empty\" class=\"space-y-4\">{}</section>",
-                EmptyState {
-                    title: &data.empty_title,
-                    description: Some(&data.empty_description),
-                    icon_markup: None,
-                    action_label: data.primary_action.as_ref().map(|(label, _)| label.as_str()),
-                    action_href: data.primary_action.as_ref().map(|(_, href)| href.as_str()),
-                }
-                .render_html()
-            )
-        }
-        Some(table) => {
-            let has_bulk = data.bulk_action.is_some();
-            let has_actions = data.detail_path_prefix.is_some() || data.delete_intent.is_some();
+            None => String::new(),
+            Some(table) if table.rows.is_empty() && !is_transfer => {
+                // Honest empty state: visible, with the page's own copy.
+                format!(
+                    "<section data-view-state=\"empty\" class=\"space-y-4\">{}</section>",
+                    EmptyState {
+                        title: &data.empty_title,
+                        description: Some(&data.empty_description),
+                        icon_markup: None,
+                        action_label: data
+                            .primary_action
+                            .as_ref()
+                            .map(|(label, _)| label.as_str()),
+                        action_href: data.primary_action.as_ref().map(|(_, href)| href.as_str()),
+                    }
+                    .render_html()
+                )
+            }
+            Some(table) => {
+                let has_bulk = data.bulk_action.is_some();
+                let has_actions = data.detail_path_prefix.is_some() || data.delete_intent.is_some();
 
-            // Per-row CP actions land in an extra trailing column.
-            let row_actions: Vec<Option<(String, String)>> =
-                table.rows.iter().map(|row| cp_row_actions(&data.base_path, row)).collect();
-            let has_row_actions = row_actions.iter().any(|action| action.is_some());
+                // Per-row CP actions land in an extra trailing column.
+                let row_actions: Vec<Option<(String, String)>> = table
+                    .rows
+                    .iter()
+                    .map(|row| cp_row_actions(&data.base_path, row))
+                    .collect();
+                let has_row_actions = row_actions.iter().any(|action| action.is_some());
 
-            let mut columns: Vec<TableColumn> = Vec::with_capacity(table.columns.len() + 3);
-            let mut owned_rows: Vec<Vec<String>> = Vec::with_capacity(table.rows.len());
-            if has_bulk {
-                columns.push(TableColumn { label: "", align: "left" });
-            }
-            for label in &table.columns {
-                columns.push(TableColumn { label, align: "left" });
-            }
-            if has_actions || has_row_actions {
-                columns.push(TableColumn { label: "Actions", align: "right" });
-            }
-            for (row, row_action) in table.rows.iter().zip(row_actions.iter()) {
-                let mut cells: Vec<String> = Vec::with_capacity(columns.len());
+                let mut columns: Vec<TableColumn> = Vec::with_capacity(table.columns.len() + 3);
+                let mut owned_rows: Vec<Vec<String>> = Vec::with_capacity(table.rows.len());
                 if has_bulk {
-                    cells.push(format!(
+                    columns.push(TableColumn {
+                        label: "",
+                        align: "left",
+                    });
+                }
+                for label in &table.columns {
+                    columns.push(TableColumn {
+                        label,
+                        align: "left",
+                    });
+                }
+                if has_actions || has_row_actions {
+                    columns.push(TableColumn {
+                        label: "Actions",
+                        align: "right",
+                    });
+                }
+                for (row, row_action) in table.rows.iter().zip(row_actions.iter()) {
+                    let mut cells: Vec<String> = Vec::with_capacity(columns.len());
+                    if has_bulk {
+                        cells.push(format!(
                         "<input type=\"checkbox\" name=\"ids\" value=\"{}\" aria-label=\"Select row {}\" />",
                         html_escape(&row.id),
                         html_escape(&row.id)
                     ));
-                }
-                for cell in &row.cells {
-                    cells.push(render_data_cell(cell));
-                }
-                if has_actions || has_row_actions {
-                    let mut actions: Vec<String> = Vec::with_capacity(4);
-                    if let Some(prefix) = &data.detail_path_prefix {
-                        let label = if data.detail_label.is_empty() { "View" } else { &data.detail_label };
-                        actions.push(format!(
+                    }
+                    for cell in &row.cells {
+                        cells.push(render_data_cell(cell));
+                    }
+                    if has_actions || has_row_actions {
+                        let mut actions: Vec<String> = Vec::with_capacity(4);
+                        if let Some(prefix) = &data.detail_path_prefix {
+                            let label = if data.detail_label.is_empty() {
+                                "View"
+                            } else {
+                                &data.detail_label
+                            };
+                            actions.push(format!(
                             "<a href=\"{prefix}{id}\" class=\"inline-flex items-center justify-center rounded-sm border border-input bg-background px-3 py-2 text-sm font-bold text-foreground transition-colors hover:bg-accent hover:text-accent-foreground\">{label}</a>",
                             prefix = html_escape(prefix),
                             id = html_escape(&row.id),
                             label = html_escape(label),
                         ));
-                        if let Some(suffix) = &data.edit_path_suffix {
-                            actions.push(format!(
+                            if let Some(suffix) = &data.edit_path_suffix {
+                                actions.push(format!(
                                 "<a href=\"{prefix}{id}{suffix}\" class=\"inline-flex items-center justify-center rounded-sm border border-input bg-background px-3 py-2 text-sm font-bold text-foreground transition-colors hover:bg-accent hover:text-accent-foreground\">Edit</a>",
                                 prefix = html_escape(prefix),
                                 id = html_escape(&row.id),
                                 suffix = html_escape(suffix),
                             ));
+                            }
                         }
-                    }
-                    if let Some(intent) = &data.delete_intent {
-                        actions.push(format!(
+                        if let Some(intent) = &data.delete_intent {
+                            actions.push(format!(
                             "<a href=\"/confirm?intent={intent}&amp;id={id}&amp;return_to={return_to}\" class=\"inline-flex items-center justify-center rounded-sm border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm font-bold text-destructive transition-colors hover:bg-destructive/10\">Delete</a>",
                             intent = html_escape(intent),
                             id = html_escape(&row.id),
                             return_to = urlencode_path(&data.base_path),
                         ));
+                        }
+                        if let Some((_, action_html)) = row_action {
+                            actions.push(action_html.clone());
+                        }
+                        if !actions.is_empty() {
+                            cells.push(format!(
+                                "<div class=\"flex flex-wrap justify-end gap-2\">{}</div>",
+                                actions.join("")
+                            ));
+                        }
                     }
-                    if let Some((_, action_html)) = row_action {
-                        actions.push(action_html.clone());
-                    }
-                    if !actions.is_empty() {
-                        cells.push(format!(
-                            "<div class=\"flex flex-wrap justify-end gap-2\">{}</div>",
-                            actions.join("")
-                        ));
-                    }
+                    owned_rows.push(cells);
                 }
-                owned_rows.push(cells);
-            }
-            let borrowed_rows: Vec<Vec<&str>> = owned_rows
-                .iter()
-                .map(|row| row.iter().map(String::as_str).collect())
-                .collect();
-            let mut rendered_table = Table {
-                caption: Some(&data.title),
-                columns,
-                rows: borrowed_rows,
-            }
-            .render_html();
-            // Operator density + working sticky headers on CP tables.
-            if cp {
-                rendered_table = rendered_table
-                    .replace(
-                        "class=\"apex-table-wrap relative w-full overflow-x-auto\"",
-                        "class=\"apex-table-wrap apex-table-wrap--scroll relative w-full\"",
-                    )
-                    .replace("class=\"apex-table w-full", "class=\"apex-table apex-table--dense w-full");
-            }
+                let borrowed_rows: Vec<Vec<&str>> = owned_rows
+                    .iter()
+                    .map(|row| row.iter().map(String::as_str).collect())
+                    .collect();
+                let mut rendered_table = Table {
+                    caption: Some(&data.title),
+                    columns,
+                    rows: borrowed_rows,
+                }
+                .render_html();
+                // Operator density + working sticky headers on CP tables.
+                if cp {
+                    rendered_table = rendered_table
+                        .replace(
+                            "class=\"apex-table-wrap relative w-full overflow-x-auto\"",
+                            "class=\"apex-table-wrap apex-table-wrap--scroll relative w-full\"",
+                        )
+                        .replace(
+                            "class=\"apex-table w-full",
+                            "class=\"apex-table apex-table--dense w-full",
+                        );
+                }
 
-            let pagination = PaginationControls {
-                page: data.page.max(1),
-                total_pages: data.total_pages.max(1),
-            }
-            .render_html_with_links(
-                &data.base_path,
-                Some(data.filter_query.as_str()),
-                None,
-            );
-            let summary = data.summary(noun);
+                let pagination = PaginationControls {
+                    page: data.page.max(1),
+                    total_pages: data.total_pages.max(1),
+                }
+                .render_html_with_links(
+                    &data.base_path,
+                    Some(data.filter_query.as_str()),
+                    None,
+                );
+                let summary = data.summary(noun);
 
-            if has_bulk {
-                let bulk = data.bulk_action.as_ref().expect("checked above");
-                format!(
+                if has_bulk {
+                    let bulk = data.bulk_action.as_ref().expect("checked above");
+                    format!(
                     "<form method=\"post\" action=\"{action}\" data-bulk-form=\"{noun}\"><section class=\"rounded-sm border border-surface-200 bg-card/80 p-6\" data-bulk-scope=\"{noun}\"><div class=\"flex flex-col gap-3 md:flex-row md:items-center md:justify-between\"><div><p class=\"text-sm font-bold text-foreground\">Select rows to act on them in bulk</p><p class=\"text-xs text-muted-foreground\">There is no select-all without scripts — tick each row you want. Bulk actions apply to every checked row and return to this exact page.</p></div><div class=\"flex flex-col gap-2 sm:flex-row\"><button type=\"submit\" formaction=\"{action}\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-md bg-destructive px-4 py-2 text-sm font-semibold text-destructive-foreground transition-all duration-200 ease-premium active:scale-[0.98] hover:bg-destructive/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">{label}</button></div></div></section><section data-view-state=\"ready\" class=\"space-y-4\">{table}<div class=\"flex flex-col gap-3 md:flex-row md:items-center md:justify-between\"><p class=\"text-sm text-muted-foreground\">{summary}</p>{pagination}</div></section></form>",
                     action = html_escape(&bulk.action),
                     noun = html_escape(noun),
@@ -908,15 +942,15 @@ pub fn data_list_page(data: &ListPageData, noun: &str) -> String {
                     summary = html_escape(&summary),
                     pagination = pagination,
                 )
-            } else {
-                format!(
+                } else {
+                    format!(
                     "<section data-view-state=\"ready\" class=\"space-y-4\">{table}<div class=\"flex flex-col gap-3 md:flex-row md:items-center md:justify-between\"><p class=\"text-sm text-muted-foreground\">{summary}</p>{pagination}</div></section>",
                     table = rendered_table,
                     summary = html_escape(&summary),
                     pagination = pagination,
                 )
+                }
             }
-        }
         }
     };
 
@@ -981,6 +1015,7 @@ fn render_campaign_editor_page(
         name: Some("html_body"),
     }
     .render_html();
+    let save_button = format!("<button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-md bg-primary px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-brand-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">{primary_action_label}</button>", primary_action_label = primary_action_label);
 
     format!(
         "{breadcrumbs}<div class=\"w-full max-w-3xl space-y-6\"><section class=\"rounded-sm border border-warning/25 bg-warning/10 p-4\"><div class=\"flex flex-col gap-3 md:flex-row md:items-center md:justify-between\"><div><p class=\"text-xs font-bold uppercase tracking-[0.24em] text-warning\">Draft protection</p><h1 class=\"mt-1 text-2xl font-bold text-surface-950 tracking-tight\">{title}</h1><p class=\"mt-2 text-sm text-muted-foreground\">Your work is saved when you press {primary_action_label} — no background sync to wait for.</p></div><div class=\"flex flex-col items-start gap-2 md:items-end\"><div class=\"flex items-center gap-2\">{draft_badge}<span class=\"text-xs font-medium text-muted-foreground\">Unsaved changes live only in this form</span></div><p class=\"text-xs text-muted-foreground\">Use Preview to render the HTML exactly as recipients will see it.</p></div></div></section><form class=\"space-y-6\" method=\"post\" action=\"/web/campaigns\" enctype=\"application/x-www-form-urlencoded\"><div class=\"space-y-2\">{name_label}{name_input}</div><div class=\"grid gap-6 md:grid-cols-2\"><div class=\"space-y-2\">{subject_label}{subject_input}</div><div class=\"space-y-2\">{audience_label}{audience_select}</div></div><div class=\"space-y-2\">{content_label}{content_input}</div><div class=\"space-y-2\"><label class=\"text-sm font-medium leading-none\" for=\"campaign-scheduled-at\">Schedule (optional)</label><input id=\"campaign-scheduled-at\" name=\"scheduled_at\" type=\"datetime-local\" class=\"flex h-12 w-full rounded-sm border border-input bg-background px-3 text-[14px] ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:border-primary\" /><p class=\"text-xs text-muted-foreground\">Pick a send time to schedule the campaign instead of saving it as a draft.</p></div><div class=\"flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between\"><p class=\"text-xs text-muted-foreground\">Everything runs server-side: submit, schedule, and preview are plain form posts.</p><div class=\"flex flex-col gap-3 sm:flex-row\">{preview_button}{save_button}</div></div></form></div>",
@@ -997,7 +1032,7 @@ fn render_campaign_editor_page(
         content_label = Label { text: "HTML Content", variant: "default", size: "default", required: false, optional: false }.render_html(),
         content_input = content_input,
         preview_button = "<button type=\"submit\" formaction=\"/web/campaigns/preview\" formtarget=\"_blank\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-md border border-surface-200 bg-background px-4 py-2 text-sm font-semibold text-foreground transition-colors hover:border-surface-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">Preview</button>",
-        save_button = format!("<button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-md bg-primary px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-brand-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">{primary_action_label}</button>", primary_action_label = primary_action_label),
+        save_button = save_button,
     )
 }
 
@@ -1655,14 +1690,13 @@ fn csrf_hidden_input(token: &str) -> String {
     web_auth_hidden_input("_csrf", token)
 }
 
-/// Renders the KiwiCaptcha slot for auth forms.
-///
-/// KiwiCaptcha is ApexMail's native Rust CAPTCHA. Under the zero-JS policy
-/// the browser widget is gone: proof-of-work challenges are solved by the
-/// SERVER during `/web/auth/*` handling (the form POST itself is the proof
-/// of humanity — rate limiting plus the signed CSRF token gate the flow),
-/// so this helper is intentionally empty and exists only to document why
-/// there is no client-side widget markup here anymore.
+// The KiwiCaptcha slot for auth forms.
+//
+// KiwiCaptcha is ApexMail's native Rust CAPTCHA. Under the zero-JS policy
+// the browser widget is gone: proof-of-work challenges are solved by the
+// SERVER during `/web/auth/*` handling (the form POST itself is the proof
+// of humanity — rate limiting plus the signed CSRF token gate the flow),
+// so there is no client-side widget markup here anymore.
 
 fn web_auth_notice(intent: &str, title: &str, description: &str) -> String {
     let classes = match intent {
@@ -1951,8 +1985,7 @@ pub fn web_verify_email_page_with_state(
 
 /// Dashboard overview page with summary cards.
 pub fn web_dashboard_page() -> String {
-    format!(
-        "<div class=\"space-y-8\">\
+    "<div class=\"space-y-8\">\
 <section data-view-state=\"ready\" class=\"space-y-8\">\
 <header class=\"flex flex-col gap-2\">\
 <h1 class=\"text-2xl font-bold tracking-tight text-surface-950\">Overview</h1>\
@@ -1986,8 +2019,7 @@ pub fn web_dashboard_page() -> String {
 </article>\
 </div>\
 </section>
-</div>",
-    )
+</div>".to_string()
 }
 
 /// Campaigns list page.
@@ -1998,13 +2030,21 @@ pub fn web_campaigns_page() -> String {
             "campaign-status",
             "Filter by status",
             "status",
-            &[("draft", "Draft", true), ("scheduled", "Scheduled", false), ("sent", "Sent", false)],
+            &[
+                ("draft", "Draft", true),
+                ("scheduled", "Scheduled", false),
+                ("sent", "Sent", false)
+            ],
         ),
         sort = render_native_select(
             "campaign-sort",
             "Sort order",
             "sort",
-            &[("updated", "Recently updated", true), ("created", "Recently created", false), ("open-rate", "Open rate", false)],
+            &[
+                ("updated", "Recently updated", true),
+                ("created", "Recently created", false),
+                ("open-rate", "Open rate", false)
+            ],
         ),
     );
     // Native checkboxes: the whole table lives inside one form whose bulk
@@ -2139,13 +2179,21 @@ pub fn web_contacts_page() -> String {
             "contact-status",
             "Filter by status",
             "status",
-            &[("subscribed", "Subscribed", true), ("unsubscribed", "Unsubscribed", false), ("bounced", "Bounced", false)],
+            &[
+                ("subscribed", "Subscribed", true),
+                ("unsubscribed", "Unsubscribed", false),
+                ("bounced", "Bounced", false)
+            ],
         ),
         list = render_native_select(
             "contact-list",
             "Filter by list",
             "list",
-            &[("vip", "VIP Customers", true), ("newsletter", "Newsletter Subscribers", false), ("trial", "Trial Accounts", false)],
+            &[
+                ("vip", "VIP Customers", true),
+                ("newsletter", "Newsletter Subscribers", false),
+                ("trial", "Trial Accounts", false)
+            ],
         ),
     );
     let subscriber_status = StatusIndicator {
@@ -2288,13 +2336,19 @@ pub fn web_lists_page() -> String {
             "list-segment",
             "Filter by segment",
             "segment",
-            &[("active", "Active lists", true), ("archived", "Archived lists", false)],
+            &[
+                ("active", "Active lists", true),
+                ("archived", "Archived lists", false)
+            ],
         ),
         sort = render_native_select(
             "list-sort",
             "Sort order",
             "sort",
-            &[("largest", "Largest audience", true), ("recent", "Recently updated", false)],
+            &[
+                ("largest", "Largest audience", true),
+                ("recent", "Recently updated", false)
+            ],
         ),
     );
     let vip_actions = "<div class=\"flex flex-wrap justify-end gap-2\"><a href=\"/lists/l_vip\" class=\"inline-flex items-center justify-center rounded-sm border border-input bg-background px-3 py-2 text-sm font-bold text-foreground transition-colors hover:bg-accent hover:text-accent-foreground\">Open</a><a href=\"/confirm?intent=delete-list&amp;id=l_vip&amp;return_to=%2Flists\" class=\"inline-flex items-center justify-center rounded-sm border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm font-bold text-destructive transition-colors hover:bg-destructive/10\">Delete</a></div>";
@@ -2354,8 +2408,7 @@ pub fn web_lists_page() -> String {
 /// List detail page. Metrics are server-rendered placeholders; the
 /// delete action routes through the signed /confirm page (no JavaScript).
 pub fn web_list_detail_page() -> String {
-    format!(
-        "<div class=\"space-y-6\" data-page=\"list-detail\">\
+    "<div class=\"space-y-6\" data-page=\"list-detail\">\
 <nav aria-label=\"Breadcrumb\" class=\"mb-2\"><ol class=\"flex items-center gap-2 text-sm text-surface-500\">\
 <li><a href=\"/lists\" class=\"hover:text-surface-900 transition-colors\">Lists</a></li>\
 <li class=\"text-surface-400\">/</li>\
@@ -2371,8 +2424,7 @@ pub fn web_list_detail_page() -> String {
 <div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium\"><h3 class=\"text-sm font-medium text-muted-foreground\">Subscribers</h3><p class=\"text-2xl font-bold text-surface-950 tracking-tight\">—</p></div>\
 <div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium\"><h3 class=\"text-sm font-medium text-muted-foreground\">Subscribed</h3><p class=\"text-2xl font-bold text-surface-950 tracking-tight\">—</p></div>\
 <div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium\"><h3 class=\"text-sm font-medium text-muted-foreground\">Unsubscribed</h3><p class=\"text-2xl font-bold text-surface-950 tracking-tight\">—</p></div>\
-</div></div>"
-    )
+</div></div>".to_string()
 }
 
 /// List edit page: real form against `PUT /v1/lists/{id}` via the
@@ -2415,7 +2467,8 @@ pub fn web_list_edit_page() -> String {
             disabled: false,
             loading: false,
             left_icon: None,
-            right_icon: None, submit: true
+            right_icon: None,
+            submit: true
         }
         .render_html(),
     )
@@ -2459,7 +2512,8 @@ pub fn web_lists_new_page() -> String {
             disabled: false,
             loading: false,
             left_icon: None,
-            right_icon: None, submit: true
+            right_icon: None,
+            submit: true
         }
         .render_html(),
     )
@@ -2522,9 +2576,7 @@ pub fn web_templates_new_page() -> String {
 /// or edited body server-side in a new tab. Failed posts re-populate via
 /// the signed field-map cookie.
 pub fn web_template_edit_page(template_id: &str) -> String {
-    let breadcrumbs = format!(
-        "<nav aria-label=\"Breadcrumb\" class=\"mb-6\"><ol class=\"flex items-center gap-2 text-sm text-surface-500\"><li><a href=\"/templates\" class=\"hover:text-surface-900 transition-colors\">Templates</a></li><li class=\"text-surface-400\">/</li><li class=\"text-surface-900 font-medium\" aria-current=\"page\">Edit Template</li></ol></nav>"
-    );
+    let breadcrumbs = "<nav aria-label=\"Breadcrumb\" class=\"mb-6\"><ol class=\"flex items-center gap-2 text-sm text-surface-500\"><li><a href=\"/templates\" class=\"hover:text-surface-900 transition-colors\">Templates</a></li><li class=\"text-surface-400\">/</li><li class=\"text-surface-900 font-medium\" aria-current=\"page\">Edit Template</li></ol></nav>".to_string();
     format!(
         "{breadcrumbs}<div class=\"w-full max-w-3xl space-y-6\">\
 <div class=\"flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between\"><div><h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Edit Template</h1><p class=\"text-sm text-muted-foreground\">Saving creates a new version snapshot — the previous one can be restored.</p></div><a href=\"/templates\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-sm border border-input bg-background px-4 py-2 text-sm font-bold text-foreground transition-colors hover:bg-accent hover:text-accent-foreground\">Back to templates</a></div>\
@@ -2544,20 +2596,27 @@ pub fn web_template_edit_page(template_id: &str) -> String {
 
 /// Reports page.
 pub fn web_reports_page() -> String {
+    let card_delivery = format!("<article aria-label=\"Delivery Report – Track email delivery metrics\">{}</article>", Card { title: "Delivery Report", body: "<p class=\"text-2xl font-bold text-surface-950 tracking-tight\">View</p><p class=\"text-sm text-muted-foreground\">Track email delivery metrics</p>", variant: "default", padding: "default", interactive: false }.render_html());
+    let card_engage = format!("<article aria-label=\"Engagement Report – Opens, clicks, and conversions\">{}</article>", Card { title: "Engagement Report", body: "<p class=\"text-2xl font-bold text-surface-950 tracking-tight\">View</p><p class=\"text-sm text-muted-foreground\">Opens, clicks, and conversions</p>", variant: "default", padding: "default", interactive: false }.render_html());
+    let card_bounce = format!("<article aria-label=\"Bounce Report – Bounce reasons and trends\">{}</article>", Card { title: "Bounce Report", body: "<p class=\"text-2xl font-bold text-surface-950 tracking-tight\">View</p><p class=\"text-sm text-muted-foreground\">Bounce reasons and trends</p>", variant: "default", padding: "default", interactive: false }.render_html());
     format!(
         "<div class=\"space-y-6\">\
 <h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Reports</h1>\
 <div class=\"grid gap-4 md:grid-cols-2 lg:grid-cols-3\">\
 {card_delivery}{card_engage}{card_bounce}\
 </div></div>",
-        card_delivery = format!("<article aria-label=\"Delivery Report – Track email delivery metrics\">{}</article>", Card { title: "Delivery Report", body: "<p class=\"text-2xl font-bold text-surface-950 tracking-tight\">View</p><p class=\"text-sm text-muted-foreground\">Track email delivery metrics</p>", variant: "default", padding: "default", interactive: false }.render_html()),
-        card_engage = format!("<article aria-label=\"Engagement Report – Opens, clicks, and conversions\">{}</article>", Card { title: "Engagement Report", body: "<p class=\"text-2xl font-bold text-surface-950 tracking-tight\">View</p><p class=\"text-sm text-muted-foreground\">Opens, clicks, and conversions</p>", variant: "default", padding: "default", interactive: false }.render_html()),
-        card_bounce = format!("<article aria-label=\"Bounce Report – Bounce reasons and trends\">{}</article>", Card { title: "Bounce Report", body: "<p class=\"text-2xl font-bold text-surface-950 tracking-tight\">View</p><p class=\"text-sm text-muted-foreground\">Bounce reasons and trends</p>", variant: "default", padding: "default", interactive: false }.render_html()),
+        card_delivery = card_delivery,
+        card_engage = card_engage,
+        card_bounce = card_bounce,
     )
 }
 
 /// Deliverability report page.
 pub fn web_reports_deliverability_page() -> String {
+    let inbox = format!("<article aria-label=\"Inbox placement: 0%\">{}</article>", Card { title: "Inbox", body: "<p class=\"text-2xl font-bold text-surface-950 tracking-tight\">0%</p><p class=\"text-sm text-muted-foreground\">Inbox placement</p>", variant: "default", padding: "default", interactive: false }.render_html());
+    let spam = format!("<article aria-label=\"Spam folder rate: 0%\">{}</article>", Card { title: "Spam", body: "<p class=\"text-2xl font-bold text-surface-950 tracking-tight\">0%</p><p class=\"text-sm text-muted-foreground\">Spam folder</p>", variant: "default", padding: "default", interactive: false }.render_html());
+    let bounced = format!("<article aria-label=\"Bounce rate: 0% hard and soft\">{}</article>", Card { title: "Bounced", body: "<p class=\"text-2xl font-bold text-surface-950 tracking-tight\">0%</p><p class=\"text-sm text-muted-foreground\">Hard + soft</p>", variant: "default", padding: "default", interactive: false }.render_html());
+    let deferred = format!("<article aria-label=\"Deferred in retry queue: 0\">{}</article>", Card { title: "Deferred", body: "<p class=\"text-2xl font-bold text-surface-950 tracking-tight\">0</p><p class=\"text-sm text-muted-foreground\">Retry queue</p>", variant: "default", padding: "default", interactive: false }.render_html());
     format!(
         "<div class=\"space-y-6\">\
 <nav aria-label=\"Breadcrumb\" class=\"mb-2\"><ol class=\"flex items-center gap-2 text-sm text-surface-500\">\
@@ -2570,10 +2629,10 @@ pub fn web_reports_deliverability_page() -> String {
 </div>\
 <div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium\"><h3 class=\"text-xs font-bold uppercase tracking-widest text-surface-400 mb-6\">Deliverability Trend</h3><div class=\"h-64\">{chart}</div></div>\
 </div>",
-        inbox = format!("<article aria-label=\"Inbox placement: 0%\">{}</article>", Card { title: "Inbox", body: "<p class=\"text-2xl font-bold text-surface-950 tracking-tight\">0%</p><p class=\"text-sm text-muted-foreground\">Inbox placement</p>", variant: "default", padding: "default", interactive: false }.render_html()),
-        spam = format!("<article aria-label=\"Spam folder rate: 0%\">{}</article>", Card { title: "Spam", body: "<p class=\"text-2xl font-bold text-surface-950 tracking-tight\">0%</p><p class=\"text-sm text-muted-foreground\">Spam folder</p>", variant: "default", padding: "default", interactive: false }.render_html()),
-        bounced = format!("<article aria-label=\"Bounce rate: 0% hard and soft\">{}</article>", Card { title: "Bounced", body: "<p class=\"text-2xl font-bold text-surface-950 tracking-tight\">0%</p><p class=\"text-sm text-muted-foreground\">Hard + soft</p>", variant: "default", padding: "default", interactive: false }.render_html()),
-        deferred = format!("<article aria-label=\"Deferred in retry queue: 0\">{}</article>", Card { title: "Deferred", body: "<p class=\"text-2xl font-bold text-surface-950 tracking-tight\">0</p><p class=\"text-sm text-muted-foreground\">Retry queue</p>", variant: "default", padding: "default", interactive: false }.render_html()),
+        inbox = inbox,
+        spam = spam,
+        bounced = bounced,
+        deferred = deferred,
         chart = ApexLineChart { title: None, description: None, last_updated_label: None, height: 256, series: vec![], data_count: 0, empty_state_reason: "No data" }.render_html(),
     )
 }
@@ -2583,6 +2642,10 @@ pub fn web_reports_deliverability_page() -> String {
 /// Lists historical placement tests for the current tenant and exposes a
 /// "Run new test" CTA. Backed by `GET /v1/placement/tests`.
 pub fn web_inbox_placement_page() -> String {
+    let kpi_total = format!("<article aria-label=\"Total placement tests: 0 all time\">{}</article>", Card { title: "Total tests", body: "<p class=\"text-2xl font-bold text-surface-950 tracking-tight\" data-metric=\"placement.total\">0</p><p class=\"text-sm text-muted-foreground\">All time</p>", variant: "default", padding: "default", interactive: false }.render_html());
+    let kpi_inbox = format!("<article aria-label=\"Average inbox rate: — last 30 days\">{}</article>", Card { title: "Avg inbox rate", body: "<p class=\"text-2xl font-bold text-surface-950 tracking-tight\" data-metric=\"placement.inbox_rate\">—</p><p class=\"text-sm text-muted-foreground\">Last 30 days</p>", variant: "default", padding: "default", interactive: false }.render_html());
+    let kpi_spam = format!("<article aria-label=\"Average spam rate: — last 30 days\">{}</article>", Card { title: "Avg spam rate", body: "<p class=\"text-2xl font-bold text-surface-950 tracking-tight\" data-metric=\"placement.spam_rate\">—</p><p class=\"text-sm text-muted-foreground\">Last 30 days</p>", variant: "default", padding: "default", interactive: false }.render_html());
+    let kpi_recent = format!("<article aria-label=\"Last placement test: — most recent run\">{}</article>", Card { title: "Last test", body: "<p class=\"text-2xl font-bold text-surface-950 tracking-tight\" data-metric=\"placement.last_run\">—</p><p class=\"text-sm text-muted-foreground\">Most recent run</p>", variant: "default", padding: "default", interactive: false }.render_html());
     format!(
         "<div class=\"space-y-6\" data-page=\"inbox-placement\">\
 <nav aria-label=\"Breadcrumb\" class=\"mb-2\"><ol class=\"flex items-center gap-2 text-sm text-surface-500\">\
@@ -2609,10 +2672,10 @@ pub fn web_inbox_placement_page() -> String {
             action_href: Some("/inbox-placement/new"),
         }
         .render_html(),
-        kpi_total = format!("<article aria-label=\"Total placement tests: 0 all time\">{}</article>", Card { title: "Total tests", body: "<p class=\"text-2xl font-bold text-surface-950 tracking-tight\" data-metric=\"placement.total\">0</p><p class=\"text-sm text-muted-foreground\">All time</p>", variant: "default", padding: "default", interactive: false }.render_html()),
-        kpi_inbox = format!("<article aria-label=\"Average inbox rate: — last 30 days\">{}</article>", Card { title: "Avg inbox rate", body: "<p class=\"text-2xl font-bold text-surface-950 tracking-tight\" data-metric=\"placement.inbox_rate\">—</p><p class=\"text-sm text-muted-foreground\">Last 30 days</p>", variant: "default", padding: "default", interactive: false }.render_html()),
-        kpi_spam = format!("<article aria-label=\"Average spam rate: — last 30 days\">{}</article>", Card { title: "Avg spam rate", body: "<p class=\"text-2xl font-bold text-surface-950 tracking-tight\" data-metric=\"placement.spam_rate\">—</p><p class=\"text-sm text-muted-foreground\">Last 30 days</p>", variant: "default", padding: "default", interactive: false }.render_html()),
-        kpi_recent = format!("<article aria-label=\"Last placement test: — most recent run\">{}</article>", Card { title: "Last test", body: "<p class=\"text-2xl font-bold text-surface-950 tracking-tight\" data-metric=\"placement.last_run\">—</p><p class=\"text-sm text-muted-foreground\">Most recent run</p>", variant: "default", padding: "default", interactive: false }.render_html()),
+        kpi_total = kpi_total,
+        kpi_inbox = kpi_inbox,
+        kpi_spam = kpi_spam,
+        kpi_recent = kpi_recent,
     )
 }
 
@@ -2739,16 +2802,17 @@ pub fn web_events_page() -> String {
         ],
         rows: vec![],
     };
+    let search = format!(
+        "<form method=\"get\" action=\"/events\" role=\"search\" class=\"flex flex-col gap-2 sm:flex-row\"><label class=\"sr-only\" for=\"events-search\">Filter events</label><div class=\"relative flex-1\"><span class=\"pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground\">{icon}</span><input id=\"events-search\" type=\"search\" name=\"query\" placeholder=\"Filter events...\" class=\"flex h-12 w-full rounded-md border border-surface-200 bg-background pl-10 pr-4 text-[14px] outline-none transition focus-visible:ring-2 focus-visible:ring-primary/20\" /></div><button type=\"submit\" class=\"rounded-sm border border-surface-200 bg-card px-4 py-2 text-sm font-bold text-surface-950 hover:border-surface-950\">Apply</button></form>",
+        icon = search_icon,
+    );
     format!(
         "<div class=\"space-y-6\">\
 <h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Events</h1>\
 {search}\
 <section data-view-state=\"ready\">{table}</section>\
 </div>",
-        search = format!(
-            "<form method=\"get\" action=\"/events\" role=\"search\" class=\"flex flex-col gap-2 sm:flex-row\"><label class=\"sr-only\" for=\"events-search\">Filter events</label><div class=\"relative flex-1\"><span class=\"pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground\">{icon}</span><input id=\"events-search\" type=\"search\" name=\"query\" placeholder=\"Filter events...\" class=\"flex h-12 w-full rounded-md border border-surface-200 bg-background pl-10 pr-4 text-[14px] outline-none transition focus-visible:ring-2 focus-visible:ring-primary/20\" /></div><button type=\"submit\" class=\"rounded-sm border border-surface-200 bg-card px-4 py-2 text-sm font-bold text-surface-950 hover:border-surface-950\">Apply</button></form>",
-            icon = search_icon,
-        ),
+        search = search,
         table = table.render_html(),
     )
 }
@@ -2810,7 +2874,8 @@ pub fn web_domains_new_page() -> String {
             disabled: false,
             loading: false,
             left_icon: None,
-            right_icon: None, submit: true
+            right_icon: None,
+            submit: true
         }
         .render_html(),
     )
@@ -2818,8 +2883,7 @@ pub fn web_domains_new_page() -> String {
 
 /// Settings overview page.
 pub fn web_settings_page() -> String {
-    format!(
-        "<div class=\"space-y-6\">\
+    "<div class=\"space-y-6\">\
 <section data-view-state=\"ready\" class=\"space-y-6\">\
 <h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Settings</h1>\
 <nav class=\"grid gap-4 md:grid-cols-2\">\
@@ -2829,8 +2893,7 @@ pub fn web_settings_page() -> String {
 <a href=\"/settings/dedicated-ips\" class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium hover:border-primary transition-colors\"><h3 class=\"font-bold\">Dedicated IPs</h3><p class=\"text-sm text-muted-foreground mt-1\">Manage dedicated sending IPs</p></a>\
 <a href=\"/settings/webhooks\" class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium hover:border-primary transition-colors\"><h3 class=\"font-bold\">Webhooks</h3><p class=\"text-sm text-muted-foreground mt-1\">Configure event webhooks</p></a>\
 <a href=\"/settings/profile\" class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium hover:border-primary transition-colors\"><h3 class=\"font-bold\">Profile</h3><p class=\"text-sm text-muted-foreground mt-1\">Your account settings</p></a>\
-</nav></section></div>",
-    )
+</nav></section></div>".to_string()
 }
 
 /// API keys settings page.
@@ -3061,7 +3124,8 @@ pub fn web_settings_profile_page() -> String {
             disabled: false,
             loading: false,
             left_icon: None,
-            right_icon: None, submit: true
+            right_icon: None,
+            submit: true
         }
         .render_html(),
         current_label = Label {
@@ -3117,7 +3181,8 @@ pub fn web_settings_profile_page() -> String {
             disabled: false,
             loading: false,
             left_icon: None,
-            right_icon: None, submit: true
+            right_icon: None,
+            submit: true
         }
         .render_html(),
     )
@@ -3239,7 +3304,9 @@ fn render_cp_collection_page(
     let body = if table_is_empty {
         empty
     } else {
-        format!("<div class=\"w-full\"><div class=\"w-full overflow-x-auto\">{table_html}</div></div>")
+        format!(
+            "<div class=\"w-full\"><div class=\"w-full overflow-x-auto\">{table_html}</div></div>"
+        )
     };
     format!(
         "<div class=\"space-y-8\">\
@@ -3373,7 +3440,8 @@ pub fn control_plane_tenants_new_page() -> String {
             disabled: false,
             loading: false,
             left_icon: None,
-            right_icon: None, submit: true
+            right_icon: None,
+            submit: true
         }
         .render_html(),
     )
@@ -3481,7 +3549,8 @@ pub fn control_plane_operators_new_page() -> String {
             disabled: false,
             loading: false,
             left_icon: None,
-            right_icon: None, submit: true
+            right_icon: None,
+            submit: true
         }
         .render_html(),
     )
@@ -3914,7 +3983,11 @@ impl<'a> MfaSetupView<'a> {
     pub fn new(secret: &'a str, otpauth: &'a str) -> Self {
         let qr_svg = crate::qr::encode_to_svg(otpauth, 5, 4)
             .unwrap_or_else(|| "<p class=\"text-sm text-muted-foreground\">QR unavailable — use the manual secret below.</p>".to_string());
-        Self { secret, otpauth, qr_svg }
+        Self {
+            secret,
+            otpauth,
+            qr_svg,
+        }
     }
 }
 
@@ -3939,11 +4012,36 @@ pub fn marketing_pricing_page() -> String {
     // the marketing site.
     let plans: &[(&str, &str, &str, &str)] = &[
         ("Free", "€0", "30,000 emails/month", ""),
-        ("Starter", "€25", "50,000 emails/month · €0.40 per extra 1,000", ""),
-        ("Pro", "€65", "150,000 emails/month · €0.40 per extra 1,000", "border-2 border-primary"),
-        ("Growth", "€150", "500,000 emails/month · €0.40 per extra 1,000", ""),
-        ("Scale", "€350", "2,000,000 emails/month · priority support", ""),
-        ("Enterprise", "€3,000", "5,000,000 emails/month on annual contracts", ""),
+        (
+            "Starter",
+            "€25",
+            "50,000 emails/month · €0.40 per extra 1,000",
+            "",
+        ),
+        (
+            "Pro",
+            "€65",
+            "150,000 emails/month · €0.40 per extra 1,000",
+            "border-2 border-primary",
+        ),
+        (
+            "Growth",
+            "€150",
+            "500,000 emails/month · €0.40 per extra 1,000",
+            "",
+        ),
+        (
+            "Scale",
+            "€350",
+            "2,000,000 emails/month · priority support",
+            "",
+        ),
+        (
+            "Enterprise",
+            "€3,000",
+            "5,000,000 emails/month on annual contracts",
+            "",
+        ),
     ];
     let cards = plans
         .iter()
@@ -4104,7 +4202,13 @@ pub fn marketing_zola_compare_index_page() -> String {
 /// HMAC signature produced at render time; this page verifies it and shows
 /// a single confirm form whose POST carries intent + id + signature for the
 /// server to re-verify. Invalid or expired signatures render a safe refusal.
-pub fn web_confirm_page(intent: &str, resource_id: &str, return_to: &str, sig: &str, signature_valid: bool) -> String {
+pub fn web_confirm_page(
+    intent: &str,
+    resource_id: &str,
+    return_to: &str,
+    sig: &str,
+    signature_valid: bool,
+) -> String {
     let (title, description) = confirm_intent_copy(intent);
     let safe_return = if return_to.starts_with('/') && !return_to.starts_with("//") {
         return_to
@@ -4155,11 +4259,20 @@ pub fn web_confirm_page(intent: &str, resource_id: &str, return_to: &str, sig: &
 
 fn confirm_intent_copy(intent: &str) -> (&'static str, &'static str) {
     match intent {
-        "delete-campaign" => ("Delete campaign?", "This permanently removes the draft, schedule, and associated analytics snapshots for"),
-        "delete-list" => ("Delete list?", "This removes the list definition immediately; contacts remain intact for"),
+        "delete-campaign" => (
+            "Delete campaign?",
+            "This permanently removes the draft, schedule, and associated analytics snapshots for",
+        ),
+        "delete-list" => (
+            "Delete list?",
+            "This removes the list definition immediately; contacts remain intact for",
+        ),
         "delete-domain" => ("Delete domain?", "This stops sending and verification for"),
         "delete-contact" => ("Delete contact?", "This removes the contact record"),
-        _ => ("Confirm action", "You are about to perform a destructive action on"),
+        _ => (
+            "Confirm action",
+            "You are about to perform a destructive action on",
+        ),
     }
 }
 
@@ -4220,11 +4333,7 @@ pub fn web_login_page(csrf_token: &str) -> String {
 /// plain form posting to `/web/auth/mfa/verify`; the server re-verifies
 /// both the challenge cookie and the TOTP code before minting a session.
 /// There is no client-side code — the step transition itself is a redirect.
-pub fn web_login_mfa_challenge_page(
-    csrf_token: &str,
-    email: &str,
-    return_to: &str,
-) -> String {
+pub fn web_login_mfa_challenge_page(csrf_token: &str, email: &str, return_to: &str) -> String {
     let csrf = csrf_hidden_input(csrf_token);
     // Only same-origin paths survive (defense in depth: the router already
     // vets return_to, and form_mfa_verify re-vets it on POST).
@@ -4425,7 +4534,10 @@ mod tests {
             web_root_layout("<p>test</p>"),
             control_plane_root_layout("<p>test</p>"),
         ] {
-            assert!(!html.contains("<script"), "root layout must not emit scripts");
+            assert!(
+                !html.contains("<script"),
+                "root layout must not emit scripts"
+            );
         }
     }
 
@@ -4437,10 +4549,14 @@ mod tests {
     fn mfa_page_is_server_driven_with_local_qr_and_no_scripts() {
         let idle = control_plane_security_page();
         assert!(idle.contains("action=\"/web/auth/mfa/setup\""));
-        assert!(!idle.contains("<script"), "security page must ship zero scripts");
+        assert!(
+            !idle.contains("<script"),
+            "security page must ship zero scripts"
+        );
 
         let secret = "JBSWY3DPEHPK3PXP";
-        let otpauth = format!("otpauth://totp/ApexMail:ops@apexmail.ee?secret={secret}&issuer=ApexMail");
+        let otpauth =
+            format!("otpauth://totp/ApexMail:ops@apexmail.ee?secret={secret}&issuer=ApexMail");
         let view = MfaSetupView::new(secret, &otpauth);
         let setup = control_plane_security_page_with_setup(Some(&view));
         // QR rendered server-side as inline SVG — no third-party service,
@@ -4713,7 +4829,11 @@ mod tests {
         // Zero-JS contract: the login/signup forms are native urlencoded
         // POSTs to the /web/auth/* PRG routes, and the auth pages contain
         // no script tags and no JS-only toggle buttons.
-        for page in [web_login_page(""), web_signup_page(""), web_forgot_password_page("")] {
+        for page in [
+            web_login_page(""),
+            web_signup_page(""),
+            web_forgot_password_page(""),
+        ] {
             assert!(page.contains("method=\"POST\""));
             assert!(page.contains("action=\"/web/auth/"));
             assert!(!page.contains("<script"));
@@ -4885,7 +5005,10 @@ mod tests {
             KpiCardData::new("Pending", "0"),
             KpiCardData::new("Sent (30d)", "12485670").with_trend(&[4, 6, 5, 8, 9, 12, 11]),
         ];
-        data.table = Some(TableData { columns: vec!["Queue".into()], rows: vec![] });
+        data.table = Some(TableData {
+            columns: vec!["Queue".into()],
+            rows: vec![],
+        });
         let html = data_list_page(&data, "queue");
         // Stat-tile chassis, not the old KPI card dialect.
         assert!(html.contains("apex-cp-stat-tile"));
@@ -4915,7 +5038,10 @@ mod tests {
         };
         data.table = Some(TableData {
             columns: vec!["Name".into()],
-            rows: vec![DataRowData { id: "t_1".into(), cells: vec![crate::view_data::DataCell::text("Acme")] }],
+            rows: vec![DataRowData {
+                id: "t_1".into(),
+                cells: vec![crate::view_data::DataCell::text("Acme")],
+            }],
         });
         let html = data_list_page(&data, "tenant");
         assert!(html.contains("apex-eyebrow"));

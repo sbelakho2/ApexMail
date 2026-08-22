@@ -824,18 +824,29 @@ mod tests {
     fn add_normalizes_stored_vectors() {
         let store = make_store();
         let id = store
-            .add("big".into(), vec![3.0, 0.0, 0.0], tenant_metadata("tenant-a"))
+            .add(
+                "big".into(),
+                vec![3.0, 0.0, 0.0],
+                tenant_metadata("tenant-a"),
+            )
             .unwrap();
         let stored = store.get(id).unwrap();
         let norm: f32 = stored.vector.iter().map(|x| x * x).sum::<f32>().sqrt();
-        assert!((norm - 1.0).abs() < 1e-5, "stored vectors must be unit norm");
+        assert!(
+            (norm - 1.0).abs() < 1e-5,
+            "stored vectors must be unit norm"
+        );
     }
 
     #[test]
     fn add_rejects_zero_norm_vectors() {
         let store = make_store();
         let err = store
-            .add("zero".into(), vec![0.0, 0.0, 0.0], tenant_metadata("tenant-a"))
+            .add(
+                "zero".into(),
+                vec![0.0, 0.0, 0.0],
+                tenant_metadata("tenant-a"),
+            )
             .unwrap_err();
         assert!(matches!(err, EmbeddingError::ZeroNormVector));
     }
@@ -847,10 +858,18 @@ mod tests {
             .add("a".into(), vec![9.0, 0.0, 0.0], tenant_metadata("tenant-a"))
             .unwrap();
         store
-            .add("b".into(), vec![0.0, 25.0, 0.0], tenant_metadata("tenant-a"))
+            .add(
+                "b".into(),
+                vec![0.0, 25.0, 0.0],
+                tenant_metadata("tenant-a"),
+            )
             .unwrap();
         store
-            .add("opposite".into(), vec![-40.0, 0.0, 0.0], tenant_metadata("tenant-a"))
+            .add(
+                "opposite".into(),
+                vec![-40.0, 0.0, 0.0],
+                tenant_metadata("tenant-a"),
+            )
             .unwrap();
 
         // Deliberately unnormalized query with a large magnitude.
@@ -888,7 +907,10 @@ mod tests {
         assert_eq!(imported, 1);
         let stored = store.get(id).unwrap();
         let norm: f32 = stored.vector.iter().map(|x| x * x).sum::<f32>().sqrt();
-        assert!((norm - 1.0).abs() < 1e-5, "imported vector must be normalized");
+        assert!(
+            (norm - 1.0).abs() < 1e-5,
+            "imported vector must be normalized"
+        );
 
         // Rows without tenant scope must be refused.
         let bad = serde_json::json!({
@@ -902,9 +924,6 @@ mod tests {
         let mut buf2 = Vec::new();
         writeln!(buf2, "{}", bad).unwrap();
         let result = store.import_ndjson(std::io::BufReader::new(buf2.as_slice()));
-        assert!(matches!(
-            result,
-            Err(EmbeddingError::MissingTenantScope)
-        ));
+        assert!(matches!(result, Err(EmbeddingError::MissingTenantScope)));
     }
 }

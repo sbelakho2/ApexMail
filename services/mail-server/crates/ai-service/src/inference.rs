@@ -282,8 +282,10 @@ mod tests {
 
     #[test]
     fn normalizes_chat_completion_urls() {
-        let mut config = InferenceConfig::default();
-        config.endpoint = "http://model.example/v1".into();
+        let mut config = InferenceConfig {
+            endpoint: "http://model.example/v1".into(),
+            ..Default::default()
+        };
         assert_eq!(
             config.chat_completions_url(),
             "http://model.example/v1/chat/completions"
@@ -305,9 +307,10 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_unknown_model_before_network_access() {
-        let mut config = InferenceConfig::default();
-        config.enabled = true;
-        let client = LlmClient::new(config);
+        let client = LlmClient::new(InferenceConfig {
+            enabled: true,
+            ..Default::default()
+        });
         let result = client.predict("unknown", serde_json::json!({})).await;
         assert!(matches!(result, Err(AiError::ModelNotFound(_))));
     }

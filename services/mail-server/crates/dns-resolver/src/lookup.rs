@@ -4,8 +4,9 @@
 
 use std::sync::LazyLock;
 use std::time::{Duration, Instant};
-use trust_dns_resolver::config::{ResolverConfig, ResolverOpts};
-use trust_dns_resolver::TokioAsyncResolver;
+use trust_dns_resolver::config::{ResolveHosts, ResolverConfig, ResolverOpts};
+use trust_dns_resolver::net::runtime::TokioRuntimeProvider;
+use trust_dns_resolver::{Resolver, TokioResolver};
 
 use crate::config::DnsConfig;
 use crate::records::*;
@@ -40,11 +41,20 @@ impl<T> DnsLookupResult<T> {
 
 /// Thin wrapper around trust-dns-resolver for email-specific lookups.
 pub struct DnsLookup {
-    resolver: TokioAsyncResolver,
+    resolver: TokioResolver,
 }
 
-static DEFAULT_RESOLVER: LazyLock<TokioAsyncResolver> =
-    LazyLock::new(|| TokioAsyncResolver::tokio(ResolverConfig::default(), ResolverOpts::default()));
+fn build_resolver(config: ResolverConfig, opts: ResolverOpts) -> Result<TokioResolver, DnsError> {
+    Resolver::builder_with_config(config, TokioRuntimeProvider::default())
+        .with_options(opts)
+        .build()
+        .map_err(|e| DnsError::InvalidConfig(e.to_string()))
+}
+
+static DEFAULT_RESOLVER: LazyLock<TokioResolver> = LazyLock::new(|| {
+    build_resolver(ResolverConfig::default(), ResolverOpts::default())
+        .expect("system resolver configuration is always buildable")
+});
 
 impl DnsLookup {
     /// Create a new resolver with system defaults.
@@ -60,23 +70,23 @@ impl DnsLookup {
         let mut opts = ResolverOpts::default();
         opts.timeout = config.query_timeout();
         opts.attempts = config.retries as usize;
-        opts.use_hosts_file = false;
+        opts.use_hosts_file = ResolveHosts::Never;
 
-        // #193:Wire custom nameservers from config instead of always using system defaults
+        // #193:Wire custom nameservers from config instead of always using system defaults.
+        // UDP+TCP per server so large answers (TXT chains, DNSSEC) fall back to
+        // TCP per RFC 5321 §5.3.4 instead of truncating.
         let resolver_config = if config.nameservers.is_empty() {
             ResolverConfig::default()
         } else {
-            let mut rc = ResolverConfig::new();
+            let mut rc = ResolverConfig::default();
             for ns in &config.nameservers {
                 if let Ok(addr) = ns.parse::<std::net::SocketAddr>() {
-                    rc.add_name_server(trust_dns_resolver::config::NameServerConfig::new(
-                        addr,
-                        trust_dns_resolver::config::Protocol::Udp,
+                    rc.add_name_server(trust_dns_resolver::config::NameServerConfig::udp_and_tcp(
+                        addr.ip(),
                     ));
                 } else if let Ok(ip) = ns.parse::<std::net::IpAddr>() {
-                    rc.add_name_server(trust_dns_resolver::config::NameServerConfig::new(
-                        std::net::SocketAddr::new(ip, 53),
-                        trust_dns_resolver::config::Protocol::Udp,
+                    rc.add_name_server(trust_dns_resolver::config::NameServerConfig::udp_and_tcp(
+                        ip,
                     ));
                 } else {
                     tracing::warn!(nameserver = %ns, "Skipping unparseable nameserver");
@@ -85,7 +95,7 @@ impl DnsLookup {
             rc
         };
 
-        let resolver = TokioAsyncResolver::tokio(resolver_config, opts);
+        let resolver = build_resolver(resolver_config, opts)?;
         Ok(Self { resolver })
     }
 
@@ -106,8 +116,14 @@ impl DnsLookup {
             .map_err(|e| DnsError::ResolveFailed(e.to_string()))?;
 
         let mut records: Vec<MxRecord> = response
+            .answers()
             .iter()
-            .map(|mx| MxRecord::new(mx.preference(), mx.exchange().to_string()))
+            .filter_map(|r| match &r.data {
+                trust_dns_resolver::proto::rr::RData::MX(mx) => {
+                    Some(MxRecord::new(mx.preference, mx.exchange.to_string()))
+                }
+                _ => None,
+            })
             .collect();
 
         records.sort();
@@ -134,13 +150,17 @@ impl DnsLookup {
             .map_err(|e| DnsError::ResolveFailed(e.to_string()))?;
 
         let texts: Vec<String> = response
+            .answers()
             .iter()
-            .map(|txt| {
-                txt.txt_data()
-                    .iter()
-                    .map(|d| String::from_utf8_lossy(d).to_string())
-                    .collect::<Vec<_>>()
-                    .join("")
+            .filter_map(|r| match &r.data {
+                trust_dns_resolver::proto::rr::RData::TXT(txt) => Some(
+                    txt.txt_data
+                        .iter()
+                        .map(|d| String::from_utf8_lossy(d).to_string())
+                        .collect::<Vec<_>>()
+                        .join(""),
+                ),
+                _ => None,
             })
             .collect();
 
@@ -237,10 +257,15 @@ impl DnsLookup {
             .map_err(|e| DnsError::ResolveFailed(e.to_string()))?;
 
         let ttl = ttl_from_valid_until(response.valid_until());
-        Ok(DnsLookupResult::new(
-            response.iter().map(|ip| ip.to_string()).collect(),
-            ttl,
-        ))
+        let ips: Vec<String> = response
+            .answers()
+            .iter()
+            .filter_map(|r| match &r.data {
+                trust_dns_resolver::proto::rr::RData::A(a) => Some(a.0.to_string()),
+                _ => None,
+            })
+            .collect();
+        Ok(DnsLookupResult::new(ips, ttl))
     }
 
     /// Lookup AAAA records.
@@ -260,10 +285,15 @@ impl DnsLookup {
             .map_err(|e| DnsError::ResolveFailed(e.to_string()))?;
 
         let ttl = ttl_from_valid_until(response.valid_until());
-        Ok(DnsLookupResult::new(
-            response.iter().map(|ip| ip.to_string()).collect(),
-            ttl,
-        ))
+        let ips: Vec<String> = response
+            .answers()
+            .iter()
+            .filter_map(|r| match &r.data {
+                trust_dns_resolver::proto::rr::RData::AAAA(aaaa) => Some(aaaa.0.to_string()),
+                _ => None,
+            })
+            .collect();
+        Ok(DnsLookupResult::new(ips, ttl))
     }
 
     /// Reverse DNS lookup.
@@ -274,7 +304,15 @@ impl DnsLookup {
             .await
             .map_err(|e| DnsError::ResolveFailed(e.to_string()))?;
 
-        Ok(response.iter().map(|name| name.to_string()).collect())
+        let names: Vec<String> = response
+            .answers()
+            .iter()
+            .filter_map(|r| match &r.data {
+                trust_dns_resolver::proto::rr::RData::PTR(ptr) => Some(ptr.0.to_string()),
+                _ => None,
+            })
+            .collect();
+        Ok(names)
     }
 
     /// Validate that a domain has MX or A records (can receive email).

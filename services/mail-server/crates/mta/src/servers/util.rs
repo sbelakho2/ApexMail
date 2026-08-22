@@ -360,7 +360,146 @@ pub(crate) fn mail_size_param(line: &str) -> Option<u64> {
     None
 }
 
+// ── command parsing (F-06: exact verb matching) ─────────────────────────────────
+
+/// Split a command line into `(verb, arg)`.
+///
+/// The verb is the FIRST whitespace-delimited token, uppercased for
+/// case-insensitive matching; the arg is the remainder (leading separator
+/// whitespace removed). Matching the verb as an exact token — instead of
+/// `starts_with("DATA")`-style prefix tests — stops inputs like `DATABASE`
+/// or `MAIL FROMX:<a@b>` from being accepted as real commands.
+pub(crate) fn split_verb(line: &str) -> (String, &str) {
+    let trimmed = line.trim_start();
+    match trimmed.find(char::is_whitespace) {
+        Some(pos) => (
+            trimmed[..pos].to_ascii_uppercase(),
+            trimmed[pos..].trim_start(),
+        ),
+        None => (trimmed.to_ascii_uppercase(), ""),
+    }
+}
+
+/// `MAIL FROM:` argument shape: the arg must begin with the literal
+/// `FROM:` (case-insensitive) so `MAIL FROMX:<a@b>` is refused.
+pub(crate) fn is_mail_from_arg(arg: &str) -> bool {
+    arg.as_bytes()
+        .get(..5)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(b"FROM:"))
+}
+
+/// `RCPT TO:` argument shape: the arg must begin with the literal `TO:`
+/// (case-insensitive).
+pub(crate) fn is_rcpt_to_arg(arg: &str) -> bool {
+    arg.as_bytes()
+        .get(..3)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(b"TO:"))
+}
+
+/// Whether the `MAIL FROM` line carries the `SMTPUTF8` parameter (RFC 6531)
+/// — used to record the UTF8 clause of the trace header for this hop.
+pub(crate) fn mail_smtputf8_param(line: &str) -> bool {
+    params_after_address(line)
+        .iter()
+        .any(|param| param.eq_ignore_ascii_case("SMTPUTF8"))
+}
+
+// ── Received-hop counting (F-01: routing-loop limit) ────────────────────────────
+
+/// Maximum number of `Received:` header fields a message may carry before
+/// this server treats it as a routing loop (RFC 5321 §6.2 allows refusing
+/// undeliverable loops; 40 hops is far beyond any legitimate path).
+pub(crate) const MAX_RECEIVED_HOPS: usize = 40;
+
+/// Count the `Received:` header fields in the RAW header block (everything
+/// before the first blank line). Cheap byte scan performed BEFORE any MIME
+/// parsing so an attacker-supplied loop is refused at end-of-DATA.
+pub(crate) fn count_received_headers(raw: &[u8]) -> usize {
+    let header_end = raw
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .or_else(|| raw.windows(2).position(|w| w == b"\n\n"))
+        .unwrap_or(raw.len());
+    raw[..header_end]
+        .split(|&b| b == b'\n')
+        .filter(|line| {
+            line.get(..9)
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case(b"Received:"))
+        })
+        .count()
+}
+
+/// Whether the message already carries too many `Received:` hops and must
+/// be refused with `550 5.4.6` (routing loop).
+pub(crate) fn received_hop_limit_exceeded(raw: &[u8]) -> bool {
+    count_received_headers(raw) >= MAX_RECEIVED_HOPS
+}
+
+/// Build the `Received:` trace header for one SMTP hop (RFC 5321 §4.4),
+/// WITHOUT a trailing CRLF. Layout:
+///
+/// ```text
+/// Received: from <helo> (<rdns-or-"unknown"> [<client_ip>])
+///     by <my-hostname> with ESMTP[SA][UTF8-prefixed] id <queue-id>;
+///     <rfc5322-date>
+/// ```
+///
+/// CRLF-injection invariant (F-01): every interpolated value is either
+/// server-generated or pre-validated.
+///
+/// `helo` only reaches here after passing `is_valid_helo_hostname`
+/// (ASCII-only, no whitespace, no control characters), so it can never
+/// carry CR/LF; this is pinned by tests on both servers.
+///
+/// `rdns` is DNS-derived and defensively re-checked here (printable
+/// ASCII only, else "unknown"). `my_hostname`/`queue_id` are
+/// server-generated. The output is therefore always exactly three
+/// physical lines.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn build_received_header(
+    helo: &str,
+    rdns: Option<&str>,
+    client_ip: IpAddr,
+    my_hostname: &str,
+    tls: bool,
+    authenticated: bool,
+    smtputf8: bool,
+    queue_id: &str,
+) -> String {
+    let rdns = rdns
+        .filter(|host| !host.is_empty() && host.bytes().all(|b| b.is_ascii_graphic()))
+        .unwrap_or("unknown");
+    // RFC 3848 with-protocol values: ESMTP, ESMTPS (TLS), +A when the hop
+    // was authenticated (RFC 4954). SMTPUTF8 sessions (RFC 6531 §3.7) use
+    // the UTF8-prefixed form.
+    let mut with_proto = String::from("ESMTP");
+    if tls {
+        with_proto.push('S');
+    }
+    if authenticated {
+        with_proto.push('A');
+    }
+    if smtputf8 {
+        with_proto = format!("UTF8{with_proto}");
+    }
+    format!(
+        "Received: from {helo} ({rdns} [{client_ip}])\r\n\tby {my_hostname} with {with_proto} id {queue_id};\r\n\t{date}",
+        date = chrono::Utc::now().to_rfc2822()
+    )
+}
+
 // ── observability helpers ──────────────────────────────────────────────────────
+
+/// `mta.smtp.message{server,action}`: one accepted/rejected message per
+/// server. Call at the accept/reject decision points that already log.
+pub(crate) fn metric_message(server: &str, action: &str) {
+    metrics::counter!(
+        "mta.smtp.message",
+        "server" => server.to_string(),
+        "action" => action.to_string()
+    )
+    .increment(1);
+}
 
 /// Structured log + metric for one SMTP rejection.
 ///
@@ -370,7 +509,12 @@ pub(crate) fn mail_size_param(line: &str) -> Option<u64> {
 /// `mta.smtp.reject` counter is incremented partitioned by server and code.
 pub(crate) fn log_smtp_reject(server: &str, ip: IpAddr, session: &str, response: &str) {
     let code = response.get(..3).unwrap_or("???");
-    let reason = response.get(3..).unwrap_or("").trim().trim_end_matches('\r').trim_end_matches('\n');
+    let reason = response
+        .get(3..)
+        .unwrap_or("")
+        .trim()
+        .trim_end_matches('\r')
+        .trim_end_matches('\n');
     tracing::info!(
         server,
         code,
@@ -412,6 +556,12 @@ pub(crate) fn log_session_summary(
         "SMTP session summary"
     );
     metrics::counter!("mta.smtp.session", "server" => server.to_string()).increment(1);
+    // F-24: session duration histogram (milliseconds) alongside the counter.
+    metrics::histogram!(
+        "mta.smtp.session.duration",
+        "server" => server.to_string()
+    )
+    .record(duration_ms as f64);
 }
 
 // ── tests ──────────────────────────────────────────────────────────────────────
@@ -459,11 +609,23 @@ mod tests {
             is_strict_end_of_data(b".\r\n", CrLf),
             "CRLF dot terminates DATA"
         );
-        assert!(!is_strict_end_of_data(b".\n", BareLf), "bare-LF dot is body data");
-        assert!(!is_strict_end_of_data(b".\r", Unterminated), "lone CR is not a terminator");
-        assert!(!is_strict_end_of_data(b".", Unterminated), "unterminated dot is body data");
+        assert!(
+            !is_strict_end_of_data(b".\n", BareLf),
+            "bare-LF dot is body data"
+        );
+        assert!(
+            !is_strict_end_of_data(b".\r", Unterminated),
+            "lone CR is not a terminator"
+        );
+        assert!(
+            !is_strict_end_of_data(b".", Unterminated),
+            "unterminated dot is body data"
+        );
         // A CRLF-terminated tag with non-dot content is body data.
-        assert!(!is_strict_end_of_data(b".\n", CrLf), "tag and bytes disagree → body");
+        assert!(
+            !is_strict_end_of_data(b".\n", CrLf),
+            "tag and bytes disagree → body"
+        );
     }
 
     #[test]
@@ -474,17 +636,26 @@ mod tests {
         assert!(!is_strict_end_of_data(b" .\r\n", CrLf));
         assert!(!is_strict_end_of_data(b". \r\n", CrLf));
         assert!(!is_strict_end_of_data(b" . \r\n", CrLf));
-        assert!(!is_strict_end_of_data(b"..\r\n", CrLf), "stuffed dot is body data");
+        assert!(
+            !is_strict_end_of_data(b"..\r\n", CrLf),
+            "stuffed dot is body data"
+        );
         assert!(!is_strict_end_of_data(b"x.\r\n", CrLf));
         assert!(!is_strict_end_of_data(b".x\r\n", CrLf));
-        assert!(!is_strict_end_of_data(b"\r\n", CrLf), "empty line is body data");
+        assert!(
+            !is_strict_end_of_data(b"\r\n", CrLf),
+            "empty line is body data"
+        );
     }
 
     #[test]
     fn split_terminator_classifies_actual_terminators() {
         assert_eq!(split_terminator_bytes(b"DATA\r\n"), LineTerminator::CrLf);
         assert_eq!(split_terminator_bytes(b"DATA\n"), LineTerminator::BareLf);
-        assert_eq!(split_terminator_bytes(b"DATA"), LineTerminator::Unterminated);
+        assert_eq!(
+            split_terminator_bytes(b"DATA"),
+            LineTerminator::Unterminated
+        );
         // A bare LF preceded by a CR that belongs to the content is not CRLF.
         assert_eq!(split_terminator_bytes(b"DATA\r\r\n"), LineTerminator::CrLf);
     }
@@ -585,13 +756,19 @@ mod tests {
             .await
             .unwrap();
 
-        match read_line_capped(&mut stream, MAX_COMMAND_LINE).await.unwrap() {
+        match read_line_capped(&mut stream, MAX_COMMAND_LINE)
+            .await
+            .unwrap()
+        {
             LineRead::TooLong => {}
             other => panic!("expected TooLong, got {other:?}"),
         }
         // The "QUIT" embedded in the oversized line was drained together
         // with it; the next read starts clean at "NOOP".
-        match read_line_capped(&mut stream, MAX_COMMAND_LINE).await.unwrap() {
+        match read_line_capped(&mut stream, MAX_COMMAND_LINE)
+            .await
+            .unwrap()
+        {
             LineRead::Line(l, t) => {
                 assert_eq!(l, b"NOOP\r\n");
                 assert_eq!(t, LineTerminator::CrLf);
@@ -609,23 +786,28 @@ mod tests {
         let (client, server) = tokio::io::duplex(256 * 1024);
         let mut writer = client;
         let mut stream = BufStream::new(server);
-        let attack = format!(
-            "{}\r\nRSET\r\nQUIT\r\n",
-            "X".repeat(80 * 1024)
-        );
+        let attack = format!("{}\r\nRSET\r\nQUIT\r\n", "X".repeat(80 * 1024));
         tokio::io::AsyncWriteExt::write_all(&mut writer, attack.as_bytes())
             .await
             .unwrap();
 
         assert!(matches!(
-            read_line_capped(&mut stream, MAX_COMMAND_LINE).await.unwrap(),
+            read_line_capped(&mut stream, MAX_COMMAND_LINE)
+                .await
+                .unwrap(),
             LineRead::TooLong
         ));
-        match read_line_capped(&mut stream, MAX_COMMAND_LINE).await.unwrap() {
+        match read_line_capped(&mut stream, MAX_COMMAND_LINE)
+            .await
+            .unwrap()
+        {
             LineRead::Line(l, _) => assert_eq!(l, b"RSET\r\n"),
             other => panic!("expected Line, got {other:?}"),
         }
-        match read_line_capped(&mut stream, MAX_COMMAND_LINE).await.unwrap() {
+        match read_line_capped(&mut stream, MAX_COMMAND_LINE)
+            .await
+            .unwrap()
+        {
             LineRead::Line(l, _) => assert_eq!(l, b"QUIT\r\n"),
             other => panic!("expected Line, got {other:?}"),
         }
@@ -714,10 +896,7 @@ mod tests {
             Ok(())
         );
         assert_eq!(
-            validate_mail_params(
-                "MAIL FROM:<a@b.com> SIZE=5 BODY=8BITMIME SMTPUTF8",
-                policy
-            ),
+            validate_mail_params("MAIL FROM:<a@b.com> SIZE=5 BODY=8BITMIME SMTPUTF8", policy),
             Ok(())
         );
         // Lowercase parameter names are still recognised.
@@ -811,5 +990,85 @@ mod tests {
         assert_eq!(mail_size_param("MAIL FROM:<a@b.com>"), None);
         // Malformed values surface as None; validate_mail_params rejects them.
         assert_eq!(mail_size_param("MAIL FROM:<a@b.com> SIZE=1e5"), None);
+    }
+
+    // ── F-06: exact verb parsing ─────────────────────────────────────────────
+
+    #[test]
+    fn split_verb_extracts_first_token_only() {
+        assert_eq!(split_verb("DATA\r\n"), ("DATA".into(), ""));
+        assert_eq!(split_verb("data\r\n"), ("DATA".into(), ""));
+        assert_eq!(
+            split_verb("MAIL FROM:<a@b.com> SIZE=5"),
+            ("MAIL".into(), "FROM:<a@b.com> SIZE=5")
+        );
+        assert_eq!(
+            split_verb("  rcpt   TO:<a@b.com>"),
+            ("RCPT".into(), "TO:<a@b.com>")
+        );
+        assert_eq!(split_verb("DATABASE"), ("DATABASE".into(), ""));
+        assert_eq!(split_verb(""), ("".into(), ""));
+    }
+
+    #[test]
+    fn mail_rcpt_args_require_exact_suffix() {
+        assert!(is_mail_from_arg("FROM:<a@b.com>"));
+        assert!(is_mail_from_arg("from:<a@b.com>"));
+        assert!(is_mail_from_arg("FROM: <a@b.com>"));
+        assert!(!is_mail_from_arg("FROMX:<a@b.com>"));
+        assert!(!is_mail_from_arg(""));
+        assert!(is_rcpt_to_arg("TO:<a@b.com>"));
+        assert!(is_rcpt_to_arg("to:<a@b.com>"));
+        assert!(!is_rcpt_to_arg("TOX:<a@b.com>"));
+        assert!(!is_rcpt_to_arg(""));
+    }
+
+    #[test]
+    fn mail_smtputf8_param_detects_the_extension_parameter() {
+        assert!(mail_smtputf8_param("MAIL FROM:<a@b.com> SMTPUTF8"));
+        assert!(mail_smtputf8_param("MAIL FROM:<a@b.com> smtputf8 SIZE=5"));
+        assert!(!mail_smtputf8_param("MAIL FROM:<a@b.com> SIZE=5"));
+        assert!(!mail_smtputf8_param("MAIL FROM:<a@b.com> XSMTPUTF8"));
+    }
+
+    // ── F-01: Received-hop counting ─────────────────────────────────────────
+
+    #[test]
+    fn count_received_headers_scans_only_the_header_block() {
+        let mk = |n: usize| {
+            let mut msg = Vec::new();
+            for _ in 0..n {
+                msg.extend_from_slice(b"Received: from a by b; now\r\n");
+            }
+            msg.extend_from_slice(b"Subject: t\r\n\r\nReceived: body decoy\r\n.\r\n");
+            msg
+        };
+        assert_eq!(count_received_headers(&mk(3)), 3, "body decoys not counted");
+        assert_eq!(count_received_headers(&mk(0)), 0);
+        // Case-insensitive, LF-only line endings tolerated.
+        assert_eq!(
+            count_received_headers(b"received: from a by b\nSubject: t\n\nbody"),
+            1
+        );
+        // Continuation lines (folded header) are not extra hops.
+        assert_eq!(
+            count_received_headers(b"Received: a\r\n\tby b\r\n\r\nbody"),
+            1
+        );
+    }
+
+    #[test]
+    fn received_hop_limit_boundary_is_40() {
+        let mk = |n: usize| {
+            let mut msg = Vec::new();
+            for _ in 0..n {
+                msg.extend_from_slice(b"Received: hop\r\n");
+            }
+            msg.extend_from_slice(b"\r\nbody");
+            msg
+        };
+        assert!(!received_hop_limit_exceeded(&mk(39)), "39 hops accepted");
+        assert!(received_hop_limit_exceeded(&mk(40)), "40 hops refused");
+        assert!(received_hop_limit_exceeded(&mk(41)));
     }
 }

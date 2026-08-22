@@ -183,11 +183,10 @@ async fn get_insights(
            AND created_at < NOW() - '{interval}'::interval"
     );
 
-    if let Some(cmp) = compare_metric(db, &delivery_sql_current, &delivery_sql_previous, &interval)
-        .await
+    if let Some(cmp) =
+        compare_metric(db, &delivery_sql_current, &delivery_sql_previous, &interval).await
     {
-        let (pct, dir) =
-            calc_change_pct(cmp.current_value, cmp.previous_value);
+        let (pct, dir) = calc_change_pct(cmp.current_value, cmp.previous_value);
         if pct.abs() > 2.0 && cmp.current_count > 10 {
             insights.push(Insight {
                 category: "deliverability".into(),
@@ -242,11 +241,10 @@ async fn get_insights(
            AND created_at < NOW() - '{interval}'::interval"
     );
 
-    if let Some(cmp) = compare_metric(db, &bounce_sql_current, &bounce_sql_previous, &interval)
-        .await
+    if let Some(cmp) =
+        compare_metric(db, &bounce_sql_current, &bounce_sql_previous, &interval).await
     {
-        let (pct, dir) =
-            calc_change_pct(cmp.current_value, cmp.previous_value);
+        let (pct, dir) = calc_change_pct(cmp.current_value, cmp.previous_value);
         if pct.abs() > 10.0 || (dir == "up" && cmp.current_count > 5) {
             insights.push(Insight {
                 category: "deliverability".into(),
@@ -301,10 +299,8 @@ async fn get_insights(
            AND timestamp < NOW() - '{interval}'::interval"
     );
 
-    if let Some(cmp) = compare_metric(db, &open_sql_current, &open_sql_previous, &interval).await
-    {
-        let (pct, dir) =
-            calc_change_pct(cmp.current_value, cmp.previous_value);
+    if let Some(cmp) = compare_metric(db, &open_sql_current, &open_sql_previous, &interval).await {
+        let (pct, dir) = calc_change_pct(cmp.current_value, cmp.previous_value);
         if pct.abs() > 5.0 && cmp.current_count > 10 {
             insights.push(Insight {
                 category: "engagement".into(),
@@ -350,8 +346,7 @@ async fn get_insights(
     .await
     .unwrap_or(0);
 
-    let (signup_pct, signup_dir) =
-        calc_change_pct(signup_current as f64, signup_previous as f64);
+    let (signup_pct, signup_dir) = calc_change_pct(signup_current as f64, signup_previous as f64);
 
     if signup_current > 0 || signup_previous > 0 {
         let direction = signup_dir.clone();
@@ -502,8 +497,7 @@ async fn get_insights(
     .await
     .unwrap_or(0);
 
-    let (com_pct, com_dir) =
-        calc_change_pct(complaint_current as f64, complaint_previous as f64);
+    let (com_pct, com_dir) = calc_change_pct(complaint_current as f64, complaint_previous as f64);
 
     if complaint_current > 0 && (com_dir == "up" || com_pct.abs() > 50.0) {
         insights.push(Insight {
@@ -632,7 +626,12 @@ async fn get_trends(
                 ),
                 data_points: volume_rows.len() as i64,
                 trend_direction: dir,
-                confidence: if volume_rows.len() > 14 { "high" } else { "medium" }.into(),
+                confidence: if volume_rows.len() > 14 {
+                    "high"
+                } else {
+                    "medium"
+                }
+                .into(),
             });
         }
     }
@@ -666,7 +665,11 @@ async fn get_trends(
             trends.push(TrendInsight {
                 title: format!(
                     "Queue depth {} by {:+.1}%",
-                    if dir == "up" { "increasing" } else { "decreasing" },
+                    if dir == "up" {
+                        "increasing"
+                    } else {
+                        "decreasing"
+                    },
                     pct
                 ),
                 description: format!(
@@ -830,8 +833,8 @@ mod tests {
     #[test]
     fn unverified_domains_recommendation_fires_for_seeded_unverified_domain() {
         // A tenant with an unverified domain (count > 0) → fires.
-        let recommendation =
-            unverified_domains_recommendation(1).expect("must fire when a tenant lacks a verified domain");
+        let recommendation = unverified_domains_recommendation(1)
+            .expect("must fire when a tenant lacks a verified domain");
         assert_eq!(recommendation.category, "growth");
         assert_eq!(recommendation.priority, "medium");
         assert!(recommendation.actionable);

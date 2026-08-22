@@ -642,7 +642,10 @@ impl FailoverService {
     /// Clear a node's fence key (used when the node is promoted back).
     async fn unfence_node(&self, node_id: &str) {
         let Ok(mut conn) = self.redis_conn().await else {
-            warn!(node = node_id, "Failed to connect to Redis to clear fence key");
+            warn!(
+                node = node_id,
+                "Failed to connect to Redis to clear fence key"
+            );
             return;
         };
         let _: () = redis::cmd("DEL")
@@ -705,7 +708,10 @@ impl FailoverService {
     /// B.2: delete a demoted node's primary claim.
     async fn release_primary_claim(&self, node: &str) {
         let Ok(mut conn) = self.redis_conn().await else {
-            warn!(node = node, "Failed to connect to Redis to release primary claim");
+            warn!(
+                node = node,
+                "Failed to connect to Redis to release primary claim"
+            );
             return;
         };
         let _: () = redis::cmd("DEL")
@@ -1080,7 +1086,10 @@ mod tests {
             let svc = FailoverService::new(test_pool(), Arc::new(cfg));
             svc.report_failure("db").await.unwrap();
             let res = svc.report_failure("db").await;
-            assert!(res.is_err(), "triggered failover with unreachable Redis must error");
+            assert!(
+                res.is_err(),
+                "triggered failover with unreachable Redis must error"
+            );
             assert!(res.unwrap_err().contains("failover lock"));
             assert_eq!(svc.get_state().await, FailoverState::Normal);
             // Counters survive a failed attempt so the next failure re-triggers.
@@ -1127,8 +1136,12 @@ mod tests {
             let primary = svc.primary_node.read().await.clone();
             assert_eq!(primary, "node-primary");
             // No promotion happened: no claim for the replica, no fence on us.
-            assert!(redis_get(redis.port, "ha:primary:node-replica").await.is_none());
-            assert!(redis_get(redis.port, "ha:fenced:node-primary").await.is_none());
+            assert!(redis_get(redis.port, "ha:primary:node-replica")
+                .await
+                .is_none());
+            assert!(redis_get(redis.port, "ha:fenced:node-primary")
+                .await
+                .is_none());
             // B.4: the lock was released on the failure path.
             assert!(redis_get(redis.port, FAILOVER_LOCK_KEY).await.is_none());
         });
@@ -1199,9 +1212,15 @@ mod tests {
 
             // B.2: claim created for the promoted node, old primary claim gone,
             // old primary fenced, and the lock released (B.4).
-            assert!(redis_get(redis.port, "ha:primary:node-replica").await.is_some());
-            assert!(redis_get(redis.port, "ha:primary:node-primary").await.is_none());
-            assert!(redis_get(redis.port, "ha:fenced:node-primary").await.is_some());
+            assert!(redis_get(redis.port, "ha:primary:node-replica")
+                .await
+                .is_some());
+            assert!(redis_get(redis.port, "ha:primary:node-primary")
+                .await
+                .is_none());
+            assert!(redis_get(redis.port, "ha:fenced:node-primary")
+                .await
+                .is_some());
             assert!(redis_get(redis.port, FAILOVER_LOCK_KEY).await.is_none());
 
             // A second claim appearing elsewhere is a split brain.
@@ -1246,14 +1265,17 @@ mod tests {
             assert_eq!(*svc.primary_node.read().await, "node-primary");
             // Forced failback has no evidence: data_loss must NOT be claimed false.
             assert!(!event.data_loss);
-            assert_eq!(
-                event.metadata.unwrap()["forced"],
-                serde_json::json!(true)
-            );
+            assert_eq!(event.metadata.unwrap()["forced"], serde_json::json!(true));
             // Claims swapped and the original's fence cleared; lock released.
-            assert!(redis_get(redis.port, "ha:primary:node-primary").await.is_some());
-            assert!(redis_get(redis.port, "ha:primary:node-replica").await.is_none());
-            assert!(redis_get(redis.port, "ha:fenced:node-primary").await.is_none());
+            assert!(redis_get(redis.port, "ha:primary:node-primary")
+                .await
+                .is_some());
+            assert!(redis_get(redis.port, "ha:primary:node-replica")
+                .await
+                .is_none());
+            assert!(redis_get(redis.port, "ha:fenced:node-primary")
+                .await
+                .is_none());
             assert!(redis_get(redis.port, FAILOVER_LOCK_KEY).await.is_none());
         });
     }

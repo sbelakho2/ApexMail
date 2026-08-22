@@ -2727,7 +2727,8 @@ mod tests {
             disabled: false,
             loading: false,
             left_icon: None,
-            right_icon: None, submit: true,
+            right_icon: None,
+            submit: true,
         };
         let input = Input {
             input_type: "email",
@@ -2807,7 +2808,8 @@ mod tests {
             disabled: false,
             loading: false,
             left_icon: Some("<svg></svg>"),
-            right_icon: None, submit: true,
+            right_icon: None,
+            submit: true,
         }
         .render_html();
 
@@ -2826,7 +2828,8 @@ mod tests {
             disabled: false,
             loading: false,
             left_icon: None,
-            right_icon: None, submit: true,
+            right_icon: None,
+            submit: true,
         }
         .render_html();
 
@@ -3090,15 +3093,26 @@ mod tests {
             size: "default",
             orientation: "vertical",
             items: vec![
-                RadioGroupItem { value: "starter", label: "Starter", disabled: false },
-                RadioGroupItem { value: "pro", label: "Pro", disabled: false },
+                RadioGroupItem {
+                    value: "starter",
+                    label: "Starter",
+                    disabled: false,
+                },
+                RadioGroupItem {
+                    value: "pro",
+                    label: "Pro",
+                    disabled: false,
+                },
             ],
         }
         .render_html();
         assert!(html.contains("id=\"plan-option-0\""));
         assert!(html.contains("id=\"plan-option-1\""));
         assert!(html.contains("for=\"plan-option-1\""));
-        assert!(html.contains("aria-labelledby=\"plan-option-1\"") || html.contains("for=\"plan-option-1\""));
+        assert!(
+            html.contains("aria-labelledby=\"plan-option-1\"")
+                || html.contains("for=\"plan-option-1\"")
+        );
     }
 
     #[test]
@@ -3137,14 +3151,18 @@ mod tests {
         .render_html();
         assert!(a.contains("id=\"apex-dialog-delete-campaign\""));
         assert!(b.contains("id=\"apex-dialog-delete-list\""));
-        assert_eq!(a, Dialog {
-            title: "Delete campaign?",
-            description: None,
-            body: "",
-            size: "default",
-            variant: "default",
-            hide_close_button: false,
-        }.render_html());
+        assert_eq!(
+            a,
+            Dialog {
+                title: "Delete campaign?",
+                description: None,
+                body: "",
+                size: "default",
+                variant: "default",
+                hide_close_button: false,
+            }
+            .render_html()
+        );
     }
 
     #[test]
@@ -3261,7 +3279,8 @@ mod tests {
             icon_markup: Some("<span class=\"h-8 w-8\">☆</span>"),
             title: "No campaigns yet",
             description: Some("Create your first campaign to get started."),
-            action_label: Some("Create campaign"), action_href: None,
+            action_label: Some("Create campaign"),
+            action_href: None,
         }
         .render_html();
 

@@ -66,7 +66,10 @@ struct StreamClaims {
     pub scopes: Vec<String>,
     /// Expiration (unix timestamp) — read by jsonwebtoken's `validate_exp`
     /// during verification, not directly by this crate.
-    #[expect(dead_code, reason = "validated by jsonwebtoken, not read directly here")]
+    #[expect(
+        dead_code,
+        reason = "validated by jsonwebtoken, not read directly here"
+    )]
     pub exp: u64,
 }
 

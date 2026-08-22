@@ -44,7 +44,14 @@ pub fn mask_destination_config(config: &serde_json::Value) -> serde_json::Value 
     for field in SECRET_CONFIG_FIELDS {
         if let Some(value) = obj.get_mut(*field) {
             if let Some(secret) = value.as_str() {
-                let tail: String = secret.chars().rev().take(4).collect::<Vec<_>>().into_iter().rev().collect();
+                let tail: String = secret
+                    .chars()
+                    .rev()
+                    .take(4)
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .rev()
+                    .collect();
                 *value = serde_json::json!(format!("****{tail}"));
             }
         }
@@ -131,8 +138,7 @@ impl LogStreamingService {
     /// `field_encryption::derive_kek_from_secret`.
     pub fn with_secret_key(db: PgPool, secret: &str) -> Self {
         let secret_encryptor =
-            crate::field_encryption::encryptor_from_secret(secret, LOG_STREAM_SECRET_PURPOSE)
-                .ok();
+            crate::field_encryption::encryptor_from_secret(secret, LOG_STREAM_SECRET_PURPOSE).ok();
         if secret_encryptor.is_none() {
             tracing::error!(
                 "Failed to derive log-stream destination secret encryptor — secrets will NOT be encrypted at rest"
@@ -298,13 +304,12 @@ impl LogStreamingService {
         // stream's owning tenant binding.
         let mut destination_config = destination_config;
         if let Some(config) = destination_config.as_mut() {
-            let owner: Option<String> = sqlx::query_scalar(
-                "SELECT tenant_id FROM ent_log_streams WHERE id = $1",
-            )
-            .bind(id)
-            .fetch_optional(&self.db)
-            .await
-            .map_err(|e| format!("Load stream tenant: {e}"))?;
+            let owner: Option<String> =
+                sqlx::query_scalar("SELECT tenant_id FROM ent_log_streams WHERE id = $1")
+                    .bind(id)
+                    .fetch_optional(&self.db)
+                    .await
+                    .map_err(|e| format!("Load stream tenant: {e}"))?;
             match owner {
                 Some(tenant_id) => self.encrypt_config_secrets(&tenant_id, config)?,
                 None => return Ok(ApiResult::err("Log stream not found", "NOT_FOUND")),
@@ -565,7 +570,15 @@ impl LogStreamingService {
                 Ok(bytes) => {
                     delivered += 1;
                     if let Err(e) = self
-                        .record_delivery(stream.id, &batch_id, 1, bytes as i64, duration_ms, true, None)
+                        .record_delivery(
+                            stream.id,
+                            &batch_id,
+                            1,
+                            bytes as i64,
+                            duration_ms,
+                            true,
+                            None,
+                        )
                         .await
                     {
                         tracing::warn!(stream_id = %stream.id, error = %e, "delivery: record failed");
@@ -657,8 +670,7 @@ async fn deliver_heartbeat(stream: &LogStream) -> Result<usize, String> {
                 .get("api_key")
                 .and_then(|v| v.as_str())
                 .ok_or("No Datadog API key")?;
-            let dest =
-                ssrf_guard_url("https://http-intake.logs.datadoghq.com/api/v2/logs").await?;
+            let dest = ssrf_guard_url("https://http-intake.logs.datadoghq.com/api/v2/logs").await?;
             let resp = pinned_client(&dest.host, dest.addr)?
                 .post(dest.url)
                 .header("DD-API-KEY", api_key)
@@ -725,13 +737,14 @@ pub fn is_private_or_reserved_ip(ip: std::net::IpAddr) -> bool {
 
 /// Addresses explicitly allow-listed via `LOG_STREAMING_SSRF_ALLOWLIST`
 /// (comma-separated IPs) — an escape hatch for internal test destinations.
-static SSRF_ALLOWLIST: std::sync::LazyLock<Vec<std::net::IpAddr>> = std::sync::LazyLock::new(|| {
-    std::env::var("LOG_STREAMING_SSRF_ALLOWLIST")
-        .unwrap_or_default()
-        .split(',')
-        .filter_map(|entry| entry.trim().parse().ok())
-        .collect()
-});
+static SSRF_ALLOWLIST: std::sync::LazyLock<Vec<std::net::IpAddr>> =
+    std::sync::LazyLock::new(|| {
+        std::env::var("LOG_STREAMING_SSRF_ALLOWLIST")
+            .unwrap_or_default()
+            .split(',')
+            .filter_map(|entry| entry.trim().parse().ok())
+            .collect()
+    });
 
 /// Cached per-destination clients whose DNS is pinned to the validated
 /// address (fix F: closes the DNS-rebinding TOCTOU between validation and
@@ -958,7 +971,6 @@ mod tests {
     use super::*;
     use chrono::Utc;
 
-
     // ── SSRF guard unit tests (fix F) ─────────────────────────────────
 
     fn ip(s: &str) -> std::net::IpAddr {
@@ -977,12 +989,12 @@ mod tests {
             "127.0.0.1",
             "0.0.0.0",
             "255.255.255.255",
-            "100.64.0.1",   // CGNAT
-            "198.18.0.1",   // benchmarking
-            "240.0.0.1",    // reserved
+            "100.64.0.1", // CGNAT
+            "198.18.0.1", // benchmarking
+            "240.0.0.1",  // reserved
             "::1",
-            "fe80::1",      // IPv6 link-local
-            "fc00::1",      // IPv6 ULA
+            "fe80::1",         // IPv6 link-local
+            "fc00::1",         // IPv6 ULA
             "::ffff:10.0.0.1", // IPv4-mapped private
         ] {
             assert!(
@@ -994,7 +1006,12 @@ mod tests {
 
     #[test]
     fn ssrf_guard_allows_public_addresses() {
-        for allowed in ["8.8.8.8", "1.1.1.1", "93.184.216.34", "2606:4700:4700::1111"] {
+        for allowed in [
+            "8.8.8.8",
+            "1.1.1.1",
+            "93.184.216.34",
+            "2606:4700:4700::1111",
+        ] {
             assert!(
                 !is_private_or_reserved_ip(ip(allowed)),
                 "{allowed} must be classified public"
@@ -1045,7 +1062,10 @@ mod tests {
             "api_key": "ddog-abcdef9988"
         });
         let masked = mask_destination_config(&config);
-        assert_eq!(masked["url"], "https://input.example.com:8088", "non-secret fields pass through");
+        assert_eq!(
+            masked["url"], "https://input.example.com:8088",
+            "non-secret fields pass through"
+        );
         assert_eq!(masked["token"], "****1234");
         assert_eq!(masked["api_key"], "****9988");
         assert!(!masked.to_string().contains("super-secret"));
@@ -1068,22 +1088,27 @@ mod tests {
                 .unwrap();
         });
         let stored = config["token"].as_str().unwrap();
-        assert!(stored.starts_with("ENC:v1:"), "secret must be encrypted at rest");
+        assert!(
+            stored.starts_with("ENC:v1:"),
+            "secret must be encrypted at rest"
+        );
 
         // Roundtrip with the right tenant.
         rt.block_on(async {
-            service.decrypt_config_secrets("tenant-a", &mut config).unwrap();
+            service
+                .decrypt_config_secrets("tenant-a", &mut config)
+                .unwrap();
         });
         assert_eq!(config["token"], "plain-secret-value");
 
         // A ciphertext bound to tenant A must not decrypt for tenant B.
         let mut config = serde_json::json!({"token": "plain-secret-value"});
         rt.block_on(async {
-            service.encrypt_config_secrets("tenant-a", &mut config).unwrap();
+            service
+                .encrypt_config_secrets("tenant-a", &mut config)
+                .unwrap();
         });
-        let result = rt.block_on(async {
-            service.decrypt_config_secrets("tenant-b", &mut config)
-        });
+        let result = rt.block_on(async { service.decrypt_config_secrets("tenant-b", &mut config) });
         assert!(result.is_err(), "cross-tenant secret decryption must fail");
     }
 

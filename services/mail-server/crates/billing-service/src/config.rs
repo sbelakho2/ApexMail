@@ -331,8 +331,7 @@ mod tests {
                 _ => {
                     let first = 10_000_i128 * 100;
                     let second_tier = (i128::from(emails) - 10_000).min(90_000) * 80;
-                    let third_tier =
-                        ((i128::from(emails) - 100_000).max(0)).min(900_000) * 50;
+                    let third_tier = (i128::from(emails) - 100_000).clamp(0, 900_000) * 50;
                     let fourth_tier = (i128::from(emails) - 1_000_000).max(0) * 30;
                     first + second_tier + third_tier + fourth_tier
                 }

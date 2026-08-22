@@ -351,7 +351,7 @@ mod tests {
         let limiter = KeyedRateLimiter::from_params(1, 5, 1000);
 
         assert!(limiter.check("key_a").is_allowed()); // 4 tokens left
-        // Simulate eviction (NOT an administrative remove — tombstone stays)
+                                                      // Simulate eviction (NOT an administrative remove — tombstone stays)
         limiter.limiters.invalidate("key_a");
         limiter.run_maintenance();
 

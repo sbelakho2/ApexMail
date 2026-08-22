@@ -193,7 +193,7 @@ static LOCAL_FALLBACK: std::sync::LazyLock<
 > = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
 
 fn local_fallback_limit(configured: u32) -> u32 {
-    configured.min(EMERGENCY_LOCAL_LIMIT).max(1)
+    configured.clamp(1, EMERGENCY_LOCAL_LIMIT)
 }
 
 /// Count `ip` against the local fallback window; true when still allowed.
@@ -268,7 +268,11 @@ async fn rate_limit_middleware(
                 next.run(req).await
             } else {
                 warn!(ip = %ip, "Local emergency rate limit exceeded");
-                rate_limited_response(&ip, u64::from(local_fallback_limit(cfg.max_per_minute)), req)
+                rate_limited_response(
+                    &ip,
+                    u64::from(local_fallback_limit(cfg.max_per_minute)),
+                    req,
+                )
             }
         }
         _ => next.run(req).await,

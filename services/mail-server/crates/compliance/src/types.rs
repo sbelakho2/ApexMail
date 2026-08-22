@@ -618,7 +618,7 @@ pub struct DataSubjectRequest {
     pub result: Option<serde_json::Value>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct DataSubjectRequestResult {
     pub data: Option<serde_json::Value>,
     pub export_url: Option<String>,
@@ -634,22 +634,6 @@ pub struct DataSubjectRequestResult {
     /// True when the result requires human follow-up (rectification review).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub review_required: bool,
-}
-
-impl Default for DataSubjectRequestResult {
-    fn default() -> Self {
-        Self {
-            data: None,
-            export_url: None,
-            export_expires_at: None,
-            deleted_records: None,
-            deletion_confirmation: None,
-            modified_records: None,
-            rejection_reason: None,
-            partial: None,
-            review_required: false,
-        }
-    }
 }
 
 /// API response for submitting a data-subject request.
@@ -903,8 +887,7 @@ mod tests {
     #[test]
     fn test_audit_outcome_denied_display() {
         assert_eq!(AuditOutcome::Denied.to_string(), "denied");
-        let parsed: AuditOutcome =
-            serde_json::from_value(serde_json::json!("denied")).unwrap();
+        let parsed: AuditOutcome = serde_json::from_value(serde_json::json!("denied")).unwrap();
         assert_eq!(parsed, AuditOutcome::Denied);
     }
 

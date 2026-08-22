@@ -533,6 +533,9 @@ mod tests {
         assert_eq!(parsed.dispatch.dispatch_batch_size, 50);
         // Trailing slash is trimmed when loading from env; serialization
         // keeps the stored value verbatim.
-        assert_eq!(parsed.dispatch.public_base_url, "https://sales.apexmail.ee/");
+        assert_eq!(
+            parsed.dispatch.public_base_url,
+            "https://sales.apexmail.ee/"
+        );
     }
 }

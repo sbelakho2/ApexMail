@@ -70,8 +70,7 @@ const AUTH_TAG_LEN: usize = 16;
 /// key is unset or too short — callers must NOT emit tokens in that case
 /// (they would be undecodable and leak the payload shape).
 fn tracking_secret() -> Result<zeroize::Zeroizing<String>, &'static str> {
-    let key =
-        zeroize::Zeroizing::new(std::env::var(TRACKING_SECRET_KEY_ENV).unwrap_or_default());
+    let key = zeroize::Zeroizing::new(std::env::var(TRACKING_SECRET_KEY_ENV).unwrap_or_default());
     if key.trim().is_empty() {
         return Err(TRACKING_SECRET_KEY_ENV);
     }
@@ -88,8 +87,7 @@ fn tracking_secret() -> Result<zeroize::Zeroizing<String>, &'static str> {
 fn derive_key_hmac(secret: &[u8], info: &[u8], len: usize) -> zeroize::Zeroizing<Vec<u8>> {
     use hmac::{Hmac, Mac};
     use sha2::Sha256;
-    let mut mac =
-        <Hmac<Sha256> as Mac>::new_from_slice(secret).expect("HMAC accepts any key size");
+    let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(secret).expect("HMAC accepts any key size");
     mac.update(info);
     let result = mac.finalize().into_bytes();
     zeroize::Zeroizing::new(result[..len].to_vec())
@@ -116,7 +114,12 @@ fn serialize_payload(
         1 + 2 * 5 + tenant_id.len() + message_id.len() + recipient.len() + url_bytes.len(),
     );
     buf.push(version);
-    for field in [tenant_id.as_bytes(), message_id.as_bytes(), recipient.as_bytes(), b""] {
+    for field in [
+        tenant_id.as_bytes(),
+        message_id.as_bytes(),
+        recipient.as_bytes(),
+        b"",
+    ] {
         write_u16be(&mut buf, field.len() as u16);
         buf.extend_from_slice(field);
     }
@@ -133,8 +136,8 @@ fn serialize_payload(
 /// Wire format: base64url(IV[12] || AuthTag[16] || ciphertext).
 pub fn encode_tracking_id(payload: &TrackingPayload) -> Result<String, &'static str> {
     use aes_gcm::aead::rand_core::RngCore;
-    use aes_gcm::aead::{Aead, KeyInit, Payload};
     use aes_gcm::aead::OsRng;
+    use aes_gcm::aead::{Aead, KeyInit, Payload};
     use aes_gcm::{Aes128Gcm, Key, Nonce};
 
     let secret = tracking_secret()?;
@@ -156,7 +159,13 @@ pub fn encode_tracking_id(payload: &TrackingPayload) -> Result<String, &'static 
     let nonce = Nonce::from_slice(&iv_bytes);
     let aad: &[u8] = b"";
     let mut ciphertext_with_tag = cipher
-        .encrypt(nonce, Payload { msg: &plaintext, aad })
+        .encrypt(
+            nonce,
+            Payload {
+                msg: &plaintext,
+                aad,
+            },
+        )
         .map_err(|_| "aes-gcm encrypt failed")?;
     let tag_start = ciphertext_with_tag.len() - AUTH_TAG_LEN;
     let tag: Vec<u8> = ciphertext_with_tag.split_off(tag_start);
@@ -503,10 +512,7 @@ mod tests {
         assert_eq!(decoded.message_id, payload.message_id);
         assert_eq!(decoded.tenant_id, payload.tenant_id);
         assert_eq!(decoded.recipient, payload.recipient_hash);
-        assert_eq!(
-            decoded.original_url.as_deref(),
-            Some("https://example.com")
-        );
+        assert_eq!(decoded.original_url.as_deref(), Some("https://example.com"));
         // linkId is not used by the worker path.
         assert!(decoded.link_id.is_none());
     }

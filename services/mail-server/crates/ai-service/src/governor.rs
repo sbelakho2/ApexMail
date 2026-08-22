@@ -113,7 +113,7 @@ impl RateGovernor {
                 let queue = queue.lock();
                 let live = queue
                     .iter()
-                    .filter(|t| cutoff.map_or(true, |c| **t > c))
+                    .filter(|t| cutoff.is_none_or(|c| **t > c))
                     .count();
                 live < self.limit
             }

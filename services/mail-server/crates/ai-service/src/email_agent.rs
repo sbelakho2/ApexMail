@@ -482,7 +482,10 @@ impl EmailAnswerer {
         for row in &rows {
             // Rate-limit deferrals must not consume a retry attempt: peek
             // first and simply re-queue the message for a later poll.
-            if !self.governor.would_allow(&governor_key(row.tenant_id.as_deref())) {
+            if !self
+                .governor
+                .would_allow(&governor_key(row.tenant_id.as_deref()))
+            {
                 tracing::debug!(
                     msg_id = %row.id,
                     "Inference rate limit reached — deferring inbound message"
@@ -496,10 +499,7 @@ impl EmailAnswerer {
                 continue;
             }
             if let Err(e) = self.process_message(row).await {
-                let mut attempt = self
-                    .attempts
-                    .entry(row.id.clone())
-                    .or_insert(0);
+                let mut attempt = self.attempts.entry(row.id.clone()).or_insert(0);
                 *attempt.value_mut() += 1;
                 let attempt_no = *attempt.value();
                 match failure_action(attempt_no) {
@@ -593,14 +593,14 @@ impl EmailAnswerer {
     /// per-tenant governor still bounds LLM spend.
     async fn sender_reply_count(&self, from_email: &str) -> i64 {
         sqlx::query_scalar::<_, i64>(SENDER_REPLY_COUNT_SQL)
-        .bind(from_email)
-        .bind(REPLY_CAP_WINDOW_DAYS.to_string())
-        .fetch_one(&self.pool)
-        .await
-        .unwrap_or_else(|error| {
-            tracing::warn!(error = %error, "reply-cap lookup failed — allowing message");
-            0
-        })
+            .bind(from_email)
+            .bind(REPLY_CAP_WINDOW_DAYS.to_string())
+            .fetch_one(&self.pool)
+            .await
+            .unwrap_or_else(|error| {
+                tracing::warn!(error = %error, "reply-cap lookup failed — allowing message");
+                0
+            })
     }
 
     /// Number of drafts generated for the tenant over the last 24h (per-tenant
@@ -608,10 +608,10 @@ impl EmailAnswerer {
     /// rate-limits them.
     async fn tenant_draft_count_today(&self, tenant_id: &str) -> Option<i64> {
         sqlx::query_scalar::<_, i64>(TENANT_DRAFT_COUNT_SQL)
-        .bind(tenant_id)
-        .fetch_one(&self.pool)
-        .await
-        .ok()
+            .bind(tenant_id)
+            .fetch_one(&self.pool)
+            .await
+            .ok()
     }
 
     /// Process a single inbound message into a human-approval draft. This method
@@ -746,7 +746,11 @@ impl EmailAnswerer {
         // handles it and no draft is stored.
         let response = self
             .llm
-            .generate(&self.config.system_prompt, &prompt, self.config.max_response_tokens as u32)
+            .generate(
+                &self.config.system_prompt,
+                &prompt,
+                self.config.max_response_tokens as u32,
+            )
             .await
             .map_err(|e| {
                 tracing::error!(msg_id = %row.id, error = %e, "LLM generation failed");
@@ -1135,16 +1139,19 @@ mod tests {
         for attempt in 1..MAX_PROCESS_ATTEMPTS {
             assert_eq!(failure_action(attempt), FailureAction::Retry);
         }
-        assert_eq!(failure_action(MAX_PROCESS_ATTEMPTS), FailureAction::Quarantine);
-        assert_eq!(failure_action(MAX_PROCESS_ATTEMPTS + 3), FailureAction::Quarantine);
+        assert_eq!(
+            failure_action(MAX_PROCESS_ATTEMPTS),
+            FailureAction::Quarantine
+        );
+        assert_eq!(
+            failure_action(MAX_PROCESS_ATTEMPTS + 3),
+            FailureAction::Quarantine
+        );
     }
 
     #[test]
     fn redact_for_log_masks_emails_and_long_digit_runs() {
-        assert_eq!(
-            redact_for_log("john.doe@example.com"),
-            "j***@example.com"
-        );
+        assert_eq!(redact_for_log("john.doe@example.com"), "j***@example.com");
         assert_eq!(redact_for_log("card 4532015118513702 end"), "card 4*** end");
         assert_eq!(redact_for_log("order 123 arrived"), "order 123 arrived");
         assert_eq!(redact_for_log("plain subject"), "plain subject");
@@ -1205,7 +1212,10 @@ mod tests {
             "support+question@corp.example",
             "anna_customer@example.org",
         ] {
-            assert!(!is_loop_sender(human, reply_from), "{human} must be allowed");
+            assert!(
+                !is_loop_sender(human, reply_from),
+                "{human} must be allowed"
+            );
         }
     }
 
@@ -1293,10 +1303,7 @@ mod tests {
 
     #[test]
     fn governor_keys_are_per_tenant() {
-        assert_eq!(
-            governor_key(Some("tenant_abc")),
-            "email-agent:tenant_abc"
-        );
+        assert_eq!(governor_key(Some("tenant_abc")), "email-agent:tenant_abc");
         assert_eq!(governor_key(None), "email-agent:_unknown");
         assert_eq!(governor_key(Some("  ")), "email-agent:_unknown");
         assert_ne!(
@@ -1352,7 +1359,12 @@ mod tests {
         // The email agent composes DRAFTS ONLY. None of its write paths may
         // reference the outbound queue — releasing a draft is the approval
         // control plane's job, never the agent's.
-        for sql in [STORE_DRAFT_SQL, DECLINE_MESSAGE_SQL, SENDER_REPLY_COUNT_SQL, TENANT_DRAFT_COUNT_SQL] {
+        for sql in [
+            STORE_DRAFT_SQL,
+            DECLINE_MESSAGE_SQL,
+            SENDER_REPLY_COUNT_SQL,
+            TENANT_DRAFT_COUNT_SQL,
+        ] {
             let lower = sql.to_lowercase();
             assert!(
                 !lower.contains("email_queue"),
@@ -1403,8 +1415,10 @@ mod tests {
 
     #[test]
     fn caps_are_bounded_constants() {
-        assert!(MAX_REPLIES_PER_SENDER_WINDOW >= 1);
-        assert!(REPLY_CAP_WINDOW_DAYS >= 1);
-        assert!(MAX_DRAFTS_PER_TENANT_PER_DAY >= 1);
+        const {
+            assert!(MAX_REPLIES_PER_SENDER_WINDOW >= 1);
+            assert!(REPLY_CAP_WINDOW_DAYS >= 1);
+            assert!(MAX_DRAFTS_PER_TENANT_PER_DAY >= 1);
+        }
     }
 }

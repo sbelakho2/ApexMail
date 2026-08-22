@@ -211,7 +211,7 @@ impl SpamEngine {
             // Cold-start:if model has insufficient training data, treat as neutral.
             // Uses the cheap O(1) accessor — a full export_model() here would
             // deep-clone the entire vocabulary on every email.
-            if self.bayesian.total_samples() < self.config.min_training_samples as u64 {
+            if self.bayesian.total_samples() < self.config.min_training_samples {
                 0.5 // Neutral — don't let an under-trained model influence scoring
             } else {
                 raw_prob
@@ -253,8 +253,13 @@ impl SpamEngine {
         let dmarc_penalty = self.check_dmarc_policy(auth_results);
 
         // 6. Composite scoring + classification (shared path)
-        let (composite, classification) =
-            self.composite_score(bayesian_prob, &header_result, &content_result, &url_result, dmarc_penalty);
+        let (composite, classification) = self.composite_score(
+            bayesian_prob,
+            &header_result,
+            &content_result,
+            &url_result,
+            dmarc_penalty,
+        );
 
         self.record_probability(bayesian_prob);
 
@@ -987,6 +992,9 @@ mod tests {
         );
         // The oldest snapshots were evicted; the newest must survive.
         assert!(!engine.model_snapshots.read().contains_key(&ids[0]));
-        assert!(engine.model_snapshots.read().contains_key(ids.last().unwrap()));
+        assert!(engine
+            .model_snapshots
+            .read()
+            .contains_key(ids.last().expect("ids non-empty")));
     }
 }

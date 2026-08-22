@@ -256,6 +256,46 @@ fn expand_rows_within_cap(rows: Vec<QueuedEmailRow>, cap: usize) -> Vec<EmailJob
     jobs
 }
 
+/// F-21: disposition class for a failed send attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SendFailureClass {
+    /// Temporary failure (4xx reply, or a "Soft bounce"/"temporary" marker) —
+    /// retried via `handle_soft_bounce` with the existing exponential backoff.
+    Soft,
+    /// Permanent failure (5xx reply, or a "Hard bounce" marker) —
+    /// `handle_hard_bounce`: row marked 'bounced', recipient suppressed,
+    /// bounce event recorded. Never retried.
+    Hard,
+    /// No classification signal (timeouts, DNS, connection errors) —
+    /// `handle_error`: retried below max_retries, DLQ + 'failed' above.
+    Unknown,
+}
+
+/// F-21: classify a transport failure for the retry decision.
+///
+/// The structured SMTP reply code wins when present (the transport now
+/// carries it in [`ProcessorError::Smtp`] instead of flattening the reply
+/// into a redacted, truncated string): 4xx is temporary, 5xx is permanent.
+/// Legacy string markers keep working for messages that already carry them
+/// so other error paths (and the SES transport) are unaffected.
+fn classify_send_failure(err: &ProcessorError) -> SendFailureClass {
+    if let ProcessorError::Smtp { code, .. } = err {
+        return match code {
+            400..=499 => SendFailureClass::Soft,
+            500..=599 => SendFailureClass::Hard,
+            _ => SendFailureClass::Unknown,
+        };
+    }
+    let err_str = err.to_string();
+    if err_str.contains("Soft bounce") || err_str.contains("temporary") {
+        SendFailureClass::Soft
+    } else if err_str.contains("Hard bounce") {
+        SendFailureClass::Hard
+    } else {
+        SendFailureClass::Unknown
+    }
+}
+
 /// Email processor for sending emails from the queue.
 pub struct EmailProcessor {
     db: PgPool,
@@ -683,6 +723,14 @@ impl EmailProcessor {
         // Record outcome for error rate tracking
         let outcome = match &result {
             Ok(_) => SendOutcome::Success,
+            // F-21: structured reply-code classification (must mirror
+            // `classify_send_failure`).
+            Err(ProcessorError::Smtp {
+                code: 400..=499, ..
+            }) => SendOutcome::SoftBounce,
+            Err(ProcessorError::Smtp {
+                code: 500..=599, ..
+            }) => SendOutcome::HardBounce,
             Err(ProcessorError::Transport(msg)) if msg.contains("Soft bounce") => {
                 SendOutcome::SoftBounce
             }
@@ -785,14 +833,17 @@ impl EmailProcessor {
             Err(e) => {
                 self.smtp_circuit_breaker.record_failure();
 
-                // Check if retryable
-                let err_str = e.to_string();
-                if err_str.contains("Soft bounce") || err_str.contains("temporary") {
-                    self.handle_soft_bounce(job, &e).await?;
-                } else if err_str.contains("Hard bounce") {
-                    self.handle_hard_bounce(job, &e).await?;
-                } else {
-                    self.handle_error(job, &e).await?;
+                // F-21: classify by the structured SMTP reply code when the
+                // error carries one (4xx → retry with the existing
+                // exponential backoff, 5xx → the existing hard-bounce
+                // handling). Messages without a code keep the legacy string
+                // classification; codeless transport errors (timeout, DNS,
+                // connection) fall through to `handle_error`, which retries
+                // below max_retries and DLQs above.
+                match classify_send_failure(&e) {
+                    SendFailureClass::Soft => self.handle_soft_bounce(job, &e).await?,
+                    SendFailureClass::Hard => self.handle_hard_bounce(job, &e).await?,
+                    SendFailureClass::Unknown => self.handle_error(job, &e).await?,
                 }
 
                 Err(e)
@@ -2284,6 +2335,9 @@ mod tests {
 
     /// B: with `enabled: false` the gate in `prepare_email` must leave the
     /// HTML byte-identical — no pixel, no link rewriting.
+    /// The env guard is held across awaits on purpose: the awaited processor
+    /// setup reads the process-global `TRACKING_SECRET_KEY`.
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn tracking_gate_disabled_leaves_html_untouched() {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -2310,6 +2364,9 @@ mod tests {
 
     /// B: with `enabled: true` (and the shared secret configured) the gate
     /// lets the pixel + link rewriters run.
+    /// The env guard is held across awaits on purpose: the awaited processor
+    /// setup reads the process-global `TRACKING_SECRET_KEY`.
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn tracking_gate_enabled_rewrites_html() {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -2584,6 +2641,96 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------------
+    // F-21: retry classification by SMTP reply code (not substrings)
+    // ---------------------------------------------------------------------------
+
+    /// A raw permanent relay rejection ("550 5.1.1") matched NEITHER the
+    /// soft- nor the hard-bounce string marker before and was retried up to
+    /// max_retries via the generic handler. It now maps to the typed
+    /// `ProcessorError::Smtp` and classifies Hard — i.e. the existing
+    /// hard-bounce handling: queue row 'bounced', recipient suppressed,
+    /// bounce event recorded, never requeued.
+    #[test]
+    fn relay_550_is_classified_hard_and_not_retried() {
+        let err =
+            crate::email::transport::SmtpTransport::map_smtp_error("550 5.1.1 mailbox unavailable");
+        assert!(
+            matches!(err, ProcessorError::Smtp { code: 550, .. }),
+            "relay string must map to the typed Smtp error: {err}"
+        );
+        assert_eq!(classify_send_failure(&err), SendFailureClass::Hard);
+    }
+
+    /// A temporary relay deferral ("450 greylisted") classifies Soft — i.e.
+    /// the existing soft-bounce handling: requeued with the unchanged
+    /// exponential backoff (attempt + 1, retry_at = now + retry_delay *
+    /// 2^attempt) until max_retries.
+    #[test]
+    fn relay_450_greylist_is_classified_soft_for_backoff_retry() {
+        let err = crate::email::transport::SmtpTransport::map_smtp_error("450 4.7.1 greylisted");
+        assert!(matches!(err, ProcessorError::Smtp { code: 450, .. }));
+        assert_eq!(classify_send_failure(&err), SendFailureClass::Soft);
+        // The soft handler's backoff is the pre-existing formula (verified
+        // in test_exponential_backoff_formula): base delay * 2^attempt.
+        let attempt: i32 = 1;
+        assert_eq!(2_i64.saturating_pow(attempt.min(30) as u32), 2);
+    }
+
+    /// The structured reply code outranks contradicting free text: a 5xx
+    /// whose tail happens to say "temporary" is still permanent (mail-send's
+    /// production Display shape included).
+    #[test]
+    fn reply_code_outranks_free_text_markers() {
+        let err = crate::email::transport::SmtpTransport::map_smtp_error(
+            "Unexpected reply: Code: 550, Enhanced code: 5.1.1, Message: temporary local error",
+        );
+        assert!(matches!(err, ProcessorError::Smtp { code: 550, .. }));
+        assert_eq!(classify_send_failure(&err), SendFailureClass::Hard);
+    }
+
+    /// The legacy string markers keep their meaning for messages that
+    /// already carry them (backward compat with other error paths).
+    #[test]
+    fn legacy_string_classification_still_works() {
+        assert_eq!(
+            classify_send_failure(&ProcessorError::Transport(
+                "Soft bounce: mailbox full".into()
+            )),
+            SendFailureClass::Soft
+        );
+        assert_eq!(
+            classify_send_failure(&ProcessorError::Transport(
+                "relay said temporary failure".into()
+            )),
+            SendFailureClass::Soft
+        );
+        assert_eq!(
+            classify_send_failure(&ProcessorError::Transport(
+                "Hard bounce: user unknown".into()
+            )),
+            SendFailureClass::Hard
+        );
+    }
+
+    /// Codeless transport errors (timeout, DNS, connection) stay Unknown:
+    /// the generic handler retries them below max_retries and dead-letters
+    /// (DLQ + 'failed') after — unchanged behavior.
+    #[test]
+    fn codeless_transport_errors_stay_generic() {
+        for err in [
+            ProcessorError::Transport("Connection timeout".into()),
+            ProcessorError::Transport("I/O error: connection reset by peer".into()),
+            ProcessorError::Dns("resolution failed".into()),
+        ] {
+            assert_eq!(
+                classify_send_failure(&err),
+                SendFailureClass::Unknown,
+                "codeless error must stay generic: {err}"
+            );
+        }
+    }
+
+    // ---------------------------------------------------------------------------
     // G.3a: recipient expansion respects the concurrency cap
     // ---------------------------------------------------------------------------
 
@@ -2643,20 +2790,32 @@ mod tests {
         // pending set (not blanket-flip the row) and only set the terminal
         // 'suppressed' status when the set is empty.
         let sql = SUPPRESSED_UPDATE_SQL;
-        assert!(sql.contains("pending_recipients"), "must maintain the pending set");
-        assert!(sql.contains("- $3::text"), "must remove the suppressed recipient");
+        assert!(
+            sql.contains("pending_recipients"),
+            "must maintain the pending set"
+        );
+        assert!(
+            sql.contains("- $3::text"),
+            "must remove the suppressed recipient"
+        );
         assert!(
             sql.contains("THEN 'suppressed' ELSE status END"),
             "status must be conditional"
         );
-        assert!(sql.contains("error_message = $1"), "reason must be recorded");
+        assert!(
+            sql.contains("error_message = $1"),
+            "reason must be recorded"
+        );
     }
 
     #[test]
     fn possibly_sent_update_records_audit_trail_and_completes_row() {
         let sql = POSSIBLY_SENT_UPDATE_SQL;
         assert!(sql.contains("possibly_sent"), "must append an audit marker");
-        assert!(sql.contains("- $2::text"), "must remove the recipient from pending");
+        assert!(
+            sql.contains("- $2::text"),
+            "must remove the recipient from pending"
+        );
         assert!(
             sql.contains("THEN 'sent' ELSE status END"),
             "row completes when pending empties"
@@ -2678,10 +2837,7 @@ mod tests {
             sql.contains("status = 'queued'"),
             "transition must be conditional on the current status"
         );
-        assert!(
-            sql.contains("tenant_id = $2"),
-            "must be tenant-scoped"
-        );
+        assert!(sql.contains("tenant_id = $2"), "must be tenant-scoped");
         assert!(
             sql.contains("id = $1::uuid"),
             "must key on the message UUID"

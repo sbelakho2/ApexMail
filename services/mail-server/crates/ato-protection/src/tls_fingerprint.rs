@@ -460,7 +460,10 @@ mod tests {
         );
         assert_eq!(chrome.cipher_suites.len(), 15);
         assert_eq!(chrome.extensions.len(), 16);
-        assert!(!chrome.looks_like_bot(), "Chrome JA4 must not look like a bot");
+        assert!(
+            !chrome.looks_like_bot(),
+            "Chrome JA4 must not look like a bot"
+        );
         assert_eq!(chrome.tls_version, "t13");
     }
 

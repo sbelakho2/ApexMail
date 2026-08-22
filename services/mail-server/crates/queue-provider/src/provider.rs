@@ -358,7 +358,12 @@ impl PostgresQueueProvider {
     /// whose lease was lost (recovered to pending, re-claimed by another
     /// worker, or already finished) is a no-op instead of corrupting the
     /// new attempt.
-    pub async fn fail(&self, job_id: Uuid, lease_token: Uuid, error: &str) -> Result<(), QueueError> {
+    pub async fn fail(
+        &self,
+        job_id: Uuid,
+        lease_token: Uuid,
+        error: &str,
+    ) -> Result<(), QueueError> {
         let now = Utc::now();
 
         // Fetch current state
@@ -647,10 +652,7 @@ fn canonical_json_bytes(value: &serde_json::Value) -> Result<Vec<u8>, serde_json
     Ok(out)
 }
 
-fn write_canonical(
-    value: &serde_json::Value,
-    out: &mut Vec<u8>,
-) -> Result<(), serde_json::Error> {
+fn write_canonical(value: &serde_json::Value, out: &mut Vec<u8>) -> Result<(), serde_json::Error> {
     match value {
         serde_json::Value::Null => out.extend_from_slice(b"null"),
         serde_json::Value::Bool(true) => out.extend_from_slice(b"true"),
@@ -853,7 +855,8 @@ mod tests {
             serde_json::Value::Object(map) => {
                 let mut keys: Vec<&String> = map.keys().collect();
                 keys.sort_by(|a, b| {
-                    a.len().cmp(&b.len())
+                    a.len()
+                        .cmp(&b.len())
                         .then_with(|| a.as_bytes().cmp(b.as_bytes()))
                 });
                 let parts: Vec<String> = keys
@@ -887,7 +890,9 @@ mod tests {
             "custom_flag": null
         });
 
-        let prepared = provider.prepare_payload_for_storage(payload.clone()).unwrap();
+        let prepared = provider
+            .prepare_payload_for_storage(payload.clone())
+            .unwrap();
         let stored_sig = prepared
             .payload
             .get(HMAC_FIELD)
@@ -1093,7 +1098,9 @@ mod tests {
         let dequeued = provider.dequeue(&queue, 1).await.unwrap();
         assert_eq!(dequeued.len(), 1);
         let current = &dequeued[0];
-        let live_token = current.lease_token.expect("dequeue must mint a lease token");
+        let live_token = current
+            .lease_token
+            .expect("dequeue must mint a lease token");
 
         // A STALE worker (wrong token) can neither complete nor fail the
         // job: complete() reports NotFound, fail() is a no-op.
@@ -1107,7 +1114,10 @@ mod tests {
         assert_eq!(current_status(&pool, job.id).await, "completed");
 
         // Even the LIVE token cannot act afterwards (token cleared).
-        provider.fail(job.id, live_token, "late failure").await.unwrap();
+        provider
+            .fail(job.id, live_token, "late failure")
+            .await
+            .unwrap();
         assert_eq!(current_status(&pool, job.id).await, "completed");
 
         sqlx::query("DELETE FROM queue_jobs WHERE queue = $1")
@@ -1158,7 +1168,8 @@ mod tests {
         let second = provider.dequeue(&queue, 1).await.unwrap().remove(0);
         let second_token = second.lease_token.unwrap();
         assert_ne!(first_token, second_token, "dequeue must rotate the token");
-        provider.fail(job.id, first_token, "stale worker after recovery")
+        provider
+            .fail(job.id, first_token, "stale worker after recovery")
             .await
             .unwrap();
         assert_eq!(current_status(&pool, job.id).await, "processing");

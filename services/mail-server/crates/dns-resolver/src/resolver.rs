@@ -243,7 +243,10 @@ mod tests {
         let resolver = CachedDnsResolver::new(&config).expect("resolver construction");
 
         let outcome = resolver.mx("example.com").await;
-        assert!(outcome.is_err(), "unreachable nameserver must yield an error");
+        assert!(
+            outcome.is_err(),
+            "unreachable nameserver must yield an error"
+        );
         assert!(
             resolver.cache_size() == 0,
             "transient errors must not be cached (positive or negative)"
@@ -272,7 +275,10 @@ mod tests {
         resolver.invalidate_domain("example.com");
 
         assert!(
-            resolver.cache.get("dkim:sel1._domainkey.example.com").is_none(),
+            resolver
+                .cache
+                .get("dkim:sel1._domainkey.example.com")
+                .is_none(),
             "DKIM selector keys must be invalidated with the domain"
         );
         assert!(

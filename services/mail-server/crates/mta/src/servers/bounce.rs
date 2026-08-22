@@ -20,8 +20,9 @@ use uuid::Uuid;
 use crate::config::BounceConfig;
 
 use super::util::{
-    is_strict_end_of_data, line_content_bytes, line_lossy, log_session_summary, log_smtp_reject,
-    read_line_capped, write_reply, LineRead, MAX_COMMAND_LINE, MAX_DATA_LINE,
+    is_mail_from_arg, is_rcpt_to_arg, is_strict_end_of_data, line_content_bytes, line_lossy,
+    log_session_summary, log_smtp_reject, metric_message, read_line_capped, split_verb,
+    write_reply, LineRead, LineTerminator, MAX_COMMAND_LINE, MAX_DATA_LINE,
 };
 
 /// Per-line timeout while receiving bounce DATA.
@@ -227,12 +228,27 @@ impl BounceServer {
                     .await;
                     break;
                 }
+                Ok(Ok(LineRead::Line(_, LineTerminator::BareLf))) => {
+                    // F-08: a bare-LF COMMAND line is refused (DATA body
+                    // tolerance is unchanged).
+                    let _ = write_reply(
+                        &mut stream,
+                        "bounce",
+                        peer_ip,
+                        &session_id,
+                        "500 5.5.2 Bare LF not allowed\r\n",
+                    )
+                    .await;
+                    continue;
+                }
                 Ok(Ok(LineRead::Line(l, _))) => line = line_lossy(&l),
             }
 
-            let cmd = line.trim().to_uppercase();
+            // F-06: the verb is matched as an exact first token.
+            let (verb_owned, arg) = split_verb(line.trim());
+            let verb = verb_owned.as_str();
 
-            if cmd.starts_with("EHLO") || cmd.starts_with("HELO") {
+            if verb == "EHLO" || verb == "HELO" {
                 let _host = line.split_whitespace().nth(1).unwrap_or("");
                 // SIZE advertisement equals the enforced cap (RFC 1870): the
                 // 552 reply below uses exactly max_message_size, so a client
@@ -242,7 +258,7 @@ impl BounceServer {
                     self.hostname, self.config.max_message_size
                 );
                 let _ = write_line(&mut stream, &caps).await;
-            } else if cmd.starts_with("MAIL FROM") {
+            } else if verb == "MAIL" && is_mail_from_arg(arg) {
                 let addr = extract_addr(&line);
                 // RFC 5321:bounces (DSNs) must have exactly the null sender.
                 // `extract_addr("MAIL FROM:<>")` yields the EMPTY string (the
@@ -262,7 +278,17 @@ impl BounceServer {
                     rcpt_to.clear();
                     let _ = write_line(&mut stream, "250 2.0.0 Ok\r\n").await;
                 }
-            } else if cmd.starts_with("RCPT TO") {
+            } else if verb == "MAIL" {
+                // F-06: "MAIL FROMX:..." is a syntax error, not a MAIL.
+                let _ = write_reply(
+                    &mut stream,
+                    "bounce",
+                    peer_ip,
+                    &session_id,
+                    "501 5.5.4 Syntax: MAIL FROM:<address>\r\n",
+                )
+                .await;
+            } else if verb == "RCPT" && is_rcpt_to_arg(arg) {
                 let addr = extract_addr(&line);
                 if !mail_from_seen {
                     let _ = write_reply(
@@ -295,7 +321,16 @@ impl BounceServer {
                     rcpt_to.push(addr);
                     let _ = write_line(&mut stream, "250 2.0.0 Ok\r\n").await;
                 }
-            } else if cmd.starts_with("DATA") {
+            } else if verb == "RCPT" {
+                let _ = write_reply(
+                    &mut stream,
+                    "bounce",
+                    peer_ip,
+                    &session_id,
+                    "501 5.5.4 Syntax: RCPT TO:<address>\r\n",
+                )
+                .await;
+            } else if verb == "DATA" {
                 if !mail_from_seen || rcpt_to.is_empty() {
                     let _ = write_reply(
                         &mut stream,
@@ -483,30 +518,30 @@ impl BounceServer {
                 }
                 msgs_this_conn += 1;
                 rcpt_to.clear();
-            } else if cmd.starts_with("RSET") {
+            } else if verb == "RSET" {
                 rcpt_to.clear();
                 mail_from_seen = false;
                 let _ = write_line(&mut stream, "250 2.0.0 Ok\r\n").await;
-            } else if cmd.starts_with("QUIT") {
+            } else if verb == "QUIT" {
                 let _ = write_line(&mut stream, "221 2.0.0 Bye\r\n").await;
                 close_reason = "quit";
                 break;
-            } else if cmd.starts_with("NOOP") {
+            } else if verb == "NOOP" {
                 let _ = write_line(&mut stream, "250 2.0.0 Ok\r\n").await;
-            } else if cmd.starts_with("VRFY") || cmd.starts_with("EXPN") {
+            } else if verb == "VRFY" || verb == "EXPN" {
                 // We intentionally do not reveal recipient validity to avoid directory harvests.
                 let _ = write_line(
                     &mut stream,
                     "252 2.5.2 Cannot VRFY user, but will accept message and attempt delivery\r\n",
                 )
                 .await;
-            } else if cmd.starts_with("HELP") {
+            } else if verb == "HELP" {
                 let _ = write_line(
                     &mut stream,
                     "214 2.0.0 Commands: EHLO HELO MAIL RCPT DATA RSET NOOP QUIT; see RFC 5321\r\n",
                 )
                 .await;
-            } else if cmd.starts_with("STARTTLS") {
+            } else if verb == "STARTTLS" {
                 let _ = write_reply(
                     &mut stream,
                     "bounce",
@@ -516,12 +551,13 @@ impl BounceServer {
                 )
                 .await;
             } else {
+                // F-06: unknown COMMAND is a syntax error (RFC 5321 §4.2.4).
                 let _ = write_reply(
                     &mut stream,
                     "bounce",
                     peer_ip,
                     &session_id,
-                    "502 5.5.1 Command not recognised\r\n",
+                    "500 5.5.2 Command not recognised\r\n",
                 )
                 .await;
             }
@@ -633,9 +669,10 @@ impl BounceServer {
                 Some(verp_recip.clone())
             }
             (Some(verp_recip), queued_recip) => {
+                // F-23: both addresses are PII — redact before logging.
                 warn!(
-                    verp_recipient = %verp_recip,
-                    queued_recipient = %queued_recip,
+                    verp_recipient = %mail_common::pii::redact_email(verp_recip),
+                    queued_recipient = %mail_common::pii::redact_email(&queued_recip),
                     msg_id = ?original_message_id,
                     "VERP recipient does not match queued recipient — dropping forged bounce"
                 );
@@ -702,6 +739,7 @@ impl BounceServer {
             bounce_type = ?bounce_info.bounce_type,
             "Bounce processed"
         );
+        metric_message("bounce", "accepted");
 
         Ok(bounce_id.to_string())
     }
@@ -940,12 +978,7 @@ fn is_valid_email_addr(addr: &str) -> bool {
 pub(crate) fn append_data_line(message: &mut BytesMut, content: &[u8], max_size: usize) -> bool {
     let body = super::util::unstuff_dot_line_bytes(content);
     // +2 for the normalized CRLF terminator.
-    if message
-        .len()
-        .saturating_add(body.len())
-        .saturating_add(2)
-        > max_size
-    {
+    if message.len().saturating_add(body.len()).saturating_add(2) > max_size {
         return false;
     }
     message.extend_from_slice(body);
@@ -1164,18 +1197,23 @@ mod tests {
         let recip_domain = "example.com";
         let addr = format!("bounces+{message_id}={recip_domain}={recip_local}@{verp_domain}");
 
-        assert!(addr.starts_with("bounces+"), "inbound is_verp prefix matches");
+        assert!(
+            addr.starts_with("bounces+"),
+            "inbound is_verp prefix matches"
+        );
         assert_eq!(
             parse_verp_address(&addr, verp_domain),
-            Some((message_id.to_string(), format!("{recip_local}@{recip_domain}")))
+            Some((
+                message_id.to_string(),
+                format!("{recip_local}@{recip_domain}")
+            ))
         );
 
         // Tricky locals (embedded '=' allowed after the second field) still
         // round-trip; the message id itself must not contain '='.
         let tricky = format!("bounces+{message_id}={recip_domain}=a=b=c@{verp_domain}");
         assert_eq!(
-            parse_verp_address(&tricky, verp_domain)
-                .map(|(_, recip)| recip),
+            parse_verp_address(&tricky, verp_domain).map(|(_, recip)| recip),
             Some("a=b=c@example.com".to_string())
         );
     }
@@ -1545,7 +1583,10 @@ mod tests {
         // The session is still alive and command-synchronized: QUIT now gets 221.
         writer.write_all(b"QUIT\r\n").await.unwrap();
         let resp = read_reply(&mut reader).await;
-        assert!(resp.starts_with("221"), "session still synchronized: {resp:?}");
+        assert!(
+            resp.starts_with("221"),
+            "session still synchronized: {resp:?}"
+        );
 
         tokio::time::timeout(Duration::from_secs(5), task)
             .await
@@ -1582,7 +1623,10 @@ mod tests {
         assert!(read_reply(&mut reader).await.starts_with("354"));
 
         // " ." / " . " must NOT terminate DATA (the old trim() check did).
-        writer.write_all(b"body\r\n .\r\n . \r\n.\r\n").await.unwrap();
+        writer
+            .write_all(b"body\r\n .\r\n . \r\n.\r\n")
+            .await
+            .unwrap();
 
         let resp = read_reply(&mut reader).await;
         assert!(
@@ -1592,7 +1636,10 @@ mod tests {
 
         writer.write_all(b"QUIT\r\n").await.unwrap();
         let resp = read_reply(&mut reader).await;
-        assert!(resp.starts_with("221"), "session still synchronized: {resp:?}");
+        assert!(
+            resp.starts_with("221"),
+            "session still synchronized: {resp:?}"
+        );
 
         tokio::time::timeout(Duration::from_secs(5), task)
             .await
@@ -1620,7 +1667,10 @@ mod tests {
         let _ = read_reply(&mut reader).await; // greeting
 
         // Non-null sender on the DSN endpoint → 550 5.7.1 (policy refusal).
-        writer.write_all(b"MAIL FROM:<attacker@evil.com>\r\n").await.unwrap();
+        writer
+            .write_all(b"MAIL FROM:<attacker@evil.com>\r\n")
+            .await
+            .unwrap();
         assert_eq!(
             read_reply(&mut reader).await,
             "550 5.7.1 Bounce MAIL FROM must be null (<>)\r\n"
@@ -1640,17 +1690,20 @@ mod tests {
         assert_eq!(read_reply(&mut reader).await, "250 2.0.0 Ok\r\n");
 
         // Non-VERP, non-legacy recipient → 550 5.1.1.
-        writer.write_all(b"RCPT TO:<user@other.com>\r\n").await.unwrap();
+        writer
+            .write_all(b"RCPT TO:<user@other.com>\r\n")
+            .await
+            .unwrap();
         assert_eq!(
             read_reply(&mut reader).await,
             "550 5.1.1 Invalid bounce recipient\r\n"
         );
 
-        // Unknown command → 502 5.5.1 (consistent with inbound/submission).
+        // Unknown command → 500 5.5.2 (F-06, consistent with inbound/submission).
         writer.write_all(b"FROBNICATE\r\n").await.unwrap();
         assert_eq!(
             read_reply(&mut reader).await,
-            "502 5.5.1 Command not recognised\r\n"
+            "500 5.5.2 Command not recognised\r\n"
         );
 
         // STARTTLS is not offered here → 454 4.7.0.
@@ -1771,12 +1824,8 @@ mod tests {
         let redis = deadpool_redis::Config::from_url("redis://127.0.0.1:1")
             .create_pool(Some(deadpool_redis::Runtime::Tokio1))
             .unwrap();
-        let server = std::sync::Arc::new(BounceServer::new(
-            config,
-            pool,
-            redis,
-            "bounce.test".into(),
-        ));
+        let server =
+            std::sync::Arc::new(BounceServer::new(config, pool, redis, "bounce.test".into()));
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let srv = server.clone();

@@ -61,12 +61,11 @@ async fn get_cross_tenant_health(
     let db = &state.db;
     let cutoff = Utc::now() - Duration::days(30);
 
-    let total_tenants: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*)::bigint FROM tenants WHERE status = 'active'",
-    )
-    .fetch_one(db)
-    .await
-    .unwrap_or(0);
+    let total_tenants: i64 =
+        sqlx::query_scalar("SELECT COUNT(*)::bigint FROM tenants WHERE status = 'active'")
+            .fetch_one(db)
+            .await
+            .unwrap_or(0);
 
     let has_messages = table_exists(db, "messages").await;
     let has_events = table_exists(db, "events").await;
@@ -242,7 +241,9 @@ fn monthly_revenue_cents(
     match billing_interval {
         // Round-half-up yearly normalization, mirroring billing-service's
         // yearly_price_to_monthly_mrr (no truncation).
-        Some(interval) if interval.eq_ignore_ascii_case("yearly") || interval.eq_ignore_ascii_case("year") => {
+        Some(interval)
+            if interval.eq_ignore_ascii_case("yearly") || interval.eq_ignore_ascii_case("year") =>
+        {
             (price_yearly + 6) / 12
         }
         _ => price_monthly,
@@ -557,12 +558,10 @@ async fn get_cross_tenant_growth(
     };
 
     let total_active_tenants = if has_tenants {
-        sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*)::bigint FROM tenants WHERE status = 'active'",
-        )
-        .fetch_one(db)
-        .await
-        .unwrap_or(0)
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*)::bigint FROM tenants WHERE status = 'active'")
+            .fetch_one(db)
+            .await
+            .unwrap_or(0)
     } else {
         0
     };

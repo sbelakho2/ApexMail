@@ -19,6 +19,13 @@ pub mod email;
 pub mod reply_handler;
 pub mod webhook;
 
+// Re-export main processor types
+pub use analytics::AnalyticsProcessor;
+pub use common::{ProcessorConfig, ProcessorError, ProcessorResult};
+pub use email::EmailProcessor;
+pub use reply_handler::{classify, ReplyClassification, ReplyHandler};
+pub use webhook::WebhookProcessor;
+
 /// Single crate-wide lock serializing env-mutating tests.
 ///
 /// `std::env` is process-global, and `cargo test` runs every test of this
@@ -33,10 +40,3 @@ pub mod webhook;
 pub(crate) mod test_support {
     pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 }
-
-// Re-export main processor types
-pub use analytics::AnalyticsProcessor;
-pub use common::{ProcessorConfig, ProcessorError, ProcessorResult};
-pub use email::EmailProcessor;
-pub use reply_handler::{classify, ReplyClassification, ReplyHandler};
-pub use webhook::WebhookProcessor;

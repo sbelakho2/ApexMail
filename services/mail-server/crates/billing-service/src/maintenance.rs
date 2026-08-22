@@ -294,10 +294,12 @@ pub fn start_periodic_jobs(state: std::sync::Arc<AppState>) {
     // ── Stripe webhook stale-pending reclaim (startup + hourly, Fix G) ──
     let webhook_state = state.clone();
     tokio::spawn(async move {
-        match crate::stripe_webhooks::reclaim_stale_pending_webhooks(webhook_state.as_ref()).await
-        {
+        match crate::stripe_webhooks::reclaim_stale_pending_webhooks(webhook_state.as_ref()).await {
             Ok(reclaimed) if !reclaimed.is_empty() => {
-                info!(count = reclaimed.len(), "reclaimed stale pending stripe webhooks on startup");
+                info!(
+                    count = reclaimed.len(),
+                    "reclaimed stale pending stripe webhooks on startup"
+                );
             }
             Ok(_) => {}
             Err(error_message) => {
@@ -305,20 +307,20 @@ pub fn start_periodic_jobs(state: std::sync::Arc<AppState>) {
             }
         }
 
-        let mut interval =
-            interval_at(Instant::now() + HOURLY_TASK_INTERVAL, HOURLY_TASK_INTERVAL);
+        let mut interval = interval_at(Instant::now() + HOURLY_TASK_INTERVAL, HOURLY_TASK_INTERVAL);
         interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
         loop {
             interval.tick().await;
 
-            match crate::stripe_webhooks::reclaim_stale_pending_webhooks(
-                webhook_state.as_ref(),
-            )
-            .await
+            match crate::stripe_webhooks::reclaim_stale_pending_webhooks(webhook_state.as_ref())
+                .await
             {
                 Ok(reclaimed) if !reclaimed.is_empty() => {
-                    info!(count = reclaimed.len(), "reclaimed stale pending stripe webhooks");
+                    info!(
+                        count = reclaimed.len(),
+                        "reclaimed stale pending stripe webhooks"
+                    );
                 }
                 Ok(_) => {}
                 Err(error_message) => {
@@ -477,11 +479,12 @@ pub fn start_periodic_jobs(state: std::sync::Arc<AppState>) {
             interval.tick().await;
 
             match crate::usage_ingest::sweep_derived_usage(&derived_state.db, Utc::now()).await {
-                Ok(result) if result.emails_delivered > 0
-                    || result.webhooks_delivered > 0
-                    || result.dedicated_ip_hours > 0
-                    || result.storage_gb_hours > 0
-                    || result.bandwidth_gb > 0 =>
+                Ok(result)
+                    if result.emails_delivered > 0
+                        || result.webhooks_delivered > 0
+                        || result.dedicated_ip_hours > 0
+                        || result.storage_gb_hours > 0
+                        || result.bandwidth_gb > 0 =>
                 {
                     info!(
                         day = %result.day,
@@ -827,10 +830,11 @@ async fn generate_kmd_if_due(
 
     let mut results = Vec::with_capacity(missing.len());
     for (tax_year, tax_month) in missing {
-        info!(tax_year, tax_month, "generating KMD return for missed period");
-        results.push(
-            crate::vat_kmd::generate_kmd_return(&state.db, tax_year, tax_month).await?,
+        info!(
+            tax_year,
+            tax_month, "generating KMD return for missed period"
         );
+        results.push(crate::vat_kmd::generate_kmd_return(&state.db, tax_year, tax_month).await?);
     }
 
     Ok(results)
@@ -1216,7 +1220,7 @@ pub(crate) async fn drain_pending_metering_events(
     let mut valid_events = Vec::new();
     let mut cleanup_keys = Vec::new();
 
-    for (key, payload) in pending_keys.iter().zip(payloads.into_iter()) {
+    for (key, payload) in pending_keys.iter().zip(payloads) {
         let Some(payload) = payload else {
             cleanup_keys.push(key.clone());
             continue;
@@ -1983,7 +1987,8 @@ async fn process_monthly_sla_credits(state: &AppState) -> Result<SlaCreditSweepR
         // Money invariant: integer cents, half-up rounding — no f64 in the
         // computation path (the previous `(cents as f64) * pct/100` drifted
         // for large cent values).
-        let credit_amount = percent_of_cents_half_up(invoice_amount_cents, i64::from(credit_percent));
+        let credit_amount =
+            percent_of_cents_half_up(invoice_amount_cents, i64::from(credit_percent));
         if credit_amount <= 0 {
             continue;
         }
@@ -2119,9 +2124,11 @@ async fn process_pending_dedicated_ip_charges(
     // inside a SAVEPOINT so one failure does not roll back the others.
     // Double-charging remains impossible even if the transaction is lost
     // after the Stripe call thanks to the Idempotency-Key.
-    let mut tx = state.db.begin().await.map_err(|error| {
-        format!("Failed to begin dedicated IP charge transaction: {error}")
-    })?;
+    let mut tx = state
+        .db
+        .begin()
+        .await
+        .map_err(|error| format!("Failed to begin dedicated IP charge transaction: {error}"))?;
 
     let rows = match sqlx::query_as::<_, DedicatedIpPendingRow>(
         r#"
@@ -2151,7 +2158,7 @@ async fn process_pending_dedicated_ip_charges(
 
     let mut processed = 0_i64;
     for row in rows {
-        let mut savepoint = match (&mut *tx).begin().await {
+        let mut savepoint = match (*tx).begin().await {
             Ok(savepoint) => savepoint,
             Err(error) => {
                 warn!(ip_id = %row.id, error = %error, "failed to open dedicated IP savepoint");
@@ -2179,9 +2186,9 @@ async fn process_pending_dedicated_ip_charges(
         }
     }
 
-    tx.commit().await.map_err(|error| {
-        format!("Failed to commit dedicated IP charge transaction: {error}")
-    })?;
+    tx.commit()
+        .await
+        .map_err(|error| format!("Failed to commit dedicated IP charge transaction: {error}"))?;
 
     Ok(processed)
 }
@@ -2191,9 +2198,11 @@ async fn process_pending_dedicated_ip_cancels(
     client: &Client,
 ) -> Result<i64, String> {
     // Fix I7 — same explicit-transaction claim as the charge path.
-    let mut tx = state.db.begin().await.map_err(|error| {
-        format!("Failed to begin dedicated IP cancel transaction: {error}")
-    })?;
+    let mut tx = state
+        .db
+        .begin()
+        .await
+        .map_err(|error| format!("Failed to begin dedicated IP cancel transaction: {error}"))?;
 
     let rows = match sqlx::query_as::<_, DedicatedIpPendingRow>(
         r#"
@@ -2222,7 +2231,7 @@ async fn process_pending_dedicated_ip_cancels(
 
     let mut processed = 0_i64;
     for row in rows {
-        let mut savepoint = match (&mut *tx).begin().await {
+        let mut savepoint = match (*tx).begin().await {
             Ok(savepoint) => savepoint,
             Err(error) => {
                 warn!(ip_id = %row.id, error = %error, "failed to open dedicated IP cancel savepoint");
@@ -2247,9 +2256,9 @@ async fn process_pending_dedicated_ip_cancels(
         }
     }
 
-    tx.commit().await.map_err(|error| {
-        format!("Failed to commit dedicated IP cancel transaction: {error}")
-    })?;
+    tx.commit()
+        .await
+        .map_err(|error| format!("Failed to commit dedicated IP cancel transaction: {error}"))?;
 
     Ok(processed)
 }
@@ -3053,10 +3062,7 @@ mod tests {
 
     #[test]
     fn kmd_backfill_is_bounded() {
-        assert_eq!(
-            kmd_backfill_periods(&[(2024, 1)], (2026, 12), 5).len(),
-            5
-        );
+        assert_eq!(kmd_backfill_periods(&[(2024, 1)], (2026, 12), 5).len(), 5);
     }
 
     // ------------------------------------------------------------------

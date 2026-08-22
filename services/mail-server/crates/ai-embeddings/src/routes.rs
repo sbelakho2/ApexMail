@@ -313,7 +313,10 @@ mod tests {
         let texts: Vec<String> = (0..257).map(|i| format!("text {i}")).collect();
         let (status, body) = embed_response(serde_json::json!({"texts": texts})).await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
-        assert!(body["error"].as_str().unwrap().contains("exceeds the maximum"));
+        assert!(body["error"]
+            .as_str()
+            .unwrap()
+            .contains("exceeds the maximum"));
     }
 
     #[tokio::test]

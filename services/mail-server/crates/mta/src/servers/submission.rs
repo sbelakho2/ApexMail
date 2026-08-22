@@ -21,9 +21,11 @@ use crate::auth::{verify_against_dummy, AuthError, AuthFailTracker};
 use crate::config::{RateLimitConfig, SubmissionConfig};
 
 use super::util::{
-    is_strict_end_of_data, line_content_bytes, line_lossy, log_session_summary, log_smtp_reject,
-    mail_size_param, read_line_capped, unstuff_dot_line_bytes, validate_mail_params,
-    validate_rcpt_params, LineRead, MailParamPolicy, MAX_COMMAND_LINE, MAX_DATA_LINE,
+    build_received_header, is_mail_from_arg, is_rcpt_to_arg, is_strict_end_of_data,
+    line_content_bytes, line_lossy, log_session_summary, log_smtp_reject, mail_size_param,
+    mail_smtputf8_param, metric_message, read_line_capped, received_hop_limit_exceeded, split_verb,
+    unstuff_dot_line_bytes, validate_mail_params, validate_rcpt_params, LineRead, LineTerminator,
+    MailParamPolicy, MAX_COMMAND_LINE, MAX_DATA_LINE,
 };
 
 /// Per-read timeout for AUTH challenge/response lines (a silent client must
@@ -35,6 +37,14 @@ const DATA_TOTAL_TIMEOUT: Duration = Duration::from_secs(600);
 
 /// Per-line timeout while receiving message DATA.
 const DATA_LINE_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// F-14: number of 4xx/5xx replies after which the session is closed with
+/// `421 4.7.0 Too many errors` (RFC 5321 §4.3.2 recommends a small limit).
+const MAX_SESSION_ERRORS: u32 = 20;
+
+/// F-14: hard wall-clock cap for an UNAUTHENTICATED session. Authenticated
+/// sessions are bounded by the per-command idle timeout instead.
+const SESSION_DEADLINE: Duration = Duration::from_secs(30 * 60);
 
 /// Outcome of reading one DATA payload (see
 /// [`SubmissionServer::read_data_message`]).
@@ -150,13 +160,18 @@ impl SubmissionServer {
             return;
         }
 
-        self.track_connection(ip, true);
+        // F-19: RAII slot guard (same pattern as the bounce server) — the
+        // per-IP slot is released on EVERY exit path, early returns included.
+        *self.connections.entry(ip).or_insert(0) += 1;
+        let _conn_guard = super::bounce::ConnGuard {
+            conns: self.connections.clone(),
+            ip,
+        };
 
         let greeting = format!("220 {} ESMTP ApexMail Submission\r\n", self.config.hostname);
         let mut stream = BufStream::new(socket);
         if let Err(e) = write_line(&mut stream, &greeting).await {
             debug!(error = %e, peer = %peer, "Failed to send greeting");
-            self.track_connection(ip, false);
             return;
         }
 
@@ -188,8 +203,6 @@ impl SubmissionServer {
                 }
             }
         }
-
-        self.track_connection(ip, false);
     }
 
     // ── Generic session loop (works over TCP or TLS) ─────────────────────
@@ -210,13 +223,49 @@ impl SubmissionServer {
         let mut authenticated = false;
         let mut auth_email = String::new();
         let mut helo_seen = false;
+        // Validated EHLO/HELO argument ("unknown" when it failed validation) —
+        // used for the Received trace header (F-01).
+        let mut helo_hostname = String::new();
         let mut mail_from: Option<String> = None;
         let mut rcpt_to: Vec<String> = Vec::new();
+        // Whether the current transaction's MAIL FROM carried SMTPUTF8
+        // (recorded in the Received trace header, F-01).
+        let mut smtputf8 = false;
         let mut message_count: u32 = 0;
         let mut line = String::new();
         let ip = peer.ip();
         let session_id = Uuid::new_v4().to_string();
         let started = Instant::now();
+        // F-14: hard wall-clock cap for the unauthenticated phase.
+        let session_deadline = tokio::time::Instant::now() + SESSION_DEADLINE;
+        // F-14: count of 4xx/5xx replies this session has emitted.
+        let mut error_count: u32 = 0;
+
+        // Single write point for command replies: 4xx/5xx replies count
+        // toward the error budget; at MAX_SESSION_ERRORS the session is
+        // closed with 421 (RFC 5321 §4.3.2 "too many errors").
+        // NOTE: the plain `break` below exits the dispatch loop — the only
+        // loop enclosing every `reply!` invocation.
+        macro_rules! reply {
+            ($($arg:tt)*) => {{
+                let response: String = format!($($arg)*);
+                let is_error = response.starts_with('4') || response.starts_with('5');
+                if let Err(e) = write_line(stream, &response).await {
+                    debug!(error = %e, peer = %peer, "Write error");
+                }
+                if is_error {
+                    error_count += 1;
+                    if error_count >= MAX_SESSION_ERRORS {
+                        let _ = write_line(
+                            stream,
+                            "421 4.7.0 Too many errors, closing connection\r\n",
+                        )
+                        .await;
+                        break;
+                    }
+                }
+            }};
+        }
 
         loop {
             line.clear();
@@ -230,8 +279,7 @@ impl SubmissionServer {
                         &session_id,
                         "421 4.4.2 Idle timeout, closing connection",
                     );
-                    let _ = write_line(stream, "421 4.4.2 Idle timeout, closing connection\r\n")
-                        .await;
+                    reply!("421 4.4.2 Idle timeout, closing connection\r\n");
                     break;
                 }
                 Ok(Ok(LineRead::Eof)) => break,
@@ -239,7 +287,7 @@ impl SubmissionServer {
                     // Remainder drained through its newline: session stays
                     // synchronised.
                     log_smtp_reject("submission", ip, &session_id, "500 5.5.2 Line too long");
-                    let _ = write_line(stream, "500 5.5.2 Line too long\r\n").await;
+                    reply!("500 5.5.2 Line too long\r\n");
                     continue;
                 }
                 Ok(Ok(LineRead::Overflow)) => {
@@ -251,8 +299,21 @@ impl SubmissionServer {
                         &session_id,
                         "500 5.5.2 Line too long (connection closed)",
                     );
-                    let _ = write_line(stream, "500 5.5.2 Line too long\r\n").await;
+                    reply!("500 5.5.2 Line too long\r\n");
                     break;
+                }
+                Ok(Ok(LineRead::Line(_, LineTerminator::BareLf))) => {
+                    // F-08: a bare-LF COMMAND line is refused (RFC 5321
+                    // commands are CRLF-terminated). DATA body tolerance is
+                    // unchanged — only command lines are gated here.
+                    log_smtp_reject(
+                        "submission",
+                        ip,
+                        &session_id,
+                        "500 5.5.2 Bare LF not allowed",
+                    );
+                    reply!("500 5.5.2 Bare LF not allowed\r\n");
+                    continue;
                 }
                 Ok(Ok(LineRead::Line(l, _))) => line = line_lossy(&l),
                 Ok(Err(e)) => {
@@ -261,23 +322,43 @@ impl SubmissionServer {
                 }
             }
 
-            // IMPORTANT: Only uppercase the command verb, NOT the arguments.
-            // Base64 payloads in AUTH PLAIN are case-sensitive — uppercasing
-            // the entire line corrupts the credentials.
-            let trimmed = line.trim();
-            let cmd_upper = trimmed.to_uppercase();
-            let cmd = cmd_upper.as_str();
+            // F-14: an unauthenticated session must not outlive the deadline.
+            if !authenticated && tokio::time::Instant::now() >= session_deadline {
+                log_smtp_reject(
+                    "submission",
+                    ip,
+                    &session_id,
+                    "421 4.7.0 Session deadline exceeded",
+                );
+                reply!("421 4.7.0 Session deadline exceeded, closing connection\r\n");
+                break;
+            }
 
-            if cmd.starts_with("EHLO") || cmd.starts_with("HELO") {
+            // F-06: the verb is matched as an exact first token —
+            // `starts_with("DATA")`-style prefix tests accepted `DATABASE`
+            // and `MAIL FROMX:<a@b>` as real commands.
+            // IMPORTANT: only the verb is uppercased, never the arguments
+            // (base64 payloads in AUTH PLAIN are case-sensitive).
+            let trimmed = line.trim();
+            let (verb_owned, arg) = split_verb(trimmed);
+            let verb = verb_owned.as_str();
+
+            if verb == "EHLO" || verb == "HELO" {
                 helo_seen = true;
                 // E-3:validate the EHLO argument before echoing it back —
                 // an unvalidated argument used to be reflected verbatim into
                 // the greeting (CRLF/control payloads included).
-                let host = line
+                let host = trimmed
                     .split_whitespace()
                     .nth(1)
                     .filter(|host| super::inbound::is_valid_helo_hostname(host))
                     .unwrap_or("unknown");
+                helo_hostname = host.to_string();
+                // F-04: EHLO/HELO resets any transaction in progress
+                // (RFC 5321 §4.1.4).
+                mail_from = None;
+                rcpt_to.clear();
+                smtputf8 = false;
                 let mut caps = format!("250-{} Hello {}\r\n", self.config.hostname, host);
                 caps.push_str(&format!("250-SIZE {}\r\n", self.config.max_message_size));
                 if allow_starttls && !already_tls {
@@ -291,9 +372,12 @@ impl SubmissionServer {
                 }
                 caps.push_str("250-8BITMIME\r\n");
                 caps.push_str("250-PIPELINING\r\n");
+                // F-05: ENHANCEDSTATUSCODES (RFC 2034) — every reply this
+                // server emits already carries an enhanced status code.
+                caps.push_str("250-ENHANCEDSTATUSCODES\r\n");
                 caps.push_str("250 SMTPUTF8\r\n");
                 let _ = write_line(stream, &caps).await;
-            } else if cmd == "STARTTLS" && allow_starttls && !already_tls {
+            } else if verb == "STARTTLS" {
                 if !helo_seen {
                     log_smtp_reject(
                         "submission",
@@ -301,45 +385,83 @@ impl SubmissionServer {
                         &session_id,
                         "503 5.5.1 Error: send HELO/EHLO first",
                     );
-                    let _ = write_line(stream, "503 5.5.1 Error: send HELO/EHLO first\r\n").await;
-                } else {
+                    reply!("503 5.5.1 Error: send HELO/EHLO first\r\n");
+                } else if already_tls {
+                    // RFC 3207 §4: nested STARTTLS is a sequencing error.
+                    log_smtp_reject(
+                        "submission",
+                        ip,
+                        &session_id,
+                        "503 5.5.1 TLS already active",
+                    );
+                    reply!("503 5.5.1 TLS already active\r\n");
+                } else if !arg.is_empty() {
+                    log_smtp_reject("submission", ip, &session_id, "501 5.5.4 Syntax: STARTTLS");
+                    reply!("501 5.5.4 Syntax: STARTTLS\r\n");
+                } else if allow_starttls {
                     return (true, message_count);
+                } else {
+                    log_smtp_reject("submission", ip, &session_id, "454 4.7.0 TLS not available");
+                    reply!("454 4.7.0 TLS not available\r\n");
                 }
-            } else if cmd == "STARTTLS" && already_tls {
-                // RFC 3207 §4: nested STARTTLS is a sequencing error.
-                log_smtp_reject("submission", ip, &session_id, "503 5.5.1 TLS already active");
-                let _ = write_line(stream, "503 5.5.1 TLS already active\r\n").await;
-            } else if cmd.starts_with("STARTTLS") {
-                log_smtp_reject("submission", ip, &session_id, "454 4.7.0 TLS not available");
-                let _ = write_line(stream, "454 4.7.0 TLS not available\r\n").await;
-            } else if cmd.starts_with("AUTH LOGIN") || cmd.starts_with("AUTH PLAIN") {
+            } else if verb == "AUTH" {
+                // F-12: the mechanism is the first ARG token (any case) and
+                // the remainder is the optional inline initial response.
+                let (mech, initial_response) = match arg.split_once(char::is_whitespace) {
+                    Some((mech, rest)) => (mech.to_ascii_uppercase(), rest.trim_start()),
+                    None => (arg.to_ascii_uppercase(), ""),
+                };
                 if !helo_seen {
                     // RFC 4954 §4: AUTH must not be used before EHLO.
-                    let _ = write_line(stream, "503 5.5.1 Send EHLO first\r\n").await;
+                    reply!("503 5.5.1 Send EHLO first\r\n");
                 } else if !already_tls {
                     // FIX-2: refuse AUTH on a plaintext session — the
                     // credentials would traverse the network in cleartext.
-                    let _ = write_line(stream, "530 5.7.0 Must issue STARTTLS first\r\n").await;
+                    reply!("530 5.7.0 Must issue STARTTLS first\r\n");
                 } else if authenticated {
-                    let _ = write_line(stream, "503 5.5.1 Already authenticated\r\n").await;
-                } else if cmd.starts_with("AUTH LOGIN") {
+                    reply!("503 5.5.1 Already authenticated\r\n");
+                } else if mech == "LOGIN" {
                     if let Some((email, _account_id)) =
-                        self.handle_auth_login(stream, trimmed, ip).await
+                        self.handle_auth_login(stream, initial_response, ip).await
                     {
                         authenticated = true;
                         auth_email = email;
                     }
-                } else if let Some((email, _account_id)) =
-                    self.handle_auth_plain(stream, trimmed, ip).await
-                {
-                    authenticated = true;
-                    auth_email = email;
+                } else if mech == "PLAIN" {
+                    if let Some((email, _account_id)) =
+                        self.handle_auth_plain(stream, initial_response, ip).await
+                    {
+                        authenticated = true;
+                        auth_email = email;
+                    }
+                } else {
+                    reply!("504 5.5.4 Unrecognized authentication type\r\n");
                 }
-            } else if cmd.starts_with("MAIL FROM") {
+            } else if verb == "MAIL" {
                 if !helo_seen {
-                    let _ = write_line(stream, "503 5.5.1 Send EHLO first\r\n").await;
+                    reply!("503 5.5.1 Send EHLO first\r\n");
+                } else if !is_mail_from_arg(arg) {
+                    // F-06: "MAIL FROMX:<a@b>" must not be treated as MAIL.
+                    // (Syntax errors are answered regardless of auth state —
+                    // RFC 5321 §4.1.4.)
+                    log_smtp_reject(
+                        "submission",
+                        ip,
+                        &session_id,
+                        "501 5.5.4 Syntax: MAIL FROM:<address>",
+                    );
+                    reply!("501 5.5.4 Syntax: MAIL FROM:<address>\r\n");
                 } else if !authenticated {
-                    let _ = write_line(stream, "530 5.7.0 Authentication required\r\n").await;
+                    reply!("530 5.7.0 Authentication required\r\n");
+                } else if mail_from.is_some() {
+                    // F-04: nested MAIL — RFC 5321 §4.1.4 sequencing error.
+                    log_smtp_reject(
+                        "submission",
+                        ip,
+                        &session_id,
+                        "503 5.5.1 Nested MAIL command",
+                    );
+                    reply!("503 5.5.1 Nested MAIL command\r\n");
                 } else if let Err(reject) = validate_mail_params(
                     trimmed,
                     MailParamPolicy {
@@ -348,7 +470,7 @@ impl SubmissionServer {
                     },
                 ) {
                     log_smtp_reject("submission", ip, &session_id, reject);
-                    let _ = write_line(stream, &format!("{reject}\r\n")).await;
+                    reply!("{reject}\r\n");
                 } else if mail_size_param(trimmed)
                     .is_some_and(|size| size > self.config.max_message_size as u64)
                 {
@@ -361,11 +483,7 @@ impl SubmissionServer {
                         &session_id,
                         "552 5.3.4 Message size exceeds fixed maximum message size",
                     );
-                    let _ = write_line(
-                        stream,
-                        "552 5.3.4 Message size exceeds fixed maximum message size\r\n",
-                    )
-                    .await;
+                    reply!("552 5.3.4 Message size exceeds fixed maximum message size\r\n");
                 } else {
                     // Store only the envelope address, not the full command line.
                     let addr = extract_address(trimmed);
@@ -373,40 +491,52 @@ impl SubmissionServer {
                         // RFC 6409: a submission server must reject messages with a
                         // null/invalid reverse-path; email_queue.from_address also
                         // enforces a valid-address CHECK constraint.
-                        let _ = write_line(stream, "553 5.1.7 Sender address required\r\n").await;
+                        reply!("553 5.1.7 Sender address required\r\n");
                     } else {
                         mail_from = Some(addr);
+                        smtputf8 = mail_smtputf8_param(trimmed);
                         let _ = write_line(stream, "250 2.0.0 Ok\r\n").await;
                     }
                 }
-            } else if cmd.starts_with("RCPT TO") {
+            } else if verb == "RCPT" {
                 if !helo_seen {
-                    let _ = write_line(stream, "503 5.5.1 Send EHLO first\r\n").await;
+                    reply!("503 5.5.1 Send EHLO first\r\n");
                 } else if !authenticated {
-                    let _ = write_line(stream, "530 5.7.0 Authentication required\r\n").await;
+                    reply!("530 5.7.0 Authentication required\r\n");
+                } else if !is_rcpt_to_arg(arg) {
+                    // F-06: "RCPT TOX:<a@b>" must not be treated as RCPT.
+                    log_smtp_reject(
+                        "submission",
+                        ip,
+                        &session_id,
+                        "501 5.5.4 Syntax: RCPT TO:<address>",
+                    );
+                    reply!("501 5.5.4 Syntax: RCPT TO:<address>\r\n");
                 } else if rcpt_to.len() >= self.config.max_recipients {
-                    let _ = write_line(stream, "452 4.5.3 Too many recipients\r\n").await;
+                    reply!("452 4.5.3 Too many recipients\r\n");
                 } else if let Err(reject) = validate_rcpt_params(trimmed) {
                     log_smtp_reject("submission", ip, &session_id, reject);
-                    let _ = write_line(stream, &format!("{reject}\r\n")).await;
+                    reply!("{reject}\r\n");
                 } else {
                     // Store only the recipient address, not the full command line.
                     let addr = extract_address(trimmed);
                     if !is_valid_envelope_address(&addr) {
-                        let _ =
-                            write_line(stream, "501 5.1.3 Bad recipient address syntax\r\n").await;
+                        reply!("501 5.1.3 Bad recipient address syntax\r\n");
                     } else {
                         rcpt_to.push(addr);
                         let _ = write_line(stream, "250 2.0.0 Ok\r\n").await;
                     }
                 }
-            } else if cmd.starts_with("DATA") {
+            } else if verb == "DATA" {
                 if !helo_seen {
-                    let _ = write_line(stream, "503 5.5.1 Send EHLO first\r\n").await;
+                    reply!("503 5.5.1 Send EHLO first\r\n");
                 } else if !authenticated {
-                    let _ = write_line(stream, "530 5.7.0 Authentication required\r\n").await;
+                    reply!("530 5.7.0 Authentication required\r\n");
+                } else if !arg.is_empty() {
+                    log_smtp_reject("submission", ip, &session_id, "501 5.5.4 Syntax: DATA");
+                    reply!("501 5.5.4 Syntax: DATA\r\n");
                 } else if mail_from.is_none() || rcpt_to.is_empty() {
-                    let _ = write_line(stream, "503 5.5.1 Need MAIL and RCPT first\r\n").await;
+                    reply!("503 5.5.1 Need MAIL and RCPT first\r\n");
                 } else {
                     let _ = write_line(stream, "354 Start mail input; end with <CRLF>.<CRLF>\r\n")
                         .await;
@@ -419,8 +549,7 @@ impl SubmissionServer {
                                 &session_id,
                                 "421 4.4.2 Data timeout exceeded",
                             );
-                            let _ =
-                                write_line(stream, "421 4.4.2 Data timeout exceeded\r\n").await;
+                            reply!("421 4.4.2 Data timeout exceeded\r\n");
                             break;
                         }
                         ReadDataOutcome::Overflow => {
@@ -430,7 +559,7 @@ impl SubmissionServer {
                                 &session_id,
                                 "500 5.5.2 Data line too long (connection closed)",
                             );
-                            let _ = write_line(stream, "500 5.5.2 Line too long\r\n").await;
+                            reply!("500 5.5.2 Line too long\r\n");
                             break;
                         }
                         ReadDataOutcome::Aborted => {
@@ -446,24 +575,48 @@ impl SubmissionServer {
                                 &session_id,
                                 "552 5.3.4 Message size exceeds fixed maximum message size",
                             );
-                            let _ = write_line(
-                                stream,
-                                "552 5.3.4 Message size exceeds fixed maximum message size\r\n",
-                            )
-                            .await;
+                            reply!("552 5.3.4 Message size exceeds fixed maximum message size\r\n");
                             mail_from = None;
                             rcpt_to.clear();
                             continue;
                         }
                         ReadDataOutcome::Message(data) => {
-                            let data_str = String::from_utf8_lossy(&data);
+                            // F-01: refuse obvious routing loops before any
+                            // parsing/persist work (cheap raw header scan).
+                            if received_hop_limit_exceeded(&data) {
+                                log_smtp_reject(
+                                    "submission",
+                                    ip,
+                                    &session_id,
+                                    "550 5.4.6 Routing loop detected",
+                                );
+                                reply!("550 5.4.6 Routing loop detected\r\n");
+                                mail_from = None;
+                                rcpt_to.clear();
+                                continue;
+                            }
+                            // F-01: prepend the trace header for this hop
+                            // before the queue write. helo_hostname passed
+                            // is_valid_helo_hostname (or is the literal
+                            // "unknown"), so no CRLF injection is possible.
                             let msg_id = Uuid::new_v4().to_string();
+                            let received = build_received_header(
+                                &helo_hostname,
+                                None,
+                                ip,
+                                &self.config.hostname,
+                                already_tls,
+                                true,
+                                smtputf8,
+                                &msg_id,
+                            );
+                            let message = compose_stored_message(&received, &data);
                             match self
                                 .queue_message(
                                     &auth_email,
                                     mail_from.as_deref().unwrap_or(""),
                                     &rcpt_to,
-                                    &data_str,
+                                    &message,
                                     &msg_id,
                                 )
                                 .await
@@ -475,8 +628,7 @@ impl SubmissionServer {
                                         &format!("250 2.0.0 Ok id={}\r\n", msg_id),
                                     )
                                     .await;
-                                    if message_count
-                                        >= self.rate_limit.max_messages_per_connection
+                                    if message_count >= self.rate_limit.max_messages_per_connection
                                     {
                                         let _ = write_line(
                                             stream,
@@ -489,63 +641,59 @@ impl SubmissionServer {
                                 Ok(QueueOutcome::SenderNotOwned) => {
                                     // MAIL FROM domain is not owned by the
                                     // authenticated account's tenant.
-                                    let _ = write_line(
-                                        stream,
-                                        "550 5.7.1 sender address not owned by account\r\n",
-                                    )
-                                    .await;
+                                    reply!("550 5.7.1 sender address not owned by account\r\n");
                                 }
                                 Ok(QueueOutcome::SenderNotReady) => {
-                                    let _ = write_line(
-                                        stream,
-                                        "550 5.7.1 sender domain is not verified and ready for delivery\r\n",
-                                    )
-                                    .await;
+                                    reply!("550 5.7.1 sender domain is not verified and ready for delivery\r\n");
                                 }
                                 Ok(QueueOutcome::RecipientSuppressed) => {
-                                    let _ = write_line(
-                                        stream,
-                                        "550 5.1.1 recipient address suppressed\r\n",
-                                    )
-                                    .await;
+                                    reply!("550 5.1.1 recipient address suppressed\r\n");
                                 }
                                 Err(_) => {
-                                    let _ =
-                                        write_line(stream, "451 4.3.0 Requested action aborted\r\n")
-                                            .await;
+                                    reply!("451 4.3.0 Requested action aborted\r\n");
                                 }
                             }
                             mail_from = None;
                             rcpt_to.clear();
+                            smtputf8 = false;
                         }
                     }
                 }
-            } else if cmd.starts_with("RSET") {
+            } else if verb == "RSET" {
                 mail_from = None;
                 rcpt_to.clear();
+                smtputf8 = false;
                 let _ = write_line(stream, "250 2.0.0 Ok\r\n").await;
-            } else if cmd.starts_with("NOOP") {
+            } else if verb == "NOOP" {
                 let _ = write_line(stream, "250 2.0.0 Ok\r\n").await;
-            } else if cmd.starts_with("QUIT") {
+            } else if verb == "QUIT" {
                 let _ = write_line(stream, "221 2.0.0 Bye\r\n").await;
                 break;
-            } else if cmd.starts_with("HELP") {
+            } else if verb == "HELP" {
                 let _ = write_line(
                     stream,
                     "214 2.0.0 Commands: EHLO HELO AUTH MAIL RCPT DATA RSET NOOP QUIT STARTTLS HELP VRFY EXPN; see RFC 5321\r\n",
                 )
                 .await;
-            } else if cmd.starts_with("VRFY") {
+            } else if verb == "VRFY" {
                 // RFC 5321 §7.3: never confirm address existence.
                 let _ = write_line(
                     stream,
                     "252 2.5.2 Cannot VRFY user, but will accept message and attempt delivery\r\n",
                 )
                 .await;
-            } else if cmd.starts_with("EXPN") {
-                let _ = write_line(stream, "502 5.5.1 EXPN command not supported\r\n").await;
+            } else if verb == "EXPN" {
+                reply!("502 5.5.1 EXPN command not supported\r\n");
             } else {
-                let _ = write_line(stream, "502 5.5.1 Command not recognised\r\n").await;
+                // F-06: unknown COMMAND is a syntax error (RFC 5321 §4.2.4
+                // uses 500 for unrecognized commands).
+                log_smtp_reject(
+                    "submission",
+                    ip,
+                    &session_id,
+                    "500 5.5.2 Command not recognised",
+                );
+                reply!("500 5.5.2 Command not recognised\r\n");
             }
         }
 
@@ -650,19 +798,18 @@ impl SubmissionServer {
     async fn handle_auth_login<S: AsyncRead + AsyncWrite + Unpin>(
         self: &Arc<Self>,
         stream: &mut BufStream<S>,
-        trimmed: &str,
+        initial_response: &str,
         ip: std::net::IpAddr,
     ) -> Option<(String, Uuid)> {
-        // Optional inline initial response: "AUTH LOGIN <base64-username>".
-        let inline_user = trimmed
-            .strip_prefix("AUTH LOGIN")
-            .or_else(|| trimmed.strip_prefix("auth login"))
-            .unwrap_or(trimmed)
-            .trim();
-        let user_b64: String = if !inline_user.is_empty() {
-            inline_user.to_string()
+        // F-12: "AUTH LOGIN <base64-username>" carries the username inline
+        // (RFC 4954 initial-response); "=" encodes the empty string.
+        let user_b64: String = if !initial_response.is_empty() {
+            initial_response
+                .strip_prefix('=')
+                .unwrap_or(initial_response)
+                .to_string()
         } else {
-            let _ = write_line(stream, "334 VXNlcm5hbWU6\r\n").await;
+            let _ = write_line(stream, "334 VXNlcm5lbWU6\r\n").await;
             self.read_auth_line(stream).await?
         };
 
@@ -709,17 +856,16 @@ impl SubmissionServer {
     async fn handle_auth_plain<S: AsyncRead + AsyncWrite + Unpin>(
         self: &Arc<Self>,
         stream: &mut BufStream<S>,
-        trimmed: &str,
+        initial_response: &str,
         ip: std::net::IpAddr,
     ) -> Option<(String, Uuid)> {
-        // Use the ORIGINAL line (not uppercased) to preserve base64 case.
-        let inline_b64 = trimmed
-            .strip_prefix("AUTH PLAIN")
-            .or_else(|| trimmed.strip_prefix("auth plain"))
-            .unwrap_or(trimmed)
-            .trim();
-        let auth_b64: String = if !inline_b64.is_empty() {
-            inline_b64.to_string()
+        // F-12: the base64 payload arrives verbatim (any command case); "="
+        // encodes the empty initial response (RFC 4954).
+        let auth_b64: String = if !initial_response.is_empty() {
+            initial_response
+                .strip_prefix('=')
+                .unwrap_or(initial_response)
+                .to_string()
         } else {
             let _ = write_line(stream, "334 \r\n").await;
             self.read_auth_line(stream).await?
@@ -762,6 +908,8 @@ impl SubmissionServer {
     }
 
     /// Read one AUTH response line with a timeout and a line-length cap.
+    /// A line consisting of the single `*` cancels the authentication
+    /// exchange (RFC 4954 §4) — answered with 501 and `None`.
     async fn read_auth_line<S: AsyncRead + AsyncWrite + Unpin>(
         &self,
         stream: &mut BufStream<S>,
@@ -772,7 +920,14 @@ impl SubmissionServer {
         )
         .await
         {
-            Ok(Ok(LineRead::Line(l, _))) => Some(line_lossy(&l)),
+            Ok(Ok(LineRead::Line(l, _))) => {
+                let line = line_lossy(&l);
+                if line.trim() == "*" {
+                    let _ = write_line(stream, "501 5.7.0 Authentication cancelled\r\n").await;
+                    return None;
+                }
+                Some(line)
+            }
             Ok(Ok(LineRead::TooLong)) => {
                 let _ = write_line(stream, "500 5.5.2 Line too long\r\n").await;
                 None
@@ -869,46 +1024,22 @@ impl SubmissionServer {
     /// legacy worker columns (`"from"`, `"to"`, `html`, `text`, `tenant_id`,
     /// `domain_id`, `message_id`) are populated so `EmailProcessor::fetch_jobs`
     /// can decode the row.
+    ///
+    /// F-10: `data` is the raw BYTES of the message (Received header already
+    /// prepended by the caller). 8BITMIME is advertised, so the payload may
+    /// contain octets outside US-ASCII — the header/body split and the MIME
+    /// parsing both run on the original bytes (see [`prepare_queue_payload`]);
+    /// a lossy UTF-8 decode is applied ONLY to values destined for the TEXT
+    /// columns, never to the parser input.
     async fn queue_message(
         &self,
         auth_email: &str,
         mail_from: &str,
         rcpt_to: &[String],
-        data: &str,
+        data: &[u8],
         msg_id: &str,
     ) -> Result<QueueOutcome, ()> {
-        // Split the raw message into headers and body so the queue stores them
-        // separately (the queue has no raw_mime column).
-        let (headers_part, body_part) = split_headers_body(data);
-
-        // Parse the MIME content so the worker's html/text columns are
-        // populated (the worker builds the outgoing message from them).
-        let parsed = mail_parser::MessageParser::default().parse(data.as_bytes());
-        let subject = parsed
-            .as_ref()
-            .and_then(|m| m.subject())
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| extract_subject(headers_part));
-        let html_body = parsed
-            .as_ref()
-            .and_then(|m| m.body_html(0))
-            .map(|b| b.into_owned());
-        let text_body = parsed
-            .as_ref()
-            .and_then(|m| m.body_text(0))
-            .map(|b| b.into_owned())
-            .filter(|b| !b.is_empty())
-            .unwrap_or_else(|| body_part.to_string());
-
-        // subject is NOT NULL in email_queue (max length 998 per CHECK).
-        // E-4:the mail_parser value is NOT pre-truncated (only the header
-        // fallback is), so a >998-char subject failed the INSERT with a
-        // permanent 451. Truncate char-safely on every path.
-        let subject = if subject.is_empty() {
-            "(no subject)".to_string()
-        } else {
-            truncate_subject_chars(&subject, MAX_SUBJECT_CHARS)
-        };
+        let payload = prepare_queue_payload(data);
 
         let mut tx = self.pool.begin().await.map_err(|_| ())?;
 
@@ -962,6 +1093,7 @@ impl SubmissionServer {
                 }
                 let allowed = filter_suppressed_recipients(rcpt_to, &suppressed);
                 if allowed.is_empty() {
+                    metric_message("submission", "rejected");
                     return Ok(QueueOutcome::RecipientSuppressed);
                 }
                 allowed
@@ -1014,6 +1146,7 @@ impl SubmissionServer {
                     from = %mail_common::pii::redact_email(mail_from),
                     "Submission MAIL FROM domain not owned by account's tenant; rejecting"
                 );
+                metric_message("submission", "rejected");
                 return Ok(QueueOutcome::SenderNotOwned);
             }
             Some((_, false)) => {
@@ -1022,6 +1155,7 @@ impl SubmissionServer {
                     requires_ses,
                     "Submission MAIL FROM domain is not ready; rejecting"
                 );
+                metric_message("submission", "rejected");
                 return Ok(QueueOutcome::SenderNotReady);
             }
             Some((domain_id, true)) => domain_id,
@@ -1041,13 +1175,13 @@ impl SubmissionServer {
         .bind(message_uuid)
         .bind(mail_from)
         .bind(&rcpt_to)
-        .bind(&subject)
-        .bind(headers_part)
-        .bind(&text_body)
+        .bind(&payload.subject)
+        .bind(&payload.headers)
+        .bind(&payload.text_body)
         .bind(mail_from)
         .bind(&to_first)
-        .bind(&html_body)
-        .bind(&text_body)
+        .bind(&payload.html_body)
+        .bind(&payload.text_body)
         .bind(&tenant_id)
         .bind(message_uuid)
         .bind(domain_id)
@@ -1065,22 +1199,8 @@ impl SubmissionServer {
             size = data.len(),
             "Message queued via submission"
         );
+        metric_message("submission", "queued");
         Ok(QueueOutcome::Queued)
-    }
-
-    fn track_connection(&self, ip: std::net::IpAddr, incr: bool) {
-        if incr {
-            self.connections
-                .entry(ip)
-                .and_modify(|c| *c += 1)
-                .or_insert(1);
-        } else {
-            self.connections.entry(ip).and_modify(|c| {
-                if *c > 0 {
-                    *c -= 1;
-                }
-            });
-        }
     }
 }
 
@@ -1121,10 +1241,17 @@ fn extract_address(line: &str) -> String {
 pub(crate) const MAX_ENVELOPE_ADDR_LEN: usize = 320;
 
 /// Validate an envelope address against the same rules `email_queue` enforces
-/// (`chk_email_queue_from_address`): no whitespace, one `@`, a non-empty local
-/// part, and a non-empty domain containing at least one dot.
+/// (`chk_email_queue_from_address`): no whitespace, no control characters,
+/// exactly one `@`, a non-empty local part, and a non-empty domain containing
+/// at least one dot. Charset-agnostic by design (SMTPUTF8).
 pub(crate) fn is_valid_envelope_address(addr: &str) -> bool {
-    if addr.is_empty() || addr.len() > MAX_ENVELOPE_ADDR_LEN || addr.chars().any(char::is_whitespace) {
+    if addr.is_empty()
+        || addr.len() > MAX_ENVELOPE_ADDR_LEN
+        || addr.chars().any(|c| c.is_whitespace() || c.is_control())
+        // Exactly one '@' (F-03): rsplit_once alone accepted "a@@b.com",
+        // which the queue's DB CHECK refuses.
+        || addr.matches('@').count() != 1
+    {
         return false;
     }
     match addr.rsplit_once('@') {
@@ -1140,13 +1267,94 @@ pub(crate) fn is_valid_envelope_address(addr: &str) -> bool {
 }
 
 /// Split a raw message into (headers, body) at the first blank line.
-fn split_headers_body(raw: &str) -> (&str, &str) {
-    if let Some(sep) = raw.find("\r\n\r\n") {
-        (&raw[..sep], &raw[sep + 4..])
-    } else if let Some(sep) = raw.find("\n\n") {
-        (&raw[..sep], &raw[sep + 2..])
+///
+/// F-10: byte-oriented — the raw payload may contain 8-bit octets
+/// (8BITMIME) that are NOT valid UTF-8, so the split must never go through
+/// a lossy String decode first (that would both corrupt the boundary search
+/// and replace body octets with U+FFFD). Shared with the inbound server's
+/// ARC sealing path.
+pub(crate) fn split_headers_body(raw: &[u8]) -> (&[u8], &[u8]) {
+    // Earliest separator wins, whatever its flavour: a message with LF-only
+    // headers followed by a CRLF body must split at the LF blank line.
+    let crlf = raw.windows(4).position(|w| w == b"\r\n\r\n");
+    let lf = raw.windows(2).position(|w| w == b"\n\n");
+    match (crlf, lf) {
+        (Some(a), Some(b)) if a < b => (&raw[..a], &raw[a + 4..]),
+        (Some(a), None) => (&raw[..a], &raw[a + 4..]),
+        (_, Some(b)) => (&raw[..b], &raw[b + 2..]),
+        (None, None) => (raw, b""),
+    }
+}
+
+/// Compose the message handed to the queue: the `Received:` trace header for
+/// this hop followed by the client's RAW bytes, verbatim (F-10 — the bytes
+/// are never decoded on this path).
+fn compose_stored_message(received: &str, data: &[u8]) -> Vec<u8> {
+    let mut message = Vec::with_capacity(received.len() + 2 + data.len());
+    message.extend_from_slice(received.as_bytes());
+    message.extend_from_slice(b"\r\n");
+    message.extend_from_slice(data);
+    message
+}
+
+/// Derived values `email_queue` needs from the raw message bytes (F-10).
+struct PreparedQueuePayload {
+    /// Header block as text for the `raw_headers` TEXT column (lossy decode
+    /// is acceptable ONLY here — it is a display/inspection column, not the
+    /// parsing input).
+    headers: String,
+    subject: String,
+    text_body: String,
+    html_body: Option<String>,
+}
+
+/// Split and MIME-parse the RAW message bytes.
+///
+/// The MIME parser handles charset-labelled 8-bit bodies (e.g.
+/// `charset=iso-8859-1`) correctly when fed the ORIGINAL octets — decoding
+/// to text with the declared charset. The previous implementation ran
+/// `String::from_utf8_lossy` over the whole payload first, which replaced
+/// every non-UTF-8 octet with U+FFFD BEFORE parsing and corrupted every
+/// 8BITMIME submission. The parser input stays raw bytes; `from_utf8_lossy`
+/// is applied only to the TEXT-column fallbacks.
+fn prepare_queue_payload(data: &[u8]) -> PreparedQueuePayload {
+    let (headers_bytes, body_bytes) = split_headers_body(data);
+
+    // Parse the MIME content so the worker's html/text columns are
+    // populated (the worker builds the outgoing message from them).
+    let parsed = mail_parser::MessageParser::default().parse(data);
+    let headers = String::from_utf8_lossy(headers_bytes).into_owned();
+    let subject = parsed
+        .as_ref()
+        .and_then(|m| m.subject())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| extract_subject(&headers));
+    let html_body = parsed
+        .as_ref()
+        .and_then(|m| m.body_html(0))
+        .map(|b| b.into_owned());
+    let text_body = parsed
+        .as_ref()
+        .and_then(|m| m.body_text(0))
+        .map(|b| b.into_owned())
+        .filter(|b| !b.is_empty())
+        .unwrap_or_else(|| String::from_utf8_lossy(body_bytes).into_owned());
+
+    // subject is NOT NULL in email_queue (max length 998 per CHECK).
+    // E-4:the mail_parser value is NOT pre-truncated (only the header
+    // fallback is), so a >998-char subject failed the INSERT with a
+    // permanent 451. Truncate char-safely on every path.
+    let subject = if subject.is_empty() {
+        "(no subject)".to_string()
     } else {
-        (raw, "")
+        truncate_subject_chars(&subject, MAX_SUBJECT_CHARS)
+    };
+
+    PreparedQueuePayload {
+        headers,
+        subject,
+        text_body,
+        html_body,
     }
 }
 
@@ -1751,7 +1959,10 @@ mod tests {
                     text.contains("QUIT\r\n"),
                     "line after the bare-LF dot stays body data: {text:?}"
                 );
-                assert!(text.ends_with("tail"), "final CRLF belongs to terminator: {text:?}");
+                assert!(
+                    text.ends_with("tail"),
+                    "final CRLF belongs to terminator: {text:?}"
+                );
             }
             other => panic!("expected Message, got {other:?}"),
         }
@@ -1769,8 +1980,14 @@ mod tests {
                 assert!(text.contains(" . \r\n"), "padded dot kept: {text:?}");
                 // ". " unstuffs to " " (exactly one dot removed); ".." (a
                 // stuffed single dot) unstuffs to "." and stays body.
-                assert!(text.contains(" \r\n."), "dot-space and stuffed-dot semantics: {text:?}");
-                assert!(text.ends_with('.'), "last body line is the unstuffed '..': {text:?}");
+                assert!(
+                    text.contains(" \r\n."),
+                    "dot-space and stuffed-dot semantics: {text:?}"
+                );
+                assert!(
+                    text.ends_with('.'),
+                    "last body line is the unstuffed '..': {text:?}"
+                );
             }
             other => panic!("expected Message, got {other:?}"),
         }
@@ -1812,7 +2029,10 @@ mod tests {
         // payload must be discarded (Aborted), never queued.
         let (client, server_side) = tokio::io::duplex(4096);
         let mut writer = client;
-        writer.write_all(b"Subject: half\r\nbody-so-far\r\n").await.unwrap();
+        writer
+            .write_all(b"Subject: half\r\nbody-so-far\r\n")
+            .await
+            .unwrap();
         writer.flush().await.unwrap();
         drop(writer);
         let mut stream = BufStream::new(server_side);
@@ -1877,10 +2097,16 @@ mod tests {
             "invalid EHLO arg must be replaced with 'unknown': {resp:?}"
         );
         // A valid hostname is still echoed.
-        client_buf.write_all(b"EHLO client.example\r\n").await.unwrap();
+        client_buf
+            .write_all(b"EHLO client.example\r\n")
+            .await
+            .unwrap();
         client_buf.flush().await.unwrap();
         let resp = read_smtp_response(&mut client_buf).await;
-        assert!(resp.contains("client.example"), "valid host echoed: {resp:?}");
+        assert!(
+            resp.contains("client.example"),
+            "valid host echoed: {resp:?}"
+        );
         client_buf.write_all(b"QUIT\r\n").await.unwrap();
         client_buf.flush().await.unwrap();
         let _ = read_smtp_response(&mut client_buf).await;
@@ -1893,7 +2119,12 @@ mod tests {
     #[test]
     fn subject_truncation_is_char_safe_and_caps_at_998() {
         let ascii = "a".repeat(1200);
-        assert_eq!(truncate_subject_chars(&ascii, MAX_SUBJECT_CHARS).chars().count(), 998);
+        assert_eq!(
+            truncate_subject_chars(&ascii, MAX_SUBJECT_CHARS)
+                .chars()
+                .count(),
+            998
+        );
 
         // Multibyte: never splits a character.
         let multibyte = "\u{f6}".repeat(600); // 1200 bytes, 600 chars
@@ -1962,7 +2193,10 @@ mod tests {
 
         let ehlo = read_smtp_response(&mut client_buf).await;
         assert!(ehlo.contains("250-"), "EHLO reply: {ehlo:?}");
-        assert!(ehlo.ends_with("250 SMTPUTF8\r\n"), "last capability line: {ehlo:?}");
+        assert!(
+            ehlo.ends_with("250 SMTPUTF8\r\n"),
+            "last capability line: {ehlo:?}"
+        );
 
         let noop = read_smtp_response(&mut client_buf).await;
         assert_eq!(noop, "250 2.0.0 Ok\r\n", "NOOP reply must come second");
@@ -2079,18 +2313,126 @@ mod tests {
     fn split_headers_body_tolerates_double_blank_lines() {
         // Some clients emit an extra CRLF before the body; the split must
         // still find the header block and not treat headers as body.
-        let raw = "Subject: t\r\nFrom: a@b.com\r\n\r\n\r\nbody";
+        let raw = b"Subject: t\r\nFrom: a@b.com\r\n\r\n\r\nbody";
         let (headers, body) = split_headers_body(raw);
-        assert!(headers.contains("Subject: t"));
-        assert_eq!(body, "\r\nbody");
+        assert!(String::from_utf8_lossy(headers).contains("Subject: t"));
+        assert_eq!(body, b"\r\nbody");
         // LF-only variant is tolerated identically.
-        let (headers, body) = split_headers_body("Subject: t\n\nbody");
-        assert!(headers.contains("Subject: t"));
-        assert_eq!(body, "body");
+        let (headers, body) = split_headers_body(b"Subject: t\n\nbody");
+        assert!(String::from_utf8_lossy(headers).contains("Subject: t"));
+        assert_eq!(body, b"body");
         // No blank line at all: everything is headers, body empty.
-        let (headers, body) = split_headers_body("Subject: only-headers");
-        assert!(headers.contains("Subject:"));
-        assert_eq!(body, "");
+        let (headers, body) = split_headers_body(b"Subject: only-headers");
+        assert!(String::from_utf8_lossy(headers).contains("Subject:"));
+        assert_eq!(body, b"");
+        // Mixed flavours: the EARLIEST blank line wins (LF-only headers
+        // followed by a CRLF body must not swallow body bytes into headers).
+        let (headers, body) = split_headers_body(b"Subject: t\nX: 1\n\nbody\r\n\r\nrest");
+        assert_eq!(headers, b"Subject: t\nX: 1");
+        assert_eq!(body, b"body\r\n\r\nrest");
+    }
+
+    // ── F-10: 8-bit payloads survive the queue preparation ────────────────
+
+    #[test]
+    fn prepare_queue_payload_preserves_iso_8859_1_bytes() {
+        // 8BITMIME is advertised: an ISO-8859-1 body (0xE9 = é, 0xEF = ï)
+        // must reach the MIME parser as RAW BYTES so the parser decodes it
+        // with the declared charset — never through a lossy UTF-8 decode
+        // that would replace every high octet with U+FFFD. (The subject
+        // uses legal RFC 6532 UTF-8, which also round-trips exactly.)
+        let mut msg = Vec::new();
+        msg.extend_from_slice(b"From: a@b.com\r\n");
+        msg.extend_from_slice("Subject: caf\u{e9}\r\n".as_bytes()); // UTF-8 8-bit header
+        msg.extend_from_slice(b"Content-Type: text/plain; charset=iso-8859-1\r\n");
+        msg.extend_from_slice(b"\r\n");
+        msg.extend_from_slice(b"caf\xe9 na\xefve\r\n");
+        let payload = prepare_queue_payload(&msg);
+        assert!(
+            !payload.text_body.contains('\u{fffd}'),
+            "8-bit body must not be mangled: {:?}",
+            payload.text_body
+        );
+        assert!(
+            payload.text_body.contains("caf\u{e9} na\u{ef}ve"),
+            "parser decodes the declared charset: {:?}",
+            payload.text_body
+        );
+        assert!(
+            payload.subject.contains("caf\u{e9}"),
+            "UTF-8 8-bit subject round-trips: {:?}",
+            payload.subject
+        );
+        // The header/body split is byte-exact even with high octets in both.
+        assert!(payload.headers.starts_with("From: a@b.com"));
+    }
+
+    #[test]
+    fn prepare_queue_payload_falls_back_lossy_only_for_text_columns() {
+        // Unparseable body (no Content-Type, invalid UTF-8): the fallback for
+        // the TEXT column is lossy — but the mangling is confined to the
+        // derived text, and the parser still saw the original bytes.
+        let msg = b"Subject: t\r\n\r\nraw \xe9 bytes";
+        let payload = prepare_queue_payload(msg);
+        assert_eq!(payload.subject, "t");
+        assert!(payload.text_body.contains("raw"));
+        // A charset-less 8-bit SUBJECT header is not valid UTF-8: it decodes
+        // best-effort (replacement chars). The DB column is TEXT, so this is
+        // the ceiling for undeclared-charset headers; the body above shows
+        // the charset-declared path is exact.
+        let latin1_subject = b"Subject: caf\xe9\r\n\r\nbody";
+        let payload = prepare_queue_payload(latin1_subject);
+        assert!(payload.subject.contains("caf"), "{}", payload.subject);
+    }
+
+    #[test]
+    fn eight_bit_submission_session_passes_bytes_to_queue_untouched() {
+        // E2E byte-pipeline pin (the full session cannot authenticate against
+        // the unreachable test DB, so the pipeline is composed from its two
+        // real stages): DATA bytes as delivered by read_data_message (pinned
+        // verbatim by eight_bit_body_bytes_are_preserved_verbatim) →
+        // compose_stored_message (Received prepend) → prepare_queue_payload
+        // (split + MIME parse feeding the queue columns). Every 0xE9/0xEF
+        // octet must survive to the parsed columns — the old
+        // String::from_utf8_lossy over the whole body replaced them with
+        // U+FFFD here.
+        let mut data = Vec::new();
+        data.extend_from_slice(b"From: a@b.com\r\n");
+        data.extend_from_slice("Subject: caf\u{e9}\r\n".as_bytes()); // UTF-8 8-bit header
+        data.extend_from_slice(b"Content-Type: text/plain; charset=iso-8859-1\r\n");
+        data.extend_from_slice(b"\r\n");
+        data.extend_from_slice(b"caf\xe9 na\xefve\r\n");
+
+        let received = build_received_header(
+            "client.example",
+            None,
+            "10.0.0.9".parse().unwrap(),
+            "submission.test",
+            true,
+            true,
+            true,
+            "0192f0a4-e2e",
+        );
+        let composed = compose_stored_message(&received, &data);
+        assert!(composed.starts_with(b"Received: from client.example"));
+        // The raw client bytes follow the trace header byte-for-byte.
+        assert_eq!(&composed[composed.len() - data.len()..], &data[..]);
+
+        let payload = prepare_queue_payload(&composed);
+        // The trace header (and only it) lands in the headers column...
+        assert!(payload
+            .headers
+            .starts_with("Received: from client.example (unknown [10.0.0.9])"));
+        assert!(payload.headers.contains("with UTF8ESMTPSA id 0192f0a4-e2e"));
+        // ...and the ISO-8859-1 body/subject decode via the declared charset
+        // with zero U+FFFD replacement octets.
+        assert!(
+            !payload.text_body.contains('\u{fffd}'),
+            "{:?}",
+            payload.text_body
+        );
+        assert!(payload.text_body.contains("caf\u{e9} na\u{ef}ve"));
+        assert!(payload.subject.contains("caf\u{e9}"));
     }
 
     // ── queue-insert durability (item h) ───────────────────────────────────
@@ -2121,5 +2463,410 @@ mod tests {
             set_pos < insert_pos,
             "synchronous_commit must be pinned before the email_queue insert"
         );
+    }
+
+    // ── F-06: exact verb matching ──────────────────────────────────────────
+
+    #[tokio::test]
+    async fn database_and_mail_fromx_are_not_real_commands() {
+        let server = Arc::new(test_server(None));
+        let (client, server_side) = tokio::io::duplex(32 * 1024);
+        let task = tokio::spawn(async move {
+            let mut server_buf = BufStream::new(server_side);
+            server
+                .run_session_loop(&mut server_buf, test_peer(11), false, true)
+                .await
+        });
+        let mut client_buf = BufStream::new(client);
+
+        client_buf
+            .write_all(b"EHLO client.example\r\n")
+            .await
+            .unwrap();
+        client_buf.flush().await.unwrap();
+        assert!(read_smtp_response(&mut client_buf).await.starts_with("250"));
+
+        client_buf.write_all(b"DATABASE\r\n").await.unwrap();
+        client_buf.flush().await.unwrap();
+        let resp = read_smtp_response(&mut client_buf).await;
+        assert_eq!(
+            resp, "500 5.5.2 Command not recognised\r\n",
+            "DATABASE must not be treated as DATA"
+        );
+
+        // MAIL FROMX must not start a transaction (the old prefix match
+        // accepted it): with EHLO seen, the syntax guard fires 501.
+        client_buf
+            .write_all(b"MAIL FROMX:<a@b.com>\r\n")
+            .await
+            .unwrap();
+        client_buf.flush().await.unwrap();
+        let resp = read_smtp_response(&mut client_buf).await;
+        assert_eq!(
+            resp, "501 5.5.4 Syntax: MAIL FROM:<address>\r\n",
+            "MAIL FROMX must be a syntax error, got {resp:?}"
+        );
+
+        client_buf.write_all(b"QUIT\r\n").await.unwrap();
+        client_buf.flush().await.unwrap();
+        let _ = read_smtp_response(&mut client_buf).await;
+        tokio::time::timeout(Duration::from_secs(10), task)
+            .await
+            .expect("session must finish")
+            .expect("session must not panic");
+    }
+
+    #[test]
+    fn envelope_validator_rejects_double_at_and_control_chars() {
+        // F-03: "a@@b.com" must fail the same validator inbound reuses.
+        assert!(!is_valid_envelope_address("a@@b.com"));
+        assert!(!is_valid_envelope_address("a\x01b@example.com"));
+        assert!(!is_valid_envelope_address("a b@example.com"));
+        assert!(is_valid_envelope_address("plain@example.com"));
+        assert!(is_valid_envelope_address("p\u{f8}ser@example.com"));
+    }
+
+    // ── F-04/F-05: EHLO capability list and transaction reset ──────────────
+
+    #[tokio::test]
+    async fn ehlo_advertises_enhancedstatuscodes_and_keeps_sequencing() {
+        // The transaction gates run before authentication in the loop, so
+        // the behavioral nested-MAIL pin lives in the inbound command-level
+        // suite (both servers share the rule); the EHLO capability list and
+        // command sequencing are observable here pre-auth.
+        let server = Arc::new(test_server(None));
+        let (client, server_side) = tokio::io::duplex(32 * 1024);
+        let task = tokio::spawn(async move {
+            let mut server_buf = BufStream::new(server_side);
+            server
+                .run_session_loop(&mut server_buf, test_peer(12), false, true)
+                .await
+        });
+        let mut client_buf = BufStream::new(client);
+
+        // EHLO works pre-auth.
+        client_buf
+            .write_all(b"EHLO client.example\r\n")
+            .await
+            .unwrap();
+        client_buf.flush().await.unwrap();
+        let caps = read_smtp_response(&mut client_buf).await;
+        assert!(
+            caps.contains("250-ENHANCEDSTATUSCODES\r\n"),
+            "F-05: {caps:?}"
+        );
+        assert!(
+            caps.ends_with("250 SMTPUTF8\r\n"),
+            "last capability: {caps:?}"
+        );
+
+        // DATA without a transaction, pre-auth: the authentication gate
+        // fires first (530), same ordering as before the verb rework.
+        client_buf.write_all(b"DATA\r\n").await.unwrap();
+        client_buf.flush().await.unwrap();
+        assert!(read_smtp_response(&mut client_buf).await.starts_with("530"));
+
+        // MAIL pre-auth: 530 (gate order kept).
+        client_buf
+            .write_all(b"MAIL FROM:<a@b.com>\r\n")
+            .await
+            .unwrap();
+        client_buf.flush().await.unwrap();
+        assert!(read_smtp_response(&mut client_buf).await.starts_with("530"));
+
+        client_buf.write_all(b"QUIT\r\n").await.unwrap();
+        client_buf.flush().await.unwrap();
+        let _ = read_smtp_response(&mut client_buf).await;
+        tokio::time::timeout(Duration::from_secs(10), task)
+            .await
+            .expect("session must finish")
+            .expect("session must not panic");
+    }
+
+    #[test]
+    fn submission_source_pins_ehlo_reset_and_nested_mail_guard() {
+        // The authenticated-path rules (EHLO resets the transaction; nested
+        // MAIL → 503) are not reachable in the unit suite (no live DB to
+        // authenticate against), so they are pinned against the compiled-in
+        // source — same idiom as the synchronous_commit pin above.
+        let source = include_str!("submission.rs");
+        let ehlo_branch = source
+            .find("if verb == \"EHLO\" || verb == \"HELO\"")
+            .expect("EHLO branch");
+        let mail_branch = source
+            .find("} else if verb == \"MAIL\" {")
+            .expect("MAIL branch");
+        let nested_guard = source
+            .find("503 5.5.1 Nested MAIL command")
+            .expect("nested MAIL guard");
+        assert!(
+            ehlo_branch < mail_branch,
+            "both branches live in the dispatch chain"
+        );
+        // The EHLO branch clears the transaction BEFORE the next branch starts.
+        let reset = source[ehlo_branch..mail_branch]
+            .find("mail_from = None;")
+            .expect("EHLO must reset mail_from");
+        assert!(reset > 0);
+        // The nested guard sits inside the MAIL branch, before storing.
+        assert!(nested_guard > mail_branch);
+    }
+
+    // ── F-08: bare-LF command lines ────────────────────────────────────────
+
+    #[tokio::test]
+    async fn bare_lf_command_line_is_refused_but_session_survives() {
+        let server = Arc::new(test_server(None));
+        let (client, server_side) = tokio::io::duplex(32 * 1024);
+        let task = tokio::spawn(async move {
+            let mut server_buf = BufStream::new(server_side);
+            server
+                .run_session_loop(&mut server_buf, test_peer(13), false, true)
+                .await
+        });
+        let mut client_buf = BufStream::new(client);
+
+        client_buf.write_all(b"NOOP\n").await.unwrap();
+        client_buf.flush().await.unwrap();
+        assert_eq!(
+            read_smtp_response(&mut client_buf).await,
+            "500 5.5.2 Bare LF not allowed\r\n"
+        );
+
+        // The session continues; a properly terminated command works.
+        client_buf.write_all(b"NOOP\r\n").await.unwrap();
+        client_buf.flush().await.unwrap();
+        assert_eq!(
+            read_smtp_response(&mut client_buf).await,
+            "250 2.0.0 Ok\r\n"
+        );
+
+        client_buf.write_all(b"QUIT\r\n").await.unwrap();
+        client_buf.flush().await.unwrap();
+        let _ = read_smtp_response(&mut client_buf).await;
+        tokio::time::timeout(Duration::from_secs(10), task)
+            .await
+            .expect("session must finish")
+            .expect("session must not panic");
+    }
+
+    // ── F-14: error cap and unauthenticated session deadline ───────────────
+
+    #[tokio::test]
+    async fn twenty_error_replies_close_the_session() {
+        let server = Arc::new(test_server(None));
+        let (client, server_side) = tokio::io::duplex(32 * 1024);
+        let task = tokio::spawn(async move {
+            let mut server_buf = BufStream::new(server_side);
+            server
+                .run_session_loop(&mut server_buf, test_peer(14), false, true)
+                .await
+        });
+        let mut client_buf = BufStream::new(client);
+
+        for i in 1..=MAX_SESSION_ERRORS {
+            client_buf.write_all(b"FROBNICATE\r\n").await.unwrap();
+            client_buf.flush().await.unwrap();
+            let resp = read_smtp_response(&mut client_buf).await;
+            assert_eq!(resp, "500 5.5.2 Command not recognised\r\n", "error #{i}");
+        }
+        // The 20th error is followed by 421 Too many errors and a close.
+        assert_eq!(
+            read_smtp_response(&mut client_buf).await,
+            "421 4.7.0 Too many errors, closing connection\r\n"
+        );
+        tokio::time::timeout(Duration::from_secs(10), task)
+            .await
+            .expect("session must finish")
+            .expect("session must not panic");
+    }
+
+    #[tokio::test]
+    async fn unauthenticated_session_deadline_is_enforced() {
+        tokio::time::pause();
+        let server = Arc::new(test_server(None));
+        let (client, server_side) = tokio::io::duplex(32 * 1024);
+        let task = tokio::spawn(async move {
+            let mut server_buf = BufStream::new(server_side);
+            server
+                .run_session_loop(&mut server_buf, test_peer(15), false, true)
+                .await
+        });
+        let mut client_buf = BufStream::new(client);
+
+        client_buf.write_all(b"NOOP\r\n").await.unwrap();
+        client_buf.flush().await.unwrap();
+        assert_eq!(
+            read_smtp_response(&mut client_buf).await,
+            "250 2.0.0 Ok\r\n"
+        );
+
+        // Advance past the 30-minute unauthenticated deadline.
+        tokio::time::advance(SESSION_DEADLINE + Duration::from_secs(1)).await;
+
+        client_buf.write_all(b"NOOP\r\n").await.unwrap();
+        client_buf.flush().await.unwrap();
+        assert_eq!(
+            read_smtp_response(&mut client_buf).await,
+            "421 4.7.0 Session deadline exceeded, closing connection\r\n"
+        );
+        tokio::time::resume();
+        tokio::time::timeout(Duration::from_secs(10), task)
+            .await
+            .expect("session must finish")
+            .expect("session must not panic");
+    }
+
+    // ── F-12: "*" cancels the AUTH exchange ────────────────────────────────
+
+    #[tokio::test]
+    async fn auth_login_cancelled_with_star_replies_501() {
+        let server = Arc::new(test_server(None));
+        let (client, server_side) = tokio::io::duplex(32 * 1024);
+        let task = tokio::spawn(async move {
+            let mut server_buf = BufStream::new(server_side);
+            server
+                .run_session_loop(&mut server_buf, test_peer(16), false, true)
+                .await
+        });
+        let mut client_buf = BufStream::new(client);
+        client_buf
+            .write_all(b"EHLO client.example\r\n")
+            .await
+            .unwrap();
+        client_buf.flush().await.unwrap();
+        let _ = read_smtp_response(&mut client_buf).await;
+
+        client_buf.write_all(b"AUTH LOGIN\r\n").await.unwrap();
+        client_buf.flush().await.unwrap();
+        assert!(
+            read_smtp_response(&mut client_buf).await.starts_with("334"),
+            "username challenge"
+        );
+        client_buf.write_all(b"*\r\n").await.unwrap();
+        client_buf.flush().await.unwrap();
+        assert_eq!(
+            read_smtp_response(&mut client_buf).await,
+            "501 5.7.0 Authentication cancelled\r\n"
+        );
+
+        client_buf.write_all(b"QUIT\r\n").await.unwrap();
+        client_buf.flush().await.unwrap();
+        let _ = read_smtp_response(&mut client_buf).await;
+        tokio::time::timeout(Duration::from_secs(10), task)
+            .await
+            .expect("session must finish")
+            .expect("session must not panic");
+    }
+
+    // ── F-01: hop limit end-of-DATA refusal ────────────────────────────────
+
+    #[test]
+    fn data_with_forty_received_headers_exceeds_hop_limit() {
+        // The session-level 550 5.4.6 reply is emitted between end-of-DATA
+        // and the queue write; reaching it in the unit suite needs a live DB
+        // (authentication), so the boundary is pinned on the exact payload
+        // shape the loop feeds this helper (terminator included).
+        let mut msg = Vec::new();
+        for _ in 0..40 {
+            msg.extend_from_slice(b"Received: hop\r\n");
+        }
+        msg.extend_from_slice(b"\r\nbody\r\n.\r\n");
+        assert!(received_hop_limit_exceeded(&msg));
+
+        let mut under = Vec::new();
+        for _ in 0..39 {
+            under.extend_from_slice(b"Received: hop\r\n");
+        }
+        under.extend_from_slice(b"\r\nbody\r\n.\r\n");
+        assert!(!received_hop_limit_exceeded(&under));
+    }
+
+    #[test]
+    fn received_trace_header_clauses_are_correct() {
+        // Plain ESMTP hop (inbound shape, no TLS).
+        let h = build_received_header(
+            "mail.sender.example",
+            Some("rev.example.com"),
+            "192.0.2.10".parse().unwrap(),
+            "mx.apexmail.ee",
+            false,
+            false,
+            false,
+            "inb_abc123",
+        );
+        assert!(h.starts_with("Received: from mail.sender.example (rev.example.com [192.0.2.10])"));
+        assert!(h.contains("by mx.apexmail.ee with ESMTP id inb_abc123;"));
+        // Exactly three physical lines (two folds).
+        assert_eq!(h.matches("\r\n").count(), 2);
+
+        // TLS leg → ESMTPS; unknown rDNS → "unknown".
+        let tls = build_received_header(
+            "mail.sender.example",
+            None,
+            "192.0.2.10".parse().unwrap(),
+            "mx.apexmail.ee",
+            true,
+            false,
+            false,
+            "inb_abc124",
+        );
+        assert!(tls.contains("with ESMTPS id"));
+        assert!(tls.contains("(unknown [192.0.2.10])"));
+
+        // SMTPUTF8 + TLS + auth → UTF8-prefixed ESMTPSA.
+        let utf8 = build_received_header(
+            "mail.sender.example",
+            None,
+            "192.0.2.10".parse().unwrap(),
+            "mx.apexmail.ee",
+            true,
+            true,
+            true,
+            "q-1",
+        );
+        assert!(utf8.contains("with UTF8ESMTPSA id"));
+    }
+
+    #[test]
+    fn received_trace_header_rejects_crlf_injection_from_rdns() {
+        // The rDNS value is DNS-derived; a hostile/odd PTR string with CR/LF
+        // must collapse to "unknown" rather than split the header.
+        let h = build_received_header(
+            "mail.sender.example",
+            Some("evil\r\nX-Injected: 1"),
+            "192.0.2.10".parse().unwrap(),
+            "mx.apexmail.ee",
+            false,
+            false,
+            false,
+            "inb_abc125",
+        );
+        assert!(!h.contains("X-Injected"));
+        assert!(h.contains("(unknown [192.0.2.10])"));
+        assert_eq!(h.matches("\r\n").count(), 2, "still exactly three lines");
+    }
+
+    #[test]
+    fn validated_helo_hostname_can_never_inject_crlf() {
+        // Pin the invariant the Received header relies on: any HELO argument
+        // that passes is_valid_helo_hostname is free of CR/LF/controls.
+        for junk in [
+            "evil\r\nX-Injected: 1",
+            "evil\nX-Injected: 1",
+            "evil\rX: 1",
+            "evil\x01junk",
+            "evil junk",
+        ] {
+            assert!(
+                !super::super::inbound::is_valid_helo_hostname(junk),
+                "{junk:?} must never pass HELO validation"
+            );
+        }
+        // And the shapes that DO pass are injection-free by construction.
+        assert!(super::super::inbound::is_valid_helo_hostname(
+            "mail.example.com"
+        ));
+        assert!(super::super::inbound::is_valid_helo_hostname("[127.0.0.1]"));
     }
 }

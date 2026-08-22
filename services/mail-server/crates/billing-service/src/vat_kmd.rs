@@ -318,7 +318,10 @@ pub(crate) fn effective_vat_bucket(
         return (0, Some("reverse_charge"));
     }
     if is_eu {
-        return (vat_rates::get_eu_vat_rate(&country).unwrap_or(0), Some("eu_b2c"));
+        return (
+            vat_rates::get_eu_vat_rate(&country).unwrap_or(0),
+            Some("eu_b2c"),
+        );
     }
     (0, Some("non_eu"))
 }
@@ -396,7 +399,9 @@ pub async fn generate_kmd_return(
     // Query rate breakdown. Fix I4 — prefer the country + VAT rate captured
     // on the invoice row at creation; fall back to the current billing
     // address only for pre-migration-101 rows (both stored values NULL).
-    let rate_rows: Vec<(i64, i64, Option<String>, Option<i32>, Option<bool>)> = sqlx::query_as(
+    // Local alias for the rate-breakdown row shape (clippy::type_complexity).
+    type RateRow = (i64, i64, Option<String>, Option<i32>, Option<bool>);
+    let rate_rows: Vec<RateRow> = sqlx::query_as(
         r#"
         SELECT
             COALESCE(SUM(i.subtotal), 0)::bigint,

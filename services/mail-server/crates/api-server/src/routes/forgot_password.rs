@@ -25,6 +25,9 @@ pub fn router() -> Router<AppState> {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+// `kiwi__token` is KiwiCaptcha's literal wire field name — kept verbatim
+// (same convention as LoginRequest) so the hidden form field deserializes.
+#[allow(non_snake_case)]
 pub struct ForgotPasswordRequest {
     pub email: String,
     #[serde(default)]
@@ -88,10 +91,7 @@ async fn forgot_password(
         // does) — storing raw emails as key names pollutes Redis with PII,
         // leaks addresses to anyone with Redis list/scan access, and keeps
         // the victim's mailbox address resident long after the window.
-        let email_rate_key = format!(
-            "apexmail:forgot_password_rate:email:{}",
-            hash_token(&email)
-        );
+        let email_rate_key = format!("apexmail:forgot_password_rate:email:{}", hash_token(&email));
 
         // Atomic rate-limit check using Lua script to avoid INCR + EXPIRE race condition.
         // The script atomically increments the counter and sets expiry on first creation.
@@ -274,18 +274,18 @@ mod tests {
         // it would leave PII resident in Redis key names and leak addresses
         // to anything able to SCAN the keyspace.
         let email = "victim@example.com";
-        let key = format!(
-            "apexmail:forgot_password_rate:email:{}",
-            hash_token(email)
+        let key = format!("apexmail:forgot_password_rate:email:{}", hash_token(email));
+        assert!(
+            !key.contains(email),
+            "key must not contain raw email: {key}"
         );
-        assert!(!key.contains(email), "key must not contain raw email: {key}");
-        assert!(!key.contains("victim"), "key must not contain the local part");
+        assert!(
+            !key.contains("victim"),
+            "key must not contain the local part"
+        );
         assert!(key.starts_with("apexmail:forgot_password_rate:email:"));
         // Deterministic — the same address maps to the same bucket.
-        let again = format!(
-            "apexmail:forgot_password_rate:email:{}",
-            hash_token(email)
-        );
+        let again = format!("apexmail:forgot_password_rate:email:{}", hash_token(email));
         assert_eq!(key, again);
         // Distinct addresses map to distinct buckets.
         let other = format!(

@@ -278,8 +278,9 @@ pub async fn verify_kiwi_token(
 
     // Aggregate Argon2id verification cap: bound concurrent memory-hard
     // verifications server-wide (not just per nonce). SHA-256 verifications
-    // are cheap and not gated.
-    let argon2_permit = if record.algorithm == kiwicaptcha::PoWAlgorithm::Argon2id {
+    // are cheap and not gated. (RAII permit: held to the end of the scope,
+    // never read.)
+    let _argon2_permit = if record.algorithm == kiwicaptcha::PoWAlgorithm::Argon2id {
         let semaphore = ARGON2_VERIFY_SEMAPHORE
             .get_or_init(|| Arc::new(Semaphore::new(config.kiwi_argon2_max_concurrent as usize)))
             .clone();
@@ -728,23 +729,16 @@ async fn record_login_failure(
     // Track which source IPs produced the failures. `None` (no ConnectInfo)
     // buckets into a single "unknown" source.
     let ip_member = source_ip.unwrap_or("unknown");
-    let _: () = deadpool_redis::redis::AsyncCommands::sadd(
-        &mut *conn,
-        &failure_ip_key,
-        ip_member,
-    )
-    .await?;
+    let _: () =
+        deadpool_redis::redis::AsyncCommands::sadd(&mut *conn, &failure_ip_key, ip_member).await?;
     let _: () = deadpool_redis::redis::AsyncCommands::expire(
         &mut *conn,
         &failure_ip_key,
         LOGIN_FAILURE_WINDOW_SECS as i64,
     )
     .await?;
-    let distinct_ips: i64 = deadpool_redis::redis::AsyncCommands::scard(
-        &mut *conn,
-        &failure_ip_key,
-    )
-    .await?;
+    let distinct_ips: i64 =
+        deadpool_redis::redis::AsyncCommands::scard(&mut *conn, &failure_ip_key).await?;
 
     if failures < LOGIN_FAILURE_THRESHOLD {
         return Ok(());
@@ -1297,7 +1291,11 @@ async fn insert_auth_audit_log(
 /// environment. It previously re-read the `ENVIRONMENT` env var here, so a
 /// deployment configured as production through config loading could silently
 /// sign with the public fallback key.
-fn audit_log_signature(is_production: bool, hash: &str, previous_hash: &str) -> Result<String, ApiError> {
+fn audit_log_signature(
+    is_production: bool,
+    hash: &str,
+    previous_hash: &str,
+) -> Result<String, ApiError> {
     use hmac::{Hmac, Mac};
     type HmacSha256 = Hmac<Sha256>;
     let key = match std::env::var("AUDIT_SIGNING_KEY") {
@@ -1338,6 +1336,9 @@ fn extract_bearer_token(headers: &HeaderMap) -> Option<String> {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+// `kiwi__token` is KiwiCaptcha's literal wire field name — kept verbatim
+// (same convention as LoginRequest) so the hidden form field deserializes.
+#[allow(non_snake_case)]
 pub struct ResetPasswordRequest {
     pub token: String,
     pub email: String,
@@ -1526,7 +1527,8 @@ async fn login(
                                     .await?;
                         }
                         _ => {
-                            record_login_failure(&state.redis, &login_identifier, Some(&client_ip)).await?;
+                            record_login_failure(&state.redis, &login_identifier, Some(&client_ip))
+                                .await?;
                             return Err(ApiError::Unauthorized("invalid MFA code".into()));
                         }
                     }
@@ -1824,7 +1826,8 @@ async fn complete_mfa_challenge(
                     .as_deref()
                     .filter(|c| !c.trim().is_empty());
                 if rc.is_none() {
-                    record_login_failure(&state.redis, &login_identifier, client_ip.as_deref()).await?;
+                    record_login_failure(&state.redis, &login_identifier, client_ip.as_deref())
+                        .await?;
                     return Err(ApiError::Unauthorized("invalid MFA code".into()));
                 }
                 // Recovery code verification happens below after loading user
@@ -1947,7 +1950,8 @@ async fn complete_mfa_challenge(
                 .await?;
 
                 if !consumed {
-                    record_login_failure(&state.redis, &login_identifier, client_ip.as_deref()).await?;
+                    record_login_failure(&state.redis, &login_identifier, client_ip.as_deref())
+                        .await?;
                     return Err(ApiError::Unauthorized("invalid MFA code".into()));
                 }
 
@@ -3225,8 +3229,10 @@ mod tests {
 
     #[test]
     fn test_register_rate_limit_is_not_tiny_retry_bucket() {
-        assert!(REGISTER_RATE_LIMIT_MAX_REQUESTS >= 20);
-        assert!(REGISTER_RATE_LIMIT_WINDOW_SECS <= 10 * 60);
+        const {
+            assert!(REGISTER_RATE_LIMIT_MAX_REQUESTS >= 20);
+            assert!(REGISTER_RATE_LIMIT_WINDOW_SECS <= 10 * 60);
+        }
         assert!(register_rate_limit_message().contains("sign-up attempts"));
     }
 
@@ -3340,35 +3346,34 @@ mod tests {
 
     #[test]
     fn test_audit_signature_refuses_fallback_key_in_production() {
-        let _guard = AUDIT_KEY_ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = AUDIT_KEY_ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
 
         // Production without a configured key: hard error — never sign with
         // the publicly-known development fallback (L-14/L-21).
         std::env::remove_var("AUDIT_SIGNING_KEY");
         match audit_log_signature(true, "hash", "prev") {
             Err(ApiError::Internal(message)) if message.contains("AUDIT_SIGNING_KEY") => {}
-            other => panic!(
-                "production without AUDIT_SIGNING_KEY must refuse to sign, got {other:?}"
-            ),
+            other => {
+                panic!("production without AUDIT_SIGNING_KEY must refuse to sign, got {other:?}")
+            }
         }
 
         // Production with the key configured: real HMAC signature.
         std::env::set_var("AUDIT_SIGNING_KEY", "prod-audit-key-0123456789abcdef");
         let signed = audit_log_signature(true, "hash", "prev").expect("signs with real key");
         assert_eq!(signed.len(), 64, "hex-encoded HMAC-SHA256");
-        assert!(
-            !signed.is_empty()
-                && signed
-                    .chars()
-                    .all(|c| c.is_ascii_hexdigit())
-        );
+        assert!(!signed.is_empty() && signed.chars().all(|c| c.is_ascii_hexdigit()));
 
         std::env::remove_var("AUDIT_SIGNING_KEY");
     }
 
     #[test]
     fn test_audit_signature_uses_dev_fallback_outside_production() {
-        let _guard = AUDIT_KEY_ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = AUDIT_KEY_ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
 
         std::env::remove_var("AUDIT_SIGNING_KEY");
         let dev = audit_log_signature(false, "hash", "prev")
@@ -4116,7 +4121,10 @@ mod tests {
             .execute(&admin)
             .await;
         admin.close().await;
-        assert!(created.is_ok(), "isolated login-index test DB must be creatable");
+        assert!(
+            created.is_ok(),
+            "isolated login-index test DB must be creatable"
+        );
 
         let pool = PgPoolOptions::new()
             .max_connections(2)
@@ -4144,7 +4152,8 @@ mod tests {
         .expect("users table created");
 
         // The login query must FAIL before the migration (missing column).
-        let login_sql = "SELECT id FROM users WHERE LOWER(email) = LOWER($1) OR LOWER(username) = LOWER($2)";
+        let login_sql =
+            "SELECT id FROM users WHERE LOWER(email) = LOWER($1) OR LOWER(username) = LOWER($2)";
         let pre_migration = sqlx::query(login_sql)
             .bind("a@b.com")
             .bind("a@b.com")
@@ -4285,12 +4294,12 @@ mod tests {
             crate::routes::system_sender::SYSTEM_TENANT_ID,
             crate::routes::system_sender::SYSTEM_DOMAIN_ID,
         );
-        let encrypted = apexmail_lib::dkim::encrypt_dkim_private_key(&key_pair.private_key_pem, &aad)
-            .expect("test DKIM private key encryption must not fail");
-        let public_key = apexmail_lib::dkim::public_key_base64_from_private_key_pem(
-            &key_pair.private_key_pem,
-        )
-        .expect("test DKIM public key derivation must not fail");
+        let encrypted =
+            apexmail_lib::dkim::encrypt_dkim_private_key(&key_pair.private_key_pem, &aad)
+                .expect("test DKIM private key encryption must not fail");
+        let public_key =
+            apexmail_lib::dkim::public_key_base64_from_private_key_pem(&key_pair.private_key_pem)
+                .expect("test DKIM public key derivation must not fail");
 
         sqlx::query(
             "INSERT INTO domains (id, tenant_id, name, status, verified, ses_verified,
@@ -4319,10 +4328,9 @@ mod tests {
     /// convention).
     fn restore_dkim_env(previous_key: Option<String>) {
         match previous_key {
-            Some(key) => std::env::set_var(
-                apexmail_lib::dkim::DKIM_PRIVATE_KEY_ENCRYPTION_KEY_ENV,
-                key,
-            ),
+            Some(key) => {
+                std::env::set_var(apexmail_lib::dkim::DKIM_PRIVATE_KEY_ENCRYPTION_KEY_ENV, key)
+            }
             None => std::env::remove_var(apexmail_lib::dkim::DKIM_PRIVATE_KEY_ENCRYPTION_KEY_ENV),
         }
     }
@@ -4331,6 +4339,9 @@ mod tests {
     /// users row (UUID id) + tenants row, store a verifiable bcrypt hash,
     /// and queue the verification email. Before the fix the users INSERT
     /// failed with invalid uuid syntax and NOTHING was persisted.
+    /// The DKIM env guard is held across awaits on purpose: the awaited
+    /// signup path reads the process-global key.
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn signup_persists_uuid_user_and_tenant_rows() {
         let Some(pool) = crate::test_db::canonical_pool("signup_rows").await else {
@@ -4438,10 +4449,15 @@ mod tests {
     /// same credentials reaches the authentication decision (for a fresh
     /// owner account that is the MFA-enrollment challenge, 202 — NOT
     /// 401 invalid credentials), proving the persisted row is usable.
+    /// The DKIM env guard is held across awaits on purpose: the awaited
+    /// signup path reads the process-global key.
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn signup_then_login_authenticates_the_new_account() {
         let Some(pool) = crate::test_db::canonical_pool("signup_login").await else {
-            eprintln!("skipping signup_then_login_authenticates_the_new_account: no TEST_DATABASE_URL");
+            eprintln!(
+                "skipping signup_then_login_authenticates_the_new_account: no TEST_DATABASE_URL"
+            );
             return;
         };
         let redis_url = std::env::var("TEST_REDIS_URL")
@@ -4460,8 +4476,9 @@ mod tests {
         .await
         {
             Ok(Ok(mut conn)) => {
-                let pong: Result<String, _> =
-                    deadpool_redis::redis::cmd("PING").query_async(&mut *conn).await;
+                let pong: Result<String, _> = deadpool_redis::redis::cmd("PING")
+                    .query_async(&mut *conn)
+                    .await;
                 pong.is_ok()
             }
             _ => false,

@@ -208,10 +208,7 @@ impl SignatureSet {
             // that would drop legitimate traffic containing a ubiquitous
             // word. Require either ≥2 distinct matched tokens or one
             // sufficiently long (≥ MIN_DROP_SINGLE_TOKEN_LEN bytes) token.
-            let destructive = matches!(
-                sig.action,
-                SignatureAction::Drop | SignatureAction::Reject
-            );
+            let destructive = matches!(sig.action, SignatureAction::Drop | SignatureAction::Reject);
             let specificity_ok = if destructive && has_content && !has_regex {
                 sig_hit_details
                     .get(&sig_idx)
@@ -306,7 +303,8 @@ fn protocol_applies(sig_protocol: &str, wire_protocol: &str) -> bool {
 
 /// Result of a signature scan match
 #[derive(Debug, Clone)]
-pub struct ScanMatch {    /// Signature ID
+pub struct ScanMatch {
+    /// Signature ID
     pub sid: u32,
     /// Alert message
     pub message: String,

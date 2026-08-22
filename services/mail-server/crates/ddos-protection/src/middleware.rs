@@ -424,12 +424,18 @@ mod tests {
         // A DIRECT client sending spoofed X-Real-Ip / XFF / CF headers must
         // be identified by its socket address.
         let direct = ip("203.0.113.99");
-        assert_eq!(extract_client_ip(Some("10.0.0.1"), None, None, direct), direct);
+        assert_eq!(
+            extract_client_ip(Some("10.0.0.1"), None, None, direct),
+            direct
+        );
         assert_eq!(
             extract_client_ip(None, Some("10.0.0.2, 10.0.0.3"), None, direct),
             direct
         );
-        assert_eq!(extract_client_ip(None, None, Some("10.0.0.4"), direct), direct);
+        assert_eq!(
+            extract_client_ip(None, None, Some("10.0.0.4"), direct),
+            direct
+        );
         assert_eq!(
             extract_client_ip(
                 Some("10.0.0.1"),
@@ -470,7 +476,11 @@ mod tests {
             proxy1,
             &trusted,
         );
-        assert_eq!(result, ip("203.0.113.50"), "rightmost untrusted entry is the client");
+        assert_eq!(
+            result,
+            ip("203.0.113.50"),
+            "rightmost untrusted entry is the client"
+        );
     }
 
     #[test]

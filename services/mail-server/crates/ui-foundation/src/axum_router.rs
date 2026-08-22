@@ -163,357 +163,474 @@ fn marketing_static_document(surface: &str, path: &str) -> Option<&'static str> 
     };
 
     match path {
-        "/" => Some(include_str!(
-            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/index.html"),
-        )),
-        "/about" => Some(include_str!(
-            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/about/index.html"),
-        )),
-        "/acceptable-use" => Some(include_str!(
-            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/acceptable-use/index.html"),
-        )),
-        "/anti-spam" => Some(include_str!(
-            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/anti-spam/index.html"),
-        )),
-        "/api-explorer" => Some(include_str!(
-            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/api-explorer/index.html"),
-        )),
-        "/architecture" => Some(include_str!(
-            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/architecture/index.html"),
-        )),
-        "/case-studies" => Some(include_str!(
-            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/case-studies/index.html"),
-        )),
-        "/compare" => Some(include_str!(
-            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/compare/index.html"),
-        )),
-        "/compare/amazon-ses" => Some(include_str!(
-            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/compare/amazon-ses/index.html"),
-        )),
-        "/compare/mailgun" => Some(include_str!(
-            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/compare/mailgun/index.html"),
-        )),
-        "/compare/methodology" => Some(include_str!(
-            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/compare/methodology/index.html"),
-        )),
-        "/compare/postmark" => Some(include_str!(
-            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/compare/postmark/index.html"),
-        )),
-        "/compare/resend" => Some(include_str!(
-            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/compare/resend/index.html"),
-        )),
-        "/compare/sendgrid" => Some(include_str!(
-            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/compare/sendgrid/index.html"),
-        )),
-        "/compliance" => Some(include_str!(
-            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/compliance/index.html"),
-        )),
-        "/contact" => Some(include_str!(
-            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/contact/index.html"),
-        )),
-        "/contact/enterprise" => Some(include_str!(
-            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/contact/enterprise/index.html"),
-        )),
-        "/contact/sales" => Some(include_str!(
-            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/contact/sales/index.html"),
-        )),
-        "/contact/security" => Some(include_str!(
-            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/contact/security/index.html"),
-        )),
-        "/cookies" => Some(include_str!(
-            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/cookies/index.html"),
-        )),
-        "/data-locations" => Some(include_str!(
-            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/data-locations/index.html"),
-        )),
-        "/de" => Some(include_str!(
-            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/de/index.html"),
-        )),
-        "/de/about" => Some(include_str!(
-            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/de/about/index.html"),
-        )),
-        "/de/acceptable-use" => Some(include_str!(
-            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/de/acceptable-use/index.html"),
-        )),
-        "/de/compare" => Some(include_str!(
-            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/de/compare/index.html"),
-        )),
-        "/de/compliance" => Some(include_str!(
-            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/de/compliance/index.html"),
-        )),
-        "/de/contact" => Some(include_str!(
-            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/de/contact/index.html"),
-        )),
-        "/de/cookies" => Some(include_str!(
-            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/de/cookies/index.html"),
-        )),
-        "/de/data-locations" => Some(include_str!(
-            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/de/data-locations/index.html"),
-        )),
-        "/de/dpa" => Some(include_str!(
-            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/de/dpa/index.html"),
-        )),
-        "/de/features" => Some(include_str!(
-            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/de/features/index.html"),
-        )),
-        "/de/privacy" => Some(include_str!(
-            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/de/privacy/index.html"),
-        )),
-        "/de/private-cloud" => Some(include_str!(
-            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/de/private-cloud/index.html"),
-        )),
-        "/de/quickstart" => Some(include_str!(
-            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/de/quickstart/index.html"),
-        )),
-        "/de/responsible-disclosure" => Some(include_str!(
-            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/de/responsible-disclosure/index.html"),
-        )),
-        "/de/security" => Some(include_str!(
-            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/de/security/index.html"),
-        )),
-        "/de/sla" => Some(include_str!(
-            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/de/sla/index.html"),
-        )),
-        "/de/solutions/enterprise" => Some(include_str!(
-            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/de/solutions/enterprise/index.html"),
-        )),
-        "/de/status" => Some(include_str!(
-            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/de/status/index.html"),
-        )),
-        "/de/subprocessors" => Some(include_str!(
-            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/de/subprocessors/index.html"),
-        )),
-        "/de/terms" => Some(include_str!(
-            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/de/terms/index.html"),
-        )),
-        "/docs" => Some(include_str!(
-            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/docs/index.html"),
-        )),
-        "/docs/alerts" => Some(include_str!(
-            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/docs/alerts/index.html"),
-        )),
-        "/docs/analytics" => Some(include_str!(
-            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/docs/analytics/index.html"),
-        )),
-        "/docs/api" => Some(include_str!(
-            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/docs/api/index.html"),
-        )),
-        "/docs/api/grader" => Some(include_str!(
-            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/docs/api/grader/index.html"),
-        )),
-        "/docs/api/openapi" => Some(include_str!(
-            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/docs/api/openapi/index.html"),
-        )),
-        "/docs/sdks" => Some(include_str!(
-            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/docs/sdks/index.html"),
-        )),
-        "/docs/webhooks" => Some(include_str!(
-            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/docs/webhooks/index.html"),
-        )),
-        "/dpa" => Some(include_str!(
-            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/dpa/index.html"),
-        )),
-        "/enterprise" => Some(include_str!(
-            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/enterprise/index.html"),
-        )),
-        "/es" => Some(include_str!(
-            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/es/index.html"),
-        )),
-        "/es/about" => Some(include_str!(
-            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/es/about/index.html"),
-        )),
-        "/es/acceptable-use" => Some(include_str!(
-            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/es/acceptable-use/index.html"),
-        )),
-        "/es/compare" => Some(include_str!(
-            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/es/compare/index.html"),
-        )),
-        "/es/compliance" => Some(include_str!(
-            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/es/compliance/index.html"),
-        )),
-        "/es/contact" => Some(include_str!(
-            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/es/contact/index.html"),
-        )),
-        "/es/cookies" => Some(include_str!(
-            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/es/cookies/index.html"),
-        )),
-        "/es/data-locations" => Some(include_str!(
-            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/es/data-locations/index.html"),
-        )),
-        "/es/dpa" => Some(include_str!(
-            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/es/dpa/index.html"),
-        )),
-        "/es/features" => Some(include_str!(
-            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/es/features/index.html"),
-        )),
-        "/es/privacy" => Some(include_str!(
-            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/es/privacy/index.html"),
-        )),
-        "/es/private-cloud" => Some(include_str!(
-            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/es/private-cloud/index.html"),
-        )),
-        "/es/quickstart" => Some(include_str!(
-            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/es/quickstart/index.html"),
-        )),
-        "/es/responsible-disclosure" => Some(include_str!(
-            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/es/responsible-disclosure/index.html"),
-        )),
-        "/es/security" => Some(include_str!(
-            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/es/security/index.html"),
-        )),
-        "/es/sla" => Some(include_str!(
-            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/es/sla/index.html"),
-        )),
-        "/es/solutions/enterprise" => Some(include_str!(
-            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/es/solutions/enterprise/index.html"),
-        )),
-        "/es/status" => Some(include_str!(
-            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/es/status/index.html"),
-        )),
-        "/es/subprocessors" => Some(include_str!(
-            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/es/subprocessors/index.html"),
-        )),
-        "/es/terms" => Some(include_str!(
-            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/es/terms/index.html"),
-        )),
-        "/features" => Some(include_str!(
-            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/features/index.html"),
-        )),
-        "/forensic" => Some(include_str!(
-            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/forensic/index.html"),
-        )),
-        "/fr" => Some(include_str!(
-            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/fr/index.html"),
-        )),
-        "/fr/about" => Some(include_str!(
-            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/fr/about/index.html"),
-        )),
-        "/fr/acceptable-use" => Some(include_str!(
-            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/fr/acceptable-use/index.html"),
-        )),
-        "/fr/compare" => Some(include_str!(
-            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/fr/compare/index.html"),
-        )),
-        "/fr/compliance" => Some(include_str!(
-            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/fr/compliance/index.html"),
-        )),
-        "/fr/contact" => Some(include_str!(
-            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/fr/contact/index.html"),
-        )),
-        "/fr/cookies" => Some(include_str!(
-            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/fr/cookies/index.html"),
-        )),
-        "/fr/data-locations" => Some(include_str!(
-            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/fr/data-locations/index.html"),
-        )),
-        "/fr/dpa" => Some(include_str!(
-            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/fr/dpa/index.html"),
-        )),
-        "/fr/features" => Some(include_str!(
-            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/fr/features/index.html"),
-        )),
-        "/fr/privacy" => Some(include_str!(
-            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/fr/privacy/index.html"),
-        )),
-        "/fr/private-cloud" => Some(include_str!(
-            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/fr/private-cloud/index.html"),
-        )),
-        "/fr/quickstart" => Some(include_str!(
-            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/fr/quickstart/index.html"),
-        )),
-        "/fr/responsible-disclosure" => Some(include_str!(
-            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/fr/responsible-disclosure/index.html"),
-        )),
-        "/fr/security" => Some(include_str!(
-            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/fr/security/index.html"),
-        )),
-        "/fr/sla" => Some(include_str!(
-            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/fr/sla/index.html"),
-        )),
-        "/fr/solutions/enterprise" => Some(include_str!(
-            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/fr/solutions/enterprise/index.html"),
-        )),
-        "/fr/status" => Some(include_str!(
-            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/fr/status/index.html"),
-        )),
-        "/fr/subprocessors" => Some(include_str!(
-            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/fr/subprocessors/index.html"),
-        )),
-        "/fr/terms" => Some(include_str!(
-            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/fr/terms/index.html"),
-        )),
-        "/inbox-placement" => Some(include_str!(
-            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/inbox-placement/index.html"),
-        )),
-        "/performance-methodology" => Some(include_str!(
-            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/performance-methodology/index.html"),
-        )),
-        "/pricing" => Some(include_str!(
-            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/pricing/index.html"),
-        )),
-        "/pricing/calculator" => Some(include_str!(
-            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/pricing/calculator/index.html"),
-        )),
-        "/privacy" => Some(include_str!(
-            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/privacy/index.html"),
-        )),
-        "/privacy/do-not-sell" => Some(include_str!(
-            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/privacy/do-not-sell/index.html"),
-        )),
-        "/private-cloud" => Some(include_str!(
-            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/private-cloud/index.html"),
-        )),
-        "/quickstart" => Some(include_str!(
-            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/quickstart/index.html"),
-        )),
-        "/responsible-disclosure" => Some(include_str!(
-            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/responsible-disclosure/index.html"),
-        )),
-        "/secure-email-for-regulated-saas" => Some(include_str!(
-            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/secure-email-for-regulated-saas/index.html"),
-        )),
-        "/security" => Some(include_str!(
-            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/security/index.html"),
-        )),
-        "/sla" => Some(include_str!(
-            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/sla/index.html"),
-        )),
-        "/solutions" => Some(include_str!(
-            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/solutions/index.html"),
-        )),
-        "/solutions/enterprise" => Some(include_str!(
-            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/solutions/enterprise/index.html"),
-        )),
-        "/solutions/high-volume-sending" => Some(include_str!(
-            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/solutions/high-volume-sending/index.html"),
-        )),
-        "/solutions/migration" => Some(include_str!(
-            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/solutions/migration/index.html"),
-        )),
-        "/solutions/regulated-industries" => Some(include_str!(
-            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/solutions/regulated-industries/index.html"),
-        )),
-        "/solutions/saas-platforms" => Some(include_str!(
-            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/solutions/saas-platforms/index.html"),
-        )),
-        "/solutions/transactional-email" => Some(include_str!(
-            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/solutions/transactional-email/index.html"),
-        )),
-        "/status" => Some(include_str!(
-            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/status/index.html"),
-        )),
-        "/subprocessors" => Some(include_str!(
-            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/subprocessors/index.html"),
-        )),
-        "/terms" => Some(include_str!(
-            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/terms/index.html"),
-        )),
-        "/api-console" => Some(include_str!(
-            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/api-explorer/index.html"),
-        )),
-        "/aup" => Some(include_str!(
-            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/acceptable-use/index.html"),
-        )),
+        "/" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/index.html"
+        ),)),
+        "/about" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/about/index.html"
+        ),)),
+        "/acceptable-use" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/acceptable-use/index.html"
+        ),)),
+        "/anti-spam" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/anti-spam/index.html"
+        ),)),
+        "/api-explorer" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/api-explorer/index.html"
+        ),)),
+        "/architecture" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/architecture/index.html"
+        ),)),
+        "/case-studies" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/case-studies/index.html"
+        ),)),
+        "/compare" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/compare/index.html"
+        ),)),
+        "/compare/amazon-ses" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/compare/amazon-ses/index.html"
+        ),)),
+        "/compare/mailgun" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/compare/mailgun/index.html"
+        ),)),
+        "/compare/methodology" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/compare/methodology/index.html"
+        ),)),
+        "/compare/postmark" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/compare/postmark/index.html"
+        ),)),
+        "/compare/resend" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/compare/resend/index.html"
+        ),)),
+        "/compare/sendgrid" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/compare/sendgrid/index.html"
+        ),)),
+        "/compliance" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/compliance/index.html"
+        ),)),
+        "/contact" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/contact/index.html"
+        ),)),
+        "/contact/enterprise" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/contact/enterprise/index.html"
+        ),)),
+        "/contact/sales" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/contact/sales/index.html"
+        ),)),
+        "/contact/security" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/contact/security/index.html"
+        ),)),
+        "/cookies" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/cookies/index.html"
+        ),)),
+        "/data-locations" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/data-locations/index.html"
+        ),)),
+        "/de" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/de/index.html"
+        ),)),
+        "/de/about" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/de/about/index.html"
+        ),)),
+        "/de/acceptable-use" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/de/acceptable-use/index.html"
+        ),)),
+        "/de/compare" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/de/compare/index.html"
+        ),)),
+        "/de/compliance" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/de/compliance/index.html"
+        ),)),
+        "/de/contact" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/de/contact/index.html"
+        ),)),
+        "/de/cookies" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/de/cookies/index.html"
+        ),)),
+        "/de/data-locations" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/de/data-locations/index.html"
+        ),)),
+        "/de/dpa" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/de/dpa/index.html"
+        ),)),
+        "/de/features" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/de/features/index.html"
+        ),)),
+        "/de/privacy" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/de/privacy/index.html"
+        ),)),
+        "/de/private-cloud" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/de/private-cloud/index.html"
+        ),)),
+        "/de/quickstart" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/de/quickstart/index.html"
+        ),)),
+        "/de/responsible-disclosure" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/de/responsible-disclosure/index.html"
+        ),)),
+        "/de/security" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/de/security/index.html"
+        ),)),
+        "/de/sla" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/de/sla/index.html"
+        ),)),
+        "/de/solutions/enterprise" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/de/solutions/enterprise/index.html"
+        ),)),
+        "/de/status" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/de/status/index.html"
+        ),)),
+        "/de/subprocessors" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/de/subprocessors/index.html"
+        ),)),
+        "/de/terms" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/de/terms/index.html"
+        ),)),
+        "/docs" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/docs/index.html"
+        ),)),
+        "/docs/alerts" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/docs/alerts/index.html"
+        ),)),
+        "/docs/analytics" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/docs/analytics/index.html"
+        ),)),
+        "/docs/api" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/docs/api/index.html"
+        ),)),
+        "/docs/api/grader" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/docs/api/grader/index.html"
+        ),)),
+        "/docs/api/openapi" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/docs/api/openapi/index.html"
+        ),)),
+        "/docs/sdks" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/docs/sdks/index.html"
+        ),)),
+        "/docs/webhooks" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/docs/webhooks/index.html"
+        ),)),
+        "/dpa" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/dpa/index.html"
+        ),)),
+        "/enterprise" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/enterprise/index.html"
+        ),)),
+        "/es" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/es/index.html"
+        ),)),
+        "/es/about" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/es/about/index.html"
+        ),)),
+        "/es/acceptable-use" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/es/acceptable-use/index.html"
+        ),)),
+        "/es/compare" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/es/compare/index.html"
+        ),)),
+        "/es/compliance" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/es/compliance/index.html"
+        ),)),
+        "/es/contact" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/es/contact/index.html"
+        ),)),
+        "/es/cookies" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/es/cookies/index.html"
+        ),)),
+        "/es/data-locations" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/es/data-locations/index.html"
+        ),)),
+        "/es/dpa" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/es/dpa/index.html"
+        ),)),
+        "/es/features" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/es/features/index.html"
+        ),)),
+        "/es/privacy" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/es/privacy/index.html"
+        ),)),
+        "/es/private-cloud" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/es/private-cloud/index.html"
+        ),)),
+        "/es/quickstart" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/es/quickstart/index.html"
+        ),)),
+        "/es/responsible-disclosure" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/es/responsible-disclosure/index.html"
+        ),)),
+        "/es/security" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/es/security/index.html"
+        ),)),
+        "/es/sla" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/es/sla/index.html"
+        ),)),
+        "/es/solutions/enterprise" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/es/solutions/enterprise/index.html"
+        ),)),
+        "/es/status" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/es/status/index.html"
+        ),)),
+        "/es/subprocessors" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/es/subprocessors/index.html"
+        ),)),
+        "/es/terms" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/es/terms/index.html"
+        ),)),
+        "/features" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/features/index.html"
+        ),)),
+        "/forensic" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/forensic/index.html"
+        ),)),
+        "/fr" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/fr/index.html"
+        ),)),
+        "/fr/about" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/fr/about/index.html"
+        ),)),
+        "/fr/acceptable-use" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/fr/acceptable-use/index.html"
+        ),)),
+        "/fr/compare" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/fr/compare/index.html"
+        ),)),
+        "/fr/compliance" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/fr/compliance/index.html"
+        ),)),
+        "/fr/contact" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/fr/contact/index.html"
+        ),)),
+        "/fr/cookies" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/fr/cookies/index.html"
+        ),)),
+        "/fr/data-locations" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/fr/data-locations/index.html"
+        ),)),
+        "/fr/dpa" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/fr/dpa/index.html"
+        ),)),
+        "/fr/features" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/fr/features/index.html"
+        ),)),
+        "/fr/privacy" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/fr/privacy/index.html"
+        ),)),
+        "/fr/private-cloud" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/fr/private-cloud/index.html"
+        ),)),
+        "/fr/quickstart" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/fr/quickstart/index.html"
+        ),)),
+        "/fr/responsible-disclosure" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/fr/responsible-disclosure/index.html"
+        ),)),
+        "/fr/security" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/fr/security/index.html"
+        ),)),
+        "/fr/sla" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/fr/sla/index.html"
+        ),)),
+        "/fr/solutions/enterprise" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/fr/solutions/enterprise/index.html"
+        ),)),
+        "/fr/status" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/fr/status/index.html"
+        ),)),
+        "/fr/subprocessors" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/fr/subprocessors/index.html"
+        ),)),
+        "/fr/terms" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/fr/terms/index.html"
+        ),)),
+        "/inbox-placement" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/inbox-placement/index.html"
+        ),)),
+        "/performance-methodology" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/performance-methodology/index.html"
+        ),)),
+        "/pricing" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/pricing/index.html"
+        ),)),
+        "/pricing/calculator" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/pricing/calculator/index.html"
+        ),)),
+        "/privacy" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/privacy/index.html"
+        ),)),
+        "/privacy/do-not-sell" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/privacy/do-not-sell/index.html"
+        ),)),
+        "/private-cloud" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/private-cloud/index.html"
+        ),)),
+        "/quickstart" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/quickstart/index.html"
+        ),)),
+        "/responsible-disclosure" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/responsible-disclosure/index.html"
+        ),)),
+        "/secure-email-for-regulated-saas" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/secure-email-for-regulated-saas/index.html"
+        ),)),
+        "/security" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/security/index.html"
+        ),)),
+        "/sla" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/sla/index.html"
+        ),)),
+        "/solutions" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/solutions/index.html"
+        ),)),
+        "/solutions/enterprise" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/solutions/enterprise/index.html"
+        ),)),
+        "/solutions/high-volume-sending" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/solutions/high-volume-sending/index.html"
+        ),)),
+        "/solutions/migration" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/solutions/migration/index.html"
+        ),)),
+        "/solutions/regulated-industries" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/solutions/regulated-industries/index.html"
+        ),)),
+        "/solutions/saas-platforms" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/solutions/saas-platforms/index.html"
+        ),)),
+        "/solutions/transactional-email" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/solutions/transactional-email/index.html"
+        ),)),
+        "/status" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/status/index.html"
+        ),)),
+        "/subprocessors" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/subprocessors/index.html"
+        ),)),
+        "/terms" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/terms/index.html"
+        ),)),
+        "/api-console" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/api-explorer/index.html"
+        ),)),
+        "/aup" => Some(include_str!(concat!(
+            env!("APX_MARKETING_PUBLIC_DIR"),
+            "/acceptable-use/index.html"
+        ),)),
         _ => None,
     }
 }
@@ -623,8 +740,8 @@ pub fn strip_executable_scripts(document: &str) -> String {
         };
         let tag_end = tag_start + tag_end_offset;
         let opening_tag = &lower[tag_start..=tag_end];
-        let is_data_block = opening_tag.contains("application/ld+json")
-            || opening_tag.contains("application/json");
+        let is_data_block =
+            opening_tag.contains("application/ld+json") || opening_tag.contains("application/json");
         if is_data_block {
             // Keep the whole element (opening tag, body, closing tag).
             if let Some(close_offset) = lower[tag_end..].find("</script>") {
@@ -719,43 +836,44 @@ pub fn render_route_with_form_fields(
         path
     };
     let csrf_token = csrf_secret.map_or_else(String::new, crate::csrf::generate_csrf_token);
-    let html = match surface {
-        "web" => {
-            let inner = render_inner(surface, path, query, csrf_secret, data)?;
-            let page = match path {
-                "/login" | "/signup" | "/forgot-password" | "/reset-password" | "/verify-email"
-                | "/" | "/not-found" => leptos_views::web_root_layout(&inner),
-                _ => leptos_views::web_root_layout(&leptos_views::web_dashboard_layout_with_csrf(
-                    &inner, path, &csrf_token,
-                )),
-            };
-            page
-        }
-        "control-plane" => {
-            let inner = render_inner(surface, path, query, csrf_secret, data)?;
-            let page = match path {
-                "/login" => inner,
-                _ => {
-                    let (title, description) = control_plane_route_context(path);
-                    leptos_views::control_plane_app_layout_with_title(
-                        &inner,
-                        title,
-                        description,
-                        path,
-                        &csrf_token,
-                    )
-                }
-            };
-            leptos_views::control_plane_root_layout(&page)
-        }
-        "marketing" | "marketing-zola" => marketing_static_document(surface, path)
-            .map(normalize_marketing_static_document)
-            .or_else(|| {
+    let html =
+        match surface {
+            "web" => {
                 let inner = render_inner(surface, path, query, csrf_secret, data)?;
-                Some(leptos_views::marketing_page(&inner))
-            })?,
-        _ => return None,
-    };
+
+                match path {
+                    "/login" | "/signup" | "/forgot-password" | "/reset-password"
+                    | "/verify-email" | "/" | "/not-found" => leptos_views::web_root_layout(&inner),
+                    _ => leptos_views::web_root_layout(
+                        &leptos_views::web_dashboard_layout_with_csrf(&inner, path, &csrf_token),
+                    ),
+                }
+            }
+            "control-plane" => {
+                let inner = render_inner(surface, path, query, csrf_secret, data)?;
+                let page = match path {
+                    "/login" => inner,
+                    _ => {
+                        let (title, description) = control_plane_route_context(path);
+                        leptos_views::control_plane_app_layout_with_title(
+                            &inner,
+                            title,
+                            description,
+                            path,
+                            &csrf_token,
+                        )
+                    }
+                };
+                leptos_views::control_plane_root_layout(&page)
+            }
+            "marketing" | "marketing-zola" => marketing_static_document(surface, path)
+                .map(normalize_marketing_static_document)
+                .or_else(|| {
+                    let inner = render_inner(surface, path, query, csrf_secret, data)?;
+                    Some(leptos_views::marketing_page(&inner))
+                })?,
+            _ => return None,
+        };
     let html = render_flash_banners(html, flash);
     let html = inject_form_field_state(html, fields);
     let html = inject_csrf_and_sign_confirms(html, csrf_secret);
@@ -780,7 +898,10 @@ fn inject_opt_in_auto_refresh(
     path: &str,
     query: Option<&str>,
 ) -> String {
-    if !LIVE_METRICS_PATHS.iter().any(|(s, p)| *s == surface && *p == path) {
+    if !LIVE_METRICS_PATHS
+        .iter()
+        .any(|(s, p)| *s == surface && *p == path)
+    {
         return html;
     }
     let params = parse_query_params(query);
@@ -804,7 +925,10 @@ fn inject_opt_in_auto_refresh(
     };
     let insert_pill = |html: &mut String, pill: &str| {
         if let Some(body_at) = html.find("<body") {
-            let insert_at = html[body_at..].find('>').map(|e| body_at + e + 1).unwrap_or(body_at);
+            let insert_at = html[body_at..]
+                .find('>')
+                .map(|e| body_at + e + 1)
+                .unwrap_or(body_at);
             html.insert_str(insert_at, pill);
         }
     };
@@ -816,7 +940,10 @@ fn inject_opt_in_auto_refresh(
     if let Some(head_end) = html.find("</head>") {
         html.insert_str(head_end, &meta);
     } else if let Some(body_at) = html.find("<body") {
-        let insert_at = html[body_at..].find('>').map(|e| body_at + e + 1).unwrap_or(body_at);
+        let insert_at = html[body_at..]
+            .find('>')
+            .map(|e| body_at + e + 1)
+            .unwrap_or(body_at);
         html.insert_str(insert_at, &meta);
     }
     insert_pill(&mut html, &pill);
@@ -860,10 +987,16 @@ fn render_flash_banners(mut html: String, flash: &[crate::flash::FlashMessage]) 
         banners = banners
     );
     if let Some(idx) = html.find("<main id=\"app-main\"") {
-        let insert_at = html[idx..].find('>').map(|end| idx + end + 1).unwrap_or(idx);
+        let insert_at = html[idx..]
+            .find('>')
+            .map(|end| idx + end + 1)
+            .unwrap_or(idx);
         html.insert_str(insert_at, &anchored);
     } else if let Some(idx) = html.find("<body") {
-        let insert_at = html[idx..].find('>').map(|end| idx + end + 1).unwrap_or(idx);
+        let insert_at = html[idx..]
+            .find('>')
+            .map(|end| idx + end + 1)
+            .unwrap_or(idx);
         html.insert_str(insert_at, &anchored);
     }
     html
@@ -914,10 +1047,18 @@ fn inject_form_field_state(html: String, fields: Option<&FormFieldData>) -> Stri
             .join("");
         if let Some(idx) = html.find("</div>") {
             // Right after the flash container when present…
-            let after_flash = html[..idx].contains("id=\"flash\"").then(|| idx + "</div>".len());
+            let after_flash = html[..idx]
+                .contains("id=\"flash\"")
+                .then(|| idx + "</div>".len());
             let insert_at = after_flash
-                .or_else(|| html.find("<main id=\"app-main\"").and_then(|main| html[main..].find('>').map(|e| main + e + 1)))
-                .or_else(|| html.find("<body").and_then(|body| html[body..].find('>').map(|e| body + e + 1)));
+                .or_else(|| {
+                    html.find("<main id=\"app-main\"")
+                        .and_then(|main| html[main..].find('>').map(|e| main + e + 1))
+                })
+                .or_else(|| {
+                    html.find("<body")
+                        .and_then(|body| html[body..].find('>').map(|e| body + e + 1))
+                });
             if let Some(insert_at) = insert_at {
                 html.insert_str(insert_at, &chips);
             }
@@ -926,7 +1067,12 @@ fn inject_form_field_state(html: String, fields: Option<&FormFieldData>) -> Stri
 
     // 2. Value / error injection per named control.
     let form_scoped = html.contains("data-form-id=\"");
-    if form_scoped && !html.contains(&format!("data-form-id=\"{}\"", crate::shell::html_escape(&map.form_id))) {
+    if form_scoped
+        && !html.contains(&format!(
+            "data-form-id=\"{}\"",
+            crate::shell::html_escape(&map.form_id)
+        ))
+    {
         // The map belongs to a form this page does not carry — do not
         // replay values into unrelated fields.
         return html;
@@ -946,8 +1092,14 @@ fn make_checked(html: &str, name: &str, value: &str) -> String {
         // Only rewrite inputs (not textareas/selects named the same).
         let tag_start = rest[..pos].rfind('<').unwrap_or(0);
         let is_input = rest[tag_start..].starts_with("<input");
-        let tag_end = rest[pos..].find('>').map(|offset| pos + offset).unwrap_or(pos);
-        if is_input && rest[tag_start..=tag_end].contains(&format!("value=\"{}\"", crate::shell::html_escape(value))) {
+        let tag_end = rest[pos..]
+            .find('>')
+            .map(|offset| pos + offset)
+            .unwrap_or(pos);
+        if is_input
+            && rest[tag_start..=tag_end]
+                .contains(&format!("value=\"{}\"", crate::shell::html_escape(value)))
+        {
             out.push_str(&rest[..tag_end]);
             out.push_str(" checked");
             out.push('>');
@@ -1042,7 +1194,11 @@ fn rewrite_input_tag(tag: &str, map: &FormFieldData) -> String {
     let is_choice = tag.contains("type=\"checkbox\"") || tag.contains("type=\"radio\"");
     let self_closing = tag.trim_end().ends_with("/>");
     let close_len = if self_closing {
-        if tag.trim_end().ends_with("/>") { 2 } else { 1 }
+        if tag.trim_end().ends_with("/>") {
+            2
+        } else {
+            1
+        }
     } else {
         1
     };
@@ -1052,7 +1208,7 @@ fn rewrite_input_tag(tag: &str, map: &FormFieldData) -> String {
     if let Some(value) = value {
         let escaped = crate::shell::html_escape(value);
         if is_choice {
-            if extract_attribute(tag, "value").as_deref() == Some(&*value)
+            if extract_attribute(tag, "value").as_deref() == Some(value)
                 && !body.contains(" checked")
             {
                 body.push_str(" checked");
@@ -1141,13 +1297,16 @@ fn inject_select_values(html: &mut String, map: &FormFieldData) {
                         .unwrap_or(options.len());
                     selected_inner.push_str(&options[..option_end]);
                     let option_tag = &options[option_start..option_end];
-                    if extract_attribute(option_tag, "value").as_deref() == Some(&*value) {
+                    if extract_attribute(option_tag, "value").as_deref() == Some(value) {
                         selected_inner.push_str(" selected");
                     }
                     selected_inner.push('>');
                     // Preserve the rest of this option's markup up to the
                     // next option (or the end).
-                    let next = options[option_end..].find("<option").map(|offset| option_end + offset).unwrap_or(options.len());
+                    let next = options[option_end..]
+                        .find("<option")
+                        .map(|offset| option_end + offset)
+                        .unwrap_or(options.len());
                     selected_inner.push_str(&options[option_end..next]);
                     options = &options[next..];
                 }
@@ -1189,7 +1348,10 @@ fn inject_csrf_and_sign_confirms(html: String, csrf_secret: Option<&str>) -> Str
     let mut output = String::with_capacity(html.len() + 512);
     let mut rest = html.as_str();
     while let Some(start) = rest.find("<form ") {
-        let end = rest[start..].find('>').map(|offset| start + offset + 1).unwrap_or(rest.len());
+        let end = rest[start..]
+            .find('>')
+            .map(|offset| start + offset + 1)
+            .unwrap_or(rest.len());
         let tag = &rest[start..end];
         let posts_to_web = tag.contains("method=\"post\"") && tag.contains("action=\"/web/");
         if posts_to_web && !rest[..end].contains("name=\"_csrf\"") {
@@ -1356,7 +1518,10 @@ fn data_backed_inner(path: &str, data: Option<&RouteData>) -> Option<String> {
 /// Single-word noun for pagination storage keys / summary copy, derived
 /// from the route path.
 fn list_noun(path: &str) -> String {
-    let segment = path.rsplit('/').find(|s| !s.is_empty()).unwrap_or("records");
+    let segment = path
+        .rsplit('/')
+        .find(|s| !s.is_empty())
+        .unwrap_or("records");
     match segment {
         "inbox-placement" | "billing" => segment.to_string(),
         other => other.trim_end_matches('s').to_string(),
@@ -1442,8 +1607,9 @@ fn render_web(
             params.status.as_deref(),
             params.message.as_deref(),
         ),
-        "/dashboard" => data_backed_inner("/dashboard", data)
-            .unwrap_or_else(|| leptos_views::web_dashboard_page()),
+        "/dashboard" => {
+            data_backed_inner("/dashboard", data).unwrap_or_else(leptos_views::web_dashboard_page)
+        }
         // Legacy /legal/* paths are 301-style redirects to the canonical
         // marketing routes (kept so external links and old bookmarks keep
         // working). The page both meta-refreshes and carries rel=canonical.
@@ -1454,66 +1620,75 @@ fn render_web(
         // app.apexmail.ee).
         "/terms" => legal_redirect_page(MARKETING_ORIGIN, "/terms"),
         "/privacy" => legal_redirect_page(MARKETING_ORIGIN, "/privacy"),
-        "/campaigns" => data_backed_inner("/campaigns", data)
-            .unwrap_or_else(|| leptos_views::web_campaigns_page()),
+        "/campaigns" => {
+            data_backed_inner("/campaigns", data).unwrap_or_else(leptos_views::web_campaigns_page)
+        }
         "/campaigns/new" => leptos_views::web_campaigns_new_page(),
-        "/contacts" => data_backed_inner("/contacts", data)
-            .unwrap_or_else(|| leptos_views::web_contacts_page()),
+        "/contacts" => {
+            data_backed_inner("/contacts", data).unwrap_or_else(leptos_views::web_contacts_page)
+        }
         "/contacts/new" => leptos_views::web_contacts_new_page(),
-        "/lists" => data_backed_inner("/lists", data)
-            .unwrap_or_else(|| leptos_views::web_lists_page()),
+        "/lists" => data_backed_inner("/lists", data).unwrap_or_else(leptos_views::web_lists_page),
         "/lists/new" => leptos_views::web_lists_new_page(),
-        "/templates" => data_backed_inner("/templates", data)
-            .unwrap_or_else(|| leptos_views::web_templates_page()),
-        "/templates/new" => leptos_views::web_templates_new_page(),        "/reports" => data_backed_inner("/reports", data)
-            .unwrap_or_else(|| leptos_views::web_reports_page()),
+        "/templates" => {
+            data_backed_inner("/templates", data).unwrap_or_else(leptos_views::web_templates_page)
+        }
+        "/templates/new" => leptos_views::web_templates_new_page(),
+        "/reports" => {
+            data_backed_inner("/reports", data).unwrap_or_else(leptos_views::web_reports_page)
+        }
         "/reports/deliverability" => data_backed_inner("/reports/deliverability", data)
-            .unwrap_or_else(|| leptos_views::web_reports_deliverability_page()),
-        "/analytics" => data_backed_inner("/analytics", data)
-            .unwrap_or_else(|| leptos_views::web_analytics_page()),
+            .unwrap_or_else(leptos_views::web_reports_deliverability_page),
+        "/analytics" => {
+            data_backed_inner("/analytics", data).unwrap_or_else(leptos_views::web_analytics_page)
+        }
         "/inbox-placement" => data_backed_inner("/inbox-placement", data)
-            .unwrap_or_else(|| leptos_views::web_inbox_placement_page()),
+            .unwrap_or_else(leptos_views::web_inbox_placement_page),
         "/inbox-placement/new" => leptos_views::web_inbox_placement_new_page(),
-        "/events" => data_backed_inner("/events", data)
-            .unwrap_or_else(|| leptos_views::web_events_page()),
-        "/domains" => data_backed_inner("/domains", data)
-            .unwrap_or_else(|| leptos_views::web_domains_page()),
+        "/events" => {
+            data_backed_inner("/events", data).unwrap_or_else(leptos_views::web_events_page)
+        }
+        "/domains" => {
+            data_backed_inner("/domains", data).unwrap_or_else(leptos_views::web_domains_page)
+        }
         "/domains/new" => leptos_views::web_domains_new_page(),
         "/settings" => leptos_views::web_settings_page(),
         "/settings/api-keys" => data_backed_inner("/settings/api-keys", data)
-            .unwrap_or_else(|| leptos_views::web_settings_api_keys_page()),
+            .unwrap_or_else(leptos_views::web_settings_api_keys_page),
         "/settings/team" => data_backed_inner("/settings/team", data)
-            .unwrap_or_else(|| leptos_views::web_settings_team_page()),
+            .unwrap_or_else(leptos_views::web_settings_team_page),
         "/settings/billing" => data_backed_inner("/settings/billing", data)
-            .unwrap_or_else(|| leptos_views::web_settings_billing_page()),
+            .unwrap_or_else(leptos_views::web_settings_billing_page),
         "/settings/dedicated-ips" => data_backed_inner("/settings/dedicated-ips", data)
-            .unwrap_or_else(|| leptos_views::web_dedicated_ips_page()),
+            .unwrap_or_else(leptos_views::web_dedicated_ips_page),
         "/settings/webhooks" => data_backed_inner("/settings/webhooks", data)
-            .unwrap_or_else(|| leptos_views::web_settings_webhooks_page()),
+            .unwrap_or_else(leptos_views::web_settings_webhooks_page),
         "/settings/profile" => leptos_views::web_settings_profile_page(),
-        p if p.starts_with("/campaigns/") && p.ends_with("/edit") => match
-            data.and_then(|d| d.campaign_edit.as_ref())
-        {
-            Some(edit) => leptos_views::web_campaign_edit_page_with_values(edit),
-            None => leptos_views::web_campaign_edit_page(),
-        },
-        p if p.starts_with("/campaigns/") => data_backed_inner(p, data)
-            .unwrap_or_else(|| leptos_views::web_campaign_detail_page()),
+        p if p.starts_with("/campaigns/") && p.ends_with("/edit") => {
+            match data.and_then(|d| d.campaign_edit.as_ref()) {
+                Some(edit) => leptos_views::web_campaign_edit_page_with_values(edit),
+                None => leptos_views::web_campaign_edit_page(),
+            }
+        }
+        p if p.starts_with("/campaigns/") => {
+            data_backed_inner(p, data).unwrap_or_else(leptos_views::web_campaign_detail_page)
+        }
         p if p.starts_with("/inbox-placement/") => leptos_views::web_inbox_placement_detail_page(),
         // /templates/{id}/edit — the editor's formaction/formtarget pattern
         // (previously a 404 behind the templates table's edit links).
         p if p.starts_with("/templates/") && p.ends_with("/edit") => {
-            let id = p.trim_start_matches("/templates/").trim_end_matches("/edit");
+            let id = p
+                .trim_start_matches("/templates/")
+                .trim_end_matches("/edit");
             leptos_views::web_template_edit_page(id)
         }
         // /domains/{id} — the DNS detail flow; without data the list page
         // renders as the honest fallback.
-        p if p.starts_with("/domains/") => data_backed_inner(p, data)
-            .unwrap_or_else(|| leptos_views::web_domains_page()),
-        // /lists/{id} and /lists/{id}/edit — previously dead links (404).
-        p if p.starts_with("/lists/") && p.ends_with("/edit") => {
-            leptos_views::web_list_edit_page()
+        p if p.starts_with("/domains/") => {
+            data_backed_inner(p, data).unwrap_or_else(leptos_views::web_domains_page)
         }
+        // /lists/{id} and /lists/{id}/edit — previously dead links (404).
+        p if p.starts_with("/lists/") && p.ends_with("/edit") => leptos_views::web_list_edit_page(),
         p if p.starts_with("/lists/new") => leptos_views::web_lists_new_page(),
         p if p.starts_with("/lists/") => leptos_views::web_list_detail_page(),
         _ => return None,
@@ -1552,9 +1727,9 @@ fn render_control_plane(
 
     Some(match path {
         "/cp" => data_backed_inner("/dashboard", data)
-            .unwrap_or_else(|| leptos_views::control_plane_dashboard_page()),
+            .unwrap_or_else(leptos_views::control_plane_dashboard_page),
         "/cp/tenants" => data_backed_inner("/tenants", data)
-            .unwrap_or_else(|| leptos_views::control_plane_tenants_page()),
+            .unwrap_or_else(leptos_views::control_plane_tenants_page),
         "/cp/infra" | "/cp/infrastructure" => leptos_views::control_plane_infrastructure_page(),
         "/cp/security" => match data.and_then(|d| d.mfa_setup.as_ref()) {
             Some(setup) => leptos_views::control_plane_security_page_with_setup(Some(
@@ -1562,50 +1737,53 @@ fn render_control_plane(
             )),
             None => leptos_views::control_plane_security_page(),
         },
-        "/cp/audit" => data_backed_inner("/audit", data)
-            .unwrap_or_else(|| leptos_views::control_plane_audit_page()),
-        "/cp/sales" => data_backed_inner("/sales", data)
-            .unwrap_or_else(|| leptos_views::control_plane_sales_page()),
-        "/" => data_backed_inner("/", data)
-            .unwrap_or_else(|| leptos_views::control_plane_home_page()),
+        "/cp/audit" => {
+            data_backed_inner("/audit", data).unwrap_or_else(leptos_views::control_plane_audit_page)
+        }
+        "/cp/sales" => {
+            data_backed_inner("/sales", data).unwrap_or_else(leptos_views::control_plane_sales_page)
+        }
+        "/" => data_backed_inner("/", data).unwrap_or_else(leptos_views::control_plane_home_page),
         "/login" => {
             let token = csrf_secret.map_or_else(String::new, csrf_token);
             leptos_views::control_plane_login_page(&token)
         }
         "/dashboard" => data_backed_inner("/dashboard", data)
-            .unwrap_or_else(|| leptos_views::control_plane_dashboard_page()),
+            .unwrap_or_else(leptos_views::control_plane_dashboard_page),
         "/tenants" => data_backed_inner("/tenants", data)
-            .unwrap_or_else(|| leptos_views::control_plane_tenants_page()),
+            .unwrap_or_else(leptos_views::control_plane_tenants_page),
         "/tenants/new" => leptos_views::control_plane_tenants_new_page(),
-        "/sales" => data_backed_inner("/sales", data)
-            .unwrap_or_else(|| leptos_views::control_plane_sales_page()),
+        "/sales" => {
+            data_backed_inner("/sales", data).unwrap_or_else(leptos_views::control_plane_sales_page)
+        }
         "/operators" => data_backed_inner("/operators", data)
-            .unwrap_or_else(|| leptos_views::control_plane_operators_page()),
+            .unwrap_or_else(leptos_views::control_plane_operators_page),
         "/operators/new" => leptos_views::control_plane_operators_new_page(),
         "/analytics" => data_backed_inner("/analytics", data)
-            .unwrap_or_else(|| leptos_views::control_plane_analytics_page()),
+            .unwrap_or_else(leptos_views::control_plane_analytics_page),
         "/discovery" => data_backed_inner("/discovery", data)
-            .unwrap_or_else(|| leptos_views::control_plane_discovery_page()),
-        "/jobs" => data_backed_inner("/jobs", data)
-            .unwrap_or_else(|| leptos_views::control_plane_jobs_page()),
+            .unwrap_or_else(leptos_views::control_plane_discovery_page),
+        "/jobs" => {
+            data_backed_inner("/jobs", data).unwrap_or_else(leptos_views::control_plane_jobs_page)
+        }
         "/infrastructure" => leptos_views::control_plane_infrastructure_page(),
         "/infrastructure/nodes" => data_backed_inner("/infrastructure/nodes", data)
-            .unwrap_or_else(|| leptos_views::control_plane_nodes_page()),
+            .unwrap_or_else(leptos_views::control_plane_nodes_page),
         "/infrastructure/queues" => data_backed_inner("/infrastructure/queues", data)
-            .unwrap_or_else(|| leptos_views::control_plane_queues_page()),
+            .unwrap_or_else(leptos_views::control_plane_queues_page),
         "/domains" => data_backed_inner("/domains", data)
-            .unwrap_or_else(|| leptos_views::control_plane_domains_page()),
+            .unwrap_or_else(leptos_views::control_plane_domains_page),
         "/billing" => leptos_views::control_plane_billing_page(),
         "/billing/plans" => data_backed_inner("/billing/plans", data)
-            .unwrap_or_else(|| leptos_views::control_plane_billing_plans_page()),
+            .unwrap_or_else(leptos_views::control_plane_billing_plans_page),
         "/compliance" => data_backed_inner("/compliance", data)
-            .unwrap_or_else(|| leptos_views::control_plane_compliance_page()),
+            .unwrap_or_else(leptos_views::control_plane_compliance_page),
         "/compliance/gdpr" => data_backed_inner("/compliance/gdpr", data)
-            .unwrap_or_else(|| leptos_views::control_plane_gdpr_page()),
+            .unwrap_or_else(leptos_views::control_plane_gdpr_page),
         "/alerts" => data_backed_inner("/alerts", data)
-            .unwrap_or_else(|| leptos_views::control_plane_alerts_page()),
+            .unwrap_or_else(leptos_views::control_plane_alerts_page),
         "/alerts/rules" => data_backed_inner("/alerts/rules", data)
-            .unwrap_or_else(|| leptos_views::control_plane_alert_rules_page()),
+            .unwrap_or_else(leptos_views::control_plane_alert_rules_page),
         "/settings" => leptos_views::control_plane_settings_page(),
         "/settings/security" => match data.and_then(|d| d.mfa_setup.as_ref()) {
             Some(setup) => leptos_views::control_plane_security_page_with_setup(Some(
@@ -1613,8 +1791,9 @@ fn render_control_plane(
             )),
             None => leptos_views::control_plane_security_page(),
         },
-        "/audit" => data_backed_inner("/audit", data)
-            .unwrap_or_else(|| leptos_views::control_plane_audit_page()),
+        "/audit" => {
+            data_backed_inner("/audit", data).unwrap_or_else(leptos_views::control_plane_audit_page)
+        }
         _ => return None,
     })
 }
@@ -1747,10 +1926,10 @@ mod tests {
         // class="...">`, so the class attribute is inside the opening tag but
         // does not directly follow `<footer`. Assert a footer element whose
         // opening tag carries a class attribute.
-        let footer_has_class = html.find("<footer ").map_or(false, |start| {
+        let footer_has_class = html.find("<footer ").is_some_and(|start| {
             html[start..]
                 .find('>')
-                .map_or(false, |end| html[start..start + end].contains("class="))
+                .is_some_and(|end| html[start..start + end].contains("class="))
         });
         assert!(
             footer_has_class,
@@ -2003,7 +2182,9 @@ mod tests {
         .unwrap();
         assert!(live.contains("<meta http-equiv=\"refresh\" content=\"30\" />"));
         assert!(live.contains("Live — auto-refresh every 30s"));
-        assert!(live.contains("href=\"/infrastructure/queues\" aria-label=\"Pause auto-refresh\">Pause</a>"));
+        assert!(live.contains(
+            "href=\"/infrastructure/queues\" aria-label=\"Pause auto-refresh\">Pause</a>"
+        ));
         // The active pill carries the honest SSR render timestamp.
         assert!(live.contains("Updated "));
 
@@ -2022,7 +2203,11 @@ mod tests {
     #[test]
     fn auto_refresh_is_rejected_off_the_allowlist() {
         // Non-live pages never gain a meta refresh, whatever the query says.
-        for (surface, path) in [("web", "/campaigns"), ("web", "/login"), ("control-plane", "/tenants")] {
+        for (surface, path) in [
+            ("web", "/campaigns"),
+            ("web", "/login"),
+            ("control-plane", "/tenants"),
+        ] {
             let html = render_route_with_query(surface, path, Some("refresh=30"), None).unwrap();
             assert!(
                 !html.contains("http-equiv=\"refresh\""),
@@ -2062,8 +2247,9 @@ mod tests {
     #[test]
     fn no_executable_script_tags_in_any_rendered_route() {
         for route in ssr::ssr_routes() {
-            let html = render_route(route.surface, route.pattern)
-                .unwrap_or_else(|| panic!("missing view for [{}] {}", route.surface, route.pattern));
+            let html = render_route(route.surface, route.pattern).unwrap_or_else(|| {
+                panic!("missing view for [{}] {}", route.surface, route.pattern)
+            });
             if let Some(index) = html.find("<script") {
                 // Find every script and prove each is a JSON-LD data block.
                 let mut cursor = index;
@@ -2088,8 +2274,16 @@ mod tests {
     #[test]
     fn no_inline_event_handlers_in_any_rendered_route() {
         let handlers = [
-            " onclick=", " onload=", " onerror=", " onsubmit=", " onmouseover=",
-            " onfocus=", " onblur=", " onchange=", " oninput=", " onkeydown=",
+            " onclick=",
+            " onload=",
+            " onerror=",
+            " onsubmit=",
+            " onmouseover=",
+            " onfocus=",
+            " onblur=",
+            " onchange=",
+            " oninput=",
+            " onkeydown=",
         ];
         for route in ssr::ssr_routes() {
             let html = render_route(route.surface, route.pattern).unwrap();
@@ -2114,13 +2308,16 @@ mod tests {
     #[test]
     fn no_on_anything_attribute_shapes_in_any_rendered_route() {
         for route in ssr::ssr_routes() {
-            let html = render_route(route.surface, route.pattern)
-                .unwrap_or_else(|| panic!("missing view for [{}] {}", route.surface, route.pattern));
+            let html = render_route(route.surface, route.pattern).unwrap_or_else(|| {
+                panic!("missing view for [{}] {}", route.surface, route.pattern)
+            });
             let lower = html.to_ascii_lowercase();
             let mut cursor = 0usize;
             while let Some(rel) = lower[cursor..].find('<') {
                 let at = cursor + rel;
-                let Some(end_rel) = lower[at..].find('>') else { break };
+                let Some(end_rel) = lower[at..].find('>') else {
+                    break;
+                };
                 let end = at + end_rel;
                 let tag = &lower[at..=end];
                 // Skip closing tags and doctype/PI/comment openers.
@@ -2193,7 +2390,7 @@ mod tests {
                 let at = cursor + rel;
                 let open_end = lower[at..].find('>').map(|o| at + o).unwrap_or(at);
                 let close = lower[open_end..].find("</form>").map(|o| open_end + o);
-                let form_html = &html[open_end..close.map(|c| c).unwrap_or(html.len())];
+                let form_html = &html[open_end..close.unwrap_or(html.len())];
                 let form_lower = form_html.to_ascii_lowercase();
                 if form_lower.contains("method=\"post\"") {
                     let mut inner = 0usize;
@@ -2201,8 +2398,11 @@ mod tests {
                         let iat = inner + irel;
                         let iend = form_lower[iat..].find('>').map(|o| iat + o).unwrap_or(iat);
                         let tag = &form_lower[iat..=iend];
-                        if !tag.contains("name=") && !tag.contains("type=\"submit\"")
-                            && !tag.contains("type=\"button\"") && !tag.contains("type=\"checkbox\"") {
+                        if !tag.contains("name=")
+                            && !tag.contains("type=\"submit\"")
+                            && !tag.contains("type=\"button\"")
+                            && !tag.contains("type=\"checkbox\"")
+                        {
                             panic!(
                                 "[{}] {} POST form input missing name: {}",
                                 route.surface, route.pattern, tag
@@ -2267,8 +2467,10 @@ mod tests {
                     let is_internal = path_only.starts_with('/')
                         && !path_only.starts_with("//")
                         && !path_only.contains('.');
-                    if is_internal && !path_only.starts_with("/v1/")
-                        && !path_only.starts_with("/api/") && !path_only.starts_with("/web/")
+                    if is_internal
+                        && !path_only.starts_with("/v1/")
+                        && !path_only.starts_with("/api/")
+                        && !path_only.starts_with("/web/")
                         && !path_only.starts_with('#')
                     {
                         assert!(
@@ -2318,7 +2520,8 @@ mod tests {
             chrono::Utc::now().timestamp()
         ));
 
-        let contacts_new = render_route_with_query("web", "/contacts/new", None, Some(secret)).unwrap();
+        let contacts_new =
+            render_route_with_query("web", "/contacts/new", None, Some(secret)).unwrap();
         assert!(contacts_new.contains("name=\"_csrf\""));
     }
 
@@ -2343,7 +2546,9 @@ mod tests {
             let html = render_route("web", path)
                 .unwrap_or_else(|| panic!("web {path} should render a redirect"));
             assert!(html.contains(&format!("url=https://apexmail.ee{path}")));
-            assert!(html.contains(&format!("rel=\"canonical\" href=\"https://apexmail.ee{path}\"")));
+            assert!(html.contains(&format!(
+                "rel=\"canonical\" href=\"https://apexmail.ee{path}\""
+            )));
         }
     }
 
@@ -2461,15 +2666,8 @@ mod tests {
             if let Some(list) = data.list.as_mut() {
                 list.base_path = path.to_string();
             }
-            let html = render_route_with_data(
-                "control-plane",
-                path,
-                None,
-                None,
-                &[],
-                Some(&data),
-            )
-            .unwrap_or_else(|| panic!("control-plane {path} must render with data"));
+            let html = render_route_with_data("control-plane", path, None, None, &[], Some(&data))
+                .unwrap_or_else(|| panic!("control-plane {path} must render with data"));
             assert!(html.contains("<title>ApexMail Control Plane</title>"));
         }
 
@@ -2491,8 +2689,9 @@ mod tests {
             }),
             mfa_setup: None,
         };
-        let html = render_route_with_data("web", "/campaigns/c_123/edit", None, None, &[], Some(&data))
-            .expect("edit route must render with values");
+        let html =
+            render_route_with_data("web", "/campaigns/c_123/edit", None, None, &[], Some(&data))
+                .expect("edit route must render with values");
         // The form POSTs to the real update handler with the row id and the
         // stored values prefilled — editing no longer duplicates.
         assert!(html.contains("action=\"/web/campaigns/update\""));
@@ -2653,7 +2852,10 @@ mod tests {
     #[test]
     fn route_contexts_are_honest_about_their_tables() {
         assert_eq!(control_plane_route_context("/discovery").0, "Lead Sources");
-        assert_eq!(control_plane_route_context("/infrastructure/nodes").0, "IP Pool");
+        assert_eq!(
+            control_plane_route_context("/infrastructure/nodes").0,
+            "IP Pool"
+        );
     }
 
     /// Console item 19: /templates/{id}/edit renders the editor form with
@@ -2691,11 +2893,18 @@ mod tests {
                 ],
             }],
         });
-        let html = render_route_with_data("web", &format!("/domains/{id}"), None, None, &[], Some(&RouteData {
-            list: Some(data),
-            campaign_edit: None,
-            mfa_setup: None,
-        }))
+        let html = render_route_with_data(
+            "web",
+            &format!("/domains/{id}"),
+            None,
+            None,
+            &[],
+            Some(&RouteData {
+                list: Some(data),
+                campaign_edit: None,
+                mfa_setup: None,
+            }),
+        )
         .unwrap();
         assert!(html.contains("data-page=\"domain-detail\""));
         assert!(html.contains("select to copy") || html.contains("Select to copy"));
@@ -2742,11 +2951,18 @@ mod tests {
             "Audience list",
             vec![("l_1".into(), "VIP Customers".into(), false)],
         )];
-        let html = render_route_with_data("web", &format!("/campaigns/{id}"), None, None, &[], Some(&RouteData {
-            list: Some(data),
-            campaign_edit: None,
-            mfa_setup: None,
-        }))
+        let html = render_route_with_data(
+            "web",
+            &format!("/campaigns/{id}"),
+            None,
+            None,
+            &[],
+            Some(&RouteData {
+                list: Some(data),
+                campaign_edit: None,
+                mfa_setup: None,
+            }),
+        )
         .unwrap();
         assert!(html.contains("data-page=\"campaign-detail\""));
         // Available action renders as a POST button; unavailable as disabled.
@@ -2820,7 +3036,8 @@ mod tests {
             ],
         );
         assert!(tenants.contains("/web/admin/tenants/99999999-8888-7777-6666-555555555555/suspend"));
-        assert!(tenants.contains("/confirm?intent=delete-tenant&amp;id=99999999-8888-7777-6666-555555555555"));
+        assert!(tenants
+            .contains("/confirm?intent=delete-tenant&amp;id=99999999-8888-7777-6666-555555555555"));
     }
 
     /// CP item 16 (domain transfer): the typed-confirmation form carries

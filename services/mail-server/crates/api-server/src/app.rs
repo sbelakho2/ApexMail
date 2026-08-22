@@ -11,7 +11,6 @@ use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
 use axum::routing::post;
 use axum::{BoxError, Json, Router};
-use base64::Engine;
 use serde::Deserialize;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -49,10 +48,7 @@ async fn handle_backpressure_error(error: BoxError) -> Response {
 
     // Timeouts and transient overload degrade to 503 with a retry hint —
     // never a raw error string or stack trace.
-    let timed_out = error
-        .to_string()
-        .to_lowercase()
-        .contains("timeout")
+    let timed_out = error.to_string().to_lowercase().contains("timeout")
         || error.to_string().to_lowercase().contains("elapsed");
     if timed_out {
         return (
@@ -823,8 +819,11 @@ fn apply_recorded_consent_state(html: String, headers: &HeaderMap) -> String {
     if !has_consent {
         return html;
     }
-    html.replace("data-consent-state=\"pending\"", "data-consent-state=\"recorded\"")
-        .replace("data-consent-state=pending", "data-consent-state=recorded")
+    html.replace(
+        "data-consent-state=\"pending\"",
+        "data-consent-state=\"recorded\"",
+    )
+    .replace("data-consent-state=pending", "data-consent-state=recorded")
 }
 
 async fn browser_globals_css() -> impl IntoResponse {
@@ -1044,13 +1043,8 @@ fn render_ui_response(
         .and_then(|value| value.to_str().ok())
         .map(|cookies| routes::web::decode_flash_from_cookie_header(cookies, &config.csrf_secret))
         .unwrap_or_default();
-    let html = ui_router::render_route_with_flash(
-        surface,
-        uri.path(),
-        uri.query(),
-        csrf_secret,
-        &flash,
-    )?;
+    let html =
+        ui_router::render_route_with_flash(surface, uri.path(), uri.query(), csrf_secret, &flash)?;
     let html = apply_recorded_consent_state(html, headers);
     let mut response = browser_html_response(html);
     if !flash.is_empty() {
@@ -1087,7 +1081,9 @@ async fn render_ui_response_with_state(
     let flash = headers
         .get(header::COOKIE)
         .and_then(|value| value.to_str().ok())
-        .map(|cookies| routes::web::decode_flash_from_cookie_header(cookies, &state.config.csrf_secret))
+        .map(|cookies| {
+            routes::web::decode_flash_from_cookie_header(cookies, &state.config.csrf_secret)
+        })
         .unwrap_or_default();
 
     // Control-plane pages (other than the login) are operator-only: a
@@ -1100,7 +1096,7 @@ async fn render_ui_response_with_state(
             Some(user) => user,
             None => return Some(login_redirect_response(uri)),
         };
-        if !routes::web::is_system_tenant(&state, &auth_user.tenant_id).await {
+        if !routes::web::is_system_tenant(state, &auth_user.tenant_id).await {
             tracing::warn!(
                 tenant_id = %auth_user.tenant_id,
                 path = %uri.path(),
@@ -1356,7 +1352,10 @@ async fn fallback_handler(
     }
 
     // Browser surfaces get the branded, script-free 404 page.
-    branded_not_found(&state.config, request.headers().get(HOST).and_then(|v| v.to_str().ok()))
+    branded_not_found(
+        &state.config,
+        request.headers().get(HOST).and_then(|v| v.to_str().ok()),
+    )
 }
 
 /// Branded, zero-JS 404 page: ui-foundation's not-found contract for the
@@ -1483,6 +1482,9 @@ mod tests {
         db: sqlx::PgPool,
         redis: deadpool_redis::Pool,
         ses_provider: Arc<SesIpProvider>,
+        // Fixture holder only: the config is never read through TestState,
+        // but constructing it validates the Config wiring.
+        #[allow(dead_code)]
         config: Config,
     }
 
@@ -1861,7 +1863,10 @@ mod tests {
             .to_string();
         assert!(csp.contains("script-src 'none'"), "CSP was: {csp}");
         let body = response_body_string(page).await;
-        assert!(!body.contains("<script"), "rendered page must contain no scripts");
+        assert!(
+            !body.contains("<script"),
+            "rendered page must contain no scripts"
+        );
     }
 
     #[tokio::test]
@@ -1912,9 +1917,13 @@ mod tests {
             .and_then(|v| v.to_str().ok())
             .unwrap_or_default()
             .to_string();
-        assert!(set_cookie.contains("apexmail_flash="), "flash cookie missing");
+        assert!(
+            set_cookie.contains("apexmail_flash="),
+            "flash cookie missing"
+        );
         // The flash payload is signed and decodes to a friendly message.
-        let flash = routes::web::decode_flash_from_cookie_header(&set_cookie, &test_config().csrf_secret);
+        let flash =
+            routes::web::decode_flash_from_cookie_header(&set_cookie, &test_config().csrf_secret);
         assert!(!flash.is_empty());
         assert_eq!(flash[0].kind, ui_foundation::flash::FlashKind::Error);
         assert!(flash[0].text.contains("expired"));
@@ -1946,7 +1955,10 @@ mod tests {
             .and_then(|v| v.to_str().ok())
             .unwrap_or_default()
             .to_string();
-        assert!(set_cookie.starts_with("apexmail_consent=all;"), "{set_cookie}");
+        assert!(
+            set_cookie.starts_with("apexmail_consent=all;"),
+            "{set_cookie}"
+        );
         assert!(set_cookie.contains("Domain=.apexmail.ee"));
         assert!(set_cookie.contains("Max-Age=31536000"));
         assert!(set_cookie.contains("HttpOnly"));
@@ -1980,14 +1992,20 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::FOUND);
-        assert_eq!(response.headers().get(header::LOCATION).unwrap(), "/pricing");
+        assert_eq!(
+            response.headers().get(header::LOCATION).unwrap(),
+            "/pricing"
+        );
         let set_cookie = response
             .headers()
             .get("set-cookie")
             .and_then(|v| v.to_str().ok())
             .unwrap_or_default()
             .to_string();
-        assert!(set_cookie.starts_with("apexmail_consent=necessary;"), "{set_cookie}");
+        assert!(
+            set_cookie.starts_with("apexmail_consent=necessary;"),
+            "{set_cookie}"
+        );
 
         // Unknown choice: redirect WITHOUT writing any cookie (the banner
         // stays pending instead of silently downgrading recorded consent).
@@ -2082,12 +2100,7 @@ mod tests {
         for (legacy, canonical) in [("/legal/terms", "/terms"), ("/legal/privacy", "/privacy")] {
             let response = test_app()
                 .await
-                .oneshot(
-                    Request::builder()
-                        .uri(legacy)
-                        .body(Body::empty())
-                        .unwrap(),
-                )
+                .oneshot(Request::builder().uri(legacy).body(Body::empty()).unwrap())
                 .await
                 .unwrap();
 
@@ -2242,7 +2255,12 @@ mod tests {
     /// other path (console pages, API responses) stays `no-store`.
     #[test]
     fn static_asset_cache_control_tiers() {
-        for immutable in ["/css/styles.css", "/js/none.js", "/fonts/Inter.woff2", "/images/logo.svg"] {
+        for immutable in [
+            "/css/styles.css",
+            "/js/none.js",
+            "/fonts/Inter.woff2",
+            "/images/logo.svg",
+        ] {
             assert_eq!(
                 static_asset_cache_control(immutable),
                 "public, max-age=31536000, immutable",
@@ -2264,7 +2282,13 @@ mod tests {
                 "{cacheable} must be cacheable"
             );
         }
-        for private in ["/login", "/dashboard", "/v1/messages", "/api/csrf/token", "/"] {
+        for private in [
+            "/login",
+            "/dashboard",
+            "/v1/messages",
+            "/api/csrf/token",
+            "/",
+        ] {
             assert_eq!(
                 static_asset_cache_control(private),
                 "no-store, no-cache, must-revalidate",
@@ -2335,12 +2359,6 @@ mod tests {
             .to_string();
         assert_eq!(cache, "no-store, no-cache, must-revalidate");
     }
-
-
-
-
-
-
 
     #[tokio::test]
     async fn migrated_ui_route_inventory_renders_for_exposed_surfaces() {
@@ -2616,8 +2634,7 @@ mod tests {
 
     #[test]
     fn browser_csp_accepts_configured_https_analytics_image_source() {
-        let csp =
-            browser_csp_header_with_analytics(Some("https://analytics.example.com"));
+        let csp = browser_csp_header_with_analytics(Some("https://analytics.example.com"));
         let csp = csp.to_str().expect("csp header should be utf-8");
 
         assert!(csp.contains("img-src 'self' data: https://analytics.example.com"));
@@ -2626,8 +2643,7 @@ mod tests {
 
     #[test]
     fn browser_csp_rejects_non_https_analytics_image_source() {
-        let csp =
-            browser_csp_header_with_analytics(Some("http://analytics.example.com"));
+        let csp = browser_csp_header_with_analytics(Some("http://analytics.example.com"));
         let csp = csp.to_str().expect("csp header should be utf-8");
 
         assert!(csp.contains("img-src 'self' data:"));
@@ -2794,10 +2810,7 @@ mod tests {
         // exactly like /v1/admin/*: a customer-tenant AuthUser (even with
         // the wildcard scope every tenant admin holds) is forbidden.
         let gated = Router::new()
-            .route(
-                "/web/admin/tenants",
-                post(|| async { "created" }),
-            )
+            .route("/web/admin/tenants", post(|| async { "created" }))
             .layer(axum::middleware::from_fn(
                 crate::middleware::auth::require_system_tenant_middleware,
             ));
@@ -2805,13 +2818,15 @@ mod tests {
         let mut request = Request::post("/web/admin/tenants")
             .body(Body::empty())
             .unwrap();
-        request.extensions_mut().insert(crate::middleware::auth::AuthUser {
-            tenant_id: "01HCUSTOMERTENANT0abcdefgh".into(),
-            user_id: Some("00000000-0000-0000-0000-000000000001".into()),
-            api_key_id: None,
-            session_id: None,
-            scopes: vec!["*".into()],
-        });
+        request
+            .extensions_mut()
+            .insert(crate::middleware::auth::AuthUser {
+                tenant_id: "01HCUSTOMERTENANT0abcdefgh".into(),
+                user_id: Some("00000000-0000-0000-0000-000000000001".into()),
+                api_key_id: None,
+                session_id: None,
+                scopes: vec!["*".into()],
+            });
         let response = gated.clone().oneshot(request).await.unwrap();
         assert_eq!(
             response.status(),
@@ -2823,13 +2838,15 @@ mod tests {
         let mut request = Request::post("/web/admin/tenants")
             .body(Body::empty())
             .unwrap();
-        request.extensions_mut().insert(crate::middleware::auth::AuthUser {
-            tenant_id: "system".into(),
-            user_id: None,
-            api_key_id: None,
-            session_id: None,
-            scopes: vec!["*".into()],
-        });
+        request
+            .extensions_mut()
+            .insert(crate::middleware::auth::AuthUser {
+                tenant_id: "system".into(),
+                user_id: None,
+                api_key_id: None,
+                session_id: None,
+                scopes: vec!["*".into()],
+            });
         let response = gated.oneshot(request).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
     }
@@ -2882,15 +2899,9 @@ mod tests {
                 "/web/auth/login",
                 post(|| async { StatusCode::BAD_REQUEST }),
             )
-            .route(
-                "/web/campaigns",
-                post(|| async { StatusCode::BAD_REQUEST }),
-            )
+            .route("/web/campaigns", post(|| async { StatusCode::BAD_REQUEST }))
             .route("/v1/other", post(|| async { StatusCode::BAD_REQUEST }))
-            .route(
-                "/web/ok",
-                post(|| async { "handled" }),
-            )
+            .route("/web/ok", post(|| async { "handled" }))
             .layer(axum::middleware::from_fn_with_state(
                 state.clone(),
                 routes::web::web_form_rejection_middleware_for_tests,
@@ -2919,13 +2930,11 @@ mod tests {
             .and_then(|value| value.to_str().ok())
             .unwrap_or_default();
         assert!(set_cookie.contains("apexmail_flash="), "got: {set_cookie}");
-        let decoded = routes::web::decode_flash_from_cookie_header(
-            set_cookie,
-            &state.config.csrf_secret,
-        );
-        assert!(decoded.iter().any(|message| message
-            .text
-            .contains("The form could not be read")));
+        let decoded =
+            routes::web::decode_flash_from_cookie_header(set_cookie, &state.config.csrf_secret);
+        assert!(decoded
+            .iter()
+            .any(|message| message.text.contains("The form could not be read")));
 
         // No Referer → the dashboard fallback.
         let response = app
@@ -2934,7 +2943,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::SEE_OTHER);
-        assert_eq!(response.headers().get(header::LOCATION).unwrap(), "/dashboard");
+        assert_eq!(
+            response.headers().get(header::LOCATION).unwrap(),
+            "/dashboard"
+        );
 
         // Non-/web paths and non-400 statuses are untouched.
         let response = app
@@ -2974,14 +2986,12 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), StatusCode::SEE_OTHER);
         let decoded = flash_from_response(&response);
-        assert!(decoded.iter().any(|message| matches!(
-            message.kind,
-            ui_foundation::flash::FlashKind::Error
-        )));
-        assert!(!decoded.iter().any(|message| matches!(
-            message.kind,
-            ui_foundation::flash::FlashKind::Success
-        )));
+        assert!(decoded
+            .iter()
+            .any(|message| matches!(message.kind, ui_foundation::flash::FlashKind::Error)));
+        assert!(!decoded
+            .iter()
+            .any(|message| matches!(message.kind, ui_foundation::flash::FlashKind::Success)));
 
         // Mismatched passwords → error.
         let body = format!(
@@ -3026,7 +3036,10 @@ mod tests {
             return;
         }
 
-        let email = format!("web-reset-{}@test.apexmail.ee", uuid::Uuid::new_v4().simple());
+        let email = format!(
+            "web-reset-{}@test.apexmail.ee",
+            uuid::Uuid::new_v4().simple()
+        );
         let tenant_id = apexmail_lib::id::generate_id("", 26);
         // users.id is a UUID column in both the migration chain and the
         // canonical apexmail-db SCHEMA — a 26-char text id fails with
@@ -3044,15 +3057,14 @@ mod tests {
         .execute(&state.db)
         .await
         .expect("seed tenant");
-        let password_hash =
-            bcrypt::hash("OldValid123!Password", 4).expect("hash old password");
+        let password_hash = bcrypt::hash("OldValid123!Password", 4).expect("hash old password");
         let token = format!("vfy_{}", &uuid::Uuid::new_v4().simple().to_string()[..24]);
         let token_hash = crate::routes::helpers::hash_token(&token);
         sqlx::query(
             "INSERT INTO users (id, tenant_id, email, name, password_hash, role, status, email_verified, mfa_enabled, metadata, created_at, updated_at)
              VALUES ($1, $2, $3, 'Reset Test', $4, 'owner', 'active', true, false, $5::jsonb, NOW(), NOW())",
         )
-        .bind(&user_id)
+        .bind(user_id)
         .bind(&tenant_id)
         .bind(&email)
         .bind(&password_hash)
@@ -3086,14 +3098,13 @@ mod tests {
             .unwrap();
         let decoded = flash_from_response(&response);
         assert!(
-            !decoded.iter().any(|message| matches!(
-                message.kind,
-                ui_foundation::flash::FlashKind::Success
-            )),
+            !decoded
+                .iter()
+                .any(|message| matches!(message.kind, ui_foundation::flash::FlashKind::Success)),
             "bad token must not flash success: {decoded:?}"
         );
         let stored: String = sqlx::query_scalar("SELECT password_hash FROM users WHERE id = $1")
-            .bind(&user_id)
+            .bind(user_id)
             .fetch_one(&state.db)
             .await
             .unwrap();
@@ -3117,33 +3128,32 @@ mod tests {
             .unwrap();
         let decoded = flash_from_response(&response);
         assert!(
-            decoded.iter().any(|message| matches!(
-                message.kind,
-                ui_foundation::flash::FlashKind::Success
-            )),
+            decoded
+                .iter()
+                .any(|message| matches!(message.kind, ui_foundation::flash::FlashKind::Success)),
             "good token must flash success: {decoded:?}"
         );
         let stored: String = sqlx::query_scalar("SELECT password_hash FROM users WHERE id = $1")
-            .bind(&user_id)
+            .bind(user_id)
             .fetch_one(&state.db)
             .await
             .unwrap();
         assert!(bcrypt::verify("NewValid123!Pass", &stored).unwrap());
         let metadata: serde_json::Value =
             sqlx::query_scalar("SELECT metadata FROM users WHERE id = $1")
-                .bind(&user_id)
+                .bind(user_id)
                 .fetch_one(&state.db)
                 .await
                 .unwrap();
         assert!(metadata.get("password_reset_token_hash").is_none());
 
         sqlx::query("DELETE FROM users WHERE id = $1")
-            .bind(&user_id)
+            .bind(user_id)
             .execute(&state.db)
             .await
             .expect("cleanup user");
         sqlx::query("DELETE FROM tenants WHERE id = $1")
-            .bind(&tenant_id)
+            .bind(tenant_id)
             .execute(&state.db)
             .await
             .expect("cleanup tenant");
@@ -3156,7 +3166,9 @@ mod tests {
     async fn ssr_data_layer_renders_seeded_rows_with_filters_and_paging() {
         let state = test_state_app().await;
         if !test_db_reachable(&state.db).await {
-            eprintln!("skipping ssr_data_layer_renders_seeded_rows_with_filters_and_paging: no database");
+            eprintln!(
+                "skipping ssr_data_layer_renders_seeded_rows_with_filters_and_paging: no database"
+            );
             return;
         }
 
@@ -3212,8 +3224,8 @@ mod tests {
         };
 
         // Unfiltered: 25 campaigns, first page of 20.
-        let data = routes::web::load_page_data(&state, "web", "/campaigns", None, Some(&user))
-            .await;
+        let data =
+            routes::web::load_page_data(&state, "web", "/campaigns", None, Some(&user)).await;
         let list = data.list.expect("campaigns list data");
         assert_eq!(list.total_count, 25);
         assert_eq!(list.total_pages, 2);
@@ -3255,21 +3267,16 @@ mod tests {
         assert_eq!(data.list.unwrap().total_count, 5);
 
         // Pagination: page 2 has the remaining 5 rows.
-        let data = routes::web::load_page_data(
-            &state,
-            "web",
-            "/campaigns",
-            Some("page=2"),
-            Some(&user),
-        )
-        .await;
+        let data =
+            routes::web::load_page_data(&state, "web", "/campaigns", Some("page=2"), Some(&user))
+                .await;
         let list = data.list.expect("paged list");
         assert_eq!(list.page, 2);
         assert_eq!(list.table.as_ref().unwrap().rows.len(), 5);
 
         // The render pipeline shows the seeded row names.
-        let data = routes::web::load_page_data(&state, "web", "/campaigns", None, Some(&user))
-            .await;
+        let data =
+            routes::web::load_page_data(&state, "web", "/campaigns", None, Some(&user)).await;
         let html = ui_foundation::axum_router::render_route_with_data(
             "web",
             "/campaigns",
@@ -3291,8 +3298,8 @@ mod tests {
             session_id: None,
             scopes: vec![],
         };
-        let data = routes::web::load_page_data(&state, "web", "/campaigns", None, Some(&user))
-            .await;
+        let data =
+            routes::web::load_page_data(&state, "web", "/campaigns", None, Some(&user)).await;
         let html = ui_foundation::axum_router::render_route_with_data(
             "web",
             "/campaigns",

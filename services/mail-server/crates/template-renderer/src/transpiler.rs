@@ -75,8 +75,7 @@ static DANGEROUS_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
     vec![
         Regex::new(r"(?i)\beval\s*\(").expect("DANGEROUS_PATTERNS[0]: invalid regex"),
         Regex::new(r"(?i)\bFunction\s*\(").expect("DANGEROUS_PATTERNS[1]: invalid regex"),
-        Regex::new(r"(?i)\{\{\s*process\s*\}\}")
-            .expect("DANGEROUS_PATTERNS[2]: invalid regex"),
+        Regex::new(r"(?i)\{\{\s*process\s*\}\}").expect("DANGEROUS_PATTERNS[2]: invalid regex"),
         Regex::new(r"(?i)\bprocess\s*[(.]").expect("DANGEROUS_PATTERNS[3]: invalid regex"),
         Regex::new(r"(?i)(::|->)\s*process\b").expect("DANGEROUS_PATTERNS[4]: invalid regex"),
         Regex::new(r#"(?i)require\s*\(\s*['"]process['"]\s*\)"#)
@@ -91,7 +90,7 @@ static DANGEROUS_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
 /// Validate template source without rendering.
 pub fn validate_source(source: &str, max_length: usize) -> ValidationResult {
     let mut errors = Vec::new();
-    let mut warnings = Vec::new();
+    let warnings = Vec::new();
 
     // Size check
     if source.len() > max_length {
@@ -321,10 +320,7 @@ pub fn resolve_placeholders_plain_reported(
             }
         })
         .into_owned();
-    ResolveOutcome {
-        html,
-        warnings,
-    }
+    ResolveOutcome { html, warnings }
 }
 
 // ─── Internal helpers ──────────────────────────────────────────
@@ -455,8 +451,14 @@ fn stylesheet_href_allowed(href: &str) -> bool {
     else {
         return true;
     };
-    let host = rest.split(['/', '?', '#']).next().unwrap_or("").to_ascii_lowercase();
-    ALLOWED_STYLESHEET_HOSTS.iter().any(|allowed| host == *allowed)
+    let host = rest
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    ALLOWED_STYLESHEET_HOSTS
+        .iter()
+        .any(|allowed| host == *allowed)
 }
 
 /// Allow only http/https schemes (or scheme-less relative URLs).
@@ -803,7 +805,10 @@ mod tests {
         let props = serde_json::json!({});
         let outcome = resolve_placeholders_reported(html, &props, "");
         assert_eq!(outcome.html, "Hello ");
-        assert_eq!(outcome.warnings, vec!["Missing merge field 'missing' replaced with fallback"]);
+        assert_eq!(
+            outcome.warnings,
+            vec!["Missing merge field 'missing' replaced with fallback"]
+        );
     }
 
     #[test]
@@ -929,7 +934,10 @@ mod tests {
         ] {
             let result = resolve_placeholders(html, &serde_json::json!({}));
             assert!(
-                !result.to_ascii_lowercase().replace("&#x09;", "").contains("javascript:"),
+                !result
+                    .to_ascii_lowercase()
+                    .replace("&#x09;", "")
+                    .contains("javascript:"),
                 "{html} bypassed the scheme check: {result}"
             );
         }
@@ -943,7 +951,10 @@ mod tests {
             r#"<a href=https://ok.example/x>x</a>"#,
         ] {
             let result = resolve_placeholders(html, &serde_json::json!({}));
-            assert!(result.contains("https://ok.example/x"), "{html} -> {result}");
+            assert!(
+                result.contains("https://ok.example/x"),
+                "{html} -> {result}"
+            );
         }
     }
 

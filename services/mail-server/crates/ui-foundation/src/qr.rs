@@ -22,9 +22,12 @@ pub struct QrMatrix {
     pub modules: Vec<Vec<bool>>,
 }
 
-const ECC_L_CODEWORDS_PER_BLOCK: [usize; 21] =
-    [0, 7, 10, 15, 20, 26, 18, 20, 24, 30, 18, 20, 24, 26, 30, 22, 24, 28, 30, 28, 28];
-const NUM_ECC_BLOCKS_L: [usize; 21] = [0, 1, 1, 1, 1, 1, 2, 2, 2, 2, 4, 4, 4, 4, 4, 6, 6, 6, 6, 7, 8];
+const ECC_L_CODEWORDS_PER_BLOCK: [usize; 21] = [
+    0, 7, 10, 15, 20, 26, 18, 20, 24, 30, 18, 20, 24, 26, 30, 22, 24, 28, 30, 28, 28,
+];
+const NUM_ECC_BLOCKS_L: [usize; 21] = [
+    0, 1, 1, 1, 1, 1, 2, 2, 2, 2, 4, 4, 4, 4, 4, 6, 6, 6, 6, 7, 8,
+];
 const MAX_VERSION: usize = 20;
 
 fn num_raw_data_modules(ver: usize) -> usize {
@@ -136,7 +139,11 @@ fn alignment_positions(ver: usize, size: usize) -> Vec<usize> {
         return Vec::new();
     }
     let num_align = ver / 7 + 2;
-    let step = if ver == 32 { 26 } else { ((ver * 4 + 4 + num_align * 2 - 3) / (num_align * 2 - 2)).max(1) * 2 };
+    let step = if ver == 32 {
+        26
+    } else {
+        ((ver * 4 + 4 + num_align * 2 - 3) / (num_align * 2 - 2)).max(1) * 2
+    };
     let mut positions = vec![6usize];
     let mut pos = size - 7;
     while positions.len() < num_align {
@@ -283,10 +290,7 @@ fn draw_matrix(codewords: &[u8], ver: usize) -> QrMatrix {
     let num_align = align.len();
     for (ai, &ax) in align.iter().enumerate() {
         for (aj, &ay) in align.iter().enumerate() {
-            if (ai == 0 && aj == 0)
-                || (ai == 0 && aj == num_align - 1)
-                || (ai == num_align - 1 && aj == 0)
-            {
+            if (ai == 0 && (aj == 0 || aj == num_align - 1)) || (ai == num_align - 1 && aj == 0) {
                 continue;
             }
             state.draw_alignment_pattern(ax as isize, ay as isize);
@@ -331,7 +335,11 @@ fn draw_matrix(codewords: &[u8], ver: usize) -> QrMatrix {
             for dj in 0..2isize {
                 let x = (right - dj) as usize;
                 let upward = ((right + 1) & 2) == 0;
-                let y = if upward { size as isize - 1 - vert } else { vert } as usize;
+                let y = if upward {
+                    size as isize - 1 - vert
+                } else {
+                    vert
+                } as usize;
                 if !state.is_function[y][x] {
                     if bit_index < total_bits {
                         state.modules[y][x] =
@@ -436,7 +444,10 @@ fn penalty_score(state: &DrawState) -> u64 {
     for y in 0..size - 1 {
         for x in 0..size - 1 {
             let c = state.modules[y][x];
-            if c == state.modules[y][x + 1] && c == state.modules[y + 1][x] && c == state.modules[y + 1][x + 1] {
+            if c == state.modules[y][x + 1]
+                && c == state.modules[y + 1][x]
+                && c == state.modules[y + 1][x + 1]
+            {
                 result += 3;
             }
         }
@@ -448,7 +459,7 @@ fn penalty_score(state: &DrawState) -> u64 {
         .map(|row| row.iter().filter(|&&c| c).count())
         .sum();
     let total = size * size;
-    let k = ((dark * 20).abs_diff(total * 10) + total - 1) / total;
+    let k = (dark * 20).abs_diff(total * 10).div_ceil(total);
     result += k.saturating_sub(1) as u64 * 10;
     result
 }
@@ -457,7 +468,7 @@ fn penalty_score(state: &DrawState) -> u64 {
 /// a square subpath per dark module plus the quiet zone as margin).
 pub fn to_svg(qr: &QrMatrix, scale: usize, quiet_zone: usize) -> String {
     let scale = scale.max(1);
-    let quiet = quiet_zone.max(0);
+    let quiet = quiet_zone;
     let dim = (qr.size + quiet * 2) * scale;
     let mut path = String::with_capacity(qr.modules.len() * qr.modules.len() * 12);
     for (y, row) in qr.modules.iter().enumerate() {
@@ -488,12 +499,16 @@ mod tests {
 
     fn build_function_map(size: usize, ver: usize) -> Vec<Vec<bool>> {
         let mut is_fn = vec![vec![false; size]; size];
-        let mut mark = |x: isize, y: isize, is_fn: &mut Vec<Vec<bool>>| {
+        let mark = |x: isize, y: isize, is_fn: &mut Vec<Vec<bool>>| {
             if x >= 0 && y >= 0 && (x as usize) < size && (y as usize) < size {
                 is_fn[y as usize][x as usize] = true;
             }
         };
-        for &(cx, cy) in &[(3isize, 3isize), (size as isize - 4, 3), (3, size as isize - 4)] {
+        for &(cx, cy) in &[
+            (3isize, 3isize),
+            (size as isize - 4, 3),
+            (3, size as isize - 4),
+        ] {
             for dy in -4..=4isize {
                 for dx in -4..=4isize {
                     mark(cx + dx, cy + dy, &mut is_fn);
@@ -506,7 +521,11 @@ mod tests {
         }
         if ver > 1 {
             let num_align = ver / 7 + 2;
-            let step = if ver == 32 { 26 } else { ((ver * 4 + 4 + num_align * 2 - 3) / (num_align * 2 - 2)).max(1) * 2 };
+            let step = if ver == 32 {
+                26
+            } else {
+                ((ver * 4 + 4 + num_align * 2 - 3) / (num_align * 2 - 2)).max(1) * 2
+            };
             let mut pos = vec![6usize];
             let mut p = size - 7;
             while pos.len() < num_align {
@@ -515,7 +534,9 @@ mod tests {
             }
             for (ai, &ax) in pos.iter().enumerate() {
                 for (aj, &ay) in pos.iter().enumerate() {
-                    if (ai == 0 && aj == 0) || (ai == 0 && aj == pos.len() - 1) || (ai == pos.len() - 1 && aj == 0) {
+                    if (ai == 0 && (aj == 0 || aj == pos.len() - 1))
+                        || (ai == pos.len() - 1 && aj == 0)
+                    {
                         continue;
                     }
                     for dy in -2..=2isize {
@@ -615,7 +636,11 @@ mod tests {
                 for dj in 0..2isize {
                     let x = (right - dj) as usize;
                     let upward = ((right + 1) & 2) == 0;
-                    let y = if upward { size as isize - 1 - vert } else { vert } as usize;
+                    let y = if upward {
+                        size as isize - 1 - vert
+                    } else {
+                        vert
+                    } as usize;
                     if !is_fn[y][x] {
                         let mut v = qr.modules[y][x];
                         if f(x, y) {
@@ -651,8 +676,8 @@ mod tests {
                 idx += 1;
             }
         }
-        for bl in num_short..num_blocks {
-            blocks_data[bl].push(codewords[idx]);
+        for bd in blocks_data.iter_mut().skip(num_short) {
+            bd.push(codewords[idx]);
             idx += 1;
         }
         for _e in 0..block_ecc_len {
@@ -733,10 +758,16 @@ mod tests {
         ];
         for url in urls {
             let qr = encode(url).unwrap_or_else(|| panic!("failed to encode {url}"));
-            assert!((qr.size - 17) % 4 == 0 && qr.size >= 21 && qr.size <= 97);
+            assert!((qr.size - 17).is_multiple_of(4) && qr.size >= 21 && qr.size <= 97);
             assert!(check_finder(&qr, 3, 3), "finder TL broken for {url}");
-            assert!(check_finder(&qr, qr.size - 4, 3), "finder TR broken for {url}");
-            assert!(check_finder(&qr, 3, qr.size - 4), "finder BL broken for {url}");
+            assert!(
+                check_finder(&qr, qr.size - 4, 3),
+                "finder TR broken for {url}"
+            );
+            assert!(
+                check_finder(&qr, 3, qr.size - 4),
+                "finder BL broken for {url}"
+            );
             for i in 8..qr.size - 8 {
                 assert_eq!(qr.modules[6][i], i % 2 == 0, "timing broken for {url}");
                 assert_eq!(qr.modules[i][6], i % 2 == 0, "timing broken for {url}");
@@ -760,7 +791,11 @@ mod tests {
         let svg = to_svg(&qr, 5, 4);
         assert!(svg.starts_with("<svg ") && svg.ends_with("</svg>"));
         assert!(svg.contains("role=\"img\""));
-        let dark_count = qr.modules.iter().map(|r| r.iter().filter(|&&c| c).count()).sum::<usize>();
+        let dark_count = qr
+            .modules
+            .iter()
+            .map(|r| r.iter().filter(|&&c| c).count())
+            .sum::<usize>();
         // Each dark module contributes one 'z' subpath close.
         assert_eq!(svg.matches('z').count(), dark_count);
         // Dimensions include the quiet zone.
@@ -770,7 +805,10 @@ mod tests {
     #[test]
     fn encode_to_svg_helper_matches_composition() {
         let text = "https://apexmail.ee";
-        assert_eq!(encode_to_svg(text, 4, 2), encode(text).map(|q| to_svg(&q, 4, 2)));
+        assert_eq!(
+            encode_to_svg(text, 4, 2),
+            encode(text).map(|q| to_svg(&q, 4, 2))
+        );
         assert!(encode_to_svg(&"a".repeat(900), 4, 2).is_none());
     }
 }

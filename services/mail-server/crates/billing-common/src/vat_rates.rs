@@ -202,8 +202,9 @@ pub fn resolve_map_miss_rate(
 }
 
 /// The deployed map-miss policy, read once from `VAT_MAP_MISS_POLICY`.
-pub static VAT_MAP_MISS_POLICY: LazyLock<VatMapMissPolicy> =
-    LazyLock::new(|| VatMapMissPolicy::from_env_value(std::env::var("VAT_MAP_MISS_POLICY").ok().as_deref()));
+pub static VAT_MAP_MISS_POLICY: LazyLock<VatMapMissPolicy> = LazyLock::new(|| {
+    VatMapMissPolicy::from_env_value(std::env::var("VAT_MAP_MISS_POLICY").ok().as_deref())
+});
 
 /// The configured fallback country for map misses, read once from
 /// `VAT_FALLBACK_COUNTRY` (default `EE`).
@@ -313,8 +314,8 @@ pub fn calculate_vat(subtotal: i64, country: &str, vat_number: Option<&str>) -> 
         let rate = match EU_VAT_RATES.get(&country).copied() {
             Some(rate) => rate,
             None => {
-                let fallback_rate = get_eu_vat_rate(&VAT_FALLBACK_COUNTRY)
-                    .unwrap_or(ESTONIA_VAT_RATE);
+                let fallback_rate =
+                    get_eu_vat_rate(&VAT_FALLBACK_COUNTRY).unwrap_or(ESTONIA_VAT_RATE);
                 match *VAT_MAP_MISS_POLICY {
                     VatMapMissPolicy::Error => {
                         tracing::error!(
@@ -372,19 +373,10 @@ pub fn calculate_vat_strict(
         {
             return Ok((0, 0));
         }
-        let rate = EU_VAT_RATES
-            .get(&upper)
-            .copied()
-            .map_or_else(
-                || {
-                    resolve_map_miss_rate(
-                        &upper,
-                        VatMapMissPolicy::Error,
-                        &VAT_FALLBACK_COUNTRY,
-                    )
-                },
-                Ok,
-            )?;
+        let rate = EU_VAT_RATES.get(&upper).copied().map_or_else(
+            || resolve_map_miss_rate(&upper, VatMapMissPolicy::Error, &VAT_FALLBACK_COUNTRY),
+            Ok,
+        )?;
         let amt = ((subtotal * rate as i64) + 50) / 100;
         return Ok((rate, amt));
     }
@@ -582,12 +574,21 @@ mod tests {
 
         assert_eq!(VatMapMissPolicy::from_env_value(None), FallbackCountry);
         assert_eq!(VatMapMissPolicy::from_env_value(Some("")), FallbackCountry);
-        assert_eq!(VatMapMissPolicy::from_env_value(Some("fallback")), FallbackCountry);
-        assert_eq!(VatMapMissPolicy::from_env_value(Some("FALLBACK")), FallbackCountry);
+        assert_eq!(
+            VatMapMissPolicy::from_env_value(Some("fallback")),
+            FallbackCountry
+        );
+        assert_eq!(
+            VatMapMissPolicy::from_env_value(Some("FALLBACK")),
+            FallbackCountry
+        );
         assert_eq!(VatMapMissPolicy::from_env_value(Some("  error ")), Error);
         assert_eq!(VatMapMissPolicy::from_env_value(Some("ERROR")), Error);
         // Unknown values fail safe to the default, not to error.
-        assert_eq!(VatMapMissPolicy::from_env_value(Some("nonsense")), FallbackCountry);
+        assert_eq!(
+            VatMapMissPolicy::from_env_value(Some("nonsense")),
+            FallbackCountry
+        );
     }
 
     #[test]

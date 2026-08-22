@@ -364,7 +364,8 @@ impl DdosProtector {
                             .saturating_mul(
                                 1u64.checked_shl(extra_bits.min(10) as u32).unwrap_or(1024),
                             )
-                            .min(u32::MAX as u64) as u32;
+                            .min(u32::MAX as u64)
+                            as u32;
                         return ProtectionDecision::Challenge(crate::decision::Challenge::Pow(
                             crate::decision::PowChallenge {
                                 id: pow.challenge_id,
@@ -651,7 +652,8 @@ impl DdosProtector {
     }
 
     /// Background cleanup task
-    pub async fn run_cleanup_loop(&self, interval: Duration) {        let mut ticker = tokio::time::interval(interval);
+    pub async fn run_cleanup_loop(&self, interval: Duration) {
+        let mut ticker = tokio::time::interval(interval);
 
         loop {
             ticker.tick().await;
@@ -706,7 +708,7 @@ impl DdosProtector {
                     && !entry.is_flagged;
                 let is_old = entry.first_seen.elapsed() > eviction_threshold;
 
-                !is_stale && !(is_neutral && is_inactive && is_old)
+                !(is_stale || is_neutral && is_inactive && is_old)
             });
 
             // Periodic enforcement of the hard capacity cap as well.
@@ -743,7 +745,8 @@ fn generate_challenge_secret() -> [u8; 32] {
 
 /// DDoS protection errors
 #[derive(Debug, thiserror::Error)]
-pub enum DdosError {    /// Configuration error
+pub enum DdosError {
+    /// Configuration error
     #[error("Configuration error: {0}")]
     Config(String),
 

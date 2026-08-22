@@ -298,12 +298,7 @@ pub(crate) async fn load_page_data(
 
 // ─── Web (tenant-scoped) routes ─────────────────────────────────
 
-async fn web_route_data(
-    state: &AppState,
-    path: &str,
-    q: &ListQuery,
-    user: &AuthUser,
-) -> RouteData {
+async fn web_route_data(state: &AppState, path: &str, q: &ListQuery, user: &AuthUser) -> RouteData {
     let tenant = user.tenant_id.clone();
     let list = match path {
         "/dashboard" => Some(web_dashboard(state, &tenant).await),
@@ -383,7 +378,14 @@ async fn web_campaigns(state: &AppState, tenant: &str, q: &ListQuery) -> ListPag
     let mut where_sql = WhereBuilder::new();
     where_sql.eq("tenant_id", tenant);
     where_sql.status_in(
-        &["draft", "sending", "paused", "stopped", "completed", "failed"],
+        &[
+            "draft",
+            "sending",
+            "paused",
+            "stopped",
+            "completed",
+            "failed",
+        ],
         &q.status,
     );
     if !q.search.is_empty() {
@@ -446,7 +448,11 @@ async fn web_campaigns(state: &AppState, tenant: &str, q: &ListQuery) -> ListPag
             ("sending".into(), "Sending".into(), q.status == "sending"),
             ("paused".into(), "Paused".into(), q.status == "paused"),
             ("stopped".into(), "Stopped".into(), q.status == "stopped"),
-            ("completed".into(), "Completed".into(), q.status == "completed"),
+            (
+                "completed".into(),
+                "Completed".into(),
+                q.status == "completed",
+            ),
             ("failed".into(), "Failed".into(), q.status == "failed"),
         ],
     )];
@@ -465,7 +471,12 @@ async fn web_campaigns(state: &AppState, tenant: &str, q: &ListQuery) -> ListPag
     data.empty_title = "No campaigns yet".into();
     data.empty_description = "Create your first email campaign to see it listed here.".into();
     data.table = Some(TableData {
-        columns: vec!["Name".into(), "Subject".into(), "Status".into(), "Updated".into()],
+        columns: vec![
+            "Name".into(),
+            "Subject".into(),
+            "Status".into(),
+            "Updated".into(),
+        ],
         rows: rows
             .into_iter()
             .map(|(id, name, subject, status, updated)| DataRowData {
@@ -574,8 +585,16 @@ async fn web_contacts(state: &AppState, tenant: &str, q: &ListQuery) -> ListPage
         "Filter by status",
         vec![
             ("".into(), "All statuses".into(), q.status.is_empty()),
-            ("subscribed".into(), "Subscribed".into(), q.status == "subscribed"),
-            ("unsubscribed".into(), "Unsubscribed".into(), q.status == "unsubscribed"),
+            (
+                "subscribed".into(),
+                "Subscribed".into(),
+                q.status == "subscribed",
+            ),
+            (
+                "unsubscribed".into(),
+                "Unsubscribed".into(),
+                q.status == "unsubscribed",
+            ),
             ("bounced".into(), "Bounced".into(), q.status == "bounced"),
         ],
     )];
@@ -591,7 +610,12 @@ async fn web_contacts(state: &AppState, tenant: &str, q: &ListQuery) -> ListPage
     data.empty_title = "No contacts yet".into();
     data.empty_description = "Add your first contact to start building an audience.".into();
     data.table = Some(TableData {
-        columns: vec!["Email".into(), "Name".into(), "Status".into(), "Updated".into()],
+        columns: vec![
+            "Email".into(),
+            "Name".into(),
+            "Status".into(),
+            "Updated".into(),
+        ],
         rows: rows
             .into_iter()
             .map(|(id, email, name, status, updated)| DataRowData {
@@ -639,7 +663,11 @@ async fn web_lists(state: &AppState, tenant: &str, q: &ListQuery) -> ListPageDat
     )
     .await;
 
-    let mut data = base_list("Lists", "Audience segments — rows come from the lists table.", "/lists");
+    let mut data = base_list(
+        "Lists",
+        "Audience segments — rows come from the lists table.",
+        "/lists",
+    );
     data.search_label = "Search lists".into();
     data.search_placeholder = "Search by list name".into();
     data.current_query = q.search.clone();
@@ -732,16 +760,22 @@ async fn web_templates(state: &AppState, tenant: &str, q: &ListQuery) -> ListPag
         ],
         rows: rows
             .into_iter()
-            .map(|(id, name, subject, version, status, updated)| DataRowData {
-                id,
-                cells: vec![
-                    DataCell::text(name),
-                    DataCell::text(subject),
-                    DataCell::text(version.map(|v| format!("v{v}")).unwrap_or_else(|| "—".into())),
-                    DataCell::status(&status),
-                    DataCell::text(relative_time(updated)),
-                ],
-            })
+            .map(
+                |(id, name, subject, version, status, updated)| DataRowData {
+                    id,
+                    cells: vec![
+                        DataCell::text(name),
+                        DataCell::text(subject),
+                        DataCell::text(
+                            version
+                                .map(|v| format!("v{v}"))
+                                .unwrap_or_else(|| "—".into()),
+                        ),
+                        DataCell::status(&status),
+                        DataCell::text(relative_time(updated)),
+                    ],
+                },
+            )
             .collect(),
     });
     data
@@ -781,7 +815,11 @@ async fn web_domains(state: &AppState, tenant: &str, q: &ListQuery) -> ListPageD
     )
     .await;
 
-    let mut data = base_list("Domains", "Sending domains and their verification state.", "/domains");
+    let mut data = base_list(
+        "Domains",
+        "Sending domains and their verification state.",
+        "/domains",
+    );
     data.search_label = "Search domains".into();
     data.search_placeholder = "Search by domain name".into();
     data.current_query = q.search.clone();
@@ -886,11 +924,19 @@ async fn web_events(state: &AppState, tenant: &str, q: &ListQuery) -> ListPageDa
         vec![
             ("".into(), "All types".into(), q.status.is_empty()),
             ("sent".into(), "Sent".into(), q.status == "sent"),
-            ("delivered".into(), "Delivered".into(), q.status == "delivered"),
+            (
+                "delivered".into(),
+                "Delivered".into(),
+                q.status == "delivered",
+            ),
             ("opened".into(), "Opened".into(), q.status == "opened"),
             ("clicked".into(), "Clicked".into(), q.status == "clicked"),
             ("bounced".into(), "Bounced".into(), q.status == "bounced"),
-            ("complained".into(), "Complained".into(), q.status == "complained"),
+            (
+                "complained".into(),
+                "Complained".into(),
+                q.status == "complained",
+            ),
         ],
     )];
     data.page = page;
@@ -900,7 +946,12 @@ async fn web_events(state: &AppState, tenant: &str, q: &ListQuery) -> ListPageDa
     data.empty_title = "No events yet".into();
     data.empty_description = "Delivery events appear here as soon as mail starts flowing.".into();
     data.table = Some(TableData {
-        columns: vec!["Type".into(), "Recipient".into(), "Message".into(), "When".into()],
+        columns: vec![
+            "Type".into(),
+            "Recipient".into(),
+            "Message".into(),
+            "When".into(),
+        ],
         rows: rows
             .into_iter()
             .map(|(id, event_type, recipient, message_id, ts)| DataRowData {
@@ -917,7 +968,11 @@ async fn web_events(state: &AppState, tenant: &str, q: &ListQuery) -> ListPageDa
     data
 }
 
-async fn event_aggregate(state: &AppState, where_sql: &str, binds: &[String]) -> HashMap<String, i64> {
+async fn event_aggregate(
+    state: &AppState,
+    where_sql: &str,
+    binds: &[String],
+) -> HashMap<String, i64> {
     let sql = format!(
         "SELECT
             COALESCE(SUM(CASE WHEN event_type = 'sent' THEN 1 ELSE 0 END), 0)::bigint,
@@ -1041,7 +1096,12 @@ async fn web_reports(state: &AppState, tenant: &str) -> ListPageData {
     data.empty_title = "No reportable campaigns yet".into();
     data.empty_description = "Send a campaign to populate cross-campaign reports.".into();
     data.table = Some(TableData {
-        columns: vec!["Campaign".into(), "Status".into(), "Sent".into(), "Updated".into()],
+        columns: vec![
+            "Campaign".into(),
+            "Status".into(),
+            "Sent".into(),
+            "Updated".into(),
+        ],
         rows: rows
             .into_iter()
             .map(|(id, name, status, sent_count, updated)| DataRowData {
@@ -1049,7 +1109,11 @@ async fn web_reports(state: &AppState, tenant: &str) -> ListPageData {
                 cells: vec![
                     DataCell::text(name),
                     DataCell::status(&status),
-                    DataCell::text(sent_count.map(|c| c.to_string()).unwrap_or_else(|| "0".into())),
+                    DataCell::text(
+                        sent_count
+                            .map(|c| c.to_string())
+                            .unwrap_or_else(|| "0".into()),
+                    ),
                     DataCell::text(relative_time(updated)),
                 ],
             })
@@ -1101,7 +1165,10 @@ async fn web_deliverability(state: &AppState, tenant: &str) -> ListPageData {
             .into_iter()
             .map(|(event_type, count)| DataRowData {
                 id: event_type.clone(),
-                cells: vec![DataCell::status(&event_type), DataCell::text(count.to_string())],
+                cells: vec![
+                    DataCell::status(&event_type),
+                    DataCell::text(count.to_string()),
+                ],
             })
             .collect(),
     });
@@ -1165,7 +1232,11 @@ async fn web_inbox_placement(state: &AppState, tenant: &str, q: &ListQuery) -> L
             ("".into(), "All statuses".into(), q.status.is_empty()),
             ("pending".into(), "Pending".into(), q.status == "pending"),
             ("running".into(), "Running".into(), q.status == "running"),
-            ("completed".into(), "Completed".into(), q.status == "completed"),
+            (
+                "completed".into(),
+                "Completed".into(),
+                q.status == "completed",
+            ),
         ],
     )];
     data.page = page;
@@ -1176,18 +1247,29 @@ async fn web_inbox_placement(state: &AppState, tenant: &str, q: &ListQuery) -> L
     data.empty_title = "No placement tests yet".into();
     data.empty_description = "Start a seed-account test to measure inbox placement.".into();
     data.table = Some(TableData {
-        columns: vec!["Test".into(), "Status".into(), "Accounts".into(), "Created".into()],
+        columns: vec![
+            "Test".into(),
+            "Status".into(),
+            "Accounts".into(),
+            "Created".into(),
+        ],
         rows: rows
             .into_iter()
-            .map(|(id, name, status, total_accounts, completed, created)| DataRowData {
-                id,
-                cells: vec![
-                    DataCell::text(name.unwrap_or_else(|| "Unnamed test".into())),
-                    DataCell::status(&status),
-                    DataCell::text(format!("{}/{}", completed.unwrap_or(0), total_accounts.unwrap_or(0))),
-                    DataCell::text(relative_time(created)),
-                ],
-            })
+            .map(
+                |(id, name, status, total_accounts, completed, created)| DataRowData {
+                    id,
+                    cells: vec![
+                        DataCell::text(name.unwrap_or_else(|| "Unnamed test".into())),
+                        DataCell::status(&status),
+                        DataCell::text(format!(
+                            "{}/{}",
+                            completed.unwrap_or(0),
+                            total_accounts.unwrap_or(0)
+                        )),
+                        DataCell::text(relative_time(created)),
+                    ],
+                },
+            )
             .collect(),
     });
     data
@@ -1225,7 +1307,12 @@ async fn web_api_keys(state: &AppState, tenant: &str) -> ListPageData {
     data.empty_title = "No API keys yet".into();
     data.empty_description = "Create a key to call the API programmatically.".into();
     data.table = Some(TableData {
-        columns: vec!["Name".into(), "Prefix".into(), "Status".into(), "Created".into()],
+        columns: vec![
+            "Name".into(),
+            "Prefix".into(),
+            "Status".into(),
+            "Created".into(),
+        ],
         rows: rows
             .into_iter()
             .map(|(id, name, prefix, created, revoked)| DataRowData {
@@ -1233,7 +1320,11 @@ async fn web_api_keys(state: &AppState, tenant: &str) -> ListPageData {
                 cells: vec![
                     DataCell::text(name),
                     DataCell::mono(format!("{prefix}…")),
-                    DataCell::status(if revoked.is_some() { "paused" } else { "active" }),
+                    DataCell::status(if revoked.is_some() {
+                        "paused"
+                    } else {
+                        "active"
+                    }),
                     DataCell::text(relative_time(created)),
                 ],
             })
@@ -1293,7 +1384,11 @@ async fn web_team(state: &AppState, tenant: &str) -> ListPageData {
     )
     .await;
 
-    let mut data = base_list("Team", "Workspace members and their access level.", "/settings/team");
+    let mut data = base_list(
+        "Team",
+        "Workspace members and their access level.",
+        "/settings/team",
+    );
     data.total_count = rows.len() as i64;
     data.empty_title = "No team members yet".into();
     data.empty_description = "Invite teammates to collaborate on this workspace.".into();
@@ -1354,7 +1449,11 @@ async fn web_billing(state: &AppState, tenant: &str) -> ListPageData {
         )
         .await;
 
-    let outstanding: i64 = rows.iter().filter(|row| row.3 != "paid").map(|row| row.1).sum();
+    let outstanding: i64 = rows
+        .iter()
+        .filter(|row| row.3 != "paid")
+        .map(|row| row.1)
+        .sum();
 
     let mut data = base_list(
         "Billing",
@@ -1362,10 +1461,14 @@ async fn web_billing(state: &AppState, tenant: &str) -> ListPageData {
         "/settings/billing",
     );
     data.kpis = vec![
-        KpiCardData::new("Current plan", plan.unwrap_or_else(|| "free".into())).with_hint("Tenant record"),
+        KpiCardData::new("Current plan", plan.unwrap_or_else(|| "free".into()))
+            .with_hint("Tenant record"),
         KpiCardData::new("Invoices", rows.len().to_string()).with_hint("On record"),
-        KpiCardData::new("Outstanding", format!("{:.2} EUR", outstanding as f64 / 100.0))
-            .with_hint("Unpaid total"),
+        KpiCardData::new(
+            "Outstanding",
+            format!("{:.2} EUR", outstanding as f64 / 100.0),
+        )
+        .with_hint("Unpaid total"),
     ];
     data.total_count = rows.len() as i64;
     data.empty_title = "No invoices yet".into();
@@ -1422,13 +1525,19 @@ async fn web_dedicated_ips(state: &AppState, tenant: &str) -> ListPageData {
     );
     data.kpis = vec![
         KpiCardData::new("Assigned", rows.len().to_string()).with_hint("Active allocations"),
-        KpiCardData::new("Pending requests", pending.to_string()).with_hint("Awaiting the provisioner"),
+        KpiCardData::new("Pending requests", pending.to_string())
+            .with_hint("Awaiting the provisioner"),
     ];
     data.total_count = rows.len() as i64;
     data.empty_title = "No dedicated IPs yet".into();
     data.empty_description = "Request an allocation — the provisioner completes it.".into();
     data.table = Some(TableData {
-        columns: vec!["IP".into(), "Region".into(), "Status".into(), "Warmup".into()],
+        columns: vec![
+            "IP".into(),
+            "Region".into(),
+            "Status".into(),
+            "Warmup".into(),
+        ],
         rows: rows
             .into_iter()
             .map(|(id, ip, region, status, warmup)| DataRowData {
@@ -1438,7 +1547,9 @@ async fn web_dedicated_ips(state: &AppState, tenant: &str) -> ListPageData {
                     DataCell::text(region.unwrap_or_else(|| "—".into())),
                     DataCell::status(&status),
                     DataCell::text(
-                        warmup.map(|w| format!("{:.0}%", w * 100.0)).unwrap_or_else(|| "—".into()),
+                        warmup
+                            .map(|w| format!("{:.0}%", w * 100.0))
+                            .unwrap_or_else(|| "—".into()),
                     ),
                 ],
             })
@@ -1531,9 +1642,15 @@ async fn cp_home(state: &AppState) -> ListPageData {
         KpiCardData::new("Queue depth", queue_depth.to_string()).with_hint("Pending jobs"),
     ];
     data.empty_title = "No tenants yet".into();
-    data.empty_description = "Provision the first tenant workspace to populate the fleet view.".into();
+    data.empty_description =
+        "Provision the first tenant workspace to populate the fleet view.".into();
     data.table = Some(TableData {
-        columns: vec!["Tenant".into(), "Slug".into(), "Plan".into(), "Created".into()],
+        columns: vec![
+            "Tenant".into(),
+            "Slug".into(),
+            "Plan".into(),
+            "Created".into(),
+        ],
         rows: rows
             .into_iter()
             .map(|(id, name, slug, plan, created)| DataRowData {
@@ -1605,7 +1722,8 @@ async fn cp_dashboard(state: &AppState) -> ListPageData {
         KpiCardData::new("GDPR pending", gdpr_pending.to_string()).with_hint("Requests"),
     ];
     data.empty_title = "No alerts recorded".into();
-    data.empty_description = "Fleet alert signals will list here when the alerting pipeline fires.".into();
+    data.empty_description =
+        "Fleet alert signals will list here when the alerting pipeline fires.".into();
     data.table = Some(TableData {
         columns: vec![
             "Severity".into(),
@@ -1616,21 +1734,23 @@ async fn cp_dashboard(state: &AppState) -> ListPageData {
         ],
         rows: rows
             .into_iter()
-            .map(|(id, severity, alert_type, message, acknowledged, created)| DataRowData {
-                id,
-                cells: vec![
-                    DataCell::status(&severity),
-                    DataCell::text(alert_type),
-                    DataCell::text(message),
-                    // Item H: same honest-state fix as the alerts page.
-                    DataCell::status(if acknowledged {
-                        "acknowledged"
-                    } else {
-                        "active"
-                    }),
-                    DataCell::text(relative_time(created)),
-                ],
-            })
+            .map(
+                |(id, severity, alert_type, message, acknowledged, created)| DataRowData {
+                    id,
+                    cells: vec![
+                        DataCell::status(&severity),
+                        DataCell::text(alert_type),
+                        DataCell::text(message),
+                        // Item H: same honest-state fix as the alerts page.
+                        DataCell::status(if acknowledged {
+                            "acknowledged"
+                        } else {
+                            "active"
+                        }),
+                        DataCell::text(relative_time(created)),
+                    ],
+                },
+            )
             .collect(),
     });
     data
@@ -1692,7 +1812,11 @@ async fn cp_tenants(state: &AppState, q: &ListQuery) -> ListPageData {
             ("".into(), "All statuses".into(), q.status.is_empty()),
             ("pending".into(), "Pending".into(), q.status == "pending"),
             ("active".into(), "Active".into(), q.status == "active"),
-            ("suspended".into(), "Suspended".into(), q.status == "suspended"),
+            (
+                "suspended".into(),
+                "Suspended".into(),
+                q.status == "suspended",
+            ),
         ],
     )];
     data.page = page;
@@ -1797,16 +1921,18 @@ async fn cp_operators(state: &AppState, q: &ListQuery) -> ListPageData {
         rows: rows
             .into_iter()
             .enumerate()
-            .map(|(index, (email, name, role, mfa, status, _created))| DataRowData {
-                id: format!("operator-{index}"),
-                cells: vec![
-                    DataCell::text(email),
-                    DataCell::text(name.unwrap_or_default()),
-                    DataCell::text(role),
-                    DataCell::status(if mfa { "sent" } else { "draft" }),
-                    DataCell::status(&status),
-                ],
-            })
+            .map(
+                |(index, (email, name, role, mfa, status, _created))| DataRowData {
+                    id: format!("operator-{index}"),
+                    cells: vec![
+                        DataCell::text(email),
+                        DataCell::text(name.unwrap_or_default()),
+                        DataCell::text(role),
+                        DataCell::status(if mfa { "sent" } else { "draft" }),
+                        DataCell::status(&status),
+                    ],
+                },
+            )
             .collect(),
     });
     data
@@ -1820,7 +1946,14 @@ async fn cp_sales(state: &AppState, q: &ListQuery) -> ListPageData {
     };
     let mut where_sql = WhereBuilder::new();
     where_sql.status_in(
-        &["new", "qualified", "proposal", "approved", "escalated", "prospect"],
+        &[
+            "new",
+            "qualified",
+            "proposal",
+            "approved",
+            "escalated",
+            "prospect",
+        ],
         &stage,
     );
     if !q.search.is_empty() {
@@ -1898,7 +2031,12 @@ async fn cp_sales(state: &AppState, q: &ListQuery) -> ListPageData {
     data.empty_title = "No leads yet".into();
     data.empty_description = "Discovery runs populate the pipeline as leads are identified.".into();
     data.table = Some(TableData {
-        columns: vec!["Company".into(), "Stage".into(), "Score".into(), "Added".into()],
+        columns: vec![
+            "Company".into(),
+            "Stage".into(),
+            "Score".into(),
+            "Added".into(),
+        ],
         rows: rows
             .into_iter()
             .map(|(id, company, status, score, created)| DataRowData {
@@ -1994,15 +2132,21 @@ async fn cp_audit(state: &AppState, q: &ListQuery) -> ListPageData {
         rows: rows
             .into_iter()
             .enumerate()
-            .map(|(index, (created, action, resource_type, user_id))| DataRowData {
-                id: format!("audit-{index}"),
-                cells: vec![
-                    DataCell::text(created.map(|ts| ts.to_rfc3339()).unwrap_or_else(|| "—".into())),
-                    DataCell::text(action),
-                    DataCell::text(resource_type.unwrap_or_else(|| "—".into())),
-                    DataCell::mono(user_id.unwrap_or_else(|| "system".into())),
-                ],
-            })
+            .map(
+                |(index, (created, action, resource_type, user_id))| DataRowData {
+                    id: format!("audit-{index}"),
+                    cells: vec![
+                        DataCell::text(
+                            created
+                                .map(|ts| ts.to_rfc3339())
+                                .unwrap_or_else(|| "—".into()),
+                        ),
+                        DataCell::text(action),
+                        DataCell::text(resource_type.unwrap_or_else(|| "—".into())),
+                        DataCell::mono(user_id.unwrap_or_else(|| "system".into())),
+                    ],
+                },
+            )
             .collect(),
     });
     data
@@ -2021,7 +2165,11 @@ async fn cp_jobs(state: &AppState) -> ListPageData {
     .await;
 
     let pending: i64 = rows.iter().filter(|r| r.1 == "pending").map(|r| r.2).sum();
-    let queues = rows.iter().map(|r| r.0.clone()).collect::<std::collections::HashSet<_>>().len();
+    let queues = rows
+        .iter()
+        .map(|r| r.0.clone())
+        .collect::<std::collections::HashSet<_>>()
+        .len();
 
     let mut data = base_list("Jobs", "Background work and remediation queues.", "/jobs");
     data.kpis = vec![
@@ -2031,7 +2179,12 @@ async fn cp_jobs(state: &AppState) -> ListPageData {
     data.empty_title = "No queued jobs".into();
     data.empty_description = "Background work appears here as workers enqueue it.".into();
     data.table = Some(TableData {
-        columns: vec!["Queue".into(), "Status".into(), "Jobs".into(), "Last activity".into()],
+        columns: vec![
+            "Queue".into(),
+            "Status".into(),
+            "Jobs".into(),
+            "Last activity".into(),
+        ],
         rows: rows
             .into_iter()
             .enumerate()
@@ -2062,13 +2215,18 @@ async fn cp_nodes(state: &AppState) -> ListPageData {
     .await;
 
     let active = rows.iter().filter(|r| r.3 == "active").count();
-    let mut data = base_list("Nodes", "Cluster capacity and node health.", "/infrastructure/nodes");
+    let mut data = base_list(
+        "Nodes",
+        "Cluster capacity and node health.",
+        "/infrastructure/nodes",
+    );
     data.kpis = vec![
         KpiCardData::new("Nodes", rows.len().to_string()).with_hint("MTA pool"),
         KpiCardData::new("Active", active.to_string()).with_hint("Sending"),
     ];
     data.empty_title = "No nodes registered".into();
-    data.empty_description = "MTA pool addresses appear here as infrastructure registers them.".into();
+    data.empty_description =
+        "MTA pool addresses appear here as infrastructure registers them.".into();
     data.table = Some(TableData {
         columns: vec![
             "Node".into(),
@@ -2085,7 +2243,11 @@ async fn cp_nodes(state: &AppState) -> ListPageData {
                     DataCell::mono(ip.unwrap_or_else(|| "—".into())),
                     DataCell::mono(pool.unwrap_or_else(|| "—".into())),
                     DataCell::status(&status),
-                    DataCell::text(warmup_day.map(|d| d.to_string()).unwrap_or_else(|| "—".into())),
+                    DataCell::text(
+                        warmup_day
+                            .map(|d| d.to_string())
+                            .unwrap_or_else(|| "—".into()),
+                    ),
                 ],
                 id,
             })
@@ -2095,18 +2257,16 @@ async fn cp_nodes(state: &AppState) -> ListPageData {
 }
 
 async fn cp_queues(state: &AppState) -> ListPageData {
-    let rows: Vec<(String, i64, i64)> = optional_rows(
-        async {
-            sqlx::query_as::<_, (String, i64, i64)>(
-                "SELECT COALESCE(queue, 'default') AS q,
+    let rows: Vec<(String, i64, i64)> = optional_rows(async {
+        sqlx::query_as::<_, (String, i64, i64)>(
+            "SELECT COALESCE(queue, 'default') AS q,
                         SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END)::bigint AS depth,
                         SUM(CASE WHEN status = 'processing' THEN 1 ELSE 0 END)::bigint AS proc
                  FROM queue_jobs GROUP BY 1",
-            )
-            .fetch_all(&state.db)
-            .await
-        },
-    )
+        )
+        .fetch_all(&state.db)
+        .await
+    })
     .await;
 
     let depth: i64 = rows.iter().map(|r| r.1).sum();
@@ -2122,7 +2282,12 @@ async fn cp_queues(state: &AppState) -> ListPageData {
     data.empty_title = "No queues reporting".into();
     data.empty_description = "Queue telemetry appears once workers enqueue jobs.".into();
     data.table = Some(TableData {
-        columns: vec!["Queue".into(), "Depth".into(), "Processing".into(), "State".into()],
+        columns: vec![
+            "Queue".into(),
+            "Depth".into(),
+            "Processing".into(),
+            "State".into(),
+        ],
         rows: rows
             .into_iter()
             .map(|(queue, depth, processing)| DataRowData {
@@ -2184,7 +2349,11 @@ async fn cp_alerts(state: &AppState, q: &ListQuery) -> ListPageData {
     )
     .await;
 
-    let mut data = base_list("Alerts", "Incident triage and fleet risk signals.", "/alerts");
+    let mut data = base_list(
+        "Alerts",
+        "Incident triage and fleet risk signals.",
+        "/alerts",
+    );
     data.filters = vec![FilterSelectData::new(
         "status",
         "Filter by severity",
@@ -2196,7 +2365,8 @@ async fn cp_alerts(state: &AppState, q: &ListQuery) -> ListPageData {
             ("low".into(), "Low".into(), q.status == "low"),
         ],
     )];
-    data.kpis = vec![KpiCardData::new("Unacknowledged", unacknowledged.to_string()).with_hint("Open")];
+    data.kpis =
+        vec![KpiCardData::new("Unacknowledged", unacknowledged.to_string()).with_hint("Open")];
     data.page = page;
     data.total_pages = total_pages;
     data.total_count = total;
@@ -2218,23 +2388,25 @@ async fn cp_alerts(state: &AppState, q: &ListQuery) -> ListPageData {
         .to_vec(),
         rows: rows
             .into_iter()
-            .map(|(id, severity, alert_type, message, acknowledged, created)| DataRowData {
-                id,
-                cells: vec![
-                    DataCell::status(&severity),
-                    DataCell::text(alert_type),
-                    DataCell::text(message),
-                    // Item H: honest state — acknowledged rows surface
-                    // "acknowledged"; unacknowledged rows are still
-                    // "active" work (the previous mapping inverted this).
-                    DataCell::status(if acknowledged {
-                        "acknowledged"
-                    } else {
-                        "active"
-                    }),
-                    DataCell::text(relative_time(created)),
-                ],
-            })
+            .map(
+                |(id, severity, alert_type, message, acknowledged, created)| DataRowData {
+                    id,
+                    cells: vec![
+                        DataCell::status(&severity),
+                        DataCell::text(alert_type),
+                        DataCell::text(message),
+                        // Item H: honest state — acknowledged rows surface
+                        // "acknowledged"; unacknowledged rows are still
+                        // "active" work (the previous mapping inverted this).
+                        DataCell::status(if acknowledged {
+                            "acknowledged"
+                        } else {
+                            "active"
+                        }),
+                        DataCell::text(relative_time(created)),
+                    ],
+                },
+            )
             .collect(),
     });
     data
@@ -2338,15 +2510,13 @@ async fn cp_domains(state: &AppState, q: &ListQuery) -> ListPageData {
 }
 
 async fn cp_plans(state: &AppState) -> ListPageData {
-    let rows: Vec<(String, Option<String>, i64)> = optional_rows(
-        async {
-            sqlx::query_as::<_, (String, Option<String>, i64)>(
-                "SELECT name, display_name, price_cents FROM plans ORDER BY price_cents ASC LIMIT 50",
-            )
-            .fetch_all(&state.db)
-            .await
-        },
-    )
+    let rows: Vec<(String, Option<String>, i64)> = optional_rows(async {
+        sqlx::query_as::<_, (String, Option<String>, i64)>(
+            "SELECT name, display_name, price_cents FROM plans ORDER BY price_cents ASC LIMIT 50",
+        )
+        .fetch_all(&state.db)
+        .await
+    })
     .await;
 
     let tenants = count_rows(state, "SELECT COUNT(*)::bigint FROM tenants", &[]).await;
@@ -2361,7 +2531,8 @@ async fn cp_plans(state: &AppState) -> ListPageData {
         KpiCardData::new("Tenants", tenants.to_string()).with_hint("On any plan"),
     ];
     data.empty_title = "No plans in the catalog".into();
-    data.empty_description = "Plan packaging appears here once the billing catalog is seeded.".into();
+    data.empty_description =
+        "Plan packaging appears here once the billing catalog is seeded.".into();
     data.table = Some(TableData {
         columns: vec!["Plan".into(), "Display name".into(), "Price".into()],
         rows: rows
@@ -2419,19 +2590,24 @@ async fn cp_compliance(state: &AppState) -> ListPageData {
     data.empty_title = "No compliance requests".into();
     data.empty_description = "GDPR and trust workflows appear here as they are filed.".into();
     data.table = Some(TableData {
-        columns: vec!["Request".into(), "Type".into(), "Status".into(), "Filed".into()],
+        columns: vec![
+            "Request".into(),
+            "Type".into(),
+            "Status".into(),
+            "Filed".into(),
+        ],
         rows: rows
             .into_iter()
             .map(|(id, request_type, status, created)| {
                 let short_id = id.chars().take(12).collect::<String>();
                 DataRowData {
-                id,
-                cells: vec![
-                    DataCell::mono(short_id),
-                    DataCell::text(request_type),
-                    DataCell::status(&status),
-                    DataCell::text(relative_time(created)),
-                ],
+                    id,
+                    cells: vec![
+                        DataCell::mono(short_id),
+                        DataCell::text(request_type),
+                        DataCell::status(&status),
+                        DataCell::text(relative_time(created)),
+                    ],
                 }
             })
             .collect(),
@@ -2441,7 +2617,10 @@ async fn cp_compliance(state: &AppState) -> ListPageData {
 
 async fn cp_gdpr(state: &AppState, q: &ListQuery) -> ListPageData {
     let mut where_sql = WhereBuilder::new();
-    where_sql.status_in(&["pending", "in_progress", "completed", "rejected"], &q.status);
+    where_sql.status_in(
+        &["pending", "in_progress", "completed", "rejected"],
+        &q.status,
+    );
     let where_clause = where_sql.build();
 
     let total = count_rows(
@@ -2487,8 +2666,16 @@ async fn cp_gdpr(state: &AppState, q: &ListQuery) -> ListPageData {
         vec![
             ("".into(), "All statuses".into(), q.status.is_empty()),
             ("pending".into(), "Pending".into(), q.status == "pending"),
-            ("in_progress".into(), "In progress".into(), q.status == "in_progress"),
-            ("completed".into(), "Completed".into(), q.status == "completed"),
+            (
+                "in_progress".into(),
+                "In progress".into(),
+                q.status == "in_progress",
+            ),
+            (
+                "completed".into(),
+                "Completed".into(),
+                q.status == "completed",
+            ),
         ],
     )];
     data.page = page;
@@ -2498,7 +2685,12 @@ async fn cp_gdpr(state: &AppState, q: &ListQuery) -> ListPageData {
     data.empty_title = "No GDPR requests".into();
     data.empty_description = "Data-subject requests appear here as they arrive.".into();
     data.table = Some(TableData {
-        columns: vec!["Email".into(), "Type".into(), "Status".into(), "Filed".into()],
+        columns: vec![
+            "Email".into(),
+            "Type".into(),
+            "Status".into(),
+            "Filed".into(),
+        ],
         rows: rows
             .into_iter()
             .map(|(id, email, request_type, status, created)| DataRowData {
@@ -2606,7 +2798,7 @@ pub(crate) async fn load_domain_detail(
     .await
     .ok()
     .flatten();
-    let Some((
+    let (
         id,
         name,
         status,
@@ -2617,10 +2809,7 @@ pub(crate) async fn load_domain_detail(
         dkim_selector,
         dkim_public_key,
         dkim_private_key,
-    )) = row
-    else {
-        return None;
-    };
+    ) = row?;
 
     let mut data = base_list(
         "Domain",
@@ -2671,21 +2860,14 @@ pub(crate) async fn load_domain_detail(
             crate::config::Config::ses_transport_enabled(),
         );
         data.table = Some(TableData {
-            columns: vec![
-                "Type".into(),
-                "Host".into(),
-                "Value".into(),
-                "State".into(),
-            ],
+            columns: vec!["Type".into(), "Host".into(), "Value".into(), "State".into()],
             rows: records
                 .iter()
                 .map(|record| {
                     let verified = match record.hostname.as_str() {
                         host if host.starts_with("_dmarc.") => dmarc_verified,
                         host if host.contains("._domainkey.") => dkim_verified,
-                        host if host.starts_with("bounce.") => {
-                            spf_verified || return_path_verified
-                        }
+                        host if host.starts_with("bounce.") => spf_verified || return_path_verified,
                         _ => false,
                     };
                     DataRowData {
@@ -2694,11 +2876,7 @@ pub(crate) async fn load_domain_detail(
                             DataCell::mono(record.record_type.clone()),
                             DataCell::mono(record.hostname.clone()),
                             DataCell::mono(record.value.clone()),
-                            DataCell::status(if verified {
-                                "verified"
-                            } else {
-                                "pending"
-                            }),
+                            DataCell::status(if verified { "verified" } else { "pending" }),
                         ],
                     }
                 })
@@ -2744,7 +2922,10 @@ impl CampaignDetailData {
     pub(crate) fn to_list_page(&self) -> ListPageData {
         let mut data = base_list(
             "Campaign",
-            &format!("Status, audience, and lifecycle actions for “{}”.", self.name),
+            &format!(
+                "Status, audience, and lifecycle actions for “{}”.",
+                self.name
+            ),
             &format!("/campaigns/{}", self.id),
         );
         data.kpis = vec![
@@ -2765,10 +2946,7 @@ impl CampaignDetailData {
             .with_hint("Scheduled time"),
         ];
         data.table = Some(TableData {
-            columns: vec![
-                "Field".into(),
-                "Value".into(),
-            ],
+            columns: vec!["Field".into(), "Value".into()],
             rows: vec![
                 DataRowData {
                     id: "name".into(),
@@ -2793,23 +2971,13 @@ impl CampaignDetailData {
             let options = self
                 .lists
                 .iter()
-                .map(|(id, name, _)| {
-                    (id.clone(), name.clone(), *id == selected_list)
-                })
+                .map(|(id, name, _)| (id.clone(), name.clone(), *id == selected_list))
                 .collect();
-            data.filters = vec![FilterSelectData::new(
-                "list_id",
-                "Audience list",
-                options,
-            )];
+            data.filters = vec![FilterSelectData::new("list_id", "Audience list", options)];
         }
         // The action list rides along as a second block via the primary
         // action slot + a mono summary of availability.
-        if let Some((label, target, _)) = self
-            .actions
-            .iter()
-            .find(|(_, _, available)| *available)
-        {
+        if let Some((label, target, _)) = self.actions.iter().find(|(_, _, available)| *available) {
             data.primary_action = Some((label.clone(), target.clone()));
         }
         data.empty_title = "No actions available".into();
@@ -2862,22 +3030,22 @@ pub(crate) async fn load_campaign_detail(
     .await
     .ok()
     .flatten();
-    let Some((id, name, subject, status, scheduled_at, recipients_job)) = row else {
-        return None;
-    };
+    let (id, name, subject, status, scheduled_at, recipients_job) = row?;
     // The wired audience is the latest `recipients:{list}:{segment}` job.
     let (list_id, segment) = recipients_job
         .as_deref()
         .and_then(super::parse_recipients_job)
         .unzip();
     let list_name: Option<String> = match &list_id {
-        Some(list_id) => sqlx::query_scalar("SELECT name FROM lists WHERE id = $1::uuid AND tenant_id = $2")
-            .bind(list_id)
-            .bind(tenant)
-            .fetch_optional(db)
-            .await
-            .ok()
-            .flatten(),
+        Some(list_id) => {
+            sqlx::query_scalar("SELECT name FROM lists WHERE id = $1::uuid AND tenant_id = $2")
+                .bind(list_id)
+                .bind(tenant)
+                .fetch_optional(db)
+                .await
+                .ok()
+                .flatten()
+        }
         None => None,
     };
     let recipient_count = match &list_id {
@@ -3082,7 +3250,10 @@ mod tests {
     #[test]
     fn where_builder_positions_binds_in_order() {
         let mut where_sql = WhereBuilder::new();
-        where_sql.eq("tenant_id", "t_1").ilike("name", "spring").eq("status", "draft");
+        where_sql
+            .eq("tenant_id", "t_1")
+            .ilike("name", "spring")
+            .eq("status", "draft");
         assert_eq!(
             where_sql.build(),
             "tenant_id = $1 AND name ILIKE '%' || $2 || '%' AND status = $3"

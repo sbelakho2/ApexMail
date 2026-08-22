@@ -207,7 +207,9 @@ impl MessageStorage {
             MIGRATOR.run(&self.pool).await?;
             info!("Mailstore embedded migrations applied");
         } else {
-            info!("Mailstore embedded migrations skipped (canonical chain owns the shared database)");
+            info!(
+                "Mailstore embedded migrations skipped (canonical chain owns the shared database)"
+            );
         }
         Ok(())
     }

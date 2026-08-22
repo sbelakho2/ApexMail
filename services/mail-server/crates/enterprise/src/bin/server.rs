@@ -142,7 +142,11 @@ fn spawn_background_jobs(state: Arc<AppState>, db: sqlx::PgPool) {
     // Best-effort: failures are recorded per stream and retried next cycle.
     let delivery_state = state.clone();
     let flush_interval = std::time::Duration::from_millis(
-        delivery_state.config.log_stream.flush_interval_ms.max(1_000),
+        delivery_state
+            .config
+            .log_stream
+            .flush_interval_ms
+            .max(1_000),
     );
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(flush_interval);
@@ -150,7 +154,10 @@ fn spawn_background_jobs(state: Arc<AppState>, db: sqlx::PgPool) {
             interval.tick().await;
             match delivery_state.log_streaming.run_delivery_cycle().await {
                 Ok(delivered) if delivered > 0 => {
-                    info!(delivered = delivered, "Log-stream heartbeat deliveries completed");
+                    info!(
+                        delivered = delivered,
+                        "Log-stream heartbeat deliveries completed"
+                    );
                 }
                 Ok(_) => {}
                 Err(e) => tracing::error!(error = %e, "Log-stream delivery cycle failed"),

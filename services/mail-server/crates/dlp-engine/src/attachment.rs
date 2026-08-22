@@ -333,7 +333,7 @@ fn extract_pdf_text(data: &[u8]) -> (String, bool, String) {
     // PDFs entirely.
     let mut inflated_streams = 0u32;
     for stream in find_pdf_streams(data) {
-        if let Some(inflated) = inflate_pdf_stream(&stream) {
+        if let Some(inflated) = inflate_pdf_stream(stream) {
             let decoded = String::from_utf8_lossy(&inflated);
             let mut rem = decoded.as_ref();
             while let Some(bt_pos) = rem.find("BT") {
@@ -402,13 +402,11 @@ fn find_pdf_streams(data: &[u8]) -> Vec<&[u8]> {
 }
 
 /// Find a subslice in a haystack (memmem without extra deps).
-fn find_subslice<'a>(haystack: &'a [u8], needle: &[u8]) -> Option<usize> {
+fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     if needle.is_empty() || haystack.len() < needle.len() {
         return None;
     }
-    haystack
-        .windows(needle.len())
-        .position(|w| w == needle)
+    haystack.windows(needle.len()).position(|w| w == needle)
 }
 
 /// Inflate a PDF FlateDecode stream (zlib format) with a hard output cap.
@@ -484,9 +482,7 @@ fn extract_pdf_strings(text_object: &str, out: &mut String) {
                 }
                 if closed && !hex.is_empty() {
                     let bytes: Vec<u8> = (0..hex.len() / 2)
-                        .filter_map(|i| {
-                            u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).ok()
-                        })
+                        .filter_map(|i| u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).ok())
                         .collect();
                     let decoded = String::from_utf8_lossy(&bytes).into_owned();
                     if !decoded.is_empty() {
@@ -898,11 +894,10 @@ mod tests {
         // Build a PDF whose text object lives inside a FlateDecode stream.
         let inner = b"BT\n(Credit card: 4111 1111 1111 1111 SSN: 123-45-6789) Tj\nET";
         let mut enc = ZlibEncoder::new(Vec::new(), Compression::default());
-        enc.write_all(inner).unwrap();
-        let compressed = enc.finish().unwrap();
+        enc.write_all(inner).expect("zlib write");
+        let compressed = enc.finish().expect("zlib finish");
 
-        let mut pdf =
-            b"%PDF-1.4\n1 0 obj\n<< /Length ".to_vec();
+        let mut pdf = b"%PDF-1.4\n1 0 obj\n<< /Length ".to_vec();
         pdf.extend_from_slice(compressed.len().to_string().as_bytes());
         pdf.extend_from_slice(b" /Filter /FlateDecode >>\nstream\n");
         pdf.extend_from_slice(&compressed);

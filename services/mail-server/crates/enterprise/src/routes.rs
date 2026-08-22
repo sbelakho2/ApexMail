@@ -115,10 +115,16 @@ struct JwtClaims {
     #[serde(default)]
     admin: bool,
     #[serde(default)]
-    #[allow(dead_code, reason = "validated by jsonwebtoken against config, not read directly")]
+    #[allow(
+        dead_code,
+        reason = "validated by jsonwebtoken against config, not read directly"
+    )]
     aud: Option<String>,
     #[serde(default)]
-    #[allow(dead_code, reason = "validated by jsonwebtoken against config, not read directly")]
+    #[allow(
+        dead_code,
+        reason = "validated by jsonwebtoken against config, not read directly"
+    )]
     iss: Option<String>,
     #[serde(rename = "exp")]
     _exp: usize,
@@ -1030,16 +1036,14 @@ fn support_result<T: serde::Serialize>(
         if !r.success {
             let status = match r.code.as_deref() {
                 Some("VALIDATION") => StatusCode::BAD_REQUEST,
-                Some("INVALID_TRANSITION") | Some("ALREADY_SUBMITTED") => {
-                    StatusCode::CONFLICT
-                }
+                Some("INVALID_TRANSITION") | Some("ALREADY_SUBMITTED") => StatusCode::CONFLICT,
                 Some("NOT_FOUND") => StatusCode::NOT_FOUND,
                 _ => StatusCode::OK,
             };
             if status != StatusCode::OK {
-                let body = serde_json::to_value(r).unwrap_or_else(|_| {
-                    serde_json::json!({"success": false, "error": "invalid request"})
-                });
+                let body = serde_json::to_value(r).unwrap_or_else(
+                    |_| serde_json::json!({"success": false, "error": "invalid request"}),
+                );
                 return (status, Json(body));
             }
         }
@@ -2699,8 +2703,10 @@ async fn ticket_list(
                 q.priority.as_deref(),
                 limit,
                 offset,
-                cursor,
-                q.q.as_deref(),
+                crate::support::TicketListRefinements {
+                    cursor,
+                    search: q.q.as_deref(),
+                },
             )
             .await,
     )
@@ -2892,7 +2898,12 @@ async fn template_reject(
     if let Some(e) = guard_resource_tenant(&auth, &existing).await {
         return e;
     }
-    service_result(state.templates.reject(id, &auth.user_id, &body.reason).await)
+    service_result(
+        state
+            .templates
+            .reject(id, &auth.user_id, &body.reason)
+            .await,
+    )
 }
 
 async fn template_request_changes(

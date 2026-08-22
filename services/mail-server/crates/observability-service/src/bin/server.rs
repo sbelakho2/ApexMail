@@ -36,39 +36,6 @@ fn redact_url_credentials(url: &str) -> String {
     format!("{scheme}://{host_port}{path}")
 }
 
-#[cfg(test)]
-mod tests {
-    use super::redact_url_credentials;
-
-    #[test]
-    fn redacts_password_from_redis_url() {
-        assert_eq!(
-            redact_url_credentials("redis://:p%40ss%3Aw@redis:6379/0"),
-            "redis://redis:6379/0"
-        );
-    }
-
-    #[test]
-    fn redacts_user_and_password() {
-        assert_eq!(
-            redact_url_credentials("postgres://user:secret@db:5432/apexmail"),
-            "postgres://db:5432/apexmail"
-        );
-    }
-
-    #[test]
-    fn keeps_credential_free_urls_untouched() {
-        assert_eq!(
-            redact_url_credentials("redis://127.0.0.1:6379/0"),
-            "redis://127.0.0.1:6379/0"
-        );
-        assert_eq!(
-            redact_url_credentials("http://otel-collector:4317/path"),
-            "http://otel-collector:4317/path"
-        );
-    }
-}
-
 #[tokio::main]
 async fn main() {
     let config = match ObservabilityConfig::from_env() {
@@ -379,5 +346,38 @@ async fn main() {
         .await
     {
         tracing::error!(error = %err, "server error");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::redact_url_credentials;
+
+    #[test]
+    fn redacts_password_from_redis_url() {
+        assert_eq!(
+            redact_url_credentials("redis://:p%40ss%3Aw@redis:6379/0"),
+            "redis://redis:6379/0"
+        );
+    }
+
+    #[test]
+    fn redacts_user_and_password() {
+        assert_eq!(
+            redact_url_credentials("postgres://user:secret@db:5432/apexmail"),
+            "postgres://db:5432/apexmail"
+        );
+    }
+
+    #[test]
+    fn keeps_credential_free_urls_untouched() {
+        assert_eq!(
+            redact_url_credentials("redis://127.0.0.1:6379/0"),
+            "redis://127.0.0.1:6379/0"
+        );
+        assert_eq!(
+            redact_url_credentials("http://otel-collector:4317/path"),
+            "http://otel-collector:4317/path"
+        );
     }
 }

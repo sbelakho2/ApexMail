@@ -225,12 +225,11 @@ impl BreachNotifier {
             .ok_or_else(|| "Just-created breach report missing".into())
     }
 
-    pub async fn notify_dpa(
-        &self,
-        breach_id: &str,
-        caller: &str,
-    ) -> Result<BreachReport, String> {
-        let current = self.fetch(breach_id).await?.ok_or("Breach report not found")?;
+    pub async fn notify_dpa(&self, breach_id: &str, caller: &str) -> Result<BreachReport, String> {
+        let current = self
+            .fetch(breach_id)
+            .await?
+            .ok_or("Breach report not found")?;
         let now = Utc::now();
 
         sqlx::query(
@@ -278,7 +277,10 @@ impl BreachNotifier {
         breach_id: &str,
         caller: &str,
     ) -> Result<BreachReport, String> {
-        let current = self.fetch(breach_id).await?.ok_or("Breach report not found")?;
+        let current = self
+            .fetch(breach_id)
+            .await?
+            .ok_or("Breach report not found")?;
         let now = Utc::now();
 
         sqlx::query(
@@ -321,12 +323,11 @@ impl BreachNotifier {
         Ok(updated)
     }
 
-    pub async fn resolve(
-        &self,
-        breach_id: &str,
-        caller: &str,
-    ) -> Result<BreachReport, String> {
-        let current = self.fetch(breach_id).await?.ok_or("Breach report not found")?;
+    pub async fn resolve(&self, breach_id: &str, caller: &str) -> Result<BreachReport, String> {
+        let current = self
+            .fetch(breach_id)
+            .await?
+            .ok_or("Breach report not found")?;
         let now = Utc::now();
 
         sqlx::query(
@@ -381,7 +382,11 @@ impl BreachNotifier {
         let data_types: Vec<String> = report
             .data_types
             .as_array()
-            .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
             .unwrap_or_default();
 
         let doc = BreachNotificationDocument {
@@ -509,12 +514,19 @@ impl BreachNotifier {
         subjects_notified_at: Option<DateTime<Utc>>,
         resolved_at: Option<DateTime<Utc>>,
     ) -> Result<BreachReport, String> {
-        let report = self.fetch(breach_id).await?.ok_or("Breach report not found")?;
+        let report = self
+            .fetch(breach_id)
+            .await?
+            .ok_or("Breach report not found")?;
 
         let data_types: Vec<String> = report
             .data_types
             .as_array()
-            .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
             .unwrap_or_default();
 
         let updated_doc = self.build_notification_document(
@@ -553,8 +565,7 @@ impl BreachNotifier {
             "status": report.status,
             "resolved_at": report.resolved_at.map(|t| t.to_rfc3339()),
         });
-        let canonical_str =
-            serde_json::to_string(&canonical).map_err(|e| format!("JSON: {e}"))?;
+        let canonical_str = serde_json::to_string(&canonical).map_err(|e| format!("JSON: {e}"))?;
         let mut mac = HmacSha256::new_from_slice(&self.signing_key)
             .map_err(|e| format!("HMAC key error: {e}"))?;
         mac.update(canonical_str.as_bytes());
@@ -635,26 +646,11 @@ mod tests {
 
     #[test]
     fn test_severity_validation() {
-        assert_eq!(
-            BreachNotifier::validate_severity("low"),
-            "low"
-        );
-        assert_eq!(
-            BreachNotifier::validate_severity("HIGH"),
-            "high"
-        );
-        assert_eq!(
-            BreachNotifier::validate_severity("  medium  "),
-            "medium"
-        );
-        assert_eq!(
-            BreachNotifier::validate_severity("invalid"),
-            "medium"
-        );
-        assert_eq!(
-            BreachNotifier::validate_severity(""),
-            "medium"
-        );
+        assert_eq!(BreachNotifier::validate_severity("low"), "low");
+        assert_eq!(BreachNotifier::validate_severity("HIGH"), "high");
+        assert_eq!(BreachNotifier::validate_severity("  medium  "), "medium");
+        assert_eq!(BreachNotifier::validate_severity("invalid"), "medium");
+        assert_eq!(BreachNotifier::validate_severity(""), "medium");
     }
 
     #[test]

@@ -708,7 +708,7 @@ impl Config {
             .parse()
             .unwrap_or(8)
             .min(SOLVER_MAX_ARGON2_TARGET_BITS);
-        let kiwi_challenge_ttl_secs = env_or("KIWI_CHALLENGE_TTL_SECS", "120")
+        let kiwi_challenge_ttl_secs: u64 = env_or("KIWI_CHALLENGE_TTL_SECS", "120")
             .parse()
             .unwrap_or(120);
         let kiwi_min_duration_ms = env::var("KIWI_MIN_DURATION_MS")
@@ -718,7 +718,7 @@ impl Config {
         // the TTL leaves no acceptable submission time (TooFast before
         // expiry, Expired after). Fail fast at startup.
         if let Some(ms) = kiwi_min_duration_ms {
-            if ms >= (kiwi_challenge_ttl_secs as u64).saturating_mul(1000) {
+            if ms >= kiwi_challenge_ttl_secs.saturating_mul(1000) {
                 panic!(
                     "KIWI_MIN_DURATION_MS ({ms}) must be < KIWI_CHALLENGE_TTL_SECS ({kiwi_challenge_ttl_secs}) * 1000"
                 );

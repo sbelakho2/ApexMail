@@ -52,6 +52,22 @@ pub enum ProcessorError {
     #[error("email transport error: {0}")]
     Transport(String),
 
+    /// SMTP reply error carrying the structured reply code (F-21).
+    ///
+    /// `code` is the leading 3-digit SMTP reply code (e.g. 550) and is never
+    /// redacted; only the free-text `message` tail passes through redaction.
+    /// Callers classify by `code` (4xx temporary → retry, 5xx permanent →
+    /// hard bounce) instead of substring matching on a redacted string.
+    #[error("smtp error {code}: {message}")]
+    Smtp {
+        /// 3-digit SMTP reply code (400..=599).
+        code: u16,
+        /// Enhanced status code (e.g. "5.1.1"), when the reply carried one.
+        enhanced: Option<String>,
+        /// Redacted free-text part of the reply.
+        message: String,
+    },
+
     /// DKIM signing error.
     #[error("dkim error: {0}")]
     Dkim(String),

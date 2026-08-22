@@ -250,7 +250,7 @@ impl PatternMatcher {
         }
         // Fallback literal scan (automaton build failed):keep matching.
         let text_lower = normalized.as_ref().to_lowercase();
-        self.find_all_fallback(&text_lower).first().is_some()
+        !self.find_all_fallback(&text_lower).is_empty()
     }
 
     /// Count total matches.
@@ -471,13 +471,14 @@ mod tests {
         // must KEEP matching literals instead of silently matching nothing.
         let matcher = PatternMatcher {
             automaton: None,
-            fallback: Some(vec![
-                ("googlebot".to_string(), 0),
-                ("curl/".to_string(), 1),
-            ]),
+            fallback: Some(vec![("googlebot".to_string(), 0), ("curl/".to_string(), 1)]),
             patterns: vec![
-                PatternEntry { label: "bot:google".into() },
-                PatternEntry { label: "tool:curl".into() },
+                PatternEntry {
+                    label: "bot:google".into(),
+                },
+                PatternEntry {
+                    label: "tool:curl".into(),
+                },
             ],
         };
         assert!(!matcher.is_healthy());
@@ -501,9 +502,7 @@ mod tests {
         // Patterns are NFC-normalized at build time now:an NFD-encoded
         // pattern ("e" + combining acute) must match NFC input ("é").
         let nfd_pattern = "cafe\u{0301}".to_string();
-        let matcher = build_matcher(vec![
-            (&nfd_pattern, "accented"),
-        ]);
+        let matcher = build_matcher(vec![(&nfd_pattern, "accented")]);
         assert!(
             matcher.is_match("caf\u{00e9} au lait"),
             "NFD-built pattern must match NFC input (pattern-side normalization)"

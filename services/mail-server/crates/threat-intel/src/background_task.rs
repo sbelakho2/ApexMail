@@ -243,8 +243,7 @@ pub async fn run_refresh_loop<F>(
         let delay = if failures == 0 {
             config.interval
         } else {
-            let backoff = REFRESH_BACKOFF_BASE
-                .saturating_mul(failures.min(u32::MAX as u64) as u32);
+            let backoff = REFRESH_BACKOFF_BASE.saturating_mul(failures.min(u32::MAX as u64) as u32);
             backoff.min(config.interval)
         };
         tokio::time::sleep(delay).await;

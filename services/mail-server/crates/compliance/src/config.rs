@@ -412,11 +412,7 @@ mod tests {
 
     fn temp_key_file(name: &str) -> std::path::PathBuf {
         let mut path = std::env::temp_dir();
-        path.push(format!(
-            "{}-{}",
-            name,
-            std::process::id()
-        ));
+        path.push(format!("{}-{}", name, std::process::id()));
         let _ = std::fs::remove_file(&path);
         path
     }
@@ -434,7 +430,10 @@ mod tests {
         assert!(path.exists(), "key must be persisted to the file");
 
         let second = resolve_audit_signing_key(path.to_str().unwrap());
-        assert_eq!(first, second, "persisted key must be reused, not regenerated");
+        assert_eq!(
+            first, second,
+            "persisted key must be reused, not regenerated"
+        );
 
         let _ = std::fs::remove_file(&path);
     }

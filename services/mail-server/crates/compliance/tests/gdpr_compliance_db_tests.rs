@@ -191,9 +191,7 @@ async fn isolated_pool(db_suffix: &str, schema: &str) -> Option<PgPool> {
     let database_url = match std::env::var("TEST_DATABASE_URL") {
         Ok(v) if !v.trim().is_empty() => v,
         _ => {
-            eprintln!(
-                "skipping: set TEST_DATABASE_URL to run DB-backed compliance tests"
-            );
+            eprintln!("skipping: set TEST_DATABASE_URL to run DB-backed compliance tests");
             return None;
         }
     };
@@ -210,9 +208,11 @@ async fn isolated_pool(db_suffix: &str, schema: &str) -> Option<PgPool> {
         .await
         .ok()?;
 
-    let _ = sqlx::query(&format!(r#"DROP DATABASE IF EXISTS "{isolated}" WITH (FORCE)"#))
-        .execute(&admin)
-        .await;
+    let _ = sqlx::query(&format!(
+        r#"DROP DATABASE IF EXISTS "{isolated}" WITH (FORCE)"#
+    ))
+    .execute(&admin)
+    .await;
     if sqlx::query(&format!(r#"CREATE DATABASE "{isolated}""#))
         .execute(&admin)
         .await
@@ -282,13 +282,7 @@ fn unique_tenant() -> String {
     format!("t-{}", Uuid::new_v4().simple())
 }
 
-async fn seed_request(
-    pool: &PgPool,
-    id: &str,
-    tenant: &str,
-    email: &str,
-    request_type: &str,
-) {
+async fn seed_request(pool: &PgPool, id: &str, tenant: &str, email: &str, request_type: &str) {
     sqlx::query(
         "INSERT INTO data_subject_requests
          (id, tenant_id, request_type, email, verification_token_hash, verified, status, requested_at, expires_at)
@@ -346,43 +340,101 @@ async fn erasure_is_scoped_to_the_data_subject() {
     // Seed subject + unrelated data everywhere the erasure touches.
     for email in [&subject, &other] {
         sqlx::query("INSERT INTO subscribers (email, tenant_id) VALUES ($1,$2)")
-            .bind(email).bind(&tenant).execute(&pool).await.unwrap();
+            .bind(email)
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .unwrap();
         sqlx::query("INSERT INTO message_events (recipient_email, tenant_id) VALUES ($1,$2)")
-            .bind(email).bind(&tenant).execute(&pool).await.unwrap();
+            .bind(email)
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .unwrap();
         sqlx::query("INSERT INTO engagement_events (email, tenant_id) VALUES ($1,$2)")
-            .bind(email).bind(&tenant).execute(&pool).await.unwrap();
+            .bind(email)
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .unwrap();
         sqlx::query("INSERT INTO tracking_events (email, tenant_id) VALUES ($1,$2)")
-            .bind(email).bind(&tenant).execute(&pool).await.unwrap();
+            .bind(email)
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .unwrap();
         sqlx::query("INSERT INTO subscriber_analytics (email, tenant_id) VALUES ($1,$2)")
-            .bind(email).bind(&tenant).execute(&pool).await.unwrap();
+            .bind(email)
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .unwrap();
         sqlx::query("INSERT INTO contacts (email, tenant_id, name) VALUES ($1,$2,'n')")
-            .bind(email).bind(&tenant).execute(&pool).await.unwrap();
+            .bind(email)
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .unwrap();
         sqlx::query("INSERT INTO consent_records (id, tenant_id, subscriber_id, email, consent_type, granted, source) VALUES ($1,$2,$3,$4,'marketing',true,'api')")
             .bind(Uuid::new_v4().to_string()).bind(&tenant).bind(email).bind(email)
             .execute(&pool).await.unwrap();
         // A user account + session per email.
-        let user_id: (String,) = sqlx::query_as("INSERT INTO users (tenant_id, email) VALUES ($1,$2) RETURNING id::text")
-            .bind(&tenant).bind(email).fetch_one(&pool).await.unwrap();
+        let user_id: (String,) = sqlx::query_as(
+            "INSERT INTO users (tenant_id, email) VALUES ($1,$2) RETURNING id::text",
+        )
+        .bind(&tenant)
+        .bind(email)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
         sqlx::query("INSERT INTO sessions (id, user_id, tenant_id, expires_at) VALUES ($1,$2,$3, NOW() + INTERVAL '1 day')")
             .bind(Uuid::new_v4().to_string()).bind(&user_id.0).bind(&tenant)
             .execute(&pool).await.unwrap();
     }
-    sqlx::query("INSERT INTO suppression_list (id, tenant_id, email, reason) VALUES ($1,$2,$3,'complaint')")
-        .bind(Uuid::new_v4().to_string()).bind(&tenant).bind(&subject)
-        .execute(&pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO suppression_list (id, tenant_id, email, reason) VALUES ($1,$2,$3,'complaint')",
+    )
+    .bind(Uuid::new_v4().to_string())
+    .bind(&tenant)
+    .bind(&subject)
+    .execute(&pool)
+    .await
+    .unwrap();
     sqlx::query("INSERT INTO api_keys (tenant_id, name) VALUES ($1,'tenant key')")
-        .bind(&tenant).execute(&pool).await.unwrap();
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .unwrap();
     sqlx::query("INSERT INTO webhooks (id, tenant_id, url) VALUES ($1,$2,'https://wh.example')")
-        .bind(Uuid::new_v4().to_string()).bind(&tenant).execute(&pool).await.unwrap();
-    sqlx::query("INSERT INTO invoices (id, tenant_id, amount_cents, customer_email) VALUES ($1,$2,100,$3)")
-        .bind(short_id()).bind(&tenant).bind(&subject)
-        .execute(&pool).await.unwrap();
-    sqlx::query("INSERT INTO invoices (id, tenant_id, amount_cents, customer_email) VALUES ($1,$2,200,$3)")
-        .bind(short_id()).bind(&tenant).bind(&other)
-        .execute(&pool).await.unwrap();
+        .bind(Uuid::new_v4().to_string())
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO invoices (id, tenant_id, amount_cents, customer_email) VALUES ($1,$2,100,$3)",
+    )
+    .bind(short_id())
+    .bind(&tenant)
+    .bind(&subject)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO invoices (id, tenant_id, amount_cents, customer_email) VALUES ($1,$2,200,$3)",
+    )
+    .bind(short_id())
+    .bind(&tenant)
+    .bind(&other)
+    .execute(&pool)
+    .await
+    .unwrap();
 
     let gdpr = GdprAutomation::new(pool.clone(), redis, test_gdpr_config());
-    let result = gdpr.process_request(&req_id).await.expect("erasure should succeed");
+    let result = gdpr
+        .process_request(&req_id)
+        .await
+        .expect("erasure should succeed");
 
     // Subject rows are gone …
     for (table, col) in [
@@ -394,9 +446,21 @@ async fn erasure_is_scoped_to_the_data_subject() {
         ("contacts", "email"),
         ("consent_records", "email"),
     ] {
-        let c = count(&pool, &format!("SELECT COUNT(*) FROM {table} WHERE {col} = $1 AND tenant_id = $2"), &subject, &tenant).await;
+        let c = count(
+            &pool,
+            &format!("SELECT COUNT(*) FROM {table} WHERE {col} = $1 AND tenant_id = $2"),
+            &subject,
+            &tenant,
+        )
+        .await;
         assert_eq!(c, 0, "{table}: subject rows must be deleted");
-        let c = count(&pool, &format!("SELECT COUNT(*) FROM {table} WHERE {col} = $1 AND tenant_id = $2"), &other, &tenant).await;
+        let c = count(
+            &pool,
+            &format!("SELECT COUNT(*) FROM {table} WHERE {col} = $1 AND tenant_id = $2"),
+            &other,
+            &tenant,
+        )
+        .await;
         assert_eq!(c, 1, "{table}: other users' rows must survive");
     }
 
@@ -438,7 +502,10 @@ async fn erasure_is_scoped_to_the_data_subject() {
             .fetch_one(&pool)
             .await
             .unwrap();
-    assert_eq!(invoice_count, 2, "invoices must never be deleted on erasure");
+    assert_eq!(
+        invoice_count, 2,
+        "invoices must never be deleted on erasure"
+    );
     let anon: String = sqlx::query_scalar(
         "SELECT customer_email FROM invoices WHERE tenant_id = $1 AND customer_email LIKE 'erased+%'",
     )
@@ -455,20 +522,32 @@ async fn erasure_is_scoped_to_the_data_subject() {
     .fetch_one(&pool)
     .await
     .unwrap_or_default();
-    assert_eq!(other_invoice, other, "other customer's invoice must be untouched");
+    assert_eq!(
+        other_invoice, other,
+        "other customer's invoice must be untouched"
+    );
 
     // Tenant-owned resources survive (A-4).
     let keys: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM api_keys WHERE tenant_id = $1")
-        .bind(&tenant).fetch_one(&pool).await.unwrap();
+        .bind(&tenant)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
     assert_eq!(keys, 1, "api_keys must survive a subject erasure");
     let hooks: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM webhooks WHERE tenant_id = $1")
-        .bind(&tenant).fetch_one(&pool).await.unwrap();
+        .bind(&tenant)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
     assert_eq!(hooks, 1, "webhooks must survive a subject erasure");
 
     // Status: contact_list_members does not exist in this schema → honest
     // `partial`, with the skipped store listed in the certificate.
     let (status, result_json) = request_status(&pool, &req_id).await;
-    assert_eq!(status, "partial", "missing stores must yield partial, not completed");
+    assert_eq!(
+        status, "partial",
+        "missing stores must yield partial, not completed"
+    );
     assert_eq!(result.partial, Some(true));
     // The persisted result also records the partial flag.
     assert_eq!(result_json.unwrap()["partial"], true);
@@ -541,7 +620,11 @@ async fn erasure_store_failure_fails_the_request_after_retries() {
     let req_id = Uuid::new_v4().to_string();
     seed_request(&pool, &req_id, &tenant, &subject, "erasure").await;
     sqlx::query("INSERT INTO subscribers_backing (email, tenant_id) VALUES ($1,$2)")
-        .bind(&subject).bind(&tenant).execute(&pool).await.unwrap();
+        .bind(&subject)
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .unwrap();
 
     let gdpr = automation(pool.clone());
     // Three processing passes: attempt 1 → retrying, 2 → retrying, 3 → failed.
@@ -578,7 +661,10 @@ async fn rectification_parks_in_pending_manual_review() {
     seed_request(&pool, &req_id, &tenant, &subject, "rectification").await;
 
     let gdpr = automation(pool.clone());
-    let result = gdpr.process_request(&req_id).await.expect("rectification runs");
+    let result = gdpr
+        .process_request(&req_id)
+        .await
+        .expect("rectification runs");
 
     let (status, _) = request_status(&pool, &req_id).await;
     assert_eq!(
@@ -612,19 +698,42 @@ async fn consent_reconsent_updates_the_same_row() {
     let gdpr = automation(pool.clone());
 
     let first = gdpr
-        .record_consent(&tenant, "sub-1", &email, compliance::types::ConsentType::Marketing, true, compliance::types::ConsentSource::Api, None)
+        .record_consent(
+            &tenant,
+            "sub-1",
+            &email,
+            compliance::types::ConsentType::Marketing,
+            true,
+            compliance::types::ConsentSource::Api,
+            None,
+        )
         .await
         .expect("first consent");
     assert!(first.granted);
     assert!(first.proof_document.is_some());
 
     // Withdraw, then grant again — must update the SAME row.
-    gdpr
-        .record_consent(&tenant, "sub-1", &email, compliance::types::ConsentType::Marketing, false, compliance::types::ConsentSource::PreferenceCenter, None)
-        .await
-        .expect("withdraw");
+    gdpr.record_consent(
+        &tenant,
+        "sub-1",
+        &email,
+        compliance::types::ConsentType::Marketing,
+        false,
+        compliance::types::ConsentSource::PreferenceCenter,
+        None,
+    )
+    .await
+    .expect("withdraw");
     let third = gdpr
-        .record_consent(&tenant, "sub-1", &email, compliance::types::ConsentType::Marketing, true, compliance::types::ConsentSource::Form, None)
+        .record_consent(
+            &tenant,
+            "sub-1",
+            &email,
+            compliance::types::ConsentType::Marketing,
+            true,
+            compliance::types::ConsentSource::Form,
+            None,
+        )
         .await
         .expect("re-grant");
 
@@ -638,7 +747,12 @@ async fn consent_reconsent_updates_the_same_row() {
     assert_eq!(rows, 1, "re-consent must update, not duplicate");
     assert_eq!(ids[0], third.id, "RETURNING id must be the existing row id");
 
-    let row: (bool, Option<String>, Option<chrono::DateTime<chrono::Utc>>, Option<String>) = sqlx::query_as(
+    let row: (
+        bool,
+        Option<String>,
+        Option<chrono::DateTime<chrono::Utc>>,
+        Option<String>,
+    ) = sqlx::query_as(
         "SELECT granted, proof_document, granted_at, revoked_at FROM consent_records WHERE id = $1",
     )
     .bind(&third.id)
@@ -646,7 +760,10 @@ async fn consent_reconsent_updates_the_same_row() {
     .await
     .unwrap();
     assert!(row.0, "final state granted");
-    assert!(row.1.is_some(), "proof document must be stored on the same row");
+    assert!(
+        row.1.is_some(),
+        "proof document must be stored on the same row"
+    );
     assert!(row.2.is_some(), "granted_at recorded");
     assert!(row.3.is_none(), "revoked_at cleared after re-grant");
 }
@@ -664,18 +781,38 @@ async fn access_export_covers_all_stores_and_downloads() {
     seed_request(&pool, &req_id, &tenant, &subject, "access").await;
 
     sqlx::query("INSERT INTO subscribers (email, tenant_id) VALUES ($1,$2)")
-        .bind(&subject).bind(&tenant).execute(&pool).await.unwrap();
+        .bind(&subject)
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .unwrap();
     sqlx::query("INSERT INTO message_events (recipient_email, tenant_id) VALUES ($1,$2)")
-        .bind(&subject).bind(&tenant).execute(&pool).await.unwrap();
+        .bind(&subject)
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .unwrap();
     sqlx::query("INSERT INTO consent_records (id, tenant_id, subscriber_id, email, consent_type, granted, source) VALUES ($1,$2,$3,$4,'marketing',true,'api')")
         .bind(Uuid::new_v4().to_string()).bind(&tenant).bind(&subject).bind(&subject)
         .execute(&pool).await.unwrap();
-    sqlx::query("INSERT INTO suppression_list (id, tenant_id, email, reason) VALUES ($1,$2,$3,'complaint')")
-        .bind(Uuid::new_v4().to_string()).bind(&tenant).bind(&subject)
-        .execute(&pool).await.unwrap();
-    sqlx::query("INSERT INTO invoices (id, tenant_id, amount_cents, customer_email) VALUES ($1,$2,42,$3)")
-        .bind(short_id()).bind(&tenant).bind(&subject)
-        .execute(&pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO suppression_list (id, tenant_id, email, reason) VALUES ($1,$2,$3,'complaint')",
+    )
+    .bind(Uuid::new_v4().to_string())
+    .bind(&tenant)
+    .bind(&subject)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO invoices (id, tenant_id, amount_cents, customer_email) VALUES ($1,$2,42,$3)",
+    )
+    .bind(short_id())
+    .bind(&tenant)
+    .bind(&subject)
+    .execute(&pool)
+    .await
+    .unwrap();
 
     let gdpr = automation(pool.clone());
     let result = match gdpr.process_request(&req_id).await {
@@ -725,7 +862,10 @@ async fn access_export_covers_all_stores_and_downloads() {
 
     // Invoice PII is anonymized in the export.
     let invoices = serde_json::to_string(&data["invoices"]).unwrap();
-    assert!(!invoices.contains(&subject), "invoice export must be anonymized");
+    assert!(
+        !invoices.contains(&subject),
+        "invoice export must be anonymized"
+    );
     assert!(invoices.contains("erased+"));
 
     // export_url points at this service's download route.
@@ -736,12 +876,11 @@ async fn access_export_covers_all_stores_and_downloads() {
     );
 
     // The stored export is downloadable via the route handler.
-    let export_id: String =
-        sqlx::query_scalar("SELECT id FROM gdpr_exports WHERE request_id = $1")
-            .bind(&req_id)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+    let export_id: String = sqlx::query_scalar("SELECT id FROM gdpr_exports WHERE request_id = $1")
+        .bind(&req_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
 
     let state = download_test_state(pool.clone()).await;
     let response = compliance::routes::gdpr_download_export(
@@ -757,7 +896,10 @@ async fn access_export_covers_all_stores_and_downloads() {
         .get(axum::http::header::CONTENT_DISPOSITION)
         .and_then(|v| v.to_str().ok())
         .unwrap_or_default();
-    assert!(disposition.contains("attachment"), "Content-Disposition attachment");
+    assert!(
+        disposition.contains("attachment"),
+        "Content-Disposition attachment"
+    );
 
     // Unknown id → 404.
     let missing = compliance::routes::gdpr_download_export(
@@ -770,11 +912,13 @@ async fn access_export_covers_all_stores_and_downloads() {
     assert_eq!(missing.0, axum::http::StatusCode::NOT_FOUND);
 
     // Expired export → 410 Gone.
-    sqlx::query("UPDATE gdpr_exports SET expires_at = NOW() - INTERVAL '1 day' WHERE request_id = $1")
-        .bind(&req_id)
-        .execute(&pool)
-        .await
-        .unwrap();
+    sqlx::query(
+        "UPDATE gdpr_exports SET expires_at = NOW() - INTERVAL '1 day' WHERE request_id = $1",
+    )
+    .bind(&req_id)
+    .execute(&pool)
+    .await
+    .unwrap();
     let gone = compliance::routes::gdpr_download_export(
         axum::extract::State(download_test_state(pool.clone()).await),
         auth_headers(),
@@ -794,7 +938,10 @@ async fn download_test_state(pool: PgPool) -> std::sync::Arc<compliance::routes:
         std::env::set_var("SECRETS_KDF_SALT", "integration-test-salt-0123456789");
     }
     std::sync::Arc::new(compliance::routes::AppState {
-        risk_engine: compliance::risk_scoring::RiskScoringEngine::new(pool.clone(), test_compliance_config()),
+        risk_engine: compliance::risk_scoring::RiskScoringEngine::new(
+            pool.clone(),
+            test_compliance_config(),
+        ),
         content_scanner: compliance::content_scanner::ContentScanner::new(
             pool.clone(),
             compliance::config::ContentScanningConfig {
@@ -1052,24 +1199,22 @@ async fn audit_archive_preserves_conflicts_and_verify_spans_tables() {
 
     // … then archive. The conflicting original must stay in the LIVE table.
     audit.archive(old_cutoff).await.expect("archive");
-    let conflicting_live: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM audit_logs WHERE id = $1")
-            .bind(&old_ids[0])
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+    let conflicting_live: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM audit_logs WHERE id = $1")
+        .bind(&old_ids[0])
+        .fetch_one(&pool)
+        .await
+        .unwrap();
     assert_eq!(
         conflicting_live, 1,
         "conflicting row must be preserved in the live table, not vanish"
     );
     // The other old entries moved to the archive.
-    let archived_others: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM audit_logs_archive WHERE id = ANY($1)",
-    )
-    .bind(&old_ids[1..])
-    .fetch_one(&pool)
-    .await
-    .unwrap();
+    let archived_others: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM audit_logs_archive WHERE id = ANY($1)")
+            .bind(&old_ids[1..])
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     assert_eq!(archived_others, 4);
 
     // The tampered archive copy is EVIDENT: verification for this tenant
@@ -1246,7 +1391,11 @@ async fn queue_recovery_sweep_requeues_stuck_entries() {
         .query_async(&mut *conn)
         .await
         .unwrap();
-    assert_eq!(queue, vec![stale.clone()], "stale entry returns to the main queue");
+    assert_eq!(
+        queue,
+        vec![stale.clone()],
+        "stale entry returns to the main queue"
+    );
     let processing: Vec<String> = redis::cmd("LRANGE")
         .arg("gdpr:request_processing")
         .arg(0)
@@ -1254,7 +1403,11 @@ async fn queue_recovery_sweep_requeues_stuck_entries() {
         .query_async(&mut *conn)
         .await
         .unwrap();
-    assert_eq!(processing, vec![fresh], "fresh in-flight entry is untouched");
+    assert_eq!(
+        processing,
+        vec![fresh],
+        "fresh in-flight entry is untouched"
+    );
 
     // Processing the batch completes the request AND acks the entry.
     let results = gdpr.process_queue_batch(10).await.unwrap();
@@ -1416,24 +1569,28 @@ async fn retention_sweep_enforces_durations_and_respects_legal_holds() {
         ("engagement_events", "email"),
     ] {
         let email = format!("u-{}@x.com", &tenant_a[..6]);
-        let remaining_a: i64 = sqlx::query_scalar(&format!(
-            "SELECT COUNT(*) FROM {table} WHERE {col} = $1"
-        ))
-        .bind(&email)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-        assert_eq!(remaining_a, 1, "{table}: only the fresh row survives for the unheld tenant");
+        let remaining_a: i64 =
+            sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {table} WHERE {col} = $1"))
+                .bind(&email)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            remaining_a, 1,
+            "{table}: only the fresh row survives for the unheld tenant"
+        );
 
         let email_b = format!("u-{}@x.com", &tenant_b[..6]);
-        let remaining_b: i64 = sqlx::query_scalar(&format!(
-            "SELECT COUNT(*) FROM {table} WHERE {col} = $1"
-        ))
-        .bind(&email_b)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-        assert_eq!(remaining_b, 2, "{table}: legal-hold tenant rows must survive");
+        let remaining_b: i64 =
+            sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {table} WHERE {col} = $1"))
+                .bind(&email_b)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            remaining_b, 2,
+            "{table}: legal-hold tenant rows must survive"
+        );
     }
 
     // Exports: only the fresh one remains.
@@ -1441,7 +1598,10 @@ async fn retention_sweep_enforces_durations_and_respects_legal_holds() {
         .fetch_one(&pool)
         .await
         .unwrap();
-    assert_eq!(exports, 1, "expired gdpr_exports must be purged (7d window)");
+    assert_eq!(
+        exports, 1,
+        "expired gdpr_exports must be purged (7d window)"
+    );
     assert_eq!(report.gdpr_exports_deleted, 1);
 
     // Audit rows moved to the archive by the sweep (via archive()).
@@ -1460,10 +1620,26 @@ async fn retention_sweep_enforces_durations_and_respects_legal_holds() {
     // Per-category report numbers: considered 2 (a + b expired), deleted 1,
     // skipped_legal_hold 1 — for every swept store.
     for cat in &report.categories {
-        assert_eq!(cat.considered, 2, "{}: considered both tenants' expired rows", cat.store);
-        assert_eq!(cat.deleted, 1, "{}: deleted the unheld tenant's row", cat.store);
-        assert_eq!(cat.skipped_legal_hold, 1, "{}: held tenant's row skipped", cat.store);
-        assert_eq!(cat.retention_days, 30, "{}: registry default drives the cutoff", cat.store);
+        assert_eq!(
+            cat.considered, 2,
+            "{}: considered both tenants' expired rows",
+            cat.store
+        );
+        assert_eq!(
+            cat.deleted, 1,
+            "{}: deleted the unheld tenant's row",
+            cat.store
+        );
+        assert_eq!(
+            cat.skipped_legal_hold, 1,
+            "{}: held tenant's row skipped",
+            cat.store
+        );
+        assert_eq!(
+            cat.retention_days, 30,
+            "{}: registry default drives the cutoff",
+            cat.store
+        );
         assert_eq!(
             cat.legal_hold_check,
             compliance::retention_sweep::LegalHoldCheck::TenantsTable
@@ -1473,7 +1649,10 @@ async fn retention_sweep_enforces_durations_and_respects_legal_holds() {
 
     // Out-of-scope stores are listed with their registry durations.
     let oos: Vec<&str> = report.out_of_scope.iter().map(|s| s.store).collect();
-    assert_eq!(oos, vec!["clickhouse_analytics", "backups", "mailstore_blobs"]);
+    assert_eq!(
+        oos,
+        vec!["clickhouse_analytics", "backups", "mailstore_blobs"]
+    );
 
     // The run is observable: one retention_report row carrying the JSON.
     let (ran_rows, tier): (i64, String) =
@@ -1483,11 +1662,10 @@ async fn retention_sweep_enforces_durations_and_respects_legal_holds() {
             .unwrap();
     assert_eq!(ran_rows, 1, "one retention_report row per run");
     assert_eq!(tier, "default");
-    let persisted: serde_json::Value =
-        sqlx::query_scalar("SELECT report FROM retention_report")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+    let persisted: serde_json::Value = sqlx::query_scalar("SELECT report FROM retention_report")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
     assert_eq!(persisted["categories"].as_array().unwrap().len(), 3);
     assert_eq!(persisted["out_of_scope"].as_array().unwrap().len(), 3);
 }
@@ -1551,7 +1729,11 @@ async fn dsr_submit_writes_verification_outbox() {
     let tenant = unique_tenant();
     let subject = format!("outbox-{}@x.com", Uuid::new_v4().simple());
     let (request, token) = gdpr
-        .submit_request(&tenant, compliance::types::DataSubjectRequestType::Access, &subject)
+        .submit_request(
+            &tenant,
+            compliance::types::DataSubjectRequestType::Access,
+            &subject,
+        )
         .await
         .expect("submit succeeds");
 
@@ -1564,7 +1746,10 @@ async fn dsr_submit_writes_verification_outbox() {
     assert_eq!(entry.email, subject);
     assert_eq!(entry.status, "pending");
     assert!(entry.sent_at.is_none());
-    assert_eq!(entry.verification_token, token, "raw token must be queued for delivery");
+    assert_eq!(
+        entry.verification_token, token,
+        "raw token must be queued for delivery"
+    );
 
     // The queued token is the one that verifies the request (its SHA-256
     // matches the stored verification_token_hash — checked in SQL to avoid
@@ -1578,7 +1763,10 @@ async fn dsr_submit_writes_verification_outbox() {
     .fetch_one(&pool)
     .await
     .unwrap();
-    assert!(hash_matches, "outbox token must hash to the request's stored token hash");
+    assert!(
+        hash_matches,
+        "outbox token must hash to the request's stored token hash"
+    );
 
     // Mark-sent completes the handoff; the queue drains.
     gdpr.mark_outbox_sent(&entry.id).await.unwrap();
@@ -1944,7 +2132,10 @@ async fn breach_workflow_tracks_lifecycle_and_deadlines() {
     assert_eq!(notified.status, "notified_dpa");
     assert!(notified.dpa_notified_at.is_some());
 
-    let subjects = notifier.notify_subjects(&report.id, "db-test").await.unwrap();
+    let subjects = notifier
+        .notify_subjects(&report.id, "db-test")
+        .await
+        .unwrap();
     assert_eq!(subjects.status, "notified_subjects");
     assert!(subjects.subjects_notified_at.is_some());
 

@@ -451,10 +451,8 @@ impl CampaignManager {
                                     // recipient inside its own transaction, so
                                     // this UPDATE is a no-op there.)
                                     if enqueued == recipients.len() {
-                                        let emails: Vec<String> = recipients
-                                            .iter()
-                                            .map(|r| r.email.clone())
-                                            .collect();
+                                        let emails: Vec<String> =
+                                            recipients.iter().map(|r| r.email.clone()).collect();
                                         if let Err(mark_err) =
                                             self.mark_recipients_sent(id, &emails).await
                                         {
@@ -481,8 +479,7 @@ impl CampaignManager {
                                     // campaign PAUSES WITH AN ERROR STATE —
                                     // never a silent partial send.
                                     let reason = "email quota exhausted";
-                                    if let Err(pause_err) =
-                                        self.pause_with_error(id, reason).await
+                                    if let Err(pause_err) = self.pause_with_error(id, reason).await
                                     {
                                         tracing::error!(
                                             error = %pause_err,
@@ -560,9 +557,8 @@ impl CampaignManager {
         })?;
 
         #[allow(clippy::type_complexity)]
-        let rows: Vec<(String, Option<String>, Option<String>, Option<String>)> =
-            sqlx::query_as(
-                "SELECT r.email, l.contact_name, l.company_name, l.title \
+        let rows: Vec<(String, Option<String>, Option<String>, Option<String>)> = sqlx::query_as(
+            "SELECT r.email, l.contact_name, l.company_name, l.title \
                  FROM sales_campaign_recipients r \
                  JOIN sales_campaigns c ON r.campaign_id = c.id \
                  LEFT JOIN sales_leads l \
@@ -584,14 +580,14 @@ impl CampaignManager {
                  ) < $3 \
                  ORDER BY r.email \
                  LIMIT $4",
-            )
-            .bind(campaign_id)
-            .bind(tenant_id)
-            .bind(RECIPIENT_FREQUENCY_CAP_WEEKLY)
-            .bind(limit)
-            .fetch_all(&self.db)
-            .await
-            .map_err(|e| SalesError::Database(e.to_string()))?;
+        )
+        .bind(campaign_id)
+        .bind(tenant_id)
+        .bind(RECIPIENT_FREQUENCY_CAP_WEEKLY)
+        .bind(limit)
+        .fetch_all(&self.db)
+        .await
+        .map_err(|e| SalesError::Database(e.to_string()))?;
 
         Ok(rows
             .into_iter()
@@ -760,9 +756,7 @@ impl CampaignManager {
         // Recipient funnel counts (shared query — see
         // `recipient_funnel_counts`, also used by the scheduler's completion
         // gate).
-        let funnel = self
-            .recipient_funnel_counts(tenant_id, campaign_id)
-            .await?;
+        let funnel = self.recipient_funnel_counts(tenant_id, campaign_id).await?;
         let RecipientFunnel {
             total,
             already_sent,
@@ -806,24 +800,21 @@ impl CampaignManager {
             }
         };
 
-        let template = match crate::dispatcher::fetch_template(
-            &self.db,
-            tenant_id,
-            &campaign.template_id,
-        )
-        .await
-        {
-            Ok(t) => Some(serde_json::json!({
-                "id": campaign.template_id,
-                "subject": t.subject,
-                "has_html": t.html_body.is_some(),
-                "has_text": t.text_body.is_some(),
-            })),
-            Err(e) => {
-                warnings.push(format!("template not renderable: {e}"));
-                None
-            }
-        };
+        let template =
+            match crate::dispatcher::fetch_template(&self.db, tenant_id, &campaign.template_id)
+                .await
+            {
+                Ok(t) => Some(serde_json::json!({
+                    "id": campaign.template_id,
+                    "subject": t.subject,
+                    "has_html": t.html_body.is_some(),
+                    "has_text": t.text_body.is_some(),
+                })),
+                Err(e) => {
+                    warnings.push(format!("template not renderable: {e}"));
+                    None
+                }
+            };
 
         // Render previews for up to `sample_limit` due recipients.
         let mut preview = Vec::new();
@@ -871,11 +862,7 @@ impl CampaignManager {
 
     /// Record an unsubscribe (suppression) for a tenant (fix I-2).
     /// Suppressed recipients are excluded from every future campaign send.
-    pub async fn suppress_recipient(
-        &self,
-        tenant_id: &str,
-        email: &str,
-    ) -> Result<(), SalesError> {
+    pub async fn suppress_recipient(&self, tenant_id: &str, email: &str) -> Result<(), SalesError> {
         sqlx::query(
             "INSERT INTO sales_unsubscribes (tenant_id, email, created_at) \
              VALUES ($1, $2, NOW()) ON CONFLICT (tenant_id, email) DO NOTHING",
@@ -1373,11 +1360,7 @@ mod tests {
         let dispatcher = NoopCampaignDispatcher;
         let recipients = [DispatchRecipient {
             email: "a@x.com".into(),
-            unsubscribe_link: dispatcher.unsubscribe_link(
-                "tenant-a",
-                Uuid::new_v4(),
-                "a@x.com",
-            ),
+            unsubscribe_link: dispatcher.unsubscribe_link("tenant-a", Uuid::new_v4(), "a@x.com"),
             lead: None,
         }];
         let result = dispatcher
@@ -1430,7 +1413,12 @@ mod tests {
 
         let manager = CampaignManager::new(10, db.clone());
         let campaign = manager
-            .create_campaign("stats-f-test".into(), "stats".into(), "t".into(), "all".into())
+            .create_campaign(
+                "stats-f-test".into(),
+                "stats".into(),
+                "t".into(),
+                "all".into(),
+            )
             .await
             .unwrap();
         manager
@@ -1450,24 +1438,24 @@ mod tests {
 
         // Path 2 first: NO events yet — reconcile keeps the enqueue count.
         manager.reconcile_campaign_stats(campaign.id).await.unwrap();
-        let sent: i64 =
-            sqlx::query_scalar("SELECT sent FROM sales_campaigns WHERE id = $1")
-                .bind(campaign.id)
-                .fetch_one(&db)
-                .await
-                .unwrap();
+        let sent: i64 = sqlx::query_scalar("SELECT sent FROM sales_campaigns WHERE id = $1")
+            .bind(campaign.id)
+            .fetch_one(&db)
+            .await
+            .unwrap();
         assert_eq!(sent, 3, "no events => enqueue count is kept, not zeroed");
 
         // Simulate the worker having recorded only TWO 'sent' events (the
         // third row is still queued / bounced): delivered truth is 2.
-        let message_ids: Vec<Uuid> =
-            sqlx::query_scalar("UPDATE sales_campaign_recipients \
+        let message_ids: Vec<Uuid> = sqlx::query_scalar(
+            "UPDATE sales_campaign_recipients \
                  SET sent_at = NOW(), message_id = gen_random_uuid() \
-                 WHERE campaign_id = $1 AND email IN ('a@x.com', 'b@x.com') RETURNING message_id")
-                .bind(campaign.id)
-                .fetch_all(&db)
-                .await
-                .unwrap();
+                 WHERE campaign_id = $1 AND email IN ('a@x.com', 'b@x.com') RETURNING message_id",
+        )
+        .bind(campaign.id)
+        .fetch_all(&db)
+        .await
+        .unwrap();
         assert_eq!(message_ids.len(), 2);
         for mid in &message_ids {
             sqlx::query(
@@ -1484,12 +1472,11 @@ mod tests {
 
         // Path 1: events exist — sent is rewritten to the events count.
         manager.reconcile_campaign_stats(campaign.id).await.unwrap();
-        let sent: i64 =
-            sqlx::query_scalar("SELECT sent FROM sales_campaigns WHERE id = $1")
-                .bind(campaign.id)
-                .fetch_one(&db)
-                .await
-                .unwrap();
+        let sent: i64 = sqlx::query_scalar("SELECT sent FROM sales_campaigns WHERE id = $1")
+            .bind(campaign.id)
+            .fetch_one(&db)
+            .await
+            .unwrap();
         assert_eq!(sent, 2, "sent must reflect delivered truth from events");
 
         sqlx::query("DELETE FROM sales_campaigns WHERE id = $1")

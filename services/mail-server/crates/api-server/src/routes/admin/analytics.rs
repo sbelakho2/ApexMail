@@ -270,8 +270,7 @@ pub struct ClickHouseEngagementResponse {
 /// deployment wires both services identically.
 pub fn clickhouse_config_from_env() -> apexmail_analytics::config::ClickHouseConfig {
     apexmail_analytics::config::ClickHouseConfig {
-        url: std::env::var("CLICKHOUSE_URL")
-            .unwrap_or_else(|_| "http://clickhouse:8123".into()),
+        url: std::env::var("CLICKHOUSE_URL").unwrap_or_else(|_| "http://clickhouse:8123".into()),
         database: std::env::var("CLICKHOUSE_DATABASE").unwrap_or_else(|_| "apexmail".into()),
         user: std::env::var("CLICKHOUSE_USER").unwrap_or_else(|_| "default".into()),
         password: std::env::var("CLICKHOUSE_PASSWORD").unwrap_or_default(),
@@ -330,8 +329,7 @@ async fn get_clickhouse_engagement(
         note: Some(note),
     };
 
-    let engine = match apexmail_analytics::ClickHouseEngine::new(clickhouse_config_from_env())
-        .await
+    let engine = match apexmail_analytics::ClickHouseEngine::new(clickhouse_config_from_env()).await
     {
         Ok(engine) => engine,
         Err(error) => {

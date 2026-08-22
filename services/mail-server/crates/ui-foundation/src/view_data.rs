@@ -185,7 +185,10 @@ impl ListPageData {
         }
         let start = (self.page.saturating_sub(1)) * self.per_page.max(1) + 1;
         let end = ((start + self.rows_len().saturating_sub(1)) as i64).min(self.total_count);
-        format!("Showing {start}–{end} of {total} {plural}.", total = self.total_count)
+        format!(
+            "Showing {start}–{end} of {total} {plural}.",
+            total = self.total_count
+        )
     }
 
     fn rows_len(&self) -> usize {
@@ -338,10 +341,7 @@ mod tests {
                 .collect(),
         });
         assert_eq!(data.summary("campaign"), "Showing 11–20 of 42 campaigns.");
-        assert_eq!(
-            ListPageData::default().summary("tenant"),
-            "No tenants yet."
-        );
+        assert_eq!(ListPageData::default().summary("tenant"), "No tenants yet.");
     }
 
     #[test]
@@ -379,10 +379,7 @@ mod tests {
 
     #[test]
     fn time_cells_render_the_one_timestamp_policy() {
-        let html = render_data_cell(&DataCell::time(
-            "2 hours ago",
-            "2026-08-21T10:00:00+00:00",
-        ));
+        let html = render_data_cell(&DataCell::time("2 hours ago", "2026-08-21T10:00:00+00:00"));
         assert!(html.contains("<time"));
         assert!(html.contains("datetime=\"2026-08-21T10:00:00+00:00\""));
         assert!(html.contains("title=\"2026-08-21T10:00:00+00:00 UTC\""));

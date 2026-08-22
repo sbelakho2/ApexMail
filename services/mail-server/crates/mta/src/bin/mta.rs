@@ -40,6 +40,12 @@ async fn main() -> anyhow::Result<()> {
     // The MTA emits SPF cache metrics through the `metrics` facade. Install a
     // dedicated Prometheus listener before any SMTP task starts so Prometheus
     // can scrape both service availability and those counters.
+    //
+    // F-24: METRICS_ENABLED keeps its FALSE default. Flipping it would make
+    // `install_recorder()` (which binds 0.0.0.0:METRICS_PORT) part of every
+    // default boot — a port collision or a locked-down environment would
+    // then abort startup, so the safer default stays and the operator gets
+    // a loud warning instead.
     if config.metrics.enabled {
         let metrics_addr: std::net::SocketAddr =
             format!("0.0.0.0:{}", config.metrics.port).parse()?;
@@ -51,6 +57,13 @@ async fn main() -> anyhow::Result<()> {
         info!(
             port = config.metrics.port,
             "Prometheus metrics listener ready"
+        );
+    } else {
+        tracing::warn!(
+            "METRICS_ENABLED is false: all mta.* counters/histograms (smtp, auth, tls, spf) \
+             are recorded into a no-op sink. Set METRICS_ENABLED=true to expose them on the \
+             Prometheus listener (port {})",
+            config.metrics.port
         );
     }
 
@@ -88,6 +101,33 @@ async fn main() -> anyhow::Result<()> {
     } else {
         None
     };
+
+    // F-20: TLS_ENABLED deliberately defaults to false (a cert-less host
+    // must still boot), but a PUBLIC plaintext SMTP listener deserves a loud
+    // startup warning — port 25 then offers no STARTTLS, and port 587/465
+    // AUTH is permanently gated (530 Must issue STARTTLS first).
+    if tls_acceptor.is_none() {
+        let public_listeners: Vec<&str> = [
+            config.inbound.enabled.then_some("inbound:25 (STARTTLS)"),
+            config
+                .inbound
+                .enabled
+                .then_some("inbound:465 (implicit TLS)"),
+            config
+                .submission
+                .enabled
+                .then_some("submission:587 (STARTTLS + AUTH)"),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        if !public_listeners.is_empty() {
+            tracing::warn!(
+                listeners = ?public_listeners,
+                "TLS_ENABLED is false while public SMTP listeners are enabled: mail arrives in plaintext, STARTTLS is not offered, and AUTH is refused until TLS is configured (TLS_ENABLED=true + TLS_CERT_PATH/TLS_KEY_PATH)"
+            );
+        }
+    }
 
     // Email authenticator
     let authenticator = Arc::new(

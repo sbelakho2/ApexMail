@@ -588,6 +588,10 @@ struct AdminTenantListQuery {
 struct AdminCreditBody {
     amount: i64,
     reason: String,
+    // Accepted for API compatibility (camelCase `expiresAt` in the request
+    // body must keep deserializing under deny_unknown_fields) even though
+    // the credit-granting handler does not read it.
+    #[allow(dead_code)]
     expires_at: Option<String>,
     idempotency_key: Option<String>,
 }
@@ -1558,10 +1562,6 @@ fn format_invoice_date(date: chrono::DateTime<Utc>) -> String {
     date.format("%Y-%m-%d").to_string()
 }
 
-fn format_invoice_currency_html(cents: i64) -> String {
-    format_invoice_currency_with(cents, "EUR")
-}
-
 /// Format cents with the invoice's actual currency (the invoice carries a
 /// `currency` column; USD invoices were being rendered with a € symbol).
 fn format_invoice_currency_with(cents: i64, currency: &str) -> String {
@@ -1612,7 +1612,10 @@ fn invoice_style_nonce() -> String {
     let mut hasher = Sha256::new();
     hasher.update(Uuid::new_v4().as_u128().to_le_bytes());
     let digest = hasher.finalize();
-    digest[..16].iter().map(|byte| format!("{byte:02x}")).collect()
+    digest[..16]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 /// Build the print-to-PDF invoice response (audit H-6).
@@ -1641,8 +1644,7 @@ fn invoice_html_response(invoice: &LegacyInvoiceDto) -> Response {
     let mut response = Html(html).into_response();
     response.headers_mut().insert(
         header::CONTENT_SECURITY_POLICY,
-        HeaderValue::from_str(&csp)
-            .expect("invoice CSP contains only header-safe characters"),
+        HeaderValue::from_str(&csp).expect("invoice CSP contains only header-safe characters"),
     );
     response
 }
@@ -2266,37 +2268,6 @@ fn compute_audit_log_hash(
     hasher.update(b"|");
     hasher.update(timestamp.to_rfc3339().as_bytes());
     format!("{:x}", hasher.finalize())
-}
-
-async fn insert_audit_log(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    tenant_id: &str,
-    action: &str,
-    resource_type: &str,
-    resource_id: Option<&str>,
-    metadata: serde_json::Value,
-    timestamp: chrono::DateTime<Utc>,
-) -> Result<(), ApiError> {
-    // Delegate to the canonical hash-chained writer (src/audit_log.rs) so
-    // billing audit rows share the same chain-link selection (FOR UPDATE in
-    // the insert transaction) and the fail-closed AUDIT_SIGNING_KEY policy
-    // as every other audit writer. The old local copy silently signed with
-    // a publicly-known fallback key when the env var was unset.
-    crate::audit_log::insert_audit_log_in_tx(
-        tx,
-        Some(tenant_id),
-        None,
-        action,
-        resource_type,
-        resource_id,
-        metadata,
-        None,
-        None,
-        timestamp,
-    )
-    .await?;
-
-    Ok(())
 }
 
 async fn get_route_subscription(
@@ -4690,7 +4661,10 @@ mod tests {
             1,
             "exactly one style element"
         );
-        assert!(!html.contains("<script"), "no scripts in the invoice document");
+        assert!(
+            !html.contains("<script"),
+            "no scripts in the invoice document"
+        );
     }
 
     #[test]

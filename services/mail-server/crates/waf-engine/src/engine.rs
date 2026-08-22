@@ -175,10 +175,7 @@ impl WafEngine {
             .iter()
             .find(|(_, v)| v.contains('\0') || v.contains("%00"))
         {
-            all_matches.push(null_byte_match(
-                MatchLocation::Header(name.clone()),
-                value,
-            ));
+            all_matches.push(null_byte_match(MatchLocation::Header(name.clone()), value));
         }
 
         // 1. Decode and inspect URL path

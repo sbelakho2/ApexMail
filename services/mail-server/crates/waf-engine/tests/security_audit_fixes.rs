@@ -222,7 +222,8 @@ mod fix_d_null_byte_bypass {
         assert!(
             info.matches
                 .iter()
-                .any(|m| m.rule_id == 920400 && matches!(m.location, waf_engine::MatchLocation::Body)),
+                .any(|m| m.rule_id == 920400
+                    && matches!(m.location, waf_engine::MatchLocation::Body)),
             "null byte in body must fire 920400"
         );
         assert!(
@@ -376,7 +377,9 @@ mod fix_f_allowlist_prefix {
         };
         let info = e.inspect(&req);
         assert!(
-            info.matches.iter().any(|m| m.rule_id == 930100 || m.rule_id == 930200),
+            info.matches
+                .iter()
+                .any(|m| m.rule_id == 930100 || m.rule_id == 930200),
             "`/static/../../etc/passwd` must fire traversal rules even though allowlisted"
         );
         assert!(is_blocked(&e, &req));
@@ -469,9 +472,10 @@ mod fix_k7_size_limits {
 
     #[test]
     fn oversized_url_blocked_with_400() {
-        let mut cfg = WafConfig::default();
-        cfg.max_url_length = 128;
-        let engine = WafEngine::new(cfg);
+        let engine = WafEngine::new(WafConfig {
+            max_url_length: 128,
+            ..Default::default()
+        });
         let long_path = format!("/a/{}", "x".repeat(300));
         let req = HttpRequest {
             client_ip: client_ip(),
@@ -491,9 +495,10 @@ mod fix_k7_size_limits {
 
     #[test]
     fn url_within_limit_not_blocked_for_length() {
-        let mut cfg = WafConfig::default();
-        cfg.max_url_length = 128;
-        let engine = WafEngine::new(cfg);
+        let engine = WafEngine::new(WafConfig {
+            max_url_length: 128,
+            ..Default::default()
+        });
         let req = HttpRequest {
             client_ip: client_ip(),
             method: "GET",
@@ -508,9 +513,10 @@ mod fix_k7_size_limits {
 
     #[test]
     fn too_many_query_params_blocked() {
-        let mut cfg = WafConfig::default();
-        cfg.max_query_params = 5;
-        let engine = WafEngine::new(cfg);
+        let engine = WafEngine::new(WafConfig {
+            max_query_params: 5,
+            ..Default::default()
+        });
         let qs = (0..20)
             .map(|i| format!("p{i}=1"))
             .collect::<Vec<_>>()
@@ -531,9 +537,10 @@ mod fix_k7_size_limits {
 
     #[test]
     fn too_many_headers_blocked() {
-        let mut cfg = WafConfig::default();
-        cfg.max_headers = 3;
-        let engine = WafEngine::new(cfg);
+        let engine = WafEngine::new(WafConfig {
+            max_headers: 3,
+            ..Default::default()
+        });
         let headers: Vec<(String, String)> = (0..10)
             .map(|i| (format!("X-H{i}"), "v".to_string()))
             .collect();
@@ -553,9 +560,10 @@ mod fix_k7_size_limits {
 
     #[test]
     fn oversized_header_value_blocked() {
-        let mut cfg = WafConfig::default();
-        cfg.max_header_value_length = 32;
-        let engine = WafEngine::new(cfg);
+        let engine = WafEngine::new(WafConfig {
+            max_header_value_length: 32,
+            ..Default::default()
+        });
         let headers = vec![("X-Long".to_string(), "z".repeat(200))];
         let req = HttpRequest {
             client_ip: client_ip(),
@@ -627,7 +635,10 @@ mod fix_k8_event_handlers {
             headers: &[],
             body: Some("<div onanimationstart=alert(1)>x</div>"),
         };
-        assert!(is_blocked(&engine, &req), "onanimationstart must be blocked");
+        assert!(
+            is_blocked(&engine, &req),
+            "onanimationstart must be blocked"
+        );
     }
 
     #[test]

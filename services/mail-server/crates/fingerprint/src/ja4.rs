@@ -259,7 +259,8 @@ fn is_grease_value(value: u16) -> bool {
 /// the `_` field separator in full JA4 strings and could never round-trip
 /// through [`Ja4Fingerprint::parse`]), two 2-digit decimal counts, then a
 /// lowercase alphanumeric ALPN marker ("00" when absent).
-/// Used to validate both parsed and seeded fingerprint keys.
+/// Test-only: validates the hardcoded seed keys (see `database.rs` tests).
+#[cfg(test)]
 pub fn is_valid_ja4_a(s: &str) -> bool {
     let chars: Vec<char> = s.chars().collect();
     if chars.len() < 7 {
@@ -388,17 +389,32 @@ mod tests {
             server_name: Some("example.com".to_string()),
             cipher_suites: vec![0x1301, 0x1302, 0x1303, 0xc02b, 0xc02c],
             extensions: vec![
-                Extension { extension_type: 0, data: vec![] },
-                Extension { extension_type: 10, data: vec![] },
-                Extension { extension_type: 11, data: vec![] },
-                Extension { extension_type: 43, data: vec![] },
+                Extension {
+                    extension_type: 0,
+                    data: vec![],
+                },
+                Extension {
+                    extension_type: 10,
+                    data: vec![],
+                },
+                Extension {
+                    extension_type: 11,
+                    data: vec![],
+                },
+                Extension {
+                    extension_type: 43,
+                    data: vec![],
+                },
             ],
             signature_algorithms: vec![0x0403, 0x0804],
             alpn_protocols: vec!["h2".to_string()],
         };
         let mut greased = base.clone();
         greased.cipher_suites.push(0x0a0a); // GREASE cipher
-        greased.extensions.push(Extension { extension_type: 0x1a1a, data: vec![] }); // GREASE ext
+        greased.extensions.push(Extension {
+            extension_type: 0x1a1a,
+            data: vec![],
+        }); // GREASE ext
 
         let fp_base = Ja4Fingerprint::compute(&base);
         let fp_greased = Ja4Fingerprint::compute(&greased);
@@ -425,7 +441,7 @@ mod tests {
         assert!(Ja4Fingerprint::parse("xd0506h2_deadbeefcafe_0123456789ab").is_none());
         assert!(Ja4Fingerprint::parse("tz0506h2_deadbeefcafe_0123456789ab").is_none());
         // Valid one parses.
-        let fp = Ja4Fingerprint::parse("td0506h2_deadbeefcafe_0123456789ab").unwrap();
+        let fp = Ja4Fingerprint::parse("td0506h2_deadbeefcafe_0123456789ab").expect("valid ja4");
         assert_eq!(fp.protocol, 't');
         assert_eq!(fp.sni, 'd');
         assert_eq!(fp.cipher_count, 5);
@@ -436,8 +452,8 @@ mod tests {
     fn test_missing_alpn_ok_for_mail_context() {
         // Mail (SMTP/IMAP STARTTLS) clients legitimately omit ALPN —
         // missing ALPN must not flag them anomalous.
-        let mut fp = Ja4Fingerprint::parse("td1008h2_deadbeefcafe_0123456789ab")
-            .expect("valid ja4");
+        let mut fp =
+            Ja4Fingerprint::parse("td1008h2_deadbeefcafe_0123456789ab").expect("valid ja4");
         fp.alpn = "00".to_string();
         assert!(
             !fp.is_anomalous_in(crate::ja4::FingerprintContext::Mail),
@@ -455,7 +471,10 @@ mod tests {
         assert!(is_valid_ja4_a("td1817h2"));
         assert!(is_valid_ja4_a("di020200"));
         assert!(is_valid_ja4_a("dd090800"));
-        assert!(!is_valid_ja4_a("d_020200"), "'_' SNI collides with the separator");
+        assert!(
+            !is_valid_ja4_a("d_020200"),
+            "'_' SNI collides with the separator"
+        );
         assert!(!is_valid_ja4_a("t130613h2"), "wrong alphabet (old seed)");
         assert!(!is_valid_ja4_a("d100200"), "too short (old seed)");
         assert!(!is_valid_ja4_a("tZ0506h2"), "bad SNI char");

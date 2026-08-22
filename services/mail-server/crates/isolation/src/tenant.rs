@@ -624,8 +624,8 @@ impl TenantService {
                 .fetch_optional(&self.db)
                 .await?;
 
-        let (usage, quota) = row
-            .ok_or_else(|| anyhow::anyhow!("Workspace not found: {}", workspace_id))?;
+        let (usage, quota) =
+            row.ok_or_else(|| anyhow::anyhow!("Workspace not found: {}", workspace_id))?;
         let usage: WorkspaceUsage = serde_json::from_value(usage)?;
         let quota: QuotaConfig = serde_json::from_value(quota)?;
 
@@ -636,10 +636,7 @@ impl TenantService {
                 usage.api_requests_this_minute,
                 quota.api_requests_per_minute,
             ),
-            "webhooks_per_month" => (
-                usage.webhooks_sent_this_month,
-                quota.webhooks_per_month,
-            ),
+            "webhooks_per_month" => (usage.webhooks_sent_this_month, quota.webhooks_per_month),
             "contacts" => (usage.contacts_count, quota.contacts_limit),
             "templates" => (usage.templates_count, quota.templates_limit),
             "domains" => (usage.domains_count, quota.domains_limit),
@@ -883,8 +880,8 @@ mod tests {
             "templates_count",
             "domains_count",
         ] {
-            let field = usage_field(metric)
-                .unwrap_or_else(|| panic!("missing usage field for {metric}"));
+            let field =
+                usage_field(metric).unwrap_or_else(|| panic!("missing usage field for {metric}"));
             assert_eq!(field, metric);
         }
         // Reject unknown metrics — they must never reach SQL.

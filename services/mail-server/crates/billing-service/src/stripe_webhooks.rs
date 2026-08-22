@@ -550,9 +550,7 @@ fn stale_pending_cutoff(now: DateTime<Utc>) -> DateTime<Utc> {
 /// replay can claim them again. Returns the reclaimed event ids.
 ///
 /// Wired into the maintenance worker loop (runs on startup and hourly).
-pub async fn reclaim_stale_pending_webhooks(
-    state: &AppState,
-) -> Result<Vec<String>, String> {
+pub async fn reclaim_stale_pending_webhooks(state: &AppState) -> Result<Vec<String>, String> {
     let cutoff = stale_pending_cutoff(Utc::now());
     let reclaimed: Vec<String> = sqlx::query_scalar(
         r#"
@@ -596,7 +594,9 @@ fn derive_invoice_totals(
 
     let (subtotal, vat, total) = match (subtotal, total) {
         (Some(sub), Some(tot)) => {
-            let vat = tax.filter(|value| sub + value <= tot).unwrap_or((tot - sub).max(0));
+            let vat = tax
+                .filter(|value| sub + value <= tot)
+                .unwrap_or((tot - sub).max(0));
             (sub, vat, tot)
         }
         (Some(sub), None) => {
@@ -691,10 +691,8 @@ fn parse_signature_header(signature: &str) -> Result<(i64, Vec<&str>), String> {
             "t" => {
                 timestamp = value.parse::<i64>().ok();
             }
-            "v1" => {
-                if !value.is_empty() {
-                    signatures.push(value);
-                }
+            "v1" if !value.is_empty() => {
+                signatures.push(value);
             }
             _ => {}
         }
@@ -1179,21 +1177,19 @@ async fn handle_invoice_paid(state: &AppState, invoice: InvoiceEvent) -> Result<
     // Resolve tenant via the subscription fallback when metadata is absent.
     let fallback_tenant_id = match (&metadata_tenant_id, subscription_id) {
         (Some(_), _) => None,
-        (None, Some(sub_id)) => {
-            sqlx::query_scalar::<_, String>(
-                r#"
+        (None, Some(sub_id)) => sqlx::query_scalar::<_, String>(
+            r#"
                 SELECT tenant_id
                 FROM stripe_subscriptions
                 WHERE stripe_subscription_id = $1
                 ORDER BY created_at DESC
                 LIMIT 1
                 "#,
-            )
-            .bind(sub_id)
-            .fetch_optional(&state.db)
-            .await
-            .map_err(|error| format!("Failed to resolve tenant from subscription: {error}"))?
-        }
+        )
+        .bind(sub_id)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(|error| format!("Failed to resolve tenant from subscription: {error}"))?,
         (None, None) => None,
     };
 
@@ -1257,8 +1253,12 @@ async fn insert_paid_invoice_from_stripe(
     invoice: &InvoiceEvent,
     tenant_id: &str,
 ) -> Result<(), String> {
-    let (subtotal, vat_total, total) =
-        derive_invoice_totals(invoice.subtotal, invoice.tax, invoice.total, invoice.amount_due);
+    let (subtotal, vat_total, total) = derive_invoice_totals(
+        invoice.subtotal,
+        invoice.tax,
+        invoice.total,
+        invoice.amount_due,
+    );
     let vat_rate = derive_invoice_vat_rate(subtotal, vat_total);
     let currency = normalize_stripe_currency(invoice.currency.as_deref());
 
@@ -1279,14 +1279,13 @@ async fn insert_paid_invoice_from_stripe(
     // invoices created directly from Stripe carry no local VAT derivation,
     // so store the current address; the VAT rate is derived from the Stripe
     // amounts themselves.
-    let billing_country: Option<String> = sqlx::query_scalar(
-        "SELECT UPPER(country) FROM billing_addresses WHERE tenant_id = $1",
-    )
-    .bind(tenant_id)
-    .fetch_optional(&state.db)
-    .await
-    .unwrap_or(None)
-    .flatten();
+    let billing_country: Option<String> =
+        sqlx::query_scalar("SELECT UPPER(country) FROM billing_addresses WHERE tenant_id = $1")
+            .bind(tenant_id)
+            .fetch_optional(&state.db)
+            .await
+            .unwrap_or(None)
+            .flatten();
 
     sqlx::query(
         r#"
@@ -1542,7 +1541,12 @@ pub fn dunning_transition(previous: Option<&str>, new_status: &str) -> Option<Du
         "hard_suspended" if !matches!(previous, Some("hard_suspended")) => {
             Some(DunningTransition::HardSuspended)
         }
-        "healthy" if matches!(previous, Some("warning" | "soft_suspended" | "hard_suspended")) => {
+        "healthy"
+            if matches!(
+                previous,
+                Some("warning" | "soft_suspended" | "hard_suspended")
+            ) =>
+        {
             Some(DunningTransition::Recovered)
         }
         _ => None,
@@ -2875,7 +2879,10 @@ mod tests {
         let now = Utc::now();
         let cutoff = stale_pending_cutoff(now);
 
-        assert_eq!(now - cutoff, TimeDelta::seconds(STALE_PENDING_RECLAIM_SECS as i64));
+        assert_eq!(
+            now - cutoff,
+            TimeDelta::seconds(STALE_PENDING_RECLAIM_SECS as i64)
+        );
     }
 
     // ------------------------------------------------------------------
@@ -2956,7 +2963,10 @@ mod tests {
         assert_eq!(invoice.total, Some(12_400));
         assert_eq!(invoice.currency.as_deref(), Some("eur"));
         assert_eq!(invoice.number.as_deref(), Some("2026-000042"));
-        assert_eq!(invoice.subscription.as_ref().map(ExpandableId::id), Some("sub_1"));
+        assert_eq!(
+            invoice.subscription.as_ref().map(ExpandableId::id),
+            Some("sub_1")
+        );
     }
 
     #[test]
@@ -3026,8 +3036,14 @@ mod tests {
         // Repeated payment failures in the same state must not spam
         // duplicate transition events.
         assert_eq!(dunning_transition(Some("warning"), "warning"), None);
-        assert_eq!(dunning_transition(Some("soft_suspended"), "soft_suspended"), None);
-        assert_eq!(dunning_transition(Some("hard_suspended"), "hard_suspended"), None);
+        assert_eq!(
+            dunning_transition(Some("soft_suspended"), "soft_suspended"),
+            None
+        );
+        assert_eq!(
+            dunning_transition(Some("hard_suspended"), "hard_suspended"),
+            None
+        );
         assert_eq!(dunning_transition(None, "warning"), None);
         assert_eq!(dunning_transition(None, "healthy"), None);
     }
@@ -3037,16 +3053,28 @@ mod tests {
         // Hard -> soft is a state change but not a new suspension entry; the
         // soft-suspension event must not fire again for an already
         // suspended tenant.
-        assert_eq!(dunning_transition(Some("hard_suspended"), "soft_suspended"), None);
+        assert_eq!(
+            dunning_transition(Some("hard_suspended"), "soft_suspended"),
+            None
+        );
     }
 
     #[test]
     fn dunning_transition_event_types_are_snake_case_rows() {
         // Values must match the dunning_events.event_type conventions
         // already used by the payment_recovered path (mark_payment_recovered).
-        assert_eq!(DunningTransition::SoftSuspended.event_type(), "soft_suspended");
-        assert_eq!(DunningTransition::HardSuspended.event_type(), "hard_suspended");
-        assert_eq!(DunningTransition::Recovered.event_type(), "payment_recovered");
+        assert_eq!(
+            DunningTransition::SoftSuspended.event_type(),
+            "soft_suspended"
+        );
+        assert_eq!(
+            DunningTransition::HardSuspended.event_type(),
+            "hard_suspended"
+        );
+        assert_eq!(
+            DunningTransition::Recovered.event_type(),
+            "payment_recovered"
+        );
     }
 
     #[test]
@@ -3121,10 +3149,7 @@ mod tests {
 
         assert_eq!(state.status, "hard_suspended");
         assert!(state.suspended_at.is_some());
-        assert_eq!(
-            state.grace_period_ends_at,
-            Some(now + TimeDelta::days(7))
-        );
+        assert_eq!(state.grace_period_ends_at, Some(now + TimeDelta::days(7)));
 
         // Already hard-suspended → grace/suspension timestamps preserved.
         let state = next_dunning_state(

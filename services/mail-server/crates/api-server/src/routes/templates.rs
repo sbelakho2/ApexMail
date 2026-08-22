@@ -657,9 +657,11 @@ mod tests {
         {
             return false;
         }
-        snapshot_template_version(&mut tx, id, tenant_id, 1, "welcome", subject, html_body, None)
-            .await
-            .is_ok()
+        snapshot_template_version(
+            &mut tx, id, tenant_id, 1, "welcome", subject, html_body, None,
+        )
+        .await
+        .is_ok()
             && tx.commit().await.is_ok()
     }
 
@@ -690,7 +692,14 @@ mod tests {
         .await
         .unwrap();
         snapshot_template_version(
-            &mut tx, &id, tenant, 2, "welcome", "Welcome v2", "<p>v2</p>", None,
+            &mut tx,
+            &id,
+            tenant,
+            2,
+            "welcome",
+            "Welcome v2",
+            "<p>v2</p>",
+            None,
         )
         .await
         .unwrap();
@@ -704,11 +713,16 @@ mod tests {
         .fetch_one(&pool)
         .await
         .unwrap();
-        assert_eq!((subject.as_str(), html.as_str(), version), ("Welcome v2", "<p>v2</p>", 2));
+        assert_eq!(
+            (subject.as_str(), html.as_str(), version),
+            ("Welcome v2", "<p>v2</p>", 2)
+        );
 
         // Rollback to v1 — must restore the v1 snapshot.
         assert!(
-            restore_template_version(&pool, tenant, &id, 1).await.unwrap(),
+            restore_template_version(&pool, tenant, &id, 1)
+                .await
+                .unwrap(),
             "rollback must find the v1 snapshot"
         );
         let (subject, html, version): (String, String, i32) = sqlx::query_as(
@@ -724,7 +738,9 @@ mod tests {
         assert_eq!(version, 1);
 
         // Unknown versions report not-found instead of silently succeeding.
-        assert!(!restore_template_version(&pool, tenant, &id, 99).await.unwrap());
+        assert!(!restore_template_version(&pool, tenant, &id, 99)
+            .await
+            .unwrap());
 
         pool.close().await;
     }

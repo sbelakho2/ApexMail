@@ -571,9 +571,7 @@ impl DynamicAnalyzer for ClamAvSocketAnalyzer {
             let chunk_size = 8192;
             for chunk in data.chunks(chunk_size) {
                 let len = (chunk.len() as u32).to_be_bytes();
-                if let Err(e) = stream.write_all(&len)
-                    .and_then(|_| stream.write_all(chunk))
-                {
+                if let Err(e) = stream.write_all(&len).and_then(|_| stream.write_all(chunk)) {
                     return Some(scanner_unavailable(format!("write failed: {e}")));
                 }
             }
@@ -667,9 +665,7 @@ pub fn parse_clamd_response(response: &str) -> ClamdVerdict {
         }
         // Bare "… FOUND" without stream prefix (IDSESSION style)
         if line.ends_with(" FOUND") && line.len() > " FOUND".len() {
-            return ClamdVerdict::Detected(
-                line.trim_end_matches(" FOUND").trim().to_string(),
-            );
+            return ClamdVerdict::Detected(line.trim_end_matches(" FOUND").trim().to_string());
         }
         return ClamdVerdict::Invalid;
     }
@@ -946,9 +942,8 @@ mod tests {
     fn test_clamav_unreachable_scanner_fails_closed() {
         // Nonexistent socket path:the previous behavior returned None
         // (treated as clean = fail-open). It must now fail closed.
-        let analyzer = ClamAvSocketAnalyzer::new(
-            "/nonexistent/clamd-socket-for-test-8f3a.ctl".into(),
-        );
+        let analyzer =
+            ClamAvSocketAnalyzer::new("/nonexistent/clamd-socket-for-test-8f3a.ctl".into());
         let finding = analyzer
             .analyze(b"innocuous", Some("doc.pdf"))
             .expect("scanner outage must produce a finding");
@@ -989,9 +984,15 @@ mod tests {
         );
         // Invalid:must never be treated as clean (fail-closed)
         assert_eq!(parse_clamd_response(""), ClamdVerdict::Invalid);
-        assert_eq!(parse_clamd_response("UNKNOWN STATUS"), ClamdVerdict::Invalid);
+        assert_eq!(
+            parse_clamd_response("UNKNOWN STATUS"),
+            ClamdVerdict::Invalid
+        );
         // Substring traps:"OK" inside another word is not a clean verdict.
-        assert_eq!(parse_clamd_response("OKAY BUT WEIRD"), ClamdVerdict::Invalid);
+        assert_eq!(
+            parse_clamd_response("OKAY BUT WEIRD"),
+            ClamdVerdict::Invalid
+        );
         assert_eq!(
             parse_clamd_response("stream: UNKNOWN"),
             ClamdVerdict::Invalid

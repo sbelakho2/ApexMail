@@ -692,10 +692,9 @@ impl MailstoreService for MailstoreServiceImpl {
         let uids: Vec<i64> = req
             .uids
             .iter()
-            .map(|uid| {
-                i64::try_from(*uid).map_err(|_| Status::invalid_argument("UID exceeds valid range"))
-            })
-            .collect::<Result<_, _>>()?;
+            .map(|uid| i64::try_from(*uid))
+            .collect::<Result<_, _>>()
+            .map_err(|_| Status::invalid_argument("UID exceeds valid range"))?;
         if uids.is_empty() {
             return Ok(Response::new(SetFlagsResponse { updated_count: 0 }));
         }
@@ -752,10 +751,9 @@ impl MailstoreService for MailstoreServiceImpl {
         let uids: Vec<i64> = req
             .uids
             .iter()
-            .map(|uid| {
-                i64::try_from(*uid).map_err(|_| Status::invalid_argument("UID exceeds valid range"))
-            })
-            .collect::<Result<_, _>>()?;
+            .map(|uid| i64::try_from(*uid))
+            .collect::<Result<_, _>>()
+            .map_err(|_| Status::invalid_argument("UID exceeds valid range"))?;
         let flags = self
             .storage
             .get_message_flags_by_uids(&account_id, &mailbox.id, &uids)
@@ -798,10 +796,9 @@ impl MailstoreService for MailstoreServiceImpl {
         let uids: Vec<i64> = req
             .uids
             .iter()
-            .map(|uid| {
-                i64::try_from(*uid).map_err(|_| Status::invalid_argument("UID exceeds valid range"))
-            })
-            .collect::<Result<_, _>>()?;
+            .map(|uid| i64::try_from(*uid))
+            .collect::<Result<_, _>>()
+            .map_err(|_| Status::invalid_argument("UID exceeds valid range"))?;
         let messages = self
             .storage
             .get_messages_by_uids(&account_id, &source_mailbox.id, &uids)
@@ -848,10 +845,9 @@ impl MailstoreService for MailstoreServiceImpl {
         let uids: Vec<i64> = req
             .uids
             .iter()
-            .map(|uid| {
-                i64::try_from(*uid).map_err(|_| Status::invalid_argument("UID exceeds valid range"))
-            })
-            .collect::<Result<_, _>>()?;
+            .map(|uid| i64::try_from(*uid))
+            .collect::<Result<_, _>>()
+            .map_err(|_| Status::invalid_argument("UID exceeds valid range"))?;
         let messages = self
             .storage
             .get_messages_by_uids(&account_id, &source_mailbox.id, &uids)
@@ -1075,11 +1071,9 @@ impl MailstoreService for MailstoreServiceImpl {
             let uids: Vec<i64> = req
                 .uids
                 .iter()
-                .map(|uid| {
-                    i64::try_from(*uid)
-                        .map_err(|_| Status::invalid_argument("UID exceeds valid range"))
-                })
-                .collect::<Result<_, _>>()?;
+                .map(|uid| i64::try_from(*uid))
+                .collect::<Result<_, _>>()
+                .map_err(|_| Status::invalid_argument("UID exceeds valid range"))?;
             self.storage
                 .expunge_deleted_messages_for_uids(&account_id, &mailbox.id, &uids)
                 .await

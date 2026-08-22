@@ -530,9 +530,8 @@ fn percent_decode_pass(data: &[u8]) -> Vec<u8> {
                 // Need two hex digits after '%'
                 let hex = [data[i + 1], data[i + 2]];
                 if hex[0].is_ascii_hexdigit() && hex[1].is_ascii_hexdigit() {
-                    let byte =
-                        u8::from_str_radix(std::str::from_utf8(&hex).unwrap_or("zz"), 16)
-                            .unwrap_or(b'%');
+                    let byte = u8::from_str_radix(std::str::from_utf8(&hex).unwrap_or("zz"), 16)
+                        .unwrap_or(b'%');
                     result.push(byte);
                     i += 3;
                 } else {

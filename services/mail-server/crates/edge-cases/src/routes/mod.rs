@@ -686,7 +686,10 @@ mod tests {
     fn test_health_bypasses_auth() {
         test_runtime().block_on(async {
             let app = router(test_state("", false));
-            let req = Request::builder().uri("/health").body(Body::empty()).unwrap();
+            let req = Request::builder()
+                .uri("/health")
+                .body(Body::empty())
+                .unwrap();
             let resp = app.oneshot(req).await.unwrap();
             assert_eq!(resp.status(), StatusCode::OK);
         });

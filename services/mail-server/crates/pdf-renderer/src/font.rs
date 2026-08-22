@@ -69,7 +69,10 @@ impl TtfFont {
         // 12-byte sfnt header: version, numTables, searchRange,
         // entrySelector, rangeShift.
         if data.len() < 12 {
-            return Err(FontError::Truncated { offset: 0, needed: 12 });
+            return Err(FontError::Truncated {
+                offset: 0,
+                needed: 12,
+            });
         }
         let version = be_u32(&data, 0)?;
         if version != 0x0001_0000 && version != u32::from_be_bytes(*b"true") {
@@ -82,13 +85,22 @@ impl TtfFont {
         for i in 0..num_tables {
             let rec = 12 + i * 16;
             if data.len() < rec + 16 {
-                return Err(FontError::Truncated { offset: rec, needed: 16 });
+                return Err(FontError::Truncated {
+                    offset: rec,
+                    needed: 16,
+                });
             }
             let tag = [data[rec], data[rec + 1], data[rec + 2], data[rec + 3]];
             let offset = be_u32(&data, rec + 8)? as usize;
             let length = be_u32(&data, rec + 12)? as usize;
-            if offset.checked_add(length).is_none_or(|end| end > data.len()) {
-                return Err(FontError::Truncated { offset, needed: length });
+            if offset
+                .checked_add(length)
+                .is_none_or(|end| end > data.len())
+            {
+                return Err(FontError::Truncated {
+                    offset,
+                    needed: length,
+                });
             }
             tables.push((tag, offset, length));
         }
@@ -103,7 +115,10 @@ impl TtfFont {
         let head = table(b"head").ok_or(FontError::MissingTable("head"))?;
         let units_per_em = be_u16(&data, head + 18)?;
         if units_per_em == 0 {
-            return Err(FontError::Truncated { offset: head + 18, needed: 2 });
+            return Err(FontError::Truncated {
+                offset: head + 18,
+                needed: 2,
+            });
         }
         let bbox = [
             be_i16(&data, head + 36)?,
@@ -122,7 +137,10 @@ impl TtfFont {
         let descent = be_i16(&data, hhea + 6)?;
         let number_of_h_metrics = be_u16(&data, hhea + 34)?;
         if number_of_h_metrics == 0 {
-            return Err(FontError::Truncated { offset: hhea + 34, needed: 2 });
+            return Err(FontError::Truncated {
+                offset: hhea + 34,
+                needed: 2,
+            });
         }
 
         let (hmtx_offset, hmtx_len) = tables
@@ -138,7 +156,10 @@ impl TtfFont {
         for i in 0..subtable_count {
             let rec = cmap_offset + 4 + i * 8;
             if rec + 8 > data.len() {
-                return Err(FontError::Truncated { offset: rec, needed: 8 });
+                return Err(FontError::Truncated {
+                    offset: rec,
+                    needed: 8,
+                });
             }
             let platform = be_u16(&data, rec)?;
             let encoding = be_u16(&data, rec + 2)?;
@@ -229,7 +250,9 @@ impl TtfFont {
         for (&cp, &gid) in &self.cmap {
             if gid != 0 {
                 rev.entry(gid).or_insert_with(|| {
-                    char::from_u32(cp).filter(|c| *c != '\0').unwrap_or('\u{FFFD}')
+                    char::from_u32(cp)
+                        .filter(|c| *c != '\0')
+                        .unwrap_or('\u{FFFD}')
                 });
             }
         }
@@ -248,7 +271,10 @@ impl TtfFont {
 fn parse_cmap4(data: &[u8], offset: usize, map: &mut HashMap<u32, u16>) -> Result<(), FontError> {
     let seg_count_x2 = be_u16(data, offset + 6)? as usize;
     if !seg_count_x2.is_multiple_of(2) {
-        return Err(FontError::Truncated { offset, needed: seg_count_x2 });
+        return Err(FontError::Truncated {
+            offset,
+            needed: seg_count_x2,
+        });
     }
     let seg_count = seg_count_x2 / 2;
     let end_codes = offset + 14;
@@ -403,7 +429,10 @@ mod tests {
         let at_10 = sans.advance_pt(gid, 10.0);
         let at_20 = sans.advance_pt(gid, 20.0);
         assert!((at_20 - 2.0 * at_10).abs() < 1e-9);
-        assert!(at_10 > 5.0 && at_10 < 12.0, "W at 10pt is ~9.4pt, got {at_10}");
+        assert!(
+            at_10 > 5.0 && at_10 < 12.0,
+            "W at 10pt is ~9.4pt, got {at_10}"
+        );
     }
 
     #[test]

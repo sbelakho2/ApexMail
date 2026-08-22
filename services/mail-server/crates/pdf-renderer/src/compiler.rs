@@ -148,13 +148,33 @@ pub async fn render_pdf(template: &str, data: &serde_json::Value) -> Result<Vec<
 fn fold_char_direct(c: char) -> Option<char> {
     let code = c as u32;
     const CP1252_SPECIALS: &[(u32, u8)] = &[
-        (0x20AC, 0x80), (0x201A, 0x82), (0x0192, 0x83), (0x201E, 0x84),
-        (0x2026, 0x85), (0x2020, 0x86), (0x2021, 0x87), (0x02C6, 0x88),
-        (0x2030, 0x89), (0x0160, 0x8A), (0x2039, 0x8B), (0x0152, 0x8C),
-        (0x017D, 0x8E), (0x2018, 0x91), (0x2019, 0x92), (0x201C, 0x93),
-        (0x201D, 0x94), (0x2022, 0x95), (0x2013, 0x96), (0x2014, 0x97),
-        (0x02DC, 0x98), (0x2122, 0x99), (0x0161, 0x9A), (0x203A, 0x9B),
-        (0x0153, 0x9C), (0x017E, 0x9E), (0x0178, 0x9F),
+        (0x20AC, 0x80),
+        (0x201A, 0x82),
+        (0x0192, 0x83),
+        (0x201E, 0x84),
+        (0x2026, 0x85),
+        (0x2020, 0x86),
+        (0x2021, 0x87),
+        (0x02C6, 0x88),
+        (0x2030, 0x89),
+        (0x0160, 0x8A),
+        (0x2039, 0x8B),
+        (0x0152, 0x8C),
+        (0x017D, 0x8E),
+        (0x2018, 0x91),
+        (0x2019, 0x92),
+        (0x201C, 0x93),
+        (0x201D, 0x94),
+        (0x2022, 0x95),
+        (0x2013, 0x96),
+        (0x2014, 0x97),
+        (0x02DC, 0x98),
+        (0x2122, 0x99),
+        (0x0161, 0x9A),
+        (0x203A, 0x9B),
+        (0x0153, 0x9C),
+        (0x017E, 0x9E),
+        (0x0178, 0x9F),
     ];
     if (0x20..=0x7E).contains(&code) || (0xA0..=0xFF).contains(&code) {
         return Some(c);
@@ -207,34 +227,138 @@ fn transliterate(c: char) -> Option<&'static str> {
         'ŷ' | 'ý' | 'ÿ' => "y",
         'Ź' | 'Ż' | 'Ž' => "Z",
         'ź' | 'ż' | 'ž' => "z",
-        'а' => "a", 'б' => "b", 'в' => "v", 'г' => "g", 'д' => "d",
-        'е' => "e", 'ё' => "yo", 'ж' => "zh", 'з' => "z", 'и' => "i",
-        'й' => "y", 'к' => "k", 'л' => "l", 'м' => "m", 'н' => "n",
-        'о' => "o", 'п' => "p", 'р' => "r", 'с' => "s", 'т' => "t",
-        'у' => "u", 'ф' => "f", 'х' => "kh", 'ц' => "ts", 'ч' => "ch",
-        'ш' => "sh", 'щ' => "shch", 'ъ' => "\"", 'ы' => "y", 'ь' => "'",
-        'э' => "e", 'ю' => "yu", 'я' => "ya",
-        'А' => "A", 'Б' => "B", 'В' => "V", 'Г' => "G", 'Д' => "D",
-        'Е' => "E", 'Ё' => "Yo", 'Ж' => "Zh", 'З' => "Z", 'И' => "I",
-        'Й' => "Y", 'К' => "K", 'Л' => "L", 'М' => "M", 'Н' => "N",
-        'О' => "O", 'П' => "P", 'Р' => "R", 'С' => "S", 'Т' => "T",
-        'У' => "U", 'Ф' => "F", 'Х' => "Kh", 'Ц' => "Ts", 'Ч' => "Ch",
-        'Ш' => "Sh", 'Щ' => "Shch", 'Ъ' => "\"", 'Ы' => "Y", 'Ь' => "'",
-        'Э' => "E", 'Ю' => "Yu", 'Я' => "Ya",
-        'α' => "a", 'β' => "b", 'γ' => "g", 'δ' => "d", 'ε' => "e",
-        'ζ' => "z", 'η' => "e", 'θ' => "th", 'ι' => "i", 'κ' => "k",
-        'λ' => "l", 'μ' => "m", 'ν' => "n", 'ξ' => "x", 'ο' => "o",
-        'π' => "p", 'ρ' => "r", 'σ' | 'ς' => "s", 'τ' => "t", 'υ' => "y",
-        'φ' => "f", 'χ' => "ch", 'ψ' => "ps", 'ω' => "o",
-        'Α' => "A", 'Β' => "B", 'Γ' => "G", 'Δ' => "D", 'Ε' => "E",
-        'Ζ' => "Z", 'Η' => "E", 'Θ' => "Th", 'Ι' => "I", 'Κ' => "K",
-        'Λ' => "L", 'Μ' => "M", 'Ν' => "N", 'Ξ' => "X", 'Ο' => "O",
-        'Π' => "P", 'Ρ' => "R", 'Σ' => "S", 'Τ' => "T", 'Υ' => "Y",
-        'Φ' => "F", 'Χ' => "Ch", 'Ψ' => "Ps", 'Ω' => "O",
-        '©' => "(c)", '®' => "(r)", '™' => "(tm)", '°' => "deg",
-        '±' => "+/-", '×' => "x", '÷' => "/", '≈' => "~=", '≠' => "!=",
-        '≤' => "<=", '≥' => ">=", '→' => "->", '←' => "<-", '⇒' => "=>",
-        '·' => ".", '«' => "<<", '»' => ">>", '№' => "No.",
+        'а' => "a",
+        'б' => "b",
+        'в' => "v",
+        'г' => "g",
+        'д' => "d",
+        'е' => "e",
+        'ё' => "yo",
+        'ж' => "zh",
+        'з' => "z",
+        'и' => "i",
+        'й' => "y",
+        'к' => "k",
+        'л' => "l",
+        'м' => "m",
+        'н' => "n",
+        'о' => "o",
+        'п' => "p",
+        'р' => "r",
+        'с' => "s",
+        'т' => "t",
+        'у' => "u",
+        'ф' => "f",
+        'х' => "kh",
+        'ц' => "ts",
+        'ч' => "ch",
+        'ш' => "sh",
+        'щ' => "shch",
+        'ъ' => "\"",
+        'ы' => "y",
+        'ь' => "'",
+        'э' => "e",
+        'ю' => "yu",
+        'я' => "ya",
+        'А' => "A",
+        'Б' => "B",
+        'В' => "V",
+        'Г' => "G",
+        'Д' => "D",
+        'Е' => "E",
+        'Ё' => "Yo",
+        'Ж' => "Zh",
+        'З' => "Z",
+        'И' => "I",
+        'Й' => "Y",
+        'К' => "K",
+        'Л' => "L",
+        'М' => "M",
+        'Н' => "N",
+        'О' => "O",
+        'П' => "P",
+        'Р' => "R",
+        'С' => "S",
+        'Т' => "T",
+        'У' => "U",
+        'Ф' => "F",
+        'Х' => "Kh",
+        'Ц' => "Ts",
+        'Ч' => "Ch",
+        'Ш' => "Sh",
+        'Щ' => "Shch",
+        'Ъ' => "\"",
+        'Ы' => "Y",
+        'Ь' => "'",
+        'Э' => "E",
+        'Ю' => "Yu",
+        'Я' => "Ya",
+        'α' => "a",
+        'β' => "b",
+        'γ' => "g",
+        'δ' => "d",
+        'ε' => "e",
+        'ζ' => "z",
+        'η' => "e",
+        'θ' => "th",
+        'ι' => "i",
+        'κ' => "k",
+        'λ' => "l",
+        'μ' => "m",
+        'ν' => "n",
+        'ξ' => "x",
+        'ο' => "o",
+        'π' => "p",
+        'ρ' => "r",
+        'σ' | 'ς' => "s",
+        'τ' => "t",
+        'υ' => "y",
+        'φ' => "f",
+        'χ' => "ch",
+        'ψ' => "ps",
+        'ω' => "o",
+        'Α' => "A",
+        'Β' => "B",
+        'Γ' => "G",
+        'Δ' => "D",
+        'Ε' => "E",
+        'Ζ' => "Z",
+        'Η' => "E",
+        'Θ' => "Th",
+        'Ι' => "I",
+        'Κ' => "K",
+        'Λ' => "L",
+        'Μ' => "M",
+        'Ν' => "N",
+        'Ξ' => "X",
+        'Ο' => "O",
+        'Π' => "P",
+        'Ρ' => "R",
+        'Σ' => "S",
+        'Τ' => "T",
+        'Υ' => "Y",
+        'Φ' => "F",
+        'Χ' => "Ch",
+        'Ψ' => "Ps",
+        'Ω' => "O",
+        '©' => "(c)",
+        '®' => "(r)",
+        '™' => "(tm)",
+        '°' => "deg",
+        '±' => "+/-",
+        '×' => "x",
+        '÷' => "/",
+        '≈' => "~=",
+        '≠' => "!=",
+        '≤' => "<=",
+        '≥' => ">=",
+        '→' => "->",
+        '←' => "<-",
+        '⇒' => "=>",
+        '·' => ".",
+        '«' => "<<",
+        '»' => ">>",
+        '№' => "No.",
         '\u{00A0}' | '\u{2007}' | '\u{202F}' => " ",
         '\u{2009}' | '\u{200A}' | '\u{2002}' | '\u{2003}' => " ",
         '\u{2011}' => "-",
@@ -411,7 +535,10 @@ fn glyph_runs(chars: &[char]) -> Vec<GlyphRun> {
         let (font, gid) = font_for_char(ch);
         match runs.last_mut() {
             Some(run) if run.font == font => run.gids.push(gid),
-            _ => runs.push(GlyphRun { font, gids: vec![gid] }),
+            _ => runs.push(GlyphRun {
+                font,
+                gids: vec![gid],
+            }),
         }
     }
     runs
@@ -553,10 +680,8 @@ fn format_value(value: &serde_json::Value, depth: usize, lines: &mut Vec<String>
 /// Render an array as a column table when it contains objects (union of
 /// keys as the header), or as itemized lines otherwise.
 fn format_table(items: &[serde_json::Value], depth: usize, lines: &mut Vec<String>) {
-    let object_items: Vec<&serde_json::Map<String, serde_json::Value>> = items
-        .iter()
-        .filter_map(|item| item.as_object())
-        .collect();
+    let object_items: Vec<&serde_json::Map<String, serde_json::Value>> =
+        items.iter().filter_map(|item| item.as_object()).collect();
     let pad = indent_for(depth);
     if object_items.len() == items.len() && !object_items.is_empty() {
         let mut headers: Vec<String> = Vec::new();
@@ -705,8 +830,7 @@ fn generate_pdf(template: &str, world: &TypstWorld) -> Result<Vec<u8>, RenderErr
                 let entry = widths.entry(run.font).or_default();
                 for &gid in &run.gids {
                     let ttf = run.font.ttf();
-                    let w = (f64::from(ttf.advance(gid)) * 1000.0
-                        / f64::from(ttf.units_per_em()))
+                    let w = (f64::from(ttf.advance(gid)) * 1000.0 / f64::from(ttf.units_per_em()))
                         .round() as u16;
                     entry.insert(gid, w);
                 }
@@ -759,8 +883,7 @@ fn generate_pdf(template: &str, world: &TypstWorld) -> Result<Vec<u8>, RenderErr
                             continue;
                         }
                         let ttf = run.font.ttf();
-                        let hex: String =
-                            run.gids.iter().map(|g| format!("{g:04X}")).collect();
+                        let hex: String = run.gids.iter().map(|g| format!("{g:04X}")).collect();
                         body.push_str(&format!(
                             "BT\n{res} {size} Tf\n{x:.2} {y} Td\n<{hex}> Tj\nET\n",
                             res = run.font.resource_ref(),
@@ -801,8 +924,7 @@ fn generate_pdf(template: &str, world: &TypstWorld) -> Result<Vec<u8>, RenderErr
     let mut unicode_refs: Vec<(&'static str, usize, usize, usize, usize)> = Vec::new();
     let mut next_obj = font_object + 1;
     for font in &used_fonts {
-        let (type0, cid, descriptor, file) =
-            (next_obj, next_obj + 1, next_obj + 2, next_obj + 3);
+        let (type0, cid, descriptor, file) = (next_obj, next_obj + 1, next_obj + 2, next_obj + 3);
         next_obj += 4;
         unicode_refs.push((font.resource_ref(), type0, cid, descriptor, file));
     }
@@ -876,9 +998,12 @@ fn generate_pdf(template: &str, world: &TypstWorld) -> Result<Vec<u8>, RenderErr
             .into_bytes(),
         );
         let raw = ttf.raw_bytes();
-        let mut obj =
-            format!("<< /Length {} /Length1 {} >>\nstream\n", raw.len(), raw.len())
-                .into_bytes();
+        let mut obj = format!(
+            "<< /Length {} /Length1 {} >>\nstream\n",
+            raw.len(),
+            raw.len()
+        )
+        .into_bytes();
         obj.extend_from_slice(raw);
         obj.extend_from_slice(b"\nendstream");
         objects.push(obj);
@@ -1025,8 +1150,14 @@ mod tests {
         let (folded, folded_count, markers) = fold_string(input);
         let direct = input.chars().count() - folded_count - markers;
         assert_eq!(direct + folded_count + markers, input.chars().count());
-        assert_eq!(markers, 0, "Cyrillic should transliterate, not marker: {folded}");
-        assert!(folded.contains("Privet"), "transliteration missing: {folded}");
+        assert_eq!(
+            markers, 0,
+            "Cyrillic should transliterate, not marker: {folded}"
+        );
+        assert!(
+            folded.contains("Privet"),
+            "transliteration missing: {folded}"
+        );
 
         let (out, _, markers) = fold_string("你");
         assert_eq!(out, "?");
@@ -1041,7 +1172,9 @@ mod tests {
             if i > 0 {
                 items.push(',');
             }
-            items.push_str(&format!(r#"{{"line": {i}, "note": "row {i} of the export"}}"#));
+            items.push_str(&format!(
+                r#"{{"line": {i}, "note": "row {i} of the export"}}"#
+            ));
         }
         items.push(']');
         let world = TypstWorld {
@@ -1085,7 +1218,10 @@ mod tests {
     fn text_stream_chunks(pdf: &[u8]) -> Vec<&[u8]> {
         let mut chunks = Vec::new();
         for start in find_all(pdf, b"stream\n") {
-            let dict_start = pdf[..start].windows(2).rposition(|w| w == b"<<").unwrap_or(0);
+            let dict_start = pdf[..start]
+                .windows(2)
+                .rposition(|w| w == b"<<")
+                .unwrap_or(0);
             let is_font_file = pdf[dict_start..start].windows(9).any(|w| w == b"/Length1 ");
             if is_font_file {
                 continue;
@@ -1153,7 +1289,10 @@ mod tests {
     fn fontfile2_streams(pdf: &[u8]) -> Vec<&[u8]> {
         let mut out = Vec::new();
         for start in find_all(pdf, b"stream\n") {
-            let dict_start = pdf[..start].windows(2).rposition(|w| w == b"<<").unwrap_or(0);
+            let dict_start = pdf[..start]
+                .windows(2)
+                .rposition(|w| w == b"<<")
+                .unwrap_or(0);
             if !pdf[dict_start..start].windows(9).any(|w| w == b"/Length1 ") {
                 continue;
             }
@@ -1181,7 +1320,10 @@ mod tests {
                 .split_whitespace()
                 .filter_map(|t| t.parse().ok())
                 .collect();
-            let pairs = nums.chunks(2).filter_map(|c| Some((*c.first()?, *c.get(1)?))).collect();
+            let pairs = nums
+                .chunks(2)
+                .filter_map(|c| Some((*c.first()?, *c.get(1)?)))
+                .collect();
             out.push(pairs);
         }
         out
@@ -1261,8 +1403,12 @@ mod tests {
         }
         // The CJK strings must come from the SC font, Cyrillic/Greek from
         // Noto Sans.
-        assert!(runs.iter().any(|(res, text)| *res == NOTO_SANS_SC_REF && text.contains("你好世界")));
-        assert!(runs.iter().any(|(res, text)| *res == NOTO_SANS_REF && text.contains("Привет мир")));
+        assert!(runs
+            .iter()
+            .any(|(res, text)| *res == NOTO_SANS_SC_REF && text.contains("你好世界")));
+        assert!(runs
+            .iter()
+            .any(|(res, text)| *res == NOTO_SANS_REF && text.contains("Привет мир")));
 
         // None of the source strings contain '?', so any '?' in the
         // decoded output would be a folding marker.
@@ -1287,8 +1433,9 @@ mod tests {
             "the SC FontFile2 must equal the committed asset byte-for-byte"
         );
         assert!(
-            streams.iter().all(|s| *s == NOTO_SANS_SC.raw_bytes()
-                || *s == NOTO_SANS.raw_bytes()),
+            streams
+                .iter()
+                .all(|s| *s == NOTO_SANS_SC.raw_bytes() || *s == NOTO_SANS.raw_bytes()),
             "only committed assets may be embedded"
         );
 
@@ -1329,7 +1476,11 @@ mod tests {
         );
         // The CJK glyphs are full-width (1000).
         let sc_map = NOTO_SANS_SC.reverse_map();
-        let ni_gid = sc_map.iter().find(|(_, c)| **c == '你').map(|(g, _)| *g).unwrap();
+        let ni_gid = sc_map
+            .iter()
+            .find(|(_, c)| **c == '你')
+            .map(|(g, _)| *g)
+            .unwrap();
         assert!(
             flat.contains(&(ni_gid, 1000)),
             "CJK glyph must be 1000 units: {flat:?}"
@@ -1341,7 +1492,9 @@ mod tests {
         // No Type0 machinery appears at all: same objects, same bytes.
         let world = TypstWorld {
             template_source: String::new(),
-            data_json: r#"{"customer": {"name": "Ada Lovelace"}, "items": [{"sku": "A-1", "qty": 2}]}"#.to_string(),
+            data_json:
+                r#"{"customer": {"name": "Ada Lovelace"}, "items": [{"sku": "A-1", "qty": 2}]}"#
+                    .to_string(),
             now: chrono::Utc::now(),
         };
         let pdf = generate_pdf("invoice", &world).expect("pdf generation failed");
@@ -1357,7 +1510,10 @@ mod tests {
             now: chrono::Utc::now(),
         };
         let pdf1 = generate_pdf("invoice", &world_latin1).expect("pdf generation failed");
-        assert!(!pdf1.windows(11).any(|w| w == b"/Identity-H"), "Latin-1 stays legacy");
+        assert!(
+            !pdf1.windows(11).any(|w| w == b"/Identity-H"),
+            "Latin-1 stays legacy"
+        );
         assert!(pdf1.windows(7).any(|w| w == b"caf\\351"));
     }
 
@@ -1374,7 +1530,10 @@ mod tests {
         let pdf = generate_pdf("analytics_export", &world).expect("pdf generation failed");
         let runs = decode_glyph_runs(&pdf);
         let glyph_line_count = runs.len();
-        assert!(glyph_line_count > 1, "expected wrapping, got {glyph_line_count} runs");
+        assert!(
+            glyph_line_count > 1,
+            "expected wrapping, got {glyph_line_count} runs"
+        );
         // Every rendered line's measured advance must fit the content box.
         for chunk in text_stream_chunks(&pdf) {
             for run in extract_run_positions(chunk) {
@@ -1408,8 +1567,12 @@ mod tests {
                 .filter_map(|t| t.parse::<f64>().ok())
                 .collect();
             let x = *coords.last().unwrap_or(&0.0);
-            let Some(hex_start) = rest[td..].find('<') else { break };
-            let Some(hex_end) = rest[td + hex_start..].find('>') else { break };
+            let Some(hex_start) = rest[td..].find('<') else {
+                break;
+            };
+            let Some(hex_end) = rest[td + hex_start..].find('>') else {
+                break;
+            };
             let hex = &rest[td + hex_start + 1..td + hex_start + hex_end];
             let font = if is_f3 { &NOTO_SANS } else { &NOTO_SANS_SC };
             let size = 10.0;
@@ -1426,7 +1589,7 @@ mod tests {
         out
     }
 
-        #[test]
+    #[test]
     fn nested_payload_uses_blocks_and_tables() {
         let world = TypstWorld {
             template_source: String::new(),
@@ -1471,4 +1634,3 @@ mod tests {
         assert_eq!(declared, stream_end - stream_start);
     }
 }
-

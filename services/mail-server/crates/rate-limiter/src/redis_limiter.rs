@@ -589,7 +589,10 @@ mod tests {
             allowed <= 30, // 25 exact + refill headroom
             "divided fallback must allow ~25, got {allowed}"
         );
-        assert!(allowed >= 25, "expected at least the divided burst, got {allowed}");
+        assert!(
+            allowed >= 25,
+            "expected at least the divided burst, got {allowed}"
+        );
     }
 
     #[tokio::test]
@@ -619,10 +622,7 @@ mod tests {
             let _ = limiter.peek().await;
         }
         // The second burst token is still there
-        assert!(
-            limiter.check().await.is_allowed(),
-            "peek must be read-only"
-        );
+        assert!(limiter.check().await.is_allowed(), "peek must be read-only");
         assert!(limiter.check().await.is_denied());
     }
 

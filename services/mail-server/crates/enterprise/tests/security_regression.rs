@@ -303,7 +303,11 @@ async fn cross_tenant_by_id_handlers_are_blocked() {
             })),
         )
         .await;
-    assert_eq!(status, StatusCode::OK, "seed deployment failed: {deployment}");
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "seed deployment failed: {deployment}"
+    );
     let deploy_id = deployment["data"]["id"].as_str().unwrap().to_string();
 
     let (status, ticket) = app
@@ -366,7 +370,11 @@ async fn cross_tenant_by_id_handlers_are_blocked() {
             })),
         )
         .await;
-    assert_eq!(status, StatusCode::OK, "seed data access failed: {access_req}");
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "seed data access failed: {access_req}"
+    );
     let access_id = access_req["data"]["id"].as_str().unwrap().to_string();
 
     // Tenant B probing each resource by UUID must be denied (403), and the
@@ -398,11 +406,7 @@ async fn cross_tenant_by_id_handlers_are_blocked() {
 
     // Mutations as tenant B are denied and have no effect.
     let (status, _) = app
-        .post(
-            &format!("/log-streams/{stream_id}/pause"),
-            &b,
-            None,
-        )
+        .post(&format!("/log-streams/{stream_id}/pause"), &b, None)
         .await;
     assert_eq!(status, StatusCode::FORBIDDEN, "pause as B must be 403");
     let row: Option<String> =
@@ -420,7 +424,11 @@ async fn cross_tenant_by_id_handlers_are_blocked() {
             Some(serde_json::json!({"status": "resolved"})),
         )
         .await;
-    assert_eq!(status, StatusCode::FORBIDDEN, "ticket update as B must be 403");
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "ticket update as B must be 403"
+    );
     let ticket_status: Option<String> =
         sqlx::query_scalar("SELECT status FROM ent_support_tickets WHERE id = $1")
             .bind(ticket_id.parse::<Uuid>().unwrap())
@@ -493,13 +501,12 @@ async fn template_approve_reject_require_admin() {
             "non-admin {path} must be 403, got {status}: {body}"
         );
     }
-    let db_status: String = sqlx::query_scalar(
-        "SELECT status FROM ent_template_submissions WHERE id = $1",
-    )
-    .bind(id.parse::<Uuid>().unwrap())
-    .fetch_one(&app.db)
-    .await
-    .unwrap();
+    let db_status: String =
+        sqlx::query_scalar("SELECT status FROM ent_template_submissions WHERE id = $1")
+            .bind(id.parse::<Uuid>().unwrap())
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
     assert_eq!(db_status, "pending", "no mutation may occur");
 
     // Admin (reviewer) can approve; reviewer identity comes from claims.
@@ -510,14 +517,17 @@ async fn template_approve_reject_require_admin() {
             Some(serde_json::json!({"reviewed_by": "ignored", "notes": null})),
         )
         .await;
-    assert_eq!(status, StatusCode::OK, "admin approve should succeed: {body}");
-    let reviewed_by: Option<String> = sqlx::query_scalar(
-        "SELECT reviewed_by FROM ent_template_submissions WHERE id = $1",
-    )
-    .bind(id.parse::<Uuid>().unwrap())
-    .fetch_one(&app.db)
-    .await
-    .unwrap();
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "admin approve should succeed: {body}"
+    );
+    let reviewed_by: Option<String> =
+        sqlx::query_scalar("SELECT reviewed_by FROM ent_template_submissions WHERE id = $1")
+            .bind(id.parse::<Uuid>().unwrap())
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
     assert_eq!(
         reviewed_by.as_deref(),
         Some("user-test-subject"),
@@ -588,7 +598,11 @@ async fn decrypt_field_is_tenant_bound() {
             })),
         )
         .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "plaintext must be rejected");
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "plaintext must be rejected"
+    );
 }
 
 // ── Fix C: audit log identity ───────────────────────────────────────────────
@@ -764,15 +778,15 @@ async fn whitelabel_domain_requires_txt_token() {
         .as_str()
         .expect("a verification token must be issued")
         .to_string();
-    assert!(token.len() >= 32, "token must be crypto-random, got {token}");
+    assert!(
+        token.len() >= 32,
+        "token must be crypto-random, got {token}"
+    );
     // The TXT record instructions are part of the response.
     let records = domain["data"]["dns_records"].as_array().unwrap();
     assert!(
-        records
-            .iter()
-            .any(|r| r["record_type"] == "TXT" && r["value"]
-                .as_str()
-                .is_some_and(|v| v.contains(&token))),
+        records.iter().any(|r| r["record_type"] == "TXT"
+            && r["value"].as_str().is_some_and(|v| v.contains(&token))),
         "dns_records must include the TXT verification record"
     );
 
@@ -848,8 +862,13 @@ async fn log_stream_secrets_encrypted_at_rest_and_masked() {
     // GET by ID: masked (last-4 only).
     let (status, fetched) = app.get(&format!("/log-streams/{id}"), &a).await;
     assert_eq!(status, StatusCode::OK);
-    let masked = fetched["data"]["destination_config"]["token"].as_str().unwrap();
-    assert!(masked.starts_with("****"), "response must mask secret: {masked}");
+    let masked = fetched["data"]["destination_config"]["token"]
+        .as_str()
+        .unwrap();
+    assert!(
+        masked.starts_with("****"),
+        "response must mask secret: {masked}"
+    );
     assert!(masked.ends_with("1234"));
 
     // LIST: masked too.
@@ -991,7 +1010,11 @@ async fn log_stream_delivery_primitives_record_and_report() {
     assert_eq!(stats.total_deliveries, 2);
     assert_eq!(stats.total_events, 5);
     assert_eq!(stats.total_bytes, 1024);
-    assert!((stats.success_rate - 50.0).abs() < 0.01, "{}", stats.success_rate);
+    assert!(
+        (stats.success_rate - 50.0).abs() < 0.01,
+        "{}",
+        stats.success_rate
+    );
 
     // get_active_streams (previously dead) surfaces the stream for the
     // background delivery loop.
@@ -1090,15 +1113,30 @@ async fn jwt_audience_issuer_are_enforced_when_configured() {
     };
 
     // Correct aud/iss → passes auth (handler then runs; contracts GET works).
-    let good = TestApp::token_with(&app.tenant_a, false, Some("apexmail-enterprise"), Some("apexmail-issuer"));
+    let good = TestApp::token_with(
+        &app.tenant_a,
+        false,
+        Some("apexmail-enterprise"),
+        Some("apexmail-issuer"),
+    );
     assert_eq!(call(&good).await, StatusCode::OK);
 
     // Wrong audience → rejected.
-    let wrong_aud = TestApp::token_with(&app.tenant_a, false, Some("other-audience"), Some("apexmail-issuer"));
+    let wrong_aud = TestApp::token_with(
+        &app.tenant_a,
+        false,
+        Some("other-audience"),
+        Some("apexmail-issuer"),
+    );
     assert_eq!(call(&wrong_aud).await, StatusCode::UNAUTHORIZED);
 
     // Wrong issuer → rejected.
-    let wrong_iss = TestApp::token_with(&app.tenant_a, false, Some("apexmail-enterprise"), Some("evil-issuer"));
+    let wrong_iss = TestApp::token_with(
+        &app.tenant_a,
+        false,
+        Some("apexmail-enterprise"),
+        Some("evil-issuer"),
+    );
     assert_eq!(call(&wrong_iss).await, StatusCode::UNAUTHORIZED);
 
     // No audience at all → rejected when pinned.
@@ -1260,14 +1298,16 @@ async fn sla_math_counts_all_tickets_in_denominator() {
         )
         .await;
     assert_eq!(status, StatusCode::OK);
-    let fr: Option<chrono::DateTime<chrono::Utc>> = sqlx::query_scalar(
-        "SELECT first_response_at FROM ent_support_tickets WHERE id = $1",
-    )
-    .bind(t2_id.parse::<Uuid>().unwrap())
-    .fetch_one(&app.db)
-    .await
-    .unwrap();
-    assert!(fr.is_none(), "waiting_customer must not set first_response_at");
+    let fr: Option<chrono::DateTime<chrono::Utc>> =
+        sqlx::query_scalar("SELECT first_response_at FROM ent_support_tickets WHERE id = $1")
+            .bind(t2_id.parse::<Uuid>().unwrap())
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+    assert!(
+        fr.is_none(),
+        "waiting_customer must not set first_response_at"
+    );
 
     // SLA denominator = all tickets: 1 answered of 2 → 50%.
     let (_, metrics) = app
@@ -1326,7 +1366,10 @@ async fn ip_allocation_validated_against_pool() {
         )
         .await;
     assert_eq!(status, StatusCode::OK, "service result envelope: {body}");
-    assert_eq!(body["success"], false, "non-pool IP must be rejected: {body}");
+    assert_eq!(
+        body["success"], false,
+        "non-pool IP must be rejected: {body}"
+    );
     assert_eq!(body["code"], "IP_NOT_IN_POOL");
 
     // In the pool but already allocated → rejected as collision.
@@ -1351,7 +1394,10 @@ async fn ip_allocation_validated_against_pool() {
         .await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert!(
-        body["data"]["ip_address"].as_str().unwrap().starts_with(&pool_ip),
+        body["data"]["ip_address"]
+            .as_str()
+            .unwrap()
+            .starts_with(&pool_ip),
         "allocated IP should be {pool_ip}: {}",
         body["data"]["ip_address"]
     );
@@ -1365,7 +1411,10 @@ async fn ip_allocation_validated_against_pool() {
         )
         .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(body["success"], false, "double allocation must collide: {body}");
+    assert_eq!(
+        body["success"], false,
+        "double allocation must collide: {body}"
+    );
 }
 
 #[tokio::test]
@@ -1468,7 +1517,12 @@ fn debug_jwt_roundtrip() {
     let key = jsonwebtoken::EncodingKey::from_rsa_pem(TEST_PRIVATE_PEM.as_bytes()).unwrap();
     let token = jsonwebtoken::encode(
         &jsonwebtoken::Header::new(jsonwebtoken::Algorithm::RS256),
-        &Claims { sub: "u".into(), tenant_id: "t".into(), admin: false, exp: 9999999999 },
+        &Claims {
+            sub: "u".into(),
+            tenant_id: "t".into(),
+            admin: false,
+            exp: 9999999999,
+        },
         &key,
     )
     .unwrap();

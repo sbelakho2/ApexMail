@@ -47,15 +47,24 @@ pub struct FlashMessage {
 
 impl FlashMessage {
     pub fn success(text: impl Into<String>) -> Self {
-        Self { kind: FlashKind::Success, text: text.into() }
+        Self {
+            kind: FlashKind::Success,
+            text: text.into(),
+        }
     }
 
     pub fn error(text: impl Into<String>) -> Self {
-        Self { kind: FlashKind::Error, text: text.into() }
+        Self {
+            kind: FlashKind::Error,
+            text: text.into(),
+        }
     }
 
     pub fn info(text: impl Into<String>) -> Self {
-        Self { kind: FlashKind::Info, text: text.into() }
+        Self {
+            kind: FlashKind::Info,
+            text: text.into(),
+        }
     }
 }
 
@@ -66,7 +75,9 @@ fn b64_encode(bytes: &[u8]) -> String {
 
 fn b64_decode(input: &str) -> Option<Vec<u8>> {
     use base64::Engine;
-    base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(input).ok()
+    base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(input)
+        .ok()
 }
 
 fn sign(secret: &str, payload: &[u8]) -> String {
@@ -131,7 +142,10 @@ pub fn flash_set_cookie(messages: &[FlashMessage], secret: &str, secure: bool) -
 
 /// Build the `Set-Cookie` header value that clears the flash cookie.
 pub fn flash_clear_cookie(secure: bool) -> String {
-    format!("{FLASH_COOKIE_NAME}=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax{}", if secure { "; Secure" } else { "" })
+    format!(
+        "{FLASH_COOKIE_NAME}=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax{}",
+        if secure { "; Secure" } else { "" }
+    )
 }
 
 /// Produce the signed confirmation token for a destructive intent.
@@ -244,17 +258,59 @@ mod tests {
     #[test]
     fn confirmation_signature_round_trips() {
         let token = sign_confirmation_for_ttl(SECRET, "delete-campaign", "c_1", 1_000, 300);
-        assert!(verify_confirmation(SECRET, &token, "delete-campaign", "c_1", 1_100));
+        assert!(verify_confirmation(
+            SECRET,
+            &token,
+            "delete-campaign",
+            "c_1",
+            1_100
+        ));
         // Expired.
-        assert!(!verify_confirmation(SECRET, &token, "delete-campaign", "c_1", 1_400));
+        assert!(!verify_confirmation(
+            SECRET,
+            &token,
+            "delete-campaign",
+            "c_1",
+            1_400
+        ));
         // Wrong intent or resource: fails closed.
-        assert!(!verify_confirmation(SECRET, &token, "delete-list", "c_1", 1_100));
-        assert!(!verify_confirmation(SECRET, &token, "delete-campaign", "c_2", 1_100));
+        assert!(!verify_confirmation(
+            SECRET,
+            &token,
+            "delete-list",
+            "c_1",
+            1_100
+        ));
+        assert!(!verify_confirmation(
+            SECRET,
+            &token,
+            "delete-campaign",
+            "c_2",
+            1_100
+        ));
         // Wrong secret.
-        assert!(!verify_confirmation("other", &token, "delete-campaign", "c_1", 1_100));
+        assert!(!verify_confirmation(
+            "other",
+            &token,
+            "delete-campaign",
+            "c_1",
+            1_100
+        ));
         // Malformed.
-        assert!(!verify_confirmation(SECRET, "garbage", "delete-campaign", "c_1", 1_100));
-        assert!(!verify_confirmation(SECRET, "abc.def", "delete-campaign", "c_1", 1_100));
+        assert!(!verify_confirmation(
+            SECRET,
+            "garbage",
+            "delete-campaign",
+            "c_1",
+            1_100
+        ));
+        assert!(!verify_confirmation(
+            SECRET,
+            "abc.def",
+            "delete-campaign",
+            "c_1",
+            1_100
+        ));
     }
 
     #[test]

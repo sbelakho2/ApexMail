@@ -313,7 +313,10 @@ mod tests {
         // Custom cap is configurable.
         let rs = RuleSet::with_occurrence_cap(test_rules(), 5);
         let score = rs.total_score(&text);
-        assert!((score - 15.0).abs() < f64::EPSILON, "cap 5 → 15.0, got {score}");
+        assert!(
+            (score - 15.0).abs() < f64::EPSILON,
+            "cap 5 → 15.0, got {score}"
+        );
 
         // Cap 0 means "use the default".
         let rs = RuleSet::with_occurrence_cap(test_rules(), 0);

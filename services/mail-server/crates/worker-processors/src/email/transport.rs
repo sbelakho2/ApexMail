@@ -143,16 +143,143 @@ where
                 .send_signed(message, signer)
                 .await
                 .map_err(SmtpTransport::map_smtp_error),
-            None => client.send(message).await.map_err(SmtpTransport::map_smtp_error),
+            None => client
+                .send(message)
+                .await
+                .map_err(SmtpTransport::map_smtp_error),
         },
         Outgoing::Envelope(message) => match signer {
             Some(signer) => client
                 .send_signed(message, signer)
                 .await
                 .map_err(SmtpTransport::map_smtp_error),
-            None => client.send(message).await.map_err(SmtpTransport::map_smtp_error),
+            None => client
+                .send(message)
+                .await
+                .map_err(SmtpTransport::map_smtp_error),
         },
     }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// F-21: SMTP reply parsing + free-text redaction
+// ═══════════════════════════════════════════════════════════════
+
+/// True when the error text looks authentication-related and therefore must
+/// be truncated before it is stored or logged (O-16.1 credential redaction).
+fn looks_auth_related(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    lower.contains("authentication")
+        || lower.contains("auth ")
+        || lower.contains("login failed")
+        || lower.contains("535")
+}
+
+/// Redact the free-text part of an SMTP error (O-16.1):
+/// * authentication-related text is truncated to 50 chars (first line) and
+///   marked redacted — mail-send may include `username:secret` there;
+/// * other text merely drops tokens that look like base64-encoded AUTH
+///   strings, and otherwise passes through.
+///
+/// F-21: the reply CODE is never passed through here — it is carried in the
+/// structured `ProcessorError::Smtp` fields — so this redaction can no longer
+/// eat the code, no matter how long the free text is.
+fn redact_error_text(text: &str, auth_related: bool) -> String {
+    if auth_related {
+        text.chars()
+            .take(50)
+            .collect::<String>()
+            .lines()
+            .next()
+            .unwrap_or("SMTP authentication failed")
+            .to_string()
+            + " [credential details redacted]"
+    } else {
+        // Still redact anything that looks like an embedded secret pattern
+        text.split([' ', '\n'])
+            .filter(|word| {
+                // Filter out anything that looks like a base64-encoded AUTH string
+                // (typical length > 20 and contains only base64 chars)
+                if word.len() > 40 {
+                    let is_b64 = word
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '=');
+                    if is_b64 {
+                        return false;
+                    }
+                }
+                true
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+}
+
+/// Split a leading `X.N.N` enhanced status code off `text`, returning the
+/// code and the remainder ("450 4.7.1 greylisted" → ("4.7.1", "greylisted")).
+fn split_enhanced_code(text: &str) -> (Option<String>, &str) {
+    let (token, remainder) = match text.split_once(' ') {
+        Some((token, remainder)) => (token, remainder),
+        None => (text, ""),
+    };
+    let parts: Vec<&str> = token.split('.').collect();
+    let is_enhanced = parts.len() == 3
+        && parts
+            .iter()
+            .all(|p| !p.is_empty() && p.len() <= 3 && p.bytes().all(|b| b.is_ascii_digit()));
+    if is_enhanced {
+        (Some(token.to_string()), remainder)
+    } else {
+        (None, text)
+    }
+}
+
+/// Parse the SMTP reply code (and optional enhanced status code) out of a
+/// mail-send error Display string (F-21). Two shapes occur:
+///
+/// * raw relay text: `"550 5.1.1 mailbox unavailable"`;
+/// * mail-send/smtp-proto's `Response` Display, which wraps the reply:
+///   `"Unexpected reply: Code: 550, Enhanced code: 5.1.1, Message: ..."`.
+///
+/// Returns `(code, enhanced, free-text tail)`. `None` when the string
+/// carries no 4xx/5xx reply code (connection, TLS, timeout and DNS errors
+/// keep the legacy `Transport` classification).
+fn parse_smtp_reply(raw: &str) -> Option<(u16, Option<String>, &str)> {
+    // Shape 1: leading "NNN[ X.N.N] text".
+    if let Some(head) = raw.get(..3) {
+        let leading_digits = !head.is_empty() && head.bytes().all(|b| b.is_ascii_digit());
+        if leading_digits && raw[3..].starts_with(' ') {
+            if let Ok(code) = head.parse::<u16>() {
+                if (400..=599).contains(&code) {
+                    let (enhanced, tail) = split_enhanced_code(&raw[4..]);
+                    return Some((code, enhanced, tail));
+                }
+            }
+        }
+    }
+
+    // Shape 2: smtp-proto's embedded "Code: NNN, Enhanced code: X.N.N,
+    // Message: ..." (as rendered by mail-send's UnexpectedReply Display).
+    if let Some(code_pos) = raw.find("Code: ") {
+        let digits = raw.get(code_pos + 6..code_pos + 9)?;
+        let code = digits.parse::<u16>().ok()?;
+        if (400..=599).contains(&code) {
+            let enhanced = raw
+                .find("Enhanced code: ")
+                .and_then(|pos| raw.get(pos + 15..))
+                // The Display renders "Enhanced code: 5.1.1, Message: ...":
+                // the code ends at the following space or comma.
+                .and_then(|rest| rest.split([',', ' ']).next())
+                .and_then(|token| split_enhanced_code(token).0);
+            let tail = raw
+                .find("Message: ")
+                .map(|pos| &raw[pos + 9..])
+                .unwrap_or(raw);
+            return Some((code, enhanced, tail));
+        }
+    }
+
+    None
 }
 
 /// SMTP transport implementation using mail-send.
@@ -166,50 +293,31 @@ impl SmtpTransport {
         Self { config }
     }
 
-    /// Convert an SMTP error into `ProcessorError::Transport`, redacting
-    /// any credential material that mail-send may have included in the
-    /// error Display impl (O-16.1 fix).
-    fn map_smtp_error(err: impl std::fmt::Display) -> ProcessorError {
+    /// Convert an SMTP error into a typed error (F-21), redacting any
+    /// credential material that mail-send may have included in the error
+    /// Display impl (O-16.1 fix).
+    ///
+    /// The SMTP reply code is parsed BEFORE redaction and carried in
+    /// [`ProcessorError::Smtp`] so the processor's retry classifier can
+    /// decide 4xx (temporary) vs 5xx (permanent) structurally; only the
+    /// free-text tail is redacted, never the code. Errors without a reply
+    /// code (connection, TLS, timeout, DNS) keep the legacy
+    /// `ProcessorError::Transport` classification.
+    pub(crate) fn map_smtp_error(err: impl std::fmt::Display) -> ProcessorError {
         let raw = err.to_string();
-        // mail-send's authentication error may include `username:secret`
-        // in its Display output. We redact by returning a generic message
-        // when the error looks authentication-related.
-        let lower = raw.to_lowercase();
-        let redacted = if lower.contains("authentication")
-            || lower.contains("auth ")
-            || lower.contains("login failed")
-            || lower.contains("535")
-        {
-            raw.chars()
-                .take(50)
-                .collect::<String>()
-                .lines()
-                .next()
-                .unwrap_or("SMTP authentication failed")
-                .to_string()
-                + " [credential details redacted]"
-        } else {
-            // Still redact anything that looks like an embedded secret pattern
-            let redacted = raw
-                .split([' ', '\n'])
-                .filter(|word| {
-                    // Filter out anything that looks like a base64-encoded AUTH string
-                    // (typical length > 20 and contains only base64 chars)
-                    if word.len() > 40 {
-                        let is_b64 = word
-                            .chars()
-                            .all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '=');
-                        if is_b64 {
-                            return false;
-                        }
-                    }
-                    true
-                })
-                .collect::<Vec<_>>()
-                .join(" ");
-            redacted
-        };
-        ProcessorError::Transport(redacted)
+        if let Some((code, enhanced, tail)) = parse_smtp_reply(&raw) {
+            // mail-send's authentication error may include `username:secret`
+            // in its Display output; a 535 reply is by definition an AUTH
+            // failure, so the tail is truncated and marked redacted.
+            let auth_related = code == 535 || looks_auth_related(tail);
+            return ProcessorError::Smtp {
+                code,
+                enhanced,
+                message: redact_error_text(tail, auth_related),
+            };
+        }
+        // No reply code: keep the legacy whole-string redaction.
+        ProcessorError::Transport(redact_error_text(&raw, looks_auth_related(&raw)))
     }
 
     fn smtp_builder(&self) -> ProcessorResult<SmtpClientBuilder<String>> {
@@ -218,6 +326,18 @@ impl SmtpTransport {
 
         match (&self.config.username, &self.config.password) {
             (Some(username), Some(password)) => {
+                // F-15: mail-send's `connect_plain()` sends AUTH PLAIN/LOGIN
+                // in cleartext (the crate itself labels it "should not be
+                // used"). Refuse the insecure combination up front instead of
+                // putting the credentials on the wire in the clear.
+                if !self.config.secure {
+                    return Err(ProcessorError::Config(
+                        "SMTP credentials require an encrypted connection: enable \
+                         SMTP_SECURE/SMTP_TLS or remove the SMTP credentials — refusing \
+                         to send SMTP AUTH in cleartext"
+                            .into(),
+                    ));
+                }
                 // NOTE: `password.clone()` preserves the Zeroizing<String> wrapper,
                 // ensuring the heap-allocated password bytes are zeroized when the
                 // local `pw` is dropped. However, `pw.to_string()` below creates a
@@ -748,6 +868,189 @@ mod tests {
             "Auth error should be redacted: {}",
             msg
         );
+    }
+
+    // ── F-15: no credentials over plaintext connections ──────────────────
+
+    /// SMTP_SECURE=false + credentials configured must be a configuration
+    /// error, not a cleartext AUTH handshake.
+    #[test]
+    fn test_smtp_builder_rejects_credentials_over_plaintext() {
+        use zeroize::Zeroizing;
+
+        let _ = rustls::crypto::ring::default_provider().install_default();
+
+        let config = SmtpConfig {
+            host: "relay.example.com".into(),
+            port: 25,
+            secure: false,
+            username: Some("user".into()),
+            password: Some(Zeroizing::new("hunter2".into())),
+            ..Default::default()
+        };
+        let transport = SmtpTransport::new(config);
+        let result = transport.smtp_builder();
+        assert!(result.is_err(), "must refuse cleartext AUTH");
+        let err = result.err().unwrap();
+        assert!(
+            matches!(err, ProcessorError::Config(ref message)
+                if message.contains("SMTP_SECURE") && message.contains("remove")),
+            "expected a Config error naming the remediation, got: {err}"
+        );
+        // The message must not leak the configured credential material.
+        assert!(!err.to_string().contains("hunter2"));
+
+        // The same credentials over an encrypted connection stay accepted.
+        let config = SmtpConfig {
+            secure: true,
+            username: Some("user".into()),
+            password: Some(Zeroizing::new("hunter2".into())),
+            ..Default::default()
+        };
+        assert!(SmtpTransport::new(config).smtp_builder().is_ok());
+    }
+
+    /// Cleartext WITHOUT credentials stays allowed (open relays exist):
+    /// `verify()` must still connect over `connect_plain()` and quit.
+    #[tokio::test]
+    async fn plaintext_without_credentials_still_connects() {
+        use std::io::{BufRead, BufReader, Write};
+
+        let _ = rustls::crypto::ring::default_provider().install_default();
+
+        // Minimal plaintext SMTP stub (blocking IO thread): greeting, EHLO,
+        // QUIT — the exact command sequence of connect_plain() + quit().
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("bind stub");
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accept");
+            let mut reader = BufReader::new(stream.try_clone().expect("clone"));
+            let mut stream = stream;
+            stream.write_all(b"220 stub.example ESMTP\r\n").unwrap();
+
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            assert!(line.starts_with("EHLO"), "expected EHLO, got: {line:?}");
+            stream.write_all(b"250 stub.example\r\n").unwrap();
+
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            assert!(line.starts_with("QUIT"), "expected QUIT, got: {line:?}");
+            stream.write_all(b"221 2.0.0 bye\r\n").unwrap();
+        });
+
+        let transport = SmtpTransport::new(SmtpConfig {
+            host: "127.0.0.1".into(),
+            port,
+            secure: false,
+            username: None,
+            password: None,
+            ..Default::default()
+        });
+        let result = transport.verify().await;
+        server.join().expect("stub server thread");
+        result.expect("plaintext connect without credentials must stay allowed");
+    }
+
+    // ── F-21: typed SMTP reply codes survive redaction ───────────────────
+
+    /// A raw permanent relay rejection keeps its reply code in the typed
+    /// variant instead of a truncated, redacted string.
+    #[test]
+    fn map_smtp_error_keeps_permanent_reply_code() {
+        let err = SmtpTransport::map_smtp_error("550 5.1.1 mailbox unavailable");
+        match &err {
+            ProcessorError::Smtp {
+                code,
+                enhanced,
+                message,
+            } => {
+                assert_eq!(*code, 550, "reply code must survive redaction");
+                assert_eq!(enhanced.as_deref(), Some("5.1.1"));
+                assert_eq!(message, "mailbox unavailable");
+            }
+            other => panic!("expected Smtp variant, got: {other}"),
+        }
+        assert_eq!(err.to_string(), "smtp error 550: mailbox unavailable");
+    }
+
+    /// A temporary relay deferral keeps its code too (the processor's retry
+    /// path keys on it).
+    #[test]
+    fn map_smtp_error_keeps_temporary_reply_code() {
+        let err = SmtpTransport::map_smtp_error("450 4.7.1 greylisted, try again later");
+        match &err {
+            ProcessorError::Smtp { code, enhanced, .. } => {
+                assert_eq!(*code, 450);
+                assert_eq!(enhanced.as_deref(), Some("4.7.1"));
+            }
+            other => panic!("expected Smtp variant, got: {other}"),
+        }
+    }
+
+    /// mail-send surfaces relay replies through smtp-proto's Response
+    /// Display ("Unexpected reply: Code: 550, Enhanced code: 5.1.1,
+    /// Message: ...") — the production shape must parse as well as the raw
+    /// audit-string shape.
+    #[test]
+    fn map_smtp_error_parses_mailsend_reply_display() {
+        let err = SmtpTransport::map_smtp_error(
+            "Unexpected reply: Code: 552, Enhanced code: 5.3.0, Message: Mailbox full",
+        );
+        match &err {
+            ProcessorError::Smtp {
+                code,
+                enhanced,
+                message,
+            } => {
+                assert_eq!(*code, 552);
+                assert_eq!(enhanced.as_deref(), Some("5.3.0"));
+                assert_eq!(message, "Mailbox full");
+            }
+            other => panic!("expected Smtp variant, got: {other}"),
+        }
+    }
+
+    /// The 50-char auth redaction truncates only the free-text tail — the
+    /// reply code is a structured field now, so arbitrarily long messages
+    /// can no longer eat it.
+    #[test]
+    fn map_smtp_error_redaction_never_eats_the_code() {
+        let long_tail = format!("Authentication failed: {}", "x".repeat(200));
+        let raw = format!("535 {long_tail}");
+        let err = SmtpTransport::map_smtp_error(&raw);
+        match &err {
+            ProcessorError::Smtp { code, message, .. } => {
+                assert_eq!(*code, 535, "code must survive the long redacted tail");
+                // The tail is truncated (≤50 chars) and marked redacted.
+                assert!(message.contains("[credential details redacted]"));
+                let redacted_head = message
+                    .strip_suffix(" [credential details redacted]")
+                    .unwrap();
+                assert!(redacted_head.chars().count() <= 50);
+            }
+            other => panic!("expected Smtp variant, got: {other}"),
+        }
+        // The rendered error still leads with the structured code.
+        assert!(err.to_string().starts_with("smtp error 535:"));
+    }
+
+    /// Codeless errors (connection/TLS/timeout/DNS) keep the legacy
+    /// Transport classification — nothing regresses for them.
+    #[test]
+    fn map_smtp_error_without_reply_code_stays_transport() {
+        for raw in [
+            "Connection refused (os error 61)",
+            "I/O error: connection reset by peer",
+            "Connection timeout",
+            "TLS error: invalid peer certificate",
+        ] {
+            let err = SmtpTransport::map_smtp_error(raw);
+            assert!(
+                matches!(err, ProcessorError::Transport(_)),
+                "codeless error must stay Transport: {raw}"
+            );
+        }
     }
 
     // ── C: VERP envelope Return-Path ──────────────────────────────────────

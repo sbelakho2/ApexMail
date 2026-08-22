@@ -82,7 +82,8 @@ async fn fence_guard(
         method,
         Method::POST | Method::PUT | Method::DELETE | Method::PATCH
     );
-    let recovery_path = path.starts_with("/api/v1/failover/split-brain") || path.ends_with("/unfence");
+    let recovery_path =
+        path.starts_with("/api/v1/failover/split-brain") || path.ends_with("/unfence");
     if !mutating || recovery_path {
         return next.run(request).await;
     }
@@ -169,7 +170,10 @@ pub fn build_router(state: Arc<AppState>) -> Router<()> {
         .route("/api/v1/chaos/experiments/:id/abort", post(chaos_abort))
         .layer(DefaultBodyLimit::max(1024 * 1024)) // 1 MB
         .layer(TimeoutLayer::new(Duration::from_secs(30)))
-        .layer(middleware::from_fn_with_state(Arc::clone(&state), fence_guard))
+        .layer(middleware::from_fn_with_state(
+            Arc::clone(&state),
+            fence_guard,
+        ))
         .with_state(state)
 }
 

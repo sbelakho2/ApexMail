@@ -9,8 +9,9 @@ use std::time::Duration;
 use mail_auth::{AuthenticatedMessage, DkimResult, Resolver, SpfResult};
 use moka::sync::Cache;
 use serde::{Deserialize, Serialize};
-use trust_dns_resolver::config::{ResolverConfig, ResolverOpts};
-use trust_dns_resolver::TokioAsyncResolver;
+use trust_dns_resolver::config::ResolverConfig;
+use trust_dns_resolver::net::runtime::TokioRuntimeProvider;
+use trust_dns_resolver::TokioResolver;
 
 use crate::config::EmailAuthConfig;
 
@@ -173,7 +174,7 @@ enum DmarcLookup {
 pub struct EmailAuthenticator {
     resolver: Resolver,
     /// #120:Dedicated DNS resolver for DMARC TXT lookups.
-    dns_resolver: TokioAsyncResolver,
+    dns_resolver: TokioResolver,
     config: EmailAuthConfig,
     hostname: String,
     /// Domain → SPF evaluation cache (TTL 5 min).
@@ -187,9 +188,15 @@ impl EmailAuthenticator {
     pub async fn new(config: EmailAuthConfig, hostname: String) -> anyhow::Result<Self> {
         let resolver = Resolver::new_system_conf().map_err(|e| anyhow::anyhow!("resolver: {e}"))?;
 
-        // #120:Shared DNS resolver for DMARC TXT lookups (avoids per-call allocation)
-        let dns_resolver =
-            TokioAsyncResolver::tokio(ResolverConfig::default(), ResolverOpts::default());
+        // #120:Shared DNS resolver for DMARC TXT lookups (avoids per-call allocation).
+        // trust-dns 0.26: TokioAsyncResolver::tokio is gone; build a TokioResolver
+        // (builder defaults already equal ResolverOpts::default()).
+        let dns_resolver = trust_dns_resolver::Resolver::builder_with_config(
+            ResolverConfig::default(),
+            TokioRuntimeProvider::default(),
+        )
+        .build()
+        .map_err(|e| anyhow::anyhow!("dns resolver: {e}"))?;
 
         // Default SPF cache: 10K entries, 5 min TTL
         let spf_cache = Cache::builder()
@@ -401,8 +408,7 @@ impl EmailAuthenticator {
         let mut saw_permerror = false;
         match self.dns_resolver.txt_lookup(&dmarc_domain).await {
             Ok(lookup) => {
-                for record in lookup.iter() {
-                    let txt = record.to_string();
+                for txt in txt_record_strings(&lookup) {
                     match parse_dmarc_record(&txt) {
                         Ok(record) => return DmarcLookup::Record(record),
                         Err(DmarcRecordError::PermError) => saw_permerror = true,
@@ -420,10 +426,13 @@ impl EmailAuthenticator {
             // (timeout, SERVFAIL, network) is transient and must surface as
             // TempError so the caller can tempfail instead of treating the
             // domain as p=none (fail-open).
-            Err(err) => match err.kind() {
-                trust_dns_resolver::error::ResolveErrorKind::NoRecordsFound { .. } => {
-                    DmarcLookup::None
-                }
+            Err(err) => match err {
+                // trust-dns 0.26: ResolveErrorKind was replaced by
+                // net::NetError; NoRecordsFound is now a nested DnsError
+                // variant holding a NoRecords struct (response_code et al.).
+                trust_dns_resolver::net::NetError::Dns(
+                    trust_dns_resolver::net::DnsError::NoRecordsFound { .. },
+                ) => DmarcLookup::None,
                 other => {
                     tracing::debug!(
                         domain,
@@ -476,6 +485,28 @@ impl EmailAuthenticator {
 }
 
 // ── mapping helpers ────────────────────────────────────────────────────────────
+
+/// Flatten a TXT lookup into one String per TXT record.
+///
+/// trust-dns 0.26 removed typed lookup iteration; `txt_lookup` now returns raw
+/// records. Each record's character-string chunks are joined without a
+/// separator (mirroring apexmail-dns-resolver's migrated TXT handling).
+fn txt_record_strings(lookup: &trust_dns_resolver::lookup::Lookup) -> Vec<String> {
+    lookup
+        .answers()
+        .iter()
+        .filter_map(|record| match &record.data {
+            trust_dns_resolver::proto::rr::RData::TXT(txt) => Some(
+                txt.txt_data
+                    .iter()
+                    .map(|d| String::from_utf8_lossy(d).to_string())
+                    .collect::<Vec<_>>()
+                    .join(""),
+            ),
+            _ => None,
+        })
+        .collect()
+}
 
 /// Pure disposition decision (extracted from
 /// [`EmailAuthenticator::should_accept`] so the policy matrix is testable
@@ -799,8 +830,14 @@ mod tests {
 
     fn test_authenticator(config: EmailAuthConfig, hostname: &str) -> Option<EmailAuthenticator> {
         let resolver = Resolver::new_system_conf().ok()?;
-        let dns_resolver =
-            TokioAsyncResolver::tokio(ResolverConfig::default(), ResolverOpts::default());
+        // trust-dns 0.26: build the TokioResolver via the builder API; the
+        // default builder options equal the old default ResolverOpts.
+        let dns_resolver = trust_dns_resolver::Resolver::builder_with_config(
+            ResolverConfig::default(),
+            TokioRuntimeProvider::default(),
+        )
+        .build()
+        .ok()?;
         Some(EmailAuthenticator {
             resolver,
             dns_resolver,
@@ -1245,7 +1282,10 @@ mod tests {
             DmarcVerdict::TempError,
             DmarcPolicy::None,
         );
-        assert_eq!(disposition_for(&config, &results), MessageDisposition::Accept);
+        assert_eq!(
+            disposition_for(&config, &results),
+            MessageDisposition::Accept
+        );
     }
 
     #[test]
@@ -1505,7 +1545,10 @@ mod tests {
             result: DmarcVerdict::Fail,
             domain: "example.com".into(),
             policy: DmarcPolicy::Quarantine,
-            alignment: DmarcAlignment { spf: false, dkim: false },
+            alignment: DmarcAlignment {
+                spf: false,
+                dkim: false,
+            },
         };
 
         let header = auth.build_auth_results_header(&spf, &dkim, &dmarc);

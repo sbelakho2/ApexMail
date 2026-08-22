@@ -122,7 +122,10 @@ pub fn month_period_for_tz(
             };
             let period_end = local_midnight(&tz, next_year, next_month)?;
 
-            Ok((period_start.with_timezone(&Utc), period_end.with_timezone(&Utc)))
+            Ok((
+                period_start.with_timezone(&Utc),
+                period_end.with_timezone(&Utc),
+            ))
         }
     }
 }
@@ -316,8 +319,10 @@ pub async fn get_usage(
     }
 
     // Look up plan limits (override-aware — Fix I2).
-    let limits: Option<TenantPlanLimitRow> =
-        sqlx::query_as(TENANT_PLAN_LIMITS_SQL).bind(tenant_id).fetch_optional(pool).await
+    let limits: Option<TenantPlanLimitRow> = sqlx::query_as(TENANT_PLAN_LIMITS_SQL)
+        .bind(tenant_id)
+        .fetch_optional(pool)
+        .await
         .map_err(UsageError::Db)?;
 
     let resolved_limits = resolve_plan_limits(limits);
@@ -387,8 +392,10 @@ pub async fn check_quota(
         }
     };
 
-    let limits: Option<TenantPlanLimitRow> =
-        sqlx::query_as(TENANT_PLAN_LIMITS_SQL).bind(tenant_id).fetch_optional(pool).await
+    let limits: Option<TenantPlanLimitRow> = sqlx::query_as(TENANT_PLAN_LIMITS_SQL)
+        .bind(tenant_id)
+        .fetch_optional(pool)
+        .await
         .map_err(UsageError::Db)?;
 
     let limit = resolve_plan_limits(limits).email_limit;
@@ -647,8 +654,10 @@ pub async fn record_with_quota_check(
     // 2. Fetch plan limits from Postgres (override-aware) and select the
     //    quota for this event type (Fix E — API calls are no longer gated by
     //    the email limit; unmetered types are unlimited).
-    let limit_row: Option<TenantPlanLimitRow> =
-        sqlx::query_as(TENANT_PLAN_LIMITS_SQL).bind(tenant_id).fetch_optional(pool).await
+    let limit_row: Option<TenantPlanLimitRow> = sqlx::query_as(TENANT_PLAN_LIMITS_SQL)
+        .bind(tenant_id)
+        .fetch_optional(pool)
+        .await
         .map_err(UsageError::Db)?;
 
     let limit = quota_limit_for_event(event_type, &resolve_plan_limits(limit_row));
@@ -1067,7 +1076,10 @@ mod tests {
         };
 
         // A tiny email limit must NOT block API calls (old behaviour).
-        assert_eq!(quota_limit_for_event(MeterEventType::ApiCalls, &limits), 1_000);
+        assert_eq!(
+            quota_limit_for_event(MeterEventType::ApiCalls, &limits),
+            1_000
+        );
 
         let email_tight = PlanLimitRow {
             email_limit: 1,

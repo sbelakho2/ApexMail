@@ -66,8 +66,7 @@ fn extract_session_email(headers: &axum::http::HeaderMap, secret: &str) -> Optio
     let cookie = headers.get("cookie")?.to_str().ok()?;
     for part in cookie.split(';') {
         let part = part.trim();
-        if part.starts_with("apexmail_session=") {
-            let token = &part["apexmail_session=".len()..];
+        if let Some(token) = part.strip_prefix("apexmail_session=") {
             return verify_session_token(token, secret);
         }
     }

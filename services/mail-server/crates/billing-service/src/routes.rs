@@ -1144,16 +1144,20 @@ async fn preview_proration_for_tenant(
         .billing_cycle_end
         .unwrap_or_else(|| period_start + chrono::Months::new(1));
 
-    let interval = q.billing_interval.unwrap_or(match subscription.billing_interval.as_deref() {
-        Some("yearly") => BillingInterval::Yearly,
-        _ => BillingInterval::Monthly,
-    });
+    let interval = q
+        .billing_interval
+        .unwrap_or(match subscription.billing_interval.as_deref() {
+            Some("yearly") => BillingInterval::Yearly,
+            _ => BillingInterval::Monthly,
+        });
 
     let current_plan = match plans::get_plan_for_tenant(&state.db, &q.tenant_id).await? {
         Some(plan) => Some(plan),
         // No tenant-plan row (e.g. pre-migration tenant): fall back to the
         // free plan so the preview can still compute.
-        None => plans::get_plan_by_name(&state.db, "free").await.unwrap_or(None),
+        None => plans::get_plan_by_name(&state.db, "free")
+            .await
+            .unwrap_or(None),
     };
     let Some(current_plan) = current_plan else {
         return Ok(error_response(
@@ -3057,7 +3061,10 @@ mod tests {
         // A server-resolved unlimited plan (-1) must zero the overage even
         // when the client claimed a small limit.
         let limit = resolve_overage_email_limit(30_000, Some(-1));
-        assert_eq!(plans::calculate_overage_cost_with_rate(1_000_000, limit, 40), 0);
+        assert_eq!(
+            plans::calculate_overage_cost_with_rate(1_000_000, limit, 40),
+            0
+        );
     }
 
     #[test]
@@ -3122,9 +3129,13 @@ mod tests {
         assert!(error.contains("exceeds maximum allowed"));
 
         // The default cap (100 000) accepts the same preview.
-        let preview =
-            preview_plan_proration(&BillingConfig::default(), &current_plan, &new_plan, &subscription)
-                .expect("default caps accept the preview");
+        let preview = preview_plan_proration(
+            &BillingConfig::default(),
+            &current_plan,
+            &new_plan,
+            &subscription,
+        )
+        .expect("default caps accept the preview");
         assert_eq!(preview.net_amount, 49_500);
     }
 
@@ -3143,9 +3154,13 @@ mod tests {
         assert!(warnings[0].contains("$495.00"));
 
         // Default warn threshold (25 000) also fires for this size.
-        let preview =
-            preview_plan_proration(&BillingConfig::default(), &current_plan, &new_plan, &subscription)
-                .expect("preview must calculate");
+        let preview = preview_plan_proration(
+            &BillingConfig::default(),
+            &current_plan,
+            &new_plan,
+            &subscription,
+        )
+        .expect("preview must calculate");
         assert!(preview.warnings.is_some());
     }
 

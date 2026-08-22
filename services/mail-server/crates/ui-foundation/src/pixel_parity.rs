@@ -368,7 +368,8 @@ mod tests {
             disabled: false,
             loading: false,
             left_icon: None,
-            right_icon: None, submit: true,
+            right_icon: None,
+            submit: true,
         };
         let html = btn.render_html();
         let html2 = btn.render_html();
@@ -565,7 +566,6 @@ mod tests {
         let _ = tampered;
         // Self-consistency is asserted above; the JS-era data-error-key
         // tamper check retired with the attribute itself.
-
     }
 
     #[test]

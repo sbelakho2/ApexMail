@@ -40,7 +40,10 @@ pub fn campaign_is_finished(funnel: &RecipientFunnel) -> bool {
 }
 
 /// Which campaigns to process in one tick.
-async fn active_campaigns(db: &PgPool, limit: i64) -> Result<Vec<(Uuid, String, String)>, SalesError> {
+async fn active_campaigns(
+    db: &PgPool,
+    limit: i64,
+) -> Result<Vec<(Uuid, String, String)>, SalesError> {
     let rows: Vec<(Uuid, String, String)> = sqlx::query_as(
         "SELECT id, tenant_id, template_id FROM sales_campaigns \
          WHERE status = 'active' \
@@ -64,7 +67,9 @@ pub async fn process_campaign(
     tenant_id: &str,
     template_id: &str,
 ) -> Result<usize, SalesError> {
-    let recipients = manager.due_recipients(tenant_id, campaign_id, batch_size as i64).await?;
+    let recipients = manager
+        .due_recipients(tenant_id, campaign_id, batch_size as i64)
+        .await?;
 
     if recipients.is_empty() {
         // Nothing due right now. Two very different causes (audit E):
@@ -166,8 +171,15 @@ pub async fn tick(
         let dispatcher = dispatcher.clone();
         handles.push(tokio::spawn(async move {
             let _permit = permit;
-            process_campaign(&manager, &dispatcher, batch_size, campaign_id, &tenant_id, &template_id)
-                .await
+            process_campaign(
+                &manager,
+                &dispatcher,
+                batch_size,
+                campaign_id,
+                &tenant_id,
+                &template_id,
+            )
+            .await
         }));
     }
 
@@ -360,13 +372,11 @@ mod tests {
         }
         // The campaign under test starts unsent (only the cap signals from
         // the filler sends above remain).
-        sqlx::query(
-            "UPDATE sales_campaign_recipients SET sent_at = NULL WHERE campaign_id = $1",
-        )
-        .bind(campaign.id)
-        .execute(&db)
-        .await
-        .unwrap();
+        sqlx::query("UPDATE sales_campaign_recipients SET sent_at = NULL WHERE campaign_id = $1")
+            .bind(campaign.id)
+            .execute(&db)
+            .await
+            .unwrap();
         sqlx::query("UPDATE sales_campaigns SET status = 'active' WHERE id = $1")
             .bind(campaign.id)
             .execute(&db)
@@ -404,16 +414,17 @@ mod tests {
             .unwrap();
         assert_eq!(funnel.due, 1, "cap window passed — recipient is due again");
         assert_eq!(funnel.frequency_capped, 0);
-        assert!(!campaign_is_finished(&funnel), "due recipient blocks completion");
+        assert!(
+            !campaign_is_finished(&funnel),
+            "due recipient blocks completion"
+        );
 
         // Drain it: now the campaign is genuinely finished.
-        sqlx::query(
-            "UPDATE sales_campaign_recipients SET sent_at = NOW() WHERE campaign_id = $1",
-        )
-        .bind(campaign.id)
-        .execute(&db)
-        .await
-        .unwrap();
+        sqlx::query("UPDATE sales_campaign_recipients SET sent_at = NOW() WHERE campaign_id = $1")
+            .bind(campaign.id)
+            .execute(&db)
+            .await
+            .unwrap();
         let funnel = manager
             .recipient_funnel_counts("sched-e-test", campaign.id)
             .await

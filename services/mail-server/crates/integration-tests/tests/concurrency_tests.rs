@@ -7,7 +7,6 @@
 //! Run with: cargo test --test concurrency_tests -- --nocapture
 //! Requires: PostgreSQL + Redis running (set TEST_DATABASE_URL).
 
-use std::sync::Arc;
 use std::time::Duration;
 
 use sqlx::postgres::PgPoolOptions;
@@ -388,7 +387,7 @@ async fn concurrent_webhook_creation_uniqueness() {
             .bind(id::generate_id("whk", 18))
             .bind(&tid1)
             .bind(&url1)
-            .bind(&events_json.clone())
+            .bind(events_json.clone())
             .bind(webhook_secret)
             .fetch_optional(&pool1)
             .await
@@ -405,7 +404,7 @@ async fn concurrent_webhook_creation_uniqueness() {
             .bind(id::generate_id("whk", 18))
             .bind(&tid2)
             .bind(&url2)
-            .bind(&events_json2.clone())
+            .bind(events_json2.clone())
             .bind(webhook_secret)
             .fetch_optional(&pool2)
             .await

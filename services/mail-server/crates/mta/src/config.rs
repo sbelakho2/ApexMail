@@ -89,6 +89,29 @@ pub struct InboundConfig {
     /// `SMTP_ADVERTISE_AUTH_PORT25=true`.
     #[serde(default)]
     pub advertise_auth_port25: bool,
+    /// Whether MAIL FROM is refused when the client IP has no
+    /// forward-confirmed reverse DNS (`550 5.7.25`).
+    ///
+    /// DEFAULT FALSE (RFC 5321 §7.9: refusing mail for lack of FCrDNS is a
+    /// POLICY choice, not a protocol requirement, and a surprising amount of
+    /// legitimate mail still comes from IPs without matching PTR records).
+    /// With `false`, a missing/unconfirmed PTR is logged as a warning and the
+    /// session continues; with `true` the hard `550 5.7.25` gate applies.
+    /// Transient resolver failures are ALWAYS answered with a temporary
+    /// `451 4.4.3` (and never cached), regardless of this flag — a DNS
+    /// outage must not permanently bounce mail on a fail-closed default.
+    #[serde(default)]
+    pub require_fcrdns: bool,
+    /// Whether accepted inbound messages get an ARC seal (RFC 8617) added
+    /// after DMARC evaluation, sealed with the receiving (managed) domain's
+    /// DKIM key.
+    ///
+    /// DEFAULT FALSE. Sealing is only meaningful for intermediaries that
+    /// forward/re-lay managed-domain mail onward (the direct-MX outbound
+    /// sender path, tracked as F-16); enabling it on a pure terminal
+    /// mailbox host adds signatures without a consumer.
+    #[serde(default)]
+    pub arc_seal: bool,
     #[serde(default)]
     pub tls: TlsConfig,
 }
@@ -295,6 +318,8 @@ impl_default!(
         max_recipients: default_max_recipients(),
         auth_required: false,
         advertise_auth_port25: false,
+        require_fcrdns: false,
+        arc_seal: false,
         tls: TlsConfig::default(),
     }
 );
@@ -522,6 +547,8 @@ impl MtaConfig {
                 max_recipients: parse_usize_env("MAX_RECIPIENTS", default_max_recipients()),
                 auth_required: parse_bool_env("AUTH_REQUIRED", false),
                 advertise_auth_port25: parse_bool_env("SMTP_ADVERTISE_AUTH_PORT25", false),
+                require_fcrdns: parse_bool_env("SMTP_REQUIRE_FCRDNS", false),
+                arc_seal: parse_bool_env("SMTP_ARC_SEAL", false),
                 tls: TlsConfig {
                     enabled: parse_bool_env("TLS_ENABLED", false),
                     key_path: std::env::var("TLS_KEY_PATH").ok(),
@@ -863,5 +890,26 @@ mod tests {
         let opted_in: InboundConfig =
             serde_json::from_str("{\"advertise_auth_port25\": true}").unwrap();
         assert!(opted_in.advertise_auth_port25);
+    }
+
+    #[test]
+    fn inbound_fcrdns_and_arc_seal_default_to_false() {
+        // SMTP_REQUIRE_FCRDNS: no-PTR senders are a warning by default
+        // (RFC 5321 §7.9 — rejecting for missing FCrDNS is a policy opt-in,
+        // and transient DNS errors tempfail independently of this flag).
+        // SMTP_ARC_SEAL: ARC sealing is opt-in for relay deployments.
+        let default = InboundConfig::default();
+        assert!(
+            !default.require_fcrdns,
+            "require_fcrdns must default to false"
+        );
+        assert!(!default.arc_seal, "arc_seal must default to false");
+        let from_json: InboundConfig = serde_json::from_str("{}").unwrap();
+        assert!(!from_json.require_fcrdns);
+        assert!(!from_json.arc_seal);
+        let opted_in: InboundConfig =
+            serde_json::from_str("{\"require_fcrdns\": true, \"arc_seal\": true}").unwrap();
+        assert!(opted_in.require_fcrdns);
+        assert!(opted_in.arc_seal);
     }
 }

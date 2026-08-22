@@ -592,7 +592,9 @@ mod tests {
         let ciphertext = enc
             .encrypt_with_aad("secret-value", b"tenant:tenant-a")
             .unwrap();
-        assert!(enc.decrypt_with_aad(&ciphertext, b"tenant:tenant-b").is_err());
+        assert!(enc
+            .decrypt_with_aad(&ciphertext, b"tenant:tenant-b")
+            .is_err());
     }
 
     #[test]
@@ -610,7 +612,9 @@ mod tests {
     fn decrypt_with_aad_rejects_plaintext_provenance() {
         let enc = test_encryptor();
         // Unknown-provenance values must be rejected, not passed through.
-        assert!(enc.decrypt_with_aad("not-an-envelope", b"tenant:t").is_err());
+        assert!(enc
+            .decrypt_with_aad("not-an-envelope", b"tenant:t")
+            .is_err());
         assert!(enc.decrypt_with_aad("", b"tenant:t").is_err());
     }
 

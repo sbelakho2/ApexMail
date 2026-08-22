@@ -1115,11 +1115,8 @@ mod tests {
     #[test]
     fn test_resettable_rate_limit_key_rejects_foreign_keys() {
         // Arbitrary caller keys must be rejected…
-        let err = resettable_rate_limit_key(
-            "ws-1",
-            Some("workspace:ws-other:api"),
-        )
-        .expect_err("foreign workspace key must be rejected");
+        let err = resettable_rate_limit_key("ws-1", Some("workspace:ws-other:api"))
+            .expect_err("foreign workspace key must be rejected");
         assert_eq!(err.0, StatusCode::FORBIDDEN);
 
         let err =

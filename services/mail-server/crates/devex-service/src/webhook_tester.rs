@@ -239,9 +239,7 @@ async fn resolve_host(host: &str, port: u16) -> Result<Vec<SocketAddr>, DevExErr
         (host.as_str(), port)
             .to_socket_addrs()
             .map(|iter| iter.collect::<Vec<_>>())
-            .map_err(|e| {
-                DevExError::Validation(format!("Webhook host could not be resolved: {e}"))
-            })
+            .map_err(|e| DevExError::Validation(format!("Webhook host could not be resolved: {e}")))
     })
     .await
     .map_err(|e| DevExError::WebhookError(format!("DNS resolution task failed: {e}")))?
@@ -305,7 +303,12 @@ fn is_private_ipv6(ip: &Ipv6Addr) -> bool {
     }
     // 6to4 (2002::/16) and Teredo (2001:0::/32) embed IPv4 — inspect it.
     if s[0] == 0x2002 {
-        let embedded = Ipv4Addr::new((s[1] >> 8) as u8, (s[1] & 0xff) as u8, (s[2] >> 8) as u8, (s[2] & 0xff) as u8);
+        let embedded = Ipv4Addr::new(
+            (s[1] >> 8) as u8,
+            (s[1] & 0xff) as u8,
+            (s[2] >> 8) as u8,
+            (s[2] & 0xff) as u8,
+        );
         if is_private_ipv4(&embedded) {
             return true;
         }
@@ -461,11 +464,9 @@ mod tests {
             );
         }
         // ANY private answer in the set rejects the whole set.
-        assert!(validate_resolved_addrs(
-            "mixed.example",
-            &[addr("8.8.8.8"), addr("10.0.0.5")]
-        )
-        .is_err());
+        assert!(
+            validate_resolved_addrs("mixed.example", &[addr("8.8.8.8"), addr("10.0.0.5")]).is_err()
+        );
     }
 
     #[test]

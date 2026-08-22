@@ -149,7 +149,10 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/breaches", post(breach_report))
         .route("/breaches/{tenant_id}", get(breach_list))
         .route("/breaches/{id}/notify-dpa", post(breach_notify_dpa))
-        .route("/breaches/{id}/notify-subjects", post(breach_notify_subjects))
+        .route(
+            "/breaches/{id}/notify-subjects",
+            post(breach_notify_subjects),
+        )
         .route("/breaches/{id}/resolve", post(breach_resolve))
         // SOC2 / HIPAA / Trust Portal
         .merge(crate::admin_routes::admin_router())
@@ -1192,33 +1195,31 @@ pub async fn gdpr_download_export(
 ) -> Result<axum::response::Response, (StatusCode, Json<serde_json::Value>)> {
     verify_bearer(&headers, &state.config).map_err(|(c, m)| err_json(c, m))?;
 
-    let row: Option<(serde_json::Value, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
-        "SELECT data, expires_at FROM gdpr_exports WHERE id = $1",
-    )
-    .bind(&export_id)
-    .fetch_optional(&state.db)
-    .await
-    .map_err(|e| {
-        error!("Failed to fetch GDPR export {export_id}: {e}");
-        err_json(StatusCode::INTERNAL_SERVER_ERROR, "Failed to fetch export")
-    })?;
+    let row: Option<(serde_json::Value, chrono::DateTime<chrono::Utc>)> =
+        sqlx::query_as("SELECT data, expires_at FROM gdpr_exports WHERE id = $1")
+            .bind(&export_id)
+            .fetch_optional(&state.db)
+            .await
+            .map_err(|e| {
+                error!("Failed to fetch GDPR export {export_id}: {e}");
+                err_json(StatusCode::INTERNAL_SERVER_ERROR, "Failed to fetch export")
+            })?;
 
     let Some((data, expires_at)) = row else {
         return Err(err_json(StatusCode::NOT_FOUND, "Export not found"));
     };
 
     if expires_at < chrono::Utc::now() {
-        return Err(err_json(
-            StatusCode::GONE,
-            "Export has expired",
-        ));
+        return Err(err_json(StatusCode::GONE, "Export has expired"));
     }
 
-    let body = serde_json::to_string_pretty(&data)
-        .map_err(|e| {
-            error!("Failed to serialize GDPR export {export_id}: {e}");
-            err_json(StatusCode::INTERNAL_SERVER_ERROR, "Failed to serialize export")
-        })?;
+    let body = serde_json::to_string_pretty(&data).map_err(|e| {
+        error!("Failed to serialize GDPR export {export_id}: {e}");
+        err_json(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Failed to serialize export",
+        )
+    })?;
 
     let mut response = axum::response::Response::new(axum::body::Body::from(body));
     *response.status_mut() = StatusCode::OK;
@@ -1311,7 +1312,11 @@ async fn breach_notify_subjects(
     axum::extract::Path(breach_id): axum::extract::Path<String>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
     verify_bearer(&headers, &state.config).map_err(|(c, m)| err_json(c, m))?;
-    match state.breach.notify_subjects(&breach_id, "compliance-api").await {
+    match state
+        .breach
+        .notify_subjects(&breach_id, "compliance-api")
+        .await
+    {
         Ok(report) => Ok(ok_json(report)),
         Err(e) => {
             error!("Breach subject notification failed: {e}");
@@ -2742,7 +2747,6 @@ mod tests {
         let response = rt.block_on(gdpr_record_consent(State(state), headers, Json(body)));
         assert_eq!(result_status(response), StatusCode::SERVICE_UNAVAILABLE);
     }
-
 
     // ── 7. Body deserialisation edge cases ──────────────────────
 

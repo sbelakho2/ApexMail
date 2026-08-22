@@ -126,12 +126,16 @@ impl PoolPair {
             .connect_with(pair_connect_options(primary_url)?)
             .await?;
         let ro = match replica_url {
-            Some(url) => pool_pair_options(max_connections)
-                .connect_with(pair_connect_options(url)?)
-                .await?,
-            None => pool_pair_options(max_connections)
-                .connect_with(pair_connect_options(primary_url)?)
-                .await?,
+            Some(url) => {
+                pool_pair_options(max_connections)
+                    .connect_with(pair_connect_options(url)?)
+                    .await?
+            }
+            None => {
+                pool_pair_options(max_connections)
+                    .connect_with(pair_connect_options(primary_url)?)
+                    .await?
+            }
         };
         Ok(Self { rw, ro })
     }
@@ -160,7 +164,9 @@ fn pool_pair_options(max_connections: u32) -> PgPoolOptions {
 
 /// G.5: connect options with the sibling statement-cache capacity (PERF-100).
 fn pair_connect_options(url: &str) -> Result<PgConnectOptions, sqlx::Error> {
-    Ok(url.parse::<PgConnectOptions>()?.statement_cache_capacity(100))
+    Ok(url
+        .parse::<PgConnectOptions>()?
+        .statement_cache_capacity(100))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

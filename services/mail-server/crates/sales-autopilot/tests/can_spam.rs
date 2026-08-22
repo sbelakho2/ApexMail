@@ -13,9 +13,7 @@ mod common;
 
 use std::sync::Arc;
 
-use sales_autopilot::campaigns::{
-    CampaignEmailDispatcher, CampaignManager, DispatchRecipient,
-};
+use sales_autopilot::campaigns::{CampaignEmailDispatcher, CampaignManager, DispatchRecipient};
 use sales_autopilot::types::SalesError;
 use uuid::Uuid;
 
@@ -32,14 +30,10 @@ impl CampaignEmailDispatcher for RecordingDispatcher {
         campaign_id: Uuid,
         template_id: &str,
         recipients: &[DispatchRecipient],
-    ) -> std::pin::Pin<
-        Box<dyn std::future::Future<Output = Result<usize, SalesError>> + Send>,
-    > {
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<usize, SalesError>> + Send>>
+    {
         let _ = (tenant_id, campaign_id, template_id);
-        self.calls
-            .lock()
-            .unwrap()
-            .push(recipients.to_vec());
+        self.calls.lock().unwrap().push(recipients.to_vec());
         let count = recipients.len();
         Box::pin(async move { Ok(count) })
     }
@@ -93,7 +87,11 @@ async fn suppressed_recipients_are_excluded_and_footer_attached() {
     let calls = dispatcher.calls.lock().unwrap().clone();
     assert_eq!(calls.len(), 1, "one dispatch batch: {calls:?}");
     let sent = &calls[0];
-    assert_eq!(sent.len(), 1, "suppressed recipient must be excluded: {sent:?}");
+    assert_eq!(
+        sent.len(),
+        1,
+        "suppressed recipient must be excluded: {sent:?}"
+    );
     assert_eq!(sent[0].email, "keep@corp.example");
     // CAN-SPAM unsubscribe footer link is attached to every dispatch.
     assert!(
@@ -141,11 +139,20 @@ async fn frequency_cap_blocks_over_mailing() {
     }
 
     let campaign = manager
-        .create_campaign(tenant.clone(), "new-wave".into(), "tmpl".into(), String::new())
+        .create_campaign(
+            tenant.clone(),
+            "new-wave".into(),
+            "tmpl".into(),
+            String::new(),
+        )
         .await
         .unwrap();
     manager
-        .add_recipients(&tenant, campaign.id, vec![heavy.to_string(), "fresh@corp.example".into()])
+        .add_recipients(
+            &tenant,
+            campaign.id,
+            vec![heavy.to_string(), "fresh@corp.example".into()],
+        )
         .await
         .unwrap();
 

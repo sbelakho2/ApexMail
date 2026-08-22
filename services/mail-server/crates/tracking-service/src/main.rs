@@ -143,8 +143,7 @@ async fn main() -> Result<()> {
         // G.2: metrics are unauthenticated — bind to loopback by default.
         // Set METRICS_BIND_ADDR (e.g. 0.0.0.0) to expose them on other
         // interfaces, restricted by network policy.
-        let bind_addr = std::env::var("METRICS_BIND_ADDR")
-            .unwrap_or_else(|_| "127.0.0.1".into());
+        let bind_addr = std::env::var("METRICS_BIND_ADDR").unwrap_or_else(|_| "127.0.0.1".into());
         let metrics_addr: std::net::SocketAddr =
             format!("{}:{}", bind_addr.trim(), cfg.metrics.port)
                 .parse()

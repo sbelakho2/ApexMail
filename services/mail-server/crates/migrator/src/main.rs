@@ -91,7 +91,10 @@ async fn apply_migrations(database_url: &str) -> Result<()> {
         .context("failed to apply migrations")?;
 
     let after = applied_count(&pool).await?;
-    println!("applied migrations after run: {after} ({} new)", after - before);
+    println!(
+        "applied migrations after run: {after} ({} new)",
+        after - before
+    );
     pool.close().await;
     Ok(())
 }
@@ -144,11 +147,7 @@ mod tests {
             !MIGRATIONS.migrations.is_empty(),
             "sqlx::migrate! embedded an empty migration set"
         );
-        let mut versions: Vec<i64> = MIGRATIONS
-            .migrations
-            .iter()
-            .map(|m| m.version)
-            .collect();
+        let mut versions: Vec<i64> = MIGRATIONS.migrations.iter().map(|m| m.version).collect();
         let mut sorted = versions.clone();
         sorted.sort_unstable();
         assert_eq!(versions, sorted, "migration versions must be ascending");
@@ -172,7 +171,10 @@ mod tests {
             .map(|m| m.version)
             .max()
             .expect("non-empty migration set");
-        assert!(latest >= 108, "expected migrations up to >= 108, latest is {latest}");
+        assert!(
+            latest >= 108,
+            "expected migrations up to >= 108, latest is {latest}"
+        );
     }
 
     /// DB-gated test: applies the full chain to `TEST_DATABASE_URL` when that
@@ -224,7 +226,9 @@ mod tests {
             exists.flatten().is_none(),
             "TEST_FRESH_DATABASE_URL must point at an empty database"
         );
-        let count = applied_count(&pool).await.expect("applied_count on fresh DB");
+        let count = applied_count(&pool)
+            .await
+            .expect("applied_count on fresh DB");
         assert_eq!(count, 0, "fresh database must report 0 applied migrations");
         pool.close().await;
     }

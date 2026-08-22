@@ -205,10 +205,7 @@ fn validate_webhook_url(url_str: &str) -> Result<(), String> {
 /// controlling DNS can mix public and private A records — rejecting the set,
 /// not skipping the bad entry, prevents partial-rebinding tricks).
 /// Loopback targets are tolerated only under the explicit dev override.
-fn select_pinned_addr(
-    addrs: &[SocketAddr],
-    allow_loopback: bool,
-) -> Result<SocketAddr, String> {
+fn select_pinned_addr(addrs: &[SocketAddr], allow_loopback: bool) -> Result<SocketAddr, String> {
     if addrs.is_empty() {
         return Err("webhook URL could not be resolved to any IP address".into());
     }
@@ -245,7 +242,9 @@ fn webhook_delivery_client(
     if !safe_addrs.is_empty() {
         builder = builder.resolve_to_addrs(host, safe_addrs);
     }
-    builder.build().map_err(|e| format!("failed to build webhook client: {e}"))
+    builder
+        .build()
+        .map_err(|e| format!("failed to build webhook client: {e}"))
 }
 
 // ─── Handlers ──────────────────────────────────────────────────

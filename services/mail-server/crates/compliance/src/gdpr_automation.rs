@@ -699,9 +699,7 @@ impl GdprAutomation {
                     .filter(|r| matches!(r.status, StoreErasureStatus::Failed))
                     .map(|r| r.store)
                     .collect();
-                return Err(format!(
-                    "erasure failed for data stores: {failed_stores:?}"
-                ));
+                return Err(format!("erasure failed for data stores: {failed_stores:?}"));
             }
         }
 
@@ -710,10 +708,7 @@ impl GdprAutomation {
         self.clear_redis_keys(&request.tenant_id, &request.email)
             .await?;
 
-        let total_deleted: u64 = results
-            .iter()
-            .map(|r| r.rows_affected)
-            .sum();
+        let total_deleted: u64 = results.iter().map(|r| r.rows_affected).sum();
         let partial = matches!(
             summarize_erasure(&results),
             ErasureOverall::Partial | ErasureOverall::Failed
@@ -752,16 +747,14 @@ impl GdprAutomation {
                 name: _,
                 table,
                 email_column,
-            } => {
-                sqlx::query(&format!(
-                    "DELETE FROM {table} WHERE tenant_id = $1 AND {email_column} = $2"
-                ))
-                .bind(tid)
-                .bind(email)
-                .execute(&self.db)
-                .await
-                .map(|r| r.rows_affected())
-            }
+            } => sqlx::query(&format!(
+                "DELETE FROM {table} WHERE tenant_id = $1 AND {email_column} = $2"
+            ))
+            .bind(tid)
+            .bind(email)
+            .execute(&self.db)
+            .await
+            .map(|r| r.rows_affected()),
             SessionsByUserEmail => {
                 // users.id is UUID while sessions.user_id is TEXT — cast to
                 // text or Postgres rejects the IN-subquery (uuid = text has
@@ -1407,8 +1400,8 @@ impl GdprAutomation {
             .await
             .map_err(|e| format!("Redis LRANGE: {e}"))?;
 
-        let cutoff = Utc::now() - TimeDelta::try_seconds(stale_after_secs as i64)
-            .unwrap_or_else(TimeDelta::zero);
+        let cutoff = Utc::now()
+            - TimeDelta::try_seconds(stale_after_secs as i64).unwrap_or_else(TimeDelta::zero);
         let mut requeued = 0usize;
         for entry in entries {
             if queue_entry_is_stale(&entry, cutoff) {
@@ -1737,7 +1730,10 @@ pub enum ErasureStore {
         columns: &'static [&'static str],
     },
     /// Store intentionally retained (with reason) — never deleted.
-    Retained { name: &'static str, reason: &'static str },
+    Retained {
+        name: &'static str,
+        reason: &'static str,
+    },
 }
 
 impl ErasureStore {
@@ -1964,11 +1960,13 @@ pub fn redact_marker(email: &str) -> String {
 
 /// Textually replace occurrences of the subject email in a JSON value with
 /// the redaction marker (anonymized view of retained records).
-pub fn anonymize_json_text(value: serde_json::Value, email: &str, marker: &str) -> serde_json::Value {
+pub fn anonymize_json_text(
+    value: serde_json::Value,
+    email: &str,
+    marker: &str,
+) -> serde_json::Value {
     match value {
-        serde_json::Value::String(s) => {
-            serde_json::Value::String(s.replace(email, marker))
-        }
+        serde_json::Value::String(s) => serde_json::Value::String(s.replace(email, marker)),
         serde_json::Value::Array(a) => serde_json::Value::Array(
             a.into_iter()
                 .map(|v| anonymize_json_text(v, email, marker))
@@ -2542,12 +2540,15 @@ mod tests {
         }
 
         // The tenant-wide-destroyed stores are now retained, never deleted.
-        let names: Vec<&str> = stores.iter().map(|s| match s {
-            ErasureStore::TableBySubjectEmail { name, .. } => *name,
-            ErasureStore::SessionsByUserEmail => "sessions",
-            ErasureStore::AnonymizeSubjectEmail { name, .. } => *name,
-            ErasureStore::Retained { name, .. } => *name,
-        }).collect();
+        let names: Vec<&str> = stores
+            .iter()
+            .map(|s| match s {
+                ErasureStore::TableBySubjectEmail { name, .. } => *name,
+                ErasureStore::SessionsByUserEmail => "sessions",
+                ErasureStore::AnonymizeSubjectEmail { name, .. } => *name,
+                ErasureStore::Retained { name, .. } => *name,
+            })
+            .collect();
         // Invoices are anonymized (A-3), never deleted.
         assert!(stores.iter().any(|s| matches!(
             s,
@@ -2600,10 +2601,7 @@ mod tests {
     fn test_summarize_erasure_failed() {
         let results = vec![
             store_result("subscribers", StoreErasureStatus::Deleted),
-            store_result(
-                "consent_records",
-                StoreErasureStatus::Failed,
-            ),
+            store_result("consent_records", StoreErasureStatus::Failed),
         ];
         assert_eq!(summarize_erasure(&results), ErasureOverall::Failed);
     }
@@ -2624,7 +2622,9 @@ mod tests {
         let cert = build_deletion_confirmation("req-1", "t1", "u@x.com", &results);
         assert_eq!(cert["overall"], "failed");
         let text = cert["confirmation"].as_str().unwrap();
-        assert!(!text.to_lowercase().contains("all personal data has been permanently erased"));
+        assert!(!text
+            .to_lowercase()
+            .contains("all personal data has been permanently erased"));
         assert!(text.contains("no erasure is certified"));
     }
 
@@ -2700,20 +2700,32 @@ mod tests {
     fn test_retry_decision_retries_then_fails() {
         assert_eq!(
             next_retry_decision(1),
-            RetryDecision { attempt: 1, status: RetryStatus::Retrying }
+            RetryDecision {
+                attempt: 1,
+                status: RetryStatus::Retrying
+            }
         );
         assert_eq!(
             next_retry_decision(2),
-            RetryDecision { attempt: 2, status: RetryStatus::Retrying }
+            RetryDecision {
+                attempt: 2,
+                status: RetryStatus::Retrying
+            }
         );
         // Third failure is terminal.
         assert_eq!(
             next_retry_decision(3),
-            RetryDecision { attempt: 3, status: RetryStatus::Failed }
+            RetryDecision {
+                attempt: 3,
+                status: RetryStatus::Failed
+            }
         );
         assert_eq!(
             next_retry_decision(9),
-            RetryDecision { attempt: 9, status: RetryStatus::Failed }
+            RetryDecision {
+                attempt: 9,
+                status: RetryStatus::Failed
+            }
         );
     }
 
@@ -2783,13 +2795,11 @@ mod tests {
         assert_eq!(consent_cutoff, now - Duration::days(730));
         assert_eq!(export_cutoff, now - Duration::days(7));
     }
-
 }
-    #[test]
-    fn gdpr_requests_mirror_id_fits_varchar_26() {
-        // The CP gdpr_requests.id column is VARCHAR(26): "gdr_" + 22 hex.
-        let cp_request_id = format!("gdr_{}", &Uuid::new_v4().simple().to_string()[..22]);
-        assert_eq!(cp_request_id.len(), 26);
-        assert!(cp_request_id.starts_with("gdr_"));
-    }
-
+#[test]
+fn gdpr_requests_mirror_id_fits_varchar_26() {
+    // The CP gdpr_requests.id column is VARCHAR(26): "gdr_" + 22 hex.
+    let cp_request_id = format!("gdr_{}", &Uuid::new_v4().simple().to_string()[..22]);
+    assert_eq!(cp_request_id.len(), 26);
+    assert!(cp_request_id.starts_with("gdr_"));
+}

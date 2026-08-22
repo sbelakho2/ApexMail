@@ -328,9 +328,10 @@ const SNS_MAX_AGE_SECS: i64 = 3600;
 const SNS_MAX_FUTURE_SKEW_SECS: i64 = 600;
 
 fn validate_sns_timestamp_freshness(msg: &SnsMessage) -> Result<(), ApiError> {
-    let timestamp = msg.timestamp.as_deref().ok_or_else(|| {
-        ApiError::Validation(vec!["Missing Timestamp in SNS message".into()])
-    })?;
+    let timestamp = msg
+        .timestamp
+        .as_deref()
+        .ok_or_else(|| ApiError::Validation(vec!["Missing Timestamp in SNS message".into()]))?;
 
     let parsed = chrono::DateTime::parse_from_rfc3339(timestamp)
         .map_err(|_| ApiError::Validation(vec!["Invalid Timestamp in SNS message".into()]))?
@@ -487,13 +488,11 @@ async fn fetch_sns_signing_key(
         ApiError::Validation(vec!["Invalid SNS signing certificate".into()])
     })?;
 
-    let key = RsaPublicKey::from_pkcs1_der(
-        &certificate.public_key().subject_public_key.data,
-    )
-    .map_err(|e| {
-        warn!(error = %e, cert_url = %cert_url, "Invalid SNS signing certificate public key");
-        ApiError::Validation(vec!["Invalid SNS signing certificate".into()])
-    })?;
+    let key = RsaPublicKey::from_pkcs1_der(&certificate.public_key().subject_public_key.data)
+        .map_err(|e| {
+            warn!(error = %e, cert_url = %cert_url, "Invalid SNS signing certificate public key");
+            ApiError::Validation(vec!["Invalid SNS signing certificate".into()])
+        })?;
 
     cache_put_sns_signing_key(cert_url, key.clone());
     Ok(key)
@@ -1271,7 +1270,10 @@ mod tests {
         .unwrap();
         assert_eq!(click.event_type, "Click");
         let click_payload = click.click.as_ref().unwrap();
-        assert_eq!(click_payload.link.as_deref(), Some("https://example.com/pricing"));
+        assert_eq!(
+            click_payload.link.as_deref(),
+            Some("https://example.com/pricing")
+        );
     }
 
     #[test]
@@ -1391,7 +1393,9 @@ mod tests {
 
         // Exactly past the 1h bound (61 minutes).
         let sixty_one_minutes = (chrono::Utc::now() - chrono::Duration::minutes(61)).to_rfc3339();
-        assert!(validate_sns_timestamp_freshness(&message_with_timestamp(&sixty_one_minutes)).is_err());
+        assert!(
+            validate_sns_timestamp_freshness(&message_with_timestamp(&sixty_one_minutes)).is_err()
+        );
 
         // More than 10 minutes in the future — clock-skew abuse.
         let far_future = (chrono::Utc::now() + chrono::Duration::minutes(30)).to_rfc3339();

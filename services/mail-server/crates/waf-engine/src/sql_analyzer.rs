@@ -1080,7 +1080,10 @@ mod tests {
             .iter()
             .find(|r| r.rule_id == 942100)
             .expect("boolean-blind tautology must be detected");
-        assert!(taut.score >= 5, "connector-chained comparison must score >= 5");
+        assert!(
+            taut.score >= 5,
+            "connector-chained comparison must score >= 5"
+        );
 
         // Same comparison without a connector stays at monitoring severity.
         let results = analyze_sqli("2>1", MatchLocation::QueryParam("id".into()));

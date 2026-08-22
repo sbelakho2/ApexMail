@@ -165,8 +165,7 @@ async fn avg_session_count_per_user(db: &sqlx::PgPool) -> f64 {
 
 /// Trials started in the window — a trial is a stripe_subscriptions row
 /// with a non-NULL trial_end.
-const TRIALS_STARTED_SQL: &str =
-    "SELECT COUNT(*)::bigint FROM stripe_subscriptions
+const TRIALS_STARTED_SQL: &str = "SELECT COUNT(*)::bigint FROM stripe_subscriptions
          WHERE trial_end IS NOT NULL
            AND created_at >= NOW() - $1::interval";
 
@@ -175,8 +174,7 @@ const TRIALS_STARTED_SQL: &str =
 /// formulation selected rows that were simultaneously `status = 'active'`
 /// AND `status = 'trialing'` on a single-row-per-subscription table, which
 /// can never match (self-negating).
-const TRIALS_CONVERTED_SQL: &str =
-    "SELECT COUNT(*)::bigint FROM stripe_subscriptions
+const TRIALS_CONVERTED_SQL: &str = "SELECT COUNT(*)::bigint FROM stripe_subscriptions
          WHERE trial_end IS NOT NULL
            AND trial_end < NOW()
            AND status IN ('active', 'past_due')
@@ -213,12 +211,11 @@ async fn get_growth_analytics(
     .await
     .unwrap_or(0);
 
-    let new_today: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*)::bigint FROM tenants WHERE created_at >= CURRENT_DATE",
-    )
-    .fetch_one(db)
-    .await
-    .unwrap_or(0);
+    let new_today: i64 =
+        sqlx::query_scalar("SELECT COUNT(*)::bigint FROM tenants WHERE created_at >= CURRENT_DATE")
+            .fetch_one(db)
+            .await
+            .unwrap_or(0);
 
     let new_this_week: i64 = sqlx::query_scalar(
         "SELECT COUNT(*)::bigint FROM tenants WHERE created_at >= NOW() - INTERVAL '7 days'",
@@ -424,12 +421,13 @@ async fn get_growth_analytics(
     // Average trial-to-paid duration from real conversion timestamps
     // (trial_end - created_at over converted trials). NULL when no
     // converted trial exists — never a fabricated constant.
-    let avg_trial_to_paid_days: Option<f64> = sqlx::query_scalar::<_, Option<f64>>(AVG_TRIAL_TO_PAID_SQL)
-        .bind(&interval)
-        .fetch_one(db)
-        .await
-        .ok()
-        .flatten();
+    let avg_trial_to_paid_days: Option<f64> =
+        sqlx::query_scalar::<_, Option<f64>>(AVG_TRIAL_TO_PAID_SQL)
+            .bind(&interval)
+            .fetch_one(db)
+            .await
+            .ok()
+            .flatten();
 
     // Trial conversion by plan (subscription plan, falling back to the
     // tenant's current plan)
@@ -529,15 +527,17 @@ async fn get_growth_analytics(
             } else {
                 0.0
             },
-            avg_time_to_activate_hours: avg_activation_hours
-                .and_then(|r| r.0)
-                .unwrap_or(0.0),
+            avg_time_to_activate_hours: avg_activation_hours.and_then(|r| r.0).unwrap_or(0.0),
             activation_funnel,
         },
         engagement: EngagementMetrics {
             dau,
             mau,
-            dau_mau_ratio: if mau > 0 { dau as f64 / mau as f64 } else { 0.0 },
+            dau_mau_ratio: if mau > 0 {
+                dau as f64 / mau as f64
+            } else {
+                0.0
+            },
             wau,
             monthly_active_tenants,
             avg_session_count_per_user: avg_session_count_per_user(db).await,
@@ -655,9 +655,7 @@ async fn get_activation_funnel(
         } else {
             0.0
         },
-        avg_time_to_activate_hours: avg_activation
-            .and_then(|r| r.0)
-            .unwrap_or(0.0),
+        avg_time_to_activate_hours: avg_activation.and_then(|r| r.0).unwrap_or(0.0),
         activation_funnel: vec![
             ActivationFunnelStage {
                 stage: "Signed up".into(),
@@ -729,7 +727,11 @@ async fn get_engagement_metrics(
     Ok(Json(EngagementMetrics {
         dau,
         mau,
-        dau_mau_ratio: if mau > 0 { dau as f64 / mau as f64 } else { 0.0 },
+        dau_mau_ratio: if mau > 0 {
+            dau as f64 / mau as f64
+        } else {
+            0.0
+        },
         wau,
         monthly_active_tenants,
         avg_session_count_per_user: avg_session_count_per_user(db).await,
@@ -756,7 +758,7 @@ mod tests {
 
     #[test]
     fn activation_funnel_stages_ordered() {
-        let stages = vec![
+        let stages = [
             ActivationFunnelStage {
                 stage: "Signed up".into(),
                 count: 100,
@@ -795,7 +797,11 @@ mod tests {
     fn trial_sql_reads_stripe_subscriptions_with_period_semantics() {
         // The legacy table had no writer; all trial SQL must read
         // stripe_subscriptions and use trial_end period semantics.
-        for sql in [TRIALS_STARTED_SQL, TRIALS_CONVERTED_SQL, AVG_TRIAL_TO_PAID_SQL] {
+        for sql in [
+            TRIALS_STARTED_SQL,
+            TRIALS_CONVERTED_SQL,
+            AVG_TRIAL_TO_PAID_SQL,
+        ] {
             assert!(sql.contains("FROM stripe_subscriptions"));
             assert!(sql.contains("trial_end IS NOT NULL"));
             assert!(!sql.contains("FROM subscriptions\n"));

@@ -1,6 +1,13 @@
 //! DANE – DNS‑Based Authentication of Named Entities (RFC 6698 / 7671).
 //!
 //! TLSA record lookup, generation, and certificate validation.
+//!
+//! MAINTAINED-BUT-NOT-WIRED (F-16): no SMTP session path performs
+//! TLSA-validated outbound connections yet — DANE applies when the direct-MX
+//! sender (tracked as finding F-16) opens TLS to a peer MX and must verify
+//! its certificate against the TLSA RRset instead of a WebPKI CA. This
+//! module is exercised only by its own unit tests until that sender lands.
+//! Do not delete: the direct-MX sender (see F-16) builds on this code.
 
 use std::sync::LazyLock;
 use std::time::{Duration, Instant};
@@ -326,10 +333,8 @@ fn evaluate_tlsa_records(
                 }
             }
             2 => result.mode = DaneMode::DaneTa,
-            0 | 1 => {
-                if result.mode == DaneMode::None {
-                    result.mode = DaneMode::Pkix;
-                }
+            0 | 1 if result.mode == DaneMode::None => {
+                result.mode = DaneMode::Pkix;
             }
             _ => {}
         }

@@ -242,8 +242,7 @@ fn hmac_sign(secret: &[u8; 32], data: &[u8]) -> String {
     use sha2::Sha256;
 
     type HmacSha256 = Hmac<Sha256>;
-    let mut mac = HmacSha256::new_from_slice(secret)
-        .expect("HMAC-SHA256 accepts any key length");
+    let mut mac = HmacSha256::new_from_slice(secret).expect("HMAC-SHA256 accepts any key length");
     mac.update(data);
     hex_encode(&mac.finalize().into_bytes())
 }
@@ -267,11 +266,7 @@ fn hex_encode(bytes: &[u8]) -> String {
 /// solved nonce could be replayed forever (and across requests from the
 /// same IP). Each issuance now gets 128 bits of randomness from the OS.
 pub fn fresh_pow_challenge_data() -> String {
-    format!(
-        "pow:{}:{}",
-        uuid::Uuid::new_v4(),
-        uuid::Uuid::new_v4()
-    )
+    format!("pow:{}:{}", uuid::Uuid::new_v4(), uuid::Uuid::new_v4())
 }
 
 #[cfg(test)]

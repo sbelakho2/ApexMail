@@ -141,7 +141,7 @@ pub(crate) mod test_db {
                             .await
                         {
                             Ok(pool) => {
-                                let verdict: Option<bool> = (|| async {
+                                let check_test_db_marker = || async {
                                     let marked: bool = sqlx::query_scalar(
                                         "SELECT EXISTS(SELECT 1 FROM pg_tables \
                                          WHERE schemaname = 'public' \
@@ -179,8 +179,8 @@ pub(crate) mod test_db {
                                     .await
                                     .ok()?;
                                     Some(!dirty)
-                                })()
-                                .await;
+                                };
+                                let verdict: Option<bool> = check_test_db_marker().await;
                                 pool.close().await;
                                 if let Some(is_healthy) = verdict {
                                     healthy = is_healthy;

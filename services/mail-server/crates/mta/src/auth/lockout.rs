@@ -79,7 +79,10 @@ impl FailStore for RedisFailStore {
     async fn incr(&self, key: &str, ttl: Duration) -> anyhow::Result<i64> {
         let mut conn = self.pool.get().await?;
         let full = format!("{}{key}", self.prefix);
-        let value: i64 = redis::cmd("INCR").arg(&full).query_async(&mut *conn).await?;
+        let value: i64 = redis::cmd("INCR")
+            .arg(&full)
+            .query_async(&mut *conn)
+            .await?;
         let expire: i64 = redis::cmd("EXPIRE")
             .arg(&full)
             .arg(ttl.as_secs() as i64)

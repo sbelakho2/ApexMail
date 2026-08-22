@@ -20,8 +20,9 @@ use std::sync::LazyLock;
 use std::time::Duration;
 
 use moka::sync::Cache;
-use trust_dns_resolver::config::{ResolverConfig, ResolverOpts};
-use trust_dns_resolver::TokioAsyncResolver;
+use trust_dns_resolver::config::ResolverConfig;
+use trust_dns_resolver::net::runtime::TokioRuntimeProvider;
+use trust_dns_resolver::{Resolver, TokioResolver};
 use url::Url;
 
 use super::types::{dns_cache_max_entries, dns_cache_ttl_secs, BLOCKED_HOSTNAMES};
@@ -40,15 +41,20 @@ pub struct ResolvedWebhookTarget {
 
 /// DNS resolver with caching and SSRF protection.
 pub struct SsrfValidator {
-    resolver: TokioAsyncResolver,
+    resolver: TokioResolver,
     cache: Cache<String, Vec<IpAddr>>,
     extra_blocked_hosts: Vec<String>,
     /// Maximum acceptable age of DNS resolution before a re-resolution is forced (O-16.4).
     max_resolution_age: Duration,
 }
 
-static SSRF_RESOLVER: LazyLock<TokioAsyncResolver> =
-    LazyLock::new(|| TokioAsyncResolver::tokio(ResolverConfig::default(), ResolverOpts::default()));
+// trust-dns 0.26: TokioAsyncResolver::tokio is gone; build a TokioResolver
+// (builder defaults already equal ResolverOpts::default()).
+static SSRF_RESOLVER: LazyLock<TokioResolver> = LazyLock::new(|| {
+    Resolver::builder_with_config(ResolverConfig::default(), TokioRuntimeProvider::default())
+        .build()
+        .expect("system resolver configuration is always buildable")
+});
 
 impl SsrfValidator {
     /// Create a new SSRF validator.
@@ -233,13 +239,10 @@ impl SsrfValidator {
         // Resolve IPv4
         let mut ips = Vec::new();
 
-        if let Ok(response) = self.resolver.ipv4_lookup(hostname).await {
-            ips.extend(response.iter().map(|ip| IpAddr::V4(ip.0)));
-        }
-
-        // Resolve IPv6
-        if let Ok(response) = self.resolver.ipv6_lookup(hostname).await {
-            ips.extend(response.iter().map(|ip| IpAddr::V6(ip.0)));
+        // trust-dns 0.26: the A/AAAA split lookups were replaced by
+        // `lookup_ip`, whose LookupIp iterates IpAddr for both families.
+        if let Ok(response) = self.resolver.lookup_ip(hostname).await {
+            ips.extend(response.iter());
         }
 
         // Cache the result

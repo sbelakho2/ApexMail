@@ -234,12 +234,10 @@ async fn initialize_schema_inner(db: &PgPool) -> Result<(), SalesError> {
     // Links each dispatched recipient to its platform `messages` row — used
     // by the campaign stats reconciliation (opens/clicks are maintained on
     // `messages` by the platform tracking service).
-    sqlx::query(
-        "ALTER TABLE sales_campaign_recipients ADD COLUMN IF NOT EXISTS message_id UUID",
-    )
-    .execute(db)
-    .await
-    .map_err(|e| SalesError::Database(e.to_string()))?;
+    sqlx::query("ALTER TABLE sales_campaign_recipients ADD COLUMN IF NOT EXISTS message_id UUID")
+        .execute(db)
+        .await
+        .map_err(|e| SalesError::Database(e.to_string()))?;
 
     // Error state for paused campaigns (e.g. "email quota exhausted") — a
     // stalled campaign must never be a silent partial send.
@@ -1440,8 +1438,13 @@ async fn apply_unsubscribe(
         SalesError::InvalidInput("invalid or expired unsubscribe token".into())
     })?;
 
-    ProductionCampaignDispatcher::suppress(&state.db, &data.tenant_id, &data.email, "unsubscribe-link")
-        .await?;
+    ProductionCampaignDispatcher::suppress(
+        &state.db,
+        &data.tenant_id,
+        &data.email,
+        "unsubscribe-link",
+    )
+    .await?;
 
     metrics::counter!("sales_campaign_unsubscribes_total").increment(1);
     tracing::info!(
@@ -1506,11 +1509,7 @@ async fn unsubscribe_post(
             .into_response();
     }
     match apply_unsubscribe(&state, &token).await {
-        Ok(_) => (
-            StatusCode::OK,
-            Json(serde_json::json!({ "success": true })),
-        )
-            .into_response(),
+        Ok(_) => (StatusCode::OK, Json(serde_json::json!({ "success": true }))).into_response(),
         Err(SalesError::InvalidInput(msg)) => (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({ "error": msg })),
@@ -1791,8 +1790,7 @@ async fn reply_inbox_message(
         .fetch_optional(&state.db)
         .await
         .map_err(|e| SalesError::Database(e.to_string()))?;
-        let (sender, original_subject) =
-            row.ok_or(SalesError::MessageNotFound(id))?;
+        let (sender, original_subject) = row.ok_or(SalesError::MessageNotFound(id))?;
 
         // The correspondent's address is the reply recipient — validate it
         // syntactically before spending a quota reservation.
@@ -1926,16 +1924,13 @@ mod tests {
         router(state)
     }
 
-
     // ── Fix I tests: honest failures + tenant scoping ────────────────────
 
     /// Async-test-safe app builder: a LAZY pool (never connects) so the
     /// router can be driven inside `#[tokio::test]` without nesting
     /// runtimes. Handlers that reach the database fail; the tests below
     /// assert on the pre-database behavior (auth, scoping, 501/503).
-    fn lazy_test_app_with_config(
-        config: crate::config::SalesConfig,
-    ) -> Router {
+    fn lazy_test_app_with_config(config: crate::config::SalesConfig) -> Router {
         let db = PgPoolOptions::new()
             .max_connections(1)
             .acquire_timeout(Duration::from_millis(100))
@@ -2004,9 +1999,12 @@ mod tests {
                     .header("x-api-key", "test-key")
                     .header("x-tenant-id", "tenant-a")
                     .header("content-type", "application/json")
-                    .body(Body::from(serde_json::to_vec(&serde_json::json!({
-                        "body": "Thanks for reaching out!"
-                    })).unwrap()))
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({
+                            "body": "Thanks for reaching out!"
+                        }))
+                        .unwrap(),
+                    ))
                     .unwrap(),
             )
             .await
@@ -2038,9 +2036,12 @@ mod tests {
                     .header("x-api-key", "test-key")
                     .header("x-tenant-id", "tenant-a")
                     .header("content-type", "application/json")
-                    .body(Body::from(serde_json::to_vec(&serde_json::json!({
-                        "body": "   "
-                    })).unwrap()))
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({
+                            "body": "   "
+                        }))
+                        .unwrap(),
+                    ))
                     .unwrap(),
             )
             .await
@@ -2079,8 +2080,10 @@ mod tests {
     /// Fix I-3: SALES_ALLOWED_TENANTS scopes the shared-token blast radius.
     #[tokio::test]
     async fn test_allowed_tenants_scoping() {
-        let mut config = crate::config::SalesConfig::default();
-        config.allowed_tenants = Some(vec!["tenant-a".into()]);
+        let config = crate::config::SalesConfig {
+            allowed_tenants: Some(vec!["tenant-a".into()]),
+            ..Default::default()
+        };
         let app = lazy_test_app_with_config(config);
 
         // Allowed tenant passes the middleware (then fails on the dead DB

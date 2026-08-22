@@ -401,8 +401,14 @@ fn detect_markdown_injection(input: &str) -> Vec<InjectionFinding> {
         });
     }
 
-    // Detect hidden markdown (same-color text: white on white, etc.)
-    if input.contains("[​](") || input.contains("[‎](") || input.contains("[‏](") {
+    // Detect hidden markdown (same-color text: white on white, etc.).
+    // The labels embed zero-width characters (ZWSP U+200B, LRM U+200E,
+    // RLM U+200F) — written as escapes so the source itself stays free of
+    // invisible characters (clippy::invisible_characters).
+    if input.contains("[\u{200B}](")
+        || input.contains("[\u{200E}](")
+        || input.contains("[\u{200F}](")
+    {
         findings.push(InjectionFinding::MarkdownImage {
             url: "zero-width link label".into(),
         });
@@ -791,7 +797,7 @@ pub fn validate_tool_params(tool: &str, params: &serde_json::Value) -> Result<()
         "calculate_overage" | "calculate_payg" => {
             if let Some(emails) = params.get("emails_sent").or(params.get("emails")) {
                 if let Some(n) = emails.as_i64() {
-                    if n < 0 || n > 100_000_000 {
+                    if !(0..=100_000_000).contains(&n) {
                         errors.push(format!("email count {n} out of valid range (0–100M)"));
                     }
                 }

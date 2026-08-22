@@ -225,11 +225,6 @@ async fn process_autopilot_cycle(
     Ok(approved_ids.len())
 }
 
-/// API-105: Per-tenant autopilot worker state key.
-fn autopilot_tenant_worker_key(tenant_id: &str) -> String {
-    format!("apexmail:autopilot:worker:{tenant_id}")
-}
-
 async fn run_autopilot_worker(state: AppState, tenant_id: String) {
     loop {
         let current = match load_autopilot_state(&state.db).await {
