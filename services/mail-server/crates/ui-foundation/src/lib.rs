@@ -13,6 +13,7 @@ pub mod routing;
 pub mod shell;
 pub mod ssr;
 pub mod tokens;
+pub mod view_data;
 
 #[cfg(test)]
 mod migration_tests;

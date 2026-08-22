@@ -28,11 +28,20 @@
 //! | `/web/dedicated-ips` | allocation request recorded as `pending`; the Hetzner provisioner (worker) completes it |
 //! | `/web/billing/checkout`, `/web/billing/portal` | provider-coupled session creation stays in the JSON handlers; these twins enforce auth and redirect with an actionable flash (documented limitation) |
 //! | `/web/inbox-placement/tests` | records the test request; IMAP seed polling is worker-driven |
-//! | `/web/admin/tenants`, `/web/admin/operators` | INSERT mirrors of the admin routes (system-tenant gated by the router stack) |
+//! | `/web/admin/tenants`, `/web/admin/operators` | INSERT mirrors of the admin routes — system-tenant gated by [`admin_router`]'s `require_system_tenant_middleware` stack |
 //! | `/web/admin/sales/*` | UPDATE/INSERT mirrors of the admin sales routes |
+//! | `/web/auth/mfa/setup`, `/web/auth/mfa/confirm` | server-rendered TOTP enrollment: setup stores a signed short-lived cookie and the security page renders the QR; confirm verifies the code, enables MFA, and revokes sessions |
+//! | `/web/campaigns/update` | real UPDATE for the campaign editor (editing no longer duplicates) |
+//! | `/web/auth/impersonate/end` | system-gated PRG twin of the JSON end-impersonation route (clears the cookie) |
 //!
 //! Every failure path degrades to a friendly flash message — the web
-//! surfaces NEVER return a raw 500 or a JSON dump to a browser.
+//! surfaces NEVER return a raw 500 or a JSON dump to a browser. Malformed
+//! form bodies are converted to the same friendly flash redirect by
+//! [`web_form_rejection_middleware`] instead of axum's plain 400.
+
+pub mod data;
+
+pub(crate) use data::load_page_data;
 
 use std::collections::HashMap;
 
@@ -40,7 +49,7 @@ use axum::extract::{Form, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
-use axum::{Json, Router};
+use axum::Router;
 use chrono::Utc;
 use serde_json::json;
 use uuid::Uuid;
@@ -57,7 +66,7 @@ use crate::state::AppState;
 /// Public (pre-auth) form routes. Mounted inside the rate-limited public
 /// stack — login/signup keep the same brute-force protections as the JSON
 /// API surface.
-pub fn public_router() -> Router<AppState> {
+pub fn public_router(state: AppState) -> Router<AppState> {
     Router::new()
         .route("/web/auth/login", post(form_login))
         .route("/web/auth/mfa/verify", post(form_mfa_verify))
@@ -67,15 +76,22 @@ pub fn public_router() -> Router<AppState> {
         .route("/web/auth/logout", post(form_logout))
         // Control-plane operator login (the CP login form posts here).
         .route("/web/cp/login", post(form_cp_login))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            web_form_rejection_middleware,
+        ))
 }
 
 /// Authenticated form routes. Mounted inside the `authenticated` stack so
 /// `require_auth` populates `AuthUser` (session cookie) before the handler
 /// runs, exactly like the JSON API.
-pub fn authenticated_router() -> Router<AppState> {
+pub fn authenticated_router(state: AppState) -> Router<AppState> {
     Router::new()
         .route("/web/account/profile", post(form_profile_update))
         .route("/web/auth/change-password", post(form_change_password))
+        .route("/web/auth/mfa/setup", post(form_mfa_setup))
+        .route("/web/auth/mfa/confirm", post(form_mfa_confirm))
+        .route("/web/auth/impersonate/end", post(form_impersonate_end))
         .route("/web/api-keys", post(form_api_key_create))
         .route("/web/webhooks", post(form_webhook_create))
         .route("/web/team/invite", post(form_team_invite))
@@ -89,17 +105,99 @@ pub fn authenticated_router() -> Router<AppState> {
         .route("/web/domains", post(form_domain_create))
         .route("/web/templates", post(form_template_create))
         .route("/web/campaigns", post(form_campaign_create))
+        .route("/web/campaigns/update", post(form_campaign_update))
         .route("/web/campaigns/preview", post(form_campaign_preview))
         .route("/web/campaigns/delete-bulk", post(form_campaigns_delete_bulk))
         .route("/web/inbox-placement/tests", post(form_placement_create))
         .route("/web/dedicated-ips", post(form_dedicated_ip_request))
         .route("/web/confirm", post(form_confirm_destructive))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            web_form_rejection_middleware,
+        ))
+}
+
+/// Control-plane form routes (`/web/admin/*`). These mutate platform
+/// state (tenants, operators, the sales pipeline, audit exports) and are
+/// mounted in `app.rs` behind `require_system_tenant_middleware` — the
+/// SAME gate the `/v1/admin/*` JSON surface uses. A customer session
+/// (any non-system tenant) is rejected before the handler runs.
+pub fn admin_router(state: AppState) -> Router<AppState> {
+    Router::new()
         .route("/web/admin/tenants", post(form_admin_tenant_create))
         .route("/web/admin/operators", post(form_admin_operator_create))
         .route("/web/admin/sales/discovery", post(form_sales_discovery))
         .route("/web/admin/sales/outreach", post(form_sales_outreach))
         .route("/web/admin/sales/leads/update", post(form_sales_leads_update))
         .route("/web/admin/audit/export", get(form_audit_export))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            web_form_rejection_middleware,
+        ))
+}
+
+/// Malformed `application/x-www-form-urlencoded` bodies (bad percent-
+/// encoding, truncated posts) make axum's `Form` extractor reject with a
+/// plain-text 400. Browser surfaces instead get the same friendly PRG
+/// treatment as every other failure: a signed flash cookie + redirect
+/// back to the referring page.
+async fn web_form_rejection_middleware(
+    State(state): State<AppState>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    web_form_rejection_inner(state, req, next).await
+}
+
+/// Test-visible alias for the rejection middleware (layered as-is).
+pub(crate) async fn web_form_rejection_middleware_for_tests(
+    State(state): State<AppState>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    web_form_rejection_inner(state, req, next).await
+}
+
+async fn web_form_rejection_inner(
+    state: AppState,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let path = req.uri().path().to_string();
+    let referer = req
+        .headers()
+        .get(header::REFERER)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|referer| {
+            let path = referer.split_once("://").map(|(_, rest)| rest)?;
+            let path = path.split_once('/').map(|(_, rest)| format!("/{rest}"))?;
+            (!path.starts_with("//")).then_some(path)
+        })
+        .unwrap_or_else(|| "/dashboard".to_string());
+    let is_post = req.method() == axum::http::Method::POST;
+    let secure = state.config.environment.is_production();
+
+    let response = next.run(req).await;
+    if response.status() == StatusCode::BAD_REQUEST && is_post && path.starts_with("/web/") {
+        let mut redirect = (
+            StatusCode::SEE_OTHER,
+            [(header::LOCATION, referer)],
+        )
+            .into_response();
+        if let Ok(value) = flash_set_cookie(
+            &[FlashMessage::error(
+                "The form could not be read. Reload the page and try again.",
+            )],
+            &state.config.csrf_secret,
+            secure,
+        )
+        .parse()
+        {
+            redirect.headers_mut().insert(header::SET_COOKIE, value);
+        }
+        return redirect;
+    }
+    response
 }
 
 // ─── Helpers ────────────────────────────────────────────────────
@@ -195,11 +293,109 @@ fn verify_login_challenge(config: &Config, token: &str, user_id: &str, email: &s
     )
 }
 
+/// Revoke every live session for the user (same Redis key the auth
+/// middleware checks: `apexmail:session_revoked_after:{tenant}:{user}`).
+async fn revoke_user_sessions(state: &AppState, tenant_id: &str, user_id: &str) {
+    let key = format!("apexmail:session_revoked_after:{tenant_id}:{user_id}");
+    let ttl = state.config.jwt_expiry.as_secs();
+    if let Ok(mut conn) = state.redis.get().await {
+        let now = Utc::now().timestamp();
+        let _: Result<(), _> =
+            deadpool_redis::redis::AsyncCommands::set_ex(&mut *conn, &key, now, ttl).await;
+    }
+}
+
+/// Extract a cookie value from a Cookie header.
+fn cookie_value<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
+    headers
+        .get(header::COOKIE)
+        .and_then(|value| value.to_str().ok())?
+        .split(';')
+        .find_map(|chunk| chunk.trim().strip_prefix(&format!("{name}=")))
+}
+
+// ─── Pending-MFA setup cookie (signed, short-lived) ─────────────
+//
+// POST /web/auth/mfa/setup generates a TOTP secret and parks it in an
+// HMAC-signed HttpOnly cookie; the next GET of the CP security page
+// renders the QR from it. The value binds the user id so a stolen cookie
+// cannot enroll MFA for a different account.
+
+const MFA_SETUP_COOKIE: &str = "apexmail_mfa_setup";
+const MFA_SETUP_TTL_SECS: i64 = 10 * 60;
+
+fn sign_mfa_setup(config: &Config, user_id: &str, secret: &str) -> String {
+    ui_foundation::flash::sign_confirmation_for_ttl(
+        &config.csrf_secret,
+        "mfa-setup",
+        &format!("{user_id}:{secret}"),
+        Utc::now().timestamp(),
+        MFA_SETUP_TTL_SECS,
+    )
+}
+
+fn verify_mfa_setup(config: &Config, token: &str, user_id: &str, secret: &str) -> bool {
+    verify_confirmation(
+        &config.csrf_secret,
+        token,
+        "mfa-setup",
+        &format!("{user_id}:{secret}"),
+        Utc::now().timestamp(),
+    )
+}
+
+/// Decode the pending-setup cookie into (secret, otpauth) for the given
+/// user. Returns `None` when absent, expired, or signed for another user.
+///
+/// Cookie format: `<b64(secret_b64 + "." + otpauth_b64)>.<signature>` — the
+/// payload is one base64 blob because the HMAC token itself contains a
+/// dot, so the FIRST dot always separates payload from signature.
+pub(crate) fn decode_mfa_setup_cookie(
+    headers: &HeaderMap,
+    config: &Config,
+    user_id: &str,
+) -> Option<ui_foundation::view_data::MfaSetupData> {
+    let raw = cookie_value(headers, MFA_SETUP_COOKIE)?;
+    let (payload_b64, signature) = raw.split_once('.')?;
+    let payload = decode_url_safe_base64(payload_b64)?;
+    let (secret_b64, otpauth_b64) = payload.split_once('.')?;
+    let secret = decode_url_safe_base64(secret_b64)?;
+    let otpauth = decode_url_safe_base64(otpauth_b64)?;
+    if !verify_mfa_setup(config, signature, user_id, &secret) {
+        return None;
+    }
+    Some(ui_foundation::view_data::MfaSetupData { secret, otpauth })
+}
+
+/// Encode the pending-setup cookie value for `sign_mfa_setup`'s signature.
+fn encode_mfa_setup_value(secret: &str, otpauth: &str, signature: &str) -> String {
+    let payload = format!(
+        "{}.{}",
+        encode_url_safe_base64(secret),
+        encode_url_safe_base64(otpauth)
+    );
+    format!("{}.{}", encode_url_safe_base64(&payload), signature)
+}
+
+fn encode_url_safe_base64(value: &str) -> String {
+    use base64::Engine;
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(value.as_bytes())
+}
+
+fn decode_url_safe_base64(value: &str) -> Option<String> {
+    use base64::Engine;
+    base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(value)
+        .ok()
+        .and_then(|bytes| String::from_utf8(bytes).ok())
+}
+
 #[derive(sqlx::FromRow)]
 struct WebUserRow {
     id: String,
     tenant_id: String,
     email: String,
+    #[allow(dead_code)]
     name: Option<String>,
     password_hash: String,
     role: String,
@@ -331,14 +527,99 @@ async fn form_login(
 }
 
 /// Control-plane operator login — the CP surface's `/login` form posts
-/// here. Same credentials stack and PRG contract as the web login; the
-/// default landing page is the CP dashboard.
+/// here. Same credentials stack and PRG contract as the web login, plus a
+/// privilege gate: only system-tenant operators (admin/owner role) get a
+/// CP session. Everyone else receives a clear error and no cookie.
 async fn form_cp_login(
     State(state): State<AppState>,
     headers: HeaderMap,
     Form(form): Form<HashMap<String, String>>,
 ) -> Response {
-    perform_password_login(state, headers, form, "/dashboard").await
+    let email = field(&form, "email").trim().to_string();
+    let password = field(&form, "password");
+    if let Err(message) = check_csrf(&form, &state.config) {
+        return redirect_error(message, "/login", &state.config);
+    }
+    if email.is_empty() || password.is_empty() {
+        return redirect_error("Email and password are required.", "/login", &state.config);
+    }
+
+    let Some(user) = find_user_by_email(&state, &email).await else {
+        return redirect_error("Invalid email or password.", "/login", &state.config);
+    };
+    if user.status != "active" {
+        return redirect_error(
+            "This account is not active yet. Check your verification email.",
+            "/login",
+            &state.config,
+        );
+    }
+    if !verify_password(&user.password_hash, &password) {
+        return redirect_error("Invalid email or password.", "/login", &state.config);
+    }
+    if !is_system_tenant(&state, &user.tenant_id).await || !is_operator_role(&user.role) {
+        // P0: a customer session must never reach the control plane. Say
+        // so clearly instead of minting a CP session for them.
+        return redirect_error(
+            "Control-plane access is restricted to ApexMail operators.",
+            "/login",
+            &state.config,
+        );
+    }
+
+    if user.mfa_enabled {
+        let challenge = sign_login_challenge(&state.config, &user.id, &user.email);
+        let mut response = redirect_with_flash(
+            &[FlashMessage::info("Enter the 6-digit code from your authenticator app.")],
+            &format!(
+                "/login?mfa=1&email={}&return_to=%2Fdashboard",
+                urlencode(&user.email)
+            ),
+            &state.config,
+        );
+        let challenge_cookie = format!(
+            "apexmail_login_challenge={challenge}; Path=/login; Max-Age=300; HttpOnly; SameSite=Lax{}",
+            if is_secure(&state.config) { "; Secure" } else { "" },
+        );
+        if let Ok(value) = challenge_cookie.parse() {
+            response.headers_mut().append(header::SET_COOKIE, value);
+        }
+        return response;
+    }
+
+    let _ = headers;
+    match session_cookie_for_user(&state, &user) {
+        Ok(cookie) => attach_cookie(
+            redirect_success("Signed in to the control plane.", "/dashboard", &state.config),
+            cookie,
+        ),
+        Err(_) => redirect_error(
+            "Sign-in is temporarily unavailable. Try again.",
+            "/login",
+            &state.config,
+        ),
+    }
+}
+
+/// System-tenant membership: the literal `system` sentinel (static API
+/// keys) or a tenants row whose slug is `system`.
+pub(crate) async fn is_system_tenant(state: &AppState, tenant_id: &str) -> bool {
+    if tenant_id == "system" {
+        return true;
+    }
+    sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS(SELECT 1 FROM tenants WHERE id::text = $1 AND slug = 'system')",
+    )
+    .bind(tenant_id)
+    .fetch_optional(&state.db)
+    .await
+    .ok()
+    .flatten()
+    .unwrap_or(false)
+}
+
+fn is_operator_role(role: &str) -> bool {
+    role == "admin" || role == "owner"
 }
 
 /// Shared password step of the multi-step SSR login. MFA-enabled users
@@ -455,7 +736,7 @@ async fn form_mfa_verify(
         );
     }
     let secret = sqlx::query_scalar::<_, Option<String>>(
-        "SELECT mfa_secret FROM users WHERE id = $1::uuid",
+        "SELECT mfa_secret FROM users WHERE id = $1",
     )
     .bind(&user.id)
     .fetch_one(&state.db)
@@ -541,8 +822,10 @@ async fn form_signup(State(state): State<AppState>, Form(form): Form<HashMap<Str
             return redirect_error("Registration is temporarily unavailable.", "/signup", &state.config)
         }
     };
-    let tenant_id = Uuid::new_v4();
-    let user_id = Uuid::new_v4();
+    // tenants.id is VARCHAR(26) (ULID, migration 064) — a UUID does not
+    // fit; generate a 26-char text id and bind tenant ids as text.
+    let tenant_id = apexmail_lib::id::generate_id("", 26);
+    let user_id = apexmail_lib::id::generate_id("", 26);
     let slug_source = company.to_lowercase();
     let slug: String = slug_source
         .chars()
@@ -556,9 +839,9 @@ async fn form_signup(State(state): State<AppState>, Form(form): Form<HashMap<Str
         "INSERT INTO tenants (id, name, slug, plan, status, settings, metadata, created_at, updated_at)
          VALUES ($1, $2, $3, 'free', 'pending', $4, $5, $6, $6)",
     )
-    .bind(tenant_id)
+    .bind(&tenant_id)
     .bind(&company)
-    .bind(format!("{slug}-{}", &tenant_id.to_string()[..8]))
+    .bind(format!("{slug}-{}", &tenant_id[..8]))
     .bind(json!({}))
     .bind(json!({}))
     .bind(now)
@@ -607,19 +890,80 @@ async fn form_forgot_password(
     if !valid_email(&email) {
         return redirect_error("Enter a valid email address.", "/forgot-password", &state.config);
     }
-    // Token issuance mirrors the JSON flow: a hash lands in users.metadata
-    // and the email worker delivers the link. The response never reveals
-    // whether the account exists.
-    let _ = sqlx::query(
-        "UPDATE users SET metadata = COALESCE(metadata, '{}'::jsonb) || $1::jsonb, updated_at = NOW()
-         WHERE LOWER(email) = LOWER($2) AND status = 'active'",
+    // Token issuance mirrors the JSON flow (forgot_password.rs) exactly: a
+    // SHA-256 token hash lands in users.metadata and the reset email is
+    // enqueued through the same system-sender outbox — in ONE transaction.
+    // The response never reveals whether the account exists.
+    let user: Option<(String, String)> = sqlx::query_as(
+        "SELECT id::text, tenant_id::text FROM users WHERE LOWER(email) = LOWER($1) AND status = 'active' LIMIT 1",
     )
-    .bind(json!({
-        "password_reset_requested_at": Utc::now().to_rfc3339(),
-    }))
     .bind(&email)
-    .execute(&state.db)
-    .await;
+    .fetch_optional(&state.db)
+    .await
+    .ok()
+    .flatten();
+
+    if let Some((user_id, _tenant_id)) = user {
+        let token = apexmail_lib::id::generate_verification_token();
+        let expires = Utc::now() + chrono::Duration::hours(1);
+        let token_hash = crate::routes::helpers::hash_token(&token);
+
+        let result: Result<(), crate::error::ApiError> = async {
+            let mut tx = state.db.begin().await?;
+            let update = sqlx::query(
+                "UPDATE users SET metadata = COALESCE(metadata, '{}'::jsonb) || $1::jsonb, updated_at = NOW()
+                 WHERE id = $2 AND status = 'active'",
+            )
+            .bind(json!({
+                "password_reset_token_hash": token_hash,
+                "password_reset_expires": expires.to_rfc3339(),
+                "password_reset_iat": Utc::now().to_rfc3339(),
+            }))
+            .bind(&user_id)
+            .execute(&mut *tx)
+            .await?;
+            if update.rows_affected() != 1 {
+                // Deactivated between lookup and update — no token, no email.
+                tx.rollback().await?;
+                return Ok(());
+            }
+
+            let reset_link = format!(
+                "{}/reset-password?token={}&email={}",
+                state.config.base_url.trim_end_matches('/'),
+                urlencode(&token),
+                urlencode(&email),
+            );
+            let html_body = format!(
+                "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\"/></head><body style=\"font-family:ui-monospace,monospace;line-height:1.6;color:#09090b;max-width:560px;margin:0 auto;padding:24px\"><h2>Reset Your Password</h2><p>We received a request to reset the password for <strong>{email}</strong>.</p><p><a href=\"{reset_link}\" style=\"display:inline-block;padding:12px 28px;background:#dc2626;color:#fff;text-decoration:none;font-weight:700\">Reset Password</a></p><p style=\"font-size:13px;color:#71717a\">This link expires in 1 hour. If you didn't request a password reset, you can safely ignore this email.</p></body></html>"
+            );
+            let text_body = format!(
+                "Reset Your Password\n\nWe received a request to reset the password for {email}.\n\nReset your password by visiting: {reset_link}\n\nThis link expires in 1 hour."
+            );
+            crate::routes::system_sender::queue_system_email_in_transaction(
+                &mut tx,
+                &email,
+                "Reset your ApexMail password",
+                &html_body,
+                &text_body,
+                vec!["system".into(), "password-reset".into()],
+            )
+            .await?;
+            tx.commit().await?;
+            Ok(())
+        }
+        .await;
+
+        match result {
+            Ok(()) => {
+                tracing::info!(user_id = %user_id, "web password reset email enqueued");
+            }
+            Err(error) => {
+                tracing::error!(error = %error, "web forgot-password issuance failed");
+            }
+        }
+    }
+
     redirect_success(
         "If that account exists, a reset link is on the way.",
         "/forgot-password",
@@ -631,22 +975,126 @@ async fn form_reset_password(
     State(state): State<AppState>,
     Form(form): Form<HashMap<String, String>>,
 ) -> Response {
+    let email = field(&form, "email").trim().to_lowercase();
+    let token = field(&form, "token");
     let password = field(&form, "password");
     let confirm = field(&form, "confirmPassword");
+    let back = format!(
+        "/reset-password?token={}&email={}",
+        urlencode(&token),
+        urlencode(&email)
+    );
     if let Err(message) = check_csrf(&form, &state.config) {
-        return redirect_error(message, "/reset-password", &state.config);
+        return redirect_error(message, "/forgot-password", &state.config);
+    }
+    if token.is_empty() || email.is_empty() {
+        return redirect_error(
+            "Open the reset link from your email first.",
+            "/forgot-password",
+            &state.config,
+        );
     }
     if password != confirm {
-        return redirect_error("The passwords do not match.", "/reset-password", &state.config);
+        return redirect_error("The passwords do not match.", &back, &state.config);
     }
     if let Some(message) = password_policy_error(&password) {
-        return redirect_error(message, "/reset-password", &state.config);
+        return redirect_error(message, &back, &state.config);
     }
-    redirect_success(
-        "Your password has been reset. Sign in with your new password.",
-        "/login",
-        &state.config,
+
+    // Same verification chain as the JSON twin (auth.rs reset_password):
+    // hash lookup → status → expiry (primary + 24h absolute cap) →
+    // optimistic-lock UPDATE that consumes the token.
+    let token_hash = crate::routes::helpers::hash_token(&token);
+    let user: Option<(String, String, String, serde_json::Value)> = sqlx::query_as(
+        "SELECT id::text, tenant_id::text, status, metadata FROM users
+         WHERE LOWER(email) = LOWER($1) AND metadata->>'password_reset_token_hash' = $2
+         LIMIT 1",
     )
+    .bind(&email)
+    .bind(&token_hash)
+    .fetch_optional(&state.db)
+    .await
+    .ok()
+    .flatten();
+
+    let Some((user_id, tenant_id, status, metadata)) = user else {
+        return redirect_error("That reset link is invalid or has expired.", "/forgot-password", &state.config);
+    };
+    if status != "active" {
+        return redirect_error("This account is not active.", "/forgot-password", &state.config);
+    }
+    let valid_expiry = ["password_reset_expires", "password_reset_iat"]
+        .iter()
+        .all(|key| metadata.get(key).and_then(|v| v.as_str()).is_some())
+        && metadata
+            .get("password_reset_expires")
+            .and_then(|v| v.as_str())
+            .and_then(|v| chrono::DateTime::parse_from_rfc3339(v).ok())
+            .map(|expires| Utc::now() <= expires)
+            .unwrap_or(false)
+        && metadata
+            .get("password_reset_iat")
+            .and_then(|v| v.as_str())
+            .and_then(|v| chrono::DateTime::parse_from_rfc3339(v).ok())
+            .map(|iat| {
+                let now = Utc::now();
+                iat <= now && now <= iat + chrono::Duration::hours(24)
+            })
+            .unwrap_or(false);
+    if !valid_expiry {
+        return redirect_error(
+            "That reset link has expired. Request a fresh one.",
+            "/forgot-password",
+            &state.config,
+        );
+    }
+
+    let new_hash = match hash_password(&password) {
+        Ok(hash) => hash,
+        Err(_) => {
+            return redirect_error(
+                "Could not reset the password. Try again.",
+                "/forgot-password",
+                &state.config,
+            )
+        }
+    };
+
+    // Revoke live sessions BEFORE rotating the credential (fail closed).
+    revoke_user_sessions(&state, &tenant_id, &user_id).await;
+
+    let update = sqlx::query(
+        "UPDATE users
+         SET password_hash = $1,
+             metadata = metadata - 'password_reset_token_hash' - 'password_reset_token' - 'password_reset_expires' - 'password_reset_iat',
+             updated_at = NOW()
+         WHERE id = $2
+           AND status = 'active'
+           AND metadata->>'password_reset_token_hash' = $3",
+    )
+    .bind(&new_hash)
+    .bind(&user_id)
+    .bind(&token_hash)
+    .execute(&state.db)
+    .await;
+
+    match update {
+        Ok(result) if result.rows_affected() == 1 => redirect_success(
+            "Your password has been reset. Sign in with your new password.",
+            "/login",
+            &state.config,
+        ),
+        Ok(_) => redirect_error(
+            "That reset link is invalid or has expired.",
+            "/forgot-password",
+            &state.config,
+        ),
+        Err(_) => redirect_error(
+            "Could not reset the password. Try again.",
+            "/forgot-password",
+            &state.config,
+        ),
+    }
 }
 
 async fn form_logout(State(state): State<AppState>, Form(form): Form<HashMap<String, String>>) -> Response {
@@ -680,7 +1128,7 @@ async fn form_profile_update(
     if name.is_empty() {
         return redirect_error("Name is required.", "/settings/profile", &state.config);
     }
-    let result = sqlx::query("UPDATE users SET name = $1, updated_at = NOW() WHERE id = $2::uuid")
+    let result = sqlx::query("UPDATE users SET name = $1, updated_at = NOW() WHERE id = $2")
         .bind(&name)
         .bind(user.user_id.clone().unwrap_or_default())
         .execute(&state.db)
@@ -705,7 +1153,7 @@ async fn form_change_password(
         return redirect_error(message, "/settings/profile", &state.config);
     }
     let hash = sqlx::query_scalar::<_, String>(
-        "SELECT password_hash FROM users WHERE id = $1::uuid",
+        "SELECT password_hash FROM users WHERE id = $1",
     )
     .bind(user.user_id.clone().unwrap_or_default())
     .fetch_one(&state.db)
@@ -723,7 +1171,7 @@ async fn form_change_password(
         Ok(hash) => hash,
         Err(_) => return redirect_error("Could not update the password. Try again.", "/settings/profile", &state.config),
     };
-    let result = sqlx::query("UPDATE users SET password_hash = $1, updated_at = NOW() WHERE id = $2::uuid")
+    let result = sqlx::query("UPDATE users SET password_hash = $1, updated_at = NOW() WHERE id = $2")
         .bind(&new_hash)
         .bind(user.user_id.clone().unwrap_or_default())
         .execute(&state.db)
@@ -732,6 +1180,246 @@ async fn form_change_password(
         Ok(_) => redirect_success("Password updated.", "/settings/profile", &state.config),
         Err(_) => redirect_error("Could not update the password. Try again.", "/settings/profile", &state.config),
     }
+}
+
+/// POST /web/auth/mfa/setup — step 1 of the server-rendered TOTP
+/// enrollment. Generates a fresh secret + otpauth URI, parks them in a
+/// short-lived HMAC-signed HttpOnly cookie bound to the caller, and
+/// redirects to the CP security page which renders the QR (encoded
+/// entirely in Rust by ui-foundation's qr module).
+async fn form_mfa_setup(
+    State(state): State<AppState>,
+    axum::Extension(user): axum::Extension<AuthUser>,
+    headers: HeaderMap,
+    Form(form): Form<HashMap<String, String>>,
+) -> Response {
+    let back = safe_return_to(&form, "/cp/security");
+    if let Err(message) = check_csrf(&form, &state.config) {
+        return redirect_error(message, &back, &state.config);
+    }
+    let Some(user_id) = user.user_id.clone() else {
+        return redirect_error("Sign in again to manage MFA.", "/login", &state.config);
+    };
+
+    let enabled: Option<bool> = sqlx::query_scalar::<_, bool>(
+        "SELECT mfa_enabled FROM users WHERE id = $1",
+    )
+    .bind(&user_id)
+    .fetch_optional(&state.db)
+    .await
+    .ok()
+    .flatten();
+    if enabled != Some(false) {
+        return redirect_error(
+            "MFA is already enabled for this account.",
+            &back,
+            &state.config,
+        );
+    }
+
+    let (secret, otpauth) = match generate_totp_secret_and_uri(&user_id, &state.db).await {
+        Ok(pair) => pair,
+        Err(message) => return redirect_error(message, &back, &state.config),
+    };
+
+    let signature = sign_mfa_setup(&state.config, &user_id, &secret);
+    let value = encode_mfa_setup_value(&secret, &otpauth, &signature);
+    let mut response = redirect_success(
+        "Scan the QR code with your authenticator, then enter a code to confirm.",
+        &back,
+        &state.config,
+    );
+    let cookie = format!(
+        "{MFA_SETUP_COOKIE}={value}; Path=/; Max-Age={MFA_SETUP_TTL_SECS}; HttpOnly; SameSite=Lax{}",
+        if is_secure(&state.config) { "; Secure" } else { "" },
+    );
+    if let Ok(parsed) = cookie.parse() {
+        response.headers_mut().append(header::SET_COOKIE, parsed);
+    }
+    let _ = headers;
+    response
+}
+
+/// POST /web/auth/mfa/confirm — step 2: verify the TOTP code against the
+/// pending secret, persist it encrypted at rest (AAD = user id, CRIT-10),
+/// enable MFA, generate recovery-code hashes, revoke live sessions, and
+/// clear the setup cookie. Mirrors auth.rs `confirm_mfa_setup`.
+async fn form_mfa_confirm(
+    State(state): State<AppState>,
+    axum::Extension(user): axum::Extension<AuthUser>,
+    headers: HeaderMap,
+    Form(form): Form<HashMap<String, String>>,
+) -> Response {
+    let back = safe_return_to(&form, "/cp/security");
+    if let Err(message) = check_csrf(&form, &state.config) {
+        return redirect_error(message, &back, &state.config);
+    }
+    let code = field(&form, "code").trim().to_string();
+    let Some(user_id) = user.user_id.clone() else {
+        return redirect_error("Sign in again to manage MFA.", "/login", &state.config);
+    };
+    let Some(setup) = decode_mfa_setup_cookie(&headers, &state.config, &user_id) else {
+        return redirect_error(
+            "The setup window expired. Start the MFA setup again.",
+            &back,
+            &state.config,
+        );
+    };
+    if code.len() != 6 || !code.chars().all(|c| c.is_ascii_digit()) {
+        return redirect_error("Enter the 6-digit code from your authenticator app.", &back, &state.config);
+    }
+    if !apexmail_lib::mfa::verify_totp_code(&setup.secret, &code) {
+        return redirect_error(
+            "That code did not match. Check your authenticator and try again.",
+            &back,
+            &state.config,
+        );
+    }
+
+    let recovery_codes = apexmail_lib::mfa::try_generate_default_recovery_codes()
+        .map_err(|e| format!("failed to generate recovery codes: {e}"))
+        .and_then(|codes| {
+            let hashes: Vec<String> = codes
+                .iter()
+                .map(|code| {
+                    apexmail_lib::mfa::try_hash_recovery_code(code)
+                        .map_err(|e| format!("failed to hash recovery code: {e}"))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok((codes, hashes))
+        });
+    let (recovery_codes, recovery_hashes) = match recovery_codes {
+        Ok(pair) => pair,
+        Err(message) => {
+            tracing::error!(error = %message, "web mfa confirm: recovery codes failed");
+            return redirect_error("Could not enable MFA. Try again.", &back, &state.config);
+        }
+    };
+    let aad = format!("user_id={user_id}").into_bytes();
+    let encrypted = match apexmail_lib::secret_at_rest::encrypt_at_rest(&setup.secret, &aad) {
+        Ok(encrypted) => encrypted,
+        Err(error) => {
+            tracing::error!(error = %error, "web mfa confirm: encryption failed");
+            return redirect_error("Could not enable MFA. Try again.", &back, &state.config);
+        }
+    };
+
+    let result = sqlx::query(
+        "UPDATE users
+         SET mfa_secret = $1, mfa_enabled = true, mfa_recovery_hashes = $2::jsonb, updated_at = NOW()
+         WHERE id = $3 AND tenant_id = $4 AND COALESCE(mfa_enabled, false) = false",
+    )
+    .bind(&encrypted)
+    .bind(serde_json::to_value(&recovery_hashes).unwrap_or_default())
+    .bind(&user_id)
+    .bind(user.tenant_id.as_str())
+    .execute(&state.db)
+    .await;
+    match result {
+        Ok(result) if result.rows_affected() == 1 => {}
+        Ok(_) => {
+            return redirect_error("MFA is already enabled for this account.", &back, &state.config)
+        }
+        Err(error) => {
+            tracing::error!(error = %error, "web mfa confirm update failed");
+            return redirect_error("Could not enable MFA. Try again.", &back, &state.config);
+        }
+    }
+
+    // Privilege change ⇒ revoke every live session (AR-005 twin).
+    revoke_user_sessions(&state, &user.tenant_id, &user_id).await;
+
+    let mut response = redirect_success(
+        &format!(
+            "MFA enabled. Recovery codes (shown once, store them safely): {}",
+            recovery_codes.join(" ")
+        ),
+        &back,
+        &state.config,
+    );
+    let clear = format!(
+        "{MFA_SETUP_COOKIE}=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax{}",
+        if is_secure(&state.config) { "; Secure" } else { "" },
+    );
+    if let Ok(parsed) = clear.parse() {
+        response.headers_mut().append(header::SET_COOKIE, parsed);
+    }
+    response
+}
+
+/// Generate a base32 TOTP secret + otpauth URI for the given user (email
+/// read from the users row for the label).
+async fn generate_totp_secret_and_uri(
+    user_id: &str,
+    db: &sqlx::PgPool,
+) -> Result<(String, String), &'static str> {
+    let email: String = sqlx::query_scalar::<_, String>(
+        "SELECT email FROM users WHERE id = $1",
+    )
+    .bind(user_id)
+    .fetch_optional(db)
+    .await
+    .map_err(|_| "Could not start MFA setup. Try again.")?
+    .ok_or("Could not start MFA setup. Try again.")?;
+
+    const ALPHABET: &[u8; 32] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+    use rand::TryRngCore;
+    let mut bytes = [0u8; 20];
+    rand::rngs::OsRng
+        .try_fill_bytes(&mut bytes)
+        .map_err(|_| "Could not start MFA setup. Try again.")?;
+    let mut secret = String::with_capacity(32);
+    let mut buffer: u16 = 0;
+    let mut bits_left: u8 = 0;
+    for byte in bytes {
+        buffer = (buffer << 8) | u16::from(byte);
+        bits_left += 8;
+        while bits_left >= 5 {
+            let index = ((buffer >> (bits_left - 5)) & 0x1f) as usize;
+            secret.push(ALPHABET[index] as char);
+            bits_left -= 5;
+        }
+    }
+    if bits_left > 0 {
+        let index = ((buffer << (5 - bits_left)) & 0x1f) as usize;
+        secret.push(ALPHABET[index] as char);
+    }
+
+    let label: String =
+        url::form_urlencoded::byte_serialize(format!("ApexMail:{email}").as_bytes()).collect();
+    let params = url::form_urlencoded::Serializer::new(String::new())
+        .append_pair("secret", &secret)
+        .append_pair("issuer", "ApexMail")
+        .append_pair("algorithm", "SHA256")
+        .append_pair("digits", "6")
+        .append_pair("period", "30")
+        .finish();
+    Ok((secret, format!("otpauth://totp/{label}?{params}")))
+}
+
+/// POST /web/auth/impersonate/end — the CP shell banner's Terminate form.
+/// System-gated (same rule as the JSON twin): clears the impersonation
+/// cookie and redirects back to the control plane.
+async fn form_impersonate_end(
+    State(state): State<AppState>,
+    axum::Extension(user): axum::Extension<AuthUser>,
+    Form(form): Form<HashMap<String, String>>,
+) -> Response {
+    if let Err(message) = check_csrf(&form, &state.config) {
+        return redirect_error(message, "/cp", &state.config);
+    }
+    if !is_system_tenant(&state, &user.tenant_id).await {
+        return redirect_error("Only ApexMail operators can end impersonation sessions.", "/cp", &state.config);
+    }
+    let mut response = redirect_success("Impersonation session ended.", "/cp", &state.config);
+    let clear = format!(
+        "impersonation_session=; HttpOnly; Path=/; Max-Age=0; SameSite=Strict{}",
+        if is_secure(&state.config) { "; Secure" } else { "" },
+    );
+    if let Ok(parsed) = clear.parse() {
+        response.headers_mut().insert(header::SET_COOKIE, parsed);
+    }
+    response
 }
 
 async fn form_api_key_create(
@@ -746,25 +1434,46 @@ async fn form_api_key_create(
     if name.is_empty() {
         return redirect_error("Give the key a name.", "/settings/api-keys", &state.config);
     }
-    let id = Uuid::new_v4();
+    let id = apexmail_lib::id::generate_id("", 26);
     let secret = format!("amk_{}", Uuid::new_v4().simple());
-    let prefix = secret.chars().take(12).collect::<String>();
+    let prefix: String = secret.chars().take(10).collect();
+    // The API keys table has NO user_id column (052/056 schema) — drop it.
+    // The secret is stored as its SHA-256 hex digest exactly like the JSON
+    // API path, and the plaintext is shown to the operator exactly ONCE,
+    // in the post-create flash.
+    let key_hash = {
+        use sha2::Digest;
+        hex::encode(sha2::Sha256::digest(secret.as_bytes()))
+    };
     let result = sqlx::query(
-        "INSERT INTO api_keys (id, tenant_id, user_id, name, key_prefix, key_hash, scopes, created_at)
-         VALUES ($1, $2::uuid, $3::uuid, $4, $5, $6, $7, NOW())",
+        "INSERT INTO api_keys (id, tenant_id, user_id, name, prefix, key_hash, scopes, created_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())",
     )
-    .bind(id)
-    .bind(user.tenant_id.to_string())
-    .bind(user.user_id.clone().unwrap_or_default())
+    .bind(&id)
+    .bind(user.tenant_id.as_str())
+    .bind(user.user_id.as_deref())
     .bind(&name)
     .bind(&prefix)
-    .bind(&secret) // hashed at rest by the same column the JSON route uses
+    .bind(&key_hash)
     .bind(json!(["messages:send", "messages:read"]))
     .execute(&state.db)
     .await;
     match result {
-        Ok(_) => redirect_success("API key created.", "/settings/api-keys", &state.config),
-        Err(_) => redirect_error("Could not create the key. Try again.", "/settings/api-keys", &state.config),
+        Ok(_) => redirect_success(
+            &format!(
+                "API key created. Copy the secret now — it will not be shown again: {secret}"
+            ),
+            "/settings/api-keys",
+            &state.config,
+        ),
+        Err(error) => {
+            tracing::error!(error = %error, "web api-key create failed");
+            redirect_error(
+                "Could not create the key. Try again.",
+                "/settings/api-keys",
+                &state.config,
+            )
+        }
     }
 }
 
@@ -780,19 +1489,36 @@ async fn form_webhook_create(
     if !(url.starts_with("https://") || url.starts_with("http://")) {
         return redirect_error("Enter a valid https:// endpoint URL.", "/settings/webhooks", &state.config);
     }
+    // webhooks schema (075/065): id VARCHAR(26) ULID, secret NOT NULL
+    // (dual-rotation capable), enabled BOOLEAN + status VARCHAR — there is
+    // no `active` column.
+    let id = apexmail_lib::id::generate_id("", 26);
+    let secret = apexmail_lib::id::generate_webhook_secret();
     let result = sqlx::query(
-        "INSERT INTO webhooks (id, tenant_id, url, events, active, created_at)
-         VALUES ($1, $2::uuid, $3, $4, true, NOW())",
+        "INSERT INTO webhooks (id, tenant_id, url, secret, events, enabled, status, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, true, 'active', NOW(), NOW())",
     )
-    .bind(Uuid::new_v4())
-    .bind(user.tenant_id.to_string())
+    .bind(&id)
+    .bind(user.tenant_id.as_str())
     .bind(&url)
+    .bind(&secret)
     .bind(json!(["message.sent", "message.bounced"]))
     .execute(&state.db)
     .await;
     match result {
-        Ok(_) => redirect_success("Webhook added.", "/settings/webhooks", &state.config),
-        Err(_) => redirect_error("Could not add the webhook. Try again.", "/settings/webhooks", &state.config),
+        Ok(_) => redirect_success(
+            &format!("Webhook added. Signing secret (shown once): {secret}"),
+            "/settings/webhooks",
+            &state.config,
+        ),
+        Err(error) => {
+            tracing::error!(error = %error, "web webhook create failed");
+            redirect_error(
+                "Could not add the webhook. Try again.",
+                "/settings/webhooks",
+                &state.config,
+            )
+        }
     }
 }
 
@@ -815,10 +1541,10 @@ async fn form_team_invite(
     let result = sqlx::query(
         "INSERT INTO users (id, tenant_id, email, name, password_hash, role, status,
                             email_verified, mfa_enabled, metadata, created_at, updated_at)
-         VALUES ($1, $2::uuid, $3, '', $4, $5, 'invited', false, false, '{}'::jsonb, NOW(), NOW())",
+         VALUES ($1, $2, $3, '', $4, $5, 'invited', false, false, '{}'::jsonb, NOW(), NOW())",
     )
-    .bind(Uuid::new_v4())
-    .bind(user.tenant_id.to_string())
+    .bind(apexmail_lib::id::generate_id("", 26))
+    .bind(user.tenant_id.as_str())
     .bind(&email)
     .bind("!invited-pending-activation") // cannot authenticate until they set a password
     .bind(role)
@@ -885,10 +1611,10 @@ async fn form_contact_create(
     }
     let result = sqlx::query(
         "INSERT INTO contacts (id, tenant_id, email, name, status, created_at, updated_at)
-         VALUES ($1, $2::uuid, $3, $4, 'subscribed', NOW(), NOW())",
+         VALUES ($1, $2, $3, $4, 'subscribed', NOW(), NOW())",
     )
-    .bind(Uuid::new_v4())
-    .bind(user.tenant_id.to_string())
+    .bind(apexmail_lib::id::generate_id("", 26))
+    .bind(user.tenant_id.as_str())
     .bind(&email)
     .bind(if name.is_empty() { None } else { Some(name) })
     .execute(&state.db)
@@ -913,10 +1639,10 @@ async fn form_list_create(
     }
     let result = sqlx::query(
         "INSERT INTO lists (id, tenant_id, name, created_at, updated_at)
-         VALUES ($1, $2::uuid, $3, NOW(), NOW())",
+         VALUES ($1, $2, $3, NOW(), NOW())",
     )
-    .bind(Uuid::new_v4())
-    .bind(user.tenant_id.to_string())
+    .bind(apexmail_lib::id::generate_id("", 26))
+    .bind(user.tenant_id.as_str())
     .bind(&name)
     .execute(&state.db)
     .await;
@@ -941,11 +1667,11 @@ async fn form_list_update(
     }
     let result = sqlx::query(
         "UPDATE lists SET name = $1, updated_at = NOW()
-         WHERE id = $2::uuid AND tenant_id = $3::uuid",
+         WHERE id = $2 AND tenant_id = $3",
     )
     .bind(&name)
     .bind(&id)
-    .bind(user.tenant_id.to_string())
+    .bind(user.tenant_id.as_str())
     .execute(&state.db)
     .await;
     match result {
@@ -974,10 +1700,10 @@ async fn form_domain_create(
     }
     let result = sqlx::query(
         "INSERT INTO domains (id, tenant_id, name, status, created_at, updated_at)
-         VALUES ($1, $2::uuid, $3, 'pending', NOW(), NOW())",
+         VALUES ($1, $2, $3, 'pending', NOW(), NOW())",
     )
-    .bind(Uuid::new_v4())
-    .bind(user.tenant_id.to_string())
+    .bind(apexmail_lib::id::generate_id("", 26))
+    .bind(user.tenant_id.as_str())
     .bind(&name)
     .execute(&state.db)
     .await;
@@ -1004,12 +1730,15 @@ async fn form_template_create(
     if html_body.trim().is_empty() {
         return redirect_error("Add some HTML content.", "/templates/new", &state.config);
     }
+    // templates.id is VARCHAR(26) — a UUID's 36-char hyphenated form
+    // overflows the column; generate a 26-char text id like templates.rs.
+    let id = apexmail_lib::id::generate_id("", 26);
     let result = sqlx::query(
         "INSERT INTO templates (id, tenant_id, name, subject, html_body, created_at, updated_at)
-         VALUES ($1, $2::uuid, $3, $4, $5, NOW(), NOW())",
+         VALUES ($1, $2, $3, $4, $5, NOW(), NOW())",
     )
-    .bind(Uuid::new_v4())
-    .bind(user.tenant_id.to_string())
+    .bind(&id)
+    .bind(user.tenant_id.as_str())
     .bind(&name)
     .bind(if subject.is_empty() { None } else { Some(subject) })
     .bind(&html_body)
@@ -1035,27 +1764,33 @@ async fn form_campaign_create(
     if name.is_empty() || subject.is_empty() {
         return redirect_error("Campaign name and subject are required.", "/campaigns/new", &state.config);
     }
-    // Empty datetime-local → draft; a value → scheduled.
-    let (status, scheduled): (&str, Option<String>) = if scheduled_at.trim().is_empty() {
-        ("draft", None)
+    // The campaigns status CHECK (live schema) allows draft/sending/
+    // paused/stopped/completed/failed — there is no 'scheduled' status, so
+    // a picked time is stored in scheduled_at on a draft row.
+    let scheduled: Option<String> = if scheduled_at.trim().is_empty() {
+        None
     } else {
-        ("scheduled", Some(scheduled_at))
+        Some(scheduled_at)
     };
     let result = sqlx::query(
         "INSERT INTO campaigns (id, tenant_id, name, subject, status, scheduled_at, created_at, updated_at)
-         VALUES ($1, $2::uuid, $3, $4, $5, $6::timestamptz, NOW(), NOW())",
+         VALUES ($1, $2, $3, $4, 'draft', $5::timestamptz, NOW(), NOW())",
     )
-    .bind(Uuid::new_v4())
-    .bind(user.tenant_id.to_string())
+    .bind(apexmail_lib::id::generate_id("", 26))
+    .bind(user.tenant_id.as_str())
     .bind(&name)
     .bind(&subject)
-    .bind(status)
-    .bind(scheduled)
+    .bind(scheduled.clone())
     .execute(&state.db)
     .await;
+    let scheduled_saved = scheduled.is_some();
     match result {
         Ok(_) => redirect_success(
-            if status == "scheduled" { "Campaign scheduled." } else { "Campaign draft saved." },
+            if scheduled_saved {
+                "Campaign draft saved with its schedule time."
+            } else {
+                "Campaign draft saved."
+            },
             "/campaigns",
             &state.config,
         ),
@@ -1068,18 +1803,81 @@ async fn form_campaign_create(
 /// client-side preview.
 async fn form_campaign_preview(
     State(state): State<AppState>,
-    axum::Extension(_user): axum::Extension<AuthUser>,
+    axum::Extension(user): axum::Extension<AuthUser>,
     Form(form): Form<HashMap<String, String>>,
 ) -> Response {
-    let html_body = field(&form, "html_body");
+    // CSRF is enforced like every other authenticated POST — a bad token
+    // bounces back to the editor with a flash instead of rendering the
+    // (attacker-supplied) body.
+    let back = safe_return_to(&form, "/campaigns");
     if let Err(message) = check_csrf(&form, &state.config) {
-        let _ = message;
+        return redirect_error(message, &back, &state.config);
     }
+    let _ = user;
+    let html_body = field(&form, "html_body");
     let page = ui_foundation::leptos_views::web_campaign_preview_page(&html_body);
     Html(page).into_response()
 }
 
 use axum::response::Html;
+
+/// POST /web/campaigns/update — the campaign editor's save action. Updates
+/// the existing row in place (scoped to the caller's tenant); editing no
+/// longer duplicates the campaign.
+async fn form_campaign_update(
+    State(state): State<AppState>,
+    axum::Extension(user): axum::Extension<AuthUser>,
+    Form(form): Form<HashMap<String, String>>,
+) -> Response {
+    if let Err(message) = check_csrf(&form, &state.config) {
+        return redirect_error(message, "/campaigns", &state.config);
+    }
+    let id = field(&form, "id");
+    let name = field_truncated(&form, "name", 120);
+    let subject = field_truncated(&form, "subject", 200);
+    let scheduled_at = field(&form, "scheduled_at");
+    let back = if id.is_empty() {
+        "/campaigns".to_string()
+    } else {
+        format!("/campaigns/{}/edit", urlencode(&id))
+    };
+    if id.is_empty() {
+        return redirect_error("Missing campaign id.", "/campaigns", &state.config);
+    }
+    if name.is_empty() || subject.is_empty() {
+        return redirect_error("Campaign name and subject are required.", &back, &state.config);
+    }
+    let scheduled: Option<String> = if scheduled_at.trim().is_empty() {
+        None
+    } else {
+        Some(scheduled_at)
+    };
+    let result = sqlx::query(
+        "UPDATE campaigns SET name = $1, subject = $2, scheduled_at = $3::timestamptz, updated_at = NOW()
+         WHERE id = $4 AND tenant_id = $5",
+    )
+    .bind(&name)
+    .bind(&subject)
+    .bind(scheduled)
+    .bind(&id)
+    .bind(user.tenant_id.as_str())
+    .execute(&state.db)
+    .await;
+    match result {
+        Ok(result) if result.rows_affected() == 1 => {
+            redirect_success("Campaign saved.", "/campaigns", &state.config)
+        }
+        Ok(_) => redirect_error(
+            "That campaign could not be found in this workspace.",
+            "/campaigns",
+            &state.config,
+        ),
+        Err(error) => {
+            tracing::error!(error = %error, "web campaign update failed");
+            redirect_error("Could not save the campaign. Try again.", &back, &state.config)
+        }
+    }
+}
 
 async fn form_placement_create(
     State(state): State<AppState>,
@@ -1100,11 +1898,11 @@ async fn form_placement_create(
         return redirect_error("Enter a valid from email.", "/inbox-placement/new", &state.config);
     }
     let result = sqlx::query(
-        "INSERT INTO placement_tests (id, tenant_id, name, from_email, subject, html_body, status, created_at)
-         VALUES ($1, $2::uuid, $3, $4, $5, $6, 'pending', NOW())",
+        "INSERT INTO placement_tests (id, tenant_id, name, from_email, subject, body_html, status, created_at)
+         VALUES ($1, $2, $3, $4, $5, $6, 'pending', NOW())",
     )
     .bind(Uuid::new_v4())
-    .bind(user.tenant_id.to_string())
+    .bind(user.tenant_id.as_str())
     .bind(&name)
     .bind(&from_email)
     .bind(&subject)
@@ -1126,12 +1924,14 @@ async fn form_dedicated_ip_request(
         return redirect_error(message, "/settings/dedicated-ips", &state.config);
     }
     let region = field_truncated(&form, "region", 40);
+    // dedicated_ips.ip_address is nullable: the request row is recorded
+    // with status 'pending' and the Hetzner provisioner fills the address.
     let result = sqlx::query(
-        "INSERT INTO dedicated_ips (id, tenant_id, region, status, created_at, updated_at)
-         VALUES ($1, $2::uuid, $3, 'pending', NOW(), NOW())",
+        "INSERT INTO dedicated_ips (id, tenant_id, region, status, ip_address, created_at, updated_at)
+         VALUES ($1, $2, $3, 'pending', NULL, NOW(), NOW())",
     )
-    .bind(Uuid::new_v4())
-    .bind(user.tenant_id.to_string())
+    .bind(apexmail_lib::id::generate_id("", 26))
+    .bind(user.tenant_id.as_str())
     .bind(if region.is_empty() { "eu-central" } else { &region })
     .execute(&state.db)
     .await;
@@ -1165,24 +1965,24 @@ async fn form_confirm_destructive(
             &state.config,
         );
     }
-    let tenant = user.tenant_id.to_string();
+    let tenant = user.tenant_id.clone();
     let result: Result<u64, sqlx::Error> = match intent.as_str() {
         "delete-campaign" => sqlx::query(
-            "DELETE FROM campaigns WHERE id = $1::uuid AND tenant_id = $2::uuid",
+            "DELETE FROM campaigns WHERE id = $1 AND tenant_id = $2",
         )
         .bind(&id)
         .bind(&tenant)
         .execute(&state.db)
         .await
         .map(|r| r.rows_affected()),
-        "delete-list" => sqlx::query("DELETE FROM lists WHERE id = $1::uuid AND tenant_id = $2::uuid")
+        "delete-list" => sqlx::query("DELETE FROM lists WHERE id = $1 AND tenant_id = $2")
             .bind(&id)
             .bind(&tenant)
             .execute(&state.db)
             .await
             .map(|r| r.rows_affected()),
         "delete-domain" => sqlx::query(
-            "DELETE FROM domains WHERE id = $1::uuid AND tenant_id = $2::uuid",
+            "DELETE FROM domains WHERE id = $1 AND tenant_id = $2",
         )
         .bind(&id)
         .bind(&tenant)
@@ -1205,7 +2005,7 @@ async fn form_campaigns_delete_bulk(
     axum::Extension(user): axum::Extension<AuthUser>,
     Form(form): Form<HashMap<String, String>>,
 ) -> Response {
-    bulk_delete(state, user, form, "campaigns", "DELETE FROM campaigns WHERE id = ANY($1::uuid[]) AND tenant_id = $2::uuid").await
+    bulk_delete(state, user, form, "campaigns", "DELETE FROM campaigns WHERE id = ANY($1) AND tenant_id = $2").await
 }
 
 async fn form_contacts_delete_bulk(
@@ -1213,7 +2013,7 @@ async fn form_contacts_delete_bulk(
     axum::Extension(user): axum::Extension<AuthUser>,
     Form(form): Form<HashMap<String, String>>,
 ) -> Response {
-    bulk_delete(state, user, form, "contacts", "UPDATE contacts SET status = 'deleted', updated_at = NOW() WHERE id = ANY($1::uuid[]) AND tenant_id = $2::uuid").await
+    bulk_delete(state, user, form, "contacts", "UPDATE contacts SET status = 'deleted', updated_at = NOW() WHERE id = ANY($1) AND tenant_id = $2").await
 }
 
 async fn bulk_delete(
@@ -1243,7 +2043,7 @@ async fn bulk_delete(
     }
     let result = sqlx::query(sql)
         .bind(ids)
-        .bind(user.tenant_id.to_string())
+        .bind(user.tenant_id.as_str())
         .execute(&state.db)
         .await;
     match result {
@@ -1263,9 +2063,9 @@ async fn form_contacts_export(
     axum::Extension(user): axum::Extension<AuthUser>,
 ) -> Response {
     let rows = sqlx::query_as::<_, (String, Option<String>, String)>(
-        "SELECT email, name, status FROM contacts WHERE tenant_id = $1::uuid AND status != 'deleted' ORDER BY created_at DESC LIMIT 10000",
+        "SELECT email, name, status FROM contacts WHERE tenant_id = $1 AND status != 'deleted' ORDER BY created_at DESC LIMIT 10000",
     )
-    .bind(user.tenant_id.to_string())
+    .bind(user.tenant_id.as_str())
     .fetch_all(&state.db)
     .await;
     let mut csv = String::from("email,name,status\n");
@@ -1286,23 +2086,27 @@ async fn form_audit_export(
     State(state): State<AppState>,
     axum::Extension(user): axum::Extension<AuthUser>,
 ) -> Response {
-    // System-tenant gate (mirrors the /v1/admin stack).
-    if user.tenant_id.to_string() != "system" && !user.scopes.iter().any(|s| s == "*") {
+    // Defense in depth: the router stack already gates this route behind
+    // require_system_tenant_middleware; re-verify here (slug-aware).
+    if !is_system_tenant(&state, &user.tenant_id).await {
         return redirect_error("Operator access required.", "/audit", &state.config);
     }
-    let rows = sqlx::query_as::<_, (chrono::DateTime<Utc>, Option<String>, Option<String>)>(
-        "SELECT created_at, action, status FROM audit_logs ORDER BY created_at DESC LIMIT 10000",
+    // Live audit_logs columns: timestamp/created_at, action,
+    // resource_type, user_id (there is no outcome/status/resource).
+    let rows = sqlx::query_as::<_, (Option<chrono::DateTime<Utc>>, Option<String>, Option<String>, Option<String>)>(
+        "SELECT created_at, action, resource_type, user_id FROM audit_logs ORDER BY created_at DESC NULLS LAST LIMIT 10000",
     )
     .fetch_all(&state.db)
     .await;
-    let mut csv = String::from("timestamp,action,status\n");
+    let mut csv = String::from("timestamp,action,resource_type,actor\n");
     if let Ok(rows) = rows {
-        for (created_at, action, status) in rows {
+        for (created_at, action, resource_type, user_id) in rows {
             csv.push_str(&format!(
-                "{},{},{}\n",
-                created_at.to_rfc3339(),
+                "{},{},{},{}\n",
+                created_at.map(|ts| ts.to_rfc3339()).unwrap_or_default(),
                 csv_escape(action.as_deref().unwrap_or("")),
-                csv_escape(status.as_deref().unwrap_or("")),
+                csv_escape(resource_type.as_deref().unwrap_or("")),
+                csv_escape(user_id.as_deref().unwrap_or("")),
             ));
         }
     }
@@ -1347,7 +2151,7 @@ async fn form_admin_tenant_create(
     if name.is_empty() || domain.split('.').count() < 2 {
         return redirect_error("Tenant name and a primary domain are required.", "/tenants/new", &state.config);
     }
-    let tenant_id = Uuid::new_v4();
+    let tenant_id = apexmail_lib::id::generate_id("", 26);
     let slug: String = domain
         .chars()
         .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
@@ -1357,7 +2161,7 @@ async fn form_admin_tenant_create(
         "INSERT INTO tenants (id, name, slug, plan, status, settings, metadata, created_at, updated_at)
          VALUES ($1, $2, $3, 'free', 'pending', '{}'::jsonb, $4, NOW(), NOW())",
     )
-    .bind(tenant_id)
+    .bind(&tenant_id)
     .bind(&name)
     .bind(&slug)
     .bind(json!({"primary_domain": domain, "created_by": user.user_id.clone().unwrap_or_default()}))
@@ -1393,10 +2197,10 @@ async fn form_admin_operator_create(
     let result = sqlx::query(
         "INSERT INTO users (id, tenant_id, email, name, password_hash, role, status,
                             email_verified, mfa_enabled, metadata, created_at, updated_at)
-         VALUES ($1, $2::uuid, $3, $4, '!invited-pending-activation', 'admin', 'invited', false, false,
+         VALUES ($1, $2, $3, $4, '!invited-pending-activation', 'admin', 'invited', false, false,
                  $5::jsonb, NOW(), NOW())",
     )
-    .bind(Uuid::new_v4())
+    .bind(apexmail_lib::id::generate_id("", 26))
     .bind(system_tenant)
     .bind(&email)
     .bind(if name.is_empty() { None } else { Some(name) })
@@ -1429,7 +2233,11 @@ async fn form_sales_discovery(
         return redirect_error("Add at least one comma-separated source.", "/sales", &state.config);
     }
     let _categories = field(&form, "categories");
-    redirect_success("Discovery run queued for the selected sources.", "/sales", &state.config)
+    redirect_success(
+        "Discovery runs are launched from the API console (POST /v1/admin/leads/discovery/run).",
+        "/sales",
+        &state.config,
+    )
 }
 
 async fn form_sales_outreach(
@@ -1447,12 +2255,16 @@ async fn form_sales_outreach(
     if lead_ids.is_empty() {
         return redirect_error("Pick at least one lead in the queue first.", "/sales", &state.config);
     }
-    redirect_success("Outreach launch queued for the selected leads.", "/sales", &state.config)
+    redirect_success(
+        "Outreach launches from the API console (POST /v1/admin/autopilot/outreach).",
+        "/sales",
+        &state.config,
+    )
 }
 
 async fn form_sales_leads_update(
     State(state): State<AppState>,
-    axum::Extension(_user): axum::Extension<AuthUser>,
+    axum::Extension(user): axum::Extension<AuthUser>,
     Form(form): Form<HashMap<String, String>>,
 ) -> Response {
     if let Err(message) = check_csrf(&form, &state.config) {
@@ -1471,10 +2283,11 @@ async fn form_sales_leads_update(
         return redirect_error("Choose a valid stage.", "/sales", &state.config);
     }
     let result = sqlx::query(
-        "UPDATE sales_leads SET status = $1, updated_at = NOW() WHERE id = ANY($2::text[])",
+        "UPDATE sales_leads SET status = $1, updated_at = NOW() WHERE id = ANY($2) AND tenant_id = $3",
     )
     .bind(&status)
     .bind(lead_ids)
+    .bind(user.tenant_id.as_str())
     .execute(&state.db)
     .await;
     match result {
@@ -1483,7 +2296,16 @@ async fn form_sales_leads_update(
             "/sales",
             &state.config,
         ),
-        Err(_) => redirect_success("Stage change queued.", "/sales", &state.config),
+        Err(error) => {
+            // Honest failure: a database error is an error, never a
+            // success flash.
+            tracing::error!(error = %error, "web sales leads update failed");
+            redirect_error(
+                "The stage change failed. Refresh and retry.",
+                "/sales",
+                &state.config,
+            )
+        }
     }
 }
 
@@ -1587,6 +2409,52 @@ mod tests {
         assert_eq!(csv_escape("plain"), "plain");
         assert_eq!(csv_escape("a,b"), "\"a,b\"");
         assert_eq!(csv_escape("say \"hi\""), "\"say \"\"hi\"\"\"");
+    }
+
+    #[test]
+    fn mfa_setup_cookie_roundtrips_and_binds_the_user() {
+        let config = test_config();
+        let secret = "JBSWY3DPEHPK3PXP";
+        let otpauth = "otpauth://totp/ApexMail:ops%40apexmail.ee?secret=JBSWY3DPEHPK3PXP";
+        let signature = sign_mfa_setup(&config, "user_1", secret);
+        let value = encode_mfa_setup_value(secret, otpauth, &signature);
+
+        let headers = {
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                header::COOKIE,
+                format!("{MFA_SETUP_COOKIE}={value}").parse().unwrap(),
+            );
+            headers
+        };
+
+        let setup = decode_mfa_setup_cookie(&headers, &config, "user_1")
+            .expect("valid cookie decodes for its user");
+        assert_eq!(setup.secret, secret);
+        assert_eq!(setup.otpauth, otpauth);
+
+        // A different user cannot use the cookie.
+        assert!(decode_mfa_setup_cookie(&headers, &config, "user_2").is_none());
+        // Tampering with the payload breaks the signature.
+        let tampered = encode_mfa_setup_value("OTHERSECRET00", otpauth, &signature);
+        let mut bad = HeaderMap::new();
+        bad.insert(
+            header::COOKIE,
+            format!("{MFA_SETUP_COOKIE}={tampered}").parse().unwrap(),
+        );
+        assert!(decode_mfa_setup_cookie(&bad, &config, "user_1").is_none());
+        // Absent cookie → None.
+        assert!(decode_mfa_setup_cookie(&HeaderMap::new(), &config, "user_1").is_none());
+    }
+
+    #[test]
+    fn operator_role_check_is_privilege_aware() {
+        assert!(is_operator_role("admin"));
+        assert!(is_operator_role("owner"));
+        // Customer roles never count as operators.
+        assert!(!is_operator_role("member"));
+        assert!(!is_operator_role("developer"));
+        assert!(!is_operator_role(""));
     }
 
     #[test]

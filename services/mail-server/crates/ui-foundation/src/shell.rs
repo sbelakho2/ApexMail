@@ -214,7 +214,7 @@ impl<'a> ImpersonationBanner<'a> {
         let safe_operator = html_escape(self.operator_name);
         let safe_time = html_escape(self.time_remaining);
         format!(
-            "<div class=\"fixed top-0 left-0 right-0 z-[100] bg-primary text-white border-b border-brand-700\" role=\"alert\" aria-live=\"polite\"><div class=\"max-w-7xl mx-auto px-6 py-2\"><div class=\"flex items-center justify-between\"><div class=\"flex items-center gap-6\"><div class=\"flex items-center gap-2 bg-white/10 px-2 py-0.5 rounded-full\"><span class=\"text-[10px] font-semibold uppercase tracking-[0.1em]\">Impersonation Active</span></div><div class=\"flex items-center gap-2 text-[11px] font-semibold tracking-tight\"><span class=\"opacity-70\">Tenant:</span><span class=\"bg-white/10 px-1.5 py-0.5 rounded-md\">{}</span></div><div class=\"hidden md:flex items-center gap-2 text-[11px] font-semibold tracking-tight\"><span class=\"opacity-70\">Operator:</span><span>{}</span></div></div><div class=\"flex items-center gap-6\">{}<div class=\"flex items-center gap-2 text-[11px] font-semibold tracking-tight\"><span class=\"opacity-70\">Expires:</span><span class=\"font-mono bg-white/20 px-1.5 py-0.5 rounded-md\">{}</span></div><form method=\"POST\" action=\"/web/auth/impersonate/end\" data-api-form data-redirect=\"/cp\" class=\"inline\"><button type=\"submit\" class=\"px-3 py-1 bg-white text-primary rounded-md text-[11px] font-semibold hover:bg-surface-50 transition-colors\">{}</button></form></div></div></div></div>",
+            "<div class=\"fixed top-0 left-0 right-0 z-[100] bg-primary text-white border-b border-brand-700\" role=\"alert\" aria-live=\"polite\"><div class=\"max-w-7xl mx-auto px-6 py-2\"><div class=\"flex items-center justify-between\"><div class=\"flex items-center gap-6\"><div class=\"flex items-center gap-2 bg-white/10 px-2 py-0.5 rounded-full\"><span class=\"text-[10px] font-semibold uppercase tracking-[0.1em]\">Impersonation Active</span></div><div class=\"flex items-center gap-2 text-[11px] font-semibold tracking-tight\"><span class=\"opacity-70\">Tenant:</span><span class=\"bg-white/10 px-1.5 py-0.5 rounded-md\">{}</span></div><div class=\"hidden md:flex items-center gap-2 text-[11px] font-semibold tracking-tight\"><span class=\"opacity-70\">Operator:</span><span>{}</span></div></div><div class=\"flex items-center gap-6\">{}<div class=\"flex items-center gap-2 text-[11px] font-semibold tracking-tight\"><span class=\"opacity-70\">Expires:</span><span class=\"font-mono bg-white/20 px-1.5 py-0.5 rounded-md\">{}</span></div><form method=\"POST\" action=\"/web/auth/impersonate/end\" class=\"inline\"><button type=\"submit\" class=\"px-3 py-1 bg-white text-primary rounded-md text-[11px] font-semibold hover:bg-surface-50 transition-colors\">{}</button></form></div></div></div></div>",
             safe_tenant,
             safe_operator,
             error,
@@ -650,7 +650,10 @@ mod tests {
         .render_html();
         assert!(banner.contains("action=\"/web/auth/impersonate/end\""));
         assert!(banner.contains("method=\"POST\""));
-        assert!(banner.contains("data-api-form"));
+        // Native form submission only — the JS-era data-api-form/data-redirect
+        // bridge attributes are gone (the handler is a PRG form POST).
+        assert!(!banner.contains("data-api-form"));
+        assert!(!banner.contains("data-redirect"));
         assert!(banner.contains("Terminate"));
     }
 

@@ -977,8 +977,11 @@ impl<'a> AsyncState<'a> {
                 icon_markup: Some("<span class=\"h-8 w-8 text-muted-foreground/60\">!</span>"),
                 title,
                 description: Some(description),
+                // The Retry control is a real link, not a dead button: an
+                // empty-href anchor reloads the current page natively (the
+                // console has no JavaScript to drive a button).
                 action_label: *retry_label,
-                action_href: None,
+                action_href: retry_label.map(|_| ""),
             }
             .render_html(),
             Self::Empty {

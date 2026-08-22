@@ -463,7 +463,7 @@ mod tests {
         let html = leptos_views::control_plane_login_page("");
         assert!(html.contains("id=\"login-email\""));
         assert!(html.contains("id=\"login-password\""));
-        assert!(html.contains("id=\"login-mfa\""));
+        assert!(!html.contains("id=\"login-mfa\""));
     }
 
     // ─── Marketing parity tests ─────────────────────────────

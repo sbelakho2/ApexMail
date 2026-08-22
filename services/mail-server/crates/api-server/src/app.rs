@@ -385,7 +385,7 @@ pub fn build_app(state: AppState) -> Router {
         .nest("/v1/kcaptcha", routes::kiwicaptcha::router())
         // Zero-JS console form routes (PRG twins). Public auth forms ride
         // the same rate-limited stack as the JSON auth surface.
-        .merge(routes::web::public_router())
+        .merge(routes::web::public_router(state.clone()))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             rate_limiter::public_rate_limit_middleware,
@@ -548,6 +548,10 @@ pub fn build_app(state: AppState) -> Router {
             routes::admin::system_sender::router(),
         )
         .nest("/v1/admin/vat", routes::admin::vat::router())
+        // Zero-JS control-plane form routes (/web/admin/*) ride the SAME
+        // system-tenant gate as the JSON admin surface: a customer session
+        // (any non-system tenant) is rejected before the handler runs.
+        .merge(routes::web::admin_router(state.clone()))
         .layer(axum::middleware::from_fn(
             auth::require_system_tenant_middleware,
         ));
@@ -593,8 +597,8 @@ pub fn build_app(state: AppState) -> Router {
         .nest("/v1/dedicated-ips", routes::dedicated_ips::router())
         .nest("/v1/account", routes::account::router())
         .nest("/v1/stream", routes::stream_tokens::router())
-        // Zero-JS console form routes that require a session.
-        .merge(routes::web::authenticated_router())
+        // ── Zero-JS console form routes that require a session ──────
+        .merge(routes::web::authenticated_router(state.clone()))
         // Migrated auth routes (require session/auth)
         .nest("/v1/auth/impersonate", routes::impersonate::router())
         .nest("/v1/auth/telemetry", routes::telemetry::router())
@@ -1029,6 +1033,125 @@ fn render_ui_response(
     Some(response)
 }
 
+/// Data-aware render: the authenticated browser surfaces load their page
+/// data (rows/KPIs) from the database before rendering, so list pages show
+/// real records instead of static demo markup. Anonymous requests (and the
+/// marketing surface) render exactly as before.
+async fn render_ui_response_with_state(
+    state: &AppState,
+    headers: &HeaderMap,
+    uri: &Uri,
+    method: &Method,
+) -> Option<Response> {
+    if !matches!(method, &Method::GET | &Method::HEAD) {
+        return None;
+    }
+
+    if uri.path() == "/v1" || uri.path().starts_with("/v1/") {
+        return None;
+    }
+
+    let host = headers.get(HOST).and_then(|value| value.to_str().ok());
+    let surface = state.config.ui_surface_for_host(host)?;
+    let csrf_secret = Some(state.config.csrf_secret.as_str());
+    let flash = headers
+        .get(header::COOKIE)
+        .and_then(|value| value.to_str().ok())
+        .map(|cookies| routes::web::decode_flash_from_cookie_header(cookies, &state.config.csrf_secret))
+        .unwrap_or_default();
+
+    // Control-plane pages (other than the login) are operator-only: a
+    // customer session is bounced to the CP login, mirroring the
+    // /web/admin/* form gate and require_system_tenant on the JSON side.
+    if surface == "control-plane" && !is_cp_public_path(uri.path()) {
+        // Fail closed: no resolvable identity ⇒ login redirect, never the
+        // static CP page.
+        let auth_user = match browser_auth_user(state, headers, uri, method).await {
+            Some(user) => user,
+            None => return Some(login_redirect_response(uri)),
+        };
+        if !routes::web::is_system_tenant(&state, &auth_user.tenant_id).await {
+            tracing::warn!(
+                tenant_id = %auth_user.tenant_id,
+                path = %uri.path(),
+                "non-system session bounced from the control plane"
+            );
+            return Some(login_redirect_response(uri));
+        }
+    }
+
+    let route_data = match surface {
+        "web" | "control-plane" => {
+            let auth_user = browser_auth_user(state, headers, uri, method).await;
+            let mut data = routes::web::load_page_data(
+                state,
+                surface,
+                uri.path(),
+                uri.query(),
+                auth_user.as_ref(),
+            )
+            .await;
+            // Pending MFA setup rides along on the CP security page via its
+            // signed cookie (set by POST /web/auth/mfa/setup).
+            if surface == "control-plane"
+                && matches!(uri.path(), "/cp/security" | "/settings/security")
+            {
+                if let Some(user_id) = auth_user.as_ref().and_then(|user| user.user_id.clone()) {
+                    data.mfa_setup =
+                        routes::web::decode_mfa_setup_cookie(headers, &state.config, &user_id);
+                }
+            }
+            Some(data)
+        }
+        _ => None,
+    };
+
+    let html = ui_router::render_route_with_data(
+        surface,
+        uri.path(),
+        uri.query(),
+        csrf_secret,
+        &flash,
+        route_data.as_ref(),
+    )?;
+    let mut response = browser_html_response(html);
+    if !flash.is_empty() {
+        if let Ok(value) =
+            ui_foundation::flash::flash_clear_cookie(state.config.environment.is_production())
+                .parse()
+        {
+            response.headers_mut().append(header::SET_COOKIE, value);
+        }
+    }
+    Some(response)
+}
+
+/// CP paths reachable without a system-tenant session.
+fn is_cp_public_path(path: &str) -> bool {
+    path == "/login" || path == "/login/" || path == "/not-found"
+}
+
+/// Resolve the browser request's `AuthUser` (session cookie/API key), if
+/// authenticated — the data loader needs the tenant id and user id.
+async fn browser_auth_user(
+    state: &AppState,
+    headers: &HeaderMap,
+    uri: &Uri,
+    method: &Method,
+) -> Option<auth::AuthUser> {
+    let mut request_builder = axum::http::Request::builder()
+        .method(method.clone())
+        .uri(uri.clone());
+    for (name, value) in headers {
+        request_builder = request_builder.header(name, value);
+    }
+    let request = request_builder.body(axum::body::Body::empty()).ok()?;
+    let (mut parts, _) = request.into_parts();
+    auth::AuthUser::from_request_parts(&mut parts, state)
+        .await
+        .ok()
+}
+
 fn ui_route_requires_auth(surface: &str, path: &str) -> bool {
     if let Some(auth_required) = ui_foundation::routing::auth_required(surface, path) {
         return auth_required;
@@ -1179,6 +1302,14 @@ async fn fallback_handler(
         return response;
     }
 
+    // Data-aware render first (authenticated pages load real rows); the
+    // sync, database-free render remains the fallback.
+    if let Some(response) =
+        render_ui_response_with_state(&state, request.headers(), request.uri(), request.method())
+            .await
+    {
+        return response;
+    }
     if let Some(response) = render_ui_response(
         &state.config,
         request.headers(),
@@ -1296,6 +1427,43 @@ mod tests {
     }
 
     async fn test_app_with_ddos(ddos_protector: Arc<DdosProtector>) -> Router {
+        let state = test_state().await;
+        build_app(AppStateInner::with_ddos_protector(
+            state.db.clone(),
+            apexmail_db::pool::PoolPair {
+                rw: state.db.clone(),
+                ro: state.db.clone(),
+            },
+            state.redis.clone(),
+            test_config(),
+            reqwest::Client::new(),
+            (*state.ses_provider).clone(),
+            None,
+            ddos_protector,
+            None, // grader_state
+            None, // placement_state
+            ResilientClient::new_from_config(&test_config()),
+        ))
+    }
+
+    /// Minimal AppState for calling state-driven helpers (the SSR data
+    /// loader) directly in tests.
+    struct TestState {
+        db: sqlx::PgPool,
+        redis: deadpool_redis::Pool,
+        ses_provider: Arc<SesIpProvider>,
+        config: Config,
+    }
+
+    impl std::ops::Deref for TestState {
+        type Target = AppStateInner;
+
+        fn deref(&self) -> &Self::Target {
+            unreachable!("TestState is a fixture holder, not an AppState")
+        }
+    }
+
+    async fn test_state() -> TestState {
         install_test_metrics_recorder();
 
         let database_url = std::env::var("TEST_DATABASE_URL")
@@ -1315,31 +1483,59 @@ mod tests {
             .region(aws_sdk_sesv2::config::Region::new("us-east-1"))
             .load()
             .await;
-        let ses_provider = SesIpProvider::new(
+        let ses_provider = Arc::new(SesIpProvider::new(
             aws_sdk_sesv2::Client::new(&aws_config),
             db.clone(),
             "apexmail".into(),
             "us-east-1".into(),
-        );
+        ));
 
-        let pools = apexmail_db::pool::PoolPair {
-            rw: db.clone(),
-            ro: db.clone(),
-        };
-
-        build_app(AppStateInner::with_ddos_protector(
+        TestState {
             db,
-            pools,
             redis,
+            ses_provider,
+            config: test_config(),
+        }
+    }
+
+    /// DB presence probe for conditional tests: the suite must stay green
+    /// on machines without a local Postgres, while still exercising the
+    /// SQL paths where one exists (TEST_DATABASE_URL or the dev default).
+    async fn test_db_reachable(db: &sqlx::PgPool) -> bool {
+        matches!(
+            tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                sqlx::query_scalar::<_, i32>("SELECT 1").fetch_one(db),
+            )
+            .await,
+            Ok(Ok(1))
+        )
+    }
+
+    /// A real AppState (the same shape test_app builds) for calling the
+    /// SSR data loader directly.
+    async fn test_state_app() -> AppState {
+        let fixture = test_state().await;
+        AppStateInner::with_ddos_protector(
+            fixture.db.clone(),
+            apexmail_db::pool::PoolPair {
+                rw: fixture.db.clone(),
+                ro: fixture.db.clone(),
+            },
+            fixture.redis.clone(),
             test_config(),
             reqwest::Client::new(),
-            ses_provider,
+            (*fixture.ses_provider).clone(),
             None,
-            ddos_protector,
-            None, // grader_state
-            None, // placement_state
+            Arc::new(
+                DdosProtector::new(ProtectorConfig::default())
+                    .await
+                    .expect("failed to create default ddos protector"),
+            ),
+            None,
+            None,
             ResilientClient::new_from_config(&test_config()),
-        ))
+        )
     }
 
     #[test]
@@ -2391,6 +2587,528 @@ mod tests {
             StatusCode::FORBIDDEN,
             "/v1/auth/change-password should reject cookie-authenticated writes without CSRF"
         );
+    }
+
+    #[tokio::test]
+    async fn web_admin_form_routes_reject_customer_sessions() {
+        // P0 security fix: /web/admin/* used to sit on the plain
+        // authenticated router — any customer session could create tenants
+        // and operators. The branch now rides require_system_tenant_middleware
+        // exactly like /v1/admin/*: a customer-tenant AuthUser (even with
+        // the wildcard scope every tenant admin holds) is forbidden.
+        let gated = Router::new()
+            .route(
+                "/web/admin/tenants",
+                post(|| async { "created" }),
+            )
+            .layer(axum::middleware::from_fn(
+                crate::middleware::auth::require_system_tenant_middleware,
+            ));
+
+        let mut request = Request::post("/web/admin/tenants")
+            .body(Body::empty())
+            .unwrap();
+        request.extensions_mut().insert(crate::middleware::auth::AuthUser {
+            tenant_id: "01HCUSTOMERTENANT0abcdefgh".into(),
+            user_id: Some("00000000-0000-0000-0000-000000000001".into()),
+            api_key_id: None,
+            session_id: None,
+            scopes: vec!["*".into()],
+        });
+        let response = gated.clone().oneshot(request).await.unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::FORBIDDEN,
+            "a customer session must be forbidden from /web/admin/*"
+        );
+
+        // System-tenant operators pass the gate.
+        let mut request = Request::post("/web/admin/tenants")
+            .body(Body::empty())
+            .unwrap();
+        request.extensions_mut().insert(crate::middleware::auth::AuthUser {
+            tenant_id: "system".into(),
+            user_id: None,
+            api_key_id: None,
+            session_id: None,
+            scopes: vec!["*".into()],
+        });
+        let response = gated.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn web_admin_form_routes_require_authentication() {
+        // The gated branch also runs after require_auth: unauthenticated
+        // (or garbage-session) posts never reach the handler.
+        let app = test_app().await;
+        for path in [
+            "/web/admin/tenants",
+            "/web/admin/operators",
+            "/web/admin/sales/leads/update",
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::post(path)
+                        .header("cookie", "am_session=not.a.jwt")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_ne!(
+                response.status(),
+                StatusCode::SEE_OTHER,
+                "{path} must be rejected by the auth stack, not PRG-handled"
+            );
+            assert!(
+                matches!(
+                    response.status(),
+                    StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN
+                ),
+                "{path} unauthenticated posts must be rejected by auth, got {}",
+                response.status()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn malformed_form_posts_get_friendly_redirects_not_plain_400() {
+        // The rejection middleware converts extractor 400s on POST /web/*
+        // into the console's PRG contract: 303 redirect (Referer or the
+        // dashboard fallback) + a signed friendly flash cookie. Anything
+        // else passes through untouched.
+        let state = test_state_app().await;
+        let app = Router::new()
+            .route(
+                "/web/auth/login",
+                post(|| async { StatusCode::BAD_REQUEST }),
+            )
+            .route(
+                "/web/campaigns",
+                post(|| async { StatusCode::BAD_REQUEST }),
+            )
+            .route("/v1/other", post(|| async { StatusCode::BAD_REQUEST }))
+            .route(
+                "/web/ok",
+                post(|| async { "handled" }),
+            )
+            .layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                routes::web::web_form_rejection_middleware_for_tests,
+            ));
+
+        // POST /web/* + 400 → 303 + flash, back to the Referer.
+        let response = app
+            .clone()
+            .oneshot(
+                Request::post("/web/auth/login")
+                    .header("referer", "http://app.apexmail.ee/login")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert_eq!(
+            response.headers().get(header::LOCATION).unwrap(),
+            "/login",
+            "the referer's path becomes the redirect target"
+        );
+        let set_cookie = response
+            .headers()
+            .get(header::SET_COOKIE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default();
+        assert!(set_cookie.contains("apexmail_flash="), "got: {set_cookie}");
+        let decoded = routes::web::decode_flash_from_cookie_header(
+            set_cookie,
+            &state.config.csrf_secret,
+        );
+        assert!(decoded.iter().any(|message| message
+            .text
+            .contains("The form could not be read")));
+
+        // No Referer → the dashboard fallback.
+        let response = app
+            .clone()
+            .oneshot(Request::post("/web/campaigns").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert_eq!(response.headers().get(header::LOCATION).unwrap(), "/dashboard");
+
+        // Non-/web paths and non-400 statuses are untouched.
+        let response = app
+            .clone()
+            .oneshot(Request::post("/v1/other").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let response = app
+            .clone()
+            .oneshot(Request::post("/web/ok").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn reset_password_validates_before_flashing_anything() {
+        // The handler used to be a no-op that flashed success. Validation
+        // failures now flash errors — without touching the database.
+        let app = test_app().await;
+        let csrf = test_csrf_token();
+
+        // Missing token → error, not success.
+        let body = format!(
+            "_csrf={csrf}&token=&email=owner%40apexmail.ee&password=Valid123!Password&confirmPassword=Valid123!Password"
+        );
+        let response = app
+            .clone()
+            .oneshot(
+                Request::post("/web/auth/reset-password")
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let decoded = flash_from_response(&response);
+        assert!(decoded.iter().any(|message| matches!(
+            message.kind,
+            ui_foundation::flash::FlashKind::Error
+        )));
+        assert!(!decoded.iter().any(|message| matches!(
+            message.kind,
+            ui_foundation::flash::FlashKind::Success
+        )));
+
+        // Mismatched passwords → error.
+        let body = format!(
+            "_csrf={csrf}&token=abc&email=owner%40apexmail.ee&password=Valid123!Password&confirmPassword=Different123!Pass"
+        );
+        let response = app
+            .clone()
+            .oneshot(
+                Request::post("/web/auth/reset-password")
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let decoded = flash_from_response(&response);
+        assert!(
+            decoded
+                .iter()
+                .any(|message| message.text.contains("do not match")),
+            "expected a mismatch error, got {decoded:?}"
+        );
+    }
+
+    fn flash_from_response(response: &Response) -> Vec<ui_foundation::flash::FlashMessage> {
+        let set_cookie = response
+            .headers()
+            .get(header::SET_COOKIE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default();
+        routes::web::decode_flash_from_cookie_header(set_cookie, &test_config().csrf_secret)
+    }
+
+    /// Full bad/good-token roundtrip against a real database: skipped when
+    /// no local Postgres is reachable so the suite stays green everywhere.
+    #[tokio::test]
+    async fn reset_password_token_roundtrip_against_db() {
+        let state = test_state_app().await;
+        if !test_db_reachable(&state.db).await {
+            eprintln!("skipping reset_password_token_roundtrip_against_db: no database");
+            return;
+        }
+
+        let email = format!("web-reset-{}@test.apexmail.ee", uuid::Uuid::new_v4().simple());
+        let tenant_id = apexmail_lib::id::generate_id("", 26);
+        let user_id = apexmail_lib::id::generate_id("", 26);
+        sqlx::query(
+            "INSERT INTO tenants (id, name, slug, plan, status, settings, metadata, created_at, updated_at)
+             VALUES ($1, 'Reset Test', $2, 'free', 'active', '{}'::jsonb, '{}'::jsonb, NOW(), NOW())
+             ON CONFLICT (id) DO NOTHING",
+        )
+        .bind(&tenant_id)
+        .bind(format!("reset-test-{}", &tenant_id[..8]))
+        .execute(&state.db)
+        .await
+        .expect("seed tenant");
+        let password_hash =
+            bcrypt::hash("OldValid123!Password", 4).expect("hash old password");
+        let token = format!("vfy_{}", &uuid::Uuid::new_v4().simple().to_string()[..24]);
+        let token_hash = crate::routes::helpers::hash_token(&token);
+        sqlx::query(
+            "INSERT INTO users (id, tenant_id, email, name, password_hash, role, status, email_verified, mfa_enabled, metadata, created_at, updated_at)
+             VALUES ($1, $2, $3, 'Reset Test', $4, 'owner', 'active', true, false, $5::jsonb, NOW(), NOW())",
+        )
+        .bind(&user_id)
+        .bind(&tenant_id)
+        .bind(&email)
+        .bind(&password_hash)
+        .bind(serde_json::json!({
+            "password_reset_token_hash": token_hash,
+            "password_reset_expires": (chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc3339(),
+            "password_reset_iat": chrono::Utc::now().to_rfc3339(),
+        }))
+        .execute(&state.db)
+        .await
+        .expect("seed user");
+
+        // Drive the handler through the real router.
+        let app = build_app(state.clone());
+        let csrf = test_csrf_token();
+
+        // Bad token: rejected, password unchanged.
+        let body = format!(
+            "_csrf={csrf}&token=not-the-token&email={}&password=NewValid123!Pass&confirmPassword=NewValid123!Pass",
+            email.replace('@', "%40"),
+        );
+        let response = app
+            .clone()
+            .oneshot(
+                Request::post("/web/auth/reset-password")
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let decoded = flash_from_response(&response);
+        assert!(
+            !decoded.iter().any(|message| matches!(
+                message.kind,
+                ui_foundation::flash::FlashKind::Success
+            )),
+            "bad token must not flash success: {decoded:?}"
+        );
+        let stored: String = sqlx::query_scalar("SELECT password_hash FROM users WHERE id = $1")
+            .bind(&user_id)
+            .fetch_one(&state.db)
+            .await
+            .unwrap();
+        assert!(bcrypt::verify("OldValid123!Password", &stored).unwrap());
+
+        // Good token: password rotated, token consumed, success flash.
+        let body = format!(
+            "_csrf={csrf}&token={}&email={}&password=NewValid123!Pass&confirmPassword=NewValid123!Pass",
+            token,
+            email.replace('@', "%40"),
+        );
+        let response = app
+            .clone()
+            .oneshot(
+                Request::post("/web/auth/reset-password")
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let decoded = flash_from_response(&response);
+        assert!(
+            decoded.iter().any(|message| matches!(
+                message.kind,
+                ui_foundation::flash::FlashKind::Success
+            )),
+            "good token must flash success: {decoded:?}"
+        );
+        let stored: String = sqlx::query_scalar("SELECT password_hash FROM users WHERE id = $1")
+            .bind(&user_id)
+            .fetch_one(&state.db)
+            .await
+            .unwrap();
+        assert!(bcrypt::verify("NewValid123!Pass", &stored).unwrap());
+        let metadata: serde_json::Value =
+            sqlx::query_scalar("SELECT metadata FROM users WHERE id = $1")
+                .bind(&user_id)
+                .fetch_one(&state.db)
+                .await
+                .unwrap();
+        assert!(metadata.get("password_reset_token_hash").is_none());
+
+        sqlx::query("DELETE FROM users WHERE id = $1")
+            .bind(&user_id)
+            .execute(&state.db)
+            .await
+            .expect("cleanup user");
+        sqlx::query("DELETE FROM tenants WHERE id = $1")
+            .bind(&tenant_id)
+            .execute(&state.db)
+            .await
+            .expect("cleanup tenant");
+    }
+
+    /// Read-wiring smoke test: the SSR data layer renders DB-seeded rows
+    /// and applies search/filter/pagination server-side. Skipped without
+    /// a reachable database.
+    #[tokio::test]
+    async fn ssr_data_layer_renders_seeded_rows_with_filters_and_paging() {
+        let state = test_state_app().await;
+        if !test_db_reachable(&state.db).await {
+            eprintln!("skipping ssr_data_layer_renders_seeded_rows_with_filters_and_paging: no database");
+            return;
+        }
+
+        let tenant_id = apexmail_lib::id::generate_id("", 26);
+        sqlx::query(
+            "INSERT INTO tenants (id, name, slug, plan, status, settings, metadata, created_at, updated_at)
+             VALUES ($1, 'SSR Data Test', $2, 'free', 'active', '{}'::jsonb, '{}'::jsonb, NOW(), NOW())
+             ON CONFLICT (id) DO NOTHING",
+        )
+        .bind(&tenant_id)
+        .bind(format!("ssr-data-{}", &tenant_id[..8]))
+        .execute(&state.db)
+        .await
+        .expect("seed tenant");
+        // 25 campaigns: 20 named "Alpha Row N" (draft) + 5 "Beta Row N"
+        // (completed — the live status CHECK has no 'sent').
+        for index in 0..20 {
+            sqlx::query(
+                "INSERT INTO campaigns (id, tenant_id, name, subject, status, created_at, updated_at)
+                 VALUES ($1, $2, $3, $4, 'draft', NOW(), NOW())",
+            )
+            .bind(apexmail_lib::id::generate_id("", 26))
+            .bind(&tenant_id)
+            .bind(format!("Alpha Row {index:02}"))
+            .bind("alpha subject")
+            .execute(&state.db)
+            .await
+            .expect("seed campaign");
+        }
+        for index in 0..5 {
+            sqlx::query(
+                "INSERT INTO campaigns (id, tenant_id, name, subject, status, created_at, updated_at)
+                 VALUES ($1, $2, $3, $4, 'completed', NOW(), NOW())",
+            )
+            .bind(apexmail_lib::id::generate_id("", 26))
+            .bind(&tenant_id)
+            .bind(format!("Beta Row {index:02}"))
+            .bind("beta subject")
+            .execute(&state.db)
+            .await
+            .expect("seed campaign");
+        }
+
+        let user = crate::middleware::auth::AuthUser {
+            tenant_id: tenant_id.clone(),
+            user_id: None,
+            api_key_id: None,
+            session_id: None,
+            scopes: vec![],
+        };
+
+        // Unfiltered: 25 campaigns, first page of 20.
+        let data = routes::web::load_page_data(&state, "web", "/campaigns", None, Some(&user))
+            .await;
+        let list = data.list.expect("campaigns list data");
+        assert_eq!(list.total_count, 25);
+        assert_eq!(list.total_pages, 2);
+        assert_eq!(list.page, 1);
+        let table = list.table.as_ref().expect("table");
+        assert_eq!(table.rows.len(), 20);
+
+        // Status filter: only the 5 completed campaigns.
+        let data = routes::web::load_page_data(
+            &state,
+            "web",
+            "/campaigns",
+            Some("status=completed"),
+            Some(&user),
+        )
+        .await;
+        let list = data.list.expect("filtered list");
+        assert_eq!(list.total_count, 5);
+        assert!(list
+            .table
+            .as_ref()
+            .unwrap()
+            .rows
+            .iter()
+            .all(|row| row.cells.iter().any(|cell| matches!(
+                cell,
+                ui_foundation::view_data::DataCell::Status(ref status) if status == "completed"
+            ))));
+
+        // Search filter: "Beta" matches the 5 beta rows.
+        let data = routes::web::load_page_data(
+            &state,
+            "web",
+            "/campaigns",
+            Some("query=Beta"),
+            Some(&user),
+        )
+        .await;
+        assert_eq!(data.list.unwrap().total_count, 5);
+
+        // Pagination: page 2 has the remaining 5 rows.
+        let data = routes::web::load_page_data(
+            &state,
+            "web",
+            "/campaigns",
+            Some("page=2"),
+            Some(&user),
+        )
+        .await;
+        let list = data.list.expect("paged list");
+        assert_eq!(list.page, 2);
+        assert_eq!(list.table.as_ref().unwrap().rows.len(), 5);
+
+        // The render pipeline shows the seeded row names.
+        let data = routes::web::load_page_data(&state, "web", "/campaigns", None, Some(&user))
+            .await;
+        let html = ui_foundation::axum_router::render_route_with_data(
+            "web",
+            "/campaigns",
+            None,
+            None,
+            &[],
+            Some(&data),
+        )
+        .expect("render with data");
+        assert!(html.contains("Alpha Row 0"));
+        assert!(html.contains("Showing 1–20 of 25 campaigns"));
+
+        // Honest empty state: a tenant with no campaigns.
+        let empty_tenant = apexmail_lib::id::generate_id("", 26);
+        let user = crate::middleware::auth::AuthUser {
+            tenant_id: empty_tenant.clone(),
+            user_id: None,
+            api_key_id: None,
+            session_id: None,
+            scopes: vec![],
+        };
+        let data = routes::web::load_page_data(&state, "web", "/campaigns", None, Some(&user))
+            .await;
+        let html = ui_foundation::axum_router::render_route_with_data(
+            "web",
+            "/campaigns",
+            None,
+            None,
+            &[],
+            Some(&data),
+        )
+        .expect("render empty");
+        assert!(html.contains("No campaigns yet"));
+
+        sqlx::query("DELETE FROM campaigns WHERE tenant_id = $1")
+            .bind(&tenant_id)
+            .execute(&state.db)
+            .await
+            .expect("cleanup campaigns");
+        sqlx::query("DELETE FROM tenants WHERE id = ANY($1)")
+            .bind(vec![tenant_id, empty_tenant])
+            .execute(&state.db)
+            .await
+            .expect("cleanup tenants");
     }
 
     #[tokio::test]

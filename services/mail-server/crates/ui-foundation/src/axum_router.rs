@@ -3,8 +3,28 @@
 //! Maps every SSR route pattern to its corresponding `leptos_views` function,
 //! producing the final HTML response. This replaces the legacy browser
 //! router dispatch.
+//!
+//! ## Data-driven rendering
+//!
+//! [`render_route_with_data`] additionally accepts server-loaded page data
+//! (the api-server query layer builds it per route). When present, list
+//! pages render their real rows/KPIs through [`leptos_views::data_list_page`]
+//! instead of the static demo markup; when absent (unit tests, no state) the
+//! static fallback pages render exactly as before.
 
 use crate::leptos_views;
+use crate::view_data::{CampaignEditData, ListPageData, MfaSetupData};
+
+/// Server-loaded page data for one route request.
+#[derive(Debug, Clone, Default)]
+pub struct RouteData {
+    /// List/overview page data (table rows, KPIs, filters, pagination).
+    pub list: Option<ListPageData>,
+    /// Campaign edit form values (server-filled from the campaigns row).
+    pub campaign_edit: Option<CampaignEditData>,
+    /// Pending TOTP setup (QR + secret) for the CP security page.
+    pub mfa_setup: Option<MfaSetupData>,
+}
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 struct UiQueryParams {
@@ -126,130 +146,371 @@ fn decode_query_component(input: &str) -> String {
     String::from_utf8_lossy(&decoded).into_owned()
 }
 
+/// Serve any built marketing page by route. The Zola build output is the
+/// single source of truth: every `public/**/index.html` is whitelisted here
+/// (footer- and nav-linked pages included — /security/, /solutions/*,
+/// /compare/*, locale variants) so no built page 404s behind the SSR router.
+/// Both marketing surfaces ("marketing" legacy and "marketing-zola") serve
+/// the same static documents.
 fn marketing_static_document(surface: &str, path: &str) -> Option<&'static str> {
+    let _ = surface;
     let path = if path != "/" {
         path.strip_suffix('/').unwrap_or(path)
     } else {
         path
     };
 
-    match (surface, path) {
-        ("marketing", "/") | ("marketing-zola", "/") => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/index.html"
+    match path {
+        "/" => Some(include_str!(
+            "../../../../../apps/marketing-zola/public/index.html",
         )),
-        ("marketing", "/acceptable-use")
-        | ("marketing", "/aup")
-        | ("marketing-zola", "/acceptable-use")
-        | ("marketing-zola", "/aup") => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/acceptable-use/index.html"
+        "/about" => Some(include_str!(
+            "../../../../../apps/marketing-zola/public/about/index.html",
         )),
-        ("marketing", "/api-console")
-        | ("marketing", "/api-explorer")
-        | ("marketing-zola", "/api-console")
-        | ("marketing-zola", "/api-explorer") => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/api-explorer/index.html"
+        "/acceptable-use" => Some(include_str!(
+            "../../../../../apps/marketing-zola/public/acceptable-use/index.html",
         )),
-        ("marketing", "/case-studies") | ("marketing-zola", "/case-studies") => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/case-studies/index.html"
+        "/anti-spam" => Some(include_str!(
+            "../../../../../apps/marketing-zola/public/anti-spam/index.html",
         )),
-        ("marketing", "/compliance") | ("marketing-zola", "/compliance") => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/compliance/index.html"
+        "/api-explorer" => Some(include_str!(
+            "../../../../../apps/marketing-zola/public/api-explorer/index.html",
         )),
-        ("marketing-zola", "/compare") => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/compare/index.html"
+        "/architecture" => Some(include_str!(
+            "../../../../../apps/marketing-zola/public/architecture/index.html",
         )),
-        ("marketing", "/compare/postmark") | ("marketing-zola", "/compare/postmark") => Some(
-            include_str!("../../../../../apps/marketing-zola/public/compare/postmark/index.html"),
-        ),
-        ("marketing", "/compare/resend") | ("marketing-zola", "/compare/resend") => Some(
-            include_str!("../../../../../apps/marketing-zola/public/compare/resend/index.html"),
-        ),
-        ("marketing", "/compare/sendgrid") | ("marketing-zola", "/compare/sendgrid") => Some(
-            include_str!("../../../../../apps/marketing-zola/public/compare/sendgrid/index.html"),
-        ),
-        ("marketing-zola", "/contact") => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/contact/index.html"
+        "/case-studies" => Some(include_str!(
+            "../../../../../apps/marketing-zola/public/case-studies/index.html",
         )),
-        ("marketing-zola", "/contact/sales") => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/contact/sales/index.html"
+        "/compare" => Some(include_str!(
+            "../../../../../apps/marketing-zola/public/compare/index.html",
         )),
-        ("marketing", "/cookies") | ("marketing-zola", "/cookies") => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/cookies/index.html"
+        "/compare/amazon-ses" => Some(include_str!(
+            "../../../../../apps/marketing-zola/public/compare/amazon-ses/index.html",
         )),
-        ("marketing-zola", "/de") => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/de/index.html"
+        "/compare/mailgun" => Some(include_str!(
+            "../../../../../apps/marketing-zola/public/compare/mailgun/index.html",
         )),
-        ("marketing-zola", "/de/cookies") => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/de/cookies/index.html"
+        "/compare/methodology" => Some(include_str!(
+            "../../../../../apps/marketing-zola/public/compare/methodology/index.html",
         )),
-        ("marketing", "/dpa") | ("marketing-zola", "/dpa") => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/dpa/index.html"
+        "/compare/postmark" => Some(include_str!(
+            "../../../../../apps/marketing-zola/public/compare/postmark/index.html",
         )),
-        ("marketing", "/docs") | ("marketing-zola", "/docs") => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/docs/index.html"
+        "/compare/resend" => Some(include_str!(
+            "../../../../../apps/marketing-zola/public/compare/resend/index.html",
         )),
-        ("marketing", "/docs/analytics") | ("marketing-zola", "/docs/analytics") => Some(
-            include_str!("../../../../../apps/marketing-zola/public/docs/analytics/index.html"),
-        ),
-        ("marketing", "/docs/api") | ("marketing-zola", "/docs/api") => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/docs/api/index.html"
+        "/compare/sendgrid" => Some(include_str!(
+            "../../../../../apps/marketing-zola/public/compare/sendgrid/index.html",
         )),
-        ("marketing-zola", "/docs/api/grader") => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/docs/api/grader/index.html"
+        "/compliance" => Some(include_str!(
+            "../../../../../apps/marketing-zola/public/compliance/index.html",
         )),
-        ("marketing", "/docs/alerts") | ("marketing-zola", "/docs/alerts") => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/docs/alerts/index.html"
+        "/contact" => Some(include_str!(
+            "../../../../../apps/marketing-zola/public/contact/index.html",
         )),
-        ("marketing", "/docs/sdks") | ("marketing-zola", "/docs/sdks") => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/docs/sdks/index.html"
+        "/contact/enterprise" => Some(include_str!(
+            "../../../../../apps/marketing-zola/public/contact/enterprise/index.html",
         )),
-        ("marketing", "/docs/webhooks") | ("marketing-zola", "/docs/webhooks") => Some(
-            include_str!("../../../../../apps/marketing-zola/public/docs/webhooks/index.html"),
-        ),
-        ("marketing", "/features") | ("marketing-zola", "/features") => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/features/index.html"
+        "/contact/sales" => Some(include_str!(
+            "../../../../../apps/marketing-zola/public/contact/sales/index.html",
         )),
-        ("marketing-zola", "/es") => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/es/index.html"
+        "/contact/security" => Some(include_str!(
+            "../../../../../apps/marketing-zola/public/contact/security/index.html",
         )),
-        ("marketing-zola", "/es/cookies") => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/es/cookies/index.html"
+        "/cookies" => Some(include_str!(
+            "../../../../../apps/marketing-zola/public/cookies/index.html",
         )),
-        ("marketing", "/forensic") | ("marketing-zola", "/forensic") => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/forensic/index.html"
+        "/data-locations" => Some(include_str!(
+            "../../../../../apps/marketing-zola/public/data-locations/index.html",
         )),
-        ("marketing-zola", "/fr") => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/fr/index.html"
+        "/de" => Some(include_str!(
+            "../../../../../apps/marketing-zola/public/de/index.html",
         )),
-        ("marketing-zola", "/fr/cookies") => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/fr/cookies/index.html"
+        "/de/about" => Some(include_str!(
+            "../../../../../apps/marketing-zola/public/de/about/index.html",
         )),
-        ("marketing-zola", "/inbox-placement") => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/inbox-placement/index.html"
+        "/de/acceptable-use" => Some(include_str!(
+            "../../../../../apps/marketing-zola/public/de/acceptable-use/index.html",
         )),
-        ("marketing", "/pricing") | ("marketing-zola", "/pricing") => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/pricing/index.html"
+        "/de/compare" => Some(include_str!(
+            "../../../../../apps/marketing-zola/public/de/compare/index.html",
         )),
-        ("marketing", "/pricing/calculator") | ("marketing-zola", "/pricing/calculator") => Some(
-            include_str!("../../../../../apps/marketing-zola/public/pricing/calculator/index.html"),
-        ),
-        ("marketing", "/privacy") | ("marketing-zola", "/privacy") => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/privacy/index.html"
+        "/de/compliance" => Some(include_str!(
+            "../../../../../apps/marketing-zola/public/de/compliance/index.html",
         )),
-        ("marketing", "/private-cloud") | ("marketing-zola", "/private-cloud") => Some(
-            include_str!("../../../../../apps/marketing-zola/public/private-cloud/index.html"),
-        ),
-        ("marketing-zola", "/secure-email-for-regulated-saas") => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/secure-email-for-regulated-saas/index.html"
+        "/de/contact" => Some(include_str!(
+            "../../../../../apps/marketing-zola/public/de/contact/index.html",
         )),
-        ("marketing", "/sla") | ("marketing-zola", "/sla") => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/sla/index.html"
+        "/de/cookies" => Some(include_str!(
+            "../../../../../apps/marketing-zola/public/de/cookies/index.html",
         )),
-        ("marketing", "/status") | ("marketing-zola", "/status") => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/status/index.html"
+        "/de/data-locations" => Some(include_str!(
+            "../../../../../apps/marketing-zola/public/de/data-locations/index.html",
         )),
-        ("marketing", "/terms") | ("marketing-zola", "/terms") => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/terms/index.html"
+        "/de/dpa" => Some(include_str!(
+            "../../../../../apps/marketing-zola/public/de/dpa/index.html",
+        )),
+        "/de/features" => Some(include_str!(
+            "../../../../../apps/marketing-zola/public/de/features/index.html",
+        )),
+        "/de/privacy" => Some(include_str!(
+            "../../../../../apps/marketing-zola/public/de/privacy/index.html",
+        )),
+        "/de/private-cloud" => Some(include_str!(
+            "../../../../../apps/marketing-zola/public/de/private-cloud/index.html",
+        )),
+        "/de/quickstart" => Some(include_str!(
+            "../../../../../apps/marketing-zola/public/de/quickstart/index.html",
+        )),
+        "/de/responsible-disclosure" => Some(include_str!(
+            "../../../../../apps/marketing-zola/public/de/responsible-disclosure/index.html",
+        )),
+        "/de/security" => Some(include_str!(
+            "../../../../../apps/marketing-zola/public/de/security/index.html",
+        )),
+        "/de/sla" => Some(include_str!(
+            "../../../../../apps/marketing-zola/public/de/sla/index.html",
+        )),
+        "/de/solutions/enterprise" => Some(include_str!(
+            "../../../../../apps/marketing-zola/public/de/solutions/enterprise/index.html",
+        )),
+        "/de/status" => Some(include_str!(
+            "../../../../../apps/marketing-zola/public/de/status/index.html",
+        )),
+        "/de/subprocessors" => Some(include_str!(
+            "../../../../../apps/marketing-zola/public/de/subprocessors/index.html",
+        )),
+        "/de/terms" => Some(include_str!(
+            "../../../../../apps/marketing-zola/public/de/terms/index.html",
+        )),
+        "/docs" => Some(include_str!(
+            "../../../../../apps/marketing-zola/public/docs/index.html",
+        )),
+        "/docs/alerts" => Some(include_str!(
+            "../../../../../apps/marketing-zola/public/docs/alerts/index.html",
+        )),
+        "/docs/analytics" => Some(include_str!(
+            "../../../../../apps/marketing-zola/public/docs/analytics/index.html",
+        )),
+        "/docs/api" => Some(include_str!(
+            "../../../../../apps/marketing-zola/public/docs/api/index.html",
+        )),
+        "/docs/api/grader" => Some(include_str!(
+            "../../../../../apps/marketing-zola/public/docs/api/grader/index.html",
+        )),
+        "/docs/api/openapi" => Some(include_str!(
+            "../../../../../apps/marketing-zola/public/docs/api/openapi/index.html",
+        )),
+        "/docs/sdks" => Some(include_str!(
+            "../../../../../apps/marketing-zola/public/docs/sdks/index.html",
+        )),
+        "/docs/webhooks" => Some(include_str!(
+            "../../../../../apps/marketing-zola/public/docs/webhooks/index.html",
+        )),
+        "/dpa" => Some(include_str!(
+            "../../../../../apps/marketing-zola/public/dpa/index.html",
+        )),
+        "/enterprise" => Some(include_str!(
+            "../../../../../apps/marketing-zola/public/enterprise/index.html",
+        )),
+        "/es" => Some(include_str!(
+            "../../../../../apps/marketing-zola/public/es/index.html",
+        )),
+        "/es/about" => Some(include_str!(
+            "../../../../../apps/marketing-zola/public/es/about/index.html",
+        )),
+        "/es/acceptable-use" => Some(include_str!(
+            "../../../../../apps/marketing-zola/public/es/acceptable-use/index.html",
+        )),
+        "/es/compare" => Some(include_str!(
+            "../../../../../apps/marketing-zola/public/es/compare/index.html",
+        )),
+        "/es/compliance" => Some(include_str!(
+            "../../../../../apps/marketing-zola/public/es/compliance/index.html",
+        )),
+        "/es/contact" => Some(include_str!(
+            "../../../../../apps/marketing-zola/public/es/contact/index.html",
+        )),
+        "/es/cookies" => Some(include_str!(
+            "../../../../../apps/marketing-zola/public/es/cookies/index.html",
+        )),
+        "/es/data-locations" => Some(include_str!(
+            "../../../../../apps/marketing-zola/public/es/data-locations/index.html",
+        )),
+        "/es/dpa" => Some(include_str!(
+            "../../../../../apps/marketing-zola/public/es/dpa/index.html",
+        )),
+        "/es/features" => Some(include_str!(
+            "../../../../../apps/marketing-zola/public/es/features/index.html",
+        )),
+        "/es/privacy" => Some(include_str!(
+            "../../../../../apps/marketing-zola/public/es/privacy/index.html",
+        )),
+        "/es/private-cloud" => Some(include_str!(
+            "../../../../../apps/marketing-zola/public/es/private-cloud/index.html",
+        )),
+        "/es/quickstart" => Some(include_str!(
+            "../../../../../apps/marketing-zola/public/es/quickstart/index.html",
+        )),
+        "/es/responsible-disclosure" => Some(include_str!(
+            "../../../../../apps/marketing-zola/public/es/responsible-disclosure/index.html",
+        )),
+        "/es/security" => Some(include_str!(
+            "../../../../../apps/marketing-zola/public/es/security/index.html",
+        )),
+        "/es/sla" => Some(include_str!(
+            "../../../../../apps/marketing-zola/public/es/sla/index.html",
+        )),
+        "/es/solutions/enterprise" => Some(include_str!(
+            "../../../../../apps/marketing-zola/public/es/solutions/enterprise/index.html",
+        )),
+        "/es/status" => Some(include_str!(
+            "../../../../../apps/marketing-zola/public/es/status/index.html",
+        )),
+        "/es/subprocessors" => Some(include_str!(
+            "../../../../../apps/marketing-zola/public/es/subprocessors/index.html",
+        )),
+        "/es/terms" => Some(include_str!(
+            "../../../../../apps/marketing-zola/public/es/terms/index.html",
+        )),
+        "/features" => Some(include_str!(
+            "../../../../../apps/marketing-zola/public/features/index.html",
+        )),
+        "/forensic" => Some(include_str!(
+            "../../../../../apps/marketing-zola/public/forensic/index.html",
+        )),
+        "/fr" => Some(include_str!(
+            "../../../../../apps/marketing-zola/public/fr/index.html",
+        )),
+        "/fr/about" => Some(include_str!(
+            "../../../../../apps/marketing-zola/public/fr/about/index.html",
+        )),
+        "/fr/acceptable-use" => Some(include_str!(
+            "../../../../../apps/marketing-zola/public/fr/acceptable-use/index.html",
+        )),
+        "/fr/compare" => Some(include_str!(
+            "../../../../../apps/marketing-zola/public/fr/compare/index.html",
+        )),
+        "/fr/compliance" => Some(include_str!(
+            "../../../../../apps/marketing-zola/public/fr/compliance/index.html",
+        )),
+        "/fr/contact" => Some(include_str!(
+            "../../../../../apps/marketing-zola/public/fr/contact/index.html",
+        )),
+        "/fr/cookies" => Some(include_str!(
+            "../../../../../apps/marketing-zola/public/fr/cookies/index.html",
+        )),
+        "/fr/data-locations" => Some(include_str!(
+            "../../../../../apps/marketing-zola/public/fr/data-locations/index.html",
+        )),
+        "/fr/dpa" => Some(include_str!(
+            "../../../../../apps/marketing-zola/public/fr/dpa/index.html",
+        )),
+        "/fr/features" => Some(include_str!(
+            "../../../../../apps/marketing-zola/public/fr/features/index.html",
+        )),
+        "/fr/privacy" => Some(include_str!(
+            "../../../../../apps/marketing-zola/public/fr/privacy/index.html",
+        )),
+        "/fr/private-cloud" => Some(include_str!(
+            "../../../../../apps/marketing-zola/public/fr/private-cloud/index.html",
+        )),
+        "/fr/quickstart" => Some(include_str!(
+            "../../../../../apps/marketing-zola/public/fr/quickstart/index.html",
+        )),
+        "/fr/responsible-disclosure" => Some(include_str!(
+            "../../../../../apps/marketing-zola/public/fr/responsible-disclosure/index.html",
+        )),
+        "/fr/security" => Some(include_str!(
+            "../../../../../apps/marketing-zola/public/fr/security/index.html",
+        )),
+        "/fr/sla" => Some(include_str!(
+            "../../../../../apps/marketing-zola/public/fr/sla/index.html",
+        )),
+        "/fr/solutions/enterprise" => Some(include_str!(
+            "../../../../../apps/marketing-zola/public/fr/solutions/enterprise/index.html",
+        )),
+        "/fr/status" => Some(include_str!(
+            "../../../../../apps/marketing-zola/public/fr/status/index.html",
+        )),
+        "/fr/subprocessors" => Some(include_str!(
+            "../../../../../apps/marketing-zola/public/fr/subprocessors/index.html",
+        )),
+        "/fr/terms" => Some(include_str!(
+            "../../../../../apps/marketing-zola/public/fr/terms/index.html",
+        )),
+        "/inbox-placement" => Some(include_str!(
+            "../../../../../apps/marketing-zola/public/inbox-placement/index.html",
+        )),
+        "/performance-methodology" => Some(include_str!(
+            "../../../../../apps/marketing-zola/public/performance-methodology/index.html",
+        )),
+        "/pricing" => Some(include_str!(
+            "../../../../../apps/marketing-zola/public/pricing/index.html",
+        )),
+        "/pricing/calculator" => Some(include_str!(
+            "../../../../../apps/marketing-zola/public/pricing/calculator/index.html",
+        )),
+        "/privacy" => Some(include_str!(
+            "../../../../../apps/marketing-zola/public/privacy/index.html",
+        )),
+        "/privacy/do-not-sell" => Some(include_str!(
+            "../../../../../apps/marketing-zola/public/privacy/do-not-sell/index.html",
+        )),
+        "/private-cloud" => Some(include_str!(
+            "../../../../../apps/marketing-zola/public/private-cloud/index.html",
+        )),
+        "/quickstart" => Some(include_str!(
+            "../../../../../apps/marketing-zola/public/quickstart/index.html",
+        )),
+        "/responsible-disclosure" => Some(include_str!(
+            "../../../../../apps/marketing-zola/public/responsible-disclosure/index.html",
+        )),
+        "/secure-email-for-regulated-saas" => Some(include_str!(
+            "../../../../../apps/marketing-zola/public/secure-email-for-regulated-saas/index.html",
+        )),
+        "/security" => Some(include_str!(
+            "../../../../../apps/marketing-zola/public/security/index.html",
+        )),
+        "/sla" => Some(include_str!(
+            "../../../../../apps/marketing-zola/public/sla/index.html",
+        )),
+        "/solutions" => Some(include_str!(
+            "../../../../../apps/marketing-zola/public/solutions/index.html",
+        )),
+        "/solutions/enterprise" => Some(include_str!(
+            "../../../../../apps/marketing-zola/public/solutions/enterprise/index.html",
+        )),
+        "/solutions/high-volume-sending" => Some(include_str!(
+            "../../../../../apps/marketing-zola/public/solutions/high-volume-sending/index.html",
+        )),
+        "/solutions/migration" => Some(include_str!(
+            "../../../../../apps/marketing-zola/public/solutions/migration/index.html",
+        )),
+        "/solutions/regulated-industries" => Some(include_str!(
+            "../../../../../apps/marketing-zola/public/solutions/regulated-industries/index.html",
+        )),
+        "/solutions/saas-platforms" => Some(include_str!(
+            "../../../../../apps/marketing-zola/public/solutions/saas-platforms/index.html",
+        )),
+        "/solutions/transactional-email" => Some(include_str!(
+            "../../../../../apps/marketing-zola/public/solutions/transactional-email/index.html",
+        )),
+        "/status" => Some(include_str!(
+            "../../../../../apps/marketing-zola/public/status/index.html",
+        )),
+        "/subprocessors" => Some(include_str!(
+            "../../../../../apps/marketing-zola/public/subprocessors/index.html",
+        )),
+        "/terms" => Some(include_str!(
+            "../../../../../apps/marketing-zola/public/terms/index.html",
+        )),
+        "/api-console" => Some(include_str!(
+            "../../../../../apps/marketing-zola/public/api-explorer/index.html",
+        )),
+        "/aup" => Some(include_str!(
+            "../../../../../apps/marketing-zola/public/acceptable-use/index.html",
         )),
         _ => None,
     }
@@ -416,6 +677,20 @@ pub fn render_route_with_flash(
     csrf_secret: Option<&str>,
     flash: &[crate::flash::FlashMessage],
 ) -> Option<String> {
+    render_route_with_data(surface, path, query, csrf_secret, flash, None)
+}
+
+/// Full render with server-loaded page data. When `data.list` is present
+/// the route renders through the data-driven list page (real rows/KPIs,
+/// honest empty states); the static demo page is only the no-data fallback.
+pub fn render_route_with_data(
+    surface: &str,
+    path: &str,
+    query: Option<&str>,
+    csrf_secret: Option<&str>,
+    flash: &[crate::flash::FlashMessage],
+    data: Option<&RouteData>,
+) -> Option<String> {
     // Normalise trailing slash at the top level so ALL surfaces handle /login/ etc.
     let path = if path.len() > 1 && path.ends_with('/') {
         &path[..path.len() - 1]
@@ -425,7 +700,7 @@ pub fn render_route_with_flash(
     let csrf_token = csrf_secret.map_or_else(String::new, crate::csrf::generate_csrf_token);
     let html = match surface {
         "web" => {
-            let inner = render_inner(surface, path, query, csrf_secret)?;
+            let inner = render_inner(surface, path, query, csrf_secret, data)?;
             let page = match path {
                 "/login" | "/signup" | "/forgot-password" | "/reset-password" | "/verify-email"
                 | "/" | "/not-found" => leptos_views::web_root_layout(&inner),
@@ -436,7 +711,7 @@ pub fn render_route_with_flash(
             page
         }
         "control-plane" => {
-            let inner = render_inner(surface, path, query, csrf_secret)?;
+            let inner = render_inner(surface, path, query, csrf_secret, data)?;
             let page = match path {
                 "/login" => inner,
                 _ => {
@@ -455,7 +730,7 @@ pub fn render_route_with_flash(
         "marketing" | "marketing-zola" => marketing_static_document(surface, path)
             .map(normalize_marketing_static_document)
             .or_else(|| {
-                let inner = render_inner(surface, path, query, csrf_secret)?;
+                let inner = render_inner(surface, path, query, csrf_secret, data)?;
                 Some(leptos_views::marketing_page(&inner))
             })?,
         _ => return None,
@@ -680,9 +955,10 @@ fn render_inner(
     path: &str,
     query: Option<&str>,
     csrf_secret: Option<&str>,
+    data: Option<&RouteData>,
 ) -> Option<String> {
     match surface {
-        "web" => render_web(path, query, csrf_secret),
+        "web" => render_web(path, query, csrf_secret, data),
         "control-plane" => {
             // The CP login shares the web MFA challenge step (multi-step
             // SSR login): `?mfa=1&email=…` renders the same challenge form.
@@ -701,14 +977,36 @@ fn render_inner(
                     }
                 }
             }
-            render_control_plane(path, csrf_secret)
+            render_control_plane(path, csrf_secret, data)
         }
         "marketing" | "marketing-zola" => render_marketing(surface, path),
         _ => None,
     }
 }
 
-fn render_web(path: &str, query: Option<&str>, csrf_secret: Option<&str>) -> Option<String> {
+/// The data-aware fast path: routes whose server data replaces the static
+/// demo markup render through the generic data list page.
+fn data_backed_inner(path: &str, data: Option<&RouteData>) -> Option<String> {
+    let list = data.and_then(|d| d.list.as_ref())?;
+    Some(leptos_views::data_list_page(list, &list_noun(path)))
+}
+
+/// Single-word noun for pagination storage keys / summary copy, derived
+/// from the route path.
+fn list_noun(path: &str) -> String {
+    let segment = path.rsplit('/').find(|s| !s.is_empty()).unwrap_or("records");
+    match segment {
+        "inbox-placement" | "billing" => segment.to_string(),
+        other => other.trim_end_matches('s').to_string(),
+    }
+}
+
+fn render_web(
+    path: &str,
+    query: Option<&str>,
+    csrf_secret: Option<&str>,
+    data: Option<&RouteData>,
+) -> Option<String> {
     let params = parse_query_params(query);
 
     // Generate CSRF token for auth routes if a secret is available
@@ -782,7 +1080,8 @@ fn render_web(path: &str, query: Option<&str>, csrf_secret: Option<&str>) -> Opt
             params.status.as_deref(),
             params.message.as_deref(),
         ),
-        "/dashboard" => leptos_views::web_dashboard_page(),
+        "/dashboard" => data_backed_inner("/dashboard", data)
+            .unwrap_or_else(|| leptos_views::web_dashboard_page()),
         // Legacy /legal/* paths are 301-style redirects to the canonical
         // marketing routes (kept so external links and old bookmarks keep
         // working). The page both meta-refreshes and carries rel=canonical.
@@ -793,32 +1092,50 @@ fn render_web(path: &str, query: Option<&str>, csrf_secret: Option<&str>) -> Opt
         // app.apexmail.ee).
         "/terms" => legal_redirect_page(MARKETING_ORIGIN, "/terms"),
         "/privacy" => legal_redirect_page(MARKETING_ORIGIN, "/privacy"),
-        "/campaigns" => leptos_views::web_campaigns_page(),
+        "/campaigns" => data_backed_inner("/campaigns", data)
+            .unwrap_or_else(|| leptos_views::web_campaigns_page()),
         "/campaigns/new" => leptos_views::web_campaigns_new_page(),
-        "/contacts" => leptos_views::web_contacts_page(),
+        "/contacts" => data_backed_inner("/contacts", data)
+            .unwrap_or_else(|| leptos_views::web_contacts_page()),
         "/contacts/new" => leptos_views::web_contacts_new_page(),
-        "/lists" => leptos_views::web_lists_page(),
+        "/lists" => data_backed_inner("/lists", data)
+            .unwrap_or_else(|| leptos_views::web_lists_page()),
         "/lists/new" => leptos_views::web_lists_new_page(),
-        "/templates" => leptos_views::web_templates_page(),
+        "/templates" => data_backed_inner("/templates", data)
+            .unwrap_or_else(|| leptos_views::web_templates_page()),
         "/templates/new" => leptos_views::web_templates_new_page(),
-        "/reports" => leptos_views::web_reports_page(),
-        "/reports/deliverability" => leptos_views::web_reports_deliverability_page(),
-        "/analytics" => leptos_views::web_analytics_page(),
-        "/inbox-placement" => leptos_views::web_inbox_placement_page(),
+        "/reports" => data_backed_inner("/reports", data)
+            .unwrap_or_else(|| leptos_views::web_reports_page()),
+        "/reports/deliverability" => data_backed_inner("/reports/deliverability", data)
+            .unwrap_or_else(|| leptos_views::web_reports_deliverability_page()),
+        "/analytics" => data_backed_inner("/analytics", data)
+            .unwrap_or_else(|| leptos_views::web_analytics_page()),
+        "/inbox-placement" => data_backed_inner("/inbox-placement", data)
+            .unwrap_or_else(|| leptos_views::web_inbox_placement_page()),
         "/inbox-placement/new" => leptos_views::web_inbox_placement_new_page(),
-        "/events" => leptos_views::web_events_page(),
-        "/domains" => leptos_views::web_domains_page(),
+        "/events" => data_backed_inner("/events", data)
+            .unwrap_or_else(|| leptos_views::web_events_page()),
+        "/domains" => data_backed_inner("/domains", data)
+            .unwrap_or_else(|| leptos_views::web_domains_page()),
         "/domains/new" => leptos_views::web_domains_new_page(),
         "/settings" => leptos_views::web_settings_page(),
-        "/settings/api-keys" => leptos_views::web_settings_api_keys_page(),
-        "/settings/team" => leptos_views::web_settings_team_page(),
-        "/settings/billing" => leptos_views::web_settings_billing_page(),
-        "/settings/dedicated-ips" => leptos_views::web_dedicated_ips_page(),
-        "/settings/webhooks" => leptos_views::web_settings_webhooks_page(),
+        "/settings/api-keys" => data_backed_inner("/settings/api-keys", data)
+            .unwrap_or_else(|| leptos_views::web_settings_api_keys_page()),
+        "/settings/team" => data_backed_inner("/settings/team", data)
+            .unwrap_or_else(|| leptos_views::web_settings_team_page()),
+        "/settings/billing" => data_backed_inner("/settings/billing", data)
+            .unwrap_or_else(|| leptos_views::web_settings_billing_page()),
+        "/settings/dedicated-ips" => data_backed_inner("/settings/dedicated-ips", data)
+            .unwrap_or_else(|| leptos_views::web_dedicated_ips_page()),
+        "/settings/webhooks" => data_backed_inner("/settings/webhooks", data)
+            .unwrap_or_else(|| leptos_views::web_settings_webhooks_page()),
         "/settings/profile" => leptos_views::web_settings_profile_page(),
-        p if p.starts_with("/campaigns/") && p.ends_with("/edit") => {
-            leptos_views::web_campaign_edit_page()
-        }
+        p if p.starts_with("/campaigns/") && p.ends_with("/edit") => match
+            data.and_then(|d| d.campaign_edit.as_ref())
+        {
+            Some(edit) => leptos_views::web_campaign_edit_page_with_values(edit),
+            None => leptos_views::web_campaign_edit_page(),
+        },
         p if p.starts_with("/campaigns/") => leptos_views::web_campaign_detail_page(),
         p if p.starts_with("/inbox-placement/") => leptos_views::web_inbox_placement_detail_page(),
         // /lists/{id} and /lists/{id}/edit — previously dead links (404).
@@ -854,43 +1171,78 @@ fn legal_redirect_page(origin: &str, target: &str) -> String {
     )
 }
 
-fn render_control_plane(path: &str, csrf_secret: Option<&str>) -> Option<String> {
+fn render_control_plane(
+    path: &str,
+    csrf_secret: Option<&str>,
+    data: Option<&RouteData>,
+) -> Option<String> {
     let csrf_token = |secret: &str| crate::csrf::generate_csrf_token(secret);
 
     Some(match path {
-        "/cp" => leptos_views::control_plane_dashboard_page(),
-        "/cp/tenants" => leptos_views::control_plane_tenants_page(),
+        "/cp" => data_backed_inner("/dashboard", data)
+            .unwrap_or_else(|| leptos_views::control_plane_dashboard_page()),
+        "/cp/tenants" => data_backed_inner("/tenants", data)
+            .unwrap_or_else(|| leptos_views::control_plane_tenants_page()),
         "/cp/infra" | "/cp/infrastructure" => leptos_views::control_plane_infrastructure_page(),
-        "/cp/security" => leptos_views::control_plane_security_page(),
-        "/cp/audit" => leptos_views::control_plane_audit_page(),
-        "/cp/sales" => leptos_views::control_plane_sales_page(),
-        "/" => leptos_views::control_plane_home_page(),
+        "/cp/security" => match data.and_then(|d| d.mfa_setup.as_ref()) {
+            Some(setup) => leptos_views::control_plane_security_page_with_setup(Some(
+                &leptos_views::MfaSetupView::new(&setup.secret, &setup.otpauth),
+            )),
+            None => leptos_views::control_plane_security_page(),
+        },
+        "/cp/audit" => data_backed_inner("/audit", data)
+            .unwrap_or_else(|| leptos_views::control_plane_audit_page()),
+        "/cp/sales" => data_backed_inner("/sales", data)
+            .unwrap_or_else(|| leptos_views::control_plane_sales_page()),
+        "/" => data_backed_inner("/", data)
+            .unwrap_or_else(|| leptos_views::control_plane_home_page()),
         "/login" => {
             let token = csrf_secret.map_or_else(String::new, csrf_token);
             leptos_views::control_plane_login_page(&token)
         }
-        "/dashboard" => leptos_views::control_plane_dashboard_page(),
-        "/tenants" => leptos_views::control_plane_tenants_page(),
+        "/dashboard" => data_backed_inner("/dashboard", data)
+            .unwrap_or_else(|| leptos_views::control_plane_dashboard_page()),
+        "/tenants" => data_backed_inner("/tenants", data)
+            .unwrap_or_else(|| leptos_views::control_plane_tenants_page()),
         "/tenants/new" => leptos_views::control_plane_tenants_new_page(),
-        "/sales" => leptos_views::control_plane_sales_page(),
-        "/operators" => leptos_views::control_plane_operators_page(),
+        "/sales" => data_backed_inner("/sales", data)
+            .unwrap_or_else(|| leptos_views::control_plane_sales_page()),
+        "/operators" => data_backed_inner("/operators", data)
+            .unwrap_or_else(|| leptos_views::control_plane_operators_page()),
         "/operators/new" => leptos_views::control_plane_operators_new_page(),
-        "/analytics" => leptos_views::control_plane_analytics_page(),
-        "/discovery" => leptos_views::control_plane_discovery_page(),
-        "/jobs" => leptos_views::control_plane_jobs_page(),
+        "/analytics" => data_backed_inner("/analytics", data)
+            .unwrap_or_else(|| leptos_views::control_plane_analytics_page()),
+        "/discovery" => data_backed_inner("/discovery", data)
+            .unwrap_or_else(|| leptos_views::control_plane_discovery_page()),
+        "/jobs" => data_backed_inner("/jobs", data)
+            .unwrap_or_else(|| leptos_views::control_plane_jobs_page()),
         "/infrastructure" => leptos_views::control_plane_infrastructure_page(),
-        "/infrastructure/nodes" => leptos_views::control_plane_nodes_page(),
-        "/infrastructure/queues" => leptos_views::control_plane_queues_page(),
-        "/domains" => leptos_views::control_plane_domains_page(),
+        "/infrastructure/nodes" => data_backed_inner("/infrastructure/nodes", data)
+            .unwrap_or_else(|| leptos_views::control_plane_nodes_page()),
+        "/infrastructure/queues" => data_backed_inner("/infrastructure/queues", data)
+            .unwrap_or_else(|| leptos_views::control_plane_queues_page()),
+        "/domains" => data_backed_inner("/domains", data)
+            .unwrap_or_else(|| leptos_views::control_plane_domains_page()),
         "/billing" => leptos_views::control_plane_billing_page(),
-        "/billing/plans" => leptos_views::control_plane_billing_plans_page(),
-        "/compliance" => leptos_views::control_plane_compliance_page(),
-        "/compliance/gdpr" => leptos_views::control_plane_gdpr_page(),
-        "/alerts" => leptos_views::control_plane_alerts_page(),
-        "/alerts/rules" => leptos_views::control_plane_alert_rules_page(),
+        "/billing/plans" => data_backed_inner("/billing/plans", data)
+            .unwrap_or_else(|| leptos_views::control_plane_billing_plans_page()),
+        "/compliance" => data_backed_inner("/compliance", data)
+            .unwrap_or_else(|| leptos_views::control_plane_compliance_page()),
+        "/compliance/gdpr" => data_backed_inner("/compliance/gdpr", data)
+            .unwrap_or_else(|| leptos_views::control_plane_gdpr_page()),
+        "/alerts" => data_backed_inner("/alerts", data)
+            .unwrap_or_else(|| leptos_views::control_plane_alerts_page()),
+        "/alerts/rules" => data_backed_inner("/alerts/rules", data)
+            .unwrap_or_else(|| leptos_views::control_plane_alert_rules_page()),
         "/settings" => leptos_views::control_plane_settings_page(),
-        "/settings/security" => leptos_views::control_plane_security_page(),
-        "/audit" => leptos_views::control_plane_audit_page(),
+        "/settings/security" => match data.and_then(|d| d.mfa_setup.as_ref()) {
+            Some(setup) => leptos_views::control_plane_security_page_with_setup(Some(
+                &leptos_views::MfaSetupView::new(&setup.secret, &setup.otpauth),
+            )),
+            None => leptos_views::control_plane_security_page(),
+        },
+        "/audit" => data_backed_inner("/audit", data)
+            .unwrap_or_else(|| leptos_views::control_plane_audit_page()),
         _ => return None,
     })
 }
@@ -1610,6 +1962,218 @@ mod tests {
                 .unwrap_or_else(|| panic!("web {path} should render a redirect"));
             assert!(html.contains(&format!("url=https://apexmail.ee{path}")));
             assert!(html.contains(&format!("rel=\"canonical\" href=\"https://apexmail.ee{path}\"")));
+        }
+    }
+
+    // ─── Data-driven rendering (server-loaded rows) ─────────────────
+
+    fn sample_route_data(rows: usize) -> RouteData {
+        let mut data = ListPageData {
+            title: "Campaigns".into(),
+            description: "All your campaigns.".into(),
+            base_path: "/campaigns".into(),
+            search_label: "Search campaigns".into(),
+            search_placeholder: "Search by name".into(),
+            current_query: "spring".into(),
+            page: 2,
+            total_pages: 3,
+            total_count: (rows + 20) as i64,
+            per_page: 20,
+            filter_query: "query=spring&status=draft".into(),
+            filters: vec![crate::view_data::FilterSelectData::new(
+                "status",
+                "Filter by status",
+                vec![
+                    ("".into(), "All statuses".into(), false),
+                    ("draft".into(), "Draft".into(), true),
+                    ("sent".into(), "Sent".into(), false),
+                ],
+            )],
+            bulk_action: Some(crate::view_data::BulkActionData {
+                action: "/web/campaigns/delete-bulk".into(),
+                button_label: "Delete selected".into(),
+            }),
+            primary_action: Some(("New Campaign".into(), "/campaigns/new".into())),
+            detail_path_prefix: Some("/campaigns/".into()),
+            edit_path_suffix: Some("/edit".into()),
+            delete_intent: Some("delete-campaign".into()),
+            empty_title: "No campaigns yet".into(),
+            empty_description: "Create your first campaign.".into(),
+            ..Default::default()
+        };
+        data.table = Some(crate::view_data::TableData {
+            columns: vec!["Name".into(), "Status".into(), "Updated".into()],
+            rows: (0..rows)
+                .map(|i| crate::view_data::DataRowData {
+                    id: format!("c_{i}"),
+                    cells: vec![
+                        crate::view_data::DataCell::text(format!("Spring Winback {i}")),
+                        crate::view_data::DataCell::status("draft"),
+                        crate::view_data::DataCell::text("2 minutes ago"),
+                    ],
+                })
+                .collect(),
+        });
+        RouteData {
+            list: Some(data),
+            campaign_edit: None,
+            mfa_setup: None,
+        }
+    }
+
+    #[test]
+    fn data_backed_campaigns_render_real_rows() {
+        let data = sample_route_data(2);
+        let html = render_route_with_data("web", "/campaigns", None, None, &[], Some(&data))
+            .expect("campaigns route must render with data");
+        // Real rows replace the demo markup.
+        assert!(html.contains("Spring Winback 0"));
+        assert!(html.contains("Spring Winback 1"));
+        assert!(!html.contains("Launch Sequence"));
+        // Bulk action + signed delete confirms + pagination with filters.
+        assert!(html.contains("action=\"/web/campaigns/delete-bulk\""));
+        assert!(html.contains("name=\"ids\" value=\"c_0\""));
+        assert!(html.contains("/confirm?intent=delete-campaign&amp;id=c_1"));
+        assert!(html.contains("/campaigns?page=3&query=spring&status=draft"));
+        // GET filter form serializes the search + filter params.
+        assert!(html.contains("method=\"get\" action=\"/campaigns\""));
+        assert!(html.contains("name=\"query\""));
+        assert!(html.contains("name=\"status\""));
+        assert!(html.contains("value=\"spring\""));
+    }
+
+    #[test]
+    fn data_backed_empty_tables_render_honest_empty_states() {
+        let data = sample_route_data(0);
+        let html = render_route_with_data("web", "/campaigns", None, None, &[], Some(&data))
+            .expect("campaigns route must render with data");
+        assert!(html.contains("No campaigns yet"));
+        assert!(html.contains("Create your first campaign."));
+        // No fabricated demo rows on the data path.
+        assert!(!html.contains("Spring Winback"));
+        assert!(!html.contains("c_spring"));
+    }
+
+    #[test]
+    fn control_plane_routes_render_data_and_static_fallbacks() {
+        let data = sample_route_data(1);
+        for path in [
+            "/dashboard",
+            "/tenants",
+            "/operators",
+            "/jobs",
+            "/infrastructure/nodes",
+            "/infrastructure/queues",
+            "/alerts",
+            "/alerts/rules",
+            "/domains",
+            "/billing/plans",
+            "/audit",
+            "/compliance",
+            "/compliance/gdpr",
+            "/discovery",
+            "/analytics",
+            "/sales",
+        ] {
+            let mut data = data.clone();
+            if let Some(list) = data.list.as_mut() {
+                list.base_path = path.to_string();
+            }
+            let html = render_route_with_data(
+                "control-plane",
+                path,
+                None,
+                None,
+                &[],
+                Some(&data),
+            )
+            .unwrap_or_else(|| panic!("control-plane {path} must render with data"));
+            assert!(html.contains("<title>ApexMail Control Plane</title>"));
+        }
+
+        // No data ⇒ the static pages render unchanged (unit-test fallback).
+        let static_html = render_route("control-plane", "/tenants").unwrap();
+        assert!(static_html.contains("Add Tenant") || static_html.contains("Tenants"));
+    }
+
+    #[test]
+    fn campaign_edit_with_values_updates_in_place() {
+        let data = RouteData {
+            list: None,
+            campaign_edit: Some(CampaignEditData {
+                id: "c_123".into(),
+                name: "Spring Winback".into(),
+                subject: "We miss you".into(),
+                html_body: "<p>Hello</p>".into(),
+                scheduled_at: "2026-09-01T09:00".into(),
+            }),
+            mfa_setup: None,
+        };
+        let html = render_route_with_data("web", "/campaigns/c_123/edit", None, None, &[], Some(&data))
+            .expect("edit route must render with values");
+        // The form POSTs to the real update handler with the row id and the
+        // stored values prefilled — editing no longer duplicates.
+        assert!(html.contains("action=\"/web/campaigns/update\""));
+        assert!(html.contains("name=\"id\" value=\"c_123\""));
+        assert!(html.contains("value=\"Spring Winback\""));
+        assert!(html.contains("value=\"We miss you\""));
+        assert!(html.contains("&lt;p&gt;Hello&lt;/p&gt;"));
+        assert!(html.contains("value=\"2026-09-01T09:00\""));
+    }
+
+    #[test]
+    fn mfa_setup_data_renders_qr_and_secret() {
+        let data = RouteData {
+            list: None,
+            campaign_edit: None,
+            mfa_setup: Some(crate::view_data::MfaSetupData {
+                secret: "JBSWY3DPEHPK3PXP".into(),
+                otpauth: "otpauth://totp/ApexMail:ops%40apexmail.ee?secret=JBSWY3DPEHPK3PXP&issuer=ApexMail".into(),
+            }),
+        };
+        for path in ["/cp/security", "/settings/security"] {
+            let html = render_route_with_data("control-plane", path, None, None, &[], Some(&data))
+                .unwrap_or_else(|| panic!("{path} must render with setup data"));
+            assert!(html.contains("<svg"), "{path} must render the QR SVG");
+            assert!(html.contains("JBSWY3DPEHPK3PXP"));
+            assert!(html.contains("action=\"/web/auth/mfa/confirm\""));
+            assert!(html.contains("name=\"code\""));
+            // The confirm form is a real submission (submittable, named field).
+            assert!(html.contains("Verify &amp; Enable"));
+        }
+    }
+
+    #[test]
+    fn previously_missing_marketing_pages_now_serve() {
+        // Footer-linked and locale pages that used to 404 behind the SSR
+        // router are part of the static whitelist now.
+        for path in [
+            "/security",
+            "/solutions/enterprise",
+            "/solutions/saas-platforms",
+            "/compare/mailgun",
+            "/compare/amazon-ses",
+            "/compare/methodology",
+            "/about",
+            "/de/about",
+            "/es/solutions/enterprise",
+            "/fr/privacy",
+            "/anti-spam",
+            "/architecture",
+            "/quickstart",
+            "/responsible-disclosure",
+            "/subprocessors",
+            "/data-locations",
+            "/docs/api/openapi",
+            "/contact/enterprise",
+            "/privacy/do-not-sell",
+            "/enterprise",
+            "/performance-methodology",
+        ] {
+            assert!(
+                render_route("marketing-zola", path).is_some(),
+                "marketing-zola {path} must serve its built page"
+            );
         }
     }
 

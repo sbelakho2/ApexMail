@@ -9,6 +9,7 @@
 use crate::icons::{render_icon, IconRenderOptions};
 use crate::primitives::*;
 use crate::shell::*;
+use crate::view_data::{render_data_cell, ListPageData};
 
 fn ui_icon(name: &str, class_name: &str) -> String {
     render_icon(
@@ -231,8 +232,251 @@ fn render_native_select(
     )
 }
 
-fn render_table_loading_state(label: &str, source_label: &str, column_count: usize) -> String {
-    let header_cells = (0..column_count)
+/// Generic server-data list page. This is the data-driven counterpart of
+/// the hand-written demo pages: the api-server loads real rows per route
+/// and renders them through here — same chrome (breadcrumbs, KPI cards,
+/// native GET filter bar, bulk-action form, pagination) with zero demo
+/// content. Empty tables render an honest empty state; nothing is
+/// fabricated.
+pub fn data_list_page(data: &ListPageData, noun: &str) -> String {
+    let breadcrumbs = render_page_breadcrumbs(&data.title);
+
+    let primary_action = match &data.primary_action {
+        Some((label, href)) => format!(
+            "<a href=\"{}\" class=\"inline-flex w-full items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold transition-all bg-primary text-white hover:bg-brand-700 h-12 px-6 py-3 sm:w-auto\">{}</a>",
+            html_escape(href),
+            html_escape(label)
+        ),
+        None => String::new(),
+    };
+
+    let kpi_cards = if data.kpis.is_empty() {
+        String::new()
+    } else {
+        let cards = data
+            .kpis
+            .iter()
+            .map(|kpi| {
+                let hint = kpi
+                    .hint
+                    .as_deref()
+                    .map(|text| format!("<p class=\"text-xs text-muted-foreground mt-1\">{}</p>", html_escape(text)))
+                    .unwrap_or_default();
+                format!(
+                    "<div class=\"rounded-sm border border-surface-200 bg-card p-6 shadow-premium\"><h3 class=\"text-xs font-bold uppercase tracking-widest text-surface-400 mb-3\">{}</h3><p class=\"text-2xl font-bold text-surface-950 tracking-tight\">{}</p>{}</div>",
+                    html_escape(&kpi.label),
+                    html_escape(&kpi.value),
+                    hint
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("");
+        format!(
+            "<div class=\"grid gap-4 sm:grid-cols-2 lg:grid-cols-4\">{cards}</div>"
+        )
+    };
+
+    // Native GET filter form: search input + selects + Apply/Clear.
+    let filters_html = if data.search_label.is_empty() && data.filters.is_empty() {
+        String::new()
+    } else {
+        let selects = data
+            .filters
+            .iter()
+            .map(|filter| {
+                let options = filter
+                    .options
+                    .iter()
+                    .map(|(value, label, selected)| {
+                        if *selected {
+                            format!("<option value=\"{}\" selected>{}</option>", html_escape(value), html_escape(label))
+                        } else {
+                            format!("<option value=\"{}\">{}</option>", html_escape(value), html_escape(label))
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join("");
+                format!(
+                    "<div class=\"min-w-[10rem]\"><label class=\"sr-only\" for=\"filter-{}\">{}</label><select id=\"filter-{}\" name=\"{}\" class=\"flex h-12 w-full rounded-sm border border-input bg-background px-3 text-[14px] ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/20 focus-visible:border-primary\">{}</select></div>",
+                    html_escape(&filter.name),
+                    html_escape(&filter.label),
+                    html_escape(&filter.name),
+                    html_escape(&filter.name),
+                    options
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("");
+        let search = if data.search_label.is_empty() {
+            String::new()
+        } else {
+            let search_icon = ui_icon("search", "h-4 w-4");
+            format!(
+                "<div class=\"min-w-0 flex-1\"><label class=\"sr-only\" for=\"{id}-search\">{label}</label><div class=\"relative\"><span class=\"pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground\">{search_icon}</span><input id=\"{id}-search\" type=\"search\" name=\"query\" aria-label=\"{label}\" value=\"{value}\" placeholder=\"{placeholder}\" class=\"flex h-12 w-full rounded-sm border border-input bg-background pl-10 pr-4 text-[14px] ring-offset-background transition-all duration-200 placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/20 focus-visible:border-primary\" /></div></div>",
+                id = html_escape(&data.base_path.replace('/', "-")),
+                label = html_escape(&data.search_label),
+                search_icon = search_icon,
+                value = html_escape(&data.current_query),
+                placeholder = html_escape(&data.search_placeholder),
+            )
+        };
+        format!(
+            "<section class=\"rounded-sm border border-surface-200 bg-card/80 p-6\"><form method=\"get\" action=\"{action}\" class=\"flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between\" role=\"search\">{search}<div class=\"flex w-full flex-col gap-3 sm:flex-row lg:w-auto\">{selects}<div class=\"flex flex-col gap-2 sm:flex-row\"><button type=\"submit\" class=\"inline-flex w-full items-center justify-center rounded-sm bg-primary px-4 py-2 text-sm font-bold text-white transition-colors hover:bg-brand-700 sm:w-auto\">Apply filters</button><a href=\"{action}\" class=\"inline-flex w-full items-center justify-center rounded-sm border border-input bg-background px-4 py-2 text-sm font-bold text-foreground transition-colors hover:bg-accent hover:text-accent-foreground sm:w-auto\">Clear filters</a></div></div></form></section>",
+            action = html_escape(&data.base_path),
+            search = search,
+            selects = selects,
+        )
+    };
+
+    let table_section = match &data.table {
+        None => String::new(),
+        Some(table) if table.rows.is_empty() => {
+            // Honest empty state: visible, with the page's own copy.
+            format!(
+                "<section data-view-state=\"empty\" class=\"space-y-4\">{}</section>",
+                EmptyState {
+                    title: &data.empty_title,
+                    description: Some(&data.empty_description),
+                    icon_markup: None,
+                    action_label: data.primary_action.as_ref().map(|(label, _)| label.as_str()),
+                    action_href: data.primary_action.as_ref().map(|(_, href)| href.as_str()),
+                }
+                .render_html()
+            )
+        }
+        Some(table) => {
+            let has_bulk = data.bulk_action.is_some();
+            let has_actions = data.detail_path_prefix.is_some() || data.delete_intent.is_some();
+
+            let mut columns: Vec<TableColumn> = Vec::with_capacity(table.columns.len() + 2);
+            let mut owned_rows: Vec<Vec<String>> = Vec::with_capacity(table.rows.len());
+            if has_bulk {
+                columns.push(TableColumn { label: "", align: "left" });
+            }
+            for label in &table.columns {
+                columns.push(TableColumn { label, align: "left" });
+            }
+            if has_actions {
+                columns.push(TableColumn { label: "Actions", align: "right" });
+            }
+            for row in &table.rows {
+                let mut cells: Vec<String> = Vec::with_capacity(columns.len());
+                if has_bulk {
+                    cells.push(format!(
+                        "<input type=\"checkbox\" name=\"ids\" value=\"{}\" aria-label=\"Select row {}\" />",
+                        html_escape(&row.id),
+                        html_escape(&row.id)
+                    ));
+                }
+                for cell in &row.cells {
+                    cells.push(render_data_cell(cell));
+                }
+                if has_actions {
+                    let mut actions: Vec<String> = Vec::with_capacity(3);
+                    if let Some(prefix) = &data.detail_path_prefix {
+                        let label = if data.detail_label.is_empty() { "View" } else { &data.detail_label };
+                        actions.push(format!(
+                            "<a href=\"{prefix}{id}\" class=\"inline-flex items-center justify-center rounded-sm border border-input bg-background px-3 py-2 text-sm font-bold text-foreground transition-colors hover:bg-accent hover:text-accent-foreground\">{label}</a>",
+                            prefix = html_escape(prefix),
+                            id = html_escape(&row.id),
+                            label = html_escape(label),
+                        ));
+                        if let Some(suffix) = &data.edit_path_suffix {
+                            actions.push(format!(
+                                "<a href=\"{prefix}{id}{suffix}\" class=\"inline-flex items-center justify-center rounded-sm border border-input bg-background px-3 py-2 text-sm font-bold text-foreground transition-colors hover:bg-accent hover:text-accent-foreground\">Edit</a>",
+                                prefix = html_escape(prefix),
+                                id = html_escape(&row.id),
+                                suffix = html_escape(suffix),
+                            ));
+                        }
+                    }
+                    if let Some(intent) = &data.delete_intent {
+                        actions.push(format!(
+                            "<a href=\"/confirm?intent={intent}&amp;id={id}&amp;return_to={return_to}\" class=\"inline-flex items-center justify-center rounded-sm border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm font-bold text-destructive transition-colors hover:bg-destructive/10\">Delete</a>",
+                            intent = html_escape(intent),
+                            id = html_escape(&row.id),
+                            return_to = urlencode_path(&data.base_path),
+                        ));
+                    }
+                    cells.push(format!(
+                        "<div class=\"flex flex-wrap justify-end gap-2\">{}</div>",
+                        actions.join("")
+                    ));
+                }
+                owned_rows.push(cells);
+            }
+            let borrowed_rows: Vec<Vec<&str>> = owned_rows
+                .iter()
+                .map(|row| row.iter().map(String::as_str).collect())
+                .collect();
+            let rendered_table = Table {
+                caption: Some(&data.title),
+                columns,
+                rows: borrowed_rows,
+            }
+            .render_html();
+
+            let pagination = PaginationControls {
+                page: data.page.max(1),
+                total_pages: data.total_pages.max(1),
+            }
+            .render_html_with_links(
+                &data.base_path,
+                Some(data.filter_query.as_str()),
+                Some(pagination_storage_key(noun).as_str()),
+            );
+            let summary = data.summary(noun);
+
+            if has_bulk {
+                let bulk = data.bulk_action.as_ref().expect("checked above");
+                format!(
+                    "<form method=\"post\" action=\"{action}\" data-bulk-form=\"{noun}\"><section class=\"rounded-sm border border-surface-200 bg-card/80 p-6\" data-bulk-scope=\"{noun}\"><div class=\"flex flex-col gap-3 md:flex-row md:items-center md:justify-between\"><p class=\"text-sm font-bold text-foreground\">Select rows to act on them in bulk</p><div class=\"flex flex-col gap-2 sm:flex-row\"><button type=\"submit\" formaction=\"{action}\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-md bg-destructive px-4 py-2 text-sm font-semibold text-destructive-foreground transition-colors hover:bg-destructive/90\">{label}</button></div></div></section><section data-view-state=\"ready\" class=\"space-y-4\">{table}<div class=\"flex flex-col gap-3 md:flex-row md:items-center md:justify-between\"><p class=\"text-sm text-muted-foreground\">{summary}</p>{pagination}</div></section></form>",
+                    action = html_escape(&bulk.action),
+                    noun = html_escape(noun),
+                    label = html_escape(&bulk.button_label),
+                    table = rendered_table,
+                    summary = html_escape(&summary),
+                    pagination = pagination,
+                )
+            } else {
+                format!(
+                    "<section data-view-state=\"ready\" class=\"space-y-4\">{table}<div class=\"flex flex-col gap-3 md:flex-row md:items-center md:justify-between\"><p class=\"text-sm text-muted-foreground\">{summary}</p>{pagination}</div></section>",
+                    table = rendered_table,
+                    summary = html_escape(&summary),
+                    pagination = pagination,
+                )
+            }
+        }
+    };
+
+    format!(
+        "<div class=\"space-y-6\">{breadcrumbs}<div class=\"flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between\"><div><h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">{title}</h1><p class=\"text-sm text-muted-foreground\">{description}</p></div>{primary_action}</div>{kpis}{filters}{table_section}</div>",
+        breadcrumbs = breadcrumbs,
+        title = html_escape(&data.title),
+        description = html_escape(&data.description),
+        primary_action = primary_action,
+        kpis = kpi_cards,
+        filters = filters_html,
+        table_section = table_section,
+    )
+}
+
+/// Minimal path-only percent-encoding for `return_to` values (the query
+/// string separators must be encoded so the confirm page reads one value).
+fn urlencode_path(value: &str) -> String {
+    let mut out = String::with_capacity(value.len() * 3);
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(byte as char);
+            }
+            _ => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    out
+}
+
+fn render_table_loading_state(label: &str, source_label: &str, column_count: usize) -> String {    let header_cells = (0..column_count)
         .map(|index| {
             let class_name = match index {
                 0 => "h-4 w-28",
@@ -626,7 +870,7 @@ pub fn control_plane_audit_page() -> String {
 <a href=\"/web/admin/audit/export\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-md border border-surface-200 bg-background px-4 py-2 text-sm font-semibold text-foreground transition-colors hover:border-surface-300\">Export audit log (CSV)</a>\
 </div>\
 <form method=\"get\" action=\"/audit\" role=\"search\" class=\"flex items-center gap-4\">\
-<div class=\"flex-1\"><label class=\"sr-only\" for=\"audit-search\">Search audit logs</label><input id=\"audit-search\" type=\"search\" name=\"query\" placeholder=\"Search audit logs...\" class=\"flex h-12 w-full rounded-md border border-surface-200 bg-background px-4 text-[14px] outline-none transition focus-visible:ring-2 focus-visible:ring-primary/20\" /></div><button type=\"submit\" class=\"rounded-sm border border-surface-200 bg-card px-4 py-2 text-sm font-bold text-surface-950 Search</button>\
+<div class=\"flex-1\"><label class=\"sr-only\" for=\"audit-search\">Search audit logs</label><input id=\"audit-search\" type=\"search\" name=\"query\" placeholder=\"Search audit logs...\" class=\"flex h-12 w-full rounded-md border border-surface-200 bg-background px-4 text-[14px] outline-none transition focus-visible:ring-2 focus-visible:ring-primary/20\" /></div><button type=\"submit\" class=\"rounded-sm border border-surface-200 bg-card px-4 py-2 text-sm font-bold text-surface-950\">Search</button>\
 </form>\
 {loading}\
 <section data-view-state=\"ready\">{table}</section>\
@@ -1520,6 +1764,32 @@ pub fn web_campaign_edit_page() -> String {
     )
 }
 
+/// Campaign edit page with server-loaded values: the form carries the
+/// campaign's id (hidden) and prefilled name/subject/content, and POSTs to
+/// the real update handler — editing updates the row instead of silently
+/// creating a duplicate.
+pub fn web_campaign_edit_page_with_values(edit: &crate::view_data::CampaignEditData) -> String {
+    let breadcrumbs = render_page_breadcrumbs("Campaigns");
+    format!(
+        "<div class=\"w-full max-w-3xl space-y-6\">{breadcrumbs}\
+<div class=\"flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between\"><div><h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Edit Campaign</h1><p class=\"text-sm text-muted-foreground\">Saving updates this campaign in place.</p></div><a href=\"/campaigns\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-sm border border-input bg-background px-4 py-2 text-sm font-bold text-foreground transition-colors hover:bg-accent hover:text-accent-foreground\">Back to campaigns</a></div>\
+<form class=\"space-y-6\" method=\"post\" action=\"/web/campaigns/update\">\
+<input type=\"hidden\" name=\"id\" value=\"{id}\" />\
+<div class=\"space-y-2\"><label class=\"text-sm font-medium leading-none\" for=\"campaign-name\">Campaign Name</label><input id=\"campaign-name\" name=\"name\" type=\"text\" required value=\"{name}\" class=\"flex h-12 w-full rounded-sm border border-input bg-background px-3 text-[14px] ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/20 focus-visible:border-primary\" /></div>\
+<div class=\"space-y-2\"><label class=\"text-sm font-medium leading-none\" for=\"campaign-subject\">Subject Line</label><input id=\"campaign-subject\" name=\"subject\" type=\"text\" required value=\"{subject}\" class=\"flex h-12 w-full rounded-sm border border-input bg-background px-3 text-[14px] ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/20 focus-visible:border-primary\" /></div>\
+<div class=\"space-y-2\"><label class=\"text-sm font-medium leading-none\" for=\"campaign-content\">HTML Content</label><textarea id=\"campaign-content\" name=\"html_body\" rows=\"10\" maxlength=\"25000\" class=\"flex min-h-[160px] w-full rounded-sm border border-input bg-background px-3 py-2 text-[14px] ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/20 focus-visible:border-primary\">{html_body}</textarea></div>\
+<div class=\"space-y-2\"><label class=\"text-sm font-medium leading-none\" for=\"campaign-scheduled-at\">Schedule (optional)</label><input id=\"campaign-scheduled-at\" name=\"scheduled_at\" type=\"datetime-local\" value=\"{scheduled_at}\" class=\"flex h-12 w-full rounded-sm border border-input bg-background px-3 text-[14px] ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/20 focus-visible:border-primary\" /><p class=\"text-xs text-muted-foreground\">Keep the field empty to store the campaign as a draft.</p></div>\
+<div class=\"flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between\"><p class=\"text-xs text-muted-foreground\">Everything runs server-side: save is a plain form post.</p><button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-md bg-primary px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-brand-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">Save Changes</button></div>\
+</form></div>",
+        breadcrumbs = breadcrumbs,
+        id = html_escape(&edit.id),
+        name = html_escape(&edit.name),
+        subject = html_escape(&edit.subject),
+        html_body = html_escape(&edit.html_body),
+        scheduled_at = html_escape(&edit.scheduled_at),
+    )
+}
+
 /// Contacts list page.
 pub fn web_contacts_page() -> String {
     let filters = format!(
@@ -1789,7 +2059,7 @@ pub fn web_list_edit_page() -> String {
             disabled: false,
             loading: false,
             left_icon: None,
-            right_icon: None, submit: false
+            right_icon: None, submit: true
         }
         .render_html(),
     )
@@ -1833,7 +2103,7 @@ pub fn web_lists_new_page() -> String {
             disabled: false,
             loading: false,
             left_icon: None,
-            right_icon: None, submit: false
+            right_icon: None, submit: true
         }
         .render_html(),
     )
@@ -1957,8 +2227,8 @@ pub fn web_inbox_placement_page() -> String {
 <div class=\"overflow-x-auto\"><table class=\"min-w-full text-sm\" data-table=\"placement-tests\">\
 <thead class=\"bg-surface-50 text-left text-xs uppercase tracking-wider text-surface-500\">\
 <tr><th class=\"px-6 py-3\">Test</th><th class=\"px-6 py-3\">From</th><th class=\"px-6 py-3\">Status</th><th class=\"px-6 py-3\">Score</th><th class=\"px-6 py-3\">Created</th><th class=\"px-6 py-3 text-right\">Actions</th></tr></thead>\
-<tbody data-rows-target=\"placement-tests\" data-empty-message=\"No placement tests yet — start with a new test.\">\
-<tr data-empty-row><td class=\"px-6 py-12 text-center text-surface-500\" colspan=\"6\">No placement tests yet. <a href=\"/inbox-placement/new\" class=\"text-primary hover:underline\">Run your first test</a>.</td></tr>\
+<tbody>\
+<tr><td class=\"px-6 py-12 text-center text-surface-500\" colspan=\"6\">No placement tests yet. <a href=\"/inbox-placement/new\" class=\"text-primary hover:underline\">Run your first test</a>.</td></tr>\
 </tbody></table></div></div>\
 </div>",
         kpi_total = format!("<article aria-label=\"Total placement tests: 0 all time\">{}</article>", Card { title: "Total tests", body: "<p class=\"text-2xl font-bold text-surface-950 tracking-tight\" data-metric=\"placement.total\">0</p><p class=\"text-sm text-muted-foreground\">All time</p>", variant: "default", padding: "default", interactive: false }.render_html()),
@@ -2023,32 +2293,32 @@ pub fn web_inbox_placement_detail_page() -> String {
 <nav aria-label=\"Breadcrumb\" class=\"mb-2\"><ol class=\"flex items-center gap-2 text-sm text-surface-500\">\
 <li><a href=\"/inbox-placement\" class=\"hover:text-surface-900 transition-colors\">Inbox Placement</a></li>\
 <li class=\"text-surface-300\">/</li>\
-<li class=\"text-surface-900 font-medium\" data-bind=\"placement.test_name\">Test detail</li></ol></nav>\
+<li class=\"text-surface-900 font-medium\">Test detail</li></ol></nav>\
 <div class=\"flex flex-col md:flex-row md:items-center md:justify-between gap-4\">\
-<div><h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\" data-bind=\"placement.test_name\">Loading test…</h1>\
-<p class=\"text-sm text-surface-600\"><span data-bind=\"placement.subject\">—</span> · from <span data-bind=\"placement.from_email\">—</span></p></div>\
+<div><h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Loading test…</h1>\
+<p class=\"text-sm text-surface-600\"><span>—</span> · from <span>—</span></p></div>\
 <div class=\"flex items-center gap-3\">\
-<span class=\"inline-flex items-center rounded-sm px-3 py-1 text-xs font-bold bg-surface-100 text-surface-700\" data-bind=\"placement.status\">Pending</span>\
+<span class=\"inline-flex items-center rounded-sm px-3 py-1 text-xs font-bold bg-surface-100 text-surface-700\">Pending</span>\
 <a href=\"/inbox-placement\" class=\"text-sm text-surface-600 hover:text-surface-900\">← Back</a>\
 </div></div>\
 <div class=\"grid gap-4 md:grid-cols-4\">{kpi_score}{kpi_inbox}{kpi_spam}{kpi_missing}</div>\
 <div class=\"rounded-sm border bg-white dark:bg-gray-900\">\
 <div class=\"border-b px-6 py-3\"><h3 class=\"text-lg font-bold\">Per-provider breakdown</h3></div>\
-<div class=\"overflow-x-auto\"><table class=\"min-w-full text-sm\" data-table=\"placement-results\">\
+<div class=\"overflow-x-auto\"><table class=\"min-w-full text-sm\">\
 <thead class=\"bg-surface-50 text-left text-xs uppercase tracking-wider text-surface-500\">\
 <tr><th class=\"px-6 py-3\">Provider</th><th class=\"px-6 py-3\">Tested</th><th class=\"px-6 py-3\">Inbox</th><th class=\"px-6 py-3\">Spam</th><th class=\"px-6 py-3\">Missing</th><th class=\"px-6 py-3\">Inbox rate</th></tr></thead>\
-<tbody data-rows-target=\"placement-results\" data-empty-message=\"Awaiting delivery results…\">\
-<tr data-empty-row><td class=\"px-6 py-12 text-center text-surface-500\" colspan=\"6\">Results will appear here as seed accounts receive the message.</td></tr>\
+<tbody>\
+<tr><td class=\"px-6 py-12 text-center text-surface-500\" colspan=\"6\">Results will appear here as seed accounts receive the message.</td></tr>\
 </tbody></table></div></div>\
 <div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium\"><h3 class=\"text-xs font-bold uppercase tracking-widest text-surface-400 mb-6\">Inbox rate over time</h3><div class=\"h-64\">{chart}</div></div>\
 <div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium\"><h3 class=\"text-lg font-bold mb-2\">Recommendations</h3>\
-<ul class=\"space-y-2 text-sm text-surface-700\" data-bind-list=\"placement.recommendations\" data-empty-message=\"No recommendations available yet.\"><li class=\"text-surface-500\">Recommendations will appear once the test completes.</li></ul>\
+<ul class=\"space-y-2 text-sm text-surface-700\"><li class=\"text-surface-500\">Recommendations will appear once the test completes.</li></ul>\
 </div>\
 </div>",
-        kpi_score = Card { title: "Overall score", body: "<p class=\"text-2xl font-bold text-surface-950 tracking-tight\" data-bind=\"placement.score\">—</p><p class=\"text-sm text-muted-foreground\">0–100</p>", variant: "default", padding: "default", interactive: false }.render_html(),
-        kpi_inbox = Card { title: "Inbox", body: "<p class=\"text-2xl font-bold text-surface-950 tracking-tight\" data-bind=\"placement.inbox_rate\">—</p><p class=\"text-sm text-muted-foreground\">Across providers</p>", variant: "default", padding: "default", interactive: false }.render_html(),
-        kpi_spam = Card { title: "Spam", body: "<p class=\"text-2xl font-bold text-surface-950 tracking-tight\" data-bind=\"placement.spam_rate\">—</p><p class=\"text-sm text-muted-foreground\">Across providers</p>", variant: "default", padding: "default", interactive: false }.render_html(),
-        kpi_missing = Card { title: "Missing", body: "<p class=\"text-2xl font-bold text-surface-950 tracking-tight\" data-bind=\"placement.missing_rate\">—</p><p class=\"text-sm text-muted-foreground\">Not delivered</p>", variant: "default", padding: "default", interactive: false }.render_html(),
+        kpi_score = Card { title: "Overall score", body: "<p class=\"text-2xl font-bold text-surface-950 tracking-tight\">—</p><p class=\"text-sm text-muted-foreground\">0–100</p>", variant: "default", padding: "default", interactive: false }.render_html(),
+        kpi_inbox = Card { title: "Inbox", body: "<p class=\"text-2xl font-bold text-surface-950 tracking-tight\">—</p><p class=\"text-sm text-muted-foreground\">Across providers</p>", variant: "default", padding: "default", interactive: false }.render_html(),
+        kpi_spam = Card { title: "Spam", body: "<p class=\"text-2xl font-bold text-surface-950 tracking-tight\">—</p><p class=\"text-sm text-muted-foreground\">Across providers</p>", variant: "default", padding: "default", interactive: false }.render_html(),
+        kpi_missing = Card { title: "Missing", body: "<p class=\"text-2xl font-bold text-surface-950 tracking-tight\">—</p><p class=\"text-sm text-muted-foreground\">Not delivered</p>", variant: "default", padding: "default", interactive: false }.render_html(),
         chart = ApexLineChart { title: None, description: None, last_updated_label: None, height: 256, series: vec![], data_count: 0, empty_state_reason: "Awaiting results" }.render_html(),
     )
 }
@@ -2224,7 +2494,7 @@ pub fn web_domains_new_page() -> String {
             disabled: false,
             loading: false,
             left_icon: None,
-            right_icon: None, submit: false
+            right_icon: None, submit: true
         }
         .render_html(),
     )
@@ -2382,21 +2652,6 @@ pub fn web_settings_billing_page() -> String {
 <form class=\"inline\" method=\"post\" action=\"/web/billing/portal\"><button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold transition-all border border-surface-300 text-surface-700 hover:bg-surface-100 h-10 px-4 py-2\">Add Payment Method</button></form>\
 </div>\
 </div>\
-<div class=\"mt-4 rounded-sm border border-dashed border-surface-300 p-4\" data-payment-methods-list hidden>\
-<h4 class=\"text-sm font-bold text-surface-950 mb-3\">Saved Payment Methods</h4>\
-<div class=\"flex items-center justify-between p-3 rounded-sm bg-surface-50 border border-surface-100\">\
-<div class=\"flex items-center gap-3\">\
-<svg class=\"h-6 w-6 text-surface-400\" xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><rect width=\"20\" height=\"14\" x=\"2\" y=\"5\" rx=\"2\"/><line x1=\"2\" x2=\"22\" y1=\"10\" y2=\"10\"/></svg>\
-<div><p class=\"text-sm font-semibold text-surface-950\" data-payment-method-label>Visa ending in 4242</p><p class=\"text-xs text-surface-500\" data-payment-method-expiry>Expires 12/28</p></div>\
-</div>\
-<div class=\"flex items-center gap-2\">\
-<span class=\"inline-flex items-center rounded-sm bg-success-50 px-2 py-0.5 text-xs font-bold text-success-700\">Default</span>\
-<button class=\"inline-flex items-center justify-center rounded-sm text-xs font-bold text-surface-600 hover:text-surface-900 h-8 px-2\" data-action=\"edit-payment\">Edit</button>\
-<button class=\"inline-flex items-center justify-center rounded-sm text-xs font-bold text-destructive hover:text-destructive/80 h-8 px-2\" data-action=\"delete-payment\">Delete</button>\
-</div>\
-</div>\
-</div>\
-</div>\
 <div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium\"><h3 class=\"text-xs font-bold uppercase tracking-widest text-surface-400 mb-6\">Usage This Month</h3>\
 {progress}\
 <p class=\"text-sm text-muted-foreground mt-2\">0 of 1,000 emails sent</p>\
@@ -2521,7 +2776,7 @@ pub fn web_settings_profile_page() -> String {
             disabled: false,
             loading: false,
             left_icon: None,
-            right_icon: None, submit: false
+            right_icon: None, submit: true
         }
         .render_html(),
         current_label = Label {
@@ -2577,7 +2832,7 @@ pub fn web_settings_profile_page() -> String {
             disabled: false,
             loading: false,
             left_icon: None,
-            right_icon: None, submit: false
+            right_icon: None, submit: true
         }
         .render_html(),
     )
@@ -2803,7 +3058,7 @@ pub fn control_plane_tenants_new_page() -> String {
             disabled: false,
             autocomplete: None,
             required: true,
-            name: None,
+            name: Some("name"),
         }
         .render_html(),
         domain_label = Label {
@@ -2826,7 +3081,7 @@ pub fn control_plane_tenants_new_page() -> String {
             disabled: false,
             autocomplete: None,
             required: true,
-            name: None,
+            name: Some("domain"),
         }
         .render_html(),
         save_button = Button {
@@ -2836,7 +3091,7 @@ pub fn control_plane_tenants_new_page() -> String {
             disabled: false,
             loading: false,
             left_icon: None,
-            right_icon: None, submit: false
+            right_icon: None, submit: true
         }
         .render_html(),
     )
@@ -2911,7 +3166,7 @@ pub fn control_plane_operators_new_page() -> String {
             disabled: false,
             autocomplete: None,
             required: true,
-            name: None,
+            name: Some("name"),
         }
         .render_html(),
         email_label = Label {
@@ -2934,7 +3189,7 @@ pub fn control_plane_operators_new_page() -> String {
             disabled: false,
             autocomplete: None,
             required: true,
-            name: None,
+            name: Some("email"),
         }
         .render_html(),
         save_button = Button {
@@ -2944,7 +3199,7 @@ pub fn control_plane_operators_new_page() -> String {
             disabled: false,
             loading: false,
             left_icon: None,
-            right_icon: None, submit: false
+            right_icon: None, submit: true
         }
         .render_html(),
     )
@@ -3663,10 +3918,6 @@ pub fn web_login_page(csrf_token: &str) -> String {
 
 <button type=\"submit\" class=\"w-full bg-primary hover:bg-brand-700 text-white text-sm font-semibold flex items-center justify-center gap-3 py-3 rounded-md shadow-premium transition-all active:scale-[0.99] group mt-2\"><span>Sign In</span>{arrow}</button>\
 <div class=\"text-center text-xs font-medium text-surface-500\">No account? <a href=\"/signup\" class=\"text-primary font-bold hover:underline\">Sign up</a></div>\
-<div id=\"login-mfa\" data-mfa-section class=\"hidden\" aria-hidden=\"true\">\
-<p class=\"text-[11px] font-bold text-surface-500\">Additional verification required. Enter your MFA code.</p>\
-<input id=\"mfaCode\" name=\"mfaCode\" type=\"text\" inputmode=\"numeric\" pattern=\"[0-9]*\" maxlength=\"6\" autocomplete=\"one-time-code\" placeholder=\"000000\" class=\"flex h-11 w-full rounded-md border border-surface-200 bg-background px-4 py-2 text-sm font-mono text-center tracking-widest focus:border-primary outline-none transition-all\" />\
-</div>\
 <div id=\"login-form-errors\" class=\"hidden\" role=\"alert\" aria-live=\"assertive\" data-error-key=\"auth.error.rate_limited\"></div></form>",
         csrf = csrf,
         arrow = web_auth_arrow_icon(),
@@ -3760,10 +4011,6 @@ pub fn control_plane_login_page(csrf_token: &str) -> String {
 </div>\
 
 <button type=\"submit\" class=\"w-full bg-primary hover:bg-brand-700 text-white text-sm font-semibold flex items-center justify-center gap-3 py-3 rounded-md shadow-premium transition-all active:scale-[0.99] group mt-2\"><span>Authorize Access</span>{arrow}</button>\
-<div id=\"login-mfa\" data-mfa-section class=\"hidden\" aria-hidden=\"true\">\
-<p class=\"text-[11px] font-bold text-surface-500\">Additional verification required. Enter your MFA code.</p>\
-<input id=\"mfaCode\" name=\"mfaCode\" type=\"text\" inputmode=\"numeric\" pattern=\"[0-9]*\" maxlength=\"6\" autocomplete=\"one-time-code\" placeholder=\"000000\" class=\"flex h-11 w-full rounded-md border border-surface-200 bg-background px-4 py-2 text-sm font-mono text-center tracking-widest focus:border-primary outline-none transition-all\" />\
-</div>\
 <div id=\"login-form-errors\" class=\"hidden\" role=\"alert\" aria-live=\"assertive\" data-error-key=\"auth.error.rate_limited\"></div></form>",
         csrf = csrf,
         arrow = web_auth_arrow_icon(),
@@ -4031,11 +4278,13 @@ mod tests {
         // Field IDs matching behavior baseline manifest
         assert!(html.contains("id=\"login-email\""));
         assert!(html.contains("id=\"password\""));
-        assert!(html.contains("id=\"mfaCode\""));
+        // The JS-era hidden MFA div is gone: MFA-enabled accounts are routed
+        // to the server-rendered challenge page (/login?mfa=1) after the
+        // password step succeeds.
+        assert!(!html.contains("id=\"mfaCode\""));
+        assert!(!html.contains("data-mfa-section"));
         // Error data attribute for rate limiting
         assert!(html.contains("data-error-key=\"auth.error.rate_limited\""));
-        // MFA section
-        assert!(html.contains("Additional verification required. Enter your MFA code."));
         // CSRF endpoint
         assert!(html.contains("action=\"/web/auth/login\""));
         // Form structure
@@ -4054,9 +4303,10 @@ mod tests {
         // Selectors from behavior baseline manifest
         assert!(html.contains("id=\"login-email\""));
         assert!(html.contains("id=\"login-password\""));
-        assert!(html.contains("id=\"login-mfa\""));
-        // MFA text (matches the web login's MFA wording)
-        assert!(html.contains("MFA code"));
+        // The JS-era hidden MFA div is gone: the multi-step SSR login renders
+        // the challenge as its own page (/login?mfa=1), not a JS-unhidden div.
+        assert!(!html.contains("id=\"login-mfa\""));
+        assert!(!html.contains("data-mfa-section"));
         // Auth endpoint
         assert!(html.contains("action=\"/web/cp/login\""));
         // CP login now shares the two-column web auth shell

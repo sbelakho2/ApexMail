@@ -326,17 +326,13 @@ fn migration_primitives_render_valid_html() {
 #[test]
 fn migration_login_pages_preserve_field_ids() {
     let web = leptos_views::web_login_page("");
-    let ids = ["id=\"login-email\"", "id=\"password\"", "id=\"mfaCode\""];
+    let ids = ["id=\"login-email\"", "id=\"password\""];
     for id in &ids {
         assert!(web.contains(id), "web login missing {}", id);
     }
 
     let cp = leptos_views::control_plane_login_page("");
-    let cp_ids = [
-        "id=\"login-email\"",
-        "id=\"login-password\"",
-        "id=\"login-mfa\"",
-    ];
+    let cp_ids = ["id=\"login-email\"", "id=\"login-password\""];
     for id in &cp_ids {
         assert!(cp.contains(id), "control-plane login missing {}", id);
     }
@@ -383,7 +379,10 @@ fn migration_security_data_attributes_present() {
         "rate limiting data attribute missing"
     );
 
-    let mfa_input = login.contains("inputmode=\"numeric\"") && login.contains("maxlength=\"6\"");
+    // MFA input attributes live on the server-rendered challenge page
+    // (/login?mfa=1), not on the password step's JS-era hidden div.
+    let challenge = leptos_views::web_login_mfa_challenge_page("", "ops@apexmail.ee", "/dashboard");
+    let mfa_input = challenge.contains("inputmode=\"numeric\"") && challenge.contains("maxlength=\"6\"");
     assert!(mfa_input, "MFA input attributes missing");
 }
 
