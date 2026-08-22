@@ -95,7 +95,10 @@ fn dmarc_record_value() -> String {
     )
 }
 
-fn effective_dkim_selector(selector: Option<&str>) -> &str {
+/// Effective DKIM selector for record building. `pub(crate)` so the SSR
+/// domain detail page reuses the exact same record generation as
+/// GET /v1/domains/:id/dns-records (never a duplicated copy).
+pub(crate) fn effective_dkim_selector(selector: Option<&str>) -> &str {
     selector
         .filter(|selector| !selector.trim().is_empty())
         .unwrap_or(DEFAULT_DKIM_SELECTOR)
@@ -140,7 +143,10 @@ fn return_path_dns_record(domain: &str, aws_region: &str) -> DnsRecord {
     }
 }
 
-fn required_sender_dns_records(
+/// The full record set a sender must publish. `pub(crate)` so the SSR
+/// domain detail page renders the SAME records the JSON dns-records
+/// endpoint returns (single source of truth).
+pub(crate) fn required_sender_dns_records(
     domain: &str,
     selector: &str,
     public_key: &str,

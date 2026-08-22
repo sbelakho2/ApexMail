@@ -45,7 +45,7 @@ pub(crate) use data::load_page_data;
 
 use std::collections::HashMap;
 
-use axum::extract::{Form, Query, State};
+use axum::extract::{Form, Path, Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -244,14 +244,29 @@ pub fn authenticated_router(state: AppState) -> Router<AppState> {
         .route("/web/contacts", post(form_contact_create))
         .route("/web/contacts/delete-bulk", post(form_contacts_delete_bulk))
         .route("/web/contacts/export.csv", get(form_contacts_export))
+        .route("/web/contacts/import", post(form_contacts_import))
         .route("/web/lists", post(form_list_create))
         .route("/web/lists/update", post(form_list_update))
+        .route("/web/lists/delete-bulk", post(form_lists_delete_bulk))
         .route("/web/domains", post(form_domain_create))
+        .route("/web/domains/:id/verify", post(form_domain_verify))
         .route("/web/templates", post(form_template_create))
+        .route("/web/templates/update", post(form_template_update))
+        .route("/web/templates/preview", post(form_template_preview))
         .route("/web/campaigns", post(form_campaign_create))
         .route("/web/campaigns/update", post(form_campaign_update))
         .route("/web/campaigns/preview", post(form_campaign_preview))
         .route("/web/campaigns/delete-bulk", post(form_campaigns_delete_bulk))
+        .route(
+            "/web/campaigns/:id/start",
+            post(form_campaign_start),
+        )
+        .route("/web/campaigns/:id/pause", post(form_campaign_pause))
+        .route("/web/campaigns/:id/resume", post(form_campaign_resume))
+        .route(
+            "/web/campaigns/:id/recipients",
+            post(form_campaign_recipients),
+        )
         .route("/web/inbox-placement/tests", post(form_placement_create))
         .route("/web/dedicated-ips", post(form_dedicated_ip_request))
         .route("/web/confirm", post(form_confirm_destructive))
@@ -259,6 +274,19 @@ pub fn authenticated_router(state: AppState) -> Router<AppState> {
             state.clone(),
             web_form_rejection_middleware,
         ))
+}
+
+/// Data-backed SSR detail pages (`GET /domains/{id}`, `GET /campaigns/{id}`).
+/// Mounted OUTSIDE the require_auth stack: these are browser pages whose
+/// anonymous contract is the same 303 `/login?next=…` redirect the SSR
+/// fallback produces for every auth-required UI route (the routing
+/// inventory asserts this), not a JSON 401. Sessions are resolved inside
+/// the handlers; non-id segments (e.g. `/campaigns/new`) fall through to
+/// the standard SSR render exactly as the fallback would serve them.
+pub fn detail_router() -> Router<AppState> {
+    Router::new()
+        .route("/domains/:id", get(web_domain_detail))
+        .route("/campaigns/:id", get(web_campaign_detail))
 }
 
 /// Control-plane form routes (`/web/admin/*`). These mutate platform
@@ -272,8 +300,33 @@ pub fn admin_router(state: AppState) -> Router<AppState> {
         .route("/web/admin/operators", post(form_admin_operator_create))
         .route("/web/admin/sales/discovery", post(form_sales_discovery))
         .route("/web/admin/sales/outreach", post(form_sales_outreach))
+        .route(
+            "/web/admin/sales/discovery/run",
+            post(form_sales_discovery_run),
+        )
+        .route(
+            "/web/admin/sales/outreach/launch",
+            post(form_sales_outreach_launch),
+        )
         .route("/web/admin/sales/leads/update", post(form_sales_leads_update))
         .route("/web/admin/audit/export", get(form_audit_export))
+        .route("/web/admin/alerts/ack", post(form_admin_alert_ack))
+        .route("/web/admin/alerts/ack-bulk", post(form_admin_alert_ack_bulk))
+        .route(
+            "/web/admin/tenants/:id/suspend",
+            post(form_admin_tenant_suspend),
+        )
+        .route("/web/admin/tenants/:id/resume", post(form_admin_tenant_resume))
+        .route("/web/admin/tenants/:id/delete", post(form_admin_tenant_delete))
+        .route(
+            "/web/admin/domains/:domain/transfer",
+            get(web_admin_domain_transfer),
+        )
+        .route("/web/admin/domains/transfer", post(form_admin_domain_transfer))
+        .route(
+            "/web/admin/gdpr/:id/transition",
+            post(form_admin_gdpr_transition),
+        )
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             web_form_rejection_middleware,
@@ -533,6 +586,785 @@ fn decode_url_safe_base64(value: &str) -> Option<String> {
         .ok()
         .and_then(|bytes| String::from_utf8(bytes).ok())
 }
+
+// ─── Form field-map cookie (value/error preservation, item F) ────
+//
+// flash.rs (ui-foundation, read-only here) carries only {kind, text}
+// banners, so the failed-POST round trip gets its OWN small signed
+// cookie, mirroring flash.rs's HMAC pattern exactly:
+//
+//   POST /web/… (validation fails) → signed `apexmail_form_fields`
+//     cookie holding {form_id, field_values, field_errors, secrets}
+//     + error flash → 303 back to the form's GET
+//   GET /forms/…   → [`decode_form_fields_from_headers`] hands the map
+//     to the render layer, which re-populates inputs and renders
+//     per-field errors; the cookie is cleared with the response.
+//
+// The `secrets` slot carries reveal-once values (API key / webhook
+// signing secrets, item N) as structured data the view renders in a
+// mono cell instead of prose buried in a flash sentence.
+
+/// Cookie name for the form field-map.
+pub const FORM_FIELDS_COOKIE_NAME: &str = "apexmail_form_fields";
+/// Field maps are short-lived: they exist for one PRG round trip.
+const FORM_FIELDS_MAX_AGE_SECS: i64 = 120;
+/// Bound the decoded payload (cookie-stuffing resistance, like flash.rs).
+const FORM_FIELDS_MAX_BYTES: usize = 8 * 1024;
+
+/// Signed, short-lived form state for one failed (or secret-bearing)
+/// POST → GET round trip.
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct FormFieldMap {
+    /// Identifies which form the values belong to (e.g. "webhook-create");
+    /// renderers use it to avoid replaying values into a different form.
+    pub form_id: String,
+    /// Submitted field values to re-populate (order preserved).
+    pub values: Vec<(String, String)>,
+    /// Per-field validation errors (field name → message).
+    pub errors: Vec<(String, String)>,
+    /// Reveal-once secrets (label → value) rendered as mono data.
+    pub secrets: Vec<(String, String)>,
+}
+
+impl FormFieldMap {
+    pub fn new(form_id: &str) -> Self {
+        Self {
+            form_id: form_id.to_string(),
+            ..Default::default()
+        }
+    }
+
+    /// Record a field value for re-population.
+    pub fn set(&mut self, name: &str, value: &str) {
+        if let Some(slot) = self.values.iter_mut().find(|(n, _)| n == name) {
+            slot.1 = value.to_string();
+        } else {
+            self.values.push((name.to_string(), value.to_string()));
+        }
+    }
+
+    /// Record a per-field error.
+    pub fn error(&mut self, name: &str, message: &str) {
+        self.errors.push((name.to_string(), message.to_string()));
+    }
+
+    /// Record a reveal-once secret (mono-renderable, item N).
+    pub fn secret(&mut self, label: &str, value: &str) {
+        self.secrets.push((label.to_string(), value.to_string()));
+    }
+
+    /// The re-population value for a field (last write wins).
+    pub fn field_value(&self, name: &str) -> Option<&str> {
+        self.values
+            .iter()
+            .rev()
+            .find(|(n, _)| n == name)
+            .map(|(_, v)| v.as_str())
+    }
+
+    /// The validation error for a field, if any.
+    pub fn field_error(&self, name: &str) -> Option<&str> {
+        self.errors
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, m)| m.as_str())
+    }
+
+    /// Reveal-once secrets for mono rendering (item N).
+    pub fn secrets(&self) -> &[(String, String)] {
+        &self.secrets
+    }
+
+    /// True when nothing would render (no values, errors, or secrets).
+    pub fn is_empty(&self) -> bool {
+        self.values.is_empty() && self.errors.is_empty() && self.secrets.is_empty()
+    }
+
+    fn encode(&self, secret: &str) -> String {
+        use base64::Engine;
+        use hmac::{Hmac, Mac};
+        use sha2::Sha256;
+        let payload =
+            serde_json::to_vec(self).expect("form field map serializes (plain strings)");
+        let payload_b64 =
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&payload);
+        let mut mac = <Hmac<Sha256>>::new_from_slice(secret.as_bytes())
+            .expect("form field map HMAC key error");
+        mac.update(payload_b64.as_bytes());
+        let signature =
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes());
+        format!("v1.{payload_b64}.{signature}")
+    }
+
+    fn decode(value: &str, secret: &str) -> Option<Self> {
+        use base64::Engine;
+        use hmac::{Hmac, Mac};
+        use sha2::Sha256;
+        let rest = value.strip_prefix("v1.")?;
+        let (payload_b64, signature) = rest.rsplit_once('.')?;
+        let mut mac = <Hmac<Sha256>>::new_from_slice(secret.as_bytes())
+            .expect("form field map HMAC key error");
+        mac.update(payload_b64.as_bytes());
+        let expected = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(signature)
+            .ok()?;
+        mac.verify_slice(&expected).ok()?;
+        let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(payload_b64)
+            .ok()?;
+        if payload.len() > FORM_FIELDS_MAX_BYTES {
+            return None;
+        }
+        serde_json::from_slice(&payload).ok()
+    }
+}
+
+/// Build the `Set-Cookie` value that carries a form field map.
+pub fn form_fields_set_cookie(map: &FormFieldMap, secret: &str, secure: bool) -> String {
+    format!(
+        "{FORM_FIELDS_COOKIE_NAME}={}; Path=/; Max-Age={FORM_FIELDS_MAX_AGE_SECS}; HttpOnly; SameSite=Lax{}",
+        map.encode(secret),
+        if secure { "; Secure" } else { "" },
+    )
+}
+
+/// Build the `Set-Cookie` value that clears the form field map.
+pub fn form_fields_clear_cookie(secure: bool) -> String {
+    format!(
+        "{FORM_FIELDS_COOKIE_NAME}=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax{}",
+        if secure { "; Secure" } else { "" }
+    )
+}
+
+/// Clean accessor for the render path (the VIEW layer calls this): read
+/// and verify the signed field-map cookie from a request's Cookie header.
+/// Returns `None` when absent, expired handling aside (short Max-Age
+/// bounds it), tampered, or signed with another secret.
+pub fn decode_form_fields_from_headers(
+    headers: &HeaderMap,
+    secret: &str,
+) -> Option<FormFieldMap> {
+    let raw = cookie_value(headers, FORM_FIELDS_COOKIE_NAME)?;
+    FormFieldMap::decode(raw, secret).filter(|map| !map.is_empty())
+}
+
+/// PRG response for a failed create/update POST: signed error flash +
+/// signed field-map cookie + 303 back to the form.
+fn redirect_with_field_map(
+    map: &FormFieldMap,
+    message: &str,
+    location: &str,
+    config: &Config,
+) -> Response {
+    let mut response = redirect_with_flash(&[FlashMessage::error(message)], location, config);
+    if let Ok(value) =
+        form_fields_set_cookie(map, &config.csrf_secret, is_secure(config)).parse()
+    {
+        // Append: the flash cookie was already set by redirect_with_flash.
+        response.headers_mut().append(header::SET_COOKIE, value);
+    }
+    response
+}
+
+/// PRG response that carries a reveal-once secret (item N): success flash
+/// for the banner + the structured secret in the field-map cookie.
+fn redirect_with_secret(
+    map: &FormFieldMap,
+    message: &str,
+    location: &str,
+    config: &Config,
+) -> Response {
+    let mut response = redirect_with_flash(&[FlashMessage::success(message)], location, config);
+    if let Ok(value) =
+        form_fields_set_cookie(map, &config.csrf_secret, is_secure(config)).parse()
+    {
+        response.headers_mut().append(header::SET_COOKIE, value);
+    }
+    response
+}
+
+// ─── Multi-value form bodies (checkbox groups, file uploads) ──────
+//
+// axum's `Form<HashMap<_, _>>` collapses repeated keys (checkbox groups
+// post `events=a&events=b`), and the multipart file part needs raw body
+// access (axum's multipart feature is not enabled). Both are parsed here
+// into one lossless shape.
+
+/// A parsed form body: every (name, value) pair in order, plus file parts.
+#[derive(Debug, Default, Clone)]
+pub(crate) struct ParsedForm {
+    pairs: Vec<(String, String)>,
+    files: Vec<(String, String)>,
+}
+
+impl ParsedForm {
+    fn from_pairs(pairs: Vec<(String, String)>) -> Self {
+        Self {
+            pairs,
+            files: Vec::new(),
+        }
+    }
+
+    /// Single-valued field (last write wins, like the HashMap handlers).
+    fn field(&self, key: &str) -> String {
+        self.pairs
+            .iter()
+            .rev()
+            .find(|(n, _)| n == key)
+            .map(|(_, v)| v.clone())
+            .unwrap_or_default()
+    }
+
+    /// ALL values posted for a key (checkbox groups).
+    fn get_all(&self, key: &str) -> Vec<String> {
+        self.pairs
+            .iter()
+            .filter(|(n, _)| n == key)
+            .map(|(_, v)| v.clone())
+            .collect()
+    }
+
+    /// First file part's text content, or the named textarea field.
+    fn csv_text(&self) -> String {
+        if let Some((_, content)) = self.files.first() {
+            return content.clone();
+        }
+        self.field("csv")
+    }
+
+    /// CSRF check against the parsed pairs (same contract as check_csrf).
+    fn check_csrf(&self, config: &Config) -> Result<(), &'static str> {
+        match self
+            .pairs
+            .iter()
+            .rev()
+            .find(|(n, _)| n == "_csrf")
+            .map(|(_, v)| v.as_str())
+            .filter(|t| !t.is_empty())
+        {
+            Some(token) => validate_csrf_token(token, &config.csrf_secret)
+                .map_err(|_| "Your session expired. Reload the page and try again."),
+            None => Err("Your session expired. Reload the page and try again."),
+        }
+    }
+}
+
+/// Parse an `application/x-www-form-urlencoded` body leniently (malformed
+/// percent escapes are kept literally — validation handles bad input).
+fn parse_urlencoded(body: &str) -> Vec<(String, String)> {
+    body.split('&')
+        .filter(|part| !part.is_empty())
+        .map(|part| match part.split_once('=') {
+            Some((key, value)) => (urlencoded_component(key), urlencoded_component(value)),
+            None => (urlencoded_component(part), String::new()),
+        })
+        .collect()
+}
+
+fn urlencoded_component(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'+' => {
+                decoded.push(b' ');
+                index += 1;
+            }
+            b'%' if index + 2 < bytes.len() => {
+                let hi = (bytes[index + 1] as char).to_digit(16);
+                let lo = (bytes[index + 2] as char).to_digit(16);
+                if let (Some(hi), Some(lo)) = (hi, lo) {
+                    decoded.push((hi * 16 + lo) as u8);
+                    index += 3;
+                } else {
+                    decoded.push(b'%');
+                    index += 1;
+                }
+            }
+            byte => {
+                decoded.push(byte);
+                index += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&decoded).into_owned()
+}
+
+/// Parse a `multipart/form-data` body (fields + one text file part).
+/// Returns `None` when the Content-Type carries no boundary or the body
+/// does not match it — callers degrade to the friendly flash redirect.
+fn parse_multipart(body: &[u8], content_type: &str) -> Option<ParsedForm> {
+    let boundary = content_type
+        .split(';')
+        .map(str::trim)
+        .find_map(|part| part.strip_prefix("boundary="))?
+        .trim_matches('"');
+    if boundary.is_empty() {
+        return None;
+    }
+    let delimiter = format!("--{boundary}");
+    let text = String::from_utf8_lossy(body);
+    let mut form = ParsedForm::default();
+    for raw_part in text.split(delimiter.as_str()) {
+        let part = raw_part.trim_start_matches("\r\n");
+        if part.is_empty() || part.starts_with("--") {
+            continue; // preamble / closing marker
+        }
+        let Some((headers_raw, content)) = part.split_once("\r\n\r\n") else {
+            continue;
+        };
+        let content = content.strip_suffix("\r\n").unwrap_or(content);
+        let mut name = None;
+        let mut filename = None;
+        for header_line in headers_raw.split("\r\n") {
+            let lower = header_line.to_ascii_lowercase();
+            if let Some(rest) = lower.strip_prefix("content-disposition:") {
+                if rest.contains("form-data") {
+                    for attr in header_line.split(';').map(str::trim) {
+                        if let Some(value) = attr.strip_prefix("name=") {
+                            name = Some(value.trim_matches('"').to_string());
+                        } else if let Some(value) = attr.strip_prefix("filename=") {
+                            filename = Some(value.trim_matches('"').to_string());
+                        }
+                    }
+                }
+            }
+        }
+        let Some(name) = name else { continue };
+        if filename.is_some() {
+            form.files.push((name, content.to_string()));
+        } else {
+            form.pairs.push((name, content.to_string()));
+        }
+    }
+    Some(form)
+}
+
+/// Parse a form request body regardless of encoding (urlencoded or
+/// multipart). The 10 MiB cap keeps hostile bodies out of the parser.
+async fn parse_form_body(headers: &HeaderMap, body: axum::body::Bytes) -> Result<ParsedForm, &'static str> {
+    if body.len() > 10 * 1024 * 1024 {
+        return Err("That upload is too large. Keep imports under 10 MB.");
+    }
+    let content_type = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("");
+    if content_type.starts_with("multipart/form-data") {
+        parse_multipart(&body, content_type)
+            .ok_or("The form could not be read. Reload the page and try again.")
+    } else {
+        Ok(ParsedForm::from_pairs(parse_urlencoded(
+            &String::from_utf8_lossy(&body),
+        )))
+    }
+}
+
+// ─── Contact CSV import parsing (item C) ──────────────────────────
+
+/// Hard cap on imported rows — larger files must be split.
+pub(crate) const CONTACT_IMPORT_MAX_ROWS: usize = 10_000;
+
+/// One parsed import row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ContactCsvRow {
+    pub email: String,
+    pub name: Option<String>,
+}
+
+/// The parsed outcome of an import body: valid rows plus the invalid
+/// ones with line numbers and reasons (for the honest flash).
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct ContactCsvParse {
+    pub rows: Vec<ContactCsvRow>,
+    pub invalid: Vec<(usize, String)>,
+    /// True when the first row was consumed as a header.
+    pub had_header: bool,
+}
+
+/// Parse RFC 4180-style CSV (quoted fields, embedded commas/newlines,
+/// `""` escapes) and map email/name columns case-insensitively.
+pub(crate) fn parse_contact_csv(text: &str) -> ContactCsvParse {
+    let records = parse_csv_records(text);
+    let mut out = ContactCsvParse::default();
+    let mut records = records.into_iter().peekable();
+
+    // Header detection: a first record whose cells include an email-ish
+    // column name. Otherwise col0 = email, col1 = name.
+    let (email_col, name_col) = if let Some(first) = records.peek() {
+        let email_col = first.iter().position(|cell| {
+            matches!(
+                normalize_csv_header(cell).as_str(),
+                "email" | "emailaddress"
+            )
+        });
+        if email_col.is_some() {
+            out.had_header = true;
+            let name_col = first
+                .iter()
+                .position(|cell| normalize_csv_header(cell) == "name");
+            let email_col = email_col.expect("checked above");
+            let _ = records.next(); // consume the header row
+            (email_col, name_col)
+        } else {
+            (0, Some(1))
+        }
+    } else {
+        (0, Some(1))
+    };
+
+    for (index, record) in records.enumerate() {
+        let line_no = index + if out.had_header { 2 } else { 1 };
+        let Some(email) = record.get(email_col).map(|cell| cell.trim().to_lowercase()) else {
+            if record.iter().all(|cell| cell.trim().is_empty()) {
+                continue; // blank line
+            }
+            out.invalid
+                .push((line_no, "row has no email column".to_string()));
+            continue;
+        };
+        if !valid_email(&email) {
+            out.invalid
+                .push((line_no, format!("invalid email: {email}")));
+            continue;
+        }
+        let name = name_col
+            .and_then(|col| record.get(col))
+            .map(|cell| cell.trim().to_string())
+            .filter(|name| !name.is_empty());
+        out.rows.push(ContactCsvRow { email, name });
+    }
+    out
+}
+
+fn normalize_csv_header(cell: &str) -> String {
+    cell.trim()
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .collect::<String>()
+        .to_ascii_lowercase()
+}
+
+/// Minimal RFC 4180 record parser: handles quoted fields with embedded
+/// commas, newlines, and doubled quotes.
+fn parse_csv_records(text: &str) -> Vec<Vec<String>> {
+    let mut records: Vec<Vec<String>> = Vec::new();
+    let mut record: Vec<String> = Vec::new();
+    let mut field = String::new();
+    let mut chars = text.chars().peekable();
+    let mut in_quotes = false;
+    let mut saw_any = false;
+    while let Some(ch) = chars.next() {
+        saw_any = true;
+        match ch {
+            '"' if in_quotes => {
+                if chars.peek() == Some(&'"') {
+                    chars.next();
+                    field.push('"');
+                } else {
+                    in_quotes = false;
+                }
+            }
+            '"' => in_quotes = true,
+            ',' if !in_quotes => {
+                record.push(std::mem::take(&mut field));
+            }
+            '\r' if !in_quotes && chars.peek() == Some(&'\n') => {
+                chars.next();
+                record.push(std::mem::take(&mut field));
+                records.push(std::mem::take(&mut record));
+            }
+            '\n' if !in_quotes => {
+                record.push(std::mem::take(&mut field));
+                records.push(std::mem::take(&mut record));
+            }
+            other => field.push(other),
+        }
+    }
+    if saw_any && (!field.is_empty() || !record.is_empty()) {
+        record.push(field);
+        records.push(record);
+    }
+    records
+}
+
+/// The honest import summary: "Imported N, skipped M (duplicates: X,
+/// invalid: Y)" plus the first three invalid examples.
+fn contact_import_summary(imported: usize, duplicates: usize, invalid: &[(usize, String)]) -> String {
+    let skipped = duplicates + invalid.len();
+    let mut summary = format!(
+        "Imported {imported}, skipped {skipped} (duplicates: {duplicates}, invalid: {}).",
+        invalid.len()
+    );
+    if !invalid.is_empty() {
+        let examples: Vec<String> = invalid
+            .iter()
+            .take(3)
+            .map(|(line, reason)| format!("line {line}: {reason}"))
+            .collect();
+        summary.push_str(&format!(" Examples: {}.", examples.join("; ")));
+    }
+    summary
+}
+
+// ─── Campaign lifecycle rules (item B) ────────────────────────────
+//
+// The campaigns status CHECK (live schema) allows draft / sending /
+// paused / stopped / completed / failed — there is no 'scheduled'
+// status, so a picked time stays in scheduled_at on a draft row.
+
+/// May a campaign in this status be started (draft/paused → sending)?
+fn campaign_start_allowed(status: &str) -> bool {
+    matches!(status, "draft" | "paused")
+}
+
+/// May a campaign in this status be paused (sending → paused)?
+fn campaign_pause_allowed(status: &str) -> bool {
+    status == "sending"
+}
+
+/// May a campaign in this status be resumed (paused → sending)?
+fn campaign_resume_allowed(status: &str) -> bool {
+    status == "paused"
+}
+
+/// Per-status actions for the campaign detail page (which buttons to
+/// show). Pure so the loader and tests share one truth.
+fn campaign_actions(id: &str, status: &str) -> Vec<(&'static str, String, bool)> {
+    vec![
+        (
+            "Start sending",
+            format!("/web/campaigns/{id}/start"),
+            campaign_start_allowed(status),
+        ),
+        (
+            "Pause",
+            format!("/web/campaigns/{id}/pause"),
+            campaign_pause_allowed(status),
+        ),
+        (
+            "Resume",
+            format!("/web/campaigns/{id}/resume"),
+            campaign_resume_allowed(status),
+        ),
+        (
+            "Wire recipients",
+            format!("/web/campaigns/{id}/recipients"),
+            campaign_start_allowed(status),
+        ),
+    ]
+}
+
+// ─── Webhook event binding rules (item E) ─────────────────────────
+
+/// Normalize a checkbox group posting: trim, drop blanks, dedupe.
+fn normalize_webhook_events(raw: Vec<String>) -> Vec<String> {
+    let mut events: Vec<String> = Vec::new();
+    for event in raw {
+        let event = event.trim().to_string();
+        if event.is_empty() || events.contains(&event) {
+            continue;
+        }
+        events.push(event);
+    }
+    events
+}
+
+/// Validate a webhook's chosen events against the JSON API's known set
+/// (routes/webhooks.rs). The error lists the valid names so a typo is
+/// immediately fixable.
+fn validate_webhook_events(events: &[String]) -> Option<String> {
+    let known = crate::routes::webhooks::KNOWN_WEBHOOK_EVENTS;
+    if events.is_empty() {
+        return Some(format!(
+            "Pick at least one event; valid events: {}",
+            known.join(", ")
+        ));
+    }
+    let invalid: Vec<&str> = events
+        .iter()
+        .map(String::as_str)
+        .filter(|event| !known.contains(event))
+        .collect();
+    if invalid.is_empty() {
+        None
+    } else {
+        Some(format!(
+            "Unknown event type(s): {}; valid events: {}",
+            invalid.join(", "),
+            known.join(", ")
+        ))
+    }
+}
+
+// ─── Typed transfer confirmation (item J) ─────────────────────────
+
+/// The exact string an operator must type to confirm a domain transfer:
+/// `transfer {domain}` (mirrors the JSON route's typed confirmation).
+fn transfer_confirmation_matches(domain: &str, typed: &str) -> bool {
+    typed.trim() == format!("transfer {}", domain.trim().to_ascii_lowercase())
+}
+
+// ─── GDPR transition rules (item L) ───────────────────────────────//
+// The compliance crate's request flow is a strict forward triad
+// (pending → processing → completed/rejected; gdpr_automation.rs).
+// The CP queue stores the middle state as 'in_progress' — both are
+// accepted as "work has started" and terminal states never reopen.
+
+/// Target statuses the CP transition form may request.
+const GDPR_TARGET_STATUSES: &[&str] = &["in_progress", "completed", "rejected"];
+
+/// Is `from → to` a legal GDPR request transition?
+fn gdpr_transition_allowed(from: &str, to: &str) -> bool {
+    if !GDPR_TARGET_STATUSES.contains(&to) {
+        return false;
+    }
+    match from {
+        "pending" => true,
+        "in_progress" | "processing" | "verified" => to != "in_progress",
+        _ => false, // completed / rejected / unknown are terminal
+    }
+}
+
+// ─── Bulk delete confirmation helpers (item G) ────────────────────
+
+/// Cap on ids carried through a signed bulk confirmation URL.
+const BULK_CONFIRM_MAX_IDS: usize = 100;
+
+/// Parse a comma-separated id list for bulk actions (deduplicated,
+/// order-preserved, hard-capped).
+fn parse_bulk_ids(raw: &str) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    raw.split(',')
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .filter(|id| seen.insert(id.to_string()))
+        .take(BULK_CONFIRM_MAX_IDS)
+        .map(str::to_string)
+        .collect()
+}
+
+/// Sign a bulk destructive intent over its id list and redirect to the
+/// typed `/confirm` page (the POST body never deletes directly).
+fn redirect_to_bulk_confirm(
+    intent: &str,
+    ids: &[String],
+    return_to: &str,
+    config: &Config,
+) -> Response {
+    let resource = ids.join(",");
+    let sig = ui_foundation::flash::sign_confirmation_for_ttl(
+        &config.csrf_secret,
+        intent,
+        &resource,
+        Utc::now().timestamp(),
+        ui_foundation::flash::CONFIRMATION_DEFAULT_TTL_SECS,
+    );
+    let location = format!(
+        "/confirm?intent={}&id={}&return_to={}&sig={}",
+        urlencode(intent),
+        urlencode(&resource),
+        urlencode(return_to),
+        urlencode(&sig),
+    );
+    let mut response = (
+        StatusCode::SEE_OTHER,
+        [(header::LOCATION, location)],
+    )
+        .into_response();
+    // Clear any stale field-map so the confirm page renders clean.
+    if let Ok(value) = form_fields_clear_cookie(is_secure(config)).parse() {
+        response.headers_mut().append(header::SET_COOKIE, value);
+    }
+    response
+}
+
+// ─── Stub SSR pages via the generic renderers ─────────────────────
+//
+// The data-backed detail pages compose ui-foundation's PUBLIC generic
+// renderers (data_list_page + layouts). The view layer owns the final
+// markup; these stubs guarantee the routes exist and render real data.
+
+/// Minimal flash banner for stub pages (the render pipeline's own
+/// banner injection is internal to ui-foundation; stubs carry their own).
+fn stub_flash_banner(flash: &[FlashMessage]) -> String {
+    if flash.is_empty() {
+        return String::new();
+    }
+    let banners = flash
+        .iter()
+        .map(|message| {
+            let (tone, label) = match message.kind {
+                ui_foundation::flash::FlashKind::Success => ("border-emerald-200 bg-emerald-50 text-emerald-900", "Success"),
+                ui_foundation::flash::FlashKind::Error => ("border-red-200 bg-red-50 text-red-900", "Error"),
+                ui_foundation::flash::FlashKind::Info => ("border-surface-200 bg-surface-100 text-foreground", "Notice"),
+            };
+            format!(
+                "<div class=\"mb-4 rounded-sm border {tone} px-4 py-3 text-sm\" role=\"status\"><span class=\"font-bold\">{label}:</span> {}</div>",
+                html_escape_text(&message.text)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!("<div class=\"mb-6\">{banners}</div>")
+}
+
+fn html_escape_text(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
+/// Compose a full authenticated web page from list data (stub path —
+/// the view layer replaces this with a dedicated page function).
+fn web_data_page(
+    path: &str,
+    list: &ui_foundation::view_data::ListPageData,
+    noun: &str,
+    flash: &[FlashMessage],
+    config: &Config,
+) -> String {
+    let mut inner = stub_flash_banner(flash);
+    inner.push_str(&ui_foundation::leptos_views::data_list_page(list, noun));
+    let csrf = ui_foundation::csrf::generate_csrf_token(&config.csrf_secret);
+    let layout =
+        ui_foundation::leptos_views::web_dashboard_layout_with_csrf(&inner, path, &csrf);
+    ui_foundation::leptos_views::web_root_layout(&layout)
+}
+
+/// Compose a full control-plane page from list data (stub path).
+fn cp_data_page(
+    path: &str,
+    list: &ui_foundation::view_data::ListPageData,
+    noun: &str,
+    flash: &[FlashMessage],
+    config: &Config,
+) -> String {
+    let mut inner = stub_flash_banner(flash);
+    inner.push_str(&ui_foundation::leptos_views::data_list_page(list, noun));
+    let csrf = ui_foundation::csrf::generate_csrf_token(&config.csrf_secret);
+    let layout = ui_foundation::leptos_views::control_plane_app_layout_with_title(
+        &inner,
+        "Control Plane",
+        "ApexMail administration and monitoring.",
+        path,
+        &csrf,
+    );
+    ui_foundation::leptos_views::control_plane_root_layout(&layout)
+}
+
+/// Read the PRG flash from a Cookie header (mirrors the render path).
+fn flash_from_headers(headers: &HeaderMap, config: &Config) -> Vec<FlashMessage> {
+    headers
+        .get(header::COOKIE)
+        .and_then(|value| value.to_str().ok())
+        .map(|cookies| decode_flash_from_cookie_header(cookies, &config.csrf_secret))
+        .unwrap_or_default()
+}
+
 
 #[derive(sqlx::FromRow)]
 struct WebUserRow {
@@ -1056,7 +1888,7 @@ async fn form_forgot_password(
             let mut tx = state.db.begin().await?;
             let update = sqlx::query(
                 "UPDATE users SET metadata = COALESCE(metadata, '{}'::jsonb) || $1::jsonb, updated_at = NOW()
-                 WHERE id = $2 AND status = 'active'",
+                 WHERE id = $2::uuid AND status = 'active'",
             )
             .bind(json!({
                 "password_reset_token_hash": token_hash,
@@ -1212,7 +2044,7 @@ async fn form_reset_password(
          SET password_hash = $1,
              metadata = metadata - 'password_reset_token_hash' - 'password_reset_token' - 'password_reset_expires' - 'password_reset_iat',
              updated_at = NOW()
-         WHERE id = $2
+         WHERE id = $2::uuid
            AND status = 'active'
            AND metadata->>'password_reset_token_hash' = $3",
     )
@@ -1603,13 +2435,22 @@ async fn form_api_key_create(
     .execute(&state.db)
     .await;
     match result {
-        Ok(_) => redirect_success(
-            &format!(
-                "API key created. Copy the secret now — it will not be shown again: {secret}"
-            ),
-            "/settings/api-keys",
-            &state.config,
-        ),
+        Ok(_) => {
+            // Item N: the reveal-once secret travels as STRUCTURED data in
+            // the signed field-map cookie (mono-renderable by the view),
+            // with the prose flash kept for no-JS banner parity.
+            let mut fields = FormFieldMap::new("api-key-create");
+            fields.set("name", &name);
+            fields.secret("API key secret (shown once)", &secret);
+            redirect_with_secret(
+                &fields,
+                &format!(
+                    "API key created. Copy the secret now — it will not be shown again: {secret}"
+                ),
+                "/settings/api-keys",
+                &state.config,
+            )
+        }
         Err(error) => {
             tracing::error!(error = %error, "web api-key create failed");
             redirect_error(
@@ -1621,17 +2462,49 @@ async fn form_api_key_create(
     }
 }
 
+/// POST /web/webhooks — create a webhook. The form's event CHECKBOX GROUP
+/// posts repeated `events=` keys; the body is parsed losslessly (a HashMap
+/// would collapse them to the last box) and every chosen name is validated
+/// against the JSON API's KNOWN_WEBHOOK_EVENTS set (item E) — what was
+/// picked is what gets stored, and a typo is rejected with the valid list.
 async fn form_webhook_create(
     State(state): State<AppState>,
     axum::Extension(user): axum::Extension<AuthUser>,
-    Form(form): Form<HashMap<String, String>>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
 ) -> Response {
-    if let Err(message) = check_csrf(&form, &state.config) {
+    let form = match parse_form_body(&headers, body).await {
+        Ok(form) => form,
+        Err(message) => {
+            return redirect_error(message, "/settings/webhooks", &state.config);
+        }
+    };
+    if let Err(message) = form.check_csrf(&state.config) {
         return redirect_error(message, "/settings/webhooks", &state.config);
     }
-    let url = field(&form, "url").trim().to_string();
+    let mut fields = FormFieldMap::new("webhook-create");
+    let url = form.field("url").trim().to_string();
+    fields.set("url", &url);
     if !(url.starts_with("https://") || url.starts_with("http://")) {
-        return redirect_error("Enter a valid https:// endpoint URL.", "/settings/webhooks", &state.config);
+        fields.error("url", "Enter a valid https:// endpoint URL.");
+        return redirect_with_field_map(
+            &fields,
+            "Enter a valid https:// endpoint URL.",
+            "/settings/webhooks",
+            &state.config,
+        );
+    }
+    // Item E: bind the checkbox group — trim, dedupe, validate each name
+    // against KNOWN_WEBHOOK_EVENTS, store exactly what was chosen.
+    let events = normalize_webhook_events(form.get_all("events"));
+    if let Some(message) = validate_webhook_events(&events) {
+        fields.error("events", &message);
+        return redirect_with_field_map(
+            &fields,
+            &message,
+            "/settings/webhooks",
+            &state.config,
+        );
     }
     // webhooks schema (075/065): id VARCHAR(26) ULID, secret NOT NULL
     // (dual-rotation capable), enabled BOOLEAN + status VARCHAR — there is
@@ -1646,15 +2519,22 @@ async fn form_webhook_create(
     .bind(user.tenant_id.as_str())
     .bind(&url)
     .bind(&secret)
-    .bind(json!(["message.sent", "message.bounced"]))
+    .bind(serde_json::to_value(&events).unwrap_or_else(|_| serde_json::json!(["*"])))
     .execute(&state.db)
     .await;
     match result {
-        Ok(_) => redirect_success(
-            &format!("Webhook added. Signing secret (shown once): {secret}"),
-            "/settings/webhooks",
-            &state.config,
-        ),
+        Ok(_) => {
+            // Item N: signing secret as structured data (mono cell).
+            let mut fields = FormFieldMap::new("webhook-create");
+            fields.set("url", &url);
+            fields.secret("Webhook signing secret (shown once)", &secret);
+            redirect_with_secret(
+                &fields,
+                &format!("Webhook added. Signing secret (shown once): {secret}"),
+                "/settings/webhooks",
+                &state.config,
+            )
+        }
         Err(error) => {
             tracing::error!(error = %error, "web webhook create failed");
             redirect_error(
@@ -1757,7 +2637,8 @@ async fn form_contact_create(
         "INSERT INTO contacts (id, tenant_id, email, name, status, created_at, updated_at)
          VALUES ($1, $2, $3, $4, 'subscribed', NOW(), NOW())",
     )
-    .bind(apexmail_lib::id::generate_id("", 26))
+    // contacts.id is a UUID column (068/069 lineage — ci/README §9 F4).
+    .bind(Uuid::new_v4())
     .bind(user.tenant_id.as_str())
     .bind(&email)
     .bind(if name.is_empty() { None } else { Some(name) })
@@ -1785,7 +2666,8 @@ async fn form_list_create(
         "INSERT INTO lists (id, tenant_id, name, created_at, updated_at)
          VALUES ($1, $2, $3, NOW(), NOW())",
     )
-    .bind(apexmail_lib::id::generate_id("", 26))
+    // lists.id is a UUID column (068 lineage).
+    .bind(Uuid::new_v4())
     .bind(user.tenant_id.as_str())
     .bind(&name)
     .execute(&state.db)
@@ -1839,21 +2721,45 @@ async fn form_domain_create(
         && name
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-');
+    let mut fields = FormFieldMap::new("domain-create");
+    fields.set("name", &name);
     if !valid {
-        return redirect_error("Enter a domain like mail.example.com.", "/domains/new", &state.config);
+        fields.error("name", "Enter a domain like mail.example.com.");
+        return redirect_with_field_map(
+            &fields,
+            "Enter a domain like mail.example.com.",
+            "/domains/new",
+            &state.config,
+        );
     }
+    // domains.id is a UUID column (both schema lineages) — bind a UUID.
+    let id = Uuid::new_v4();
     let result = sqlx::query(
         "INSERT INTO domains (id, tenant_id, name, status, created_at, updated_at)
          VALUES ($1, $2, $3, 'pending', NOW(), NOW())",
     )
-    .bind(apexmail_lib::id::generate_id("", 26))
+    .bind(id)
     .bind(user.tenant_id.as_str())
     .bind(&name)
     .execute(&state.db)
     .await;
     match result {
-        Ok(_) => redirect_success("Domain added — DNS records are being generated.", "/domains", &state.config),
-        Err(_) => redirect_error("Could not add the domain. It may already exist.", "/domains/new", &state.config),
+        // Item A(3): land the operator straight on the new detail page,
+        // which shows the DNS records to publish and the verify action.
+        Ok(_) => redirect_success(
+            "Domain added — review its DNS records and run verification when they are published.",
+            &format!("/domains/{id}"),
+            &state.config,
+        ),
+        Err(_) => {
+            fields.error("name", "Could not add the domain. It may already exist.");
+            redirect_with_field_map(
+                &fields,
+                "Could not add the domain. It may already exist.",
+                "/domains/new",
+                &state.config,
+            )
+        }
     }
 }
 
@@ -1905,8 +2811,23 @@ async fn form_campaign_create(
     let name = field_truncated(&form, "name", 120);
     let subject = field_truncated(&form, "subject", 200);
     let scheduled_at = field(&form, "scheduled_at");
+    let mut fields = FormFieldMap::new("campaign-create");
+    fields.set("name", &name);
+    fields.set("subject", &subject);
+    fields.set("scheduled_at", &scheduled_at);
     if name.is_empty() || subject.is_empty() {
-        return redirect_error("Campaign name and subject are required.", "/campaigns/new", &state.config);
+        if name.is_empty() {
+            fields.error("name", "Campaign name is required.");
+        }
+        if subject.is_empty() {
+            fields.error("subject", "Subject is required.");
+        }
+        return redirect_with_field_map(
+            &fields,
+            "Campaign name and subject are required.",
+            "/campaigns/new",
+            &state.config,
+        );
     }
     // The campaigns status CHECK (live schema) allows draft/sending/
     // paused/stopped/completed/failed — there is no 'scheduled' status, so
@@ -1916,11 +2837,13 @@ async fn form_campaign_create(
     } else {
         Some(scheduled_at)
     };
+    // campaigns.id is a UUID column (both schema lineages; ci/README §9 F4)
+    // — text nanoid ids fail the bind.
     let result = sqlx::query(
         "INSERT INTO campaigns (id, tenant_id, name, subject, status, scheduled_at, created_at, updated_at)
          VALUES ($1, $2, $3, $4, 'draft', $5::timestamptz, NOW(), NOW())",
     )
-    .bind(apexmail_lib::id::generate_id("", 26))
+    .bind(Uuid::new_v4())
     .bind(user.tenant_id.as_str())
     .bind(&name)
     .bind(&subject)
@@ -2085,7 +3008,913 @@ async fn form_dedicated_ip_request(
     }
 }
 
-// ─── Destructive confirmations ───────────────────────────────────
+// ─── Domain DNS flow (item A) ─────────────────────────────────────
+
+/// Mirror of the render path's browser-session login redirect: anonymous
+/// GETs on auth-required UI pages land on `/login?next=…`, never a JSON 401.
+fn login_redirect(path_and_query: &str) -> Response {
+    let mut serializer = url::form_urlencoded::Serializer::new(String::new());
+    serializer.append_pair("next", path_and_query);
+    let location = format!("/login?{}", serializer.finish());
+    (
+        StatusCode::SEE_OTHER,
+        [(header::LOCATION, location)],
+    )
+        .into_response()
+}
+
+/// Resolve the browser session (cookie/API key) for a detail-page GET —
+/// the same extractor the SSR fallback's data loader uses.
+async fn browser_session_user(
+    state: &AppState,
+    headers: &HeaderMap,
+    uri: &axum::http::Uri,
+) -> Option<AuthUser> {
+    let mut request_builder = axum::http::Request::builder().uri(uri.clone());
+    for (name, value) in headers {
+        request_builder = request_builder.header(name, value);
+    }
+    let request = request_builder.body(axum::body::Body::empty()).ok()?;
+    let (mut parts, _) = request.into_parts();
+    <AuthUser as axum::extract::FromRequestParts<AppState>>::from_request_parts(
+        &mut parts,
+        state,
+    )
+    .await
+    .ok()
+}
+
+/// GET /domains/{id} — the domain detail page. Joins the domain row with
+/// the SAME DKIM/SPF/DMARC record generation the JSON dns-records
+/// endpoint uses (`routes::domains::required_sender_dns_records` — never
+/// a duplicated copy). Records render as data (mono cells).
+async fn web_domain_detail(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    uri: axum::http::Uri,
+    headers: HeaderMap,
+) -> Response {
+    // Anonymous browser GETs redirect to login like every auth-required
+    // UI route (the routing inventory's contract).
+    let Some(user) = browser_session_user(&state, &headers, &uri).await else {
+        return login_redirect(
+            uri.path_and_query()
+                .map(|value| value.as_str())
+                .unwrap_or(uri.path()),
+        );
+    };
+    // Non-UUID segments (`/domains/new`) fall back to the static SSR page
+    // exactly as the fallback handler would have rendered it.
+    if Uuid::parse_str(&id).is_err() {
+        return static_ssr_fallback("web", &format!("/domains/{id}"), &headers, &state.config);
+    }
+    let flash = flash_from_headers(&headers, &state.config);
+    match data::load_domain_detail(
+        &state.db,
+        user.tenant_id.as_str(),
+        &id,
+        &state.config.aws_region,
+    )
+    .await
+    {
+        Some(list) => {
+            let html = web_data_page(
+                &format!("/domains/{id}"),
+                &list,
+                "record",
+                &flash,
+                &state.config,
+            );
+            html_page_response(html, !flash.is_empty(), &state.config)
+        }
+        None => redirect_error(
+            "That domain could not be found in this workspace.",
+            "/domains",
+            &state.config,
+        ),
+    }
+}
+
+/// POST /web/domains/{id}/verify — runs the SAME locked verification path
+/// the JSON POST /v1/domains/:id/verify uses (DKIM provisioning, live DNS
+/// lookups, SES readiness) and flashes the honest per-record outcome.
+async fn form_domain_verify(
+    State(state): State<AppState>,
+    axum::Extension(user): axum::Extension<AuthUser>,
+    Path(id): Path<String>,
+    Form(form): Form<HashMap<String, String>>,
+) -> Response {
+    let back = format!("/domains/{}", urlencode(&id));
+    if let Err(message) = check_csrf(&form, &state.config) {
+        return redirect_error(message, &back, &state.config);
+    }
+    if Uuid::parse_str(&id).is_err() {
+        return redirect_error("Unknown domain.", "/domains", &state.config);
+    }
+    // Reuse the JSON path verbatim — one verification truth.
+    match crate::routes::domains::verify_domain_for_tenant(
+        &state,
+        user.tenant_id.as_str(),
+        &id,
+    )
+    .await
+    {
+        Ok(axum::Json(response)) => {
+            let records = [
+                ("SPF", response.spf_verified),
+                ("DKIM", response.dkim_verified),
+                ("DMARC", response.dmarc_verified),
+                ("Return-Path", response.return_path_verified),
+            ];
+            let passed: Vec<&str> = records
+                .iter()
+                .filter(|(_, ok)| *ok)
+                .map(|(name, _)| *name)
+                .collect();
+            let failed: Vec<&str> = records
+                .iter()
+                .filter(|(_, ok)| !*ok)
+                .map(|(name, _)| *name)
+                .collect();
+            let summary = if failed.is_empty() {
+                format!(
+                    "All checks passed ({}) — status is now {}.",
+                    passed.join(", "),
+                    response.status
+                )
+            } else {
+                format!(
+                    "Verified: {}. Not published yet: {} — add the missing records, then verify again.",
+                    if passed.is_empty() {
+                        "none".to_string()
+                    } else {
+                        passed.join(", ")
+                    },
+                    failed.join(", "),
+                )
+            };
+            redirect_success(&summary, &back, &state.config)
+        }
+        Err(error) => redirect_error(
+            &format!("Verification could not run: {error}"),
+            &back,
+            &state.config,
+        ),
+    }
+}
+
+// ─── Campaign completion (item B) ─────────────────────────────────
+
+/// GET /campaigns/{id} — the campaign detail page with per-status action
+/// data (which buttons the view should render) and the wired audience.
+async fn web_campaign_detail(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    uri: axum::http::Uri,
+    headers: HeaderMap,
+) -> Response {
+    let Some(user) = browser_session_user(&state, &headers, &uri).await else {
+        return login_redirect(
+            uri.path_and_query()
+                .map(|value| value.as_str())
+                .unwrap_or(uri.path()),
+        );
+    };
+    if Uuid::parse_str(&id).is_err() {
+        return static_ssr_fallback(
+            "web",
+            &format!("/campaigns/{id}"),
+            &headers,
+            &state.config,
+        );
+    }
+    let flash = flash_from_headers(&headers, &state.config);
+    match data::load_campaign_detail(&state.db, user.tenant_id.as_str(), &id).await {
+        Some(detail) => {
+            let list = detail.to_list_page();
+            let html = web_data_page(
+                &format!("/campaigns/{id}"),
+                &list,
+                "action",
+                &flash,
+                &state.config,
+            );
+            html_page_response(html, !flash.is_empty(), &state.config)
+        }
+        None => redirect_error(
+            "That campaign could not be found in this workspace.",
+            "/campaigns",
+            &state.config,
+        ),
+    }
+}
+
+/// Shared status-transition executor for the campaign lifecycle twins:
+/// validate the current status honestly, then flip it atomically with a
+/// guard against TOCTOU races (mirrors the JSON route's pattern).
+async fn campaign_transition(
+    state: &AppState,
+    user: &AuthUser,
+    id: &str,
+    new_status: &str,
+    allowed: fn(&str) -> bool,
+    action_label: &str,
+    allowed_from_label: &str,
+) -> Response {
+    let back = format!("/campaigns/{}", urlencode(id));
+    let row: Option<(String,)> = sqlx::query_as(
+        "SELECT status FROM campaigns WHERE id = $1::uuid AND tenant_id = $2",
+    )
+    .bind(id)
+    .bind(user.tenant_id.as_str())
+    .fetch_optional(&state.db)
+    .await
+    .ok()
+    .flatten();
+    let Some((status,)) = row else {
+        return redirect_error(
+            "That campaign could not be found in this workspace.",
+            "/campaigns",
+            &state.config,
+        );
+    };
+    if !allowed(&status) {
+        return redirect_error(
+            &format!(
+                "Campaign is “{status}” — only {allowed_from_label} campaigns can be {}.",
+                action_label.to_lowercase()
+            ),
+            &back,
+            &state.config,
+        );
+    }
+    let allowed_from: Vec<String> = ["draft", "paused", "sending"]
+        .into_iter()
+        .filter(|candidate| allowed(candidate))
+        .map(String::from)
+        .collect();
+    let result = sqlx::query(
+        "UPDATE campaigns SET status = $1, updated_at = NOW()
+         WHERE id = $2::uuid AND tenant_id = $3 AND status = ANY($4)",
+    )
+    .bind(new_status)
+    .bind(id)
+    .bind(user.tenant_id.as_str())
+    .bind(&allowed_from)
+    .execute(&state.db)
+    .await;
+    match result {
+        Ok(result) if result.rows_affected() == 1 => redirect_success(
+            &format!(
+                "Campaign {} — status is now {new_status}.",
+                action_label.to_lowercase()
+            ),
+            &back,
+            &state.config,
+        ),
+        Ok(_) => redirect_error(
+            "The campaign changed state just now. Reload and retry.",
+            &back,
+            &state.config,
+        ),
+        Err(error) => {
+            tracing::error!(error = %error, "web campaign transition failed");
+            redirect_error(
+                "Could not update the campaign. Try again.",
+                &back,
+                &state.config,
+            )
+        }
+    }
+}
+
+/// POST /web/campaigns/{id}/start — draft/paused → sending, with the
+/// honest recipients validation the console report asked for.
+async fn form_campaign_start(
+    State(state): State<AppState>,
+    axum::Extension(user): axum::Extension<AuthUser>,
+    Path(id): Path<String>,
+    Form(form): Form<HashMap<String, String>>,
+) -> Response {
+    let back = format!("/campaigns/{}", urlencode(&id));
+    if let Err(message) = check_csrf(&form, &state.config) {
+        return redirect_error(message, &back, &state.config);
+    }
+    if Uuid::parse_str(&id).is_err() {
+        return redirect_error("Unknown campaign.", "/campaigns", &state.config);
+    }
+    // Honest recipient accounting before any transition: a campaign with
+    // no wired audience must never flip to "sending". The audience is the
+    // campaign's latest `recipients` job (list + segment).
+    let row: Option<(String, Option<String>)> = sqlx::query_as(
+        "SELECT status,
+                (SELECT job_type FROM campaign_jobs
+                 WHERE campaign_id = campaigns.id AND job_type LIKE 'recipients:%'
+                 ORDER BY created_at DESC LIMIT 1)
+         FROM campaigns WHERE id = $1::uuid AND tenant_id = $2",
+    )
+    .bind(&id)
+    .bind(user.tenant_id.as_str())
+    .fetch_optional(&state.db)
+    .await
+    .ok()
+    .flatten();
+    let Some((status, recipients_job)) = row else {
+        return redirect_error(
+            "That campaign could not be found in this workspace.",
+            "/campaigns",
+            &state.config,
+        );
+    };
+    if !campaign_start_allowed(&status) {
+        return redirect_error(
+            &format!(
+                "Campaign is “{status}” — only draft or paused campaigns can be started."
+            ),
+            &back,
+            &state.config,
+        );
+    }
+    let Some((list_id, segment)) = recipients_job.as_deref().and_then(parse_recipients_job)
+    else {
+        return redirect_error(
+            "This campaign has no recipients yet — wire an audience list first.",
+            &back,
+            &state.config,
+        );
+    };
+    let subscribers = data::count_list_recipients_filtered(
+        &state.db,
+        user.tenant_id.as_str(),
+        &list_id,
+        &segment,
+    )
+    .await
+    .unwrap_or(0);
+    if subscribers == 0 {
+        return redirect_error(
+            "The selected audience list has no subscribed contacts — add contacts before starting.",
+            &back,
+            &state.config,
+        );
+    }
+    let result = sqlx::query(
+        "UPDATE campaigns SET status = 'sending', updated_at = NOW()
+         WHERE id = $1::uuid AND tenant_id = $2 AND status = ANY($3)",
+    )
+    .bind(&id)
+    .bind(user.tenant_id.as_str())
+    .bind(&["draft", "paused"][..])
+    .execute(&state.db)
+    .await;
+    match result {
+        Ok(result) if result.rows_affected() == 1 => redirect_success(
+            &format!("Campaign started — dispatching to {subscribers} recipient(s)."),
+            &back,
+            &state.config,
+        ),
+        Ok(_) => redirect_error(
+            "The campaign changed state just now. Reload and retry.",
+            &back,
+            &state.config,
+        ),
+        Err(error) => {
+            tracing::error!(error = %error, "web campaign start failed");
+            redirect_error("Could not start the campaign. Try again.", &back, &state.config)
+        }
+    }
+}
+
+/// POST /web/campaigns/{id}/pause — sending → paused.
+async fn form_campaign_pause(
+    State(state): State<AppState>,
+    axum::Extension(user): axum::Extension<AuthUser>,
+    Path(id): Path<String>,
+    Form(form): Form<HashMap<String, String>>,
+) -> Response {
+    let back = format!("/campaigns/{}", urlencode(&id));
+    if let Err(message) = check_csrf(&form, &state.config) {
+        return redirect_error(message, &back, &state.config);
+    }
+    campaign_transition(
+        &state,
+        &user,
+        &id,
+        "paused",
+        campaign_pause_allowed,
+        "Paused",
+        "sending",
+    )
+    .await
+}
+
+/// POST /web/campaigns/{id}/resume — paused → sending.
+async fn form_campaign_resume(
+    State(state): State<AppState>,
+    axum::Extension(user): axum::Extension<AuthUser>,
+    Path(id): Path<String>,
+    Form(form): Form<HashMap<String, String>>,
+) -> Response {
+    let back = format!("/campaigns/{}", urlencode(&id));
+    if let Err(message) = check_csrf(&form, &state.config) {
+        return redirect_error(message, &back, &state.config);
+    }
+    campaign_transition(
+        &state,
+        &user,
+        &id,
+        "sending",
+        campaign_resume_allowed,
+        "Resumed",
+        "paused",
+    )
+    .await
+}
+
+/// The job_type marker for a campaign's wired audience:
+/// `recipients:{list_id}:{segment}` — stored on the campaign_jobs row the
+/// dispatch path already reads (works on both schema lineages; the
+/// campaigns table itself has no audience columns in the 069/075 set).
+pub(crate) fn recipients_job_type(list_id: &str, segment: &str) -> String {
+    format!("recipients:{list_id}:{segment}")
+}
+
+/// The campaign's wired audience, if any: (list_id, segment) parsed from
+/// the LATEST recipients job.
+pub(crate) fn parse_recipients_job(job_type: &str) -> Option<(String, String)> {
+    let rest = job_type.strip_prefix("recipients:")?;
+    let (list_id, segment) = rest.split_once(':')?;
+    if list_id.is_empty() {
+        None
+    } else {
+        Some((
+            list_id.to_string(),
+            if segment.is_empty() {
+                "subscribed".to_string()
+            } else {
+                segment.to_string()
+            },
+        ))
+    }
+}
+
+/// POST /web/campaigns/{id}/recipients — wire the campaign's audience:
+/// a list select (by id) plus an optional contact-status segment filter.
+/// The selection lands as the campaign's latest `recipients` job row in
+/// one transaction (previous wirings are replaced — latest wins).
+async fn form_campaign_recipients(
+    State(state): State<AppState>,
+    axum::Extension(user): axum::Extension<AuthUser>,
+    Path(id): Path<String>,
+    Form(form): Form<HashMap<String, String>>,
+) -> Response {
+    let back = format!("/campaigns/{}", urlencode(&id));
+    if let Err(message) = check_csrf(&form, &state.config) {
+        return redirect_error(message, &back, &state.config);
+    }
+    if Uuid::parse_str(&id).is_err() {
+        return redirect_error("Unknown campaign.", "/campaigns", &state.config);
+    }
+    let mut fields = FormFieldMap::new("campaign-recipients");
+    let list_id = field(&form, "list_id").trim().to_string();
+    let segment = field(&form, "segment");
+    fields.set("list_id", &list_id);
+    fields.set("segment", &segment);
+    let allowed_segments = ["subscribed", "unsubscribed", "bounced", "all"];
+    if list_id.is_empty() || Uuid::parse_str(&list_id).is_err() {
+        fields.error("list_id", "Pick one of your lists.");
+        return redirect_with_field_map(
+            &fields,
+            "Pick one of your lists.",
+            &back,
+            &state.config,
+        );
+    }
+    if !allowed_segments.contains(&segment.as_str()) {
+        fields.error("segment", "Choose a valid segment filter.");
+        return redirect_with_field_map(
+            &fields,
+            "Choose a valid segment filter.",
+            &back,
+            &state.config,
+        );
+    }
+    let campaign: Option<(String,)> = sqlx::query_as(
+        "SELECT id::text FROM campaigns WHERE id = $1::uuid AND tenant_id = $2",
+    )
+    .bind(&id)
+    .bind(user.tenant_id.as_str())
+    .fetch_optional(&state.db)
+    .await
+    .ok()
+    .flatten();
+    if campaign.is_none() {
+        return redirect_error(
+            "That campaign could not be found in this workspace.",
+            "/campaigns",
+            &state.config,
+        );
+    }
+    let list: Option<(String,)> = sqlx::query_as(
+        "SELECT name FROM lists WHERE id = $1::uuid AND tenant_id = $2",
+    )
+    .bind(&list_id)
+    .bind(user.tenant_id.as_str())
+    .fetch_optional(&state.db)
+    .await
+    .ok()
+    .flatten();
+    let Some((list_name,)) = list else {
+        fields.error("list_id", "That list is not in this workspace.");
+        return redirect_with_field_map(
+            &fields,
+            "That list is not in this workspace.",
+            &back,
+            &state.config,
+        );
+    };
+    let count = data::count_list_recipients_filtered(
+        &state.db,
+        user.tenant_id.as_str(),
+        &list_id,
+        &segment,
+    )
+    .await
+    .unwrap_or(0);
+    if count == 0 {
+        fields.error("list_id", "That selection matches no contacts.");
+        return redirect_with_field_map(
+            &fields,
+            "That selection matches no contacts — pick another list or segment.",
+            &back,
+            &state.config,
+        );
+    }
+    let result: Result<(), sqlx::Error> = async {
+        let mut tx = state.db.begin().await?;
+        // Latest-wins: drop any previous wiring for this campaign, then
+        // record exactly one audience job the dispatcher reads.
+        sqlx::query(
+            "DELETE FROM campaign_jobs WHERE campaign_id = $1::uuid AND job_type LIKE 'recipients:%'",
+        )
+        .bind(&id)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            "INSERT INTO campaign_jobs (id, tenant_id, campaign_id, job_type, status, created_at)
+             VALUES ($1, $2, $3::uuid, $4, 'pending', NOW())",
+        )
+        .bind(Uuid::new_v4())
+        .bind(user.tenant_id.as_str())
+        .bind(&id)
+        .bind(recipients_job_type(&list_id, &segment))
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+    .await;
+    match result {
+        Ok(()) => redirect_success(
+            &format!(
+                "Recipients wired: {count} “{segment}” contact(s) from “{list_name}”."
+            ),
+            &back,
+            &state.config,
+        ),
+        Err(error) => {
+            tracing::error!(error = %error, "web campaign recipients failed");
+            redirect_error(
+                "Could not wire the recipients. Try again.",
+                &back,
+                &state.config,
+            )
+        }
+    }
+}
+
+// ─── Contacts CSV import (item C) ─────────────────────────────────
+
+/// POST /web/contacts/import — accept a raw CSV textarea (urlencoded) or
+/// a file part (multipart); parse server-side (quoted fields, header row,
+/// email+name columns case-insensitively), dedupe against existing rows,
+/// validate per row, and flash the honest "Imported N, skipped M" result.
+async fn form_contacts_import(
+    State(state): State<AppState>,
+    axum::Extension(user): axum::Extension<AuthUser>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    let back = "/contacts";
+    let form = match parse_form_body(&headers, body).await {
+        Ok(form) => form,
+        Err(message) => return redirect_error(message, back, &state.config),
+    };
+    if let Err(message) = form.check_csrf(&state.config) {
+        return redirect_error(message, back, &state.config);
+    }
+    let csv_text = form.csv_text();
+    if csv_text.trim().is_empty() {
+        let mut fields = FormFieldMap::new("contacts-import");
+        fields.error("csv", "Paste CSV content or choose a file.");
+        return redirect_with_field_map(
+            &fields,
+            "Paste CSV content or choose a file to import.",
+            back,
+            &state.config,
+        );
+    }
+    let parsed = parse_contact_csv(&csv_text);
+    if parsed.rows.len() > CONTACT_IMPORT_MAX_ROWS {
+        return redirect_error(
+            &format!(
+                "That import has {} rows — the hard cap is {CONTACT_IMPORT_MAX_ROWS}. Split the file.",
+                parsed.rows.len()
+            ),
+            back,
+            &state.config,
+        );
+    }
+    if parsed.rows.is_empty() {
+        let mut fields = FormFieldMap::new("contacts-import");
+        let example = parsed
+            .invalid
+            .first()
+            .map(|(line, reason)| format!(" (line {line}: {reason})"))
+            .unwrap_or_default();
+        fields.error("csv", "No valid rows found.");
+        return redirect_with_field_map(
+            &fields,
+            &format!("No valid rows found.{example}"),
+            back,
+            &state.config,
+        );
+    }
+
+    // Dedupe: within the file, then against existing rows for this tenant.
+    let mut unique: Vec<ContactCsvRow> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let mut file_duplicates = 0usize;
+    for row in parsed.rows {
+        if seen.insert(row.email.clone()) {
+            unique.push(row);
+        } else {
+            file_duplicates += 1;
+        }
+    }
+    let batch: Vec<String> = unique.iter().map(|row| row.email.clone()).collect();
+    let existing: Vec<String> = sqlx::query_scalar(
+        "SELECT email FROM contacts WHERE tenant_id = $1 AND email = ANY($2)",
+    )
+    .bind(user.tenant_id.as_str())
+    .bind(&batch)
+    .fetch_all(&state.db)
+    .await
+    .unwrap_or_default();
+    let existing_set: std::collections::HashSet<String> = existing.into_iter().collect();
+    let fresh: Vec<ContactCsvRow> = unique
+        .into_iter()
+        .filter(|row| !existing_set.contains(&row.email))
+        .collect();
+    let db_duplicates = seen.len().saturating_sub(fresh.len());
+
+    let imported: usize = if fresh.is_empty() {
+        0
+    } else {
+        let result: Result<usize, sqlx::Error> = async {
+            let mut tx = state.db.begin().await?;
+            let mut imported = 0usize;
+            for row in &fresh {
+                let insert = sqlx::query(
+                    "INSERT INTO contacts (id, tenant_id, email, name, status, created_at, updated_at)
+                     VALUES ($1, $2, $3, $4, 'subscribed', NOW(), NOW())
+                     ON CONFLICT (tenant_id, email) DO NOTHING",
+                )
+                // contacts.id is a UUID column (068/069 lineage).
+                .bind(Uuid::new_v4())
+                .bind(user.tenant_id.as_str())
+                .bind(&row.email)
+                .bind(row.name.as_deref().filter(|name| !name.is_empty()))
+                .execute(&mut *tx)
+                .await?;
+                imported += insert.rows_affected() as usize;
+            }
+            tx.commit().await?;
+            Ok(imported)
+        }
+        .await;
+        match result {
+            Ok(count) => count,
+            Err(error) => {
+                tracing::error!(error = %error, "web contacts import failed");
+                return redirect_error(
+                    "The import could not be saved. Nothing was committed.",
+                    back,
+                    &state.config,
+                );
+            }
+        }
+    };
+
+    let duplicates = file_duplicates + db_duplicates;
+    redirect_success(
+        &contact_import_summary(imported, duplicates, &parsed.invalid),
+        back,
+        &state.config,
+    )
+}
+
+// ─── Template edit + preview (item D) ─────────────────────────────
+
+/// POST /web/templates/update — the template editor's save action.
+/// Snapshots the previous state through the SAME versioning writer the
+/// JSON update path uses (`templates::snapshot_template_version`), so
+/// rollback history stays coherent.
+async fn form_template_update(
+    State(state): State<AppState>,
+    axum::Extension(user): axum::Extension<AuthUser>,
+    Form(form): Form<HashMap<String, String>>,
+) -> Response {
+    let id = field(&form, "id");
+    let name = field_truncated(&form, "name", 120);
+    let subject = field_truncated(&form, "subject", 200);
+    let html_body = field(&form, "html_body");
+    let back = if id.is_empty() {
+        "/templates".to_string()
+    } else {
+        format!("/templates/{}", urlencode(&id))
+    };
+    if let Err(message) = check_csrf(&form, &state.config) {
+        return redirect_error(message, &back, &state.config);
+    }
+    let mut fields = FormFieldMap::new("template-update");
+    fields.set("id", &id);
+    fields.set("name", &name);
+    fields.set("subject", &subject);
+    if id.is_empty() {
+        return redirect_error("Missing template id.", "/templates", &state.config);
+    }
+    if name.is_empty() {
+        fields.error("name", "Give the template a name.");
+        return redirect_with_field_map(
+            &fields,
+            "Give the template a name.",
+            &back,
+            &state.config,
+        );
+    }
+    if html_body.trim().is_empty() {
+        fields.error("html_body", "Add some HTML content.");
+        return redirect_with_field_map(
+            &fields,
+            "Add some HTML content.",
+            &back,
+            &state.config,
+        );
+    }
+    let existing: Option<(i32, String)> = sqlx::query_as(
+        "SELECT version, COALESCE(subject, '') FROM templates WHERE id = $1 AND tenant_id = $2",
+    )
+    .bind(&id)
+    .bind(user.tenant_id.as_str())
+    .fetch_optional(&state.db)
+    .await
+    .ok()
+    .flatten();
+    let Some((version, existing_subject)) = existing else {
+        return redirect_error(
+            "That template could not be found in this workspace.",
+            "/templates",
+            &state.config,
+        );
+    };
+    // A blank subject keeps the stored one (JSON semantics: None ⇒ keep).
+    let subject = if subject.is_empty() {
+        existing_subject
+    } else {
+        subject
+    };
+    let new_version = version + 1;
+    let result: Result<(), sqlx::Error> = async {
+        let mut tx = state.db.begin().await?;
+        let update = sqlx::query(
+            "UPDATE templates SET name = $1, subject = $2, html_body = $3, version = $4, updated_at = NOW()
+             WHERE id = $5 AND tenant_id = $6",
+        )
+        .bind(&name)
+        .bind(&subject)
+        .bind(&html_body)
+        .bind(new_version)
+        .bind(&id)
+        .bind(user.tenant_id.as_str())
+        .execute(&mut *tx)
+        .await?;
+        if update.rows_affected() != 1 {
+            return Err(sqlx::Error::RowNotFound);
+        }
+        crate::routes::templates::snapshot_template_version(
+            &mut tx,
+            &id,
+            user.tenant_id.as_str(),
+            new_version,
+            &name,
+            &subject,
+            &html_body,
+            None,
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+    .await;
+    match result {
+        Ok(()) => redirect_success(
+            &format!("Template saved as v{new_version} — the previous version can be restored."),
+            &back,
+            &state.config,
+        ),
+        Err(error) => {
+            tracing::error!(error = %error, "web template update failed");
+            redirect_error("Could not save the template. Try again.", &back, &state.config)
+        }
+    }
+}
+
+/// POST /web/templates/preview — mirrors the campaign preview exactly:
+/// the submitted draft (or the stored body when the editor posts only an
+/// id) is sanitized and rendered by the same ui-foundation page builder.
+async fn form_template_preview(
+    State(state): State<AppState>,
+    axum::Extension(user): axum::Extension<AuthUser>,
+    Form(form): Form<HashMap<String, String>>,
+) -> Response {
+    let back = safe_return_to(&form, "/templates");
+    if let Err(message) = check_csrf(&form, &state.config) {
+        return redirect_error(message, &back, &state.config);
+    }
+    let mut html_body = field(&form, "html_body");
+    let id = field(&form, "id");
+    if html_body.trim().is_empty() && !id.is_empty() {
+        // Preview the stored body when the form posts only the template id.
+        html_body = sqlx::query_scalar::<_, String>(
+            "SELECT html_body FROM templates WHERE id = $1 AND tenant_id = $2",
+        )
+        .bind(&id)
+        .bind(user.tenant_id.as_str())
+        .fetch_optional(&state.db)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    }
+    if html_body.trim().is_empty() {
+        return redirect_error("Add some HTML content to preview.", &back, &state.config);
+    }
+    let page = ui_foundation::leptos_views::web_campaign_preview_page(&html_body);
+    Html(page).into_response()
+}
+
+// ─── SSR fallback + response helpers ──────────────────────────────
+
+/// Render any path through ui-foundation's public SSR entry (used when a
+/// detail route matches a non-id segment like `/campaigns/new`).
+fn static_ssr_fallback(surface: &str, path: &str, headers: &HeaderMap, config: &Config) -> Response {
+    let flash = flash_from_headers(headers, config);
+    match ui_foundation::axum_router::render_route_with_flash(
+        surface,
+        path,
+        None,
+        Some(config.csrf_secret.as_str()),
+        &flash,
+    ) {
+        Some(html) => html_page_response(html, !flash.is_empty(), config),
+        None => (
+            StatusCode::NOT_FOUND,
+            [(header::LOCATION, "/dashboard".to_string())],
+            "Not found",
+        )
+            .into_response(),
+    }
+}
+
+/// HTML response with flash-cookie clearing (mirrors the render path).
+fn html_page_response(html: String, clear_flash: bool, config: &Config) -> Response {
+    let mut response = (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "text/html; charset=utf-8".to_string())],
+        html,
+    )
+        .into_response();
+    if clear_flash {
+        if let Ok(value) = ui_foundation::flash::flash_clear_cookie(is_secure(config)).parse() {
+            response.headers_mut().append(header::SET_COOKIE, value);
+        }
+    }
+    response
+}
+
+
+// ─── Destructive confirmations (single + bulk, item G) ────────────
 
 /// POST /web/confirm — the confirm page's form. The signature is
 /// re-verified server-side before anything is deleted.
@@ -2112,36 +3941,163 @@ async fn form_confirm_destructive(
     let tenant = user.tenant_id.clone();
     let result: Result<u64, sqlx::Error> = match intent.as_str() {
         "delete-campaign" => sqlx::query(
-            "DELETE FROM campaigns WHERE id = $1 AND tenant_id = $2",
+            "DELETE FROM campaigns WHERE id = $1::uuid AND tenant_id = $2",
         )
         .bind(&id)
         .bind(&tenant)
         .execute(&state.db)
         .await
         .map(|r| r.rows_affected()),
-        "delete-list" => sqlx::query("DELETE FROM lists WHERE id = $1 AND tenant_id = $2")
+        "delete-list" => sqlx::query("DELETE FROM lists WHERE id = $1::uuid AND tenant_id = $2")
             .bind(&id)
             .bind(&tenant)
             .execute(&state.db)
             .await
             .map(|r| r.rows_affected()),
         "delete-domain" => sqlx::query(
-            "DELETE FROM domains WHERE id = $1 AND tenant_id = $2",
+            "DELETE FROM domains WHERE id = $1::uuid AND tenant_id = $2",
         )
         .bind(&id)
         .bind(&tenant)
         .execute(&state.db)
         .await
         .map(|r| r.rows_affected()),
+        // ── Bulk intents (item G): the id list is the signed resource ──
+        "delete-campaigns-bulk" => {
+            let ids = parse_bulk_ids(&id);
+            sqlx::query("DELETE FROM campaigns WHERE id = ANY($1::uuid[]) AND tenant_id = $2")
+                .bind(ids)
+                .bind(&tenant)
+                .execute(&state.db)
+                .await
+                .map(|r| r.rows_affected())
+        }
+        "delete-contacts-bulk" => {
+            let ids = parse_bulk_ids(&id);
+            sqlx::query(
+                "UPDATE contacts SET status = 'deleted', updated_at = NOW()
+                 WHERE id = ANY($1::uuid[]) AND tenant_id = $2",
+            )
+            .bind(ids)
+            .bind(&tenant)
+            .execute(&state.db)
+            .await
+            .map(|r| r.rows_affected())
+        }
+        "delete-lists-bulk" => {
+            let ids = parse_bulk_ids(&id);
+            sqlx::query("DELETE FROM lists WHERE id = ANY($1::uuid[]) AND tenant_id = $2")
+                .bind(ids)
+                .bind(&tenant)
+                .execute(&state.db)
+                .await
+                .map(|r| r.rows_affected())
+        }
+        // ── Control-plane intents (items I) — system-gated ──
+        "suspend-tenant" => {
+            if !is_system_tenant(&state, &tenant).await {
+                return redirect_error("Operator access required.", "/tenants", &state.config);
+            }
+            sqlx::query(
+                "UPDATE tenants SET status = 'suspended', updated_at = NOW()
+                 WHERE id = $1 AND status IN ('pending', 'active')",
+            )
+            .bind(&id)
+            .execute(&state.db)
+            .await
+            .map(|r| r.rows_affected())
+        }
+        "delete-tenant" => {
+            if !is_system_tenant(&state, &tenant).await {
+                return redirect_error("Operator access required.", "/tenants", &state.config);
+            }
+            // Typed confirmation (item I): the operator must repeat the
+            // tenant's exact name — verified against the row server-side.
+            let confirmation = field(&form, "confirmation").trim().to_string();
+            let name: Option<String> = sqlx::query_scalar(
+                "SELECT name FROM tenants WHERE id = $1",
+            )
+            .bind(&id)
+            .fetch_optional(&state.db)
+            .await
+            .ok()
+            .flatten();
+            match name {
+                Some(expected) if confirmation == expected => sqlx::query(
+                    "DELETE FROM tenants WHERE id = $1 AND name = $2",
+                )
+                .bind(&id)
+                .bind(&confirmation)
+                .execute(&state.db)
+                .await
+                .map(|r| r.rows_affected()),
+                Some(_) => {
+                    return redirect_error(
+                        "The typed name does not match the tenant — nothing was deleted.",
+                        "/tenants",
+                        &state.config,
+                    )
+                }
+                None => {
+                    return redirect_error(
+                        "That tenant could not be found.",
+                        "/tenants",
+                        &state.config,
+                    )
+                }
+            }
+        }
         _ => {
             return redirect_error("Unknown action.", &return_to, &state.config);
         }
     };
+    let noun = match intent.as_str() {
+        "delete-contacts-bulk" => "contact(s)",
+        "delete-campaigns-bulk" => "campaign(s)",
+        "delete-lists-bulk" => "list(s)",
+        "suspend-tenant" => "tenant(s)",
+        "delete-tenant" => "tenant(s)",
+        _ => "row(s)",
+    };
     match result {
-        Ok(0) => redirect_error("It may have been deleted already.", &return_to, &state.config),
-        Ok(_) => redirect_success("Deleted.", &return_to, &state.config),
+        Ok(0) => redirect_error(
+            "It may have been deleted already.",
+            &return_to,
+            &state.config,
+        ),
+        Ok(count) => redirect_success(
+            &match intent.as_str() {
+                "suspend-tenant" => format!("Tenant suspended ({count} row(s))."),
+                "delete-tenant" => format!("Tenant deleted ({count} row(s))."),
+                _ => format!("{count} {noun} processed."),
+            },
+            &return_to,
+            &state.config,
+        ),
         Err(_) => redirect_error("Could not delete it. Try again.", &return_to, &state.config),
     }
+}
+
+/// Bulk destructive POSTs never delete directly (item G): the id list is
+/// signed over and the operator confirms on the typed `/confirm` page,
+/// whose POST re-verifies the signature server-side.
+async fn bulk_delete_confirm(
+    state: AppState,
+    user: AuthUser,
+    form: HashMap<String, String>,
+    scope: &str,
+    intent: &str,
+) -> Response {
+    let back = format!("/{scope}");
+    if let Err(message) = check_csrf(&form, &state.config) {
+        return redirect_error(message, &back, &state.config);
+    }
+    let ids = parse_bulk_ids(&field(&form, "ids"));
+    if ids.is_empty() {
+        return redirect_error("Select at least one row first.", &back, &state.config);
+    }
+    let _ = user;
+    redirect_to_bulk_confirm(intent, &ids, &back, &state.config)
 }
 
 async fn form_campaigns_delete_bulk(
@@ -2149,7 +4105,7 @@ async fn form_campaigns_delete_bulk(
     axum::Extension(user): axum::Extension<AuthUser>,
     Form(form): Form<HashMap<String, String>>,
 ) -> Response {
-    bulk_delete(state, user, form, "campaigns", "DELETE FROM campaigns WHERE id = ANY($1) AND tenant_id = $2").await
+    bulk_delete_confirm(state, user, form, "campaigns", "delete-campaigns-bulk").await
 }
 
 async fn form_contacts_delete_bulk(
@@ -2157,47 +4113,17 @@ async fn form_contacts_delete_bulk(
     axum::Extension(user): axum::Extension<AuthUser>,
     Form(form): Form<HashMap<String, String>>,
 ) -> Response {
-    bulk_delete(state, user, form, "contacts", "UPDATE contacts SET status = 'deleted', updated_at = NOW() WHERE id = ANY($1) AND tenant_id = $2").await
+    bulk_delete_confirm(state, user, form, "contacts", "delete-contacts-bulk").await
 }
 
-async fn bulk_delete(
-    state: AppState,
-    user: AuthUser,
-    form: HashMap<String, String>,
-    scope: &str,
-    sql: &str,
+/// POST /web/lists/delete-bulk — the lists page's bulk action, routed
+/// through the same signed confirmation as campaigns/contacts.
+async fn form_lists_delete_bulk(
+    State(state): State<AppState>,
+    axum::Extension(user): axum::Extension<AuthUser>,
+    Form(form): Form<HashMap<String, String>>,
 ) -> Response {
-    let back = format!("/{scope}");
-    if let Err(message) = check_csrf(&form, &state.config) {
-        return redirect_error(message, &back, &state.config);
-    }
-    let ids: Vec<String> = form
-        .get("ids")
-        .map(|value| {
-            value
-                .split(',')
-                .map(str::trim)
-                .filter(|id| !id.is_empty())
-                .map(str::to_string)
-                .collect()
-        })
-        .unwrap_or_default();
-    if ids.is_empty() {
-        return redirect_error("Select at least one row first.", &back, &state.config);
-    }
-    let result = sqlx::query(sql)
-        .bind(ids)
-        .bind(user.tenant_id.as_str())
-        .execute(&state.db)
-        .await;
-    match result {
-        Ok(result) => redirect_success(
-            &format!("{} row(s) processed.", result.rows_affected()),
-            &back,
-            &state.config,
-        ),
-        Err(_) => redirect_error("Some rows could not be processed. Refresh and retry.", &back, &state.config),
-    }
+    bulk_delete_confirm(state, user, form, "lists", "delete-lists-bulk").await
 }
 
 // ─── CSV exports (server-rendered downloads) ─────────────────────
@@ -2229,19 +4155,60 @@ async fn form_contacts_export(
 async fn form_audit_export(
     State(state): State<AppState>,
     axum::Extension(user): axum::Extension<AuthUser>,
+    Query(params): Query<HashMap<String, String>>,
 ) -> Response {
     // Defense in depth: the router stack already gates this route behind
     // require_system_tenant_middleware; re-verify here (slug-aware).
     if !is_system_tenant(&state, &user.tenant_id).await {
         return redirect_error("Operator access required.", "/audit", &state.config);
     }
+    // Item M: the export honors the SAME widened search + optional days
+    // filter the audit list applies (action OR user_id OR resource_type).
+    let search = params
+        .get("query")
+        .or_else(|| params.get("q"))
+        .or_else(|| params.get("search"))
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .unwrap_or("");
+    let days = params
+        .get("days")
+        .and_then(|value| value.parse::<i64>().ok())
+        .filter(|days| (1..=3650).contains(days));
+    let where_clause = if search.is_empty() && days.is_none() {
+        "TRUE".to_string()
+    } else {
+        let mut clauses: Vec<String> = Vec::new();
+        if !search.is_empty() {
+            clauses.push(
+                "(action ILIKE '%' || $1 || '%' OR user_id ILIKE '%' || $1 || '%' OR resource_type ILIKE '%' || $1 || '%')".to_string(),
+            );
+        }
+        if let Some(days) = days {
+            clauses.push(format!(
+                "created_at >= NOW() - '{days} days'::interval"
+            ));
+        }
+        clauses.join(" AND ")
+    };
+    let binds: Vec<String> = if search.is_empty() {
+        Vec::new()
+    } else {
+        vec![search.to_string()]
+    };
     // Live audit_logs columns: timestamp/created_at, action,
     // resource_type, user_id (there is no outcome/status/resource).
+    let sql = format!(
+        "SELECT created_at, action, resource_type, user_id FROM audit_logs WHERE {where_clause} ORDER BY created_at DESC NULLS LAST LIMIT 10000"
+    );
     let rows = sqlx::query_as::<_, (Option<chrono::DateTime<Utc>>, Option<String>, Option<String>, Option<String>)>(
-        "SELECT created_at, action, resource_type, user_id FROM audit_logs ORDER BY created_at DESC NULLS LAST LIMIT 10000",
-    )
-    .fetch_all(&state.db)
-    .await;
+        &sql,
+    );
+    let mut query = rows;
+    for value in &binds {
+        query = query.bind(value);
+    }
+    let rows = query.fetch_all(&state.db).await;
     let mut csv = String::from("timestamp,action,resource_type,actor\n");
     if let Ok(rows) = rows {
         for (created_at, action, resource_type, user_id) in rows {
@@ -2292,9 +4259,43 @@ async fn form_admin_tenant_create(
     }
     let name = field_truncated(&form, "name", 120);
     let domain = field(&form, "domain").trim().to_lowercase();
+    let plan = field(&form, "plan").trim().to_lowercase();
+    let mut fields = FormFieldMap::new("tenant-create");
+    fields.set("name", &name);
+    fields.set("domain", &domain);
+    fields.set("plan", &plan);
     if name.is_empty() || domain.split('.').count() < 2 {
-        return redirect_error("Tenant name and a primary domain are required.", "/tenants/new", &state.config);
+        if name.is_empty() {
+            fields.error("name", "Tenant name is required.");
+        }
+        if domain.split('.').count() < 2 {
+            fields.error("domain", "A primary domain is required.");
+        }
+        return redirect_with_field_map(
+            &fields,
+            "Tenant name and a primary domain are required.",
+            "/tenants/new",
+            &state.config,
+        );
     }
+    // Item I: the plan select is bound — the value must exist in the
+    // plans catalog (same source cp_plans reads), defaulting to free.
+    let catalog = data::tenant_plan_names(&state.db).await;
+    let plan = if catalog.contains(&plan) {
+        plan
+    } else if plan.is_empty() && catalog.is_empty() {
+        "free".to_string()
+    } else if plan.is_empty() {
+        "free".to_string()
+    } else {
+        fields.error("plan", "Choose a plan from the catalog.");
+        return redirect_with_field_map(
+            &fields,
+            "Choose a plan from the catalog.",
+            "/tenants/new",
+            &state.config,
+        );
+    };
     let tenant_id = apexmail_lib::id::generate_id("", 26);
     let slug: String = domain
         .chars()
@@ -2303,16 +4304,21 @@ async fn form_admin_tenant_create(
         .collect();
     let result = sqlx::query(
         "INSERT INTO tenants (id, name, slug, plan, status, settings, metadata, created_at, updated_at)
-         VALUES ($1, $2, $3, 'free', 'pending', '{}'::jsonb, $4, NOW(), NOW())",
+         VALUES ($1, $2, $3, $4, 'pending', '{}'::jsonb, $5, NOW(), NOW())",
     )
     .bind(&tenant_id)
     .bind(&name)
     .bind(&slug)
+    .bind(&plan)
     .bind(json!({"primary_domain": domain, "created_by": user.user_id.clone().unwrap_or_default()}))
     .execute(&state.db)
     .await;
     match result {
-        Ok(_) => redirect_success("Tenant workspace created.", "/tenants", &state.config),
+        Ok(_) => redirect_success(
+            &format!("Tenant workspace created on the {plan} plan."),
+            "/tenants",
+            &state.config,
+        ),
         Err(_) => redirect_error("Could not create the tenant. Try again.", "/tenants/new", &state.config),
     }
 }
@@ -2452,6 +4458,693 @@ async fn form_sales_leads_update(
         }
     }
 }
+
+// ─── CP alerts acknowledge (item H) ───────────────────────────────
+
+/// POST /web/admin/alerts/ack — acknowledge one alert (honest row-count
+/// flash; already-acknowledged rows are not touched).
+async fn form_admin_alert_ack(
+    State(state): State<AppState>,
+    axum::Extension(user): axum::Extension<AuthUser>,
+    Form(form): Form<HashMap<String, String>>,
+) -> Response {
+    if let Err(message) = check_csrf(&form, &state.config) {
+        return redirect_error(message, "/alerts", &state.config);
+    }
+    let id = field(&form, "id");
+    if Uuid::parse_str(&id).is_err() {
+        return redirect_error("Unknown alert.", "/alerts", &state.config);
+    }
+    let result = sqlx::query(
+        "UPDATE system_alerts
+         SET acknowledged = true, acknowledged_by = $1, acknowledged_at = NOW()
+         WHERE id = $2::uuid AND acknowledged = false",
+    )
+    .bind(user.user_id.as_deref().unwrap_or("operator"))
+    .bind(&id)
+    .execute(&state.db)
+    .await;
+    match result {
+        Ok(result) if result.rows_affected() == 1 => redirect_success(
+            "Alert acknowledged.",
+            &safe_return_to(&form, "/alerts"),
+            &state.config,
+        ),
+        Ok(_) => redirect_error(
+            "It may have been acknowledged already.",
+            "/alerts",
+            &state.config,
+        ),
+        Err(error) => {
+            tracing::error!(error = %error, "web alert ack failed");
+            redirect_error("Could not acknowledge the alert. Try again.", "/alerts", &state.config)
+        }
+    }
+}
+
+/// POST /web/admin/alerts/ack-bulk — acknowledge a checked set. Accepts
+/// a comma-joined `ids` field or repeated `ids` keys; the flash reports
+/// exactly how many rows flipped.
+async fn form_admin_alert_ack_bulk(
+    State(state): State<AppState>,
+    axum::Extension(user): axum::Extension<AuthUser>,
+    Form(form): Form<HashMap<String, String>>,
+) -> Response {
+    if let Err(message) = check_csrf(&form, &state.config) {
+        return redirect_error(message, "/alerts", &state.config);
+    }
+    let mut ids: Vec<String> = parse_bulk_ids(&field(&form, "ids"));
+    if ids.is_empty() {
+        return redirect_error("Select at least one alert first.", "/alerts", &state.config);
+    }
+    ids.retain(|id| Uuid::parse_str(id).is_ok());
+    if ids.is_empty() {
+        return redirect_error("No valid alert ids were posted.", "/alerts", &state.config);
+    }
+    let result = sqlx::query(
+        "UPDATE system_alerts
+         SET acknowledged = true, acknowledged_by = $1, acknowledged_at = NOW()
+         WHERE id = ANY($2::uuid[]) AND acknowledged = false",
+    )
+    .bind(user.user_id.as_deref().unwrap_or("operator"))
+    .bind(&ids)
+    .execute(&state.db)
+    .await;
+    match result {
+        Ok(result) => {
+            let count = result.rows_affected();
+            if count == 0 {
+                redirect_error(
+                    "They may have been acknowledged already.",
+                    "/alerts",
+                    &state.config,
+                )
+            } else {
+                redirect_success(
+                    &format!("Acknowledged {count} alert(s)."),
+                    &safe_return_to(&form, "/alerts"),
+                    &state.config,
+                )
+            }
+        }
+        Err(error) => {
+            tracing::error!(error = %error, "web alert ack-bulk failed");
+            redirect_error("Could not acknowledge the alerts. Try again.", "/alerts", &state.config)
+        }
+    }
+}
+
+// ─── CP tenant lifecycle (item I) ─────────────────────────────────
+
+/// POST /web/admin/tenants/{id}/suspend — signs a `suspend-tenant`
+/// confirmation; the confirm page's POST performs the guarded UPDATE.
+async fn form_admin_tenant_suspend(
+    State(state): State<AppState>,
+    axum::Extension(_user): axum::Extension<AuthUser>,
+    Path(id): Path<String>,
+    Form(form): Form<HashMap<String, String>>,
+) -> Response {
+    if let Err(message) = check_csrf(&form, &state.config) {
+        return redirect_error(message, "/tenants", &state.config);
+    }
+    let row: Option<(String,)> = sqlx::query_as(
+        "SELECT status FROM tenants WHERE id = $1",
+    )
+    .bind(&id)
+    .fetch_optional(&state.db)
+    .await
+    .ok()
+    .flatten();
+    match row {
+        Some((status,)) if matches!(status.as_str(), "pending" | "active") => {
+            redirect_to_bulk_confirm("suspend-tenant", &[id], "/tenants", &state.config)
+        }
+        Some((status,)) => redirect_error(
+            &format!("Tenant is “{status}” — only pending or active tenants can be suspended."),
+            "/tenants",
+            &state.config,
+        ),
+        None => redirect_error("That tenant could not be found.", "/tenants", &state.config),
+    }
+}
+
+/// POST /web/admin/tenants/{id}/resume — suspended → active (validated,
+/// direct — resuming is not destructive).
+async fn form_admin_tenant_resume(
+    State(state): State<AppState>,
+    axum::Extension(_user): axum::Extension<AuthUser>,
+    Path(id): Path<String>,
+    Form(form): Form<HashMap<String, String>>,
+) -> Response {
+    if let Err(message) = check_csrf(&form, &state.config) {
+        return redirect_error(message, "/tenants", &state.config);
+    }
+    let result = sqlx::query(
+        "UPDATE tenants SET status = 'active', updated_at = NOW()
+         WHERE id = $1 AND status = 'suspended'",
+    )
+    .bind(&id)
+    .execute(&state.db)
+    .await;
+    match result {
+        Ok(result) if result.rows_affected() == 1 => redirect_success(
+            "Tenant resumed — status is now active.",
+            "/tenants",
+            &state.config,
+        ),
+        Ok(_) => redirect_error(
+            "Only suspended tenants can be resumed.",
+            "/tenants",
+            &state.config,
+        ),
+        Err(error) => {
+            tracing::error!(error = %error, "web tenant resume failed");
+            redirect_error("Could not resume the tenant. Try again.", "/tenants", &state.config)
+        }
+    }
+}
+
+/// POST /web/admin/tenants/{id}/delete — signs a `delete-tenant`
+/// confirmation; the confirm page collects the typed tenant name and the
+/// confirm POST re-verifies it against the row server-side.
+async fn form_admin_tenant_delete(
+    State(state): State<AppState>,
+    axum::Extension(_user): axum::Extension<AuthUser>,
+    Path(id): Path<String>,
+    Form(form): Form<HashMap<String, String>>,
+) -> Response {
+    if let Err(message) = check_csrf(&form, &state.config) {
+        return redirect_error(message, "/tenants", &state.config);
+    }
+    let exists: Option<(String,)> = sqlx::query_as(
+        "SELECT id::text FROM tenants WHERE id = $1",
+    )
+    .bind(&id)
+    .fetch_optional(&state.db)
+    .await
+    .ok()
+    .flatten();
+    match exists {
+        Some(_) => redirect_to_bulk_confirm("delete-tenant", &[id], "/tenants", &state.config),
+        None => redirect_error("That tenant could not be found.", "/tenants", &state.config),
+    }
+}
+
+// ─── CP domain transfer surface (item J) ──────────────────────────
+
+/// GET /web/admin/domains/{domain}/transfer — renders the transfer
+/// SUGGESTION data by calling the exact JSON logic
+/// (`admin::domains::get_transfer_suggestion`): owner verification
+/// history, live DNS-control evidence, and the recommendation flag.
+async fn web_admin_domain_transfer(
+    State(state): State<AppState>,
+    axum::Extension(user): axum::Extension<AuthUser>,
+    Path(domain): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    use crate::routes::admin::domains::{
+        get_transfer_suggestion, TransferSuggestionQuery,
+    };
+    let query = TransferSuggestionQuery {
+        domain: domain.clone(),
+    };
+    match get_transfer_suggestion(
+        State(state.clone()),
+        user.clone(),
+        axum::extract::Query(query),
+    )
+    .await
+    {
+        Ok(axum::Json(suggestion)) => {
+            let flash = flash_from_headers(&headers, &state.config);
+            let list = data::transfer_suggestion_page(&suggestion);
+            let path = format!(
+                "/web/admin/domains/{}/transfer",
+                urlencode(&domain)
+            );
+            let html = cp_data_page(&path, &list, "signal", &flash, &state.config);
+            html_page_response(html, !flash.is_empty(), &state.config)
+        }
+        Err(error) => redirect_error(
+            &format!("Transfer check could not run: {error}"),
+            "/domains",
+            &state.config,
+        ),
+    }
+}
+
+/// POST /web/admin/domains/transfer — typed `transfer {domain}`
+/// exact-match confirmation calling the existing admin transfer service
+/// path (DKIM re-bind, quota checks, verification reset).
+async fn form_admin_domain_transfer(
+    State(state): State<AppState>,
+    axum::Extension(user): axum::Extension<AuthUser>,
+    Form(form): Form<HashMap<String, String>>,
+) -> Response {
+    use crate::routes::admin::domains::{admin_transfer_domain, AdminTransferDomainRequest};
+    if let Err(message) = check_csrf(&form, &state.config) {
+        return redirect_error(message, "/domains", &state.config);
+    }
+    let domain = field(&form, "domain").trim().to_ascii_lowercase();
+    let to_tenant_id = field(&form, "to_tenant_id").trim().to_string();
+    let confirmation = field(&form, "confirmation").trim().to_string();
+    let mut fields = FormFieldMap::new("domain-transfer");
+    fields.set("domain", &domain);
+    fields.set("to_tenant_id", &to_tenant_id);
+    fields.set("confirmation", &confirmation);
+    let expected = format!("transfer {domain}");
+    if domain.is_empty() || to_tenant_id.is_empty() {
+        fields.error("domain", "Domain and target tenant are required.");
+        return redirect_with_field_map(
+            &fields,
+            "Domain and target tenant are required.",
+            "/domains",
+            &state.config,
+        );
+    }
+    if !transfer_confirmation_matches(&domain, &confirmation) {
+        fields.error(
+            "confirmation",
+            &format!("Type “{expected}” exactly to confirm."),
+        );
+        return redirect_with_field_map(
+            &fields,
+            &format!("Type “{expected}” exactly to confirm the transfer."),
+            "/domains",
+            &state.config,
+        );
+    }
+    let body = AdminTransferDomainRequest {
+        domain: domain.clone(),
+        to_tenant_id,
+        confirmation,
+    };
+    match admin_transfer_domain(State(state.clone()), user.clone(), axum::Json(body)).await {
+        Ok((_status, axum::Json(response))) => redirect_success(
+            &format!(
+                "Domain {} transferred to tenant {} — status {}, DKIM {}.",
+                response.domain,
+                response.to_tenant_id,
+                response.status,
+                if response.dkim_rotated {
+                    "rotated"
+                } else {
+                    "carried over"
+                }
+            ),
+            "/domains",
+            &state.config,
+        ),
+        Err(error) => redirect_error(
+            &format!("Transfer failed: {error}"),
+            "/domains",
+            &state.config,
+        ),
+    }
+}
+
+// ─── Sales actions (item K) ───────────────────────────────────────
+
+/// The sales-autopilot service's base URL, or `None` when unconfigured.
+/// The config carries a default loopback address — an explicitly EMPTY
+/// value means "not configured", and an unreachable engine surfaces as
+/// an honest error (never a success flash).
+fn sales_engine_base_url(state: &AppState) -> Option<String> {
+    sales_engine_base_url_for(&state.config)
+}
+
+fn sales_engine_base_url_for(config: &Config) -> Option<String> {
+    let base = config.sales_autopilot_base_url.trim();
+    (!base.is_empty()).then(|| base.trim_end_matches('/').to_string())
+}
+
+/// POST /web/admin/sales/discovery/run — triggers the sales engine's
+/// enrich path (POST {base}/enrich) for each selected source domain,
+/// surfacing the engine's errors verbatim in an error flash.
+async fn form_sales_discovery_run(
+    State(state): State<AppState>,
+    axum::Extension(user): axum::Extension<AuthUser>,
+    Form(form): Form<HashMap<String, String>>,
+) -> Response {
+    if let Err(message) = check_csrf(&form, &state.config) {
+        return redirect_error(message, "/sales", &state.config);
+    }
+    let sources: Vec<String> = field(&form, "sources")
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect();
+    if sources.is_empty() {
+        return redirect_error("Add at least one comma-separated source.", "/sales", &state.config);
+    }
+    let Some(base) = sales_engine_base_url(&state) else {
+        return redirect_error(
+            "Sales engine not configured — set SALES_AUTOPILOT_BASE_URL to run discovery.",
+            "/sales",
+            &state.config,
+        );
+    };
+    let _ = user;
+    let mut enriched = 0usize;
+    let mut failed: Vec<String> = Vec::new();
+    for source in &sources {
+        let payload = serde_json::json!({ "domain": source, "tenant_id": "system" });
+        let request = state
+            .http_client
+            .post(format!("{base}/enrich"))
+            .header("x-tenant-id", "system")
+            .json(&payload)
+            .timeout(std::time::Duration::from_secs(30));
+        let request = if let Some(token) = state.config.internal_service_token.as_deref() {
+            request.header("x-api-key", token)
+        } else {
+            request
+        };
+        match request.send().await {
+            Ok(response) if response.status().is_success() => enriched += 1,
+            Ok(response) => {
+                let status = response.status();
+                let body = response.text().await.unwrap_or_default();
+                let detail = body.trim().trim_matches('"');
+                failed.push(if detail.is_empty() {
+                    format!("{source}: engine returned {status}")
+                } else {
+                    format!("{source}: {detail}")
+                });
+            }
+            Err(error) => failed.push(format!("{source}: {error}")),
+        }
+    }
+    if enriched == 0 {
+        return redirect_error(
+            &format!(
+                "Discovery run failed — the sales engine did not enrich any source. {}",
+                failed.join("; ")
+            ),
+            "/sales",
+            &state.config,
+        );
+    }
+    let summary = format!(
+        "Discovery run finished: {enriched} source(s) enriched, {} failed.",
+        failed.len()
+    );
+    if failed.is_empty() {
+        redirect_success(&summary, "/sales", &state.config)
+    } else {
+        redirect_with_flash(
+            &[FlashMessage::success(summary), FlashMessage::error(failed.join("; "))],
+            "/sales",
+            &state.config,
+        )
+    }
+}
+
+/// POST /web/admin/sales/outreach/launch — creates a sales campaign via
+/// the engine's documented contract (POST {base}/campaigns →
+/// /campaigns/{id}/recipients → /campaigns/{id}/start) for the selected
+/// leads' contact emails. Quota-pause style errors surface verbatim.
+async fn form_sales_outreach_launch(
+    State(state): State<AppState>,
+    axum::Extension(user): axum::Extension<AuthUser>,
+    Form(form): Form<HashMap<String, String>>,
+) -> Response {
+    if let Err(message) = check_csrf(&form, &state.config) {
+        return redirect_error(message, "/sales", &state.config);
+    }
+    let lead_ids: Vec<String> = form
+        .get("lead_ids")
+        .map(|v| {
+            v.split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    if lead_ids.is_empty() {
+        return redirect_error("Pick at least one lead in the queue first.", "/sales", &state.config);
+    }
+    let Some(base) = sales_engine_base_url(&state) else {
+        return redirect_error(
+            "Sales engine not configured — set SALES_AUTOPILOT_BASE_URL to launch outreach.",
+            "/sales",
+            &state.config,
+        );
+    };
+    // Recipient emails come from the leads table (same scoping as the
+    // JSON outreach route).
+    let rows: Vec<(Option<String>,)> = sqlx::query_as(
+        "SELECT contact_email FROM sales_leads WHERE id = ANY($1) AND tenant_id = $2",
+    )
+    .bind(&lead_ids)
+    .bind(user.tenant_id.as_str())
+    .fetch_all(&state.db)
+    .await
+    .unwrap_or_default();
+    let emails: Vec<String> = rows
+        .into_iter()
+        .filter_map(|(email,)| email)
+        .collect();
+    if emails.is_empty() {
+        return redirect_error(
+            "None of the selected leads have a contact email.",
+            "/sales",
+            &state.config,
+        );
+    }
+
+    let authed = |request: reqwest::RequestBuilder| {
+        if let Some(token) = state.config.internal_service_token.as_deref() {
+            request.header("x-api-key", token)
+        } else {
+            request
+        }
+    };
+    let client = state
+        .http_client
+        .clone()
+        .request(reqwest::Method::POST, format!("{base}/campaigns"))
+        .header("x-tenant-id", "system")
+        .timeout(std::time::Duration::from_secs(30));
+    let template_id = {
+        let requested = field(&form, "template_id");
+        let trimmed = requested.trim();
+        if trimmed.is_empty() {
+            "default".to_string()
+        } else {
+            trimmed.to_string()
+        }
+    };
+    let create = authed(client)
+        .json(&serde_json::json!({
+            "name": format!("Operator outreach — {}", Utc::now().date_naive()),
+            "template_id": template_id,
+            "audience": "selected-leads",
+            "tenant_id": "system",
+        }))
+        .send()
+        .await;
+    let campaign_id = match create {
+        Ok(response) if response.status().is_success() => response
+            .json::<serde_json::Value>()
+            .await
+            .ok()
+            .and_then(|body| {
+                body.get("id")
+                    .or_else(|| body.get("campaignId"))
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string)
+            }),
+        Ok(response) => {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return sales_engine_error_flash(status, &body, "/sales", &state.config);
+        }
+        Err(error) => {
+            return redirect_error(
+                &format!("Sales engine not reachable at {base}: {error}"),
+                "/sales",
+                &state.config,
+            )
+        }
+    };
+    let Some(campaign_id) = campaign_id else {
+        return redirect_error(
+            "The sales engine created the campaign but returned no id.",
+            "/sales",
+            &state.config,
+        );
+    };
+
+    let recipients = authed(
+        state
+            .http_client
+            .post(format!("{base}/campaigns/{campaign_id}/recipients"))
+            .header("x-tenant-id", "system")
+            .timeout(std::time::Duration::from_secs(30)),
+    )
+    .json(&serde_json::json!({ "emails": emails }))
+    .send()
+    .await;
+    match recipients {
+        Ok(response) if response.status().is_success() => {}
+        Ok(response) => {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return sales_engine_error_flash(status, &body, "/sales", &state.config);
+        }
+        Err(error) => {
+            return redirect_error(
+                &format!("Sales engine not reachable at {base}: {error}"),
+                "/sales",
+                &state.config,
+            )
+        }
+    }
+
+    let start = authed(
+        state
+            .http_client
+            .post(format!("{base}/campaigns/{campaign_id}/start"))
+            .header("x-tenant-id", "system")
+            .timeout(std::time::Duration::from_secs(30)),
+    )
+    .send()
+    .await;
+    match start {
+        Ok(response) if response.status().is_success() => redirect_success(
+            &format!("Outreach campaign {campaign_id} launched."),
+            "/sales",
+            &state.config,
+        ),
+        Ok(response) => {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            sales_engine_error_flash(status, &body, "/sales", &state.config)
+        }
+        Err(error) => redirect_error(
+            &format!("Sales engine not reachable at {base}: {error}"),
+            "/sales",
+            &state.config,
+        ),
+    }
+}
+
+/// Surface a sales-engine failure verbatim (quota-pause style errors
+/// arrive as JSON bodies like "campaign paused: email quota exhausted").
+fn sales_engine_error_flash(status: reqwest::StatusCode, body: &str, location: &str, config: &Config) -> Response {
+    let trimmed = body.trim().trim_matches('"');
+    let detail = if trimmed.is_empty() {
+        format!("engine returned {status}")
+    } else {
+        // Prefer the engine's structured message when present.
+        serde_json::from_str::<serde_json::Value>(trimmed)
+            .ok()
+            .and_then(|value| {
+                value
+                    .get("error")
+                    .or_else(|| value.get("message"))
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string)
+            })
+            .unwrap_or_else(|| trimmed.to_string())
+    };
+    redirect_error(&format!("Outreach failed: {detail}."), location, config)
+}
+
+// ─── GDPR queue transitions (item L) ──────────────────────────────
+
+/// POST /web/admin/gdpr/{id}/transition — the triad
+/// pending → in_progress → completed/rejected, validated against the
+/// compliance crate's forward-only semantics, with an audit-log entry
+/// and honest row-count flashes.
+async fn form_admin_gdpr_transition(
+    State(state): State<AppState>,
+    axum::Extension(user): axum::Extension<AuthUser>,
+    Path(id): Path<String>,
+    Form(form): Form<HashMap<String, String>>,
+) -> Response {
+    if let Err(message) = check_csrf(&form, &state.config) {
+        return redirect_error(message, "/compliance/gdpr", &state.config);
+    }
+    let target = field(&form, "status").trim().to_string();
+    let back = safe_return_to(&form, "/compliance/gdpr");
+    let current: Option<(String,)> = sqlx::query_as(
+        "SELECT status FROM gdpr_requests WHERE id = $1",
+    )
+    .bind(&id)
+    .fetch_optional(&state.db)
+    .await
+    .ok()
+    .flatten();
+    let Some((current,)) = current else {
+        return redirect_error(
+            "That GDPR request could not be found.",
+            &back,
+            &state.config,
+        );
+    };
+    if !gdpr_transition_allowed(&current, &target) {
+        return redirect_error(
+            &format!(
+                "A “{current}” request cannot move to “{target}”. Legal moves: pending → in_progress → completed/rejected."
+            ),
+            &back,
+            &state.config,
+        );
+    }
+    let result = sqlx::query(
+        "UPDATE gdpr_requests
+         SET status = $1,
+             fulfilled_at = CASE WHEN $1 = 'completed' THEN NOW() ELSE fulfilled_at END,
+             updated_at = NOW()
+         WHERE id = $2 AND status = $3",
+    )
+    .bind(&target)
+    .bind(&id)
+    .bind(&current)
+    .execute(&state.db)
+    .await;
+    match result {
+        Ok(result) if result.rows_affected() == 1 => {
+            // Audit-honest: the transition is recorded in the platform
+            // audit chain (actor + from/to).
+            let _ = crate::audit_log::insert_audit_log(
+                &state.db,
+                None,
+                user.user_id.as_deref(),
+                "gdpr_request.transition",
+                "gdpr_request",
+                Some(&id),
+                json!({ "from": current, "to": target }),
+                None,
+                None,
+            )
+            .await;
+            redirect_success(
+                &format!("Request {id} moved to {target}."),
+                &back,
+                &state.config,
+            )
+        }
+        Ok(_) => redirect_error(
+            "The request changed state just now. Reload and retry.",
+            &back,
+            &state.config,
+        ),
+        Err(error) => {
+            tracing::error!(error = %error, "web gdpr transition failed");
+            redirect_error(
+                "Could not update the request. Try again.",
+                &back,
+                &state.config,
+            )
+        }
+    }
+}
+
 
 // ─── Misc helpers ────────────────────────────────────────────────
 
@@ -2743,5 +5436,1436 @@ mod tests {
         assert!(verify_login_challenge(&config, &token, "u1", "ops@apexmail.ee"));
         assert!(!verify_login_challenge(&config, &token, "u2", "ops@apexmail.ee"));
         assert!(!verify_login_challenge(&config, "garbage", "u1", "ops@apexmail.ee"));
+    }
+
+    // ─── Item F: form field-map cookie ────────────────────────────
+
+    #[test]
+    fn form_field_map_round_trips_values_errors_and_secrets() {
+        let config = test_config();
+        let mut map = FormFieldMap::new("webhook-create");
+        map.set("url", "https://example.com/hook");
+        map.set("name", "primary");
+        map.set("name", "primary v2"); // last write wins
+        map.error("url", "Enter a valid https:// endpoint URL.");
+        map.secret("API key secret (shown once)", "amk_deadbeef");
+
+        let cookie = form_fields_set_cookie(&map, &config.csrf_secret, false);
+        assert!(cookie.starts_with("apexmail_form_fields=v1."));
+        assert!(cookie.contains("HttpOnly"));
+        assert!(cookie.contains("SameSite=Lax"));
+        assert!(cookie.contains("Max-Age=120"));
+        assert!(!cookie.contains("Secure"));
+
+        // The VIEW-layer accessor reads it back from a Cookie header.
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            cookie.split_once(';').unwrap().0.to_string().parse().unwrap(),
+        );
+        let decoded = decode_form_fields_from_headers(&headers, &config.csrf_secret)
+            .expect("valid cookie decodes");
+        assert_eq!(decoded.form_id, "webhook-create");
+        assert_eq!(decoded.field_value("name"), Some("primary v2"));
+        assert_eq!(decoded.field_value("url"), Some("https://example.com/hook"));
+        assert_eq!(
+            decoded.field_error("url"),
+            Some("Enter a valid https:// endpoint URL.")
+        );
+        assert_eq!(decoded.field_error("name"), None);
+        assert_eq!(
+            decoded.secrets(),
+            &[(
+                "API key secret (shown once)".to_string(),
+                "amk_deadbeef".to_string()
+            )]
+        );
+        assert!(!decoded.is_empty());
+    }
+
+    #[test]
+    fn form_field_map_rejects_tampering_wrong_secret_and_oversize() {
+        let config = test_config();
+        let mut map = FormFieldMap::new("f");
+        map.set("x", "y");
+        let cookie = form_fields_set_cookie(&map, &config.csrf_secret, false);
+
+        // Wrong secret fails closed.
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            cookie.split_once(';').unwrap().0.parse::<String>().unwrap().parse().unwrap(),
+        );
+        assert!(decode_form_fields_from_headers(&headers, "other-secret").is_none());
+
+        // Payload tampering breaks the signature.
+        let value = cookie.split_once('=').unwrap().1.split_once(';').unwrap().0;
+        let (prefix, rest) = value.split_at(value.find('.').unwrap() + 1);
+        let mut chars: Vec<char> = rest.chars().collect();
+        chars[0] = if chars[0] == 'A' { 'B' } else { 'A' };
+        let tampered = format!("{prefix}{}", chars.into_iter().collect::<String>());
+        let mut bad = HeaderMap::new();
+        bad.insert(header::COOKIE, format!("{FORM_FIELDS_COOKIE_NAME}={tampered}").parse().unwrap());
+        assert!(decode_form_fields_from_headers(&bad, &config.csrf_secret).is_none());
+
+        // Oversized payloads are rejected (cookie stuffing resistance).
+        let mut big = FormFieldMap::new("big");
+        let blob = "x".repeat(16 * 1024);
+        big.set("blob", &blob);
+        let big_cookie = form_fields_set_cookie(&big, &config.csrf_secret, false);
+        let mut big_headers = HeaderMap::new();
+        big_headers.insert(
+            header::COOKIE,
+            big_cookie.split_once(';').unwrap().0.parse::<String>().unwrap().parse().unwrap(),
+        );
+        assert!(decode_form_fields_from_headers(&big_headers, &config.csrf_secret).is_none());
+
+        // Absent cookie and empty maps yield None.
+        assert!(decode_form_fields_from_headers(&HeaderMap::new(), &config.csrf_secret).is_none());
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            format!("{FORM_FIELDS_COOKIE_NAME}={}", FormFieldMap::new("empty").encode(&config.csrf_secret)).parse().unwrap(),
+        );
+        assert!(decode_form_fields_from_headers(&headers, &config.csrf_secret).is_none());
+    }
+
+    #[test]
+    fn redirect_with_field_map_sets_both_cookies_and_prg_shape() {
+        let config = test_config();
+        let mut map = FormFieldMap::new("domain-create");
+        map.set("name", "mail.example.com");
+        map.error("name", "Enter a domain like mail.example.com.");
+        let response = redirect_with_field_map(
+            &map,
+            "Enter a domain like mail.example.com.",
+            "/domains/new",
+            &config,
+        );
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert_eq!(
+            response.headers().get(header::LOCATION).unwrap(),
+            "/domains/new"
+        );
+        let cookies: Vec<&str> = response
+            .headers()
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .map(|value| value.to_str().unwrap())
+            .collect();
+        assert!(cookies.iter().any(|cookie| cookie.starts_with("apexmail_flash=")));
+        assert!(cookies.iter().any(|cookie| cookie.starts_with("apexmail_form_fields=")));
+    }
+
+    // ─── Multi-value form parsing ─────────────────────────────────
+
+    #[test]
+    fn urlencoded_parser_keeps_repeated_keys_and_decodes_escapes() {
+        let pairs = parse_urlencoded("events=message.sent&events=email.bounced&url=https%3A%2F%2Fex.io%2Fhook&q=a+b");
+        let form = ParsedForm::from_pairs(pairs);
+        assert_eq!(
+            form.get_all("events"),
+            vec!["message.sent".to_string(), "email.bounced".to_string()]
+        );
+        assert_eq!(form.field("url"), "https://ex.io/hook");
+        assert_eq!(form.field("q"), "a b");
+        // Malformed percent escapes degrade instead of failing.
+        let form = ParsedForm::from_pairs(parse_urlencoded("a=100%"));
+        assert_eq!(form.field("a"), "100%");
+    }
+
+    #[test]
+    fn multipart_parser_extracts_fields_and_the_file_part() {
+        let body = "--BOUND\r\nContent-Disposition: form-data; name=\"_csrf\"\r\n\r\ntoken123\r\n--BOUND\r\nContent-Disposition: form-data; name=\"csv\"; filename=\"contacts.csv\"\r\nContent-Type: text/csv\r\n\r\nemail,name\r\na@b.ce,A\r\n--BOUND--\r\n";
+        let form = parse_multipart(body.as_bytes(), "multipart/form-data; boundary=BOUND")
+            .expect("multipart parses");
+        assert_eq!(form.field("_csrf"), "token123");
+        assert_eq!(form.csv_text(), "email,name\r\na@b.ce,A");
+        // The textarea fallback still works.
+        let form = ParsedForm::from_pairs(parse_urlencoded("csv=a%40b.ce%2CName"));
+        assert_eq!(form.csv_text(), "a@b.ce,Name");
+        // A missing boundary is rejected (callers degrade to the flash).
+        assert!(parse_multipart(b"x", "multipart/form-data").is_none());
+    }
+
+    // ─── Item C: contact CSV parsing ──────────────────────────────
+
+    #[test]
+    fn contact_csv_parses_headers_quoted_fields_and_case_insensitive_columns() {
+        let csv = "NAME,Email\r\n\"Doe, Jane\",\tJANE@Example.COM \r\n";
+        let parsed = parse_contact_csv(&csv);
+        assert!(parsed.had_header);
+        assert_eq!(
+            parsed.rows,
+            vec![ContactCsvRow {
+                email: "jane@example.com".to_string(),
+                name: Some("Doe, Jane".to_string()),
+            }]
+        );
+        // A file without a header maps col0=email col1=name.
+        let parsed = parse_contact_csv("x@y.io,Bo\n");
+        assert!(!parsed.had_header);
+        assert_eq!(parsed.rows.len(), 1);
+        assert_eq!(parsed.rows[0].name.as_deref(), Some("Bo"));
+        // "E-Mail Address" style headers normalize to the email column.
+        let parsed = parse_contact_csv("E-Mail Address,Name\nz@w.io,Al\n");
+        assert!(parsed.had_header);
+        assert_eq!(parsed.rows[0].email, "z@w.io");
+        assert_eq!(parsed.rows[0].name.as_deref(), Some("Al"));
+    }
+
+    #[test]
+    fn contact_csv_reports_invalid_rows_with_line_numbers() {
+        let csv = "email,name\nnot-an-email,X\nok@ok.io,\nalso bad,Z\n";
+        let parsed = parse_contact_csv(&csv);
+        assert_eq!(parsed.rows.len(), 1);
+        assert_eq!(parsed.rows[0].email, "ok@ok.io");
+        assert_eq!(parsed.invalid.len(), 2);
+        assert_eq!(parsed.invalid[0].0, 2); // first data row after header
+        assert!(parsed.invalid[0].1.contains("not-an-email"));
+        assert_eq!(parsed.invalid[1].0, 4);
+    }
+
+    #[test]
+    fn contact_import_summary_names_counts_and_first_three_examples() {
+        let invalid = vec![
+            (4usize, "invalid email: nope".to_string()),
+            (7usize, "invalid email: worse".to_string()),
+            (9usize, "invalid email: bad".to_string()),
+            (12usize, "invalid email: also bad".to_string()),
+        ];
+        let summary = contact_import_summary(5, 2, &invalid);
+        assert!(summary.starts_with("Imported 5, skipped 6 (duplicates: 2, invalid: 4)."));
+        assert!(summary.contains("line 4: invalid email: nope"));
+        assert!(summary.contains("line 7"));
+        assert!(summary.contains("line 9"));
+        assert!(!summary.contains("line 12"), "only the first three examples");
+    }
+
+    // ─── Item E: webhook event binding rules ──────────────────────
+
+    #[test]
+    fn webhook_event_selection_validates_against_the_known_set() {
+        assert_eq!(
+            normalize_webhook_events(vec![
+                "message.sent".into(),
+                " message.sent ".into(),
+                "".into(),
+                "email.bounced".into(),
+            ]),
+            vec!["message.sent".to_string(), "email.bounced".to_string()]
+        );
+        assert!(validate_webhook_events(&[]).is_some());
+        let error = validate_webhook_events(&["message.sent".into(), "delivred".into()]);
+        let error = error.expect("typo rejected");
+        assert!(error.contains("delivred"));
+        assert!(error.contains("message.sent"));
+        assert!(
+            validate_webhook_events(&["*".into(), "email.delivered".into()]).is_none(),
+            "wildcard and known names pass"
+        );
+    }
+
+    // ─── Item B: campaign lifecycle rules ─────────────────────────
+
+    #[test]
+    fn campaign_lifecycle_rules_match_the_live_status_check() {
+        // There is no 'scheduled' status — it can neither start nor pause.
+        assert!(campaign_start_allowed("draft"));
+        assert!(campaign_start_allowed("paused"));
+        assert!(!campaign_start_allowed("scheduled"));
+        assert!(!campaign_start_allowed("sending"));
+        assert!(!campaign_start_allowed("completed"));
+        assert!(campaign_pause_allowed("sending"));
+        assert!(!campaign_pause_allowed("paused"));
+        assert!(campaign_resume_allowed("paused"));
+        assert!(!campaign_resume_allowed("sending"));
+    }
+
+    #[test]
+    fn campaign_actions_availability_follows_status() {
+        let draft = campaign_actions("c1", "draft");
+        assert!(draft.iter().find(|a| a.0 == "Start sending").unwrap().2);
+        assert!(draft.iter().find(|a| a.0 == "Wire recipients").unwrap().2);
+        assert!(!draft.iter().find(|a| a.0 == "Pause").unwrap().2);
+
+        let sending = campaign_actions("c1", "sending");
+        assert!(sending.iter().find(|a| a.0 == "Pause").unwrap().2);
+        assert!(!sending.iter().find(|a| a.0 == "Start sending").unwrap().2);
+
+        let done = campaign_actions("c1", "completed");
+        assert!(done.iter().all(|a| !a.2), "terminal campaigns have no actions");
+    }
+
+    // ─── Item L: GDPR transition rules ────────────────────────────
+
+    #[test]
+    fn gdpr_transitions_follow_the_compliance_triad() {
+        // The forward triad out of pending.
+        assert!(gdpr_transition_allowed("pending", "in_progress"));
+        assert!(gdpr_transition_allowed("pending", "completed"));
+        assert!(gdpr_transition_allowed("pending", "rejected"));
+        // Work has started: only the terminal pair remains.
+        assert!(gdpr_transition_allowed("in_progress", "completed"));
+        assert!(gdpr_transition_allowed("in_progress", "rejected"));
+        assert!(!gdpr_transition_allowed("in_progress", "in_progress"));
+        assert!(gdpr_transition_allowed("processing", "completed"), "the crate's middle state is honored");
+        // Terminal states never reopen, and bogus targets are rejected.
+        assert!(!gdpr_transition_allowed("completed", "rejected"));
+        assert!(!gdpr_transition_allowed("rejected", "in_progress"));
+        assert!(!gdpr_transition_allowed("pending", "expired"));
+        assert!(!gdpr_transition_allowed("pending", "pending"));
+    }
+
+    // ─── Item G: bulk confirmation helpers ────────────────────────
+
+    #[test]
+    fn bulk_ids_parse_dedupe_and_cap() {
+        assert_eq!(
+            parse_bulk_ids(" a , b ,a, ,c "),
+            vec!["a".to_string(), "b".to_string(), "c".to_string()]
+        );
+        assert!(parse_bulk_ids("").is_empty());
+        assert!(parse_bulk_ids(" , ").is_empty());
+        let many = (0..500).map(|index| format!("id{index}")).collect::<Vec<_>>().join(",");
+        assert_eq!(parse_bulk_ids(&many).len(), BULK_CONFIRM_MAX_IDS);
+    }
+
+    #[test]
+    fn bulk_confirm_redirect_signs_the_id_list() {
+        let config = test_config();
+        let ids = vec!["c1".to_string(), "c2".to_string()];
+        let response = redirect_to_bulk_confirm("delete-campaigns-bulk", &ids, "/campaigns", &config);
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let location = response
+            .headers()
+            .get(header::LOCATION)
+            .and_then(|value| value.to_str().ok())
+            .unwrap()
+            .to_string();
+        assert!(location.starts_with("/confirm?intent=delete-campaigns-bulk&id=c1%2Cc2&return_to=%2Fcampaigns&sig="));
+        // Extract the sig and re-verify it over the exact id list.
+        let sig = location
+            .split("sig=")
+            .nth(1)
+            .unwrap()
+            .to_string();
+        assert!(verify_confirmation(
+            &config.csrf_secret,
+            &sig,
+            "delete-campaigns-bulk",
+            "c1,c2",
+            Utc::now().timestamp(),
+        ));
+        // A different id list must NOT verify (no replay across selections).
+        assert!(!verify_confirmation(
+            &config.csrf_secret,
+            &sig,
+            "delete-campaigns-bulk",
+            "c1,c3",
+            Utc::now().timestamp(),
+        ));
+    }
+
+    // ─── Item J: typed transfer confirmation ──────────────────────
+
+    #[test]
+    fn transfer_confirmation_requires_the_exact_typed_string() {
+        assert!(transfer_confirmation_matches(
+            "victim.com",
+            "transfer victim.com"
+        ));
+        assert!(transfer_confirmation_matches(
+            "Victim.COM",
+            "  transfer victim.com  "
+        ));
+        assert!(!transfer_confirmation_matches("victim.com", "transfer victim"));
+        assert!(!transfer_confirmation_matches(
+            "victim.com",
+            "TRANSFER VICTIM.COM"
+        ));
+        assert!(!transfer_confirmation_matches("victim.com", ""));
+    }
+
+    // ─── Item M: days filter parsing ──────────────────────────────
+
+    #[test]
+    fn days_filter_parses_and_bounds() {
+        let q = data::parse_list_query(Some("query=login&days=7"));
+        assert_eq!(q.days, Some(7));
+        // Hostile / out-of-range values degrade to no filter.
+        assert_eq!(data::parse_list_query(Some("days=0")).days, None);
+        assert_eq!(data::parse_list_query(Some("days=-5")).days, None);
+        assert_eq!(data::parse_list_query(Some("days=999999")).days, None);
+        assert_eq!(data::parse_list_query(Some("days=abc")).days, None);
+    }
+
+    // ─── Item K: sales engine configuration ───────────────────────
+
+    #[test]
+    fn sales_engine_base_url_distinguishes_unconfigured() {
+        let config = test_config();
+        assert!(sales_engine_base_url_for(&config).is_some());
+        let mut unconfigured = config.clone();
+        unconfigured.sales_autopilot_base_url = "  ".to_string();
+        assert!(sales_engine_base_url_for(&unconfigured).is_none());
+        // Trailing slashes are trimmed for path composition.
+        let mut slashed = config.clone();
+        slashed.sales_autopilot_base_url = "http://localhost:3010/".to_string();
+        assert_eq!(
+            sales_engine_base_url_for(&slashed).as_deref(),
+            Some("http://localhost:3010")
+        );
+    }
+
+    // ─── DB-gated handler tests (skipped without TEST_DATABASE_URL) ──
+    //
+    // These drive the real handlers through a router with a session
+    // AuthUser extension — the same shape app.rs's full-stack tests use,
+    // scoped to the /web form twins. Seeds are unique per run and cleaned
+    // up in teardown; without a reachable database every test skips.
+
+    mod db_backed {
+        use super::*;
+        use axum::body::Body;
+        use axum::http::Request;
+        use std::sync::Arc;
+        use tower::ServiceExt;
+
+        /// Real AppState (mirrors app.rs's test fixture).
+        async fn web_test_state() -> AppState {
+            static INSTALL: std::sync::Once = std::sync::Once::new();
+            INSTALL.call_once(|| {
+                let _ = metrics_exporter_prometheus::PrometheusBuilder::new().install_recorder();
+                std::env::set_var("AWS_EC2_METADATA_DISABLED", "true");
+                std::env::set_var("AWS_ACCESS_KEY_KEY", "test");
+                std::env::set_var("AWS_ACCESS_KEY_ID", "test");
+                std::env::set_var("AWS_SECRET_ACCESS_KEY", "test");
+            });
+            let database_url = std::env::var("TEST_DATABASE_URL")
+                .unwrap_or_else(|_| "postgres://apexmail:apexmail@127.0.0.1:5433/apexmail".to_string());
+            let db = sqlx::postgres::PgPoolOptions::new()
+                .max_connections(1)
+                .connect_lazy(&database_url)
+                .expect("lazy test pool");
+            let redis_url =
+                std::env::var("TEST_REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:1".into());
+            let redis = deadpool_redis::Config::from_url(&redis_url)
+                .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+                .expect("lazy redis pool");
+            let aws_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
+                .region(aws_sdk_sesv2::config::Region::new("us-east-1"))
+                .load()
+                .await;
+            let ses_provider = Arc::new(crate::ses_provider::SesIpProvider::new(
+                aws_sdk_sesv2::Client::new(&aws_config),
+                db.clone(),
+                "apexmail".into(),
+                "us-east-1".into(),
+            ));
+            let config = test_config();
+            crate::state::AppStateInner::with_ddos_protector(
+                db.clone(),
+                apexmail_db::pool::PoolPair {
+                    rw: db.clone(),
+                    ro: db.clone(),
+                },
+                redis,
+                config.clone(),
+                reqwest::Client::new(),
+                (*ses_provider).clone(),
+                None,
+                Arc::new(
+                    ddos_protection::DdosProtector::new(ddos_protection::ProtectorConfig::default())
+                        .await
+                        .expect("ddos protector"),
+                ),
+                None,
+                None,
+                crate::resilience::ResilientClient::new_from_config(&config),
+            )
+        }
+
+        async fn db_reachable(db: &sqlx::PgPool) -> bool {
+            matches!(
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(2),
+                    sqlx::query_scalar::<_, i32>("SELECT 1").fetch_one(db),
+                )
+                .await,
+                Ok(Ok(1))
+            )
+        }
+
+        fn session_user(tenant: &str) -> AuthUser {
+            AuthUser {
+                tenant_id: tenant.to_string(),
+                user_id: Some(format!("op-{tenant}")),
+                api_key_id: None,
+                session_id: None,
+                scopes: vec!["*".to_string()],
+            }
+        }
+
+        /// A router exposing the /web form twins with the session user
+        /// injected (mirrors the authenticated stack's Extension layer).
+        fn web_handlers(state: AppState, user: AuthUser) -> axum::Router {
+            axum::Router::new()
+                .route("/web/campaigns/:id/start", post(form_campaign_start))
+                .route("/web/campaigns/:id/pause", post(form_campaign_pause))
+                .route("/web/campaigns/:id/resume", post(form_campaign_resume))
+                .route("/web/campaigns/:id/recipients", post(form_campaign_recipients))
+                .route("/web/campaigns/delete-bulk", post(form_campaigns_delete_bulk))
+                .route("/web/contacts/import", post(form_contacts_import))
+                .route("/web/webhooks", post(form_webhook_create))
+                .route("/web/templates/update", post(form_template_update))
+                .route("/web/confirm", post(form_confirm_destructive))
+                .route("/web/admin/alerts/ack-bulk", post(form_admin_alert_ack_bulk))
+                .route("/web/admin/gdpr/:id/transition", post(form_admin_gdpr_transition))
+                .route("/web/admin/tenants/:id/suspend", post(form_admin_tenant_suspend))
+                .route("/web/admin/tenants/:id/resume", post(form_admin_tenant_resume))
+                .route("/web/admin/tenants/:id/delete", post(form_admin_tenant_delete))
+                .layer(axum::middleware::from_fn(
+                    move |mut req: axum::extract::Request,
+                          next: axum::middleware::Next|
+                          -> std::pin::Pin<
+                              Box<dyn std::future::Future<Output = axum::response::Response> + Send>,
+                          > {
+                        req.extensions_mut().insert(user.clone());
+                        Box::pin(next.run(req))
+                    },
+                ))
+                .with_state(state)
+        }
+
+        fn csrf_body(state: &AppState, extra: &[(&str, &str)]) -> String {
+            let token =
+                ui_foundation::csrf::generate_csrf_token(&state.config.csrf_secret);
+            let mut pairs = vec![("_csrf".to_string(), token)];
+            for (key, value) in extra {
+                pairs.push((key.to_string(), value.to_string()));
+            }
+            pairs
+                .iter()
+                .map(|(key, value)| format!("{}={}", key, urlencode(value)))
+                .collect::<Vec<_>>()
+                .join("&")
+        }
+
+        fn post_form(uri: &str, body: &str) -> Request<Body> {
+            Request::builder()
+                .method("POST")
+                .uri(uri)
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(body.to_string()))
+                .unwrap()
+        }
+
+        /// Flash messages from a response's Set-Cookie headers.
+        fn response_flash(response: &Response, secret: &str) -> Vec<FlashMessage> {
+            response
+                .headers()
+                .get_all(header::SET_COOKIE)
+                .iter()
+                .filter_map(|value| value.to_str().ok())
+                .map(|cookie| decode_flash_from_cookie_header(cookie, secret))
+                .find(|messages| !messages.is_empty())
+                .unwrap_or_default()
+        }
+
+        fn flash_text(messages: &[FlashMessage]) -> String {
+            messages
+                .iter()
+                .map(|message| message.text.clone())
+                .collect::<Vec<_>>()
+                .join(" | ")
+        }
+
+        async fn seed_tenant(state: &AppState, tenant: &str) {
+            sqlx::query(
+                "INSERT INTO tenants (id, name, slug, plan, status, settings, metadata, created_at, updated_at)
+                 VALUES ($1, $2, $3, 'free', 'active', '{}'::jsonb, '{}'::jsonb, NOW(), NOW())
+                 ON CONFLICT (id) DO NOTHING",
+            )
+            .bind(tenant)
+            .bind(format!("Web Flow Test {tenant}"))
+            .bind(format!("web-flow-{tenant}"))
+            .execute(&state.db)
+            .await
+            .expect("seed tenant");
+        }
+
+        async fn cleanup_tenant(state: &AppState, tenant: &str) {
+            // Cascade-clean the tenant's rows (contacts FK-cascade; the
+            // rest explicitly).
+            let _ = sqlx::query("DELETE FROM campaign_jobs WHERE tenant_id = $1")
+                .bind(tenant)
+                .execute(&state.db)
+                .await;
+            let _ = sqlx::query("DELETE FROM campaigns WHERE tenant_id = $1")
+                .bind(tenant)
+                .execute(&state.db)
+                .await;
+            let _ = sqlx::query("DELETE FROM list_subscribers WHERE list_id IN (SELECT id FROM lists WHERE tenant_id = $1)")
+                .bind(tenant)
+                .execute(&state.db)
+                .await;
+            let _ = sqlx::query("DELETE FROM lists WHERE tenant_id = $1")
+                .bind(tenant)
+                .execute(&state.db)
+                .await;
+            let _ = sqlx::query("DELETE FROM contacts WHERE tenant_id = $1")
+                .bind(tenant)
+                .execute(&state.db)
+                .await;
+            let _ = sqlx::query("DELETE FROM webhooks WHERE tenant_id = $1")
+                .bind(tenant)
+                .execute(&state.db)
+                .await;
+            let _ = sqlx::query("DELETE FROM templates WHERE tenant_id = $1")
+                .bind(tenant)
+                .execute(&state.db)
+                .await;
+            let _ = sqlx::query("DELETE FROM domains WHERE tenant_id = $1")
+                .bind(tenant)
+                .execute(&state.db)
+                .await;
+            let _ = sqlx::query("DELETE FROM gdpr_requests WHERE tenant_id = $1")
+                .bind(tenant)
+                .execute(&state.db)
+                .await;
+            let _ = sqlx::query("DELETE FROM tenants WHERE id = $1")
+                .bind(tenant)
+                .execute(&state.db)
+                .await;
+        }
+
+        #[tokio::test]
+        async fn campaign_start_requires_recipients_then_transitions() {
+            let state = web_test_state().await;
+            if !db_reachable(&state.db).await {
+                eprintln!("skipping campaign_start_requires_recipients_then_transitions: no database");
+                return;
+            }
+            let tenant = apexmail_lib::id::generate_id("webflow", 18);
+            seed_tenant(&state, &tenant).await;
+            let campaign = Uuid::new_v4();
+            sqlx::query(
+                "INSERT INTO campaigns (id, tenant_id, name, subject, status, created_at, updated_at)
+                 VALUES ($1, $2, 'Start Flow', 'Hello', 'draft', NOW(), NOW())",
+            )
+            .bind(campaign)
+            .bind(&tenant)
+            .execute(&state.db)
+            .await
+            .expect("seed campaign");
+
+            let app = web_handlers(state.clone(), session_user(&tenant));
+            let uri = format!("/web/campaigns/{campaign}/start");
+
+            // CSRF failure first: friendly flash, nothing changes.
+            let response = app
+                .clone()
+                .oneshot(post_form(&uri, "start=1"))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::SEE_OTHER);
+            let flash = response_flash(&response, &state.config.csrf_secret);
+            assert!(flash_text(&flash).contains("session expired"));
+
+            // Honest validation: no recipients wired yet.
+            let response = app
+                .clone()
+                .oneshot(post_form(&uri, &csrf_body(&state, &[])))
+                .await
+                .unwrap();
+            let flash = response_flash(&response, &state.config.csrf_secret);
+            assert!(
+                flash_text(&flash).to_lowercase().contains("no recipients"),
+                "flash was: {flash:?}"
+            );
+            let status: String =
+                sqlx::query_scalar("SELECT status FROM campaigns WHERE id = $1::uuid")
+                    .bind(campaign)
+                    .fetch_one(&state.db)
+                    .await
+                    .unwrap();
+            assert_eq!(status, "draft");
+
+            // Wire an audience: list + two subscribed contacts.
+            let list = Uuid::new_v4();
+            sqlx::query("INSERT INTO lists (id, tenant_id, name, created_at, updated_at) VALUES ($1, $2, 'Starters', NOW(), NOW())")
+                .bind(list)
+                .bind(&tenant)
+                .execute(&state.db)
+                .await
+                .unwrap();
+            for email in ["a-start@t.io", "b-start@t.io"] {
+                let contact = Uuid::new_v4();
+                sqlx::query("INSERT INTO contacts (id, tenant_id, email, status, created_at, updated_at) VALUES ($1, $2, $3, 'subscribed', NOW(), NOW())")
+                    .bind(contact)
+                    .bind(&tenant)
+                    .bind(email)
+                    .execute(&state.db)
+                    .await
+                    .unwrap();
+                sqlx::query("INSERT INTO list_subscribers (id, list_id, contact_id, status, created_at) VALUES ($1, $2, $3, 'active', NOW())")
+                    .bind(Uuid::new_v4())
+                    .bind(list)
+                    .bind(contact)
+                    .execute(&state.db)
+                    .await
+                    .unwrap();
+            }
+            let recipients_uri = format!("/web/campaigns/{campaign}/recipients");
+            let response = app
+                .clone()
+                .oneshot(post_form(
+                    &recipients_uri,
+                    &csrf_body(&state, &[("list_id", &list.to_string()), ("segment", "subscribed")]),
+                ))
+                .await
+                .unwrap();
+            let flash = response_flash(&response, &state.config.csrf_secret);
+            assert!(flash_text(&flash).contains("Recipients wired: 2"), "flash was: {flash:?}");
+
+            // Start: draft → sending, with the honest recipient count.
+            let response = app
+                .clone()
+                .oneshot(post_form(&uri, &csrf_body(&state, &[])))
+                .await
+                .unwrap();
+            let flash = response_flash(&response, &state.config.csrf_secret);
+            assert!(flash_text(&flash).contains("2 recipient"), "flash was: {flash:?}");
+            let status: String =
+                sqlx::query_scalar("SELECT status FROM campaigns WHERE id = $1::uuid")
+                    .bind(campaign)
+                    .fetch_one(&state.db)
+                    .await
+                    .unwrap();
+            assert_eq!(status, "sending");
+
+            // Pause (sending → paused); pausing again is refused, and
+            // resuming returns the campaign to sending.
+            let response = app
+                .clone()
+                .oneshot(post_form(&format!("/web/campaigns/{campaign}/pause"), &csrf_body(&state, &[])))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::SEE_OTHER);
+            let response = app
+                .clone()
+                .oneshot(post_form(&format!("/web/campaigns/{campaign}/pause"), &csrf_body(&state, &[])))
+                .await
+                .unwrap();
+            let flash = response_flash(&response, &state.config.csrf_secret);
+            assert!(flash_text(&flash).contains("only sending"), "flash was: {flash:?}");
+            let response = app
+                .clone()
+                .oneshot(post_form(&format!("/web/campaigns/{campaign}/resume"), &csrf_body(&state, &[])))
+                .await
+                .unwrap();
+            let flash = response_flash(&response, &state.config.csrf_secret);
+            assert!(flash_text(&flash).contains("sending"), "flash was: {flash:?}");
+
+            // The detail loader exposes per-status actions from the same rule.
+            let detail =
+                data::load_campaign_detail(&state.db, &tenant, &campaign.to_string())
+                    .await
+                    .expect("detail loads");
+            assert_eq!(detail.status, "sending");
+            assert_eq!(detail.recipient_count, 2);
+            assert_eq!(detail.list_name.as_deref(), Some("Starters"));
+            assert!(!detail.actions.iter().find(|a| a.0 == "Start sending").unwrap().2);
+            assert!(detail.actions.iter().find(|a| a.0 == "Pause").unwrap().2);
+
+            cleanup_tenant(&state, &tenant).await;
+        }
+
+        #[tokio::test]
+        async fn contacts_import_flashes_the_honest_summary() {
+            let state = web_test_state().await;
+            if !db_reachable(&state.db).await {
+                eprintln!("skipping contacts_import_flashes_the_honest_summary: no database");
+                return;
+            }
+            let tenant = apexmail_lib::id::generate_id("webflow", 18);
+            seed_tenant(&state, &tenant).await;
+            sqlx::query("INSERT INTO contacts (id, tenant_id, email, status, created_at, updated_at) VALUES ($1, $2, 'dup@t.io', 'subscribed', NOW(), NOW())")
+                .bind(Uuid::new_v4())
+                .bind(&tenant)
+                .execute(&state.db)
+                .await
+                .unwrap();
+
+            let app = web_handlers(state.clone(), session_user(&tenant));
+            // Header row, a duplicate (in DB), a duplicate in-file, an
+            // invalid row, and one fresh import.
+            let csv = "Email,Name\ndup@t.io,Dup\nfresh@t.io,\"Fresh, Inc\"\nfresh@t.io,Again\nnot-an-email,Bad\n";
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/web/contacts/import")
+                        .header("content-type", "application/x-www-form-urlencoded")
+                        .body(Body::from(csrf_body(&state, &[("csv", &csv)])))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::SEE_OTHER);
+            let flash = response_flash(&response, &state.config.csrf_secret);
+            let text = flash_text(&flash);
+            assert!(text.contains("Imported 1"), "flash was: {text}");
+            assert!(text.contains("skipped 3"), "flash was: {text}");
+            assert!(text.contains("duplicates: 2"), "flash was: {text}");
+            assert!(text.contains("invalid: 1"), "flash was: {text}");
+            assert!(text.contains("line 5"), "flash was: {text}");
+
+            // The stored contact carries the quoted name with its comma.
+            let name: Option<String> =
+                sqlx::query_scalar("SELECT name FROM contacts WHERE tenant_id = $1 AND email = 'fresh@t.io'")
+                    .bind(&tenant)
+                    .fetch_one(&state.db)
+                    .await
+                    .unwrap();
+            assert_eq!(name.as_deref(), Some("Fresh, Inc"));
+
+            cleanup_tenant(&state, &tenant).await;
+        }
+
+        #[tokio::test]
+        async fn webhook_create_binds_the_checkbox_group() {
+            let state = web_test_state().await;
+            if !db_reachable(&state.db).await {
+                eprintln!("skipping webhook_create_binds_the_checkbox_group: no database");
+                return;
+            }
+            let tenant = apexmail_lib::id::generate_id("webflow", 18);
+            seed_tenant(&state, &tenant).await;
+            let app = web_handlers(state.clone(), session_user(&tenant));
+
+            // Repeated `events` keys (a checkbox group) all bind; the
+            // secret rides in the structured field-map cookie.
+            let body = format!(
+                "{}&url=https%3A%2F%2Fexample.com%2Fhook&events=message.sent&events=email.delivered&events=email.delivered",
+                csrf_body(&state, &[]).replace('&', "%26").replace('=', "%3D")
+            );
+            // NOTE: the csrf pair must stay a normal pair — build it
+            // explicitly instead.
+            let _ = body;
+            let token = ui_foundation::csrf::generate_csrf_token(&state.config.csrf_secret);
+            let body = format!(
+                "_csrf={}&url=https%3A%2F%2Fexample.com%2Fhook&events=message.sent&events=email.delivered&events=email.delivered",
+                urlencode(&token)
+            );
+            let response = app
+                .clone()
+                .oneshot(post_form("/web/webhooks", &body))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::SEE_OTHER);
+            let events: serde_json::Value = sqlx::query_scalar(
+                "SELECT events FROM webhooks WHERE tenant_id = $1 ORDER BY created_at DESC LIMIT 1",
+            )
+            .bind(&tenant)
+            .fetch_one(&state.db)
+            .await
+            .unwrap();
+            assert_eq!(
+                events,
+                serde_json::json!(["message.sent", "email.delivered"]),
+                "the chosen checkbox set is stored, deduplicated"
+            );
+            // Item N: the signing secret is in the structured field-map.
+            let field_cookie = response
+                .headers()
+                .get_all(header::SET_COOKIE)
+                .iter()
+                .filter_map(|value| value.to_str().ok())
+                .find(|cookie| cookie.starts_with(&format!("{FORM_FIELDS_COOKIE_NAME}=")))
+                .expect("field-map cookie set");
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                header::COOKIE,
+                field_cookie.split_once(';').unwrap().0.parse().unwrap(),
+            );
+            let fields =
+                decode_form_fields_from_headers(&headers, &state.config.csrf_secret)
+                    .expect("field-map decodes");
+            assert_eq!(fields.secrets().len(), 1);
+            assert!(fields.secrets()[0].0.contains("signing secret"));
+
+            // An unknown event name is rejected with the valid list and
+            // the URL is preserved for re-population.
+            let body = format!(
+                "_csrf={}&url=https%3A%2F%2Fexample.com%2Fhook&events=delivred",
+                urlencode(&token)
+            );
+            let response = app
+                .clone()
+                .oneshot(post_form("/web/webhooks", &body))
+                .await
+                .unwrap();
+            let flash = response_flash(&response, &state.config.csrf_secret);
+            assert!(flash_text(&flash).contains("delivred"), "flash was: {flash:?}");
+            assert!(flash_text(&flash).contains("message.sent"));
+            let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM webhooks WHERE tenant_id = $1")
+                .bind(&tenant)
+                .fetch_one(&state.db)
+                .await
+                .unwrap();
+            assert_eq!(rows, 1, "the invalid create was not stored");
+
+            cleanup_tenant(&state, &tenant).await;
+        }
+
+        #[tokio::test]
+        async fn template_update_bumps_the_version_snapshot() {
+            let state = web_test_state().await;
+            if !db_reachable(&state.db).await {
+                eprintln!("skipping template_update_bumps_the_version_snapshot: no database");
+                return;
+            }
+            let tenant = apexmail_lib::id::generate_id("webflow", 18);
+            seed_tenant(&state, &tenant).await;
+            let template = apexmail_lib::id::generate_id("", 26);
+            sqlx::query(
+                "INSERT INTO templates (id, tenant_id, name, subject, html_body, created_at, updated_at)
+                 VALUES ($1, $2, 'Monthly', 'News', '<p>v1</p>', NOW(), NOW())",
+            )
+            .bind(&template)
+            .bind(&tenant)
+            .execute(&state.db)
+            .await
+            .unwrap();
+
+            let app = web_handlers(state.clone(), session_user(&tenant));
+            let response = app
+                .clone()
+                .oneshot(post_form(
+                    &format!("/web/templates/update"),
+                    &csrf_body(
+                        &state,
+                        &[("id", &template), ("name", "Monthly v2"), ("html_body", "<p>v2</p>")],
+                    ),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::SEE_OTHER);
+            let flash = response_flash(&response, &state.config.csrf_secret);
+            assert!(flash_text(&flash).contains("v2"), "flash was: {flash:?}");
+
+            let (name, html): (String, String) = sqlx::query_as(
+                "SELECT name, html_body FROM templates WHERE id = $1 AND tenant_id = $2",
+            )
+            .bind(&template)
+            .bind(&tenant)
+            .fetch_one(&state.db)
+            .await
+            .unwrap();
+            assert_eq!(name, "Monthly v2");
+            assert_eq!(html, "<p>v2</p>");
+            // The snapshot row exists (the JSON rollback path's history).
+            let snapshots: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM template_versions WHERE template_id = $1 AND version = 2",
+            )
+            .bind(&template)
+            .fetch_one(&state.db)
+            .await
+            .unwrap();
+            assert_eq!(snapshots, 1, "the v2 snapshot was written");
+
+            cleanup_tenant(&state, &tenant).await;
+        }
+
+        #[tokio::test]
+        async fn bulk_delete_flows_through_the_signed_confirm_page() {
+            let state = web_test_state().await;
+            if !db_reachable(&state.db).await {
+                eprintln!("skipping bulk_delete_flows_through_the_signed_confirm_page: no database");
+                return;
+            }
+            let tenant = apexmail_lib::id::generate_id("webflow", 18);
+            seed_tenant(&state, &tenant).await;
+            let first = Uuid::new_v4();
+            let second = Uuid::new_v4();
+            for (id, name) in [(first, "Bulk A"), (second, "Bulk B")] {
+                sqlx::query(
+                    "INSERT INTO campaigns (id, tenant_id, name, subject, status, created_at, updated_at)
+                     VALUES ($1, $2, $3, 'x', 'draft', NOW(), NOW())",
+                )
+                .bind(id)
+                .bind(&tenant)
+                .bind(name)
+                .execute(&state.db)
+                .await
+                .unwrap();
+            }
+
+            let app = web_handlers(state.clone(), session_user(&tenant));
+            // The bulk POST never deletes: it signs and redirects.
+            let response = app
+                .clone()
+                .oneshot(post_form(
+                    "/web/campaigns/delete-bulk",
+                    &csrf_body(&state, &[("ids", &format!("{first},{second}"))]),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::SEE_OTHER);
+            let location = response
+                .headers()
+                .get(header::LOCATION)
+                .and_then(|value| value.to_str().ok())
+                .unwrap()
+                .to_string();
+            assert!(location.starts_with("/confirm?intent=delete-campaigns-bulk&id="), "was {location}");
+            let remaining: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM campaigns WHERE tenant_id = $1")
+                    .bind(&tenant)
+                    .fetch_one(&state.db)
+                    .await
+                    .unwrap();
+            assert_eq!(remaining, 2, "nothing was deleted before confirmation");
+
+            // Confirm: replay the signed params through /web/confirm.
+            let query = location.trim_start_matches("/confirm?");
+            let pairs: Vec<(String, String)> = query
+                .split('&')
+                .map(|pair| pair.split_once('=').map(|(k, v)| (k.to_string(), v.to_string())).unwrap())
+                .collect();
+            let get = |name: &str| {
+                pairs
+                    .iter()
+                    .find(|(key, _)| key == name)
+                    .map(|(_, value)| value.clone())
+                    .unwrap_or_default()
+            };
+            let confirm_body = format!(
+                "_csrf={}&intent={}&id={}&sig={}&return_to=%2Fcampaigns",
+                urlencode(&ui_foundation::csrf::generate_csrf_token(&state.config.csrf_secret)),
+                get("intent"),
+                get("id"),
+                get("sig"),
+            );
+            let response = app
+                .clone()
+                .oneshot(post_form("/web/confirm", &confirm_body))
+                .await
+                .unwrap();
+            let flash = response_flash(&response, &state.config.csrf_secret);
+            assert!(flash_text(&flash).contains("2 campaign"), "flash was: {flash:?}");
+            let remaining: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM campaigns WHERE tenant_id = $1")
+                    .bind(&tenant)
+                    .fetch_one(&state.db)
+                    .await
+                    .unwrap();
+            assert_eq!(remaining, 0);
+
+            // A forged signature changes nothing.
+            let forged = format!(
+                "_csrf={}&intent=delete-campaigns-bulk&id={first}&sig=1234.AAAA&return_to=%2Fcampaigns",
+                urlencode(&ui_foundation::csrf::generate_csrf_token(&state.config.csrf_secret)),
+            );
+            let response = app
+                .clone()
+                .oneshot(post_form("/web/confirm", &forged))
+                .await
+                .unwrap();
+            let flash = response_flash(&response, &state.config.csrf_secret);
+            assert!(flash_text(&flash).contains("expired"), "flash was: {flash:?}");
+
+            cleanup_tenant(&state, &tenant).await;
+        }
+
+        #[tokio::test]
+        async fn alerts_ack_bulk_flips_rows_with_honest_counts() {
+            let state = web_test_state().await;
+            if !db_reachable(&state.db).await {
+                eprintln!("skipping alerts_ack_bulk_flips_rows_with_honest_counts: no database");
+                return;
+            }
+            let system_tenant: String =
+                sqlx::query_scalar("SELECT id::text FROM tenants WHERE slug = 'system' LIMIT 1")
+                    .fetch_optional(&state.db)
+                    .await
+                    .ok()
+                    .flatten()
+                    .unwrap_or_else(|| "system".to_string());
+            let mut ids: Vec<String> = Vec::new();
+            for index in 0..3 {
+                let id: uuid::Uuid = sqlx::query_scalar(
+                    "INSERT INTO system_alerts (alert_type, message, severity, acknowledged, created_at)
+                     VALUES ('web_flow_test', $1, 'warning', false, NOW()) RETURNING id",
+                )
+                .bind(format!("ack-bulk probe {index}"))
+                .fetch_one(&state.db)
+                .await
+                .unwrap();
+                ids.push(id.to_string());
+            }
+
+            let app = web_handlers(state.clone(), session_user(&system_tenant));
+            let response = app
+                .clone()
+                .oneshot(post_form(
+                    "/web/admin/alerts/ack-bulk",
+                    &csrf_body(&state, &[("ids", &ids.join(","))]),
+                ))
+                .await
+                .unwrap();
+            let flash = response_flash(&response, &state.config.csrf_secret);
+            assert!(flash_text(&flash).contains("Acknowledged 3"), "flash was: {flash:?}");
+            let acknowledged: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM system_alerts WHERE id = ANY($1::uuid[]) AND acknowledged",
+            )
+            .bind(&ids)
+            .fetch_one(&state.db)
+            .await
+            .unwrap();
+            assert_eq!(acknowledged, 3);
+
+            // Re-acking flips nothing and says so honestly.
+            let response = app
+                .clone()
+                .oneshot(post_form(
+                    "/web/admin/alerts/ack-bulk",
+                    &csrf_body(&state, &[("ids", &ids.join(","))]),
+                ))
+                .await
+                .unwrap();
+            let flash = response_flash(&response, &state.config.csrf_secret);
+            assert!(flash_text(&flash).contains("already"), "flash was: {flash:?}");
+
+            sqlx::query("DELETE FROM system_alerts WHERE id = ANY($1::uuid[])")
+                .bind(&ids)
+                .execute(&state.db)
+                .await
+                .unwrap();
+        }
+
+        #[tokio::test]
+        async fn gdpr_transition_validates_the_triad_and_audits() {
+            let state = web_test_state().await;
+            if !db_reachable(&state.db).await {
+                eprintln!("skipping gdpr_transition_validates_the_triad_and_audits: no database");
+                return;
+            }
+            let tenant = apexmail_lib::id::generate_id("webflow", 18);
+            seed_tenant(&state, &tenant).await;
+            let request = apexmail_lib::id::generate_id("", 26);
+            sqlx::query(
+                "INSERT INTO gdpr_requests (id, tenant_id, email, request_type, status, created_at, updated_at)
+                 VALUES ($1, $2, 'subject@t.io', 'access', 'pending', NOW(), NOW())",
+            )
+            .bind(&request)
+            .bind(&tenant)
+            .execute(&state.db)
+            .await
+            .unwrap();
+
+            let app = web_handlers(state.clone(), session_user(&tenant));
+            let uri = format!("/web/admin/gdpr/{request}/transition");
+
+            // pending → in_progress is legal and audited.
+            let response = app
+                .clone()
+                .oneshot(post_form(&uri, &csrf_body(&state, &[("status", "in_progress")])))
+                .await
+                .unwrap();
+            let flash = response_flash(&response, &state.config.csrf_secret);
+            assert!(flash_text(&flash).contains("in_progress"), "flash was: {flash:?}");
+
+            // in_progress → in_progress is refused.
+            let response = app
+                .clone()
+                .oneshot(post_form(&uri, &csrf_body(&state, &[("status", "in_progress")])))
+                .await
+                .unwrap();
+            let flash = response_flash(&response, &state.config.csrf_secret);
+            assert!(flash_text(&flash).contains("cannot move"), "flash was: {flash:?}");
+
+            // in_progress → completed stamps fulfilled_at.
+            let response = app
+                .clone()
+                .oneshot(post_form(&uri, &csrf_body(&state, &[("status", "completed")])))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::SEE_OTHER);
+            let (status, fulfilled): (String, bool) = sqlx::query_as(
+                "SELECT status, fulfilled_at IS NOT NULL FROM gdpr_requests WHERE id = $1",
+            )
+            .bind(&request)
+            .fetch_one(&state.db)
+            .await
+            .unwrap();
+            assert_eq!(status, "completed");
+            assert!(fulfilled);
+
+            // Terminal: completed → rejected is refused.
+            let response = app
+                .clone()
+                .oneshot(post_form(&uri, &csrf_body(&state, &[("status", "rejected")])))
+                .await
+                .unwrap();
+            let flash = response_flash(&response, &state.config.csrf_secret);
+            assert!(flash_text(&flash).contains("cannot move"), "flash was: {flash:?}");
+
+            cleanup_tenant(&state, &tenant).await;
+        }
+
+        #[tokio::test]
+        async fn tenant_lifecycle_suspends_resumes_and_deletes_with_typing() {
+            let state = web_test_state().await;
+            if !db_reachable(&state.db).await {
+                eprintln!("skipping tenant_lifecycle_suspends_resumes_and_deletes_with_typing: no database");
+                return;
+            }
+            let tenant = apexmail_lib::id::generate_id("webflow", 18);
+            seed_tenant(&state, &tenant).await;
+            let name = format!("Web Flow Test {tenant}");
+            let system_tenant: String =
+                sqlx::query_scalar("SELECT id::text FROM tenants WHERE slug = 'system' LIMIT 1")
+                    .fetch_optional(&state.db)
+                    .await
+                    .ok()
+                    .flatten()
+                    .unwrap_or_else(|| "system".to_string());
+            let app = web_handlers(state.clone(), session_user(&system_tenant));
+
+            // Suspend signs a confirmation rather than acting directly.
+            let response = app
+                .clone()
+                .oneshot(post_form(
+                    &format!("/web/admin/tenants/{tenant}/suspend"),
+                    &csrf_body(&state, &[]),
+                ))
+                .await
+                .unwrap();
+            let location = response
+                .headers()
+                .get(header::LOCATION)
+                .and_then(|value| value.to_str().ok())
+                .unwrap()
+                .to_string();
+            assert!(location.starts_with("/confirm?intent=suspend-tenant&id="), "was {location}");
+            let sig = location.split("sig=").nth(1).unwrap().to_string();
+            let confirm = csrf_body(
+                &state,
+                &[("intent", "suspend-tenant"), ("id", &tenant), ("sig", &sig)],
+            );
+            let response = app
+                .clone()
+                .oneshot(post_form("/web/confirm", &confirm))
+                .await
+                .unwrap();
+            let flash = response_flash(&response, &state.config.csrf_secret);
+            assert!(flash_text(&flash).contains("suspended"), "flash was: {flash:?}");
+
+            // Resume directly (validated transition).
+            let response = app
+                .clone()
+                .oneshot(post_form(&format!("/web/admin/tenants/{tenant}/resume"), &csrf_body(&state, &[])))
+                .await
+                .unwrap();
+            let flash = response_flash(&response, &state.config.csrf_secret);
+            assert!(flash_text(&flash).contains("resumed"), "flash was: {flash:?}");
+
+            // Delete requires typing the EXACT tenant name server-side.
+            let response = app
+                .clone()
+                .oneshot(post_form(&format!("/web/admin/tenants/{tenant}/delete"), &csrf_body(&state, &[])))
+                .await
+                .unwrap();
+            let location = response
+                .headers()
+                .get(header::LOCATION)
+                .and_then(|value| value.to_str().ok())
+                .unwrap()
+                .to_string();
+            let sig = location.split("sig=").nth(1).unwrap().to_string();
+            let wrong = csrf_body(
+                &state,
+                &[
+                    ("intent", "delete-tenant"),
+                    ("id", &tenant),
+                    ("sig", &sig),
+                    ("confirmation", "wrong name"),
+                ],
+            );
+            let response = app
+                .clone()
+                .oneshot(post_form("/web/confirm", &wrong))
+                .await
+                .unwrap();
+            let flash = response_flash(&response, &state.config.csrf_secret);
+            assert!(flash_text(&flash).contains("does not match"), "flash was: {flash:?}");
+            let still_there: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM tenants WHERE id = $1)")
+                .bind(&tenant)
+                .fetch_one(&state.db)
+                .await
+                .unwrap();
+            assert!(still_there, "a mistyped name must never delete");
+
+            let right = csrf_body(
+                &state,
+                &[
+                    ("intent", "delete-tenant"),
+                    ("id", &tenant),
+                    ("sig", &sig),
+                    ("confirmation", &name),
+                ],
+            );
+            let response = app
+                .clone()
+                .oneshot(post_form("/web/confirm", &right))
+                .await
+                .unwrap();
+            let flash = response_flash(&response, &state.config.csrf_secret);
+            assert!(flash_text(&flash).contains("deleted"), "flash was: {flash:?}");
+            let still_there: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM tenants WHERE id = $1)")
+                .bind(&tenant)
+                .fetch_one(&state.db)
+                .await
+                .unwrap();
+            assert!(!still_there);
+        }
+
+        #[tokio::test]
+        async fn events_loader_passes_page_and_total_through_the_data_path() {
+            let state = web_test_state().await;
+            if !db_reachable(&state.db).await {
+                eprintln!("skipping events_loader_passes_page_and_total_through_the_data_path: no database");
+                return;
+            }
+            let tenant = apexmail_lib::id::generate_id("webflow", 18);
+            seed_tenant(&state, &tenant).await;
+            // 25 events: two pages at PER_PAGE=20.
+            for index in 0..25 {
+                sqlx::query(
+                    "INSERT INTO events (id, tenant_id, event_type, recipient, timestamp)
+                     VALUES ($1, $2, 'sent', $3, NOW())",
+                )
+                .bind(Uuid::new_v4())
+                .bind(&tenant)
+                .bind(format!("evt-{index}@t.io"))
+                .execute(&state.db)
+                .await
+                .unwrap();
+            }
+            let user = session_user(&tenant);
+            let page1 = load_page_data(&state, "web", "/events", None, Some(&user)).await;
+            let list = page1.list.expect("events list");
+            assert_eq!(list.page, 1);
+            assert_eq!(list.total_pages, 2);
+            assert_eq!(list.total_count, 25);
+            assert_eq!(list.table.as_ref().unwrap().rows.len(), 20);
+
+            let page2 = load_page_data(&state, "web", "/events", Some("page=2"), Some(&user)).await;
+            let list = page2.list.expect("events page 2");
+            assert_eq!(list.page, 2);
+            assert_eq!(list.table.as_ref().unwrap().rows.len(), 5);
+
+            sqlx::query("DELETE FROM events WHERE tenant_id = $1")
+                .bind(&tenant)
+                .execute(&state.db)
+                .await
+                .unwrap();
+            cleanup_tenant(&state, &tenant).await;
+        }
+
+        #[tokio::test]
+        async fn domain_detail_reuses_the_dns_record_generation() {
+            let state = web_test_state().await;
+            if !db_reachable(&state.db).await {
+                eprintln!("skipping domain_detail_reuses_the_dns_record_generation: no database");
+                return;
+            }
+            let tenant = apexmail_lib::id::generate_id("webflow", 18);
+            seed_tenant(&state, &tenant).await;
+            let domain = Uuid::new_v4();
+            let domain_name = format!("dns-{tenant}.example.org");
+            sqlx::query("DELETE FROM domains WHERE name = $1")
+                .bind(&domain_name)
+                .execute(&state.db)
+                .await
+                .unwrap();
+            // Seed WITHOUT DKIM material first: the page must show the
+            // honest "records not generated yet" state.
+            sqlx::query(
+                "INSERT INTO domains (id, tenant_id, name, status, created_at, updated_at)
+                 VALUES ($1, $2, $3, 'pending', NOW(), NOW())",
+            )
+            .bind(domain)
+            .bind(&tenant)
+            .bind(&domain_name)
+            .execute(&state.db)
+            .await
+            .unwrap();
+
+            let empty =
+                data::load_domain_detail(&state.db, &tenant, &domain.to_string(), "us-east-1")
+                    .await
+                    .expect("detail loads without material");
+            assert!(empty.empty_title.contains("not generated"));
+
+            // Provision DKIM material exactly like the JSON verify path,
+            // then the SAME record set the dns-records endpoint returns
+            // must appear as data rows.
+            let key_pair = apexmail_lib::dkim::generate_dkim_keypair().unwrap();
+            let selector = format!("am-{}", Uuid::new_v4().simple());
+            sqlx::query(
+                "UPDATE domains SET dkim_selector = $1, dkim_public_key = $2, dkim_private_key = $3 WHERE id = $4::uuid",
+            )
+            .bind(&selector)
+            .bind(&key_pair.public_key)
+            .bind(key_pair.private_key_pem.as_str())
+            .bind(domain)
+            .execute(&state.db)
+            .await
+            .unwrap();
+
+            let detail =
+                data::load_domain_detail(&state.db, &tenant, &domain.to_string(), "us-east-1")
+                    .await
+                    .expect("detail loads");
+            let table = detail.table.expect("records table");
+            assert!(table.columns.contains(&"Value".to_string()));
+            let hostnames: Vec<String> = table
+                .rows
+                .iter()
+                .map(|row| match &row.cells[1] {
+                    ui_foundation::view_data::DataCell::Mono(value) => value.clone(),
+                    other => panic!("host cell must be mono data, was {other:?}"),
+                })
+                .collect();
+            assert!(
+                hostnames
+                    .iter()
+                    .any(|host| host.contains(&format!("{selector}._domainkey.{domain_name}"))),
+                "DKIM record for the row's selector: {hostnames:?}"
+            );
+            assert!(
+                hostnames
+                    .iter()
+                    .any(|host| host == &format!("_dmarc.{domain_name}")),
+                "DMARC record present: {hostnames:?}"
+            );
+            // Values are mono cells (system-correct rendering data).
+            assert!(table.rows.iter().all(|row| matches!(row.cells[2], ui_foundation::view_data::DataCell::Mono(_))));
+
+            // Another tenant's domain does not leak.
+            let other_tenant = apexmail_lib::id::generate_id("webflow", 18);
+            assert!(
+                data::load_domain_detail(&state.db, &other_tenant, &domain.to_string(), "us-east-1")
+                    .await
+                    .is_none()
+            );
+
+            cleanup_tenant(&state, &tenant).await;
+        }
     }
 }

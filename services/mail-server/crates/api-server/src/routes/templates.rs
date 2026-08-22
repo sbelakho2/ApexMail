@@ -394,7 +394,9 @@ async fn fetch_template(
 /// L-1: persist a rollback snapshot for one saved template state. The upsert
 /// keeps history linear: after rolling back to v1, the next save rewrites
 /// the v2 snapshot instead of colliding with the stale one.
-async fn snapshot_template_version(
+/// `pub(crate)` so the SSR template editor snapshots versions through the
+/// exact same writer the JSON update path uses.
+pub(crate) async fn snapshot_template_version(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     template_id: &str,
     tenant_id: &str,

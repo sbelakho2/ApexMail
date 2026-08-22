@@ -101,7 +101,9 @@ fn txt_looks_like_dmarc(txt: &str) -> bool {
     txt.trim_start().to_ascii_lowercase().starts_with("v=dmarc1")
 }
 
-async fn get_transfer_suggestion(
+/// `pub(crate)` so the control-plane's SSR transfer page reuses the exact
+/// suggestion logic (called with constructed extractors from web.rs).
+pub(crate) async fn get_transfer_suggestion(
     State(state): State<AppState>,
     auth: AuthUser,
     Query(params): Query<TransferSuggestionQuery>,
@@ -251,7 +253,9 @@ pub struct AdminTransferDomainResponse {
     pub dkim_rotated: bool,
 }
 
-async fn admin_transfer_domain(
+/// `pub(crate)` so the control-plane's SSR transfer form reuses the exact
+/// transfer service path (typed confirmation, DKIM re-bind, quota checks).
+pub(crate) async fn admin_transfer_domain(
     State(state): State<AppState>,
     auth: AuthUser,
     Json(body): Json<AdminTransferDomainRequest>,

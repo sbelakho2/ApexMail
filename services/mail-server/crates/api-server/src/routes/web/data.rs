@@ -27,7 +27,8 @@ const PER_PAGE: usize = 20;
 /// offsets.
 const MAX_PAGE: usize = 500;
 
-/// Parsed GET list parameters (`query`, `status`, `sort`, `stage`, `page`).
+/// Parsed GET list parameters (`query`, `status`, `sort`, `stage`, `page`,
+/// `days`).
 #[derive(Debug, Clone, Default)]
 pub(crate) struct ListQuery {
     pub search: String,
@@ -35,6 +36,8 @@ pub(crate) struct ListQuery {
     pub sort: String,
     pub stage: String,
     pub page: usize,
+    /// Optional recency window (days) for the audit list + export.
+    pub days: Option<i64>,
 }
 
 pub(crate) fn parse_list_query(query: Option<&str>) -> ListQuery {
@@ -57,6 +60,14 @@ pub(crate) fn parse_list_query(query: Option<&str>) -> ListQuery {
             "stage" => out.stage = value,
             "page" => {
                 out.page = value.parse::<usize>().unwrap_or(1).clamp(1, MAX_PAGE);
+            }
+            // Item M: optional recency window shared by the audit list and
+            // export. Hostile values degrade to "no filter".
+            "days" => {
+                out.days = value
+                    .parse::<i64>()
+                    .ok()
+                    .filter(|days| (1..=3650).contains(days));
             }
             _ => {}
         }
@@ -209,6 +220,9 @@ fn filter_query(list: &ListQuery) -> String {
     }
     if !list.stage.is_empty() {
         parts.push(format!("stage={}", urlencode(&list.stage)));
+    }
+    if let Some(days) = list.days {
+        parts.push(format!("days={days}"));
     }
     parts.join("&")
 }
@@ -395,7 +409,7 @@ async fn web_campaigns(state: &AppState, tenant: &str, q: &ListQuery) -> ListPag
         optional_rows(
             async {
                 let campaigns_sql = format!(
-                    "SELECT id, name, subject, status, updated_at FROM campaigns WHERE {where_clause} ORDER BY {order} LIMIT {PER_PAGE} OFFSET {offset}"
+                    "SELECT id::text, name, subject, status, updated_at FROM campaigns WHERE {where_clause} ORDER BY {order} LIMIT {PER_PAGE} OFFSET {offset}"
                 );
                 let mut query = sqlx::query_as::<
                     _,
@@ -477,7 +491,9 @@ async fn load_campaign_edit(
         match sqlx::query_as::<
             _,
             (String, String, Option<String>, Option<chrono::DateTime<chrono::Utc>>),
-        >("SELECT id, name, subject, scheduled_at FROM campaigns WHERE id = $1 AND tenant_id = $2")
+        // campaigns.id is a UUID in both schema lineages: cast it to text for
+        // the String row shape (and cast the bound id back for the comparison).
+        >("SELECT id::text, name, subject, scheduled_at FROM campaigns WHERE id = $1::uuid AND tenant_id = $2")
             .bind(id)
             .bind(tenant)
             .fetch_optional(&state.db)
@@ -1606,7 +1622,12 @@ async fn cp_dashboard(state: &AppState) -> ListPageData {
                     DataCell::status(&severity),
                     DataCell::text(alert_type),
                     DataCell::text(message),
-                    DataCell::status(if acknowledged { "active" } else { "pending" }),
+                    // Item H: same honest-state fix as the alerts page.
+                    DataCell::status(if acknowledged {
+                        "acknowledged"
+                    } else {
+                        "active"
+                    }),
                     DataCell::text(relative_time(created)),
                 ],
             })
@@ -1895,15 +1916,27 @@ async fn cp_sales(state: &AppState, q: &ListQuery) -> ListPageData {
 }
 
 async fn cp_audit(state: &AppState, q: &ListQuery) -> ListPageData {
-    let where_clause = if q.search.is_empty() {
+    // Item M: the search widens to (action ILIKE OR user_id ILIKE OR
+    // resource_type ILIKE), with an optional recency window in days —
+    // the SAME clause the CSV export applies.
+    let mut clauses: Vec<String> = Vec::new();
+    let mut binds: Vec<String> = Vec::new();
+    if !q.search.is_empty() {
+        binds.push(q.search.clone());
+        clauses.push(format!(
+            "(action ILIKE '%' || ${} || '%' OR user_id ILIKE '%' || ${} || '%' OR resource_type ILIKE '%' || ${} || '%')",
+            binds.len(),
+            binds.len(),
+            binds.len()
+        ));
+    }
+    if let Some(days) = q.days {
+        clauses.push(format!("created_at >= NOW() - '{days} days'::interval"));
+    }
+    let where_clause = if clauses.is_empty() {
         "TRUE".to_string()
     } else {
-        "action ILIKE '%' || $1 || '%'".to_string()
-    };
-    let binds: Vec<String> = if q.search.is_empty() {
-        Vec::new()
-    } else {
-        vec![q.search.clone()]
+        clauses.join(" AND ")
     };
 
     let total = count_rows(
@@ -1943,7 +1976,7 @@ async fn cp_audit(state: &AppState, q: &ListQuery) -> ListPageData {
         "/audit",
     );
     data.search_label = "Search audit logs".into();
-    data.search_placeholder = "Search by action".into();
+    data.search_placeholder = "Search action, actor, or resource".into();
     data.current_query = q.search.clone();
     data.page = page;
     data.total_pages = total_pages;
@@ -2170,14 +2203,19 @@ async fn cp_alerts(state: &AppState, q: &ListQuery) -> ListPageData {
     data.filter_query = filter_query(q);
     data.empty_title = "No alerts".into();
     data.empty_description = "Fleet alert signals appear here when raised.".into();
+    data.bulk_action = Some(BulkActionData {
+        action: "/web/admin/alerts/ack-bulk".into(),
+        button_label: "Acknowledge selected".into(),
+    });
     data.table = Some(TableData {
-        columns: vec![
+        columns: [
             "Severity".into(),
             "Type".into(),
             "Message".into(),
             "State".into(),
             "Raised".into(),
-        ],
+        ]
+        .to_vec(),
         rows: rows
             .into_iter()
             .map(|(id, severity, alert_type, message, acknowledged, created)| DataRowData {
@@ -2186,7 +2224,14 @@ async fn cp_alerts(state: &AppState, q: &ListQuery) -> ListPageData {
                     DataCell::status(&severity),
                     DataCell::text(alert_type),
                     DataCell::text(message),
-                    DataCell::status(if acknowledged { "active" } else { "pending" }),
+                    // Item H: honest state — acknowledged rows surface
+                    // "acknowledged"; unacknowledged rows are still
+                    // "active" work (the previous mapping inverted this).
+                    DataCell::status(if acknowledged {
+                        "acknowledged"
+                    } else {
+                        "active"
+                    }),
                     DataCell::text(relative_time(created)),
                 ],
             })
@@ -2523,6 +2568,481 @@ async fn cp_analytics(state: &AppState) -> ListPageData {
         KpiCardData::new("Bounced", bounced.to_string()).with_hint(&rate(bounced, sent)),
         KpiCardData::new("Complaints", complained.to_string()).with_hint(&rate(complained, sent)),
     ];
+    data
+}
+
+// ─── Detail-page loaders (items A, B, I, J) ──────────────────────
+
+/// Load `/domains/{id}` detail data: the tenant-scoped domain row joined
+/// with the SAME generated DKIM/SPF/DMARC record set the JSON
+/// GET /v1/domains/:id/dns-records endpoint returns (record building is
+/// reused from `routes::domains`, never duplicated). Records render as
+/// data rows with mono cells — the view layer lays them out.
+pub(crate) async fn load_domain_detail(
+    db: &sqlx::PgPool,
+    tenant: &str,
+    id: &str,
+    aws_region: &str,
+) -> Option<ListPageData> {
+    let row: Option<(
+        String,
+        String,
+        String,
+        bool,
+        bool,
+        bool,
+        bool,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    )> = sqlx::query_as(
+        "SELECT id::text, name, status, spf_verified, dkim_verified, dmarc_verified,
+                return_path_verified, dkim_selector, dkim_public_key, dkim_private_key
+         FROM domains WHERE id = $1::uuid AND tenant_id = $2",
+    )
+    .bind(id)
+    .bind(tenant)
+    .fetch_optional(db)
+    .await
+    .ok()
+    .flatten();
+    let Some((
+        id,
+        name,
+        status,
+        spf_verified,
+        dkim_verified,
+        dmarc_verified,
+        return_path_verified,
+        dkim_selector,
+        dkim_public_key,
+        dkim_private_key,
+    )) = row
+    else {
+        return None;
+    };
+
+    let mut data = base_list(
+        "Domain",
+        &format!("DNS setup and verification state for {name}."),
+        &format!("/domains/{id}"),
+    );
+    data.kpis = vec![
+        KpiCardData::new("Domain", name.clone()).with_hint("Sending domain"),
+        KpiCardData::new("Status", status.clone()).with_hint("Verification state"),
+        KpiCardData::new(
+            "Verified records",
+            format!(
+                "{}/4",
+                [
+                    spf_verified,
+                    dkim_verified,
+                    dmarc_verified,
+                    return_path_verified,
+                ]
+                .iter()
+                .filter(|ok| **ok)
+                .count()
+            ),
+        )
+        .with_hint("SPF, DKIM, DMARC, Return-Path"),
+    ];
+
+    // Same completeness gate as the JSON endpoint: DKIM material must be
+    // provisioned (by a verify run) before records can be rendered.
+    let material_ready = dkim_public_key
+        .as_deref()
+        .filter(|key| !key.trim().is_empty())
+        .filter(|_| {
+            dkim_private_key
+                .as_deref()
+                .is_some_and(|key| !key.trim().is_empty())
+        })
+        .is_some();
+
+    if material_ready {
+        let selector =
+            crate::routes::domains::effective_dkim_selector(dkim_selector.as_deref()).to_string();
+        let records = crate::routes::domains::required_sender_dns_records(
+            &name,
+            &selector,
+            dkim_public_key.as_deref().unwrap_or_default(),
+            aws_region,
+            crate::config::Config::ses_transport_enabled(),
+        );
+        data.table = Some(TableData {
+            columns: vec![
+                "Type".into(),
+                "Host".into(),
+                "Value".into(),
+                "State".into(),
+            ],
+            rows: records
+                .iter()
+                .map(|record| {
+                    let verified = match record.hostname.as_str() {
+                        host if host.starts_with("_dmarc.") => dmarc_verified,
+                        host if host.contains("._domainkey.") => dkim_verified,
+                        host if host.starts_with("bounce.") => {
+                            spf_verified || return_path_verified
+                        }
+                        _ => false,
+                    };
+                    DataRowData {
+                        id: format!("{}:{}", record.record_type, record.hostname),
+                        cells: vec![
+                            DataCell::mono(record.record_type.clone()),
+                            DataCell::mono(record.hostname.clone()),
+                            DataCell::mono(record.value.clone()),
+                            DataCell::status(if verified {
+                                "verified"
+                            } else {
+                                "pending"
+                            }),
+                        ],
+                    }
+                })
+                .collect(),
+        });
+    } else {
+        data.empty_title = "DNS records are not generated yet".into();
+        data.empty_description =
+            "DKIM keys are provisioned on the first verification run — use the Verify action to generate the full record set."
+                .into();
+        data.table = Some(TableData {
+            columns: vec!["Type".into(), "Host".into(), "Value".into()],
+            rows: Vec::new(),
+        });
+    }
+    Some(data)
+}
+
+/// Per-status action data for the campaign detail page (item B): which
+/// lifecycle buttons the view should render, plus the wired audience.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct CampaignDetailData {
+    pub id: String,
+    pub name: String,
+    pub subject: String,
+    pub status: String,
+    pub scheduled_at: Option<String>,
+    /// Wired audience list id (the view layer's recipients form uses it).
+    #[allow(dead_code)]
+    pub list_id: Option<String>,
+    pub list_name: Option<String>,
+    pub recipient_count: i64,
+    /// (label, POST target, available) — the pure campaign_actions rule
+    /// from web.rs decides availability from the live status.
+    pub actions: Vec<(String, String, bool)>,
+    /// The tenant's lists for the recipients select: (id, name, selected).
+    pub lists: Vec<(String, String, bool)>,
+}
+
+impl CampaignDetailData {
+    /// Render through the generic list-page machinery (stub path — the
+    /// view layer replaces this with a dedicated detail page).
+    pub(crate) fn to_list_page(&self) -> ListPageData {
+        let mut data = base_list(
+            "Campaign",
+            &format!("Status, audience, and lifecycle actions for “{}”.", self.name),
+            &format!("/campaigns/{}", self.id),
+        );
+        data.kpis = vec![
+            KpiCardData::new("Status", self.status.clone()).with_hint("Campaign state"),
+            KpiCardData::new(
+                "Audience",
+                match (&self.list_name, self.recipient_count) {
+                    (Some(name), count) if count > 0 => format!("{count} — {name}"),
+                    (Some(name), _) => format!("wired — {name} (0 subscribed)"),
+                    (None, _) => "no recipients wired".to_string(),
+                },
+            )
+            .with_hint("Wired list"),
+            KpiCardData::new(
+                "Scheduled",
+                self.scheduled_at.clone().unwrap_or_else(|| "—".into()),
+            )
+            .with_hint("Scheduled time"),
+        ];
+        data.table = Some(TableData {
+            columns: vec![
+                "Field".into(),
+                "Value".into(),
+            ],
+            rows: vec![
+                DataRowData {
+                    id: "name".into(),
+                    cells: vec![
+                        DataCell::text("Name".to_string()),
+                        DataCell::text(self.name.clone()),
+                    ],
+                },
+                DataRowData {
+                    id: "subject".into(),
+                    cells: vec![
+                        DataCell::text("Subject".to_string()),
+                        DataCell::text(self.subject.clone()),
+                    ],
+                },
+            ],
+        });
+        // The audience-list select for the recipients wiring (item B2):
+        // the tenant's lists, pre-selected when one is already wired.
+        if !self.lists.is_empty() {
+            let selected_list = self.list_id.clone().unwrap_or_default();
+            let options = self
+                .lists
+                .iter()
+                .map(|(id, name, _)| {
+                    (id.clone(), name.clone(), *id == selected_list)
+                })
+                .collect();
+            data.filters = vec![FilterSelectData::new(
+                "list_id",
+                "Audience list",
+                options,
+            )];
+        }
+        // The action list rides along as a second block via the primary
+        // action slot + a mono summary of availability.
+        if let Some((label, target, _)) = self
+            .actions
+            .iter()
+            .find(|(_, _, available)| *available)
+        {
+            data.primary_action = Some((label.clone(), target.clone()));
+        }
+        data.empty_title = "No actions available".into();
+        data.empty_description =
+            "This campaign's status has no lifecycle actions — completed and failed campaigns are terminal."
+                .into();
+        data.table = Some(TableData {
+            columns: vec!["Action".into(), "Posts to".into(), "Available".into()],
+            rows: self
+                .actions
+                .iter()
+                .map(|(label, target, available)| DataRowData {
+                    id: label.clone(),
+                    cells: vec![
+                        DataCell::text(label.clone()),
+                        DataCell::mono(target.clone()),
+                        DataCell::status(if *available { "active" } else { "paused" }),
+                    ],
+                })
+                .collect(),
+        });
+        data
+    }
+}
+
+/// Load `/campaigns/{id}` detail data (tenant-scoped), including the
+/// per-status action availability computed by web.rs's pure rule.
+pub(crate) async fn load_campaign_detail(
+    db: &sqlx::PgPool,
+    tenant: &str,
+    id: &str,
+) -> Option<CampaignDetailData> {
+    let row: Option<(
+        String,
+        String,
+        Option<String>,
+        String,
+        Option<chrono::DateTime<chrono::Utc>>,
+        Option<String>,
+    )> = sqlx::query_as(
+        "SELECT id::text, name, subject, status, scheduled_at,
+                (SELECT job_type FROM campaign_jobs
+                 WHERE campaign_id = campaigns.id AND job_type LIKE 'recipients:%'
+                 ORDER BY created_at DESC LIMIT 1)
+         FROM campaigns WHERE id = $1::uuid AND tenant_id = $2",
+    )
+    .bind(id)
+    .bind(tenant)
+    .fetch_optional(db)
+    .await
+    .ok()
+    .flatten();
+    let Some((id, name, subject, status, scheduled_at, recipients_job)) = row else {
+        return None;
+    };
+    // The wired audience is the latest `recipients:{list}:{segment}` job.
+    let (list_id, segment) = recipients_job
+        .as_deref()
+        .and_then(super::parse_recipients_job)
+        .unzip();
+    let list_name: Option<String> = match &list_id {
+        Some(list_id) => sqlx::query_scalar("SELECT name FROM lists WHERE id = $1::uuid AND tenant_id = $2")
+            .bind(list_id)
+            .bind(tenant)
+            .fetch_optional(db)
+            .await
+            .ok()
+            .flatten(),
+        None => None,
+    };
+    let recipient_count = match &list_id {
+        Some(list_id) => count_list_recipients_filtered(
+            db,
+            tenant,
+            list_id,
+            segment.as_deref().unwrap_or("subscribed"),
+        )
+        .await
+        .unwrap_or(0),
+        None => 0,
+    };
+    let actions = super::campaign_actions(&id, &status)
+        .into_iter()
+        .map(|(label, target, available)| (label.to_string(), target, available))
+        .collect();
+    let lists = tenant_lists_for_select(db, tenant).await;
+    Some(CampaignDetailData {
+        id,
+        name,
+        subject: subject.unwrap_or_default(),
+        status,
+        scheduled_at: scheduled_at.map(|ts| ts.to_rfc3339()),
+        list_id,
+        list_name,
+        recipient_count,
+        actions,
+        lists,
+    })
+}
+
+/// Count a list's contacts with an optional segment filter (all /
+/// subscribed / unsubscribed / bounced) for the recipients wiring.
+pub(crate) async fn count_list_recipients_filtered(
+    db: &sqlx::PgPool,
+    tenant: &str,
+    list_id: &str,
+    segment: &str,
+) -> Option<i64> {
+    let status_clause = if segment == "all" {
+        String::new()
+    } else {
+        format!(" AND c.status = '{segment}'")
+    };
+    sqlx::query_scalar(&format!(
+        "SELECT COUNT(*)::bigint
+         FROM list_subscribers ls
+         JOIN contacts c ON c.id = ls.contact_id
+         WHERE ls.list_id = $1::uuid AND c.tenant_id = $2{status_clause}"
+    ))
+    .bind(list_id)
+    .bind(tenant)
+    .fetch_optional(db)
+    .await
+    .ok()
+    .flatten()
+}
+
+/// The tenant's lists for the campaign-recipients select: (id, name,
+/// selected) triples with none selected by default.
+pub(crate) async fn tenant_lists_for_select(
+    db: &sqlx::PgPool,
+    tenant: &str,
+) -> Vec<(String, String, bool)> {
+    let rows: Vec<(String, String)> = optional_rows(async {
+        sqlx::query_as::<_, (String, String)>(
+            "SELECT id::text, name FROM lists WHERE tenant_id = $1 ORDER BY name ASC LIMIT 200",
+        )
+        .bind(tenant)
+        .fetch_all(db)
+        .await
+    })
+    .await;
+    rows.into_iter()
+        .map(|(id, name)| (id, name, false))
+        .collect()
+}
+
+/// Plan names from the billing catalog (item I) — the tenant-create
+/// form's plan select is validated against this exact set.
+pub(crate) async fn tenant_plan_names(db: &sqlx::PgPool) -> Vec<String> {
+    optional_rows(async {
+        sqlx::query_as::<_, (String,)>("SELECT name FROM plans ORDER BY price_cents ASC LIMIT 50")
+            .fetch_all(db)
+            .await
+    })
+    .await
+    .into_iter()
+    .map(|(name,)| name)
+    .collect()
+}
+
+/// Render the admin transfer-suggestion data (item J) as list-page data.
+/// The suggestion itself is computed by the JSON route's exact logic;
+/// this only shapes it for the generic renderer.
+pub(crate) fn transfer_suggestion_page(
+    suggestion: &crate::routes::admin::domains::TransferSuggestionResponse,
+) -> ListPageData {
+    let mut data = base_list(
+        "Domain Transfer",
+        &format!(
+            "Transfer assessment for {} (tenant {}).",
+            suggestion.domain, suggestion.current_tenant_id
+        ),
+        "/domains",
+    );
+    data.kpis = vec![
+        KpiCardData::new(
+            "Transfer suggested",
+            if suggestion.transfer_suggested {
+                "yes".to_string()
+            } else {
+                "no".to_string()
+            },
+        )
+        .with_hint("DNS-control evidence"),
+        KpiCardData::new(
+            "Owner ever verified",
+            if suggestion.owner_ever_verified {
+                "yes".to_string()
+            } else {
+                "no".to_string()
+            },
+        )
+        .with_hint("Tenant of record"),
+        KpiCardData::new("DNS control", suggestion.dns_control.clone()).with_hint("Live probe"),
+    ];
+    data.table = Some(TableData {
+        columns: vec!["Field".into(), "Value".into()],
+        rows: vec![
+            DataRowData {
+                id: "domain".into(),
+                cells: vec![
+                    DataCell::text("Domain".to_string()),
+                    DataCell::mono(suggestion.domain.clone()),
+                ],
+            },
+            DataRowData {
+                id: "domain_id".into(),
+                cells: vec![
+                    DataCell::text("Domain id".to_string()),
+                    DataCell::mono(suggestion.domain_id.clone()),
+                ],
+            },
+            DataRowData {
+                id: "current_tenant".into(),
+                cells: vec![
+                    DataCell::text("Current tenant".to_string()),
+                    DataCell::mono(suggestion.current_tenant_id.clone()),
+                ],
+            },
+            DataRowData {
+                id: "note".into(),
+                cells: vec![
+                    DataCell::text("Note".to_string()),
+                    DataCell::text(if suggestion.note.is_empty() {
+                        "No transfer is suggested for this domain.".to_string()
+                    } else {
+                        suggestion.note.clone()
+                    }),
+                ],
+            },
+        ],
+    });
     data
 }
 

@@ -389,6 +389,11 @@ pub fn build_app(state: AppState) -> Router {
         // No-JS cookie consent endpoint (marketing banner links here).
         // Same public rate-limit stack = the light per-IP bucketing.
         .merge(routes::web::consent_router())
+        // Data-backed SSR detail pages (/domains/{id}, /campaigns/{id}).
+        // Browser pages: the handlers resolve the session and redirect
+        // anonymous visitors to /login?next=… (same contract as the SSR
+        // fallback's auth gate), so they ride the public rate-limit stack.
+        .merge(routes::web::detail_router())
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             rate_limiter::public_rate_limit_middleware,
@@ -1499,8 +1504,11 @@ mod tests {
             .connect_lazy(&database_url)
             .expect("failed to create lazy test database pool");
 
+        // F6: never default to the ambient 6379 — a brew Redis there must
+        // not be probed by tests that did not opt in via TEST_REDIS_URL.
+        // Port 1 is the same deterministic dead-end the CI pipeline pins.
         let redis_url =
-            std::env::var("TEST_REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".into());
+            std::env::var("TEST_REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:1".into());
         let redis = RedisConfig::from_url(&redis_url)
             .create_pool(Some(deadpool_redis::Runtime::Tokio1))
             .expect("failed to create lazy test redis pool");
@@ -1998,6 +2006,12 @@ mod tests {
 
     #[tokio::test]
     async fn marketing_page_hides_banner_when_consent_cookie_present() {
+        if !ui_foundation::MARKETING_PUBLIC_BUILT {
+            // F5: bare checkouts embed placeholder pages (no consent banner
+            // markup); the assertion needs the real Zola build output.
+            eprintln!("skipping: marketing site not built (placeholder pages embedded)");
+            return;
+        }
         let app = test_app().await;
 
         // Fresh visitor: banner pending (visible).
@@ -2560,6 +2574,12 @@ mod tests {
 
     #[tokio::test]
     async fn marketing_fallback_pages_receive_nonce_backed_browser_csp() {
+        if !ui_foundation::MARKETING_PUBLIC_BUILT {
+            // F5: bare checkouts embed placeholder pages (no JSON-LD block);
+            // the assertion needs the real Zola build output.
+            eprintln!("skipping: marketing site not built (placeholder pages embedded)");
+            return;
+        }
         let app = test_app().await;
 
         let response = app
@@ -3008,7 +3028,12 @@ mod tests {
 
         let email = format!("web-reset-{}@test.apexmail.ee", uuid::Uuid::new_v4().simple());
         let tenant_id = apexmail_lib::id::generate_id("", 26);
-        let user_id = apexmail_lib::id::generate_id("", 26);
+        // users.id is a UUID column in both the migration chain and the
+        // canonical apexmail-db SCHEMA — a 26-char text id fails with
+        // "column id is of type uuid but expression is of type text"
+        // (ci/README.md §9 F4). tenants.id is VARCHAR(26), so the text
+        // tenant id is correct.
+        let user_id = uuid::Uuid::new_v4();
         sqlx::query(
             "INSERT INTO tenants (id, name, slug, plan, status, settings, metadata, created_at, updated_at)
              VALUES ($1, 'Reset Test', $2, 'free', 'active', '{}'::jsonb, '{}'::jsonb, NOW(), NOW())
@@ -3148,12 +3173,15 @@ mod tests {
         .expect("seed tenant");
         // 25 campaigns: 20 named "Alpha Row N" (draft) + 5 "Beta Row N"
         // (completed — the live status CHECK has no 'sent').
+        // campaigns.id is a UUID column (both schema lineages) — the text
+        // nanoid ids previously failed the bind (ci/README.md §9 F4);
+        // campaigns.tenant_id is VARCHAR, matching the text tenant id.
         for index in 0..20 {
             sqlx::query(
                 "INSERT INTO campaigns (id, tenant_id, name, subject, status, created_at, updated_at)
                  VALUES ($1, $2, $3, $4, 'draft', NOW(), NOW())",
             )
-            .bind(apexmail_lib::id::generate_id("", 26))
+            .bind(uuid::Uuid::new_v4())
             .bind(&tenant_id)
             .bind(format!("Alpha Row {index:02}"))
             .bind("alpha subject")
@@ -3166,7 +3194,7 @@ mod tests {
                 "INSERT INTO campaigns (id, tenant_id, name, subject, status, created_at, updated_at)
                  VALUES ($1, $2, $3, $4, 'completed', NOW(), NOW())",
             )
-            .bind(apexmail_lib::id::generate_id("", 26))
+            .bind(uuid::Uuid::new_v4())
             .bind(&tenant_id)
             .bind(format!("Beta Row {index:02}"))
             .bind("beta subject")
