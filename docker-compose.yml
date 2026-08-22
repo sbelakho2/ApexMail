@@ -757,7 +757,7 @@ services:
     # CLICKHOUSE_ADMIN_PASSWORD is loaded from its Docker secret (prod) or
     # env (dev) and consumed by deploy/clickhouse/users.xml via from_env to
     # keep the admin user's password SEPARATE from the app password (audit I).
-    entrypoint: ["/bin/sh", "/usr/local/bin/load-secret-env.sh", "CLICKHOUSE_PASSWORD", "CLICKHOUSE_PASSWORD_FILE", "CLICKHOUSE_ADMIN_PASSWORD", "CLICKHOUSE_ADMIN_PASSWORD_FILE", "/entrypoint.sh"]
+    entrypoint: ["/bin/sh", "/usr/local/bin/load-secret-env.sh", "CLICKHOUSE_PASSWORD", "CLICKHOUSE_PASSWORD_FILE", "CLICKHOUSE_ADMIN_PASSWORD", "CLICKHOUSE_ADMIN_PASSWORD_FILE", "--", "/entrypoint.sh"]
     restart: unless-stopped
     environment:
       CLICKHOUSE_DB: ${CLICKHOUSE_DATABASE:-apexmail}

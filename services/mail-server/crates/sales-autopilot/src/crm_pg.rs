@@ -119,11 +119,6 @@ impl SqlxCrmService {
             .await
             .map_err(|e| SalesError::Database(e.to_string()))?;
 
-        sqlx::query("CREATE INDEX IF NOT EXISTS idx_sales_leads_email ON sales_leads(email)")
-            .execute(&self.pool)
-            .await
-            .map_err(|e| SalesError::Database(e.to_string()))?;
-
         sqlx::query("CREATE INDEX IF NOT EXISTS idx_sales_leads_tenant ON sales_leads(tenant_id)")
             .execute(&self.pool)
             .await
@@ -158,6 +153,14 @@ impl SqlxCrmService {
                 .await
                 .map_err(|e| SalesError::Database(e.to_string()))?;
         }
+
+        // The email index lives AFTER the ALTER loop: databases whose
+        // sales_leads predates this crate (the api-server writer's shape)
+        // gain the column here, not at table-creation time.
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_sales_leads_email ON sales_leads(email)")
+            .execute(&self.pool)
+            .await
+            .map_err(|e| SalesError::Database(e.to_string()))?;
 
         // GIN index for full-text search across contact name, email, and company columns.
         // Supports the to_tsvector @@ plainto_tsquery query used in search_leads().
