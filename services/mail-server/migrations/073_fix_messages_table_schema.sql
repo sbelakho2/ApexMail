@@ -25,21 +25,31 @@ ALTER TABLE messages ADD COLUMN IF NOT EXISTS metadata JSONB;
 ALTER TABLE messages ADD COLUMN IF NOT EXISTS scheduled_at TIMESTAMPTZ;
 ALTER TABLE messages ADD COLUMN IF NOT EXISTS sent_at TIMESTAMPTZ;
 
--- Step 2: Migrate data from old column names to new column names
--- from_address → from_email (only for rows where from_email is still NULL)
-UPDATE messages
-SET from_email = COALESCE(from_email, from_address)
-WHERE from_email IS NULL AND from_address IS NOT NULL;
+-- Step 2: Migrate data from old column names to new column names.
+-- The legacy columns exist only when the table was created by the SQL chain
+-- (052/056); the runtime-provisioned shape (apexmail-db CREATE_MESSAGES)
+-- never had them, so every copy is guarded by a column-existence check and
+-- no-ops on databases that were already runtime-shaped.
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM information_schema.columns
+               WHERE table_name = 'messages' AND column_name = 'from_address') THEN
+        UPDATE messages
+        SET from_email = COALESCE(from_email, from_address)
+        WHERE from_email IS NULL AND from_address IS NOT NULL;
 
--- to_addresses (TEXT[]) → to_emails (JSONB) (only for rows where to_emails is still NULL)
-UPDATE messages
-SET to_emails = COALESCE(to_emails, to_jsonb(to_addresses))
-WHERE to_emails IS NULL AND from_address IS NOT NULL;
+        UPDATE messages
+        SET to_emails = COALESCE(to_emails, to_jsonb(to_addresses))
+        WHERE to_emails IS NULL AND from_address IS NOT NULL;
+    END IF;
 
--- body → text_body (best-effort: body could be HTML or plain text; store as text_body)
-UPDATE messages
-SET text_body = COALESCE(text_body, body)
-WHERE text_body IS NULL AND body IS NOT NULL;
+    IF EXISTS (SELECT 1 FROM information_schema.columns
+               WHERE table_name = 'messages' AND column_name = 'body') THEN
+        UPDATE messages
+        SET text_body = COALESCE(text_body, body)
+        WHERE text_body IS NULL AND body IS NOT NULL;
+    END IF;
+END $$;
 
 -- Step 3: Set defaults for required columns where data may be missing
 UPDATE messages SET from_email = '' WHERE from_email IS NULL;

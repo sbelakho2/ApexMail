@@ -640,9 +640,10 @@ impl RedisChallengeStore {
 
     /// Require every durability-critical write to be acknowledged by
     /// `wait_replicas` replicas before the call returns: after the issuance
-    /// SET, after the pending→consumed transition, after the
-    /// deterministic-result commit, and after the delete-if-pending
-    /// cleanup, a replica wait is issued with
+    /// SET, after a fresh pending→consumed transition (a consumed-before
+    /// replay — or a missing key — performs no write and therefore no
+    /// wait), after the deterministic-result commit, and after the
+    /// delete-if-pending cleanup, a replica wait is issued with
     /// `replicas timeout_ms` and its acknowledgement count is verified.
     /// Fewer than `wait_replicas` acknowledged replicas fail the call
     /// closed with an error — the durability promise is unconditional, it
@@ -862,6 +863,14 @@ impl RedisChallengeStore {
     ///   yet — the previous consumer crashed between transition and commit).
     /// - missing → `Ok(None)` (RecordNotFound).
     ///
+    /// When [`RedisChallengeStore::with_wait`] configured a replica wait,
+    /// the verified wait applies to the fresh pending→consumed transition
+    /// only: the winner's consumed state must reach the configured replica
+    /// count before it may act on the record (a promotion must never
+    /// resurrect a pending challenge). A consumed-before replay — and a
+    /// missing key — perform no write, so they never wait: a replica
+    /// outage cannot turn an idempotent retry into a failure.
+    ///
     /// The `state` / `consumed_result` / `operation_identity` JSON fields
     /// are storage-level runtime state only — the [`ChallengeRecord`] wire
     /// schema itself is unchanged, and the record fields parse strictly
@@ -888,6 +897,12 @@ impl RedisChallengeStore {
     /// the verify flow maps that to
     /// [`VerifyError::ConsumeIndeterminate`], exactly like the PHP
     /// verifier catches the identity `\InvalidArgumentException`.
+    ///
+    /// When [`RedisChallengeStore::with_wait`] configured a replica wait,
+    /// the verified wait applies to the fresh pending→consumed transition
+    /// only; a consumed-before replay performs no write and therefore no
+    /// barrier — a replica outage cannot turn an idempotent retry into a
+    /// failure.
     pub fn consume_with_operation_identity(
         &self,
         nonce: &str,
@@ -901,29 +916,32 @@ impl RedisChallengeStore {
         let wait_replicas = self.wait_replicas;
         let wait_timeout_ms = self.wait_timeout_ms;
         let mut conn = self.checkout()?;
-        let value = Self::run_command(&mut conn, |c| {
+        let result = Self::run_command(&mut conn, |c| {
             let v = Self::invoke_script::<redis::Value>(
                 c,
                 &redis::Script::new(CONSUME_TRANSITION_LUA),
                 &key,
                 &[&identity_arg],
             )?;
-            // Durability barrier: when the transition DID
-            // execute, the consumed state must reach the configured replica
-            // count before the caller may act on it. The wait proves that
-            // at least N replicas acknowledged the write; it does NOT
-            // constrain which replicas a future failover manager promotes —
-            // replay-safe promotion additionally requires the threshold to
-            // cover every eligible failover target or promotion gating. A
-            // barrier failure surfaces as an Err (ConsumeIndeterminate at
-            // the verifier), which is exactly right: the transition
-            // happened but its durability is unconfirmed.
-            if !matches!(v, redis::Value::Nil) && wait_replicas > 0 {
+            let parsed = parse_consume(v);
+            // Durability barrier: only the fresh pending → consumed
+            // transition mutated the store, so only it waits. The wait
+            // proves that at least N replicas acknowledged the write; it
+            // does NOT constrain which replicas a future failover manager
+            // promotes — replay-safe promotion additionally requires the
+            // threshold to cover every eligible failover target or
+            // promotion gating. A barrier failure surfaces as an Err
+            // (ConsumeIndeterminate at the verifier), which is exactly
+            // right: the transition happened but its durability is
+            // unconfirmed. A consumed-before replay — and a missing key —
+            // performed no write, so they never wait: a replica outage
+            // cannot turn an idempotent retry into a failure.
+            if matches!(parsed, Some(ref result) if result.first) && wait_replicas > 0 {
                 Self::wait_verified(c, wait_replicas, wait_timeout_ms)?;
             }
-            Ok(v)
+            Ok(parsed)
         })?;
-        Ok(parse_consume(value))
+        Ok(result)
     }
 
     /// Read a record's retained consumed state without any transition —

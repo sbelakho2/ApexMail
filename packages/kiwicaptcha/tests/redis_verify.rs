@@ -2134,6 +2134,266 @@ fn delete_if_pending_barrier_fails_closed_without_replicas() {
 }
 
 #[test]
+fn consume_issues_the_verified_wait_only_on_the_fresh_transition() {
+    // A miniature Redis-protocol server records every issued command and
+    // answers the consume-transition Lua with the tri-state replies keyed
+    // on the nonce, so the WAIT barrier placement is observable: exactly
+    // the fresh pending→consumed transition with wait_replicas > 0 issues
+    // WAIT (carrying the configured replica count and timeout, with the
+    // acked count verified against the threshold); a consumed-before
+    // replay, a missing key and wait_replicas == 0 never wait — those
+    // outcomes leave the stored value untouched, so there is no durability
+    // barrier to satisfy. The same server then violates the
+    // acknowledgement (fewer acked than configured), and the fresh
+    // transition fails closed with the same durability failure the other
+    // transitions use. Hermetic: no Redis URL needed.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+
+    // The stored value a consumed record carries: the record JSON plus
+    // the runtime envelope, exactly as consume() writes it.
+    let issued = issue_challenge(
+        &sha_config(4),
+        "login",
+        IP,
+        now_unix(),
+        now_micros(),
+        0,
+        None,
+    )
+    .unwrap();
+    let mut consumed_json = serde_json::to_string(&issued.record).unwrap();
+    consumed_json.truncate(consumed_json.len() - 1);
+    consumed_json
+        .push_str(",\"state\":\"consumed\",\"consumed_result\":null,\"operation_identity\":null}");
+
+    let commands: Arc<Mutex<Vec<Vec<String>>>> = Arc::new(Mutex::new(Vec::new()));
+    // -1 = echo the requested replica count (the wait is satisfied);
+    // >= 0 = the ack count to reply (0 violates any configured barrier).
+    let wait_acks = Arc::new(AtomicI64::new(-1));
+    let server_commands = Arc::clone(&commands);
+    let server_acks = Arc::clone(&wait_acks);
+    std::thread::spawn(move || {
+        use std::io::{Read, Write};
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            let server_commands = Arc::clone(&server_commands);
+            let server_acks = Arc::clone(&server_acks);
+            let consumed_json = consumed_json.clone();
+            std::thread::spawn(move || {
+                let mut buf = Vec::new();
+                let mut tmp = [0u8; 4096];
+                // The redis crate invokes scripts by sha: the first
+                // sha-addressed invocation misses (no-script), the load
+                // command registers the script, and the retried
+                // invocation is answered with the scripted Lua reply.
+                let mut script_loaded = false;
+                loop {
+                    match stream.read(&mut tmp) {
+                        Ok(0) => return,
+                        Ok(n) => {
+                            buf.extend_from_slice(&tmp[..n]);
+                            while let Some((args, consumed)) = parse_resp_command(&buf) {
+                                buf.drain(..consumed);
+                                server_commands.lock().unwrap().push(args.clone());
+                                let reply = match args[0].as_str() {
+                                    "PING" => "+PONG\r\n".to_string(),
+                                    "EVALSHA" if !script_loaded => {
+                                        "-NOSCRIPT No matching script. Use EVAL.\r\n".to_string()
+                                    }
+                                    "EVALSHA" => {
+                                        let key = args.get(3).map(String::as_str).unwrap_or("");
+                                        if key.ends_with("-pending") {
+                                            format!(
+                                                "*2\r\n${}\r\n{}\r\n:1\r\n",
+                                                consumed_json.len(),
+                                                consumed_json
+                                            )
+                                        } else if key.ends_with("-consumed") {
+                                            format!(
+                                                "*2\r\n${}\r\n{}\r\n:0\r\n",
+                                                consumed_json.len(),
+                                                consumed_json
+                                            )
+                                        } else {
+                                            "$-1\r\n".to_string()
+                                        }
+                                    }
+                                    "SCRIPT" => {
+                                        script_loaded = true;
+                                        "+OK\r\n".to_string()
+                                    }
+                                    "WAIT" => {
+                                        let acks = server_acks.load(Ordering::SeqCst);
+                                        let n = if acks >= 0 {
+                                            acks.to_string()
+                                        } else {
+                                            args.get(1)
+                                                .map(String::as_str)
+                                                .unwrap_or("0")
+                                                .to_string()
+                                        };
+                                        format!(":{n}\r\n")
+                                    }
+                                    _ => "+OK\r\n".to_string(),
+                                };
+                                stream.write_all(reply.as_bytes()).unwrap();
+                            }
+                        }
+                        Err(_) => return,
+                    }
+                }
+            });
+        }
+    });
+
+    let url = format!("redis://127.0.0.1:{port}/");
+    let barriered = store_for(&url, &prefix("consume-wait")).with_wait(2, 1000);
+    // Fresh pending→consumed: the transition mutated the store, so WAIT is
+    // issued and the satisfied acknowledgement is accepted.
+    let fresh = barriered
+        .consume_with_operation_identity("nonce-a-pending", Some("op-a"))
+        .unwrap()
+        .expect("the fresh transition wins");
+    assert!(fresh.first);
+    // Consumed-before replay: no mutation, so no wait (a wait here would
+    // hang the configured timeout and then fail closed on a 0 ack).
+    let replay = barriered
+        .consume("nonce-b-consumed")
+        .unwrap()
+        .expect("the consumed-before replay reads the retained record");
+    assert!(!replay.first);
+    // Missing: no mutation, no wait.
+    assert!(barriered.consume("nonce-c-missing").unwrap().is_none());
+    // wait_replicas == 0 disables the barrier even on the fresh transition.
+    let unbarriered = store_for(&url, &prefix("consume-nowait"));
+    assert!(
+        unbarriered
+            .consume("nonce-d-pending")
+            .unwrap()
+            .expect("the unbarriered fresh transition wins")
+            .first
+    );
+
+    // A violated acknowledgement (fewer than wait_replicas) fails closed
+    // on the fresh-transition path with the same durability failure as
+    // commit and delete: the transition happened but its durability is
+    // unconfirmed.
+    wait_acks.store(0, Ordering::SeqCst);
+    let barriered2 = store_for(&url, &prefix("consume-wait2")).with_wait(2, 1000);
+    let err = barriered2
+        .consume("nonce-e-pending")
+        .expect_err("a violated replica-wait barrier must fail closed on the fresh transition");
+    assert!(
+        err.to_string().contains("replica wait not satisfied"),
+        "unexpected error: {err}"
+    );
+
+    let recorded = commands.lock().unwrap().clone();
+    let waits: Vec<&Vec<String>> = recorded.iter().filter(|args| args[0] == "WAIT").collect();
+    assert_eq!(
+        waits.len(),
+        2,
+        "WAIT must be issued exactly on the fresh transitions with wait_replicas > 0 (one satisfied, one violated); full command log: {recorded:?}"
+    );
+    for wait in &waits {
+        assert_eq!(wait[1], "2", "WAIT must carry the configured replica count");
+        assert_eq!(wait[2], "1000", "WAIT must carry the configured timeout");
+    }
+}
+
+#[test]
+fn consumed_before_replay_never_waits_without_replicas() {
+    // The consumed-before replay performs no write and therefore no
+    // barrier: against a replica-less server with a configured wait, the
+    // fresh pending→consumed transition still fails closed (the consumed
+    // state must reach the configured replica count before the winner may
+    // act on it), but the replay of the already-consumed record — and a
+    // missing key — succeed without any wait. A replica outage can never
+    // turn an idempotent retry into a failure, and the retained record
+    // survives.
+    let Some(url) = redis_url() else { return };
+    let barrier_prefix = prefix("consume-replay");
+    let store = store_for(&url, &barrier_prefix).with_wait(1, 200);
+
+    // Fresh pending→consumed with a violated barrier: the transition
+    // executed on the primary, then the wait reported 0 acks and the call
+    // failed closed — the consumed state's durability is unconfirmed.
+    let issued = issue_challenge(
+        &sha_config(4),
+        "login",
+        IP,
+        now_unix(),
+        now_micros(),
+        0,
+        None,
+    )
+    .unwrap();
+    store_for(&url, &barrier_prefix)
+        .store(&issued.record)
+        .unwrap();
+    let err = store.consume(&issued.record.nonce).expect_err(
+        "the fresh transition must fail closed when the consumed state is not durably replicated",
+    );
+    assert!(
+        err.to_string().contains("replica wait not satisfied"),
+        "unexpected error: {err}"
+    );
+    // The transition DID land on the primary: the retained consumed
+    // record is the replay evidence.
+    let key = format!("{barrier_prefix}{}", issued.record.nonce);
+    let mut conn = redis::Client::open(url.clone())
+        .unwrap()
+        .get_connection()
+        .unwrap();
+    let raw: String = redis::cmd("GET").arg(&key).query(&mut conn).unwrap();
+    let stored: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    assert_eq!(stored["state"], "consumed");
+
+    // The consumed-before replay performs NO write, so it never waits:
+    // it succeeds even though this replica-less server could never
+    // satisfy the configured barrier — a replica outage cannot turn the
+    // idempotent retry into a failure, and the retained record survives.
+    let replay = store
+        .consume(&issued.record.nonce)
+        .unwrap()
+        .expect("the consumed-before replay reads the retained record");
+    assert!(!replay.first);
+    let replay_identity = store
+        .consume_with_operation_identity(&issued.record.nonce, Some("op-replay"))
+        .unwrap()
+        .expect("the identity-aware replay reads the retained record");
+    assert!(!replay_identity.first);
+
+    // Missing: no write, no wait — the call succeeds even though the
+    // configured barrier could never be satisfied on this server.
+    assert!(store.consume("never-stored-nonce").unwrap().is_none());
+
+    // wait_replicas == 0 disables the barrier entirely: a fresh pending
+    // record consumes without any wait.
+    let issued2 = issue_challenge(
+        &sha_config(4),
+        "login",
+        IP,
+        now_unix(),
+        now_micros(),
+        0,
+        None,
+    )
+    .unwrap();
+    store_for(&url, &barrier_prefix)
+        .store(&issued2.record)
+        .unwrap();
+    assert!(
+        store_for(&url, &barrier_prefix)
+            .consume(&issued2.record.nonce)
+            .unwrap()
+            .expect("a fresh pending record consumes without a barrier")
+            .first
+    );
+}
+
+#[test]
 fn ttl_margin_extends_the_redis_ttl_only() {
     // store() uses EX = max(1, expires_at - now + margin). The
     // verifier's own TTL check still rejects at expires_at, so the margin

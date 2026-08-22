@@ -198,7 +198,7 @@ final class RedisStorageTest extends TestCase
         } catch (\InvalidArgumentException $e) {
             self::assertStringContainsString('Predis Redis Cluster', $e->getMessage());
             self::assertStringContainsString('connection-relative', $e->getMessage());
-            self::assertStringContainsString('standalone and Sentinel', $e->getMessage());
+            self::assertStringContainsString('standalone Redis connections only', $e->getMessage());
         }
     }
 
@@ -221,12 +221,19 @@ final class RedisStorageTest extends TestCase
         self::assertInstanceOf(RedisStorage::class, $storage);
     }
 
-    public function testPredisSentinelAggregateWithWaitReplicasIsAllowed(): void
+    public function testPredisSentinelAggregateWithWaitReplicasIsRefusedAtConstruction(): void
     {
-        // The Sentinel replication aggregate is NOT a cluster: it
-        // resolves every command to the current primary's real node
-        // connection, where WAIT is well-defined. The verified barrier
-        // stays supported and construction succeeds.
+        // The Sentinel replication aggregate wraps every command in
+        // failure-retry logic: on a communication failure it wipes its
+        // server list, rediscovers the topology, and RETRIES the command
+        // on a NEW connection to the promoted node. The verified WAIT
+        // travels through the same aggregate, so a primary failure
+        // between the write and the WAIT retries the WAIT on a
+        // replacement connection whose write offset is empty — the
+        // acknowledgement would prove nothing about the original write's
+        // replication, yet the barrier would treat it as proof. The
+        // whole replication aggregate family is therefore refused with
+        // waitReplicas > 0, fail closed before any write can run.
         if (!\class_exists(\Predis\Client::class)) {
             self::markTestSkipped('predis/predis is not installed; cannot test RedisStorage');
         }
@@ -237,8 +244,24 @@ final class RedisStorageTest extends TestCase
         );
         $client = new \Predis\Client($sentinel);
 
-        $storage = new RedisStorage($client, waitReplicas: 1);
+        try {
+            new RedisStorage($client, waitReplicas: 1);
+            self::fail('a Predis replication aggregate must be refused when waitReplicas > 0');
+        } catch (\InvalidArgumentException $e) {
+            self::assertStringContainsString('replication aggregate', $e->getMessage());
+            self::assertStringContainsString('write offset is empty', $e->getMessage());
+            self::assertStringContainsString('standalone Redis connections only', $e->getMessage());
+        }
 
+        // Without the verified barrier the aggregate constructs normally.
+        $storage = new RedisStorage($client);
+        self::assertInstanceOf(RedisStorage::class, $storage);
+
+        // A standalone single-connection Predis client is NOT an
+        // aggregate: WAIT is well-defined on its one node connection, so
+        // the verified barrier stays supported.
+        $standalone = new \Predis\Client('tcp://127.0.0.1:6379');
+        $storage = new RedisStorage($standalone, waitReplicas: 1);
         self::assertInstanceOf(RedisStorage::class, $storage);
     }
 
@@ -427,6 +450,72 @@ final class RedisStorageTest extends TestCase
         $consumed = $storage->consume('redis-nonce-1');
         self::assertNotNull($consumed);
         self::assertTrue($consumed->consumedBefore, 'the first (failed-barrier) consume still transitioned the record');
+    }
+
+    public function testConsumeIssuesWaitOnlyOnTheFreshTransition(): void
+    {
+        // The verified WAIT guards the write that actually happened: a
+        // fresh pending→consumed transition issues exactly one WAIT,
+        // while an already-consumed replay (consumed-before) and a
+        // missing record performed no write and must issue none — an
+        // idempotent retry must not turn a replica outage into a storage
+        // failure.
+        $client = $this->requirePredis();
+        $storage = new RedisStorage($client, waitReplicas: 1, waitTimeoutMs: 100);
+        $client->waitAck = 1;
+        $waits = fn (): int => \count(array_values(array_filter($client->calls, fn ($c) => $c[0] === 'WAIT')));
+
+        $storage->store($this->makeRecord()); // +1 WAIT (issuance)
+        self::assertSame(1, $waits());
+
+        $consumed = $storage->consume('redis-nonce-1');
+        self::assertNotNull($consumed);
+        self::assertTrue($consumed->consumedNow, 'the first consume wins the fresh transition');
+        self::assertSame(2, $waits(), 'a fresh pending→consumed transition must issue exactly one WAIT');
+
+        $replay = $storage->consume('redis-nonce-1');
+        self::assertNotNull($replay);
+        self::assertTrue($replay->consumedBefore);
+        self::assertSame(2, $waits(), 'an already-consumed replay performs no write and must issue NO WAIT');
+
+        self::assertNull($storage->consume('never-stored'));
+        self::assertSame(2, $waits(), 'a missing record performs no write and must issue NO WAIT');
+    }
+
+    public function testConsumeWithOperationIdentityIssuesWaitOnlyOnTheFreshTransition(): void
+    {
+        // The identity-bearing consume carries the same gated barrier:
+        // WAIT exactly when the transition was fresh, never on a replay.
+        $client = $this->requirePredis();
+        $storage = new RedisStorage($client, waitReplicas: 1, waitTimeoutMs: 100);
+        $client->waitAck = 1;
+        $waits = fn (): int => \count(array_values(array_filter($client->calls, fn ($c) => $c[0] === 'WAIT')));
+        $identity = 'op-'.hash('sha256', 'gated');
+
+        $storage->store($this->makeRecord()); // +1 WAIT (issuance)
+        $consumed = $storage->consumeWithOperationIdentity('redis-nonce-1', $identity);
+        self::assertNotNull($consumed);
+        self::assertTrue($consumed->consumedNow);
+        self::assertSame(2, $waits(), 'a fresh identity-bearing transition must issue exactly one WAIT');
+
+        $replay = $storage->consumeWithOperationIdentity('redis-nonce-1', $identity);
+        self::assertNotNull($replay);
+        self::assertTrue($replay->consumedBefore);
+        self::assertSame(2, $waits(), 'an identity-bearing replay performs no write and must issue NO WAIT');
+    }
+
+    public function testConsumeSkipsWaitWhenDisabled(): void
+    {
+        $client = $this->requirePredis();
+        $storage = new RedisStorage($client);
+        $storage->store($this->makeRecord());
+
+        $consumed = $storage->consume('redis-nonce-1');
+        self::assertNotNull($consumed);
+        self::assertTrue($consumed->consumedNow);
+
+        $waits = array_values(array_filter($client->calls, fn ($c) => $c[0] === 'WAIT'));
+        self::assertSame([], $waits, 'WAIT must not be issued when waitReplicas is 0');
     }
 
     public function testCommitResultIssuesWaitAndFailsClosedBelowThreshold(): void
