@@ -82,7 +82,18 @@ const RETURN_PATH_LABEL: &str = "bounce";
 const SES_RETURN_PATH_MX_PRIORITY: u16 = 10;
 const SPF_INCLUDE_MECHANISM: &str = "include:amazonses.com";
 const SPF_RECORD_VALUE: &str = "v=spf1 include:amazonses.com ~all";
-const DMARC_RECORD_VALUE: &str = "v=DMARC1; p=quarantine; rua=mailto:dmarc@apexmail.io";
+
+/// The DMARC record we instruct customers to publish. The aggregate-report
+/// mailbox derives from the single product-domain constant (`SYSTEM_DOMAIN`
+/// in `system_sender.rs`, currently `apexmail.ee`) so the guidance can never
+/// drift to a domain the platform does not operate (audit M-4: the .io hint
+/// previously drifted here).
+fn dmarc_record_value() -> String {
+    format!(
+        "v=DMARC1; p=quarantine; rua=mailto:dmarc@{}",
+        crate::routes::system_sender::SYSTEM_DOMAIN
+    )
+}
 
 fn effective_dkim_selector(selector: Option<&str>) -> &str {
     selector
@@ -141,7 +152,7 @@ fn required_sender_dns_records(
         DnsRecord {
             record_type: "TXT".into(),
             hostname: format!("_dmarc.{domain}"),
-            value: DMARC_RECORD_VALUE.into(),
+            value: dmarc_record_value(),
             priority: None,
         },
     ];
@@ -1641,7 +1652,7 @@ impl AuthKind {
                     record.record_type, record.hostname, record.value
                 )
             }),
-            AuthKind::Dmarc => Some(format!("TXT _dmarc.{domain}  {DMARC_RECORD_VALUE}")),
+            AuthKind::Dmarc => Some(format!("TXT _dmarc.{domain}  {}", dmarc_record_value())),
             AuthKind::ReturnPath => {
                 let record = return_path_dns_record(domain, aws_region);
                 Some(format!(
@@ -1686,10 +1697,12 @@ impl AuthKind {
                              to provision a new per-domain key before publishing DNS."
                     .into(),
             },
-            AuthKind::Dmarc => "DMARC missing. Add a TXT record at host `_dmarc` with value \
-                 `v=DMARC1; p=quarantine; rua=mailto:dmarc@apexmail.io`. Start with \
-                 `p=none` if you want monitoring before enforcement."
-                .into(),
+            AuthKind::Dmarc => format!(
+                "DMARC missing. Add a TXT record at host `_dmarc` with value \
+                 `{}`. Start with \
+                 `p=none` if you want monitoring before enforcement.",
+                dmarc_record_value()
+            ),
             AuthKind::ReturnPath => {
                 let record = return_path_dns_record(domain, aws_region);
                 format!(

@@ -1050,6 +1050,8 @@ impl InboundServer {
                     ..Default::default()
                 }),
                 internal_date: chrono::Utc::now().timestamp(),
+                // Delivery path: keep per-mailbox Message-ID dedup active.
+                dedup_exempt: false,
             };
             match rpc_with_deadline(client.store_message(req), MAILSTORE_RPC_TIMEOUT).await {
                 Some(Ok(resp)) => {

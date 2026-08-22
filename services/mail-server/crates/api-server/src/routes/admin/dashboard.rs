@@ -14,7 +14,12 @@ use crate::middleware::auth::AuthUser;
 use crate::state::AppState;
 
 pub fn router() -> Router<AppState> {
-    Router::new().route("/stats", get(get_dashboard_stats))
+    Router::new()
+        .route("/stats", get(get_dashboard_stats))
+        // Realtime SSE streams for dashboard metrics and alerts. Mounted here
+        // (rather than as a separate nest in app.rs) so they are reachable
+        // through the single `/v1/admin/dashboard` nest.
+        .nest("/sse", super::sse::router())
 }
 
 static CACHE: Mutex<Option<(Instant, DashboardStats)>> = Mutex::const_new(None);

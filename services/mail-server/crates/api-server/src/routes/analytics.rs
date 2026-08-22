@@ -23,6 +23,10 @@ pub fn router() -> Router<AppState> {
         .route("/export", get(export))
         .route("/export/pdf", get(export_pdf))
         .route("/export/:job_id", get(get_export_job))
+        // L-28: real, authenticated download for completed exports. The job
+        // used to return a fabricated `https://exports.apexmail.io/...`
+        // presigned URL that nothing ever served.
+        .route("/export/:job_id/download", get(download_export))
 }
 
 // ─── Types ─────────────────────────────────────────────────────
@@ -532,10 +536,10 @@ async fn process_analytics_export(
     let total_rows = rows.len() as i64;
 
     // Generate export content based on format
-    let (content, content_type, extension) = match format.as_str() {
+    let content = match format.as_str() {
         "json" => {
             let json = serde_json::to_string_pretty(&rows)?;
-            (json.into_bytes(), "application/json", "json")
+            json.into_bytes()
         }
         _ => {
             // CSV format (default)
@@ -552,15 +556,18 @@ async fn process_analytics_export(
                     escape_csv(&row.event_time.map(|t| t.to_rfc3339()).unwrap_or_default())
                 ));
             }
-            (csv.into_bytes(), "text/csv", "csv")
+            csv.into_bytes()
         }
     };
 
     let file_size = content.len() as i64;
 
-    // Upload to S3 (using object store pattern)
-    let object_key = format!("exports/{}/{}.{}", tenant_id, job_id, extension);
-    let download_url = upload_export_to_storage(&object_key, &content, content_type).await?;
+    // Store the export on the local exports volume and hand out a real,
+    // authenticated download route (L-28: the previous presigned-style URL
+    // pointed at `exports.apexmail.io`, which nothing serves).
+    let object_key = export_object_key(&tenant_id, job_id, &format);
+    store_export_file(&object_key, &content).await?;
+    let download_url = format!("/v1/analytics/export/{job_id}/download");
     let expires_at = Utc::now() + TimeDelta::try_hours(24).unwrap_or(TimeDelta::zero());
 
     // Update job as completed
@@ -613,40 +620,67 @@ fn escape_csv(s: &str) -> String {
     }
 }
 
-async fn upload_export_to_storage(
-    key: &str,
-    content: &[u8],
-    _content_type: &str,
-) -> anyhow::Result<String> {
-    // In production, this would upload to S3/GCS/MinIO
-    // For now, generate a presigned-style URL
-    // The actual implementation would use object_store crate
+/// File extension for an export format. `json` is structured; everything
+/// else was generated as CSV.
+fn export_extension(format: &str) -> &'static str {
+    match format {
+        "json" => "json",
+        _ => "csv",
+    }
+}
 
-    let export_dir = std::env::var("EXPORT_STORAGE_PATH")
+/// Storage key for an export artifact.
+fn export_object_key(tenant_id: &str, job_id: uuid::Uuid, format: &str) -> String {
+    format!(
+        "exports/{}_{}.{}",
+        tenant_id,
+        job_id,
+        export_extension(format)
+    )
+}
+
+/// On-disk file name for a storage key (flat, no subdirectories — the key
+/// separator is flattened so a crafted key can never traverse paths).
+fn export_file_name(key: &str) -> String {
+    key.replace('/', "_")
+}
+
+fn export_storage_dir() -> std::path::PathBuf {
+    std::env::var("EXPORT_STORAGE_PATH")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|_| {
             // Use XDG data dir or fallback to a more secure location
             dirs::data_local_dir()
                 .unwrap_or_else(|| std::path::PathBuf::from("/var/lib/apexmail"))
                 .join("exports")
-        });
+        })
+}
+
+/// Persist an export artifact to the local exports volume.
+///
+/// L-28: directory permission changes are blocking `std::fs` calls, so they
+/// run on the blocking pool (`spawn_blocking`) instead of stalling the async
+/// worker; file writes use `tokio::fs`.
+async fn store_export_file(key: &str, content: &[u8]) -> anyhow::Result<()> {
+    let export_dir = export_storage_dir();
     tokio::fs::create_dir_all(&export_dir).await?;
 
-    // Set restrictive permissions on the directory (owner only)
+    // Set restrictive permissions on the directory (owner only) on the
+    // blocking pool — std::fs::set_permissions blocks the runtime thread.
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let perms = std::fs::Permissions::from_mode(0o700);
-        std::fs::set_permissions(&export_dir, perms).ok();
+        let dir = export_dir.clone();
+        tokio::task::spawn_blocking(move || {
+            let perms = std::fs::Permissions::from_mode(0o700);
+            std::fs::set_permissions(&dir, perms).ok();
+        })
+        .await?;
     }
 
-    let file_path = export_dir.join(key.replace('/', "_"));
+    let file_path = export_dir.join(export_file_name(key));
     tokio::fs::write(&file_path, content).await?;
-
-    // Return a URL - in production this would be a presigned S3 URL
-    let base_url =
-        std::env::var("EXPORT_BASE_URL").unwrap_or_else(|_| "https://exports.apexmail.io".into());
-    Ok(format!("{}/{}", base_url, key))
+    Ok(())
 }
 
 #[derive(sqlx::FromRow, Serialize)]
@@ -702,6 +736,61 @@ struct ExportJobRow {
     download_url: Option<String>,
     download_expires_at: Option<DateTime<Utc>>,
     error_message: Option<String>,
+}
+
+/// `GET /analytics/export/:job_id/download` — streams a completed export
+/// artifact from the exports volume (L-28). Tenant-scoped: the job must
+/// belong to the caller's tenant, be completed, and be inside its 24h
+/// download window.
+async fn download_export(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(job_id): Path<Uuid>,
+) -> Result<axum::response::Response, ApiError> {
+    use axum::http::header;
+
+    require_scopes(&auth, &["analytics:read"])?;
+
+    let row: Option<(String, Option<DateTime<Utc>>)> = sqlx::query_as(
+        "SELECT format, download_expires_at
+         FROM export_jobs
+         WHERE id = $1 AND tenant_id = $2 AND status = 'completed'",
+    )
+    .bind(job_id)
+    .bind(&auth.tenant_id)
+    .fetch_optional(&state.db)
+    .await?;
+
+    let (format, expires_at) =
+        row.ok_or_else(|| ApiError::NotFound("export job not found".into()))?;
+    if expires_at <= Some(Utc::now()) {
+        return Err(ApiError::NotFound(
+            "export download link has expired".into(),
+        ));
+    }
+
+    let object_key = export_object_key(&auth.tenant_id, job_id, &format);
+    let file_path = export_storage_dir().join(export_file_name(&object_key));
+    let content = tokio::fs::read(&file_path)
+        .await
+        .map_err(|e| ApiError::NotFound(format!("export artifact unavailable: {e}")))?;
+
+    let (content_type, extension) = match format.as_str() {
+        "json" => ("application/json", "json"),
+        _ => ("text/csv", "csv"),
+    };
+    let filename = format!("analytics-export-{job_id}.{extension}");
+
+    axum::response::Response::builder()
+        .status(axum::http::StatusCode::OK)
+        .header(header::CONTENT_TYPE, content_type)
+        .header(
+            header::CONTENT_DISPOSITION,
+            format!("attachment; filename=\"{filename}\""),
+        )
+        .header(header::CACHE_CONTROL, "private, no-store")
+        .body(axum::body::Body::from(content))
+        .map_err(|e| ApiError::Internal(format!("failed to build export response: {e}")))
 }
 
 #[derive(Debug, Serialize)]
@@ -976,5 +1065,55 @@ mod tests {
         assert_eq!(escape_csv("=SUM(A1:A2)"), "'=SUM(A1:A2)");
         assert_eq!(escape_csv("  keep-leading-space"), "  keep-leading-space");
         assert_eq!(escape_csv("hello,world"), "\"hello,world\"");
+    }
+
+    #[test]
+    fn test_export_keys_and_file_names_are_flat_and_deterministic() {
+        let job_id = uuid::Uuid::new_v4();
+
+        let json_key = export_object_key("ten_abc", job_id, "json");
+        assert_eq!(json_key, format!("exports/ten_abc_{job_id}.json"));
+        assert_eq!(export_extension("json"), "json");
+        assert_eq!(export_extension("pdf"), "csv", "non-json formats are CSV");
+
+        // The storage separator is flattened on disk: no subdirectories and
+        // no traversal possible from the key.
+        assert_eq!(export_file_name(&json_key), format!("exports_ten_abc_{job_id}.json"));
+        assert!(!export_file_name(&json_key).contains('/'));
+        assert_eq!(export_file_name("a/../../etc/passwd"), "a_.._.._etc_passwd");
+    }
+
+    /// Serialises tests that mutate the `EXPORT_STORAGE_PATH` process env var.
+    static EXPORT_ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[tokio::test]
+    async fn test_store_export_file_writes_content_with_private_directory() {
+        let _guard = EXPORT_ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+
+        let dir = std::env::temp_dir().join(format!("apexmail-export-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("EXPORT_STORAGE_PATH", &dir);
+
+        let key = export_object_key("ten_test", uuid::Uuid::new_v4(), "json");
+        let payload = b"{\"rows\":[]}".to_vec();
+        store_export_file(&key, &payload).await.expect("stores export");
+
+        let file_path = dir.join(export_file_name(&key));
+        let stored = tokio::fs::read(&file_path).await.expect("artifact written");
+        assert_eq!(stored, payload);
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&dir).unwrap().permissions().mode();
+            assert_eq!(
+                mode & 0o777,
+                0o700,
+                "exports directory must stay owner-only"
+            );
+        }
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::env::remove_var("EXPORT_STORAGE_PATH");
     }
 }

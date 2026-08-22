@@ -11,7 +11,17 @@ use crate::middleware::auth::AuthUser;
 use crate::state::AppState;
 
 pub fn router() -> Router<AppState> {
-    Router::new().route("/", get(get_analytics))
+    Router::new()
+        .route("/", get(get_analytics))
+        // Analytics-family routers are composed here rather than as separate
+        // nests in app.rs, so they are all reachable through the single
+        // `/v1/admin/analytics` nest while inheriting the same system-tenant
+        // middleware stack.
+        .nest("/delivery", super::delivery_analytics::router())
+        .nest("/growth", super::growth_analytics::router())
+        .nest("/insights", super::insights::router())
+        .nest("/predictive", super::predictive_analytics::router())
+        .nest("/cross-tenant", super::cross_tenant::router())
 }
 
 #[derive(Debug, Deserialize)]

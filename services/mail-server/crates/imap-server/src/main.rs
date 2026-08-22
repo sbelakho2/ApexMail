@@ -3444,6 +3444,9 @@ async fn handle_append<W: AsyncWrite + Unpin>(
         raw_message: raw_message.into(),
         flags: Some(flags),
         internal_date,
+        // IMAP APPEND is an explicit client request for this copy: exempt it
+        // from per-mailbox Message-ID dedup (RFC 3501 APPEND semantics).
+        dedup_exempt: true,
     };
 
     let resp = match client.store_message(req).await {

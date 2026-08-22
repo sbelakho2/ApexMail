@@ -74,6 +74,7 @@ mod ui_xss {
                 page_title: "Security",
                 page_description: "Security status",
                 current_path: "/cp",
+            csrf_token: "",
                 banners: vec![OperationalBanner {
                     tone: "critical",
                     message: payload,
@@ -93,6 +94,7 @@ mod ui_xss {
             mobile_menu_open: false,
             child_html: child,
             current_path: "/dashboard",
+            csrf_token: "",
             header: ShellHeader {
                 search_query: "safe",
                 unread_count: 0,

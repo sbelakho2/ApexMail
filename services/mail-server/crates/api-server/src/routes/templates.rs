@@ -108,6 +108,9 @@ async fn create_template(
     let id = apexmail_lib::id::generate_id("", 26);
     let now = Utc::now();
 
+    // L-1: the templates row and its v1 snapshot land in one transaction so
+    // a template can never exist without rollback history.
+    let mut tx = state.db.begin().await?;
     sqlx::query(
         "INSERT INTO templates (id, tenant_id, name, subject, html_body, text_body, version, status, created_at, updated_at)
          VALUES ($1,$2,$3,$4,$5,$6,1,'active',$7,$7)",
@@ -119,8 +122,20 @@ async fn create_template(
     .bind(&body.html_body)
     .bind(&body.text_body)
     .bind(now)
-    .execute(&state.db)
+    .execute(&mut *tx)
     .await?;
+    snapshot_template_version(
+        &mut tx,
+        &id,
+        &auth.tenant_id,
+        1,
+        &body.name,
+        &body.subject,
+        &body.html_body,
+        body.text_body.as_deref(),
+    )
+    .await?;
+    tx.commit().await?;
 
     Ok((
         StatusCode::CREATED,
@@ -185,6 +200,9 @@ async fn update_template(
     let text_body = body.text_body.or(existing.text_body);
     let new_version = existing.version + 1;
 
+    // L-1: snapshot every saved state atomically with the templates write,
+    // so POST /:id/rollback always has the history it restores from.
+    let mut tx = state.db.begin().await?;
     sqlx::query(
         "UPDATE templates SET name=$1, subject=$2, html_body=$3, text_body=$4, version=$5, updated_at=NOW()
          WHERE id=$6 AND tenant_id=$7",
@@ -196,8 +214,20 @@ async fn update_template(
     .bind(new_version)
     .bind(&id)
     .bind(&auth.tenant_id)
-    .execute(&state.db)
+    .execute(&mut *tx)
     .await?;
+    snapshot_template_version(
+        &mut tx,
+        &id,
+        &auth.tenant_id,
+        new_version,
+        &name,
+        &subject,
+        &html_body,
+        text_body.as_deref(),
+    )
+    .await?;
+    tx.commit().await?;
 
     Ok(Json(TemplateResponse {
         id,
@@ -361,6 +391,43 @@ async fn fetch_template(
     .ok_or_else(|| ApiError::NotFound("template not found".into()))
 }
 
+/// L-1: persist a rollback snapshot for one saved template state. The upsert
+/// keeps history linear: after rolling back to v1, the next save rewrites
+/// the v2 snapshot instead of colliding with the stale one.
+async fn snapshot_template_version(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    template_id: &str,
+    tenant_id: &str,
+    version: i32,
+    name: &str,
+    subject: &str,
+    html_body: &str,
+    text_body: Option<&str>,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO template_versions
+            (template_id, tenant_id, version, name, subject, html_body, text_body)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)
+         ON CONFLICT (template_id, version) DO UPDATE SET
+            tenant_id  = EXCLUDED.tenant_id,
+            name       = EXCLUDED.name,
+            subject    = EXCLUDED.subject,
+            html_body  = EXCLUDED.html_body,
+            text_body  = EXCLUDED.text_body,
+            created_at = NOW()",
+    )
+    .bind(template_id)
+    .bind(tenant_id)
+    .bind(version)
+    .bind(name)
+    .bind(subject)
+    .bind(html_body)
+    .bind(text_body)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
 // ─── Duplicate / Rollback Handlers ─────────────────────────────
 
 async fn duplicate_template(
@@ -408,30 +475,44 @@ async fn rollback_template(
 ) -> Result<Json<TemplateResponse>, ApiError> {
     require_scopes(&auth, &["templates:write"])?;
 
-    // Restore from template_versions table
-    let result = sqlx::query(
-        "UPDATE templates SET
-            html_body = tv.html_body,
-            text_body = tv.text_body,
-            subject = tv.subject,
-            version = tv.version,
-            updated_at = NOW()
-         FROM template_versions tv
-         WHERE templates.id = $1 AND templates.tenant_id = $2
-           AND tv.template_id = $1 AND tv.version = $3",
-    )
-    .bind(&id)
-    .bind(auth.tenant_id.to_string())
-    .bind(body.version)
-    .execute(&state.db)
-    .await?;
-
-    if result.rows_affected() == 0 {
+    // Restore from template_versions (snapshots are written on every save —
+    // see snapshot_template_version; L-1).
+    let restored = restore_template_version(&state.db, &auth.tenant_id, &id, body.version).await?;
+    if !restored {
         return Err(ApiError::NotFound("template or version not found".into()));
     }
 
     let row = fetch_template(&state, &auth.tenant_id, id).await?;
     Ok(Json(row.into()))
+}
+
+/// Restore a template's content from its version snapshot. Returns `false`
+/// when the template or the requested version does not exist.
+async fn restore_template_version(
+    db: &sqlx::PgPool,
+    tenant_id: &str,
+    template_id: &str,
+    version: i32,
+) -> Result<bool, sqlx::Error> {
+    let result = sqlx::query(
+        "UPDATE templates SET
+            html_body = tv.html_body,
+            text_body = tv.text_body,
+            subject = tv.subject,
+            name = tv.name,
+            version = tv.version,
+            updated_at = NOW()
+         FROM template_versions tv
+         WHERE templates.id = $1 AND templates.tenant_id = $2
+           AND tv.template_id = $1 AND tv.tenant_id = $2 AND tv.version = $3",
+    )
+    .bind(template_id)
+    .bind(tenant_id)
+    .bind(version)
+    .execute(db)
+    .await?;
+
+    Ok(result.rows_affected() > 0)
 }
 
 // ─── Tests ─────────────────────────────────────────────────────
@@ -472,5 +553,177 @@ mod tests {
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["version"], 1);
+    }
+
+    // ── L-1: version snapshots + rollback (skipped without TEST_DATABASE_URL) ──
+
+    /// Minimal schema for the template versioning flow in a dedicated
+    /// per-test database (same convention as `self_hosted_bounces.rs`).
+    async fn template_test_pool(db_suffix: &str) -> Option<sqlx::PgPool> {
+        use sqlx::postgres::PgPoolOptions;
+        use std::time::Duration;
+
+        let database_url = std::env::var("TEST_DATABASE_URL")
+            .ok()
+            .filter(|value| !value.trim().is_empty())?;
+        let (server_part, db_part) = database_url.rsplit_once('/')?;
+        let db_only = db_part.split('?').next().unwrap_or(db_part);
+        let isolated_db = format!("{db_only}_api_templates_{db_suffix}");
+        let isolated_url = format!("{server_part}/{isolated_db}");
+        let admin_url = format!("{server_part}/postgres");
+
+        let admin = PgPoolOptions::new()
+            .max_connections(1)
+            .acquire_timeout(Duration::from_secs(3))
+            .connect(&admin_url)
+            .await
+            .ok()?;
+        let _ = sqlx::query(&format!(
+            r#"DROP DATABASE IF EXISTS "{isolated_db}" WITH (FORCE)"#
+        ))
+        .execute(&admin)
+        .await;
+        let created = sqlx::query(&format!(r#"CREATE DATABASE "{isolated_db}""#))
+            .execute(&admin)
+            .await;
+        admin.close().await;
+        created.ok()?;
+
+        let pool = PgPoolOptions::new()
+            .max_connections(4)
+            .acquire_timeout(Duration::from_secs(5))
+            .connect(&isolated_url)
+            .await
+            .ok()?;
+        sqlx::query(
+            r#"
+            CREATE TABLE templates (
+                id          VARCHAR(26) PRIMARY KEY,
+                tenant_id   VARCHAR(26) NOT NULL,
+                name        VARCHAR(255) NOT NULL,
+                slug        VARCHAR(100),
+                subject     VARCHAR(255) NOT NULL,
+                html_body   TEXT NOT NULL,
+                text_body   TEXT,
+                version     INTEGER NOT NULL DEFAULT 1,
+                status      VARCHAR(20) NOT NULL DEFAULT 'active',
+                created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );
+            CREATE TABLE template_versions (
+                template_id VARCHAR(26)  NOT NULL,
+                tenant_id   VARCHAR(26)  NOT NULL,
+                version     INTEGER      NOT NULL,
+                name        VARCHAR(255) NOT NULL,
+                subject     VARCHAR(255) NOT NULL,
+                html_body   TEXT         NOT NULL,
+                text_body   TEXT,
+                created_at  TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+                PRIMARY KEY (template_id, version)
+            );
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .ok()?;
+        Some(pool)
+    }
+
+    /// The create-template DB path: templates row + v1 snapshot atomically.
+    async fn insert_template_v1(
+        pool: &sqlx::PgPool,
+        tenant_id: &str,
+        id: &str,
+        subject: &str,
+        html_body: &str,
+    ) -> bool {
+        let mut tx = match pool.begin().await {
+            Ok(tx) => tx,
+            Err(_) => return false,
+        };
+        if sqlx::query(
+            "INSERT INTO templates (id, tenant_id, name, subject, html_body, version, status)
+             VALUES ($1, $2, 'welcome', $3, $4, 1, 'active')",
+        )
+        .bind(id)
+        .bind(tenant_id)
+        .bind(subject)
+        .bind(html_body)
+        .execute(&mut *tx)
+        .await
+        .is_err()
+        {
+            return false;
+        }
+        snapshot_template_version(&mut tx, id, tenant_id, 1, "welcome", subject, html_body, None)
+            .await
+            .is_ok()
+            && tx.commit().await.is_ok()
+    }
+
+    #[tokio::test]
+    async fn save_twice_then_rollback_to_v1_returns_v1_content() {
+        let Some(pool) = template_test_pool("rollback").await else {
+            eprintln!("skipping: set TEST_DATABASE_URL to run DB-backed test");
+            return;
+        };
+
+        let tenant = "ten_tpl_rollback_001";
+        let id = apexmail_lib::id::generate_id("", 26);
+
+        // Save #1 — create (v1 content).
+        assert!(insert_template_v1(&pool, tenant, &id, "Welcome v1", "<p>v1</p>").await);
+
+        // Save #2 — update to v2 (mirrors update_template's DB path).
+        let mut tx = pool.begin().await.unwrap();
+        sqlx::query(
+            "UPDATE templates SET subject=$1, html_body=$2, version=2, updated_at=NOW()
+             WHERE id=$3 AND tenant_id=$4",
+        )
+        .bind("Welcome v2")
+        .bind("<p>v2</p>")
+        .bind(&id)
+        .bind(tenant)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+        snapshot_template_version(
+            &mut tx, &id, tenant, 2, "welcome", "Welcome v2", "<p>v2</p>", None,
+        )
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+
+        let (subject, html, version): (String, String, i32) = sqlx::query_as(
+            "SELECT subject, html_body, version FROM templates WHERE id = $1 AND tenant_id = $2",
+        )
+        .bind(&id)
+        .bind(tenant)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!((subject.as_str(), html.as_str(), version), ("Welcome v2", "<p>v2</p>", 2));
+
+        // Rollback to v1 — must restore the v1 snapshot.
+        assert!(
+            restore_template_version(&pool, tenant, &id, 1).await.unwrap(),
+            "rollback must find the v1 snapshot"
+        );
+        let (subject, html, version): (String, String, i32) = sqlx::query_as(
+            "SELECT subject, html_body, version FROM templates WHERE id = $1 AND tenant_id = $2",
+        )
+        .bind(&id)
+        .bind(tenant)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(subject, "Welcome v1");
+        assert_eq!(html, "<p>v1</p>");
+        assert_eq!(version, 1);
+
+        // Unknown versions report not-found instead of silently succeeding.
+        assert!(!restore_template_version(&pool, tenant, &id, 99).await.unwrap());
+
+        pool.close().await;
     }
 }

@@ -522,9 +522,11 @@ impl MailstoreService for MailstoreServiceImpl {
             is_deleted: flags.deleted,
             is_spam: false,
             labels: proto_flag_labels(&flags),
-            // Delivery path (SMTP redelivery / APPEND): keeps per-mailbox
-            // Message-ID dedup. Only copy_message sets TRUE (migration 102).
-            dedup_exempt: false,
+            // Passthrough of the proto field (added for IMAP APPEND, which
+            // must bypass per-mailbox Message-ID dedup). The SMTP delivery
+            // path leaves it false and keeps deduplicating; only
+            // copy_message sets TRUE itself (migration 102).
+            dedup_exempt: req.dedup_exempt,
             headers: metadata.headers,
             attachments: vec![],
             created_at: chrono::Utc::now(),
@@ -1577,6 +1579,7 @@ mod tests {
                 raw_message: raw.clone().into_bytes().into(),
                 flags: None,
                 internal_date: 0,
+                dedup_exempt: false,
             }))
             .await
             .unwrap()
@@ -1668,6 +1671,115 @@ mod tests {
         assert_ne!(third_uid, same_mailbox_uid, "third copy must not alias");
 
         // Cleanup.
+        for table in ["mail_messages", "mail_mailboxes"] {
+            sqlx::query(&format!("DELETE FROM {table} WHERE account_id = $1"))
+                .bind(account.id)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        sqlx::query("DELETE FROM mail_accounts WHERE id = $1")
+            .bind(account.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+
+    /// Proto `dedup_exempt` passthrough: the RPC handler must forward the
+    /// flag into `StoredMessage` so exempt stores bypass per-mailbox
+    /// Message-ID dedup (IMAP APPEND semantics) while the default path
+    /// keeps deduplicating.
+    #[tokio::test]
+    async fn store_message_passes_dedup_exempt_through_to_storage() {
+        let Ok(url) = std::env::var("TEST_DATABASE_URL") else {
+            eprintln!("skipping: set TEST_DATABASE_URL to run DB-backed test");
+            return;
+        };
+        let Ok(pool) = sqlx::PgPool::connect(&url).await else {
+            eprintln!("skipping: TEST_DATABASE_URL unreachable");
+            return;
+        };
+        let storage = Arc::new(MessageStorage::new(pool.clone()));
+        if let Err(e) = storage.initialize().await {
+            eprintln!("skipping: migrator could not run ({e})");
+            return;
+        }
+        let svc = MailstoreServiceImpl::new(storage);
+
+        let email = format!("append-{}@example.com", Uuid::new_v4());
+        let account = svc
+            .storage
+            .create_account(&email, "not-a-real-hash", None)
+            .await
+            .unwrap();
+        let mailboxes = svc.storage.list_mailboxes(&account.id).await.unwrap();
+        let inbox = mailboxes
+            .iter()
+            .find(|m| m.mailbox_type == MailboxType::Inbox)
+            .unwrap()
+            .clone();
+
+        let message_id = format!("<append-{}@example.com>", Uuid::new_v4());
+        let raw = format!(
+            "From: sender@example.com\r\nSubject: append test\r\nMessage-ID: {message_id}\r\n\r\nbody"
+        );
+
+        async fn store(
+            svc: &MailstoreServiceImpl,
+            account_id: &str,
+            mailbox: &str,
+            raw: &str,
+            dedup_exempt: bool,
+        ) -> StoreMessageResponse {
+            svc.store_message(Request::new(StoreMessageRequest {
+                account_id: account_id.to_string(),
+                mailbox: mailbox.to_string(),
+                raw_message: raw.as_bytes().to_vec().into(),
+                flags: None,
+                internal_date: 0,
+                dedup_exempt,
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+        }
+
+        // Default (false): storing the same Message-ID again deduplicates.
+        let account_id = account.id.to_string();
+        let mailbox = inbox.name.clone();
+        let first = store(&svc, &account_id, &mailbox, &raw, false).await;
+        let dupe = store(&svc, &account_id, &mailbox, &raw, false).await;
+        assert_eq!(
+            first.uid, dupe.uid,
+            "delivery-path re-store of the same Message-ID must deduplicate"
+        );
+
+        // Passthrough (true): an exempt store materializes a fresh row/UID
+        // even though the Message-ID already exists in the mailbox.
+        let appended = store(&svc, &account_id, &mailbox, &raw, true).await;
+        assert_ne!(
+            appended.uid, first.uid,
+            "dedup_exempt store must not alias the existing message"
+        );
+
+        let list = svc
+            .list_messages(Request::new(ListMessagesRequest {
+                account_id: account.id.to_string(),
+                mailbox: inbox.name.clone(),
+                uid_min: 0,
+                uid_max: 0,
+                limit: 100,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(
+            list.messages.len(),
+            2,
+            "original and exempt copy must coexist, got {:?}",
+            list.messages.iter().map(|m| m.uid).collect::<Vec<_>>()
+        );
+
         for table in ["mail_messages", "mail_mailboxes"] {
             sqlx::query(&format!("DELETE FROM {table} WHERE account_id = $1"))
                 .bind(account.id)

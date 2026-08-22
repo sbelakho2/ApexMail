@@ -12,7 +12,12 @@ use crate::middleware::auth::AuthUser;
 use crate::state::AppState;
 
 pub fn router() -> Router<AppState> {
-    Router::new().route("/", get(list_audit_logs))
+    Router::new()
+        .route("/", get(list_audit_logs))
+        // Full-text search + CSV export over the same audit logs. Mounted here
+        // (rather than as a separate nest in app.rs) so the whole audit family
+        // is reachable through the single `/v1/admin/audit` nest.
+        .merge(super::audit_search::router())
 }
 
 #[derive(Debug, Deserialize)]

@@ -132,6 +132,10 @@ message StoreMessageRequest {
     bytes raw_message = 3;
     MessageFlags flags = 4;
     int64 internal_date = 5;
+    // Skip per-mailbox Message-ID deduplication for this store (IMAP APPEND
+    // semantics: the client explicitly asked for this copy). Default false —
+    // the SMTP delivery path keeps deduplicating.
+    bool dedup_exempt = 6;
 }
 
 message StoreMessageResponse {

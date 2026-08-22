@@ -38,6 +38,73 @@ fn challenge_cache() -> &'static Mutex<kiwicaptcha::ChallengeCache> {
     CHALLENGE_CACHE.get_or_init(|| Mutex::new(kiwicaptcha::ChallengeCache::new()))
 }
 
+/// Outcome of the per-IP challenge-issuance rate-limit check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChallengeRateLimit {
+    /// Under the limit — issuance may proceed.
+    Allowed,
+    /// Over the limit — issuance must be rejected with 429.
+    Exceeded,
+    /// Redis is unavailable (L-26). Issuance must FAIL CLOSED (503):
+    /// silently skipping the rate limit would let a bot mint unbounded
+    /// single-use challenges while the store is degraded.
+    RedisUnavailable,
+}
+
+/// The per-IP challenge issuance rate-limit check, extracted so it can be
+/// unit-tested directly. Never silently allows on a Redis error.
+async fn check_challenge_rate_limit(
+    redis_pool: &deadpool_redis::Pool,
+    ip_rate_key: &str,
+) -> ChallengeRateLimit {
+    let mut conn = match redis_pool.get().await {
+        Ok(conn) => conn,
+        Err(error) => {
+            tracing::error!(
+                error = %error,
+                "KiwiCaptcha rate-limit store unavailable — failing challenge issuance closed"
+            );
+            return ChallengeRateLimit::RedisUnavailable;
+        }
+    };
+
+    let count: i64 = deadpool_redis::redis::Script::new(
+        r#"
+            local ip_key = KEYS[1]
+            local max_ip = tonumber(ARGV[1])
+            local window_secs = tonumber(ARGV[2])
+
+            local ip_count = redis.call('INCR', ip_key)
+            if ip_count == 1 then
+                redis.call('EXPIRE', ip_key, window_secs)
+            end
+
+            if ip_count > max_ip then
+                return 1
+            end
+            return 0
+        "#,
+    )
+    .key(ip_rate_key)
+    .arg(CHALLENGE_IP_RATE_LIMIT)
+    .arg(CHALLENGE_IP_RATE_LIMIT_WINDOW_SECS)
+    .invoke_async::<i64>(&mut *conn)
+    .await
+    .unwrap_or_else(|error| {
+        tracing::error!(
+            error = %error,
+            "KiwiCaptcha rate-limit script failed — failing challenge issuance closed"
+        );
+        1
+    });
+
+    if count > 0 {
+        ChallengeRateLimit::Exceeded
+    } else {
+        ChallengeRateLimit::Allowed
+    }
+}
+
 pub fn router() -> Router<AppState> {
     Router::new().route("/challenge", post(issue_challenge_handler))
 }
@@ -130,34 +197,19 @@ async fn issue_challenge_handler(
         "apexmail:kiwi_challenge_rate:hmac:{}",
         kiwicaptcha::hash_ip(&client_ip, &state.config.kiwi_secret_key)
     );
-    if let Ok(mut conn) = state.redis.get().await {
-        let count: i64 = deadpool_redis::redis::Script::new(
-            r#"
-                local ip_key = KEYS[1]
-                local max_ip = tonumber(ARGV[1])
-                local window_secs = tonumber(ARGV[2])
-
-                local ip_count = redis.call('INCR', ip_key)
-                if ip_count == 1 then
-                    redis.call('EXPIRE', ip_key, window_secs)
-                end
-
-                if ip_count > max_ip then
-                    return 1
-                end
-                return 0
-            "#,
-        )
-        .key(&ip_rate_key)
-        .arg(CHALLENGE_IP_RATE_LIMIT)
-        .arg(CHALLENGE_IP_RATE_LIMIT_WINDOW_SECS)
-        .invoke_async::<i64>(&mut *conn)
-        .await
-        .unwrap_or(0);
-
-        if count > 0 {
+    // L-26: fail CLOSED on Redis errors. The old `if let Ok(...)` silently
+    // skipped the rate limit whenever the pool errored, letting bots mint
+    // unbounded challenges exactly when the platform is degraded.
+    match check_challenge_rate_limit(&state.redis, &ip_rate_key).await {
+        ChallengeRateLimit::Allowed => {}
+        ChallengeRateLimit::Exceeded => {
             tracing::warn!("KiwiCaptcha challenge rate limit exceeded");
             return Err(ApiError::RateLimited);
+        }
+        ChallengeRateLimit::RedisUnavailable => {
+            return Err(ApiError::ServiceUnavailable(
+                "captcha challenge store unavailable; please retry shortly".into(),
+            ));
         }
     }
 
@@ -248,5 +300,90 @@ fn challenge_response(issued: &kiwicaptcha::Issued) -> ChallengeResponse {
         ttl_secs: issued.challenge.ttl_secs,
         min_duration_ms: issued.challenge.min_duration_ms,
         prefix: issued.challenge.prefix.clone(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// L-26 regression: when Redis is unreachable the issuance rate-limit
+    /// check must report unavailability — never silently allow.
+    #[tokio::test]
+    async fn challenge_rate_limit_fails_closed_when_redis_is_down() {
+        // Port 1 is guaranteed-closed on loopback; the pool is created lazily
+        // so construction succeeds and the failure surfaces on acquire.
+        let cfg = deadpool_redis::Config::from_url("redis://127.0.0.1:1/");
+        let pool = cfg
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .expect("pool construction is lazy");
+
+        assert_eq!(
+            check_challenge_rate_limit(&pool, "apexmail:kiwi_challenge_rate:hmac:test")
+                .await,
+            ChallengeRateLimit::RedisUnavailable,
+            "a dead Redis must never silently allow challenge issuance"
+        );
+    }
+
+    /// Against live Redis the check allows under the limit and rejects over
+    /// it (skipped when no local Redis is available).
+    #[tokio::test]
+    async fn challenge_rate_limit_allows_then_exceeds_on_live_redis() {
+        let redis_url =
+            std::env::var("TEST_REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".into());
+        let pool = match deadpool_redis::Config::from_url(&redis_url)
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+        {
+            Ok(pool) => pool,
+            Err(_) => return,
+        };
+        let mut conn = match pool.get().await {
+            Ok(conn) => conn,
+            Err(_) => return,
+        };
+        let ping: Result<String, _> = deadpool_redis::redis::cmd("PING")
+            .query_async(&mut *conn)
+            .await;
+        if ping.is_err() {
+            return;
+        }
+        drop(conn);
+
+        let key = format!(
+            "apexmail:kiwi_challenge_rate:hmac:test-{}",
+            uuid::Uuid::new_v4()
+        );
+        if let Ok(mut conn) = pool.get().await {
+            let _: Result<i64, _> = deadpool_redis::redis::cmd("DEL")
+                .arg(&key)
+                .query_async(&mut *conn)
+                .await;
+        }
+
+        assert_eq!(
+            check_challenge_rate_limit(&pool, &key).await,
+            ChallengeRateLimit::Allowed
+        );
+
+        // Burn the rest of the allowance (already used one above), then one
+        // more must exceed.
+        for _ in 0..(CHALLENGE_IP_RATE_LIMIT - 1) {
+            assert_eq!(
+                check_challenge_rate_limit(&pool, &key).await,
+                ChallengeRateLimit::Allowed
+            );
+        }
+        assert_eq!(
+            check_challenge_rate_limit(&pool, &key).await,
+            ChallengeRateLimit::Exceeded
+        );
+
+        if let Ok(mut conn) = pool.get().await {
+            let _: Result<i64, _> = deadpool_redis::redis::cmd("DEL")
+                .arg(&key)
+                .query_async(&mut *conn)
+                .await;
+        }
     }
 }

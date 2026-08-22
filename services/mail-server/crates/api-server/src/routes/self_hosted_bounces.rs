@@ -310,11 +310,24 @@ pub struct SelfHostedBounceHandler {
     return_path_regex: Regex,
 }
 
+/// VERP Return-Path pattern, anchored to the platform's bounce domain.
+///
+/// Return-Path format: bounce+{tenant_id}+{message_id}@returns.{SYSTEM_DOMAIN}
+/// The domain is anchored to the platform's product domain (audit M-4: the
+/// pattern previously tolerated — and tests hardcoded — a drifted
+/// `returns.apexmail.io`, while the platform operates `apexmail.ee`).
+fn return_path_regex_pattern() -> String {
+    format!(
+        r"bounce\+([^+]+)\+([^@]+)@returns\.{}\b",
+        regex::escape(crate::routes::system_sender::SYSTEM_DOMAIN)
+    )
+}
+
 impl SelfHostedBounceHandler {
     /// Create a new bounce handler.
     pub fn new(db: PgPool) -> Self {
-        // Return-Path format:bounce+{tenant_id}+{message_id}@returns.apexmail.io
-        let return_path_regex = Regex::new(r"bounce\+([^+]+)\+([^@]+)@").expect("Invalid regex");
+        let return_path_regex =
+            Regex::new(&return_path_regex_pattern()).expect("Invalid regex");
 
         Self {
             db,
@@ -979,7 +992,7 @@ mod tests {
         // A non-MIME bounce: a Status line planted in the body must not
         // classify the bounce (and a body Final-Recipient must not win).
         let raw = "From: MAILER-DAEMON@example.net\r\n\
-                   To: bounce+t+msg@returns.apexmail.io\r\n\
+                   To: bounce+t+msg@returns.apexmail.ee\r\n\
                    Subject: failure\r\n\
                    \r\n\
                    Final-Recipient: rfc822; body-planted@attacker.tld\r\n\
@@ -998,6 +1011,34 @@ mod tests {
     }
 
     // ── M-3: VERP validation decision ────────────────────────────
+
+    #[test]
+    fn verp_return_path_regex_anchors_to_the_platform_domain() {
+        let re = Regex::new(&return_path_regex_pattern()).expect("valid pattern");
+
+        // The platform domain parses and extracts tenant + message id.
+        let caps = re
+            .captures("bounce+tenant-a+00000000-0000-0000-0000-000000000000@returns.apexmail.ee")
+            .expect("platform-domain VERP address must match");
+        assert_eq!(caps.get(1).unwrap().as_str(), "tenant-a");
+        assert_eq!(
+            caps.get(2).unwrap().as_str(),
+            "00000000-0000-0000-0000-000000000000"
+        );
+
+        // M-4 regression: the drifted `apexmail.io` domain must NOT parse.
+        assert!(
+            re.captures("bounce+tenant-a+00000000-0000-0000-0000-000000000000@returns.apexmail.io")
+                .is_none(),
+            "VERP addresses on a domain the platform does not operate must be rejected"
+        );
+
+        // Arbitrary attacker domains must not parse either.
+        assert!(
+            re.captures("bounce+tenant-a+msg@returns.attacker.tld").is_none(),
+            "foreign VERP domains must be rejected"
+        );
+    }
 
     #[test]
     fn verp_bounce_disposition_rejects_unknown_and_mismatched_messages() {
@@ -1140,7 +1181,7 @@ mod tests {
         handler
             .process_bounce_email(
                 "mailer-daemon@evil.example",
-                "bounce+tenant-a+00000000-0000-0000-0000-000000000000@returns.apexmail.io",
+                "bounce+tenant-a+00000000-0000-0000-0000-000000000000@returns.apexmail.ee",
                 dsn_with_planted_headers().as_bytes(),
             )
             .await
@@ -1171,7 +1212,7 @@ mod tests {
         handler
             .process_bounce_email(
                 "mailer-daemon@evil.example",
-                &format!("bounce+tenant-a+{message_id}@returns.apexmail.io"),
+                &format!("bounce+tenant-a+{message_id}@returns.apexmail.ee"),
                 dsn_with_planted_headers().as_bytes(),
             )
             .await
@@ -1200,7 +1241,7 @@ mod tests {
         handler
             .process_bounce_email(
                 "mailer-daemon@mail.example.net",
-                &format!("bounce+tenant-a+{message_id}@returns.apexmail.io"),
+                &format!("bounce+tenant-a+{message_id}@returns.apexmail.ee"),
                 dsn_with_planted_headers().as_bytes(),
             )
             .await

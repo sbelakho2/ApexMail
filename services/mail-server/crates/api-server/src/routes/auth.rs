@@ -674,6 +674,20 @@ fn login_lockout_counter_key(identifier: &str) -> String {
     format!("apexmail:auth:lockouts:{}", hash_token(identifier))
 }
 
+/// Redis set of source IPs that recently produced failed logins for an
+/// identifier. Lockout requires corroboration across distinct sources (M-6),
+/// so the set — not just a counter — drives the lock decision.
+fn login_failure_ip_key(identifier: &str) -> String {
+    format!("apexmail:auth:fail_ips:{}", hash_token(identifier))
+}
+
+/// How many distinct source IPs must have produced failures before an
+/// account may be locked (audit M-6). A single source — however persistent —
+/// can no longer lock a victim's account at will; the per-IP login rate
+/// limit keeps throttling that source while the account stays usable for
+/// the real owner elsewhere.
+const LOGIN_LOCKOUT_MIN_DISTINCT_IPS: i64 = 2;
+
 fn login_lockout_duration(lockout_count: i64) -> u64 {
     let exponent = lockout_count.saturating_sub(1).clamp(0, 7) as u32;
     LOGIN_LOCKOUT_BASE_SECS
@@ -696,8 +710,10 @@ async fn login_lock_ttl(
 async fn record_login_failure(
     redis_pool: &deadpool_redis::Pool,
     identifier: &str,
+    source_ip: Option<&str>,
 ) -> Result<(), ApiError> {
     let failure_key = login_failure_key(identifier);
+    let failure_ip_key = login_failure_ip_key(identifier);
     let lock_key = login_lock_key(identifier);
     let lockout_counter_key = login_lockout_counter_key(identifier);
     let identifier_hash = hash_token(identifier);
@@ -709,7 +725,44 @@ async fn record_login_failure(
         .invoke_async(&mut *conn)
         .await?;
 
+    // Track which source IPs produced the failures. `None` (no ConnectInfo)
+    // buckets into a single "unknown" source.
+    let ip_member = source_ip.unwrap_or("unknown");
+    let _: () = deadpool_redis::redis::AsyncCommands::sadd(
+        &mut *conn,
+        &failure_ip_key,
+        ip_member,
+    )
+    .await?;
+    let _: () = deadpool_redis::redis::AsyncCommands::expire(
+        &mut *conn,
+        &failure_ip_key,
+        LOGIN_FAILURE_WINDOW_SECS as i64,
+    )
+    .await?;
+    let distinct_ips: i64 = deadpool_redis::redis::AsyncCommands::scard(
+        &mut *conn,
+        &failure_ip_key,
+    )
+    .await?;
+
     if failures < LOGIN_FAILURE_THRESHOLD {
+        return Ok(());
+    }
+
+    // M-6: lock only with corroboration across distinct source IPs. One
+    // source's failures alone never lock the account (its per-IP rate limit
+    // already throttles it); the failure counter stays alive so a second
+    // distinct source immediately triggers the lock on the next failure.
+    if distinct_ips < LOGIN_LOCKOUT_MIN_DISTINCT_IPS {
+        tracing::warn!(
+            identifier_hash = %identifier_hash,
+            failures = failures,
+            distinct_ips = distinct_ips,
+            "login failures reached the threshold from a single source — \
+             account lockout withheld (M-6 distinct-IP rule); per-IP rate \
+             limits remain active"
+        );
         return Ok(());
     }
 
@@ -723,13 +776,15 @@ async fn record_login_failure(
     let _: () =
         deadpool_redis::redis::AsyncCommands::set_ex(&mut *conn, &lock_key, "1", duration).await?;
     let _: i64 = deadpool_redis::redis::AsyncCommands::del(&mut *conn, &failure_key).await?;
+    let _: i64 = deadpool_redis::redis::AsyncCommands::del(&mut *conn, &failure_ip_key).await?;
 
     tracing::warn!(
         identifier_hash = %identifier_hash,
         failures = failures,
+        distinct_ips = distinct_ips,
         lockouts = lockouts,
         lockout_seconds = duration,
-        "login account temporarily locked after repeated failures"
+        "login account temporarily locked after repeated failures from multiple sources"
     );
 
     Ok(())
@@ -740,8 +795,13 @@ async fn clear_login_failures(
     identifier: &str,
 ) -> Result<(), ApiError> {
     let failure_key = login_failure_key(identifier);
+    let failure_ip_key = login_failure_ip_key(identifier);
     let mut conn = redis_pool.get().await?;
-    let _: i64 = deadpool_redis::redis::AsyncCommands::del(&mut *conn, &failure_key).await?;
+    let _: i64 = deadpool_redis::redis::AsyncCommands::del(
+        &mut *conn,
+        vec![failure_key.as_str(), failure_ip_key.as_str()],
+    )
+    .await?;
     Ok(())
 }
 
@@ -1187,7 +1247,15 @@ async fn insert_auth_audit_log(
     let mut tx = state.db.begin().await?;
     let previous_hash: Option<String> =
         crate::audit_log::advance_chain_head(&mut *tx, &hash).await?;
-    let signature = audit_log_signature(&hash, previous_hash.as_deref().unwrap_or_default())?;
+    // L-14/L-21: the production decision comes from the loaded config
+    // (`state.config.environment`), NOT a separate `ENVIRONMENT` env read —
+    // a deployment that configures the app as production through config
+    // loading must never silently fall back to the public dev signing key.
+    let signature = audit_log_signature(
+        state.config.environment.is_production(),
+        &hash,
+        previous_hash.as_deref().unwrap_or_default(),
+    )?;
 
     sqlx::query(
         "INSERT INTO audit_logs (
@@ -1221,14 +1289,21 @@ async fn insert_auth_audit_log(
 /// HMAC-SHA256 signature over the audit hash (and its chain link), keyed
 /// with `AUDIT_SIGNING_KEY`. In production the key MUST be configured — a
 /// publicly-known fallback would make every signature forgeable — so the
-/// function fails closed there. Development keeps a fallback with a warning.
-fn audit_log_signature(hash: &str, previous_hash: &str) -> Result<String, ApiError> {
+/// function fails closed there (hard error on first use). Development keeps
+/// a fallback with a warning.
+///
+/// L-14/L-21: `is_production` is derived from the loaded config
+/// (`state.config.environment`), the single real source for the deployment
+/// environment. It previously re-read the `ENVIRONMENT` env var here, so a
+/// deployment configured as production through config loading could silently
+/// sign with the public fallback key.
+fn audit_log_signature(is_production: bool, hash: &str, previous_hash: &str) -> Result<String, ApiError> {
     use hmac::{Hmac, Mac};
     type HmacSha256 = Hmac<Sha256>;
     let key = match std::env::var("AUDIT_SIGNING_KEY") {
         Ok(k) if !k.is_empty() => k,
         Ok(_) | Err(_) => {
-            if state_is_production() {
+            if is_production {
                 return Err(ApiError::Internal(
                     "AUDIT_SIGNING_KEY must be configured in production".into(),
                 ));
@@ -1247,12 +1322,6 @@ fn audit_log_signature(hash: &str, previous_hash: &str) -> Result<String, ApiErr
     mac.update(b"|");
     mac.update(hash.as_bytes());
     Ok(hex::encode(mac.finalize().into_bytes()))
-}
-
-fn state_is_production() -> bool {
-    std::env::var("ENVIRONMENT")
-        .map(|v| v.eq_ignore_ascii_case("production"))
-        .unwrap_or(false)
 }
 
 fn extract_bearer_token(headers: &HeaderMap) -> Option<String> {
@@ -1411,7 +1480,7 @@ async fn login(
     .await?;
 
     let Some(mut user) = user else {
-        record_login_failure(&state.redis, &login_identifier).await?;
+        record_login_failure(&state.redis, &login_identifier, Some(&client_ip)).await?;
         return Err(ApiError::Unauthorized("invalid credentials".into()));
     };
 
@@ -1424,7 +1493,7 @@ async fn login(
     let valid = verify_password_or_log(&body.password, &user.password_hash, &user.email)?;
 
     if !valid {
-        record_login_failure(&state.redis, &login_identifier).await?;
+        record_login_failure(&state.redis, &login_identifier, Some(&client_ip)).await?;
         return Err(ApiError::Unauthorized("invalid credentials".into()));
     }
 
@@ -1457,7 +1526,7 @@ async fn login(
                                     .await?;
                         }
                         _ => {
-                            record_login_failure(&state.redis, &login_identifier).await?;
+                            record_login_failure(&state.redis, &login_identifier, Some(&client_ip)).await?;
                             return Err(ApiError::Unauthorized("invalid MFA code".into()));
                         }
                     }
@@ -1585,7 +1654,7 @@ async fn login(
                 };
 
                 if !totp_valid && !recovery_valid {
-                    record_login_failure(&state.redis, &login_identifier).await?;
+                    record_login_failure(&state.redis, &login_identifier, Some(&client_ip)).await?;
                     return Err(ApiError::Unauthorized("invalid MFA code".into()));
                 }
             } else {
@@ -1739,7 +1808,7 @@ async fn complete_mfa_challenge(
             if !has_mfa_code
                 || !apexmail_lib::mfa::verify_totp_code(&challenge.secret, &body.mfa_code)
             {
-                record_login_failure(&state.redis, &login_identifier).await?;
+                record_login_failure(&state.redis, &login_identifier, client_ip.as_deref()).await?;
                 return Err(ApiError::Unauthorized("invalid MFA code".into()));
             }
         }
@@ -1755,7 +1824,7 @@ async fn complete_mfa_challenge(
                     .as_deref()
                     .filter(|c| !c.trim().is_empty());
                 if rc.is_none() {
-                    record_login_failure(&state.redis, &login_identifier).await?;
+                    record_login_failure(&state.redis, &login_identifier, client_ip.as_deref()).await?;
                     return Err(ApiError::Unauthorized("invalid MFA code".into()));
                 }
                 // Recovery code verification happens below after loading user
@@ -1878,7 +1947,7 @@ async fn complete_mfa_challenge(
                 .await?;
 
                 if !consumed {
-                    record_login_failure(&state.redis, &login_identifier).await?;
+                    record_login_failure(&state.redis, &login_identifier, client_ip.as_deref()).await?;
                     return Err(ApiError::Unauthorized("invalid MFA code".into()));
                 }
 
@@ -3258,6 +3327,60 @@ mod tests {
         assert_eq!(login_lockout_duration(10), LOGIN_LOCKOUT_MAX_SECS);
     }
 
+    /// Serialises tests that mutate the `AUDIT_SIGNING_KEY` process env var
+    /// (env access is process-global and cargo runs tests in parallel).
+    static AUDIT_KEY_ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn test_audit_signature_refuses_fallback_key_in_production() {
+        let _guard = AUDIT_KEY_ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+
+        // Production without a configured key: hard error — never sign with
+        // the publicly-known development fallback (L-14/L-21).
+        std::env::remove_var("AUDIT_SIGNING_KEY");
+        match audit_log_signature(true, "hash", "prev") {
+            Err(ApiError::Internal(message)) if message.contains("AUDIT_SIGNING_KEY") => {}
+            other => panic!(
+                "production without AUDIT_SIGNING_KEY must refuse to sign, got {other:?}"
+            ),
+        }
+
+        // Production with the key configured: real HMAC signature.
+        std::env::set_var("AUDIT_SIGNING_KEY", "prod-audit-key-0123456789abcdef");
+        let signed = audit_log_signature(true, "hash", "prev").expect("signs with real key");
+        assert_eq!(signed.len(), 64, "hex-encoded HMAC-SHA256");
+        assert!(
+            !signed.is_empty()
+                && signed
+                    .chars()
+                    .all(|c| c.is_ascii_hexdigit())
+        );
+
+        std::env::remove_var("AUDIT_SIGNING_KEY");
+    }
+
+    #[test]
+    fn test_audit_signature_uses_dev_fallback_outside_production() {
+        let _guard = AUDIT_KEY_ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+
+        std::env::remove_var("AUDIT_SIGNING_KEY");
+        let dev = audit_log_signature(false, "hash", "prev")
+            .expect("development may use the warned fallback key");
+        assert_eq!(dev.len(), 64);
+
+        // The configured key always wins, in any environment.
+        std::env::set_var("AUDIT_SIGNING_KEY", "shared-key-0123456789abcdef");
+        let keyed = audit_log_signature(false, "hash", "prev").unwrap();
+        assert_eq!(
+            keyed,
+            audit_log_signature(true, "hash", "prev").unwrap(),
+            "signature depends only on the key material, not the environment flag"
+        );
+        assert_ne!(keyed, dev, "fallback and real keys sign differently");
+
+        std::env::remove_var("AUDIT_SIGNING_KEY");
+    }
+
     #[test]
     fn test_login_lockout_keys_hash_identifiers() {
         let key = login_failure_key("Owner@Example.com");
@@ -3300,26 +3423,125 @@ mod tests {
 
         let identifier = format!("lockout-{}@example.com", Uuid::new_v4());
         let failure_key = login_failure_key(&identifier);
+        let failure_ip_key = login_failure_ip_key(&identifier);
         let lock_key = login_lock_key(&identifier);
         let counter_key = login_lockout_counter_key(&identifier);
 
+        let cleanup_keys = [
+            failure_key.clone(),
+            failure_ip_key.clone(),
+            lock_key.clone(),
+            counter_key.clone(),
+        ];
         if let Ok(mut conn) = pool.get().await {
             let _: Result<i64, _> = deadpool_redis::redis::cmd("DEL")
-                .arg(&[
-                    failure_key.as_str(),
-                    lock_key.as_str(),
-                    counter_key.as_str(),
-                ])
+                .arg(cleanup_keys.as_slice())
                 .query_async(&mut *conn)
                 .await;
         }
 
-        for _ in 0..(LOGIN_FAILURE_THRESHOLD - 1) {
-            record_login_failure(&pool, &identifier).await.unwrap();
+        // M-6 distinct-IP rule: five failures from ONE source never lock the
+        // account (an attacker must not be able to lock a victim at will;
+        // the per-IP login rate limit keeps throttling that single source).
+        for _ in 0..LOGIN_FAILURE_THRESHOLD {
+            record_login_failure(&pool, &identifier, Some("203.0.113.10"))
+                .await
+                .unwrap();
         }
-        assert!(login_lock_ttl(&pool, &identifier).await.unwrap().is_none());
+        assert!(
+            login_lock_ttl(&pool, &identifier).await.unwrap().is_none(),
+            "single-source failures must not lock the account"
+        );
 
-        record_login_failure(&pool, &identifier).await.unwrap();
+        // A corroborating failure from a SECOND distinct source locks it.
+        record_login_failure(&pool, &identifier, Some("198.51.100.77"))
+            .await
+            .unwrap();
+        assert!(
+            login_lock_ttl(&pool, &identifier)
+                .await
+                .unwrap()
+                .unwrap_or_default()
+                > 0,
+            "failures spanning two distinct sources must lock the account"
+        );
+
+        // A lock is lifted by its TTL (a locked account never reaches the
+        // success path), but `clear_login_failures` — the successful-login
+        // path — must clear the failure evidence keys.
+        clear_login_failures(&pool, &identifier).await.unwrap();
+        if let Ok(mut conn) = pool.get().await {
+            let failures: Result<i64, _> = deadpool_redis::redis::cmd("GET")
+                .arg(login_failure_key(&identifier))
+                .query_async(&mut *conn)
+                .await;
+            assert!(
+                matches!(failures, Ok(0) | Err(_)),
+                "failure counter cleared after successful login, got {failures:?}"
+            );
+        }
+
+        if let Ok(mut conn) = pool.get().await {
+            let _: Result<i64, _> = deadpool_redis::redis::cmd("DEL")
+                .arg(cleanup_keys.as_slice())
+                .query_async(&mut *conn)
+                .await;
+        }
+    }
+
+    #[tokio::test]
+    async fn test_record_login_failure_locks_after_failures_from_two_sources() {
+        let redis_url =
+            std::env::var("TEST_REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".into());
+        let pool = match RedisConfig::from_url(&redis_url)
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+        {
+            Ok(pool) => pool,
+            Err(_) => return,
+        };
+        let mut conn = match pool.get().await {
+            Ok(conn) => conn,
+            Err(_) => return,
+        };
+        let ping: Result<String, _> = deadpool_redis::redis::cmd("PING")
+            .query_async(&mut *conn)
+            .await;
+        if ping.is_err() {
+            return;
+        }
+        drop(conn);
+
+        let identifier = format!("lockout-multi-{}@example.com", Uuid::new_v4());
+        let keys = [
+            login_failure_key(&identifier),
+            login_failure_ip_key(&identifier),
+            login_lock_key(&identifier),
+            login_lockout_counter_key(&identifier),
+        ];
+        if let Ok(mut conn) = pool.get().await {
+            let _: Result<i64, _> = deadpool_redis::redis::cmd("DEL")
+                .arg(keys.as_slice())
+                .query_async(&mut *conn)
+                .await;
+        }
+
+        // Below the threshold even with two sources: no lock.
+        for ip in ["203.0.113.1", "203.0.113.2"] {
+            for _ in 0..(LOGIN_FAILURE_THRESHOLD / 2) {
+                record_login_failure(&pool, &identifier, Some(ip))
+                    .await
+                    .unwrap();
+            }
+        }
+        assert!(
+            login_lock_ttl(&pool, &identifier).await.unwrap().is_none(),
+            "threshold not reached yet"
+        );
+
+        // Reaching the threshold with failures spanning multiple IPs locks.
+        record_login_failure(&pool, &identifier, Some("203.0.113.3"))
+            .await
+            .unwrap();
         assert!(
             login_lock_ttl(&pool, &identifier)
                 .await
@@ -3330,11 +3552,7 @@ mod tests {
 
         if let Ok(mut conn) = pool.get().await {
             let _: Result<i64, _> = deadpool_redis::redis::cmd("DEL")
-                .arg(&[
-                    failure_key.as_str(),
-                    lock_key.as_str(),
-                    counter_key.as_str(),
-                ])
+                .arg(keys.as_slice())
                 .query_async(&mut *conn)
                 .await;
         }

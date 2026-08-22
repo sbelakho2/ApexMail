@@ -224,6 +224,36 @@ mod tests {
         assert!(decoded.is_none());
     }
 
+    /// Field 6 (`dedup_exempt`, IMAP APPEND exemption): round-trips through
+    /// wire encoding and defaults to false (delivery-path dedup stays on).
+    #[test]
+    fn store_message_request_dedup_exempt_round_trips() {
+        // Default: false.
+        let default = generated::StoreMessageRequest::default();
+        assert!(!default.dedup_exempt);
+
+        // Set + encode + decode.
+        let msg = generated::StoreMessageRequest {
+            account_id: "acc".into(),
+            mailbox: "INBOX".into(),
+            raw_message: vec![1, 2, 3].into(),
+            dedup_exempt: true,
+            ..Default::default()
+        };
+        let decoded =
+            generated::StoreMessageRequest::decode(msg.encode_to_vec().as_slice()).unwrap();
+        assert!(decoded.dedup_exempt);
+        assert_eq!(decoded.account_id, "acc");
+
+        // Field number 6 on the wire: tag byte = (6 << 3) | 0 (varint) = 0x30.
+        let encoded = generated::StoreMessageRequest {
+            dedup_exempt: true,
+            ..Default::default()
+        }
+        .encode_to_vec();
+        assert_eq!(encoded.first(), Some(&0x30), "dedup_exempt must be field 6");
+    }
+
     #[test]
     fn internal_service_token_rejects_weak_or_unsafe_values() {
         assert!(matches!(

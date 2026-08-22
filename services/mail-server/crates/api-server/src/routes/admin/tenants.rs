@@ -14,10 +14,16 @@ use crate::middleware::auth::AuthUser;
 use crate::state::AppState;
 
 pub fn router() -> Router<AppState> {
-    Router::new().route(
-        "/",
-        get(list_tenants).patch(update_tenant).delete(delete_tenant),
-    )
+    Router::new()
+        .route(
+            "/",
+            get(list_tenants).patch(update_tenant).delete(delete_tenant),
+        )
+        // Domain squatting remediation (audit M-9): transfer a squatted
+        // domain to its verified owner. Composed here (rather than a separate
+        // nest in app.rs) so it is reachable through the single
+        // `/v1/admin/tenants` nest.
+        .nest("/domains", super::domains::router())
 }
 
 // ─── Types ─────────────────────────────────────────────────────

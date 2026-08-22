@@ -3,8 +3,9 @@
 //! All endpoints require admin authentication. SSE streams push JSON events
 //! at regular intervals with keep-alive pings for connection health.
 //!
-//! - `GET /v1/admin/sse/dashboard` — live dashboard metrics every 5 seconds
-//! - `GET /v1/admin/sse/alerts` — real-time alert stream every 10 seconds
+//! Mounted under the dashboard router (see `dashboard.rs`):
+//! - `GET /v1/admin/dashboard/sse/dashboard` — live dashboard metrics every 5 seconds
+//! - `GET /v1/admin/dashboard/sse/alerts` — real-time alert stream every 10 seconds
 
 use std::convert::Infallible;
 use std::sync::Arc;
@@ -19,12 +20,20 @@ use futures::StreamExt;
 use serde::Serialize;
 use serde_json;
 use tokio::sync::Mutex;
-use tokio_stream::wrappers::IntervalStream;
 
 use crate::error::ApiError;
 use crate::middleware::auth::{require_scopes, AuthUser};
 use crate::routes::helpers::table_exists;
 use crate::state::AppState;
+
+/// A stream that yields `()` every `period`, implemented with `futures`
+/// primitives so this crate does not need a `tokio-stream` dependency.
+fn interval_stream(period: Duration) -> impl futures::Stream<Item = ()> {
+    futures::stream::unfold((), move |_| async move {
+        tokio::time::sleep(period).await;
+        Some(((), ()))
+    })
+}
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -135,7 +144,7 @@ async fn sse_dashboard(
     require_scopes(&auth, &["*"])?;
 
     let db = state.db.clone();
-    let stream = IntervalStream::new(tokio::time::interval(Duration::from_secs(5)))
+    let stream = interval_stream(Duration::from_secs(5))
         .then(move |_| {
             let db = db.clone();
             async move {
@@ -230,7 +239,7 @@ async fn sse_alerts(
             .collect::<Vec<_>>(),
     )
     .chain(
-        IntervalStream::new(tokio::time::interval(Duration::from_secs(10)))
+        interval_stream(Duration::from_secs(10))
             .then({
                 let db = db.clone();
                 let last_seen = Arc::clone(&last_seen);
