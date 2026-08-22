@@ -186,31 +186,70 @@ pub struct TrackingConfig {
     pub base_url: String,
     pub open_pixel_path: String,
     pub click_redirect_path: String,
+    /// Shared AES-GCM master secret (`TRACKING_SECRET_KEY`, >= 32 chars) —
+    /// the SAME secret the tracking-service verifies tokens with. Held
+    /// zeroized; `None` means unset (token encoding is refused then, see
+    /// `email::tracking`).
+    pub secret_key: Option<Zeroizing<String>>,
+}
+
+impl TrackingConfig {
+    /// Env var gating the pixel/link rewrite (`TRACKING_ENABLED`).
+    const ENABLED_ENV: &'static str = "TRACKING_ENABLED";
+    /// Env var holding the shared tracking master secret.
+    const SECRET_KEY_ENV: &'static str = "TRACKING_SECRET_KEY";
+
+    /// Build the tracking config from the environment:
+    ///
+    /// * `TRACKING_ENABLED` — `true`/`1` enables the rewrite gate. Absent
+    ///   keeps the historical default (`false`) so existing deployments do
+    ///   not silently change behaviour on upgrade; compose sets it
+    ///   explicitly.
+    /// * `TRACKING_SECRET_KEY` — shared with the tracking-service; too-short
+    ///   values are treated as unset (the encoder refuses short keys anyway,
+    ///   and a deployment that disagrees on key policy must not half-encode).
+    /// * `TRACKING_PUBLIC_HOST` / `TRACKING_BASE_URL` — public tracking host.
+    pub fn from_env() -> Self {
+        let base_url = tracking_base_url_from_env();
+        let enabled = std::env::var(Self::ENABLED_ENV)
+            .map(|v| v.trim() == "true" || v.trim() == "1")
+            .unwrap_or(false);
+        let secret_key = std::env::var(Self::SECRET_KEY_ENV)
+            .ok()
+            .map(|v| v.trim().to_string())
+            .filter(|v| v.len() >= 32)
+            .map(Zeroizing::new);
+        Self {
+            enabled,
+            base_url,
+            open_pixel_path: "/o".to_string(),
+            click_redirect_path: "/c".to_string(),
+            secret_key,
+        }
+    }
 }
 
 impl Default for TrackingConfig {
     fn default() -> Self {
-        // C: the public tracking host is unified with tracking-service —
-        // both read TRACKING_PUBLIC_HOST (falling back to TRACKING_BASE_URL,
-        // the service's legacy variable) with the service's default
-        // `https://t.apexmail.ee`. The worker previously defaulted to
-        // `tracking.apexmail.ee`, which does not serve the tracking routes.
-        let base_url = std::env::var("TRACKING_PUBLIC_HOST")
-            .ok()
-            .filter(|v| !v.trim().is_empty())
-            .or_else(|| {
-                std::env::var("TRACKING_BASE_URL")
-                    .ok()
-                    .filter(|v| !v.trim().is_empty())
-            })
-            .unwrap_or_else(|| "https://t.apexmail.ee".to_string());
-        Self {
-            enabled: false,
-            base_url,
-            open_pixel_path: "/o".to_string(),
-            click_redirect_path: "/c".to_string(),
-        }
+        Self::from_env()
     }
+}
+
+/// C: the public tracking host is unified with tracking-service — both read
+/// TRACKING_PUBLIC_HOST (falling back to TRACKING_BASE_URL, the service's
+/// legacy variable) with the service's default `https://t.apexmail.ee`. The
+/// worker previously defaulted to `tracking.apexmail.ee`, which does not
+/// serve the tracking routes.
+fn tracking_base_url_from_env() -> String {
+    std::env::var("TRACKING_PUBLIC_HOST")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .or_else(|| {
+            std::env::var("TRACKING_BASE_URL")
+                .ok()
+                .filter(|v| !v.trim().is_empty())
+        })
+        .unwrap_or_else(|| "https://t.apexmail.ee".to_string())
 }
 
 /// Warmup configuration.
@@ -346,5 +385,87 @@ impl Default for ReplyHandlerConfig {
             auto_suppress: false,
             auto_suppress_confidence_threshold: 0.85,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Serializes env-mutating tests (std::env is process-global).
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn clear_tracking_env() {
+        std::env::remove_var("TRACKING_ENABLED");
+        std::env::remove_var("TRACKING_SECRET_KEY");
+        std::env::remove_var("TRACKING_PUBLIC_HOST");
+        std::env::remove_var("TRACKING_BASE_URL");
+    }
+
+    /// B: TRACKING_ENABLED=true flips the rewrite gate on; the shared secret
+    /// is captured from the environment.
+    #[test]
+    fn tracking_config_parses_enabled_and_secret_from_env() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_tracking_env();
+        std::env::set_var("TRACKING_ENABLED", "true");
+        std::env::set_var("TRACKING_SECRET_KEY", "k".repeat(40));
+
+        let cfg = TrackingConfig::from_env();
+        assert!(cfg.enabled, "TRACKING_ENABLED=true must enable the gate");
+        assert_eq!(
+            cfg.secret_key.as_deref().map(String::as_str),
+            Some("k".repeat(40).as_str()),
+            "the shared secret must be captured"
+        );
+        assert_eq!(cfg.base_url, "https://t.apexmail.ee");
+
+        clear_tracking_env();
+    }
+
+    /// B: absent / non-true values keep the historical default (disabled) so
+    /// existing deployments do not change behaviour implicitly; short secrets
+    /// are treated as unset (policy disagreement must not half-encode).
+    #[test]
+    fn tracking_config_disabled_by_default_and_rejects_short_secrets() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_tracking_env();
+        assert!(!TrackingConfig::from_env().enabled);
+
+        for value in ["false", "1 ", "yes", "0"] {
+            std::env::set_var("TRACKING_ENABLED", value);
+            let expected = value.trim() == "1";
+            assert_eq!(
+                TrackingConfig::from_env().enabled,
+                expected,
+                "TRACKING_ENABLED={value:?}"
+            );
+        }
+
+        std::env::set_var("TRACKING_ENABLED", "true");
+        std::env::set_var("TRACKING_SECRET_KEY", "too-short");
+        let cfg = TrackingConfig::from_env();
+        assert!(cfg.enabled);
+        assert!(
+            cfg.secret_key.is_none(),
+            "a short secret must be treated as unset"
+        );
+
+        clear_tracking_env();
+    }
+
+    /// B: Default delegates to from_env so `..Default::default()` construction
+    /// sites (bin/worker.rs and EmailConfig) pick up the env-driven fields.
+    #[test]
+    fn tracking_config_default_reads_env() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_tracking_env();
+        std::env::set_var("TRACKING_ENABLED", "true");
+        assert!(TrackingConfig::default().enabled);
+
+        std::env::set_var("TRACKING_ENABLED", "false");
+        assert!(!TrackingConfig::default().enabled);
+
+        clear_tracking_env();
     }
 }

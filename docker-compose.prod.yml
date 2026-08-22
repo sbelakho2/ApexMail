@@ -86,6 +86,8 @@ services:
         condition: service_healthy
       marketing:
         condition: service_healthy
+      sales-autopilot:
+        condition: service_healthy
     ports:
       - "80:80"
       - "443:443"
@@ -367,6 +369,98 @@ services:
       - aws_secret_access_key
 
   # ===========================================================================
+  # SALES AUTOPILOT (internal sales engine: CRM, campaigns, inbox, scheduler)
+  # ===========================================================================
+  # Internal-only: no host ports. The control plane calls it server-side over
+  # apexmail_backend (sales-autopilot:3010). The single public surface is the
+  # CAN-SPAM unsubscribe endpoint, routed by nginx at
+  # https://api.apexmail.ee/sales-api/u/ — SALES_PUBLIC_BASE_URL must match
+  # that exact prefix so the links embedded in campaign mail resolve.
+  sales-autopilot:
+    image: ghcr.io/sbelakho2/apexmail/sales-autopilot:latest
+    restart: unless-stopped
+    # Chain: load-secret-env.sh bridges the sales-specific Docker secret to
+    # env, then the shared entrypoint wrapper bridges DB/Redis/internal-token
+    # secrets and assembles DATABASE_URL / REDIS_URL from the parts.
+    entrypoint:
+      - /bin/sh
+      - /usr/local/bin/load-secret-env.sh
+      - SALES_UNSUBSCRIBE_SECRET
+      - SALES_UNSUBSCRIBE_SECRET_FILE
+      - --
+      - /bin/sh
+      - /opt/apexmail/entrypoint-wrapper.sh
+      - sales-autopilot
+    command: []
+    volumes:
+      - ./deploy/scripts/entrypoint-wrapper.sh:/opt/apexmail/entrypoint-wrapper.sh:ro
+      - ./deploy/load-secret-env.sh:/usr/local/bin/load-secret-env.sh:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      RUST_LOG: info
+      # ── Database / Redis (URLs assembled by the entrypoint wrapper) ───────
+      DATABASE_URL: ""
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: ${POSTGRES_DB:-apexmail}
+      DB_USER: ${POSTGRES_USER:-apexmail}
+      DB_PASSWORD_FILE: /run/secrets/postgres_password
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD_FILE: /run/secrets/redis_password
+      # ── Auth: shared internal service token via Docker secret ────────────
+      INTERNAL_SERVICE_TOKEN: ""
+      INTERNAL_SERVICE_TOKEN_FILE: /run/secrets/internal_service_token
+      # ── HTTP bind — MUST stay 3010: it is the nginx upstream and the
+      #    healthcheck target. ──────────────────────────────────────────────
+      SALES_PORT: "3010"
+      # ── Campaign dispatch (production dispatcher; required in prod) ───────
+      SALES_CAMPAIGN_FROM_EMAIL: ${SALES_CAMPAIGN_FROM_EMAIL:?SALES_CAMPAIGN_FROM_EMAIL is required in production}
+      SALES_CAMPAIGN_FROM_NAME: ${SALES_CAMPAIGN_FROM_NAME:-ApexMail}
+      SALES_UNSUBSCRIBE_SECRET: ""
+      SALES_UNSUBSCRIBE_SECRET_FILE: /run/secrets/sales_unsubscribe_secret
+      SALES_PUBLIC_BASE_URL: ${SALES_PUBLIC_BASE_URL:-https://api.apexmail.ee/sales-api}
+      SALES_UNSUBSCRIBE_REDIRECT_URL: ${SALES_UNSUBSCRIBE_REDIRECT_URL:-}
+      SALES_ALLOWED_TENANTS: ${SALES_ALLOWED_TENANTS:-}
+      SALES_DISPATCH_INTERVAL_SECS: ${SALES_DISPATCH_INTERVAL_SECS:-30}
+      SALES_DISPATCH_BATCH_SIZE: ${SALES_DISPATCH_BATCH_SIZE:-100}
+      SALES_DISPATCH_CONCURRENCY: ${SALES_DISPATCH_CONCURRENCY:-4}
+      SALES_ENRICHMENT_API_URL: ${SALES_ENRICHMENT_API_URL:-https://enrich.apexmail.ee}
+      ENRICHMENT_API_KEY: ${ENRICHMENT_API_KEY:-}
+    secrets:
+      - postgres_password
+      - redis_password
+      - internal_service_token
+      - sales_unsubscribe_secret
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/3010' 2>/dev/null || nc -z 127.0.0.1 3010"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    networks:
+      # Backend keeps enrichment egress; data_internal reaches postgres/redis.
+      - apexmail_backend
+      - apexmail_data_internal
+    logging: *default-logging
+    deploy:
+      replicas: 1
+      resources:
+        limits:
+          memory: 512M
+          cpus: '0.5'
+        reservations:
+          memory: 128M
+      restart_policy:
+        condition: on-failure
+        delay: 10s
+        max_attempts: 5
+
+  # ===========================================================================
   # STATUS SERVER (public status page + status API)
   # ===========================================================================
   # Runs the auth-server binary's /status, /status/api and /status/history
@@ -472,6 +566,10 @@ services:
       # gRPC endpoint of the mailstore service (inbound mailbox delivery)
       MAILSTORE_GRPC_ADDR: ${MAILSTORE_GRPC_ADDR:-http://mailstore:50051}
       INTERNAL_SERVICE_TOKEN_FILE: /run/secrets/internal_service_token
+      # VERP bounce domain — the bounce server only accepts
+      # bounces+{message_id}=...@{VERP_DOMAIN} recipients. Kept in lockstep
+      # with the worker's VERP_DOMAIN so generated Return-Paths parse here.
+      VERP_DOMAIN: ${VERP_DOMAIN:-bounces.apexmail.ee}
     secrets:
       - postgres_password
       - redis_password
@@ -719,6 +817,20 @@ services:
       # There is deliberately no global customer-domain key fallback.
       DKIM_ENABLED: ${DKIM_ENABLED:-true}
       DKIM_PRIVATE_KEY_ENCRYPTION_KEY_FILE: /run/secrets/dkim_private_key_encryption_key
+      # ── Open/click tracking (engagement accounting) ────────────────────────
+      # The worker's rewrite gate is config.tracking.enabled — previously it
+      # defaulted to false everywhere, so no pixel/links were ever rewritten
+      # and campaign engagement accounting was dead. Enablement is env-driven
+      # (TRACKING_ENABLED) and the shared secret is the SAME Docker secret the
+      # tracking-service verifies tokens with (bridged by the wrapper).
+      TRACKING_ENABLED: ${TRACKING_ENABLED:-true}
+      TRACKING_SECRET_KEY: ""
+      TRACKING_SECRET_KEY_FILE: /run/secrets/tracking_secret_key
+      # ── VERP bounce routing (SMTP transport) ──────────────────────────────
+      # Envelope Return-Path domain for bounces+{message_id}=... addresses.
+      # MUST equal the MTA bounce server's VERP_DOMAIN so generated addresses
+      # land back on the platform bounce parser.
+      VERP_DOMAIN: ${VERP_DOMAIN:-bounces.apexmail.ee}
     secrets:
       - postgres_password
       - redis_password
@@ -728,6 +840,7 @@ services:
       - aws_secret_access_key
       - smtp_username
       - smtp_password
+      - tracking_secret_key
     ports: !override []  # force-clear dev compose ports (empty list is ignored by merge)
     healthcheck:
       test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/9093' 2>/dev/null || exit 1"]
@@ -969,6 +1082,10 @@ secrets:
     file: ${PROD_SMTP_USERNAME_FILE:?PROD_SMTP_USERNAME_FILE is required in production}
   smtp_password:
     file: ${PROD_SMTP_PASSWORD_FILE:?PROD_SMTP_PASSWORD_FILE is required in production}
+  # HMAC key signing the sales campaign unsubscribe tokens (dispatcher.rs).
+  # Reuses the _FILE bridging chain; >= 32 chars.
+  sales_unsubscribe_secret:
+    file: ${PROD_SALES_UNSUBSCRIBE_SECRET_FILE:?PROD_SALES_UNSUBSCRIBE_SECRET_FILE is required in production}
   # Audit E — backup encryption key for postgres-backup-encrypt.sh.
   backup_encryption_key:
     file: ${PROD_BACKUP_ENCRYPTION_KEY_FILE:?PROD_BACKUP_ENCRYPTION_KEY_FILE is required in production}

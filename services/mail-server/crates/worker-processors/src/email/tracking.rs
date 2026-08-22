@@ -473,6 +473,7 @@ mod tests {
             base_url: "https://track.example.com".to_string(),
             open_pixel_path: "/o".to_string(),
             click_redirect_path: "/c".to_string(),
+            secret_key: None,
         }
     }
 

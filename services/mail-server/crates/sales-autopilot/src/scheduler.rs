@@ -15,7 +15,9 @@
 //!   are idempotent: the (campaign, recipient) idempotency key makes a
 //!   double-send impossible even after a crash between ledger write and
 //!   enqueue,
-//! * a campaign with no due recipients left transitions to completed,
+//! * a campaign with no due AND no cap-pending recipients left transitions
+//!   to completed (frequency-capped recipients keep it active until the
+//!   7-day cap window passes — audit E),
 //! * after each batch, opens/clicks stats are reconciled from the
 //!   platform `messages` counters maintained by the tracking service.
 
@@ -24,9 +26,18 @@ use std::sync::Arc;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::campaigns::{CampaignEmailDispatcher, CampaignManager};
+use crate::campaigns::{CampaignEmailDispatcher, CampaignManager, RecipientFunnel};
 use crate::dispatcher::ProductionCampaignDispatcher;
 use crate::types::SalesError;
+
+/// Completion gate (audit E): an empty due batch finishes the campaign ONLY
+/// when no recipient is still awaiting the frequency-cap window. A
+/// capped-only campaign must stay active — the 7-day window (fix I-2
+/// CAN-SPAM) eventually makes those recipients due again, and completing
+/// early would strand them forever.
+pub fn campaign_is_finished(funnel: &RecipientFunnel) -> bool {
+    funnel.due == 0 && funnel.frequency_capped == 0
+}
 
 /// Which campaigns to process in one tick.
 async fn active_campaigns(db: &PgPool, limit: i64) -> Result<Vec<(Uuid, String, String)>, SalesError> {
@@ -56,12 +67,28 @@ pub async fn process_campaign(
     let recipients = manager.due_recipients(tenant_id, campaign_id, batch_size as i64).await?;
 
     if recipients.is_empty() {
-        // Nothing due (all sent / suppressed / capped): finish the campaign.
+        // Nothing due right now. Two very different causes (audit E):
+        // * every recipient is sent/suppressed → the campaign is DONE;
+        // * recipients remain but are frequency-capped (7-day window) → the
+        //   campaign must STAY active so later ticks dispatch them once the
+        //   cap window passes. Completing here stranded them forever.
+        let funnel = manager
+            .recipient_funnel_counts(tenant_id, campaign_id)
+            .await?;
+        if !campaign_is_finished(&funnel) {
+            tracing::info!(
+                tenant_id = %tenant_id,
+                campaign_id = %campaign_id,
+                capped_pending = funnel.frequency_capped,
+                "campaign stays active — recipients await the frequency-cap window"
+            );
+            return Ok(0);
+        }
         manager.complete_campaign(campaign_id).await?;
         tracing::info!(
             tenant_id = %tenant_id,
             campaign_id = %campaign_id,
-            "campaign completed — no due recipients remain"
+            "campaign completed — no due or cap-pending recipients remain"
         );
         return Ok(0);
     }
@@ -225,6 +252,183 @@ mod tests {
         for _ in 0..200 {
             let j = rand_jitter_ms(base);
             assert!(j <= 6_000, "jitter {j}ms exceeds 20% of 30s");
+        }
+    }
+
+    fn funnel(due: i64, capped: i64) -> RecipientFunnel {
+        RecipientFunnel {
+            total: due + capped,
+            already_sent: 0,
+            suppressed_local: 0,
+            suppressed_platform: 0,
+            frequency_capped: capped,
+            due,
+        }
+    }
+
+    /// E: the funnel gate — a capped-only campaign is NOT finished, so the
+    /// scheduler keeps it active until the cap window passes; a fully
+    /// drained campaign (or one whose remainder is suppressed/sent)
+    /// completes.
+    #[test]
+    fn completion_requires_no_due_and_no_capped_recipients() {
+        // Fully drained → finished.
+        assert!(campaign_is_finished(&funnel(0, 0)));
+        // Suppressed/sent remainders funnel to zero due/capped → finished.
+        assert!(campaign_is_finished(&RecipientFunnel {
+            total: 5,
+            already_sent: 3,
+            suppressed_local: 1,
+            suppressed_platform: 1,
+            ..funnel(0, 0)
+        }));
+        // Capped-only → NOT finished: the 7-day window will make them due.
+        assert!(
+            !campaign_is_finished(&funnel(0, 4)),
+            "capped-only campaign must stay active"
+        );
+        // Due recipients exist → not finished (sanity; the scheduler only
+        // consults the gate on an empty batch).
+        assert!(!campaign_is_finished(&funnel(2, 0)));
+    }
+
+    /// E (integration, local Postgres): a capped-only campaign stays active
+    /// across scheduler ticks; once the cap window passes (simulated by
+    /// back-dating the recipients' last sends beyond 7 days) the recipients
+    /// become due again and the campaign then completes. Requires the
+    /// sales-autopilot schema (`initialize_schema`).
+    #[ignore = "requires local PostgreSQL with the sales-autopilot schema"]
+    #[tokio::test]
+    async fn capped_only_campaign_stays_active_until_cap_window_passes() {
+        let db = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&std::env::var("TEST_DATABASE_URL").unwrap_or_else(|_| {
+                "postgres://apexmail:apexmail@localhost:5432/apexmail".to_string()
+            }))
+            .await
+            .unwrap();
+        crate::routes::initialize_schema(&db).await.unwrap();
+
+        let manager = CampaignManager::new(10, db.clone());
+        let campaign = manager
+            .create_campaign(
+                "sched-e-test".into(),
+                "capped".into(),
+                "t".into(),
+                "all".into(),
+            )
+            .await
+            .unwrap();
+        manager
+            .add_recipients(
+                "sched-e-test",
+                campaign.id,
+                vec!["capped@example.com".into()],
+            )
+            .await
+            .unwrap();
+
+        // Make the recipient capped: the weekly cap is
+        // RECIPIENT_FREQUENCY_CAP_WEEKLY (3) sends within 7 days, and each
+        // campaign contributes at most ONE ledger row per recipient (PK
+        // campaign_id+email) — so three filler campaigns with a recent send
+        // put the recipient at the cap.
+        let mut filler_ids = Vec::new();
+        for n in 0..3 {
+            let filler = manager
+                .create_campaign(
+                    "sched-e-test".into(),
+                    format!("filler-{n}"),
+                    "t".into(),
+                    "all".into(),
+                )
+                .await
+                .unwrap();
+            manager
+                .add_recipients("sched-e-test", filler.id, vec!["capped@example.com".into()])
+                .await
+                .unwrap();
+            sqlx::query(
+                "UPDATE sales_campaign_recipients SET sent_at = NOW() - INTERVAL '1 hour' \
+                 WHERE campaign_id = $1",
+            )
+            .bind(filler.id)
+            .execute(&db)
+            .await
+            .unwrap();
+            filler_ids.push(filler.id);
+        }
+        // The campaign under test starts unsent (only the cap signals from
+        // the filler sends above remain).
+        sqlx::query(
+            "UPDATE sales_campaign_recipients SET sent_at = NULL WHERE campaign_id = $1",
+        )
+        .bind(campaign.id)
+        .execute(&db)
+        .await
+        .unwrap();
+        sqlx::query("UPDATE sales_campaigns SET status = 'active' WHERE id = $1")
+            .bind(campaign.id)
+            .execute(&db)
+            .await
+            .unwrap();
+
+        // Tick with the cap in force: the funnel must show capped=1 → the
+        // gate keeps the campaign active even though nothing is due.
+        let funnel = manager
+            .recipient_funnel_counts("sched-e-test", campaign.id)
+            .await
+            .unwrap();
+        assert_eq!(funnel.due, 0, "recipient is capped, not due");
+        assert_eq!(funnel.frequency_capped, 1);
+        assert!(
+            !campaign_is_finished(&funnel),
+            "capped-only campaign must not complete"
+        );
+
+        // Back-date every send past the 7-day window: the recipient becomes
+        // due again, so after a (hypothetical) dispatch drain the gate opens.
+        for filler_id in &filler_ids {
+            sqlx::query(
+                "UPDATE sales_campaign_recipients SET sent_at = NOW() - INTERVAL '8 days' \
+                 WHERE campaign_id = $1",
+            )
+            .bind(filler_id)
+            .execute(&db)
+            .await
+            .unwrap();
+        }
+        let funnel = manager
+            .recipient_funnel_counts("sched-e-test", campaign.id)
+            .await
+            .unwrap();
+        assert_eq!(funnel.due, 1, "cap window passed — recipient is due again");
+        assert_eq!(funnel.frequency_capped, 0);
+        assert!(!campaign_is_finished(&funnel), "due recipient blocks completion");
+
+        // Drain it: now the campaign is genuinely finished.
+        sqlx::query(
+            "UPDATE sales_campaign_recipients SET sent_at = NOW() WHERE campaign_id = $1",
+        )
+        .bind(campaign.id)
+        .execute(&db)
+        .await
+        .unwrap();
+        let funnel = manager
+            .recipient_funnel_counts("sched-e-test", campaign.id)
+            .await
+            .unwrap();
+        assert_eq!(funnel.due, 0);
+        assert_eq!(funnel.frequency_capped, 0);
+        assert!(campaign_is_finished(&funnel));
+
+        // Cleanup.
+        for campaign_id in std::iter::once(campaign.id).chain(filler_ids) {
+            sqlx::query("DELETE FROM sales_campaigns WHERE id = $1")
+                .bind(campaign_id)
+                .execute(&db)
+                .await
+                .unwrap();
         }
     }
 }

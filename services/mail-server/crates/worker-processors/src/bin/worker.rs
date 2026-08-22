@@ -19,7 +19,7 @@ use tracing_subscriber::EnvFilter;
 use worker_processors::{
     common::{
         AnalyticsConfig, DkimConfig, EmailConfig, ProcessorConfig, ReplyHandlerConfig, SesConfig,
-        SmtpConfig, TransportType, WebhookConfig,
+        SmtpConfig, TrackingConfig, TransportType, WebhookConfig,
     },
     AnalyticsProcessor, EmailProcessor, ReplyHandler, WebhookProcessor,
 };
@@ -233,6 +233,11 @@ async fn main() -> Result<()> {
                 // that could sign another tenant's domain.
                 ..Default::default()
             },
+            // Tracking enablement is env-driven (TRACKING_ENABLED +
+            // TRACKING_SECRET_KEY): previously the ..Default::default() here
+            // always left `enabled: false`, so pixels/links were never
+            // rewritten and engagement accounting was dead.
+            tracking: TrackingConfig::from_env(),
             ..Default::default()
         };
 

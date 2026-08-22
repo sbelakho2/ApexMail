@@ -32,6 +32,24 @@ impl DispatchRecipient {
     }
 }
 
+/// Recipient funnel counts for one campaign. Shared by the dry-run report
+/// and the scheduler's completion gate (E): a campaign whose only remaining
+/// recipients are `frequency_capped` must STAY active until the 7-day window
+/// passes — completing it strands them forever.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct RecipientFunnel {
+    pub total: i64,
+    pub already_sent: i64,
+    pub suppressed_local: i64,
+    pub suppressed_platform: i64,
+    /// Unsent and unsuppressed, but blocked by the per-recipient weekly
+    /// frequency cap (fix I-2 CAN-SPAM) — becomes due when the cap window
+    /// passes.
+    pub frequency_capped: i64,
+    /// Unsent, unsuppressed, within the cap — dispatchable right now.
+    pub due: i64,
+}
+
 /// Maximum number of campaign emails a single recipient may receive within a
 /// 7-day window (fix I-2 CAN-SPAM frequency cap).
 pub const RECIPIENT_FREQUENCY_CAP_WEEKLY: i64 = 3;
@@ -138,6 +156,35 @@ impl CampaignEmailDispatcher for NoopCampaignDispatcher {
         )
     }
 }
+
+/// Stats reconciliation SQL (see `reconcile_campaign_stats`): `sent` counts
+/// worker 'sent' events joined via the send ledger's message_id (delivered
+/// truth, audit F), falling back to the enqueue-time counter when no events
+/// exist; `opened`/`clicked` fold the tracking-service message counters back
+/// into the campaign columns.
+const RECONCILE_CAMPAIGN_STATS_SQL: &str = r#"
+            UPDATE sales_campaigns c SET
+               sent = CASE WHEN EXISTS (
+                   SELECT 1 FROM events e
+                   JOIN sales_campaign_recipients r ON r.message_id::text = e.message_id
+                   WHERE r.campaign_id = c.id AND e.event_type = 'sent'
+               ) THEN (
+                   SELECT COUNT(*) FROM events e
+                   JOIN sales_campaign_recipients r ON r.message_id::text = e.message_id
+                   WHERE r.campaign_id = c.id AND e.event_type = 'sent'
+               ) ELSE c.sent END,
+               opened = (
+                 SELECT COUNT(*) FROM sales_campaign_recipients r
+                 JOIN messages m ON m.id = r.message_id
+                 WHERE r.campaign_id = c.id AND m.open_count > 0
+               ),
+               clicked = (
+                 SELECT COUNT(*) FROM sales_campaign_recipients r
+                 JOIN messages m ON m.id = r.message_id
+                 WHERE r.campaign_id = c.id AND m.click_count > 0
+               )
+             WHERE c.id = $1
+        "#;
 
 /// PostgreSQL-backed campaign manager.
 /// Campaigns and recipients are persisted across restarts.
@@ -597,61 +644,37 @@ impl CampaignManager {
         Ok(())
     }
 
-    /// Reconcile campaign engagement stats: `opened` / `clicked` count the
-    /// recipients whose dispatched message has been opened/clicked. The
-    /// per-message counters (`messages.open_count` / `click_count`) are
-    /// maintained by the platform tracking service; this folds them back
-    /// into the campaign columns.
+    /// Reconcile campaign engagement stats.
+    ///
+    /// * `opened` / `clicked` count the recipients whose dispatched message
+    ///   has been opened/clicked. The per-message counters
+    ///   (`messages.open_count` / `click_count`) are maintained by the
+    ///   platform tracking service; this folds them back into the campaign
+    ///   columns.
+    /// * `sent` is reconciled to DELIVERED truth (audit F): the dispatcher
+    ///   increments it at enqueue time (an intent count — a queued row can
+    ///   still bounce or dead-letter), so this rewrite counts the worker's
+    ///   `events` rows of type 'sent' joined through the send ledger's
+    ///   `message_id`. When NO sent events exist yet (worker lag, or rows
+    ///   enqueued but never processed), the enqueue-time counter is kept —
+    ///   it remains the only available estimate rather than being zeroed.
     pub async fn reconcile_campaign_stats(&self, campaign_id: Uuid) -> Result<(), SalesError> {
-        sqlx::query(
-            "UPDATE sales_campaigns c SET \
-               opened = (\
-                 SELECT COUNT(*) FROM sales_campaign_recipients r \
-                 JOIN messages m ON m.id = r.message_id \
-                 WHERE r.campaign_id = c.id AND m.open_count > 0\
-               ), \
-               clicked = (\
-                 SELECT COUNT(*) FROM sales_campaign_recipients r \
-                 JOIN messages m ON m.id = r.message_id \
-                 WHERE r.campaign_id = c.id AND m.click_count > 0\
-               ) \
-             WHERE c.id = $1",
-        )
-        .bind(campaign_id)
-        .execute(&self.db)
-        .await
-        .map_err(|e| SalesError::Database(e.to_string()))?;
+        sqlx::query(RECONCILE_CAMPAIGN_STATS_SQL)
+            .bind(campaign_id)
+            .execute(&self.db)
+            .await
+            .map_err(|e| SalesError::Database(e.to_string()))?;
         Ok(())
     }
 
-    /// Dry-run a campaign: render templates and evaluate every dispatch
-    /// filter (suppression, frequency cap, sender-domain readiness) WITHOUT
-    /// enqueueing anything or stamping the send ledger. Operator safety net
-    /// and test seam.
-    ///
-    /// `prod` is the production dispatcher when wired — it provides sender
-    /// config and real unsubscribe links for the preview. Without it the
-    /// report still contains the recipient funnel counts.
-    pub async fn dry_run(
+    /// Recipient funnel counts for a campaign — one query, FILTERed
+    /// aggregates (shared by [`Self::dry_run`] reporting and the scheduler's
+    /// completion gate).
+    pub async fn recipient_funnel_counts(
         &self,
         tenant_id: &str,
         campaign_id: Uuid,
-        sample_limit: usize,
-        prod: Option<&crate::dispatcher::ProductionCampaignDispatcher>,
-    ) -> Result<serde_json::Value, SalesError> {
-        let row: Option<CampaignRow> = sqlx::query_as(
-            "SELECT id, tenant_id, name, template_id, audience, status, sent, opened, clicked, created_at FROM sales_campaigns WHERE id = $1 AND tenant_id = $2",
-        )
-        .bind(campaign_id)
-        .bind(tenant_id)
-        .fetch_optional(&self.db)
-        .await
-        .map_err(|e| SalesError::Database(e.to_string()))?;
-        let campaign = row
-            .and_then(|r| r.into_campaign().ok())
-            .ok_or(SalesError::CampaignNotFound(campaign_id))?;
-
-        // Recipient funnel counts (one query, FILTERed aggregates).
+    ) -> Result<RecipientFunnel, SalesError> {
         let funnel: (i64, i64, i64, i64, i64, i64) = sqlx::query_as(
             "SELECT \
                 COUNT(*), \
@@ -697,6 +720,57 @@ impl CampaignManager {
         .await
         .map_err(|e| SalesError::Database(e.to_string()))?;
         let (total, already_sent, suppressed_local, suppressed_platform, capped, due) = funnel;
+        Ok(RecipientFunnel {
+            total,
+            already_sent,
+            suppressed_local,
+            suppressed_platform,
+            frequency_capped: capped,
+            due,
+        })
+    }
+
+    /// Dry-run a campaign: render templates and evaluate every dispatch
+    /// filter (suppression, frequency cap, sender-domain readiness) WITHOUT
+    /// enqueueing anything or stamping the send ledger. Operator safety net
+    /// and test seam.
+    ///
+    /// `prod` is the production dispatcher when wired — it provides sender
+    /// config and real unsubscribe links for the preview. Without it the
+    /// report still contains the recipient funnel counts.
+    pub async fn dry_run(
+        &self,
+        tenant_id: &str,
+        campaign_id: Uuid,
+        sample_limit: usize,
+        prod: Option<&crate::dispatcher::ProductionCampaignDispatcher>,
+    ) -> Result<serde_json::Value, SalesError> {
+        let row: Option<CampaignRow> = sqlx::query_as(
+            "SELECT id, tenant_id, name, template_id, audience, status, sent, opened, clicked, created_at FROM sales_campaigns WHERE id = $1 AND tenant_id = $2",
+        )
+        .bind(campaign_id)
+        .bind(tenant_id)
+        .fetch_optional(&self.db)
+        .await
+        .map_err(|e| SalesError::Database(e.to_string()))?;
+        let campaign = row
+            .and_then(|r| r.into_campaign().ok())
+            .ok_or(SalesError::CampaignNotFound(campaign_id))?;
+
+        // Recipient funnel counts (shared query — see
+        // `recipient_funnel_counts`, also used by the scheduler's completion
+        // gate).
+        let funnel = self
+            .recipient_funnel_counts(tenant_id, campaign_id)
+            .await?;
+        let RecipientFunnel {
+            total,
+            already_sent,
+            suppressed_local,
+            suppressed_platform,
+            frequency_capped: capped,
+            due,
+        } = funnel;
 
         let mut warnings: Vec<String> = Vec::new();
 
@@ -1310,5 +1384,118 @@ mod tests {
             .dispatch("tenant-a", Uuid::new_v4(), "tmpl_1", &recipients)
             .await;
         assert!(result.is_err());
+    }
+
+    // ── F: sent-counter honesty in reconcile_campaign_stats ─────────────
+
+    /// The reconciliation must derive `sent` from the worker's 'sent' events
+    /// joined via the ledger message_id, and fall back to the stored
+    /// (enqueue-time) counter when no events exist — never blanket-zero it.
+    #[test]
+    fn reconcile_sql_counts_sent_events_with_enqueue_fallback() {
+        let sql = RECONCILE_CAMPAIGN_STATS_SQL;
+        // Delivered-truth join through the send ledger's message_id.
+        assert!(
+            sql.contains("JOIN sales_campaign_recipients r ON r.message_id::text = e.message_id"),
+            "sent must be counted from events joined via message_id"
+        );
+        assert!(
+            sql.contains("e.event_type = 'sent'"),
+            "only worker 'sent' events count"
+        );
+        // Fallback path: absent events keep the enqueue-time counter.
+        assert!(
+            sql.contains("ELSE c.sent END"),
+            "no events => keep the enqueue-time count"
+        );
+        // Opens/clicks reconciliation is preserved.
+        assert!(sql.contains("m.open_count > 0"));
+        assert!(sql.contains("m.click_count > 0"));
+    }
+
+    /// Integration (local Postgres): both reconciliation paths —
+    /// (1) events present → `sent` is rewritten to the events count;
+    /// (2) events absent → `sent` keeps the enqueue-time count.
+    #[ignore = "requires local PostgreSQL with the sales-autopilot schema"]
+    #[tokio::test]
+    async fn reconcile_sent_counter_follows_events_or_falls_back() {
+        let db = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&std::env::var("TEST_DATABASE_URL").unwrap_or_else(|_| {
+                "postgres://apexmail:apexmail@localhost:5432/apexmail".to_string()
+            }))
+            .await
+            .unwrap();
+        crate::routes::initialize_schema(&db).await.unwrap();
+
+        let manager = CampaignManager::new(10, db.clone());
+        let campaign = manager
+            .create_campaign("stats-f-test".into(), "stats".into(), "t".into(), "all".into())
+            .await
+            .unwrap();
+        manager
+            .add_recipients(
+                "stats-f-test",
+                campaign.id,
+                vec!["a@x.com".into(), "b@x.com".into(), "c@x.com".into()],
+            )
+            .await
+            .unwrap();
+        // Simulate three enqueues (dispatcher increments at enqueue time).
+        sqlx::query("UPDATE sales_campaigns SET sent = 3 WHERE id = $1")
+            .bind(campaign.id)
+            .execute(&db)
+            .await
+            .unwrap();
+
+        // Path 2 first: NO events yet — reconcile keeps the enqueue count.
+        manager.reconcile_campaign_stats(campaign.id).await.unwrap();
+        let sent: i64 =
+            sqlx::query_scalar("SELECT sent FROM sales_campaigns WHERE id = $1")
+                .bind(campaign.id)
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!(sent, 3, "no events => enqueue count is kept, not zeroed");
+
+        // Simulate the worker having recorded only TWO 'sent' events (the
+        // third row is still queued / bounced): delivered truth is 2.
+        let message_ids: Vec<Uuid> =
+            sqlx::query_scalar("UPDATE sales_campaign_recipients \
+                 SET sent_at = NOW(), message_id = gen_random_uuid() \
+                 WHERE campaign_id = $1 AND email IN ('a@x.com', 'b@x.com') RETURNING message_id")
+                .bind(campaign.id)
+                .fetch_all(&db)
+                .await
+                .unwrap();
+        assert_eq!(message_ids.len(), 2);
+        for mid in &message_ids {
+            sqlx::query(
+                "INSERT INTO events (id, tenant_id, message_id, event_type, recipient, timestamp) \
+                 VALUES ($1, $2, $3, 'sent', 'x', NOW())",
+            )
+            .bind(format!("evt_{}", uuid::Uuid::new_v4()))
+            .bind("stats-f-test")
+            .bind(mid.to_string())
+            .execute(&db)
+            .await
+            .unwrap();
+        }
+
+        // Path 1: events exist — sent is rewritten to the events count.
+        manager.reconcile_campaign_stats(campaign.id).await.unwrap();
+        let sent: i64 =
+            sqlx::query_scalar("SELECT sent FROM sales_campaigns WHERE id = $1")
+                .bind(campaign.id)
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!(sent, 2, "sent must reflect delivered truth from events");
+
+        sqlx::query("DELETE FROM sales_campaigns WHERE id = $1")
+            .bind(campaign.id)
+            .execute(&db)
+            .await
+            .unwrap();
     }
 }

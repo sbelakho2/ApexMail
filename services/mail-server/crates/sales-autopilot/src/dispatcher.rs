@@ -720,6 +720,19 @@ pub enum EnqueueOutcome {
     DuplicateIdempotency,
 }
 
+/// `email_queue` insert for campaign mail. `campaign_id` is set on the COLUMN
+/// (not just metadata) so the delivery worker attributes every event it
+/// records (sent/bounced) back to the campaign — see D.
+const CAMPAIGN_EMAIL_QUEUE_INSERT_SQL: &str = r#"
+            INSERT INTO email_queue (
+                id, message_id, tenant_id, domain_id, campaign_id, from_address, to_addresses, subject,
+                "from", "to", html, text, tags, metadata, headers, scheduled_at, priority, status, created_at, updated_at
+             ) VALUES (
+                $1::uuid, $2::uuid, $3, $4::uuid, $5::uuid, $6, ARRAY[$7], $8,
+                $6, $7, $9, $10, $11, $12, $13, $14, 5, 'pending', $15, $15
+             )
+        "#;
+
 /// The production dispatcher: enqueues campaign mail through the platform's
 /// own pipeline (messages + email_queue), mirroring api-server's REST send.
 #[derive(Debug, Clone)]
@@ -973,20 +986,17 @@ impl ProductionCampaignDispatcher {
         }
 
         // 4. `email_queue` insert (single-recipient row, mirrors the REST
-        //    per-recipient loop).
-        sqlx::query(
-            "INSERT INTO email_queue (
-                id, message_id, tenant_id, domain_id, from_address, to_addresses, subject,
-                \"from\", \"to\", html, text, tags, metadata, headers, scheduled_at, priority, status, created_at, updated_at
-             ) VALUES (
-                $1::uuid, $2::uuid, $3, $4::uuid, $5, ARRAY[$6], $7,
-                $5, $6, $8, $9, $10, $11, $12, $13, 5, 'pending', $14, $14
-             )",
-        )
+        //    per-recipient loop). `campaign_id` is set on the COLUMN (not
+        //    just metadata): the delivery worker reads
+        //    email_queue.campaign_id into every events row it records
+        //    (sent/bounced), which is what attributes engagement and bounce
+        //    side effects back to this campaign.
+        sqlx::query(CAMPAIGN_EMAIL_QUEUE_INSERT_SQL)
         .bind(Uuid::new_v4())
         .bind(message_id)
         .bind(tenant_id)
         .bind(&domain_id)
+        .bind(campaign_id)
         .bind(&from)
         .bind(recipient_email)
         .bind(&rendered.subject)
@@ -1723,5 +1733,25 @@ mod tests {
         assert!(reply_idempotency_key(id).len() <= 255);
         // Distinct inbox messages never share a key.
         assert_ne!(reply_idempotency_key(id), reply_idempotency_key(Uuid::new_v4()));
+    }
+
+    /// D: campaign attribution — the email_queue insert must set the
+    /// campaign_id COLUMN (bound as a UUID, position $5), because the
+    /// delivery worker reads email_queue.campaign_id into every events row
+    /// it records. Metadata-only attribution left worker events unattributed.
+    #[test]
+    fn campaign_queue_insert_sets_campaign_id_column() {
+        let sql = CAMPAIGN_EMAIL_QUEUE_INSERT_SQL;
+        assert!(
+            sql.contains("campaign_id"),
+            "the campaign_id column must be written"
+        );
+        assert!(
+            sql.contains("$5::uuid"),
+            "campaign_id is bound as a UUID in positional slot 5"
+        );
+        // The statement still mirrors the REST send path shape.
+        assert!(sql.contains("'pending'"));
+        assert!(sql.contains("ARRAY[$7]"));
     }
 }
