@@ -80,5 +80,68 @@ if sed '/^[[:space:]]*#/d' "$RENDERED" | grep -q '${'; then
   exit 1
 fi
 
+# ── Optional integrations: strip blocks whose credential is empty ───────────
+# Alertmanager REJECTS the whole config (and crash-loops the container) when
+# a receiver declares an empty PagerDuty routing key / OpsGenie API key, and
+# a Slack webhook with an empty path is undeliverable. Deployments that have
+# not configured these integrations must still boot: remove the receiver
+# blocks / entries whose credential rendered as empty.
+
+# strip_mapping_block <key> — delete every `<indent>key:` mapping and every
+# following line indented deeper than that key (the nested block).
+strip_mapping_block() {
+  _key="$1"
+  awk -v key="$_key" '
+    {
+      if (stripping) {
+        if ($0 ~ /^[[:space:]]*$/) { pending++; next }
+        match($0, /^[[:space:]]*/)
+        if (RLENGTH > indent) { pending = 0; next }
+        for (i = 0; i < pending; i++) print ""
+        pending = 0; stripping = 0
+      }
+      if ($0 ~ "^[[:space:]]+" key ":") {
+        match($0, /^[[:space:]]*/); indent = RLENGTH
+        stripping = 1; next
+      }
+      print
+    }' "$RENDERED" > "${RENDERED}.tmp" && mv "${RENDERED}.tmp" "$RENDERED"
+}
+
+# strip_empty_slack_webhooks — delete every `- url: <q>https://hooks.slack.com/services/<q>`
+# list entry (and its deeper-indented fields) whose webhook path rendered
+# empty. Entries with a real path keep their full URL and do not match.
+strip_empty_slack_webhooks() {
+  awk '
+    {
+      if (stripping) {
+        if ($0 ~ /^[[:space:]]*$/) { pending++; next }
+        match($0, /^[[:space:]]*/)
+        if (RLENGTH > indent) { pending = 0; next }
+        for (i = 0; i < pending; i++) print ""
+        pending = 0; stripping = 0
+      }
+      if (index($0, "- url: \047https://hooks.slack.com/services/\047") > 0) {
+        match($0, /^[[:space:]]*/); indent = RLENGTH
+        stripping = 1; next
+      }
+      print
+    }' "$RENDERED" > "${RENDERED}.tmp" && mv "${RENDERED}.tmp" "$RENDERED"
+}
+
+if [ -z "$(printenv PAGERDUTY_ROUTING_KEY 2>/dev/null || true)" ]; then
+  strip_mapping_block pagerduty_configs
+  echo "[alertmanager-render] PAGERDUTY_ROUTING_KEY unset — pagerduty_configs receivers stripped"
+fi
+if [ -z "$(printenv OPSGENIE_API_KEY 2>/dev/null || true)" ]; then
+  strip_mapping_block opsgenie_configs
+  echo "[alertmanager-render] OPSGENIE_API_KEY unset — opsgenie_configs receivers stripped"
+fi
+if [ -z "$(printenv SLACK_WEBHOOK_PATH 2>/dev/null || true)" ] || \
+   [ -z "$(printenv SLACK_WEBHOOK_PATH_LOW 2>/dev/null || true)" ]; then
+  strip_empty_slack_webhooks
+  echo "[alertmanager-render] empty SLACK_WEBHOOK_PATH[_LOW] — matching slack webhook entries stripped"
+fi
+
 echo "[alertmanager-render] config rendered at ${RENDERED}; starting alertmanager"
 exec /bin/alertmanager --config.file="$RENDERED" --storage.path="$STORAGE_PATH" "$@"

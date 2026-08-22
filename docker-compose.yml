@@ -830,13 +830,17 @@ services:
       - '--storage.tsdb.path=/prometheus'
       - '--storage.tsdb.retention.time=${PROMETHEUS_RETENTION:-15d}'
       - '--storage.tsdb.retention.size=${PROMETHEUS_RETENTION_SIZE:-20GB}'
-      # SECURITY (SEC-105): Lifecycle API disabled to prevent unauthenticated
-      # remote shutdown/reload. Use SIGHUP for config reloads if needed.
+      # SECURITY (SEC-105): the --web.enable-lifecycle flag is OMITTED
+      # entirely, which DISABLES the lifecycle API (no unauthenticated
+      # remote shutdown/reload). Prometheus boolean flags take no `=value`
+      # argument — the previous `--web.enable-lifecycle=false` made the
+      # container crash-loop with "unexpected false", and a bare
+      # `--web.enable-lifecycle` would have ENABLED the API. Use SIGHUP for
+      # config reloads if needed.
       # Note: listen-address is NOT restricted to localhost because Grafana
       # and other monitoring containers need network access to query Prometheus.
       # Host-side port binding is already restricted to 127.0.0.1 via the
       # ports mapping below.
-      - '--web.enable-lifecycle=false'
     ports:
       - "127.0.0.1:${PROMETHEUS_PORT:-9090}:9090"
     networks:
@@ -1125,6 +1129,12 @@ services:
       - '--config.file=/etc/blackbox_exporter/config.yml'
     networks:
       - apexmail_monitoring
+      # apexmail_backend lets the exporter run the INTERNAL presence probes
+      # (billing-service:4100/health, sales-autopilot:3010/health) that back
+      # the SalesAutopilotDown / BillingServiceDown alerts — see
+      # deploy/prometheus.yml (jobs blackbox-sales-internal /
+      # blackbox-billing-internal).
+      - apexmail_backend
     profiles:
       - monitoring
     logging: *default-logging

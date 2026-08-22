@@ -2,7 +2,7 @@
 
 > **Document Owner:** Infrastructure Team
 > **Last Updated:** 2026-05-11
-> **Related:** [`cache-governance.md`](../architecture/cache-governance.md), [`deploy/scripts/cache-warm.sh`](../../deploy/scripts/cache-warm.sh), [`deploy/helm/apexmail/templates/post-start-hook.yaml`](../../deploy/helm/apexmail/templates/post-start-hook.yaml)
+> **Related:** [`cache-governance.md`](../architecture/cache-governance.md), [`deploy/scripts/cache-warm.sh`](../../deploy/scripts/cache-warm.sh), [`deploy/DEPLOYMENT.md`](../../deploy/DEPLOYMENT.md)
 
 ## 1. Overview
 
@@ -215,9 +215,16 @@ pub async fn warm_db_query_cache(pool: &PgPool) -> Result<(), sqlx::Error> {
 
 ## 4. Deployment Hook Integration
 
-### 4.1 Kubernetes Post-Start Hook
+### 4.1 Post-deploy invocation (Docker Compose deployment)
 
-The post-start hook is defined in [`deploy/helm/apexmail/templates/post-start-hook.yaml`](../../deploy/helm/apexmail/templates/post-start-hook.yaml) and executes the cache warming script after the container starts.
+There is no Kubernetes post-start hook — ApexMail deploys as Docker Compose
+on a single host (see [`deploy/DEPLOYMENT.md`](../../deploy/DEPLOYMENT.md)).
+Run the cache warming script over SSH after a deploy completes (optionally
+wired into the tail of `deploy/scripts/deploy.sh` for the manual path):
+
+```sh
+ssh <hetzner-host> 'cd /opt/apexmail && bash deploy/scripts/cache-warm.sh'
+```
 
 ### 4.2 Cache Warming Script
 

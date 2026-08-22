@@ -507,7 +507,7 @@ Other: `dependabot.yml`, `pull_request_template.md`
 ### 9.4 Shell Scripts
 - `bootstrap.sh`, `dev-start.sh`, `poll_instance.sh` — Dev environment
 - `run-browser-smoke.sh`, `run-compose-smoke.sh`, `run-mail-server-tests.sh` — Test runners
-- `update-checksums.sh`, `validate-compose-secrets.sh` — Maintenance
+- `update-checksums.sh`, `validate-prod-env.sh` — Maintenance
 
 ### 9.5 Shared Library (`tools/lib/`)
 - `__init__.py`, `fix_utils.py`, `pricing.py` — Shared Python utilities

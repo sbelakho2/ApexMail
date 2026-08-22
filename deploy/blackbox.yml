@@ -37,6 +37,31 @@ modules:
       tls_config:
         insecure_skip_verify: false
       fail_if_not_ssl: true
+  # Internal (plain-HTTP) liveness probes for services that expose an
+  # unauthenticated GET /health on the compose networks but have no public
+  # vhost of their own (billing-service, sales-autopilot). Powers the
+  # presence-based SalesAutopilotDown / BillingServiceDown alerts.
+  http_internal_2xx:
+    prober: http
+    timeout: 5s
+    http:
+      method: GET
+      valid_status_codes: [200]
+      follow_redirects: false
+      preferred_ip_protocol: "ip4"
+  # The public sales unsubscribe route with a bogus token must answer 404
+  # (route matched, token invalid). 502/503 means sales-autopilot is down
+  # behind nginx — exactly the failure this probe exists to catch.
+  http_sales_unsubscribe_404:
+    prober: http
+    timeout: 5s
+    http:
+      method: GET
+      valid_status_codes: [404]
+      follow_redirects: false
+      preferred_ip_protocol: "ip4"
+      tls_config:
+        insecure_skip_verify: false
   http_api_email_send:
     prober: http
     timeout: 15s

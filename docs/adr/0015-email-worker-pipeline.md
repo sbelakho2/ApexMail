@@ -1,5 +1,14 @@
 # ADR 0015: Email Worker Pipeline Architecture
 
+> **Status note (2026-08): SUPERSEDED.** The queue backends and crate names
+> described here (`outbound-queue`, `smtp-edge`, the Redis-backed dedicated-IP
+> path) no longer match the codebase. Delivery is handled by the `worker`
+> binary (`services/mail-server/crates/worker-processors`) over the SES
+> transport, and the `smtp-edge` crate was removed (see
+> deploy/DEPLOYMENT.md § "Legacy / removed crates"). This ADR is retained as a
+> historical record of the 2026-03 decision — do not use it as a description
+> of the current pipeline.
+
 **Status:** Accepted  
 **Date:** 2026-03-15  
 **Updated:** 2026-05-10  

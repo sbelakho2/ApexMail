@@ -461,6 +461,41 @@ services:
         max_attempts: 5
 
   # ===========================================================================
+  # MIGRATOR (one-shot database migration job — runs BEFORE `up`)
+  # ===========================================================================
+  # The deploy-time migration gate: applies the sqlx migration chain embedded
+  # in the image (services/mail-server/migrations) and exits. Never started by
+  # `up` (profile `migrate` + restart: no) — deploy-hetzner.yml and deploy.sh
+  # run it explicitly before `docker compose up -d`:
+  #   docker compose ... --profile migrate run --rm migrator
+  # DATABASE_URL is assembled from DB_* + the postgres_password secret by the
+  # same entrypoint wrapper as every sibling service.
+  migrator:
+    image: ghcr.io/sbelakho2/apexmail/migrator:latest
+    profiles:
+      - migrate
+    restart: "no"
+    entrypoint: ["/bin/sh", "/opt/apexmail/entrypoint-wrapper.sh", "migrator"]
+    volumes:
+      - ./deploy/scripts/entrypoint-wrapper.sh:/opt/apexmail/entrypoint-wrapper.sh:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      RUST_LOG: info
+      DATABASE_URL: ""
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: ${POSTGRES_DB:-apexmail}
+      DB_USER: ${POSTGRES_USER:-apexmail}
+      DB_PASSWORD_FILE: /run/secrets/postgres_password
+    secrets:
+      - postgres_password
+    networks:
+      - apexmail_data_internal
+    logging: *default-logging
+
+  # ===========================================================================
   # STATUS SERVER (public status page + status API)
   # ===========================================================================
   # Runs the auth-server binary's /status, /status/api and /status/history

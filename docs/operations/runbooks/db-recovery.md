@@ -189,9 +189,16 @@
      "SELECT pg_is_in_recovery(), pg_last_wal_receive_lsn(), pg_last_wal_replay_lsn();"
    ```
 
-3. **Execute automated failover:**
+3. **Execute failover:**
+   The programmatic path is the `FailoverService` state machine in the `ha`
+   crate (`services/mail-server/crates/ha/src/failover.rs` — Redis-coordinated
+   lock + state, `pg_promote` under the lock). Manual equivalent on the
+   single-host compose deployment:
    ```bash
-   ./scripts/dr-failover.sh --execute --force
+   cd /opt/apexmail
+   docker compose -f docker-compose.yml -f docker-compose.prod.yml exec postgres \
+     psql -U apexmail -c "SELECT pg_promote();"
+   docker compose -f docker-compose.yml -f docker-compose.prod.yml restart api-server worker tracking mta
    ```
 
 4. **Manual promotion if auto-failover fails:**
@@ -238,9 +245,13 @@
    ```
 
 3. **Restore from backup (PITR):**
+   Decrypt + restore the newest encrypted dump taken before the corruption
+   window (backups live in the `postgres_backups` volume, produced by
+   deploy/hardening/scripts/postgres-backup-encrypt.sh):
    ```bash
-   # Provision new database cluster
-   ./scripts/dr-restore-test.sh --execute --pitr "2026-05-14 09:30:00 UTC"
+   cd /opt/apexmail
+   docker compose -f docker-compose.yml -f docker-compose.prod.yml exec postgres-backup sh -c \
+     "openssl enc -d -aes-256-cbc -pbkdf2 -in /backups/<dump>.sql.gz.enc -pass file:/run/secrets/backup_encryption_key | gunzip | psql -h postgres -U apexmail -d apexmail"
    ```
 
 4. **Validate restored data:**
@@ -332,7 +343,6 @@ curl -sf https://api.apexmail.ee/v1/health | jq '.status'
 ## Related
 
 - [Disaster Recovery & Backup Procedures](../disaster-recovery.md)
-- [DR Restore Test Script](../../scripts/dr-restore-test.sh)
-- [DR Failover Script](../../scripts/dr-failover.sh)
+- [Backup verification](../backup-verification.md)
 - [PostgreSQL migration faults](../../faults.md)
 - [Secret Rotation Runbook](../secret-rotation.md)

@@ -129,21 +129,6 @@ ENTRYPOINT ["/usr/bin/tini", "--", "billing-service"]
 CMD ["--listen", "0.0.0.0:4100"]
 
 # =============================================================================
-# Analytics Worker
-# =============================================================================
-FROM runtime-base AS analytics
-
-COPY --from=builder /app/target/release/analytics-worker /usr/local/bin/
-
-USER apexmail
-EXPOSE 3002
-
-HEALTHCHECK --interval=15s --timeout=3s --start-period=10s --retries=3 \
-    CMD ["sh", "-c", "nc -z 127.0.0.1 3002"]
-
-ENTRYPOINT ["/usr/bin/tini", "--", "analytics-worker"]
-
-# =============================================================================
 # MTA Server
 # =============================================================================
 FROM runtime-base AS mta
@@ -151,7 +136,9 @@ FROM runtime-base AS mta
 COPY --from=builder /app/target/release/mta-server /usr/local/bin/
 
 USER apexmail
-EXPOSE 25 587 465
+# 25 inbound, 587 submission (STARTTLS), 465 submission (implicit TLS),
+# 2525 VERP/DSN bounce receiver, 2526 ISP FBL (abuse/complaint) receiver.
+EXPOSE 25 587 465 2525 2526
 
 # mta-server binds 25 (inbound, STARTTLS) and 587 (submission) unconditionally.
 # The old probe targeted port 3003 which no service ever binds, marking the
@@ -169,29 +156,14 @@ FROM runtime-base AS imap-server
 COPY --from=builder /app/target/release/imap-server /usr/local/bin/
 
 USER apexmail
-EXPOSE 143 993
+# 143 (cleartext IMAP) is intentionally NOT exposed — IMAP is SSL-only on 993.
+EXPOSE 993
 
 HEALTHCHECK --interval=15s --timeout=5s --start-period=10s --retries=3 \
-    CMD ["sh", "-c", "nc -z 127.0.0.1 993 || nc -z 127.0.0.1 143"]
+    CMD ["sh", "-c", "nc -z 127.0.0.1 993"]
 
 ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["imap-server"]
-
-# =============================================================================
-# Template Renderer
-# =============================================================================
-FROM runtime-base AS template-renderer
-
-COPY --from=builder /app/target/release/template-renderer /usr/local/bin/
-
-USER apexmail
-EXPOSE 3005
-
-HEALTHCHECK --interval=15s --timeout=3s --start-period=10s --retries=3 \
-    CMD ["sh", "-c", "nc -z 127.0.0.1 3005"]
-
-ENTRYPOINT ["/usr/bin/tini", "--", "template-renderer"]
-CMD ["--listen", "0.0.0.0:3005"]
 
 # =============================================================================
 # Worker Processors
@@ -209,22 +181,6 @@ HEALTHCHECK --interval=15s --timeout=3s --start-period=10s --retries=3 \
 ENTRYPOINT ["/usr/bin/tini", "--", "worker"]
 
 # =============================================================================
-# Compliance Server
-# =============================================================================
-FROM runtime-base AS compliance
-
-COPY --from=builder /app/target/release/compliance-server /usr/local/bin/
-
-USER apexmail
-EXPOSE 3007
-
-HEALTHCHECK --interval=15s --timeout=3s --start-period=10s --retries=3 \
-    CMD ["sh", "-c", "nc -z 127.0.0.1 3007"]
-
-ENTRYPOINT ["/usr/bin/tini", "--", "compliance-server"]
-CMD ["--listen", "0.0.0.0:3007"]
-
-# =============================================================================
 # Enterprise Server
 # =============================================================================
 FROM runtime-base AS enterprise
@@ -239,22 +195,6 @@ HEALTHCHECK --interval=15s --timeout=3s --start-period=10s --retries=3 \
 
 ENTRYPOINT ["/usr/bin/tini", "--", "enterprise-server"]
 CMD ["--listen", "0.0.0.0:3008"]
-
-# =============================================================================
-# DevEx Service
-# =============================================================================
-FROM runtime-base AS devex
-
-COPY --from=builder /app/target/release/devex-service /usr/local/bin/
-
-USER apexmail
-EXPOSE 3009
-
-HEALTHCHECK --interval=15s --timeout=3s --start-period=10s --retries=3 \
-    CMD ["sh", "-c", "nc -z 127.0.0.1 3009"]
-
-ENTRYPOINT ["/usr/bin/tini", "--", "devex-service"]
-CMD ["--listen", "0.0.0.0:3009"]
 
 # =============================================================================
 # Observability Service
@@ -289,70 +229,6 @@ HEALTHCHECK --interval=15s --timeout=3s --start-period=10s --retries=3 \
 ENTRYPOINT ["/usr/bin/tini", "--", "auth-server"]
 
 # =============================================================================
-# HA Server
-# =============================================================================
-FROM runtime-base AS ha
-
-COPY --from=builder /app/target/release/ha-server /usr/local/bin/
-
-USER apexmail
-EXPOSE 3012
-
-HEALTHCHECK --interval=15s --timeout=3s --start-period=10s --retries=3 \
-    CMD ["sh", "-c", "nc -z 127.0.0.1 3012"]
-
-ENTRYPOINT ["/usr/bin/tini", "--", "ha-server"]
-CMD ["--listen", "0.0.0.0:3012"]
-
-# =============================================================================
-# Isolation Server
-# =============================================================================
-FROM runtime-base AS isolation
-
-COPY --from=builder /app/target/release/isolation-server /usr/local/bin/
-
-USER apexmail
-EXPOSE 3013
-
-HEALTHCHECK --interval=15s --timeout=3s --start-period=10s --retries=3 \
-    CMD ["sh", "-c", "nc -z 127.0.0.1 3013"]
-
-ENTRYPOINT ["/usr/bin/tini", "--", "isolation-server"]
-CMD ["--listen", "0.0.0.0:3013"]
-
-# =============================================================================
-# Edge Cases Server
-# =============================================================================
-FROM runtime-base AS edge-cases
-
-COPY --from=builder /app/target/release/edge-cases-server /usr/local/bin/
-
-USER apexmail
-EXPOSE 3014
-
-HEALTHCHECK --interval=15s --timeout=3s --start-period=10s --retries=3 \
-    CMD ["sh", "-c", "nc -z 127.0.0.1 3014"]
-
-ENTRYPOINT ["/usr/bin/tini", "--", "edge-cases-server"]
-CMD ["--listen", "0.0.0.0:3014"]
-
-# =============================================================================
-# AI Embeddings
-# =============================================================================
-FROM runtime-base AS ai-embeddings
-
-COPY --from=builder /app/target/release/ai-embeddings /usr/local/bin/
-
-USER apexmail
-EXPOSE 3016
-
-HEALTHCHECK --interval=15s --timeout=3s --start-period=10s --retries=3 \
-    CMD ["sh", "-c", "nc -z 127.0.0.1 3016"]
-
-ENTRYPOINT ["/usr/bin/tini", "--", "ai-embeddings"]
-CMD ["--listen", "0.0.0.0:3016"]
-
-# =============================================================================
 # Sales Autopilot
 # =============================================================================
 FROM runtime-base AS sales-autopilot
@@ -360,10 +236,26 @@ FROM runtime-base AS sales-autopilot
 COPY --from=builder /app/target/release/sales-autopilot /usr/local/bin/
 
 USER apexmail
-EXPOSE 3017
+# The binary reads SALES_PORT (default 3010) — no CLI flags. Port 3010 is the
+# nginx upstream (api.apexmail.ee/sales-api/) and the healthcheck target.
+EXPOSE 3010
 
 HEALTHCHECK --interval=15s --timeout=3s --start-period=10s --retries=3 \
-    CMD ["sh", "-c", "nc -z 127.0.0.1 3017"]
+    CMD ["sh", "-c", "nc -z 127.0.0.1 3010"]
 
 ENTRYPOINT ["/usr/bin/tini", "--", "sales-autopilot"]
-CMD ["--listen", "0.0.0.0:3017"]
+
+# =============================================================================
+# Migrator (one-shot database migration job — runs BEFORE `compose up`)
+# =============================================================================
+# Applies services/mail-server/migrations via sqlx::migrate!. Run as
+#   docker compose ... --profile migrate run --rm migrator
+# (see deploy/DEPLOYMENT.md § "Database migrations"). DATABASE_URL is
+# assembled from DB_* + the postgres_password secret by entrypoint-wrapper.sh.
+FROM runtime-base AS migrator
+
+COPY --from=builder /app/target/release/migrator /usr/local/bin/
+
+USER apexmail
+
+ENTRYPOINT ["/usr/bin/tini", "--", "migrator"]

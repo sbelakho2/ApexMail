@@ -62,6 +62,70 @@ scrape_configs:
     metrics_path: '/metrics'
     scrape_interval: 15s
 
+  # ── Presence probes: sales-autopilot + billing-service ────────────────────
+  # Neither service exposes a Prometheus /metrics endpoint today (see the gap
+  # note below), so availability is asserted with blackbox presence probes
+  # against their unauthenticated GET /health routes instead of `up` scrapes.
+  # Public path through nginx (full edge): the unsubscribe route with a bogus
+  # token must answer 404 — a 502/503 means sales-autopilot is down.
+  - job_name: 'blackbox-sales-unsubscribe'
+    metrics_path: /probe
+    params:
+      module: [http_sales_unsubscribe_404]
+    static_configs:
+      - targets:
+          - https://api.apexmail.ee/sales-api/u/prometheus-probe
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target
+      - target_label: __address__
+        replacement: blackbox-exporter:9115
+    scrape_interval: 30s
+
+  # Internal path (compose network, bypasses nginx): GET /health must be 200.
+  - job_name: 'blackbox-sales-internal'
+    metrics_path: /probe
+    params:
+      module: [http_internal_2xx]
+    static_configs:
+      - targets:
+          - http://sales-autopilot:3010/health
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target
+      - target_label: __address__
+        replacement: blackbox-exporter:9115
+    scrape_interval: 30s
+
+  # billing-service is internal-only (no public vhost): presence via its
+  # internal GET /health on apexmail_backend.
+  - job_name: 'blackbox-billing-internal'
+    metrics_path: /probe
+    params:
+      module: [http_internal_2xx]
+    static_configs:
+      - targets:
+          - http://billing-service:4100/health
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target
+      - target_label: __address__
+        replacement: blackbox-exporter:9115
+    scrape_interval: 30s
+
+  # ── METRICS ENDPOINT GAP NOTE (do not invent scrape jobs) ─────────────────
+  # The following services currently expose NO Prometheus /metrics endpoint
+  # and are therefore only covered by the presence probes above (sales,
+  # billing) or by their compose healthchecks (status-server, marketing):
+  #   - sales-autopilot (:3010) — emits metrics::counter! calls but never
+  #     installs a Prometheus exporter; add metrics-exporter-prometheus
+  #     (workspace dep already exists) + a dedicated port, then add a job.
+  #   - billing-service (:4100) — depends on metrics-exporter-prometheus but
+  #     never installs the exporter; same treatment.
+  #   - status-server / auth-server (:3000) — no metrics instrumentation.
+  #   - marketing (nginx-alpine) — no stub_status location in its nginx.conf;
+  #     enable one on a dedicated internal port before scraping.
+
   - job_name: 'postgres'
     static_configs:
       - targets: ['postgres-exporter:9187']

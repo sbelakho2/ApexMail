@@ -1,9 +1,22 @@
 # Migration lineage decision (2026-08-22)
 
-**Canonical: this directory.** Applied with `sqlx migrate run --source
-services/mail-server/migrations`. `tools/migrations/` is a legacy archive
-(see its README) — never mounted, never extended; schema changes land here
-only.
+**Canonical: this directory.** Applied in every deploy path by the
+**`migrator`** one-shot job (`services/mail-server/crates/migrator`, which
+embeds this directory via `sqlx::migrate!` at build time):
+
+```sh
+# What deploy-hetzner.yml ("Run database migrations") and deploy.sh (Step 5) run:
+docker compose -f docker-compose.yml -f docker-compose.prod.yml \
+  --env-file .env --profile migrate run --rm migrator
+```
+
+The CI publisher (`.github/workflows/deploy.yml`) builds the
+`ghcr.io/<ns>/migrator` image in lockstep with the service images, so the
+embedded chain always matches the deployed binaries. The manual
+`sqlx migrate run --source services/mail-server/migrations` invocation with a
+`DATABASE_URL` remains the fallback for operators with direct database
+access. `tools/migrations/` is a legacy archive (see its README) — never
+mounted, never extended; schema changes land here only.
 
 ## The lineage convergence
 

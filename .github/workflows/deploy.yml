@@ -135,6 +135,7 @@ jobs:
           canonical=(
             api-server mta imap-server mailstore worker enterprise tracking-service
             observability marketing status-server billing-service sales-autopilot
+            migrator
           )
           # Third-party images that are allowed as-is (pinned upstream images).
           allowed_third_party=(
@@ -239,6 +240,14 @@ jobs:
       # Build the marketing site first (cheap, no Rust toolchain) so the
       # public website still publishes even if the larger Rust builds below
       # exceed the job timeout-minutes.
+      - name: Check marketing output for leaked template syntax
+        # Cheap pre-build gate over the committed public/ output: fails the
+        # build when raw Tera/Zola syntax ({{ }}, {% %}) leaked into the
+        # generated HTML instead of rendering.
+        run: |
+          set -euo pipefail
+          bash deploy/scripts/check-template-leaks.sh apps/marketing-zola/public
+
       - name: Build and push marketing site image
         uses: docker/build-push-action@67a2d409c0a876cbe6b11854e3e25193efe4e62d # v6.12.0
         with:
@@ -369,6 +378,25 @@ jobs:
           push: true
           target: sales-autopilot
           tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/sales-autopilot:${{ github.sha }},${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/sales-autopilot:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: mode=max
+          attestations: |
+            type=sbom,enabled=true
+            type=provenance,enabled=true
+
+      # Migrator — the one-shot migration job deploy-hetzner.yml runs BEFORE
+      # `docker compose up -d` (profile `migrate`, run --rm). It must be
+      # rebuilt in lockstep with the services so the embedded migration set
+      # always matches the images being deployed.
+      - name: Build and push migrator image
+        uses: docker/build-push-action@67a2d409c0a876cbe6b11854e3e25193efe4e62d # v6.12.0
+        with:
+          context: .
+          file: services/mail-server/Dockerfile
+          push: true
+          target: migrator
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/migrator:${{ github.sha }},${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/migrator:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
           provenance: mode=max

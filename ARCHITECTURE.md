@@ -1,7 +1,8 @@
 # ApexMail Architecture — Single Source of Truth
 
 > **This document is the authoritative reference for the ApexMail production
-> architecture.** All other docs (README, DEPLOYMENT.md, HETZNER_DEPLOY.md)
+> architecture.** All other docs (README, DEPLOYMENT.md and its
+> redirect deploy/scripts/HETZNER_DEPLOY.md)
 > defer to this file. If something here contradicts another doc, this doc wins.
 
 ## Quick Reference
@@ -29,13 +30,17 @@ processes, no systemd services, no Kubernetes.
 | `apexmail-nginx-1` | `nginx:1.27-alpine` | 80, 443 | Reverse proxy, TLS termination, autoconfig |
 | `apexmail-api-server-1` | `…/api-server:latest` | 3000 (internal) | REST API + SSR web UI (Axum) |
 | `apexmail-marketing-1` | `…/marketing:latest` | 8080 (internal) | Marketing site (Zola static) |
-| `apexmail-mta-1` | `…/mta:latest` | 25, 587, 465 | SMTP inbound + submission (STARTTLS) |
+| `apexmail-mta-1` | `…/mta:latest` | 25, 587, 465, 2525, 2526 | SMTP inbound + submission (STARTTLS/implicit TLS), VERP bounce + ISP FBL receivers |
 | `apexmail-imap-server-1` | `…/imap-server:latest` | 993 | IMAPS mail access |
 | `apexmail-mailstore-1` | `…/mailstore:latest` | 50051 (internal) | gRPC mail storage backend |
 | `apexmail-worker-1` | `…/worker:latest` | 9093 (metrics, internal) | Background job processor |
 | `apexmail-enterprise-1` | `…/enterprise:latest` | 3008 (internal) | Enterprise features |
 | `apexmail-tracking-1` | `…/tracking-service:latest` | 3001 (internal) | Email open/click tracking |
 | `apexmail-status-server-1` | `…/status-server:latest` | 3000 (internal) | Status page + status API |
+| `apexmail-sales-autopilot-1` | `…/sales-autopilot:latest` | 3010 (internal) | Internal sales engine (CRM, campaigns, inbox); public only via `api.apexmail.ee/sales-api/u/` |
+| `apexmail-billing-service-1` | `…/billing-service:latest` | 4100 (internal) | Plans, metering, invoices, Stripe webhooks |
+| `apexmail-observability` | `…/observability:latest` | 4400 (internal, monitoring profile) | Metrics/alerts/SLO aggregation + Redis eviction monitoring |
+| `apexmail-postgres-backup-1` | `prodrigestivill/postgres-backup-local:16-alpine` | — | Nightly encrypted pg_dump backups (deploy/hardening/scripts/postgres-backup-encrypt.sh) |
 | `apexmail-postgres` | `postgres:16.8-alpine` | 5432 (localhost) | Primary database |
 | `apexmail-redis` | `redis:7.4-alpine` | 6379 (localhost) | Cache, queues, KiwiCaptcha challenges |
 | `apexmail-clickhouse` | `clickhouse:24.8-alpine` | 8123, 9000 (localhost) | Analytics |
@@ -246,7 +251,7 @@ deploy-hetzner.yml (GitHub Actions)
   └── verify health
 ```
 
-**For manual deploys / hotfixes**, see `deploy/scripts/HETZNER_DEPLOY.md`.
+**For manual deploys / hotfixes**, see `deploy/DEPLOYMENT.md` (§ Manual fallback).
 
 ---
 
@@ -262,9 +267,9 @@ deploy-hetzner.yml (GitHub Actions)
 | `deploy/scripts/certbot-renew-loop.sh` | Auto-renewal loop (runs in certbot container; installs the renewal deploy hook) |
 | `deploy/scripts/entrypoint-wrapper.sh` | Container secret env bridging |
 | `deploy/scripts/hetzner-bootstrap.sh` | One-time host setup |
-| `deploy/scripts/health-check.sh` | Status page health probes |
+| `deploy/scripts/verify-deployment.sh` | Post-deploy cache-coherence verification (legal pages) |
 | `deploy/DEPLOYMENT.md` | CI/CD pipeline reference |
-| `deploy/scripts/HETZNER_DEPLOY.md` | Operator deploy guide |
+| `deploy/scripts/HETZNER_DEPLOY.md` | Redirect → `deploy/DEPLOYMENT.md` (merged) |
 | `deploy/rollback-plan.md` | Rollback procedure (SHA-based) |
 | `ARCHITECTURE.md` | **This file** — the single source of truth |
 
@@ -279,7 +284,7 @@ deploy-hetzner.yml (GitHub Actions)
 | Path | Why |
 |---|---|
 | `Makefile` | Manual/emergency fallback (`deploy/scripts/deploy.sh` builds images on the host). Canonical deployment is CI: `deploy.yml` + `deploy-hetzner.yml`. |
-| `deploy/monitoring/` | Standalone status-page container not in the prod compose stack |
+| `deploy/monitoring/` | Alert rule fragments + Grafana dashboards + incident policy. (The legacy standalone status-page container — status_server.py, its Dockerfile, systemd unit, nginx confs and probe scripts — was removed; the prod status surface is the `status-server` compose service.) |
 
 ---
 

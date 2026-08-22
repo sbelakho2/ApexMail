@@ -85,8 +85,13 @@ receivers:
       - url: 'http://observability:4400/alerts'
         send_resolved: true
         http_config:
-          headers:
-            X-Api-Key: '${INTERNAL_SERVICE_TOKEN}'
+          # Bearer auth instead of a custom X-Api-Key header: Alertmanager's
+          # http_config has never supported custom headers, and the
+          # observability service accepts EITHER x-api-key OR
+          # Authorization: Bearer for the same shared token.
+          authorization:
+            type: Bearer
+            credentials: '${INTERNAL_SERVICE_TOKEN}'
     email_configs:
       - to: '${ALERT_EMAIL_CRITICAL}'
         send_resolved: true
@@ -102,8 +107,13 @@ receivers:
       - url: 'http://observability:4400/alerts'
         send_resolved: true
         http_config:
-          headers:
-            X-Api-Key: '${INTERNAL_SERVICE_TOKEN}'
+          # Bearer auth instead of a custom X-Api-Key header: Alertmanager's
+          # http_config has never supported custom headers, and the
+          # observability service accepts EITHER x-api-key OR
+          # Authorization: Bearer for the same shared token.
+          authorization:
+            type: Bearer
+            credentials: '${INTERNAL_SERVICE_TOKEN}'
     email_configs:
       - to: '${ALERT_EMAIL_WARNING}'
         send_resolved: true
@@ -118,8 +128,13 @@ receivers:
       - url: 'http://observability:4400/alerts'
         send_resolved: true
         http_config:
-          headers:
-            X-Api-Key: '${INTERNAL_SERVICE_TOKEN}'
+          # Bearer auth instead of a custom X-Api-Key header: Alertmanager's
+          # http_config has never supported custom headers, and the
+          # observability service accepts EITHER x-api-key OR
+          # Authorization: Bearer for the same shared token.
+          authorization:
+            type: Bearer
+            credentials: '${INTERNAL_SERVICE_TOKEN}'
 
   # ── Default fallback ──
   - name: default
@@ -127,5 +142,10 @@ receivers:
       - url: 'http://observability:4400/alerts'
         send_resolved: true
         http_config:
-          headers:
-            X-Api-Key: '${INTERNAL_SERVICE_TOKEN}'
+          # Bearer auth instead of a custom X-Api-Key header: Alertmanager's
+          # http_config has never supported custom headers, and the
+          # observability service accepts EITHER x-api-key OR
+          # Authorization: Bearer for the same shared token.
+          authorization:
+            type: Bearer
+            credentials: '${INTERNAL_SERVICE_TOKEN}'

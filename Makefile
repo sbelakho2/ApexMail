@@ -21,6 +21,10 @@
 #                                          whatever is on the server)
 #   make deploy-restart                 — just restart containers (no rebuild)
 #   make verify                         — check live endpoints
+#   make verify-env ENV_FILE=.env.production
+#                                       — validate an env file against the
+#                                          compose ${VAR:?} contract (same
+#                                          gate deploy-hetzner.yml runs)
 #
 # Server-local state NEVER touched by these targets:
 #   .env, secrets/, certs/ (not in SYNC_DIRS), target/ (Docker build cache),
@@ -55,7 +59,9 @@ RSYNC_SSH   := -e "ssh -o StrictHostKeyChecking=accept-new"
 
 # Code directories that get synced. Each rsync uses --delete so the server
 # has EXACTLY the current repo state — no stale files, no old binaries.
-SYNC_DIRS := services/mail-server packages/kiwicaptcha packages/kiwicaptcha-wasm apps/marketing-zola deploy
+# NOTE: docs/ is synced because services/mail-server/Dockerfile COPYs it into
+# the builder stages (COPY docs /app/docs).
+SYNC_DIRS := services/mail-server packages/kiwicaptcha packages/kiwicaptcha-wasm apps/marketing-zola docs deploy
 SYNC_FILES := docker-compose.yml docker-compose.prod.yml
 
 # Map service names to the code directories they depend on (for partial deploys).
@@ -71,7 +77,7 @@ SERVICE_DEPS_marketing     := apps/marketing-zola
 SERVICE_DEPS_tracking      := deploy/Dockerfile.tracking services/mail-server/crates/tracking-service
 SERVICE_DEPS_status-server := services/mail-server/crates/auth-server services/mail-server/Cargo.toml
 
-.PHONY: deploy deploy-service deploy-quick deploy-restart verify marketing-check-kiwi
+.PHONY: deploy deploy-service deploy-quick deploy-restart verify verify-env marketing-check-kiwi
 
 ## deploy: Full deploy — sync all code + rebuild all images + restart
 deploy:
@@ -149,17 +155,56 @@ deploy-restart:
 	$(SSH) 'cd /opt/apexmail && bash deploy/scripts/deploy.sh --no-build'
 
 ## verify: Check that all live endpoints respond correctly
+##
+## Covers the canonical production surfaces: the api/track/status/enterprise
+## health endpoints, the sales-autopilot unsubscribe route (404 on a bogus
+## token — anything else, notably 502, means the service is down behind
+## nginx), SMTP TLS on 465 and the bounce/FBL ports 2525/2526, plus the
+## cache-coherence spot check from deploy/scripts/verify-deployment.sh.
 verify:
-	@echo "Checking live endpoints..."
+	@echo "Checking site + admin..."
 	@curl -sI https://apexmail.ee 2>&1 | head -1
 	@curl -sI https://app.apexmail.ee 2>&1 | head -1
 	@curl -sI https://admin.apexmail.ee 2>&1 | head -1
+	@echo "Checking service health endpoints..."
+	@curl -s -o /dev/null -w 'api      /health -> %{http_code}\n' https://api.apexmail.ee/health
+	@curl -s -o /dev/null -w 'track    /health -> %{http_code}\n' https://track.apexmail.ee/health
+	@curl -s -o /dev/null -w 'status   /status  -> %{http_code}\n' https://status.apexmail.ee/status
+	@curl -s -o /dev/null -w 'enterprise /health -> %{http_code}\n' https://enterprise.apexmail.ee/health
+	@echo "Checking sales-api unsubscribe route (expect 404, NOT 502)..."
+	@code=$$(curl -s -o /dev/null -w '%{http_code}' https://api.apexmail.ee/sales-api/u/verify-probe); \
+		if [ "$$code" = "404" ]; then \
+			echo "sales-api /u/ -> 404 OK (sales-autopilot answering behind nginx)"; \
+		else \
+			echo "sales-api /u/ -> $$code (expected 404; 502/503 = sales-autopilot DOWN)"; \
+		fi
 	@echo "Checking mail TLS..."
 	@echo Q | timeout 5 openssl s_client -connect mail.apexmail.ee:993 2>&1 | grep "verify return" | tail -1
 	@echo Q | timeout 5 openssl s_client -connect mail.apexmail.ee:587 -starttls smtp 2>&1 | grep "verify return" | tail -1
+	@echo Q | timeout 5 openssl s_client -connect mail.apexmail.ee:465 2>&1 | grep "verify return" | tail -1
+	@echo "Checking SMTP ports 2525/2526 (bounce + FBL)..."
+	@for port in 2525 2526; do \
+		nc -z -w3 mail.apexmail.ee $$port 2>/dev/null && echo "  :$$port OPEN" || echo "  :$$port CLOSED"; \
+	done
 	@echo "Checking autoconfig..."
 	@curl -s http://autoconfig.apexmail.ee/mail/config-v1.1.xml | head -1
+	@echo "Running cache-coherence check (deploy/scripts/verify-deployment.sh)..."
+	@bash deploy/scripts/verify-deployment.sh https://apexmail.ee || echo "verify-deployment: see output above"
 	@echo "Done."
+
+## verify-env: Validate an environment file against the compose contract
+##
+## Derives the required variable set straight out of docker-compose*.yml
+## (${:?} guards) and fails when any value is missing or still a documented
+## placeholder — the same check deploy-hetzner.yml runs as an early gate
+## against APEXMAIL_PROD_ENV. Default file: .env.production.
+verify-env:
+	@if [ -z "$(ENV_FILE)" ]; then \
+		if [ -f .env.production ]; then ENV_FILE=.env.production; \
+		elif [ -f .env ]; then echo "note: falling back to .env (set ENV_FILE to override)"; ENV_FILE=.env; \
+		else echo "Usage: make verify-env ENV_FILE=.env.production"; exit 1; fi; \
+	fi; \
+	bash tools/validate-prod-env.sh "$$ENV_FILE"
 
 ## marketing-check-kiwi: Verify no KiwiCaptcha references in marketing source
 ##

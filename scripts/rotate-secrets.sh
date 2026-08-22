@@ -1,46 +1,44 @@
 #!/bin/bash
 # ==============================================================================
-# ApexMail Automated Secret Rotation Script
+# ApexMail Automated Secret Rotation Script (Docker Compose deployment)
 # ==============================================================================
-# Performs zero-downtime rotation of all secrets following the rotation schedule
-# and dual-key overlap pattern documented in:
+# Performs rotation of the secrets rendered on the production host by
+# .github/workflows/deploy-hetzner.yml, following the rotation schedule and
+# dual-key overlap pattern documented in:
 #   docs/operations/secret-rotation.md
 #
-# DEPLOYMENT NOTE (audit M): production ApexMail runs on Docker Compose on a
-# single Hetzner host — NOT Kubernetes. The kubectl paths below are legacy
-# scaffolding kept for a possible k8s future and are UNUSED for the current
-# compose deployment. The compose equivalent of each step:
-#   - "kubectl get/patch secret"  -> edit /opt/apexmail/.env + re-run the
-#     render step of .github/workflows/deploy-hetzner.yml
-#     ("Render docker secret files from .env"), then
-#   - "kubectl rollout restart"   -> docker compose ... up -d --force-recreate
-#     <service> (see deploy/DEPLOYMENT.md)
+# DEPLOYMENT MODEL (audit M): production ApexMail runs on Docker Compose on a
+# single Hetzner host. Secrets live as FILES under the paths named by the
+# PROD_*_FILE variables in /opt/apexmail/.env (rendered by the deploy
+# workflow). This script rotates those files and recreates the consuming
+# services with `docker compose up -d --force-recreate`. There is no
+# Kubernetes and no kubectl path anymore.
 #
 # Rotation Schedule:
-#   - JWT signing keys:           Every 90 days
-#   - API key hash secret:        Every 90 days
-#   - DKIM signing keys:          Every 180 days
-#   - Database credentials:        Every 180 days
-#   - Master encryption key:       Every 365 days
+#   - JWT signing keys:                    Every 90 days
+#   - API key hash secret:                 Every 90 days
+#   - DKIM signing keys:                   Every 180 days
+#   - Database credentials:                Every 180 days
+#   - Master encryption key (DKIM KEK):    Every 365 days
 #
-# Usage:
+# Usage (on the production host, or via SSH):
 #   ./scripts/rotate-secrets.sh                          # Interactive menu
 #   ./scripts/rotate-secrets.sh --list                   # List secret ages
 #   ./scripts/rotate-secrets.sh --jwt                    # Rotate JWT keys only
 #   ./scripts/rotate-secrets.sh --api-key-hash           # Rotate API key hash secret
 #   ./scripts/rotate-secrets.sh --dkim                   # Rotate DKIM signing keys
-#   ./scripts/rotate-secrets.sh --db-credentials          # Rotate database credentials
-#   ./scripts/rotate-secrets.sh --master-key              # Rotate master encryption key
+#   ./scripts/rotate-secrets.sh --db-credentials         # Rotate database credentials
+#   ./scripts/rotate-secrets.sh --master-key             # Rotate master encryption key
 #   ./scripts/rotate-secrets.sh --all                    # Rotate all eligible secrets
-#   ./scripts/rotate-secrets.sh --validate                # Validate current secrets
-#   ./scripts/rotate-secrets.sh --rollback                # Roll back last rotation
+#   ./scripts/rotate-secrets.sh --validate               # Validate current secrets
+#   ./scripts/rotate-secrets.sh --rollback               # Roll back last rotation
+#   ./scripts/rotate-secrets.sh --dry-run --jwt          # Show what would happen
 #
 # Requirements:
-#   - kubectl configured with cluster access (k8s deployments only — see note)
+#   - docker compose on the production host, /opt/apexmail/.env present
 #   - openssl, jq
-#   - Access to Kubernetes secrets in apexmail namespace
 #
-# SECURITY (audit M): this script never prints secret VALUES — only key
+# SECURITY (audit M): this script never prints secret VALUES — only file
 # names, ages and rotation status. The plaintext backup it takes before
 # rotating lives in a 0700 directory with 0600 files and is removed as soon
 # as a rollback restores it (rotate manually with `shred -u` if you abort).
@@ -48,57 +46,86 @@
 
 set -euo pipefail
 
-# ── Configuration ──────────────────────────────────────────────────────────────
+# ── Configuration ─────────────────────────────────────────────────────────────
+DEPLOY_DIR="${DEPLOY_DIR:-/opt/apexmail}"
+ENV_FILE="${ENV_FILE:-$DEPLOY_DIR/.env}"
+COMPOSE_FILES="-f docker-compose.yml -f docker-compose.prod.yml"
+BACKUP_DIR="${BACKUP_DIR:-/tmp/apexmail-secret-rotation}"
+TIMESTAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 
-NAMESPACE="apexmail"
-SECRET_NAME="apexmail-secrets"
-BACKUP_DIR="/tmp/apexmail-secret-backups"
-TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'; NC='\033[0m'
+log_step()  { echo -e "\n${CYAN}━━ $* ━━${NC}"; }
+log_info()  { echo -e "${GREEN}✓${NC} $*"; }
+log_warn()  { echo -e "${YELLOW}⚠${NC} $*"; }
+log_error() { echo -e "${RED}✗${NC} $*" >&2; }
+log_detail(){ echo -e "  $*"; }
 
-# Rotation windows (for age validation)
-JWT_ROTATION_DAYS=90
-API_KEY_HASH_ROTATION_DAYS=90
-DKIM_ROTATION_DAYS=180
-DB_CREDENTIALS_ROTATION_DAYS=180
-MASTER_KEY_ROTATION_DAYS=365
+# ── .env / rendered-secret-file helpers ───────────────────────────────────────
+# The PROD_*_FILE variables in .env name the on-host secret files; the
+# matching plain variables hold the values the deploy workflow rendered from.
 
-# ── Colors ─────────────────────────────────────────────────────────────────────
+env_value() { # env_value <VAR> -> value (empty when unset)
+    grep -E "^${1}=" "$ENV_FILE" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d '"' || true
+}
 
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-CYAN='\033[0;36m'
-NC='\033[0m'
+env_file_path() { # env_file_path <PROD_*_FILE var> -> rendered file path
+    env_value "$1"
+}
 
-log_info()    { echo -e "${GREEN}[INFO]${NC}  $*"; }
-log_warn()    { echo -e "${YELLOW}[WARN]${NC}  $*"; }
-log_error()   { echo -e "${RED}[ERROR]${NC} $*"; }
-log_step()    { echo -e "${BLUE}[STEP]${NC}  $*"; }
-log_detail()  { echo -e "${CYAN}[DETAIL]${NC} $*"; }
+secret_file() { # secret_file <plain value VAR> -> path of its rendered file
+    local filevar="PROD_${1}_FILE"
+    # The two JWT PEM secrets break the PROD_<VAR>_FILE naming pattern
+    # (their .env keys drop the _PEM suffix).
+    case "$1" in
+        JWT_PRIVATE_KEY_PEM) filevar="PROD_JWT_PRIVATE_KEY_FILE" ;;
+        JWT_PUBLIC_KEY_PEM)  filevar="PROD_JWT_PUBLIC_KEY_FILE" ;;
+    esac
+    env_file_path "$filevar"
+}
+
+read_secret() { # read_secret <plain value VAR> -> file contents
+    local f
+    f="$(secret_file "$1")"
+    [[ -n "$f" && -f "$f" ]] && cat "$f" || true
+}
+
+write_secret() { # write_secret <plain value VAR> <new value>
+    local f
+    f="$(secret_file "$1")"
+    if [[ -z "$f" ]]; then
+        log_error "PROD_${1}_FILE is not defined in $ENV_FILE — cannot rotate $1"
+        return 1
+    fi
+    umask 177
+    printf '%s' "$2" > "$f"
+    chmod 600 "$f"
+}
+
+compose() {
+    (cd "$DEPLOY_DIR" && docker compose $COMPOSE_FILES --env-file "$ENV_FILE" "$@")
+}
+
+recreate_services() { # recreate_services <service...>
+    log_info "Recreating: $*"
+    compose up -d --force-recreate "$@"
+}
+
+check_prereqs() {
+    [[ -f "$ENV_FILE" ]] || { log_error "$ENV_FILE not found (set ENV_FILE or run on the production host)"; exit 1; }
+    command -v docker >/dev/null || { log_error "docker is required"; exit 1; }
+    command -v openssl >/dev/null || { log_error "openssl is required"; exit 1; }
+}
 
 usage() {
-    cat <<EOF
-Usage: $(basename "$0") [OPTIONS]
-
-Options:
-  --list                   Show current secret ages and rotation status
-  --jwt                    Rotate JWT signing keys (public/private key pair)
-  --api-key-hash           Rotate API key hash secret
-  --dkim                   Rotate DKIM signing keys
-  --db-credentials         Rotate database credentials
-  --master-key             Rotate master encryption key
-  --all                    Rotate all secrets due for rotation
-  --validate               Validate current secret integrity
-  --rollback               Roll back the most recent rotation
-  --dry-run                Show what would be rotated without making changes
-  --force                  Skip confirmation prompts
-  --help                   Show this help
-EOF
+    sed -n 's/^#   \(\./\./p' "$0" | head -n 12
     exit 0
 }
 
-# ── Backup ─────────────────────────────────────────────────────────────────────
+# ── Backup ────────────────────────────────────────────────────────────────────
+
+# Files rotated by this run — each rotation function appends its PROD_*_FILE
+# var here so backup/rollback know what to snapshot.
+BACKUP_KEYS=()
 
 backup_current_secrets() {
     log_step "Backing up current secrets..."
@@ -108,155 +135,87 @@ backup_current_secrets() {
     install -d -m 700 "$BACKUP_DIR/$TIMESTAMP"
     umask 177
 
-    kubectl get secret "$SECRET_NAME" -n "$NAMESPACE" \
-        -o json > "$BACKUP_DIR/$TIMESTAMP/secrets-backup.json" 2>/dev/null || {
-        log_error "Failed to backup secrets from $SECRET_NAME"
-        return 1
-    }
-    chmod 600 "$BACKUP_DIR/$TIMESTAMP/secrets-backup.json"
+    local key f n=0
+    for key in "${BACKUP_KEYS[@]}"; do
+        f="$(env_file_path "$key")"
+        [[ -n "$f" && -f "$f" ]] || continue
+        cp "$f" "$BACKUP_DIR/$TIMESTAMP/$(basename "$f")"
+        chmod 600 "$BACKUP_DIR/$TIMESTAMP/$(basename "$f")"
+        echo "$key $(basename "$f")" >> "$BACKUP_DIR/$TIMESTAMP/index.txt"
+        n=$((n + 1))
+    done
+    chmod 600 "$BACKUP_DIR/$TIMESTAMP/index.txt" 2>/dev/null || true
 
-    log_info "Secrets backed up to: $BACKUP_DIR/$TIMESTAMP/secrets-backup.json (mode 0600)"
-    log_info "Backup timestamp: $TIMESTAMP"
+    log_info "Secrets backed up to: $BACKUP_DIR/$TIMESTAMP ($n files, mode 0600)"
     log_warn "Plaintext backup present — shred it once the rotation is verified:"
-    log_warn "  shred -u $BACKUP_DIR/$TIMESTAMP/secrets-backup.json"
+    log_warn "  shred -u $BACKUP_DIR/$TIMESTAMP/* && rmdir $BACKUP_DIR/$TIMESTAMP"
 }
 
-# ── List Secret Ages ───────────────────────────────────────────────────────────
+# ── List Secret Ages ──────────────────────────────────────────────────────────
 
 list_secrets() {
     log_step "Current secret ages and rotation status..."
 
-    local secrets
-    secrets=$(kubectl get secret "$SECRET_NAME" -n "$NAMESPACE" \
-        -o json 2>/dev/null || {
-        log_error "Cannot access secret $SECRET_NAME"
-        exit 1
-    })
+    local keys=(
+        PROD_JWT_PRIVATE_KEY_FILE PROD_JWT_PUBLIC_KEY_FILE
+        PROD_API_KEY_HASH_SECRET_FILE PROD_WEBHOOK_SIGNING_SECRET_FILE
+        PROD_SESSION_SECRET_FILE PROD_INTERNAL_SERVICE_TOKEN_FILE
+        PROD_POSTGRES_PASSWORD_FILE PROD_REDIS_PASSWORD_FILE
+        PROD_DKIM_PRIVATE_KEY_ENCRYPTION_KEY_FILE PROD_BACKUP_ENCRYPTION_KEY_FILE
+    )
 
-    local creation_time
-    creation_time=$(echo "$secrets" | jq -r '.metadata.creationTimestamp')
-    local created_epoch
-    created_epoch=$(date -d "$creation_time" +%s 2>/dev/null || date -j -f "%Y-%m-%dT%H:%M:%SZ" "$creation_time" +%s 2>/dev/null)
+    local key f mtime age_epoch age_days status
     local now_epoch
     now_epoch=$(date +%s)
-    local age_days=$(( (now_epoch - created_epoch) / 86400 ))
 
-    echo ""
-    echo "── Secret: $SECRET_NAME ──────────────────────────────────────────"
-    echo "  Created:    $creation_time"
-    echo "  Age:        ${age_days} days"
-    echo ""
-
-    # Extract individual keys and check if they're base64
-    local keys
-    keys=$(echo "$secrets" | jq -r '.data | keys[]' 2>/dev/null || echo "")
-
-    while IFS= read -r key; do
-        [[ -z "$key" ]] && continue
-        # Audit M: NEVER print the decoded secret value — key name, size and
-        # rotation status only (values were previously echoed to stdout/logs).
-        local value_size
-        value_size=$(echo "$secrets" | jq -r ".data[\"$key\"]" 2>/dev/null | wc -c | tr -d ' ')
-
-        # Determine rotation status
-        local status="⚠ unknown"
-        case "$key" in
-            *JWT*)
-                if [[ $age_days -ge $JWT_ROTATION_DAYS ]]; then
-                    status="${RED}OVERDUE${NC} (rotate every ${JWT_ROTATION_DAYS}d)"
-                else
-                    status="${GREEN}OK${NC} ($((JWT_ROTATION_DAYS - age_days))d remaining)"
-                fi
-                ;;
-            *API_KEY*|*HASH*)
-                if [[ $age_days -ge $API_KEY_HASH_ROTATION_DAYS ]]; then
-                    status="${RED}OVERDUE${NC} (rotate every ${API_KEY_HASH_ROTATION_DAYS}d)"
-                else
-                    status="${GREEN}OK${NC} ($((API_KEY_HASH_ROTATION_DAYS - age_days))d remaining)"
-                fi
-                ;;
-            *DKIM*)
-                if [[ $age_days -ge $DKIM_ROTATION_DAYS ]]; then
-                    status="${RED}OVERDUE${NC} (rotate every ${DKIM_ROTATION_DAYS}d)"
-                else
-                    status="${GREEN}OK${NC} ($((DKIM_ROTATION_DAYS - age_days))d remaining)"
-                fi
-                ;;
-            *DB*|*DATABASE*|*POSTGRES*)
-                if [[ $age_days -ge $DB_CREDENTIALS_ROTATION_DAYS ]]; then
-                    status="${RED}OVERDUE${NC} (rotate every ${DB_CREDENTIALS_ROTATION_DAYS}d)"
-                else
-                    status="${GREEN}OK${NC} ($((DB_CREDENTIALS_ROTATION_DAYS - age_days))d remaining)"
-                fi
-                ;;
-            *KEK*|*ENCRYPTION*|*MASTER*)
-                if [[ $age_days -ge $MASTER_KEY_ROTATION_DAYS ]]; then
-                    status="${RED}OVERDUE${NC} (rotate every ${MASTER_KEY_ROTATION_DAYS}d)"
-                else
-                    status="${GREEN}OK${NC} ($((MASTER_KEY_ROTATION_DAYS - age_days))d remaining)"
-                fi
-                ;;
-        esac
-
-        echo -e "  ${key} (${value_size} bytes): $status"
-    done <<< "$keys"
+    printf "  %-42s %-11s %s\n" "SECRET FILE" "AGE (days)" "STATUS"
+    for key in "${keys[@]}"; do
+        f="$(env_file_path "$key")"
+        if [[ -z "$f" || ! -f "$f" ]]; then
+            printf "  %-42s %-11s %s\n" "${key#PROD_}" "-" "MISSING"
+            continue
+        fi
+        age_epoch=$(( now_epoch - $(stat -f %m "$f" 2>/dev/null || stat -c %Y "$f") ))
+        age_days=$(( age_epoch / 86400 ))
+        status="OK"
+        (( age_days > 365 )) && status="ROTATE SOON"
+        (( age_days > 730 )) && status="OVERDUE"
+        printf "  %-42s %-11s %s\n" "$(basename "$f")" "$age_days" "$status"
+    done
     echo ""
 }
 
-# ── Validation ─────────────────────────────────────────────────────────────────
+# ── Validation ────────────────────────────────────────────────────────────────
 
 validate_secrets() {
     log_step "Validating current secrets..."
 
     local errors=0
-
-    # Check that secret exists
-    if ! kubectl get secret "$SECRET_NAME" -n "$NAMESPACE" &>/dev/null; then
-        log_error "Secret $SECRET_NAME not found in namespace $NAMESPACE"
-        exit 1
-    fi
-
-    # Check required keys exist
-    local required_keys=(
-        "JWT_PRIVATE_KEY_PEM"
-        "JWT_PUBLIC_KEY_PEM"
-        "API_KEY_HASH_SECRET"
-        "WEBHOOK_SIGNING_SECRET"
-        "SESSION_SECRET"
+    local required=(
+        JWT_PRIVATE_KEY_PEM JWT_PUBLIC_KEY_PEM
+        API_KEY_HASH_SECRET WEBHOOK_SIGNING_SECRET SESSION_SECRET
     )
 
-    for key in "${required_keys[@]}"; do
-        local value
-        value=$(kubectl get secret "$SECRET_NAME" -n "$NAMESPACE" \
-            -o jsonpath="{.data.$key}" 2>/dev/null || echo "")
-
+    local var value
+    for var in "${required[@]}"; do
+        value="$(read_secret "$var")"
         if [[ -z "$value" ]]; then
-            log_error "Missing required secret key: $key"
+            log_error "Missing or empty rendered secret: $var ($(secret_file "$var" || echo 'path unset'))"
             errors=1
-        else
-            local decoded
-            decoded=$(echo "$value" | base64 -d 2>/dev/null || echo "")
-            if [[ ${#decoded} -lt 16 ]]; then
-                log_warn "Secret key '$key' seems too short (${#decoded} chars)"
-                errors=1
-            fi
+        elif [[ ${#value} -lt 16 ]]; then
+            log_warn "Secret '$var' seems too short (${#value} chars)"
+            errors=1
         fi
     done
 
     # Validate JWT key pair (if both exist)
-    local jwt_private
-    jwt_private=$(kubectl get secret "$SECRET_NAME" -n "$NAMESPACE" \
-        -o jsonpath="{.data.JWT_PRIVATE_KEY_PEM}" 2>/dev/null | base64 -d || echo "")
-    local jwt_public
-    jwt_public=$(kubectl get secret "$SECRET_NAME" -n "$NAMESPACE" \
-        -o jsonpath="{.data.JWT_PUBLIC_KEY_PEM}" 2>/dev/null | base64 -d || echo "")
-
-    if [[ -n "$jwt_private" ]] && [[ -n "$jwt_public" ]]; then
-        # Verify that the public key matches the private key
-        local extracted_public
-        extracted_public=$(echo "$jwt_private" | openssl pkey -pubout 2>/dev/null || echo "")
-        if [[ -n "$extracted_public" ]] && [[ "$extracted_public" == "$jwt_public" ]]; then
-            log_info "✓ JWT key pair is valid (public key matches private key)"
+    local jwt_private jwt_public extracted_public
+    jwt_private="$(read_secret JWT_PRIVATE_KEY_PEM)"
+    jwt_public="$(read_secret JWT_PUBLIC_KEY_PEM)"
+    if [[ -n "$jwt_private" && -n "$jwt_public" ]]; then
+        extracted_public="$(printf '%s' "$jwt_private" | openssl pkey -pubout 2>/dev/null || echo "")"
+        if [[ -n "$extracted_public" && "$extracted_public" == "$jwt_public" ]]; then
+            log_info "JWT key pair is valid (public key matches private key)"
         else
             log_warn "JWT public key does NOT match private key — rotation needed"
             errors=1
@@ -264,131 +223,89 @@ validate_secrets() {
     fi
 
     if [[ $errors -eq 0 ]]; then
-        log_info "✓ All secrets validated successfully"
+        log_info "All secrets validated successfully"
     else
         log_error "Some secrets failed validation"
     fi
-
     return $errors
 }
 
-# ── Individual Rotation Functions ──────────────────────────────────────────────
+# ── Individual Rotation Functions ─────────────────────────────────────────────
 
 rotate_jwt() {
     log_step "Rotating JWT signing keys..."
+    BACKUP_KEYS+=(PROD_JWT_PRIVATE_KEY_FILE PROD_JWT_PUBLIC_KEY_FILE)
 
     local temp_dir
     temp_dir=$(mktemp -d)
 
-    # Generate new RSA key pair (4096-bit)
     log_info "Generating new 4096-bit RSA key pair..."
     openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:4096 \
         -out "$temp_dir/jwt-private.pem" 2>/dev/null
     openssl pkey -in "$temp_dir/jwt-private.pem" -pubout \
         -out "$temp_dir/jwt-public.pem" 2>/dev/null
 
-    # Read the old private key for dual-key overlap
-    local old_private
-    old_private=$(kubectl get secret "$SECRET_NAME" -n "$NAMESPACE" \
-        -o jsonpath="{.data.JWT_PRIVATE_KEY_PEM}" 2>/dev/null | base64 -d || echo "")
+    # Preserve the old PUBLIC key for dual-key token overlap (the api-server
+    # accepts JWT_PREVIOUS_PUBLIC_KEYS_PEM during the overlap window — set it
+    # in .env / APEXMAIL_PROD_ENV for the staged deploy, remove after).
+    local old_public_file
+    old_public_file="$BACKUP_DIR/$TIMESTAMP/jwt-public-previous.pem"
+    mkdir -p "$BACKUP_DIR/$TIMESTAMP"
+    read_secret JWT_PUBLIC_KEY_PEM > "$old_public_file" 2>/dev/null || true
+    chmod 600 "$old_public_file" 2>/dev/null || true
 
-    # Update secret with new keys, keeping old as PREVIOUS for token overlap
-    kubectl patch secret "$SECRET_NAME" -n "$NAMESPACE" \
-        --type='json' \
-        -p="[
-            {\"op\":\"add\",\"path\":\"/data/JWT_PRIVATE_KEY_PEM_PREVIOUS\",\"value\":\"$(echo "$old_private" | base64 -w0)\"},
-            {\"op\":\"replace\",\"path\":\"/data/JWT_PRIVATE_KEY_PEM\",\"value\":\"$(base64 -w0 < "$temp_dir/jwt-private.pem")\"},
-            {\"op\":\"replace\",\"path\":\"/data/JWT_PUBLIC_KEY_PEM\",\"value\":\"$(base64 -w0 < "$temp_dir/jwt-public.pem")\"}
-        ]" 2>/dev/null || {
-        log_error "Failed to patch secret with new JWT keys"
-        rm -rf "$temp_dir"
-        return 1
-    }
+    write_secret JWT_PRIVATE_KEY_PEM "$(cat "$temp_dir/jwt-private.pem")"
+    write_secret JWT_PUBLIC_KEY_PEM "$(cat "$temp_dir/jwt-public.pem")"
 
-    # Trigger pod restart to pick up new keys
-    kubectl rollout restart deployment/api-server -n "$NAMESPACE" 2>/dev/null || true
+    recreate_services api-server status-server
 
     rm -rf "$temp_dir"
-    log_info "JWT keys rotated. Old key preserved as JWT_PRIVATE_KEY_PEM_PREVIOUS for token overlap."
+    log_info "JWT keys rotated (files: $(secret_file JWT_PRIVATE_KEY_PEM))."
+    log_info "Old public key preserved at $old_public_file for token overlap:"
+    log_detail "  Set JWT_PREVIOUS_PUBLIC_KEYS_PEM in .env for the overlap window"
+    log_detail "  (expiry + 5 min skew), then remove it and recreate api-server."
 }
 
 rotate_api_key_hash() {
     log_step "Rotating API key hash secret..."
+    BACKUP_KEYS+=(PROD_API_KEY_HASH_SECRET_FILE)
 
     local new_secret
     new_secret=$(openssl rand -base64 48)
 
-    local old_secret
-    old_secret=$(kubectl get secret "$SECRET_NAME" -n "$NAMESPACE" \
-        -o jsonpath="{.data.API_KEY_HASH_SECRET}" 2>/dev/null | base64 -d || echo "")
+    write_secret API_KEY_HASH_SECRET "$new_secret"
+    recreate_services api-server
 
-    # Update with dual-key overlap pattern
-    kubectl patch secret "$SECRET_NAME" -n "$NAMESPACE" \
-        --type='json' \
-        -p="[
-            {\"op\":\"add\",\"path\":\"/data/API_KEY_HASH_SECRET_PREVIOUS\",\"value\":\"$(echo -n "$old_secret" | base64 -w0)\"},
-            {\"op\":\"replace\",\"path\":\"/data/API_KEY_HASH_SECRET\",\"value\":\"$(echo -n "$new_secret" | base64 -w0)\"}
-        ]" 2>/dev/null || {
-        log_error "Failed to patch secret with new API key hash secret"
-        return 1
-    }
-
-    kubectl rollout restart deployment/api-server -n "$NAMESPACE" 2>/dev/null || true
-
-    log_info "API key hash secret rotated."
-    log_info "Old secret preserved as API_KEY_HASH_SECRET_PREVIOUS for validation overlap."
+    log_info "API key hash secret rotated (file: $(secret_file API_KEY_HASH_SECRET))."
+    log_info "Existing hashes re-hash lazily via the dual-key overlap in the auth"
+    log_info "middleware; the backup copy in $BACKUP_DIR/$TIMESTAMP is the rollback."
 }
 
 rotate_dkim() {
     log_step "Rotating DKIM signing keys..."
+    BACKUP_KEYS+=(PROD_DKIM_PRIVATE_KEY_ENCRYPTION_KEY_FILE)
 
-    local temp_dir
-    temp_dir=$(mktemp -d)
+    # Per-domain DKIM keys are encrypted in the database with this KEK.
+    # Rotating it requires re-encrypting the stored keys — see
+    # docs/operations/secret-rotation.md before running this.
+    local new_kek
+    new_kek=$(openssl rand -hex 32)
 
-    # Generate new 2048-bit RSA key for DKIM
-    log_info "Generating new 2048-bit DKIM key pair..."
-    openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 \
-        -out "$temp_dir/dkim-private.pem" 2>/dev/null
-    openssl pkey -in "$temp_dir/dkim-private.pem" -pubout \
-        -out "$temp_dir/dkim-public.pem" 2>/dev/null
+    write_secret DKIM_PRIVATE_KEY_ENCRYPTION_KEY "$new_kek"
+    recreate_services api-server worker mta
 
-    # Extract DNS TXT record value
-    local dns_record
-    dns_record=$(openssl pkey -in "$temp_dir/dkim-private.pem" -pubout 2>/dev/null | \
-        sed '1d;$d' | tr -d '\n')
-
-    kubectl patch secret "$SECRET_NAME" -n "$NAMESPACE" \
-        --type='json' \
-        -p="[
-            {\"op\":\"replace\",\"path\":\"/data/DKIM_PRIVATE_KEY\",\"value\":\"$(base64 -w0 < "$temp_dir/dkim-private.pem")\"}
-        ]" 2>/dev/null || {
-        log_error "Failed to patch secret with new DKIM key"
-        rm -rf "$temp_dir"
-        return 1
-    }
-
-    rm -rf "$temp_dir"
-
-    log_info "DKIM signing key rotated."
-    log_warn "⚠  IMPORTANT: Update your DNS TXT record with the new public key:"
-    log_detail "  Selector: apexmail._domainkey"
-    log_detail "  Value:    v=DKIM1; k=rsa; p=${dns_record:0:40}..."
-    log_detail ""
-    log_detail "  Full public key saved in DNS setup docs: docs/security/dkim-setup.md"
-    log_detail "  DNS propagation may take up to 48 hours."
-    log_warn "  Keep old DNS record during overlap period to avoid email rejection."
+    log_info "DKIM private-key encryption key (KEK) rotated."
+    log_warn "Stored per-domain DKIM keys must be re-encrypted with the new KEK"
+    log_warn "BEFORE the old key is destroyed — see the re-encryption procedure in"
+    log_warn "docs/operations/secret-rotation.md."
 }
 
 rotate_db_credentials() {
     log_step "Rotating database credentials..."
+    BACKUP_KEYS+=(PROD_POSTGRES_PASSWORD_FILE)
 
-    # Generate new random password
     local new_password
     new_password=$(openssl rand -base64 32)
-
-    local old_password
-    old_password=$(kubectl get secret "$SECRET_NAME" -n "$NAMESPACE" \
-        -o jsonpath="{.data.DATABASE_PASSWORD}" 2>/dev/null | base64 -d || echo "")
 
     # Update the password in PostgreSQL first
     # Audit M: the password is passed as a psql VARIABLE over stdin
@@ -396,63 +313,32 @@ rotate_db_credentials() {
     # where it would be visible in `ps` output and the server log.
     log_info "Updating password in PostgreSQL..."
     printf "ALTER USER apexmail WITH PASSWORD :'pw';\n" | \
-        kubectl exec -i -n "$NAMESPACE" deploy/postgres -- \
-            psql -U postgres -v pw="$new_password" 2>/dev/null || {
+        (cd "$DEPLOY_DIR" && docker compose $COMPOSE_FILES --env-file "$ENV_FILE" \
+            exec -T postgres psql -U apexmail -v pw="$new_password") || {
             log_warn "Could not update PostgreSQL password directly — ensure manual update"
         }
 
-    # Update Kubernetes secret
-    kubectl patch secret "$SECRET_NAME" -n "$NAMESPACE" \
-        --type='json' \
-        -p="[
-            {\"op\":\"add\",\"path\":\"/data/DATABASE_PASSWORD_PREVIOUS\",\"value\":\"$(echo -n "$old_password" | base64 -w0)\"},
-            {\"op\":\"replace\",\"path\":\"/data/DATABASE_PASSWORD\",\"value\":\"$(echo -n "$new_password" | base64 -w0)\"}
-        ]" 2>/dev/null || {
-        log_error "Failed to update database credentials secret"
-        return 1
-    }
+    write_secret POSTGRES_PASSWORD "$new_password"
+    recreate_services api-server worker tracking mta mailstore status-server \
+        billing-service sales-autopilot postgres-backup
 
-    # Roll pods to pick up new credentials
-    kubectl rollout restart deployment -n "$NAMESPACE" 2>/dev/null || true
-
-    log_info "Database credentials rotated. Old password preserved as DATABASE_PASSWORD_PREVIOUS."
+    log_info "Database credentials rotated (file: $(secret_file POSTGRES_PASSWORD))."
 }
 
 rotate_master_key() {
-    log_step "Rotating master encryption key (KEK)..."
+    log_step "Rotating master encryption key (DKIM KEK)..."
+    BACKUP_KEYS+=(PROD_DKIM_PRIVATE_KEY_ENCRYPTION_KEY_FILE)
 
-    local new_kek
-    new_kek=$(openssl rand -base64 32)
+    local new_kek old_kek_id
+    new_kek=$(openssl rand -hex 32)
+    old_kek_id="kek-$(date +%Y%m%d)-$(openssl rand -hex 4)"
 
-    local new_kek_id
-    new_kek_id="kek-$(date +%Y%m%d)-$(openssl rand -hex 4)"
+    write_secret DKIM_PRIVATE_KEY_ENCRYPTION_KEY "$new_kek"
 
-    local old_kek
-    old_kek=$(kubectl get secret "apexmail-kek" -n "$NAMESPACE" \
-        -o jsonpath="{.data.kek_material}" 2>/dev/null | base64 -d || echo "")
-    local old_kek_id
-    old_kek_id=$(kubectl get secret "apexmail-kek" -n "$NAMESPACE" \
-        -o jsonpath="{.data.kek_id}" 2>/dev/null | base64 -d || echo "legacy")
-
-    # Update KEK secret with dual-key overlap
-    kubectl patch secret "apexmail-kek" -n "$NAMESPACE" \
-        --type='json' \
-        -p="[
-            {\"op\":\"add\",\"path\":\"/data/kek_material_previous\",\"value\":\"$(echo -n "$old_kek" | base64 -w0)\"},
-            {\"op\":\"add\",\"path\":\"/data/kek_id_previous\",\"value\":\"$(echo -n "$old_kek_id" | base64 -w0)\"},
-            {\"op\":\"replace\",\"path\":\"/data/kek_material\",\"value\":\"$(echo -n "$new_kek" | base64 -w0)\"},
-            {\"op\":\"replace\",\"path\":\"/data/kek_id\",\"value\":\"$(echo -n "$new_kek_id" | base64 -w0)\"}
-        ]" 2>/dev/null || {
-        log_error "Failed to update master encryption key secret"
-        return 1
-    }
-
-    log_info "Master encryption key rotated."
-    log_info "New KEK ID: $new_kek_id"
-    log_warn "⚠  Re-encrypt all data encryption keys (DEKs) with the new KEK."
-    log_detail "  Run the re-encryption job: kubectl create job --from=cronjob/dek-re-encrypt"
-    log_detail "  Monitor: kubectl logs job/dek-re-encryption -n $NAMESPACE -f"
-    log_detail "  Verify:  docs/operations/secret-rotation.md#re-encryption-procedure"
+    log_info "Master encryption key rotated. New KEK ID: $old_kek_id"
+    log_warn "Re-encrypt all per-domain DKIM keys with the new KEK."
+    log_detail "  Procedure: docs/operations/secret-rotation.md#re-encryption-procedure"
+    log_detail "  Verify:    scripts/rotate-secrets.sh --validate"
 }
 
 # ── Rollback ──────────────────────────────────────────────────────────────────
@@ -463,28 +349,40 @@ rollback() {
     local latest_backup
     latest_backup=$(ls -td "$BACKUP_DIR"/*/ 2>/dev/null | head -1)
 
-    if [[ -z "$latest_backup" ]]; then
+    if [[ -z "$latest_backup" || ! -f "$latest_backup/index.txt" ]]; then
         log_error "No backup found to roll back to"
         exit 1
     fi
 
     log_info "Restoring from backup: $latest_backup"
 
-    kubectl apply -f "$latest_backup/secrets-backup.json" 2>/dev/null || {
-        log_error "Failed to restore secrets from backup"
-        exit 1
-    }
+    local prods f name
+    while read -r prods f; do
+        [[ -n "$prods" && -n "$f" ]] || continue
+        name="$(env_file_path "$prods")"
+        if [[ -n "$name" ]]; then
+            umask 177
+            cp "$latest_backup/$f" "$name"
+            chmod 600 "$name"
+            log_info "Restored $prods -> $name"
+        else
+            log_warn "$prods no longer defined in .env — skipped"
+        fi
+    done < "$latest_backup/index.txt"
 
-    # Restart pods to pick up old secrets
-    kubectl rollout restart deployment -n "$NAMESPACE" 2>/dev/null || true
+    # Recreate everything that consumes rotated secrets
+    recreate_services api-server worker tracking mta mailstore status-server \
+        billing-service sales-autopilot postgres-backup
 
     # Audit M: immediate cleanup — the plaintext backup has served its
     # purpose and must not linger in /tmp.
-    shred -u "$latest_backup/secrets-backup.json" 2>/dev/null || rm -f "$latest_backup/secrets-backup.json"
+    find "$latest_backup" -type f -exec shred -u {} 2>/dev/null \; \
+        || find "$latest_backup" -type f -delete
     rmdir "$latest_backup" 2>/dev/null || true
 
-    log_info "Secrets rolled back to: $(basename "$latest_backup") (backup removed)"
-    log_warn "After rollback, validate all services are healthy."
+    log_info "Secrets rolled back (backup removed)"
+    log_warn "After rollback, validate all services are healthy:"
+    log_warn "  scripts/rotate-secrets.sh --validate && make verify"
 }
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -497,16 +395,16 @@ if [[ $# -eq 0 ]]; then
     # Interactive menu mode
     echo ""
     echo "═══════════════════════════════════════════════════════════════"
-    echo "  ApexMail — Automated Secret Rotation"
+    echo "  ApexMail — Automated Secret Rotation (Docker Compose host)"
     echo "═══════════════════════════════════════════════════════════════"
     echo ""
     list_secrets
     echo "Select rotation target:"
     echo "  1) JWT signing keys"
     echo "  2) API key hash secret"
-    echo "  3) DKIM signing keys"
+    echo "  3) DKIM signing keys (KEK)"
     echo "  4) Database credentials"
-    echo "  5) Master encryption key"
+    echo "  5) Master encryption key (DKIM KEK)"
     echo "  6) All eligible secrets"
     echo "  7) Validate secrets"
     echo "  0) Exit"
@@ -545,7 +443,9 @@ else
     done
 fi
 
-# ── Execution ──────────────────────────────────────────────────────────────────
+# ── Execution ─────────────────────────────────────────────────────────────────
+
+check_prereqs
 
 case "$ACTION" in
     list)
@@ -569,15 +469,16 @@ if [[ "$DRY_RUN" == "true" ]]; then
     echo "Would rotate: $ACTION"
     echo ""
     case "$ACTION" in
-        jwt)           echo "  • Generate new 4096-bit RSA key pair" ;;
-        api-key-hash)  echo "  • Generate new API_KEY_HASH_SECRET (48 bytes)" ;;
-        dkim)          echo "  • Generate new DKIM 2048-bit RSA key pair" ;;
+        jwt)            echo "  • Generate new 4096-bit RSA key pair" ;;
+        api-key-hash)   echo "  • Generate new API_KEY_HASH_SECRET (48 bytes)" ;;
+        dkim)           echo "  • Generate new DKIM KEK (64-hex)" ;;
         db-credentials) echo "  • Generate new database password" ;;
-        master-key)    echo "  • Generate new master encryption key (KEK)" ;;
-        all)           echo "  • All secrets eligible for rotation" ;;
+        master-key)     echo "  • Generate new master encryption key (KEK)" ;;
+        all)            echo "  • All secrets eligible for rotation" ;;
     esac
-    echo "  • Update Kubernetes secret with dual-key overlap"
-    echo "  • Trigger pod rollout to pick up new secrets"
+    echo "  • Back up the rendered secret files (0600, /tmp)"
+    echo "  • Write the new values to the PROD_*_FILE paths"
+    echo "  • docker compose up -d --force-recreate <consumers>"
     echo ""
     echo "To execute: $(basename "$0") --$ACTION"
     echo ""
@@ -587,7 +488,7 @@ fi
 if [[ "$FORCE" != "true" ]]; then
     echo ""
     log_warn "About to rotate: $ACTION"
-    log_warn "This will update Kubernetes secrets and trigger pod restarts."
+    log_warn "This will rewrite rendered secret files on $DEPLOY_DIR and recreate services."
     read -rp "Continue? [y/N] " confirm
     if [[ "$confirm" != "y" ]] && [[ "$confirm" != "Y" ]]; then
         log_info "Rotation cancelled."
@@ -618,4 +519,6 @@ esac
 echo ""
 log_info "Rotation complete."
 log_info "Run validation: $(basename "$0") --validate"
+log_info "Then update APEXMAIL_PROD_ENV (GitHub secret) to match, so the next"
+log_info "deploy does not overwrite the rotated files with the old values."
 echo ""

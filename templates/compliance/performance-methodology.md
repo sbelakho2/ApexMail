@@ -164,7 +164,7 @@ Uptime is measured per component, not as a single global number. Each component 
 | Prometheus | Internal metrics collection (all services, host metrics, database metrics) | Not publicly accessible |
 | Alertmanager | Alert routing to on-call engineers | Not publicly accessible |
 | Grafana | Internal dashboards for engineering and SRE | Not publicly accessible |
-| check_services.sh | Health probe script (see `deploy/monitoring/check_services.sh`) | Source available in repository |
+| compose healthchecks | Per-service health probes in `docker-compose.prod.yml` | Source available in repository |
 
 ### Probe Location Details
 

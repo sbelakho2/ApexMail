@@ -55,6 +55,34 @@ groups:
           description: "Enterprise service {{ $labels.instance }} has been unreachable for more than 2 minutes."
           runbook_url: "https://apexmail.ee/docs/alerts#enterprise-service-down"
 
+      # ── Presence-based availability (sales-autopilot, billing-service) ──
+      # Neither service exposes a /metrics endpoint (see the gap note in
+      # deploy/prometheus.yml), so availability is asserted with blackbox
+      # presence probes instead of `up` scrapes:
+      #   blackbox-sales-unsubscribe — public route via nginx, expects 404
+      #     (502/503 = sales-autopilot down behind the edge)
+      #   blackbox-sales-internal / blackbox-billing-internal — internal
+      #     GET /health on the compose networks, expect 200
+      - alert: SalesAutopilotDown
+        expr: probe_success{job="blackbox-sales-unsubscribe"} == 0 or probe_success{job="blackbox-sales-internal"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "ApexMail sales-autopilot is down"
+          description: "The sales unsubscribe route or the internal :3010/health probe has failed for more than 2 minutes (502/timeout = service down behind nginx)."
+          runbook_url: "https://apexmail.ee/docs/alerts#sales-autopilot-down"
+
+      - alert: BillingServiceDown
+        expr: probe_success{job="blackbox-billing-internal"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "ApexMail billing service is down"
+          description: "The billing-service internal :4100/health presence probe has failed for more than 2 minutes — plan metering, invoices and Stripe webhooks are impacted."
+          runbook_url: "https://apexmail.ee/docs/alerts#billing-service-down"
+
       - alert: SyntheticTransactionFailure
         expr: apexmail_synthetic_transaction_success == 0
         for: 2m

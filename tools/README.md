@@ -10,7 +10,7 @@ These scripts are part of the current repeatable developer workflow and are refe
 - `run-browser-smoke.sh`: local runner for `browser_smoke.py`; creates `.venv/browser-smoke` and installs the Playwright Python package there so system Python stays untouched.
 - `run-mail-server-tests.sh`: mail-server test wrapper used by focused cargo task definitions.
 - `run-compose-smoke.sh`: Docker Compose smoke validation helper.
-- `validate-compose-secrets.sh`: preflight check that required local Docker secret files exist and are non-empty before compose startup.
+- `validate-prod-env.sh`: preflight that validates an environment file against the `${VAR:?}` contract in docker-compose*.yml (missing/placeholder values fail fast). Used by `make verify-env` and as an early gate in deploy-hetzner.yml; supersedes the old validate-compose-secrets.sh local-file check.
 - `dev-start.sh`: local development startup helper.
 - `bootstrap.sh`: repository/bootstrap helper.
 - `check-forbidden-patterns.sh`: quality gate that blocks known regression patterns in production Rust, Docker Compose, and GitHub workflow changes.

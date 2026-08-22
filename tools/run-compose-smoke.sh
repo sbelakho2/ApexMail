@@ -89,8 +89,10 @@ usage() {
 Usage: tools/run-compose-smoke.sh <command>
 
 Commands:
-  up       Bring up monitoring plus the prod smoke subset.
-  verify   Verify monitoring, nginx, API, and tracking endpoints.
+  up       Bring up monitoring plus the prod smoke subset (api-server,
+           enterprise, tracking, sales-autopilot, billing-service, nginx,
+           postgres, redis, clickhouse).
+  verify   Verify monitoring, nginx, API, tracking, and sales endpoints.
   alert    Inject a synthetic alert into Alertmanager and verify delivery to Observability.
   down     Stop and remove the smoke-test containers and delete target/apexmail-smoke.
   full     Run up, verify, and alert in sequence.
@@ -104,6 +106,9 @@ Environment overrides:
   INTERNAL_SERVICE_TOKEN
   TLS_CERT_DIR
   SMOKE_DIR
+
+Container names are discovered dynamically via `docker compose ps -q <svc>`
+(single-replica reality); nothing here depends on hardcoded container names.
 
 This script intentionally keeps TLS material under the repo-local target/ tree so
 Docker Desktop on macOS can mount it reliably.
@@ -122,8 +127,20 @@ compose() {
   )
 }
 
+# Resolve the (single) container of a compose service at runtime. Compose
+# naming has drifted over time (apexmail-api-1 vs apexmail-api-server-1,
+# explicit container_name for the datastores) — asking compose itself is the
+# only name-proof way.
+service_container() {
+  local svc="$1"
+  compose ps -q "$svc" 2>/dev/null | head -1
+}
+
 existing_internal_service_token() {
-  docker inspect apexmail-observability --format '{{range .Config.Env}}{{println .}}{{end}}' 2>/dev/null \
+  local cid
+  cid="$(service_container observability || true)"
+  [[ -n "$cid" ]] || return 0
+  docker inspect "$cid" --format '{{range .Config.Env}}{{println .}}{{end}}' 2>/dev/null \
     | sed -n 's/^INTERNAL_SERVICE_TOKEN=//p' \
     | head -n 1
 }
@@ -178,8 +195,12 @@ export_smoke_env() {
   export REDIS_PASSWORD="$(resolve_env_or_seed_secret REDIS_PASSWORD "$PROJECT_ROOT/secrets/redis_password.txt" 32)"
   export CLICKHOUSE_PASSWORD="$(resolve_env_or_seed_secret CLICKHOUSE_PASSWORD "$PROJECT_ROOT/secrets/clickhouse_password.txt" 32)"
   export JWT_SECRET="$(resolve_env_or_generate_secret JWT_SECRET 32)"
-  export GRAFANA_USER="${GRAFANA_USER:-smoke-admin}"
-  export GRAFANA_PASSWORD="$(resolve_env_or_generate_secret GRAFANA_PASSWORD 24)"
+  # Grafana admin credentials — the names docker-compose.yml actually reads
+  # (GF_SECURITY_ADMIN_USER directly, GRAFANA_ADMIN_PASSWORD interpolated into
+  # GF_SECURITY_ADMIN_PASSWORD). The old GRAFANA_USER/GRAFANA_PASSWORD exports
+  # were read by nothing.
+  export GF_SECURITY_ADMIN_USER="${GF_SECURITY_ADMIN_USER:-smoke-admin}"
+  export GRAFANA_ADMIN_PASSWORD="$(resolve_env_or_generate_secret GRAFANA_ADMIN_PASSWORD 24)"
   export TRACKING_SECRET_KEY="$(resolve_env_or_generate_secret TRACKING_SECRET_KEY 32)"
   export BASE_URL="${BASE_URL:-https://api.apexmail.ee}"
   export OAUTH_REDIRECT_BASE_URL="${OAUTH_REDIRECT_BASE_URL:-https://app.apexmail.ee/auth/callback}"
@@ -204,6 +225,11 @@ export_smoke_env() {
   export APEXMAIL_API_KEY="$(resolve_env_or_generate_secret APEXMAIL_API_KEY 32)"
   export KIWI_SECRET_KEY="$(resolve_env_or_generate_secret KIWI_SECRET_KEY 32)"
   export DKIM_PRIVATE_KEY_ENCRYPTION_KEY="$(resolve_env_or_seed_secret DKIM_PRIVATE_KEY_ENCRYPTION_KEY "$PROJECT_ROOT/secrets/dkim_private_key_encryption_key.txt" 32)"
+  # Required by ${VAR:?} guards in docker-compose.prod.yml for the services in
+  # the smoke set (api-server placement engine, sales-autopilot dispatcher).
+  export PLACEMENT_ENCRYPTION_SECRET="$(resolve_env_or_generate_secret PLACEMENT_ENCRYPTION_SECRET 32)"
+  export SALES_CAMPAIGN_FROM_EMAIL="${SALES_CAMPAIGN_FROM_EMAIL:-smoke@apexmail.ee}"
+  export SALES_UNSUBSCRIBE_SECRET="$(resolve_env_or_generate_secret SALES_UNSUBSCRIBE_SECRET 32)"
   export DOCKER_BUILDKIT="${DOCKER_BUILDKIT:-0}"
   export COMPOSE_DOCKER_CLI_BUILD="${COMPOSE_DOCKER_CLI_BUILD:-0}"
   seed_prod_secret_files
@@ -235,6 +261,8 @@ seed_prod_secret_files() {
   seed_prod_secret_file SMTP_USERNAME            smtp_username.txt          "${SMTP_USERNAME:-}"
   seed_prod_secret_file SMTP_PASSWORD            smtp_password.txt          "${SMTP_PASSWORD:-}"
   seed_prod_secret_file BACKUP_ENCRYPTION_KEY    backup_encryption_key.txt  "$(resolve_env_or_generate_secret BACKUP_ENCRYPTION_KEY 32)"
+  # sales-autopilot unsubscribe HMAC key (prod secret sales_unsubscribe_secret).
+  seed_prod_secret_file SALES_UNSUBSCRIBE_SECRET sales_unsubscribe_secret.txt "$SALES_UNSUBSCRIBE_SECRET"
   # JWT key material is PEM — point straight at the generated key files.
   export PROD_JWT_PRIVATE_KEY_FILE="$SMOKE_DIR/jwt-private.pem"
   export PROD_JWT_PUBLIC_KEY_FILE="$SMOKE_DIR/jwt-public.pem"
@@ -301,15 +329,29 @@ wait_for_curl_contains() {
   error "$label did not return the expected content: $expected_fragment"
 }
 
+# Wait for a compose SERVICE (container resolved dynamically) to be healthy.
+wait_for_service_health() {
+  local svc="$1"
+  local timeout_secs="$2"
+  local cid
+  cid="$(service_container "$svc")"
+  if [[ -z "$cid" ]]; then
+    error "service '$svc' has no container — did the smoke 'up' run?"
+  fi
+  wait_for_container_health "$cid" "$timeout_secs"
+}
+
 observability_alerts_raw() {
-  docker exec -e INTERNAL_SERVICE_TOKEN="$INTERNAL_SERVICE_TOKEN" apexmail-observability sh -lc '
+  local cid
+  cid="$(service_container observability)"
+  docker exec -e INTERNAL_SERVICE_TOKEN="$INTERNAL_SERVICE_TOKEN" "$cid" sh -lc '
     printf "GET /alerts HTTP/1.1\r\nHost: localhost\r\nx-api-key: %s\r\nConnection: close\r\n\r\n" "$INTERNAL_SERVICE_TOKEN" | nc 127.0.0.1 4400
   '
 }
 
 print_status_summary() {
-  docker ps --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}' \
-    | grep 'apexmail-nginx-1\|apexmail-api-1\|apexmail-api-2\|apexmail-enterprise-1\|apexmail-enterprise-2\|apexmail-tracking-1\|apexmail-tracking-2\|apexmail-clickhouse\|apexmail-observability\|apexmail-prometheus\|apexmail-alertmanager\|NAME' || true
+  compose ps --format 'table {{.Name}}\t{{.Status}}' 2>/dev/null || \
+    docker ps --format 'table {{.Names}}\t{{.Status}}' | grep apexmail || true
 }
 
 bring_up_stack() {
@@ -320,28 +362,41 @@ bring_up_stack() {
   compose up -d --force-recreate observability prometheus alertmanager
 
   log "Starting prod smoke subset"
-  compose up -d --build --force-recreate nginx api enterprise tracking postgres redis clickhouse
+  # billing-service carries the dev/full-stack profiles in the base compose
+  # file; naming it explicitly on the command line activates it WITHOUT
+  # enabling those profiles (pdf-renderer/mailpit stay out of the smoke).
+  compose up -d --build --force-recreate \
+    nginx api-server enterprise tracking sales-autopilot billing-service \
+    postgres redis clickhouse
 }
 
 verify_stack() {
   export_smoke_env
 
-  wait_for_container_health apexmail-observability 90
+  wait_for_service_health observability 90
   wait_for_curl_contains "Prometheus readiness" 'Ready' 60 -fsS http://127.0.0.1:9090/-/ready >/dev/null
   wait_for_curl_contains "Alertmanager readiness" 'OK' 60 -fsS http://127.0.0.1:9093/-/ready >/dev/null
 
-  wait_for_container_health apexmail-clickhouse 120
-  wait_for_container_health apexmail-api-1 120
-  wait_for_container_health apexmail-api-2 120
-  wait_for_container_health apexmail-enterprise-1 120
-  wait_for_container_health apexmail-enterprise-2 120
-  wait_for_container_health apexmail-tracking-1 120
-  wait_for_container_health apexmail-tracking-2 120
-  wait_for_container_health apexmail-nginx-1 120
+  wait_for_service_health clickhouse 120
+  wait_for_service_health api-server 120
+  wait_for_service_health enterprise 120
+  wait_for_service_health tracking 120
+  wait_for_service_health sales-autopilot 120
+  wait_for_service_health billing-service 120
+  wait_for_service_health nginx 120
 
   wait_for_curl_contains "nginx health" 'OK' 30 -fsS http://127.0.0.1/nginx-health >/dev/null
   wait_for_curl_contains "API TLS health" '"status":"ok"' 30 -kfsS --resolve api.apexmail.ee:443:127.0.0.1 https://api.apexmail.ee/health >/dev/null
   wait_for_curl_contains "Tracking TLS health" '"status":"healthy"' 30 -kfsS --resolve track.apexmail.ee:443:127.0.0.1 https://track.apexmail.ee/health >/dev/null
+  # The unsubscribe route with a bogus token must 404 (route matched, token
+  # invalid). A 502/503 means sales-autopilot is down behind nginx.
+  local sales_code
+  sales_code="$(curl -ks -o /dev/null -w '%{http_code}' --resolve api.apexmail.ee:443:127.0.0.1 https://api.apexmail.ee/sales-api/u/smoke-probe || echo 000)"
+  if [[ "$sales_code" == "404" ]]; then
+    log "sales-api /u/ -> 404 OK (sales-autopilot answering behind nginx)"
+  else
+    error "sales-api /u/ returned $sales_code (expected 404; 502/503 = sales-autopilot down)"
+  fi
 
   print_status_summary
 }
@@ -399,9 +454,11 @@ tear_down_stack() {
 
   local -a services=(
     nginx
-    api
+    api-server
     enterprise
     tracking
+    sales-autopilot
+    billing-service
     postgres
     redis
     clickhouse

@@ -66,7 +66,10 @@
 3. **Deploy to all API server instances** (rolling update):
 
    ```bash
-   kubectl rollout restart deployment/api-server
+   # On the production host (compose deployment — see deploy/DEPLOYMENT.md):
+   #   update APEXMAIL_PROD_ENV (GitHub secret) with the staged values, re-run
+   #   the Deploy — Hetzner workflow; or hotfix-render .env + secret files and
+   #   `docker compose ... up -d --force-recreate api-server`
    ```
 
 4. **Monitor overlap window:** Wait at least `JWT_EXPIRY` (default: 24h) + 5 min clock-skew margin.
@@ -75,7 +78,10 @@
 
    ```bash
    unset JWT_PREVIOUS_PUBLIC_KEYS_PEM
-   kubectl rollout restart deployment/api-server
+   # On the production host (compose deployment — see deploy/DEPLOYMENT.md):
+   #   update APEXMAIL_PROD_ENV (GitHub secret) with the staged values, re-run
+   #   the Deploy — Hetzner workflow; or hotfix-render .env + secret files and
+   #   `docker compose ... up -d --force-recreate api-server`
    ```
 
 ### Verification
@@ -108,7 +114,9 @@ curl -s https://api.apexmail.ee/v1/auth/session | jq '.token'
 3. **Deploy to all services** that validate API keys:
 
    ```bash
-   kubectl rollout restart deployment/api-server deployment/tracking-service
+   # recreate the validating services on the host:
+   #   docker compose -f docker-compose.yml -f docker-compose.prod.yml \
+   #     --env-file .env up -d --force-recreate api-server tracking
    ```
 
 4. **Trigger background re-hashing** of existing API keys using the new secret. The `auth.rs` middleware in [`api-server/src/middleware/auth.rs`](../../services/mail-server/crates/api-server/src/middleware/auth.rs) supports dual-key verification:
@@ -147,12 +155,10 @@ export API_KEY_HASH_SECRET_PREVIOUS="${API_KEY_HASH_SECRET}"
 export API_KEY_HASH_SECRET="${NEW_SECRET}"
 
 echo "Rotating API_KEY_HASH_SECRET..."
-kubectl set env deployment/api-server \
-  API_KEY_HASH_SECRET_PREVIOUS="${API_KEY_HASH_SECRET_PREVIOUS}" \
-  API_KEY_HASH_SECRET="${API_KEY_HASH_SECRET}"
-
-echo "Waiting for rollout..."
-kubectl rollout status deployment/api-server --timeout=300s
+# Compose deployment: update the rendered secret files on the host (paths from
+# the PROD_*_FILE entries in .env), then recreate the validating services:
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml \
+#     --env-file .env up -d --force-recreate api-server tracking
 echo "API key hash secret rotation complete."
 ```
 
@@ -196,7 +202,7 @@ The master encryption key (`TENANT_ENCRYPTION_KEY`) is used in [`isolation/src/e
 
    ```bash
    # Check re-encryption progress
-   kubectl logs -l app=worker-processors --tail=50 | grep re-encrypt
+   docker logs apexmail-worker-1 --tail=50 | grep re-encrypt
    # Expected: "Re-encryption batch complete: 100/100000 keys (0.1%)"
    ```
 
@@ -248,9 +254,9 @@ DKIM keys are managed per-domain. Rotation requires adding a new selector before
 3. **Configure the new key** in the DKIM module:
 
    ```bash
-   kubectl create secret generic dkim-keys \
-     --from-file=dkim-s2-private.pem=dkim-new.pem \
-     --dry-run=client -o yaml | kubectl apply -f -
+   # Compose deployment: update the rendered DKIM secret file
+   # (PROD_DKIM_PRIVATE_KEY_ENCRYPTION_KEY_FILE in .env) and recreate:
+   #   docker compose ... up -d --force-recreate api-server worker mta
    ```
 
 4. **Deploy** — The outbound-queue crate's [`dkim.rs`](../../services/mail-server/crates/outbound-queue/src/dkim.rs) supports multiple selectors.
@@ -259,7 +265,7 @@ DKIM keys are managed per-domain. Rotation requires adding a new selector before
 
 6. **Remove old DNS record** for the previous selector (e.g., `s1._domainkey`).
 
-7. **Remove old private key** from Kubernetes secrets.
+7. **Remove the old private key** from the rendered host secret files.
 
 ---
 
@@ -283,7 +289,8 @@ DKIM keys are managed per-domain. Rotation requires adding a new selector before
 3. **Deploy to worker-processors:**
 
    ```bash
-   kubectl rollout restart deployment/worker-processors
+   docker compose -f docker-compose.yml -f docker-compose.prod.yml \
+  --env-file .env up -d --force-recreate worker
    ```
 
 4. **Notify customers** that webhook signatures will transition to the new secret over the next 24 hours. Old signatures remain valid during the overlap.
@@ -308,16 +315,17 @@ These secrets affect all active sessions. Rotate during low-traffic windows.
 2. **Deploy new secrets:**
 
    ```bash
-   kubectl create secret generic session-secrets \
-     --from-literal=session-secret="$SESSION_SECRET_NEW" \
-     --from-literal=csrf-secret="$CSRF_SECRET_NEW" \
-     --dry-run=client -o yaml | kubectl apply -f -
+   # Compose deployment: update the rendered session secret file
+   # (PROD_SESSION_SECRET_FILE in .env) and recreate api-server.
    ```
 
 3. **Roll API server:**
 
    ```bash
-   kubectl rollout restart deployment/api-server
+   # On the production host (compose deployment — see deploy/DEPLOYMENT.md):
+   #   update APEXMAIL_PROD_ENV (GitHub secret) with the staged values, re-run
+   #   the Deploy — Hetzner workflow; or hotfix-render .env + secret files and
+   #   `docker compose ... up -d --force-recreate api-server`
    ```
 
 4. **Impact:** All users will be required to re-authenticate as existing session cookies become invalid. This is expected behavior — communicate this in the status page if rotating during an incident.
@@ -340,11 +348,13 @@ Service-to-service authentication tokens (`INTERNAL_SERVICE_TOKEN`, `CONTROL_PLA
 2. **Update both the producer and consumer:**
 
    ```bash
-   # Update all services that consume the token
-   for service in api-server tracking-service worker-processors; do
-     kubectl set env deployment/$service \
-       INTERNAL_SERVICE_TOKEN="$NEW_INTERNAL_TOKEN"
-   done
+   # Compose deployment: update the rendered internal_service_token secret
+   # file (PROD_INTERNAL_SERVICE_TOKEN_FILE in .env), then recreate every
+   # consumer in one deploy window:
+   docker compose -f docker-compose.yml -f docker-compose.prod.yml \
+     --env-file .env up -d --force-recreate \
+     api-server tracking worker mta mailstore status-server \
+     billing-service sales-autopilot observability
    ```
 
 3. **Rotate in lockstep** — All services must be updated within the same deploy window to avoid inter-service auth failures.
@@ -354,7 +364,7 @@ Service-to-service authentication tokens (`INTERNAL_SERVICE_TOKEN`, `CONTROL_PLA
    ```bash
    # Check health endpoints that depend on internal tokens
    for service in api-server tracking-service worker-processors; do
-     kubectl exec deployment/$service -- wget -qO- http://localhost:8080/health
+     docker compose -f docker-compose.yml -f docker-compose.prod.yml ps "$service"
    done
    ```
 
@@ -376,16 +386,19 @@ Service-to-service authentication tokens (`INTERNAL_SERVICE_TOKEN`, `CONTROL_PLA
    ALTER USER apexmail WITH PASSWORD '<new-password>';
    ```
 
-3. **Update Kubernetes secret and redeploy all services:**
+3. **Update the rendered secret file and recreate all consumers:**
 
    ```bash
-   kubectl create secret generic db-credentials \
-     --from-literal=password="$NEW_DB_PASSWORD" \
-     --dry-run=client -o yaml | kubectl apply -f -
-   kubectl rollout restart deployment/api-server deployment/worker-processors deployment/tracking-service
+   # On the production host: write the new password to the path
+   # PROD_POSTGRES_PASSWORD_FILE points at in .env, then recreate every
+   # postgres consumer in one window:
+   docker compose -f docker-compose.yml -f docker-compose.prod.yml \
+     --env-file .env up -d --force-recreate \
+     api-server worker tracking mta mailstore status-server \
+     billing-service sales-autopilot postgres-backup migrator
    ```
 
-4. **Do NOT remove old password** until all pods have restarted (connection pooling may keep old connections alive briefly).
+4. **Do NOT remove old password** until all containers have restarted (connection pooling may keep old connections alive briefly).
 
 ---
 
@@ -395,9 +408,12 @@ Service-to-service authentication tokens (`INTERNAL_SERVICE_TOKEN`, `CONTROL_PLA
 
 Same pattern as database credentials:
 
-1. Update Redis ACL or `requirepass`.
-2. Update Kubernetes secret.
-3. Restart all services that connect to Redis.
+1. Update the Redis password (rendered redis_password secret file,
+   PROD_REDIS_PASSWORD_FILE in .env).
+2. Recreate redis and every consumer:
+   `docker compose ... up -d --force-recreate redis api-server worker tracking
+   mta observability billing-service sales-autopilot`.
+3. Verify cache/queue operations after rotation.
 4. Verify cache/queue operations after rotation.
 
 ---
@@ -408,19 +424,19 @@ Same pattern as database credentials:
 
 1. **Rotate via AWS IAM** — Create new access key, mark old as inactive after verification.
 
-2. **Update Kubernetes secret:**
+2. **Update the rendered AWS secret files** (paths from
+   `PROD_AWS_ACCESS_KEY_ID_FILE` / `PROD_AWS_SECRET_ACCESS_KEY_FILE` in .env):
 
    ```bash
-   kubectl create secret generic ses-credentials \
-     --from-literal=access-key-id="$NEW_ACCESS_KEY_ID" \
-     --from-literal=secret-access-key="$NEW_SECRET_ACCESS_KEY" \
-     --dry-run=client -o yaml | kubectl apply -f -
+   printf '%s' "$NEW_ACCESS_KEY_ID"   > /opt/apexmail/secrets/aws_access_key_id.txt
+   printf '%s' "$NEW_SECRET_ACCESS_KEY" > /opt/apexmail/secrets/aws_secret_access_key.txt
    ```
 
-3. **Roll MTA and outbound-queue:**
+3. **Recreate the SES consumers:**
 
    ```bash
-   kubectl rollout restart deployment/mta deployment/outbound-queue
+   docker compose -f docker-compose.yml -f docker-compose.prod.yml \
+     --env-file .env up -d --force-recreate api-server worker
    ```
 
 4. **Verify email delivery** with a test send.
@@ -556,22 +572,24 @@ If a secret rotation causes production issues:
 1. **Revert the secret value** to the previous value:
 
    ```bash
-   # Example: revert API_KEY_HASH_SECRET
-   kubectl set env deployment/api-server \
-     API_KEY_HASH_SECRET="$API_KEY_HASH_SECRET_PREVIOUS" \
-     API_KEY_HASH_SECRET_PREVIOUS=""
+   # Example: revert API_KEY_HASH_SECRET — rewrite the rendered secret file
+   # (path from PROD_API_KEY_HASH_SECRET_FILE in .env):
+   printf '%s' "$API_KEY_HASH_SECRET_PREVIOUS" \
+     > /opt/apexmail/secrets/api_key_hash_secret.txt
    ```
 
-2. **Rollback deployment:**
+2. **Recreate the affected service:**
 
    ```bash
-   kubectl rollout undo deployment/api-server
+   docker compose -f docker-compose.yml -f docker-compose.prod.yml \
+     --env-file .env up -d --force-recreate api-server
    ```
 
 3. **Verify system health:**
 
    ```bash
-   kubectl rollout status deployment/api-server --timeout=300s
+   docker compose -f docker-compose.yml -f docker-compose.prod.yml ps api-server
+   curl -fsS https://api.apexmail.ee/health
    # Check metrics dashboard for auth failure rates
    ```
 

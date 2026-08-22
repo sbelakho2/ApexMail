@@ -12,17 +12,115 @@ push to main
   → .github/workflows/deploy-hetzner.yml   SSHes to the host, pulls :latest, `docker compose up -d`
 ```
 
-Local production-parity run:
+## Deployment methods (when to use which)
 
+| Method | Command / trigger | Use when | Notes |
+|---|---|---|---|
+| **CI deploy (canonical)** | `gh workflow run "Deploy — Docker Build & Push"` then `Deploy — Hetzner` (auto-runs on success), or `gh workflow run "Deploy — Hetzner" --ref main` after images exist | Every production change | Builds + scans all images, runs the migration gate, verifies the rollout (per-service health + HTTP + SMTP checks). The ONLY supported production path. |
+| **CI redeploy without rebuild** | `Deploy — Hetzner` with `skip_pull=true` | Re-apply compose/env changes when images are already on the host | Still runs migrations + verification. |
+| **Manual fallback (emergency only)** | `make deploy DEPLOY_HOST=root@<host>` / `make deploy-service S=<svc> DEPLOY_HOST=…` | Hotfix when CI is unavailable | Builds images locally on the host via `deploy/scripts/deploy.sh` (never pushed to GHCR). Includes `billing-service`, `sales-autopilot` and the `migrator`; `GHCR_NS` is overridable (`make deploy … GHCR_NS=ghcr.io/<ns>/apexmail`). Runs the same migration gate. |
+| **Local production-parity smoke** | `tools/run-compose-smoke.sh full` | Pre-merge validation of the merged compose stack on a dev machine | Brings up the monitoring slice + a prod subset (api-server, enterprise, tracking, sales-autopilot, billing-service, nginx, postgres, redis, clickhouse) with throwaway secrets; verifies health endpoints, TLS vhosts and the sales 404 route; injects a synthetic alert end-to-end. Needs enough Docker VM RAM for the Rust image builds (~8 GB+). |
+
+`make verify` (from anywhere) checks the live production endpoints, and
+`make verify-env ENV_FILE=.env.production` validates an env file against the
+compose `${VAR:?}` contract — the same gate `deploy-hetzner.yml` runs against
+`APEXMAIL_PROD_ENV` before touching the host.
+
+## Fresh-host bootstrap (one-time)
+
+1. **Install the deploy key on the host** — `ssh-copy-id -i ~/.ssh/hetzner-deploy.pub "${HETZNER_SSH_USER:-root}@${HETZNER_HOST}"`, then verify with `ssh … 'echo OK && uname -a'`.
+2. **Bootstrap the host** — `scp deploy/scripts/hetzner-bootstrap.sh "${HETZNER_SSH_USER:-root}@${HETZNER_HOST}:/root/"` then `ssh … 'bash /root/hetzner-bootstrap.sh'` (installs Docker + compose plugin, configures UFW, hardens sshd, creates `/opt/apexmail`).
+3. **Capture the host key** — `ssh-keyscan -H "${HETZNER_HOST}"` → the `HETZNER_KNOWN_HOSTS` GitHub secret.
+4. **Render the production `.env`** from `.env.production.example` (generate values with `openssl rand -base64 32`); validate it locally with `make verify-env`. It becomes the `APEXMAIL_PROD_ENV` GitHub secret. The full 24-secret table is in § "Rendered production secrets" below.
+5. **Set the GitHub secrets** (repository or org level):
+
+| Secret | Value |
+|---|---|
+| `HETZNER_SSH_HOST` (**required**) | production host IP/hostname |
+| `HETZNER_SSH_USER` (**required**) | SSH user (e.g. `root` or `deploy`) |
+| `HETZNER_SSH_PRIVATE_KEY` | `cat ~/.ssh/hetzner-deploy` (full PEM) |
+| `HETZNER_KNOWN_HOSTS` | output of `ssh-keyscan -H <host>` |
+| `APEXMAIL_PROD_ENV` | full rendered `.env` from step 4 |
+| `GHCR_DEPLOY_TOKEN` | PAT with `read:packages` for the GHCR images |
+| `HETZNER_DEPLOY_DIR` (optional) | override remote dir (defaults to `/opt/apexmail`) |
+
+6. **Trigger the first deploy** — merge to `main` (or `gh workflow run "Deploy — Docker Build & Push"`). The Hetzner deploy auto-follows: it syncs compose files + `deploy/`, renders `.env` and all 24 secret files, logs into GHCR, runs database migrations, brings up the full stack with a self-signed TLS fallback, and verifies the rollout.
+7. **Issue a real certificate** — `ssh … "cd /opt/apexmail && bash deploy/scripts/issue-letsencrypt.sh"`. Later deploys warn if the cert is still self-signed.
+
+## Rendered production secrets (the real 24)
+
+`docker-compose.prod.yml` guards **24 `PROD_*_FILE` variables** (`${VAR:?}`).
+The `deploy-hetzner.yml` step "Render docker secret files from .env" renders
+every one of them on the host from the plain value in `APEXMAIL_PROD_ENV`;
+`tools/validate-prod-env.sh` (wired into the workflow as an early gate and
+available as `make verify-env`) derives this set from the compose file, so it
+can never drift. AWS/SMTP pairs are *optional-valued* — the files are still
+rendered (empty) so the guards stay satisfied when running the SES transport.
+
+| Secret value var in `.env` | `PROD_*_FILE` var |
+|---|---|
+| `POSTGRES_PASSWORD` | `PROD_POSTGRES_PASSWORD_FILE` |
+| `REDIS_PASSWORD` | `PROD_REDIS_PASSWORD_FILE` |
+| `CLICKHOUSE_PASSWORD` | `PROD_CLICKHOUSE_PASSWORD_FILE` |
+| `CLICKHOUSE_ADMIN_PASSWORD` | `PROD_CLICKHOUSE_ADMIN_PASSWORD_FILE` |
+| `API_KEY_HASH_SECRET` | `PROD_API_KEY_HASH_SECRET_FILE` |
+| `WEBHOOK_SIGNING_SECRET` | `PROD_WEBHOOK_SIGNING_SECRET_FILE` |
+| `TRACKING_SECRET_KEY` | `PROD_TRACKING_SECRET_KEY_FILE` |
+| `INTERNAL_SERVICE_TOKEN` | `PROD_INTERNAL_SERVICE_TOKEN_FILE` |
+| `JWT_SECRET` | `PROD_JWT_SECRET_FILE` |
+| `JWT_PRIVATE_KEY_PEM` | `PROD_JWT_PRIVATE_KEY_FILE` |
+| `JWT_PUBLIC_KEY_PEM` | `PROD_JWT_PUBLIC_KEY_FILE` |
+| `SESSION_SECRET` | `PROD_SESSION_SECRET_FILE` |
+| `IMPERSONATION_SECRET` | `PROD_IMPERSONATION_SECRET_FILE` |
+| `CSRF_SECRET` | `PROD_CSRF_SECRET_FILE` |
+| `DKIM_PRIVATE_KEY_ENCRYPTION_KEY` | `PROD_DKIM_PRIVATE_KEY_ENCRYPTION_KEY_FILE` |
+| `KIWI_SECRET_KEY` | `PROD_KIWI_SECRET_KEY_FILE` |
+| `STRIPE_SECRET_KEY` | `PROD_STRIPE_SECRET_KEY_FILE` |
+| `STRIPE_WEBHOOK_SECRET` | `PROD_STRIPE_WEBHOOK_SECRET_FILE` |
+| `AWS_ACCESS_KEY_ID` *(optional)* | `PROD_AWS_ACCESS_KEY_ID_FILE` |
+| `AWS_SECRET_ACCESS_KEY` *(optional)* | `PROD_AWS_SECRET_ACCESS_KEY_FILE` |
+| `SMTP_USERNAME` *(optional)* | `PROD_SMTP_USERNAME_FILE` |
+| `SMTP_PASSWORD` *(optional)* | `PROD_SMTP_PASSWORD_FILE` |
+| `SALES_UNSUBSCRIBE_SECRET` | `PROD_SALES_UNSUBSCRIBE_SECRET_FILE` |
+| `BACKUP_ENCRYPTION_KEY` | `PROD_BACKUP_ENCRYPTION_KEY_FILE` |
+
+Non-file variables also validated by the compose overlay (`${VAR:?}`):
+`BASE_URL`, `OAUTH_REDIRECT_BASE_URL`, `APEXMAIL_API_KEY`, `JWT_SECRET`,
+`PLACEMENT_ENCRYPTION_SECRET`, `BILLING_COMPANY_IBAN`,
+`BILLING_COMPANY_PHONE`, `SALES_CAMPAIGN_FROM_EMAIL`.
+
+## Database migrations (deploy-time gate)
+
+Schema migrations (`services/mail-server/migrations`, sequential 001-108+)
+are applied by the **`migrator`** — a one-shot compose job (profile
+`migrate`, `restart: no`) whose image embeds the sqlx migration chain at
+build time (`services/mail-server/crates/migrator`). Both deploy paths run it
+BEFORE `docker compose up -d`, so the stack never starts against an outdated
+schema:
+
+```sh
+docker compose -f docker-compose.yml -f docker-compose.prod.yml \
+  --env-file .env --profile migrate run --rm migrator
 ```
-docker compose -f docker-compose.yml -f docker-compose.prod.yml --env-file .env up -d
-```
+
+- `deploy-hetzner.yml` runs it in the "Run database migrations (gate before
+  up)" step; `deploy.sh` runs the same command in its Step 5.
+- `deploy.yml` builds and publishes `…/migrator:<sha>+latest` in lockstep
+  with the service images, and the image-name drift guard includes it.
+- The job is idempotent — re-running against an up-to-date database is a
+  no-op that exits 0.
+- Manual fallback for operators with direct DB access:
+  `sqlx migrate run --source services/mail-server/migrations` with a
+  `DATABASE_URL` (see `services/mail-server/migrations/README.md`).
 
 ## Canonical service → image map
 
 These are the **only** image names that may appear in a compose file or CI
 build step. The namespace (`ghcr.io/<owner>/<repo>`) is derived from
-`github.repository` in CI — it is never hardcoded.
+`github.repository` in CI. The manual fallback (`deploy/scripts/deploy.sh`)
+defaults its `GHCR_NS` to `ghcr.io/sbelakho2/apexmail` and accepts an
+override (`GHCR_NS=ghcr.io/<ns>/apexmail bash deploy/scripts/deploy.sh`) so a
+fork can hotfix-deploy without editing the script.
 
 | Compose service key   | Canonical image                              | Built by `deploy.yml` target | Dockerfile binary |
 | --------------------- | -------------------------------------------- | ---------------------------- | ----------------- |
@@ -38,6 +136,7 @@ build step. The namespace (`ghcr.io/<owner>/<repo>`) is derived from
 | `status-server`       | `ghcr.io/<ns>/status-server`                 | `auth-server`                | `auth-server`     |
 | `billing-service`     | `ghcr.io/<ns>/billing-service`               | `billing-service`            | `billing-service` |
 | `sales-autopilot`     | `ghcr.io/<ns>/sales-autopilot`               | `sales-autopilot`            | `sales-autopilot` |
+| `migrator` *(one-shot)* | `ghcr.io/<ns>/migrator`                    | `migrator`                   | `migrator`        |
 
 Notes:
 
@@ -222,24 +321,11 @@ CloudWatch metric.
   (Earlier `v1.0.0`/`v1.0.1` pins referred to tags CI never published, which
   broke `docker compose pull`.)
 
-## Required GitHub secrets (no hardcoded defaults)
-
-The deploy workflows fail fast if any of these are absent:
-
-| Secret                    | Purpose                                                        |
-| ------------------------- | -------------------------------------------------------------- |
-| `HETZNER_SSH_HOST`        | Production host IP/hostname (**required**, no default)         |
-| `HETZNER_SSH_USER`        | SSH user (**required**, no default)                            |
-| `HETZNER_SSH_PRIVATE_KEY` | Private key matching the host's `authorized_keys`              |
-| `HETZNER_KNOWN_HOSTS`     | Output of `ssh-keyscan -H <HETZNER_SSH_HOST>`                  |
-| `APEXMAIL_PROD_ENV`       | Full `.env` contents (see `deploy/scripts/HETZNER_DEPLOY.md`)  |
-| `GHCR_DEPLOY_TOKEN`       | PAT with `read:packages` for the host's `docker login ghcr.io` |
-
 ## Drift guard
 
 The CI job `deploy-image-name-guard` (in `deploy.yml`) asserts that every
 `image:` reference in `docker-compose*.yml` matches the canonical service map
-above — including `imap-server`, `mailstore` and `status-server`. If you add
+above — including `imap-server`, `mailstore`, `status-server` and `migrator`. If you add
 a service or rename an image, update this map **and** the guard together —
 the build will fail otherwise.
 
@@ -249,4 +335,44 @@ The `Makefile` targets and `deploy/scripts/deploy.sh` are a manual/emergency
 fallback only. They build images **locally on the host** and tag them with
 GHCR-style names — those images are never pushed to GHCR, and the produced
 stack can drift from CI. Production is deployed exclusively by the two
-workflows above.
+workflows above. The fallback covers the full canonical set
+(`api-server mta imap-server mailstore worker enterprise observability
+status-server billing-service sales-autopilot migrator`), honours a
+`GHCR_NS` env override, and runs the same migration gate before `up -d`.
+
+## Rollback
+
+See [`rollback-plan.md`](rollback-plan.md) for the full procedure. In short:
+
+1. Identify the last known-good commit and its `<short-sha>` image tags.
+2. On the host, either **retag** the known-good SHA images as `:latest`
+   (preferred — compose pins `:latest`) or **sed** the `image:` lines in
+   `docker-compose.prod.yml` to the pinned SHA, then `docker compose up -d`.
+3. Restore the database snapshot only if the bad deploy included migrations
+   that are incompatible with the rolled-back images.
+
+Note: re-running the Hetzner workflow with an older `ref` deploys that
+commit's *scripts*, not its images — compose always resolves `:latest`.
+
+## Verification checklist
+
+After every deploy (the Hetzner workflow does all of this automatically in
+its "Verify rollout" step):
+
+- [ ] Every canonical service reports `running`/`healthy` via
+      `docker compose ps` (per-service assertion, incl. billing-service,
+      sales-autopilot and postgres-backup).
+- [ ] `https://api.apexmail.ee/health` → 200
+- [ ] `https://track.apexmail.ee/health` → 200
+- [ ] `https://status.apexmail.ee/status` → 200
+- [ ] `https://enterprise.apexmail.ee/health` → 200
+- [ ] `https://api.apexmail.ee/sales-api/u/<bogus>` → **404** (a 502/503 means
+      sales-autopilot is down behind nginx)
+- [ ] SMTP banner answers on port 25 (and TLS on 465; bounce/FBL ports
+      2525/2526 reachable).
+- [ ] TLS certificate is Let's Encrypt (workflow warns while self-signed).
+
+From a workstation, `make verify` runs the endpoint/port checks against the
+live host and `deploy/scripts/verify-deployment.sh` re-checks cache coherence
+of the legal pages; `tools/run-compose-smoke.sh full` is the pre-merge
+compose-stack equivalent.

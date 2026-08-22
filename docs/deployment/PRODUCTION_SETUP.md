@@ -717,7 +717,7 @@ All events are:
 ### 6.5 General
 
 - [ ] Health endpoints respond: `GET /health`, `GET /ready`
-- [ ] Database migrations applied
+- [ ] Database migrations applied (the deploy runs the `migrator` one-shot job automatically — see deploy/DEPLOYMENT.md § "Database migrations"; verify `SELECT count(*) FROM _sqlx_migrations` matches the migration count)
 - [ ] WAL archiving and automated backups configured (to Hetzner S3)
 - [ ] Stripe webhook endpoint configured for billing integration
 - [ ] Alerting rules configured in Grafana/Prometheus

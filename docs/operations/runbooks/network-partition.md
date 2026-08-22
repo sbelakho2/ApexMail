@@ -123,9 +123,12 @@ The WireGuard tunnel between regions is down.
    ```
 
 4. **If tunnel cannot be restored, enter failover state:**
+   Promote the Germany replica (the `FailoverService` state machine in the
+   `ha` crate coordinates this when deployed; manual compose equivalent):
    ```bash
-   # Promote Germany replica to primary
-   ./scripts/dr-failover.sh --execute --skip-fencing
+   # On the Germany host
+   docker compose -f docker-compose.yml -f docker-compose.prod.yml exec postgres \
+     psql -U apexmail -c "SELECT pg_promote();"
    ```
 
 5. **While partitioned, both regions operate independently:**
@@ -149,7 +152,10 @@ The entire Finland (primary) region is isolated from the internet.
    - Execute failover to Germany as per Procedure 2 in disaster-recovery.md
    - Update DNS to point to Germany ingress IP
    ```bash
-   ./scripts/dr-failover.sh --execute
+   # On the Germany host (manual path; the ha crate's FailoverService
+   # provides the coordinated version)
+   docker compose -f docker-compose.yml -f docker-compose.prod.yml exec postgres \
+     psql -U apexmail -c "SELECT pg_promote();"
    ```
 
 3. **If Germany is isolated but Finland is healthy:**
@@ -216,6 +222,5 @@ curl -sf https://api.apexmail.ee/v1/health | jq '.'
 ## Related
 
 - [Disaster Recovery & Backup Procedures](../disaster-recovery.md)
-- [DR Failover Script](../../scripts/dr-failover.sh)
-- [Infrastructure alerting rules](../../deploy/prometheus/alerts/infrastructure-alerts.yml)
-- [Helm chart network policies](../../deploy/helm/apexmail/values.yaml:476)
+- [Infrastructure alerting rules](../../deploy/alerting-rules.yml)
+- [Deployment model](../../../deploy/DEPLOYMENT.md)

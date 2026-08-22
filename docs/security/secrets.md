@@ -4,11 +4,17 @@ ApexMail secret material must not be committed to Git. Local development secret 
 
 ## Required Local Compose Files
 
-Run `tools/validate-compose-secrets.sh` before starting the Docker Compose stack. The helper fails fast when these local files are missing or empty:
+The dev compose stack mounts these local files (seeded automatically by
+`tools/run-compose-smoke.sh`; create them by hand for a manual `up`):
 
 - `secrets/postgres_password.txt`
 - `secrets/redis_password.txt`
 - `secrets/clickhouse_password.txt`
+
+For production-shaped env files, run `make verify-env ENV_FILE=<file>` (or
+`tools/validate-prod-env.sh <file>`) — it derives the required variable set
+from the `${VAR:?}` guards in docker-compose*.yml and fails fast on missing
+or placeholder values, including the `PROD_*_FILE` secret-file paths.
 
 ## JWT Secrets
 

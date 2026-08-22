@@ -51,7 +51,7 @@ ENV_FILE="${DEPLOY_DIR}/.env"
 NGINX_SSL_DIR="${DEPLOY_DIR}/deploy/nginx/ssl"
 CERT_SRC="${NGINX_SSL_DIR}/live/apexmail.ee"
 CERT_DIR="${DEPLOY_DIR}/certs"
-GHCR_NS="ghcr.io/sbelakho2/apexmail"
+GHCR_NS="${GHCR_NS:-ghcr.io/sbelakho2/apexmail}"
 
 # Colors
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'; NC='\033[0m'
@@ -75,7 +75,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 # All services that can be built from the mail-server Dockerfile
-ALL_SERVICES=(api-server mta imap-server mailstore worker enterprise observability status-server)
+ALL_SERVICES=(api-server mta imap-server mailstore worker enterprise observability status-server billing-service sales-autopilot migrator)
 # Dockerfile targets that differ from the canonical image/service name.
 # status-server is built from the `auth-server` stage (the binary inside the
 # image is auth-server); the IMAGE name follows the compose service key.
@@ -234,16 +234,28 @@ else
     warn "Let's Encrypt cert not found — using existing certs."
 fi
 
-# ── Step 5: Docker Compose up ────────────────────────────────────────────────
-step "Step 5: Deploy services via Docker Compose"
+# ── Step 5: Run database migrations (gate before up) ────────────────────────
+step "Step 5: Run database migrations (migrator one-shot job)"
+
+# P0 — the deploy-time migration gate. The migrator applies the sqlx chain
+# embedded in its image and exits; `up -d` below only runs when it succeeds
+# (same gate as .github/workflows/deploy-hetzner.yml). Profile `migrate` +
+# restart: no keep it out of the long-running stack.
+log "Running migrator (docker compose run --rm migrator)..."
+docker compose $COMPOSE_FILES --env-file "$ENV_FILE" --profile migrate run --rm migrator
+
+log "Migrations up to date."
+
+# ── Step 6: Docker Compose up ────────────────────────────────────────────────
+step "Step 6: Deploy services via Docker Compose"
 
 log "Starting services..."
 docker compose $COMPOSE_FILES --env-file "$ENV_FILE" up -d --remove-orphans 2>&1
 
 log "Services started."
 
-# ── Step 6: Clean dangling images ────────────────────────────────────────────
-step "Step 6: Clean old Docker images"
+# ── Step 7: Clean dangling images ────────────────────────────────────────────
+step "Step 7: Clean old Docker images"
 
 # Remove dangling images (<none>:<none>) left from rebuilds
 log "Pruning dangling images..."
@@ -263,8 +275,8 @@ fi
 
 log "Image cleanup complete."
 
-# ── Step 7: Reload nginx + verify ────────────────────────────────────────────
-step "Step 7: Reload nginx + verify"
+# ── Step 8: Reload nginx + verify ────────────────────────────────────────────
+step "Step 8: Reload nginx + verify"
 
 sleep 3
 NGINX_NAME=$(docker ps --format '{{.Names}}' | grep nginx | head -1)
