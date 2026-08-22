@@ -1,0 +1,2622 @@
+{
+  "fixtures": [
+    {
+      "id": "web-home-desktop",
+      "surface": "web",
+      "route": "/",
+      "htmlFile": "web-home.html",
+      "snapshotFile": "web-home-desktop.png",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "id": "web-home-mobile",
+      "surface": "web",
+      "route": "/",
+      "htmlFile": "web-home.html",
+      "snapshotFile": "web-home-mobile.png",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "id": "web-login-desktop",
+      "surface": "web",
+      "route": "/login",
+      "htmlFile": "web-login.html",
+      "snapshotFile": "web-login-desktop.png",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "id": "web-login-mobile",
+      "surface": "web",
+      "route": "/login",
+      "htmlFile": "web-login.html",
+      "snapshotFile": "web-login-mobile.png",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "id": "web-signup-desktop",
+      "surface": "web",
+      "route": "/signup",
+      "htmlFile": "web-signup.html",
+      "snapshotFile": "web-signup-desktop.png",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "id": "web-signup-mobile",
+      "surface": "web",
+      "route": "/signup",
+      "htmlFile": "web-signup.html",
+      "snapshotFile": "web-signup-mobile.png",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "id": "web-forgot-password-desktop",
+      "surface": "web",
+      "route": "/forgot-password",
+      "htmlFile": "web-forgot-password.html",
+      "snapshotFile": "web-forgot-password-desktop.png",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "id": "web-forgot-password-mobile",
+      "surface": "web",
+      "route": "/forgot-password",
+      "htmlFile": "web-forgot-password.html",
+      "snapshotFile": "web-forgot-password-mobile.png",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "id": "web-reset-password-desktop",
+      "surface": "web",
+      "route": "/reset-password",
+      "htmlFile": "web-reset-password.html",
+      "snapshotFile": "web-reset-password-desktop.png",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "id": "web-reset-password-mobile",
+      "surface": "web",
+      "route": "/reset-password",
+      "htmlFile": "web-reset-password.html",
+      "snapshotFile": "web-reset-password-mobile.png",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "id": "web-verify-email-desktop",
+      "surface": "web",
+      "route": "/verify-email",
+      "htmlFile": "web-verify-email.html",
+      "snapshotFile": "web-verify-email-desktop.png",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "id": "web-verify-email-mobile",
+      "surface": "web",
+      "route": "/verify-email",
+      "htmlFile": "web-verify-email.html",
+      "snapshotFile": "web-verify-email-mobile.png",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "id": "web-dashboard-desktop",
+      "surface": "web",
+      "route": "/dashboard",
+      "htmlFile": "web-dashboard.html",
+      "snapshotFile": "web-dashboard-desktop.png",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "id": "web-dashboard-mobile",
+      "surface": "web",
+      "route": "/dashboard",
+      "htmlFile": "web-dashboard.html",
+      "snapshotFile": "web-dashboard-mobile.png",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "id": "web-campaigns-desktop",
+      "surface": "web",
+      "route": "/campaigns",
+      "htmlFile": "web-campaigns.html",
+      "snapshotFile": "web-campaigns-desktop.png",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "id": "web-campaigns-mobile",
+      "surface": "web",
+      "route": "/campaigns",
+      "htmlFile": "web-campaigns.html",
+      "snapshotFile": "web-campaigns-mobile.png",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "id": "web-campaigns-new-desktop",
+      "surface": "web",
+      "route": "/campaigns/new",
+      "htmlFile": "web-campaigns-new.html",
+      "snapshotFile": "web-campaigns-new-desktop.png",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "id": "web-campaigns-new-mobile",
+      "surface": "web",
+      "route": "/campaigns/new",
+      "htmlFile": "web-campaigns-new.html",
+      "snapshotFile": "web-campaigns-new-mobile.png",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "id": "web-campaigns-c_1-desktop",
+      "surface": "web",
+      "route": "/campaigns/c_1",
+      "htmlFile": "web-campaigns-c_1.html",
+      "snapshotFile": "web-campaigns-c_1-desktop.png",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "id": "web-campaigns-c_1-mobile",
+      "surface": "web",
+      "route": "/campaigns/c_1",
+      "htmlFile": "web-campaigns-c_1.html",
+      "snapshotFile": "web-campaigns-c_1-mobile.png",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "id": "web-campaigns-c_1-edit-desktop",
+      "surface": "web",
+      "route": "/campaigns/c_1/edit",
+      "htmlFile": "web-campaigns-c_1-edit.html",
+      "snapshotFile": "web-campaigns-c_1-edit-desktop.png",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "id": "web-campaigns-c_1-edit-mobile",
+      "surface": "web",
+      "route": "/campaigns/c_1/edit",
+      "htmlFile": "web-campaigns-c_1-edit.html",
+      "snapshotFile": "web-campaigns-c_1-edit-mobile.png",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "id": "web-contacts-desktop",
+      "surface": "web",
+      "route": "/contacts",
+      "htmlFile": "web-contacts.html",
+      "snapshotFile": "web-contacts-desktop.png",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "id": "web-contacts-mobile",
+      "surface": "web",
+      "route": "/contacts",
+      "htmlFile": "web-contacts.html",
+      "snapshotFile": "web-contacts-mobile.png",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "id": "web-contacts-new-desktop",
+      "surface": "web",
+      "route": "/contacts/new",
+      "htmlFile": "web-contacts-new.html",
+      "snapshotFile": "web-contacts-new-desktop.png",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "id": "web-contacts-new-mobile",
+      "surface": "web",
+      "route": "/contacts/new",
+      "htmlFile": "web-contacts-new.html",
+      "snapshotFile": "web-contacts-new-mobile.png",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "id": "web-lists-desktop",
+      "surface": "web",
+      "route": "/lists",
+      "htmlFile": "web-lists.html",
+      "snapshotFile": "web-lists-desktop.png",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "id": "web-lists-mobile",
+      "surface": "web",
+      "route": "/lists",
+      "htmlFile": "web-lists.html",
+      "snapshotFile": "web-lists-mobile.png",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "id": "web-lists-new-desktop",
+      "surface": "web",
+      "route": "/lists/new",
+      "htmlFile": "web-lists-new.html",
+      "snapshotFile": "web-lists-new-desktop.png",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "id": "web-lists-new-mobile",
+      "surface": "web",
+      "route": "/lists/new",
+      "htmlFile": "web-lists-new.html",
+      "snapshotFile": "web-lists-new-mobile.png",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "id": "web-templates-desktop",
+      "surface": "web",
+      "route": "/templates",
+      "htmlFile": "web-templates.html",
+      "snapshotFile": "web-templates-desktop.png",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "id": "web-templates-mobile",
+      "surface": "web",
+      "route": "/templates",
+      "htmlFile": "web-templates.html",
+      "snapshotFile": "web-templates-mobile.png",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "id": "web-templates-new-desktop",
+      "surface": "web",
+      "route": "/templates/new",
+      "htmlFile": "web-templates-new.html",
+      "snapshotFile": "web-templates-new-desktop.png",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "id": "web-templates-new-mobile",
+      "surface": "web",
+      "route": "/templates/new",
+      "htmlFile": "web-templates-new.html",
+      "snapshotFile": "web-templates-new-mobile.png",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "id": "web-reports-desktop",
+      "surface": "web",
+      "route": "/reports",
+      "htmlFile": "web-reports.html",
+      "snapshotFile": "web-reports-desktop.png",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "id": "web-reports-mobile",
+      "surface": "web",
+      "route": "/reports",
+      "htmlFile": "web-reports.html",
+      "snapshotFile": "web-reports-mobile.png",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "id": "web-reports-deliverability-desktop",
+      "surface": "web",
+      "route": "/reports/deliverability",
+      "htmlFile": "web-reports-deliverability.html",
+      "snapshotFile": "web-reports-deliverability-desktop.png",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "id": "web-reports-deliverability-mobile",
+      "surface": "web",
+      "route": "/reports/deliverability",
+      "htmlFile": "web-reports-deliverability.html",
+      "snapshotFile": "web-reports-deliverability-mobile.png",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "id": "web-analytics-desktop",
+      "surface": "web",
+      "route": "/analytics",
+      "htmlFile": "web-analytics.html",
+      "snapshotFile": "web-analytics-desktop.png",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "id": "web-analytics-mobile",
+      "surface": "web",
+      "route": "/analytics",
+      "htmlFile": "web-analytics.html",
+      "snapshotFile": "web-analytics-mobile.png",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "id": "web-inbox-placement-desktop",
+      "surface": "web",
+      "route": "/inbox-placement",
+      "htmlFile": "web-inbox-placement.html",
+      "snapshotFile": "web-inbox-placement-desktop.png",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "id": "web-inbox-placement-mobile",
+      "surface": "web",
+      "route": "/inbox-placement",
+      "htmlFile": "web-inbox-placement.html",
+      "snapshotFile": "web-inbox-placement-mobile.png",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "id": "web-inbox-placement-new-desktop",
+      "surface": "web",
+      "route": "/inbox-placement/new",
+      "htmlFile": "web-inbox-placement-new.html",
+      "snapshotFile": "web-inbox-placement-new-desktop.png",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "id": "web-inbox-placement-new-mobile",
+      "surface": "web",
+      "route": "/inbox-placement/new",
+      "htmlFile": "web-inbox-placement-new.html",
+      "snapshotFile": "web-inbox-placement-new-mobile.png",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "id": "web-inbox-placement-t_1-desktop",
+      "surface": "web",
+      "route": "/inbox-placement/t_1",
+      "htmlFile": "web-inbox-placement-t_1.html",
+      "snapshotFile": "web-inbox-placement-t_1-desktop.png",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "id": "web-inbox-placement-t_1-mobile",
+      "surface": "web",
+      "route": "/inbox-placement/t_1",
+      "htmlFile": "web-inbox-placement-t_1.html",
+      "snapshotFile": "web-inbox-placement-t_1-mobile.png",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "id": "web-events-desktop",
+      "surface": "web",
+      "route": "/events",
+      "htmlFile": "web-events.html",
+      "snapshotFile": "web-events-desktop.png",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "id": "web-events-mobile",
+      "surface": "web",
+      "route": "/events",
+      "htmlFile": "web-events.html",
+      "snapshotFile": "web-events-mobile.png",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "id": "web-domains-desktop",
+      "surface": "web",
+      "route": "/domains",
+      "htmlFile": "web-domains.html",
+      "snapshotFile": "web-domains-desktop.png",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "id": "web-domains-mobile",
+      "surface": "web",
+      "route": "/domains",
+      "htmlFile": "web-domains.html",
+      "snapshotFile": "web-domains-mobile.png",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "id": "web-domains-new-desktop",
+      "surface": "web",
+      "route": "/domains/new",
+      "htmlFile": "web-domains-new.html",
+      "snapshotFile": "web-domains-new-desktop.png",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "id": "web-domains-new-mobile",
+      "surface": "web",
+      "route": "/domains/new",
+      "htmlFile": "web-domains-new.html",
+      "snapshotFile": "web-domains-new-mobile.png",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "id": "web-settings-desktop",
+      "surface": "web",
+      "route": "/settings",
+      "htmlFile": "web-settings.html",
+      "snapshotFile": "web-settings-desktop.png",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "id": "web-settings-mobile",
+      "surface": "web",
+      "route": "/settings",
+      "htmlFile": "web-settings.html",
+      "snapshotFile": "web-settings-mobile.png",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "id": "web-settings-api-keys-desktop",
+      "surface": "web",
+      "route": "/settings/api-keys",
+      "htmlFile": "web-settings-api-keys.html",
+      "snapshotFile": "web-settings-api-keys-desktop.png",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "id": "web-settings-api-keys-mobile",
+      "surface": "web",
+      "route": "/settings/api-keys",
+      "htmlFile": "web-settings-api-keys.html",
+      "snapshotFile": "web-settings-api-keys-mobile.png",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "id": "web-settings-team-desktop",
+      "surface": "web",
+      "route": "/settings/team",
+      "htmlFile": "web-settings-team.html",
+      "snapshotFile": "web-settings-team-desktop.png",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "id": "web-settings-team-mobile",
+      "surface": "web",
+      "route": "/settings/team",
+      "htmlFile": "web-settings-team.html",
+      "snapshotFile": "web-settings-team-mobile.png",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "id": "web-settings-billing-desktop",
+      "surface": "web",
+      "route": "/settings/billing",
+      "htmlFile": "web-settings-billing.html",
+      "snapshotFile": "web-settings-billing-desktop.png",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "id": "web-settings-billing-mobile",
+      "surface": "web",
+      "route": "/settings/billing",
+      "htmlFile": "web-settings-billing.html",
+      "snapshotFile": "web-settings-billing-mobile.png",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "id": "web-settings-dedicated-ips-desktop",
+      "surface": "web",
+      "route": "/settings/dedicated-ips",
+      "htmlFile": "web-settings-dedicated-ips.html",
+      "snapshotFile": "web-settings-dedicated-ips-desktop.png",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "id": "web-settings-dedicated-ips-mobile",
+      "surface": "web",
+      "route": "/settings/dedicated-ips",
+      "htmlFile": "web-settings-dedicated-ips.html",
+      "snapshotFile": "web-settings-dedicated-ips-mobile.png",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "id": "web-settings-webhooks-desktop",
+      "surface": "web",
+      "route": "/settings/webhooks",
+      "htmlFile": "web-settings-webhooks.html",
+      "snapshotFile": "web-settings-webhooks-desktop.png",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "id": "web-settings-webhooks-mobile",
+      "surface": "web",
+      "route": "/settings/webhooks",
+      "htmlFile": "web-settings-webhooks.html",
+      "snapshotFile": "web-settings-webhooks-mobile.png",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "id": "web-settings-profile-desktop",
+      "surface": "web",
+      "route": "/settings/profile",
+      "htmlFile": "web-settings-profile.html",
+      "snapshotFile": "web-settings-profile-desktop.png",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "id": "web-settings-profile-mobile",
+      "surface": "web",
+      "route": "/settings/profile",
+      "htmlFile": "web-settings-profile.html",
+      "snapshotFile": "web-settings-profile-mobile.png",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "id": "control-plane-login-desktop",
+      "surface": "control-plane",
+      "route": "/login",
+      "htmlFile": "control-plane-login.html",
+      "snapshotFile": "control-plane-login-desktop.png",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "id": "control-plane-login-mobile",
+      "surface": "control-plane",
+      "route": "/login",
+      "htmlFile": "control-plane-login.html",
+      "snapshotFile": "control-plane-login-mobile.png",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "id": "control-plane-home-desktop",
+      "surface": "control-plane",
+      "route": "/",
+      "htmlFile": "control-plane-home.html",
+      "snapshotFile": "control-plane-home-desktop.png",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "id": "control-plane-home-mobile",
+      "surface": "control-plane",
+      "route": "/",
+      "htmlFile": "control-plane-home.html",
+      "snapshotFile": "control-plane-home-mobile.png",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "id": "control-plane-dashboard-desktop",
+      "surface": "control-plane",
+      "route": "/dashboard",
+      "htmlFile": "control-plane-dashboard.html",
+      "snapshotFile": "control-plane-dashboard-desktop.png",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "id": "control-plane-dashboard-mobile",
+      "surface": "control-plane",
+      "route": "/dashboard",
+      "htmlFile": "control-plane-dashboard.html",
+      "snapshotFile": "control-plane-dashboard-mobile.png",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "id": "control-plane-tenants-desktop",
+      "surface": "control-plane",
+      "route": "/tenants",
+      "htmlFile": "control-plane-tenants.html",
+      "snapshotFile": "control-plane-tenants-desktop.png",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "id": "control-plane-tenants-mobile",
+      "surface": "control-plane",
+      "route": "/tenants",
+      "htmlFile": "control-plane-tenants.html",
+      "snapshotFile": "control-plane-tenants-mobile.png",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "id": "control-plane-tenants-new-desktop",
+      "surface": "control-plane",
+      "route": "/tenants/new",
+      "htmlFile": "control-plane-tenants-new.html",
+      "snapshotFile": "control-plane-tenants-new-desktop.png",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "id": "control-plane-tenants-new-mobile",
+      "surface": "control-plane",
+      "route": "/tenants/new",
+      "htmlFile": "control-plane-tenants-new.html",
+      "snapshotFile": "control-plane-tenants-new-mobile.png",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "id": "control-plane-audit-desktop",
+      "surface": "control-plane",
+      "route": "/audit",
+      "htmlFile": "control-plane-audit.html",
+      "snapshotFile": "control-plane-audit-desktop.png",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "id": "control-plane-audit-mobile",
+      "surface": "control-plane",
+      "route": "/audit",
+      "htmlFile": "control-plane-audit.html",
+      "snapshotFile": "control-plane-audit-mobile.png",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "id": "control-plane-sales-desktop",
+      "surface": "control-plane",
+      "route": "/sales",
+      "htmlFile": "control-plane-sales.html",
+      "snapshotFile": "control-plane-sales-desktop.png",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "id": "control-plane-sales-mobile",
+      "surface": "control-plane",
+      "route": "/sales",
+      "htmlFile": "control-plane-sales.html",
+      "snapshotFile": "control-plane-sales-mobile.png",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "id": "control-plane-analytics-desktop",
+      "surface": "control-plane",
+      "route": "/analytics",
+      "htmlFile": "control-plane-analytics.html",
+      "snapshotFile": "control-plane-analytics-desktop.png",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "id": "control-plane-analytics-mobile",
+      "surface": "control-plane",
+      "route": "/analytics",
+      "htmlFile": "control-plane-analytics.html",
+      "snapshotFile": "control-plane-analytics-mobile.png",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "id": "control-plane-operators-desktop",
+      "surface": "control-plane",
+      "route": "/operators",
+      "htmlFile": "control-plane-operators.html",
+      "snapshotFile": "control-plane-operators-desktop.png",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "id": "control-plane-operators-mobile",
+      "surface": "control-plane",
+      "route": "/operators",
+      "htmlFile": "control-plane-operators.html",
+      "snapshotFile": "control-plane-operators-mobile.png",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "id": "control-plane-operators-new-desktop",
+      "surface": "control-plane",
+      "route": "/operators/new",
+      "htmlFile": "control-plane-operators-new.html",
+      "snapshotFile": "control-plane-operators-new-desktop.png",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "id": "control-plane-operators-new-mobile",
+      "surface": "control-plane",
+      "route": "/operators/new",
+      "htmlFile": "control-plane-operators-new.html",
+      "snapshotFile": "control-plane-operators-new-mobile.png",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "id": "control-plane-discovery-desktop",
+      "surface": "control-plane",
+      "route": "/discovery",
+      "htmlFile": "control-plane-discovery.html",
+      "snapshotFile": "control-plane-discovery-desktop.png",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "id": "control-plane-discovery-mobile",
+      "surface": "control-plane",
+      "route": "/discovery",
+      "htmlFile": "control-plane-discovery.html",
+      "snapshotFile": "control-plane-discovery-mobile.png",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "id": "control-plane-jobs-desktop",
+      "surface": "control-plane",
+      "route": "/jobs",
+      "htmlFile": "control-plane-jobs.html",
+      "snapshotFile": "control-plane-jobs-desktop.png",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "id": "control-plane-jobs-mobile",
+      "surface": "control-plane",
+      "route": "/jobs",
+      "htmlFile": "control-plane-jobs.html",
+      "snapshotFile": "control-plane-jobs-mobile.png",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "id": "control-plane-infrastructure-desktop",
+      "surface": "control-plane",
+      "route": "/infrastructure",
+      "htmlFile": "control-plane-infrastructure.html",
+      "snapshotFile": "control-plane-infrastructure-desktop.png",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "id": "control-plane-infrastructure-mobile",
+      "surface": "control-plane",
+      "route": "/infrastructure",
+      "htmlFile": "control-plane-infrastructure.html",
+      "snapshotFile": "control-plane-infrastructure-mobile.png",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "id": "control-plane-infrastructure-nodes-desktop",
+      "surface": "control-plane",
+      "route": "/infrastructure/nodes",
+      "htmlFile": "control-plane-infrastructure-nodes.html",
+      "snapshotFile": "control-plane-infrastructure-nodes-desktop.png",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "id": "control-plane-infrastructure-nodes-mobile",
+      "surface": "control-plane",
+      "route": "/infrastructure/nodes",
+      "htmlFile": "control-plane-infrastructure-nodes.html",
+      "snapshotFile": "control-plane-infrastructure-nodes-mobile.png",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "id": "control-plane-infrastructure-queues-desktop",
+      "surface": "control-plane",
+      "route": "/infrastructure/queues",
+      "htmlFile": "control-plane-infrastructure-queues.html",
+      "snapshotFile": "control-plane-infrastructure-queues-desktop.png",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "id": "control-plane-infrastructure-queues-mobile",
+      "surface": "control-plane",
+      "route": "/infrastructure/queues",
+      "htmlFile": "control-plane-infrastructure-queues.html",
+      "snapshotFile": "control-plane-infrastructure-queues-mobile.png",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "id": "control-plane-domains-desktop",
+      "surface": "control-plane",
+      "route": "/domains",
+      "htmlFile": "control-plane-domains.html",
+      "snapshotFile": "control-plane-domains-desktop.png",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "id": "control-plane-domains-mobile",
+      "surface": "control-plane",
+      "route": "/domains",
+      "htmlFile": "control-plane-domains.html",
+      "snapshotFile": "control-plane-domains-mobile.png",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "id": "control-plane-billing-desktop",
+      "surface": "control-plane",
+      "route": "/billing",
+      "htmlFile": "control-plane-billing.html",
+      "snapshotFile": "control-plane-billing-desktop.png",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "id": "control-plane-billing-mobile",
+      "surface": "control-plane",
+      "route": "/billing",
+      "htmlFile": "control-plane-billing.html",
+      "snapshotFile": "control-plane-billing-mobile.png",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "id": "control-plane-billing-plans-desktop",
+      "surface": "control-plane",
+      "route": "/billing/plans",
+      "htmlFile": "control-plane-billing-plans.html",
+      "snapshotFile": "control-plane-billing-plans-desktop.png",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "id": "control-plane-billing-plans-mobile",
+      "surface": "control-plane",
+      "route": "/billing/plans",
+      "htmlFile": "control-plane-billing-plans.html",
+      "snapshotFile": "control-plane-billing-plans-mobile.png",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "id": "control-plane-compliance-desktop",
+      "surface": "control-plane",
+      "route": "/compliance",
+      "htmlFile": "control-plane-compliance.html",
+      "snapshotFile": "control-plane-compliance-desktop.png",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "id": "control-plane-compliance-mobile",
+      "surface": "control-plane",
+      "route": "/compliance",
+      "htmlFile": "control-plane-compliance.html",
+      "snapshotFile": "control-plane-compliance-mobile.png",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "id": "control-plane-compliance-gdpr-desktop",
+      "surface": "control-plane",
+      "route": "/compliance/gdpr",
+      "htmlFile": "control-plane-compliance-gdpr.html",
+      "snapshotFile": "control-plane-compliance-gdpr-desktop.png",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "id": "control-plane-compliance-gdpr-mobile",
+      "surface": "control-plane",
+      "route": "/compliance/gdpr",
+      "htmlFile": "control-plane-compliance-gdpr.html",
+      "snapshotFile": "control-plane-compliance-gdpr-mobile.png",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "id": "control-plane-alerts-desktop",
+      "surface": "control-plane",
+      "route": "/alerts",
+      "htmlFile": "control-plane-alerts.html",
+      "snapshotFile": "control-plane-alerts-desktop.png",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "id": "control-plane-alerts-mobile",
+      "surface": "control-plane",
+      "route": "/alerts",
+      "htmlFile": "control-plane-alerts.html",
+      "snapshotFile": "control-plane-alerts-mobile.png",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "id": "control-plane-alerts-rules-desktop",
+      "surface": "control-plane",
+      "route": "/alerts/rules",
+      "htmlFile": "control-plane-alerts-rules.html",
+      "snapshotFile": "control-plane-alerts-rules-desktop.png",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "id": "control-plane-alerts-rules-mobile",
+      "surface": "control-plane",
+      "route": "/alerts/rules",
+      "htmlFile": "control-plane-alerts-rules.html",
+      "snapshotFile": "control-plane-alerts-rules-mobile.png",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "id": "control-plane-settings-desktop",
+      "surface": "control-plane",
+      "route": "/settings",
+      "htmlFile": "control-plane-settings.html",
+      "snapshotFile": "control-plane-settings-desktop.png",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "id": "control-plane-settings-mobile",
+      "surface": "control-plane",
+      "route": "/settings",
+      "htmlFile": "control-plane-settings.html",
+      "snapshotFile": "control-plane-settings-mobile.png",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "id": "control-plane-settings-security-desktop",
+      "surface": "control-plane",
+      "route": "/settings/security",
+      "htmlFile": "control-plane-settings-security.html",
+      "snapshotFile": "control-plane-settings-security-desktop.png",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "id": "control-plane-settings-security-mobile",
+      "surface": "control-plane",
+      "route": "/settings/security",
+      "htmlFile": "control-plane-settings-security.html",
+      "snapshotFile": "control-plane-settings-security-mobile.png",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "id": "control-plane-cp-desktop",
+      "surface": "control-plane",
+      "route": "/cp",
+      "htmlFile": "control-plane-cp.html",
+      "snapshotFile": "control-plane-cp-desktop.png",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "id": "control-plane-cp-mobile",
+      "surface": "control-plane",
+      "route": "/cp",
+      "htmlFile": "control-plane-cp.html",
+      "snapshotFile": "control-plane-cp-mobile.png",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "id": "control-plane-cp-tenants-desktop",
+      "surface": "control-plane",
+      "route": "/cp/tenants",
+      "htmlFile": "control-plane-cp-tenants.html",
+      "snapshotFile": "control-plane-cp-tenants-desktop.png",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "id": "control-plane-cp-tenants-mobile",
+      "surface": "control-plane",
+      "route": "/cp/tenants",
+      "htmlFile": "control-plane-cp-tenants.html",
+      "snapshotFile": "control-plane-cp-tenants-mobile.png",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "id": "control-plane-cp-audit-desktop",
+      "surface": "control-plane",
+      "route": "/cp/audit",
+      "htmlFile": "control-plane-cp-audit.html",
+      "snapshotFile": "control-plane-cp-audit-desktop.png",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "id": "control-plane-cp-audit-mobile",
+      "surface": "control-plane",
+      "route": "/cp/audit",
+      "htmlFile": "control-plane-cp-audit.html",
+      "snapshotFile": "control-plane-cp-audit-mobile.png",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "id": "control-plane-cp-sales-desktop",
+      "surface": "control-plane",
+      "route": "/cp/sales",
+      "htmlFile": "control-plane-cp-sales.html",
+      "snapshotFile": "control-plane-cp-sales-desktop.png",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "id": "control-plane-cp-sales-mobile",
+      "surface": "control-plane",
+      "route": "/cp/sales",
+      "htmlFile": "control-plane-cp-sales.html",
+      "snapshotFile": "control-plane-cp-sales-mobile.png",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "id": "control-plane-cp-infrastructure-desktop",
+      "surface": "control-plane",
+      "route": "/cp/infrastructure",
+      "htmlFile": "control-plane-cp-infrastructure.html",
+      "snapshotFile": "control-plane-cp-infrastructure-desktop.png",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "id": "control-plane-cp-infrastructure-mobile",
+      "surface": "control-plane",
+      "route": "/cp/infrastructure",
+      "htmlFile": "control-plane-cp-infrastructure.html",
+      "snapshotFile": "control-plane-cp-infrastructure-mobile.png",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "id": "control-plane-cp-security-desktop",
+      "surface": "control-plane",
+      "route": "/cp/security",
+      "htmlFile": "control-plane-cp-security.html",
+      "snapshotFile": "control-plane-cp-security-desktop.png",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "id": "control-plane-cp-security-mobile",
+      "surface": "control-plane",
+      "route": "/cp/security",
+      "htmlFile": "control-plane-cp-security.html",
+      "snapshotFile": "control-plane-cp-security-mobile.png",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "id": "marketing-home-desktop",
+      "surface": "marketing",
+      "route": "/",
+      "htmlFile": "marketing-home.html",
+      "snapshotFile": "marketing-home-desktop.png",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "id": "marketing-home-mobile",
+      "surface": "marketing",
+      "route": "/",
+      "htmlFile": "marketing-home.html",
+      "snapshotFile": "marketing-home-mobile.png",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "id": "marketing-pricing-desktop",
+      "surface": "marketing",
+      "route": "/pricing",
+      "htmlFile": "marketing-pricing.html",
+      "snapshotFile": "marketing-pricing-desktop.png",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "id": "marketing-pricing-mobile",
+      "surface": "marketing",
+      "route": "/pricing",
+      "htmlFile": "marketing-pricing.html",
+      "snapshotFile": "marketing-pricing-mobile.png",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "id": "marketing-pricing-calculator-desktop",
+      "surface": "marketing",
+      "route": "/pricing/calculator",
+      "htmlFile": "marketing-pricing-calculator.html",
+      "snapshotFile": "marketing-pricing-calculator-desktop.png",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "id": "marketing-pricing-calculator-mobile",
+      "surface": "marketing",
+      "route": "/pricing/calculator",
+      "htmlFile": "marketing-pricing-calculator.html",
+      "snapshotFile": "marketing-pricing-calculator-mobile.png",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "id": "marketing-features-desktop",
+      "surface": "marketing",
+      "route": "/features",
+      "htmlFile": "marketing-features.html",
+      "snapshotFile": "marketing-features-desktop.png",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "id": "marketing-features-mobile",
+      "surface": "marketing",
+      "route": "/features",
+      "htmlFile": "marketing-features.html",
+      "snapshotFile": "marketing-features-mobile.png",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "id": "marketing-compliance-desktop",
+      "surface": "marketing",
+      "route": "/compliance",
+      "htmlFile": "marketing-compliance.html",
+      "snapshotFile": "marketing-compliance-desktop.png",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "id": "marketing-compliance-mobile",
+      "surface": "marketing",
+      "route": "/compliance",
+      "htmlFile": "marketing-compliance.html",
+      "snapshotFile": "marketing-compliance-mobile.png",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "id": "marketing-private-cloud-desktop",
+      "surface": "marketing",
+      "route": "/private-cloud",
+      "htmlFile": "marketing-private-cloud.html",
+      "snapshotFile": "marketing-private-cloud-desktop.png",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "id": "marketing-private-cloud-mobile",
+      "surface": "marketing",
+      "route": "/private-cloud",
+      "htmlFile": "marketing-private-cloud.html",
+      "snapshotFile": "marketing-private-cloud-mobile.png",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "id": "marketing-api-console-desktop",
+      "surface": "marketing",
+      "route": "/api-console",
+      "htmlFile": "marketing-api-console.html",
+      "snapshotFile": "marketing-api-console-desktop.png",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "id": "marketing-api-console-mobile",
+      "surface": "marketing",
+      "route": "/api-console",
+      "htmlFile": "marketing-api-console.html",
+      "snapshotFile": "marketing-api-console-mobile.png",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "id": "marketing-case-studies-desktop",
+      "surface": "marketing",
+      "route": "/case-studies",
+      "htmlFile": "marketing-case-studies.html",
+      "snapshotFile": "marketing-case-studies-desktop.png",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "id": "marketing-case-studies-mobile",
+      "surface": "marketing",
+      "route": "/case-studies",
+      "htmlFile": "marketing-case-studies.html",
+      "snapshotFile": "marketing-case-studies-mobile.png",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "id": "marketing-forensic-desktop",
+      "surface": "marketing",
+      "route": "/forensic",
+      "htmlFile": "marketing-forensic.html",
+      "snapshotFile": "marketing-forensic-desktop.png",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "id": "marketing-forensic-mobile",
+      "surface": "marketing",
+      "route": "/forensic",
+      "htmlFile": "marketing-forensic.html",
+      "snapshotFile": "marketing-forensic-mobile.png",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "id": "marketing-status-desktop",
+      "surface": "marketing",
+      "route": "/status",
+      "htmlFile": "marketing-status.html",
+      "snapshotFile": "marketing-status-desktop.png",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "id": "marketing-status-mobile",
+      "surface": "marketing",
+      "route": "/status",
+      "htmlFile": "marketing-status.html",
+      "snapshotFile": "marketing-status-mobile.png",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "id": "marketing-compare-postmark-desktop",
+      "surface": "marketing",
+      "route": "/compare/postmark",
+      "htmlFile": "marketing-compare-postmark.html",
+      "snapshotFile": "marketing-compare-postmark-desktop.png",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "id": "marketing-compare-postmark-mobile",
+      "surface": "marketing",
+      "route": "/compare/postmark",
+      "htmlFile": "marketing-compare-postmark.html",
+      "snapshotFile": "marketing-compare-postmark-mobile.png",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "id": "marketing-compare-resend-desktop",
+      "surface": "marketing",
+      "route": "/compare/resend",
+      "htmlFile": "marketing-compare-resend.html",
+      "snapshotFile": "marketing-compare-resend-desktop.png",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "id": "marketing-compare-resend-mobile",
+      "surface": "marketing",
+      "route": "/compare/resend",
+      "htmlFile": "marketing-compare-resend.html",
+      "snapshotFile": "marketing-compare-resend-mobile.png",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "id": "marketing-compare-sendgrid-desktop",
+      "surface": "marketing",
+      "route": "/compare/sendgrid",
+      "htmlFile": "marketing-compare-sendgrid.html",
+      "snapshotFile": "marketing-compare-sendgrid-desktop.png",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "id": "marketing-compare-sendgrid-mobile",
+      "surface": "marketing",
+      "route": "/compare/sendgrid",
+      "htmlFile": "marketing-compare-sendgrid.html",
+      "snapshotFile": "marketing-compare-sendgrid-mobile.png",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "id": "marketing-terms-desktop",
+      "surface": "marketing",
+      "route": "/terms",
+      "htmlFile": "marketing-terms.html",
+      "snapshotFile": "marketing-terms-desktop.png",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "id": "marketing-terms-mobile",
+      "surface": "marketing",
+      "route": "/terms",
+      "htmlFile": "marketing-terms.html",
+      "snapshotFile": "marketing-terms-mobile.png",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "id": "marketing-privacy-desktop",
+      "surface": "marketing",
+      "route": "/privacy",
+      "htmlFile": "marketing-privacy.html",
+      "snapshotFile": "marketing-privacy-desktop.png",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "id": "marketing-privacy-mobile",
+      "surface": "marketing",
+      "route": "/privacy",
+      "htmlFile": "marketing-privacy.html",
+      "snapshotFile": "marketing-privacy-mobile.png",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "id": "marketing-cookies-desktop",
+      "surface": "marketing",
+      "route": "/cookies",
+      "htmlFile": "marketing-cookies.html",
+      "snapshotFile": "marketing-cookies-desktop.png",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "id": "marketing-cookies-mobile",
+      "surface": "marketing",
+      "route": "/cookies",
+      "htmlFile": "marketing-cookies.html",
+      "snapshotFile": "marketing-cookies-mobile.png",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "id": "marketing-acceptable-use-desktop",
+      "surface": "marketing",
+      "route": "/acceptable-use",
+      "htmlFile": "marketing-acceptable-use.html",
+      "snapshotFile": "marketing-acceptable-use-desktop.png",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "id": "marketing-acceptable-use-mobile",
+      "surface": "marketing",
+      "route": "/acceptable-use",
+      "htmlFile": "marketing-acceptable-use.html",
+      "snapshotFile": "marketing-acceptable-use-mobile.png",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "id": "marketing-dpa-desktop",
+      "surface": "marketing",
+      "route": "/dpa",
+      "htmlFile": "marketing-dpa.html",
+      "snapshotFile": "marketing-dpa-desktop.png",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "id": "marketing-dpa-mobile",
+      "surface": "marketing",
+      "route": "/dpa",
+      "htmlFile": "marketing-dpa.html",
+      "snapshotFile": "marketing-dpa-mobile.png",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "id": "marketing-sla-desktop",
+      "surface": "marketing",
+      "route": "/sla",
+      "htmlFile": "marketing-sla.html",
+      "snapshotFile": "marketing-sla-desktop.png",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "id": "marketing-sla-mobile",
+      "surface": "marketing",
+      "route": "/sla",
+      "htmlFile": "marketing-sla.html",
+      "snapshotFile": "marketing-sla-mobile.png",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "id": "marketing-zola-home-desktop",
+      "surface": "marketing-zola",
+      "route": "/",
+      "htmlFile": "marketing-zola-home.html",
+      "snapshotFile": "marketing-zola-home-desktop.png",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "id": "marketing-zola-home-mobile",
+      "surface": "marketing-zola",
+      "route": "/",
+      "htmlFile": "marketing-zola-home.html",
+      "snapshotFile": "marketing-zola-home-mobile.png",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "id": "marketing-zola-pricing-desktop",
+      "surface": "marketing-zola",
+      "route": "/pricing",
+      "htmlFile": "marketing-zola-pricing.html",
+      "snapshotFile": "marketing-zola-pricing-desktop.png",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "id": "marketing-zola-pricing-mobile",
+      "surface": "marketing-zola",
+      "route": "/pricing",
+      "htmlFile": "marketing-zola-pricing.html",
+      "snapshotFile": "marketing-zola-pricing-mobile.png",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "id": "marketing-zola-pricing-calculator-desktop",
+      "surface": "marketing-zola",
+      "route": "/pricing/calculator",
+      "htmlFile": "marketing-zola-pricing-calculator.html",
+      "snapshotFile": "marketing-zola-pricing-calculator-desktop.png",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "id": "marketing-zola-pricing-calculator-mobile",
+      "surface": "marketing-zola",
+      "route": "/pricing/calculator",
+      "htmlFile": "marketing-zola-pricing-calculator.html",
+      "snapshotFile": "marketing-zola-pricing-calculator-mobile.png",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "id": "marketing-zola-features-desktop",
+      "surface": "marketing-zola",
+      "route": "/features",
+      "htmlFile": "marketing-zola-features.html",
+      "snapshotFile": "marketing-zola-features-desktop.png",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "id": "marketing-zola-features-mobile",
+      "surface": "marketing-zola",
+      "route": "/features",
+      "htmlFile": "marketing-zola-features.html",
+      "snapshotFile": "marketing-zola-features-mobile.png",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "id": "marketing-zola-compliance-desktop",
+      "surface": "marketing-zola",
+      "route": "/compliance",
+      "htmlFile": "marketing-zola-compliance.html",
+      "snapshotFile": "marketing-zola-compliance-desktop.png",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "id": "marketing-zola-compliance-mobile",
+      "surface": "marketing-zola",
+      "route": "/compliance",
+      "htmlFile": "marketing-zola-compliance.html",
+      "snapshotFile": "marketing-zola-compliance-mobile.png",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "id": "marketing-zola-private-cloud-desktop",
+      "surface": "marketing-zola",
+      "route": "/private-cloud",
+      "htmlFile": "marketing-zola-private-cloud.html",
+      "snapshotFile": "marketing-zola-private-cloud-desktop.png",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "id": "marketing-zola-private-cloud-mobile",
+      "surface": "marketing-zola",
+      "route": "/private-cloud",
+      "htmlFile": "marketing-zola-private-cloud.html",
+      "snapshotFile": "marketing-zola-private-cloud-mobile.png",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "id": "marketing-zola-api-console-desktop",
+      "surface": "marketing-zola",
+      "route": "/api-console",
+      "htmlFile": "marketing-zola-api-console.html",
+      "snapshotFile": "marketing-zola-api-console-desktop.png",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "id": "marketing-zola-api-console-mobile",
+      "surface": "marketing-zola",
+      "route": "/api-console",
+      "htmlFile": "marketing-zola-api-console.html",
+      "snapshotFile": "marketing-zola-api-console-mobile.png",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "id": "marketing-zola-case-studies-desktop",
+      "surface": "marketing-zola",
+      "route": "/case-studies",
+      "htmlFile": "marketing-zola-case-studies.html",
+      "snapshotFile": "marketing-zola-case-studies-desktop.png",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "id": "marketing-zola-case-studies-mobile",
+      "surface": "marketing-zola",
+      "route": "/case-studies",
+      "htmlFile": "marketing-zola-case-studies.html",
+      "snapshotFile": "marketing-zola-case-studies-mobile.png",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "id": "marketing-zola-forensic-desktop",
+      "surface": "marketing-zola",
+      "route": "/forensic",
+      "htmlFile": "marketing-zola-forensic.html",
+      "snapshotFile": "marketing-zola-forensic-desktop.png",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "id": "marketing-zola-forensic-mobile",
+      "surface": "marketing-zola",
+      "route": "/forensic",
+      "htmlFile": "marketing-zola-forensic.html",
+      "snapshotFile": "marketing-zola-forensic-mobile.png",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "id": "marketing-zola-status-desktop",
+      "surface": "marketing-zola",
+      "route": "/status",
+      "htmlFile": "marketing-zola-status.html",
+      "snapshotFile": "marketing-zola-status-desktop.png",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "id": "marketing-zola-status-mobile",
+      "surface": "marketing-zola",
+      "route": "/status",
+      "htmlFile": "marketing-zola-status.html",
+      "snapshotFile": "marketing-zola-status-mobile.png",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "id": "marketing-zola-compare-desktop",
+      "surface": "marketing-zola",
+      "route": "/compare",
+      "htmlFile": "marketing-zola-compare.html",
+      "snapshotFile": "marketing-zola-compare-desktop.png",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "id": "marketing-zola-compare-mobile",
+      "surface": "marketing-zola",
+      "route": "/compare",
+      "htmlFile": "marketing-zola-compare.html",
+      "snapshotFile": "marketing-zola-compare-mobile.png",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "id": "marketing-zola-compare-postmark-desktop",
+      "surface": "marketing-zola",
+      "route": "/compare/postmark",
+      "htmlFile": "marketing-zola-compare-postmark.html",
+      "snapshotFile": "marketing-zola-compare-postmark-desktop.png",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "id": "marketing-zola-compare-postmark-mobile",
+      "surface": "marketing-zola",
+      "route": "/compare/postmark",
+      "htmlFile": "marketing-zola-compare-postmark.html",
+      "snapshotFile": "marketing-zola-compare-postmark-mobile.png",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "id": "marketing-zola-compare-resend-desktop",
+      "surface": "marketing-zola",
+      "route": "/compare/resend",
+      "htmlFile": "marketing-zola-compare-resend.html",
+      "snapshotFile": "marketing-zola-compare-resend-desktop.png",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "id": "marketing-zola-compare-resend-mobile",
+      "surface": "marketing-zola",
+      "route": "/compare/resend",
+      "htmlFile": "marketing-zola-compare-resend.html",
+      "snapshotFile": "marketing-zola-compare-resend-mobile.png",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "id": "marketing-zola-compare-sendgrid-desktop",
+      "surface": "marketing-zola",
+      "route": "/compare/sendgrid",
+      "htmlFile": "marketing-zola-compare-sendgrid.html",
+      "snapshotFile": "marketing-zola-compare-sendgrid-desktop.png",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "id": "marketing-zola-compare-sendgrid-mobile",
+      "surface": "marketing-zola",
+      "route": "/compare/sendgrid",
+      "htmlFile": "marketing-zola-compare-sendgrid.html",
+      "snapshotFile": "marketing-zola-compare-sendgrid-mobile.png",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "id": "marketing-zola-contact-desktop",
+      "surface": "marketing-zola",
+      "route": "/contact",
+      "htmlFile": "marketing-zola-contact.html",
+      "snapshotFile": "marketing-zola-contact-desktop.png",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "id": "marketing-zola-contact-mobile",
+      "surface": "marketing-zola",
+      "route": "/contact",
+      "htmlFile": "marketing-zola-contact.html",
+      "snapshotFile": "marketing-zola-contact-mobile.png",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "id": "marketing-zola-contact-sales-desktop",
+      "surface": "marketing-zola",
+      "route": "/contact/sales",
+      "htmlFile": "marketing-zola-contact-sales.html",
+      "snapshotFile": "marketing-zola-contact-sales-desktop.png",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "id": "marketing-zola-contact-sales-mobile",
+      "surface": "marketing-zola",
+      "route": "/contact/sales",
+      "htmlFile": "marketing-zola-contact-sales.html",
+      "snapshotFile": "marketing-zola-contact-sales-mobile.png",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "id": "marketing-zola-terms-desktop",
+      "surface": "marketing-zola",
+      "route": "/terms",
+      "htmlFile": "marketing-zola-terms.html",
+      "snapshotFile": "marketing-zola-terms-desktop.png",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "id": "marketing-zola-terms-mobile",
+      "surface": "marketing-zola",
+      "route": "/terms",
+      "htmlFile": "marketing-zola-terms.html",
+      "snapshotFile": "marketing-zola-terms-mobile.png",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "id": "marketing-zola-privacy-desktop",
+      "surface": "marketing-zola",
+      "route": "/privacy",
+      "htmlFile": "marketing-zola-privacy.html",
+      "snapshotFile": "marketing-zola-privacy-desktop.png",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "id": "marketing-zola-privacy-mobile",
+      "surface": "marketing-zola",
+      "route": "/privacy",
+      "htmlFile": "marketing-zola-privacy.html",
+      "snapshotFile": "marketing-zola-privacy-mobile.png",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "id": "marketing-zola-cookies-desktop",
+      "surface": "marketing-zola",
+      "route": "/cookies",
+      "htmlFile": "marketing-zola-cookies.html",
+      "snapshotFile": "marketing-zola-cookies-desktop.png",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "id": "marketing-zola-cookies-mobile",
+      "surface": "marketing-zola",
+      "route": "/cookies",
+      "htmlFile": "marketing-zola-cookies.html",
+      "snapshotFile": "marketing-zola-cookies-mobile.png",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "id": "marketing-zola-de-desktop",
+      "surface": "marketing-zola",
+      "route": "/de",
+      "htmlFile": "marketing-zola-de.html",
+      "snapshotFile": "marketing-zola-de-desktop.png",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "id": "marketing-zola-de-mobile",
+      "surface": "marketing-zola",
+      "route": "/de",
+      "htmlFile": "marketing-zola-de.html",
+      "snapshotFile": "marketing-zola-de-mobile.png",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "id": "marketing-zola-de-cookies-desktop",
+      "surface": "marketing-zola",
+      "route": "/de/cookies",
+      "htmlFile": "marketing-zola-de-cookies.html",
+      "snapshotFile": "marketing-zola-de-cookies-desktop.png",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "id": "marketing-zola-de-cookies-mobile",
+      "surface": "marketing-zola",
+      "route": "/de/cookies",
+      "htmlFile": "marketing-zola-de-cookies.html",
+      "snapshotFile": "marketing-zola-de-cookies-mobile.png",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "id": "marketing-zola-docs-desktop",
+      "surface": "marketing-zola",
+      "route": "/docs",
+      "htmlFile": "marketing-zola-docs.html",
+      "snapshotFile": "marketing-zola-docs-desktop.png",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "id": "marketing-zola-docs-mobile",
+      "surface": "marketing-zola",
+      "route": "/docs",
+      "htmlFile": "marketing-zola-docs.html",
+      "snapshotFile": "marketing-zola-docs-mobile.png",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "id": "marketing-zola-docs-alerts-desktop",
+      "surface": "marketing-zola",
+      "route": "/docs/alerts",
+      "htmlFile": "marketing-zola-docs-alerts.html",
+      "snapshotFile": "marketing-zola-docs-alerts-desktop.png",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "id": "marketing-zola-docs-alerts-mobile",
+      "surface": "marketing-zola",
+      "route": "/docs/alerts",
+      "htmlFile": "marketing-zola-docs-alerts.html",
+      "snapshotFile": "marketing-zola-docs-alerts-mobile.png",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "id": "marketing-zola-docs-analytics-desktop",
+      "surface": "marketing-zola",
+      "route": "/docs/analytics",
+      "htmlFile": "marketing-zola-docs-analytics.html",
+      "snapshotFile": "marketing-zola-docs-analytics-desktop.png",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "id": "marketing-zola-docs-analytics-mobile",
+      "surface": "marketing-zola",
+      "route": "/docs/analytics",
+      "htmlFile": "marketing-zola-docs-analytics.html",
+      "snapshotFile": "marketing-zola-docs-analytics-mobile.png",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "id": "marketing-zola-docs-api-desktop",
+      "surface": "marketing-zola",
+      "route": "/docs/api",
+      "htmlFile": "marketing-zola-docs-api.html",
+      "snapshotFile": "marketing-zola-docs-api-desktop.png",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "id": "marketing-zola-docs-api-mobile",
+      "surface": "marketing-zola",
+      "route": "/docs/api",
+      "htmlFile": "marketing-zola-docs-api.html",
+      "snapshotFile": "marketing-zola-docs-api-mobile.png",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "id": "marketing-zola-docs-api-grader-desktop",
+      "surface": "marketing-zola",
+      "route": "/docs/api/grader",
+      "htmlFile": "marketing-zola-docs-api-grader.html",
+      "snapshotFile": "marketing-zola-docs-api-grader-desktop.png",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "id": "marketing-zola-docs-api-grader-mobile",
+      "surface": "marketing-zola",
+      "route": "/docs/api/grader",
+      "htmlFile": "marketing-zola-docs-api-grader.html",
+      "snapshotFile": "marketing-zola-docs-api-grader-mobile.png",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "id": "marketing-zola-docs-sdks-desktop",
+      "surface": "marketing-zola",
+      "route": "/docs/sdks",
+      "htmlFile": "marketing-zola-docs-sdks.html",
+      "snapshotFile": "marketing-zola-docs-sdks-desktop.png",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "id": "marketing-zola-docs-sdks-mobile",
+      "surface": "marketing-zola",
+      "route": "/docs/sdks",
+      "htmlFile": "marketing-zola-docs-sdks.html",
+      "snapshotFile": "marketing-zola-docs-sdks-mobile.png",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "id": "marketing-zola-docs-webhooks-desktop",
+      "surface": "marketing-zola",
+      "route": "/docs/webhooks",
+      "htmlFile": "marketing-zola-docs-webhooks.html",
+      "snapshotFile": "marketing-zola-docs-webhooks-desktop.png",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "id": "marketing-zola-docs-webhooks-mobile",
+      "surface": "marketing-zola",
+      "route": "/docs/webhooks",
+      "htmlFile": "marketing-zola-docs-webhooks.html",
+      "snapshotFile": "marketing-zola-docs-webhooks-mobile.png",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "id": "marketing-zola-es-desktop",
+      "surface": "marketing-zola",
+      "route": "/es",
+      "htmlFile": "marketing-zola-es.html",
+      "snapshotFile": "marketing-zola-es-desktop.png",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "id": "marketing-zola-es-mobile",
+      "surface": "marketing-zola",
+      "route": "/es",
+      "htmlFile": "marketing-zola-es.html",
+      "snapshotFile": "marketing-zola-es-mobile.png",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "id": "marketing-zola-es-cookies-desktop",
+      "surface": "marketing-zola",
+      "route": "/es/cookies",
+      "htmlFile": "marketing-zola-es-cookies.html",
+      "snapshotFile": "marketing-zola-es-cookies-desktop.png",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "id": "marketing-zola-es-cookies-mobile",
+      "surface": "marketing-zola",
+      "route": "/es/cookies",
+      "htmlFile": "marketing-zola-es-cookies.html",
+      "snapshotFile": "marketing-zola-es-cookies-mobile.png",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "id": "marketing-zola-fr-desktop",
+      "surface": "marketing-zola",
+      "route": "/fr",
+      "htmlFile": "marketing-zola-fr.html",
+      "snapshotFile": "marketing-zola-fr-desktop.png",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "id": "marketing-zola-fr-mobile",
+      "surface": "marketing-zola",
+      "route": "/fr",
+      "htmlFile": "marketing-zola-fr.html",
+      "snapshotFile": "marketing-zola-fr-mobile.png",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "id": "marketing-zola-fr-cookies-desktop",
+      "surface": "marketing-zola",
+      "route": "/fr/cookies",
+      "htmlFile": "marketing-zola-fr-cookies.html",
+      "snapshotFile": "marketing-zola-fr-cookies-desktop.png",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "id": "marketing-zola-fr-cookies-mobile",
+      "surface": "marketing-zola",
+      "route": "/fr/cookies",
+      "htmlFile": "marketing-zola-fr-cookies.html",
+      "snapshotFile": "marketing-zola-fr-cookies-mobile.png",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "id": "marketing-zola-inbox-placement-desktop",
+      "surface": "marketing-zola",
+      "route": "/inbox-placement",
+      "htmlFile": "marketing-zola-inbox-placement.html",
+      "snapshotFile": "marketing-zola-inbox-placement-desktop.png",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "id": "marketing-zola-inbox-placement-mobile",
+      "surface": "marketing-zola",
+      "route": "/inbox-placement",
+      "htmlFile": "marketing-zola-inbox-placement.html",
+      "snapshotFile": "marketing-zola-inbox-placement-mobile.png",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "id": "marketing-zola-secure-email-for-regulated-saas-desktop",
+      "surface": "marketing-zola",
+      "route": "/secure-email-for-regulated-saas",
+      "htmlFile": "marketing-zola-secure-email-for-regulated-saas.html",
+      "snapshotFile": "marketing-zola-secure-email-for-regulated-saas-desktop.png",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "id": "marketing-zola-secure-email-for-regulated-saas-mobile",
+      "surface": "marketing-zola",
+      "route": "/secure-email-for-regulated-saas",
+      "htmlFile": "marketing-zola-secure-email-for-regulated-saas.html",
+      "snapshotFile": "marketing-zola-secure-email-for-regulated-saas-mobile.png",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "id": "marketing-zola-acceptable-use-desktop",
+      "surface": "marketing-zola",
+      "route": "/acceptable-use",
+      "htmlFile": "marketing-zola-acceptable-use.html",
+      "snapshotFile": "marketing-zola-acceptable-use-desktop.png",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "id": "marketing-zola-acceptable-use-mobile",
+      "surface": "marketing-zola",
+      "route": "/acceptable-use",
+      "htmlFile": "marketing-zola-acceptable-use.html",
+      "snapshotFile": "marketing-zola-acceptable-use-mobile.png",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "id": "marketing-zola-dpa-desktop",
+      "surface": "marketing-zola",
+      "route": "/dpa",
+      "htmlFile": "marketing-zola-dpa.html",
+      "snapshotFile": "marketing-zola-dpa-desktop.png",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "id": "marketing-zola-dpa-mobile",
+      "surface": "marketing-zola",
+      "route": "/dpa",
+      "htmlFile": "marketing-zola-dpa.html",
+      "snapshotFile": "marketing-zola-dpa-mobile.png",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "id": "marketing-zola-sla-desktop",
+      "surface": "marketing-zola",
+      "route": "/sla",
+      "htmlFile": "marketing-zola-sla.html",
+      "snapshotFile": "marketing-zola-sla-desktop.png",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "id": "marketing-zola-sla-mobile",
+      "surface": "marketing-zola",
+      "route": "/sla",
+      "htmlFile": "marketing-zola-sla.html",
+      "snapshotFile": "marketing-zola-sla-mobile.png",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    }
+  ]
+}

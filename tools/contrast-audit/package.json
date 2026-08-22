@@ -1,0 +1,14 @@
+{
+  "name": "apexmail-contrast-audit",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Dark-mode correctness + WCAG 2.1 contrast audit for ApexMail surfaces (read-only analysis tool)",
+  "scripts": {
+    "audit": "node audit.mjs",
+    "crop": "node crop.mjs"
+  },
+  "dependencies": {
+    "playwright": "1.59.0"
+  }
+}
