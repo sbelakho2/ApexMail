@@ -1,5 +1,5 @@
 {# Security Section #}
-<section class="py-24 bg-surface-100 border-y border-surface-200">
+<section class="py-20 lg:py-32 bg-surface-100 border-y border-surface-200">
   <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
     <div class="grid lg:grid-cols-2 gap-20 items-center">
       <div>
@@ -10,74 +10,74 @@
           <li class="flex items-start gap-4">
             <div class="w-1.5 h-1.5 bg-brand-500 flex-shrink-0 mt-2"></div>
             <div>
-              <span class="font-bold text-surface-950 text-xs tracking-widest">{% if i18n_data and i18n_data[l] and i18n_data[l]["security"] and i18n_data[l]["security"]["item1_title"] %}{{ i18n_data[l]["security"]["item1_title"] }}{% else %}Enterprise Security Controls{% endif %}</span>
+              <span class="font-bold text-surface-950 text-sm tracking-tight">{% if i18n_data and i18n_data[l] and i18n_data[l]["security"] and i18n_data[l]["security"]["item1_title"] %}{{ i18n_data[l]["security"]["item1_title"] }}{% else %}Enterprise Security Controls{% endif %}</span>
               <p class="text-[13px] text-surface-600 mt-1">{% if i18n_data and i18n_data[l] and i18n_data[l]["security"] and i18n_data[l]["security"]["item1_desc"] %}{{ i18n_data[l]["security"]["item1_desc"] }}{% else %}Security and audit features vary by plan; SOC 2 certification is not currently offered.{% endif %}</p>
             </div>
           </li>
           <li class="flex items-start gap-4">
             <div class="w-1.5 h-1.5 bg-brand-500 flex-shrink-0 mt-2"></div>
             <div>
-              <span class="font-bold text-surface-950 text-xs tracking-widest">{% if i18n_data and i18n_data[l] and i18n_data[l]["security"] and i18n_data[l]["security"]["item2_title"] %}{{ i18n_data[l]["security"]["item2_title"] }}{% else %}GDPR &amp; Compliance{% endif %}</span>
+              <span class="font-bold text-surface-950 text-sm tracking-tight">{% if i18n_data and i18n_data[l] and i18n_data[l]["security"] and i18n_data[l]["security"]["item2_title"] %}{{ i18n_data[l]["security"]["item2_title"] }}{% else %}GDPR &amp; Compliance{% endif %}</span>
               <p class="text-[13px] text-surface-600 mt-1">{% if i18n_data and i18n_data[l] and i18n_data[l]["security"] and i18n_data[l]["security"]["item2_desc"] %}{{ i18n_data[l]["security"]["item2_desc"] }}{% else %}GDPR-oriented processing in EU data centers. HIPAA availability is not currently offered.{% endif %}</p>
             </div>
           </li>
           <li class="flex items-start gap-4">
             <div class="w-1.5 h-1.5 bg-brand-500 flex-shrink-0 mt-2"></div>
             <div>
-              <span class="font-bold text-surface-950 text-xs tracking-widest">{% if i18n_data and i18n_data[l] and i18n_data[l]["security"] and i18n_data[l]["security"]["item3_title"] %}{{ i18n_data[l]["security"]["item3_title"] }}{% else %}AES-256 Encryption{% endif %}</span>
+              <span class="font-bold text-surface-950 text-sm tracking-tight">{% if i18n_data and i18n_data[l] and i18n_data[l]["security"] and i18n_data[l]["security"]["item3_title"] %}{{ i18n_data[l]["security"]["item3_title"] }}{% else %}AES-256 Encryption{% endif %}</span>
               <p class="text-[13px] text-surface-600 mt-1">{% if i18n_data and i18n_data[l] and i18n_data[l]["security"] and i18n_data[l]["security"]["item3_desc"] %}{{ i18n_data[l]["security"]["item3_desc"] }}{% else %}All data encrypted at rest and in transit via TLS 1.2+ (TLS 1.3 preferred).{% endif %}</p>
             </div>
           </li>
           <li class="flex items-start gap-4">
             <div class="w-1.5 h-1.5 bg-brand-500 flex-shrink-0 mt-2"></div>
             <div>
-              <span class="font-bold text-surface-950 text-xs tracking-widest">{% if i18n_data and i18n_data[l] and i18n_data[l]["security"] and i18n_data[l]["security"]["item4_title"] %}{{ i18n_data[l]["security"]["item4_title"] }}{% else %}Complete Audit Trail{% endif %}</span>
+              <span class="font-bold text-surface-950 text-sm tracking-tight">{% if i18n_data and i18n_data[l] and i18n_data[l]["security"] and i18n_data[l]["security"]["item4_title"] %}{{ i18n_data[l]["security"]["item4_title"] }}{% else %}Complete Audit Trail{% endif %}</span>
               <p class="text-[13px] text-surface-600 mt-1">{% if i18n_data and i18n_data[l] and i18n_data[l]["security"] and i18n_data[l]["security"]["item4_desc"] %}{{ i18n_data[l]["security"]["item4_desc"] }}{% else %}Audit logging with integrity verification across all system interactions.{% endif %}</p>
             </div>
           </li>
         </ul>
       </div>
       <div class="relative">
-        <div class="apex-card bg-white p-10">
+        <div class="apex-card bg-surface-50 p-10">
           <div class="text-center mb-10 relative">
             <div class="w-16 h-16 rounded-sm bg-surface-100 flex items-center justify-center mx-auto mb-6 border border-surface-200">
               <svg xmlns="http://www.w3.org/2000/svg" class="w-8 h-8 text-surface-950" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
             </div>
-            <h3 class="text-xs font-bold text-surface-950 mb-1 tracking-widest">{% if i18n_data and i18n_data[l] and i18n_data[l]["security"] and i18n_data[l]["security"]["compliance_status"] %}{{ i18n_data[l]["security"]["compliance_status"] }}{% else %}Compliance Status{% endif %}</h3>
+            <h3 class="text-base font-bold text-surface-950 mb-1 tracking-tight">{% if i18n_data and i18n_data[l] and i18n_data[l]["security"] and i18n_data[l]["security"]["compliance_status"] %}{{ i18n_data[l]["security"]["compliance_status"] }}{% else %}Compliance Status{% endif %}</h3>
             <p class="text-[11px] font-bold tracking-tighter text-surface-400">{% if i18n_data and i18n_data[l] and i18n_data[l]["security"] and i18n_data[l]["security"]["system_integrity_label"] %}{{ i18n_data[l]["security"]["system_integrity_label"] }}{% else %}System Integrity Controls{% endif %}</p>
           </div>
           <div class="space-y-2">
             <div class="flex items-center justify-between p-3 border border-surface-200 bg-surface-100 hover:bg-surface-200 transition-colors">
               <span class="text-[11px] font-bold text-surface-700 tracking-tight">{% if i18n_data and i18n_data[l] and i18n_data[l]["security"] and i18n_data[l]["security"]["compliance_check_1"] %}{{ i18n_data[l]["security"]["compliance_check_1"] }}{% else %}Check 1{% endif %}</span>
-              <span class="inline-flex items-center gap-1.5 px-2 py-0.5 bg-white text-surface-950 text-xs font-bold border border-surface-300 tracking-widest">
+              <span class="inline-flex items-center gap-1.5 px-2 py-0.5 bg-surface-50 text-surface-950 text-xs font-bold border border-surface-300 tracking-widest">
                 <div class="w-1.5 h-1.5 bg-success-500"></div>
                 {% if i18n_data and i18n_data[l] and i18n_data[l]["security"] and i18n_data[l]["security"]["active"] %}{{ i18n_data[l]["security"]["active"] }}{% else %}Active{% endif %}
               </span>
             </div>
             <div class="flex items-center justify-between p-3 border border-surface-200 bg-surface-100 hover:bg-surface-200 transition-colors">
               <span class="text-[11px] font-bold text-surface-700 tracking-tight">{% if i18n_data and i18n_data[l] and i18n_data[l]["security"] and i18n_data[l]["security"]["compliance_check_2"] %}{{ i18n_data[l]["security"]["compliance_check_2"] }}{% else %}Check 2{% endif %}</span>
-              <span class="inline-flex items-center gap-1.5 px-2 py-0.5 bg-white text-surface-950 text-xs font-bold border border-surface-300 tracking-widest">
+              <span class="inline-flex items-center gap-1.5 px-2 py-0.5 bg-surface-50 text-surface-950 text-xs font-bold border border-surface-300 tracking-widest">
                 <div class="w-1.5 h-1.5 bg-success-500"></div>
                 {% if i18n_data and i18n_data[l] and i18n_data[l]["security"] and i18n_data[l]["security"]["active"] %}{{ i18n_data[l]["security"]["active"] }}{% else %}Active{% endif %}
               </span>
             </div>
             <div class="flex items-center justify-between p-3 border border-surface-200 bg-surface-100 hover:bg-surface-200 transition-colors">
               <span class="text-[11px] font-bold text-surface-700 tracking-tight">{% if i18n_data and i18n_data[l] and i18n_data[l]["security"] and i18n_data[l]["security"]["compliance_check_3"] %}{{ i18n_data[l]["security"]["compliance_check_3"] }}{% else %}Check 3{% endif %}</span>
-              <span class="inline-flex items-center gap-1.5 px-2 py-0.5 bg-white text-surface-950 text-xs font-bold border border-surface-300 tracking-widest">
+              <span class="inline-flex items-center gap-1.5 px-2 py-0.5 bg-surface-50 text-surface-950 text-xs font-bold border border-surface-300 tracking-widest">
                 <div class="w-1.5 h-1.5 bg-success-500"></div>
                 {% if i18n_data and i18n_data[l] and i18n_data[l]["security"] and i18n_data[l]["security"]["active"] %}{{ i18n_data[l]["security"]["active"] }}{% else %}Active{% endif %}
               </span>
             </div>
             <div class="flex items-center justify-between p-3 border border-surface-200 bg-surface-100 hover:bg-surface-200 transition-colors">
               <span class="text-[11px] font-bold text-surface-700 tracking-tight">{% if i18n_data and i18n_data[l] and i18n_data[l]["security"] and i18n_data[l]["security"]["compliance_check_4"] %}{{ i18n_data[l]["security"]["compliance_check_4"] }}{% else %}Check 4{% endif %}</span>
-              <span class="inline-flex items-center gap-1.5 px-2 py-0.5 bg-white text-surface-950 text-xs font-bold border border-surface-300 tracking-widest">
+              <span class="inline-flex items-center gap-1.5 px-2 py-0.5 bg-surface-50 text-surface-950 text-xs font-bold border border-surface-300 tracking-widest">
                 <div class="w-1.5 h-1.5 bg-success-500"></div>
                 {% if i18n_data and i18n_data[l] and i18n_data[l]["security"] and i18n_data[l]["security"]["active"] %}{{ i18n_data[l]["security"]["active"] }}{% else %}Active{% endif %}
               </span>
             </div>
             <div class="flex items-center justify-between p-3 border border-surface-200 bg-surface-100 hover:bg-surface-200 transition-colors">
               <span class="text-[11px] font-bold text-surface-700 tracking-tight">{% if i18n_data and i18n_data[l] and i18n_data[l]["security"] and i18n_data[l]["security"]["compliance_check_5"] %}{{ i18n_data[l]["security"]["compliance_check_5"] }}{% else %}Check 5{% endif %}</span>
-              <span class="inline-flex items-center gap-1.5 px-2 py-0.5 bg-white text-surface-950 text-xs font-bold border border-surface-300 tracking-widest">
+              <span class="inline-flex items-center gap-1.5 px-2 py-0.5 bg-surface-50 text-surface-950 text-xs font-bold border border-surface-300 tracking-widest">
                 <div class="w-1.5 h-1.5 bg-success-500"></div>
                 {% if i18n_data and i18n_data[l] and i18n_data[l]["security"] and i18n_data[l]["security"]["active"] %}{{ i18n_data[l]["security"]["active"] }}{% else %}Active{% endif %}
               </span>

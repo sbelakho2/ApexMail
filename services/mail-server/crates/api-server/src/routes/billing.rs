@@ -4385,8 +4385,11 @@ mod tests {
             .connect_lazy(&database_url)
             .expect("failed to create lazy test database pool");
 
+        // F6: never default to the ambient 6379 (CI pins the same dead-end
+        // port when TEST_REDIS_URL is unset; the lazy pool is only used by
+        // Redis-tolerant paths and the explicitly gated tests).
         let redis_url =
-            std::env::var("TEST_REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".into());
+            std::env::var("TEST_REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:1".into());
         let redis = RedisConfig::from_url(&redis_url)
             .create_pool(Some(deadpool_redis::Runtime::Tokio1))
             .expect("failed to create lazy test redis pool");

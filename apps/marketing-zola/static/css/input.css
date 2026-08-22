@@ -174,16 +174,16 @@
   --space-16: 64px;
 
   /* Radius — "Premium" overhaul (audit 1.1). The previous 2px/4px/6px/8px
-     scale produced "legacy industrial" corners; the new scale is softer and
-     matches the rounded-2xl (12px) standard from the design reference.
-     Because rounded-sm/-md/-lg/-xl all bind to these variables, this single
-     edit propagates to all 471 rounded-sm call-sites without a class rename.
-     A new --radius-2xl (16px) is added for cards. */
+     scale produced "legacy industrial" corners; the new scale is softer.
+     Doctrine (design audit item 7): one CARD radius — rounded-lg (12px) —
+     for .apex-card and every swept card container; rounded-sm (6px) stays
+     the chip/badge radius. --radius-xl and --radius-2xl are now distinct
+     steps (16/20px) instead of the accidental 16/16 duplication. */
   --radius-sm: 6px;
   --radius-md: 8px;
   --radius-lg: 12px;
   --radius-xl: 16px;
-  --radius-2xl: 16px;
+  --radius-2xl: 20px;
 
   /* Brand gradient — applied to primary buttons, headings, and accent elements.
      Restored to the red brand scale (#DC2626 → #991B1B). */
@@ -341,22 +341,12 @@ html.dark .apex-brand-mark {
   color: #fff !important;
 }
 
-/* Override hardcoded bg-white to respect dark mode via CSS variables.
-   This catches all 140+ instances across templates without modifying each one.
-   !important is needed to override Tailwind's ! modifier (!bg-white) in pricing/card.html */
-html.dark .bg-white {
-  background-color: rgb(var(--surface-50) / var(--tw-bg-opacity, 1)) !important;
-}
-html.dark .bg-white\/95 {
-  background-color: rgb(var(--surface-50) / 0.95) !important;
-}
-html.dark .bg-white\/80 {
-  background-color: rgb(var(--surface-50) / 0.8) !important;
-}
-html.dark .bg-white\/5 {
-  background-color: rgb(var(--surface-50) / 0.05) !important;
-}
-
+/* Dark-mode overrides for legacy utility classes.
+   The templates were migrated to the zinc token utilities
+   (bg-surface-50 etc. — design audit item 16), which flip per theme via
+   the CSS variables and need no patching; only the deliberate
+   always-white inverse CTA (!bg-white in pricing/card.html) still rides
+   the [class~="!bg-white"] rules further down. */
 html.dark .bg-brand-50 {
   background-color: rgb(69 10 10 / var(--tw-bg-opacity, 0.72)) !important;
 }
@@ -390,7 +380,6 @@ html.dark .bg-info-50 {
 html.dark .bg-danger-50 {
   background-color: rgb(127 29 29 / var(--tw-bg-opacity, 0.35)) !important;
 }
-html.dark .from-white,
 html.dark .from-surface-50,
 html.dark .from-surface-100 {
   --tw-gradient-from: rgb(9 9 11 / 1) var(--tw-gradient-from-position) !important;
@@ -402,7 +391,6 @@ html.dark .from-brand-50 {
   --tw-gradient-to: rgb(69 10 10 / 0) var(--tw-gradient-to-position) !important;
   --tw-gradient-stops: var(--tw-gradient-from), var(--tw-gradient-to) !important;
 }
-html.dark .via-white,
 html.dark .via-surface-50,
 html.dark .via-surface-100 {
   --tw-gradient-to: rgb(9 9 11 / 0) var(--tw-gradient-to-position) !important;
@@ -412,7 +400,6 @@ html.dark .via-brand-50 {
   --tw-gradient-to: rgb(69 10 10 / 0) var(--tw-gradient-to-position) !important;
   --tw-gradient-stops: var(--tw-gradient-from), rgb(69 10 10 / 0.42) var(--tw-gradient-via-position), var(--tw-gradient-to) !important;
 }
-html.dark .to-white,
 html.dark .to-surface-50,
 html.dark .to-surface-100 {
   --tw-gradient-to: rgb(9 9 11 / 1) var(--tw-gradient-to-position) !important;
@@ -534,19 +521,6 @@ html.dark .cookie-consent-banner {
     color: #fff !important;
   }
 
-  .bg-white {
-    background-color: rgb(var(--surface-50) / var(--tw-bg-opacity, 1)) !important;
-  }
-  .bg-white\/95 {
-    background-color: rgb(var(--surface-50) / 0.95) !important;
-  }
-  .bg-white\/80 {
-    background-color: rgb(var(--surface-50) / 0.8) !important;
-  }
-  .bg-white\/5 {
-    background-color: rgb(var(--surface-50) / 0.05) !important;
-  }
-
   .bg-brand-50 {
     background-color: rgb(69 10 10 / var(--tw-bg-opacity, 0.72)) !important;
   }
@@ -580,7 +554,6 @@ html.dark .cookie-consent-banner {
   .bg-danger-50 {
     background-color: rgb(127 29 29 / var(--tw-bg-opacity, 0.35)) !important;
   }
-  .from-white,
   .from-surface-50,
   .from-surface-100 {
     --tw-gradient-from: rgb(9 9 11 / 1) var(--tw-gradient-from-position) !important;
@@ -592,7 +565,6 @@ html.dark .cookie-consent-banner {
     --tw-gradient-to: rgb(69 10 10 / 0) var(--tw-gradient-to-position) !important;
     --tw-gradient-stops: var(--tw-gradient-from), var(--tw-gradient-to) !important;
   }
-  .via-white,
   .via-surface-50,
   .via-surface-100 {
     --tw-gradient-to: rgb(9 9 11 / 0) var(--tw-gradient-to-position) !important;
@@ -602,7 +574,6 @@ html.dark .cookie-consent-banner {
     --tw-gradient-to: rgb(69 10 10 / 0) var(--tw-gradient-to-position) !important;
     --tw-gradient-stops: var(--tw-gradient-from), rgb(69 10 10 / 0.42) var(--tw-gradient-via-position), var(--tw-gradient-to) !important;
   }
-  .to-white,
   .to-surface-50,
   .to-surface-100 {
     --tw-gradient-to: rgb(9 9 11 / 1) var(--tw-gradient-to-position) !important;
@@ -792,10 +763,11 @@ html.dark :focus-visible {
     @apply font-display text-[20px] md:text-[24px] font-bold leading-[1.1] tracking-normal;
   }
 
-  /* Core UI elements from Style Guide. rounded-2xl per audit 1.1
-     (cards standardized on 12px corners — the design-reference standard). */
+  /* Core UI elements from Style Guide. Radius doctrine (design audit
+     item 7): cards are standardized on rounded-lg (12px) — the single
+     card radius across .apex-card and the swept template cards. */
   .apex-card {
-    @apply bg-surface-50 border border-surface-200 rounded-2xl transition-premium;
+    @apply bg-surface-50 border border-surface-200 rounded-lg transition-premium;
   }
 
   .apex-card:hover {
@@ -842,9 +814,11 @@ html.dark :focus-visible {
 }
 
 @layer components {
-  /* Premium transitions — explicit properties only (no `all`) per premium-experience-spec.md §3 */
+  /* Premium transitions — explicit properties only (no `all`) per premium-experience-spec.md §3.
+     `filter` is in the list so the btn hover `filter: brightness(0.9)` eases
+     instead of snapping (design audit item 2). */
   .transition-premium {
-    transition-property: color, background-color, border-color, box-shadow, transform;
+    transition-property: color, background-color, border-color, box-shadow, transform, filter;
     transition-timing-function: cubic-bezier(0.23, 1, 0.32, 1);
     transition-duration: 200ms;
   }
@@ -878,10 +852,6 @@ html.dark :focus-visible {
       0 0 1px rgb(0 0 0 / 0.04);
   }
 
-  .container-marketing {
-    @apply max-w-[1200px] mx-auto px-4 md:px-6 lg:px-8;
-  }
-
   /* Removed .honest-surface and .premium-card — they were unused duplicates
      of .apex-card (same recipe, different names). Templates use .apex-card. */
 
@@ -907,21 +877,37 @@ html.dark :focus-visible {
     min-height: 44px;
   }
 
-  .btn-accent {
-    @apply px-6 py-3 text-white font-semibold rounded-lg border border-brand-700 transition-premium tracking-tight text-sm;
-    background: var(--brand-gradient);
-    min-height: 44px;
+  /* ── Button size scale (design audit item 10) ───────────────────
+     Padding/type only — the 44px minimum target height from the base
+     layer applies to every variant, so --sm never shrinks below it. */
+  .btn-primary--lg,
+  .btn-secondary--lg {
+    @apply px-8 py-4 text-base;
+    min-height: 52px;
   }
-  .btn-accent:hover {
-    filter: brightness(0.9);
+  .btn-primary--sm,
+  .btn-secondary--sm {
+    @apply px-4 py-2 text-xs;
   }
 
-  /* Heading gradient — applied to marketing page headings */
-  .heading-gradient {
-    background: var(--brand-gradient);
-    -webkit-background-clip: text;
-    background-clip: text;
-    -webkit-text-fill-color: transparent;
+  /* ── Button variants absorbed from private grammars (item 10) ──
+     .btn-primary--invert replaces the pricing-CTA "solid near-black"
+     button; .btn-secondary--invert replaces the 404 page's dark-surface
+     outline buttons. The invert primary is pinned to the literal
+     near-black zinc (like the dark-mode farm rules) — rgb(var(--surface-950))
+     would flip to white in dark mode and put white text on white. */
+  .btn-primary--invert {
+    @apply px-6 py-3 text-white font-semibold rounded-lg border border-surface-950 hover:border-brand-700 transition-premium tracking-tight text-sm;
+    background-color: rgb(9 9 11);
+    min-height: 44px;
+  }
+  .btn-primary--invert:hover {
+    background-color: rgb(var(--brand-700));
+  }
+
+  .btn-secondary--invert {
+    @apply px-6 py-3 border border-surface-700 bg-transparent text-surface-100 font-semibold rounded-lg hover:border-surface-500 hover:bg-surface-900 hover:text-surface-100 transition-premium tracking-tight text-sm;
+    min-height: 44px;
   }
 
   /* Apex Style Prose — for technical documentation and legal pages */
@@ -964,29 +950,53 @@ html.dark :focus-visible {
     @apply pl-6 border-l-4 border-brand-600 italic text-surface-500 my-8;
   }
 
+  /* Grid children default to min-width:auto, so long code lines and
+     unbreakable tokens blow out their track (the item's min-content wins).
+     Zero the automatic minimum so tracks can shrink and the inner
+     overflow-x:auto surfaces (pre, tables) do their job. */
+  .grid > * { min-width: 0; }
+
   .prose table {
     @apply w-full text-left border-collapse border border-surface-200 my-8;
   }
 
+  /* Wide data tables (data locations, API params, comparisons) must scroll
+     inside their own box on narrow screens instead of spilling past the
+     viewport; desktop rendering is unchanged. */
+  @media (max-width: 767.98px) {
+    .prose table {
+      display: block;
+      overflow-x: auto;
+    }
+  }
+
   .prose th {
-    @apply px-4 py-3 bg-surface-100 border border-surface-200 text-[10px] font-bold tracking-widest text-surface-600;
+    @apply px-4 py-3 bg-surface-100 border border-surface-200 text-[11px] font-bold tracking-widest text-surface-600;
   }
 
   .prose td {
     @apply px-4 py-3 border border-surface-200 text-[13px] text-surface-600;
   }
 
-  /* Button loading state — replaces text with CSS spinner */
+  /* Unbreakable tokens (hostnames, region ids) and long German compounds
+     (Auftragsverarbeitung) must wrap instead of pushing cells, headings,
+     and paragraphs past the viewport. */
+  .prose h1, .prose h2, .prose h3, .prose h4, .prose p,
+  .prose td, .prose th, .prose code {
+    overflow-wrap: anywhere;
+  }
+
+  /* Button loading state — replaces text with CSS spinner.
+     (.btn-accent was deleted with the button consolidation, audit item 10:
+     it was a byte-identical duplicate of .btn-primary.) */
   .btn-primary[data-loading="true"],
-  .btn-secondary[data-loading="true"],
-  .btn-accent[data-loading="true"] {
+  .btn-secondary[data-loading="true"] {
     @apply relative pointer-events-none;
     color: transparent !important;
   }
 
   .btn-primary[data-loading="true"]::before,
-  .btn-secondary[data-loading="true"]::before,
-  .btn-accent[data-loading="true"]::before {
+  .btn-secondary[data-loading="true"]::before {
     content: '';
     position: absolute;
     left: 50%;
@@ -1010,45 +1020,6 @@ html.dark :focus-visible {
     border-top-color: rgb(var(--surface-900));
   }
 
-  .btn-accent[data-loading="true"]::before {
-    border-color: rgba(255, 255, 255, 0.3);
-    border-top-color: white;
-  }
-
-  /* Button icon-only variant */
-  .btn--icon {
-    @apply px-3 py-3 inline-flex items-center justify-center;
-    min-width: 44px;
-    min-height: 44px;
-  }
-
-  /* 12-Column Grid System (Style Guide v2) */
-  .grid-12 {
-    display: grid;
-    grid-template-columns: repeat(12, 1fr);
-    gap: 16px;
-  }
-
-  @screen sm {
-    .grid-12 { gap: 16px; }
-  }
-  @screen lg {
-    .grid-12 { gap: 24px; }
-  }
-
-  .col-span-1 { grid-column: span 1 / span 1; }
-  .col-span-2 { grid-column: span 2 / span 2; }
-  .col-span-3 { grid-column: span 3 / span 3; }
-  .col-span-4 { grid-column: span 4 / span 4; }
-  .col-span-5 { grid-column: span 5 / span 5; }
-  .col-span-6 { grid-column: span 6 / span 6; }
-  .col-span-7 { grid-column: span 7 / span 7; }
-  .col-span-8 { grid-column: span 8 / span 8; }
-  .col-span-9 { grid-column: span 9 / span 9; }
-  .col-span-10 { grid-column: span 10 / span 10; }
-  .col-span-11 { grid-column: span 11 / span 11; }
-  .col-span-12 { grid-column: span 12 / span 12; }
-
   /* Button active state */
   .btn-primary:active {
     transform: scale(0.97);
@@ -1058,34 +1029,6 @@ html.dark :focus-visible {
   .btn-secondary:active {
     transform: scale(0.97);
     @apply bg-surface-100 border-surface-400;
-  }
-
-  .btn-accent:active {
-    transform: scale(0.97);
-    @apply bg-accent-700;
-  }
-
-  /* Form variant classes */
-  .input--error {
-    border-color: rgb(var(--destructive));
-  }
-  .input--error:focus {
-    border-color: rgb(var(--destructive));
-    box-shadow: 0 0 0 3px rgb(var(--destructive) / 0.1);
-  }
-  .input--success {
-    border-color: rgb(var(--success));
-  }
-  .input--success:focus {
-    border-color: rgb(var(--success));
-    box-shadow: 0 0 0 3px rgb(var(--success) / 0.1);
-  }
-  .input--warning {
-    border-color: rgb(var(--warning));
-  }
-  .input--warning:focus {
-    border-color: rgb(var(--warning));
-    box-shadow: 0 0 0 3px rgb(var(--warning) / 0.1);
   }
 
   .section-title {
@@ -1107,23 +1050,52 @@ html.dark :focus-visible {
     word-break: break-word;
   }
 
-  .nav-link {
-    @apply text-surface-300 hover:text-white transition-colors relative;
+  /* ── Form components (design audit item 9) ───────────────────
+     .input-text — the site's text/select input: 44px target height
+     (matching the button floor), font-medium, tabular numerals for the
+     volume/count fields it serves. Replaces the six hand-copied input
+     grammars in the pricing calculator.
+     .input-range — the calculator slider. The previous global
+     input[type='range'] pseudo-element paint silently overrode the
+     template's utility classes (double-styling bug); the paint now lives
+     on this opt-in class built from the token scale. */
+  .input-text {
+    @apply rounded-lg border border-surface-200 bg-surface-50 px-3 text-sm text-surface-950 font-medium tabular-nums transition-premium;
+    min-height: 44px;
+  }
+  .input-text:focus {
+    @apply outline-none border-brand-500 ring-1 ring-brand-500;
   }
 
-  .nav-link::after {
-    content: '';
-    position: absolute;
-    bottom: -4px;
-    left: 0;
-    width: 0;
-    height: 2px;
-    background: rgb(var(--primary));
-    transition: width 0.3s ease;
+  .input-range {
+    @apply w-full cursor-pointer appearance-none bg-transparent;
+    min-height: 44px;
+  }
+  .input-range::-webkit-slider-runnable-track {
+    @apply h-2 rounded-full bg-surface-200;
+  }
+  .input-range::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    @apply w-7 h-7 rounded-full bg-brand-500 border-2 border-white shadow-premium-sm cursor-pointer;
+    margin-top: -10px;
+  }
+  .input-range::-moz-range-track {
+    @apply h-2 rounded-full bg-surface-200;
+  }
+  .input-range::-moz-range-thumb {
+    @apply w-7 h-7 rounded-full bg-brand-500 border-2 border-white shadow-premium-sm cursor-pointer;
   }
 
-  .nav-link:hover::after {
-    width: 100%;
+  /* ── Callout (design audit item 18) ──────────────────────────
+     The unified note box replacing four hand-rolled grammars
+     (macros::sources_block, macros::methodology_note, the homepage
+     methodology citation, and the calculator notice boxes). */
+  .callout {
+    @apply p-4 sm:p-6 bg-surface-50 border border-surface-200 rounded-lg text-sm text-surface-600 leading-relaxed;
+  }
+  .callout--warning {
+    @apply bg-warning-50/30 border-warning-200 text-warning-700;
   }
 
   .cookie-consent-banner {
@@ -1213,6 +1185,28 @@ html.dark :focus-visible {
     animation: slideUp 0.5s ease-out forwards;
   }
 
+  /* Scroll-driven variant (design audit item 3): where animation timelines
+     are supported, the reveal is driven by the element's position in the
+     viewport instead of page load, so below-fold content animates when it
+     is actually seen. The load-timed rules above remain the fallback for
+     browsers without scroll timelines. `both` keeps the pre-entry state
+     hidden until the element enters the scroll range; elements already
+     inside the viewport at load render in their final state. */
+  @supports (animation-timeline: view()) {
+    @media (prefers-reduced-motion: no-preference) {
+      .animate-in {
+        animation: fadeIn linear both;
+        animation-timeline: view();
+        animation-range: entry 0% entry 70%;
+      }
+      .animate-in-up {
+        animation: slideUp linear both;
+        animation-timeline: view();
+        animation-range: entry 0% entry 70%;
+      }
+    }
+  }
+
   .delay-100 {
     animation-delay: 100ms;
   }
@@ -1298,6 +1292,10 @@ html.dark :focus-visible {
   font-style: italic;
 }
 
+/* Dark-theme re-assertions use the SAME brand/zinc steps as the base
+   mapping above (the indigo-era #93c5fd / #fde68a leftovers were removed
+   with the 2026-08-21 brand restore). Code blocks stay near-black in both
+   themes, so these values keep >= AA on rgb(9 9 10). */
 @media (prefers-color-scheme: dark) {
   .z-code {
     color: #f4f4f5 !important;
@@ -1310,10 +1308,10 @@ html.dark :focus-visible {
   .z-constant,
   .z-support,
   .z-keyword {
-    color: #93c5fd !important;
+    color: rgb(248 113 113) !important;
   }
   .z-string {
-    color: #fde68a !important;
+    color: rgb(254 202 202) !important;
   }
   .z-entity,
   .z-variable {
@@ -1332,10 +1330,10 @@ html.dark .z-punctuation {
 html.dark .z-constant,
 html.dark .z-support,
 html.dark .z-keyword {
-  color: #93c5fd !important;
+  color: rgb(248 113 113) !important;
 }
 html.dark .z-string {
-  color: #fde68a !important;
+  color: rgb(254 202 202) !important;
 }
 html.dark .z-entity,
 html.dark .z-variable {
@@ -1354,30 +1352,52 @@ html.dark .z-variable {
   }
 }
 
-/* Calculator slider */
-input[type='range'] {
-  -webkit-appearance: none;
-  appearance: none;
-  background: transparent;
+/* ── Form components (design audit item 9) ───────────────────
+   .input-text — the site's text/select input: 44px target height
+   (matching the button floor), font-medium, tabular numerals for the
+   volume/count fields it serves. Replaces the six hand-copied input
+   grammars in the pricing calculator.
+   .input-range — the calculator slider. The previous global
+   input[type='range'] pseudo-element paint silently overrode the
+   template's utility classes (double-styling bug); the paint now lives
+   on this opt-in class built from the token scale. */
+.input-text {
+  @apply rounded-lg border border-surface-200 bg-surface-50 px-3 text-sm text-surface-950 font-medium tabular-nums transition-premium;
+  min-height: 44px;
+}
+.input-text:focus {
+  @apply outline-none border-brand-500 ring-1 ring-brand-500;
 }
 
-input[type='range']::-webkit-slider-track {
-  @apply h-2 rounded-none bg-surface-700;
+.input-range {
+  @apply w-full cursor-pointer appearance-none bg-transparent;
+  min-height: 44px;
 }
-
-input[type='range']::-webkit-slider-thumb {
+.input-range::-webkit-slider-runnable-track {
+  @apply h-2 rounded-full bg-surface-200;
+}
+.input-range::-webkit-slider-thumb {
   -webkit-appearance: none;
   appearance: none;
-  @apply w-7 h-7 rounded-sm bg-brand-500 cursor-pointer shadow-premium border-2 border-white;
+  @apply w-7 h-7 rounded-full bg-brand-500 border-2 border-white shadow-premium-sm cursor-pointer;
   margin-top: -10px;
 }
-
-input[type='range']::-moz-range-track {
-  @apply h-2 rounded-none bg-surface-700;
+.input-range::-moz-range-track {
+  @apply h-2 rounded-full bg-surface-200;
+}
+.input-range::-moz-range-thumb {
+  @apply w-7 h-7 rounded-full bg-brand-500 border-2 border-white shadow-premium-sm cursor-pointer;
 }
 
-input[type='range']::-moz-range-thumb {
-  @apply w-7 h-7 rounded-sm bg-brand-500 cursor-pointer border-2 border-white shadow-premium;
+/* ── Callout (design audit item 18) ──────────────────────────
+   The unified note box replacing four hand-rolled grammars
+   (macros::sources_block, macros::methodology_note, the homepage
+   methodology citation, and the calculator notice boxes). */
+.callout {
+  @apply p-4 sm:p-6 bg-surface-50 border border-surface-200 rounded-lg text-sm text-surface-600 leading-relaxed;
+}
+.callout--warning {
+  @apply bg-warning-50/30 border-warning-200 text-warning-700;
 }
 
 /* Terminal animation */
@@ -1438,41 +1458,11 @@ input[type='range']::-moz-range-thumb {
   }
 }
 
-/* Intersection observer triggered animations */
-.animate-on-scroll {
-  opacity: 0;
-  transform: translateY(20px);
-  transition: opacity 0.6s ease-out, transform 0.6s ease-out;
-}
-
-.animate-on-scroll.visible {
-  opacity: 1;
-  transform: translateY(0);
-}
-
 /* Status page refresh notice — used in status-overview-island.html */
 .status-refresh-notice {
   font-size: 0.75rem;
   line-height: 1rem;
   color: rgb(var(--surface-500));
-}
-
-/* Hover transitions (replaces motion whileHover) */
-.hover-lift {
-  transition: transform 0.2s ease-out, box-shadow 0.2s ease-out;
-}
-
-.hover-lift:hover {
-  transform: translateY(-4px);
-  @apply shadow-premium-hover;
-}
-
-.hover-scale {
-  transition: transform 0.15s ease-out;
-}
-
-.hover-scale:hover {
-  transform: scale(1.02);
 }
 
 .cursor-blink {

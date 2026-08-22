@@ -1347,14 +1347,94 @@ a {
   letter-spacing: 0.14em;
   font-size: 0.66rem;
   font-weight: 700;
-  padding-top: 0.85rem;
-  padding-bottom: 0.85rem;
+  /* Symmetric table rhythm: one padding policy (0.85rem 1rem) instead of
+       Tailwind's p-4 fighting the vertical-only override (13.6px vs 16px). */
+  padding: 0.85rem 1rem;
 }
 
 .apex-table td {
   border-color: rgba(9, 9, 11, 0.06);
-  padding-top: 0.85rem;
-  padding-bottom: 0.85rem;
+  padding: 0.85rem 1rem;
+}
+
+/* Operator density: the control plane runs ~36-40px rows (consumer tables
+     keep the default rhythm). Paired with the scroll container below. */
+
+.apex-table--dense th,
+  .apex-table--dense td {
+  padding-top: 0.55rem;
+  padding-bottom: 0.55rem;
+}
+
+/* Sticky-header fix: `overflow-x-auto` alone makes overflow-y compute to
+     `auto`, which clips and disables `position: sticky` on thead. This
+     variant is a real vertical scroll container, so the sticky header
+     engages for long tables. */
+
+.apex-table-wrap--scroll {
+  max-height: 70vh;
+  overflow: auto;
+}
+
+/* One timestamp policy: mono, tabular, exact width digits. */
+
+.apex-time-cell {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* Mono id/value chips: truncated visually, full value on hover via title. */
+
+.apex-mono-id {
+  display: inline-block;
+  max-width: 16rem;
+  vertical-align: middle;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Native control tint: checkboxes, radios, and range inputs pick up the
+     brand accent without any script (one line upgrades every native input). */
+
+input[type='checkbox'],
+  input[type='radio'],
+  input[type='range'] {
+  accent-color: rgb(var(--primary));
+}
+
+/* Zero-JS client-side validation: :user-invalid fires only AFTER the user
+     has interacted with a field, so empty pristine forms stay calm. Uses the
+     pinned --error/--ring tokens; complements the server's flash field-map. */
+
+input:user-invalid,
+  textarea:user-invalid,
+  select:user-invalid {
+  border-color: rgb(var(--error));
+}
+
+input:user-invalid:focus-visible,
+  textarea:user-invalid:focus-visible,
+  select:user-invalid:focus-visible {
+  outline: 2px solid rgb(var(--ring));
+  outline-offset: 1px;
+}
+
+/* PRG flash focus: the banner container is an anchor target — when the
+     redirect URL carries #flash the browser scrolls it into view, and these
+     rules give it a visible ring when focused/targeted (long forms no longer
+     strand the outcome above the viewport). */
+
+.apex-flash {
+  scroll-margin-top: 5.5rem;
+}
+
+#flash:focus,
+  #flash:target {
+  outline: 2px solid rgb(var(--ring));
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
 }
 
 .apex-table tbody tr {
@@ -1482,6 +1562,11 @@ a {
 
 .apex-cp-stat-tile[data-tone='warn']::before {
   background: rgb(var(--warning-500, 245 158 11));
+  opacity: 0.9;
+}
+
+.apex-cp-stat-tile[data-tone='error']::before {
+  background: rgb(var(--error));
   opacity: 0.9;
 }
 
@@ -2144,6 +2229,10 @@ a {
   max-height: 100vh;
 }
 
+.min-h-\[120px\] {
+  min-height: 120px;
+}
+
 .min-h-\[160px\] {
   min-height: 160px;
 }
@@ -2154,6 +2243,10 @@ a {
 
 .min-h-\[220px\] {
   min-height: 220px;
+}
+
+.min-h-\[240px\] {
+  min-height: 240px;
 }
 
 .min-h-\[24rem\] {
@@ -2216,24 +2309,12 @@ a {
   width: 5rem;
 }
 
-.w-24 {
-  width: 6rem;
-}
-
-.w-28 {
-  width: 7rem;
-}
-
 .w-3 {
   width: 0.75rem;
 }
 
 .w-4 {
   width: 1rem;
-}
-
-.w-40 {
-  width: 10rem;
 }
 
 .w-5 {
@@ -2306,6 +2387,10 @@ a {
 
 .min-w-\[8rem\] {
   min-width: 8rem;
+}
+
+.min-w-\[9rem\] {
+  min-width: 9rem;
 }
 
 .min-w-full {
@@ -2467,6 +2552,10 @@ a {
 
 .cursor-default {
   cursor: default;
+}
+
+.cursor-not-allowed {
+  cursor: not-allowed;
 }
 
 .cursor-pointer {
@@ -3192,6 +3281,11 @@ a {
   background-color: rgb(var(--surface-200) / 0.5);
 }
 
+.bg-surface-400 {
+  --tw-bg-opacity: 1;
+  background-color: rgb(var(--surface-400) / var(--tw-bg-opacity, 1));
+}
+
 .bg-surface-50 {
   --tw-bg-opacity: 1;
   background-color: rgb(var(--surface-50) / var(--tw-bg-opacity, 1));
@@ -3285,10 +3379,6 @@ a {
 
 .bg-white\/5 {
   background-color: rgb(255 255 255 / 0.05);
-}
-
-.bg-white\/90 {
-  background-color: rgb(255 255 255 / 0.9);
 }
 
 .fill-muted-foreground {
@@ -5905,6 +5995,18 @@ input::placeholder,
   transform: translate(var(--tw-translate-x), var(--tw-translate-y)) rotate(var(--tw-rotate)) skewX(var(--tw-skew-x)) skewY(var(--tw-skew-y)) scaleX(var(--tw-scale-x)) scaleY(var(--tw-scale-y));
 }
 
+.active\:scale-\[0\.98\]:active {
+  --tw-scale-x: 0.98;
+  --tw-scale-y: 0.98;
+  transform: translate(var(--tw-translate-x), var(--tw-translate-y)) rotate(var(--tw-rotate)) skewX(var(--tw-skew-x)) skewY(var(--tw-skew-y)) scaleX(var(--tw-scale-x)) scaleY(var(--tw-scale-y));
+}
+
+.active\:scale-\[0\.99\]:active {
+  --tw-scale-x: 0.99;
+  --tw-scale-y: 0.99;
+  transform: translate(var(--tw-translate-x), var(--tw-translate-y)) rotate(var(--tw-rotate)) skewX(var(--tw-skew-x)) skewY(var(--tw-skew-y)) scaleX(var(--tw-scale-x)) scaleY(var(--tw-scale-y));
+}
+
 .disabled\:pointer-events-none:disabled {
   pointer-events: none;
 }
@@ -6176,12 +6278,5 @@ input::placeholder,
 @media (min-width: 1280px) {
   .xl\:grid-cols-4 {
     grid-template-columns: repeat(4, minmax(0, 1fr));
-  }
-}
-
-@media (prefers-color-scheme: dark) {
-  .dark\:bg-gray-900 {
-    --tw-bg-opacity: 1;
-    background-color: rgb(17 24 39 / var(--tw-bg-opacity, 1));
   }
 }

@@ -2347,9 +2347,16 @@ async fn register(
         return Ok((StatusCode::ACCEPTED, Json(register_response())));
     }
 
-    // Generate IDs and slug
+    // Generate IDs and slug.
+    //
+    // Schema note (canonical services/mail-server/migrations lineage):
+    // tenants.id is VARCHAR(26) (ULID, migration 064) — a 26-char text id is
+    // correct — but users.id is UUID (migration 052). A text nanoid bound
+    // into users.id fails the INSERT with `invalid input syntax for type
+    // uuid`, breaking every public registration; generate a UUID for the
+    // user id (same convention as create_api_key / the reset-password fix).
     let tenant_id = apexmail_lib::id::generate_id("", 26);
-    let user_id = apexmail_lib::id::generate_id("", 26);
+    let user_id = Uuid::new_v4();
     let slug = generate_slug(&body.company_name);
     let now = Utc::now();
 
@@ -2403,7 +2410,7 @@ async fn register(
                            email_verified, mfa_enabled, metadata, created_at, updated_at)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
     )
-    .bind(&user_id)
+    .bind(user_id)
     .bind(&tenant_id)
     .bind(&email_lower)
     .bind(&body.name)
@@ -3400,8 +3407,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_record_login_failure_sets_lock_when_redis_is_available() {
-        let redis_url =
-            std::env::var("TEST_REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".into());
+        // F6: never probe the ambient 6379 — the variable must name the
+        // Redis under test explicitly; unset means skip.
+        let Ok(redis_url) = std::env::var("TEST_REDIS_URL") else {
+            eprintln!("skipping: TEST_REDIS_URL not set");
+            return;
+        };
         let pool = match RedisConfig::from_url(&redis_url)
             .create_pool(Some(deadpool_redis::Runtime::Tokio1))
         {
@@ -3491,8 +3502,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_record_login_failure_locks_after_failures_from_two_sources() {
-        let redis_url =
-            std::env::var("TEST_REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".into());
+        // F6: never probe the ambient 6379 — the variable must name the
+        // Redis under test explicitly; unset means skip.
+        let Ok(redis_url) = std::env::var("TEST_REDIS_URL") else {
+            eprintln!("skipping: TEST_REDIS_URL not set");
+            return;
+        };
         let pool = match RedisConfig::from_url(&redis_url)
             .create_pool(Some(deadpool_redis::Runtime::Tokio1))
         {
@@ -3564,8 +3579,12 @@ mod tests {
     /// be rejected even though the TTL window is still open.
     #[tokio::test]
     async fn test_kiwi_token_is_single_use_when_redis_available() {
-        let redis_url =
-            std::env::var("TEST_REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".into());
+        // F6: never probe the ambient 6379 — the variable must name the
+        // Redis under test explicitly; unset means skip.
+        let Ok(redis_url) = std::env::var("TEST_REDIS_URL") else {
+            eprintln!("skipping: TEST_REDIS_URL not set");
+            return;
+        };
         let pool = match RedisConfig::from_url(&redis_url)
             .create_pool(Some(deadpool_redis::Runtime::Tokio1))
         {
@@ -3646,7 +3665,18 @@ mod tests {
             nonce: issued.challenge.nonce.clone(),
             counter,
             duration_ms: 5000,
-            telemetry: serde_json::json!({}),
+            // valid_production_config() enables kiwi_enforce_telemetry, and
+            // strict mode rejects clients that submit NO or EMPTY telemetry
+            // (a custom solver does not send it — VerifyError::BotDetected,
+            // which made the first verification fail whenever Redis was
+            // actually present; ci/README.md §9 F3). Send a realistic
+            // human-looking payload: non-empty, no webdriver flag, few
+            // discrete events (the ≥24-event uniformity heuristic never
+            // fires), well under the 30s zero-interaction bound.
+            telemetry: serde_json::json!({
+                "me": 3, "ke": 2, "hc": 8, "dm": 8, "pl": 3,
+                "et": [10, 25, 40, 90],
+            }),
         }
         .encode();
 
@@ -4163,6 +4193,351 @@ mod tests {
             "login lookup must use the functional indexes, plan: {plan}"
         );
         drop(conn);
+        pool.close().await;
+    }
+
+    // ─── Signup id-generation regression (production signup bug) ────
+    //
+    // users.id is UUID on both authoritative schema lineages (the canonical
+    // services/mail-server/migrations chain applied by the migrator crate,
+    // and the apexmail-db SCHEMA used by CI). The register handler used to
+    // generate a 26-char text nanoid for the user id, which fails the
+    // INSERT with `invalid input syntax for type uuid` — every public
+    // signup returned "database error" and no row was created. These tests
+    // drive the REAL handler through a router against a canonical-shape
+    // fixture database (crate::test_db::canonical_pool) and prove the
+    // signup persists a usable account.
+
+    /// Test AppState over the given pool (mirrors web.rs's `web_test_state`
+    /// fixture, parameterized on the database and redis URL).
+    async fn signup_test_state(db: sqlx::PgPool, redis_url: &str) -> AppState {
+        static INSTALL: std::sync::Once = std::sync::Once::new();
+        INSTALL.call_once(|| {
+            let _ = metrics_exporter_prometheus::PrometheusBuilder::new().install_recorder();
+            std::env::set_var("AWS_EC2_METADATA_DISABLED", "true");
+            std::env::set_var("AWS_ACCESS_KEY_ID", "test");
+            std::env::set_var("AWS_SECRET_ACCESS_KEY", "test");
+            // Surface handler tracing::error! output in test output (opt-in
+            // via RUST_LOG; defaults to error-level only).
+            let _ = tracing_subscriber::fmt()
+                .with_env_filter(
+                    tracing_subscriber::EnvFilter::try_from_default_env()
+                        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("error")),
+                )
+                .with_test_writer()
+                .try_init();
+        });
+        let redis = deadpool_redis::Config::from_url(redis_url)
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .expect("lazy redis pool");
+        let aws_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
+            .region(aws_sdk_sesv2::config::Region::new("us-east-1"))
+            .load()
+            .await;
+        let ses_provider = Arc::new(crate::ses_provider::SesIpProvider::new(
+            aws_sdk_sesv2::Client::new(&aws_config),
+            db.clone(),
+            "apexmail".into(),
+            "us-east-1".into(),
+        ));
+        let config = crate::app::test_support::test_config();
+        crate::state::AppStateInner::with_ddos_protector(
+            db.clone(),
+            apexmail_db::pool::PoolPair {
+                rw: db.clone(),
+                ro: db,
+            },
+            redis,
+            config,
+            reqwest::Client::new(),
+            (*ses_provider).clone(),
+            None,
+            Arc::new(
+                ddos_protection::DdosProtector::new(ddos_protection::ProtectorConfig::default())
+                    .await
+                    .expect("ddos protector"),
+            ),
+            None,
+            None,
+            crate::resilience::ResilientClient::new_from_config(
+                &crate::app::test_support::test_config(),
+            ),
+        )
+    }
+
+    /// Seed the system sender domain (apexmail.ee) with valid DKIM material
+    /// so `ensure_system_sender_ready` passes and the verification email can
+    /// be queued. Requires `DKIM_PRIVATE_KEY_ENCRYPTION_KEY` (set here) and
+    /// generates a real RSA keypair — the readiness check decrypts and
+    /// re-derives the public key, so fake material is rejected.
+    ///
+    /// The caller must hold `crate::test_db::DKIM_ENV_MUTEX` across the
+    /// whole seeded scope and restore the env var afterwards via
+    /// `restore_dkim_env` (same convention as admin/domains.rs).
+    async fn seed_system_sender(db: &sqlx::PgPool) {
+        std::env::set_var(
+            apexmail_lib::dkim::DKIM_PRIVATE_KEY_ENCRYPTION_KEY_ENV,
+            "3f7a1c9e2b5d48f01a6c3e792d4b8f15a0c6e3917d2f4b8a5c1e7309d4f2b6a8",
+        );
+        let key_pair = apexmail_lib::dkim::generate_dkim_keypair()
+            .expect("test DKIM keypair generation must not fail");
+        let aad = apexmail_lib::dkim::dkim_private_key_aad(
+            crate::routes::system_sender::SYSTEM_TENANT_ID,
+            crate::routes::system_sender::SYSTEM_DOMAIN_ID,
+        );
+        let encrypted = apexmail_lib::dkim::encrypt_dkim_private_key(&key_pair.private_key_pem, &aad)
+            .expect("test DKIM private key encryption must not fail");
+        let public_key = apexmail_lib::dkim::public_key_base64_from_private_key_pem(
+            &key_pair.private_key_pem,
+        )
+        .expect("test DKIM public key derivation must not fail");
+
+        sqlx::query(
+            "INSERT INTO domains (id, tenant_id, name, status, verified, ses_verified,
+                                  dkim_enabled, dkim_selector, dkim_public_key, dkim_private_key)
+             VALUES ($1, $2, $3, 'verified', true, true, true, 'testsel', $4, $5)
+             ON CONFLICT (tenant_id, name) DO UPDATE
+               SET status = 'verified', verified = true, ses_verified = true,
+                   dkim_enabled = true, dkim_selector = 'testsel',
+                   dkim_public_key = EXCLUDED.dkim_public_key,
+                   dkim_private_key = EXCLUDED.dkim_private_key",
+        )
+        .bind(
+            Uuid::parse_str(crate::routes::system_sender::SYSTEM_DOMAIN_ID)
+                .expect("system domain id is a uuid"),
+        )
+        .bind(crate::routes::system_sender::SYSTEM_TENANT_ID)
+        .bind(crate::routes::system_sender::SYSTEM_DOMAIN)
+        .bind(&public_key)
+        .bind(&encrypted)
+        .execute(db)
+        .await
+        .expect("system sender seed must insert");
+    }
+
+    /// Restore the DKIM env var after a seeded scope (admin/domains.rs
+    /// convention).
+    fn restore_dkim_env(previous_key: Option<String>) {
+        match previous_key {
+            Some(key) => std::env::set_var(
+                apexmail_lib::dkim::DKIM_PRIVATE_KEY_ENCRYPTION_KEY_ENV,
+                key,
+            ),
+            None => std::env::remove_var(apexmail_lib::dkim::DKIM_PRIVATE_KEY_ENCRYPTION_KEY_ENV),
+        }
+    }
+
+    /// DB-gated signup regression: POST /v1/auth/register must create a real
+    /// users row (UUID id) + tenants row, store a verifiable bcrypt hash,
+    /// and queue the verification email. Before the fix the users INSERT
+    /// failed with invalid uuid syntax and NOTHING was persisted.
+    #[tokio::test]
+    async fn signup_persists_uuid_user_and_tenant_rows() {
+        let Some(pool) = crate::test_db::canonical_pool("signup_rows").await else {
+            eprintln!("skipping signup_persists_uuid_user_and_tenant_rows: no TEST_DATABASE_URL");
+            return;
+        };
+        // The DKIM env var is process-global: serialise against every other
+        // test that mutates it, and restore the previous value afterwards.
+        let _env_guard = crate::test_db::DKIM_ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let had_dkim_key =
+            std::env::var(apexmail_lib::dkim::DKIM_PRIVATE_KEY_ENCRYPTION_KEY_ENV).ok();
+        seed_system_sender(&pool).await;
+        // Redis is deliberately NOT required for signup (the rate limiter
+        // soft-skips when Redis is unreachable) — the dead port keeps the
+        // test hermetic on that axis.
+        let state = signup_test_state(pool.clone(), "redis://127.0.0.1:1").await;
+
+        let app = axum::Router::new()
+            .merge(crate::routes::auth::router())
+            .with_state(state.clone());
+        let csrf = ui_foundation::csrf::generate_csrf_token(&state.config.csrf_secret);
+        let email = format!("signup-fix-{}@example.com", Uuid::new_v4());
+        let body = serde_json::json!({
+            "company_name": "Signup Fix Co",
+            "email": email,
+            "name": "Signup Tester",
+            "password": "Sup3r#SecurePass",
+            "plan": "free",
+        });
+
+        let response = tower::ServiceExt::oneshot(
+            app,
+            axum::http::Request::builder()
+                .method(axum::http::Method::POST)
+                .uri("/register")
+                .header(axum::http::header::CONTENT_TYPE, "application/json")
+                .header("x-csrf-token", csrf)
+                .body(axum::body::Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .expect("register request must dispatch");
+        let status = response.status();
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap_or_default();
+        let body_text = String::from_utf8_lossy(&body_bytes);
+        assert_eq!(
+            status,
+            axum::http::StatusCode::ACCEPTED,
+            "signup must succeed, not {status} with a uuid bind error; body: {body_text}"
+        );
+
+        // The users row exists, has a UUID id, and the password verifies.
+        let row: Option<(String, String, String, String)> = sqlx::query_as(
+            "SELECT id::text, tenant_id::text, password_hash, role FROM users WHERE email = $1",
+        )
+        .bind(&email)
+        .fetch_optional(&pool)
+        .await
+        .expect("users lookup must not error");
+        let Some((user_id, tenant_id, password_hash, role)) = row else {
+            panic!("signup must persist a users row for {email}");
+        };
+        assert!(
+            Uuid::parse_str(&user_id).is_ok(),
+            "users.id must be a valid UUID, got {user_id}"
+        );
+        assert_eq!(role, "owner");
+        assert!(
+            password_hash.starts_with("$2") || password_hash.starts_with("$argon2"),
+            "password hash must be a verifiable hash, got {password_hash:?}"
+        );
+
+        // The tenants row exists with the 26-char text id that was bound.
+        let tenant_status: Option<(String,)> =
+            sqlx::query_as("SELECT status FROM tenants WHERE id = $1")
+                .bind(&tenant_id)
+                .fetch_optional(&pool)
+                .await
+                .expect("tenants lookup must not error");
+        assert_eq!(
+            tenant_status.map(|(status,)| status).as_deref(),
+            Some("pending"),
+            "signup must persist the tenant row"
+        );
+
+        // The verification email was queued through the system sender.
+        let queued: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM email_queue WHERE to_addresses = ARRAY[$1]::text[]",
+        )
+        .bind(&email)
+        .fetch_one(&pool)
+        .await
+        .expect("email_queue lookup must not error");
+        assert!(queued >= 1, "verification email must be queued for {email}");
+
+        restore_dkim_env(had_dkim_key);
+        pool.close().await;
+    }
+
+    /// DB+Redis-gated full flow: after a successful signup, a login with the
+    /// same credentials reaches the authentication decision (for a fresh
+    /// owner account that is the MFA-enrollment challenge, 202 — NOT
+    /// 401 invalid credentials), proving the persisted row is usable.
+    #[tokio::test]
+    async fn signup_then_login_authenticates_the_new_account() {
+        let Some(pool) = crate::test_db::canonical_pool("signup_login").await else {
+            eprintln!("skipping signup_then_login_authenticates_the_new_account: no TEST_DATABASE_URL");
+            return;
+        };
+        let redis_url = std::env::var("TEST_REDIS_URL")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "redis://127.0.0.1:1".into());
+        // Login hard-requires Redis (lockout TTL + rate limiter); soft-skip
+        // when it is not reachable so the suite stays green without Redis.
+        let redis_probe = deadpool_redis::Config::from_url(&redis_url)
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .expect("redis pool");
+        let redis_reachable = match tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            redis_probe.get(),
+        )
+        .await
+        {
+            Ok(Ok(mut conn)) => {
+                let pong: Result<String, _> =
+                    deadpool_redis::redis::cmd("PING").query_async(&mut *conn).await;
+                pong.is_ok()
+            }
+            _ => false,
+        };
+        if !redis_reachable {
+            eprintln!(
+                "skipping signup_then_login_authenticates_the_new_account: TEST_REDIS_URL unreachable"
+            );
+            pool.close().await;
+            return;
+        }
+
+        // The DKIM env var is process-global: serialise against every other
+        // test that mutates it, and restore the previous value afterwards.
+        let _env_guard = crate::test_db::DKIM_ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let had_dkim_key =
+            std::env::var(apexmail_lib::dkim::DKIM_PRIVATE_KEY_ENCRYPTION_KEY_ENV).ok();
+        seed_system_sender(&pool).await;
+        let state = signup_test_state(pool.clone(), &redis_url).await;
+        let app = axum::Router::new()
+            .merge(crate::routes::auth::router())
+            .with_state(state.clone());
+        let csrf = ui_foundation::csrf::generate_csrf_token(&state.config.csrf_secret);
+
+        let email = format!("signup-login-{}@example.com", Uuid::new_v4());
+        let password = "Sup3r#SecurePass";
+        let register_body = serde_json::json!({
+            "company_name": "Signup Login Co",
+            "email": email,
+            "name": "Login Tester",
+            "password": password,
+            "plan": "free",
+        });
+        let response = tower::ServiceExt::oneshot(
+            app.clone(),
+            axum::http::Request::builder()
+                .method(axum::http::Method::POST)
+                .uri("/register")
+                .header(axum::http::header::CONTENT_TYPE, "application/json")
+                .header("x-csrf-token", csrf.clone())
+                .body(axum::body::Body::from(register_body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .expect("register request must dispatch");
+        assert_eq!(response.status(), axum::http::StatusCode::ACCEPTED);
+
+        let login_body = serde_json::json!({
+            "email": email,
+            "password": password,
+        });
+        let response = tower::ServiceExt::oneshot(
+            app,
+            axum::http::Request::builder()
+                .method(axum::http::Method::POST)
+                .uri("/login")
+                .header(axum::http::header::CONTENT_TYPE, "application/json")
+                .header("x-csrf-token", csrf)
+                .body(axum::body::Body::from(login_body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .expect("login request must dispatch");
+
+        // A fresh owner account is MFA-required: login succeeds up to the
+        // enrollment challenge (202), which is only reachable AFTER the
+        // password verified against the row the signup created.
+        assert_eq!(
+            response.status(),
+            axum::http::StatusCode::ACCEPTED,
+            "login after signup must authenticate (202 MFA-enrollment), not reject"
+        );
+
+        restore_dkim_env(had_dkim_key);
         pool.close().await;
     }
 }

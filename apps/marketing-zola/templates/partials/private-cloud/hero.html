@@ -1,7 +1,7 @@
 {# ── Private Cloud Hero ────────────────────────────────────────── #}
 {# Converted from private-cloud/PrivateCloudHero.tsx              #}
 
-<section class="private-cloud-hero relative overflow-hidden bg-gradient-to-b from-brand-50 via-white to-white pt-32 lg:pt-40 pb-20">
+<section class="private-cloud-hero relative overflow-hidden bg-gradient-to-b from-brand-50 via-surface-50 to-surface-50 pt-32 lg:pt-40 pb-20">
   <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
     <div class="grid lg:grid-cols-2 gap-16 items-center">
       {# Left: Copy #}
@@ -51,12 +51,12 @@
 
       {# Right: VPC Architecture Diagram #}
       <div class="animate-in delay-300 relative">
-        <div class="bg-white border border-surface-200 rounded-sm p-6">
+        <div class="bg-surface-50 border border-surface-200 rounded-lg p-6">
           <div class="text-xs font-semibold text-surface-400 tracking-wider mb-4">{% if i18n_data and i18n_data[l] and i18n_data[l]["private_cloud"] and i18n_data[l]["private_cloud"]["architecture_label"] %}{{ i18n_data[l]["private_cloud"]["architecture_label"] }}{% else %}Reference Deployment Architecture{% endif %}</div>
 
           {# Region label #}
           <div class="border-2 border-dashed border-brand-200 rounded-sm p-4 relative">
-            <span class="absolute -top-3 left-4 bg-white px-2 text-xs font-semibold text-surface-950">{% if i18n_data and i18n_data[l] and i18n_data[l]["private_cloud"] and i18n_data[l]["private_cloud"]["region_label"] %}{{ i18n_data[l]["private_cloud"]["region_label"] }}{% else %}Customer-selected cloud region{% endif %}</span>
+            <span class="absolute -top-3 left-4 bg-surface-50 px-2 text-xs font-semibold text-surface-950">{% if i18n_data and i18n_data[l] and i18n_data[l]["private_cloud"] and i18n_data[l]["private_cloud"]["region_label"] %}{{ i18n_data[l]["private_cloud"]["region_label"] }}{% else %}Customer-selected cloud region{% endif %}</span>
 
             {# Private Subnet #}
             <div class="bg-surface-100 border border-surface-200 rounded-sm p-4 mb-3">
@@ -64,7 +64,7 @@
               <div class="grid grid-cols-3 gap-2">
                 {% set private_services = ["MTA Cluster", "Queue Workers", "Analytics DB"] %}
                 {% for svc in private_services %}
-                <div class="bg-white border border-surface-200 rounded-sm p-3 text-center">
+                <div class="bg-surface-50 border border-surface-200 rounded-sm p-3 text-center">
                   <div class="w-8 h-8 rounded-sm bg-brand-100 flex items-center justify-center mx-auto mb-2">
                     <svg class="w-4 h-4 text-surface-950" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="20" height="8" x="2" y="2" rx="0" ry="0"/><rect width="20" height="8" x="2" y="14" rx="0" ry="0"/><line x1="6" x2="6.01" y1="6" y2="6"/><line x1="6" x2="6.01" y1="18" y2="18"/></svg>
                   </div>
@@ -80,7 +80,7 @@
               <div class="grid grid-cols-3 gap-2">
                 {% set public_services = ["API Gateway", "Load Balancer", "DNS Resolver"] %}
                 {% for svc in public_services %}
-                <div class="bg-white border border-brand-200 rounded-sm p-3 text-center">
+                <div class="bg-surface-50 border border-brand-200 rounded-sm p-3 text-center">
                   <div class="w-8 h-8 rounded-sm bg-brand-100 flex items-center justify-center mx-auto mb-2">
                     <svg class="w-4 h-4 text-surface-950" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
                   </div>

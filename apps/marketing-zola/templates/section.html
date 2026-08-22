@@ -12,7 +12,7 @@
 
 {% block content %}
   {% if section.content %}
-  <section class="bg-white pt-24 pb-4 lg:pt-28">
+  <section class="bg-surface-50 pt-24 pb-4 lg:pt-28">
     <div class="mx-auto max-w-3xl px-6">
       <div class="prose max-w-none">
         {{ section.content | safe }}
@@ -24,7 +24,7 @@
   {% if section.pages %}
   <div class="mx-auto max-w-3xl px-6 py-12">
     {% for page in section.pages %}
-    <a href="{{ page.permalink }}" class="block mb-4 p-6 rounded-sm border border-surface-200 bg-white hover:border-brand-300 hover:bg-surface-50 transition-colors">
+    <a href="{{ page.permalink }}" class="block mb-4 p-6 rounded-sm border border-surface-200 bg-surface-50 hover:border-brand-300 hover:bg-surface-50 transition-colors">
       <h2 class="text-xl font-semibold text-surface-950">{{ page.title }}</h2>
       {% if page.description %}<p class="mt-2 text-surface-600">{{ page.description }}</p>{% endif %}
     </a>

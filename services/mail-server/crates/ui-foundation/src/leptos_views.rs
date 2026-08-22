@@ -60,7 +60,7 @@ pub fn control_plane_root_layout(child_html: &str) -> String {
 <meta name=\"description\" content=\"ApexMail administration and monitoring\">\
 <link rel=\"stylesheet\" href=\"/assets/globals.css\">\
 </head>\
-<body class=\"antialiased bg-background text-surface-950\">{child_html}</body>\
+<body class=\"antialiased bg-background text-surface-950\"><a href=\"#app-main\" class=\"sr-only focus:not-sr-only focus:absolute focus:left-4 focus:top-4 focus:z-50 focus:rounded-sm focus:bg-card focus:px-4 focus:py-2 focus:text-sm focus:font-bold focus:text-surface-950 focus:border focus:border-surface-950\">Skip to content</a>{child_html}</body>\
 </html>",
         child_html = child_html,
     )
@@ -149,6 +149,22 @@ pub fn web_dashboard_layout_with_csrf(
     current_path: &str,
     csrf_token: &str,
 ) -> String {
+    web_dashboard_layout_with_user_context(child_html, current_path, csrf_token, None)
+}
+
+/// Dashboard shell carrying the authenticated session's identity into the
+/// header (design report item 5): the plan label, display name, email, and
+/// avatar initials render from the session instead of the hardcoded
+/// "Free Plan — 30K / mo" / "AM" defaults. `None` keeps the neutral header.
+pub fn web_dashboard_layout_with_user_context(
+    child_html: &str,
+    current_path: &str,
+    csrf_token: &str,
+    user_context: Option<&crate::shell::UserContext<'_>>,
+) -> String {
+    let avatar_fallback = user_context
+        .map(|user| crate::shell::avatar_initials(user.display_name))
+        .unwrap_or_else(|| "AM".to_string());
     let shell = WebDashboardShell {
         sidebar_collapsed: false,
         mobile_menu_open: false,
@@ -156,12 +172,16 @@ pub fn web_dashboard_layout_with_csrf(
         header: ShellHeader {
             search_query: "",
             unread_count: 0,
-            avatar_fallback: "AM",
+            avatar_fallback: avatar_fallback.as_str(),
             mobile_menu_open: false,
-            user_context: None,
+            user_context: user_context.cloned(),
         },
         impersonation_banner: None,
-        toast_surface: Some(ToastSurface { toasts: Vec::new() }),
+        // Dead JS-era markup purge (design report item 14): the toast store
+        // could never show anything without script — the signed flash cookie
+        // is the real feedback channel. The surface renders only when a
+        // caller explicitly has toasts.
+        toast_surface: None,
         current_path,
         csrf_token,
     };
@@ -195,7 +215,7 @@ fn render_debounced_filter_bar(
 ) -> String {
     let search_icon = ui_icon("search", "h-4 w-4");
     format!(
-        "<section class=\"rounded-sm border border-surface-200 bg-card/80 p-6\"><form method=\"get\" action=\"{action}\" class=\"flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between\" role=\"search\"><div class=\"min-w-0 flex-1\"><label class=\"sr-only\" for=\"{input_id}\">{search_label}</label><div class=\"relative\"><span class=\"pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground\">{search_icon}</span><input id=\"{input_id}\" type=\"search\" name=\"query\" aria-label=\"{search_label}\" value=\"{search_value}\" placeholder=\"{search_placeholder}\" class=\"flex h-12 w-full rounded-sm border border-input bg-background pl-10 pr-4 text-[14px] ring-offset-background transition-all duration-200 placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/20 focus-visible:border-primary\" /></div><p class=\"mt-2 text-xs text-muted-foreground\">Press Apply to run the search — results are rendered entirely server-side.</p></div><div class=\"flex w-full flex-col gap-3 sm:flex-row lg:w-auto\">{filters_html}<div class=\"flex flex-col gap-2 sm:flex-row\"><button type=\"submit\" class=\"inline-flex w-full items-center justify-center rounded-sm bg-primary px-4 py-2 text-sm font-bold text-white transition-colors hover:bg-brand-700 sm:w-auto\">Apply filters</button><a href=\"{clear_href}\" class=\"inline-flex w-full items-center justify-center rounded-sm border border-input bg-background px-4 py-2 text-sm font-bold text-foreground transition-colors hover:bg-accent hover:text-accent-foreground sm:w-auto\">Clear filters</a></div></div></form></section>",
+        "<section class=\"rounded-sm border border-surface-200 bg-card/80 p-6\"><form method=\"get\" action=\"{action}\" class=\"flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between\" role=\"search\"><div class=\"min-w-0 flex-1\"><label class=\"sr-only\" for=\"{input_id}\">{search_label}</label><div class=\"relative\"><span class=\"pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground\">{search_icon}</span><input id=\"{input_id}\" type=\"search\" name=\"query\" aria-label=\"{search_label}\" value=\"{search_value}\" placeholder=\"{search_placeholder}\" class=\"flex h-12 w-full rounded-sm border border-input bg-background pl-10 pr-4 text-[14px] ring-offset-background transition-all duration-200 placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:border-primary\" /></div><p class=\"mt-2 text-xs text-muted-foreground\">Press Apply to run the search — results are rendered entirely server-side.</p></div><div class=\"flex w-full flex-col gap-3 sm:flex-row lg:w-auto\">{filters_html}<div class=\"flex flex-col gap-2 sm:flex-row\"><button type=\"submit\" class=\"inline-flex w-full items-center justify-center rounded-sm bg-primary px-4 py-2 text-sm font-bold text-white transition-colors hover:bg-brand-700 sm:w-auto\">Apply filters</button><a href=\"{clear_href}\" class=\"inline-flex w-full items-center justify-center rounded-sm border border-input bg-background px-4 py-2 text-sm font-bold text-foreground transition-colors hover:bg-accent hover:text-accent-foreground sm:w-auto\">Clear filters</a></div></div></form></section>",
         action = clear_href,
         input_id = input_id,
         search_label = search_label,
@@ -228,26 +248,453 @@ fn render_native_select(
         .collect::<Vec<_>>()
         .join("");
     format!(
-        "<div class=\"min-w-[10rem]\"><label class=\"sr-only\" for=\"{id}\">{label}</label><select id=\"{id}\" name=\"{name}\" class=\"flex h-12 w-full rounded-sm border border-input bg-background px-3 text-[14px] ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/20 focus-visible:border-primary\">{opts}</select></div>"
+        "<div class=\"min-w-[10rem]\"><label class=\"sr-only\" for=\"{id}\">{label}</label><select id=\"{id}\" name=\"{name}\" class=\"flex h-12 w-full rounded-sm border border-input bg-background px-3 text-[14px] ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:border-primary\">{opts}</select></div>"
+    )
+}
+
+/// Format a KPI value for the stat tile: counts ≥ 10,000 render compact
+/// (12.4k / 1.2M) with the raw figure in `title` (design report #19).
+fn format_kpi_value(value: &str) -> (String, Option<String>) {
+    let Ok(parsed) = value.trim().replace([',', ' '], "").parse::<i64>() else {
+        return (value.to_string(), None);
+    };
+    let compact = if parsed.abs() >= 1_000_000 {
+        format!("{:.1}M", parsed as f64 / 1_000_000.0)
+    } else if parsed.abs() >= 10_000 {
+        format!("{:.1}k", parsed as f64 / 1_000.0)
+    } else {
+        return (value.to_string(), None);
+    };
+    (compact, Some(parsed.to_string()))
+}
+
+/// Infer a stat-tile tone from the label + numeric value (design report
+/// #19): risk-carrying counters only tint when they are non-zero, so a
+/// healthy fleet reads calm.
+fn infer_kpi_tone(label: &str, value: &str) -> Option<&'static str> {
+    let lower = label.to_ascii_lowercase();
+    let nonzero = value
+        .trim()
+        .replace([',', ' '], "")
+        .parse::<i64>()
+        .map(|parsed| parsed > 0)
+        .unwrap_or(true);
+    if !nonzero {
+        return None;
+    }
+    if lower.contains("critical")
+        || lower.contains("failed")
+        || lower.contains("failure")
+        || lower.contains("unacknowledged")
+        || lower.contains("errors")
+    {
+        Some("error")
+    } else if lower.contains("pending")
+        || lower.contains("queued")
+        || lower.contains("bounced")
+        || lower.contains("escalated")
+        || lower.contains("complaint")
+        || lower.contains("blocked")
+    {
+        Some("warn")
+    } else {
+        None
+    }
+}
+
+/// One KPI chassis everywhere (design report #13/#19): the CP's tone-aware
+/// stat tile (label / value / help + optional sparkline) replaces the
+/// three hand-rolled KPI dialects.
+fn render_stat_tile(kpi: &crate::view_data::KpiCardData) -> String {
+    let (display_value, raw_title) = format_kpi_value(&kpi.value);
+    let tone = infer_kpi_tone(&kpi.label, &kpi.value);
+    let tone_attr = tone.map(|tone| format!(" data-tone=\"{tone}\"")).unwrap_or_default();
+    let title_attr = raw_title
+        .map(|raw| format!(" title=\"{raw}\""))
+        .unwrap_or_default();
+    let help = kpi
+        .hint
+        .as_deref()
+        .map(|text| {
+            format!(
+                "<p class=\"apex-cp-stat-help\">{}</p>",
+                html_escape(text)
+            )
+        })
+        .unwrap_or_default();
+    let sparkline = kpi
+        .trend
+        .as_ref()
+        .filter(|values| values.len() >= 2)
+        .map(|values| {
+            let series: Vec<f64> = values.iter().map(|v| f64::from(*v as i32)).collect();
+            format!(
+                "<div class=\"mt-2\" aria-hidden=\"false\">{}</div>",
+                crate::charts::render_sparkline(&series, 120, 32, "rgb(var(--primary))")
+            )
+        })
+        .unwrap_or_default();
+    format!(
+        "<article class=\"apex-cp-stat-tile\"{tone_attr}><p class=\"apex-cp-stat-label\">{label}</p><p class=\"apex-cp-stat-value\"{title_attr}>{value}</p>{help}{sparkline}</article>",
+        tone_attr = tone_attr,
+        label = html_escape(&kpi.label),
+        title_attr = title_attr,
+        value = html_escape(&display_value),
+        help = help,
+        sparkline = sparkline,
+    )
+}
+
+/// Control-plane list paths that render with operator chrome (eyebrow +
+/// dense tables + scroll container). Unambiguous CP-only routes.
+const CP_FLAVOR_BASE_PATHS: &[&str] = &[
+    "/tenants",
+    "/operators",
+    "/jobs",
+    "/infrastructure/nodes",
+    "/infrastructure/queues",
+    "/alerts",
+    "/alerts/rules",
+    "/compliance",
+    "/compliance/gdpr",
+    "/discovery",
+    "/audit",
+    "/billing/plans",
+    "/sales",
+];
+
+fn cp_flavored(base_path: &str) -> bool {
+    CP_FLAVOR_BASE_PATHS.contains(&base_path)
+}
+
+/// True when the base path is `{prefix}{uuid}` — the detail-page shape the
+/// loaders emit (`/domains/{id}`, `/campaigns/{id}`).
+fn detail_id_under(base_path: &str, prefix: &str) -> bool {
+    let Some(rest) = base_path.strip_prefix(prefix) else {
+        return false;
+    };
+    rest.len() == 36
+        && rest
+            .bytes()
+            .enumerate()
+            .all(|(index, byte)| match index {
+                8 | 13 | 18 | 23 => byte == b'-',
+                _ => byte.is_ascii_hexdigit(),
+            })
+}
+
+/// The domain detail flow (design report structural #2): DNS records as
+/// mono chips with select-to-copy guidance, per-record verification state,
+/// and the verify action — a plain form POST to the committed handler.
+fn domain_detail_section(data: &ListPageData) -> String {
+    let records = data
+        .table
+        .as_ref()
+        .map(|table| table.rows.as_slice())
+        .unwrap_or(&[]);
+    let verify_form = format!(
+        "<form method=\"post\" action=\"{base}/verify\" class=\"inline\"><button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-md border border-surface-200 bg-background px-4 py-2 text-sm font-semibold text-foreground transition-all duration-200 ease-premium active:scale-[0.98] hover:border-surface-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">Verify DNS now</button><p class=\"mt-2 text-xs text-muted-foreground max-w-md\">Verification re-probes every record and (on the first run) provisions the DKIM keys that generate the full record set below.</p></form>",
+        base = html_escape(&data.base_path),
+    );
+    if records.is_empty() {
+        return format!(
+            "<section class=\"space-y-4\" data-page=\"domain-detail\"><div class=\"rounded-sm border border-surface-200 bg-card p-6 shadow-premium\">{empty}<div class=\"mt-4\">{verify_form}</div></div></section>",
+            empty = EmptyState {
+                title: &data.empty_title,
+                description: Some(&data.empty_description),
+                icon_markup: None,
+                action_label: None,
+                action_href: None,
+            }
+            .render_html(),
+            verify_form = verify_form,
+        );
+    }
+    let rows = records
+        .iter()
+        .map(|row| {
+            // Cells: Type / Host / Value / State (mono, mono, mono, status).
+            let cell = |index: usize| -> String {
+                row.cells
+                    .get(index)
+                    .map(crate::view_data::render_data_cell)
+                    .unwrap_or_default()
+            };
+            format!(
+                "<div class=\"rounded-sm border border-surface-200 bg-card p-4 shadow-premium\"><div class=\"flex flex-wrap items-center justify-between gap-3\"><p class=\"text-xs font-bold uppercase tracking-widest text-surface-400\">{record_type} · {host}</p>{state}</div><div class=\"mt-3 space-y-2\"><div><p class=\"text-[10px] font-bold uppercase tracking-[0.18em] text-surface-400\">Value — select to copy</p><code class=\"mt-1 block font-mono text-xs bg-muted/40 rounded px-2 py-1.5 break-all select-text text-surface-800\">{value}</code></div></div></div>",
+                record_type = cell(0),
+                host = cell(1),
+                state = cell(3),
+                value = cell(2),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("");
+    format!(
+        "<section class=\"space-y-4\" data-page=\"domain-detail\">\
+        <div class=\"rounded-sm border border-primary/30 bg-primary/5 p-4\"><div class=\"flex flex-col gap-3 md:flex-row md:items-center md:justify-between\"><div><p class=\"text-xs font-bold uppercase tracking-[0.18em] text-primary\">DNS setup</p><p class=\"mt-1 text-sm text-muted-foreground\">Add each record at your DNS provider, then verify. Values are selectable — copy them straight from this page (no clipboard scripts here).</p></div>{verify_form}</div></div>\
+        <div class=\"space-y-3\">{rows}</div>\
+        </section>",
+        verify_form = verify_form,
+        rows = rows,
+    )
+}
+
+/// The campaign detail flow (design report structural #3): per-status
+/// lifecycle actions, the recipients wiring select, and an honest monitor
+/// note. The generic data carries the action table (Action / Posts to /
+/// Available) and the audience select built by the committed loader.
+fn campaign_detail_section(data: &ListPageData) -> String {
+    // The wired-audience select: the loader emits the tenant's lists as the
+    // `list_id` filter — a form field here, not a URL filter.
+    let recipients_form = data
+        .filters
+        .iter()
+        .find(|filter| filter.name == "list_id")
+        .map(|filter| {
+            let options = filter
+                .options
+                .iter()
+                .map(|(value, label, selected)| {
+                    if *selected {
+                        format!("<option value=\"{}\" selected>{}</option>", html_escape(value), html_escape(label))
+                    } else {
+                        format!("<option value=\"{}\">{}</option>", html_escape(value), html_escape(label))
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("");
+            format!(
+                "<form method=\"post\" action=\"/web/campaigns/{id}/recipients\" class=\"space-y-3\" data-form-id=\"campaign-recipients\"><label class=\"text-sm font-medium leading-none\" for=\"campaign-recipients-list\">Recipients list</label><select id=\"campaign-recipients-list\" name=\"list_id\" class=\"flex h-12 w-full rounded-sm border border-input bg-background px-3 text-[14px] ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">{options}</select><button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-md bg-primary px-4 py-2 text-sm font-semibold text-white transition-all duration-200 ease-premium active:scale-[0.98] hover:bg-brand-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">Wire recipients</button><p class=\"text-xs text-muted-foreground\">The checked list becomes this campaign's audience; counts refresh on the next page load.</p></form>",
+                id = urlencode_path(data.base_path.trim_start_matches("/campaigns/")),
+                options = options,
+            )
+        });
+
+    // Lifecycle buttons: one per action row (label, POST target, available).
+    let actions = data
+        .table
+        .as_ref()
+        .map(|table| table.rows.as_slice())
+        .unwrap_or(&[])
+        .iter()
+        .filter_map(|row| {
+            let label = match row.cells.first() {
+                Some(crate::view_data::DataCell::Text(label)) => label.clone(),
+                _ => return None,
+            };
+            let target = match row.cells.get(1) {
+                Some(crate::view_data::DataCell::Mono(target)) => target.clone(),
+                _ => return None,
+            };
+            let available = matches!(row.cells.get(2), Some(crate::view_data::DataCell::Status(status)) if *status != "paused");
+            // The recipients wiring renders as its own form above.
+            if label.to_ascii_lowercase().contains("recipients") {
+                return None;
+            }
+            let button = if available {
+                format!(
+                    "<form method=\"post\" action=\"{target}\" class=\"inline\"><button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-md bg-primary px-4 py-2 text-sm font-semibold text-white transition-all duration-200 ease-premium active:scale-[0.98] hover:bg-brand-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">{label}</button></form>",
+                    target = html_escape(&target),
+                    label = html_escape(&label),
+                )
+            } else {
+                format!(
+                    "<button type=\"button\" disabled aria-disabled=\"true\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-md border border-surface-200 bg-background px-4 py-2 text-sm font-semibold text-surface-400 cursor-not-allowed\" title=\"Not available in this campaign's current status\">{label}</button>",
+                    label = html_escape(&label),
+                )
+            };
+            Some(button)
+        })
+        .collect::<Vec<_>>()
+        .join("");
+
+    format!(
+        "<section class=\"space-y-4\" data-page=\"campaign-detail\">\
+        <div class=\"rounded-sm border border-surface-200 bg-card p-6 shadow-premium\"><h2 class=\"text-xs font-bold uppercase tracking-widest text-surface-400 mb-4\">Lifecycle</h2><div class=\"flex flex-wrap gap-3\">{actions}</div><p class=\"mt-3 text-xs text-muted-foreground\">Actions validate the campaign's current status server-side and flash the honest outcome.</p></div>\
+        {recipients}\
+        <div class=\"rounded-sm border border-surface-200 bg-card p-6 shadow-premium\"><h2 class=\"text-xs font-bold uppercase tracking-widest text-surface-400 mb-2\">Monitor</h2><p class=\"text-sm text-muted-foreground\">While the campaign sends, reload this page to watch counts update — every number is rendered server-side from live data.</p></div>\
+        </section>",
+        actions = actions,
+        recipients = recipients_form.map(|form| format!(
+            "<div class=\"rounded-sm border border-surface-200 bg-card p-6 shadow-premium\"><h2 class=\"text-xs font-bold uppercase tracking-widest text-surface-400 mb-4\">Audience</h2>{form}</div>",
+            form = form
+        )).unwrap_or_else(|| "<div class=\"rounded-sm border border-surface-200 bg-card p-6 shadow-premium\"><h2 class=\"text-xs font-bold uppercase tracking-widest text-surface-400 mb-2\">Audience</h2><p class=\"text-sm text-muted-foreground\">No lists exist yet — create a list first, then wire this campaign's recipients.</p></div>".to_string()),
+    )
+}
+
+/// Domain transfer typed confirmation (design report structural #16): the
+/// native `pattern` gives instant no-JS feedback; the server re-validates
+/// the exact `transfer {domain}` string.
+fn domain_transfer_section(data: &ListPageData) -> String {
+    // The loader's table carries Domain / Domain id / Current tenant mono
+    // rows; the domain string is the first row's value cell.
+    let domain = data
+        .table
+        .as_ref()
+        .and_then(|table| table.rows.first())
+        .and_then(|row| row.cells.get(1))
+        .and_then(|cell| match cell {
+            crate::view_data::DataCell::Mono(value) => Some(value.clone()),
+            _ => None,
+        })
+        .unwrap_or_default();
+    let expected = format!("transfer {domain}");
+    format!(
+        "<section class=\"space-y-4\" data-page=\"domain-transfer\"><div class=\"rounded-sm border border-warning/25 bg-warning/10 p-4\"><p class=\"text-xs font-bold uppercase tracking-[0.18em] text-warning\">Typed confirmation required</p><p class=\"mt-1 text-sm text-muted-foreground\">Transferring a domain re-binds DKIM and resets verification. Type <code class=\"font-mono text-xs bg-muted/40 rounded px-1.5 py-0.5\">{expected}</code> exactly to confirm — the browser checks the pattern before anything is submitted.</p></div>\
+        <form method=\"post\" action=\"/web/admin/domains/transfer\" class=\"space-y-4 rounded-sm border border-surface-200 bg-card p-6 shadow-premium\" data-form-id=\"domain-transfer\">\
+        <div class=\"space-y-2\"><label class=\"text-sm font-medium leading-none\" for=\"transfer-domain\">Domain</label><input id=\"transfer-domain\" name=\"domain\" type=\"text\" required value=\"{domain}\" class=\"flex h-12 w-full rounded-sm border border-input bg-background px-3 text-[14px] font-mono ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\" /></div>\
+        <div class=\"space-y-2\"><label class=\"text-sm font-medium leading-none\" for=\"transfer-target\">Target tenant id</label><input id=\"transfer-target\" name=\"to_tenant_id\" type=\"text\" required placeholder=\"tenant UUID\" class=\"flex h-12 w-full rounded-sm border border-input bg-background px-3 text-[14px] font-mono ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\" /></div>\
+        <div class=\"space-y-2\"><label class=\"text-sm font-medium leading-none\" for=\"transfer-confirmation\">Confirmation</label><input id=\"transfer-confirmation\" name=\"confirmation\" type=\"text\" required pattern=\"{pattern}\" title=\"Type {expected} exactly.\" placeholder=\"{expected}\" class=\"flex h-12 w-full rounded-sm border border-input bg-background px-3 text-[14px] font-mono ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\" /><p class=\"text-xs text-muted-foreground\">The exact string is checked again server-side after the POST.</p></div>\
+        <button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-md bg-destructive px-4 py-2 text-sm font-semibold text-destructive-foreground transition-all duration-200 ease-premium active:scale-[0.98] hover:bg-destructive/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">Transfer domain</button>\
+        </form></section>",
+        expected = html_escape(&expected),
+        domain = html_escape(&domain),
+        // Escape regex-hostile characters for the HTML pattern attribute.
+        pattern = html_escape(&expected.replace('.', "\\.")),
+    )
+}
+
+/// Per-row control-plane actions (design report #24): alerts acknowledge,
+/// GDPR transitions, tenant lifecycle. Availability derives from the row's
+/// Status cell; ids come from the row id. Returns (column header, cell html).
+fn cp_row_actions(base_path: &str, row: &crate::view_data::DataRowData) -> Option<(String, String)> {
+    let status = row
+        .cells
+        .iter()
+        .rev()
+        .find_map(|cell| match cell {
+            crate::view_data::DataCell::Status(status) => Some(status.clone()),
+            _ => None,
+        })
+        .unwrap_or_default();
+    let action_button = |label: &str, target: &str, destructive: bool| {
+        let classes = if destructive {
+            "rounded-sm border border-destructive/30 bg-destructive/5 px-2.5 py-1 text-xs font-bold text-destructive transition-colors hover:bg-destructive/10"
+        } else {
+            "rounded-sm border border-surface-200 bg-background px-2.5 py-1 text-xs font-bold text-foreground transition-colors hover:border-surface-300 hover:bg-accent"
+        };
+        format!(
+            "<form method=\"post\" action=\"{target}\" class=\"inline\"><input type=\"hidden\" name=\"id\" value=\"{id}\" /><input type=\"hidden\" name=\"return_to\" value=\"{base}\" /><button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap {classes} focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">{label}</button></form>",
+            target = html_escape(target),
+            id = html_escape(&row.id),
+            base = html_escape(base_path),
+            classes = classes,
+            label = html_escape(label),
+        )
+    };
+    match base_path {
+        "/alerts" if status == "active" => Some((
+            "Triage".to_string(),
+            action_button("Acknowledge", "/web/admin/alerts/ack", false),
+        )),
+        "/compliance/gdpr" => {
+            // Forward-only triad: pending → in_progress → completed/rejected.
+            let mut buttons: Vec<String> = Vec::new();
+            if status == "pending" {
+                buttons.push(gdpr_transition_button(&row.id, "in_progress", "Start", base_path));
+            }
+            if matches!(status.as_str(), "pending" | "in_progress" | "processing" | "verified") {
+                buttons.push(gdpr_transition_button(&row.id, "completed", "Complete", base_path));
+                buttons.push(gdpr_transition_button(&row.id, "rejected", "Reject", base_path));
+            }
+            if buttons.is_empty() {
+                None
+            } else {
+                Some((
+                    "Actions".to_string(),
+                    format!(
+                        "<div class=\"flex flex-wrap justify-end gap-2\">{}</div>",
+                        buttons.join("")
+                    ),
+                ))
+            }
+        }
+        "/tenants" => {
+            let mut buttons: Vec<String> = Vec::new();
+            if matches!(status.as_str(), "pending" | "active") {
+                buttons.push(action_button(
+                    "Suspend",
+                    &format!("/web/admin/tenants/{}/suspend", row.id),
+                    false,
+                ));
+            }
+            if status == "suspended" {
+                buttons.push(action_button(
+                    "Resume",
+                    &format!("/web/admin/tenants/{}/resume", row.id),
+                    false,
+                ));
+            }
+            if matches!(status.as_str(), "pending" | "active" | "suspended") {
+                buttons.push(format!(
+                    "<a href=\"/confirm?intent=delete-tenant&amp;id={id}&amp;return_to=%2Ftenants\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-sm border border-destructive/30 bg-destructive/5 px-2.5 py-1 text-xs font-bold text-destructive transition-colors hover:bg-destructive/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">Delete</a>",
+                    id = html_escape(&row.id),
+                ));
+            }
+            if buttons.is_empty() {
+                None
+            } else {
+                Some((
+                    "Actions".to_string(),
+                    format!(
+                        "<div class=\"flex flex-wrap justify-end gap-2\">{}</div>",
+                        buttons.join("")
+                    ),
+                ))
+            }
+        }
+        _ => None,
+    }
+}
+
+fn gdpr_transition_button(id: &str, target: &str, label: &str, base_path: &str) -> String {
+    format!(
+        "<form method=\"post\" action=\"/web/admin/gdpr/{id}/transition\" class=\"inline\"><input type=\"hidden\" name=\"status\" value=\"{target}\" /><input type=\"hidden\" name=\"return_to\" value=\"{base}\" /><button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-sm border border-surface-200 bg-background px-2.5 py-1 text-xs font-bold text-foreground transition-colors hover:border-surface-300 hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">{label}</button></form>",
+        id = html_escape(id),
+        target = html_escape(target),
+        base = html_escape(base_path),
+        label = html_escape(label),
     )
 }
 
 /// Generic server-data list page. This is the data-driven counterpart of
 /// the hand-written demo pages: the api-server loads real rows per route
-/// and renders them through here — same chrome (breadcrumbs, KPI cards,
+/// and renders them through here — same chrome (breadcrumbs, stat tiles,
 /// native GET filter bar, bulk-action form, pagination) with zero demo
 /// content. Empty tables render an honest empty state; nothing is
 /// fabricated.
 pub fn data_list_page(data: &ListPageData, noun: &str) -> String {
     let breadcrumbs = render_page_breadcrumbs(&data.title);
 
-    let primary_action = match &data.primary_action {
-        Some((label, href)) => format!(
-            "<a href=\"{}\" class=\"inline-flex w-full items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold transition-all bg-primary text-white hover:bg-brand-700 h-12 px-6 py-3 sm:w-auto\">{}</a>",
-            html_escape(href),
-            html_escape(label)
-        ),
-        None => String::new(),
+    // Detail pages: the flow-specific layouts replace the generic table.
+    let detail_section = if detail_id_under(&data.base_path, "/domains/") {
+        Some(domain_detail_section(data))
+    } else if detail_id_under(&data.base_path, "/campaigns/") {
+        Some(campaign_detail_section(data))
+    } else if data.title == "Domain Transfer" {
+        Some(domain_transfer_section(data))
+    } else {
+        None
+    };
+
+    let is_transfer = data.title == "Domain Transfer";
+    // Campaign detail moves its select into the recipients POST form and
+    // its actions into lifecycle buttons — the generic GET filter bar and
+    // primary link would both lie (a POST-only target rendered as a link).
+    let is_campaign_detail = detail_id_under(&data.base_path, "/campaigns/");
+
+    let primary_action = if is_campaign_detail {
+        String::new()
+    } else {
+        match &data.primary_action {
+            Some((label, href)) => format!(
+                "<a href=\"{}\" class=\"inline-flex w-full items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold transition-all bg-primary text-white hover:bg-brand-700 h-12 px-6 py-3 sm:w-auto\">{}</a>",
+                html_escape(href),
+                html_escape(label)
+            ),
+            None => String::new(),
+        }
     };
 
     let kpi_cards = if data.kpis.is_empty() {
@@ -256,19 +703,7 @@ pub fn data_list_page(data: &ListPageData, noun: &str) -> String {
         let cards = data
             .kpis
             .iter()
-            .map(|kpi| {
-                let hint = kpi
-                    .hint
-                    .as_deref()
-                    .map(|text| format!("<p class=\"text-xs text-muted-foreground mt-1\">{}</p>", html_escape(text)))
-                    .unwrap_or_default();
-                format!(
-                    "<div class=\"rounded-sm border border-surface-200 bg-card p-6 shadow-premium\"><h3 class=\"text-xs font-bold uppercase tracking-widest text-surface-400 mb-3\">{}</h3><p class=\"text-2xl font-bold text-surface-950 tracking-tight\">{}</p>{}</div>",
-                    html_escape(&kpi.label),
-                    html_escape(&kpi.value),
-                    hint
-                )
-            })
+            .map(render_stat_tile)
             .collect::<Vec<_>>()
             .join("");
         format!(
@@ -276,8 +711,20 @@ pub fn data_list_page(data: &ListPageData, noun: &str) -> String {
         )
     };
 
+    // CP chrome (design report structural #14): operator pages get the
+    // eyebrow + dense-table/scroll-container treatment.
+    let cp = cp_flavored(&data.base_path);
+    let eyebrow = if cp {
+        format!(
+            "<p class=\"apex-eyebrow text-[11px] font-bold uppercase tracking-[0.18em] text-surface-400\"><span>{}</span></p>",
+            html_escape(&data.title)
+        )
+    } else {
+        String::new()
+    };
+
     // Native GET filter form: search input + selects + Apply/Clear.
-    let filters_html = if data.search_label.is_empty() && data.filters.is_empty() {
+    let filters_html = if (data.search_label.is_empty() && data.filters.is_empty()) || is_campaign_detail {
         String::new()
     } else {
         let selects = data
@@ -297,7 +744,7 @@ pub fn data_list_page(data: &ListPageData, noun: &str) -> String {
                     .collect::<Vec<_>>()
                     .join("");
                 format!(
-                    "<div class=\"min-w-[10rem]\"><label class=\"sr-only\" for=\"filter-{}\">{}</label><select id=\"filter-{}\" name=\"{}\" class=\"flex h-12 w-full rounded-sm border border-input bg-background px-3 text-[14px] ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/20 focus-visible:border-primary\">{}</select></div>",
+                    "<div class=\"min-w-[10rem]\"><label class=\"sr-only\" for=\"filter-{}\">{}</label><select id=\"filter-{}\" name=\"{}\" class=\"flex h-12 w-full rounded-sm border border-input bg-background px-3 text-[14px] ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:border-primary\">{}</select></div>",
                     html_escape(&filter.name),
                     html_escape(&filter.label),
                     html_escape(&filter.name),
@@ -312,7 +759,7 @@ pub fn data_list_page(data: &ListPageData, noun: &str) -> String {
         } else {
             let search_icon = ui_icon("search", "h-4 w-4");
             format!(
-                "<div class=\"min-w-0 flex-1\"><label class=\"sr-only\" for=\"{id}-search\">{label}</label><div class=\"relative\"><span class=\"pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground\">{search_icon}</span><input id=\"{id}-search\" type=\"search\" name=\"query\" aria-label=\"{label}\" value=\"{value}\" placeholder=\"{placeholder}\" class=\"flex h-12 w-full rounded-sm border border-input bg-background pl-10 pr-4 text-[14px] ring-offset-background transition-all duration-200 placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/20 focus-visible:border-primary\" /></div></div>",
+                "<div class=\"min-w-0 flex-1\"><label class=\"sr-only\" for=\"{id}-search\">{label}</label><div class=\"relative\"><span class=\"pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground\">{search_icon}</span><input id=\"{id}-search\" type=\"search\" name=\"query\" aria-label=\"{label}\" value=\"{value}\" placeholder=\"{placeholder}\" class=\"flex h-12 w-full rounded-sm border border-input bg-background pl-10 pr-4 text-[14px] ring-offset-background transition-all duration-200 placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:border-primary\" /></div></div>",
                 id = html_escape(&data.base_path.replace('/', "-")),
                 label = html_escape(&data.search_label),
                 search_icon = search_icon,
@@ -328,9 +775,13 @@ pub fn data_list_page(data: &ListPageData, noun: &str) -> String {
         )
     };
 
-    let table_section = match &data.table {
+    let table_section = if let Some(detail) = detail_section {
+        // Detail flow: stat tiles above + the flow-specific section.
+        format!("{detail}")
+    } else {
+        match &data.table {
         None => String::new(),
-        Some(table) if table.rows.is_empty() => {
+        Some(table) if table.rows.is_empty() && !is_transfer => {
             // Honest empty state: visible, with the page's own copy.
             format!(
                 "<section data-view-state=\"empty\" class=\"space-y-4\">{}</section>",
@@ -348,7 +799,12 @@ pub fn data_list_page(data: &ListPageData, noun: &str) -> String {
             let has_bulk = data.bulk_action.is_some();
             let has_actions = data.detail_path_prefix.is_some() || data.delete_intent.is_some();
 
-            let mut columns: Vec<TableColumn> = Vec::with_capacity(table.columns.len() + 2);
+            // Per-row CP actions land in an extra trailing column.
+            let row_actions: Vec<Option<(String, String)>> =
+                table.rows.iter().map(|row| cp_row_actions(&data.base_path, row)).collect();
+            let has_row_actions = row_actions.iter().any(|action| action.is_some());
+
+            let mut columns: Vec<TableColumn> = Vec::with_capacity(table.columns.len() + 3);
             let mut owned_rows: Vec<Vec<String>> = Vec::with_capacity(table.rows.len());
             if has_bulk {
                 columns.push(TableColumn { label: "", align: "left" });
@@ -356,10 +812,10 @@ pub fn data_list_page(data: &ListPageData, noun: &str) -> String {
             for label in &table.columns {
                 columns.push(TableColumn { label, align: "left" });
             }
-            if has_actions {
+            if has_actions || has_row_actions {
                 columns.push(TableColumn { label: "Actions", align: "right" });
             }
-            for row in &table.rows {
+            for (row, row_action) in table.rows.iter().zip(row_actions.iter()) {
                 let mut cells: Vec<String> = Vec::with_capacity(columns.len());
                 if has_bulk {
                     cells.push(format!(
@@ -371,8 +827,8 @@ pub fn data_list_page(data: &ListPageData, noun: &str) -> String {
                 for cell in &row.cells {
                     cells.push(render_data_cell(cell));
                 }
-                if has_actions {
-                    let mut actions: Vec<String> = Vec::with_capacity(3);
+                if has_actions || has_row_actions {
+                    let mut actions: Vec<String> = Vec::with_capacity(4);
                     if let Some(prefix) = &data.detail_path_prefix {
                         let label = if data.detail_label.is_empty() { "View" } else { &data.detail_label };
                         actions.push(format!(
@@ -398,10 +854,15 @@ pub fn data_list_page(data: &ListPageData, noun: &str) -> String {
                             return_to = urlencode_path(&data.base_path),
                         ));
                     }
-                    cells.push(format!(
-                        "<div class=\"flex flex-wrap justify-end gap-2\">{}</div>",
-                        actions.join("")
-                    ));
+                    if let Some((_, action_html)) = row_action {
+                        actions.push(action_html.clone());
+                    }
+                    if !actions.is_empty() {
+                        cells.push(format!(
+                            "<div class=\"flex flex-wrap justify-end gap-2\">{}</div>",
+                            actions.join("")
+                        ));
+                    }
                 }
                 owned_rows.push(cells);
             }
@@ -409,12 +870,21 @@ pub fn data_list_page(data: &ListPageData, noun: &str) -> String {
                 .iter()
                 .map(|row| row.iter().map(String::as_str).collect())
                 .collect();
-            let rendered_table = Table {
+            let mut rendered_table = Table {
                 caption: Some(&data.title),
                 columns,
                 rows: borrowed_rows,
             }
             .render_html();
+            // Operator density + working sticky headers on CP tables.
+            if cp {
+                rendered_table = rendered_table
+                    .replace(
+                        "class=\"apex-table-wrap relative w-full overflow-x-auto\"",
+                        "class=\"apex-table-wrap apex-table-wrap--scroll relative w-full\"",
+                    )
+                    .replace("class=\"apex-table w-full", "class=\"apex-table apex-table--dense w-full");
+            }
 
             let pagination = PaginationControls {
                 page: data.page.max(1),
@@ -423,14 +893,14 @@ pub fn data_list_page(data: &ListPageData, noun: &str) -> String {
             .render_html_with_links(
                 &data.base_path,
                 Some(data.filter_query.as_str()),
-                Some(pagination_storage_key(noun).as_str()),
+                None,
             );
             let summary = data.summary(noun);
 
             if has_bulk {
                 let bulk = data.bulk_action.as_ref().expect("checked above");
                 format!(
-                    "<form method=\"post\" action=\"{action}\" data-bulk-form=\"{noun}\"><section class=\"rounded-sm border border-surface-200 bg-card/80 p-6\" data-bulk-scope=\"{noun}\"><div class=\"flex flex-col gap-3 md:flex-row md:items-center md:justify-between\"><p class=\"text-sm font-bold text-foreground\">Select rows to act on them in bulk</p><div class=\"flex flex-col gap-2 sm:flex-row\"><button type=\"submit\" formaction=\"{action}\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-md bg-destructive px-4 py-2 text-sm font-semibold text-destructive-foreground transition-colors hover:bg-destructive/90\">{label}</button></div></div></section><section data-view-state=\"ready\" class=\"space-y-4\">{table}<div class=\"flex flex-col gap-3 md:flex-row md:items-center md:justify-between\"><p class=\"text-sm text-muted-foreground\">{summary}</p>{pagination}</div></section></form>",
+                    "<form method=\"post\" action=\"{action}\" data-bulk-form=\"{noun}\"><section class=\"rounded-sm border border-surface-200 bg-card/80 p-6\" data-bulk-scope=\"{noun}\"><div class=\"flex flex-col gap-3 md:flex-row md:items-center md:justify-between\"><div><p class=\"text-sm font-bold text-foreground\">Select rows to act on them in bulk</p><p class=\"text-xs text-muted-foreground\">There is no select-all without scripts — tick each row you want. Bulk actions apply to every checked row and return to this exact page.</p></div><div class=\"flex flex-col gap-2 sm:flex-row\"><button type=\"submit\" formaction=\"{action}\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-md bg-destructive px-4 py-2 text-sm font-semibold text-destructive-foreground transition-all duration-200 ease-premium active:scale-[0.98] hover:bg-destructive/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">{label}</button></div></div></section><section data-view-state=\"ready\" class=\"space-y-4\">{table}<div class=\"flex flex-col gap-3 md:flex-row md:items-center md:justify-between\"><p class=\"text-sm text-muted-foreground\">{summary}</p>{pagination}</div></section></form>",
                     action = html_escape(&bulk.action),
                     noun = html_escape(noun),
                     label = html_escape(&bulk.button_label),
@@ -447,11 +917,13 @@ pub fn data_list_page(data: &ListPageData, noun: &str) -> String {
                 )
             }
         }
+        }
     };
 
     format!(
-        "<div class=\"space-y-6\">{breadcrumbs}<div class=\"flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between\"><div><h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">{title}</h1><p class=\"text-sm text-muted-foreground\">{description}</p></div>{primary_action}</div>{kpis}{filters}{table_section}</div>",
+        "<div class=\"space-y-6\">{breadcrumbs}<div class=\"flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between\"><div>{eyebrow}<h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">{title}</h1><p class=\"text-sm text-muted-foreground\">{description}</p></div>{primary_action}</div>{kpis}{filters}{table_section}</div>",
         breadcrumbs = breadcrumbs,
+        eyebrow = eyebrow,
         title = html_escape(&data.title),
         description = html_escape(&data.description),
         primary_action = primary_action,
@@ -476,60 +948,6 @@ fn urlencode_path(value: &str) -> String {
     out
 }
 
-fn render_table_loading_state(label: &str, source_label: &str, column_count: usize) -> String {    let header_cells = (0..column_count)
-        .map(|index| {
-            let class_name = match index {
-                0 => "h-4 w-28",
-                _ if index + 1 == column_count => "ml-auto h-4 w-16",
-                _ => "h-4 w-20",
-            };
-            let skeleton = Skeleton {
-                variant: "text",
-                class_name,
-            }
-            .render_html();
-            format!(
-                "<th class=\"h-12 px-4 align-middle bg-muted/20\">{}</th>",
-                skeleton
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("");
-    let rows = (0..4)
-        .map(|_| {
-            let cells = (0..column_count)
-                .map(|index| {
-                    let class_name = match index {
-                        0 => "h-4 w-40",
-                        1 => "h-4 w-24",
-                        _ if index + 1 == column_count => "ml-auto h-4 w-16",
-                        _ => "h-4 w-20",
-                    };
-                    let skeleton = Skeleton {
-                        variant: "text",
-                        class_name,
-                    }
-                    .render_html();
-                    format!("<td class=\"p-4 align-middle\">{}</td>", skeleton)
-                })
-                .collect::<Vec<_>>()
-                .join("");
-            format!("<tr class=\"border-b\">{}</tr>", cells)
-        })
-        .collect::<Vec<_>>()
-        .join("");
-    format!(
-        "<section data-view-state=\"loading\" hidden aria-busy=\"true\" class=\"space-y-4\">{}<div class=\"rounded-sm border border-surface-200 bg-card/80 p-6\"><div class=\"relative w-full overflow-x-auto\"><table class=\"w-full min-w-[640px] caption-bottom text-sm\"><thead class=\"[&_tr]:border-b sticky top-0 z-10 bg-background\"><tr>{}</tr></thead><tbody>{}</tbody></table></div></div></section>",
-        AsyncState::Loading {
-            label,
-            source_label: Some(source_label),
-        }
-        .render_html(),
-        header_cells,
-        rows,
-    )
-}
-
 fn render_campaign_editor_page(
     title: &str,
     breadcrumb_label: &str,
@@ -550,7 +968,7 @@ fn render_campaign_editor_page(
     .render_html();
     // Native <select> — no combobox JS; the value is serialized by the
     // browser when the form is submitted.
-    let audience_select = "<div><label class=\"text-sm font-medium leading-none\" for=\"campaign-audience\">Audience</label><select id=\"campaign-audience\" name=\"audience\" class=\"mt-2 flex h-12 w-full rounded-sm border border-input bg-background px-3 text-[14px] ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/20 focus-visible:border-primary\"><option value=\"vip\" selected>VIP Customers</option><option value=\"newsletter\">Newsletter Subscribers</option><option value=\"trial\">Trial Accounts</option></select></div>";
+    let audience_select = "<div><label class=\"text-sm font-medium leading-none\" for=\"campaign-audience\">Audience</label><select id=\"campaign-audience\" name=\"audience\" class=\"mt-2 flex h-12 w-full rounded-sm border border-input bg-background px-3 text-[14px] ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:border-primary\"><option value=\"vip\" selected>VIP Customers</option><option value=\"newsletter\">Newsletter Subscribers</option><option value=\"trial\">Trial Accounts</option></select></div>";
     let content_input = Textarea {
         value: "",
         placeholder: "Paste your HTML content here...",
@@ -565,7 +983,7 @@ fn render_campaign_editor_page(
     .render_html();
 
     format!(
-        "{breadcrumbs}<div class=\"w-full max-w-3xl space-y-6\"><section class=\"rounded-sm border border-warning/25 bg-warning/10 p-4\"><div class=\"flex flex-col gap-3 md:flex-row md:items-center md:justify-between\"><div><p class=\"text-xs font-bold uppercase tracking-[0.24em] text-warning\">Draft protection</p><h1 class=\"mt-1 text-2xl font-bold text-surface-950 tracking-tight\">{title}</h1><p class=\"mt-2 text-sm text-muted-foreground\">Your work is saved when you press {primary_action_label} — no background sync to wait for.</p></div><div class=\"flex flex-col items-start gap-2 md:items-end\"><div class=\"flex items-center gap-2\">{draft_badge}<span class=\"text-xs font-medium text-muted-foreground\">Unsaved changes live only in this form</span></div><p class=\"text-xs text-muted-foreground\">Use Preview to render the HTML exactly as recipients will see it.</p></div></div></section><form class=\"space-y-6\" method=\"post\" action=\"/web/campaigns\" enctype=\"application/x-www-form-urlencoded\"><div class=\"space-y-2\">{name_label}{name_input}</div><div class=\"grid gap-6 md:grid-cols-2\"><div class=\"space-y-2\">{subject_label}{subject_input}</div><div class=\"space-y-2\">{audience_label}{audience_select}</div></div><div class=\"space-y-2\">{content_label}{content_input}</div><div class=\"space-y-2\"><label class=\"text-sm font-medium leading-none\" for=\"campaign-scheduled-at\">Schedule (optional)</label><input id=\"campaign-scheduled-at\" name=\"scheduled_at\" type=\"datetime-local\" class=\"flex h-12 w-full rounded-sm border border-input bg-background px-3 text-[14px] ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/20 focus-visible:border-primary\" /><p class=\"text-xs text-muted-foreground\">Pick a send time to schedule the campaign instead of saving it as a draft.</p></div><div class=\"flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between\"><p class=\"text-xs text-muted-foreground\">Everything runs server-side: submit, schedule, and preview are plain form posts.</p><div class=\"flex flex-col gap-3 sm:flex-row\">{preview_button}{save_button}</div></div></form></div>",
+        "{breadcrumbs}<div class=\"w-full max-w-3xl space-y-6\"><section class=\"rounded-sm border border-warning/25 bg-warning/10 p-4\"><div class=\"flex flex-col gap-3 md:flex-row md:items-center md:justify-between\"><div><p class=\"text-xs font-bold uppercase tracking-[0.24em] text-warning\">Draft protection</p><h1 class=\"mt-1 text-2xl font-bold text-surface-950 tracking-tight\">{title}</h1><p class=\"mt-2 text-sm text-muted-foreground\">Your work is saved when you press {primary_action_label} — no background sync to wait for.</p></div><div class=\"flex flex-col items-start gap-2 md:items-end\"><div class=\"flex items-center gap-2\">{draft_badge}<span class=\"text-xs font-medium text-muted-foreground\">Unsaved changes live only in this form</span></div><p class=\"text-xs text-muted-foreground\">Use Preview to render the HTML exactly as recipients will see it.</p></div></div></section><form class=\"space-y-6\" method=\"post\" action=\"/web/campaigns\" enctype=\"application/x-www-form-urlencoded\"><div class=\"space-y-2\">{name_label}{name_input}</div><div class=\"grid gap-6 md:grid-cols-2\"><div class=\"space-y-2\">{subject_label}{subject_input}</div><div class=\"space-y-2\">{audience_label}{audience_select}</div></div><div class=\"space-y-2\">{content_label}{content_input}</div><div class=\"space-y-2\"><label class=\"text-sm font-medium leading-none\" for=\"campaign-scheduled-at\">Schedule (optional)</label><input id=\"campaign-scheduled-at\" name=\"scheduled_at\" type=\"datetime-local\" class=\"flex h-12 w-full rounded-sm border border-input bg-background px-3 text-[14px] ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:border-primary\" /><p class=\"text-xs text-muted-foreground\">Pick a send time to schedule the campaign instead of saving it as a draft.</p></div><div class=\"flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between\"><p class=\"text-xs text-muted-foreground\">Everything runs server-side: submit, schedule, and preview are plain form posts.</p><div class=\"flex flex-col gap-3 sm:flex-row\">{preview_button}{save_button}</div></div></form></div>",
         breadcrumbs = breadcrumbs,
         title = title,
         draft_badge = draft_badge,
@@ -663,42 +1081,16 @@ pub fn web_dedicated_ips_page() -> String {
 <p class=\"text-sm text-surface-500 mt-1\">Manage your dedicated sending IP addresses</p></div>\
 <form method=\"post\" action=\"/web/dedicated-ips\" class=\"inline\"><button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold ring-offset-background transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 bg-primary text-white hover:bg-brand-700 h-12 px-6 py-3\">Provision New IP</button></form></div>";
 
-    let table = Table {
-        caption: Some("Dedicated IP addresses"),
-        columns: vec![
-            TableColumn {
-                label: "IP Address",
-                align: "left",
-            },
-            TableColumn {
-                label: "Status",
-                align: "left",
-            },
-            TableColumn {
-                label: "Reputation",
-                align: "left",
-            },
-            TableColumn {
-                label: "Allocated",
-                align: "left",
-            },
-        ],
-        rows: vec![],
-    };
-
     format!(
         "{header}\
-{loading}\
-{table}\
 {empty}",
         header = header_html,
-        loading = render_table_loading_state("Loading dedicated IPs", "api", 4),
-        table = table.render_html(),
         empty = EmptyState {
             title: "No dedicated IPs",
             description: Some("Provision a dedicated IP to improve deliverability"),
             icon_markup: None,
-            action_label: None, action_href: None
+            action_label: None,
+            action_href: None
         }
         .render_html(),
     )
@@ -834,7 +1226,6 @@ pub fn control_plane_not_found_page() -> String {
 
 /// Pixel-identical reproduction of the control-plane audit page contract.
 pub fn control_plane_audit_page() -> String {
-    let search_icon = ui_icon("search", "h-4 w-4");
     let table = Table {
         caption: Some("Audit logs"),
         columns: vec![
@@ -872,13 +1263,10 @@ pub fn control_plane_audit_page() -> String {
 <form method=\"get\" action=\"/audit\" role=\"search\" class=\"flex items-center gap-4\">\
 <div class=\"flex-1\"><label class=\"sr-only\" for=\"audit-search\">Search audit logs</label><input id=\"audit-search\" type=\"search\" name=\"query\" placeholder=\"Search audit logs...\" class=\"flex h-12 w-full rounded-md border border-surface-200 bg-background px-4 text-[14px] outline-none transition focus-visible:ring-2 focus-visible:ring-primary/20\" /></div><button type=\"submit\" class=\"rounded-sm border border-surface-200 bg-card px-4 py-2 text-sm font-bold text-surface-950\">Search</button>\
 </form>\
-{loading}\
 <section data-view-state=\"ready\">{table}</section>\
-<section data-view-state=\"empty\" hidden>{empty}</section>\
+\
 </div>",
-        loading = render_table_loading_state("Loading audit logs", "infrastructure", 5),
         table = table.render_html(),
-        empty = EmptyState { title: "No audit logs recorded", description: Some("Audit log entries will appear as operators and tenants perform actions across the control plane"), icon_markup: None, action_label: None, action_href: None }.render_html(),
     )
 }
 
@@ -1014,12 +1402,10 @@ pub fn control_plane_sales_page() -> String {
 
                     <div class="flex flex-wrap items-center justify-between gap-4 px-4 py-3 border-t border-white/10">
                         <div class="flex items-center gap-2 text-xs text-surface-400">
-                            <span>Page <strong class="text-white">1</strong> of <strong class="text-white">9</strong></span>
-                            <span class="text-surface-600">·</span>
-                            <span>184 total leads</span>
+                            <span>Sample view — the live lead inventory and its real pagination render once the database is connected</span>
                         </div>
                         <div class="flex items-center gap-2">
-                            <a href="/sales" class="inline-flex items-center justify-center rounded-sm border border-white/10 bg-black/25 px-3 py-1.5 text-xs font-medium text-surface-300 transition hover:bg-white/10 hover:text-white opacity-40 pointer-events-none" aria-disabled="true">&larr; Previous</a>
+                            <span class="inline-flex items-center justify-center rounded-sm border border-white/10 bg-black/25 px-3 py-1.5 text-xs font-medium text-surface-600 opacity-40" aria-disabled="true" tabindex="-1">&larr; Previous</span>
                             <a href="/sales?page=2" class="inline-flex items-center justify-center rounded-sm border border-white/10 bg-black/25 px-3 py-1.5 text-xs font-medium text-surface-300 transition hover:bg-white/10 hover:text-white">Next &rarr;</a>
                         </div>
                     </div>
@@ -1350,7 +1736,7 @@ pub fn web_signup_page_with_plan(csrf_token: &str, selected_plan: Option<&str>) 
 <label class=\"text-xs font-bold text-surface-900\" for=\"signup-password\">Password</label>\
 </div>\
 <div class=\"relative\">\
-<input id=\"signup-password\" name=\"password\" type=\"password\" required autocomplete=\"new-password\" minlength=\"12\" maxlength=\"128\" pattern=\"{password_pattern}\" title=\"{password_title}\" placeholder=\"At least 12 characters\" class=\"w-full px-4 py-3 rounded-md border border-surface-200 focus:border-primary focus:ring-4 focus:ring-primary/5 outline-none transition-all bg-surface-50 text-surface-950 pr-12\" />\
+<input id=\"signup-password\" name=\"password\" type=\"password\" required autocomplete=\"new-password\" minlength=\"12\" maxlength=\"128\" pattern=\"{password_pattern}\" title=\"{password_title}\" placeholder=\"At least 12 characters\" class=\"w-full px-4 py-3 rounded-md border border-surface-200 focus:border-primary focus:ring-4 focus:ring-primary/5 outline-none transition-all bg-surface-50 text-surface-950\" />\
 </div>\
 {password_hint}\
 </div>\
@@ -1450,14 +1836,14 @@ pub fn web_reset_password_page_with_state(
 <div class=\"space-y-2\">\
 <label class=\"text-xs font-bold text-surface-900\" for=\"new-password\">New password</label>\
 <div class=\"relative\">\
-<input id=\"new-password\" name=\"password\" type=\"password\" required autocomplete=\"new-password\" minlength=\"12\" maxlength=\"128\" pattern=\"{password_pattern}\" title=\"{password_title}\" placeholder=\"Choose a strong password\" class=\"w-full px-4 py-3 rounded-md border border-surface-200 focus:border-primary focus:ring-4 focus:ring-primary/5 outline-none transition-all bg-surface-50 text-surface-950 pr-12\" />\
+<input id=\"new-password\" name=\"password\" type=\"password\" required autocomplete=\"new-password\" minlength=\"12\" maxlength=\"128\" pattern=\"{password_pattern}\" title=\"{password_title}\" placeholder=\"Choose a strong password\" class=\"w-full px-4 py-3 rounded-md border border-surface-200 focus:border-primary focus:ring-4 focus:ring-primary/5 outline-none transition-all bg-surface-50 text-surface-950\" />\
 </div>\
 {password_hint}\
 </div>\
 <div class=\"space-y-2\">\
 <label class=\"text-xs font-bold text-surface-900\" for=\"confirm-password\">Confirm password</label>\
 <div class=\"relative\">\
-<input id=\"confirm-password\" name=\"confirmPassword\" type=\"password\" required autocomplete=\"new-password\" minlength=\"12\" maxlength=\"128\" pattern=\"{password_pattern}\" title=\"{password_title}\" placeholder=\"Confirm your new password\" class=\"w-full px-4 py-3 rounded-md border border-surface-200 focus:border-primary focus:ring-4 focus:ring-primary/5 outline-none transition-all bg-surface-50 text-surface-950 pr-12\" />\
+<input id=\"confirm-password\" name=\"confirmPassword\" type=\"password\" required autocomplete=\"new-password\" minlength=\"12\" maxlength=\"128\" pattern=\"{password_pattern}\" title=\"{password_title}\" placeholder=\"Confirm your new password\" class=\"w-full px-4 py-3 rounded-md border border-surface-200 focus:border-primary focus:ring-4 focus:ring-primary/5 outline-none transition-all bg-surface-50 text-surface-950\" />\
 </div>\
 </div>\
 
@@ -1565,28 +1951,11 @@ pub fn web_verify_email_page_with_state(
 
 /// Dashboard overview page with summary cards.
 pub fn web_dashboard_page() -> String {
-    let loading_state = format!(
-        "<section data-view-state=\"loading\" hidden aria-busy=\"true\">{}</section>",
-        AsyncState::Loading {
-            label: "Loading dashboard metrics",
-            source_label: Some("analytics"),
-        }
-        .render_html()
-    );
-    let error_state = format!(
-        "<section data-view-state=\"error\" hidden>{}</section>",
-        AsyncState::Error {
-            title: "Dashboard data unavailable",
-            description: "Metrics could not be loaded. Retry after checking connectivity to analytics services.",
-            retry_label: Some("Retry"),
-        }
-        .render_html()
-    );
     format!(
-        "<div class=\"space-y-8\">{loading_state}\
+        "<div class=\"space-y-8\">\
 <section data-view-state=\"ready\" class=\"space-y-8\">\
 <header class=\"flex flex-col gap-2\">\
-<h1 class=\"text-3xl font-bold tracking-tight text-surface-950\">Overview</h1>\
+<h1 class=\"text-2xl font-bold tracking-tight text-surface-950\">Overview</h1>\
 <p class=\"text-surface-500 font-medium\">Monitor your campaign performance and delivery health.</p>\
 </header>\
 <div class=\"bg-white rounded-2xl border border-surface-200/60 shadow-sm overflow-hidden\">\
@@ -1616,18 +1985,8 @@ pub fn web_dashboard_page() -> String {
 </div>\
 </article>\
 </div>\
-</section>\
-{error_state}\
-<section data-view-state=\"empty\" hidden>{empty_state}</section></div>",
-        loading_state = loading_state,
-        error_state = error_state,
-        empty_state = EmptyState {
-            title: "Ready to start sending?",
-            description: Some("Connect your domain and create your first campaign to see metrics."),
-            icon_markup: None,
-            action_label: Some("Get Started"), action_href: Some("/campaigns/new"),
-        }
-        .render_html(),
+</section>
+</div>",
     )
 }
 
@@ -1697,7 +2056,7 @@ pub fn web_campaigns_page() -> String {
         ],
     };
     let bulk_bar = format!(
-        "<section class=\"rounded-sm border border-surface-200 bg-card/80 p-6\" data-bulk-scope=\"campaigns\"><div class=\"flex flex-col gap-3 md:flex-row md:items-center md:justify-between\"><div class=\"flex items-start gap-3\"><div aria-live=\"polite\"><p class=\"text-sm font-bold text-foreground\">Select rows to act on them in bulk</p><p class=\"text-xs text-muted-foreground\">Bulk actions apply to every checked row and return to this exact page.</p></div></div><div class=\"flex flex-col gap-2 sm:flex-row\">{delete_button}</div></div></section>",
+        "<section class=\"rounded-sm border border-surface-200 bg-card/80 p-6\" data-bulk-scope=\"campaigns\"><div class=\"flex flex-col gap-3 md:flex-row md:items-center md:justify-between\"><div class=\"flex items-start gap-3\"><div aria-live=\"polite\"><p class=\"text-sm font-bold text-foreground\">Select rows to act on them in bulk</p><p class=\"text-xs text-muted-foreground\">There is no select-all without scripts — tick each row you want. Bulk actions apply to every checked row and return to this exact page.</p></div></div><div class=\"flex flex-col gap-2 sm:flex-row\">{delete_button}</div></div></section>",
         delete_button = "<button type=\"submit\" formaction=\"/web/campaigns/delete-bulk\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-md bg-destructive px-4 py-2 text-sm font-semibold text-destructive-foreground transition-colors hover:bg-destructive/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">Delete selected</button>",
     );
     let pagination_key = pagination_storage_key("campaigns");
@@ -1711,14 +2070,8 @@ pub fn web_campaigns_page() -> String {
         Some(pagination_key.as_str()),
     );
     let breadcrumbs = render_page_breadcrumbs("Campaigns");
-    let error_state = AsyncState::Error {
-        title: "Campaign list unavailable",
-        description: "Campaign data failed to load. Retry after verifying API connectivity.",
-        retry_label: Some("Retry"),
-    }
-    .render_html();
     format!(
-        "<div class=\"space-y-6\">{breadcrumbs}<div class=\"flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between\"><div><h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Campaigns</h1><p class=\"text-sm text-muted-foreground\">Search, filter, and batch-manage campaigns — every action is a plain form post rendered server-side.</p></div><a href=\"/campaigns/new\" class=\"inline-flex w-full items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold transition-all bg-primary text-white hover:bg-brand-700 h-12 px-6 py-3 sm:w-auto\">New Campaign</a></div>{filters}<form method=\"post\" action=\"/web/campaigns/delete-bulk\" data-bulk-form=\"campaigns\">{bulk_bar}{loading}<section data-view-state=\"ready\" class=\"space-y-4\">{table}<div class=\"flex flex-col gap-3 md:flex-row md:items-center md:justify-between\"><p class=\"text-sm text-muted-foreground\">Showing 11-20 of 42 campaigns. Returning from detail pages restores page 2 and the active filters.</p>{pagination}</div></section><section data-view-state=\"empty\" hidden>{empty}</section><section data-view-state=\"error\" hidden>{error_state}</section></form></div>",
+        "<div class=\"space-y-6\">{breadcrumbs}<div class=\"flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between\"><div><h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Campaigns</h1><p class=\"text-sm text-muted-foreground\">Search, filter, and batch-manage campaigns — every action is a plain form post rendered server-side.</p></div><a href=\"/campaigns/new\" class=\"inline-flex w-full items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold transition-all bg-primary text-white hover:bg-brand-700 h-12 px-6 py-3 sm:w-auto\">New Campaign</a></div>{filters}<form method=\"post\" action=\"/web/campaigns/delete-bulk\" data-bulk-form=\"campaigns\">{bulk_bar}<section data-view-state=\"ready\" class=\"space-y-4\">{table}<div class=\"flex flex-col gap-3 md:flex-row md:items-center md:justify-between\"><p class=\"text-sm text-muted-foreground\">Showing 11-20 of 42 campaigns. Returning from detail pages restores page 2 and the active filters.</p>{pagination}</div></section></form></div>",
         breadcrumbs = breadcrumbs,
         filters = render_debounced_filter_bar(
             "campaign-search",
@@ -1729,25 +2082,13 @@ pub fn web_campaigns_page() -> String {
             filters.as_str(),
         ),
         bulk_bar = bulk_bar,
-        loading = render_table_loading_state("Loading campaign performance", "api", 6),
         table = table.render_html(),
         pagination = pagination,
-        empty = EmptyState { title: "No campaigns yet", description: Some("Create your first email campaign"), icon_markup: None, action_label: Some("Create Campaign"), action_href: Some("/campaigns/new") }.render_html(),
-        error_state = error_state,
     )
 }
 
 /// Campaign detail page.
 pub fn web_campaign_detail_page() -> String {
-    let delete_dialog = AlertDialog {
-        title: "Delete campaign?",
-        message: "This permanently removes the campaign and keeps the current list-page return path intact until you confirm.",
-        confirm_label: "Delete campaign",
-        cancel_label: Some("Cancel"),
-        variant: "destructive",
-        dialog_type: "confirm",
-    }
-    .render_html();
     format!(
         "<div class=\"space-y-6\"><nav aria-label=\"Breadcrumb\" class=\"mb-2\"><ol class=\"flex items-center gap-2 text-sm text-surface-500\"><li><a href=\"{}\" class=\"hover:text-surface-900 transition-colors\">Campaigns</a></li><li class=\"text-surface-400\">/</li><li class=\"text-surface-900 font-medium\">Campaign Detail</li></ol></nav><div class=\"flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between\"><div><h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Campaign Detail</h1><p class=\"text-sm text-muted-foreground\">Breadcrumbs preserve the active list page and filter query when you navigate back.</p></div><div class=\"flex flex-col gap-3 sm:flex-row\"><a href=\"/campaigns/c_spring/edit?returnTo=%2Fcampaigns%3Fpage%3D2%26status%3Ddraft%26query%3Dspring\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold border border-input bg-background hover:bg-accent h-12 px-6 py-3\">Edit</a><a href=\"/confirm?intent=delete-campaign&amp;id=c_spring&amp;return_to=%2Fcampaigns\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold bg-destructive text-destructive-foreground hover:bg-destructive/90 h-12 px-6 py-3\">Delete Campaign</a></div></div><div class=\"grid gap-6 md:grid-cols-3\"><div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium\"><h3 class=\"text-sm font-medium text-muted-foreground\">Recipients</h3><p class=\"text-2xl font-bold text-surface-950 tracking-tight\">4,280</p></div><div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium\"><h3 class=\"text-sm font-medium text-muted-foreground\">Open Rate</h3><p class=\"text-2xl font-bold text-surface-950 tracking-tight\">41.2%</p></div><div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium\"><h3 class=\"text-sm font-medium text-muted-foreground\">Click Rate</h3><p class=\"text-2xl font-bold text-surface-950 tracking-tight\">8.6%</p></div></div></div>",
         CAMPAIGNS_RETURN_HREF,
@@ -1775,10 +2116,10 @@ pub fn web_campaign_edit_page_with_values(edit: &crate::view_data::CampaignEditD
 <div class=\"flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between\"><div><h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Edit Campaign</h1><p class=\"text-sm text-muted-foreground\">Saving updates this campaign in place.</p></div><a href=\"/campaigns\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-sm border border-input bg-background px-4 py-2 text-sm font-bold text-foreground transition-colors hover:bg-accent hover:text-accent-foreground\">Back to campaigns</a></div>\
 <form class=\"space-y-6\" method=\"post\" action=\"/web/campaigns/update\">\
 <input type=\"hidden\" name=\"id\" value=\"{id}\" />\
-<div class=\"space-y-2\"><label class=\"text-sm font-medium leading-none\" for=\"campaign-name\">Campaign Name</label><input id=\"campaign-name\" name=\"name\" type=\"text\" required value=\"{name}\" class=\"flex h-12 w-full rounded-sm border border-input bg-background px-3 text-[14px] ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/20 focus-visible:border-primary\" /></div>\
-<div class=\"space-y-2\"><label class=\"text-sm font-medium leading-none\" for=\"campaign-subject\">Subject Line</label><input id=\"campaign-subject\" name=\"subject\" type=\"text\" required value=\"{subject}\" class=\"flex h-12 w-full rounded-sm border border-input bg-background px-3 text-[14px] ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/20 focus-visible:border-primary\" /></div>\
-<div class=\"space-y-2\"><label class=\"text-sm font-medium leading-none\" for=\"campaign-content\">HTML Content</label><textarea id=\"campaign-content\" name=\"html_body\" rows=\"10\" maxlength=\"25000\" class=\"flex min-h-[160px] w-full rounded-sm border border-input bg-background px-3 py-2 text-[14px] ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/20 focus-visible:border-primary\">{html_body}</textarea></div>\
-<div class=\"space-y-2\"><label class=\"text-sm font-medium leading-none\" for=\"campaign-scheduled-at\">Schedule (optional)</label><input id=\"campaign-scheduled-at\" name=\"scheduled_at\" type=\"datetime-local\" value=\"{scheduled_at}\" class=\"flex h-12 w-full rounded-sm border border-input bg-background px-3 text-[14px] ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/20 focus-visible:border-primary\" /><p class=\"text-xs text-muted-foreground\">Keep the field empty to store the campaign as a draft.</p></div>\
+<div class=\"space-y-2\"><label class=\"text-sm font-medium leading-none\" for=\"campaign-name\">Campaign Name</label><input id=\"campaign-name\" name=\"name\" type=\"text\" required value=\"{name}\" class=\"flex h-12 w-full rounded-sm border border-input bg-background px-3 text-[14px] ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:border-primary\" /></div>\
+<div class=\"space-y-2\"><label class=\"text-sm font-medium leading-none\" for=\"campaign-subject\">Subject Line</label><input id=\"campaign-subject\" name=\"subject\" type=\"text\" required value=\"{subject}\" class=\"flex h-12 w-full rounded-sm border border-input bg-background px-3 text-[14px] ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:border-primary\" /></div>\
+<div class=\"space-y-2\"><label class=\"text-sm font-medium leading-none\" for=\"campaign-content\">HTML Content</label><textarea id=\"campaign-content\" name=\"html_body\" rows=\"10\" maxlength=\"25000\" class=\"flex min-h-[160px] w-full rounded-sm border border-input bg-background px-3 py-2 text-[14px] ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:border-primary\">{html_body}</textarea></div>\
+<div class=\"space-y-2\"><label class=\"text-sm font-medium leading-none\" for=\"campaign-scheduled-at\">Schedule (optional)</label><input id=\"campaign-scheduled-at\" name=\"scheduled_at\" type=\"datetime-local\" value=\"{scheduled_at}\" class=\"flex h-12 w-full rounded-sm border border-input bg-background px-3 text-[14px] ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:border-primary\" /><p class=\"text-xs text-muted-foreground\">Keep the field empty to store the campaign as a draft.</p></div>\
 <div class=\"flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between\"><p class=\"text-xs text-muted-foreground\">Everything runs server-side: save is a plain form post.</p><button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-md bg-primary px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-brand-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">Save Changes</button></div>\
 </form></div>",
         breadcrumbs = breadcrumbs,
@@ -1870,7 +2211,7 @@ pub fn web_contacts_page() -> String {
             ],
         ],
     };
-    let bulk_bar = "<section class=\"rounded-sm border border-surface-200 bg-card/80 p-6\" data-bulk-scope=\"contacts\"><div class=\"flex flex-col gap-3 md:flex-row md:items-center md:justify-between\"><div aria-live=\"polite\"><p class=\"text-sm font-bold text-foreground\">Select rows to act on them in bulk</p><p class=\"text-xs text-muted-foreground\">Checked contacts can be exported or deleted — a single plain form post, no scripts.</p></div><div class=\"flex flex-col gap-2 sm:flex-row\"><button type=\"submit\" formaction=\"/web/contacts/export.csv\" formmethod=\"get\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-md border border-surface-200 bg-background px-4 py-2 text-sm font-semibold text-foreground transition-colors hover:border-surface-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">Export selected</button><button type=\"submit\" formaction=\"/web/contacts/delete-bulk\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-md bg-destructive px-4 py-2 text-sm font-semibold text-destructive-foreground transition-colors hover:bg-destructive/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">Delete selected</button></div></div></section>";
+    let bulk_bar = "<section class=\"rounded-sm border border-surface-200 bg-card/80 p-6\" data-bulk-scope=\"contacts\"><div class=\"flex flex-col gap-3 md:flex-row md:items-center md:justify-between\"><div aria-live=\"polite\"><p class=\"text-sm font-bold text-foreground\">Select rows to act on them in bulk</p><p class=\"text-xs text-muted-foreground\">There is no select-all without scripts — tick each contact you want. Checked contacts can be exported or deleted in one plain form post.</p></div><div class=\"flex flex-col gap-2 sm:flex-row\"><button type=\"submit\" formaction=\"/web/contacts/export.csv\" formmethod=\"get\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-md border border-surface-200 bg-background px-4 py-2 text-sm font-semibold text-foreground transition-colors hover:border-surface-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">Export selected</button><button type=\"submit\" formaction=\"/web/contacts/delete-bulk\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-md bg-destructive px-4 py-2 text-sm font-semibold text-destructive-foreground transition-colors hover:bg-destructive/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">Delete selected</button></div></div></section>";
     let pagination_key = pagination_storage_key("contacts");
     let pagination = PaginationControls {
         page: 3,
@@ -1883,7 +2224,7 @@ pub fn web_contacts_page() -> String {
     );
     let breadcrumbs = render_page_breadcrumbs("Contacts");
     format!(
-        "<div class=\"space-y-6\">{breadcrumbs}<div class=\"flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between\"><div><h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Contacts</h1><p class=\"text-sm text-muted-foreground\">Server-rendered filters, deterministic states, and batch actions keep list management fast at scale.</p></div><a href=\"/contacts/new\" class=\"inline-flex w-full items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold transition-all bg-primary text-white hover:bg-brand-700 h-12 px-6 py-3 sm:w-auto\">Add Contact</a></div>{filters}<form method=\"post\" action=\"/web/contacts/delete-bulk\" data-bulk-form=\"contacts\">{bulk_bar}{loading}<section data-view-state=\"ready\" class=\"space-y-4\">{table}<div class=\"flex flex-col gap-3 md:flex-row md:items-center md:justify-between\"><p class=\"text-sm text-muted-foreground\">Showing 41-60 of 148 contacts. Page state persists while you review individual records and come back.</p>{pagination}</div></section><section data-view-state=\"empty\" hidden>{empty}</section></form></div>",
+        "<div class=\"space-y-6\">{breadcrumbs}<div class=\"flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between\"><div><h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Contacts</h1><p class=\"text-sm text-muted-foreground\">Server-rendered filters, deterministic states, and batch actions keep list management fast at scale.</p></div><a href=\"/contacts/new\" class=\"inline-flex w-full items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold transition-all bg-primary text-white hover:bg-brand-700 h-12 px-6 py-3 sm:w-auto\">Add Contact</a></div>{filters}<form method=\"post\" action=\"/web/contacts/delete-bulk\" data-bulk-form=\"contacts\">{bulk_bar}<section data-view-state=\"ready\" class=\"space-y-4\">{table}<div class=\"flex flex-col gap-3 md:flex-row md:items-center md:justify-between\"><p class=\"text-sm text-muted-foreground\">Showing 41-60 of 148 contacts. Page state persists while you review individual records and come back.</p>{pagination}</div></section></form></div>",
         breadcrumbs = breadcrumbs,
         filters = render_debounced_filter_bar(
             "contact-search",
@@ -1893,14 +2234,14 @@ pub fn web_contacts_page() -> String {
             "/contacts",
             filters.as_str(),
         ),
-        loading = render_table_loading_state("Loading contacts", "api", 6),
         table = table.render_html(),
         pagination = pagination,
-        empty = EmptyState { title: "No contacts yet", description: Some("Import or add your first contact"), icon_markup: None, action_label: Some("Add Contact"), action_href: Some("/contacts/new") }.render_html(),
     )
 }
 
-/// New contact page.
+/// New contact page: single-contact add plus the CSV import form (design
+/// report structural #18) — both are plain form posts to the committed
+/// handlers; the import parses RFC 4180 CSV from the textarea OR the file.
 pub fn web_contacts_new_page() -> String {
     format!(
         "<div class=\"max-w-2xl\">\
@@ -1913,7 +2254,24 @@ pub fn web_contacts_new_page() -> String {
 <div class=\"space-y-2\">{email_label}{email_input}</div>\
 <div class=\"space-y-2\">{name_label}{name_input}</div>\
 <div class=\"flex flex-col gap-3 sm:flex-row\">{save_button}</div>\
-</form></div>",
+</form>\
+<section class=\"mt-10 rounded-sm border border-surface-200 bg-card p-6 shadow-premium\" aria-labelledby=\"contacts-import-title\">\
+<h2 id=\"contacts-import-title\" class=\"text-lg font-bold text-surface-950\">Import contacts from CSV</h2>\
+<p class=\"mt-1 text-sm text-muted-foreground\">Paste CSV rows or attach a file — one contact per line with a header row (<code class=\"font-mono text-xs bg-muted/40 rounded px-1.5 py-0.5\">email,name</code>). Quoted fields with commas follow RFC 4180. Duplicates are skipped and every row's outcome is reported.</p>\
+<form class=\"mt-4 space-y-4\" method=\"post\" action=\"/web/contacts/import\" enctype=\"multipart/form-data\" data-form-id=\"contacts-import\">\
+<div class=\"space-y-2\">\
+<label class=\"text-sm font-medium leading-none\" for=\"contacts-import-csv\">Paste CSV</label>\
+<textarea id=\"contacts-import-csv\" name=\"csv\" rows=\"6\" placeholder=\"email,name&#10;jane@example.com,Jane Doe\" class=\"flex min-h-[120px] w-full rounded-sm border border-input bg-background px-3 py-2 text-sm font-mono ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\"></textarea>\
+</div>\
+<div class=\"space-y-2\">\
+<label class=\"text-sm font-medium leading-none\" for=\"contacts-import-file\">…or upload a .csv file</label>\
+<input id=\"contacts-import-file\" name=\"file\" type=\"file\" accept=\".csv,text/csv\" class=\"flex w-full rounded-sm border border-input bg-background px-3 py-2 text-sm ring-offset-background transition-all file:border-0 file:bg-transparent file:text-sm file:font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\" />\
+<p class=\"text-xs text-muted-foreground\">When both are provided the file wins. The import runs server-side — validation results arrive as a flash summary.</p>\
+</div>\
+<button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-md border border-surface-200 bg-background px-4 py-2 text-sm font-semibold text-foreground transition-all duration-200 ease-premium active:scale-[0.98] hover:border-surface-300 hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">Import contacts</button>\
+</form>\
+</section>\
+</div>",
         email_label = Label { text: "Email", variant: "default", size: "default", required: true, optional: false }.render_html(),
         email_input = Input { input_type: "email", variant: "default", size: "default", placeholder: "contact@example.com", value: "", left_icon: None, right_icon: None, error: None, disabled: false, autocomplete: None, required: true, name: Some("email") }.render_html(),
         name_label = Label { text: "Name", variant: "default", size: "default", required: false, optional: true }.render_html(),
@@ -1978,7 +2336,7 @@ pub fn web_lists_page() -> String {
     );
     let breadcrumbs = render_page_breadcrumbs("Lists");
     format!(
-        "<div class=\"space-y-6\">{breadcrumbs}<div class=\"flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between\"><div><h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Lists</h1><p class=\"text-sm text-muted-foreground\">List actions run through a signed confirmation page and preserve the active list page when you navigate away and back.</p></div><a href=\"/lists/new\" class=\"inline-flex w-full items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold transition-all bg-primary text-white hover:bg-brand-700 h-12 px-6 py-3 sm:w-auto\">New List</a></div>{filters}{loading}<section data-view-state=\"ready\" class=\"space-y-4\">{table}<div class=\"flex flex-col gap-3 md:flex-row md:items-center md:justify-between\"><p class=\"text-sm text-muted-foreground\">Showing 1-20 of 44 lists. Query parameters stay attached to pagination links for back/forward restoration.</p>{pagination}</div></section><section data-view-state=\"empty\" hidden>{empty}</section></div>",
+        "<div class=\"space-y-6\">{breadcrumbs}<div class=\"flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between\"><div><h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Lists</h1><p class=\"text-sm text-muted-foreground\">List actions run through a signed confirmation page and preserve the active list page when you navigate away and back.</p></div><a href=\"/lists/new\" class=\"inline-flex w-full items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold transition-all bg-primary text-white hover:bg-brand-700 h-12 px-6 py-3 sm:w-auto\">New List</a></div>{filters}<section data-view-state=\"ready\" class=\"space-y-4\">{table}<div class=\"flex flex-col gap-3 md:flex-row md:items-center md:justify-between\"><p class=\"text-sm text-muted-foreground\">Showing 1-20 of 44 lists. Query parameters stay attached to pagination links for back/forward restoration.</p>{pagination}</div></section></div>",
         breadcrumbs = breadcrumbs,
         filters = render_debounced_filter_bar(
             "list-search",
@@ -1988,10 +2346,8 @@ pub fn web_lists_page() -> String {
             "/lists",
             filters.as_str(),
         ),
-        loading = render_table_loading_state("Loading contact lists", "api", 4),
         table = table.render_html(),
         pagination = pagination,
-        empty = EmptyState { title: "No lists yet", description: Some("Create a list to organize your contacts"), icon_markup: None, action_label: Some("Create List"), action_href: Some("/lists/new") }.render_html(),
     )
 }
 
@@ -2129,21 +2485,12 @@ pub fn web_templates_page() -> String {
         ],
         rows: vec![],
     };
-    let error_state = AsyncState::Error {
-        title: "Template library unavailable",
-        description: "Templates failed to load. Retry after the templates service recovers.",
-        retry_label: Some("Retry"),
-    }
-    .render_html();
     format!(
         "<div class=\"space-y-6\">\
 <div class=\"flex items-center justify-between\"><h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Templates</h1>\
 <a href=\"/templates/new\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold transition-all bg-primary text-white hover:bg-brand-700 h-12 px-6 py-3\">New Template</a></div>\
-{loading}<section data-view-state=\"ready\">{table}</section><section data-view-state=\"empty\" hidden>{empty}</section><section data-view-state=\"error\" hidden>{error_state}</section></div>",
-        loading = render_table_loading_state("Loading templates", "api", 3),
+<section data-view-state=\"ready\">{table}</section></div>",
         table = table.render_html(),
-        empty = EmptyState { title: "No templates yet", description: Some("Create reusable email templates"), icon_markup: None, action_label: Some("Create Template"), action_href: Some("/templates/new") }.render_html(),
-        error_state = error_state,
     )
 }
 
@@ -2166,6 +2513,32 @@ pub fn web_templates_new_page() -> String {
         subject_label = Label { text: "Default Subject", variant: "default", size: "default", required: false, optional: true }.render_html(),
         subject_input = Input { input_type: "text", variant: "default", size: "default", placeholder: "Subject line...", value: "", left_icon: None, right_icon: None, error: None, disabled: false, autocomplete: None, required: false, name: Some("subject") }.render_html(),
         save_button = Button { variant: "default", size: "default", label: "Save Template", disabled: false, loading: false, left_icon: None, right_icon: None, submit: true }.render_html(),
+    )
+}
+
+/// Template edit page (design report quick win #19): the campaign editor's
+/// proven `formaction`/`formtarget` pattern — Save posts to the committed
+/// update handler (bumping a version snapshot), Preview renders the stored
+/// or edited body server-side in a new tab. Failed posts re-populate via
+/// the signed field-map cookie.
+pub fn web_template_edit_page(template_id: &str) -> String {
+    let breadcrumbs = format!(
+        "<nav aria-label=\"Breadcrumb\" class=\"mb-6\"><ol class=\"flex items-center gap-2 text-sm text-surface-500\"><li><a href=\"/templates\" class=\"hover:text-surface-900 transition-colors\">Templates</a></li><li class=\"text-surface-400\">/</li><li class=\"text-surface-900 font-medium\" aria-current=\"page\">Edit Template</li></ol></nav>"
+    );
+    format!(
+        "{breadcrumbs}<div class=\"w-full max-w-3xl space-y-6\">\
+<div class=\"flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between\"><div><h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Edit Template</h1><p class=\"text-sm text-muted-foreground\">Saving creates a new version snapshot — the previous one can be restored.</p></div><a href=\"/templates\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-sm border border-input bg-background px-4 py-2 text-sm font-bold text-foreground transition-colors hover:bg-accent hover:text-accent-foreground\">Back to templates</a></div>\
+<form class=\"space-y-6\" method=\"post\" action=\"/web/templates/update\" data-form-id=\"template-update\">\
+<input type=\"hidden\" name=\"id\" value=\"{id}\" />\
+<div class=\"space-y-2\"><label class=\"text-sm font-medium leading-none\" for=\"template-name\">Template Name</label><input id=\"template-name\" name=\"name\" type=\"text\" required value=\"\" class=\"flex h-12 w-full rounded-sm border border-input bg-background px-3 text-[14px] ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\" /></div>\
+<div class=\"space-y-2\"><label class=\"text-sm font-medium leading-none\" for=\"template-subject\">Default Subject</label><input id=\"template-subject\" name=\"subject\" type=\"text\" value=\"\" class=\"flex h-12 w-full rounded-sm border border-input bg-background px-3 text-[14px] ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\" /></div>\
+<div class=\"space-y-2\"><label class=\"text-sm font-medium leading-none\" for=\"template-content\">HTML Content</label><textarea id=\"template-content\" name=\"html_body\" rows=\"14\" class=\"flex min-h-[240px] w-full rounded-sm border border-input bg-background px-3 py-2 text-sm font-mono ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\"></textarea><p class=\"text-xs text-muted-foreground\">Leave the content empty to keep the stored body — Preview with an empty field renders the stored version.</p></div>\
+<div class=\"flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between\"><p class=\"text-xs text-muted-foreground\">Everything runs server-side: save and preview are plain form posts.</p><div class=\"flex flex-col gap-3 sm:flex-row\">\
+<button type=\"submit\" formaction=\"/web/templates/preview\" formtarget=\"_blank\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-md border border-surface-200 bg-background px-4 py-2 text-sm font-semibold text-foreground transition-all duration-200 ease-premium active:scale-[0.98] hover:border-surface-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">Preview</button>\
+<button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-md bg-primary px-4 py-2 text-sm font-semibold text-white transition-all duration-200 ease-premium active:scale-[0.98] hover:bg-brand-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">Save Changes</button>\
+</div></div>\
+</form></div>",
+        id = html_escape(template_id),
     )
 }
 
@@ -2222,15 +2595,20 @@ pub fn web_inbox_placement_page() -> String {
 <a href=\"/inbox-placement/new\" class=\"inline-flex items-center justify-center rounded-sm bg-primary px-4 py-2 text-sm font-bold text-white hover:bg-brand-700 transition-colors\" data-cta=\"new-placement-test\">Run new test</a>\
 </div>\
 <div class=\"grid gap-4 md:grid-cols-4\">{kpi_total}{kpi_inbox}{kpi_spam}{kpi_recent}</div>\
-<div class=\"rounded-sm border bg-white dark:bg-gray-900\">\
-<div class=\"border-b px-6 py-3 flex items-center justify-between\"><h3 class=\"text-lg font-bold\">Recent tests</h3><span class=\"text-xs text-surface-500\" data-test-list-meta>Loaded on demand</span></div>\
-<div class=\"overflow-x-auto\"><table class=\"min-w-full text-sm\" data-table=\"placement-tests\">\
-<thead class=\"bg-surface-50 text-left text-xs uppercase tracking-wider text-surface-500\">\
-<tr><th class=\"px-6 py-3\">Test</th><th class=\"px-6 py-3\">From</th><th class=\"px-6 py-3\">Status</th><th class=\"px-6 py-3\">Score</th><th class=\"px-6 py-3\">Created</th><th class=\"px-6 py-3 text-right\">Actions</th></tr></thead>\
-<tbody>\
-<tr><td class=\"px-6 py-12 text-center text-surface-500\" colspan=\"6\">No placement tests yet. <a href=\"/inbox-placement/new\" class=\"text-primary hover:underline\">Run your first test</a>.</td></tr>\
-</tbody></table></div></div>\
+<section data-view-state=\"empty\" class=\"rounded-sm border border-surface-200 bg-card p-6 shadow-premium\">\
+<h3 class=\"text-lg font-bold mb-1\">Recent tests</h3>\
+<p class=\"text-xs text-muted-foreground mb-2\" data-test-list-meta>Loaded from your placement history when the database is connected.</p>\
+{empty_state}\
+</section>\
 </div>",
+        empty_state = EmptyState {
+            title: "No placement tests yet",
+            description: Some("Run your first test to measure where your messages land at major mailbox providers."),
+            icon_markup: None,
+            action_label: Some("Run your first test"),
+            action_href: Some("/inbox-placement/new"),
+        }
+        .render_html(),
         kpi_total = format!("<article aria-label=\"Total placement tests: 0 all time\">{}</article>", Card { title: "Total tests", body: "<p class=\"text-2xl font-bold text-surface-950 tracking-tight\" data-metric=\"placement.total\">0</p><p class=\"text-sm text-muted-foreground\">All time</p>", variant: "default", padding: "default", interactive: false }.render_html()),
         kpi_inbox = format!("<article aria-label=\"Average inbox rate: — last 30 days\">{}</article>", Card { title: "Avg inbox rate", body: "<p class=\"text-2xl font-bold text-surface-950 tracking-tight\" data-metric=\"placement.inbox_rate\">—</p><p class=\"text-sm text-muted-foreground\">Last 30 days</p>", variant: "default", padding: "default", interactive: false }.render_html()),
         kpi_spam = format!("<article aria-label=\"Average spam rate: — last 30 days\">{}</article>", Card { title: "Avg spam rate", body: "<p class=\"text-2xl font-bold text-surface-950 tracking-tight\" data-metric=\"placement.spam_rate\">—</p><p class=\"text-sm text-muted-foreground\">Last 30 days</p>", variant: "default", padding: "default", interactive: false }.render_html()),
@@ -2286,7 +2664,9 @@ pub fn web_inbox_placement_new_page() -> String {
     )
 }
 
-/// Inbox-placement test detail page (per-provider breakdown + score).
+/// Inbox-placement test detail page. Static fallback renders the honest
+/// "open a test" state — the permanent "Loading test…" placeholder was a
+/// JS-era lie (nothing ever loaded it); the data path replaces this.
 pub fn web_inbox_placement_detail_page() -> String {
     format!(
         "<div class=\"space-y-6\" data-page=\"inbox-placement-detail\">\
@@ -2295,76 +2675,42 @@ pub fn web_inbox_placement_detail_page() -> String {
 <li class=\"text-surface-400\">/</li>\
 <li class=\"text-surface-900 font-medium\">Test detail</li></ol></nav>\
 <div class=\"flex flex-col md:flex-row md:items-center md:justify-between gap-4\">\
-<div><h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Loading test…</h1>\
-<p class=\"text-sm text-surface-600\"><span>—</span> · from <span>—</span></p></div>\
+<div><h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Placement test</h1>\
+<p class=\"text-sm text-surface-600\">Per-provider breakdown and score render from the recorded test results.</p></div>\
 <div class=\"flex items-center gap-3\">\
-<span class=\"inline-flex items-center rounded-sm px-3 py-1 text-xs font-bold bg-surface-100 text-surface-700\">Pending</span>\
-<a href=\"/inbox-placement\" class=\"text-sm text-surface-600 hover:text-surface-900\">← Back</a>\
+<a href=\"/inbox-placement\" class=\"text-sm text-surface-600 hover:text-surface-900\">← Back to tests</a>\
 </div></div>\
-<div class=\"grid gap-4 md:grid-cols-4\">{kpi_score}{kpi_inbox}{kpi_spam}{kpi_missing}</div>\
-<div class=\"rounded-sm border bg-white dark:bg-gray-900\">\
-<div class=\"border-b px-6 py-3\"><h3 class=\"text-lg font-bold\">Per-provider breakdown</h3></div>\
-<div class=\"overflow-x-auto\"><table class=\"min-w-full text-sm\">\
-<thead class=\"bg-surface-50 text-left text-xs uppercase tracking-wider text-surface-500\">\
-<tr><th class=\"px-6 py-3\">Provider</th><th class=\"px-6 py-3\">Tested</th><th class=\"px-6 py-3\">Inbox</th><th class=\"px-6 py-3\">Spam</th><th class=\"px-6 py-3\">Missing</th><th class=\"px-6 py-3\">Inbox rate</th></tr></thead>\
-<tbody>\
-<tr><td class=\"px-6 py-12 text-center text-surface-500\" colspan=\"6\">Results will appear here as seed accounts receive the message.</td></tr>\
-</tbody></table></div></div>\
+{empty_state}\
 <div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium\"><h3 class=\"text-xs font-bold uppercase tracking-widest text-surface-400 mb-6\">Inbox rate over time</h3><div class=\"h-64\">{chart}</div></div>\
-<div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium\"><h3 class=\"text-lg font-bold mb-2\">Recommendations</h3>\
-<ul class=\"space-y-2 text-sm text-surface-700\"><li class=\"text-surface-500\">Recommendations will appear once the test completes.</li></ul>\
-</div>\
 </div>",
-        kpi_score = Card { title: "Overall score", body: "<p class=\"text-2xl font-bold text-surface-950 tracking-tight\">—</p><p class=\"text-sm text-muted-foreground\">0–100</p>", variant: "default", padding: "default", interactive: false }.render_html(),
-        kpi_inbox = Card { title: "Inbox", body: "<p class=\"text-2xl font-bold text-surface-950 tracking-tight\">—</p><p class=\"text-sm text-muted-foreground\">Across providers</p>", variant: "default", padding: "default", interactive: false }.render_html(),
-        kpi_spam = Card { title: "Spam", body: "<p class=\"text-2xl font-bold text-surface-950 tracking-tight\">—</p><p class=\"text-sm text-muted-foreground\">Across providers</p>", variant: "default", padding: "default", interactive: false }.render_html(),
-        kpi_missing = Card { title: "Missing", body: "<p class=\"text-2xl font-bold text-surface-950 tracking-tight\">—</p><p class=\"text-sm text-muted-foreground\">Not delivered</p>", variant: "default", padding: "default", interactive: false }.render_html(),
+        empty_state = EmptyState {
+            title: "Results appear once the test completes",
+            description: Some("Seed accounts report as they receive the probe message — reload this page to check for new results."),
+            icon_markup: None,
+            action_label: Some("Back to tests"),
+            action_href: Some("/inbox-placement"),
+        }
+        .render_html(),
         chart = ApexLineChart { title: None, description: None, last_updated_label: None, height: 256, series: vec![], data_count: 0, empty_state_reason: "Awaiting results" }.render_html(),
     )
 }
 
 /// Analytics page.
 pub fn web_analytics_page() -> String {
-    let loading_state = format!(
-        "<section data-view-state=\"loading\" hidden aria-busy=\"true\">{}</section>",
-        AsyncState::Loading {
-            label: "Loading analytics",
-            source_label: Some("events"),
-        }
-        .render_html()
-    );
-    let error_state = format!(
-        "<section data-view-state=\"error\" hidden>{}</section>",
-        AsyncState::Error {
-            title: "Analytics unavailable",
-            description: "Analytics data could not be loaded. Retry after checking event ingestion services.",
-            retry_label: Some("Retry"),
-        }
-        .render_html()
-    );
     format!(
-        "<div class=\"space-y-6\">{loading_state}\
+        "<div class=\"space-y-6\">\
 <section data-view-state=\"ready\" class=\"space-y-6\">\
 <h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Analytics</h1>\
 <div class=\"grid gap-4 md:grid-cols-2 lg:grid-cols-4\">\
 {card_sent}{card_opens}{card_clicks}{card_unsubs}\
 </div>\
 <div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium\"><h3 class=\"text-xs font-bold uppercase tracking-widest text-surface-400 mb-6\">Engagement Over Time</h3><div class=\"h-64\">{chart}</div></div>\
-</section>{error_state}<section data-view-state=\"empty\" hidden>{empty_state}</section></div>",
+</section></div>",
         card_sent = Card { title: "Total Sent", body: "<p class=\"text-2xl font-bold text-surface-950 tracking-tight\">0</p><p class=\"text-sm text-muted-foreground\">All time</p>", variant: "default", padding: "default", interactive: false }.render_html(),
         card_opens = Card { title: "Unique Opens", body: "<p class=\"text-2xl font-bold text-surface-950 tracking-tight\">0</p><p class=\"text-sm text-muted-foreground\">All time</p>", variant: "default", padding: "default", interactive: false }.render_html(),
         card_clicks = Card { title: "Unique Clicks", body: "<p class=\"text-2xl font-bold text-surface-950 tracking-tight\">0</p><p class=\"text-sm text-muted-foreground\">All time</p>", variant: "default", padding: "default", interactive: false }.render_html(),
         card_unsubs = Card { title: "Unsubscribes", body: "<p class=\"text-2xl font-bold text-surface-950 tracking-tight\">0</p><p class=\"text-sm text-muted-foreground\">All time</p>", variant: "default", padding: "default", interactive: false }.render_html(),
         chart = ApexLineChart { title: None, description: None, last_updated_label: None, height: 256, series: vec![], data_count: 0, empty_state_reason: "No data" }.render_html(),
-        loading_state = loading_state,
-        error_state = error_state,
-        empty_state = EmptyState {
-            title: "No analytics events yet",
-            description: Some("Analytics will populate once campaigns generate opens, clicks, and unsubscribes."),
-            icon_markup: None,
-            action_label: Some("View Campaigns"), action_href: Some("/campaigns"),
-        }
-        .render_html(),
     )
 }
 
@@ -2397,61 +2743,31 @@ pub fn web_events_page() -> String {
         "<div class=\"space-y-6\">\
 <h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Events</h1>\
 {search}\
-{loading}\
 <section data-view-state=\"ready\">{table}</section>\
-<section data-view-state=\"empty\" hidden>{empty}</section></div>",
+</div>",
         search = format!(
             "<form method=\"get\" action=\"/events\" role=\"search\" class=\"flex flex-col gap-2 sm:flex-row\"><label class=\"sr-only\" for=\"events-search\">Filter events</label><div class=\"relative flex-1\"><span class=\"pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground\">{icon}</span><input id=\"events-search\" type=\"search\" name=\"query\" placeholder=\"Filter events...\" class=\"flex h-12 w-full rounded-md border border-surface-200 bg-background pl-10 pr-4 text-[14px] outline-none transition focus-visible:ring-2 focus-visible:ring-primary/20\" /></div><button type=\"submit\" class=\"rounded-sm border border-surface-200 bg-card px-4 py-2 text-sm font-bold text-surface-950 hover:border-surface-950\">Apply</button></form>",
             icon = search_icon,
         ),
-        loading = render_table_loading_state("Loading events", "api", 4),
         table = table.render_html(),
-        empty = EmptyState {
-            title: "No events recorded",
-            description: Some("Email events will appear once you start sending campaigns"),
-            icon_markup: None,
-            action_label: None, action_href: None
-        }
-        .render_html(),
     )
 }
 
 /// Domains page.
 pub fn web_domains_page() -> String {
-    let table = Table {
-        caption: Some("Sending domains"),
-        columns: vec![
-            TableColumn {
-                label: "Domain",
-                align: "left",
-            },
-            TableColumn {
-                label: "Status",
-                align: "left",
-            },
-            TableColumn {
-                label: "DKIM",
-                align: "left",
-            },
-            TableColumn {
-                label: "SPF",
-                align: "left",
-            },
-            TableColumn {
-                label: "Added",
-                align: "left",
-            },
-        ],
-        rows: vec![],
-    };
     format!(
         "<div class=\"space-y-6\">\
 <div class=\"flex items-center justify-between\"><h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Domains</h1>\
 <a href=\"/domains/new\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold transition-all bg-primary text-white hover:bg-brand-700 h-12 px-6 py-3\">Add Domain</a></div>\
-{loading}{table}{empty}</div>",
-        loading = render_table_loading_state("Loading domains", "api", 5),
-        table = table.render_html(),
-        empty = EmptyState { title: "No domains configured", description: Some("Add a sending domain to start delivering emails"), icon_markup: None, action_label: Some("Add Domain"), action_href: Some("/domains/new") }.render_html(),
+{empty}</div>",
+        empty = EmptyState {
+            title: "No domains configured",
+            description: Some("Add a sending domain to start delivering emails"),
+            icon_markup: None,
+            action_label: Some("Add Domain"),
+            action_href: Some("/domains/new"),
+        }
+        .render_html(),
     )
 }
 
@@ -2502,23 +2818,8 @@ pub fn web_domains_new_page() -> String {
 
 /// Settings overview page.
 pub fn web_settings_page() -> String {
-    let loading_state = format!(
-        "<section data-view-state=\"loading\" hidden aria-busy=\"true\">{}</section>",
-        AsyncState::Loading {
-            label: "Loading settings",
-            source_label: Some("config"),
-        }
-        .render_html()
-    );
-    let error_state = AsyncState::Error {
-        title: "Settings unavailable",
-        description:
-            "Settings could not be loaded. Retry after verifying account and billing services.",
-        retry_label: Some("Retry"),
-    }
-    .render_html();
     format!(
-        "<div class=\"space-y-6\">{loading_state}\
+        "<div class=\"space-y-6\">\
 <section data-view-state=\"ready\" class=\"space-y-6\">\
 <h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Settings</h1>\
 <nav class=\"grid gap-4 md:grid-cols-2\">\
@@ -2528,16 +2829,7 @@ pub fn web_settings_page() -> String {
 <a href=\"/settings/dedicated-ips\" class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium hover:border-primary transition-colors\"><h3 class=\"font-bold\">Dedicated IPs</h3><p class=\"text-sm text-muted-foreground mt-1\">Manage dedicated sending IPs</p></a>\
 <a href=\"/settings/webhooks\" class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium hover:border-primary transition-colors\"><h3 class=\"font-bold\">Webhooks</h3><p class=\"text-sm text-muted-foreground mt-1\">Configure event webhooks</p></a>\
 <a href=\"/settings/profile\" class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium hover:border-primary transition-colors\"><h3 class=\"font-bold\">Profile</h3><p class=\"text-sm text-muted-foreground mt-1\">Your account settings</p></a>\
-</nav></section><section data-view-state=\"empty\" hidden>{empty_state}</section><section data-view-state=\"error\" hidden>{error_state}</section></div>",
-        loading_state = loading_state,
-        empty_state = EmptyState {
-            title: "No settings available",
-            description: Some("Settings modules will appear after your workspace is provisioned."),
-            icon_markup: None,
-            action_label: None, action_href: None,
-        }
-        .render_html(),
-        error_state = error_state,
+</nav></section></div>",
     )
 }
 
@@ -2573,10 +2865,8 @@ pub fn web_settings_api_keys_page() -> String {
 <input id=\"api-key-name\" name=\"name\" type=\"text\" required maxlength=\"100\" class=\"w-full px-4 py-3 rounded-sm border border-surface-200 focus:border-primary outline-none transition-all bg-background text-sm font-medium text-surface-950\" placeholder=\"Production sender\" /></div>\
 <button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold transition-all bg-primary text-white hover:bg-brand-700 h-12 px-6 py-3\">Create API Key</button>\
 </form>\
-{loading}{table}{empty}</div>",
-        loading = render_table_loading_state("Loading API keys", "api", 4),
+{table}</div>",
         table = table.render_html(),
-        empty = EmptyState { title: "No API keys", description: Some("Create an API key to start sending"), icon_markup: None, action_label: None, action_href: None }.render_html(),
     )
 }
 
@@ -2614,10 +2904,8 @@ pub fn web_settings_team_page() -> String {
 <select id=\"invite-role\" name=\"role\" class=\"w-full px-4 py-3 rounded-sm border border-surface-200 focus:border-primary outline-none transition-all bg-background text-sm font-medium text-surface-950\"><option value=\"member\">Member</option><option value=\"admin\">Admin</option></select></div>\
 <button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold transition-all bg-primary text-white hover:bg-brand-700 h-12 px-6 py-3\">Invite Member</button>\
 </form>\
-{loading}{table}{empty}</div>",
-        loading = render_table_loading_state("Loading team members", "api", 4),
+{table}</div>",
         table = table.render_html(),
-        empty = EmptyState { title: "No team members yet", description: Some("Invite team members to collaborate on campaigns"), icon_markup: None, action_label: None, action_href: None }.render_html(),
     )
 }
 
@@ -2626,7 +2914,6 @@ pub fn web_settings_billing_page() -> String {
     format!(
         "<div class=\"space-y-6\">\
 <h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Billing</h1>\
-{loading}\
 <section data-view-state=\"ready\" class=\"space-y-6\">\
 <div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium\">\
 <h3 class=\"text-lg font-bold mb-2\">Current Plan</h3>\
@@ -2640,16 +2927,17 @@ pub fn web_settings_billing_page() -> String {
 </div>\
 <div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium\">\
 <h3 class=\"text-lg font-bold mb-4\">Payment Method</h3>\
-<div class=\"flex items-center gap-4 p-4 rounded-sm bg-surface-50 border border-surface-100\">\
+<div class=\"flex flex-wrap items-center gap-4 p-4 rounded-sm bg-surface-50 border border-surface-100\">\
 <div class=\"flex h-10 w-14 flex-shrink-0 items-center justify-center rounded-sm bg-surface-200 text-surface-500\">\
 <svg class=\"h-5 w-5\" xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><rect width=\"20\" height=\"14\" x=\"2\" y=\"5\" rx=\"2\"/><line x1=\"2\" x2=\"22\" y1=\"10\" y2=\"10\"/></svg>\
 </div>\
-<div class=\"flex-1 min-w-0\">\
+<div class=\"flex-1 min-w-[9rem]\">\
 <p class=\"text-sm font-semibold text-surface-950\">No payment method on file</p>\
 <p class=\"text-xs text-surface-500\">Add a credit card or ACH to enable paid plans</p>\
 </div>\
-<div class=\"flex flex-col gap-2\">\
+<div class=\"flex flex-col gap-2 w-full sm:w-auto shrink-0\">\
 <form class=\"inline\" method=\"post\" action=\"/web/billing/portal\"><button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold transition-all border border-surface-300 text-surface-700 hover:bg-surface-100 h-10 px-4 py-2\">Add Payment Method</button></form>\
+</div>\
 </div>\
 </div>\
 <div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium\"><h3 class=\"text-xs font-bold uppercase tracking-widest text-surface-400 mb-6\">Usage This Month</h3>\
@@ -2659,7 +2947,6 @@ pub fn web_settings_billing_page() -> String {
 </section>\
 <section data-view-state=\"empty\" hidden><div class=\"rounded-sm border border-surface-200 bg-card p-12 text-center shadow-premium\"><p class=\"text-lg font-bold text-surface-950\">No billing data available</p><p class=\"text-sm text-muted-foreground mt-1\">Billing information will appear once you start sending emails.</p></div></section>\
 </div>",
-        loading = render_table_loading_state("Loading billing data", "api", 4),
         progress = Progress { value: 0, variant: "default", size: "default", animated: false, show_value: true }.render_html(),
     )
 }
@@ -2699,10 +2986,8 @@ pub fn web_settings_webhooks_page() -> String {
 <label class=\"inline-flex items-center gap-2 text-xs font-bold text-surface-900\"><input type=\"checkbox\" name=\"events\" value=\"message.complained\" class=\"rounded border-surface-300\" /> Complained</label>\
 <button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold transition-all bg-primary text-white hover:bg-brand-700 h-12 px-6 py-3\">Add Webhook</button>\
 </form>\
-{loading}{table}{empty}</div>",
-        loading = render_table_loading_state("Loading webhooks", "api", 4),
+{table}</div>",
         table = table.render_html(),
-        empty = EmptyState { title: "No webhooks configured", description: Some("Add a webhook to receive signed event notifications"), icon_markup: None, action_label: None, action_href: None }.render_html(),
     )
 }
 
@@ -2862,11 +3147,12 @@ pub fn control_plane_dashboard_page() -> String {
                 <div class="flex items-end justify-between">
                     <div>
                         <p class="text-[10px] font-bold text-surface-400 uppercase tracking-widest mb-1">Active Tenants</p>
-                        <p class="text-3xl font-bold text-surface-950 tracking-tighter">1,248</p>
+                        <p class="text-3xl font-bold text-surface-950 tracking-tighter" data-metric="cp.tenants.active">&mdash;</p>
+                        <p class="text-[10px] font-medium text-surface-500 mt-1">Live count renders when the database is connected</p>
                     </div>
                     <div class="text-right">
                         <p class="text-[10px] font-bold text-surface-400 uppercase tracking-widest mb-1">MTD Volume</p>
-                        <p class="text-xl font-bold text-surface-950 tracking-tighter">84.2M</p>
+                        <p class="text-xl font-bold text-surface-950 tracking-tighter" data-metric="cp.volume.mtd">&mdash;</p>
                     </div>
                 </div>
             </div>
@@ -2936,13 +3222,8 @@ fn render_cp_collection_page(
         })
         .unwrap_or_default();
     table.caption = None;
-    let column_count = table.columns.len().max(1);
+    let table_is_empty = table.rows.is_empty();
     let table_html = table.render_html();
-    let loading = render_table_loading_state(
-        &format!("Loading {}", title),
-        "infrastructure",
-        column_count,
-    );
     let empty = EmptyState {
         icon_markup: None,
         title: empty_title,
@@ -2953,17 +3234,18 @@ fn render_cp_collection_page(
         action_href: action.map(|(_, href)| href),
     }
     .render_html();
-    // Single overflow container: the table renders on mobile too (scrolls
-    // horizontally) instead of being swapped for a bare empty state; the
-    // empty state stays available below the table.
-    let body = format!(
-        "<div class=\"w-full\"><div class=\"w-full overflow-x-auto\">{loading}{table_html}</div>{empty}</div>",
-    );
+    // No double empty states: an empty table renders the honest empty
+    // state alone; a filled one scrolls horizontally on mobile.
+    let body = if table_is_empty {
+        empty
+    } else {
+        format!("<div class=\"w-full\"><div class=\"w-full overflow-x-auto\">{table_html}</div></div>")
+    };
     format!(
         "<div class=\"space-y-8\">\
             <div class=\"flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between\">\
                 <div class=\"max-w-3xl\">\
-                    <h1 class=\"text-3xl font-bold tracking-tight text-surface-950\">{}</h1>\
+                    <h1 class=\"text-2xl font-bold tracking-tight text-surface-950\">{}</h1>\
                     <p class=\"mt-2 text-surface-500 font-medium leading-relaxed\">{}</p>\
                 </div>\
                 {}\
@@ -3223,17 +3505,16 @@ pub fn control_plane_analytics_page() -> String {
     )
 }
 
-/// Discovery page.
+/// Discovery page — IA honesty (item 26): this route lists the lead
+/// sources discovery runs enriched, so the fallback says exactly that
+/// instead of fabricating service-registry health rows.
 pub fn control_plane_discovery_page() -> String {
     "<div class=\"space-y-6\">\
-<h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Service Discovery</h1>\
+<h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Lead Sources</h1>\
 <div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium\">\
-<h3 class=\"text-xs font-bold uppercase tracking-widest text-surface-400 mb-6\">Registered Services</h3>\
-<div class=\"space-y-3\">\
-<div class=\"flex items-center justify-between p-3 bg-muted/50 rounded-sm\"><span class=\"font-medium\">MTA</span><span class=\"inline-flex items-center gap-2 text-sm text-success-700\"><span class=\"h-2 w-2 rounded-full bg-success-500\" aria-hidden=\"true\"></span>Healthy</span></div>\
-<div class=\"flex items-center justify-between p-3 bg-muted/50 rounded-sm\"><span class=\"font-medium\">SMTP Inbound</span><span class=\"inline-flex items-center gap-2 text-sm text-success-700\"><span class=\"h-2 w-2 rounded-full bg-success-500\" aria-hidden=\"true\"></span>Healthy</span></div>\
-<div class=\"flex items-center justify-between p-3 bg-muted/50 rounded-sm\"><span class=\"font-medium\">Analytics</span><span class=\"inline-flex items-center gap-2 text-sm text-success-700\"><span class=\"h-2 w-2 rounded-full bg-success-500\" aria-hidden=\"true\"></span>Healthy</span></div>\
-</div></div></div>".to_string()
+<h3 class=\"text-xs font-bold uppercase tracking-widest text-surface-400 mb-6\">Discovery intake</h3>\
+<p class=\"text-sm text-muted-foreground\">Discovery runs register the lead sources they enriched here, with per-source yield. No sources have reported yet — run a discovery cycle from the Sales Console to populate this page.</p>\
+</div></div>".to_string()
 }
 
 /// Jobs page.
@@ -3905,7 +4186,7 @@ pub fn web_login_page(csrf_token: &str) -> String {
 <label class=\"text-xs font-bold text-surface-900\" for=\"password\">Password</label>\
 </div>\
 <div class=\"relative\">\
-<input id=\"password\" name=\"password\" type=\"password\" required autocomplete=\"current-password\" placeholder=\"Enter password\" class=\"w-full px-4 py-3 rounded-md border border-surface-200 focus:border-primary focus:ring-4 focus:ring-primary/5 outline-none transition-all bg-surface-50 text-surface-950 pr-12\" />\
+<input id=\"password\" name=\"password\" type=\"password\" required autocomplete=\"current-password\" placeholder=\"Enter password\" class=\"w-full px-4 py-3 rounded-md border border-surface-200 focus:border-primary focus:ring-4 focus:ring-primary/5 outline-none transition-all bg-surface-50 text-surface-950\" />\
 </div>\
 </div>\
 <div class=\"flex items-center justify-between py-1\">\
@@ -3918,7 +4199,7 @@ pub fn web_login_page(csrf_token: &str) -> String {
 
 <button type=\"submit\" class=\"w-full bg-primary hover:bg-brand-700 text-white text-sm font-semibold flex items-center justify-center gap-3 py-3 rounded-md shadow-premium transition-all active:scale-[0.99] group mt-2\"><span>Sign In</span>{arrow}</button>\
 <div class=\"text-center text-xs font-medium text-surface-500\">No account? <a href=\"/signup\" class=\"text-primary font-bold hover:underline\">Sign up</a></div>\
-<div id=\"login-form-errors\" class=\"hidden\" role=\"alert\" aria-live=\"assertive\" data-error-key=\"auth.error.rate_limited\"></div></form>",
+</form>",
         csrf = csrf,
         arrow = web_auth_arrow_icon(),
     );
@@ -4002,7 +4283,7 @@ pub fn control_plane_login_page(csrf_token: &str) -> String {
 <label class=\"text-xs font-bold text-surface-900\" for=\"login-password\">Access Password</label>\
 </div>\
 <div class=\"relative\">\
-<input id=\"login-password\" name=\"password\" type=\"password\" required autocomplete=\"current-password\" placeholder=\"Enter password\" class=\"w-full px-4 py-3 rounded-md border border-surface-200 focus:border-primary focus:ring-4 focus:ring-primary/5 outline-none transition-all bg-surface-50 text-surface-950 pr-12\" />\
+<input id=\"login-password\" name=\"password\" type=\"password\" required autocomplete=\"current-password\" placeholder=\"Enter password\" class=\"w-full px-4 py-3 rounded-md border border-surface-200 focus:border-primary focus:ring-4 focus:ring-primary/5 outline-none transition-all bg-surface-50 text-surface-950\" />\
 </div>\
 </div>\
 <div class=\"flex items-center gap-2 py-1\">\
@@ -4011,7 +4292,7 @@ pub fn control_plane_login_page(csrf_token: &str) -> String {
 </div>\
 
 <button type=\"submit\" class=\"w-full bg-primary hover:bg-brand-700 text-white text-sm font-semibold flex items-center justify-center gap-3 py-3 rounded-md shadow-premium transition-all active:scale-[0.99] group mt-2\"><span>Authorize Access</span>{arrow}</button>\
-<div id=\"login-form-errors\" class=\"hidden\" role=\"alert\" aria-live=\"assertive\" data-error-key=\"auth.error.rate_limited\"></div></form>",
+</form>",
         csrf = csrf,
         arrow = web_auth_arrow_icon(),
     );
@@ -4203,7 +4484,9 @@ mod tests {
     fn web_dashboard_layout_uses_shell_components() {
         let html = web_dashboard_layout("<div>content</div>", "");
         assert!(html.contains("data-sidebar-storage-key=\"apexmail-ui\""));
-        assert!(html.contains("data-toast-store"));
+        // Dead JS-era markup purge: the toast store shipped empty and could
+        // never show anything without script.
+        assert!(!html.contains("data-toast-store"));
         assert!(html.contains("<div>content</div>"));
         assert!(html.contains("aria-label=\"Primary sidebar navigation\""));
     }
@@ -4229,8 +4512,10 @@ mod tests {
         let html = web_dedicated_ips_page();
         assert!(html.contains("Dedicated IPs"));
         assert!(html.contains("Provision New IP"));
+        // No double empty state: the honest EmptyState replaced the
+        // permanently-empty table.
         assert!(html.contains("No dedicated IPs"));
-        assert!(html.contains("<table"));
+        assert!(!html.contains("No rows to display"));
     }
 
     // ─── Control-plane page parity ──────────────────────────
@@ -4283,8 +4568,9 @@ mod tests {
         // password step succeeds.
         assert!(!html.contains("id=\"mfaCode\""));
         assert!(!html.contains("data-mfa-section"));
-        // Error data attribute for rate limiting
-        assert!(html.contains("data-error-key=\"auth.error.rate_limited\""));
+        // Dead JS-era markup purge: the hidden rate-limit error slot is
+        // gone — errors arrive via the signed flash cookie.
+        assert!(!html.contains("data-error-key"));
         // CSRF endpoint
         assert!(html.contains("action=\"/web/auth/login\""));
         // Form structure
@@ -4399,8 +4685,9 @@ mod tests {
         assert!(html.contains("id=\"signup-name\""));
         assert!(html.contains("id=\"signup-email\""));
         assert!(html.contains("id=\"signup-password\""));
-        assert!(html.contains("bg-surface-50 text-surface-950 pr-12"));
-        assert!(!html.contains("bg-white/90 text-foreground pr-12"));
+        // Dead JS-era markup purge: the pr-12 gutter reserved for the
+        // deleted password-toggle button is gone.
+        assert!(!html.contains("pr-12"));
         assert!(html.contains(r"\x21-\x2F\x3A-\x40\x5B-\x60\x7B-\x7E"));
         assert!(html.contains("ASCII punctuation"));
         assert!(html.contains("action=\"/web/auth/signup\""));
@@ -4576,6 +4863,132 @@ mod tests {
         assert!(html.contains("Send Volume"));
         assert!(html.contains("Last 30 days"));
         assert!(html.contains("rounded-2xl"));
+        // H1 consistency: every console page title is text-2xl.
+        assert!(!html.contains("text-3xl font-bold tracking-tight text-surface-950"));
+    }
+
+    // ─── Design-report implementation guards ──────────────────────
+
+    /// Items 8/23 (KPI convergence): the stat-tile chassis with tone
+    /// inference, K/M formatting, and the sparkline wiring.
+    #[test]
+    fn stat_tiles_render_tone_compact_values_and_sparklines() {
+        use crate::view_data::{KpiCardData, ListPageData, TableData};
+        let mut data = ListPageData {
+            title: "Queues".into(),
+            description: "Depth.".into(),
+            base_path: "/infrastructure/queues".into(),
+            ..Default::default()
+        };
+        data.kpis = vec![
+            KpiCardData::new("Unacknowledged", "7").with_hint("Open"),
+            KpiCardData::new("Pending", "0"),
+            KpiCardData::new("Sent (30d)", "12485670").with_trend(&[4, 6, 5, 8, 9, 12, 11]),
+        ];
+        data.table = Some(TableData { columns: vec!["Queue".into()], rows: vec![] });
+        let html = data_list_page(&data, "queue");
+        // Stat-tile chassis, not the old KPI card dialect.
+        assert!(html.contains("apex-cp-stat-tile"));
+        assert!(html.contains("apex-cp-stat-label"));
+        assert!(html.contains("apex-cp-stat-value"));
+        // Tone inference: non-zero risk counter tints, zero stays calm.
+        assert!(html.contains("data-tone=\"error\""));
+        assert!(!html.contains("data-tone=\"warn\""));
+        // K/M formatting with the raw figure in title.
+        assert!(html.contains("12.5M"));
+        assert!(html.contains("title=\"12485670\""));
+        // The sparkline SVG renders with its aria trend summary.
+        assert!(html.contains("<svg"));
+        assert!(html.contains("Trend across 7 points, latest value 11"));
+    }
+
+    /// Item 15 (CP chrome): CP-flavored list pages render the eyebrow and
+    /// the dense/scroll table treatment.
+    #[test]
+    fn cp_list_pages_get_operator_chrome() {
+        use crate::view_data::{DataRowData, ListPageData, TableData};
+        let mut data = ListPageData {
+            title: "Tenants".into(),
+            description: "Workspaces.".into(),
+            base_path: "/tenants".into(),
+            ..Default::default()
+        };
+        data.table = Some(TableData {
+            columns: vec!["Name".into()],
+            rows: vec![DataRowData { id: "t_1".into(), cells: vec![crate::view_data::DataCell::text("Acme")] }],
+        });
+        let html = data_list_page(&data, "tenant");
+        assert!(html.contains("apex-eyebrow"));
+        assert!(html.contains("apex-table-wrap--scroll"));
+        assert!(html.contains("apex-table--dense"));
+        // Web list pages keep the consumer density.
+        let web = {
+            let mut data = data.clone();
+            data.base_path = "/campaigns".into();
+            data_list_page(&data, "campaign")
+        };
+        assert!(!web.contains("apex-table--dense"));
+    }
+
+    /// Item 18 (contacts import): the textarea + file form posts to the
+    /// committed import handler.
+    #[test]
+    fn contacts_new_page_renders_import_form() {
+        let html = web_contacts_new_page();
+        assert!(html.contains("action=\"/web/contacts/import\""));
+        assert!(html.contains("enctype=\"multipart/form-data\""));
+        assert!(html.contains("name=\"csv\""));
+        assert!(html.contains("name=\"file\""));
+        assert!(html.contains("type=\"file\""));
+        assert!(html.contains("accept=\".csv,text/csv\""));
+    }
+
+    /// Item 19 (template edit): the editor form carries the committed
+    /// update + preview handlers.
+    #[test]
+    fn template_edit_page_renders_update_and_preview() {
+        let html = web_template_edit_page("t_42");
+        assert!(html.contains("Edit Template"));
+        assert!(html.contains("action=\"/web/templates/update\""));
+        assert!(html.contains("name=\"id\" value=\"t_42\""));
+        assert!(html.contains("formaction=\"/web/templates/preview\""));
+        assert!(html.contains("name=\"html_body\""));
+    }
+
+    /// Item 15 (inbox placement): the honest EmptyState replaces the
+    /// permanent "Loading test…" placeholders.
+    #[test]
+    fn inbox_placement_pages_render_honest_empty_states() {
+        let list = web_inbox_placement_page();
+        assert!(list.contains("No placement tests yet"));
+        assert!(!list.contains("Loaded on demand"));
+        let detail = web_inbox_placement_detail_page();
+        assert!(!detail.contains("Loading test"));
+        assert!(detail.contains("Results appear once the test completes"));
+    }
+
+    /// Item 19 (sample purge): the CP dashboard fallback no longer ships
+    /// unbadged fabricated numbers, and the sales pager carries no
+    /// fabricated page counts.
+    #[test]
+    fn cp_fallbacks_carry_no_unbadged_sample_numbers() {
+        let dashboard = control_plane_dashboard_page();
+        assert!(!dashboard.contains("1,248"));
+        assert!(!dashboard.contains("84.2M"));
+        let sales = control_plane_sales_page();
+        assert!(!sales.contains("Page <strong"));
+        assert!(!sales.contains("184 total leads"));
+        // The disabled sales Previous link is no longer focusable.
+        assert!(sales.contains("tabindex=\"-1\""));
+    }
+
+    /// Item 26: the discovery static fallback no longer fabricates healthy
+    /// service rows.
+    #[test]
+    fn discovery_fallback_is_honest() {
+        let html = control_plane_discovery_page();
+        assert!(!html.contains("Healthy</span></div>"));
+        assert!(html.contains("Lead Sources"));
     }
 
     #[test]
@@ -4583,14 +4996,13 @@ mod tests {
         let html = web_campaigns_page();
         assert!(html.contains("Campaigns"));
         assert!(html.contains("New Campaign"));
-        assert!(html.contains("No campaigns yet"));
         assert!(html.contains("aria-label=\"Breadcrumb\""));
         assert!(html.contains("aria-current=\"page\">Campaigns"));
         assert!(html.contains("<table"));
         assert!(html.contains("data-bulk-scope=\"campaigns\""));
         assert!(html.contains("Select rows to act on them in bulk"));
-        assert!(html.contains("data-view-state=\"loading\""));
-        assert!(html.contains("data-pagination-storage-key=\"apexmail-ui:campaigns:page\""));
+        assert!(!html.contains("data-view-state=\"loading\""));
+        assert!(!html.contains("data-pagination-storage-key"));
         assert!(html.contains("/confirm?intent=delete-campaign&amp;id=c_spring"));
         assert!(html.contains("action=\"/web/campaigns/delete-bulk\""));
     }
@@ -4618,13 +5030,13 @@ mod tests {
         let html = web_contacts_page();
         assert!(html.contains("Contacts"));
         assert!(html.contains("Add Contact"));
-        assert!(html.contains("No contacts yet"));
         assert!(html.contains("aria-current=\"page\">Contacts"));
         assert!(html.contains("<table"));
         assert!(html.contains("Select rows to act on them in bulk"));
         assert!(html.contains("name=\"ids\""));
         assert!(html.contains("action=\"/web/contacts/delete-bulk\""));
         assert!(html.contains("formaction=\"/web/contacts/export.csv\""));
+        assert!(html.contains("no select-all without scripts"));
     }
 
     #[test]
@@ -4640,10 +5052,9 @@ mod tests {
         let html = web_lists_page();
         assert!(html.contains("Lists"));
         assert!(html.contains("New List"));
-        assert!(html.contains("No lists yet"));
         assert!(html.contains("aria-current=\"page\">Lists"));
         assert!(html.contains("/confirm?intent=delete-list&amp;id=l_vip"));
-        assert!(html.contains("data-pagination-storage-key=\"apexmail-ui:lists:page\""));
+        assert!(!html.contains("data-pagination-storage-key"));
     }
 
     #[test]
@@ -4651,7 +5062,9 @@ mod tests {
         let html = web_templates_page();
         assert!(html.contains("Templates"));
         assert!(html.contains("New Template"));
-        assert!(html.contains("No templates yet"));
+        assert!(html.contains("<table"));
+        // Dead hidden sections purged.
+        assert!(!html.contains("data-view-state=\"empty\" hidden"));
     }
 
     #[test]
@@ -4695,6 +5108,7 @@ mod tests {
         assert!(html.contains("Domains"));
         assert!(html.contains("Add Domain"));
         assert!(html.contains("No domains configured"));
+        assert!(!html.contains("data-view-state=\"loading\""));
     }
 
     #[test]
@@ -4713,7 +5127,8 @@ mod tests {
         let html = web_settings_api_keys_page();
         assert!(html.contains("API Keys"));
         assert!(html.contains("Create API Key"));
-        assert!(html.contains("No API keys"));
+        assert!(html.contains("<table"));
+        assert!(!html.contains("data-view-state=\"loading\""));
     }
 
     #[test]
@@ -4752,7 +5167,10 @@ mod tests {
         let html = control_plane_tenants_page();
         assert!(html.contains("Tenants"));
         assert!(html.contains("Add Tenant"));
-        assert!(html.contains("<table"));
+        // No double empty state on the fallback: the honest empty renders
+        // alone (no "No rows to display" table above it).
+        assert!(html.contains("No tenants yet"));
+        assert!(!html.contains("No rows to display"));
     }
 
     #[test]
@@ -4781,20 +5199,20 @@ mod tests {
     }
 
     #[test]
-    fn cp_discovery_renders_services() {
+    fn cp_discovery_renders_lead_sources_honestly() {
         let html = control_plane_discovery_page();
-        assert!(html.contains("Service Discovery"));
-        assert!(html.contains("MTA"));
-        assert!(html.contains("SMTP Inbound"));
-        assert!(html.contains("Healthy"));
+        assert!(html.contains("Lead Sources"));
+        // Fabricated service-registry health rows are gone.
+        assert!(!html.contains("MTA"));
+        assert!(!html.contains("Healthy"));
     }
 
     #[test]
     fn cp_jobs_renders_table() {
         let html = control_plane_jobs_page();
         assert!(html.contains("Jobs"));
-        assert!(html.contains("<table"));
         assert!(html.contains("No background jobs running"));
+        assert!(!html.contains("No rows to display"));
     }
 
     #[test]

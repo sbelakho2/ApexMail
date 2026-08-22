@@ -1,6 +1,7 @@
 {# ── Header Partial ──────────────────────────────────────────── #}
-{# Pure HTML + CSS header. Dropdowns use :focus-within, mobile   #}
-{# menu uses the #mobile-menu-state checkbox defined in base.html. #}
+{# Pure HTML + CSS header. Dropdowns are native <details>           #}
+{# disclosures (Esc + keyboard support for free); the mobile menu   #}
+{# uses the #mobile-menu-state checkbox defined in base.html.      #}
 {# Static header markup only.                                      #}
 {# NOTE: uses inline i18n conditionals (not macros::t) because   #}
 {# Tera macros cannot read the caller's scope variables          #}
@@ -18,20 +19,19 @@
 
       {# ── Desktop Navigation ─────────────────────── #}
       <div class="hidden lg:flex items-center gap-2">
-        {# Product dropdown #}
-        <div class="relative" data-dropdown="product">
-          <button
+        {# Product dropdown — native <details> disclosure (design audit
+           item 5): Enter/Space toggles, Esc closes, and the open state
+           is real markup instead of a frozen aria-expanded. The chevron
+           rotation lives in no-js.css. #}
+        <details class="relative" data-dropdown="product">
+          <summary
             class="flex items-center gap-1.5 px-3 py-2 text-xs font-bold tracking-widest uppercase text-surface-600 hover:text-surface-950 transition-colors rounded-sm hover:bg-surface-100"
-            aria-haspopup="menu"
-            aria-expanded="false"
-            data-state="closed"
-            data-dropdown-toggle
           >
             {% if i18n_data and i18n_data[l] and i18n_data[l]["header"] and i18n_data[l]["header"]["product"] %}{{ i18n_data[l]["header"]["product"] }}{% else %}Product{% endif %}
-            <svg class="w-4 h-4 transition-transform duration-150 dropdown-chevron" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
-          </button>
-          <div class="hidden absolute top-full left-0 mt-0 w-80 p-1 bg-surface-50 rounded-sm border border-surface-950 shadow-premium" data-dropdown-menu role="menu" aria-orientation="vertical" data-keyboard-nav="true">
-            <a href="/features/" {% if current_path_value == "/features" or current_path_value == "/features/" %}aria-current="page"{% endif %} class="flex items-start gap-3 p-3 rounded-sm hover:bg-surface-950 hover:text-white transition-colors group" role="menuitem" tabindex="-1">
+            <svg class="w-4 h-4 dropdown-chevron" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>
+          </summary>
+          <div class="absolute top-full left-0 mt-0 w-80 p-1 bg-surface-50 rounded-sm border border-surface-950 shadow-premium" data-dropdown-menu>
+            <a href="/features/" {% if current_path_value == "/features" or current_path_value == "/features/" %}aria-current="page"{% endif %} class="flex items-start gap-3 p-3 rounded-sm hover:bg-surface-950 hover:text-white transition-colors group">
               <div class="w-8 h-8 rounded-sm bg-surface-100 flex items-center justify-center text-surface-600 group-hover:text-white group-hover:bg-surface-800 transition-colors">
                 <svg xmlns="http://www.w3.org/2000/svg" class="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
               </div>
@@ -40,7 +40,7 @@
                 <div class="text-[11px] text-surface-500 group-hover:text-surface-300 leading-snug">{% if i18n_data and i18n_data[l] and i18n_data[l]["header"] and i18n_data[l]["header"]["features_desc"] %}{{ i18n_data[l]["header"]["features_desc"] }}{% else %}Explore our complete feature set{% endif %}</div>
               </div>
             </a>
-            <a href="/security/" {% if current_path_value == "/security" or current_path_value == "/security/" %}aria-current="page"{% endif %} class="flex items-start gap-3 p-3 rounded-sm hover:bg-surface-950 hover:text-white transition-colors group" role="menuitem" tabindex="-1">
+            <a href="/security/" {% if current_path_value == "/security" or current_path_value == "/security/" %}aria-current="page"{% endif %} class="flex items-start gap-3 p-3 rounded-sm hover:bg-surface-950 hover:text-white transition-colors group">
               <div class="w-8 h-8 rounded-sm bg-surface-100 flex items-center justify-center text-surface-600 group-hover:text-white group-hover:bg-surface-800 transition-colors">
                 <svg xmlns="http://www.w3.org/2000/svg" class="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
               </div>
@@ -49,7 +49,7 @@
                 <div class="text-[11px] text-surface-500 group-hover:text-surface-300 leading-snug">{% if i18n_data and i18n_data[l] and i18n_data[l]["header"] and i18n_data[l]["header"]["security_desc"] %}{{ i18n_data[l]["header"]["security_desc"] }}{% else %}Enterprise-grade protection{% endif %}</div>
               </div>
             </a>
-            <a href="/private-cloud/" {% if current_path_value == "/private-cloud" or current_path_value == "/private-cloud/" %}aria-current="page"{% endif %} class="flex items-start gap-3 p-3 rounded-sm hover:bg-surface-950 hover:text-white transition-colors group" role="menuitem" tabindex="-1">
+            <a href="/private-cloud/" {% if current_path_value == "/private-cloud" or current_path_value == "/private-cloud/" %}aria-current="page"{% endif %} class="flex items-start gap-3 p-3 rounded-sm hover:bg-surface-950 hover:text-white transition-colors group">
               <div class="w-8 h-8 rounded-sm bg-surface-100 flex items-center justify-center text-surface-600 group-hover:text-white group-hover:bg-surface-800 transition-colors">
                 <svg xmlns="http://www.w3.org/2000/svg" class="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"/></svg>
               </div>
@@ -59,22 +59,18 @@
               </div>
             </a>
           </div>
-        </div>
+        </details>
 
-        {# Developers dropdown #}
-        <div class="relative" data-dropdown="developers">
-          <button
+        {# Developers dropdown — same native <details> disclosure #}
+        <details class="relative" data-dropdown="developers">
+          <summary
             class="flex items-center gap-1.5 px-3 py-2 text-xs font-bold tracking-widest uppercase text-surface-600 hover:text-surface-950 transition-colors rounded-sm hover:bg-surface-100"
-            aria-haspopup="menu"
-            aria-expanded="false"
-            data-state="closed"
-            data-dropdown-toggle
           >
             {% if i18n_data and i18n_data[l] and i18n_data[l]["header"] and i18n_data[l]["header"]["developers"] %}{{ i18n_data[l]["header"]["developers"] }}{% else %}Developers{% endif %}
-            <svg class="w-4 h-4 transition-transform duration-150 dropdown-chevron" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
-          </button>
-          <div class="hidden absolute top-full left-0 mt-0 w-80 p-1 bg-surface-50 rounded-sm border border-surface-950 shadow-premium" data-dropdown-menu role="menu" aria-orientation="vertical" data-keyboard-nav="true">
-            <a href="/docs/" {% if current_path_value == "/docs" or current_path_value == "/docs/" %}aria-current="page"{% endif %} class="flex items-start gap-3 p-3 rounded-sm hover:bg-surface-950 hover:text-white transition-colors group" role="menuitem" tabindex="-1">
+            <svg class="w-4 h-4 dropdown-chevron" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>
+          </summary>
+          <div class="absolute top-full left-0 mt-0 w-80 p-1 bg-surface-50 rounded-sm border border-surface-950 shadow-premium" data-dropdown-menu>
+            <a href="/docs/" {% if current_path_value == "/docs" or current_path_value == "/docs/" %}aria-current="page"{% endif %} class="flex items-start gap-3 p-3 rounded-sm hover:bg-surface-950 hover:text-white transition-colors group">
               <div class="w-8 h-8 rounded-sm bg-surface-100 flex items-center justify-center text-surface-600 group-hover:text-white group-hover:bg-surface-800 transition-colors">
                 <svg xmlns="http://www.w3.org/2000/svg" class="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
               </div>
@@ -83,7 +79,7 @@
                 <div class="text-[11px] text-surface-500 group-hover:text-surface-300 leading-snug">{% if i18n_data and i18n_data[l] and i18n_data[l]["header"] and i18n_data[l]["header"]["documentation_desc"] %}{{ i18n_data[l]["header"]["documentation_desc"] }}{% else %}API reference & guides{% endif %}</div>
               </div>
             </a>
-            <a href="/api-explorer/" {% if current_path_value == "/api-explorer" or current_path_value == "/api-explorer/" %}aria-current="page"{% endif %} class="flex items-start gap-3 p-3 rounded-sm hover:bg-surface-950 hover:text-white transition-colors group" role="menuitem" tabindex="-1">
+            <a href="/api-explorer/" {% if current_path_value == "/api-explorer" or current_path_value == "/api-explorer/" %}aria-current="page"{% endif %} class="flex items-start gap-3 p-3 rounded-sm hover:bg-surface-950 hover:text-white transition-colors group">
               <div class="w-8 h-8 rounded-sm bg-surface-100 flex items-center justify-center text-surface-600 group-hover:text-white group-hover:bg-surface-800 transition-colors">
                 <svg xmlns="http://www.w3.org/2000/svg" class="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
               </div>
@@ -93,7 +89,7 @@
               </div>
             </a>
           </div>
-        </div>
+        </details>
 
         <a href="/pricing/" {% if current_path_value == "/pricing" or current_path_value == "/pricing/" %}aria-current="page"{% endif %} class="px-3 py-2 text-xs font-bold tracking-widest uppercase text-surface-600 hover:text-surface-950 transition-colors rounded-sm hover:bg-surface-100">{% if i18n_data and i18n_data[l] and i18n_data[l]["header"] and i18n_data[l]["header"]["pricing"] %}{{ i18n_data[l]["header"]["pricing"] }}{% else %}Pricing{% endif %}</a>
         <a href="/compliance/" {% if current_path_value == "/compliance" or current_path_value == "/compliance/" %}aria-current="page"{% endif %} class="px-3 py-2 text-xs font-bold tracking-widest uppercase text-surface-600 hover:text-surface-950 transition-colors rounded-sm hover:bg-surface-100">{% if i18n_data and i18n_data[l] and i18n_data[l]["header"] and i18n_data[l]["header"]["compliance"] %}{{ i18n_data[l]["header"]["compliance"] }}{% else %}Compliance{% endif %}</a>
@@ -107,23 +103,21 @@
         <a href="{{ config.extra.app_url }}/login" class="text-xs font-bold tracking-widest uppercase text-surface-600 hover:text-surface-950 transition-colors px-3 py-2 hover:bg-surface-100 rounded-sm">
           {% if i18n_data and i18n_data[l] and i18n_data[l]["header"] and i18n_data[l]["header"]["signin"] %}{{ i18n_data[l]["header"]["signin"] }}{% else %}Sign In{% endif %}
         </a>
-        <a href="{{ config.extra.app_url }}/signup" class="btn-primary uppercase">
-          {% if i18n_data and i18n_data[l] and i18n_data[l]["header"] and i18n_data[l]["header"]["get_started"] %}{{ i18n_data[l]["header"]["get_started"] }}{% else %}Get Started{% endif %}
+        <a href="{{ config.extra.app_url }}/signup" class="btn-primary">
+          {% if i18n_data and i18n_data[l] and i18n_data[l]["header"] and i18n_data[l]["header"]["get_started"] %}{{ i18n_data[l]["header"]["get_started"] }}{% else %}Start Free{% endif %}
         </a>
       </div>
 
       {# ── Mobile Menu Button (CSS checkbox hack) ───── #}
+      {# The visually-hidden #nav-toggle checkbox itself is the keyboard
+         operative control (Space toggles it); this label is the pointer
+         affordance only, so it carries no button ARIA it cannot honor
+         (design audit item 14 — stale aria-expanded removed). #}
       <label
         for="nav-toggle"
         id="mobile-menu-toggle"
         class="lg:hidden p-2 text-surface-600 hover:text-surface-950 rounded-sm hover:bg-surface-100 transition-colors min-h-[44px] min-w-[44px] flex items-center justify-center cursor-pointer"
         aria-label="{% if i18n_data and i18n_data[l] and i18n_data[l]["header"] and i18n_data[l]["header"]["toggle_menu"] %}{{ i18n_data[l]["header"]["toggle_menu"] }}{% else %}Toggle menu{% endif %}"
-        aria-controls="mobile-menu"
-        aria-expanded="false"
-        aria-haspopup="menu"
-        role="button"
-        tabindex="0"
-        data-mobile-toggle
       >
         <svg id="menu-icon-open" aria-hidden="true" xmlns="http://www.w3.org/2000/svg" class="w-6 h-6" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
         <svg id="menu-icon-close" aria-hidden="true" xmlns="http://www.w3.org/2000/svg" class="w-6 h-6 hidden" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
@@ -132,7 +126,12 @@
   </nav>
 
   {# ── Mobile Menu ───────────────────────────────────── #}
-  <nav id="mobile-menu" class="hidden lg:hidden bg-surface-50 border-b border-surface-200 overflow-hidden" aria-label="{% if i18n_data and i18n_data[l] and i18n_data[l]["header"] and i18n_data[l]["header"]["mobile_nav"] %}{{ i18n_data[l]["header"]["mobile_nav"] }}{% else %}Mobile navigation{% endif %}">
+  {# Collapsed via the grid-template-rows 0fr→1fr animation in no-js.css
+     (design audit item 17) — not a display:none flip. The .mobile-menu-inner
+     wrapper is the row that collapses; vertical padding lives on the
+     content inside it so the panel can reach a true 0 height. #}
+  <nav id="mobile-menu" class="lg:hidden bg-surface-50 border-b border-surface-200 overflow-hidden" aria-label="{% if i18n_data and i18n_data[l] and i18n_data[l]["header"] and i18n_data[l]["header"]["mobile_nav"] %}{{ i18n_data[l]["header"]["mobile_nav"] }}{% else %}Mobile navigation{% endif %}">
+    <div class="mobile-menu-inner">
     <div class="px-4 py-6 space-y-6">
       <div class="space-y-3">
         <div class="text-xs font-bold uppercase text-surface-950 px-3">{% if i18n_data and i18n_data[l] and i18n_data[l]["header"] and i18n_data[l]["header"]["product_mobile"] %}{{ i18n_data[l]["header"]["product_mobile"] }}{% else %}Product{% endif %}</div>
@@ -173,13 +172,14 @@
       <div class="pt-6 border-t border-surface-200 space-y-3 px-3">
         {# Theme toggle removed with the zero-JS migration: dark mode
            follows the OS prefers-color-scheme setting. #}
-        <a href="{{ config.extra.app_url }}/login" class="block w-full text-center py-3 text-surface-950 font-semibold uppercase border border-surface-200 rounded-sm hover:bg-surface-100 transition-colors text-sm">
+        <a href="{{ config.extra.app_url }}/login" class="block w-full text-center py-3 text-surface-950 font-semibold border border-surface-200 rounded-sm hover:bg-surface-100 transition-colors text-sm">
           {% if i18n_data and i18n_data[l] and i18n_data[l]["header"] and i18n_data[l]["header"]["signin"] %}{{ i18n_data[l]["header"]["signin"] }}{% else %}Sign In{% endif %}
         </a>
-        <a href="{{ config.extra.app_url }}/signup" class="block w-full btn-primary text-center py-3 text-sm uppercase">
-          {% if i18n_data and i18n_data[l] and i18n_data[l]["header"] and i18n_data[l]["header"]["get_started_free"] %}{{ i18n_data[l]["header"]["get_started_free"] }}{% else %}Get Started Free{% endif %}
+        <a href="{{ config.extra.app_url }}/signup" class="block w-full btn-primary text-center py-3 text-sm">
+          {% if i18n_data and i18n_data[l] and i18n_data[l]["header"] and i18n_data[l]["header"]["get_started"] %}{{ i18n_data[l]["header"]["get_started"] }}{% else %}Start Free{% endif %}
         </a>
       </div>
+    </div>
     </div>
   </nav>
 </header>

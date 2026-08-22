@@ -16,7 +16,7 @@ acts on it.
 ## What We Measure
 
 <div class="grid grid-cols-1 md:grid-cols-2 gap-6 my-10">
-  <div class="bg-surface-900 border border-surface-800 rounded-sm p-6">
+  <div class="bg-surface-900 border border-surface-800 rounded-lg p-6">
     <h3 class="text-xl font-semibold mb-3">Google Postmaster Tools</h3>
     <ul class="list-disc pl-5 space-y-1">
       <li>Domain reputation: HIGH / MEDIUM / LOW / BAD</li>
@@ -27,7 +27,7 @@ acts on it.
       <li>Delivery error breakdown</li>
     </ul>
   </div>
-  <div class="bg-surface-900 border border-surface-800 rounded-sm p-6">
+  <div class="bg-surface-900 border border-surface-800 rounded-lg p-6">
     <h3 class="text-xl font-semibold mb-3">Microsoft SNDS</h3>
     <ul class="list-disc pl-5 space-y-1">
       <li>Filter result: GREEN / YELLOW / RED</li>

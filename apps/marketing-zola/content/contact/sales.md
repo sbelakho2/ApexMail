@@ -17,14 +17,14 @@ For enterprise buying, security review, or private-cloud planning, complete the 
   <div>
     <label for="company" class="block text-xs font-bold tracking-widest text-surface-600 uppercase mb-2">Company <span class="text-red-500">*</span></label>
     <input type="text" id="company" name="company" required
-      class="w-full px-4 py-3 border border-surface-300 text-sm text-surface-950 bg-white focus:border-brand-500 focus:ring-1 focus:ring-brand-500 outline-none"
+      class="w-full px-4 py-3 border border-surface-300 text-sm text-surface-950 bg-surface-50 focus:border-brand-500 focus:ring-1 focus:ring-brand-500 outline-none"
       placeholder="Your organisation name" />
   </div>
 
   <div>
     <label for="work-email" class="block text-xs font-bold tracking-widest text-surface-600 uppercase mb-2">Work Email <span class="text-red-500">*</span></label>
     <input type="email" id="work-email" name="work_email" required
-      class="w-full px-4 py-3 border border-surface-300 text-sm text-surface-950 bg-white focus:border-brand-500 focus:ring-1 focus:ring-brand-500 outline-none"
+      class="w-full px-4 py-3 border border-surface-300 text-sm text-surface-950 bg-surface-50 focus:border-brand-500 focus:ring-1 focus:ring-brand-500 outline-none"
       placeholder="you@company.com" />
   </div>
 
@@ -32,7 +32,7 @@ For enterprise buying, security review, or private-cloud planning, complete the 
     <div>
       <label for="monthly-volume" class="block text-xs font-bold tracking-widest text-surface-600 uppercase mb-2">Monthly Email Volume <span class="text-red-500">*</span></label>
       <select id="monthly-volume" name="monthly_volume" required
-        class="w-full px-4 py-3 border border-surface-300 text-sm text-surface-950 bg-white focus:border-brand-500 focus:ring-1 focus:ring-brand-500 outline-none">
+        class="w-full px-4 py-3 border border-surface-300 text-sm text-surface-950 bg-surface-50 focus:border-brand-500 focus:ring-1 focus:ring-brand-500 outline-none">
         <option value="" disabled selected>Select volume range</option>
         <option value="lt_50k">Under 50,000</option>
         <option value="50k_150k">50,000 – 150,000</option>
@@ -47,7 +47,7 @@ For enterprise buying, security review, or private-cloud planning, complete the 
     <div>
       <label for="peak-hourly-volume" class="block text-xs font-bold tracking-widest text-surface-600 uppercase mb-2">Peak Hourly Volume</label>
       <input type="text" id="peak-hourly-volume" name="peak_hourly_volume"
-        class="w-full px-4 py-3 border border-surface-300 text-sm text-surface-950 bg-white focus:border-brand-500 focus:ring-1 focus:ring-brand-500 outline-none"
+        class="w-full px-4 py-3 border border-surface-300 text-sm text-surface-950 bg-surface-50 focus:border-brand-500 focus:ring-1 focus:ring-brand-500 outline-none"
         placeholder="e.g. 50,000 per hour" />
     </div>
   </div>
@@ -55,7 +55,7 @@ For enterprise buying, security review, or private-cloud planning, complete the 
   <div>
     <label for="current-provider" class="block text-xs font-bold tracking-widest text-surface-600 uppercase mb-2">Current Provider</label>
     <select id="current-provider" name="current_provider"
-      class="w-full px-4 py-3 border border-surface-300 text-sm text-surface-950 bg-white focus:border-brand-500 focus:ring-1 focus:ring-brand-500 outline-none">
+      class="w-full px-4 py-3 border border-surface-300 text-sm text-surface-950 bg-surface-50 focus:border-brand-500 focus:ring-1 focus:ring-brand-500 outline-none">
       <option value="" selected>Select current provider (if any)</option>
       <option value="sendgrid">SendGrid (Twilio)</option>
       <option value="postmark">Postmark (ActiveCampaign)</option>
@@ -129,7 +129,7 @@ For enterprise buying, security review, or private-cloud planning, complete the 
   <div>
     <label for="target-timeline" class="block text-xs font-bold tracking-widest text-surface-600 uppercase mb-2">Target Timeline</label>
     <select id="target-timeline" name="target_timeline"
-      class="w-full px-4 py-3 border border-surface-300 text-sm text-surface-950 bg-white focus:border-brand-500 focus:ring-1 focus:ring-brand-500 outline-none">
+      class="w-full px-4 py-3 border border-surface-300 text-sm text-surface-950 bg-surface-50 focus:border-brand-500 focus:ring-1 focus:ring-brand-500 outline-none">
       <option value="" selected>Select timeline</option>
       <option value="immediate">Immediate (within 2 weeks)</option>
       <option value="30_days">Within 30 days</option>
@@ -142,7 +142,7 @@ For enterprise buying, security review, or private-cloud planning, complete the 
   <div>
     <label for="security-review" class="block text-xs font-bold tracking-widest text-surface-600 uppercase mb-2">Security Review Needs</label>
     <select id="security-review" name="security_review_needs"
-      class="w-full px-4 py-3 border border-surface-300 text-sm text-surface-950 bg-white focus:border-brand-500 focus:ring-1 focus:ring-brand-500 outline-none">
+      class="w-full px-4 py-3 border border-surface-300 text-sm text-surface-950 bg-surface-50 focus:border-brand-500 focus:ring-1 focus:ring-brand-500 outline-none">
       <option value="" selected>Select review level</option>
       <option value="standard">Standard — SIG/CAIQ/HECVAT packs sufficient</option>
       <option value="detailed">Detailed — Custom security questionnaire required</option>
@@ -155,7 +155,7 @@ For enterprise buying, security review, or private-cloud planning, complete the 
   <div>
     <label for="additional-context" class="block text-xs font-bold tracking-widest text-surface-600 uppercase mb-2">Additional Context</label>
     <textarea id="additional-context" name="additional_context" rows="4"
-      class="w-full px-4 py-3 border border-surface-300 text-sm text-surface-950 bg-white focus:border-brand-500 focus:ring-1 focus:ring-brand-500 outline-none resize-y"
+      class="w-full px-4 py-3 border border-surface-300 text-sm text-surface-950 bg-surface-50 focus:border-brand-500 focus:ring-1 focus:ring-brand-500 outline-none resize-y"
       placeholder="Specific integration requirements, migration plans, security architecture needs, or any other context that helps us prepare the right recommendation."></textarea>
   </div>
 

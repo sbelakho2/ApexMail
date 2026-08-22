@@ -579,8 +579,9 @@ mod tests {
     use super::*;
     use crate::common::config::{SesConfig, TransportType};
 
-    /// Serializes env-mutating tests (std::env is process-global).
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    /// Serializes env-mutating tests against every other module in this
+    /// crate (std::env is process-global; see `crate::test_support`).
+    use crate::test_support::ENV_LOCK;
 
     #[test]
     fn test_transport_type_from_env() {

@@ -182,6 +182,25 @@ run_contrast_gate() {
         sh tools/contrast-audit/gate.sh) || { ci_err "contrast gate FAILED — see tools/contrast-audit/reports/gate-report.json"; return "$CI_EXIT_FAIL"; }
 }
 
+# --- 8b. Layout-spill + tag-balance gates ------------------------------------------------
+# tools/contrast-audit/layout-gate.sh drives every console/CP fixture and
+# marketing page at desktop AND mobile widths in all themes, failing on
+# document horizontal overflow, content past the viewport, text escaping its
+# box, cut-off text, invisible text, broken images, or overlapping cards —
+# the defect class browsers silently repair (the CP header-tag bug).
+# tools/contrast-audit/tag-balance.py strict-closure-checks every built page
+# so an unclosed tag can never again swallow the rest of the document.
+# Both self-provision their inputs exactly like the contrast gate.
+run_layout_gates() {
+    command -v node >/dev/null 2>&1 || { ci_warn "node missing — layout gates skipped"; return "$CI_EXIT_OK"; }
+    [ -d "$REPO_ROOT/tools/contrast-audit/node_modules/playwright" ] || { ci_warn "tools/contrast-audit/node_modules missing — layout gates skipped"; return "$CI_EXIT_OK"; }
+    (cd "$REPO_ROOT" && ci_check "layout-spill gate (tools/contrast-audit/layout-gate.sh)" \
+        sh tools/contrast-audit/layout-gate.sh) || { ci_err "layout gate FAILED — see tools/contrast-audit/reports/layout/violations.json"; return "$CI_EXIT_FAIL"; }
+    command -v python3 >/dev/null 2>&1 || { ci_warn "python3 missing — tag-balance gate skipped"; return "$CI_EXIT_OK"; }
+    (cd "$REPO_ROOT" && ci_check "tag-balance gate (tag-balance.py)" \
+        python3 tools/contrast-audit/tag-balance.py) || { ci_err "tag-balance gate FAILED — see per-page output above"; return "$CI_EXIT_FAIL"; }
+}
+
 # --- formatting gate ------------------------------------------------------------
 # cargo fmt --check is NEW compared to rust-check.yml (GitHub never ran it).
 # The tree currently carries committed fmt drift (README §9 F7), so the gate
@@ -275,6 +294,7 @@ stage_main() {
     run_cargo_tests
     run_php_tests
     run_contrast_gate
+    run_layout_gates
 
     ci_ephem_cleanup
     ci_info "test: all suites green"

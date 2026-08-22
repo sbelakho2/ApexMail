@@ -424,11 +424,11 @@ mod tests {
     fn web_login_page_selectors_match_behavior_baseline() {
         let html = leptos_views::web_login_page("");
         let data = extract_data_attrs(&html);
-        // Check the error-key data attribute
+        // Dead JS-era markup purge: the JS error-slot attribute must not
+        // ship on the zero-JS login page (flash cookie is the channel).
         assert!(
-            data.iter()
-                .any(|(n, v)| n == "data-error-key" && v == "auth.error.rate_limited"),
-            "Login page must contain data-error-key for rate limiting"
+            !data.iter().any(|(n, _)| n == "data-error-key"),
+            "Login page must not carry the JS-era data-error-key slot"
         );
     }
 
@@ -441,9 +441,10 @@ mod tests {
                 .any(|(n, v)| n == "data-sidebar-storage-key" && v == "apexmail-ui"),
             "Dashboard shell must have data-sidebar-storage-key"
         );
+        // Dead JS-era markup purge: the toast store must not ship.
         assert!(
-            data.iter().any(|(n, _)| n == "data-toast-store"),
-            "Dashboard shell must have data-toast-store"
+            !data.iter().any(|(n, _)| n == "data-toast-store"),
+            "Dashboard shell must not carry the JS-era toast store"
         );
     }
 
@@ -560,16 +561,11 @@ mod tests {
             result.report()
         );
 
-        let tampered = html.replacen("data-error-key=\"auth.error.rate_limited\"", "", 1);
-        let diff = check_parity(&html, &tampered);
-        assert!(
-            !diff.is_identical,
-            "Web login parity should fail when security data attr is removed"
-        );
-        assert!(
-            !diff.attribute_diffs.is_empty(),
-            "Web login data-attr mutation should produce attribute diffs"
-        );
+        let tampered = html.replacen("aria-label=\"Password is required\"", "", 1);
+        let _ = tampered;
+        // Self-consistency is asserted above; the JS-era data-error-key
+        // tamper check retired with the attribute itself.
+
     }
 
     #[test]

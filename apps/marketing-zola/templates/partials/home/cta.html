@@ -1,5 +1,5 @@
 {# CTA Section #}
-<section class="py-20 lg:py-32 relative overflow-hidden bg-white">
+<section class="py-20 lg:py-32 relative overflow-hidden bg-surface-50">
   <div class="relative max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
     <div class="animate-in text-center">
       <h2 class="mb-6">
@@ -37,11 +37,11 @@
         </div>
       </div>
       <div class="animate-in delay-400 flex flex-col sm:flex-row items-center justify-center gap-4 mb-16">
-        <a href="{{ config.extra.app_url }}/signup" class="btn-primary px-8 py-4 text-base w-full sm:w-auto uppercase">
-          {% if i18n_data and i18n_data[l] and i18n_data[l]["cta"] and i18n_data[l]["cta"]["cta_button"] %}{{ i18n_data[l]["cta"]["cta_button"] }}{% else %}Get Started Free{% endif %}
+        <a href="{{ config.extra.app_url }}/signup" class="btn-primary btn-primary--lg w-full sm:w-auto">
+          {% if i18n_data and i18n_data[l] and i18n_data[l]["cta"] and i18n_data[l]["cta"]["cta_button"] %}{{ i18n_data[l]["cta"]["cta_button"] }}{% else %}Start Free{% endif %}
           <svg class="w-4 h-4 ml-2" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
         </a>
-        <a href="/private-cloud/" class="btn-secondary px-8 py-4 text-base w-full sm:w-auto uppercase">
+        <a href="/private-cloud/" class="btn-secondary btn-secondary--lg w-full sm:w-auto">
           {% if i18n_data and i18n_data[l] and i18n_data[l]["cta"] and i18n_data[l]["cta"]["cta_enterprise"] %}{{ i18n_data[l]["cta"]["cta_enterprise"] }}{% else %}Book Architecture Review{% endif %}
         </a>
       </div>

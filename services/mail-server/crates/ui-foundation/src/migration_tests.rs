@@ -374,9 +374,11 @@ fn migration_forms_have_action_attributes() {
 #[test]
 fn migration_security_data_attributes_present() {
     let login = leptos_views::web_login_page("");
+    // Dead JS-era markup purge: the hidden rate-limit slot no longer ships
+    // (errors arrive via the signed flash cookie rendered server-side).
     assert!(
-        login.contains("data-error-key=\"auth.error.rate_limited\""),
-        "rate limiting data attribute missing"
+        !login.contains("data-error-key"),
+        "JS-era rate limiting data attribute must not ship"
     );
 
     // MFA input attributes live on the server-rendered challenge page
@@ -393,7 +395,8 @@ fn migration_sidebar_data_attributes_present() {
         html.contains("data-sidebar-storage-key=\"apexmail-ui\""),
         "sidebar key missing"
     );
-    assert!(html.contains("data-toast-store"), "toast store missing");
+    // Dead JS-era markup purge: the toast store markup is gone.
+    assert!(!html.contains("data-toast-store"), "toast store must not ship");
     assert!(
         html.contains("aria-label=\"Primary sidebar navigation\""),
         "sidebar aria missing"
@@ -474,7 +477,7 @@ fn migration_control_plane_pages_have_titles() {
         ("sales", "Operator console"),
         ("operators", "Operators"),
         ("analytics", "Analytics"),
-        ("discovery", "Service Discovery"),
+        ("discovery", "Lead Sources"),
         ("jobs", "Jobs"),
         ("infrastructure", "Infrastructure"),
         ("domains", "Domains"),

@@ -3,7 +3,7 @@
 {# Uses Tera page variables: page.extra.competitor_name,         #}
 {#   page.extra.competitor_description                           #}
 
-<section class="relative pt-32 pb-20 overflow-hidden bg-white border-b border-surface-200">
+<section class="relative pt-32 pb-20 overflow-hidden bg-surface-50 border-b border-surface-200">
 
   <div class="relative max-w-5xl mx-auto px-4 sm:px-6 lg:px-8">
     <div class="animate-in text-center">
@@ -24,11 +24,11 @@
       </p>
 
       <div class="flex flex-wrap justify-center gap-4">
-        <a href="{{ config.extra.app_url }}/signup" class="btn-primary flex items-center gap-2 group uppercase">
+        <a href="{{ config.extra.app_url }}/signup" class="btn-primary flex items-center gap-2 group">
           Try ApexMail Free
           <svg class="w-4 h-4 group-hover:translate-x-1 transition-transform" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
         </a>
-        <a href="#comparison" class="btn-secondary uppercase">See Full Comparison</a>
+        <a href="#comparison" class="btn-secondary">See Full Comparison</a>
       </div>
     </div>
   </div>

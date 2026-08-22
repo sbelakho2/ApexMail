@@ -13,7 +13,7 @@
 <div class="apex-card flex flex-col p-8 bg-surface-950 !border-surface-800 shadow-premium relative group" role="region" aria-label="{{ plan_name }} plan">
   <div class="mb-4 flex items-center justify-between">
     <span class="inline-block px-3 py-1 bg-brand-500/10 text-brand-400 text-xs font-bold tracking-widest uppercase rounded-sm border border-brand-500/20">{{ plan_enterprise_label }}</span>
-    <span class="inline-block px-2 py-0.5 bg-surface-800 text-surface-300 text-[9px] font-bold tracking-widest uppercase rounded-sm">Requires payment method</span>
+    <span class="inline-block px-2 py-0.5 bg-surface-800 text-surface-300 text-[11px] font-bold tracking-widest uppercase rounded-sm">Requires payment method</span>
   </div>
 {% else %}
 <div class="apex-card flex flex-col p-8" role="region" aria-label="{{ plan_name }} plan">
@@ -35,15 +35,15 @@
     {% endfor %}
   </ul>
   {% if plan_button_primary or plan_is_popular %}
-  <a href="{{ plan_cta_url }}" aria-label="{{ plan_cta_aria_label }}" class="btn-primary w-full text-center py-4 uppercase">
+  <a href="{{ plan_cta_url }}" aria-label="{{ plan_cta_aria_label }}" class="btn-primary w-full text-center py-4">
     {{ plan_cta_label }}
   </a>
   {% elif plan_is_enterprise %}
-  <a href="{{ plan_cta_url }}" aria-label="{{ plan_cta_aria_label }}" class="btn-primary !bg-white !text-surface-950 !border-white hover:!bg-surface-100 w-full text-center py-4 uppercase">
+  <a href="{{ plan_cta_url }}" aria-label="{{ plan_cta_aria_label }}" class="btn-primary !bg-white !text-surface-950 !border-white hover:!bg-surface-100 w-full text-center py-4">
     {{ plan_cta_label }}
   </a>
   {% else %}
-  <a href="{{ plan_cta_url }}" aria-label="{{ plan_cta_aria_label }}" class="btn-secondary w-full text-center py-4 uppercase">
+  <a href="{{ plan_cta_url }}" aria-label="{{ plan_cta_aria_label }}" class="btn-secondary w-full text-center py-4">
     {{ plan_cta_label }}
   </a>
   {% endif %}

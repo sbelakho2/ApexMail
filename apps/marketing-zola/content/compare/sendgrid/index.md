@@ -45,7 +45,7 @@ comparison_sections = [
     { feature = "Residency Review", apex = '<span class="text-brand-600 font-semibold">Enterprise review</span>', comp = '<span class="text-surface-600">Enterprise only</span>', winner = "none" }
   ]},
   { title = "DEVELOPER EXPERIENCE", rows = [
-    { feature = "Time to First Email", apex = '<span class="text-brand-600 font-semibold"><10 seconds</span>', comp = '<span class="text-surface-600">~5 minutes</span>', winner = "none" },
+    { feature = "Time to First Email", apex = '<span class="text-brand-600 font-semibold">&lt;10 seconds</span>', comp = '<span class="text-surface-600">~5 minutes</span>', winner = "none" },
     { feature = "Official SDK Coverage", apex = '<span class="text-brand-600 font-semibold">Six published SDKs</span>', comp = '<span class="text-surface-600">Seven SDKs</span>', winner = "none" },
     { feature = "Idempotency Keys", apex = '<span class="text-brand-600">✓</span>', comp = '<span class="text-surface-400">✗</span>', winner = "none" },
     { feature = "Webhook Signatures", apex = '<span class="text-brand-600">✓</span>', comp = '<span class="text-brand-600">✓</span>', winner = "none" },

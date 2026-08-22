@@ -502,12 +502,18 @@ mod tests {
     }
 
     /// Serialises tests that mutate the `DKIM_PRIVATE_KEY_ENCRYPTION_KEY`
-    /// process env var (env access is process-global; tests run in parallel).
-    static DKIM_KEY_ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    /// process env var (env access is process-global; tests run in
+    /// parallel). Shared crate-wide via `crate::test_db` so signup
+    /// fixtures mutating the same env var cannot race these tests.
+    fn dkim_env_guard() -> std::sync::MutexGuard<'static, ()> {
+        crate::test_db::DKIM_ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+    }
 
     #[test]
     fn rebind_requires_complete_material() {
-        let _guard = DKIM_KEY_ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = dkim_env_guard();
         // 32 bytes of hex — key envelope encryption requires the env key.
         let had_key = std::env::var("DKIM_PRIVATE_KEY_ENCRYPTION_KEY").ok();
         std::env::set_var(
@@ -674,7 +680,7 @@ mod tests {
 
     #[tokio::test]
     async fn admin_transfer_moves_the_domain_and_resets_verification() {
-        let _guard = DKIM_KEY_ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = dkim_env_guard();
         let had_key = std::env::var("DKIM_PRIVATE_KEY_ENCRYPTION_KEY").ok();
         std::env::set_var(
             "DKIM_PRIVATE_KEY_ENCRYPTION_KEY",

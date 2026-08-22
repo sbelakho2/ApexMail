@@ -330,8 +330,12 @@ mod tests {
     /// it (skipped when no local Redis is available).
     #[tokio::test]
     async fn challenge_rate_limit_allows_then_exceeds_on_live_redis() {
-        let redis_url =
-            std::env::var("TEST_REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".into());
+        // F6: never probe the ambient 6379 — the variable must name the
+        // Redis under test explicitly; unset means skip.
+        let Ok(redis_url) = std::env::var("TEST_REDIS_URL") else {
+            eprintln!("skipping: TEST_REDIS_URL not set");
+            return;
+        };
         let pool = match deadpool_redis::Config::from_url(&redis_url)
             .create_pool(Some(deadpool_redis::Runtime::Tokio1))
         {

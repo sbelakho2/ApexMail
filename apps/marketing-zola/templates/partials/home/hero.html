@@ -1,14 +1,18 @@
 
-{# Hero Section #}
-<section aria-label="Introduction" class="relative min-h-[90vh] flex items-center pt-36 pb-24 lg:pt-40 overflow-hidden bg-white">
+{# Hero Section — rhythm per design audit item 13: the sticky header is in
+   flow, so the old pt-36/lg:pt-40 double-counted against min-h-[90vh];
+   the ratified section padding is py-20 lg:py-32. #}
+<section aria-label="Introduction" class="relative min-h-[90vh] flex items-center py-20 lg:py-32 overflow-hidden bg-surface-50">
   <div class="relative w-full max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
     <div class="grid min-w-0 lg:grid-cols-2 gap-12 lg:gap-20 items-center">
       <div class="min-w-0">
-        <div class="inline-flex items-center gap-3 px-3 py-1 border border-surface-200 text-[11px] font-bold tracking-widest text-surface-600 mb-10 uppercase">
-          <div class="w-2 h-2 bg-brand-500"></div>
+        {# Eyebrow badge on the calculator grammar (design audit item 11):
+           brand-50 surface + brand-700 text + the brand-500 dot. #}
+        <div class="inline-flex items-center gap-2 px-3 py-1 rounded-md bg-brand-50 text-brand-700 border border-brand-100/50 text-xs font-bold tracking-[0.05em] uppercase mb-10">
+          <div class="w-2 h-2 bg-brand-500" aria-hidden="true"></div>
           {% if i18n_data and i18n_data[l] and i18n_data[l]["home"] and i18n_data[l]["home"]["hero_badge"] %}{{ i18n_data[l]["home"]["hero_badge"] }}{% else %}Now with Private Cloud deployments{% endif %}
         </div>
-        <h1 class="mb-8 text-surface-950 leading-[0.95] text-balance text-[40px] sm:text-6xl lg:text-8xl">
+        <h1 class="mb-8 text-surface-950 leading-[0.95] text-balance text-[40px] sm:text-[48px] lg:text-[80px]">
           <span class="block">{% if i18n_data and i18n_data[l] and i18n_data[l]["home"] and i18n_data[l]["home"]["hero_line1"] %}{{ i18n_data[l]["home"]["hero_line1"] }}{% else %}The Email API{% endif %}</span>
           <span class="block">{% if i18n_data and i18n_data[l] and i18n_data[l]["home"] and i18n_data[l]["home"]["hero_line2"] %}{{ i18n_data[l]["home"]["hero_line2"] }}{% else %}Built for{% endif %} <span class="block sm:inline text-brand-500">{% if i18n_data and i18n_data[l] and i18n_data[l]["home"] and i18n_data[l]["home"]["hero_highlight"] %}{{ i18n_data[l]["home"]["hero_highlight"] }}{% else %}Stability.{% endif %}</span></span>
         </h1>
@@ -38,11 +42,11 @@
           </li>
         </ul>
         <div class="flex flex-col sm:flex-row flex-wrap gap-4">
-          <a href="{{ config.extra.app_url }}/signup" class="btn-primary px-8 py-4 text-lg uppercase" aria-label="{% if i18n_data and i18n_data[l] and i18n_data[l]["home"] and i18n_data[l]["home"]["hero_cta_primary"] %}{{ i18n_data[l]["home"]["hero_cta_primary"] }}{% else %}Get API Keys{% endif %}">
-            {% if i18n_data and i18n_data[l] and i18n_data[l]["home"] and i18n_data[l]["home"]["hero_cta_primary"] %}{{ i18n_data[l]["home"]["hero_cta_primary"] }}{% else %}Get API Keys{% endif %}
+          <a href="{{ config.extra.app_url }}/signup" class="btn-primary btn-primary--lg" aria-label="{% if i18n_data and i18n_data[l] and i18n_data[l]["home"] and i18n_data[l]["home"]["hero_cta_primary"] %}{{ i18n_data[l]["home"]["hero_cta_primary"] }}{% else %}Start Free{% endif %}">
+            {% if i18n_data and i18n_data[l] and i18n_data[l]["home"] and i18n_data[l]["home"]["hero_cta_primary"] %}{{ i18n_data[l]["home"]["hero_cta_primary"] }}{% else %}Start Free{% endif %}
             <svg xmlns="http://www.w3.org/2000/svg" class="w-5 h-5 ml-2" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
           </a>
-          <a href="/api-explorer/" class="btn-secondary px-8 py-4 text-lg uppercase" aria-label="{% if i18n_data and i18n_data[l] and i18n_data[l]["api_console"] and i18n_data[l]["api_console"]["hero_cta"] %}{{ i18n_data[l]["api_console"]["hero_cta"] }}{% else %}Open the interactive API explorer{% endif %}">
+          <a href="/api-explorer/" class="btn-secondary btn-secondary--lg" aria-label="{% if i18n_data and i18n_data[l] and i18n_data[l]["api_console"] and i18n_data[l]["api_console"]["hero_cta"] %}{{ i18n_data[l]["api_console"]["hero_cta"] }}{% else %}Open the interactive API explorer{% endif %}">
             <svg xmlns="http://www.w3.org/2000/svg" class="w-4 h-4 mr-2" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"/></svg>
             {% if i18n_data and i18n_data[l] and i18n_data[l]["api_console"] and i18n_data[l]["api_console"]["hero_cta"] %}{{ i18n_data[l]["api_console"]["hero_cta"] }}{% else %}Open API Explorer{% endif %}
           </a>

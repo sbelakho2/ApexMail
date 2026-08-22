@@ -38,6 +38,11 @@ module.exports = {
     'font-mono',
     'tracking-[0.12em]',
     'tracking-[0.16em]',
+    // Pressed-state scale: the rs extractor's token regex has no `.`, so
+    // arbitrary scale values never match — safelist them so the button
+    // primitive's active:scale pressed state actually compiles.
+    'active:scale-[0.98]',
+    'active:scale-[0.99]',
   ],
   theme: {
     extend: {

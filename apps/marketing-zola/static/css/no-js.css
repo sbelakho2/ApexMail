@@ -15,59 +15,31 @@ html { scroll-behavior: smooth; }
 }
 
 /* ── Skip Link ──────────────────────────────────────────────── */
-/* The skip link carries BOTH the id and the class; this id-scoped rule wins
-   the cascade, so its background must be the brand red the class rule
-   intends — white-on-white made the focused link invisible (1:1). */
+/* Single consolidated rule set (design audit item 15): the element
+   carries the id; the old duplicate .skip-to-content class block was
+   fully overridden by this id-scoped rule and deleted. Background is
+   the brand red — white-on-white made the focused link invisible
+   (1:1). */
 #skip-to-content {
   position: absolute;
   left: -9999px;
   top: 1rem;
-  z-index: 60;
-  padding: 0.75rem 1rem;
-  border-radius: 0;
-  background: rgb(var(--brand-600));
-  color: #fff;
-  border: 1px solid rgb(var(--surface-950));
-  font-weight: bold;
-  text-transform: uppercase;
-  letter-spacing: 0.1em;
-}
-
-#skip-to-content:focus {
-  left: 1rem;
-}
-
-.skip-to-content {
-  position: absolute;
-  top: -64px;
-  left: 0;
   z-index: 10000;
   padding: 12px 24px;
   border-radius: 0;
   background: rgb(var(--brand-600));
-  color: white !important;
+  color: #fff;
+  border: 1px solid rgb(var(--surface-950));
   font-size: 13px;
-  font-weight: 700;
+  font-weight: bold;
   text-transform: uppercase;
   letter-spacing: 0.1em;
   text-decoration: none;
   transition: top 0.2s cubic-bezier(0.23, 1, 0.32, 1);
-  border: 1px solid rgb(var(--surface-950));
 }
 
-.skip-to-content:focus {
-  top: 0;
-  outline: none;
-}
-
-/* Account for lg:h-20 header on larger screens */
-@media (min-width: 1024px) {
-  .skip-to-content {
-    top: -80px;
-  }
-  .skip-to-content:focus {
-    top: 0;
-  }
+#skip-to-content:focus {
+  left: 1rem;
 }
 
 /* ── Focus Rings ────────────────────────────────────────────── */
@@ -87,70 +59,36 @@ textarea:focus-visible {
   outline: none;
 }
 
-/* ── Interactive island loading states ─────────────────────── */
-.island-loading {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  min-height: 120px;
-  border-radius: var(--radius-sm);
-  background: rgb(var(--surface-50));
-  border: 1px solid rgb(var(--surface-200));
-  animation: pulse 1.5s ease-in-out infinite;
+/* ── Header Dropdowns (<details> disclosure, design audit item 5) ──
+   Native disclosure widgets: click/Enter/Space toggles, Esc closes,
+   and the open state is real markup — no frozen aria-expanded, no
+   JS-kitchen-sink ARIA. The chevron rotates with the open state. */
+details[data-dropdown] > summary {
+  cursor: pointer;
+  list-style: none;
+  min-height: 44px;
 }
-@keyframes pulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.5; }
-}
-
-/* ── Pricing trust badges ──────────────────────────────────── */
-.social-proof {
-  text-align: center;
-  margin-bottom: 32px;
-  padding: 16px;
-}
-.trust-badges {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  justify-content: center;
-  margin-bottom: 16px;
-}
-.trust-badge {
-  background: rgb(var(--surface-50));
-  border: 1px solid rgb(var(--surface-200));
-  border-radius: 0;
-  padding: 4px 12px;
-  font-size: 11px;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  color: rgb(var(--surface-600));
-}
-.trust-message {
-  font-size: 13px;
-  color: rgb(var(--surface-500));
-}
-
-/* ── Header Dropdowns (CSS :focus-within) ──────────────────── */
-[data-dropdown] [data-dropdown-menu] {
+details[data-dropdown] > summary::-webkit-details-marker {
   display: none;
-  opacity: 0;
-  transform: translateY(4px);
-  transition: opacity 150ms ease, transform 150ms ease;
-  pointer-events: none;
 }
-[data-dropdown]:hover [data-dropdown-menu],
-[data-dropdown]:focus-within [data-dropdown-menu] {
+details[data-dropdown] > summary .dropdown-chevron {
+  transition: transform 150ms ease;
+}
+details[data-dropdown][open] > summary .dropdown-chevron {
+  transform: rotate(180deg);
+}
+details[data-dropdown][open] > summary {
+  color: rgb(var(--surface-950));
+}
+details[data-dropdown] > [data-dropdown-menu] {
   display: block;
-  opacity: 1;
-  transform: translateY(0);
-  pointer-events: auto;
 }
 
-/* ── Mobile Menu (checkbox hack) ────────────────────────────── */
-/* Off-screen positioning instead of clip-based sr-only to maintain
-   keyboard focusability (clip:rect can break Tab focus in some browsers). */
+/* ── Mobile Menu (checkbox hack + grid-rows animation, item 17) ──
+   Off-screen positioning instead of clip-based sr-only to maintain
+   keyboard focusability (clip:rect can break Tab focus in some browsers).
+   The panel animates its grid-template-rows 0fr→1fr instead of a
+   display:none flip that can never animate. */
 .nav-toggle-input {
   position: absolute;
   left: -9999px;
@@ -162,9 +100,34 @@ textarea:focus-visible {
 }
 /* Ensure close icon is hidden by default (overrides header partial) */
 #menu-icon-close { display: none; }
-#nav-toggle:checked ~ #site-header #mobile-menu { display: block !important; }
 #nav-toggle:checked ~ #site-header #menu-icon-open { display: none !important; }
 #nav-toggle:checked ~ #site-header #menu-icon-close { display: block !important; }
+
+@media (max-width: 1023.98px) {
+  #site-header #mobile-menu {
+    display: grid;
+    grid-template-rows: 0fr;
+    transition: grid-template-rows 280ms cubic-bezier(0.23, 1, 0.32, 1);
+  }
+  #site-header #mobile-menu > .mobile-menu-inner {
+    overflow: hidden;
+    min-height: 0;
+  }
+  #nav-toggle:checked ~ #site-header #mobile-menu {
+    grid-template-rows: 1fr;
+  }
+}
+/* Open-state header styling: opaque surface + deepened border so the
+   expanded panel reads as one attached surface (item 17). */
+#nav-toggle:checked ~ #site-header {
+  background: rgb(var(--surface-50));
+  border-bottom-color: rgb(var(--surface-300));
+}
+@media (prefers-reduced-motion: reduce) {
+  #site-header #mobile-menu {
+    transition: none;
+  }
+}
 
 /* ── FAQ Accordion (<details>/<summary>) ────────────────────── */
 details.faq-item summary {

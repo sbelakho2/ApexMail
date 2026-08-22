@@ -21,21 +21,21 @@ After you submit the form, our enterprise team reviews your requirements and res
   <div>
     <label for="work-email" class="block text-xs font-bold tracking-widest text-surface-600 uppercase mb-2">Work Email <span class="text-red-500">*</span></label>
     <input type="email" id="work-email" name="work_email" required
-      class="w-full px-4 py-3 border border-surface-300 text-sm text-surface-950 bg-white focus:border-brand-500 focus:ring-1 focus:ring-brand-500 outline-none"
+      class="w-full px-4 py-3 border border-surface-300 text-sm text-surface-950 bg-surface-50 focus:border-brand-500 focus:ring-1 focus:ring-brand-500 outline-none"
       placeholder="you@company.com" />
   </div>
 
   <div>
     <label for="company" class="block text-xs font-bold tracking-widest text-surface-600 uppercase mb-2">Company <span class="text-red-500">*</span></label>
     <input type="text" id="company" name="company" required
-      class="w-full px-4 py-3 border border-surface-300 text-sm text-surface-950 bg-white focus:border-brand-500 focus:ring-1 focus:ring-brand-500 outline-none"
+      class="w-full px-4 py-3 border border-surface-300 text-sm text-surface-950 bg-surface-50 focus:border-brand-500 focus:ring-1 focus:ring-brand-500 outline-none"
       placeholder="Your organisation name" />
   </div>
 
   <div>
     <label for="monthly-volume" class="block text-xs font-bold tracking-widest text-surface-600 uppercase mb-2">Approximate Monthly Email Volume <span class="text-red-500">*</span></label>
     <select id="monthly-volume" name="monthly_volume" required
-      class="w-full px-4 py-3 border border-surface-300 text-sm text-surface-950 bg-white focus:border-brand-500 focus:ring-1 focus:ring-brand-500 outline-none">
+      class="w-full px-4 py-3 border border-surface-300 text-sm text-surface-950 bg-surface-50 focus:border-brand-500 focus:ring-1 focus:ring-brand-500 outline-none">
       <option value="" disabled selected>Select volume range</option>
       <option value="lt_100k">Under 100,000</option>
       <option value="100k_500k">100,000 – 500,000</option>
@@ -68,7 +68,7 @@ After you submit the form, our enterprise team reviews your requirements and res
   <div>
     <label for="requirements" class="block text-xs font-bold tracking-widest text-surface-600 uppercase mb-2">Requirements & Context</label>
     <textarea id="requirements" name="requirements" rows="5"
-      class="w-full px-4 py-3 border border-surface-300 text-sm text-surface-950 bg-white focus:border-brand-500 focus:ring-1 focus:ring-brand-500 outline-none resize-y"
+      class="w-full px-4 py-3 border border-surface-300 text-sm text-surface-950 bg-surface-50 focus:border-brand-500 focus:ring-1 focus:ring-brand-500 outline-none resize-y"
       placeholder="Compliance requirements, data residency needs, current provider, migration timeline, specific features needed, or any other context that helps us prepare the right recommendation."></textarea>
   </div>
 

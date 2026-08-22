@@ -1711,8 +1711,11 @@ async fn form_mfa_verify(
             &state.config,
         );
     }
+    // users.id is UUID (canonical migration 052): the session user id is a
+    // String, so cast the bind — an uncast text bind is an operator error
+    // (uuid = text does not exist), not a match.
     let secret = sqlx::query_scalar::<_, Option<String>>(
-        "SELECT mfa_secret FROM users WHERE id = $1",
+        "SELECT mfa_secret FROM users WHERE id = $1::uuid",
     )
     .bind(&user.id)
     .fetch_one(&state.db)
@@ -1800,8 +1803,11 @@ async fn form_signup(State(state): State<AppState>, Form(form): Form<HashMap<Str
     };
     // tenants.id is VARCHAR(26) (ULID, migration 064) — a UUID does not
     // fit; generate a 26-char text id and bind tenant ids as text.
+    // users.id, however, is UUID (migration 052): a text nanoid fails the
+    // INSERT with `invalid input syntax for type uuid` — generate a UUID
+    // for the user id (same convention as the JSON register flow).
     let tenant_id = apexmail_lib::id::generate_id("", 26);
-    let user_id = apexmail_lib::id::generate_id("", 26);
+    let user_id = Uuid::new_v4();
     let slug_source = company.to_lowercase();
     let slug: String = slug_source
         .chars()
@@ -2104,7 +2110,8 @@ async fn form_profile_update(
     if name.is_empty() {
         return redirect_error("Name is required.", "/settings/profile", &state.config);
     }
-    let result = sqlx::query("UPDATE users SET name = $1, updated_at = NOW() WHERE id = $2")
+    // users.id is UUID (canonical migration 052): cast the String bind.
+    let result = sqlx::query("UPDATE users SET name = $1, updated_at = NOW() WHERE id = $2::uuid")
         .bind(&name)
         .bind(user.user_id.clone().unwrap_or_default())
         .execute(&state.db)
@@ -2128,8 +2135,9 @@ async fn form_change_password(
     if let Some(message) = password_policy_error(&new_password) {
         return redirect_error(message, "/settings/profile", &state.config);
     }
+    // users.id is UUID (canonical migration 052): cast the String bind.
     let hash = sqlx::query_scalar::<_, String>(
-        "SELECT password_hash FROM users WHERE id = $1",
+        "SELECT password_hash FROM users WHERE id = $1::uuid",
     )
     .bind(user.user_id.clone().unwrap_or_default())
     .fetch_one(&state.db)
@@ -2147,7 +2155,8 @@ async fn form_change_password(
         Ok(hash) => hash,
         Err(_) => return redirect_error("Could not update the password. Try again.", "/settings/profile", &state.config),
     };
-    let result = sqlx::query("UPDATE users SET password_hash = $1, updated_at = NOW() WHERE id = $2")
+    // users.id is UUID (canonical migration 052): cast the String bind.
+    let result = sqlx::query("UPDATE users SET password_hash = $1, updated_at = NOW() WHERE id = $2::uuid")
         .bind(&new_hash)
         .bind(user.user_id.clone().unwrap_or_default())
         .execute(&state.db)
@@ -2177,8 +2186,9 @@ async fn form_mfa_setup(
         return redirect_error("Sign in again to manage MFA.", "/login", &state.config);
     };
 
+    // users.id is UUID (canonical migration 052): cast the String bind.
     let enabled: Option<bool> = sqlx::query_scalar::<_, bool>(
-        "SELECT mfa_enabled FROM users WHERE id = $1",
+        "SELECT mfa_enabled FROM users WHERE id = $1::uuid",
     )
     .bind(&user_id)
     .fetch_optional(&state.db)
@@ -2283,7 +2293,7 @@ async fn form_mfa_confirm(
     let result = sqlx::query(
         "UPDATE users
          SET mfa_secret = $1, mfa_enabled = true, mfa_recovery_hashes = $2::jsonb, updated_at = NOW()
-         WHERE id = $3 AND tenant_id = $4 AND COALESCE(mfa_enabled, false) = false",
+         WHERE id = $3::uuid AND tenant_id = $4 AND COALESCE(mfa_enabled, false) = false",
     )
     .bind(&encrypted)
     .bind(serde_json::to_value(&recovery_hashes).unwrap_or_default())
@@ -2329,8 +2339,9 @@ async fn generate_totp_secret_and_uri(
     user_id: &str,
     db: &sqlx::PgPool,
 ) -> Result<(String, String), &'static str> {
+    // users.id is UUID (canonical migration 052): cast the String bind.
     let email: String = sqlx::query_scalar::<_, String>(
-        "SELECT email FROM users WHERE id = $1",
+        "SELECT email FROM users WHERE id = $1::uuid",
     )
     .bind(user_id)
     .fetch_optional(db)
@@ -2567,7 +2578,9 @@ async fn form_team_invite(
                             email_verified, mfa_enabled, metadata, created_at, updated_at)
          VALUES ($1, $2, $3, '', $4, $5, 'invited', false, false, '{}'::jsonb, NOW(), NOW())",
     )
-    .bind(apexmail_lib::id::generate_id("", 26))
+    // users.id is a UUID column (migration 052) — bind a UUID, not a text
+    // nanoid (the insert would fail with invalid uuid syntax).
+    .bind(Uuid::new_v4())
     .bind(user.tenant_id.as_str())
     .bind(&email)
     .bind("!invited-pending-activation") // cannot authenticate until they set a password
@@ -2691,9 +2704,10 @@ async fn form_list_update(
     if name.is_empty() || id.is_empty() {
         return redirect_error("Pick a list and give it a name.", "/lists", &state.config);
     }
+    // lists.id is a UUID column (068 lineage): cast the String form bind.
     let result = sqlx::query(
         "UPDATE lists SET name = $1, updated_at = NOW()
-         WHERE id = $2 AND tenant_id = $3",
+         WHERE id = $2::uuid AND tenant_id = $3",
     )
     .bind(&name)
     .bind(&id)
@@ -2919,9 +2933,10 @@ async fn form_campaign_update(
     } else {
         Some(scheduled_at)
     };
+    // campaigns.id is a UUID column: cast the String form bind.
     let result = sqlx::query(
         "UPDATE campaigns SET name = $1, subject = $2, scheduled_at = $3::timestamptz, updated_at = NOW()
-         WHERE id = $4 AND tenant_id = $5",
+         WHERE id = $4::uuid AND tenant_id = $5",
     )
     .bind(&name)
     .bind(&subject)
@@ -4350,7 +4365,9 @@ async fn form_admin_operator_create(
          VALUES ($1, $2, $3, $4, '!invited-pending-activation', 'admin', 'invited', false, false,
                  $5::jsonb, NOW(), NOW())",
     )
-    .bind(apexmail_lib::id::generate_id("", 26))
+    // users.id is a UUID column (migration 052) — bind a UUID, not a text
+    // nanoid (the insert would fail with invalid uuid syntax).
+    .bind(Uuid::new_v4())
     .bind(system_tenant)
     .bind(&email)
     .bind(if name.is_empty() { None } else { Some(name) })
@@ -6866,6 +6883,615 @@ mod tests {
             );
 
             cleanup_tenant(&state, &tenant).await;
+        }
+
+        // ─── Canonical-shape sweep of the `WHERE id = $n` family ──────
+        //
+        // The handlers below bind the session/form-supplied user, list,
+        // campaign and alert ids against UUID columns (canonical
+        // services/mail-server/migrations lineage: users.id, lists.id,
+        // campaigns.id, system_alerts.id are UUID). An uncast String bind
+        // is an `uuid = text` operator error that the handlers' `.ok()`
+        // chains swallow into a silent no-match — the exact defect class
+        // this sweep pins. Every case drives the REAL handler through the
+        // router against a canonical-shape fixture database and asserts the
+        // DATABASE STATE changed, so a regression to text binds fails here
+        // instead of shipping as a silent no-op.
+
+        /// AppState over a canonical-shape fixture pool, with a REAL RSA
+        /// private key so login can mint session JWTs, and the at-rest MFA
+        /// secret key pinned (hex, 32 bytes).
+        async fn canonical_web_state(db: sqlx::PgPool) -> AppState {
+            static INSTALL: std::sync::Once = std::sync::Once::new();
+            INSTALL.call_once(|| {
+                let _ = metrics_exporter_prometheus::PrometheusBuilder::new().install_recorder();
+                std::env::set_var("AWS_EC2_METADATA_DISABLED", "true");
+                std::env::set_var("AWS_ACCESS_KEY_KEY", "test");
+                std::env::set_var("AWS_ACCESS_KEY_ID", "test");
+                std::env::set_var("AWS_SECRET_ACCESS_KEY", "test");
+                std::env::set_var(
+                    "MFA_SECRET_ENCRYPTION_KEY",
+                    "9c4e2a7f1b8d3c506a9e2f7b4d1c8a35e0b6d9437f2a5c8e1b4d7f0a3c6e9247",
+                );
+            });
+            // A real PKCS#8 RSA PEM (DKIM generation is the crate's RSA
+            // keygen) so `session_cookie_for_user` succeeds for the login
+            // cases.
+            let key_pair = apexmail_lib::dkim::generate_dkim_keypair().expect("rsa keypair");
+            let redis = deadpool_redis::Config::from_url("redis://127.0.0.1:1")
+                .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+                .expect("lazy redis pool");
+            let aws_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
+                .region(aws_sdk_sesv2::config::Region::new("us-east-1"))
+                .load()
+                .await;
+            let ses_provider = Arc::new(crate::ses_provider::SesIpProvider::new(
+                aws_sdk_sesv2::Client::new(&aws_config),
+                db.clone(),
+                "apexmail".into(),
+                "us-east-1".into(),
+            ));
+            let mut config = test_config();
+            config.jwt_private_key_pem = key_pair.private_key_pem.to_string();
+            crate::state::AppStateInner::with_ddos_protector(
+                db.clone(),
+                apexmail_db::pool::PoolPair {
+                    rw: db.clone(),
+                    ro: db,
+                },
+                redis,
+                config,
+                reqwest::Client::new(),
+                (*ses_provider).clone(),
+                None,
+                Arc::new(
+                    ddos_protection::DdosProtector::new(ddos_protection::ProtectorConfig::default())
+                        .await
+                        .expect("ddos protector"),
+                ),
+                None,
+                None,
+                crate::resilience::ResilientClient::new_from_config(&test_config()),
+            )
+        }
+
+        /// The /web handlers under sweep, with the session user injected.
+        fn canonical_handlers(state: AppState, user: AuthUser) -> axum::Router {
+            axum::Router::new()
+                .route("/web/account/profile", post(form_profile_update))
+                .route("/web/auth/change-password", post(form_change_password))
+                .route("/web/auth/mfa/setup", post(form_mfa_setup))
+                .route("/web/auth/mfa/confirm", post(form_mfa_confirm))
+                .route("/web/auth/login", post(form_login))
+                .route("/web/auth/mfa/verify", post(form_mfa_verify))
+                .route("/web/auth/signup", post(form_signup))
+                .route("/web/lists/update", post(form_list_update))
+                .route("/web/campaigns/update", post(form_campaign_update))
+                .route("/web/team/invite", post(form_team_invite))
+                .route("/web/admin/operators", post(form_admin_operator_create))
+                .route("/web/admin/alerts/ack", post(form_admin_alert_ack))
+                .layer(axum::middleware::from_fn(
+                    move |mut req: axum::extract::Request,
+                          next: axum::middleware::Next|
+                          -> std::pin::Pin<
+                        Box<dyn std::future::Future<Output = axum::response::Response> + Send>,
+                    > {
+                        req.extensions_mut().insert(user.clone());
+                        Box::pin(next.run(req))
+                    },
+                ))
+                .with_state(state)
+        }
+
+        fn session_user_for(tenant: &str, user_id: &Uuid) -> AuthUser {
+            AuthUser {
+                tenant_id: tenant.to_string(),
+                user_id: Some(user_id.to_string()),
+                api_key_id: None,
+                session_id: None,
+                scopes: vec!["*".to_string()],
+            }
+        }
+
+        /// Seed a canonical tenant + user (UUID id) and return
+        /// (tenant_id, user_id, bcrypt password hash).
+        async fn seed_canonical_user(db: &sqlx::PgPool, password: &str) -> (String, Uuid, String) {
+            let tenant = apexmail_lib::id::generate_id("sweep", 20);
+            sqlx::query(
+                "INSERT INTO tenants (id, name, slug, plan, status)
+                 VALUES ($1, 'Sweep Co', $2, 'free', 'active')",
+            )
+            .bind(&tenant)
+            .bind(format!("sweep-{tenant}"))
+            .execute(db)
+            .await
+            .expect("seed sweep tenant");
+            let user_id = Uuid::new_v4();
+            let hash = hash_password(password).expect("bcrypt hash");
+            sqlx::query(
+                "INSERT INTO users (id, tenant_id, email, name, password_hash, role, status)
+                 VALUES ($1, $2, $3, 'Sweep User', $4, 'owner', 'active')",
+            )
+            .bind(user_id)
+            .bind(&tenant)
+            .bind(format!("sweep-{}@example.com", Uuid::new_v4().simple()))
+            .bind(&hash)
+            .execute(db)
+            .await
+            .expect("seed sweep user");
+            (tenant, user_id, hash)
+        }
+
+        /// The current RFC-6238-style TOTP code for raw secret bytes —
+        /// mirrors apexmail_lib::mfa::generate_totp (HMAC-SHA256, 30s step,
+        /// 6 digits) so the confirm/verify handlers can be exercised with
+        /// a VALID code.
+        fn current_totp_code(secret_bytes: &[u8]) -> String {
+            use hmac::{Hmac, Mac};
+            use sha2::Sha256;
+            type HmacSha256 = Hmac<Sha256>;
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+            let counter = now / 30;
+            let mut mac = HmacSha256::new_from_slice(secret_bytes).unwrap();
+            mac.update(&counter.to_be_bytes());
+            let result = mac.finalize().into_bytes();
+            let offset = (result[result.len() - 1] & 0x0f) as usize;
+            let code = u32::from_be_bytes([
+                result[offset] & 0x7f,
+                result[offset + 1],
+                result[offset + 2],
+                result[offset + 3],
+            ]);
+            format!("{:06}", code % 1_000_000)
+        }
+
+        /// RFC-4648 base32 (no padding) of exactly 20 raw bytes → 32 chars,
+        /// matching the base32 alphabet mfa.rs decodes.
+        fn base32_of_20_bytes(bytes: &[u8; 20]) -> String {
+            const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+            let mut out = String::with_capacity(32);
+            for chunk in bytes.chunks(5) {
+                let mut acc: u64 = 0;
+                for byte in chunk {
+                    acc = (acc << 8) | *byte as u64;
+                }
+                acc <<= 8 * (5 - chunk.len()) as u64;
+                for shift in (0..8).rev() {
+                    let index = ((acc >> (shift * 5)) & 0x1f) as usize;
+                    out.push(ALPHABET[index] as char);
+                }
+            }
+            out
+        }
+
+        /// Extract the first Set-Cookie header value with the given name.
+        fn set_cookie_value(response: &Response, name: &str) -> Option<String> {
+            response
+                .headers()
+                .get_all(header::SET_COOKIE)
+                .iter()
+                .filter_map(|value| value.to_str().ok())
+                .find_map(|value| {
+                    value.split(';').next().and_then(|pair| {
+                        pair.strip_prefix(&format!("{name}="))
+                            .map(str::to_string)
+                    })
+                })
+        }
+
+        /// ONE parametrized sweep: every /web handler that binds an id
+        /// against a UUID column, driven against a canonical-shape database.
+        /// Each case asserts the persisted row changed (or the authenticated
+        /// flow completed) — a silent no-match fails loudly here.
+        #[tokio::test]
+        async fn web_id_binds_match_rows_on_the_canonical_schema() {
+            let Some(db) = crate::test_db::canonical_pool("web_id_sweep").await else {
+                eprintln!("skipping web_id_binds_match_rows_on_the_canonical_schema: no TEST_DATABASE_URL");
+                return;
+            };
+            let state = canonical_web_state(db.clone()).await;
+
+            // ── Case 1: profile update (UPDATE users ... WHERE id = $2) ──
+            let (tenant, user_id, _hash) =
+                seed_canonical_user(&db, "0ld#SweepPassw0rd").await;
+            let app = canonical_handlers(state.clone(), session_user_for(&tenant, &user_id));
+            let response = app
+                .clone()
+                .oneshot(post_form(
+                    "/web/account/profile",
+                    &csrf_body(&state, &[("name", "Renamed Sweep User")]),
+                ))
+                .await
+                .unwrap();
+            let flash = response_flash(&response, &state.config.csrf_secret);
+            assert!(
+                flash_text(&flash).contains("Profile updated"),
+                "profile flash: {flash:?}"
+            );
+            let name: (Option<String>,) =
+                sqlx::query_as("SELECT name FROM users WHERE id = $1")
+                    .bind(user_id)
+                    .fetch_one(&db)
+                    .await
+                    .unwrap();
+            assert_eq!(
+                name.0.as_deref(),
+                Some("Renamed Sweep User"),
+                "UPDATE users ... WHERE id = $n::uuid must match the row"
+            );
+
+            // ── Case 2: change password (SELECT + UPDATE users) ──────────
+            let response = app
+                .clone()
+                .oneshot(post_form(
+                    "/web/auth/change-password",
+                    &csrf_body(
+                        &state,
+                        &[
+                            ("current_password", "0ld#SweepPassw0rd"),
+                            ("new_password", "Br4nd#NewSweepPass"),
+                        ],
+                    ),
+                ))
+                .await
+                .unwrap();
+            let flash = response_flash(&response, &state.config.csrf_secret);
+            assert!(
+                flash_text(&flash).contains("Password updated"),
+                "change-password flash: {flash:?}"
+            );
+            let hash: String =
+                sqlx::query_scalar("SELECT password_hash FROM users WHERE id = $1")
+                    .bind(user_id)
+                    .fetch_one(&db)
+                    .await
+                    .unwrap();
+            assert!(
+                verify_password(&hash, "Br4nd#NewSweepPass"),
+                "UPDATE users password bind must have matched (new hash verifies)"
+            );
+
+            // ── Case 3: MFA setup gate (SELECT mfa_enabled + email) ──────
+            let response = app
+                .clone()
+                .oneshot(post_form("/web/auth/mfa/setup", &csrf_body(&state, &[])))
+                .await
+                .unwrap();
+            let flash = response_flash(&response, &state.config.csrf_secret);
+            assert!(
+                flash_text(&flash).contains("Scan the QR code"),
+                "mfa setup flash: {flash:?}"
+            );
+            assert!(
+                set_cookie_value(&response, "apexmail_mfa_setup").is_some(),
+                "mfa setup must set the pending-setup cookie"
+            );
+
+            // ── Case 4: MFA confirm (UPDATE users ... WHERE id = $3) ─────
+            let mut secret_bytes = [0u8; 20];
+            use rand::TryRngCore;
+            rand::rngs::OsRng
+                .try_fill_bytes(&mut secret_bytes)
+                .expect("os rng");
+            let secret_b32 = base32_of_20_bytes(&secret_bytes);
+            let setup_value = encode_mfa_setup_value(
+                &secret_b32,
+                "otpauth://totp/ApexMail:sweep",
+                &sign_mfa_setup(&state.config, &user_id.to_string(), &secret_b32),
+            );
+            let code = current_totp_code(&secret_bytes);
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/web/auth/mfa/confirm")
+                        .header("content-type", "application/x-www-form-urlencoded")
+                        .header(header::COOKIE, format!("apexmail_mfa_setup={setup_value}"))
+                        .body(Body::from(
+                            csrf_body(&state, &[("code", &code)]),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let flash = response_flash(&response, &state.config.csrf_secret);
+            assert!(
+                flash_text(&flash).contains("MFA enabled"),
+                "mfa confirm flash: {flash:?}"
+            );
+            let (mfa_enabled, mfa_secret): (bool, Option<String>) =
+                sqlx::query_as("SELECT mfa_enabled, mfa_secret FROM users WHERE id = $1")
+                    .bind(user_id)
+                    .fetch_one(&db)
+                    .await
+                    .unwrap();
+            assert!(mfa_enabled, "UPDATE users mfa bind must have matched");
+            assert!(mfa_secret.is_some(), "mfa secret must be persisted");
+
+            // ── Case 5: MFA login verify (SELECT mfa_secret by user id) ──
+            // The same user now has MFA enabled: password login redirects to
+            // the challenge, and a valid TOTP code completes the sign-in —
+            // only possible when the mfa_secret SELECT matched the row.
+            let email: String = sqlx::query_scalar("SELECT email FROM users WHERE id = $1")
+                .bind(user_id)
+                .fetch_one(&db)
+                .await
+                .unwrap();
+            let login_app = canonical_handlers(state.clone(), session_user_for(&tenant, &user_id));
+            let response = login_app
+                .clone()
+                .oneshot(post_form(
+                    "/web/auth/login",
+                    &csrf_body(
+                        &state,
+                        &[("email", &email), ("password", "Br4nd#NewSweepPass")],
+                    ),
+                ))
+                .await
+                .unwrap();
+            let challenge =
+                set_cookie_value(&response, "apexmail_login_challenge")
+                    .unwrap_or_else(|| {
+                        let flash = response_flash(&response, &state.config.csrf_secret);
+                        panic!(
+                            "password login must issue the MFA challenge cookie; flash: {flash:?}; \
+                             set-cookies: {:?}",
+                            response
+                                .headers()
+                                .get_all(header::SET_COOKIE)
+                                .iter()
+                                .map(|v| v.to_str().unwrap_or("<binary>"))
+                                .collect::<Vec<_>>()
+                        );
+                    });
+            let code = current_totp_code(&secret_bytes);
+            let response = login_app
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/web/auth/mfa/verify")
+                        .header("content-type", "application/x-www-form-urlencoded")
+                        .header(
+                            header::COOKIE,
+                            format!("apexmail_login_challenge={challenge}"),
+                        )
+                        .body(Body::from(
+                            csrf_body(&state, &[("code", &code), ("email", &email)]),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            // Full success = a signed session cookie is minted (the
+            // "Signed in" path; only reachable when the mfa_secret SELECT
+            // matched the row and the TOTP code verified).
+            assert!(
+                set_cookie_value(&response, "am_session").is_some(),
+                "mfa verify must complete sign-in (session cookie); flash: {flash:?}; \
+                 status {}; set-cookies {:?}",
+                response.status(),
+                response
+                    .headers()
+                    .get_all(header::SET_COOKIE)
+                    .iter()
+                    .map(|v| v.to_str().unwrap_or("<binary>"))
+                    .collect::<Vec<_>>()
+            );
+
+            // ── Case 6: list update (UPDATE lists ... WHERE id = $2) ─────
+            let list_id = Uuid::new_v4();
+            sqlx::query(
+                "INSERT INTO lists (id, tenant_id, name) VALUES ($1, $2, 'Before')",
+            )
+            .bind(list_id)
+            .bind(&tenant)
+            .execute(&db)
+            .await
+            .unwrap();
+            let response = app
+                .clone()
+                .oneshot(post_form(
+                    "/web/lists/update",
+                    &csrf_body(
+                        &state,
+                        &[("id", &list_id.to_string()), ("name", "After Sweep")],
+                    ),
+                ))
+                .await
+                .unwrap();
+            let flash = response_flash(&response, &state.config.csrf_secret);
+            assert!(
+                flash_text(&flash).contains("List saved"),
+                "list update flash: {flash:?}"
+            );
+            let list_name: String =
+                sqlx::query_scalar("SELECT name FROM lists WHERE id = $1")
+                    .bind(list_id)
+                    .fetch_one(&db)
+                    .await
+                    .unwrap();
+            assert_eq!(list_name, "After Sweep");
+
+            // ── Case 7: campaign update (UPDATE campaigns ... id = $4) ───
+            let campaign_id = Uuid::new_v4();
+            sqlx::query(
+                "INSERT INTO campaigns (id, tenant_id, name, subject, status)
+                 VALUES ($1, $2, 'Before', 'Old subject', 'draft')",
+            )
+            .bind(campaign_id)
+            .bind(&tenant)
+            .execute(&db)
+            .await
+            .unwrap();
+            let response = app
+                .clone()
+                .oneshot(post_form(
+                    "/web/campaigns/update",
+                    &csrf_body(
+                        &state,
+                        &[
+                            ("id", &campaign_id.to_string()),
+                            ("name", "After Campaign"),
+                            ("subject", "New subject"),
+                        ],
+                    ),
+                ))
+                .await
+                .unwrap();
+            let flash = response_flash(&response, &state.config.csrf_secret);
+            assert!(
+                flash_text(&flash).contains("Campaign saved"),
+                "campaign update flash: {flash:?}"
+            );
+            let (campaign_name, subject): (String, Option<String>) =
+                sqlx::query_as("SELECT name, subject FROM campaigns WHERE id = $1")
+                    .bind(campaign_id)
+                    .fetch_one(&db)
+                    .await
+                    .unwrap();
+            assert_eq!(campaign_name, "After Campaign");
+            assert_eq!(subject.as_deref(), Some("New subject"));
+
+            // ── Case 8: team invite (INSERT users ... VALUES ($1 uuid)) ──
+            let invite_email = format!("invitee-{}@example.com", Uuid::new_v4().simple());
+            let response = app
+                .clone()
+                .oneshot(post_form(
+                    "/web/team/invite",
+                    &csrf_body(&state, &[("userName", &invite_email), ("role", "member")]),
+                ))
+                .await
+                .unwrap();
+            let flash = response_flash(&response, &state.config.csrf_secret);
+            assert!(
+                flash_text(&flash).contains("Invitation created"),
+                "team invite flash: {flash:?}"
+            );
+            let invited: Option<(String,)> = sqlx::query_as(
+                "SELECT id::text FROM users WHERE email = $1 AND status = 'invited'",
+            )
+            .bind(&invite_email)
+            .fetch_optional(&db)
+            .await
+            .unwrap();
+            assert!(
+                invited.is_some(),
+                "INSERT INTO users with a UUID id must persist the invitation"
+            );
+
+            // ── Case 9: operator create (INSERT users, system tenant) ────
+            sqlx::query(
+                "INSERT INTO tenants (id, name, slug, plan, status)
+                 VALUES ('system_internal_tenant01', 'ApexMail', 'system', 'free', 'active')
+                 ON CONFLICT (id) DO NOTHING",
+            )
+            .execute(&db)
+            .await
+            .unwrap();
+            let operator_email = format!("operator-{}@example.com", Uuid::new_v4().simple());
+            let response = app
+                .clone()
+                .oneshot(post_form(
+                    "/web/admin/operators",
+                    &csrf_body(&state, &[("email", &operator_email), ("name", "Ops")]),
+                ))
+                .await
+                .unwrap();
+            let flash = response_flash(&response, &state.config.csrf_secret);
+            assert!(
+                flash_text(&flash).contains("Operator invited"),
+                "operator create flash: {flash:?}"
+            );
+            let operator: Option<(String,)> = sqlx::query_as(
+                "SELECT id::text FROM users WHERE email = $1 AND role = 'admin'",
+            )
+            .bind(&operator_email)
+            .fetch_optional(&db)
+            .await
+            .unwrap();
+            assert!(operator.is_some(), "operator INSERT must persist a row");
+
+            // ── Case 10: web form signup twin (INSERT tenants + users) ───
+            let signup_email = format!("websignup-{}@example.com", Uuid::new_v4().simple());
+            let response = app
+                .clone()
+                .oneshot(post_form(
+                    "/web/auth/signup",
+                    &csrf_body(
+                        &state,
+                        &[
+                            ("name", "Web Signup"),
+                            ("company_name", "Web Signup Co"),
+                            ("email", &signup_email),
+                            ("password", "We5#SignupPassword"),
+                        ],
+                    ),
+                ))
+                .await
+                .unwrap();
+            let flash = response_flash(&response, &state.config.csrf_secret);
+            assert!(
+                flash_text(&flash).contains("Account created"),
+                "web signup flash: {flash:?}"
+            );
+            let web_user: Option<(String, String)> = sqlx::query_as(
+                "SELECT id::text, tenant_id::text FROM users WHERE email = $1",
+            )
+            .bind(&signup_email)
+            .fetch_optional(&db)
+            .await
+            .unwrap();
+            let Some((web_user_id, web_tenant_id)) = web_user else {
+                panic!("web signup must persist the user row");
+            };
+            assert!(Uuid::parse_str(&web_user_id).is_ok(), "users.id must be a UUID");
+            let web_tenant: Option<(String,)> =
+                sqlx::query_as("SELECT status FROM tenants WHERE id = $1")
+                    .bind(&web_tenant_id)
+                    .fetch_optional(&db)
+                    .await
+                    .unwrap();
+            assert!(web_tenant.is_some(), "web signup must persist the tenant row");
+
+            // ── Case 11: alert ack (UPDATE system_alerts ... id = $2) ────
+            let alert_id = Uuid::new_v4();
+            sqlx::query(
+                "INSERT INTO system_alerts (id, severity, alert_type, message)
+                 VALUES ($1, 'warning', 'disk', 'sweep alert')",
+            )
+            .bind(alert_id)
+            .execute(&db)
+            .await
+            .unwrap();
+            let response = app
+                .oneshot(post_form(
+                    "/web/admin/alerts/ack",
+                    &csrf_body(&state, &[("id", &alert_id.to_string())]),
+                ))
+                .await
+                .unwrap();
+            let flash = response_flash(&response, &state.config.csrf_secret);
+            assert!(
+                flash_text(&flash).contains("Alert acknowledged"),
+                "alert ack flash: {flash:?}"
+            );
+            let acked: Option<(Option<String>,)> = sqlx::query_as(
+                "SELECT acknowledged_by FROM system_alerts WHERE id = $1 AND acknowledged",
+            )
+            .bind(alert_id)
+            .fetch_optional(&db)
+            .await
+            .unwrap();
+            assert!(
+                acked.is_some_and(|(by,)| by.is_some_and(|v| !v.is_empty())),
+                "UPDATE system_alerts must match and record the acknowledger"
+            );
+
+            db.close().await;
         }
     }
 }

@@ -25,21 +25,21 @@ ApexMail provides security documentation to qualified Enterprise prospects and c
   <div>
     <label for="work-email-sec" class="block text-xs font-bold tracking-widest text-surface-600 uppercase mb-2">Work Email <span class="text-red-500">*</span></label>
     <input type="email" id="work-email-sec" name="work_email" required
-      class="w-full px-4 py-3 border border-surface-300 text-sm text-surface-950 bg-white focus:border-brand-500 focus:ring-1 focus:ring-brand-500 outline-none"
+      class="w-full px-4 py-3 border border-surface-300 text-sm text-surface-950 bg-surface-50 focus:border-brand-500 focus:ring-1 focus:ring-brand-500 outline-none"
       placeholder="you@company.com" />
   </div>
 
   <div>
     <label for="company-sec" class="block text-xs font-bold tracking-widest text-surface-600 uppercase mb-2">Company <span class="text-red-500">*</span></label>
     <input type="text" id="company-sec" name="company" required
-      class="w-full px-4 py-3 border border-surface-300 text-sm text-surface-950 bg-white focus:border-brand-500 focus:ring-1 focus:ring-brand-500 outline-none"
+      class="w-full px-4 py-3 border border-surface-300 text-sm text-surface-950 bg-surface-50 focus:border-brand-500 focus:ring-1 focus:ring-brand-500 outline-none"
       placeholder="Your organisation name" />
   </div>
 
   <div>
     <label for="document-type" class="block text-xs font-bold tracking-widest text-surface-600 uppercase mb-2">Documentation Requested <span class="text-red-500">*</span></label>
     <select id="document-type" name="document_type" required
-      class="w-full px-4 py-3 border border-surface-300 text-sm text-surface-950 bg-white focus:border-brand-500 focus:ring-1 focus:ring-brand-500 outline-none">
+      class="w-full px-4 py-3 border border-surface-300 text-sm text-surface-950 bg-surface-50 focus:border-brand-500 focus:ring-1 focus:ring-brand-500 outline-none">
       <option value="" disabled selected>Select what you need</option>
       <option value="sig">SIG Questionnaire</option>
       <option value="caiq">CAIQ Questionnaire</option>
@@ -55,7 +55,7 @@ ApexMail provides security documentation to qualified Enterprise prospects and c
   <div>
     <label for="nda-status" class="block text-xs font-bold tracking-widest text-surface-600 uppercase mb-2">NDA Status</label>
     <select id="nda-status" name="nda_status"
-      class="w-full px-4 py-3 border border-surface-300 text-sm text-surface-950 bg-white focus:border-brand-500 focus:ring-1 focus:ring-brand-500 outline-none">
+      class="w-full px-4 py-3 border border-surface-300 text-sm text-surface-950 bg-surface-50 focus:border-brand-500 focus:ring-1 focus:ring-brand-500 outline-none">
       <option value="not_signed" selected>NDA not yet signed</option>
       <option value="signed">NDA already in place</option>
       <option value="willing">Willing to sign NDA</option>
@@ -65,7 +65,7 @@ ApexMail provides security documentation to qualified Enterprise prospects and c
   <div>
     <label for="context" class="block text-xs font-bold tracking-widest text-surface-600 uppercase mb-2">Additional Context</label>
     <textarea id="context" name="context" rows="4"
-      class="w-full px-4 py-3 border border-surface-300 text-sm text-surface-950 bg-white focus:border-brand-500 focus:ring-1 focus:ring-brand-500 outline-none resize-y"
+      class="w-full px-4 py-3 border border-surface-300 text-sm text-surface-950 bg-surface-50 focus:border-brand-500 focus:ring-1 focus:ring-brand-500 outline-none resize-y"
       placeholder="Any specific compliance framework, regulatory requirements, or timeline constraints we should know about."></textarea>
   </div>
 

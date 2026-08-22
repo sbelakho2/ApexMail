@@ -22,6 +22,7 @@ fn html_escape(text: &str) -> String {
 /// identical — titles are page-distinct ("Delete campaign?" vs "Delete
 /// list?"), and a same-title pair is still addressed via distinct wrapper
 /// ids from the page markup.
+#[allow(dead_code)]
 fn next_dialog_id() -> String {
     "apex-dialog".to_string()
 }
@@ -286,7 +287,7 @@ impl<'a> Button<'a> {
             String::new()
         };
         format!(
-            "<button type=\"{button_type}\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-md text-[14px] font-sans font-semibold tracking-[0.01em] ring-offset-background transition-colors duration-150 ease-out !shadow-none hover:!shadow-none active:!shadow-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 {} {}\" data-variant=\"{}\" data-size=\"{}\"{}>{}{}{}{}</button>",
+            "<button type=\"{button_type}\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-md text-[14px] font-sans font-semibold tracking-[0.01em] ring-offset-background transition-all duration-200 ease-premium active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 {} {}\" data-variant=\"{}\" data-size=\"{}\"{}>{}{}{}{}</button>",
             button_variant_class(self.variant),
             button_size_class(self.size),
             self.variant,
@@ -1583,14 +1584,11 @@ impl PaginationControls {
             .filter(|value| !value.is_empty())
             .map(|value| format!("&{}", value))
             .unwrap_or_default();
-        let persistence_attr = persistence_key
-            .map(|value| {
-                format!(
-                    " data-pagination-storage-key=\"{}\" data-preserve-query=\"true\"",
-                    value
-                )
-            })
-            .unwrap_or_default();
+        // Dead JS-era markup purge: the pagination storage key fed a
+        // localStorage bridge that no longer exists. Query preservation is
+        // server-side now (the links carry the filter query); the parameter
+        // stays for call-site compatibility and is deliberately unused.
+        let _ = persistence_key;
         let link = |label: &str, target_page: usize, disabled: bool| {
             if disabled {
                 return format!(
@@ -1608,10 +1606,9 @@ impl PaginationControls {
             )
         };
         format!(
-            "<div class=\"flex flex-wrap items-center gap-2\" role=\"navigation\" aria-label=\"Pagination controls\" data-current-page=\"{}\" data-total-pages=\"{}\"{}>{}{}<span class=\"px-2 text-sm text-muted-foreground\">Page {} of {}</span>{}{}</div>",
+            "<div class=\"flex flex-wrap items-center gap-2\" role=\"navigation\" aria-label=\"Pagination controls\" data-current-page=\"{}\" data-total-pages=\"{}\">{}{}<span class=\"px-2 text-sm text-muted-foreground\">Page {} of {}</span>{}{}</div>",
             current_page,
             safe_total_pages,
-            persistence_attr,
             link("First", 1, current_page == 1),
             link("Previous", current_page.saturating_sub(1).max(1), current_page == 1),
             current_page,
@@ -1696,7 +1693,9 @@ fn button_variant_class(variant: &str) -> &'static str {
 
 fn button_size_class(size: &str) -> &'static str {
     match size {
-        "sm" => "px-5 py-2.5 text-[11px] tracking-tight",
+        // Retuned sm: compact control scale — no larger than the default
+        // button's padding with a smaller type step.
+        "sm" => "px-3.5 py-1.5 text-xs tracking-tight",
         "lg" => "px-8 py-4 text-[15px] tracking-tight",
         "xl" => "px-10 py-5 text-[17px] tracking-tight",
         "icon" => "h-10 w-10",
@@ -1941,52 +1940,65 @@ fn skeleton_variant_class(variant: &str) -> &'static str {
 }
 
 fn status_indicator_config(status: &str) -> (&str, &str, &str) {
+    const DOT_SUCCESS: &str =
+        "<span class=\"mr-1 h-2 w-2 rounded-full bg-success-500\" aria-hidden=\"true\"></span>";
+    const DOT_INFO: &str =
+        "<span class=\"mr-1 h-2 w-2 rounded-full bg-info-500\" aria-hidden=\"true\"></span>";
+    const DOT_WARNING: &str =
+        "<span class=\"mr-1 h-2 w-2 rounded-full bg-warning-500\" aria-hidden=\"true\"></span>";
+    const DOT_ERROR: &str =
+        "<span class=\"mr-1 h-2 w-2 rounded-full bg-destructive\" aria-hidden=\"true\"></span>";
+    const DOT_OUTLINE: &str =
+        "<span class=\"mr-1 h-2 w-2 rounded-full border border-current\" aria-hidden=\"true\"></span>";
     match status.to_ascii_lowercase().as_str() {
-        "draft" => (
-            "Draft",
-            "secondary",
-            "<span class=\"mr-1 h-2 w-2 rounded-full border border-current\" aria-hidden=\"true\"></span>",
-        ),
-        "scheduled" => ("Scheduled", "info", "<span class=\"mr-1 h-2 w-2 rounded-full bg-info-500\" aria-hidden=\"true\"></span>"),
-        "sending" => (
-            "Sending",
-            "warning",
-            "<span class=\"mr-1 h-2 w-2 rounded-full bg-warning-500\" aria-hidden=\"true\"></span>",
-        ),
-        "sent" => ("Sent", "success", "<span class=\"mr-1 h-2 w-2 rounded-full bg-success-500\" aria-hidden=\"true\"></span>"),
-        "paused" => ("Paused", "outline", "<span class=\"mr-1 h-2 w-2 rounded-full border border-current\" aria-hidden=\"true\"></span>"),
-        "subscribed" => (
-            "Subscribed",
-            "success",
-            "<span class=\"mr-1 h-2 w-2 rounded-full bg-success-500\" aria-hidden=\"true\"></span>",
-        ),
-        "unsubscribed" => (
-            "Unsubscribed",
-            "secondary",
-            "<span class=\"mr-1 h-2 w-2 rounded-full border border-current\" aria-hidden=\"true\"></span>",
-        ),
-        "bounced" => (
-            "Bounced",
-            "warning",
-            "<span class=\"mr-1 h-2 w-2 rounded-full bg-warning-500\" aria-hidden=\"true\"></span>",
-        ),
-        "complained" => (
-            "Complained",
-            "error",
-            "<span class=\"mr-1 h-2 w-2 rounded-full bg-destructive\" aria-hidden=\"true\"></span>",
-        ),
-        "delivered" => (
-            "Delivered",
-            "success",
-            "<span class=\"mr-1 h-2 w-2 rounded-full bg-success-500\" aria-hidden=\"true\"></span>",
-        ),
+        "draft" => ("Draft", "secondary", DOT_OUTLINE),
+        "scheduled" => ("Scheduled", "info", DOT_INFO),
+        "sending" => ("Sending", "warning", DOT_WARNING),
+        "sent" => ("Sent", "success", DOT_SUCCESS),
+        "paused" => ("Paused", "outline", DOT_OUTLINE),
+        "subscribed" => ("Subscribed", "success", DOT_SUCCESS),
+        "unsubscribed" => ("Unsubscribed", "secondary", DOT_OUTLINE),
+        "bounced" => ("Bounced", "warning", DOT_WARNING),
+        "complained" => ("Complained", "error", DOT_ERROR),
+        "delivered" => ("Delivered", "success", DOT_SUCCESS),
         "queued" => (
             "Queued",
             "secondary",
             "<span class=\"mr-1 h-2 w-2 rounded-full bg-muted-foreground\" aria-hidden=\"true\"></span>",
         ),
-        "failed" => ("Failed", "error", "<span class=\"mr-1 h-2 w-2 rounded-full bg-destructive\" aria-hidden=\"true\"></span>"),
-        _ => (status, "secondary", "<span class=\"mr-1 h-2 w-2 rounded-full border border-current\" aria-hidden=\"true\"></span>"),
+        "failed" => ("Failed", "error", DOT_ERROR),
+        // ── Control-plane vocabulary ────────────────────────────────
+        // Active tenants, verified domains, healthy fleet states, and
+        // finished work previously fell through to gray. Severity words
+        // (critical/high/…) map so alerts triage by color.
+        "active" => ("Active", "success", DOT_SUCCESS),
+        "verified" => ("Verified", "success", DOT_SUCCESS),
+        "healthy" => ("Healthy", "success", DOT_SUCCESS),
+        "operational" => ("Operational", "success", DOT_SUCCESS),
+        "ready" => ("Ready", "success", DOT_SUCCESS),
+        "online" => ("Online", "success", DOT_SUCCESS),
+        "completed" => ("Completed", "success", DOT_SUCCESS),
+        "approved" => ("Approved", "success", DOT_SUCCESS),
+        "suspended" => ("Suspended", "outline-error", DOT_ERROR),
+        "blocked" => ("Blocked", "outline-error", DOT_ERROR),
+        "cancelled" | "canceled" => ("Cancelled", "secondary", DOT_OUTLINE),
+        "rejected" => ("Rejected", "secondary", DOT_OUTLINE),
+        "stopped" => ("Stopped", "secondary", DOT_OUTLINE),
+        "acknowledged" => ("Acknowledged", "outline", DOT_OUTLINE),
+        "critical" => ("Critical", "error", DOT_ERROR),
+        "high" => ("High", "error", DOT_ERROR),
+        "medium" => ("Medium", "warning", DOT_WARNING),
+        "low" => ("Low", "secondary", DOT_OUTLINE),
+        "escalated" => ("Escalated", "warning", DOT_WARNING),
+        "pending" => ("Pending", "outline", DOT_OUTLINE),
+        "invited" => ("Invited", "info", DOT_INFO),
+        "processing" => ("Processing", "info", DOT_INFO),
+        "in_progress" => ("In progress", "info", DOT_INFO),
+        "draining" => ("Draining", "warning", DOT_WARNING),
+        "new" => ("New", "secondary", DOT_OUTLINE),
+        "qualified" => ("Qualified", "info", DOT_INFO),
+        "proposal" => ("Proposal", "info", DOT_INFO),
+        _ => (status, "secondary", DOT_OUTLINE),
     }
 }
 
@@ -2767,8 +2779,12 @@ mod tests {
         assert!(html.contains("<span class=\"ml-2\"><svg></svg></span>"));
         assert!(html
             .contains("focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"));
-        assert!(html.contains("hover:!shadow-none"));
-        assert!(html.contains("active:!shadow-none"));
+        // Unification: the pressed state is active:scale, transitions ride
+        // the ease-premium curve, and the !shadow-none overrides are gone.
+        assert!(html.contains("active:scale-[0.98]"));
+        assert!(html.contains("ease-premium"));
+        assert!(!html.contains("hover:!shadow-none"));
+        assert!(!html.contains("active:!shadow-none"));
     }
 
     #[test]
@@ -3331,8 +3347,10 @@ mod tests {
         assert!(html.contains("href=\"/campaigns?page=1&status=draft&query=spring\""));
         assert!(html.contains("href=\"/campaigns?page=2&status=draft&query=spring\""));
         assert!(html.contains("href=\"/campaigns?page=4&status=draft&query=spring\""));
-        assert!(html.contains("data-pagination-storage-key=\"apexmail:campaigns:page\""));
-        assert!(html.contains("data-preserve-query=\"true\""));
+        // Dead JS-era markup purge: the localStorage bridge key is gone —
+        // query preservation is carried by the hrefs themselves.
+        assert!(!html.contains("data-pagination-storage-key"));
+        assert!(!html.contains("data-preserve-query"));
     }
 
     #[test]

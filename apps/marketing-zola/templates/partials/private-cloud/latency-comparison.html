@@ -1,5 +1,5 @@
 {# Latency comparison — illustrative deployment scenarios with CSS-only animation #}
-<section class="py-20 lg:py-32 relative bg-white">
+<section class="py-20 lg:py-32 relative bg-surface-50">
   <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
     <div class="text-center mb-12">
       <div class="inline-flex items-center gap-2 px-3 py-1 rounded-sm bg-surface-100/50 text-surface-950 border border-surface-200 text-xs font-medium mb-4">
@@ -18,7 +18,7 @@
       </p>
     </div>
 
-    <div class="bg-white border border-surface-200 rounded-sm p-8">
+    <div class="bg-surface-50 border border-surface-200 rounded-lg p-8">
       <div class="space-y-8" role="region" aria-label="Relative latency comparison by deployment scenario">
 
         {# Private Cloud — Same VPC #}
@@ -106,21 +106,21 @@
 
     {# Key Points #}
     <div class="grid md:grid-cols-3 gap-6 mt-12">
-      <div class="bg-white border border-surface-200 rounded-sm p-8 text-center">
+      <div class="bg-surface-50 border border-surface-200 rounded-lg p-8 text-center">
         <div class="w-10 h-10 rounded-sm bg-surface-100/50 flex items-center justify-center mx-auto mb-4 border border-surface-200">
           <svg class="w-5 h-5 text-surface-950" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>
         </div>
         <div class="text-lg font-semibold text-surface-950 mb-2">VPC-Collocated</div>
         <div class="text-sm text-surface-600 font-medium leading-relaxed">App and API within the same private network — no public internet hops</div>
       </div>
-      <div class="bg-white border border-surface-200 rounded-sm p-8 text-center">
+      <div class="bg-surface-50 border border-surface-200 rounded-lg p-8 text-center">
         <div class="w-10 h-10 rounded-sm bg-surface-100/50 flex items-center justify-center mx-auto mb-4 border border-surface-200">
           <svg class="w-5 h-5 text-surface-950" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M3.055 11H5a2 2 0 012 2v1a2 2 0 002 2h1a2 2 0 012-2v-1a2 2 0 012-2h1.945M12 2a10 10 0 100 20 10 10 0 000-20z"/></svg>
         </div>
         <div class="text-lg font-semibold text-surface-950 mb-2">Zero Egress</div>
         <div class="text-sm text-surface-600 font-medium leading-relaxed">Traffic stays within your VPC, reducing cost and exposure</div>
       </div>
-      <div class="bg-white border border-surface-200 rounded-sm p-8 text-center">
+      <div class="bg-surface-50 border border-surface-200 rounded-lg p-8 text-center">
         <div class="w-10 h-10 rounded-sm bg-surface-100/50 flex items-center justify-center mx-auto mb-4 border border-surface-200">
           <svg class="w-5 h-5 text-surface-950" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M12 6v6l4 2m6-2a10 10 0 11-20 0 10 10 0 0120 0z"/></svg>
         </div>

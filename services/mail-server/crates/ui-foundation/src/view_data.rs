@@ -20,6 +20,9 @@ pub struct KpiCardData {
     pub value: String,
     /// Secondary line under the value (e.g. "vs. previous 30 days").
     pub hint: Option<String>,
+    /// Optional trend series for the SSR sparkline (oldest → newest).
+    /// Rendered by [`crate::charts::render_sparkline`] inside the stat tile.
+    pub trend: Option<Vec<i64>>,
 }
 
 impl KpiCardData {
@@ -28,11 +31,18 @@ impl KpiCardData {
             label: label.to_string(),
             value: value.into(),
             hint: None,
+            trend: None,
         }
     }
 
     pub fn with_hint(mut self, hint: &str) -> Self {
         self.hint = Some(hint.to_string());
+        self
+    }
+
+    /// Attach a trend series (renders the sparkline chassis).
+    pub fn with_trend(mut self, trend: &[i64]) -> Self {
+        self.trend = Some(trend.to_vec());
         self
     }
 }
@@ -44,12 +54,16 @@ impl KpiCardData {
 pub enum DataCell {
     /// Plain text (HTML-escaped).
     Text(String),
-    /// Monospaced text for ids / codes (HTML-escaped).
+    /// Monospaced text for ids / codes (HTML-escaped, truncated visually
+    /// with the full value in `title`).
     Mono(String),
     /// Link to a same-origin path.
     Link { href: String, text: String },
     /// Status pill (draft/sent/active/… — rendered as an indicator).
     Status(String),
+    /// Timestamp under the one timestamp policy: relative prose for the
+    /// cell, RFC 3339 UTC in `title` + `datetime` for the exact value.
+    Time { relative: String, utc: String },
 }
 
 impl DataCell {
@@ -63,6 +77,15 @@ impl DataCell {
 
     pub fn status(value: &str) -> Self {
         DataCell::Status(value.to_string())
+    }
+
+    /// Timestamp cell from a RFC 3339 UTC string (renders "just now" style
+    /// prose when the loader passes a relative bucket instead).
+    pub fn time(relative: impl Into<String>, utc: impl Into<String>) -> Self {
+        DataCell::Time {
+            relative: relative.into(),
+            utc: utc.into(),
+        }
     }
 }
 
@@ -195,8 +218,9 @@ pub fn render_data_cell(cell: &DataCell) -> String {
     match cell {
         DataCell::Text(value) => html_escape(value),
         DataCell::Mono(value) => format!(
-            "<code class=\"font-mono text-xs bg-muted/40 rounded px-1.5 py-0.5\">{}</code>",
-            html_escape(value)
+            "<code class=\"font-mono text-xs bg-muted/40 rounded px-1.5 py-0.5 apex-mono-id\" title=\"{}\">{}</code>",
+            html_escape(value),
+            html_escape(value),
         ),
         DataCell::Link { href, text } => format!(
             "<a href=\"{}\" class=\"font-bold text-foreground hover:text-primary\">{}</a>",
@@ -206,6 +230,84 @@ pub fn render_data_cell(cell: &DataCell) -> String {
         DataCell::Status(status) => {
             crate::primitives::StatusIndicator { status }.render_html()
         }
+        DataCell::Time { relative, utc } => format!(
+            "<time class=\"apex-time-cell text-xs\" datetime=\"{}\" title=\"{} UTC\">{}</time>",
+            attribute_escape(utc),
+            html_escape(utc),
+            html_escape(relative),
+        ),
+    }
+}
+
+/// Signed form state for one failed (or secret-bearing) POST → GET round
+/// trip — the view-layer mirror of the api-server's `FormFieldMap` cookie.
+/// Values re-populate inputs, errors render as per-field helper text under
+/// the matching control, and reveal-once secrets render as mono chips.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FormFieldData {
+    /// Identifies which form the values belong to (e.g. "webhook-create");
+    /// guards against replaying values into an unrelated form.
+    pub form_id: String,
+    /// Submitted field values to re-populate (order preserved).
+    pub values: Vec<(String, String)>,
+    /// Per-field validation errors (field name → message).
+    pub errors: Vec<(String, String)>,
+    /// Reveal-once secrets (label → value) rendered as mono chips.
+    pub secrets: Vec<(String, String)>,
+}
+
+impl FormFieldData {
+    pub fn new(form_id: &str) -> Self {
+        Self {
+            form_id: form_id.to_string(),
+            ..Default::default()
+        }
+    }
+
+    /// Record a field value for re-population.
+    pub fn set(&mut self, name: &str, value: &str) {
+        if let Some(slot) = self.values.iter_mut().find(|(n, _)| n == name) {
+            slot.1 = value.to_string();
+        } else {
+            self.values.push((name.to_string(), value.to_string()));
+        }
+    }
+
+    /// Record a per-field error.
+    pub fn error(&mut self, name: &str, message: &str) {
+        self.errors.push((name.to_string(), message.to_string()));
+    }
+
+    /// Record a reveal-once secret (mono-renderable).
+    pub fn secret(&mut self, label: &str, value: &str) {
+        self.secrets.push((label.to_string(), value.to_string()));
+    }
+
+    /// The re-population value for a field (last write wins).
+    pub fn field_value(&self, name: &str) -> Option<&str> {
+        self.values
+            .iter()
+            .rev()
+            .find(|(n, _)| n == name)
+            .map(|(_, v)| v.as_str())
+    }
+
+    /// The validation error for a field, if any.
+    pub fn field_error(&self, name: &str) -> Option<&str> {
+        self.errors
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, m)| m.as_str())
+    }
+
+    /// Reveal-once secrets for mono rendering.
+    pub fn secrets(&self) -> &[(String, String)] {
+        &self.secrets
+    }
+
+    /// True when nothing would render.
+    pub fn is_empty(&self) -> bool {
+        self.values.is_empty() && self.errors.is_empty() && self.secrets.is_empty()
     }
 }
 
@@ -264,5 +366,49 @@ mod tests {
             attribute_escape("/a?x=\"1\"&y=2"),
             "/a?x=&quot;1&quot;&amp;y=2"
         );
+    }
+
+    #[test]
+    fn mono_cells_truncate_visually_and_carry_the_full_value() {
+        let long_id = "a1b2c3d4-e5f6-7890-abcd-ef1234567890-extra";
+        let html = render_data_cell(&DataCell::mono(long_id));
+        assert!(html.contains("apex-mono-id"));
+        assert!(html.contains(&format!("title=\"{long_id}\"")));
+        assert!(html.contains(long_id));
+    }
+
+    #[test]
+    fn time_cells_render_the_one_timestamp_policy() {
+        let html = render_data_cell(&DataCell::time(
+            "2 hours ago",
+            "2026-08-21T10:00:00+00:00",
+        ));
+        assert!(html.contains("<time"));
+        assert!(html.contains("datetime=\"2026-08-21T10:00:00+00:00\""));
+        assert!(html.contains("title=\"2026-08-21T10:00:00+00:00 UTC\""));
+        assert!(html.contains("2 hours ago"));
+        assert!(html.contains("apex-time-cell"));
+    }
+
+    #[test]
+    fn kpi_cards_carry_trend_series() {
+        let kpi = KpiCardData::new("Sent (30d)", "1_234").with_trend(&[1, 2, 3]);
+        assert_eq!(kpi.trend.as_deref(), Some(&[1, 2, 3][..]));
+        assert!(KpiCardData::new("Plain", "1").trend.is_none());
+    }
+
+    #[test]
+    fn form_field_data_accessors_mirror_the_server_map() {
+        let mut map = FormFieldData::new("webhook-create");
+        assert!(map.is_empty());
+        map.set("url", "https://example.com/hook");
+        map.set("url", "https://example.com/v2");
+        map.error("url", "Enter an https URL.");
+        map.secret("signing secret", "whsec_1");
+        assert_eq!(map.field_value("url"), Some("https://example.com/v2"));
+        assert_eq!(map.field_error("url"), Some("Enter an https URL."));
+        assert_eq!(map.secrets().len(), 1);
+        assert!(!map.is_empty());
+        assert_eq!(map.form_id, "webhook-create");
     }
 }

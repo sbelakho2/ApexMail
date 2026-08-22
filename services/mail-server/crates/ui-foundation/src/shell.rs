@@ -130,6 +130,23 @@ pub struct UserContext<'a> {
     pub plan_label: &'a str,
 }
 
+/// Session identity for the shell header, derived server-side from the
+/// authenticated session (display name, email, plan label). The avatar
+/// fallback is computed from the display name's initials.
+pub fn avatar_initials(display_name: &str) -> String {
+    let initials: String = display_name
+        .split_whitespace()
+        .filter(|part| !part.is_empty())
+        .take(2)
+        .map(|part| part.chars().next().unwrap_or('?').to_ascii_uppercase())
+        .collect();
+    if initials.is_empty() {
+        "AM".to_string()
+    } else {
+        initials
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ShellHeader<'a> {
     pub search_query: &'a str,
@@ -290,7 +307,7 @@ impl<'a> WebDashboardShell<'a> {
                 {sidebar_content}\
             </aside>\
             {mobile_sidebar}\
-            <div class=\"flex-1 flex flex-col min-h-screen transition-all duration-300 ml-0 md:ml-{ml_val}\">\
+            <div class=\"flex-1 flex flex-col min-h-screen min-w-0 transition-all duration-300 ml-0 md:ml-{ml_val}\"{impersonation_offset}>\
                 {header}\
                 <main class=\"apex-console-main relative p-6 lg:p-10 flex-1\" id=\"app-main\">\
                     <div class=\"max-w-7xl mx-auto\">\
@@ -307,6 +324,14 @@ impl<'a> WebDashboardShell<'a> {
             sidebar_content = sidebar_content,
             mobile_sidebar = mobile_sidebar,
             ml_val = if self.sidebar_collapsed { "20" } else { "64" },
+            // The impersonation banner is a fixed overlay (~2.1rem tall):
+            // push the whole column — including the sticky header — below
+            // it so the page title is not clipped (design report item 25).
+            impersonation_offset = if self.impersonation_banner.is_some() {
+                " style=\"padding-top: 2.1rem\""
+            } else {
+                ""
+            },
             header = self.header.render_html(),
             child_html = self.child_html,
             toast_surface = toast_surface,
@@ -364,9 +389,9 @@ impl<'a> ControlPlaneShell<'a> {
                 {sidebar_content}\
             </aside>\
             {mobile_sidebar}\
-            <div class=\"flex-1 flex flex-col min-h-screen ml-0 md:ml-64\">\
+            <div class=\"flex-1 flex flex-col min-h-screen min-w-0 ml-0 md:ml-64\"{banner_offset}>\
                 {banner_markup}\
-                <header class=\"h-16 border-b border-surface-200/60 bg-card flex items-center justify-between px-8 sticky top-0 z-20\"\
+                <header class=\"h-16 border-b border-surface-200/60 bg-card flex items-center justify-between px-8 sticky top-0 z-20\">\
                     <div class=\"flex items-baseline gap-3 min-w-0\">\
                         <h1 class=\"text-lg font-bold text-surface-950 tracking-tight\">{page_title}</h1>\
                         <p class=\"hidden sm:block text-xs font-medium text-surface-400 truncate\">{page_description}</p>\
@@ -383,6 +408,14 @@ impl<'a> ControlPlaneShell<'a> {
             role = html_escape(self.user_role),
             sidebar_content = sidebar_content,
             mobile_sidebar = mobile_sidebar,
+            banner_offset = if self.banners.is_empty() {
+                String::new()
+            } else {
+                // Fixed operational banners overlap the sticky header —
+                // push the scroll container down by the banner stack height
+                // (each banner renders at ~2rem of chrome).
+                format!(" style=\"padding-top: {}rem\"", self.banners.len() * 2)
+            },
             banner_markup = banner_markup,
             page_title = html_escape(self.page_title),
             page_description = html_escape(self.page_description),
@@ -451,10 +484,9 @@ fn control_plane_banner_class(tone: &str) -> &'static str {
 
 fn render_sidebar_content(
     items: &[(&str, &str, &str)],
-    link_classes: &str,
+    _link_classes: &str,
     current_path: &str,
 ) -> String {
-    let base_classes = link_classes;
     let links = items
         .iter()
         .map(|(label, href, icon_name)| {
@@ -493,18 +525,27 @@ fn render_sidebar_content(
 }
 
 fn render_web_sidebar(current_path: &str, csrf_token: &str) -> String {
-    let main_items = [
-        ("Dashboard", "/dashboard", "home"),
+    // Task-oriented IA (design report item 4): every routed page is
+    // reachable from the nav — Reports, Inbox Placement, Events, and
+    // Dedicated IPs were previously rendered-but-unreachable orphans.
+    let overview_items = [("Dashboard", "/dashboard", "home")];
+    let send_items = [
         ("Campaigns", "/campaigns", "mail"),
+        ("Templates", "/templates", "layout-template"),
         ("Contacts", "/contacts", "users"),
         ("Lists", "/lists", "list"),
-        ("Templates", "/templates", "layout-template"),
+    ];
+    let measure_items = [
+        ("Analytics", "/analytics", "bar-chart-3"),
+        ("Reports", "/reports", "file-text"),
+        ("Inbox Placement", "/inbox-placement", "inbox"),
+        ("Events", "/events", "activity"),
     ];
     let configure_items = [
         ("Domains", "/domains", "globe"),
         ("API Keys", "/settings/api-keys", "key"),
         ("Webhooks", "/settings/webhooks", "zap"),
-        ("Analytics", "/analytics", "bar-chart-3"),
+        ("Dedicated IPs", "/settings/dedicated-ips", "server"),
     ];
     let account_items = [
         ("Billing", "/settings/billing", "credit-card"),
@@ -522,10 +563,12 @@ fn render_web_sidebar(current_path: &str, csrf_token: &str) -> String {
     };
 
     let content = format!(
-        "{}{}{}",
-        render_section("Main", &main_items),
+        "{}{}{}{}{}",
+        render_section("Overview", &overview_items),
+        render_section("Send", &send_items),
+        render_section("Measure", &measure_items),
         render_section("Configure", &configure_items),
-        render_section("Account", &account_items)
+        render_section("Account", &account_items),
     );
 
     format!(
@@ -540,20 +583,45 @@ fn render_web_sidebar(current_path: &str, csrf_token: &str) -> String {
 }
 
 fn render_cp_sidebar(current_path: &str, csrf_token: &str) -> String {
-    let items = [
+    // Task-oriented regroup (design report structural #20): Operate /
+    // Customers / Governance. Alerts — the most operational page — joins
+    // the nav instead of living two clicks deep.
+    let operate_items = [
         ("Overview", "/dashboard", "home"),
-        ("Tenants", "/tenants", "building"),
+        ("Alerts", "/alerts", "bell"),
         ("Infrastructure", "/infrastructure", "server"),
-        ("Security", "/settings/security", "shield"),
-        ("Audit Logs", "/audit", "file-text"),
+        ("Jobs", "/jobs", "clock"),
+        ("Analytics", "/analytics", "bar-chart-3"),
+    ];
+    let customer_items = [
+        ("Tenants", "/tenants", "building"),
+        ("Domains", "/domains", "globe"),
         ("Sales Console", "/sales", "trending-up"),
+        ("Discovery", "/discovery", "search"),
+    ];
+    let governance_items = [
+        ("Operators", "/operators", "users"),
+        ("Compliance", "/compliance", "shield"),
+        ("Audit Logs", "/audit", "file-text"),
+        ("Billing", "/billing", "credit-card"),
+        ("Security", "/settings/security", "lock"),
     ];
 
+    let render_section = |title: &str, items: &[(&str, &str, &str)]| {
+        format!(
+            "<div class=\"space-y-1 mb-6\">\
+                <h3 class=\"px-6 text-[11px] font-semibold uppercase tracking-[0.1em] text-surface-400 mb-2\">{}</h3>\
+                {}</div>",
+            title,
+            render_sidebar_content(items, "", current_path)
+        )
+    };
+
     let content = format!(
-        "<div class=\"space-y-1 mb-6\">\
-            <h3 class=\"px-6 text-[11px] font-semibold uppercase tracking-[0.1em] text-surface-400 mb-2\">Control Plane</h3>\
-            {}</div>",
-        render_sidebar_content(&items, "", current_path)
+        "{}{}{}",
+        render_section("Operate", &operate_items),
+        render_section("Customers", &customer_items),
+        render_section("Governance", &governance_items),
     );
 
     format!(
@@ -562,8 +630,9 @@ fn render_cp_sidebar(current_path: &str, csrf_token: &str) -> String {
          <span class=\"apex-sidebar-brand text-xl font-bold tracking-tighter\"><span class=\"text-primary\">Apex</span><span class=\"text-surface-950\">Mail</span></span>\
          <span class=\"text-[11px] font-semibold uppercase tracking-[0.1em] text-surface-400\">Operations</span></div></div>\
          <nav class=\"flex-1 overflow-y-auto cp-sidebar-nav\" data-sidebar=\"primary\" aria-label=\"Control Plane navigation\">{}</nav>\
-         <div class=\"p-6 border-t border-surface-100 text-[11px] text-surface-500 font-medium\">System v2.4.0-stable</div></div>",
-        content
+         <div class=\"p-4 border-t border-surface-100\"><form method=\"POST\" action=\"/web/auth/logout\"><input type=\"hidden\" name=\"_csrf\" value=\"{}\" /><button type=\"submit\" class=\"flex w-full items-center gap-3 px-4 py-2 text-sm font-semibold rounded-md text-surface-500 hover:text-surface-950 hover:bg-surface-50 transition-colors\"><span>Sign Out</span></button></form></div></div>",
+        content,
+        csrf_token = html_escape(csrf_token),
     )
 }
 
@@ -1003,5 +1072,150 @@ mod tests {
         );
         assert!(web.contains("action=\"/web/auth/logout\""));
         assert!(web.contains("name=\"_csrf\""));
+    }
+
+    // ─── Design-report implementation guards ──────────────────────
+
+    /// Item 13 (CP #1): the CP shell's `<header` tag must actually close —
+    /// the unclosed tag mangled the page-title wrapper on every
+    /// authenticated CP page.
+    #[test]
+    fn control_plane_header_tag_is_closed() {
+        let html = ControlPlaneShell {
+            mobile_menu_open: false,
+            user_role: "admin",
+            page_title: "Tenants",
+            page_description: "Workspaces.",
+            banners: Vec::new(),
+            child_html: "<section>rows</section>",
+            current_path: "/tenants",
+            csrf_token: "",
+        }
+        .render_html();
+        let header_at = html.find("<header").expect("header present");
+        let header_end = html[header_at..].find('>').expect("header tag closes") + header_at;
+        // The opening tag closes before the title wrapper begins.
+        assert!(html[header_at..=header_end].ends_with("z-20\">"));
+        assert!(html.contains("</header>"));
+    }
+
+    /// Item 13 (CP #1, validity extension): the full shell (root layout +
+    /// app shell) must produce balanced structural tags — the previous
+    /// validity test wrapped only inner page HTML and could not catch
+    /// shell-level defects like the unclosed `<header`.
+    #[test]
+    fn control_plane_shell_wraps_validly() {
+        let shell = ControlPlaneShell {
+            mobile_menu_open: false,
+            user_role: "admin",
+            page_title: "Tenants",
+            page_description: "Workspaces.",
+            banners: Vec::new(),
+            child_html: "<section>rows</section>",
+            current_path: "/tenants",
+            csrf_token: "t",
+        }
+        .render_html();
+        let page = crate::leptos_views::control_plane_root_layout(&shell);
+        for (open, close) in [
+            ("<header", "</header>"),
+            ("<aside", "</aside>"),
+            ("<main", "</main>"),
+            ("<nav", "</nav>"),
+            ("<body", "</body>"),
+            ("<html", "</html>"),
+        ] {
+            assert!(
+                page.matches(open).count() <= page.matches(close).count(),
+                "{open} is not closed everywhere in the CP shell"
+            );
+        }
+        assert!(page.contains("Skip to content"));
+    }
+
+    /// Item 2: the web sidebar's task-oriented regroup un-orphans Reports,
+    /// Inbox Placement, Events, and Dedicated IPs — every routed page is
+    /// one click from the nav.
+    #[test]
+    fn web_sidebar_regroup_reaches_every_routed_page() {
+        let html = render_web_sidebar("/dashboard", "");
+        for group in ["Overview", "Send", "Measure", "Configure", "Account"] {
+            assert!(html.contains(group), "sidebar group {group} missing");
+        }
+        for href in [
+            "/dashboard",
+            "/campaigns",
+            "/templates",
+            "/contacts",
+            "/lists",
+            "/analytics",
+            "/reports",
+            "/inbox-placement",
+            "/events",
+            "/domains",
+            "/settings/api-keys",
+            "/settings/webhooks",
+            "/settings/dedicated-ips",
+            "/settings/billing",
+            "/settings",
+        ] {
+            assert!(
+                html.contains(&format!("href=\"{href}\"")),
+                "sidebar must link {href}"
+            );
+        }
+    }
+
+    /// Item 18 (CP #20): the CP nav regroups to Operate/Customers/
+    /// Governance, carries the Alerts entry, a sign-out form, and no
+    /// hardcoded version string.
+    #[test]
+    fn cp_sidebar_regroups_with_alerts_and_sign_out() {
+        let html = render_cp_sidebar("/alerts", "t");
+        for group in ["Operate", "Customers", "Governance"] {
+            assert!(html.contains(group), "CP sidebar group {group} missing");
+        }
+        // The most operational page joins the nav.
+        assert!(html.contains("href=\"/alerts\""));
+        assert!(html.contains("href=\"/tenants\""));
+        assert!(html.contains("href=\"/operators\""));
+        assert!(html.contains("href=\"/compliance\""));
+        assert!(html.contains("href=\"/audit\""));
+        assert!(html.contains("href=\"/jobs\""));
+        // Sign-out is a real CSRF-protected POST.
+        assert!(html.contains("action=\"/web/auth/logout\""));
+        assert!(html.contains("name=\"_csrf\""));
+        // The fabricated version string is gone.
+        assert!(!html.contains("System v2.4.0-stable"));
+        assert!(!html.contains("v2.4.0"));
+    }
+
+    /// Item 25: the impersonation banner is a fixed overlay — the shell
+    /// must push the header column below it instead of letting the banner
+    /// clip the page title.
+    #[test]
+    fn impersonation_banner_offsets_the_header_column() {
+        let with_banner = WebDashboardShell {
+            impersonation_banner: Some(ImpersonationBanner {
+                tenant_id: "t_1",
+                operator_name: "Op",
+                time_remaining: "9:58",
+                end_session_error: None,
+                ending_session: false,
+            }),
+            ..web_shell_reference()
+        }
+        .render_html();
+        assert!(with_banner.contains("padding-top: 2.1rem"));
+        let without = web_shell_reference().render_html();
+        assert!(!without.contains("padding-top: 2.1rem"));
+    }
+
+    /// Item 3: avatar initials derive from the session's display name.
+    #[test]
+    fn avatar_initials_derive_from_display_name() {
+        assert_eq!(avatar_initials("Sabela Khoua"), "SK");
+        assert_eq!(avatar_initials("ops@apexmail.ee"), "O");
+        assert_eq!(avatar_initials(""), "AM");
     }
 }

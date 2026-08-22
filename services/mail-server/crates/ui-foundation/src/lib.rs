@@ -1,5 +1,6 @@
 #![deny(unsafe_code)]
 pub mod axum_router;
+pub mod charts;
 pub mod csrf;
 pub mod data;
 pub mod flash;

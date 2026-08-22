@@ -3,7 +3,7 @@
 {# The static export links to the live status surface instead of #}
 {# asserting component health at build time.                     #}
 
-<section class="relative overflow-hidden bg-gradient-to-b from-brand-50 via-white to-white pt-32 lg:pt-40 pb-20">
+<section class="relative overflow-hidden bg-gradient-to-b from-brand-50 via-surface-50 to-surface-50 pt-32 lg:pt-40 pb-20">
   <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
     <div class="text-center mb-16">
       <div class="inline-flex items-center gap-2 px-4 py-2 rounded-sm bg-brand-100 text-brand-700 text-sm font-semibold mb-6 animate-in">
@@ -23,9 +23,9 @@
     <div id="status-island" class="animate-in delay-300">
       {# Static status display #}
       <div class="max-w-3xl mx-auto">
-        <div class="flex flex-col items-center justify-center gap-4 p-6 bg-brand-50 border border-brand-200 rounded-sm mb-8 text-center">
+        <div class="flex flex-col items-center justify-center gap-4 p-6 bg-brand-50 border border-brand-200 rounded-lg mb-8 text-center">
           <span class="text-lg font-semibold text-brand-800">View live ApexMail status</span>
-          <a href="{{ config.extra.status_url }}" class="inline-flex items-center justify-center rounded-sm bg-surface-950 px-6 py-3 text-sm font-semibold text-white transition-colors hover:bg-brand-700">
+          <a href="{{ config.extra.status_url }}" class="btn-primary--invert inline-flex items-center justify-center">
             Open Status Page
           </a>
         </div>
@@ -48,7 +48,7 @@
           </p>
         </div>
 
-        <div class="p-6 rounded-sm bg-warning-500/10 border border-warning-500/20 text-center">
+        <div class="p-6 rounded-lg bg-warning-500/10 border border-warning-500/20 text-center">
           <p class="text-sm text-warning-600 font-medium">
             <svg class="w-4 h-4 inline-block mr-1.5 -mt-0.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
             Live status data is available at <a href="{{ config.extra.status_url }}" class="font-semibold underline">status.apexmail.ee</a>. This static page does not assert component health.

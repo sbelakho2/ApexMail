@@ -13,7 +13,7 @@
 //! static fallback pages render exactly as before.
 
 use crate::leptos_views;
-use crate::view_data::{CampaignEditData, ListPageData, MfaSetupData};
+use crate::view_data::{CampaignEditData, FormFieldData, ListPageData, MfaSetupData};
 
 /// Server-loaded page data for one route request.
 #[derive(Debug, Clone, Default)]
@@ -47,14 +47,16 @@ struct UiQueryParams {
 
 /// Paths that may opt into a `<meta http-equiv="refresh">` auto-reload.
 /// These render live operational metrics (queues, nodes, alerting, the
-/// event stream). No-JS liveness: the browser reloads the whole page on a
-/// timer; the "Pause" control is just the same page without the param.
+/// event stream, placement history). No-JS liveness: the browser reloads
+/// the whole page on a timer; the "Pause" control is just the same page
+/// without the param.
 const LIVE_METRICS_PATHS: &[(&str, &str)] = &[
     ("control-plane", "/infrastructure/queues"),
     ("control-plane", "/infrastructure/nodes"),
     ("control-plane", "/alerts"),
     ("web", "/events"),
     ("web", "/analytics"),
+    ("web", "/inbox-placement"),
 ];
 
 /// Auto-refresh intervals we are willing to serve (seconds). Anything else
@@ -691,6 +693,25 @@ pub fn render_route_with_data(
     flash: &[crate::flash::FlashMessage],
     data: Option<&RouteData>,
 ) -> Option<String> {
+    render_route_with_form_fields(surface, path, query, csrf_secret, flash, data, None)
+}
+
+/// Full render carrying the signed form field-map decoded from the failed
+/// (or secret-bearing) POST's cookie: values re-populate the matching
+/// inputs, per-field errors render under their controls, and reveal-once
+/// secrets render as mono chips next to the flash banners. This is the
+/// view-layer half of the PRG error-recovery flow (design report #1) —
+/// the caller decodes the cookie with the api-server's
+/// `decode_form_fields_from_headers` and hands the map over.
+pub fn render_route_with_form_fields(
+    surface: &str,
+    path: &str,
+    query: Option<&str>,
+    csrf_secret: Option<&str>,
+    flash: &[crate::flash::FlashMessage],
+    data: Option<&RouteData>,
+    fields: Option<&FormFieldData>,
+) -> Option<String> {
     // Normalise trailing slash at the top level so ALL surfaces handle /login/ etc.
     let path = if path.len() > 1 && path.ends_with('/') {
         &path[..path.len() - 1]
@@ -736,6 +757,7 @@ pub fn render_route_with_data(
         _ => return None,
     };
     let html = render_flash_banners(html, flash);
+    let html = inject_form_field_state(html, fields);
     let html = inject_csrf_and_sign_confirms(html, csrf_secret);
     let html = inject_opt_in_auto_refresh(html, surface, path, query);
     Some(html)
@@ -747,6 +769,11 @@ pub fn render_route_with_data(
 /// "Pause" link (the same page without the parameter). Zero JavaScript —
 /// the browser's native meta-refresh does the reloading, and the user is
 /// always in control of stopping it.
+///
+/// Item #20: pages WITHOUT the parameter render a start affordance (the
+/// 10/30/60s links) in the same fixed slot, and the active pill carries an
+/// honest "Updated" timestamp (the SSR render time — every reload is a new
+/// render).
 fn inject_opt_in_auto_refresh(
     mut html: String,
     surface: &str,
@@ -757,7 +784,32 @@ fn inject_opt_in_auto_refresh(
         return html;
     }
     let params = parse_query_params(query);
+    let now = chrono::Utc::now();
+    let updated = format!(
+        "<time datetime=\"{}\" title=\"{} UTC\">Updated {}</time>",
+        now.to_rfc3339(),
+        now.to_rfc3339(),
+        now.format("%H:%M:%S")
+    );
+    let pill = match params.refresh_secs {
+        Some(secs) => format!(
+            "<div role=\"status\" class=\"fixed bottom-4 right-4 z-50 flex items-center gap-2 rounded-sm border border-surface-300 bg-card px-3 py-2 text-xs shadow-premium\"><span class=\"inline-block h-2 w-2 rounded-full bg-success-500\" aria-hidden=\"true\"></span><span class=\"font-bold\">Live — auto-refresh every {secs}s</span><span class=\"text-muted-foreground\">{updated}</span><a class=\"font-bold text-primary underline\" href=\"{path}\" aria-label=\"Pause auto-refresh\">Pause</a></div>",
+            updated = updated,
+            path = crate::shell::html_escape(path),
+        ),
+        None => format!(
+            "<div role=\"status\" class=\"fixed bottom-4 right-4 z-50 flex items-center gap-2 rounded-sm border border-surface-300 bg-card px-3 py-2 text-xs shadow-premium\"><span class=\"inline-block h-2 w-2 rounded-full bg-surface-400\" aria-hidden=\"true\"></span><span class=\"font-bold\">Live view</span><span class=\"text-muted-foreground\" aria-hidden=\"true\">Auto-refresh:</span><a class=\"font-bold text-primary underline\" href=\"{path}?refresh=10\">10s</a><a class=\"font-bold text-primary underline\" href=\"{path}?refresh=30\">30s</a><a class=\"font-bold text-primary underline\" href=\"{path}?refresh=60\">60s</a></div>",
+            path = crate::shell::html_escape(path),
+        ),
+    };
+    let insert_pill = |html: &mut String, pill: &str| {
+        if let Some(body_at) = html.find("<body") {
+            let insert_at = html[body_at..].find('>').map(|e| body_at + e + 1).unwrap_or(body_at);
+            html.insert_str(insert_at, pill);
+        }
+    };
     let Some(secs) = params.refresh_secs else {
+        insert_pill(&mut html, &pill);
         return html;
     };
     let meta = format!("<meta http-equiv=\"refresh\" content=\"{secs}\" />");
@@ -767,19 +819,15 @@ fn inject_opt_in_auto_refresh(
         let insert_at = html[body_at..].find('>').map(|e| body_at + e + 1).unwrap_or(body_at);
         html.insert_str(insert_at, &meta);
     }
-    // Visible, non-scrolling control: interval + pause (same URL, no param).
-    let pill = format!(
-        "<div role=\"status\" class=\"fixed bottom-4 right-4 z-50 flex items-center gap-2 rounded-sm border border-surface-300 bg-card px-3 py-2 text-xs shadow-premium\"><span class=\"inline-block h-2 w-2 rounded-full bg-success-500\" aria-hidden=\"true\"></span><span class=\"font-bold\">Live — auto-refresh every {secs}s</span><a class=\"font-bold text-primary underline\" href=\"{path}\">Pause</a></div>"
-    );
-    if let Some(body_at) = html.find("<body") {
-        let insert_at = html[body_at..].find('>').map(|e| body_at + e + 1).unwrap_or(body_at);
-        html.insert_str(insert_at, &pill);
-    }
+    insert_pill(&mut html, &pill);
     html
 }
 
 /// Insert the flash banners as the first element of the page content. Web
 /// pages get them just inside `<main>`; other surfaces right after `<body>`.
+/// The container is the `#flash` anchor target: a redirect ending in
+/// `#flash` scrolls it into view and `:target` CSS rings it (design report
+/// quick win #7 — flash banners rendered above the viewport on long forms).
 fn render_flash_banners(mut html: String, flash: &[crate::flash::FlashMessage]) -> String {
     if flash.is_empty() {
         return html;
@@ -807,21 +855,328 @@ fn render_flash_banners(mut html: String, flash: &[crate::flash::FlashMessage]) 
         })
         .collect::<Vec<_>>()
         .join("");
+    let anchored = format!(
+        "<div id=\"flash\" tabindex=\"-1\">{banners}</div>",
+        banners = banners
+    );
     if let Some(idx) = html.find("<main id=\"app-main\"") {
         let insert_at = html[idx..].find('>').map(|end| idx + end + 1).unwrap_or(idx);
-        html.insert_str(insert_at, &banners);
+        html.insert_str(insert_at, &anchored);
     } else if let Some(idx) = html.find("<body") {
         let insert_at = html[idx..].find('>').map(|end| idx + end + 1).unwrap_or(idx);
-        html.insert_str(insert_at, &banners);
+        html.insert_str(insert_at, &anchored);
     }
     html
+}
+
+// ─── Form field-map injection (PRG error recovery, design report #1) ───
+
+/// Re-populate inputs and render per-field errors from a decoded
+/// [`FormFieldData`] map. Purely string-level post-processing over the
+/// rendered page — no view function needs to know about the cookie.
+///
+/// Behavior:
+/// - `input` elements whose `name` has a value in the map gain/replace
+///   `value="…"` (checkboxes and radios with a matching value gain
+///   `checked`);
+/// - `textarea` elements get their submitted content between the tags;
+/// - `select` elements get the matching `<option>` marked `selected`;
+/// - a field with an error gains `aria-invalid="true"` and an error
+///   paragraph directly after its wrapper;
+/// - reveal-once secrets render as mono chips right after the flash
+///   banners.
+///
+/// The map's `form_id` guards cross-form replay: when the page carries
+/// forms tagged `data-form-id`, values apply only to the matching form.
+fn inject_form_field_state(html: String, fields: Option<&FormFieldData>) -> String {
+    let Some(map) = fields else {
+        return html;
+    };
+    if map.is_empty() {
+        return html;
+    };
+    let mut html = html;
+
+    // 1. Secrets as mono chips next to the flash banners (or at the top of
+    //    the content when no flash rendered).
+    if !map.secrets.is_empty() {
+        let chips = map
+            .secrets
+            .iter()
+            .map(|(label, value)| {
+                format!(
+                    "<div class=\"apex-flash mb-6 rounded-sm border border-success-300 bg-success-50 px-4 py-3\" role=\"status\"><p class=\"text-xs font-bold uppercase tracking-widest text-success-900\">{}</p><code class=\"mt-1 block font-mono text-sm bg-muted/40 rounded px-2 py-1.5 break-all select-text text-surface-800\">{}</code><p class=\"mt-1 text-xs text-muted-foreground\">Shown once — select the value to copy it. It will not be displayed again.</p></div>",
+                    crate::shell::html_escape(label),
+                    crate::shell::html_escape(value),
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("");
+        if let Some(idx) = html.find("</div>") {
+            // Right after the flash container when present…
+            let after_flash = html[..idx].contains("id=\"flash\"").then(|| idx + "</div>".len());
+            let insert_at = after_flash
+                .or_else(|| html.find("<main id=\"app-main\"").and_then(|main| html[main..].find('>').map(|e| main + e + 1)))
+                .or_else(|| html.find("<body").and_then(|body| html[body..].find('>').map(|e| body + e + 1)));
+            if let Some(insert_at) = insert_at {
+                html.insert_str(insert_at, &chips);
+            }
+        }
+    }
+
+    // 2. Value / error injection per named control.
+    let form_scoped = html.contains("data-form-id=\"");
+    if form_scoped && !html.contains(&format!("data-form-id=\"{}\"", crate::shell::html_escape(&map.form_id))) {
+        // The map belongs to a form this page does not carry — do not
+        // replay values into unrelated fields.
+        return html;
+    }
+    inject_input_values(&mut html, map);
+    inject_textarea_values(&mut html, map);
+    inject_select_values(&mut html, map);
+    html
+}
+
+/// Toggle `checked` on checkbox/radio inputs whose value was posted.
+fn make_checked(html: &str, name: &str, value: &str) -> String {
+    let needle = format!("name=\"{name}\"");
+    let mut out = String::with_capacity(html.len());
+    let mut rest = html;
+    while let Some(pos) = rest.find(&needle) {
+        // Only rewrite inputs (not textareas/selects named the same).
+        let tag_start = rest[..pos].rfind('<').unwrap_or(0);
+        let is_input = rest[tag_start..].starts_with("<input");
+        let tag_end = rest[pos..].find('>').map(|offset| pos + offset).unwrap_or(pos);
+        if is_input && rest[tag_start..=tag_end].contains(&format!("value=\"{}\"", crate::shell::html_escape(value))) {
+            out.push_str(&rest[..tag_end]);
+            out.push_str(" checked");
+            out.push('>');
+            rest = &rest[tag_end + 1..];
+            continue;
+        }
+        out.push_str(&rest[..tag_end + 1]);
+        rest = &rest[tag_end + 1..];
+    }
+    out.push_str(rest);
+    out
+}
+
+fn inject_input_values(html: &mut String, map: &FormFieldData) {
+    // Group-valued checkboxes: mark every posted value checked.
+    let grouped: Vec<(String, Vec<String>)> = {
+        let mut names: Vec<String> = Vec::new();
+        for (name, _) in &map.values {
+            if !names.contains(name) && name != "_csrf" {
+                names.push(name.clone());
+            }
+        }
+        names
+            .into_iter()
+            .map(|name| {
+                let values: Vec<String> = map
+                    .values
+                    .iter()
+                    .filter(|(n, _)| *n == name)
+                    .map(|(_, v)| v.clone())
+                    .collect();
+                (name, values)
+            })
+            .filter(|(_, values)| values.len() > 1)
+            .collect()
+    };
+    for (name, values) in grouped {
+        let mut current = std::mem::take(html);
+        for value in values {
+            current = make_checked(&current, &name, &value);
+        }
+        *html = current;
+    }
+
+    // Single-valued fields: set/replace value="…" and render the error.
+    let mut output = String::with_capacity(html.len());
+    let mut rest = html.as_str();
+    while let Some(start) = rest.find("<input") {
+        let end = rest[start..]
+            .find('>')
+            .map(|offset| start + offset + 1)
+            .unwrap_or(rest.len());
+        let tag = &rest[start..end];
+        output.push_str(&rest[..start]);
+        output.push_str(&rewrite_input_tag(tag, map));
+        // Per-field error text right under the control.
+        if let Some(name) = extract_attribute(tag, "name") {
+            if name != "_csrf"
+                && !tag.contains("type=\"submit\"")
+                && !tag.contains("type=\"button\"")
+            {
+                if let Some(error) = map.field_error(&name) {
+                    output.push_str(&format!(
+                        "<p class=\"text-xs text-destructive mt-1\" role=\"alert\">{}</p>",
+                        crate::shell::html_escape(error)
+                    ));
+                }
+            }
+        }
+        rest = &rest[end..];
+    }
+    output.push_str(rest);
+    *html = output;
+}
+
+/// Rewrite one `<input …>` opening tag against the field map: hidden CSRF
+/// inputs and submit/button inputs stay untouched; text-like inputs get
+/// their value set/replaced; checkbox/radio inputs gain `checked` when
+/// their value was posted; fields with errors gain `aria-invalid`.
+fn rewrite_input_tag(tag: &str, map: &FormFieldData) -> String {
+    let Some(name) = extract_attribute(tag, "name") else {
+        return tag.to_string();
+    };
+    if name == "_csrf" || tag.contains("type=\"submit\"") || tag.contains("type=\"button\"") {
+        return tag.to_string();
+    }
+    let error = map.field_error(&name);
+    let value = map.field_value(&name);
+    if error.is_none() && value.is_none() {
+        return tag.to_string();
+    }
+    let is_choice = tag.contains("type=\"checkbox\"") || tag.contains("type=\"radio\"");
+    let self_closing = tag.trim_end().ends_with("/>");
+    let close_len = if self_closing {
+        if tag.trim_end().ends_with("/>") { 2 } else { 1 }
+    } else {
+        1
+    };
+    let body_end = tag.len() - close_len;
+    let mut body = tag[..body_end].to_string();
+
+    if let Some(value) = value {
+        let escaped = crate::shell::html_escape(value);
+        if is_choice {
+            if extract_attribute(tag, "value").as_deref() == Some(&*value)
+                && !body.contains(" checked")
+            {
+                body.push_str(" checked");
+            }
+        } else {
+            // Drop any existing value="…" then append the submitted one.
+            if let Some(existing) = extract_attribute(tag, "value") {
+                body = body.replace(
+                    &format!("value=\"{}\"", crate::shell::html_escape(&existing)),
+                    "",
+                );
+            }
+            body.push_str(&format!(" value=\"{escaped}\""));
+        }
+    }
+    if error.is_some() && !body.contains("aria-invalid") {
+        body.push_str(" aria-invalid=\"true\"");
+    }
+    format!("{body}{}", if self_closing { "/>" } else { ">" })
+}
+
+fn inject_textarea_values(html: &mut String, map: &FormFieldData) {
+    let mut output = String::with_capacity(html.len());
+    let mut rest = html.as_str();
+    while let Some(start) = rest.find("<textarea") {
+        let open_end = rest[start..]
+            .find('>')
+            .map(|offset| start + offset + 1)
+            .unwrap_or(rest.len());
+        let close = rest[open_end..]
+            .find("</textarea>")
+            .map(|offset| open_end + offset)
+            .unwrap_or(rest.len());
+        let tag = &rest[start..open_end];
+        output.push_str(&rest[..open_end]);
+        if let Some(name) = extract_attribute(tag, "name") {
+            if let Some(value) = map.field_value(&name) {
+                output.push_str(&crate::shell::html_escape(value));
+                output.push_str("</textarea>");
+                rest = &rest[close + "</textarea>".len()..];
+                continue;
+            }
+            if let Some(error) = map.field_error(&name) {
+                output.push_str(&rest[open_end..close + "</textarea>".len()]);
+                output.push_str(&format!(
+                    "<p class=\"text-xs text-destructive mt-1\" role=\"alert\">{}</p>",
+                    crate::shell::html_escape(error)
+                ));
+                rest = &rest[close + "</textarea>".len()..];
+                continue;
+            }
+        }
+        output.push_str(&rest[open_end..close + "</textarea>".len()]);
+        rest = &rest[close + "</textarea>".len()..];
+    }
+    output.push_str(rest);
+    *html = output;
+}
+
+fn inject_select_values(html: &mut String, map: &FormFieldData) {
+    let mut output = String::with_capacity(html.len());
+    let mut rest = html.as_str();
+    while let Some(start) = rest.find("<select") {
+        let open_end = rest[start..]
+            .find('>')
+            .map(|offset| start + offset + 1)
+            .unwrap_or(rest.len());
+        let close = rest[open_end..]
+            .find("</select>")
+            .map(|offset| open_end + offset)
+            .unwrap_or(rest.len());
+        let tag = &rest[start..open_end];
+        output.push_str(&rest[..open_end]);
+        let mut inner = rest[open_end..close].to_string();
+        if let Some(name) = extract_attribute(tag, "name") {
+            if let Some(value) = map.field_value(&name) {
+                let escaped = crate::shell::html_escape(value);
+                // Clear any rendered selection, then mark the posted option.
+                inner = inner.replace(" selected>", ">");
+                let mut selected_inner = String::with_capacity(inner.len());
+                let mut options = inner.as_str();
+                while let Some(option_start) = options.find("<option") {
+                    let option_end = options[option_start..]
+                        .find('>')
+                        .map(|offset| option_start + offset + 1)
+                        .unwrap_or(options.len());
+                    selected_inner.push_str(&options[..option_end]);
+                    let option_tag = &options[option_start..option_end];
+                    if extract_attribute(option_tag, "value").as_deref() == Some(&*value) {
+                        selected_inner.push_str(" selected");
+                    }
+                    selected_inner.push('>');
+                    // Preserve the rest of this option's markup up to the
+                    // next option (or the end).
+                    let next = options[option_end..].find("<option").map(|offset| option_end + offset).unwrap_or(options.len());
+                    selected_inner.push_str(&options[option_end..next]);
+                    options = &options[next..];
+                }
+                selected_inner.push_str(options);
+                let _ = escaped;
+                inner = selected_inner;
+            }
+        }
+        output.push_str(&inner);
+        output.push_str("</select>");
+        rest = &rest[close + "</select>".len()..];
+    }
+    output.push_str(rest);
+    *html = output;
+}
+
+/// Extract a double-quoted attribute value from a tag string.
+fn extract_attribute(tag: &str, attribute: &str) -> Option<String> {
+    let needle = format!("{attribute}=\"");
+    let start = tag.find(&needle)? + needle.len();
+    let end = tag[start..].find('"')? + start;
+    Some(tag[start..end].to_string())
 }
 
 /// Inject the hidden `_csrf` input into every native `POST /web/*` form and
 /// append an HMAC signature to every `/confirm` link. Pages render without
 /// secrets; this pass (running only when a server secret is available) makes
 /// every submission verifiable — no client-side code participates.
-fn inject_csrf_and_sign_confirms(mut html: String, csrf_secret: Option<&str>) -> String {
+fn inject_csrf_and_sign_confirms(html: String, csrf_secret: Option<&str>) -> String {
     let Some(secret) = csrf_secret else {
         return html;
     };
@@ -923,14 +1278,21 @@ fn control_plane_route_context(path: &str) -> (&'static str, &'static str) {
             "System volume, latency, and availability telemetry.",
         ),
         "/discovery" => (
-            "Service Discovery",
-            "Registered service health and routing state.",
+            // IA honesty (design report item 26): the page lists the lead
+            // sources discovery runs enriched — not service-registry state.
+            "Lead Sources",
+            "Lead sources enriched by discovery runs and their yield.",
         ),
         "/jobs" => ("Jobs", "Background work and remediation queues."),
         "/cp/infra" | "/cp/infrastructure" | "/infrastructure" => {
             ("Infrastructure", "Nodes, queues, and fleet operations.")
         }
-        "/infrastructure/nodes" => ("Nodes", "Cluster capacity and node health."),
+        // IA honesty: the table behind this route is the MTA IP pool —
+        // capacity/warmup posture, not cluster node inventory.
+        "/infrastructure/nodes" => (
+            "IP Pool",
+            "Sending IP addresses, warmup progress, and pool health.",
+        ),
         "/infrastructure/queues" => ("Queues", "Mail queue depth and worker processing."),
         "/domains" => ("Domains", "Tenant sending domains and verification."),
         "/billing" => ("Billing", "Plan packaging and subscription operations."),
@@ -1103,8 +1465,7 @@ fn render_web(
         "/lists/new" => leptos_views::web_lists_new_page(),
         "/templates" => data_backed_inner("/templates", data)
             .unwrap_or_else(|| leptos_views::web_templates_page()),
-        "/templates/new" => leptos_views::web_templates_new_page(),
-        "/reports" => data_backed_inner("/reports", data)
+        "/templates/new" => leptos_views::web_templates_new_page(),        "/reports" => data_backed_inner("/reports", data)
             .unwrap_or_else(|| leptos_views::web_reports_page()),
         "/reports/deliverability" => data_backed_inner("/reports/deliverability", data)
             .unwrap_or_else(|| leptos_views::web_reports_deliverability_page()),
@@ -1136,8 +1497,19 @@ fn render_web(
             Some(edit) => leptos_views::web_campaign_edit_page_with_values(edit),
             None => leptos_views::web_campaign_edit_page(),
         },
-        p if p.starts_with("/campaigns/") => leptos_views::web_campaign_detail_page(),
+        p if p.starts_with("/campaigns/") => data_backed_inner(p, data)
+            .unwrap_or_else(|| leptos_views::web_campaign_detail_page()),
         p if p.starts_with("/inbox-placement/") => leptos_views::web_inbox_placement_detail_page(),
+        // /templates/{id}/edit — the editor's formaction/formtarget pattern
+        // (previously a 404 behind the templates table's edit links).
+        p if p.starts_with("/templates/") && p.ends_with("/edit") => {
+            let id = p.trim_start_matches("/templates/").trim_end_matches("/edit");
+            leptos_views::web_template_edit_page(id)
+        }
+        // /domains/{id} — the DNS detail flow; without data the list page
+        // renders as the honest fallback.
+        p if p.starts_with("/domains/") => data_backed_inner(p, data)
+            .unwrap_or_else(|| leptos_views::web_domains_page()),
         // /lists/{id} and /lists/{id}/edit — previously dead links (404).
         p if p.starts_with("/lists/") && p.ends_with("/edit") => {
             leptos_views::web_list_edit_page()
@@ -1458,19 +1830,23 @@ mod tests {
     #[test]
     fn web_console_routes_render_enhanced_ux_contracts() {
         let campaigns = render_route("web", "/campaigns").expect("campaigns route should render");
-        assert!(campaigns.contains("data-view-state=\"loading\""));
-        assert!(campaigns.contains("data-pagination-storage-key=\"apexmail-ui:campaigns:page\""));
+        // Dead JS-era markup purge: no hidden loading skeletons, no
+        // localStorage pagination keys.
+        assert!(!campaigns.contains("data-view-state=\"loading\""));
+        assert!(!campaigns.contains("data-pagination-storage-key"));
         assert!(campaigns.contains("/confirm?intent=delete-campaign&amp;id=c_spring"));
         assert!(campaigns.contains("action=\"/web/campaigns/delete-bulk\""));
+        // The bulk bar states the select-all truth.
+        assert!(campaigns.contains("no select-all without scripts"));
 
         let contacts = render_route("web", "/contacts").expect("contacts route should render");
         assert!(contacts.contains("Select rows to act on them in bulk"));
         assert!(contacts.contains("name=\"ids\""));
-        assert!(contacts.contains("data-pagination-storage-key=\"apexmail-ui:contacts:page\""));
+        assert!(!contacts.contains("data-pagination-storage-key"));
 
         let lists = render_route("web", "/lists").expect("lists route should render");
         assert!(lists.contains("/confirm?intent=delete-list&amp;id=l_vip"));
-        assert!(lists.contains("data-pagination-storage-key=\"apexmail-ui:lists:page\""));
+        assert!(!lists.contains("data-pagination-storage-key"));
     }
 
     #[test]
@@ -1627,14 +2003,20 @@ mod tests {
         .unwrap();
         assert!(live.contains("<meta http-equiv=\"refresh\" content=\"30\" />"));
         assert!(live.contains("Live — auto-refresh every 30s"));
-        assert!(live.contains("href=\"/infrastructure/queues\">Pause</a>"));
+        assert!(live.contains("href=\"/infrastructure/queues\" aria-label=\"Pause auto-refresh\">Pause</a>"));
+        // The active pill carries the honest SSR render timestamp.
+        assert!(live.contains("Updated "));
 
         let events = render_route_with_query("web", "/events", Some("refresh=10"), None).unwrap();
         assert!(events.contains("<meta http-equiv=\"refresh\" content=\"10\" />"));
 
-        // Without the parameter the page is plain SSR (no reload loop).
+        // Without the parameter the page is plain SSR (no reload loop), but
+        // carries the start affordance: 10/30/60s opt-in links.
         let idle = render_route("control-plane", "/infrastructure/queues").unwrap();
         assert!(!idle.contains("http-equiv=\"refresh\""));
+        assert!(idle.contains("href=\"/infrastructure/queues?refresh=10\""));
+        assert!(idle.contains("href=\"/infrastructure/queues?refresh=30\""));
+        assert!(idle.contains("href=\"/infrastructure/queues?refresh=60\""));
     }
 
     #[test]
@@ -2191,5 +2573,286 @@ mod tests {
         assert!(!stripped.contains("var x"));
         assert!(!stripped.contains("apexmail-site.js"));
         assert!(stripped.contains("<p>hi</p>"));
+    }
+
+    // ─── Design-report implementation guards ──────────────────────
+
+    /// Item 6/#flash: flash banners render inside an `#flash` anchor with
+    /// tabindex so a `#flash` redirect scrolls + rings them.
+    #[test]
+    fn flash_banners_render_inside_the_flash_anchor() {
+        let html = render_route_with_flash(
+            "web",
+            "/campaigns",
+            None,
+            None,
+            &[crate::flash::FlashMessage::error("Email is not valid.")],
+        )
+        .unwrap();
+        assert!(html.contains("<div id=\"flash\" tabindex=\"-1\">"));
+        assert!(html.contains("Email is not valid."));
+    }
+
+    /// Item 1 (field-map integration): values re-populate inputs, select
+    /// options re-select, checkbox groups re-check, per-field errors render
+    /// under their controls, and reveal-once secrets render as mono chips.
+    #[test]
+    fn form_field_map_repopulates_values_and_renders_errors() {
+        let mut map = crate::view_data::FormFieldData::new("webhook-create");
+        map.set("url", "https://example.com/hook");
+        map.set("events", "message.sent");
+        map.set("events", "email.delivered");
+        map.error("url", "Enter an https URL.");
+        map.secret("Webhook signing secret", "whsec_abc123");
+        let html = render_route_with_form_fields(
+            "web",
+            "/settings/webhooks",
+            None,
+            None,
+            &[crate::flash::FlashMessage::error("Webhook not saved.")],
+            None,
+            Some(&map),
+        )
+        .unwrap();
+        // Input value re-populated.
+        assert!(html.contains("value=\"https://example.com/hook\""));
+        // Both checkbox-group members re-checked.
+        assert!(html.matches(" checked").count() >= 2);
+        // Per-field error under the control + aria-invalid.
+        assert!(html.contains("Enter an https URL."));
+        assert!(html.contains("aria-invalid=\"true\""));
+        // Secret renders as a selectable mono chip, not prose.
+        assert!(html.contains("whsec_abc123"));
+        assert!(html.contains("select-text"));
+        assert!(html.contains("Shown once"));
+    }
+
+    /// The field-map never replays values into a form the page does not
+    /// carry (form_id guard).
+    #[test]
+    fn form_field_map_is_scoped_to_its_form() {
+        let mut map = crate::view_data::FormFieldData::new("webhook-create");
+        map.set("url", "https://example.com/hook");
+        // /contacts/new carries data-form-id="contacts-import" but not
+        // "webhook-create" — the values must not leak into its fields.
+        let html = render_route_with_form_fields(
+            "web",
+            "/contacts/new",
+            None,
+            None,
+            &[],
+            None,
+            Some(&map),
+        )
+        .unwrap();
+        assert!(!html.contains("value=\"https://example.com/hook\""));
+    }
+
+    /// Items 26: the route contexts tell the truth about what the tables
+    /// list.
+    #[test]
+    fn route_contexts_are_honest_about_their_tables() {
+        assert_eq!(control_plane_route_context("/discovery").0, "Lead Sources");
+        assert_eq!(control_plane_route_context("/infrastructure/nodes").0, "IP Pool");
+    }
+
+    /// Console item 19: /templates/{id}/edit renders the editor form with
+    /// the committed update + preview handlers.
+    #[test]
+    fn template_edit_route_renders_update_and_preview_forms() {
+        let html = render_route("web", "/templates/t_123/edit").unwrap();
+        assert!(html.contains("Edit Template"));
+        assert!(html.contains("action=\"/web/templates/update\""));
+        assert!(html.contains("name=\"id\" value=\"t_123\""));
+        assert!(html.contains("formaction=\"/web/templates/preview\""));
+        assert!(html.contains("formtarget=\"_blank\""));
+    }
+
+    /// Console item 2: the domain detail data renders the DNS flow — mono
+    /// values with copy guidance, the verify POST, and per-record state.
+    #[test]
+    fn domain_detail_data_renders_the_dns_flow() {
+        let id = "11111111-2222-3333-4444-555555555555";
+        let mut data = crate::view_data::ListPageData {
+            title: "Domain".into(),
+            description: "DNS setup and verification state.".into(),
+            base_path: format!("/domains/{id}"),
+            ..Default::default()
+        };
+        data.table = Some(crate::view_data::TableData {
+            columns: vec!["Type".into(), "Host".into(), "Value".into(), "State".into()],
+            rows: vec![crate::view_data::DataRowData {
+                id: "TXT".into(),
+                cells: vec![
+                    crate::view_data::DataCell::mono("TXT"),
+                    crate::view_data::DataCell::mono("_dmarc.example.com"),
+                    crate::view_data::DataCell::mono("v=DMARC1; p=none"),
+                    crate::view_data::DataCell::status("verified"),
+                ],
+            }],
+        });
+        let html = render_route_with_data("web", &format!("/domains/{id}"), None, None, &[], Some(&RouteData {
+            list: Some(data),
+            campaign_edit: None,
+            mfa_setup: None,
+        }))
+        .unwrap();
+        assert!(html.contains("data-page=\"domain-detail\""));
+        assert!(html.contains("select to copy") || html.contains("Select to copy"));
+        assert!(html.contains(&format!("action=\"/domains/{id}/verify\"")));
+        assert!(html.contains("v=DMARC1; p=none"));
+        assert!(html.contains("Verified"));
+    }
+
+    /// Console item 3: the campaign detail data renders lifecycle buttons
+    /// from the action rows and the recipients wiring form.
+    #[test]
+    fn campaign_detail_data_renders_actions_and_recipients() {
+        let id = "11111111-2222-3333-4444-555555555555";
+        let mut data = crate::view_data::ListPageData {
+            title: "Campaign".into(),
+            description: "Status, audience, and lifecycle actions.".into(),
+            base_path: format!("/campaigns/{id}"),
+            ..Default::default()
+        };
+        data.kpis = vec![crate::view_data::KpiCardData::new("Status", "draft")];
+        data.table = Some(crate::view_data::TableData {
+            columns: vec!["Action".into(), "Posts to".into(), "Available".into()],
+            rows: vec![
+                crate::view_data::DataRowData {
+                    id: "start".into(),
+                    cells: vec![
+                        crate::view_data::DataCell::text("Start sending"),
+                        crate::view_data::DataCell::mono(format!("/web/campaigns/{id}/start")),
+                        crate::view_data::DataCell::status("active"),
+                    ],
+                },
+                crate::view_data::DataRowData {
+                    id: "pause".into(),
+                    cells: vec![
+                        crate::view_data::DataCell::text("Pause"),
+                        crate::view_data::DataCell::mono(format!("/web/campaigns/{id}/pause")),
+                        crate::view_data::DataCell::status("paused"),
+                    ],
+                },
+            ],
+        });
+        data.filters = vec![crate::view_data::FilterSelectData::new(
+            "list_id",
+            "Audience list",
+            vec![("l_1".into(), "VIP Customers".into(), false)],
+        )];
+        let html = render_route_with_data("web", &format!("/campaigns/{id}"), None, None, &[], Some(&RouteData {
+            list: Some(data),
+            campaign_edit: None,
+            mfa_setup: None,
+        }))
+        .unwrap();
+        assert!(html.contains("data-page=\"campaign-detail\""));
+        // Available action renders as a POST button; unavailable as disabled.
+        assert!(html.contains(&format!("action=\"/web/campaigns/{id}/start\"")));
+        assert!(html.contains("Start sending</button>"));
+        assert!(html.contains("disabled aria-disabled=\"true\""));
+        // Recipients wiring is a POST form with the tenant's lists.
+        assert!(html.contains(&format!("action=\"/web/campaigns/{id}/recipients\"")));
+        assert!(html.contains("name=\"list_id\""));
+        assert!(html.contains("VIP Customers"));
+        // The recipients select must NOT render inside the GET filter bar
+        // (the header's global search is unrelated and stays).
+        assert!(!html.contains("Apply filters"));
+    }
+
+    /// CP item 24: alerts rows gain a per-row Acknowledge button and GDPR
+    /// rows gain the forward-triad transition buttons.
+    #[test]
+    fn cp_list_data_renders_row_actions() {
+        fn render_for(base: &str, cells: Vec<crate::view_data::DataCell>) -> String {
+            let mut data = crate::view_data::ListPageData {
+                title: "Alerts".into(),
+                description: "Triage.".into(),
+                base_path: base.to_string(),
+                bulk_action: Some(crate::view_data::BulkActionData {
+                    action: "/web/admin/alerts/ack-bulk".into(),
+                    button_label: "Acknowledge selected".into(),
+                }),
+                ..Default::default()
+            };
+            data.table = Some(crate::view_data::TableData {
+                columns: vec!["Severity".into(), "State".into()],
+                rows: vec![crate::view_data::DataRowData {
+                    id: "99999999-8888-7777-6666-555555555555".into(),
+                    cells,
+                }],
+            });
+            data_list_page_markup(&data, "alert")
+        }
+
+        let alerts = render_for(
+            "/alerts",
+            vec![
+                crate::view_data::DataCell::status("critical"),
+                crate::view_data::DataCell::status("active"),
+            ],
+        );
+        // Unacknowledged (active) alert: per-row ack + the bulk bar.
+        assert!(alerts.contains("action=\"/web/admin/alerts/ack\""));
+        assert!(alerts.contains("name=\"id\" value=\"99999999-8888-7777-6666-555555555555\""));
+        assert!(alerts.contains("action=\"/web/admin/alerts/ack-bulk\""));
+        assert!(alerts.contains("Acknowledge selected"));
+
+        let gdpr = render_for(
+            "/compliance/gdpr",
+            vec![
+                crate::view_data::DataCell::text("access"),
+                crate::view_data::DataCell::status("pending"),
+            ],
+        );
+        assert!(gdpr.contains("/transition"));
+        assert!(gdpr.contains("name=\"status\" value=\"in_progress\""));
+        assert!(gdpr.contains("name=\"status\" value=\"completed\""));
+        assert!(gdpr.contains("name=\"status\" value=\"rejected\""));
+
+        let tenants = render_for(
+            "/tenants",
+            vec![
+                crate::view_data::DataCell::text("Acme"),
+                crate::view_data::DataCell::status("active"),
+            ],
+        );
+        assert!(tenants.contains("/web/admin/tenants/99999999-8888-7777-6666-555555555555/suspend"));
+        assert!(tenants.contains("/confirm?intent=delete-tenant&amp;id=99999999-8888-7777-6666-555555555555"));
+    }
+
+    /// CP item 16 (domain transfer): the typed-confirmation form carries
+    /// the native pattern for instant no-JS feedback.
+    #[test]
+    fn domain_transfer_data_renders_typed_confirmation() {
+        let mut data = crate::view_data::ListPageData {
+            title: "Domain Transfer".into(),
+            description: "Transfer assessment.".into(),
+            base_path: "/domains".into(),
+            ..Default::default()
+        };
+        data.table = Some(crate::view_data::TableData {
+            columns: vec!["Field".into(), "Value".into()],
+            rows: vec![crate::view_data::DataRowData {
+                id: "domain".into(),
+                cells: vec![
+                    crate::view_data::DataCell::text("Domain"),
+                    crate::view_data::DataCell::mono("acme.com"),
+                ],
+            }],
+        });
+        let html = data_list_page_markup(&data, "signal");
+        assert!(html.contains("data-page=\"domain-transfer\""));
+        assert!(html.contains("action=\"/web/admin/domains/transfer\""));
+        assert!(html.contains("name=\"confirmation\""));
+        assert!(html.contains("pattern=\"transfer acme\\.com\""));
+        assert!(html.contains("name=\"to_tenant_id\""));
+    }
+
+    /// Helper: render data through the same path the loaders use.
+    fn data_list_page_markup(data: &crate::view_data::ListPageData, noun: &str) -> String {
+        leptos_views::data_list_page(data, noun)
     }
 }
