@@ -1047,7 +1047,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
 
         $names = array_keys($routes->all());
         sort($names);
-        self::assertSame(['kiwicaptcha_api_js', 'kiwicaptcha_challenge', 'kiwicaptcha_health_live', 'kiwicaptcha_health_ready', 'kiwicaptcha_siteverify', 'kiwicaptcha_widget_css'], $names, 'the bundle exposes ONLY the public surface (challenge, siteverify, api.js, health) — no admin/control-plane routes');
+        self::assertSame(['kiwicaptcha_api_js', 'kiwicaptcha_challenge', 'kiwicaptcha_challenge_cancel', 'kiwicaptcha_health_live', 'kiwicaptcha_health_ready', 'kiwicaptcha_siteverify', 'kiwicaptcha_widget_css'], $names, 'the bundle exposes ONLY the public surface (challenge, challenge/cancel, siteverify, api.js, health) — no admin/control-plane routes');
 
         foreach ($routes->all() as $route) {
             self::assertNotSame('admin', $route->getDefault('_controller')[1] ?? null);
@@ -1363,11 +1363,14 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
     }
 
     /**
-     * The challenge-issuance sequence runs every quota check
-     * before the challenge state is created — local cap, issuer limiter,
-     * scope cap and outstanding counters all precede the storage write.
-     * The FakePredis call order pins the limit/incr keys before the
-     * challenge SET key.
+     * The challenge-issuance sequence runs the pre-mint quota checks
+     * (local cap, issuer limiter, scope cap) before the challenge state is
+     * created. The outstanding admission runs after the mint, since its
+     * live-membership member is the minted nonce scored at its absolute
+     * expiry. A refused admission discards the minted record; the
+     * challenge is never handed out. The FakePredis call order pins the
+     * pre-mint limit/incr keys before the challenge SET key and the
+     * outstanding admission key after it.
      */
     public function testAdmissionQuotaChecksPrecedeChallengeStateCreation(): void
     {
@@ -1447,22 +1450,32 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         $sawScopeCap = false;
         $sawOutstanding = false;
         foreach ($evalIndices as $firstKey => $i) {
+            // The per-scope issuance cap and the issuance rate limiter
+            // precede the challenge state write; the outstanding
+            // admission admits the minted nonce, so it runs after the
+            // storage write and a refusal discards the record instead.
+            if (str_contains($firstKey, ':outstanding:')) {
+                self::assertGreaterThan(
+                    $setIndex,
+                    $i,
+                    sprintf('the outstanding admission EVAL on %s must run AFTER the challenge SET (the member is the minted nonce)', $firstKey)
+                );
+                $sawOutstanding = true;
+                self::assertStringContainsString('{kiwi:order-test}:outstanding:', $firstKey);
+                continue;
+            }
             self::assertLessThan(
                 $setIndex,
                 $i,
-                sprintf('the quota-check EVAL on %s must run BEFORE the challenge SET key', $firstKey)
+                sprintf('the pre-mint quota-check EVAL on %s must run BEFORE the challenge SET key', $firstKey)
             );
-            // The scope-cap and outstanding keys are the {kiwi:...} family
-            // (Cluster safe) and carry only keyed pseudonyms — never the
-            // raw scope or IP.
+            // The scope-cap key is the {kiwi:...} family (Cluster safe)
+            // and carries only a keyed pseudonym — never the raw scope or
+            // IP.
             if (str_contains($firstKey, ':issuance:')) {
                 $sawScopeCap = true;
                 self::assertStringContainsString('{kiwi:order-test}:issuance:', $firstKey);
                 self::assertStringNotContainsString('login', $firstKey, 'the scope cap key carries hex(hmac_sha256(scope, K_scope)), never the raw scope');
-            }
-            if (str_contains($firstKey, ':outstanding:')) {
-                $sawOutstanding = true;
-                self::assertStringContainsString('{kiwi:order-test}:outstanding:', $firstKey);
             }
         }
         self::assertTrue($sawScopeCap, 'the per-scope issuance cap must have run');

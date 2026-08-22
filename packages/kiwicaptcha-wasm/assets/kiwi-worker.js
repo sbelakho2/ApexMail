@@ -30,8 +30,8 @@
   // they prove driver+worker+wasm speak the same protocol generation —
   // exact artifact identity is guaranteed by the release tag +
   // SHA256SUMS + SRI + attestation, not by these values.
-  var KIWI_SOLVER_PROTOCOL_ID = "2026-08-r1";
-  var KIWI_SOLVER_PROTOCOL_VERSION = 1;
+  var KIWI_SOLVER_PROTOCOL_ID = "2026-08-r2";
+  var KIWI_SOLVER_PROTOCOL_VERSION = 2;
 
   // The wasm glue exposes itself as `window.__kiwiCaptchaWasm`, so the
   // worker establishes the `window` alias (same prelude the widget driver
@@ -228,6 +228,13 @@
     post({ type: "failed", reason: "exhausted" });
   }
 
+  // SHA chunks are TIME-budgeted (the wasm solver checks the same
+  // budget inside its loop and reports the partial progress; the
+  // pure-JS fallback checks performance.now() here): the synchronous
+  // work per yield is bounded by wall time (~8–12 ms), never by a hash
+  // count, so a slow device cannot block the worker for ~100 ms. 1000
+  // stays the absolute max hashes per call (the hard bound).
+  var SHA_CHUNK_TIME_BUDGET_MS = 10;
   function solveSha(w, prefix, salt, targetBits, start, maxHashes) {
     var pp = 0, sp = 0;
     var useWasm = !!(w && w.solve_sha256_chunk && allocatorPresent(w));
@@ -248,12 +255,15 @@
           buffers();
           if (!useWasm) continue;
           var res = w.solve_sha256_chunk(pp, prefix.length, sp, salt.length, targetBits, counter, 1000);
-          if (res !== -1) {
+          if (res >= 0) {
             free(w, pp, prefix.length); free(w, sp, salt.length);
             post({ type: "done", counter: res, buildId: KIWI_SOLVER_PROTOCOL_ID });
             return;
           }
-          counter += 1000;
+          // -1 = the whole 1000-hash window was scanned; -(scanned + 1)
+          // = the time budget elapsed after `scanned` hashes. Both resume
+          // at the exact next counter, never skipping or redoing work.
+          counter += res === -1 ? 1000 : -res - 1;
         } catch (e) {
           free(w, pp, prefix.length); free(w, sp, salt.length);
           pp = 0; sp = 0;
@@ -261,12 +271,15 @@
         }
       } else {
         var end = Math.min(counter + 1000, maxHashes);
-        for (; counter < end; counter++) {
+        var chunkStart = performance.now();
+        var inChunk = 0;
+        for (; counter < end; counter++, inChunk++) {
           if (leadingZeros(deriveHash(prefix, counter, salt)) >= targetBits) {
             free(w, pp, prefix.length); free(w, sp, salt.length);
             post({ type: "done", counter: counter, buildId: KIWI_SOLVER_PROTOCOL_ID });
             return;
           }
+          if ((inChunk & 255) === 0 && performance.now() - chunkStart >= SHA_CHUNK_TIME_BUDGET_MS) break;
         }
       }
       if (counter % 1000 === 0) post({ type: "progress", counter: counter });

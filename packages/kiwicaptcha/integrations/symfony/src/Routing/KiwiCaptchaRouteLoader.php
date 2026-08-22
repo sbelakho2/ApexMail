@@ -24,6 +24,10 @@ use Symfony\Component\Routing\RouteCollection;
  *
  * Routes:
  *  - POST  {prefix}/challenge          (the widget's challenge endpoint).
+ *  - POST  {prefix}/challenge/cancel   (the widget's bounded cancellation
+ *                                       endpoint — retire an abandoned
+ *                                       challenge and release its
+ *                                       live-outstanding slot).
  *  - GET   {prefix}/health/live        (liveness, always 200).
  *  - GET   {prefix}/health/ready       (readiness, 200 only when signing
  *                                       keys + security Redis + the central
@@ -92,6 +96,19 @@ final class KiwiCaptchaRouteLoader extends Loader
         $routes->add('kiwicaptcha_challenge', new Route(
             $prefix.'/challenge',
             ['_controller' => [ChallengeController::class, 'challenge']],
+            [],
+            [],
+            '',
+            [],
+            ['POST'],
+        ));
+
+        // The cancellation endpoint (the exhaustion->debt feedback break):
+        // POST-only, bounded body, the same origin checks and a bounded
+        // per-source limiter as the challenge endpoint.
+        $routes->add('kiwicaptcha_challenge_cancel', new Route(
+            $prefix.'/challenge/cancel',
+            ['_controller' => [ChallengeController::class, 'cancel']],
             [],
             [],
             '',

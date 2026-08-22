@@ -448,29 +448,21 @@ final class KiwiCaptchaValidator extends ConstraintValidator
         }
         $operationIdentity = hash('sha256', $constraint->scope."\0".($canonicalBinding ?? '')."\0".'epoch:'.$effectiveEpoch."\0".$operationContext);
 
-        // The core's expected-request-binding enforcement mirrors the
-        // post-verify comparison below: it applies only to a bound record
-        // (an unbound record skips the check entirely — BindingMode::None
-        // deployments verify regardless of any presented binding). The
-        // record read is the same storage the verifier reads next; a
-        // failure (no storage wired, unreadable record) leaves the
-        // expected binding unset and the post-verify comparison as the
-        // enforcement.
-        $expectedRequestBinding = null;
-        if ($canonicalBinding !== null) {
-            $record = $this->findVerifiedRecord($value);
-            if ($record?->requestBinding !== null) {
-                $expectedRequestBinding = $canonicalBinding;
-            }
-        }
+        // The binding contract uses one authoritative record read: the
+        // core verifier's own read, inside the verification, is the only
+        // record read of the pipeline (the validator no longer peeks the
+        // record to decide whether an expected request binding applies).
+        // The signed-record binding comparison below enforces the contract
+        // against the verified outcome's own requestBinding — the same
+        // rule for a bound record (must equal the canonical binding) and
+        // an unbound record (skipped entirely — BindingMode::None
+        // deployments verify regardless of any presented binding).
 
         // CapacityExceeded (Argon2id admission saturated) surfaces as a
         // regular failed verification — fail closed as a captcha violation.
         // The operation identity is recorded with the pending→consumed
-        // transition and gates the replay of the stored success; the
-        // expected request binding (when the record is bound) is enforced
-        // by the core before the consume.
-        $outcome = $this->verifier->verify($value, $this->secretKey, $constraint->scope, $clientIp, null, $this->enforceTelemetry, $operationIdentity, $expectedRequestBinding);
+        // transition and gates the replay of the stored success.
+        $outcome = $this->verifier->verify($value, $this->secretKey, $constraint->scope, $clientIp, null, $this->enforceTelemetry, $operationIdentity);
 
         // Ambiguous-consume deterministic retry: ConsumeIndeterminate
         // means the consume transition may have happened but its response
@@ -541,19 +533,19 @@ final class KiwiCaptchaValidator extends ConstraintValidator
             return;
         }
 
-        // Transaction binding — belt-and-suspenders comparison after the
-        // verification. The canonical binding was resolved before the
-        // verification (and drives the operation identity and the core's
-        // expected-request-binding enforcement, which is now the primary
-        // gate); this comparison re-checks the verified outcome's binding
-        // against the same resolved canonical value. The consumed record's
-        // signed request_binding must equal the canonical binding: a
-        // challenge minted for one transaction is never redeemable for
-        // another. Unbound records (binding null) skip the check entirely.
-        // For a stored-result retry the outcome's requestBinding() is the
-        // stored consumed binding, so the same rule gives the
-        // stored-result contract: same binding -> same success, different
-        // binding -> invalid_or_expired.
+        // Transaction binding — the single authoritative binding
+        // enforcement. The canonical binding was resolved before the
+        // verification (and drives the operation identity, which is
+        // recorded atomically with the consume); this comparison enforces
+        // the signed record binding against that same resolved canonical
+        // value, using the core verifier's authoritative record read (the
+        // verified outcome's requestBinding). A challenge minted for one
+        // transaction is never redeemable for another. Unbound records
+        // (binding null) skip the check entirely. For a stored-result
+        // retry the outcome's requestBinding() is the stored consumed
+        // binding, so the same rule gives the stored-result contract:
+        // same binding -> same success, different binding ->
+        // invalid_or_expired.
         if (!$this->requestBindingMatches($outcome, $canonicalBinding)) {
             $this->logger?->info('KiwiCaptcha: valid proof rejected — request binding mismatch', [
                 'scope' => $constraint->scope,
@@ -860,18 +852,22 @@ final class KiwiCaptchaValidator extends ConstraintValidator
      *     can never lose the original decision id of a no-post-solve
      *     Pass. A complete, busy or takeover claim never touches the
      *     mapping key;
-     *  2. the nonce-keyed disposition record is claimed with the
-     *     decision mapping key: 'complete' returns the persisted final
-     *     disposition immediately. A replay of a valid proof reproduces
-     *     the same pass | deny | step-up | chain-required rather than
-     *     bypassing it, and a terminal requirement supersedes even a
-     *     persisted disposition. 'pending' means another owner's
-     *     computation is live: the temporary_unavailable violation is
-     *     answered while the decision mapping is never consumed by the
-     *     busy claim. 'claimed'/'taken_over' means this owner runs the
-     *     post-solve assessment, persists the disposition and returns
-     *     it; a taken-over computation resuming with the original
-     *     owner's decision handle kept in the pending record;
+     *  2. the claim transition answers with the claim outcome AND the
+     *     record the caller needs, so the fresh path is exactly
+     *     claim -> compute -> finalize: 'complete' returns the persisted
+     *     final disposition immediately, carried in the claim response. A
+     *     replay of a valid proof reproduces the same pass | deny |
+     *     step-up | chain-required rather than bypassing it, and a
+     *     terminal requirement supersedes even a persisted disposition.
+     *     'pending' means another owner's computation is live: the
+     *     temporary_unavailable violation is answered while the decision
+     *     mapping is never consumed by the busy claim.
+     *     'claimed'/'taken_over' means this owner runs the post-solve
+     *     assessment, persists the disposition and returns it; the
+     *     claim response carries the pending record with the decision
+     *     handle (a taken-over computation resumes with the original
+     *     owner's handle kept in the pending record). No separate read
+     *     round-trip is issued before or after the claim;
      *  3. the finalize must succeed before anything is returned: a
      *     store failure is the temporary_unavailable violation, never a
      *     silent pass.
@@ -940,20 +936,18 @@ final class KiwiCaptchaValidator extends ConstraintValidator
             // current decision id; see {@see RiskGateway::setCurrentDecisionId()}.
             // On post_solve_check scopes the superseded mapping is still
             // consumed (cleanup) and the fresh post-solve decision
-            // becomes the current confirmation target instead.
+            // becomes the current confirmation target instead. The claim
+            // response carries the claim outcome AND the record the
+            // caller needs for that outcome, so the fresh path is exactly
+            // claim -> compute -> finalize with no separate read.
             $decisionKey = $this->risk?->decisionKeyFor($nonce);
-            $claim = $this->dispositionStore->claim($nonce, $owner, $ttl, $decisionKey);
+            [$claim, $claimRecord] = $this->dispositionStore->claim($nonce, $owner, $ttl, $decisionKey);
         } catch (\Throwable $e) {
             throw new PostSolveDispositionUnavailableException('the post-solve disposition store is unavailable', 0, $e);
         }
 
         if ($claim === 'complete') {
-            try {
-                $record = $this->dispositionStore->read($nonce);
-            } catch (\Throwable $e) {
-                throw new PostSolveDispositionUnavailableException('the post-solve disposition record is unreadable', 0, $e);
-            }
-            $disposition = $record?->disposition;
+            $disposition = $claimRecord?->disposition;
             if ($disposition === null) {
                 // Complete without a usable disposition: corrupt state —
                 // never silently pass.
@@ -966,9 +960,9 @@ final class KiwiCaptchaValidator extends ConstraintValidator
             // stage-2 nonce answers the terminal outcome — never the
             // stale disposition, never the stage-2 transition conflict.
             if ($requirement !== null && $requirement->state === 'denied') {
-                $disposition = new PostSolveDisposition(PostSolveDispositionKind::Deny, $record?->decisionId);
+                $disposition = new PostSolveDisposition(PostSolveDispositionKind::Deny, $claimRecord?->decisionId);
             } elseif ($requirement !== null && $requirement->state === 'step_up_required') {
-                $disposition = new PostSolveDisposition(PostSolveDispositionKind::StepUp, $record?->decisionId);
+                $disposition = new PostSolveDisposition(PostSolveDispositionKind::StepUp, $claimRecord?->decisionId);
             }
             // A replay reproduces the request-scoped decision id too, so the
             // application can confirm the same decision handle.
@@ -986,23 +980,17 @@ final class KiwiCaptchaValidator extends ConstraintValidator
             throw new PostSolveDispositionUnavailableException('the post-solve disposition claim is held by another owner');
         }
 
-        // The stored decision handle: the claim's atomic consume wrote
-        // the paired handle into the pending record (a takeover resumes
-        // the original owner's handle — the crashed owner's mapping is
-        // already consumed), so the completed disposition keeps the
-        // original decision id.
-        try {
-            $record = $this->dispositionStore->read($nonce);
-        } catch (\Throwable $e) {
-            throw new PostSolveDispositionUnavailableException('the post-solve disposition record is unreadable', 0, $e);
-        }
-        if ($record === null) {
-            // The claim was won but the record vanished between the claim
-            // and the read (a clock/expiry boundary): fail closed — never
-            // silently pass.
+        // The stored decision handle rides in the claim response: the
+        // claim's atomic consume wrote the paired handle into the pending
+        // record (a takeover resumes the original owner's handle — the
+        // crashed owner's mapping is already consumed), so the completed
+        // disposition keeps the original decision id.
+        if ($claimRecord === null) {
+            // The claim was won but the response carries no record (a
+            // clock/expiry boundary): fail closed — never silently pass.
             throw new PostSolveDispositionUnavailableException('the post-solve disposition record vanished after the claim');
         }
-        $storedDecisionId = $record->decisionId;
+        $storedDecisionId = $claimRecord->decisionId;
 
         $disposition = $this->assessFinalDisposition($token, $outcome, $request, $constraint, $ip, $session, $nonce, $canonicalBinding, $storedDecisionId, $requirement);
 

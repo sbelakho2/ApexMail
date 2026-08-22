@@ -48,6 +48,13 @@ final class ConfigurationTest extends TestCase
         self::assertSame(20, $processed['difficulty_bits']);
     }
 
+    public function testDifficultyBitsDefaultsTo18(): void
+    {
+        $processed = $this->process();
+
+        self::assertSame(18, $processed['difficulty_bits'], 'difficulty_bits defaults to 18 — the ordinary SHA baseline (mean ≈ 262k hashes, p99 ≈ 1.21M, exhaustion within the 5,000,000-hash cap ≈ 5.2×10⁻⁹); 20 stays reachable as the elevated rung via risk escalation (Argon/StepUp above it), never a default that collapses the ladder');
+    }
+
     public function testTreeCeilingTracksCoreConstant(): void
     {
         self::assertSame(Config::MAX_SHA_TARGET_BITS, 20);
@@ -215,7 +222,7 @@ final class ConfigurationTest extends TestCase
     {
         $capacity = $this->process()['resource_capacity'];
 
-        self::assertSame(20000, $capacity['issuance_per_second'], 'issuance_per_second defaults to 20000 (deployment-wide, the shared Redis counter denominator)');
+        self::assertSame(500, $capacity['issuance_per_second'], 'issuance_per_second defaults to 500, aligned with the hard global limiter rate_limit_global 500 per rate_limit_window_secs 60 (the hard limiter is the binding constraint on the default deployment)');
         self::assertSame(1, $this->process(['resource_capacity' => ['issuance_per_second' => 1]])['resource_capacity']['issuance_per_second']);
         self::assertSame(250, $this->process(['resource_capacity' => ['issuance_per_second' => 250]])['resource_capacity']['issuance_per_second']);
     }

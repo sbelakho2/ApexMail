@@ -13,18 +13,23 @@ namespace BelConsulting\KiwiCaptchaBundle\Risk;
  * single-writer machine: missing -> pending(me, lease) -> 'claimed';
  * pending+me -> 'pending'; pending+other+live -> 'pending' (busy);
  * pending+other+expired -> takeover -> 'taken_over'; complete ->
- * 'complete'. Finalize is the atomic pending(me) -> complete transition
- * and never overwrites another owner's work. Every record expires with
- * its TTL; the short fixed lease is a contention bound, never the record
- * TTL. The machine reads the existing state before touching anything
- * else: a complete claim, a busy claim and a takeover never consume the
- * nonce -> decision mapping. Only the missing path consumes it, with
- * getdel semantics and at most one winner, and persists the paired
- * decision id in the pending record in the same transition, the exact
- * mirror of the Redis claim Lua's keys[2] transfer. The pending record
- * carries the original decision handle the first owner's claim consumed;
- * a takeover keeps it, so a completed disposition survives the crash of
- * its first owner with the original decision id.
+ * 'complete'. The claim response carries the claim outcome and the
+ * record the caller needs: the pending record on claimed/taken_over
+ * (the consumed decision handle), and the complete record on complete.
+ * The caller runs claim -> compute -> finalize with no separate read,
+ * the exact mirror of the Redis claim Lua's response. Finalize is the
+ * atomic pending(me) -> complete transition and never overwrites another
+ * owner's work. Every record expires with its TTL; the short fixed lease
+ * is a contention bound, never the record TTL. The machine reads the
+ * existing state before touching anything else: a complete claim, a busy
+ * claim and a takeover never consume the nonce -> decision mapping. Only
+ * the missing path consumes it, with getdel semantics and at most one
+ * winner, and persists the paired decision id in the pending record in
+ * the same transition, the exact mirror of the Redis claim Lua's keys[2]
+ * transfer. The pending record carries the original decision handle the
+ * first owner's claim consumed; a takeover keeps it, so a completed
+ * disposition survives the crash of its first owner with the original
+ * decision id.
  *
  * Every record is decoded all-or-nothing against the strict schema, the
  * identical decode as the Redis store: a missing/malformed field or a
@@ -80,7 +85,7 @@ final class ArrayPostSolveDispositionStore implements PostSolveDispositionStore
     ) {
     }
 
-    public function claim(string $nonce, string $owner, int $ttlSeconds, ?string $decisionKey = null): string
+    public function claim(string $nonce, string $owner, int $ttlSeconds, ?string $decisionKey = null): array
     {
         $now = $this->now();
         if ($this->expired($nonce, $now)) {
@@ -88,22 +93,23 @@ final class ArrayPostSolveDispositionStore implements PostSolveDispositionStore
         }
         $existing = $this->records[$nonce] ?? null;
         if ($existing !== null) {
-            // strict pre-read: a corrupt record throws (fail closed) — it
+            // strict validation: a corrupt record throws (fail closed) — it
             // is never healed into valid state by a takeover.
             self::validateRecord($existing);
             if ($existing['state'] === 'complete') {
                 // A completed disposition is terminal: the replay claim
-                // answers 'complete' and never touches the decision key.
-                return 'complete';
+                // answers 'complete' with the complete record and never
+                // touches the decision key.
+                return ['complete', self::recordFromExisting($existing)];
             }
             if ($existing['owner'] === $owner) {
-                return 'pending';
+                return ['pending', null];
             }
             if ($existing['leaseUntil'] !== null && $existing['leaseUntil'] > $now) {
                 // Another owner's claim is live: busy — the decision key
                 // is never touched (the mapping stays resolvable for the
                 // caller who will win the next claim).
-                return 'pending';
+                return ['pending', null];
             }
             // Expired lease: takeover. The original decision handle is
             // preserved — a takeover never consumes the decision mapping
@@ -114,7 +120,7 @@ final class ArrayPostSolveDispositionStore implements PostSolveDispositionStore
             $this->records[$nonce]['leaseUntil'] = $now + self::LEASE_SECS;
             $this->records[$nonce]['disposition'] = null;
 
-            return 'taken_over';
+            return ['taken_over', self::recordFromExisting($this->records[$nonce])];
         }
         // missing: the only path that consumes the decision mapping
         // (getdel semantics, at most one winner) — the paired decision id
@@ -132,7 +138,7 @@ final class ArrayPostSolveDispositionStore implements PostSolveDispositionStore
             'decisionId' => $decisionId,
         ];
 
-        return 'claimed';
+        return ['claimed', self::recordFromExisting($this->records[$nonce])];
     }
 
     /**
@@ -170,6 +176,18 @@ final class ArrayPostSolveDispositionStore implements PostSolveDispositionStore
         }
         self::validateRecord($existing);
 
+        return self::recordFromExisting($existing);
+    }
+
+    /**
+     * Build the typed record from a validated in-memory record (the
+     * pending claim state + owner + lease deadline + decision handle, or
+     * the complete state + persisted disposition + decision handle).
+     *
+     * @param array<string, mixed> $existing the validated record
+     */
+    private static function recordFromExisting(array $existing): PostSolveDispositionRecord
+    {
         return new PostSolveDispositionRecord(
             $existing['state'],
             $existing['owner'],

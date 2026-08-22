@@ -121,6 +121,25 @@ final class ChallengeController
     /** Recursion cap for the duplicate-key scanner (depth bombs). */
     private const MAX_JSON_SCAN_DEPTH = 32;
 
+    /**
+     * The bounded shape of a challenge nonce for the cancellation
+     * endpoint: base64 of 32 random bytes (44 chars, possibly ending in
+     * '='), bounded to 1..64 characters of the base64/base64url alphabet.
+     * The widget echoes the nonce the challenge endpoint issued, so any
+     * nonce the server minted satisfies it; anything outside the bound is
+     * refused before the storage or Redis state is touched.
+     */
+    private const CANCELLATION_NONCE_PATTERN = '/^[A-Za-z0-9+\/=_-]{1,64}$/D';
+
+    /** The JSON fields the cancellation POST accepts. */
+    private const ACCEPTED_CANCELLATION_FIELDS = ['nonce'];
+
+    /**
+     * Hard ceiling for the cancellation request body: the language is a
+     * single bounded nonce, so 1 KiB is generous.
+     */
+    private const MAX_CANCELLATION_BODY_BYTES = 1024;
+
     public function __construct(
         private readonly Issuer $issuer,
         private readonly ?IssuanceRateLimiter $rateLimiter = null,
@@ -1112,30 +1131,18 @@ final class ChallengeController
             $ttlSecs = min($ttlSecs ?? $this->issuer->config()->ttlSecs, $remaining);
         }
         // Outstanding-admission bookkeeping: the slot is held from the
-        // moment the counters admit the challenge until it is successfully
-        // handed off. Every proven-not-handed-out failure after this point
-        // returns the slot and releases the reservation through the single
-        // cleanup primitive, {@see self::rollbackIssuanceAttempt()} ->
+        // moment the counters admit the minted challenge until it is
+        // successfully handed off. The admission runs after the mint (the
+        // live-membership member is the minted nonce scored at its absolute
+        // expiry, which exists only once the record is minted), so every
+        // proven-not-handed-out failure after the admission returns the
+        // slot and releases the reservation through the single cleanup
+        // primitive, {@see self::rollbackIssuanceAttempt()} ->
         // OutstandingChallenges::abortedBeforeHandoff; an indeterminate
         // failure (the chain state cannot be read after a thrown issuance
         // transition, so the challenge may be the authoritative issued
         // stage-2) must not roll back.
         $outstandingAdmissionHeld = false;
-        if ($this->outstanding !== null && $ttlSecs !== null) {
-            $admitted = $this->outstanding->issue($clientIp, $ttlSecs);
-            if ($admitted !== 1) {
-                $this->releaseChain($chainId, $chainOwner);
-
-                return $this->privateJson(
-                    ['error' => ['code' => 'RISK_DENIED', 'message' => 'Challenge issuance denied: outstanding challenge limit reached. Try again later.']],
-                    Response::HTTP_TOO_MANY_REQUESTS,
-                    $request,
-                    $riskSession,
-                    $mintedCookie,
-                );
-            }
-            $outstandingAdmissionHeld = true;
-        }
 
         try {
             // The record carries server-owned issuance metadata (Siteverify
@@ -1208,18 +1215,19 @@ final class ChallengeController
             );
         }
 
-        // Anti-stockpiling post-mint fallback: a direct controller
-        // construction without any known challenge lifetime (no wired
-        // global TTL and no per-sitekey override) admits the minted record
-        // with its actual lifetime after issuance. A refusal here is a
-        // race the pre-issuance checks did not see (concurrent
-        // issuances): the minted record is discarded best-effort and the
-        // request gets the same 429 risk-denied response, so a challenge
-        // is never handed out when its stockpile admission failed.
-        // Production wiring always provides the TTL, so the pre-mint path
-        // above is the deployment behavior.
-        if ($this->outstanding !== null && $ttlSecs === null) {
-            $admitted = $this->outstanding->issue($clientIp, max(1, $challenge->ttlSecs));
+        // Anti-stockpiling admission (post-mint): the live-membership member
+        // is the minted nonce scored at its absolute expiry, which exists
+        // only once the record is minted (OutstandingChallenges::issue). The
+        // admission runs before handoff, so a refused admission discards the
+        // minted record and never hands out; a refusal here is a race the
+        // earlier checks did not see (concurrent issuances).
+        if ($this->outstanding !== null) {
+            $admitted = $this->outstanding->issue(
+                $clientIp,
+                $challenge->nonce,
+                $this->now() + $challenge->ttlSecs,
+                max(1, $challenge->ttlSecs),
+            );
             if ($admitted !== 1) {
                 $this->discardChallenge($challenge);
                 $this->releaseChain($chainId, $chainOwner);
@@ -1265,7 +1273,7 @@ final class ChallengeController
             } catch (\Throwable $e) {
                 error_log(sprintf('kiwicaptcha: siteverify metadata store failed for nonce %s: %s', $challenge->nonce, $e->getMessage()));
                 $this->discardChallenge($challenge);
-                $this->rollbackIssuanceAttempt($outstandingAdmissionHeld, $clientIp, $chainId, $chainOwner);
+                $this->rollbackIssuanceAttempt($outstandingAdmissionHeld, $clientIp, $chainId, $chainOwner, $challenge->nonce);
 
                 return $this->privateJson(
                     ['error' => ['code' => 'SERVICE_UNAVAILABLE', 'message' => 'Challenge issuance is temporarily unavailable. Try again later.']],
@@ -1318,7 +1326,7 @@ final class ChallengeController
             // is returned and the chain reservation released; then the
             // failure propagates (the caller maps it to the closed
             // response).
-            $this->rollbackIssuanceAttempt($outstandingAdmissionHeld, $clientIp, $chainId, $chainOwner);
+            $this->rollbackIssuanceAttempt($outstandingAdmissionHeld, $clientIp, $chainId, $chainOwner, $challenge->nonce);
             throw $e;
         }
 
@@ -1342,6 +1350,237 @@ final class ChallengeController
         $outstandingAdmissionHeld = false;
 
         return $this->privateJson($challengeData, Response::HTTP_OK, $request, $riskSession, $mintedCookie);
+    }
+
+    /**
+     * Bounded cancellation endpoint, the server side of the
+     * exhaustion->debt feedback break. A widget that abandons a challenge
+     * (its bounded solve search exhausted on a stochastic tail) tells the
+     * server to retire the record and release the deployment-wide
+     * live-outstanding slot the abandoned challenge was holding. Mirrors
+     * the challenge endpoint's hardening — POST-only, a bounded JSON body
+     * carrying the challenge nonce, the same origin checks, a bounded
+     * per-source limiter, and the private no-store envelope.
+     *
+     * Idempotent: an unknown, expired or already-cancelled nonce answers
+     * the same success, and a consumed (finalized) challenge is never
+     * cancelled — the storage's atomic pending->cancelled transition
+     * decides ({@see \KiwiCaptcha\CancellableStorageInterface}), and the
+     * response only ever acknowledges the cancellation, never record
+     * contents. The per-source limiter is the anti-stockpiling layer's
+     * own cancellation window; see
+     * {@see OutstandingChallenges::cancellationAdmission()}. When that
+     * layer is not wired, the endpoint stays bounded by the body ceiling,
+     * the nonce shape and the origin checks.
+     */
+    public function cancel(Request $request): JsonResponse
+    {
+        // Path canonicality: identical gate to the challenge endpoint.
+        if (!$this->isCanonicalRequestTarget((string) $request->getRequestUri())) {
+            return $this->privateJson(
+                ['error' => ['code' => 'CANONICAL_PATH_REQUIRED', 'message' => 'The request target must be the canonical path (no empty, dot or percent-encoded segments).']],
+                Response::HTTP_NOT_FOUND,
+            );
+        }
+
+        // Narrow HTTP: the endpoint is POST-only.
+        if ($request->getMethod() !== 'POST') {
+            $response = $this->privateJson(
+                ['error' => ['code' => 'METHOD_NOT_ALLOWED', 'message' => 'The cancellation endpoint accepts POST requests only.']],
+                Response::HTTP_METHOD_NOT_ALLOWED,
+            );
+            $response->headers->set('Allow', 'POST');
+
+            return $response;
+        }
+
+        // HTTP framing: request-smuggling ambiguity refused before any
+        // body is read.
+        $contentLengths = $request->headers->all('content-length');
+        $transferEncodings = $request->headers->all('transfer-encoding');
+        if (\count($contentLengths) > 1 || ($contentLengths !== [] && $transferEncodings !== [])) {
+            return $this->privateJson(
+                ['error' => ['code' => 'FRAMING_REJECTED', 'message' => 'The request carries ambiguous HTTP framing (Content-Length and Transfer-Encoding together, or a duplicate Content-Length).']],
+                Response::HTTP_BAD_REQUEST,
+            );
+        }
+
+        // Body ceiling: the declared Content-Length is rejected before any
+        // body is read (413); the actual read is capped too.
+        foreach ($contentLengths as $declared) {
+            if (\is_string($declared) && (int) $declared > self::MAX_CANCELLATION_BODY_BYTES) {
+                return $this->privateJson(
+                    ['error' => ['code' => 'BODY_TOO_LARGE', 'message' => 'The cancellation request body must not exceed '.self::MAX_CANCELLATION_BODY_BYTES.' bytes.']],
+                    Response::HTTP_REQUEST_ENTITY_TOO_LARGE,
+                );
+            }
+        }
+
+        // Duplicate security-singular headers: identity/trust inputs must
+        // appear at most once.
+        foreach (self::SECURITY_SINGULAR_HEADERS as $headerName) {
+            if (\count($request->headers->all($headerName)) > 1) {
+                return $this->privateJson(
+                    ['error' => ['code' => 'DUPLICATE_HEADER', 'message' => sprintf('The %s header must appear at most once.', $headerName)]],
+                    Response::HTTP_BAD_REQUEST,
+                );
+            }
+        }
+
+        // No decompression bombs.
+        foreach ($request->headers->all('content-encoding') as $encoding) {
+            if (strtolower((string) $encoding) !== 'identity') {
+                return $this->privateJson(
+                    ['error' => ['code' => 'UNSUPPORTED_CONTENT_ENCODING', 'message' => 'Content-Encoding must be identity (the widget POSTs plain JSON).']],
+                    Response::HTTP_UNSUPPORTED_MEDIA_TYPE,
+                );
+            }
+        }
+
+        // Narrow HTTP: the cancellation POST is a JSON document.
+        $contentType = strtolower(trim(explode(';', (string) $request->headers->get('Content-Type', ''), 2)[0]));
+        if ($contentType !== '' && $contentType !== 'application/json') {
+            return $this->privateJson(
+                ['error' => ['code' => 'UNSUPPORTED_MEDIA_TYPE', 'message' => 'Content-Type must be application/json.']],
+                Response::HTTP_UNSUPPORTED_MEDIA_TYPE,
+            );
+        }
+
+        // Body read: at most MAX+1 bytes are ever materialized.
+        $requestBody = $this->readBoundedBody($request, self::MAX_CANCELLATION_BODY_BYTES);
+        if (\strlen($requestBody) > self::MAX_CANCELLATION_BODY_BYTES) {
+            return $this->privateJson(
+                ['error' => ['code' => 'BODY_TOO_LARGE', 'message' => 'The cancellation request body must not exceed '.self::MAX_CANCELLATION_BODY_BYTES.' bytes.']],
+                Response::HTTP_REQUEST_ENTITY_TOO_LARGE,
+            );
+        }
+
+        // Query-parameter hardening: no query parameters are accepted.
+        if ($request->query->count() > 0) {
+            return $this->privateJson(
+                ['error' => ['code' => 'QUERY_PARAMETERS_NOT_ALLOWED', 'message' => 'The cancellation endpoint accepts no query parameters.']],
+                Response::HTTP_UNPROCESSABLE_ENTITY,
+            );
+        }
+
+        // Origin checks: the same ones the challenge endpoint applies.
+        if ($this->sameOriginOnly && !$this->isSameOrigin($request)) {
+            return $this->privateJson(
+                ['error' => ['code' => 'CROSS_ORIGIN_DENIED', 'message' => 'Cross-origin cancellation requests are not allowed.']],
+                Response::HTTP_FORBIDDEN,
+            );
+        }
+        $origin = $request->headers->get('Origin');
+        if ($this->enforceOrigin && ($origin === null || $origin === '' || $origin === 'null')) {
+            return $this->privateJson(
+                ['error' => ['code' => 'origin_rejected', 'message' => 'The cancellation request carries no usable Origin header.']],
+                Response::HTTP_FORBIDDEN,
+            );
+        }
+        if ($this->challengeOriginAllowlist !== [] && !$this->originIsAllowlisted($request)) {
+            return $this->privateJson(
+                ['error' => ['code' => 'origin_rejected', 'message' => 'The cancellation request origin is not allowlisted.']],
+                Response::HTTP_FORBIDDEN,
+            );
+        }
+
+        // Fetch Metadata signal (defense in depth).
+        if ($this->enforceFetchMetadata) {
+            $fetchSite = $request->headers->get('Sec-Fetch-Site');
+            if ($fetchSite !== null && $fetchSite !== '' && strtolower($fetchSite) === 'cross-site') {
+                return $this->privateJson(
+                    ['error' => ['code' => 'CROSS_SITE_REJECTED', 'message' => 'Cross-site cancellation requests are not allowed.']],
+                    Response::HTTP_FORBIDDEN,
+                );
+            }
+        }
+
+        // Trusted client-IP policy: the canonical IP feeds the per-source
+        // cancellation limiter.
+        try {
+            $clientIp = $this->clientIpResolver !== null
+                ? $this->clientIpResolver->resolve($request)
+                : (string) ($request->getClientIp() ?? '');
+        } catch (AmbiguousForwardingException $e) {
+            return $this->privateJson(
+                ['error' => ['code' => 'AMBIGUOUS_FORWARDING', 'message' => 'The request carries ambiguous forwarding headers (X-Forwarded-For and Forwarded together).']],
+                Response::HTTP_BAD_REQUEST,
+            );
+        }
+
+        // Duplicate JSON keys: the raw body is scanned before decoding.
+        $duplicateKey = $this->scanForDuplicateJsonKey($requestBody);
+        if ($duplicateKey !== null) {
+            return $this->privateJson(
+                ['error' => ['code' => 'DUPLICATE_FIELD', 'message' => 'The cancellation request carries a duplicate JSON key: '.$duplicateKey.'.']],
+                Response::HTTP_UNPROCESSABLE_ENTITY,
+            );
+        }
+
+        // A JSON object with exactly the documented fields.
+        $decoded = json_decode($requestBody, false);
+        if (!$decoded instanceof \stdClass) {
+            return $this->privateJson(
+                ['error' => ['code' => 'INVALID_JSON', 'message' => 'The cancellation request body must be a JSON object.']],
+                Response::HTTP_UNPROCESSABLE_ENTITY,
+            );
+        }
+        $payload = (array) $decoded;
+        $unknown = array_values(array_diff(array_keys($payload), self::ACCEPTED_CANCELLATION_FIELDS));
+        if ($unknown !== []) {
+            return $this->privateJson(
+                ['error' => ['code' => 'UNKNOWN_FIELDS', 'message' => 'The cancellation request carries unknown fields: '.implode(', ', $unknown).'.']],
+                Response::HTTP_UNPROCESSABLE_ENTITY,
+            );
+        }
+        // The nonce shape: a bounded base64/base64url value. The widget
+        // echoes the nonce the challenge endpoint issued; anything outside
+        // the bound is refused before any state is touched.
+        $nonce = $payload['nonce'] ?? null;
+        if (!\is_string($nonce) || preg_match(self::CANCELLATION_NONCE_PATTERN, $nonce) !== 1) {
+            return $this->privateJson(
+                ['error' => ['code' => 'INVALID_JSON', 'message' => 'The cancellation request nonce must be a bounded base64 value.']],
+                Response::HTTP_UNPROCESSABLE_ENTITY,
+            );
+        }
+
+        // Bounded per-source limiter: the anti-stockpiling layer's own
+        // per-IP cancellation window (a sliding window in the issuance
+        // rate-limiter style).
+        if ($this->outstanding !== null && !$this->outstanding->cancellationAdmission($clientIp)) {
+            return $this->privateJson(
+                ['error' => ['code' => 'CANCELLATION_RATE_LIMITED', 'message' => 'Too many cancellation requests from this address. Try again later.']],
+                Response::HTTP_TOO_MANY_REQUESTS,
+            );
+        }
+
+        // The record transition: the atomic pending->cancelled flip
+        // (CancellableStorageInterface) decides missing / consumed /
+        // already-cancelled / cancelled-now in one storage operation. A
+        // consumed (finalized) record is never cancelled; the outcome is
+        // idempotent for every other state. The result carries state only,
+        // never record contents. A storage failure fails closed: a
+        // cancellation that could not be established is never reported as
+        // one.
+        if ($this->storage instanceof \KiwiCaptcha\CancellableStorageInterface) {
+            try {
+                $this->storage->cancel($nonce);
+            } catch (\Throwable $e) {
+                error_log(sprintf('kiwicaptcha: challenge cancellation failed for nonce %s: %s', $nonce, $e->getMessage()));
+
+                return $this->privateJson(
+                    ['error' => ['code' => 'SERVICE_UNAVAILABLE', 'message' => 'Challenge cancellation is temporarily unavailable. Try again later.']],
+                    Response::HTTP_SERVICE_UNAVAILABLE,
+                );
+            }
+        }
+
+        // Release the deployment-wide live-outstanding slot the abandoned
+        // challenge was holding (best-effort, idempotent; a failure leaves
+        // the member to expire by its score — fail closed).
+        $this->outstanding?->cancelled($nonce);
+
+        return $this->privateJson(['cancelled' => true], Response::HTTP_OK);
     }
 
     /**
@@ -1432,19 +1671,19 @@ final class ChallengeController
     /**
      * Return an admitted outstanding slot when the challenge was proven
      * never handed out (OutstandingChallenges::abortedBeforeHandoff: the
-     * per-source counter is decremented best-effort, floored at 0; the
-     * global counter decays by EXPIRE). Composed by
+     * per-source counter is decremented best-effort, floored at 0, and the
+     * nonce leaves the global live-outstanding membership). Composed by
      * {@see self::rollbackIssuanceAttempt()}, the single
      * proven-not-handed-off cleanup primitive. The caller must not roll
      * back for an indeterminate failure.
      */
-    private function rollbackOutstandingAdmission(bool $held, string $clientIp): void
+    private function rollbackOutstandingAdmission(bool $held, string $clientIp, ?string $nonce = null): void
     {
         if (!$held) {
             return;
         }
         try {
-            $this->outstanding?->abortedBeforeHandoff($clientIp);
+            $this->outstanding?->abortedBeforeHandoff($clientIp, $nonce);
         } catch (\Throwable) {
             // Best-effort; the counter decays by its EXPIRE otherwise.
         }
@@ -1462,9 +1701,9 @@ final class ChallengeController
      * transition, so the challenge may be the authoritative issued
      * stage-2.
      */
-    private function rollbackIssuanceAttempt(bool $outstandingAdmissionHeld, string $clientIp, ?string $chainId, ?string $chainOwner): void
+    private function rollbackIssuanceAttempt(bool $outstandingAdmissionHeld, string $clientIp, ?string $chainId, ?string $chainOwner, ?string $nonce = null): void
     {
-        $this->rollbackOutstandingAdmission($outstandingAdmissionHeld, $clientIp);
+        $this->rollbackOutstandingAdmission($outstandingAdmissionHeld, $clientIp, $nonce);
         $this->releaseChain($chainId, $chainOwner);
     }
 
@@ -2031,7 +2270,7 @@ final class ChallengeController
                 // Positively not issued by this request (rearmed, owned
                 // elsewhere, or vanished): discard, release and roll back.
                 $this->discardChallenge($challenge);
-                $this->rollbackIssuanceAttempt($outstandingAdmissionHeld, $clientIp, $chainId, $chainOwner);
+                $this->rollbackIssuanceAttempt($outstandingAdmissionHeld, $clientIp, $chainId, $chainOwner, $challenge->nonce);
 
                 return $this->privateJson(
                     ['error' => ['code' => 'SERVICE_UNAVAILABLE', 'message' => 'Challenge issuance is temporarily unavailable. Try again later.']],
@@ -2054,7 +2293,7 @@ final class ChallengeController
                 // recovers the challenge that was durably issued). The slot
                 // is returned and the reservation released.
                 $this->discardChallenge($challenge);
-                $this->rollbackIssuanceAttempt($outstandingAdmissionHeld, $clientIp, $chainId, $chainOwner);
+                $this->rollbackIssuanceAttempt($outstandingAdmissionHeld, $clientIp, $chainId, $chainOwner, $challenge->nonce);
 
                 return $this->privateJson(
                     ['error' => ['code' => 'SERVICE_UNAVAILABLE', 'message' => 'Challenge issuance is temporarily unavailable. Try again later.']],
@@ -2334,19 +2573,19 @@ final class ChallengeController
     }
 
     /**
-     * Read the challenge request body with a hard byte cap: the input
-     * stream is consumed for at most MAX+1 bytes, so an oversized chunked
+     * Read the request body with a hard byte cap: the input stream is
+     * consumed for at most $maxBytes + 1 bytes, so an oversized chunked
      * body is refused by the caller's length check without ever being
      * materialized in full. A declared Content-Length was already checked
      * before the stream was touched, but chunked uploads can skip a
      * truthful one. When Symfony hands back a buffered stream (tests,
      * already-consumed input), the read is still bounded.
      */
-    private function readBoundedBody(Request $request): string
+    private function readBoundedBody(Request $request, int $maxBytes = self::MAX_CHALLENGE_BODY_BYTES): string
     {
         $stream = $request->getContent(true);
         if (\is_resource($stream)) {
-            return (string) stream_get_contents($stream, self::MAX_CHALLENGE_BODY_BYTES + 1);
+            return (string) stream_get_contents($stream, $maxBytes + 1);
         }
 
         return (string) $request->getContent();

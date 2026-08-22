@@ -20,11 +20,11 @@ use Psr\Cache\CacheItemPoolInterface;
  *     single Lua script implements the audit's atomic sliding window for both
  *     the per-client ZSET and the deployment-global ZSET. `TIME` (the Redis
  *     server clock) drives the window, so all PHP-FPM workers share one
- *     consistent window and the enforcement is a gate, not a bound.
+ *     consistent window and the enforcement is an exact gate.
  *  2. PSR-6 pool (shared, best-effort): when a shared pool is configured but
  *     no Redis client exists, the per-client window is kept in the pool. A
  *     PSR-6 pool cannot express an atomic read-modify-write, so concurrent
- *     requests may briefly exceed the limit — a bound, not a gate.
+ *     requests may briefly exceed the limit; this is a soft bound.
  *  3. In-memory (per-process): single-worker fallback.
  *
  * Privacy: raw client IPs are never stored. Every key (Redis, PSR-6 and
@@ -34,9 +34,28 @@ use Psr\Cache\CacheItemPoolInterface;
  * so they agree on the same identity.
  *
  * True sliding window (all backends): the state is a set of hit
- * timestamps/members pruned to `[now - window, now]` on every check, with
+ * timestamps/members pruned to `(now - window, now]` on every check, with
  * no fixed [window_start, hits] bucket. A burst straddling a window
  * boundary can never double the allowed rate.
+ *
+ * Bounded global cardinality: the deployment-global window is a fixed set
+ * of per-window-second buckets, not one member per request. Each bucket's
+ * member is the wall-clock second it belongs to (epoch seconds) and its
+ * score is that second plus the admissions that landed in it. A fresh
+ * bucket is anchored at its second with `ZADD`, then `ZINCRBY` 1
+ * <bucket> accumulates on every admission. `ZREMRANGEBYSCORE` -inf
+ * now-window prunes buckets that slid out of the window, so the ZSET
+ * cardinality is bounded by the window length in seconds (e.g. 60
+ * buckets), never by the request count. The global key no longer grows
+ * without bound under load.
+ *
+ * The current window count is the sum of the per-bucket admissions: each
+ * retained bucket's score minus its second. A bucket that received a
+ * burst keeps its score past the boundary for at most its own count
+ * (bounded by the global cap) and is therefore over-counted, never
+ * under-counted, so the audit fails closed. The per-client window keeps
+ * the per-request-member form: a client's window count is bounded by the
+ * per-client cap, so its cardinality is inherently small.
  *
  * Results: {@see self::check()} returns 1 (allowed), 0 (per-client limit
  * reached) or -1 (global limit reached). {@see self::allow()} is the boolean
@@ -61,26 +80,46 @@ final class IssuanceRateLimiter
     }
 
     /**
-     * Atomic per-client + global sliding window (exact audit semantics):
-     *   KEYS[1]  = per-client ZSET.
-     *   KEYS[2]  = global ZSET.
+     * Atomic per-client + global sliding window (exact window-count audit
+     * semantics):
+     *   KEYS[1]  = per-client ZSET (one member per request; cardinality
+     *              bounded by the per-client cap).
+     *   KEYS[2]  = global ZSET of per-window-second buckets (cardinality
+     *              bounded by the window length in seconds).
      *   ARGV[1]  = per-client max.
      *   ARGV[2]  = global max.
      *   ARGV[3]  = window in ms.
-     *   ARGV[4]  = unique request id (shared member in both ZSETs).
-     * Returns 1 when allowed, 0 when the per-client cap is full, -1 when the
-     * global cap is full (both checked after pruning expired hits).
+     *   ARGV[4]  = unique request id (the per-client member only).
+     * The global buckets: member = the wall-clock second (epoch seconds),
+     * score = the second plus the admissions that landed in it.
+     * `ZINCRBY` on a missing member creates it at the increment, so a
+     * fresh bucket is first anchored at its second with `ZADD`, then
+     * `ZINCRBY` accumulates the count on top. `ZREMRANGEBYSCORE` -inf
+     * (now - window) prunes by time while each bucket's admission count
+     * is its score minus its second. The window count is the sum of the
+     * retained buckets' counts, computed atomically in the script.
+     * Returns 1 when allowed, 0 when the per-client cap is full, -1 when
+     * the global cap is full (both checked after pruning expired hits).
      */
     private const LIMIT_SCRIPT = <<<'LUA'
 local time = redis.call('TIME')
 local now = tonumber(time[1])*1000 + math.floor(tonumber(time[2])/1000)
 local cutoff = now - tonumber(ARGV[3])
+local bucket = tostring(math.floor(now / 1000))
 redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', cutoff)
-redis.call('ZREMRANGEBYSCORE', KEYS[2], '-inf', cutoff)
+redis.call('ZREMRANGEBYSCORE', KEYS[2], '-inf', tostring(math.floor(cutoff / 1000) + 1))
 if redis.call('ZCARD', KEYS[1]) >= tonumber(ARGV[1]) then return 0 end
-if redis.call('ZCARD', KEYS[2]) >= tonumber(ARGV[2]) then return -1 end
+local entries = redis.call('ZRANGE', KEYS[2], 0, -1, 'WITHSCORES')
+local total = 0
+for i = 1, #entries, 2 do
+    total = total + tonumber(entries[i + 1]) - tonumber(entries[i])
+end
+if total >= tonumber(ARGV[2]) then return -1 end
 redis.call('ZADD', KEYS[1], now, ARGV[4])
-redis.call('ZADD', KEYS[2], now, ARGV[4])
+if redis.call('ZSCORE', KEYS[2], bucket) == false then
+    redis.call('ZADD', KEYS[2], bucket, bucket)
+end
+redis.call('ZINCRBY', KEYS[2], 1, bucket)
 redis.call('PEXPIRE', KEYS[1], tonumber(ARGV[3]) + 1000)
 redis.call('PEXPIRE', KEYS[2], tonumber(ARGV[3]) + 1000)
 return 1
@@ -96,19 +135,29 @@ LUA;
      * every epoch: an observer of old Redis snapshots cannot correlate one
      * IP across time periods. Checking the previous-epoch key keeps the
      * per-client sliding window exact across a rotation boundary. The
-     * global budget is shared by all clients regardless of epoch.
+     * global budget is shared by all clients regardless of epoch and uses
+     * the same time-bucketed structure as `LIMIT_SCRIPT`.
      */
     private const LIMIT_SCRIPT_ROTATED = <<<'LUA'
 local time = redis.call('TIME')
 local now = tonumber(time[1])*1000 + math.floor(tonumber(time[2])/1000)
 local cutoff = now - tonumber(ARGV[3])
+local bucket = tostring(math.floor(now / 1000))
 redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', cutoff)
 redis.call('ZREMRANGEBYSCORE', KEYS[2], '-inf', cutoff)
-redis.call('ZREMRANGEBYSCORE', KEYS[3], '-inf', cutoff)
+redis.call('ZREMRANGEBYSCORE', KEYS[3], '-inf', tostring(math.floor(cutoff / 1000) + 1))
 if redis.call('ZCARD', KEYS[1]) + redis.call('ZCARD', KEYS[2]) >= tonumber(ARGV[1]) then return 0 end
-if redis.call('ZCARD', KEYS[3]) >= tonumber(ARGV[2]) then return -1 end
+local entries = redis.call('ZRANGE', KEYS[3], 0, -1, 'WITHSCORES')
+local total = 0
+for i = 1, #entries, 2 do
+    total = total + tonumber(entries[i + 1]) - tonumber(entries[i])
+end
+if total >= tonumber(ARGV[2]) then return -1 end
 redis.call('ZADD', KEYS[2], now, ARGV[4])
-redis.call('ZADD', KEYS[3], now, ARGV[4])
+if redis.call('ZSCORE', KEYS[3], bucket) == false then
+    redis.call('ZADD', KEYS[3], bucket, bucket)
+end
+redis.call('ZINCRBY', KEYS[3], 1, bucket)
 redis.call('PEXPIRE', KEYS[1], tonumber(ARGV[3]) + 1000)
 redis.call('PEXPIRE', KEYS[2], tonumber(ARGV[3]) + 1000)
 redis.call('PEXPIRE', KEYS[3], tonumber(ARGV[3]) + 1000)
@@ -273,17 +322,29 @@ LUA;
     }
 
     /**
-     * Atomic global-only window: one stable deployment-global ZSET and
-     * nothing else, used when the per-client limit is disabled, so no
-     * client pseudonym ever exists in Redis.
+     * Atomic global-only window: one stable deployment-global ZSET of
+     * per-window-second buckets and nothing else, used when the per-client
+     * limit is disabled, so no client pseudonym ever exists in Redis. The
+     * bucket structure matches `LIMIT_SCRIPT`: member = wall-clock second,
+     * score = the second + the admissions that landed in it; the window
+     * count is the sum of the retained buckets' admissions.
      */
     private const LIMIT_SCRIPT_GLOBAL_ONLY = <<<'LUA'
 local time = redis.call('TIME')
 local now = tonumber(time[1])*1000 + math.floor(tonumber(time[2])/1000)
 local cutoff = now - tonumber(ARGV[2])
-redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', cutoff)
-if redis.call('ZCARD', KEYS[1]) >= tonumber(ARGV[1]) then return -1 end
-redis.call('ZADD', KEYS[1], now, ARGV[3])
+local bucket = tostring(math.floor(now / 1000))
+redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', tostring(math.floor(cutoff / 1000) + 1))
+local entries = redis.call('ZRANGE', KEYS[1], 0, -1, 'WITHSCORES')
+local total = 0
+for i = 1, #entries, 2 do
+    total = total + tonumber(entries[i + 1]) - tonumber(entries[i])
+end
+if total >= tonumber(ARGV[1]) then return -1 end
+if redis.call('ZSCORE', KEYS[1], bucket) == false then
+    redis.call('ZADD', KEYS[1], bucket, bucket)
+end
+redis.call('ZINCRBY', KEYS[1], 1, bucket)
 redis.call('PEXPIRE', KEYS[1], tonumber(ARGV[2]) + 1000)
 return 1
 LUA;
@@ -292,13 +353,11 @@ LUA;
     {
         $globalKey = 'kiwi:rl:global:'.$this->namespace;
         $windowMs = $this->windowSecs * 1000;
-        $requestId = bin2hex(random_bytes(16));
         $globalMax = $this->globalMax > 0 ? $this->globalMax : \PHP_INT_MAX;
 
         $result = $this->eval(self::LIMIT_SCRIPT_GLOBAL_ONLY, [$globalKey], [
             (string) $globalMax,
             (string) $windowMs,
-            $requestId,
         ]);
 
         return (int) $result;

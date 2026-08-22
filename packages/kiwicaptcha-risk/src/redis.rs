@@ -28,7 +28,8 @@ use std::time::Duration;
 use crate::event::RiskObservation;
 use crate::signals::SignalVector;
 use crate::store::{
-    Observed, RiskStateStore, RiskStoreError, SessionContextTagStore, SessionTlsTagStore,
+    AssessV2Reply, Observed, OutcomeRegistration, RiskStateStore, RiskStoreError,
+    SessionContextTagStore, SessionTlsTagStore,
 };
 use ::redis as redis_crate;
 
@@ -46,6 +47,14 @@ pub const SCRIPT: &str = include_str!("../resources/risk-v1.lua");
 pub const OUTCOME_REGISTER_LUA: &str = include_str!("../resources/outcome_register.lua");
 pub const OUTCOME_CONFIRM_LUA: &str = include_str!("../resources/outcome_confirm.lua");
 pub const OUTCOME_CORRECT_LUA: &str = include_str!("../resources/outcome_correct.lua");
+
+/// The consolidated risk-v2 assessment script (shared verbatim with PHP):
+/// one atomic invocation that runs the full risk-v1 observation, records
+/// the session's first-seen client-context + trusted-edge TLS tags and
+/// (when requested) registers the decision's pending outcome-ledger
+/// entry, returning the signal vector, the recorded tag values and the
+/// registration status.
+pub const ASSESS_V2_LUA: &str = include_str!("../resources/assess_v2.lua");
 
 /// Default raw saturations in Lua argv order:
 /// src_fast, src_slow, issue, bad, mal, rep, action, switch, global,
@@ -74,6 +83,7 @@ pub struct RedisRiskStateStore {
     outcome_ttl_secs: u64,
     saturations: [u32; 11],
     script: redis_crate::Script,
+    assess_v2_script: redis_crate::Script,
     outcome_register_script: redis_crate::Script,
     outcome_confirm_script: redis_crate::Script,
     outcome_correct_script: redis_crate::Script,
@@ -157,6 +167,7 @@ impl RedisRiskStateStore {
             outcome_ttl_secs: DEFAULT_OUTCOME_TTL_SECS,
             saturations: DEFAULT_SATURATIONS,
             script: redis_crate::Script::new(SCRIPT),
+            assess_v2_script: redis_crate::Script::new(ASSESS_V2_LUA),
             outcome_register_script: redis_crate::Script::new(OUTCOME_REGISTER_LUA),
             outcome_confirm_script: redis_crate::Script::new(OUTCOME_CONFIRM_LUA),
             outcome_correct_script: redis_crate::Script::new(OUTCOME_CORRECT_LUA),
@@ -383,6 +394,214 @@ impl RedisRiskStateStore {
         })
     }
 
+    /// The consolidated risk-v2 assessment: one atomic script call that
+    /// runs the full v1 observation with the exact risk-v1 semantics,
+    /// records the session's first-seen client-context + trusted-edge TLS
+    /// tags (SET NX, first write wins, session TTL) and, when
+    /// `registration` is given, registers the decision's pending
+    /// outcome-ledger entry (SET NX EX under the store's outcome TTL) —
+    /// returning the signal vector, the recorded tag values and the
+    /// registration status. An established risk-v2 session therefore
+    /// costs ONE script call instead of the separate SET NX / GET tag
+    /// round trips and the separate outcome registration.
+    ///
+    /// `context_tag` / `tls_tag` are the presented tags of the current
+    /// request (`None` = none presented; the corresponding record is
+    /// untouched and its existing value is reported as `None`). The
+    /// records use the exact keys and TTL of
+    /// [`SessionContextTagStore::session_first_context_tag`] /
+    /// [`SessionTlsTagStore::session_first_tls_tag`], so the two surfaces
+    /// are interchangeable. The ledger registration mirrors
+    /// [`RiskStateStore::register_outcome`] byte-for-byte (the score is
+    /// computed inside the script from the exact base risk and weights
+    /// the engine scores with). All keys share the hash tag — Cluster
+    /// safe.
+    pub fn assess_v2_full(
+        &self,
+        o: &RiskObservation,
+        context_tag: Option<&str>,
+        tls_tag: Option<&str>,
+        registration: Option<&OutcomeRegistration>,
+    ) -> Result<AssessV2Reply, RiskStoreError> {
+        let now_ms = o.now_ms;
+
+        let mut keys = Self::keys_for(
+            &self.namespace,
+            o.source_epoch,
+            &o.source_id_prev,
+            &o.source_id,
+            &o.source_id_next,
+            o.subnet_epoch,
+            &o.subnet_id_prev,
+            &o.subnet_id,
+            &o.subnet_id_next,
+            o.session_id.as_ref().map(|v| v.as_slice()),
+            o.principal_id.as_ref().map(|v| v.as_slice()),
+            &o.event_id,
+        );
+        let session_hex = o
+            .session_id
+            .map(hex::encode)
+            .unwrap_or_else(|| "0".repeat(32));
+        keys.push(format!(
+            "{{kiwi:{}}}:risk:ctx:{session_hex}",
+            self.namespace
+        ));
+        keys.push(format!(
+            "{{kiwi:{}}}:risk:tls:{session_hex}",
+            self.namespace
+        ));
+        if let Some(reg) = registration {
+            keys.push(self.outcome_ledger_key(&reg.decision_id));
+        }
+        Self::assert_same_slot(&keys)?;
+
+        // The full argv contract: the 22 v1 values + the two presented
+        // tags + the 23 registration values (ARGV[25..47]).
+        let mut args: Vec<String> = Vec::with_capacity(47);
+        args.push(o.event.as_u8().to_string());
+        args.push(o.scope.to_string());
+        args.push(now_ms.to_string());
+        args.push(o.event_id.clone());
+        args.push(self.dedupe_ttl_secs.to_string());
+        args.push(self.state_ttl_secs.to_string());
+        args.push(self.hysteresis_ms.to_string());
+        args.extend(self.saturations.iter().map(|s| s.to_string()));
+        args.push((if o.session_id.is_some() { "1" } else { "0" }).to_string());
+        args.push((if o.principal_id.is_some() { "1" } else { "0" }).to_string());
+        args.push(self.session_ttl_secs.to_string());
+        args.push(self.principal_ttl_secs.to_string());
+        args.push(context_tag.unwrap_or("").to_string());
+        args.push(tls_tag.unwrap_or("").to_string());
+        match registration {
+            Some(reg) => {
+                args.push(reg.decision_id.clone());
+                args.push(reg.decision_hour.to_string());
+                args.push(self.outcome_ttl_secs.to_string());
+                args.push(o.network_risk.to_string());
+                args.push(
+                    (if reg.global_pressure_enabled {
+                        "1"
+                    } else {
+                        "0"
+                    })
+                    .to_string(),
+                );
+                args.push(reg.base_risk.to_string());
+                args.push((if reg.honeypot_hit { "1" } else { "0" }).to_string());
+                let w = &reg.v1_weights;
+                args.extend(
+                    [
+                        w.source_fast,
+                        w.source_slow,
+                        w.subnet_fast,
+                        w.issue_debt,
+                        w.bad_proof,
+                        w.malformed,
+                        w.replay,
+                        w.action_failure,
+                        w.scope_switch,
+                        w.global_pressure,
+                        w.network_risk,
+                        w.trust_credit,
+                        w.principal_credit,
+                    ]
+                    .iter()
+                    .map(u16::to_string),
+                );
+                let w2 = &reg.v2_weights;
+                args.extend(
+                    [w2.honeypot, w2.session_inconsistency, w2.tls]
+                        .iter()
+                        .map(u16::to_string),
+                );
+            }
+            None => {
+                args.push(String::new());
+                args.extend((0..22).map(|_| "0".to_string()));
+            }
+        }
+
+        let script = self.assess_v2_script.clone();
+        let mut invocation = script.prepare_invoke();
+        for key in &keys {
+            invocation.key(key.as_str());
+        }
+        for arg in &args {
+            invocation.arg(arg.as_str());
+        }
+
+        let mut conn_guard = self.pool.acquire(&self.client)?;
+        let conn = conn_guard
+            .as_mut()
+            .ok_or_else(|| RiskStoreError::BackendUnavailable("connection vanished".to_string()))?;
+        let reply: Vec<redis_crate::Value> = invocation.invoke(conn).map_err(map_redis_error)?;
+
+        if reply.len() < 19 {
+            return Err(RiskStoreError::ScriptError(format!(
+                "risk script returned an unexpected payload ({} values)",
+                reply.len()
+            )));
+        }
+
+        let value_i64 = |v: &redis_crate::Value| -> i64 {
+            match v {
+                redis_crate::Value::Int(i) => *i,
+                redis_crate::Value::BulkString(b) => std::str::from_utf8(b)
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(0),
+                _ => 0,
+            }
+        };
+        let value_string = |v: &redis_crate::Value| -> String {
+            match v {
+                redis_crate::Value::BulkString(b) => String::from_utf8_lossy(b).into_owned(),
+                redis_crate::Value::Int(i) => i.to_string(),
+                _ => String::new(),
+            }
+        };
+
+        let global_level = value_i64(&reply[13]) as u8;
+        let cooldown_until_ms = value_i64(&reply[14]) as u64;
+        let is_duplicate = value_i64(&reply[15]) != 0;
+        self.last_global_level
+            .store(global_level, Ordering::Relaxed);
+        self.last_cooldown_until_ms
+            .store(cooldown_until_ms, Ordering::Relaxed);
+
+        let existing_context_tag = value_string(&reply[16]);
+        let existing_tls_tag = value_string(&reply[17]);
+        let registration_status = value_i64(&reply[18]) != 0;
+
+        Ok(AssessV2Reply {
+            observed: Observed {
+                vector: SignalVector {
+                    source_fast: value_i64(&reply[0]) as u16,
+                    source_slow: value_i64(&reply[1]) as u16,
+                    subnet_fast: value_i64(&reply[2]) as u16,
+                    issue_debt: value_i64(&reply[3]) as u16,
+                    bad_proof: value_i64(&reply[4]) as u16,
+                    malformed: value_i64(&reply[5]) as u16,
+                    replay: value_i64(&reply[6]) as u16,
+                    action_failure: value_i64(&reply[7]) as u16,
+                    scope_switch: value_i64(&reply[8]) as u16,
+                    global_pressure: value_i64(&reply[9]) as u16,
+                    network_risk: o.network_risk,
+                    trust_credit: value_i64(&reply[11]) as u16,
+                    principal_credit: value_i64(&reply[12]) as u16,
+                },
+                global_level,
+                cooldown_until_ms,
+                is_duplicate,
+            },
+            existing_context_tag: (!existing_context_tag.is_empty())
+                .then_some(existing_context_tag),
+            existing_tls_tag: (!existing_tls_tag.is_empty()).then_some(existing_tls_tag),
+            registration_status,
+        })
+    }
+
     /// The outcome-ledger key for one decision — the same canonical key
     /// the calibration scripts use (`{kiwi:<ns>}:outcome:<decision_id>`),
     /// so the always-on ledger is one key layout whether calibration is
@@ -463,6 +682,17 @@ fn map_redis_error(e: redis_crate::RedisError) -> RiskStoreError {
 impl RiskStateStore for RedisRiskStateStore {
     fn observe(&self, o: &RiskObservation) -> Result<Observed, RiskStoreError> {
         self.observe_full(o)
+    }
+
+    fn assess_v2(
+        &self,
+        o: &RiskObservation,
+        context_tag: Option<&str>,
+        tls_tag: Option<&str>,
+        registration: Option<&OutcomeRegistration>,
+    ) -> Result<Option<AssessV2Reply>, RiskStoreError> {
+        self.assess_v2_full(o, context_tag, tls_tag, registration)
+            .map(Some)
     }
 
     fn register_outcome(
@@ -1099,6 +1329,141 @@ mod tests {
         let raw: String = conn.get(store.outcome_ledger_key("led-2")).expect("get");
         let value: serde_json::Value = serde_json::from_str(&raw).expect("json");
         assert_eq!(value["o"], "A");
+    }
+
+    #[test]
+    fn assess_v2_registers_ledger_tags_and_returns_status() {
+        let Some(_url) = redis_url() else {
+            eprintln!("skipping Redis test: RISK_REDIS_URL not set");
+            return;
+        };
+        let store = store(60_000, "v2assess");
+        let session = [0x9c; 16];
+        let mut o = observation(&event_id(5), 1, T0, 600);
+        o.session_id = Some(session);
+        let registration = OutcomeRegistration {
+            decision_id: "dec-cons-1".to_string(),
+            decision_hour: 472_222,
+            base_risk: 100,
+            global_pressure_enabled: true,
+            honeypot_hit: false,
+            v1_weights: crate::score::RiskWeights::default(),
+            v2_weights: crate::score::RiskV2Weights::default(),
+        };
+
+        let reply = store
+            .assess_v2_full(&o, Some("aa"), Some("tls13|http2"), Some(&registration))
+            .expect("consolidated assessment");
+        assert!(
+            reply.registration_status,
+            "the pending ledger entry must be created"
+        );
+        assert_eq!(reply.existing_context_tag.as_deref(), Some("aa"));
+        assert_eq!(reply.existing_tls_tag.as_deref(), Some("tls13|http2"));
+        assert_eq!(
+            reply.observed.vector.source_fast, 125,
+            "the v1 observation must run identically"
+        );
+
+        // The ledger mirrors register_outcome byte-for-byte: the script
+        // computes the exact decision score from the signals, weights and
+        // base risk (100 + weighted 125,190 + weighted 10,110 +
+        // weighted 125,80 + weighted 28,170 + weighted 600,100 = 198).
+        let mut conn = client().get_connection().expect("connection");
+        let key = store.outcome_ledger_key("dec-cons-1");
+        let raw: String = conn.get(&key).expect("get");
+        let value: serde_json::Value = serde_json::from_str(&raw).expect("json");
+        assert_eq!(value["o"], "P");
+        assert_eq!(value["scope"], 1);
+        assert_eq!(value["hour"], 472_222);
+        assert_eq!(value["score"], 198);
+        assert_eq!(value["w"], 1);
+
+        // A retried decision_id is refused (SET NX).
+        let retry = store
+            .assess_v2_full(&o, Some("aa"), Some("tls13|http2"), Some(&registration))
+            .expect("retry");
+        assert!(
+            !retry.registration_status,
+            "a duplicate decision_id must not overwrite the ledger"
+        );
+        assert_eq!(retry.existing_context_tag.as_deref(), Some("aa"));
+        assert_eq!(retry.existing_tls_tag.as_deref(), Some("tls13|http2"));
+
+        // Changed tags on an established session return the first tags.
+        let mut o2 = observation(&event_id(6), 1, T0, 600);
+        o2.session_id = Some(session);
+        let reply2 = store
+            .assess_v2_full(
+                &o2,
+                Some("bb"),
+                Some("tls12|http1"),
+                Some(&OutcomeRegistration {
+                    decision_id: "dec-cons-2".to_string(),
+                    ..registration.clone()
+                }),
+            )
+            .expect("changed tags");
+        assert_eq!(
+            reply2.existing_context_tag.as_deref(),
+            Some("aa"),
+            "the first context tag is the baseline"
+        );
+        assert_eq!(
+            reply2.existing_tls_tag.as_deref(),
+            Some("tls13|http2"),
+            "the first TLS tag is the baseline"
+        );
+        assert!(reply2.registration_status);
+
+        // The tag records carry the session TTL, exactly like the
+        // individual session_first_* record surfaces.
+        let session_hex = hex::encode(session);
+        let ctx_ttl: i64 = redis::cmd("TTL")
+            .arg(format!(
+                "{{kiwi:{}}}:risk:ctx:{session_hex}",
+                store.namespace()
+            ))
+            .query(&mut conn)
+            .expect("ttl");
+        let tls_ttl: i64 = redis::cmd("TTL")
+            .arg(format!(
+                "{{kiwi:{}}}:risk:tls:{session_hex}",
+                store.namespace()
+            ))
+            .query(&mut conn)
+            .expect("ttl");
+        assert!((1..=1800).contains(&ctx_ttl));
+        assert!((1..=1800).contains(&tls_ttl));
+    }
+
+    #[test]
+    fn assess_v2_without_registration_skips_the_ledger() {
+        let Some(_url) = redis_url() else {
+            eprintln!("skipping Redis test: RISK_REDIS_URL not set");
+            return;
+        };
+        let store = store(60_000, "v2assessnr");
+        let mut o = observation(&event_id(7), 1, T0, 0);
+        o.session_id = Some([0x2f; 16]);
+        let reply = store
+            .assess_v2_full(&o, Some("aa"), Some("tls13|http2"), None)
+            .expect("consolidated assessment");
+        assert!(
+            !reply.registration_status,
+            "without a registration payload no ledger entry is created"
+        );
+        assert_eq!(
+            reply.existing_context_tag.as_deref(),
+            Some("aa"),
+            "the tag records still apply"
+        );
+        assert_eq!(reply.observed.vector.source_fast, 125);
+        let mut conn = client().get_connection().expect("connection");
+        let raw: Option<String> = conn
+            .get(store.outcome_ledger_key("dec-missing"))
+            .expect("get");
+        assert!(raw.is_none());
     }
 
     #[test]

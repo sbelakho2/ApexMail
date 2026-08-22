@@ -9,6 +9,11 @@
 //! dedupe receipt) but the state script treats them as no-ops (like
 //! `RiskDenied`) — the honeypot signal itself is scored from the risk-v2
 //! context, never from accumulated state.
+//!
+//! Value 21 is the cancellation surface: a server-issued challenge that
+//! was cancelled before any verification. The state script restores the
+//! issue-debt contribution of the cancelled challenge (`iss − 1000`, clamped
+//! at 0) without the solve's other effects.
 
 use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
@@ -47,11 +52,14 @@ pub enum RiskEventKind {
     DecoyEndpointTouched = 19,
     /// Risk-v2: a server-issued decoy form field was submitted.
     DecoyFieldSubmitted = 20,
+    /// A server-issued challenge was cancelled before any verification.
+    ChallengeCancelled = 21,
 }
 
 impl RiskEventKind {
-    /// All twenty kinds, in contract value order (17 risk-v1 + 3 risk-v2).
-    pub const ALL: [RiskEventKind; 20] = [
+    /// All twenty-one kinds, in contract value order (17 risk-v1 +
+    /// 3 risk-v2 + ChallengeCancelled).
+    pub const ALL: [RiskEventKind; 21] = [
         RiskEventKind::PreIssue,
         RiskEventKind::ChallengeIssued,
         RiskEventKind::SolveSuccess,
@@ -72,14 +80,15 @@ impl RiskEventKind {
         RiskEventKind::HoneypotTriggered,
         RiskEventKind::DecoyEndpointTouched,
         RiskEventKind::DecoyFieldSubmitted,
+        RiskEventKind::ChallengeCancelled,
     ];
 
-    /// The contract integer value (1..20), as passed to the Lua script.
+    /// The contract integer value (1..21), as passed to the Lua script.
     pub fn as_u8(self) -> u8 {
         self as u8
     }
 
-    /// Inverse of [`RiskEventKind::as_u8`]; `None` for values outside 1..20.
+    /// Inverse of [`RiskEventKind::as_u8`]; `None` for values outside 1..21.
     pub fn from_u8(value: u8) -> Option<RiskEventKind> {
         match value {
             1 => Some(RiskEventKind::PreIssue),
@@ -102,6 +111,7 @@ impl RiskEventKind {
             18 => Some(RiskEventKind::HoneypotTriggered),
             19 => Some(RiskEventKind::DecoyEndpointTouched),
             20 => Some(RiskEventKind::DecoyFieldSubmitted),
+            21 => Some(RiskEventKind::ChallengeCancelled),
             _ => None,
         }
     }
@@ -263,6 +273,8 @@ mod tests {
             (18, "honeypot_triggered"),
             (19, "decoy_endpoint_touched"),
             (20, "decoy_field_submitted"),
+            // Cancellation surface (debt restoration, no solve effects).
+            (21, "challenge_cancelled"),
         ];
         for (i, (value, name)) in expected.iter().enumerate() {
             let kind = RiskEventKind::ALL[i];
@@ -271,7 +283,7 @@ mod tests {
             assert_eq!(serde_json::to_value(kind).unwrap(), serde_json::json!(name));
         }
         assert_eq!(RiskEventKind::from_u8(0), None);
-        assert_eq!(RiskEventKind::from_u8(21), None);
+        assert_eq!(RiskEventKind::from_u8(22), None);
         assert_eq!(RiskEventKind::from_u8(255), None);
     }
 

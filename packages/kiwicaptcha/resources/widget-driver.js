@@ -12,7 +12,7 @@
   // release tag + SHA256SUMS + SRI + attestation, never by this string.
   // Integrators must serve the driver, worker and wasm from the SAME
   // release (see SECURITY.md — versioned-resource expectation).
-  var KIWI_SOLVER_PROTOCOL_ID = "2026-08-r1";
+  var KIWI_SOLVER_PROTOCOL_ID = "2026-08-r2";
 
   // ── Challenge fetch timeout ─────────────────────────────────────────
   // A hung challenge endpoint must never leave the widget stuck: the fetch
@@ -21,6 +21,16 @@
   // data-kiwi-fetch-timeout-ms overrides the default per container/widget
   // (test-injectable; integrators may tune their own latency budget).
   var KIWI_FETCH_TIMEOUT_MS = 15000;
+
+  // ── Solve deadline margin ───────────────────────────────────────────
+  // The solver is governed by a deadline = the challenge's client-side
+  // expiry estimate (receipt + ttlSecs) minus this margin: a solve that
+  // would outlive the challenge is pure waste (CPU/battery/time) and the
+  // token would be rejected by the server anyway. 500 ms covers the final
+  // chunk plus the token-write/submission path without eating meaningful
+  // solver headroom; the deadline only truncates over-long solves, never
+  // the normal fast path.
+  var KIWI_SOLVE_DEADLINE_MARGIN_MS = 500;
 
   // ── Argon2id worker source (embedded) ───────────────────────────────
   // Same-origin Web Worker for the memory-hard Argon2id solver. The worker
@@ -71,8 +81,8 @@
   // they prove driver+worker+wasm speak the same protocol generation —
   // exact artifact identity is guaranteed by the release tag +
   // SHA256SUMS + SRI + attestation, not by these values.
-  var KIWI_SOLVER_PROTOCOL_ID = "2026-08-r1";
-  var KIWI_SOLVER_PROTOCOL_VERSION = 1;
+  var KIWI_SOLVER_PROTOCOL_ID = "2026-08-r2";
+  var KIWI_SOLVER_PROTOCOL_VERSION = 2;
 
   // The wasm glue exposes itself as \`window.__kiwiCaptchaWasm\`, so the
   // worker establishes the \`window\` alias (same prelude the widget driver
@@ -269,6 +279,13 @@
     post({ type: "failed", reason: "exhausted" });
   }
 
+  // SHA chunks are TIME-budgeted (the wasm solver checks the same
+  // budget inside its loop and reports the partial progress; the
+  // pure-JS fallback checks performance.now() here): the synchronous
+  // work per yield is bounded by wall time (~8–12 ms), never by a hash
+  // count, so a slow device cannot block the worker for ~100 ms. 1000
+  // stays the absolute max hashes per call (the hard bound).
+  var SHA_CHUNK_TIME_BUDGET_MS = 10;
   function solveSha(w, prefix, salt, targetBits, start, maxHashes) {
     var pp = 0, sp = 0;
     var useWasm = !!(w && w.solve_sha256_chunk && allocatorPresent(w));
@@ -289,12 +306,15 @@
           buffers();
           if (!useWasm) continue;
           var res = w.solve_sha256_chunk(pp, prefix.length, sp, salt.length, targetBits, counter, 1000);
-          if (res !== -1) {
+          if (res >= 0) {
             free(w, pp, prefix.length); free(w, sp, salt.length);
             post({ type: "done", counter: res, buildId: KIWI_SOLVER_PROTOCOL_ID });
             return;
           }
-          counter += 1000;
+          // -1 = the whole 1000-hash window was scanned; -(scanned + 1)
+          // = the time budget elapsed after \`scanned\` hashes. Both resume
+          // at the exact next counter, never skipping or redoing work.
+          counter += res === -1 ? 1000 : -res - 1;
         } catch (e) {
           free(w, pp, prefix.length); free(w, sp, salt.length);
           pp = 0; sp = 0;
@@ -302,12 +322,15 @@
         }
       } else {
         var end = Math.min(counter + 1000, maxHashes);
-        for (; counter < end; counter++) {
+        var chunkStart = performance.now();
+        var inChunk = 0;
+        for (; counter < end; counter++, inChunk++) {
           if (leadingZeros(deriveHash(prefix, counter, salt)) >= targetBits) {
             free(w, pp, prefix.length); free(w, sp, salt.length);
             post({ type: "done", counter: counter, buildId: KIWI_SOLVER_PROTOCOL_ID });
             return;
           }
+          if ((inChunk & 255) === 0 && performance.now() - chunkStart >= SHA_CHUNK_TIME_BUDGET_MS) break;
         }
       }
       if (counter % 1000 === 0) post({ type: "progress", counter: counter });
@@ -474,7 +497,17 @@
   }
 
   var MAX_SHA_HASHES = 5000000;
-  function solve(prefix, saltBytes, targetBits, algorithm, m_kib, t, p, onProgress) {
+  // ── Time-budgeted SHA chunks ────────────────────────────────────────
+  // Each chunk runs hashes until approximately this much wall time has
+  // elapsed since the chunk started (the wasm solver enforces the same
+  // budget inside its loop and reports the partial progress; the
+  // pure-JS fallback checks performance.now() here). The synchronous
+  // work per yield is bounded by wall time (~8–12 ms), never by a hash
+  // count — a 50,000-hash chunk can take ~100 ms on a slow device.
+  // CHUNK remains the absolute max hashes per call (the hard bound
+  // alongside MAX_SHA_HASHES).
+  var SHA_CHUNK_TIME_BUDGET_MS = 10;
+  function solve(prefix, saltBytes, targetBits, algorithm, m_kib, t, p, onProgress, deadline) {
     return new Promise(async function(resolve) {
       var prefixBytes = encoder.encode(prefix), expectedHashes = Math.pow(2, targetBits), solveStart = performance.now(), counter = 0;
       var w = await initWasm();
@@ -522,12 +555,20 @@
       var useWasm = wasmUsable();
       var CHUNK = useWasm ? 50000 : 8000;
       function chunk() {
+        // The solve deadline (challenge expiry − margin): abort BETWEEN
+        // chunks — a solve that would outlive the challenge is pure waste
+        // and the token would be rejected anyway. The driver's retry flow
+        // re-acquires a fresh challenge.
+        if (deadline && performance.now() >= deadline) { resolve({ deadline: true }); return; }
         if (useWasm) {
           try {
             if (ensureBuffers()) {
               var res = w.solve_sha256_chunk(pp, prefixBytes.length, sp, saltBytes.length, targetBits, counter, CHUNK);
-              if (res !== -1) { wasmFree(w, pp, prefixBytes.length); wasmFree(w, sp, saltBytes.length); resolve({ counter: res, duration: Math.round(performance.now() - solveStart) }); return; }
-              counter += CHUNK;
+              if (res >= 0) { wasmFree(w, pp, prefixBytes.length); wasmFree(w, sp, saltBytes.length); resolve({ counter: res, duration: Math.round(performance.now() - solveStart) }); return; }
+              // -1 = the whole CHUNK window was scanned; -(scanned + 1)
+              // = the time budget elapsed after `scanned` hashes. Both
+              // resume at the exact next counter, never skipping work.
+              counter += res === -1 ? CHUNK : -res - 1;
             } else {
               // Allocation failed: wasm is disabled permanently — fall back to JS.
               console.warn("KiwiCaptcha: WASM allocation failed, disabling WASM and falling back to JS");
@@ -537,8 +578,13 @@
         }
         if (!useWasm) {
           var end = Math.min(counter + CHUNK, MAX_SHA_HASHES);
-          for (; counter < end; counter++) if (leadingZeros(deriveHash(prefixBytes, counter, saltBytes)) >= targetBits) {
-            resolve({ counter: counter, duration: Math.round(performance.now() - solveStart) }); return;
+          var chunkStart = performance.now();
+          var inChunk = 0;
+          for (; counter < end; counter++, inChunk++) {
+            if (leadingZeros(deriveHash(prefixBytes, counter, saltBytes)) >= targetBits) {
+              resolve({ counter: counter, duration: Math.round(performance.now() - solveStart) }); return;
+            }
+            if ((inChunk & 255) === 0 && performance.now() - chunkStart >= SHA_CHUNK_TIME_BUDGET_MS) break;
           }
         }
         if (counter >= MAX_SHA_HASHES) { resolve(null); return; }
@@ -585,7 +631,7 @@
     } catch (e) {}
     return null;
   }
-  function solveWithWorker(data, onProgress, container) {
+  function solveWithWorker(data, onProgress, container, deadline) {
     var terminateHandle = function () {};
     var promise = new Promise(function(resolve) {
       if (typeof Worker === "undefined") { resolve({ unavailable: true, reason: "no-worker-support" }); return; }
@@ -629,6 +675,23 @@
           blobUrl = null;
         }
       }
+      // The solve deadline (challenge expiry − margin): a memory-hard
+      // solve that would outlive the challenge is pure waste and the
+      // token would be rejected anyway, so the worker is TERMINATED at
+      // the deadline — the same mechanics as generation cancellation
+      // (terminate() + teardown, exactly once). The driver's retry flow
+      // then re-acquires a fresh challenge.
+      var deadlineTimer = null;
+      if (deadline && deadline > performance.now()) {
+        deadlineTimer = setTimeout(function () {
+          if (settled) return;
+          settled = true;
+          clearTimeout(deadlineTimer);
+          try { worker.terminate(); } catch (e) {}
+          teardown();
+          resolve({ deadline: true });
+        }, deadline - performance.now());
+      }
       // The worker is CREATED BY THIS DRIVER (a Blob URL built from local
       // code, or the explicitly configured same-origin asset URL), so no
       // cross-origin postMessage target exists and no rate-limit window is
@@ -647,7 +710,7 @@
           if (typeof msg.buildId !== "string" || msg.buildId !== KIWI_SOLVER_PROTOCOL_ID) {
             if (!settled) {
               console.error("KiwiCaptcha worker protocol mismatch: ready buildId", msg.buildId);
-              settled = true; worker.terminate(); teardown(); resolve({ mismatch: true });
+              settled = true; clearTimeout(deadlineTimer); worker.terminate(); teardown(); resolve({ mismatch: true });
             }
           }
           return;
@@ -658,10 +721,11 @@
         } else if (msg.type === "done") {
           if (typeof msg.counter !== "number" || !isFinite(msg.counter)) return;
           if (typeof msg.buildId !== "string" || msg.buildId !== KIWI_SOLVER_PROTOCOL_ID) {
-            if (!settled) { settled = true; worker.terminate(); teardown(); resolve({ mismatch: true }); }
+            if (!settled) { settled = true; clearTimeout(deadlineTimer); worker.terminate(); teardown(); resolve({ mismatch: true }); }
             return;
           }
           settled = true;
+          clearTimeout(deadlineTimer);
           worker.terminate();
           teardown();
           resolve({ counter: msg.counter, duration: Math.round(performance.now() - workerStart) });
@@ -676,11 +740,12 @@
           if (msg.reason === "protocol-mismatch") {
             if (!settled) {
               console.error("KiwiCaptcha worker protocol mismatch: wasm/worker generation differ");
-              settled = true; worker.terminate(); teardown(); resolve({ mismatch: true });
+              settled = true; clearTimeout(deadlineTimer); worker.terminate(); teardown(); resolve({ mismatch: true });
             }
             return;
           }
           settled = true;
+          clearTimeout(deadlineTimer);
           worker.terminate();
           teardown();
           console.error("KiwiCaptcha worker failed:", msg.reason);
@@ -690,6 +755,7 @@
       worker.onerror = function(ev) {
         if (settled) return;
         settled = true;
+        clearTimeout(deadlineTimer);
         worker.terminate();
         teardown();
         console.error("KiwiCaptcha worker error:", ev && ev.message, ev && ev.filename, ev && ev.lineno);
@@ -714,7 +780,7 @@
           maxHashes: MAX_SHA_HASHES,
         });
       } catch (e) {
-        if (!settled) { settled = true; worker.terminate(); teardown(); resolve({ unavailable: true, reason: "post-failed" }); }
+        if (!settled) { settled = true; clearTimeout(deadlineTimer); worker.terminate(); teardown(); resolve({ unavailable: true, reason: "post-failed" }); }
       }
     });
     return { promise: promise, terminate: terminateHandle };
@@ -1577,6 +1643,13 @@
         setStatus(kiwiT("statusVerifying"), kiwiT("badgeWorking"), "solving");
         announce(kiwiT("checking"));
         dispatch("verifying");
+        // The solve deadline: the challenge expires ttlSecs after receipt
+        // (the same convention as the countdown and expiry timers); the
+        // solver aborts KIWI_SOLVE_DEADLINE_MARGIN_MS before that estimate
+        // — a solve that would outlive the challenge is pure waste (CPU/
+        // battery/time) and the token would be rejected by the server
+        // anyway. 0 = no deadline (missing ttl).
+        var deadline = data.ttlSecs > 0 ? performance.now() + data.ttlSecs * 1000 - KIWI_SOLVE_DEADLINE_MARGIN_MS : 0;
         var result = null;
         if ((data.algorithm || "sha256") === "argon2id") {
           // Memory-hard challenges ALWAYS run in the same-origin worker:
@@ -1585,7 +1658,7 @@
           // kiwi:worker-unavailable state. The worker handle is stored on
           // the widget record so a cancelled generation can terminate()
           // it outright.
-          var workerHandle = solveWithWorker(data, setProgress, container);
+          var workerHandle = solveWithWorker(data, setProgress, container, deadline);
           var wr = kiwiWidgets[widgetId];
           if (wr) wr.worker = workerHandle.terminate;
           result = await workerHandle.promise;
@@ -1593,11 +1666,13 @@
           if (wr2 && wr2.worker === workerHandle.terminate) wr2.worker = null;
           if (!kiwiGenerationCurrent(widgetId, gen)) return;
           if (result && result.mismatch) { solverMismatch(); return; }
+          if (result && result.deadline) throw new Error("Expired");
           if (!result || result.unavailable) { workerUnavailable(result ? result.reason : "solve-failed"); return; }
         } else {
-          result = await solve(data.prefix, b64decode(data.salt), data.targetBits, "sha256", data.mKib||0, data.t||1, data.p||1, setProgress);
+          result = await solve(data.prefix, b64decode(data.salt), data.targetBits, "sha256", data.mKib||0, data.t||1, data.p||1, setProgress, deadline);
         }
         if (!kiwiGenerationCurrent(widgetId, gen)) return;
+        if (result && result.deadline) throw new Error("Expired");
         if (!result) throw new Error("Exhausted");
         if (!kiwiGenerationCurrent(widgetId, gen)) return;
         tokenEl.value = btoa(data.nonce + "." + result.counter + "." + result.duration + "." + JSON.stringify(telemetry.build()));

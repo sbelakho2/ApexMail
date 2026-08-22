@@ -158,12 +158,12 @@ final class ChainedIssuanceRollbackTest extends TestCase
 
         // both halves of the proven-not-handed-off accounting returned to
         // their state: the admitted slot is returned (the per-source
-        // counter is back at 0 — the global counter is never decremented,
-        // it decays by expire) and the chain reservation is released (the
+        // counter is back at 0) and the chain reservation is released (the
         // chain is available/reserved-free again — the ticket stays
-        // reusable).
+        // reusable). The mint failed before the post-mint admission ran,
+        // so no nonce ever joined the global LIVE-outstanding membership.
         self::assertSame(0, $client->counters[$this->sourceKey()] ?? 0, 'the admitted outstanding slot is returned — the per-source counter is back to its prior state');
-        self::assertSame(1, $client->counters['{kiwi:rollback-test}:outstanding:global'] ?? 0, 'the GLOBAL counter is never decremented — deployment-wide pressure decays by EXPIRE');
+        self::assertSame([], $client->zsets['{kiwi:rollback-test}:outstanding:global:live'] ?? [], 'no minted nonce may join the global LIVE-outstanding membership when the mint never handed out');
         $requirement = $chainService->requirementFor($chainId);
         self::assertNotNull($requirement);
         self::assertSame('available', $requirement->state, 'the chain reservation is released — the chain is back to available');
@@ -414,14 +414,19 @@ final class RollbackLostReplyChainStore implements TransactionalChainedChallenge
 /**
  * A minimal in-memory stand-in for Predis\Client covering exactly the
  * outstanding-challenge scripts this test exercises: the atomic issue
- * (both caps -> incr both + expire), the best-effort solve and the
- * aborted-before-handoff rollback (decr floored at 0). The counters are
- * observable for the slot assertions.
+ * (per-source cap + live-membership cap -> INCR + EXPIRE the source
+ * counter and `ZADD` the nonce at its absolute expiry). Also covered:
+ * the best-effort solve and the aborted-before-handoff rollback (decr
+ * floored at 0 plus a ZREM of the nonce). The counters and the live
+ * membership are observable for the slot assertions.
  */
 final class RollbackFakeRedis extends \Predis\Client
 {
     /** @var array<string, int> plain incr counters */
     public array $counters = [];
+
+    /** @var array<string, array<string, float>> live-outstanding membership: key => nonce => score */
+    public array $zsets = [];
 
     public function __construct()
     {
@@ -440,30 +445,36 @@ final class RollbackFakeRedis extends \Predis\Client
 
         if (str_contains($script, 'Outstanding challenge issuance')) {
             // OutstandingChallenges::issue: keys[1] per-source counter,
-            // keys[2] global counter; argv[1] source cap, argv[2] global
-            // cap, argv[3] TTL seconds. GET both caps -> refuse 0/-1
-            // before anything is written -> incr both.
+            // keys[2] the global LIVE-outstanding ZSET; argv[1] source cap,
+            // argv[2] global cap, argv[3] TTL seconds, argv[4] absolute
+            // expiry (the score), argv[5] the minted nonce (the member).
             $source = (string) $keys[0];
             $global = (string) $keys[1];
             if (($this->counters[$source] ?? 0) >= (int) $rest[0]) {
                 return 0;
             }
-            if (($this->counters[$global] ?? 0) >= (int) $rest[1]) {
+            if (\count($this->zsets[$global] ?? []) >= (int) $rest[1]) {
                 return -1;
             }
             $this->counters[$source] = ($this->counters[$source] ?? 0) + 1;
-            $this->counters[$global] = ($this->counters[$global] ?? 0) + 1;
+            $this->zsets[$global][(string) $rest[4]] = (float) $rest[3];
 
             return 1;
         }
 
         if (str_contains($script, 'Outstanding challenge solve') || str_contains($script, 'Outstanding challenge aborted')) {
             // OutstandingChallenges::solved / ::abortedBeforeHandoff:
-            // keys[1] per-source counter; best-effort decr floored at 0.
-            $key = (string) $keys[0];
-            $v = $this->counters[$key] ?? 0;
+            // keys[1] per-source counter, keys[2] the global live ZSET;
+            // argv[1] the nonce ('' = none). Best-effort decr floored at 0
+            // + ZREM the nonce.
+            $source = (string) $keys[0];
+            $global = (string) $keys[1];
+            $v = $this->counters[$source] ?? 0;
             if ($v > 0) {
-                $this->counters[$key] = $v - 1;
+                $this->counters[$source] = $v - 1;
+            }
+            if ((string) $rest[0] !== '') {
+                unset($this->zsets[$global][(string) $rest[0]]);
             }
 
             return 1;

@@ -9,6 +9,8 @@ use KiwiCaptcha\Risk\Calibration\CalibrationStore;
 use KiwiCaptcha\Risk\Metrics\RiskMetrics;
 use KiwiCaptcha\Risk\Network\NetworkClassifierInterface;
 use KiwiCaptcha\Risk\Storage\ProcessEmergencyCap;
+use KiwiCaptcha\Risk\Storage\ConsolidatedAssessmentStoreInterface;
+use KiwiCaptcha\Risk\Storage\OutcomeRegistration;
 use KiwiCaptcha\Risk\Storage\RiskStateStoreInterface;
 use KiwiCaptcha\Risk\Storage\RiskStoreException;
 use KiwiCaptcha\Risk\Storage\SessionContextTagStoreInterface;
@@ -95,6 +97,15 @@ final class AdaptiveRiskEngine
         private readonly ScopeActionHysteresis $hysteresis = new ScopeActionHysteresis(),
     ) {
     }
+
+    /**
+     * True when the current assessment's consolidated store call already
+     * registered the decision's pending outcome-ledger entry atomically
+     * (calibration-less consolidated path); registerDecisionOutcome() then
+     * skips its separate registration. Per-assessment, reset at the top of
+     * runPipeline().
+     */
+    private bool $outcomeRegisteredByConsolidated = false;
 
     public function metrics(): RiskMetrics
     {
@@ -211,6 +222,7 @@ final class AdaptiveRiskEngine
     private function runPipeline(RiskContext $c, int $nowMs, ?string $idempotencyKey, ?RiskV2Context $v2 = null, ?RiskV2Weights $v2Weights = null): RiskDecision
     {
         $observation = $this->buildObservation($c, $nowMs, $idempotencyKey);
+        $this->outcomeRegisteredByConsolidated = false;
 
         if ($this->breaker->isOpen()) {
             $this->metrics->increment('degraded:breaker');
@@ -220,9 +232,55 @@ final class AdaptiveRiskEngine
             return $decision;
         }
 
+        // The pending outcome-ledger registration to fold into the
+        // consolidated assessment. Only the calibration-less path
+        // consolidates: with calibration attached, the calibrator's
+        // register_decision.lua books the receipt + sample denominator +
+        // ledger atomically, so the engine keeps that as the sole
+        // authority. The decision_id is generated here so the ledger and
+        // the returned decision carry the same id.
+        $decisionId = null;
+        $registration = null;
+        if ($this->calibration === null && $this->store instanceof ConsolidatedAssessmentStoreInterface) {
+            $decisionId = bin2hex(random_bytes(16));
+            $registration = new OutcomeRegistration(
+                decisionId: $decisionId,
+                decisionHour: intdiv($nowMs, 3_600_000),
+                baseRisk: $this->policy->baseRisk($c->scope),
+                globalPressureEnabled: $this->enableGlobalPressure,
+                honeypotHit: $v2?->honeypotHit ?? false,
+                weights: $this->policy->weights,
+                v2Weights: $v2Weights ?? new RiskV2Weights(),
+            );
+        }
+
         $start = microtime(true);
         try {
-            $vector = $this->store->observe($observation);
+            if ($this->store instanceof ConsolidatedAssessmentStoreInterface) {
+                // Consolidated assessment: ONE atomic script call runs the
+                // v1 observation AND the first-seen session tag records
+                // (SET NX, session TTL) AND the pending outcome-ledger
+                // registration, returning the vector plus the recorded
+                // tags plus the registration status — an established
+                // risk-v2 session costs one script call instead of the
+                // separate tag round trips and the separate registration.
+                [$vector, $existingContextTag, $existingTlsTag, $_registered] = $this->store->assessV2(
+                    $observation,
+                    $this->presentedContextTag($v2, $observation),
+                    $this->presentedTlsTag($v2, $observation),
+                    $registration,
+                );
+                if ($registration !== null) {
+                    // The pending ledger entry was created (or already
+                    // existed for a retried decision_id) atomically with
+                    // the observation — no separate registration call.
+                    $this->outcomeRegisteredByConsolidated = true;
+                }
+            } else {
+                $vector = $this->store->observe($observation);
+                $existingContextTag = null;
+                $existingTlsTag = null;
+            }
         } catch (RiskStoreException $e) {
             $this->breaker->recordFailure();
             $this->metrics->increment('degraded:store');
@@ -259,10 +317,17 @@ final class AdaptiveRiskEngine
         // client-context consistency and the trusted-edge TLS consistency,
         // derived from the v2 context (a session-first-tag record read that
         // degrades to "consistent" on any backend miss — probabilistic
-        // evidence never breaks an assessment). The v2 weights are the
-        // operator override when given, else the default weights (byte-
-        // identical scores to today).
-        $v2Signals = $v2 !== null ? $this->buildV2Signals($v2, $c, $observation) : null;
+        // evidence never breaks an assessment). With a consolidated store
+        // the recorded tags already came back with the observation; a
+        // store without the capability falls back to the individual
+        // record reads. The v2 weights are the operator override when
+        // given, else the default weights (byte-identical scores to today).
+        $v2Signals = null;
+        if ($v2 !== null) {
+            $v2Signals = $this->store instanceof ConsolidatedAssessmentStoreInterface
+                ? $this->deriveV2SignalsFromRecords($v2, $c, $existingContextTag, $existingTlsTag)
+                : $this->buildV2Signals($v2, $c, $observation);
+        }
         $score = $v2Signals !== null
             ? $this->scorer->scoreV2($base, $vector, $this->policy->weights, $v2Signals, $v2Weights ?? new RiskV2Weights())
             : $this->scorer->score($base, $vector, $this->policy->weights);
@@ -275,6 +340,7 @@ final class AdaptiveRiskEngine
             nowMs: $nowMs,
             cooldownUntilMs: $this->storeCooldownUntilMs(),
             hysteresis: $this->hysteresis,
+            decisionId: $decisionId,
         );
 
         $this->metrics->gauge('global:level', $decision->globalLevel);
@@ -557,7 +623,73 @@ final class AdaptiveRiskEngine
     }
 
     /**
-     * Derives the bounded risk-v2 signal vector from the v2 context.
+     * The client-context tag to present to the consolidated assessment
+     * call: the v2 context's tag when a session pseudonym exists and the
+     * tag is non-empty, else null (no record is written). Mirrors the
+     * guards of the fallback buildV2Signals() path exactly.
+     */
+    private function presentedContextTag(?RiskV2Context $v2, RiskObservation $observation): ?string
+    {
+        if ($v2 === null || $observation->sessionId === null) {
+            return null;
+        }
+        if ($v2->clientContextTag === null || $v2->clientContextTag === '') {
+            return null;
+        }
+
+        return $v2->clientContextTag;
+    }
+
+    /**
+     * The trusted-edge TLS tag to present to the consolidated assessment
+     * call: the v2 context's tag when a session pseudonym exists and the
+     * tag is non-empty and within the 64-char bound, else null (no record
+     * is written). Mirrors the guards of the fallback buildV2Signals()
+     * path exactly.
+     */
+    private function presentedTlsTag(?RiskV2Context $v2, RiskObservation $observation): ?string
+    {
+        if ($v2 === null || $observation->sessionId === null) {
+            return null;
+        }
+        if ($v2->tlsTag === null || $v2->tlsTag === '' || strlen($v2->tlsTag) > 64) {
+            return null;
+        }
+
+        return $v2->tlsTag;
+    }
+
+    /**
+     * Derives the bounded risk-v2 signal vector from the tags recorded by
+     * the consolidated assessment call (the store has already applied the
+     * first-seen records atomically with the observation).
+     *
+     * - honeypot = 1000 when the context reports a honeypot hit OR the
+     *   current observation is one of the honeypot event kinds. Any of the
+     *   three derives the signal; probabilistic evidence, never a gate.
+     * - sessionInconsistency = 1000 when the session's recorded
+     *   first-seen client-context tag differs from the current tag. It is
+     *   0 when no record exists (first request), the tag is absent, or
+     *   the record read failed (neutral degradation).
+     * - tlsInconsistency = 1000 when the session's recorded first-seen
+     *   trusted-edge TLS classification tag differs from the current tag.
+     *   It is 0 when no record exists (first request), the tag is absent,
+     *   or the record read failed (neutral degradation).
+     */
+    private function deriveV2SignalsFromRecords(RiskV2Context $v2, RiskContext $c, ?string $existingContextTag, ?string $existingTlsTag): RiskV2Signals
+    {
+        $honeypot = ($v2->honeypotHit || $c->event->isHoneypot()) ? 1000 : 0;
+        $inconsistent = ($existingContextTag !== null && $existingContextTag !== '' && $existingContextTag !== $v2->clientContextTag) ? 1000 : 0;
+        $tlsInconsistent = ($existingTlsTag !== null && $existingTlsTag !== '' && $existingTlsTag !== $v2->tlsTag) ? 1000 : 0;
+
+        return new RiskV2Signals(honeypot: $honeypot, sessionInconsistency: $inconsistent, tlsInconsistency: $tlsInconsistent);
+    }
+
+    /**
+     * Derives the bounded risk-v2 signal vector from the v2 context via
+     * the individual session-first-tag record reads. Fallback path for
+     * stores without the consolidated assessment capability; identical
+     * semantics to deriveV2SignalsFromRecords().
      *
      * - honeypot = 1000 when the context reports a honeypot hit OR the
      *   current observation is one of the honeypot event kinds. Any of the
@@ -702,6 +834,12 @@ final class AdaptiveRiskEngine
      */
     private function registerDecisionOutcome(int $scope, RiskDecision $decision, int $nowMs): void
     {
+        if ($this->outcomeRegisteredByConsolidated) {
+            // The consolidated assessment registered the pending ledger
+            // entry atomically with the observation (calibration-less
+            // consolidated path); the separate call would duplicate it.
+            return;
+        }
         $decisionHour = intdiv($nowMs, 3_600_000);
         try {
             $sampled = $this->calibration?->sample() ?? true;

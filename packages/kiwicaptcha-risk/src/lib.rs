@@ -59,7 +59,9 @@ use crate::policy::{RiskPolicy, RiskReason};
 use crate::score::score as compute_score;
 use crate::score::RiskV2Weights;
 use crate::signals::SignalVector;
-use crate::store::{Observed, RiskStateStore, SessionContextTagStore, SessionTlsTagStore};
+use crate::store::{
+    Observed, OutcomeRegistration, RiskStateStore, SessionContextTagStore, SessionTlsTagStore,
+};
 
 /// Engine-level input error.
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -567,7 +569,7 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
                 decision_id: String::new(),
             };
             self.record_decision_metrics(ctx.scope, &decision);
-            return Ok(self.finalize_decision(ctx.scope, decision));
+            return Ok(self.finalize_decision(ctx.scope, decision, None, false));
         }
         self.assess_inner(ctx, v2, idempotency_key, v2_weights)
     }
@@ -641,12 +643,40 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
                 .policy
                 .degraded_decision(ctx.scope, self.current_global_level());
             self.record_decision_metrics(ctx.scope, &decision);
-            return Ok(self.finalize_decision(ctx.scope, decision));
+            return Ok(self.finalize_decision(ctx.scope, decision, None, false));
         }
 
+        // The pending outcome-ledger registration to fold into the
+        // consolidated assessment. Only the calibration-less path
+        // consolidates: with calibration attached, the calibrator's
+        // register_decision.lua books the receipt + sample denominator +
+        // ledger atomically, so the engine keeps that as the sole
+        // authority. The decision_id is generated here so the ledger and
+        // the returned decision carry the same id.
+        let decision_id = if self.calibration.is_none() {
+            Some(hex::encode(fresh_decision_id()))
+        } else {
+            None
+        };
+        let effective_v2_weights = v2_weights.unwrap_or_default();
+        let registration = decision_id.as_ref().map(|id| OutcomeRegistration {
+            decision_id: id.clone(),
+            decision_hour: (now_ms / 3_600_000) as i64,
+            base_risk: self.policy.base_risk(ctx.scope),
+            global_pressure_enabled: self.enable_global_pressure,
+            honeypot_hit: v2.map(|v2ctx| v2ctx.honeypot_hit).unwrap_or(false),
+            v1_weights: self.policy.weights,
+            v2_weights: effective_v2_weights,
+        });
+
         let start = Instant::now();
-        let result = self.store.observe(&observation);
-        match result {
+        let consolidated = self.store.assess_v2(
+            &observation,
+            presented_context_tag(v2, observation.session_id),
+            presented_tls_tag(v2, observation.session_id),
+            registration.as_ref(),
+        );
+        let outcome = match consolidated {
             Err(_) => {
                 self.breaker.record_failure();
                 self.metrics.incr("degraded:store");
@@ -654,69 +684,96 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
                     .policy
                     .degraded_decision(ctx.scope, self.current_global_level());
                 self.record_decision_metrics(ctx.scope, &decision);
-                Ok(self.finalize_decision(ctx.scope, decision))
+                return Ok(self.finalize_decision(ctx.scope, decision, None, false));
             }
-            Ok(observed) => {
+            Ok(Some(reply)) => {
                 self.metrics
                     .add_latency_us("store:observe", start.elapsed().as_micros() as u64);
                 self.breaker.record_success();
-                // When global pressure is disabled, the signal, the level
-                // and the cooldown are ALL zeroed before any policy or
-                // cooldown-deny check: the global channel is inert (the
-                // per-source signals keep flowing).
-                let mut vector = observed.vector;
-                let global_level;
-                let cooldown_until_ms;
-                if self.enable_global_pressure {
-                    global_level = observed.global_level;
-                    cooldown_until_ms = observed.cooldown_until_ms;
-                } else {
-                    vector.global_pressure = 0;
-                    global_level = 0;
-                    cooldown_until_ms = 0;
-                }
-                self.current_global_level
-                    .store(global_level, Ordering::Relaxed);
-                let mut base = self.policy.base_risk(ctx.scope);
-                if let Some(calibration) = &self.calibration {
-                    // Bounded automatic calibration: clamp(base + bias,
-                    // 0, 1000) before band mapping (same sign, same clamp
-                    // as PHP).
-                    let bias = calibration.bias_for_scope(ctx.scope, now_ms as i64);
-                    base = (base as i32 + bias).clamp(0, 1000) as u16;
-                }
-                // Risk-v2 evidence factors: honeypot/decoy evidence, the
-                // session client-context consistency and the trusted-edge
-                // TLS consistency, derived from the v2 context (a
-                // session-first-tag record read that degrades to
-                // "consistent" on any backend miss — probabilistic evidence
-                // never breaks an assessment). The v2 weights are the
-                // operator override when given, else the default weights
-                // (byte-identical scores to today).
+                let v2_signals = v2.map(|v2ctx| {
+                    self.derive_v2_signals_from_records(
+                        v2ctx,
+                        reply.existing_context_tag.as_deref(),
+                        reply.existing_tls_tag.as_deref(),
+                        ctx.event,
+                    )
+                });
+                (reply.observed, v2_signals, registration.is_some())
+            }
+            Ok(None) => {
+                // Store without the consolidated capability: the plain
+                // observe plus the individual session-first-tag record
+                // reads (identical semantics).
+                let observed = match self.store.observe(&observation) {
+                    Ok(o) => o,
+                    Err(_) => {
+                        self.breaker.record_failure();
+                        self.metrics.incr("degraded:store");
+                        let decision = self
+                            .policy
+                            .degraded_decision(ctx.scope, self.current_global_level());
+                        self.record_decision_metrics(ctx.scope, &decision);
+                        return Ok(self.finalize_decision(ctx.scope, decision, None, false));
+                    }
+                };
+                self.metrics
+                    .add_latency_us("store:observe", start.elapsed().as_micros() as u64);
+                self.breaker.record_success();
                 let v2_signals = v2
                     .map(|v2ctx| self.derive_v2_signals(v2ctx, observation.session_id, ctx.event));
-                let score = match &v2_signals {
-                    Some(signals) => {
-                        let w2 = v2_weights.unwrap_or_default();
-                        crate::score::score_v2(base, &vector, &self.policy.weights, signals, &w2)
-                    }
-                    None => compute_score(base, &vector, &self.policy.weights),
-                };
-                let mut decision = self.policy.decide_with_hysteresis(
-                    ctx.scope,
-                    score,
-                    &vector,
-                    &ctx.resources,
-                    global_level,
-                    now_ms,
-                    cooldown_until_ms,
-                    Some(&self.hysteresis),
-                );
-                self.merge_contributor_reasons(&mut decision, &vector);
-                self.record_decision_metrics(ctx.scope, &decision);
-                Ok(self.finalize_decision(ctx.scope, decision))
+                (observed, v2_signals, false)
             }
+        };
+
+        let (observed, v2_signals, outcome_registered) = outcome;
+        // When global pressure is disabled, the signal, the level
+        // and the cooldown are ALL zeroed before any policy or
+        // cooldown-deny check: the global channel is inert (the
+        // per-source signals keep flowing).
+        let mut vector = observed.vector;
+        let global_level;
+        let cooldown_until_ms;
+        if self.enable_global_pressure {
+            global_level = observed.global_level;
+            cooldown_until_ms = observed.cooldown_until_ms;
+        } else {
+            vector.global_pressure = 0;
+            global_level = 0;
+            cooldown_until_ms = 0;
         }
+        self.current_global_level
+            .store(global_level, Ordering::Relaxed);
+        let mut base = self.policy.base_risk(ctx.scope);
+        if let Some(calibration) = &self.calibration {
+            // Bounded automatic calibration: clamp(base + bias,
+            // 0, 1000) before band mapping (same sign, same clamp
+            // as PHP).
+            let bias = calibration.bias_for_scope(ctx.scope, now_ms as i64);
+            base = (base as i32 + bias).clamp(0, 1000) as u16;
+        }
+        let score = match &v2_signals {
+            Some(signals) => crate::score::score_v2(
+                base,
+                &vector,
+                &self.policy.weights,
+                signals,
+                &effective_v2_weights,
+            ),
+            None => compute_score(base, &vector, &self.policy.weights),
+        };
+        let mut decision = self.policy.decide_with_hysteresis(
+            ctx.scope,
+            score,
+            &vector,
+            &ctx.resources,
+            global_level,
+            now_ms,
+            cooldown_until_ms,
+            Some(&self.hysteresis),
+        );
+        self.merge_contributor_reasons(&mut decision, &vector);
+        self.record_decision_metrics(ctx.scope, &decision);
+        Ok(self.finalize_decision(ctx.scope, decision, decision_id, outcome_registered))
     }
 
     /// Derives the bounded risk-v2 signal vector from the v2 context:
@@ -763,6 +820,51 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
                     _ => 0,
                 }
             }
+            _ => 0,
+        };
+        crate::signals::RiskV2Signals {
+            honeypot,
+            session_inconsistency,
+            tls_inconsistency,
+        }
+    }
+
+    /// Derives the bounded risk-v2 signal vector from the tags recorded by
+    /// the consolidated assessment call (the store has already applied the
+    /// first-seen records atomically with the observation).
+    ///
+    /// - `honeypot` = 1000 when the context reports a honeypot hit OR the
+    ///   current observation is one of the honeypot event kinds;
+    /// - `session_inconsistency` = 1000 when the session's recorded
+    ///   first-seen client-context tag differs from the current tag; 0
+    ///   when no record exists (first request), the tag is absent, or the
+    ///   record read failed (neutral degradation);
+    /// - `tls_inconsistency` = 1000 when the session's recorded first-seen
+    ///   trusted-edge TLS classification tag differs from the current tag;
+    ///   0 when no record exists (first request), the tag is absent, or
+    ///   the record read failed (neutral degradation).
+    ///
+    /// The tags returned by the consolidated call are non-`None` exactly
+    /// when a tag was presented, so `existing_* == None` implies the
+    /// current tag is absent — identical to the individual-record path.
+    fn derive_v2_signals_from_records(
+        &self,
+        v2: &RiskV2Context,
+        existing_context_tag: Option<&str>,
+        existing_tls_tag: Option<&str>,
+        event: RiskEventKind,
+    ) -> crate::signals::RiskV2Signals {
+        let honeypot = if v2.honeypot_hit || event.is_honeypot() {
+            1000
+        } else {
+            0
+        };
+        let session_inconsistency = match (existing_context_tag, v2.client_context_tag.as_deref()) {
+            (Some(first), Some(tag)) if !first.is_empty() && first != tag => 1000,
+            _ => 0,
+        };
+        let tls_inconsistency = match (existing_tls_tag, v2.tls_tag.as_deref()) {
+            (Some(first), Some(tag)) if !first.is_empty() && first != tag => 1000,
             _ => 0,
         };
         crate::signals::RiskV2Signals {
@@ -1158,15 +1260,26 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
     /// - calibration attached → `record_receipt` (register_decision.lua):
     ///   receipt + the sampled decision-time denominator + the pending
     ///   outcome ledger in ONE atomic script invocation;
-    /// - no calibration → `store.register_outcome` (outcome_register.lua):
-    ///   the pending outcome ledger alone.
+    /// - no calibration → the pending outcome ledger alone, either folded
+    ///   into the consolidated assessment (`outcome_registered = true`,
+    ///   the assess_v2.lua call already registered the entry atomically)
+    ///   or via `store.register_outcome` (outcome_register.lua).
+    ///
+    /// `decision_id` is the pre-generated id the consolidated assessment
+    /// registered the ledger under (`None` draws a fresh random id);
+    /// `outcome_registered` tells the calibration-less path that the
+    /// ledger entry already exists.
     ///
     /// `decision_hour = now_ms / 3_600_000` anchors the decision to its
     /// hour (confirmed outcomes are bucketed by decision time).
-    fn finalize_decision(&self, scope: u32, mut decision: RiskDecision) -> RiskDecision {
-        let mut id = [0u8; 16];
-        thread_rng().fill_bytes(&mut id);
-        decision.decision_id = hex::encode(id);
+    fn finalize_decision(
+        &self,
+        scope: u32,
+        mut decision: RiskDecision,
+        decision_id: Option<String>,
+        outcome_registered: bool,
+    ) -> RiskDecision {
+        decision.decision_id = decision_id.unwrap_or_else(|| hex::encode(fresh_decision_id()));
         let decision_hour = (crate::now_ms() / 3_600_000) as i64;
         match &self.calibration {
             Some(calibration) => {
@@ -1183,12 +1296,14 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
                 );
             }
             None => {
-                let _ = self.store.register_outcome(
-                    &decision.decision_id,
-                    scope,
-                    decision_hour,
-                    decision.score as u32,
-                );
+                if !outcome_registered {
+                    let _ = self.store.register_outcome(
+                        &decision.decision_id,
+                        scope,
+                        decision_hour,
+                        decision.score as u32,
+                    );
+                }
             }
         }
         decision
@@ -1210,6 +1325,43 @@ pub(crate) fn now_ms() -> u64 {
         .as_millis() as u64
 }
 
+/// A fresh 16-byte random decision id (hex), the internal handle the
+/// always-on outcome ledger is keyed under.
+fn fresh_decision_id() -> [u8; 16] {
+    let mut id = [0u8; 16];
+    thread_rng().fill_bytes(&mut id);
+    id
+}
+
+/// The client-context tag to present to the consolidated assessment call:
+/// the v2 context's tag when a session pseudonym exists and the tag is
+/// non-empty, else `None` (no record is written). Mirrors the guards of
+/// the fallback `derive_v2_signals` path exactly.
+fn presented_context_tag(v2: Option<&RiskV2Context>, session_id: Option<[u8; 16]>) -> Option<&str> {
+    let v2 = v2?;
+    session_id?;
+    let tag = v2.client_context_tag.as_deref()?;
+    if tag.is_empty() {
+        return None;
+    }
+    Some(tag)
+}
+
+/// The trusted-edge TLS tag to present to the consolidated assessment
+/// call: the v2 context's tag when a session pseudonym exists and the tag
+/// is non-empty and within the 64-char bound, else `None` (no record is
+/// written). Mirrors the guards of the fallback `derive_v2_signals` path
+/// exactly.
+fn presented_tls_tag(v2: Option<&RiskV2Context>, session_id: Option<[u8; 16]>) -> Option<&str> {
+    let v2 = v2?;
+    session_id?;
+    let tag = v2.tls_tag.as_deref()?;
+    if tag.is_empty() || tag.len() > 64 {
+        return None;
+    }
+    Some(tag)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1220,7 +1372,7 @@ mod tests {
     use crate::policy::RiskPolicy;
     use crate::resources::ResourcePressure;
     use crate::signals::SignalVector;
-    use crate::store::RiskStoreError;
+    use crate::store::{AssessV2Reply, RiskStoreError};
     use ::redis::Commands;
     use serde_json::json;
     use std::collections::{HashMap, HashSet};
@@ -1913,6 +2065,217 @@ mod tests {
         assert_eq!(
             tuned.score, 200,
             "the v2 weights override must tune the additive factors"
+        );
+    }
+
+    /// Wraps the real Redis store and counts the store-surface calls an
+    /// assessment makes (the Rust mirror of the PHP command-count seam):
+    /// an established-session assessment must issue exactly ONE
+    /// consolidated script call and no separate register_outcome. The
+    /// counters are shared via `Arc` so the test can read them after the
+    /// store is moved into the engine.
+    struct CountingConsolidatedRedisStore {
+        inner: crate::redis::RedisRiskStateStore,
+        assess_v2_calls: Arc<AtomicUsize>,
+        observe_calls: Arc<AtomicUsize>,
+        register_outcome_calls: Arc<AtomicUsize>,
+    }
+
+    impl CountingConsolidatedRedisStore {
+        fn new(
+            inner: crate::redis::RedisRiskStateStore,
+            assess_v2_calls: Arc<AtomicUsize>,
+            observe_calls: Arc<AtomicUsize>,
+            register_outcome_calls: Arc<AtomicUsize>,
+        ) -> CountingConsolidatedRedisStore {
+            CountingConsolidatedRedisStore {
+                inner,
+                assess_v2_calls,
+                observe_calls,
+                register_outcome_calls,
+            }
+        }
+    }
+
+    impl RiskStateStore for CountingConsolidatedRedisStore {
+        fn observe(&self, o: &RiskObservation) -> Result<Observed, RiskStoreError> {
+            self.observe_calls.fetch_add(1, Ordering::Relaxed);
+            self.inner.observe(o)
+        }
+
+        fn register_outcome(
+            &self,
+            decision_id: &str,
+            scope: u32,
+            decision_hour: i64,
+            score: u32,
+        ) -> Result<bool, RiskStoreError> {
+            self.register_outcome_calls.fetch_add(1, Ordering::Relaxed);
+            self.inner
+                .register_outcome(decision_id, scope, decision_hour, score)
+        }
+
+        fn assess_v2(
+            &self,
+            o: &RiskObservation,
+            context_tag: Option<&str>,
+            tls_tag: Option<&str>,
+            registration: Option<&OutcomeRegistration>,
+        ) -> Result<Option<AssessV2Reply>, RiskStoreError> {
+            self.assess_v2_calls.fetch_add(1, Ordering::Relaxed);
+            self.inner.assess_v2(o, context_tag, tls_tag, registration)
+        }
+
+        fn confirm_outcome(
+            &self,
+            decision_id: &str,
+            legitimate: bool,
+        ) -> Result<u8, RiskStoreError> {
+            self.inner.confirm_outcome(decision_id, legitimate)
+        }
+
+        fn correct_outcome(
+            &self,
+            decision_id: &str,
+            legitimate: bool,
+        ) -> Result<bool, RiskStoreError> {
+            self.inner.correct_outcome(decision_id, legitimate)
+        }
+
+        fn last_global_level(&self) -> u8 {
+            self.inner.last_global_level()
+        }
+
+        fn last_cooldown_until_ms(&self) -> u64 {
+            self.inner.last_cooldown_until_ms()
+        }
+    }
+
+    impl SessionContextTagStore for CountingConsolidatedRedisStore {
+        fn session_first_context_tag(
+            &self,
+            session_id: &[u8; 16],
+            tag: &str,
+        ) -> Result<Option<String>, RiskStoreError> {
+            self.inner.session_first_context_tag(session_id, tag)
+        }
+    }
+
+    impl SessionTlsTagStore for CountingConsolidatedRedisStore {
+        fn session_first_tls_tag(
+            &self,
+            session_id: &[u8; 16],
+            tag: &str,
+        ) -> Result<Option<String>, RiskStoreError> {
+            self.inner.session_first_tls_tag(session_id, tag)
+        }
+    }
+
+    /// The established-session assessment issues exactly ONE script call:
+    /// the full calibration-less assessment path (observation +
+    /// first-seen tags + outcome registration) runs as a single
+    /// assess_v2 invocation, and the separate observe/register_outcome
+    /// surfaces are not touched.
+    #[test]
+    fn established_session_assessment_issues_exactly_one_script_call() {
+        let Some(url) = std::env::var("RISK_REDIS_URL")
+            .ok()
+            .filter(|u| !u.is_empty())
+        else {
+            eprintln!("skipping Redis test: RISK_REDIS_URL not set");
+            return;
+        };
+        let url = url
+            .strip_prefix("tcp://")
+            .map(|rest| format!("redis://{rest}"))
+            .unwrap_or(url);
+        let mut suffix = [0u8; 4];
+        rand::thread_rng().fill_bytes(&mut suffix);
+        let inner = crate::redis::RedisRiskStateStore::new(
+            ::redis::Client::open(url.clone()).expect("url parses"),
+            &format!("engcount{}", hex::encode(suffix)),
+        )
+        .with_io_timeouts(2_000, 2_000);
+        let assess_calls = Arc::new(AtomicUsize::new(0));
+        let observe_calls = Arc::new(AtomicUsize::new(0));
+        let register_calls = Arc::new(AtomicUsize::new(0));
+        let store = CountingConsolidatedRedisStore::new(
+            inner,
+            assess_calls.clone(),
+            observe_calls.clone(),
+            register_calls.clone(),
+        );
+        let engine = RiskEngine::new(store, classifier(), policy(), keys());
+        let session: [u8; 22] = *b"established-session-id";
+
+        // Prime: the first assessment records the session tag records and
+        // registers its own decision atomically.
+        let first = engine
+            .assess_pre_issue_v2(
+                RiskContext {
+                    session_id: Some(&session),
+                    ..context()
+                },
+                &v2_context(false, Some("aa"), Some("tls13|http2")),
+                None,
+                None,
+            )
+            .unwrap();
+        assess_calls.store(0, Ordering::Relaxed);
+        observe_calls.store(0, Ordering::Relaxed);
+        register_calls.store(0, Ordering::Relaxed);
+
+        // Established session: the whole assessment is ONE consolidated
+        // script call.
+        let second = engine
+            .assess_pre_issue_v2(
+                RiskContext {
+                    session_id: Some(&session),
+                    ..context()
+                },
+                &v2_context(false, Some("aa"), Some("tls13|http2")),
+                None,
+                None,
+            )
+            .unwrap();
+        assert_eq!(
+            assess_calls.load(Ordering::Relaxed),
+            1,
+            "the established-session assessment must issue exactly ONE consolidated script call"
+        );
+        assert_eq!(
+            observe_calls.load(Ordering::Relaxed),
+            0,
+            "the consolidated path must not fall back to the plain observe"
+        );
+        assert_eq!(
+            register_calls.load(Ordering::Relaxed),
+            0,
+            "the outcome registration must run inside the consolidated call"
+        );
+
+        // The decision's pending ledger entry exists with the exact
+        // decision score (the registration ran inside that one call).
+        let mut conn = ::redis::Client::open(url)
+            .expect("url parses")
+            .get_connection()
+            .expect("connection");
+        let key = format!(
+            "{{kiwi:engcount{}}}:outcome:{}",
+            hex::encode(suffix),
+            second.decision_id
+        );
+        let raw: String = conn.get(&key).expect("get");
+        let value: serde_json::Value = serde_json::from_str(&raw).expect("json");
+        assert_eq!(value["o"], "P");
+        assert_eq!(
+            value["score"].as_u64().unwrap() as u16,
+            second.score,
+            "the consolidated ledger score must be the exact decision score"
+        );
+        assert_ne!(
+            first.decision_id, second.decision_id,
+            "each assessment registers its own decision"
         );
     }
 

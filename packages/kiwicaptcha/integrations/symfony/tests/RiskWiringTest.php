@@ -158,7 +158,7 @@ final class RiskWiringTest extends TestCase
         self::assertNull($args[0], 'no argon semaphore wired (sha256) -> null');
         self::assertInstanceOf(Reference::class, $args[1], 'arg 1 = the risk Redis client for the counter reads');
         self::assertSame('{kiwi:wiring-test}:issuance:', $args[2], 'arg 2 = the issuance counter key prefix (hash-tagged)');
-        self::assertSame(20000, $args[3], 'arg 3 = resource_capacity.issuance_per_second (the DEPLOYMENT-WIDE denominator, default 20000)');
+        self::assertSame(500, $args[3], 'arg 3 = resource_capacity.issuance_per_second (the DEPLOYMENT-WIDE denominator, default 500, aligned with the hard global limiter)');
 
         // The deployment denominator is a separate knob from the per-process
         // emergency cap: hard_limits.process_per_second stays exclusively on

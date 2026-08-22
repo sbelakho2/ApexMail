@@ -114,6 +114,7 @@ final class FakePredisClient extends \Predis\Client
         return match (strtoupper((string) $commandID)) {
             'TIME' => $this->fakeTime(),
             'ZADD' => $this->fakeZadd($arguments),
+            'ZINCRBY' => $this->fakeZincrby($arguments),
             'ZREM' => $this->fakeZrem($arguments),
             'ZREMRANGEBYSCORE' => $this->fakeZremrangebyscore($arguments),
             'ZCARD' => $this->zcard((string) $arguments[0]),
@@ -304,6 +305,39 @@ final class FakePredisClient extends \Predis\Client
         return $added;
     }
 
+    /**
+     * `ZINCRBY`: increment the score of a member, creating it at the
+     * increment when absent (the bucketed global limiter's per-second
+     * admission count).
+     *
+     * @param list<mixed> $arguments
+     */
+    private function fakeZincrby(array $arguments): float
+    {
+        $key = (string) $arguments[0];
+        $increment = (float) $arguments[1];
+        $member = (string) $arguments[2];
+        $this->zsets[$key] ??= [];
+        $this->zsets[$key][$member] = ($this->zsets[$key][$member] ?? 0.0) + $increment;
+
+        return $this->zsets[$key][$member];
+    }
+
+    /**
+     * The bucketed global window count: the sum of each retained bucket's
+     * admission count, where a bucket's score is its second plus the
+     * admissions that landed in it (mirrors the Lua sum of score - second).
+     */
+    private function bucketCount(string $key): int
+    {
+        $total = 0;
+        foreach ($this->zsets[$key] ?? [] as $member => $score) {
+            $total += (int) $score - (int) $member;
+        }
+
+        return $total;
+    }
+
     /** @param list<mixed> $arguments */
     private function fakeZrem(array $arguments): int
     {
@@ -379,9 +413,12 @@ final class FakePredisClient extends \Predis\Client
 
         if (str_contains($script, 'Outstanding challenge issuance')) {
             // OutstandingChallenges::issue: keys[1] per-source counter,
-            // keys[2] global counter; argv[1] source cap, argv[2] global
-            // cap, argv[3] TTL seconds. GET both caps -> refuse 0/-1
-            // before anything is written -> incr both + expire both.
+            // keys[2] the global LIVE-outstanding ZSET; argv[1] source cap,
+            // argv[2] global cap, argv[3] TTL seconds, argv[4] absolute
+            // expiry (the ZSET score), argv[5] the minted nonce (the
+            // member). GET the source cap -> prune expired live members ->
+            // refuse 0/-1 before anything is written -> INCR + EXPIRE the
+            // source counter and `ZADD` the nonce at its absolute expiry.
             $source = (string) $keys[0];
             $global = (string) $keys[1];
             $sourceCap = (int) $rest[0];
@@ -390,27 +427,78 @@ final class FakePredisClient extends \Predis\Client
             if (($this->counters[$source] ?? 0) >= $sourceCap) {
                 return 0;
             }
-            if (($this->counters[$global] ?? 0) >= $globalCap) {
+            $this->fakeZremrangebyscore([$global, '-inf', (string) floor($this->timeMs() / 1000)]);
+            if ($this->zcard($global) >= $globalCap) {
                 return -1;
             }
             $this->fakeIncr([$source]);
-            $this->fakeIncr([$global]);
             $this->fakePexpire([$source, $ttl * 1000]);
-            $this->fakePexpire([$global, $ttl * 1000]);
+            $this->fakeZadd([$global, (string) $rest[3], (string) $rest[4]]);
 
             return 1;
         }
 
         if (str_contains($script, 'Outstanding challenge solve')) {
-            // OutstandingChallenges::solved: keys[1] per-source counter;
-            // best-effort decr floored at 0.
-            $key = (string) $keys[0];
-            $v = $this->counters[$key] ?? 0;
+            // OutstandingChallenges::solved: keys[1] per-source counter,
+            // keys[2] the global live ZSET; argv[1] the solved nonce ('' =
+            // none). Best-effort DECR floored at 0 + ZREM the nonce.
+            $source = (string) $keys[0];
+            $global = (string) $keys[1];
+            $v = $this->counters[$source] ?? 0;
             if ($v > 0) {
-                $this->fakeDecr([$key]);
+                $this->fakeDecr([$source]);
+            }
+            if ((string) $rest[0] !== '') {
+                $this->fakeZrem([$global, (string) $rest[0]]);
             }
 
             return $v - 1;
+        }
+
+        if (str_contains($script, 'Outstanding challenge aborted')) {
+            // OutstandingChallenges::abortedBeforeHandoff: keys[1]
+            // per-source counter, keys[2] the global live ZSET; argv[1]
+            // the abandoned nonce ('' = none). Best-effort DECR floored at
+            // 0 + ZREM the nonce; returns 1 (rollback never changes the
+            // response).
+            $source = (string) $keys[0];
+            $global = (string) $keys[1];
+            $v = $this->counters[$source] ?? 0;
+            if ($v > 0) {
+                $this->fakeDecr([$source]);
+            }
+            if ((string) $rest[0] !== '') {
+                $this->fakeZrem([$global, (string) $rest[0]]);
+            }
+
+            return 1;
+        }
+
+        if (str_contains($script, 'Outstanding challenge cancelled')) {
+            // OutstandingChallenges::cancelled: keys[1] the global live
+            // ZSET; argv[1] the cancelled nonce. Best-effort idempotent
+            // ZREM.
+            return $this->fakeZrem([(string) $keys[0], (string) $rest[0]]);
+        }
+
+        if (str_contains($script, 'Outstanding challenge cancellation admission')) {
+            // OutstandingChallenges::cancellationAdmission: keys[1] the
+            // per-source cancellation window; argv[1] cap, argv[2] window
+            // ms, argv[3] request id. Prune -> cap -> `ZADD` + `PEXPIRE`.
+            $window = (string) $keys[0];
+            $cap = (int) $rest[0];
+            $windowMs = (int) $rest[1];
+            $requestId = (string) $rest[2];
+            $now = $this->timeMs();
+            $cutoff = $now - $windowMs;
+            $this->fakeZremrangebyscore([$window, '-inf', (string) $cutoff]);
+            if ($this->zcard($window) >= $cap) {
+                return 0;
+            }
+            $this->fakeZadd([$window, (string) $now, $requestId]);
+            $this->fakePexpire([$window, (string) ($windowMs + 1000)]);
+
+            return 1;
         }
 
         if (str_contains($script, 'waiters')) {
@@ -779,23 +867,29 @@ final class FakePredisClient extends \Predis\Client
             return $this->fakeZrem([$keys[0], $rest[0]]);
         }
 
-        // TIME-based scripts: semaphore acquire (1 key), global-only rate
-        // limiter (1 key) or the full rate limiter (2/3 keys). `now`
-        // mirrors the Lua time read.
+        // TIME-based scripts: semaphore acquire (1 key), the bucketed
+        // global-only limiter (1 key) or the full bucketed rate limiter
+        // (2/3 keys). `now` mirrors the Lua time read.
         $now = $this->timeMs();
 
-        if (str_contains($script, 'ZADD", KEYS[1], now, ARGV[3]') || str_contains($script, "ZADD', KEYS[1], now, ARGV[3]")) {
-            // Global-only rate limiter: prune, global cap -> -1, add at now.
+        if (str_contains($script, "ZINCRBY', KEYS[1], 1, bucket") || str_contains($script, 'ZINCRBY", KEYS[1], 1, bucket')) {
+            // Bucketed global-only rate limiter: prune the per-second
+            // buckets (score = second + count), enforce the cap on the
+            // window count, then anchor the current second's bucket at its
+            // second and `ZINCRBY` its count.
             $key = (string) $keys[0];
             $globalMax = (int) $rest[0];
             $windowMs = (int) $rest[1];
-            $requestId = (string) $rest[2];
             $cutoff = $now - $windowMs;
-            $this->fakeZremrangebyscore([$key, '-inf', (string) $cutoff]);
-            if ($this->zcard($key) >= $globalMax) {
+            $bucket = (string) floor($now / 1000);
+            $this->fakeZremrangebyscore([$key, '-inf', (string) (floor($cutoff / 1000) + 1)]);
+            if ($this->bucketCount($key) >= $globalMax) {
                 return -1;
             }
-            $this->fakeZadd([$key, (string) $now, $requestId]);
+            if (!isset($this->zsets[$key][$bucket])) {
+                $this->fakeZadd([$key, $bucket, $bucket]);
+            }
+            $this->fakeZincrby([$key, 1, $bucket]);
             $this->fakePexpire([$key, (string) ($windowMs + 1000)]);
 
             return 1;
@@ -817,8 +911,8 @@ final class FakePredisClient extends \Predis\Client
             return 1;
         }
 
-        // Rate limiter (2 keys): prune both windows, per-client cap, then
-        // global cap.
+        // Rate limiter (2 keys): prune the per-client window and the
+        // bucketed global window, per-client cap, then global cap.
         if ($numKeys === 2) {
             $clientKey = (string) $keys[0];
             $globalKey = (string) $keys[1];
@@ -827,16 +921,20 @@ final class FakePredisClient extends \Predis\Client
             $windowMs = (int) $rest[2];
             $requestId = (string) $rest[3];
             $cutoff = $now - $windowMs;
+            $bucket = (string) floor($now / 1000);
             $this->fakeZremrangebyscore([$clientKey, '-inf', (string) $cutoff]);
-            $this->fakeZremrangebyscore([$globalKey, '-inf', (string) $cutoff]);
+            $this->fakeZremrangebyscore([$globalKey, '-inf', (string) (floor($cutoff / 1000) + 1)]);
             if ($this->zcard($clientKey) >= $clientMax) {
                 return 0;
             }
-            if ($this->zcard($globalKey) >= $globalMax) {
+            if ($this->bucketCount($globalKey) >= $globalMax) {
                 return -1;
             }
             $this->fakeZadd([$clientKey, (string) $now, $requestId]);
-            $this->fakeZadd([$globalKey, (string) $now, $requestId]);
+            if (!isset($this->zsets[$globalKey][$bucket])) {
+                $this->fakeZadd([$globalKey, $bucket, $bucket]);
+            }
+            $this->fakeZincrby([$globalKey, 1, $bucket]);
             $this->fakePexpire([$clientKey, (string) ($windowMs + 1000)]);
             $this->fakePexpire([$globalKey, (string) ($windowMs + 1000)]);
 
@@ -845,7 +943,8 @@ final class FakePredisClient extends \Predis\Client
 
         // Epoch-rotated limiter (3 keys): clientPrev, clientCur, and ONE
         // stable global zset. Only the client keys are per-epoch; the
-        // global budget is shared by every client regardless of epoch.
+        // global budget is shared by every client regardless of epoch and
+        // uses the same bucketed structure.
         $clientPrev = (string) $keys[0];
         $clientCur = (string) $keys[1];
         $global = (string) $keys[2];
@@ -854,23 +953,25 @@ final class FakePredisClient extends \Predis\Client
         $windowMs = (int) $rest[2];
         $requestId = (string) $rest[3];
         $cutoff = $now - $windowMs;
-        foreach ([$clientPrev, $clientCur, $global] as $k) {
+        foreach ([$clientPrev, $clientCur] as $k) {
             $this->fakeZremrangebyscore([$k, '-inf', (string) $cutoff]);
         }
+        $this->fakeZremrangebyscore([$global, '-inf', (string) (floor($cutoff / 1000) + 1)]);
         if ($this->zcard($clientPrev) + $this->zcard($clientCur) >= $clientMax) {
             return 0;
         }
-        if ($this->zcard($global) >= $globalMax) {
+        if ($this->bucketCount($global) >= $globalMax) {
             return -1;
         }
         $this->fakeZadd([$clientCur, (string) $now, $requestId]);
-        $this->fakeZadd([$global, (string) $now, $requestId]);
+        $bucket = (string) floor($now / 1000);
+        if (!isset($this->zsets[$global][$bucket])) {
+            $this->fakeZadd([$global, $bucket, $bucket]);
+        }
+        $this->fakeZincrby([$global, 1, $bucket]);
         foreach ([$clientPrev, $clientCur, $global] as $k) {
             $this->fakePexpire([$k, (string) ($windowMs + 1000)]);
         }
-
-        return 1;
-        $this->fakePexpire([$globalKey, (string) ($windowMs + 1000)]);
 
         return 1;
     }

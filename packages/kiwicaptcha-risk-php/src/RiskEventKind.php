@@ -16,6 +16,11 @@ namespace KiwiCaptcha\Risk;
  * dedupe receipt) but the state script treats them as no-ops (like
  * RiskDenied) — the honeypot signal itself is scored from the risk-v2
  * context, never from accumulated state.
+ *
+ * Value 21 is the cancellation surface: a server-issued challenge that
+ * was cancelled before any verification. The state script restores the
+ * issue-debt contribution of the cancelled challenge (iss −1000, clamped
+ * at 0) without the solve's other effects.
  */
 enum RiskEventKind: int
 {
@@ -42,6 +47,8 @@ enum RiskEventKind: int
     case DecoyEndpointTouched = 19;
     /** Risk-v2: a server-issued decoy form field was submitted. */
     case DecoyFieldSubmitted = 20;
+    /** A server-issued challenge was cancelled before any verification. */
+    case ChallengeCancelled = 21;
 
     /**
      * True for the three risk-v2 honeypot/decoy evidence kinds.

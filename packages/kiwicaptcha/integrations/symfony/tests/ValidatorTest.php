@@ -376,8 +376,8 @@ final class ValidatorTest extends TestCase
         $outstanding = new OutstandingChallenges($client, '{kiwi:validator-test}:outstanding:', RiskKeys::fromMaster(self::SECRET), 3, 100, 0);
 
         // Two outstanding challenges for the source (the 3rd would hit the cap).
-        self::assertSame(1, $outstanding->issue('198.51.100.7', 120));
-        self::assertSame(1, $outstanding->issue('198.51.100.7', 120));
+        self::assertSame(1, $outstanding->issue('198.51.100.7', 'nonce-a', time() + 120, 120));
+        self::assertSame(1, $outstanding->issue('198.51.100.7', 'nonce-b', time() + 120, 120));
         $sourceKey = $outstanding->sourceKey('198.51.100.7');
         self::assertSame(2, $client->counters[$sourceKey]);
 
@@ -1591,7 +1591,7 @@ final class ValidatorTest extends TestCase
             ) {
             }
 
-            public function claim(string $nonce, string $owner, int $ttlSeconds, ?string $decisionKey = null): string
+            public function claim(string $nonce, string $owner, int $ttlSeconds, ?string $decisionKey = null): array
             {
                 if ($this->failClaim) {
                     throw new \RuntimeException('simulated claim outage');
@@ -1769,16 +1769,95 @@ final class ValidatorTest extends TestCase
         return hash_hmac('sha256', pack('N', $scope).chr($event->value).$key, RiskKeys::fromMaster(self::SECRET)->event);
     }
 
+    /**
+     * A store wrapper that counts the claim/read/finalize interactions —
+     * the call-pattern proof that the common fresh path runs exactly
+     * claim -> compute -> finalize (no read before or after the claim).
+     *
+     * @return array{0: PostSolveDispositionStore, 1: object}
+     */
+    private function countingStore(PostSolveDispositionStore $inner): array
+    {
+        $counting = new class($inner) implements PostSolveDispositionStore {
+            public int $claims = 0;
+
+            public int $reads = 0;
+
+            public int $finalizes = 0;
+
+            public function __construct(private readonly PostSolveDispositionStore $inner)
+            {
+            }
+
+            public function claim(string $nonce, string $owner, int $ttlSeconds, ?string $decisionKey = null): array
+            {
+                ++$this->claims;
+
+                return $this->inner->claim($nonce, $owner, $ttlSeconds, $decisionKey);
+            }
+
+            public function read(string $nonce): ?PostSolveDispositionRecord
+            {
+                ++$this->reads;
+
+                return $this->inner->read($nonce);
+            }
+
+            public function finalize(string $nonce, string $owner, PostSolveDisposition $disposition): bool
+            {
+                ++$this->finalizes;
+
+                return $this->inner->finalize($nonce, $owner, $disposition);
+            }
+        };
+
+        return [$counting, $counting];
+    }
+
+    /**
+     * The fresh path issues exactly claim + finalize (two interactions).
+     * The claim transition itself carries the validated state, the
+     * decision handle and the record info the caller needs, so the
+     * validator performs no read before or after the claim; the common
+     * path is claim -> compute -> finalize.
+     */
+    public function testFreshPathIssuesExactlyClaimAndFinalize(): void
+    {
+        $risk = $this->riskStack(1, 'allow', 'allow', true);
+        $risk['store']->setVector(SignalVector::fromArray(['network_risk' => 900]));
+        [$inner] = $this->clockedDispositionStore();
+        [$counting] = $this->countingStore($inner);
+
+        $challenge = $this->issuer->issue('login', '198.51.100.7');
+        usleep(($challenge->minDurationMs + 10) * 1000);
+        $token = $this->solveToken($challenge->prefix, $challenge->salt, $challenge->targetBits, $challenge->nonce);
+
+        [$engine] = $this->dispositionEngine($this->verifier, $risk['gateway'], $counting, operationId: 'op-retry');
+        $dto = new class {
+            public ?string $captcha = null;
+        };
+        $dto->captcha = $token;
+        $meta = $engine->getMetadataFor($dto::class);
+        $meta->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
+
+        $violations = $engine->validate($dto);
+        self::assertCount(1, $violations);
+        self::assertSame(KiwiCaptcha::POST_SOLVE_REJECTED_ERROR, $violations[0]->getCode(), 'the fresh assessment denies — the disposition is computed and persisted');
+        self::assertSame(1, $counting->claims, 'exactly one claim');
+        self::assertSame(1, $counting->finalizes, 'exactly one finalize');
+        self::assertSame(0, $counting->reads, 'the fresh path issues NO read — the claim response carries the state and the decision handle');
+    }
+
     public function testPostSolveDispositionStoreClaimMachine(): void
     {
         [$store, $advance] = $this->clockedDispositionStore();
 
         // Missing -> pending(me, 15s lease): claimed.
-        self::assertSame('claimed', $store->claim('nonce-a', 'owner-1', 300));
+        self::assertSame('claimed', $store->claim('nonce-a', 'owner-1', 300)[0]);
         // pending+me -> 'pending' (the same owner re-enters).
-        self::assertSame('pending', $store->claim('nonce-a', 'owner-1', 300));
+        self::assertSame('pending', $store->claim('nonce-a', 'owner-1', 300)[0]);
         // pending+other+live -> 'pending' (busy).
-        self::assertSame('pending', $store->claim('nonce-a', 'owner-2', 300));
+        self::assertSame('pending', $store->claim('nonce-a', 'owner-2', 300)[0]);
         $record = $store->read('nonce-a');
         self::assertNotNull($record);
         self::assertSame('pending', $record->state);
@@ -1787,12 +1866,12 @@ final class ValidatorTest extends TestCase
 
         // pending+other+expired -> takeover -> 'taken_over'.
         $advance(16);
-        self::assertSame('taken_over', $store->claim('nonce-a', 'owner-2', 300));
+        self::assertSame('taken_over', $store->claim('nonce-a', 'owner-2', 300)[0]);
         self::assertSame('owner-2', $store->read('nonce-a')?->owner, 'the takeover must move the claim to the new owner');
 
         // pending(me) -> complete(disposition), then 'complete' forever.
         self::assertTrue($store->finalize('nonce-a', 'owner-2', new PostSolveDisposition(PostSolveDispositionKind::Deny, 'decision-1')));
-        self::assertSame('complete', $store->claim('nonce-a', 'owner-3', 300), 'a completed disposition replays as complete');
+        self::assertSame('complete', $store->claim('nonce-a', 'owner-3', 300)[0], 'a completed disposition replays as complete');
         $record = $store->read('nonce-a');
         self::assertSame('complete', $record->state);
         self::assertNull($record->owner);
@@ -1810,7 +1889,7 @@ final class ValidatorTest extends TestCase
     {
         [$store] = $this->clockedDispositionStore();
 
-        self::assertSame('claimed', $store->claim('nonce-b', 'owner-1', 300));
+        self::assertSame('claimed', $store->claim('nonce-b', 'owner-1', 300)[0]);
         // A non-owner finalize is an atomic no-op.
         self::assertFalse($store->finalize('nonce-b', 'owner-2', new PostSolveDisposition(PostSolveDispositionKind::Pass)));
         self::assertSame('pending', $store->read('nonce-b')?->state, 'a refused finalize leaves the claim pending');
@@ -1824,10 +1903,10 @@ final class ValidatorTest extends TestCase
     {
         [$store, $advance] = $this->clockedDispositionStore();
 
-        self::assertSame('claimed', $store->claim('nonce-c', 'owner-1', 300));
+        self::assertSame('claimed', $store->claim('nonce-c', 'owner-1', 300)[0]);
         $advance(20);
         // The lease (15 s) expired -> takeover, while the record TTL (300 s) is still live.
-        self::assertSame('taken_over', $store->claim('nonce-c', 'owner-2', 300));
+        self::assertSame('taken_over', $store->claim('nonce-c', 'owner-2', 300)[0]);
         self::assertTrue($store->finalize('nonce-c', 'owner-2', new PostSolveDisposition(PostSolveDispositionKind::Pass)));
 
         // The record TTL is independent of the lease: it expires with its
@@ -1835,7 +1914,7 @@ final class ValidatorTest extends TestCase
         // validator's claim TTL), never with the 15 s lease.
         $advance(301);
         self::assertNull($store->read('nonce-c'), 'the record expires with its own TTL, not with the lease');
-        self::assertSame('claimed', $store->claim('nonce-c', 'owner-3', 300), 'an expired record is claimable fresh');
+        self::assertSame('claimed', $store->claim('nonce-c', 'owner-3', 300)[0], 'an expired record is claimable fresh');
     }
 
     public function testPostSolveDispositionStoreHonorsTheConfiguredRecordTtl(): void
@@ -1847,7 +1926,7 @@ final class ValidatorTest extends TestCase
             },
             Config::MAX_TTL_SECS + 7,
         );
-        self::assertSame('claimed', $store->claim('nonce-d', 'owner-1', 9999));
+        self::assertSame('claimed', $store->claim('nonce-d', 'owner-1', 9999)[0]);
         $clock += Config::MAX_TTL_SECS + 6;
         self::assertNotNull($store->read('nonce-d'), 'the configured TTL = MAX_TTL_SECS + margin keeps the record alive');
         $clock += 2;
@@ -2528,7 +2607,7 @@ final class ValidatorTest extends TestCase
         [$store] = $this->clockedDispositionStore($this->decisionMap($decisionRedis));
 
         $decisionRedis->strings['{kiwi:validator-test}:decision:nonce-atomic'] = (string) json_encode(['decision_id' => 'decision-atomic']);
-        self::assertSame('claimed', $store->claim('nonce-atomic', 'owner-a', 305, '{kiwi:validator-test}:decision:nonce-atomic'));
+        self::assertSame('claimed', $store->claim('nonce-atomic', 'owner-a', 305, '{kiwi:validator-test}:decision:nonce-atomic')[0]);
         self::assertArrayNotHasKey('{kiwi:validator-test}:decision:nonce-atomic', $decisionRedis->strings, 'the winning claim consumed the mapping');
         self::assertSame('decision-atomic', $store->read('nonce-atomic')?->decisionId, 'the pending record carries the decision id from the SAME atomic transition');
 
@@ -2537,9 +2616,9 @@ final class ValidatorTest extends TestCase
         // mapping stays resolvable for the caller who will win the next
         // claim.
         $decisionRedis->strings['{kiwi:validator-test}:decision:nonce-race'] = (string) json_encode(['decision_id' => 'decision-first']);
-        self::assertSame('claimed', $store->claim('nonce-race', 'owner-a', 305, '{kiwi:validator-test}:decision:nonce-race'));
+        self::assertSame('claimed', $store->claim('nonce-race', 'owner-a', 305, '{kiwi:validator-test}:decision:nonce-race')[0]);
         $decisionRedis->strings['{kiwi:validator-test}:decision:nonce-race'] = (string) json_encode(['decision_id' => 'decision-second']);
-        self::assertSame('pending', $store->claim('nonce-race', 'owner-b', 305, '{kiwi:validator-test}:decision:nonce-race'), 'the concurrent second claim is busy');
+        self::assertSame('pending', $store->claim('nonce-race', 'owner-b', 305, '{kiwi:validator-test}:decision:nonce-race')[0], 'the concurrent second claim is busy');
         self::assertSame('decision-first', $store->read('nonce-race')?->decisionId, 'the record keeps the first winner\'s handle');
         $loserMapping = json_decode($decisionRedis->strings['{kiwi:validator-test}:decision:nonce-race'] ?? '', true);
         self::assertIsArray($loserMapping);
@@ -2549,17 +2628,17 @@ final class ValidatorTest extends TestCase
         // touches the decision key — the mapping inserted after the
         // finalize stays resolvable.
         $decisionRedis->strings['{kiwi:validator-test}:decision:nonce-complete'] = (string) json_encode(['decision_id' => 'decision-final']);
-        self::assertSame('claimed', $store->claim('nonce-complete', 'owner-a', 305, '{kiwi:validator-test}:decision:nonce-complete'));
+        self::assertSame('claimed', $store->claim('nonce-complete', 'owner-a', 305, '{kiwi:validator-test}:decision:nonce-complete')[0]);
         self::assertTrue($store->finalize('nonce-complete', 'owner-a', new PostSolveDisposition(PostSolveDispositionKind::Pass, 'decision-final')));
         $decisionRedis->strings['{kiwi:validator-test}:decision:nonce-complete'] = (string) json_encode(['decision_id' => 'decision-after-complete']);
-        self::assertSame('complete', $store->claim('nonce-complete', 'owner-b', 305, '{kiwi:validator-test}:decision:nonce-complete'));
+        self::assertSame('complete', $store->claim('nonce-complete', 'owner-b', 305, '{kiwi:validator-test}:decision:nonce-complete')[0]);
         $completeMapping = json_decode($decisionRedis->strings['{kiwi:validator-test}:decision:nonce-complete'] ?? '', true);
         self::assertIsArray($completeMapping);
         self::assertSame('decision-after-complete', $completeMapping['decision_id'] ?? null, 'a complete claim NEVER consumes the decision mapping');
 
         // No decision map wired: the claim with a key behaves as before.
         [$plain] = $this->clockedDispositionStore();
-        self::assertSame('claimed', $plain->claim('nonce-plain', 'owner-a', 305, '{kiwi:validator-test}:decision:nonce-plain'));
+        self::assertSame('claimed', $plain->claim('nonce-plain', 'owner-a', 305, '{kiwi:validator-test}:decision:nonce-plain')[0]);
         self::assertNull($plain->read('nonce-plain')?->decisionId);
     }
 

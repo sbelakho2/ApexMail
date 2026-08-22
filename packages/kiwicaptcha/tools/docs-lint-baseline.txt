@@ -8,6 +8,8 @@
 0 packages/kiwicaptcha-php/README.md
 0 packages/kiwicaptcha-php/src/AtomicDeleteIfPendingInterface.php
 0 packages/kiwicaptcha-php/src/AtomicStorageInterface.php
+0 packages/kiwicaptcha-php/src/CancellableStorageInterface.php
+0 packages/kiwicaptcha-php/src/CancellationResult.php
 0 packages/kiwicaptcha-php/src/Challenge.php
 0 packages/kiwicaptcha-php/src/ChallengeProfile.php
 0 packages/kiwicaptcha-php/src/ChallengeRecord.php
@@ -100,6 +102,8 @@
 0 packages/kiwicaptcha-risk-php/src/RiskWeights.php
 0 packages/kiwicaptcha-risk-php/src/ScopeActionHysteresis.php
 0 packages/kiwicaptcha-risk-php/src/SignalVector.php
+0 packages/kiwicaptcha-risk-php/src/Storage/ConsolidatedAssessmentStoreInterface.php
+0 packages/kiwicaptcha-risk-php/src/Storage/OutcomeRegistration.php
 0 packages/kiwicaptcha-risk-php/src/Storage/ProcessEmergencyCap.php
 0 packages/kiwicaptcha-risk-php/src/Storage/RedisRiskStateStore.php
 0 packages/kiwicaptcha-risk-php/src/Storage/RiskStateStoreInterface.php
@@ -252,6 +256,7 @@
 0 packages/kiwicaptcha/integrations/symfony/tests/ChainedIssuanceRollbackTest.php
 0 packages/kiwicaptcha/integrations/symfony/tests/ChainedTicketDeterminismTest.php
 0 packages/kiwicaptcha/integrations/symfony/tests/ChainingWiringTest.php
+0 packages/kiwicaptcha/integrations/symfony/tests/ChallengeCancellationTest.php
 0 packages/kiwicaptcha/integrations/symfony/tests/ChallengeFlowTest.php
 0 packages/kiwicaptcha/integrations/symfony/tests/ClientContextTagTest.php
 0 packages/kiwicaptcha/integrations/symfony/tests/ClientIpResolverTest.php

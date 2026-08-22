@@ -758,6 +758,178 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         self::assertSame($wonBody, $store->stored($backendId, $uuid), 'the takeover winner finalizes its canonical response');
     }
 
+    // ── the `PENDING_SAME` exponential backoff + lease-aware takeover ────
+
+    /**
+     * A store decorator that records the wall-clock time of every
+     * stored() poll and takeover() attempt, so the wait-loop cadence is
+     * observable. The poll intervals must grow (the exponential backoff),
+     * and the takeover attempts must happen only once the owner's lease
+     * is at/expired from the waiter's perspective.
+     *
+     * @return array{0: \BelConsulting\KiwiCaptchaBundle\SiteVerify\SiteVerifyIdempotencyStore, 1: object} the
+     *         decorated store and the recorder (polls/takeovers arrays)
+     */
+    private function recordingStore(\BelConsulting\KiwiCaptchaBundle\SiteVerify\SiteVerifyIdempotencyStore $inner): array
+    {
+        $recorder = new class($inner) implements \BelConsulting\KiwiCaptchaBundle\SiteVerify\SiteVerifyIdempotencyStore {
+            /** @var list<float> wall seconds of each stored() poll */
+            public array $polls = [];
+
+            /** @var list<float> wall seconds of each takeover() attempt */
+            public array $takeovers = [];
+
+            public function __construct(private readonly \BelConsulting\KiwiCaptchaBundle\SiteVerify\SiteVerifyIdempotencyStore $inner)
+            {
+            }
+
+            public function leaseSeconds(): int
+            {
+                return $this->inner->leaseSeconds();
+            }
+
+            public function claim(string $backendId, string $idempotencyKey, string $responseHash, int $ttlSeconds, string $remoteipFingerprint, ?int $leaseSeconds = null): array
+            {
+                return $this->inner->claim($backendId, $idempotencyKey, $responseHash, $ttlSeconds, $remoteipFingerprint, $leaseSeconds);
+            }
+
+            public function takeover(string $backendId, string $idempotencyKey, string $responseHash, int $ttlSeconds, string $remoteipFingerprint, ?int $leaseSeconds = null): array
+            {
+                $this->takeovers[] = microtime(true);
+
+                return $this->inner->takeover($backendId, $idempotencyKey, $responseHash, $ttlSeconds, $remoteipFingerprint, $leaseSeconds);
+            }
+
+            public function renew(string $backendId, string $idempotencyKey, string $owner): bool
+            {
+                return $this->inner->renew($backendId, $idempotencyKey, $owner);
+            }
+
+            public function finalize(string $backendId, string $idempotencyKey, string $responseHash, string $owner, array $canonicalResponse): void
+            {
+                $this->inner->finalize($backendId, $idempotencyKey, $responseHash, $owner, $canonicalResponse);
+            }
+
+            public function stored(string $backendId, string $idempotencyKey): ?array
+            {
+                $this->polls[] = microtime(true);
+
+                return $this->inner->stored($backendId, $idempotencyKey);
+            }
+        };
+
+        return [$recorder, $recorder];
+    }
+
+    /**
+     * The lease-aware backoff: a `PENDING_SAME` waiter polls the stored
+     * result with growing intervals (100 ms -> 200 ms -> 400 ms -> ...)
+     * and probes the owner's lease once up front (a single atomic
+     * takeover attempt). A held lease is then left alone until the
+     * expiry boundary, a full fixed lease window after the pending entry
+     * was first observed. There the takeover is re-armed and the crashed
+     * owner is taken over, verified and finalized with the takeover
+     * owner token.
+     */
+    public function testPendingSameBacksOffAndTakesOverOnlyNearTheLeaseExpiry(): void
+    {
+        $storage = new ArrayStorage();
+        [$token] = $this->issuedToken($storage);
+        $now = 1_700_000_000;
+        // The store clock ticks one second per takeover call (the crashed
+        // owner's lease expires while the waiter polls).
+        $clock = static function () use (&$now): int {
+            return ++$now;
+        };
+        // A short fixed lease (1s) keeps the boundary quick; the waiter
+        // bound (5s) exceeds it (the construction invariant).
+        $store = new ArraySiteVerifyIdempotencyStore($clock, 1);
+        $backendId = hash('sha256', self::SITEVERIFY_SECRET.'|login|0');
+        $uuid = 'b3e4567e-e89b-42d3-a456-4266141740ff';
+        $hash = hash('sha256', $token);
+
+        // The stalled owner claims and never finalizes.
+        [$claim] = $store->claim($backendId, $uuid, $hash, 300, 'ip:127.0.0.1');
+        self::assertSame(IdempotencyClaim::Claimed, $claim);
+
+        [$recording] = $this->recordingStore($store);
+        $controller = $this->controller(idempotencyStore: $recording, storage: $storage, waitSecs: 5.0);
+        $start = microtime(true);
+        $won = $controller->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+            'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
+        ]));
+        $wonBody = json_decode((string) $won->getContent(), true);
+        self::assertSame(true, $wonBody['success'] ?? null, 'the waiter must take over near the lease expiry and verify: '.(string) $won->getContent());
+
+        // The lease-aware takeover: at most the one-time lease probe may
+        // happen while the lease still has room — every takeover attempt
+        // after the probe lands only once the fixed lease window has
+        // elapsed since the waiter started.
+        $takeovers = $recording->takeovers;
+        self::assertGreaterThanOrEqual(2, \count($takeovers), 'the lease probe plus the expiry-boundary takeover must run');
+        self::assertLessThan(0.5, $takeovers[0] - $start, 'the one-time lease probe runs up front');
+        foreach (\array_slice($takeovers, 1) as $takeoverAt) {
+            self::assertGreaterThanOrEqual(0.9, $takeoverAt - $start, 'takeover attempts beyond the initial probe happen only near/after the lease expiry — never while the lease has room');
+        }
+
+        // Exponential backoff: the stored-result polls before the winning
+        // takeover grow (100ms, 200ms, 400ms, ...) — never a fixed
+        // 100ms hammer.
+        $phase1Polls = array_values(array_filter($recording->polls, static fn (float $t): bool => $t < $takeovers[\count($takeovers) - 1]));
+        $deltas = [];
+        for ($i = 1; $i < \count($phase1Polls); $i++) {
+            $deltas[] = ($phase1Polls[$i] - $phase1Polls[$i - 1]) * 1000;
+        }
+        self::assertGreaterThanOrEqual(3, \count($deltas), 'the wait must poll the stored result several times before the takeover');
+        foreach ($deltas as $i => $delta) {
+            if ($i > 0) {
+                self::assertGreaterThanOrEqual($deltas[$i - 1] - 50, $delta, 'the poll intervals must grow (the exponential backoff), not stay flat');
+            }
+        }
+        self::assertLessThan(10, \count($phase1Polls), 'the growing backoff bounds the pre-takeover polls — a fixed 100ms cadence would need ~10 polls per second');
+    }
+
+    /**
+     * The hard bound: a waiter whose takeover can never win is answered
+     * with the retryable 503 internal-error at the bound, because the
+     * owner's lease never expires with a frozen store clock. Every
+     * takeover attempt beyond the one-time lease probe is gated on the
+     * lease window, never wasted while the lease has room. The entry is
+     * left pending for a later retry.
+     */
+    public function testPendingSameHardBoundReturnsTheRetryable503WithoutWastefulTakeovers(): void
+    {
+        $storage = new ArrayStorage();
+        [$token] = $this->issuedToken($storage);
+        // The store clock is frozen: the owner's lease never expires in
+        // store time, so the armed takeover always loses.
+        $now = 1_700_000_000;
+        $store = new ArraySiteVerifyIdempotencyStore(static fn (): int => $now, 1);
+        $backendId = hash('sha256', self::SITEVERIFY_SECRET.'|login|0');
+        $uuid = 'c3e4567e-e89b-42d3-a456-4266141740aa';
+        $hash = hash('sha256', $token);
+
+        [$claim] = $store->claim($backendId, $uuid, $hash, 300, 'ip:127.0.0.1');
+        self::assertSame(IdempotencyClaim::Claimed, $claim);
+
+        [$recording] = $this->recordingStore($store);
+        $controller = $this->controller(idempotencyStore: $recording, storage: $storage, waitSecs: 2.5);
+        $start = microtime(true);
+        $response = $controller->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+            'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
+        ]));
+        self::assertSame(503, $response->getStatusCode(), 'the hard bound must answer the retryable 503 internal-error');
+        self::assertSame(['internal-error'], json_decode((string) $response->getContent(), true)['error-codes']);
+        self::assertNull($store->stored($backendId, $uuid), 'the entry stays pending — a later retry can still take over or read the stored result');
+        // Beyond the one-time lease probe, no takeover is wasted while
+        // the lease has room: every later attempt lands only after the
+        // lease window.
+        $takeovers = $recording->takeovers;
+        foreach (\array_slice($takeovers, \min(1, \count($takeovers))) as $takeoverAt) {
+            self::assertGreaterThanOrEqual(0.9, $takeoverAt - $start, 'a takeover beyond the initial probe must never be attempted while the lease still has room');
+        }
+    }
+
     public function testWaiterBoundMustExceedTheOwnerLease(): void
     {
         // The lease-ordering invariant is enforced: a waiter bound that

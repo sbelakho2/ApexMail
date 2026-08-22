@@ -27,7 +27,7 @@
 --   KEYS[10] dedupe key (string)                 — event_id guard
 --
 -- ARGV:
---   [1]  event             RiskEventKind int (1..17)
+--   [1]  event             RiskEventKind int (1..21)
 --   [2]  scope             int (0 = unknown)
 --   [3]  now_ms            UNUSED — Redis TIME is the distributed state
 --                           clock authority (decay, hysteresis, cooldown and
@@ -84,6 +84,13 @@
 --                                 an individual visitor)
 --   RiskDenied (17)             → no state mutation (a risk decision that
 --                                 already denied must not be double-counted)
+--   ChallengeCancelled (21)     → restore the issue-debt contribution of a
+--                                 cancelled challenge (iss −1000, clamped at
+--                                 0) WITHOUT the solve's other effects: no
+--                                 trust credit, no solve counters — a
+--                                 cancelled challenge must not punish the
+--                                 next issuance like an unpaid one, and
+--                                 must not reward like a solved one
 --
 -- Only PreIssue counts as a REQUEST for velocity purposes; feedback events
 -- mutate only their own channels.
@@ -214,6 +221,11 @@ local function apply_feedback(s, event, scope)
         -- deliberately nothing: the global state carries the pressure
     elseif event == 17 then       -- RiskDenied: already scored, no-op
         -- deliberately nothing
+    elseif event == 21 then       -- ChallengeCancelled: restore the issue
+        -- debt of the cancelled challenge (mirrors ChallengeIssued's +1000
+        -- with −1000, clamped at 0) WITHOUT the solve's other effects —
+        -- no trust credit and no solve counters.
+        s.iss = math.max(0, s.iss - 1000)
     end
 end
 

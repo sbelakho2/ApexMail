@@ -102,6 +102,24 @@ final class SiteVerifyController
     private const MAX_BODY_BYTES = 16 * 1024;
 
     /**
+     * The base interval of the `PENDING_SAME` poll backoff in
+     * milliseconds: the first stored-result poll after the wait starts.
+     * The interval doubles on every poll up to
+     * {@see self::PENDING_SAME_POLL_MAX_MS}. A duplicate idempotency
+     * request that has to wait for the full 90 s bound issues roughly
+     * 90 polls (one per second at the ceiling), instead of ~900 at a
+     * fixed 100 ms cadence.
+     */
+    private const PENDING_SAME_POLL_BASE_MS = 100;
+
+    /**
+     * The maximum interval of the `PENDING_SAME` poll backoff in
+     * milliseconds (the growth ceiling; the schedule is 100, 200, 400,
+     * 800, then 1000 ms).
+     */
+    private const PENDING_SAME_POLL_MAX_MS = 1000;
+
+    /**
      * The retained consumed-state recovery used on the takeover path. It
      * reconstructs only when the storage is recovery-capable (the
      * SiteVerifyRecoveryCapableStorageInterface compile-time check in the
@@ -473,17 +491,36 @@ final class SiteVerifyController
         }
 
         // `PENDING_SAME`: another request with the same key and hash owns
-        // verification. This request waits on the store only: it polls
-        // stored() for completion and attempts an atomic takeover once
-        // the owner's lease has expired. It never invokes the verifier
-        // without winning the takeover, since a deliberately slow Argon
-        // solve can legitimately take tens of seconds. Verification
-        // happens strictly while holding the current owner token; at the
-        // hard bound below the request is answered with a retryable error
-        // instead, leaving the entry pending for a later retry.
+        // verification. This request waits on the store only. The stored
+        // result is polled with an exponential backoff (100 ms, 200 ms,
+        // 400 ms, 800 ms, then 1 s, jittered), so a retry storm never
+        // hammers the store at a fixed 100 ms cadence. The atomic
+        // takeover is attempted only when the owner lease is at/expired
+        // from this waiter's perspective: the lease state is probed once
+        // up front (a single atomic takeover attempt — an owner whose
+        // lease already expired is taken over promptly, the displaced-
+        // owner contract), and after a StillPending probe the takeover is
+        // re-attempted only once a full fixed lease window has elapsed
+        // since the pending entry was first observed (the owner claimed
+        // no earlier than that observation, so the lease is then
+        // guaranteed to have expired). This request never invokes the
+        // verifier without winning the takeover, since a deliberately
+        // slow Argon solve can legitimately take tens of seconds.
+        // Verification happens strictly while holding the current owner
+        // token; at the hard bound below the request is answered with a
+        // retryable error instead, leaving the entry pending for a later
+        // retry.
         if ($idempotent && $claim === IdempotencyClaim::PendingSame) {
             $stored = null;
             $waitDeadline = microtime(true) + $this->idempotencyWaitSecs;
+            $leaseSeconds = $this->idempotencyStore->leaseSeconds();
+            // The pending entry was first observed now; the owner claimed
+            // no earlier than this moment, so the fixed lease expires at
+            // the latest one full window from here.
+            $pendingSince = microtime(true);
+            $backoffMs = self::PENDING_SAME_POLL_BASE_MS;
+            $leaseProbed = false;
+            $takeoverArmed = false;
             while (true) {
                 try {
                     $stored = $this->idempotencyStore->stored($backendId, $idempotencyKey);
@@ -505,34 +542,48 @@ final class SiteVerifyController
                     // remains pending for a later retry.
                     return $this->internalErrorResponse();
                 }
-                // The lease gate is inside the store's Lua: before expiry
-                // this attempt is an atomic no-op (StillPending). The
-                // remoteip fingerprint is bound in the record, so the
-                // takeover enforces the complete claim identity (the
-                // claim() pass already checked it, defense in depth). The
-                // takeover refreshes the lease with the store's fixed
-                // configured lease, never derived from the token's
-                // remaining validity; the fixed 60s lease exceeds any
-                // supported verification window, so a live owner is never
-                // overtaken mid-verify.
-                try {
-                    [$takeover, $takeoverOwner] = $this->idempotencyStore->takeover($backendId, $idempotencyKey, hash('sha256', $response), 300, $this->remoteipFingerprint($remoteIp));
-                } catch (\Throwable) {
-                    // A failed takeover attempt (a transient store
-                    // outage) maps to the retryable provider error: the
-                    // entry stays pending and a later retry can still
-                    // take over or read the stored result.
-                    return $this->internalErrorResponse();
+                if (!$leaseProbed) {
+                    // The one-time lease probe: the owner may have claimed
+                    // long before this waiter observed the pending entry,
+                    // so the lease may already be expired — a prompt
+                    // takeover honors the displaced-owner contract (the
+                    // entry must not wait a full window for an owner whose
+                    // lease is already gone). A StillPending probe means
+                    // the lease is still held: no further takeover attempt
+                    // happens until the lease is at/expired from this
+                    // waiter's perspective.
+                    $leaseProbed = true;
+                    $attempt = $this->attemptTakeover($backendId, $idempotencyKey, $response, $remoteIp, $claimOwner, $claimedAt);
+                    if ($attempt instanceof JsonResponse) {
+                        return $attempt;
+                    }
+                    if ($attempt === true) {
+                        $claim = IdempotencyClaim::TookOver;
+                        break;
+                    }
+                } else {
+                    if (!$takeoverArmed && microtime(true) - $pendingSince >= $leaseSeconds) {
+                        // The owner's lease is at/expired from this
+                        // waiter's perspective: the takeover is now
+                        // worthwhile. The cadence resets to the short
+                        // base so the attempt lands promptly at the
+                        // boundary.
+                        $takeoverArmed = true;
+                        $backoffMs = self::PENDING_SAME_POLL_BASE_MS;
+                    }
+                    if ($takeoverArmed) {
+                        $attempt = $this->attemptTakeover($backendId, $idempotencyKey, $response, $remoteIp, $claimOwner, $claimedAt);
+                        if ($attempt instanceof JsonResponse) {
+                            return $attempt;
+                        }
+                        if ($attempt === true) {
+                            $claim = IdempotencyClaim::TookOver;
+                            break;
+                        }
+                    }
                 }
-                if ($takeover === IdempotencyClaim::TookOver) {
-                    // This request now owns the entry: it will verify
-                    // below and finalize with the takeover owner token.
-                    $claim = IdempotencyClaim::TookOver;
-                    $claimOwner = $takeoverOwner;
-                    $claimedAt = microtime(true);
-                    break;
-                }
-                usleep(100_000);
+                usleep(self::jitteredBackoffMs($backoffMs) * 1000);
+                $backoffMs = min($backoffMs * 2, self::PENDING_SAME_POLL_MAX_MS);
             }
             if ($stored !== null) {
                 return new JsonResponse($this->canonicalizeResponse($stored));
@@ -850,6 +901,57 @@ final class SiteVerifyController
     private function internalErrorResponse(): JsonResponse
     {
         return new JsonResponse(['success' => false, 'error-codes' => ['internal-error']], Response::HTTP_SERVICE_UNAVAILABLE);
+    }
+
+    /**
+     * The `PENDING_SAME` poll sleep in milliseconds: the backoff interval
+     * plus a bounded jitter (at most a quarter of the interval), so a
+     * storm of duplicate waiters desynchronizes instead of polling the
+     * store in lockstep. The jitter is capped below the doubling step, so
+     * the poll intervals still grow monotonically.
+     */
+    private static function jitteredBackoffMs(int $backoffMs): int
+    {
+        return $backoffMs + random_int(0, max(1, intdiv($backoffMs, 4)));
+    }
+
+    /**
+     * The atomic takeover attempt of a `PENDING_SAME` entry. The lease
+     * gate is inside the store's Lua: before expiry this attempt is an
+     * atomic no-op (StillPending). The remoteip fingerprint is bound in
+     * the record, so the takeover enforces the complete claim identity
+     * (the claim pass already checked it; defense in depth). The
+     * takeover refreshes the lease with the store's fixed configured
+     * lease, never derived from the token's remaining validity; the
+     * fixed 60s lease exceeds any supported verification window, so a
+     * live owner is never overtaken mid-verify. On success the caller
+     * becomes the owner and must finalize with the returned owner token.
+     *
+     * @return bool|JsonResponse true when the takeover was won (the
+     *         caller is now the owner, {@see $claimOwner} /
+     *         {@see $claimedAt} are set). False when the attempt was an
+     *         atomic no-op (StillPending, keep waiting). The retryable
+     *         503 internal-error response is returned when the store
+     *         failed: a transient takeover outage maps to the provider
+     *         error, the entry stays pending, and a later retry can
+     *         still take over or read the stored result.
+     */
+    private function attemptTakeover(string $backendId, string $idempotencyKey, string $response, ?string $remoteIp, ?string &$claimOwner, ?float &$claimedAt): bool|JsonResponse
+    {
+        try {
+            [$takeover, $takeoverOwner] = $this->idempotencyStore->takeover($backendId, $idempotencyKey, hash('sha256', $response), 300, $this->remoteipFingerprint($remoteIp));
+        } catch (\Throwable) {
+            return $this->internalErrorResponse();
+        }
+        if ($takeover !== IdempotencyClaim::TookOver) {
+            return false;
+        }
+        // This request now owns the entry: it will verify below and
+        // finalize with the takeover owner token.
+        $claimOwner = $takeoverOwner;
+        $claimedAt = microtime(true);
+
+        return true;
     }
 
     /**

@@ -194,7 +194,7 @@ final class RealRedisPostSolveDispositionTest extends TestCase
         $nonce = bin2hex(random_bytes(16));
 
         // Missing -> pending(me, lease) -> claimed.
-        self::assertSame('claimed', $store->claim($nonce, 'owner-a', 305));
+        self::assertSame('claimed', $store->claim($nonce, 'owner-a', 305)[0]);
         $record = $store->read($nonce);
         self::assertNotNull($record);
         self::assertSame('pending', $record->state);
@@ -205,7 +205,7 @@ final class RealRedisPostSolveDispositionTest extends TestCase
         self::assertLessThanOrEqual(305, $ttl);
 
         // pending+other+live -> 'pending' (busy).
-        self::assertSame('pending', $store->claim($nonce, 'owner-b', 305));
+        self::assertSame('pending', $store->claim($nonce, 'owner-b', 305)[0]);
 
         // finalize by a NON-owner is refused; by the owner it completes.
         self::assertFalse($store->finalize($nonce, 'owner-b', new PostSolveDisposition(PostSolveDispositionKind::Deny)));
@@ -220,7 +220,7 @@ final class RealRedisPostSolveDispositionTest extends TestCase
         self::assertNull($record->disposition->chainId);
 
         // complete -> 'complete' forever (a replay never re-computes).
-        self::assertSame('complete', $store->claim($nonce, 'owner-c', 305));
+        self::assertSame('complete', $store->claim($nonce, 'owner-c', 305)[0]);
         self::assertFalse($store->finalize($nonce, 'owner-c', new PostSolveDisposition(PostSolveDispositionKind::Pass)), 'a completed disposition is terminal');
         $record = $store->read($nonce);
         self::assertSame(PostSolveDispositionKind::Deny, $record?->disposition?->kind, 'the completed disposition is never overwritten');
@@ -229,14 +229,85 @@ final class RealRedisPostSolveDispositionTest extends TestCase
         // lease_until is rewound behind now (simulating the fixed 15 s
         // computation lease passing) is taken over by another owner.
         $takeoverNonce = bin2hex(random_bytes(16));
-        self::assertSame('claimed', $store->claim($takeoverNonce, 'owner-a', 305));
-        self::assertSame('pending', $store->claim($takeoverNonce, 'owner-b', 305), 'a live lease is busy');
+        self::assertSame('claimed', $store->claim($takeoverNonce, 'owner-a', 305)[0]);
+        self::assertSame('pending', $store->claim($takeoverNonce, 'owner-b', 305)[0], 'a live lease is busy');
         $rec = json_decode((string) $this->client->get($this->key($takeoverNonce)), true);
         self::assertIsArray($rec);
         $rec['lease_until'] = time() - 1;
         $this->client->set($this->key($takeoverNonce), (string) json_encode($rec), 'KEEPTTL');
-        self::assertSame('taken_over', $store->claim($takeoverNonce, 'owner-d', 305));
+        self::assertSame('taken_over', $store->claim($takeoverNonce, 'owner-d', 305)[0]);
         self::assertSame('owner-d', $store->read($takeoverNonce)?->owner, 'the takeover moves the claim to the new owner');
+    }
+
+    public function testFreshPathIssuesExactlyClaimAndFinalizeCommandsAgainstRealRedis(): void
+    {
+        // THE command-count proof: the common fresh path issues exactly
+        // two Redis EVALs — the atomic claim and the atomic finalize —
+        // and no standalone GET on the disposition record. The claim
+        // transition itself carries the validated state, the decision
+        // handle and the record info the caller needs, so the validator
+        // performs no read before or after the claim: claim -> compute ->
+        // finalize.
+        $counting = new class('tcp://127.0.0.1:6399', ['timeout' => 2.0, 'read_write_timeout' => 2.0]) extends \Predis\Client {
+            /** @var list<array{0: string, 1: list<mixed>}> */
+            public array $commands = [];
+
+            public function __call($commandID, $arguments)
+            {
+                $this->commands[] = [strtoupper((string) $commandID), $arguments];
+
+                return parent::__call($commandID, $arguments);
+            }
+        };
+        $dispositions = new RedisPostSolveDispositionStore($counting, 'ci-postsolve-count');
+
+        $storage = new RedisStorage($this->client, 'ci-postsolve-count:');
+        $issuer = new Issuer(new Config(secretKey: self::SECRET, targetBits: 8), $storage);
+        $challenge = $issuer->issue('login', '198.51.100.7');
+        $token = $this->solve($challenge);
+
+        $keys = RiskKeys::fromMaster(self::SECRET);
+        $classifier = new CidrNetworkClassifier([]);
+        $policy = RiskPolicy::fromConfig([
+            'version' => RiskPolicy::CONTRACT_VERSION,
+            'weights' => [],
+            'scopes' => [
+                1 => ['base_risk' => 100, 'minimum' => 'allow', 'post_solve_check' => true, 'degraded' => 'allow'],
+            ],
+        ]);
+        $riskStore = new FakeRiskStateStore(SignalVector::fromArray(['network_risk' => 900]));
+        $engine = new AdaptiveRiskEngine($riskStore, $classifier, new RiskIdentityFactory($keys), new RiskScorer(), $policy, $keys);
+        $gateway = new RiskGateway($engine, $classifier, new RiskProfileResolver(PoWAlgorithm::Sha256, 8), ['login' => 1], null, null, ['login' => true], 'reject', null, null, null, $counting, '{kiwi:ci-postsolve-count}:decision:', 300, $policy);
+
+        $verifier = new Verifier($storage);
+        $stack = new RequestStack();
+        $stack->push(Request::create('/', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7']));
+        $stack->getMainRequest()?->attributes->set(KiwiCaptchaValidator::OPERATION_ID_ATTRIBUTE, 'op-redis-test');
+        $validator = new KiwiCaptchaValidator(
+            $verifier,
+            $stack,
+            self::SECRET,
+            enforceTelemetry: false,
+            risk: $gateway,
+            dispositionStore: $dispositions,
+        );
+
+        // A fresh valid solve: the assessment denies, the denial is
+        // persisted per nonce, and the whole post-solve path touches the
+        // disposition store exactly twice.
+        $violations = $this->validateToken($validator, $token);
+        self::assertCount(1, $violations);
+        self::assertSame(KiwiCaptcha::POST_SOLVE_REJECTED_ERROR, $violations[0]->getCode());
+
+        // The command history is captured before the test's own read
+        // below, so only the validator's fresh path is counted.
+        $evals = array_values(array_filter($counting->commands, static fn (array $c): bool => $c[0] === 'EVAL'));
+        $gets = array_values(array_filter($counting->commands, static fn (array $c): bool => $c[0] === 'GET'));
+        self::assertCount(2, $evals, 'the fresh path issues exactly claim + finalize (two EVALs): '.json_encode($counting->commands));
+        self::assertCount(0, $gets, 'the fresh path issues NO standalone GET on the disposition record: '.json_encode($counting->commands));
+        $counting->disconnect();
+
+        self::assertSame(PostSolveDispositionKind::Deny, $dispositions->read($challenge->nonce)?->disposition?->kind, 'the denial is durably persisted');
     }
 
     public function testChainRequiredDispositionWireShapeAgainstRealRedis(): void
@@ -245,7 +316,7 @@ final class RealRedisPostSolveDispositionTest extends TestCase
         $nonce = bin2hex(random_bytes(16));
         $expiry = time() + 300;
 
-        self::assertSame('claimed', $store->claim($nonce, 'owner-a', 300));
+        self::assertSame('claimed', $store->claim($nonce, 'owner-a', 300)[0]);
         self::assertTrue($store->finalize($nonce, 'owner-a', new PostSolveDisposition(PostSolveDispositionKind::ChainRequired, 'decision-2', 'chain-xyz', $expiry)));
 
         $raw = json_decode((string) $this->client->get($this->key($nonce)), true);
@@ -298,7 +369,7 @@ final class RealRedisPostSolveDispositionTest extends TestCase
         // The claim atomically consumes the nonce -> decision mapping
         // (getdel inside the claim Lua) and persists the paired handle in
         // the pending record.
-        self::assertSame('claimed', $store->claim($nonce, 'owner-a', 305, $this->decisionKey($nonce)));
+        self::assertSame('claimed', $store->claim($nonce, 'owner-a', 305, $this->decisionKey($nonce))[0]);
         $record = $store->read($nonce);
         self::assertSame('pending', $record?->state);
         self::assertSame('decision-original', $record?->decisionId, 'the pending record carries the decision handle');
@@ -322,7 +393,7 @@ final class RealRedisPostSolveDispositionTest extends TestCase
         $nonce = bin2hex(random_bytes(16));
         $this->attachDecision($nonce, 'decision-original');
 
-        self::assertSame('claimed', $store->claim($nonce, 'owner-a', 305, $this->decisionKey($nonce)));
+        self::assertSame('claimed', $store->claim($nonce, 'owner-a', 305, $this->decisionKey($nonce))[0]);
         // The lease expires; a NEW owner takes over with a different
         // mapping — the original handle survives (a takeover never
         // touches the decision key: the fresh mapping belongs to the
@@ -332,7 +403,7 @@ final class RealRedisPostSolveDispositionTest extends TestCase
         $rec['lease_until'] = time() - 1;
         $this->client->set($this->key($nonce), (string) json_encode($rec), 'KEEPTTL');
         $this->attachDecision($nonce, 'decision-new');
-        self::assertSame('taken_over', $store->claim($nonce, 'owner-b', 305, $this->decisionKey($nonce)));
+        self::assertSame('taken_over', $store->claim($nonce, 'owner-b', 305, $this->decisionKey($nonce))[0]);
         self::assertSame('decision-original', $store->read($nonce)?->decisionId, 'the takeover keeps the ORIGINAL decision handle — never the new owner\'s');
         $mapping = json_decode((string) $this->client->get($this->decisionKey($nonce)), true);
         self::assertIsArray($mapping);
@@ -347,7 +418,7 @@ final class RealRedisPostSolveDispositionTest extends TestCase
         $store = $this->store();
         $nonce = bin2hex(random_bytes(16));
 
-        self::assertSame('claimed', $store->claim($nonce, 'owner-a', 305));
+        self::assertSame('claimed', $store->claim($nonce, 'owner-a', 305)[0]);
         self::assertNull($store->read($nonce)?->decisionId, 'no decision mapping key -> the records carry null');
         self::assertTrue($store->finalize($nonce, 'owner-a', new PostSolveDisposition(PostSolveDispositionKind::Pass)));
         $record = $store->read($nonce);
@@ -366,7 +437,7 @@ final class RealRedisPostSolveDispositionTest extends TestCase
         $nonce = bin2hex(random_bytes(16));
         $this->attachDecision($nonce, 'decision-atomic');
 
-        self::assertSame('claimed', $store->claim($nonce, 'owner-a', 305, $this->decisionKey($nonce)));
+        self::assertSame('claimed', $store->claim($nonce, 'owner-a', 305, $this->decisionKey($nonce))[0]);
         self::assertNull($this->client->get($this->decisionKey($nonce)), 'the mapping is consumed by the winning claim');
         $record = $store->read($nonce);
         self::assertSame('decision-atomic', $record?->decisionId, 'the pending record carries the decision id from the SAME atomic transition');
@@ -378,9 +449,9 @@ final class RealRedisPostSolveDispositionTest extends TestCase
         // will win the next claim).
         $nonce2 = bin2hex(random_bytes(16));
         $this->attachDecision($nonce2, 'decision-first');
-        self::assertSame('claimed', $store->claim($nonce2, 'owner-a', 305, $this->decisionKey($nonce2)));
+        self::assertSame('claimed', $store->claim($nonce2, 'owner-a', 305, $this->decisionKey($nonce2))[0]);
         $this->attachDecision($nonce2, 'decision-second');
-        self::assertSame('pending', $store->claim($nonce2, 'owner-b', 305, $this->decisionKey($nonce2)), 'the concurrent second claim is busy');
+        self::assertSame('pending', $store->claim($nonce2, 'owner-b', 305, $this->decisionKey($nonce2))[0], 'the concurrent second claim is busy');
         self::assertSame('decision-first', $store->read($nonce2)?->decisionId, 'the record keeps the first winner\'s handle');
         $mapping = json_decode((string) $this->client->get($this->decisionKey($nonce2)), true);
         self::assertIsArray($mapping);
@@ -395,10 +466,10 @@ final class RealRedisPostSolveDispositionTest extends TestCase
         $store = $this->store();
         $nonce = bin2hex(random_bytes(16));
         $this->attachDecision($nonce, 'decision-original');
-        self::assertSame('claimed', $store->claim($nonce, 'owner-a', 305, $this->decisionKey($nonce)));
+        self::assertSame('claimed', $store->claim($nonce, 'owner-a', 305, $this->decisionKey($nonce))[0]);
         self::assertTrue($store->finalize($nonce, 'owner-a', new PostSolveDisposition(PostSolveDispositionKind::Pass, 'decision-original')));
         $this->attachDecision($nonce, 'decision-after-complete');
-        self::assertSame('complete', $store->claim($nonce, 'owner-b', 305, $this->decisionKey($nonce)));
+        self::assertSame('complete', $store->claim($nonce, 'owner-b', 305, $this->decisionKey($nonce))[0]);
         $mapping = json_decode((string) $this->client->get($this->decisionKey($nonce)), true);
         self::assertIsArray($mapping);
         self::assertSame('decision-after-complete', $mapping['decision_id'] ?? null, 'a complete claim NEVER consumes the decision mapping');
@@ -965,7 +1036,7 @@ final class RealRedisPostSolveDispositionTest extends TestCase
         $nonce = bin2hex(random_bytes(16));
         $expiry = time() + 300;
 
-        self::assertSame('claimed', $store->claim($nonce, 'owner-a', 300));
+        self::assertSame('claimed', $store->claim($nonce, 'owner-a', 300)[0]);
         $pendingRaw = json_decode((string) $this->client->get($this->key($nonce)), true);
         self::assertIsArray($pendingRaw);
         self::assertSame(1, $pendingRaw['v'] ?? null, 'the claim Lua writes schema v1');

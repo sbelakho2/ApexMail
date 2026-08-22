@@ -15,8 +15,9 @@ use Predis\Response\ServerException;
  * The script is the cross-language shared asset bundled with this package
  * at resources/risk-v1.lua (self-contained, no monorepo paths), resolved
  * via dirname(__DIR__, 2) . '/resources/risk-v1.lua' and loaded with
- * evalsha (noscript fallback to eval + script load, sha cached). The
- * monorepo copy (protocol/risk-v1/risk.lua) is obsolete.
+ * evalsha (noscript fallback to eval + script load, every static script's
+ * sha cached in a script→sha map). The monorepo copy
+ * (protocol/risk-v1/risk.lua) is obsolete.
  *
  * All keys carry the hash tag {kiwi:<namespace>} so the script is Cluster
  * safe. The Lua's network_risk slot (always 0) is overridden with the
@@ -32,7 +33,7 @@ use Predis\Response\ServerException;
  * the platform — treat these as best-effort fail-fast values, not hard
  * deadlines.
  */
-final class RedisRiskStateStore implements RiskStateStoreInterface, SessionContextTagStoreInterface, SessionTlsTagStoreInterface
+final class RedisRiskStateStore implements RiskStateStoreInterface, SessionContextTagStoreInterface, SessionTlsTagStoreInterface, ConsolidatedAssessmentStoreInterface
 {
     public const DEFAULT_SATURATIONS = [
         'src_fast' => 8000,
@@ -52,7 +53,9 @@ final class RedisRiskStateStore implements RiskStateStoreInterface, SessionConte
     public const DEFAULT_OUTCOME_TTL_SECS = 86400;
 
     private string $script;
-    private ?string $scriptSha = null;
+    /** @var array<string, string> cached sha1 of every static script, keyed by the script content */
+    private array $scriptShas = [];
+    private string $assessV2Script;
     private string $outcomeRegisterScript;
     private string $outcomeConfirmScript;
     private string $outcomeCorrectScript;
@@ -97,6 +100,7 @@ final class RedisRiskStateStore implements RiskStateStoreInterface, SessionConte
             throw new \RuntimeException(sprintf('Cannot read the bundled risk-v1 script at %s', $path));
         }
         $this->script = $script;
+        $this->assessV2Script = self::loadOutcomeScript('assess_v2.lua');
         $this->outcomeRegisterScript = self::loadOutcomeScript('outcome_register.lua');
         $this->outcomeConfirmScript = self::loadOutcomeScript('outcome_confirm.lua');
         $this->outcomeCorrectScript = self::loadOutcomeScript('outcome_correct.lua');
@@ -233,6 +237,110 @@ final class RedisRiskStateStore implements RiskStateStoreInterface, SessionConte
 
     public function observe(RiskObservation $observation): SignalVector
     {
+        $keys = $this->observationKeys($observation);
+        $this->assertSameSlot($keys);
+
+        $args = $this->observationArgs($observation);
+        $result = $this->runScript($keys, $args);
+
+        if (!is_array($result) || count($result) < 16) {
+            throw new RiskStoreException('Risk script returned an unexpected payload');
+        }
+
+        $this->lastGlobalLevel = (int) $result[13];
+        $this->lastCooldownUntilMs = (int) $result[14];
+        $this->lastIsDuplicate = ((int) $result[15]) === 1;
+
+        return $this->signalVectorFromReply($result, $observation->networkRisk);
+    }
+
+    /**
+     * The consolidated risk-v2 assessment: one atomic script call that
+     * runs the v1 observation with the exact risk-v1 semantics. It
+     * applies the session's first-seen client-context tag + first-seen
+     * trusted-edge TLS tag records (SET NX, first write wins, session
+     * TTL). When $registration is given, it registers the decision's
+     * pending outcome-ledger entry (SET NX EX under the store's outcome
+     * TTL), returning the signal vector, the recorded tag values and the
+     * registration status. An established risk-v2 session therefore
+     * costs one script call instead of the separate SET NX / GET tag
+     * round trips and the separate outcome registration.
+     *
+     * $contextTag / $tlsTag are the presented tags of the current request
+     * (null/'' = none presented; the corresponding record is untouched and
+     * its existing value is reported as null). The engine passes them only
+     * when a session pseudonym exists and the tag passes the contract
+     * bounds. The records use the exact keys and TTL of
+     * sessionFirstContextTag()/sessionFirstTlsTag(), so the two surfaces
+     * are interchangeable. The ledger registration mirrors
+     * registerOutcome() byte-for-byte (the score is computed inside the
+     * script from the exact base risk and weights the engine scores
+     * with). All keys share the hash tag — Cluster safe.
+     *
+     * @return array{0: SignalVector, 1: ?string, 2: ?string, 3: bool} the
+     *         signal vector, the recorded client-context tag (null when
+     *         none recorded/presented), and the recorded TLS tag (null
+     *         when none recorded/presented). The registration status is
+     *         true when the pending ledger entry was created, false when
+     *         none was requested or the decision is already registered.
+     */
+    public function assessV2(RiskObservation $observation, ?string $contextTag, ?string $tlsTag, ?OutcomeRegistration $registration = null): array
+    {
+        $sessionId = $observation->sessionId ?? str_repeat('0', 32);
+        $keys = [...$this->observationKeys($observation),
+            "{kiwi:{$this->namespace}}:risk:ctx:{$sessionId}",
+            "{kiwi:{$this->namespace}}:risk:tls:{$sessionId}",
+        ];
+        $registrationKey = null;
+        if ($registration !== null) {
+            $registrationKey = $this->ledgerKey($registration->decisionId);
+            $keys[] = $registrationKey;
+        }
+        $this->assertSameSlot($keys);
+
+        $args = [...$this->observationArgs($observation), $contextTag ?? '', $tlsTag ?? ''];
+        if ($registration !== null) {
+            $args = [...$args,
+                $registration->decisionId,
+                $registration->decisionHour,
+                $this->outcomeTtlSecs,
+                $observation->networkRisk,
+                $registration->globalPressureEnabled ? 1 : 0,
+                $registration->baseRisk,
+                $registration->honeypotHit ? 1 : 0,
+                ...array_values($registration->weights->toArray()),
+                ...array_values($registration->v2Weights->toArray()),
+            ];
+        } else {
+            $args = [...$args, '', 0, 0, 0, 1, 0, 0, ...array_fill(0, 16, 0)];
+        }
+        $result = $this->runScript($keys, $args, $this->assessV2Script);
+
+        if (!is_array($result) || count($result) < 19) {
+            throw new RiskStoreException('Risk script returned an unexpected payload');
+        }
+
+        $this->lastGlobalLevel = (int) $result[13];
+        $this->lastCooldownUntilMs = (int) $result[14];
+        $this->lastIsDuplicate = ((int) $result[15]) === 1;
+
+        return [
+            $this->signalVectorFromReply($result, $observation->networkRisk),
+            (is_string($result[16]) && $result[16] !== '') ? $result[16] : null,
+            (is_string($result[17]) && $result[17] !== '') ? $result[17] : null,
+            ((int) $result[18]) === 1,
+        ];
+    }
+
+    /**
+     * The ten risk-v1 observation keys, in the Lua keys order
+     * (source ±1 epoch, subnet ±1 epoch, session, principal, global,
+     * dedupe). All share the {kiwi:<ns>} hash tag.
+     *
+     * @return list<string>
+     */
+    private function observationKeys(RiskObservation $observation): array
+    {
         $ns = $this->namespace;
         $tag = "{kiwi:{$ns}}";
         $sourceId = $observation->sourceId;
@@ -240,7 +348,7 @@ final class RedisRiskStateStore implements RiskStateStoreInterface, SessionConte
         $sessionId = $observation->sessionId ?? str_repeat('0', 32);
         $principalId = $observation->principalId ?? str_repeat('0', 32);
 
-        $keys = [
+        return [
             "{$tag}:risk:src:{$observation->sourceEpoch}:{$sourceId}",
             "{$tag}:risk:src:" . ($observation->sourceEpoch - 1) . ":{$observation->sourceIdPrev}",
             "{$tag}:risk:src:" . ($observation->sourceEpoch + 1) . ":{$observation->sourceIdNext}",
@@ -252,10 +360,18 @@ final class RedisRiskStateStore implements RiskStateStoreInterface, SessionConte
             "{$tag}:risk:global",
             "{$tag}:risk:dedupe:{$observation->eventId}",
         ];
-        $this->assertSameSlot($keys);
+    }
 
+    /**
+     * The twenty-two risk-v1 script arguments, in the Lua argv order.
+     *
+     * @return list<int|string>
+     */
+    private function observationArgs(RiskObservation $observation): array
+    {
         $sat = array_replace(self::DEFAULT_SATURATIONS, $this->saturations);
-        $args = [
+
+        return [
             $observation->event->value,
             $observation->scope,
             $observation->nowMs,
@@ -279,17 +395,11 @@ final class RedisRiskStateStore implements RiskStateStoreInterface, SessionConte
             $this->sessionTtlSecs,
             $this->principalTtlSecs,
         ];
+    }
 
-        $result = $this->runScript($keys, $args);
-
-        if (!is_array($result) || count($result) < 16) {
-            throw new RiskStoreException('Risk script returned an unexpected payload');
-        }
-
-        $this->lastGlobalLevel = (int) $result[13];
-        $this->lastCooldownUntilMs = (int) $result[14];
-        $this->lastIsDuplicate = ((int) $result[15]) === 1;
-
+    /** Maps the script reply's 13 signal slots onto the SignalVector. */
+    private function signalVectorFromReply(array $result, int $networkRisk): SignalVector
+    {
         return new SignalVector(
             sourceFast: (int) $result[0],
             sourceSlow: (int) $result[1],
@@ -301,7 +411,7 @@ final class RedisRiskStateStore implements RiskStateStoreInterface, SessionConte
             actionFailure: (int) $result[7],
             scopeSwitch: (int) $result[8],
             globalPressure: (int) $result[9],
-            networkRisk: $observation->networkRisk,
+            networkRisk: $networkRisk,
             trustCredit: (int) $result[11],
             principalCredit: (int) $result[12],
         );
@@ -339,17 +449,13 @@ final class RedisRiskStateStore implements RiskStateStoreInterface, SessionConte
         }
     }
 
-    /** Cached sha1 of a script (script load once per script per process). */
+    /** Cached sha1 of every static script (script load once per script per process). */
     private function shaOf(string $script): string
     {
-        if ($script === $this->script && $this->scriptSha !== null) {
-            return $this->scriptSha;
+        if (!isset($this->scriptShas[$script])) {
+            $this->scriptShas[$script] = $this->loadScript($script);
         }
-        $sha = $this->loadScript($script);
-        if ($script === $this->script) {
-            $this->scriptSha = $sha;
-        }
-        return $sha;
+        return $this->scriptShas[$script];
     }
 
     private function loadScript(string $script): string

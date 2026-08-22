@@ -217,33 +217,37 @@ final class RealRedisIntegrationTest extends TestCase
     {
         $secret = '0123456789abcdef0123456789abcdef';
         $outstanding = new OutstandingChallenges($this->client, '{kiwi:ci}:outstanding:', RiskKeys::fromMaster($secret), 3, 100, 5);
+        $now = time();
+        $nonceA = base64_encode(random_bytes(32));
+        $nonceB = base64_encode(random_bytes(32));
+        $nonceC = base64_encode(random_bytes(32));
 
-        // Three issuances admitted (expire = ttl + margin), the 4th refused.
-        self::assertSame(1, $outstanding->issue('198.51.100.7', 60));
-        self::assertSame(1, $outstanding->issue('198.51.100.7', 60));
-        self::assertSame(1, $outstanding->issue('198.51.100.7', 60));
-        self::assertSame(0, $outstanding->issue('198.51.100.7', 60), 'the 4th outstanding challenge of one source must be refused');
+        // Three issuances admitted, the 4th refused by the per-source cap.
+        self::assertSame(1, $outstanding->issue('198.51.100.7', $nonceA, $now + 60, 60));
+        self::assertSame(1, $outstanding->issue('198.51.100.7', $nonceB, $now + 60, 60));
+        self::assertSame(1, $outstanding->issue('198.51.100.7', $nonceC, $now + 60, 60));
+        self::assertSame(0, $outstanding->issue('198.51.100.7', base64_encode(random_bytes(32)), $now + 60, 60), 'the 4th outstanding challenge of one source must be refused');
 
         $sourceKey = $outstanding->sourceKey('198.51.100.7');
         self::assertSame('3', (string) $this->client->get($sourceKey));
-        self::assertSame('3', (string) $this->client->get('{kiwi:ci}:outstanding:global'));
+        self::assertSame(3, $this->client->zcard('{kiwi:ci}:outstanding:global:live'), 'the live-outstanding membership holds the three admitted nonces');
         $ttl = $this->client->ttl($sourceKey);
         self::assertGreaterThanOrEqual(60, $ttl, 'the counter TTL = challenge lifetime (60) + ttl margin (5)');
         self::assertLessThanOrEqual(65, $ttl);
 
-        // A valid solve decrements the per-source counter (floored at 0).
-        $outstanding->solved('198.51.100.7');
+        // A valid solve decrements the per-source counter (floored at 0)
+        // and removes the nonce from the live membership.
+        $outstanding->solved('198.51.100.7', $nonceA);
         self::assertSame('2', (string) $this->client->get($sourceKey));
-        $outstanding->solved('198.51.100.7');
-        $outstanding->solved('198.51.100.7');
-        $outstanding->solved('198.51.100.7');
+        self::assertSame(2, $this->client->zcard('{kiwi:ci}:outstanding:global:live'));
+        $outstanding->solved('198.51.100.7', $nonceB);
+        $outstanding->solved('198.51.100.7', $nonceC);
+        $outstanding->solved('198.51.100.7', base64_encode(random_bytes(32)));
         self::assertSame('0', (string) $this->client->get($sourceKey), 'the decrement must never drive the counter negative');
+        self::assertSame(0, $this->client->zcard('{kiwi:ci}:outstanding:global:live'), 'every solved nonce leaves the live membership');
 
-        // The global counter is never decremented by solves (expires only).
-        self::assertSame('3', (string) $this->client->get('{kiwi:ci}:outstanding:global'));
-
-        // The cap frees when the counter drops: a new issuance is admitted.
-        self::assertSame(1, $outstanding->issue('198.51.100.7', 60));
+        // The cap frees when the membership drops: a new issuance is admitted.
+        self::assertSame(1, $outstanding->issue('198.51.100.7', base64_encode(random_bytes(32)), $now + 60, 60));
     }
 
     public function testSemaphoreWaitersGuardAgainstRealRedis(): void

@@ -265,6 +265,144 @@ final class RedisStorageTest extends TestCase
         self::assertInstanceOf(RedisStorage::class, $storage);
     }
 
+    public function testPredisStandaloneRetryDisabledWithWaitReplicasConstructs(): void
+    {
+        // A standalone Predis client with the default connection
+        // parameters has command retries disabled — the vendored
+        // Parameters::isDisabledRetry() is true when no 'retry'
+        // connection parameter was provided — so every durability-
+        // critical mutation is attempted exactly once on the connection
+        // whose WAIT establishes the replication offset and the verified
+        // barrier stays supported.
+        if (!\class_exists(\Predis\Client::class)) {
+            self::markTestSkipped('predis/predis is not installed; cannot test RedisStorage');
+        }
+        $standalone = new \Predis\Client('tcp://127.0.0.1:6379');
+
+        self::assertTrue(
+            $standalone->getConnection()->getParameters()->isDisabledRetry(),
+            'the default connection parameters must report retries disabled',
+        );
+        $storage = new RedisStorage($standalone, waitReplicas: 1);
+        self::assertInstanceOf(RedisStorage::class, $storage);
+    }
+
+    public function testPredisStandaloneWithRetryEnabledAndWaitReplicasIsRefusedAtConstruction(): void
+    {
+        // Predis disables retries by default, but a caller can arm the
+        // vendored retry machinery with an explicit 'retry' connection
+        // parameter. With retries enabled, Client::executeCommand()
+        // wraps every command on the standalone connection in the
+        // configured policy (callWithRetry + disconnect), so a lost
+        // response makes the client transparently re-execute the command
+        // — including the Lua eval that carries the durability-critical
+        // mutation. The returned result may then describe the second
+        // invocation rather than the one that mutated, which breaks the
+        // mutation-to-WAIT correspondence the verified barrier depends
+        // on; the combination with waitReplicas > 0 is refused at
+        // construction, fail closed before any write can run.
+        if (!\class_exists(\Predis\Client::class)) {
+            self::markTestSkipped('predis/predis is not installed; cannot test RedisStorage');
+        }
+        $standalone = new \Predis\Client([
+            'host' => '127.0.0.1',
+            'retry' => new \Predis\Retry\Retry(new \Predis\Retry\Strategy\ExponentialBackoff(), 3),
+        ]);
+        self::assertFalse(
+            $standalone->getConnection()->getParameters()->isDisabledRetry(),
+            'an explicit retry connection parameter must report retries enabled',
+        );
+
+        try {
+            new RedisStorage($standalone, waitReplicas: 1);
+            self::fail('a retry-enabled standalone Predis client must be refused when waitReplicas > 0');
+        } catch (\InvalidArgumentException $e) {
+            self::assertStringContainsString('retry-enabled standalone Predis client', $e->getMessage());
+            self::assertStringContainsString('attempted exactly once', $e->getMessage());
+            self::assertStringContainsString('waitReplicas = 0', $e->getMessage());
+        }
+    }
+
+    public function testPredisStandaloneWithRetryEnabledAndWaitReplicasZeroConstructs(): void
+    {
+        // The refusal targets only the verified-WAIT hardening mode: a
+        // retry-enabled standalone client with waitReplicas = 0 never
+        // issues WAIT, so there is no mutation-to-WAIT correspondence to
+        // break and it constructs normally.
+        if (!\class_exists(\Predis\Client::class)) {
+            self::markTestSkipped('predis/predis is not installed; cannot test RedisStorage');
+        }
+        $standalone = new \Predis\Client([
+            'host' => '127.0.0.1',
+            'retry' => new \Predis\Retry\Retry(new \Predis\Retry\Strategy\ExponentialBackoff(), 3),
+        ]);
+
+        $storage = new RedisStorage($standalone);
+        self::assertInstanceOf(RedisStorage::class, $storage);
+    }
+
+    public function testLostEvalReplyRetryHazardIsImpossibleBecauseRetryEnabledStandaloneIsRefusedAtConstruction(): void
+    {
+        // Why the retry-enabled standalone refusal exists: deleteIfPending()
+        // sends the terminal-delete script through $client->eval(), an
+        // ordinary Predis command that participates in the configured
+        // retry policy. With retries enabled the vendored
+        // Client::executeCommand() wraps the eval in callWithRetry with a
+        // disconnect callback. If the first invocation executes the
+        // terminal DEL and the socket closes before the reply is read,
+        // the wrapper disconnects, reconnects, and transparently
+        // re-executes the eval; the second invocation sees the key gone
+        // and returns ['missing']. Kiwi concludes "no mutation -> no
+        // WAIT" although the first invocation performed the mutation — if
+        // the primary then fails before the DEL replicates, the burned
+        // challenge is resurrectable and the delete-durability barrier
+        // was silently skipped. The returned invocation is not the
+        // invocation that mutated. This test reproduces the sequence
+        // through the real vendored retry machinery to prove (i) that
+        // the hazard is real on a retry-enabled standalone client, and
+        // (ii) that the configuration producing it cannot be created
+        // with waitReplicas > 0 — the refusal makes the hazardous
+        // sequence impossible by construction.
+        if (!\class_exists(\Predis\Client::class)) {
+            self::markTestSkipped('predis/predis is not installed; cannot test RedisStorage');
+        }
+
+        // (i) The hazardous sequence on the fake connection: the first
+        // eval invocation performs the terminal DEL and throws before
+        // the reply (the socket closed), the retry re-executes the eval
+        // on the reconnected connection and returns ['missing']. The
+        // storage layer therefore reports "missing" although the DEL
+        // happened — the returned invocation is not the one that
+        // mutated.
+        $connection = new LostEvalReplyRetryConnection();
+        $connection->store['kiwicaptcha:pending-nonce'] = '{"state":"pending"}';
+        $client = new \Predis\Client($connection);
+
+        // waitReplicas = 0 constructs (no barrier can be skipped) and
+        // deleteIfPending runs the real evalScript path.
+        $storage = new RedisStorage($client);
+        $result = $storage->deleteIfPending('pending-nonce');
+
+        self::assertSame(2, $connection->evalInvocations, 'the lost reply must be retried exactly once');
+        self::assertSame('missing', $result->state, 'the retried invocation sees the key already gone');
+        self::assertNull(
+            $connection->store['kiwicaptcha:pending-nonce'] ?? null,
+            'the FIRST invocation already performed the terminal DEL before the reply was lost',
+        );
+
+        // (ii) The same retry-enabled standalone client with
+        // waitReplicas > 0 is refused at construction: the verified
+        // barrier can never sit behind a command wrapper that may
+        // re-execute the mutation it is supposed to replicate.
+        try {
+            new RedisStorage($client, waitReplicas: 1);
+            self::fail('a retry-enabled standalone Predis client must be refused when waitReplicas > 0');
+        } catch (\InvalidArgumentException $e) {
+            self::assertStringContainsString('retry-enabled standalone Predis client', $e->getMessage());
+            self::assertStringContainsString('re-execute the Lua mutation', $e->getMessage());
+        }
+    }
+
     public function testStoreWritesLanguageNeutralJson(): void
     {
         $client = $this->requirePredis();
@@ -1135,5 +1273,130 @@ final class RedisStorageTest extends TestCase
 
             $storage->delete($nonce);
         }
+    }
+}
+
+/**
+ * A faithful stand-in for a standalone Predis node connection whose
+ * command retries are explicitly enabled, used by the lost-EVAL-reply
+ * regression test.
+ *
+ * It models the exact vendored retry flow of Predis 3.5.1: an explicit
+ * 'retry' connection parameter arms the machinery,
+ * {@see \Predis\Connection\Parameters::isDisabledRetry()} reports false,
+ * and {@see \Predis\Client::executeCommand()} then wraps every command
+ * on the standalone connection in `$parameters->retry->callWithRetry(...)`
+ * with a disconnect callback. The first EVAL invocation executes the
+ * terminal DEL of the delete-if-pending script and then throws a
+ * ConnectionException, because the socket closed before the reply could
+ * be read. The retried invocation on the reconnected connection sees
+ * the key gone and returns the ['missing'] reply the real script would
+ * return. Kiwi would then treat the returned invocation as the mutating
+ * one, skipping the verified WAIT that must follow the deletion.
+ *
+ * Implemented against {@see \Predis\Connection\NodeConnectionInterface}
+ * so it can be handed to {@see \Predis\Client} directly (the client
+ * constructor accepts a ConnectionInterface instance as-is).
+ */
+final class LostEvalReplyRetryConnection implements \Predis\Connection\NodeConnectionInterface
+{
+    /** @var array<string, string> in-memory keys, the fake "server" state */
+    public array $store = [];
+
+    /** Number of times the fake connection received the EVAL command. */
+    public int $evalInvocations = 0;
+
+    private \Predis\Connection\ParametersInterface $parameters;
+
+    public function __construct()
+    {
+        $this->parameters = new \Predis\Connection\Parameters([
+            'host' => '127.0.0.1',
+            'port' => 6379,
+            'retry' => new \Predis\Retry\Retry(new \Predis\Retry\Strategy\NoBackoff(), 1),
+        ]);
+    }
+
+    public function executeCommand(\Predis\Command\CommandInterface $command)
+    {
+        if ($command->getId() !== 'EVAL') {
+            return null;
+        }
+        $this->evalInvocations++;
+        $key = (string) ($command->getArguments()[2] ?? '');
+
+        if ($this->evalInvocations === 1) {
+            // First invocation: the script's terminal DEL executes and
+            // the mutation lands, then the connection drops before the
+            // reply can be read — the lost-response case the retry
+            // wrapper handles by re-executing.
+            unset($this->store[$key]);
+            throw new \Predis\Connection\ConnectionException($this, 'socket closed before the reply could be read');
+        }
+
+        // Retried invocation on the reconnected connection: the key is
+        // already gone, so the script reports missing.
+        return ['missing'];
+    }
+
+    public function connect()
+    {
+        return true;
+    }
+
+    public function disconnect()
+    {
+    }
+
+    public function isConnected()
+    {
+        return true;
+    }
+
+    public function writeRequest(\Predis\Command\CommandInterface $command)
+    {
+    }
+
+    public function readResponse(\Predis\Command\CommandInterface $command)
+    {
+        return null;
+    }
+
+    public function write(string $buffer): void
+    {
+    }
+
+    public function getParameters()
+    {
+        return $this->parameters;
+    }
+
+    public function __toString()
+    {
+        return 'tcp://127.0.0.1:6379';
+    }
+
+    public function getResource()
+    {
+        return null;
+    }
+
+    public function getClientId(): ?int
+    {
+        return null;
+    }
+
+    public function addConnectCommand(\Predis\Command\CommandInterface $command)
+    {
+    }
+
+    public function read()
+    {
+        return null;
+    }
+
+    public function hasDataToRead(): bool
+    {
+        return false;
     }
 }

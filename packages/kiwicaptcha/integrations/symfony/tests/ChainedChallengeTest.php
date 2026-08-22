@@ -1696,7 +1696,7 @@ final class ChainedChallengeTest extends TestCase
         $outstanding->solved('198.51.100.7');
         $sourceKey = '{kiwi:chain-test}:outstanding:'.hash_hmac('sha256', Issuer::canonicalIpFamily('198.51.100.7'), RiskKeys::fromMaster(self::SECRET)->event);
         self::assertSame(0, $client->counters[$sourceKey] ?? 0, 'a valid solve decrements the per-source slot');
-        self::assertSame(1, $client->counters['{kiwi:chain-test}:outstanding:global'] ?? 0, 'the GLOBAL counter is never decremented — it decays by EXPIRE');
+        self::assertSame(1, \count($client->zsets['{kiwi:chain-test}:outstanding:global:live'] ?? []), 'a solve without a nonce leaves the live-outstanding membership intact (the member dies at its expiry score)');
     }
 
     public function testAdmittedMintFailureRollsBackTheSlot(): void
@@ -2124,7 +2124,7 @@ final class ChainedChallengeTest extends TestCase
         self::assertSame(1, $this->storageRecordCount($storage), 'no NEW challenge record may be created for a chain that cannot hold it (only the solved stage-1 record exists)');
         $sourceKey = '{kiwi:chain-test}:outstanding:'.hash_hmac('sha256', Issuer::canonicalIpFamily('198.51.100.7'), RiskKeys::fromMaster(self::SECRET)->event);
         self::assertSame(0, $client->counters[$sourceKey] ?? 0, 'no outstanding admission may be held');
-        self::assertSame(0, $client->counters['{kiwi:chain-test}:outstanding:global'] ?? 0, 'the global counter is untouched');
+        self::assertSame([], $client->zsets['{kiwi:chain-test}:outstanding:global:live'] ?? [], 'no nonce may join the live-outstanding membership for a refused mint');
 
         // The chain is NOT extended: it still expires at its signed
         // expiry, and the refused request released its reservation (the
@@ -4383,6 +4383,9 @@ final class AbortAwareFakeRedis extends \Predis\Client
     /** @var array<string, int> plain incr counters */
     public array $counters = [];
 
+    /** @var array<string, array<string, float>> live-outstanding membership: key => nonce => score */
+    public array $zsets = [];
+
     public function __construct()
     {
         // Deliberately skip the parent constructor: no connection setup.
@@ -4400,30 +4403,36 @@ final class AbortAwareFakeRedis extends \Predis\Client
 
         if (str_contains($script, 'Outstanding challenge issuance')) {
             // OutstandingChallenges::issue: keys[1] per-source counter,
-            // keys[2] global counter; argv[1] source cap, argv[2] global
-            // cap, argv[3] TTL seconds. GET both caps -> refuse 0/-1
-            // before anything is written -> incr both.
+            // keys[2] the global LIVE-outstanding ZSET; argv[1] source cap,
+            // argv[2] global cap, argv[3] TTL seconds, argv[4] absolute
+            // expiry (the score), argv[5] the minted nonce (the member).
             $source = (string) $keys[0];
             $global = (string) $keys[1];
             if (($this->counters[$source] ?? 0) >= (int) $rest[0]) {
                 return 0;
             }
-            if (($this->counters[$global] ?? 0) >= (int) $rest[1]) {
+            if (\count($this->zsets[$global] ?? []) >= (int) $rest[1]) {
                 return -1;
             }
             $this->counters[$source] = ($this->counters[$source] ?? 0) + 1;
-            $this->counters[$global] = ($this->counters[$global] ?? 0) + 1;
+            $this->zsets[$global][(string) $rest[4]] = (float) $rest[3];
 
             return 1;
         }
 
         if (str_contains($script, 'Outstanding challenge solve') || str_contains($script, 'Outstanding challenge aborted')) {
             // OutstandingChallenges::solved / ::abortedBeforeHandoff:
-            // keys[1] per-source counter; best-effort decr floored at 0.
-            $key = (string) $keys[0];
-            $v = $this->counters[$key] ?? 0;
+            // keys[1] per-source counter, keys[2] the global live ZSET;
+            // argv[1] the nonce ('' = none). Best-effort decr floored at 0
+            // + ZREM the nonce.
+            $source = (string) $keys[0];
+            $global = (string) $keys[1];
+            $v = $this->counters[$source] ?? 0;
             if ($v > 0) {
-                $this->counters[$key] = $v - 1;
+                $this->counters[$source] = $v - 1;
+            }
+            if ((string) $rest[0] !== '') {
+                unset($this->zsets[$global][(string) $rest[0]]);
             }
 
             return 1;

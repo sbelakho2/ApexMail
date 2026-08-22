@@ -11,6 +11,13 @@
 //! counter whose hash meets `target_bits` leading-zero bits, or -1 if the
 //! chunk is exhausted. Chunking lets the widget yield to the UI between calls.
 //!
+//! The SHA chunk is TIME-budgeted (see [`SHA_CHUNK_TIME_BUDGET_MS`]): the
+//! loop stops after approximately that much wall time and reports how far
+//! it got, so the synchronous work per yield is bounded by wall time, never
+//! by a hash count (a fixed hash-count chunk can block the UI for ~100 ms on
+//! slow devices). The Argon2id chunk stays hash-count-budgeted — each hash
+//! is memory-hard and inherently slow, and it always runs in a worker.
+//!
 //! The counter is encoded as its decimal representation (identical to the
 //! server verifier in `kiwicaptcha::verify::derive_hash` and to the pure-JS
 //! fallback), so all three solvers agree byte-for-byte on the preimage:
@@ -18,6 +25,7 @@
 //! the same password layout for Argon2id.
 
 use argon2::{Algorithm, Argon2, Params, Version};
+use js_sys::Date;
 use sha2::{Digest, Sha256};
 use std::alloc::Layout;
 use wasm_bindgen::prelude::*;
@@ -48,7 +56,12 @@ pub fn solver_protocol_version() -> u32 {
 
 /// The protocol/ABI generation counter (bump when the solver protocol or
 /// the worker contract changes; keep in sync with kiwi-worker.js).
-pub const SOLVER_PROTOCOL_VERSION: u32 = 1;
+///
+/// Bumped to 2 with the time-budgeted SHA chunk: `solve_sha256_chunk` now
+/// reports partial chunks (see its doc comment), so a worker from the
+/// previous generation paired with this wasm would mis-handle the return
+/// values — the runtime handshake refuses the mismatched pair instead.
+pub const SOLVER_PROTOCOL_VERSION: u32 = 2;
 
 #[cfg(test)]
 mod tests {
@@ -56,7 +69,7 @@ mod tests {
 
     #[test]
     fn solver_protocol_version_is_the_documented_generation() {
-        assert_eq!(solver_protocol_version(), 1);
+        assert_eq!(solver_protocol_version(), 2);
     }
 }
 
@@ -123,9 +136,33 @@ pub unsafe fn dealloc(ptr: *mut u8, len: usize) {
     unsafe { std::alloc::dealloc(ptr, layout) };
 }
 
+/// The wall-time budget of one `solve_sha256_chunk` call in milliseconds.
+/// The loop reads the clock and stops once approximately this much time has
+/// elapsed since the chunk started, so the synchronous work per yield is
+/// hardware-independent (≈ 8–12 ms even on slow devices). The clock is
+/// `Date.now()` (via js-sys) — available on the page AND in workers, and
+/// monotonic enough for a sub-second budget.
+const SHA_CHUNK_TIME_BUDGET_MS: f64 = 10.0;
+
+/// Clock checks are throttled to every 256 hashes: at the slowest realistic
+/// devices (≈ 500k hashes/s) one interval is ≈ 0.5 ms, so the chunk stays
+/// inside the 8–12 ms window with negligible overshoot, while the wasm→JS
+/// import call overhead stays out of the per-hash hot path.
+const SHA_CLOCK_CHECK_INTERVAL: u32 = 256;
+
 /// Search `[start_counter, start_counter + chunk_size)` for a counter whose
 /// SHA-256 hash of the prefix, the decimal counter and the salt has at
-/// least `target_bits` leading zero bits. Returns the counter or -1.
+/// least `target_bits` leading zero bits.
+///
+/// The chunk is TIME-budgeted (≈ [`SHA_CHUNK_TIME_BUDGET_MS`] of wall
+/// time), so the caller yields back to the event loop at roughly constant
+/// latency regardless of the device. Return contract:
+/// - `counter >= 0`    — a solution at that counter;
+/// - `-1`              — no solution in the whole `chunk_size` window
+///                       (the caller advances by `chunk_size`);
+/// - `-(scanned + 1)` (i.e. `<= -2`) — the time budget elapsed after
+///   `scanned` hashes with no solution; the caller resumes at
+///   `start_counter + scanned`, neither skipping nor redoing work.
 #[wasm_bindgen]
 pub fn solve_sha256_chunk(
     prefix_ptr: *const u8,
@@ -149,6 +186,8 @@ pub fn solve_sha256_chunk(
 
     let mut buf = [0u8; 12];
 
+    let deadline = Date::now() + SHA_CHUNK_TIME_BUDGET_MS;
+    let mut scanned: u32 = 0;
     for counter in start_counter..end_counter {
         let mut hasher = hasher_base.clone();
 
@@ -160,6 +199,12 @@ pub fn solve_sha256_chunk(
 
         if leading_zero_bits(&result) >= target_bits {
             return counter as i32;
+        }
+        scanned += 1;
+        if scanned % SHA_CLOCK_CHECK_INTERVAL == 0 && Date::now() >= deadline {
+            // Time budget elapsed mid-chunk: report the partial progress so
+            // the caller resumes exactly where work stopped.
+            return -((scanned + 1) as i32);
         }
     }
     -1

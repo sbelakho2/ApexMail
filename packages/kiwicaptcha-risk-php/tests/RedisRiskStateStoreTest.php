@@ -9,7 +9,9 @@ use KiwiCaptcha\Risk\RiskAction;
 use KiwiCaptcha\Risk\RiskObservation;
 use KiwiCaptcha\Risk\SignalVector;
 use KiwiCaptcha\Risk\Storage\RedisRiskStateStore;
+use KiwiCaptcha\Risk\Storage\RiskStateStoreInterface;
 use Predis\Client;
+use Predis\Command\CommandInterface;
 use PHPUnit\Framework\TestCase;
 
 /**
@@ -667,36 +669,173 @@ final class RedisRiskStateStoreTest extends TestCase
     }
 
     /**
-     * The risk-v2 session trusted-edge TLS record: SET NX first-write-wins
-     * with the session TTL. The first coarse TLS classification a session
-     * presents is recorded and returned forever; a later different tag
-     * still yields the first one, from which the engine derives the
-     * tls_inconsistency signal. Mirrors the session_first_context_tag
-     * machinery exactly under its own key.
+     * The consolidated assessment: one atomic script call runs the v1
+     * observation, records the first-seen client-context + TLS tags and
+     * registers the decision's pending outcome-ledger entry. The ledger
+     * mirrors registerOutcome() byte-for-byte (the score is computed
+     * inside the script from the exact base risk and weights the engine
+     * scores with).
      */
-    public function testSessionFirstTlsTagRecordsTheFirstTagWithTheSessionTtl(): void
+    public function testAssessV2RegistersLedgerTagsAndReturnsStatus(): void
     {
         $store = $this->store();
-        $sessionId = str_repeat('7c', 16);
+        $sessionId = str_repeat('9c', 16);
+        $obs = $this->observation(str_repeat('5', 32), 1, self::T0, 600, RiskEventKind::PreIssue, $sessionId);
+        $weights = new \KiwiCaptcha\Risk\RiskWeights();
+        $v2Weights = new \KiwiCaptcha\Risk\RiskV2Weights();
+        $registration = new \KiwiCaptcha\Risk\Storage\OutcomeRegistration(
+            decisionId: 'dec-cons-1',
+            decisionHour: 472222,
+            baseRisk: 100,
+            globalPressureEnabled: true,
+            honeypotHit: false,
+            weights: $weights,
+            v2Weights: $v2Weights,
+        );
 
-        // First TLS tag-bearing request: the tag is recorded and returned.
-        self::assertSame('tls13|http2', $store->sessionFirstTlsTag($sessionId, 'tls13|http2'));
+        [$vector, $ctx, $tls, $registered] = $store->assessV2($obs, 'aa', 'tls13|http2', $registration);
+        self::assertTrue($registered, 'the pending ledger entry must be created on the first registration');
+        self::assertSame('aa', $ctx);
+        self::assertSame('tls13|http2', $tls);
+        self::assertSame(125, $vector->sourceFast, 'the v1 observation must run identically');
 
-        // Same tag again: the recorded first tag is returned unchanged.
-        self::assertSame('tls13|http2', $store->sessionFirstTlsTag($sessionId, 'tls13|http2'));
+        // The ledger is byte-for-byte the registerOutcome() entry: the
+        // script computes the exact decision score from the signals,
+        // weights and base risk (100 + weighted 125,190 + weighted
+        // 10,110 + weighted 125,80 + weighted 28,170 + weighted
+        // 600,100 = 198).
+        $ledger = json_decode((string) $this->client->get($store->ledgerKey('dec-cons-1')), true);
+        self::assertSame('P', $ledger['o']);
+        self::assertSame(1, $ledger['scope']);
+        self::assertSame(472222, $ledger['hour']);
+        self::assertSame(198, $ledger['score']);
+        self::assertSame(1, $ledger['w']);
 
-        // A different tag: the first tag wins (the tls_inconsistency
-        // signal derives from this comparison).
-        self::assertSame('tls13|http2', $store->sessionFirstTlsTag($sessionId, 'tls12|http1'), 'the first-seen TLS tag must win');
+        // A retried decision_id is refused (SET NX).
+        [$vector2, $ctx2, $tls2, $registered2] = $store->assessV2($obs, 'aa', 'tls13|http2', $registration);
+        self::assertFalse($registered2, 'a duplicate decision_id must not overwrite the ledger');
+        self::assertSame('aa', $ctx2, 'the first-seen tag wins on repeat assessments');
+        self::assertSame('tls13|http2', $tls2);
 
-        // The record carries the session TTL (1800 s), like the risk-v1
-        // session state hash.
-        $key = "{kiwi:{$store->namespace()}}:risk:tls:{$sessionId}";
-        $ttl = (int) $this->client->ttl($key);
-        self::assertGreaterThan(0, $ttl, 'the record must expire with the session TTL');
-        self::assertLessThanOrEqual(1800, $ttl);
+        // Changed tags on an established session return the first tags.
+        [$vector3, $ctx3, $tls3, $registered3] = $store->assessV2(
+            $this->observation(str_repeat('6', 32), 1, self::T0, 600, RiskEventKind::PreIssue, $sessionId),
+            'bb',
+            'tls12|http1',
+            new \KiwiCaptcha\Risk\Storage\OutcomeRegistration('dec-cons-2', 472222, 100, true, false, $weights, $v2Weights),
+        );
+        self::assertSame('aa', $ctx3, "the session's first context tag is the comparison baseline");
+        self::assertSame('tls13|http2', $tls3, "the session's first TLS tag is the comparison baseline");
+        self::assertTrue($registered3);
 
-        // A different session has its own record.
-        self::assertSame('tls13|h3', $store->sessionFirstTlsTag(str_repeat('8d', 16), 'tls13|h3'));
+        // The tag records carry the session TTL, exactly like the
+        // individual session_first_* record surfaces.
+        $ctxKey = "{kiwi:{$store->namespace()}}:risk:ctx:{$sessionId}";
+        $tlsKey = "{kiwi:{$store->namespace()}}:risk:tls:{$sessionId}";
+        self::assertGreaterThan(0, (int) $this->client->ttl($ctxKey));
+        self::assertLessThanOrEqual(1800, (int) $this->client->ttl($ctxKey));
+        self::assertGreaterThan(0, (int) $this->client->ttl($tlsKey));
+        self::assertLessThanOrEqual(1800, (int) $this->client->ttl($tlsKey));
+    }
+
+    /** The consolidated script's registration is skipped when no registration is passed. */
+    public function testAssessV2WithoutRegistrationSkipsTheLedger(): void
+    {
+        $store = $this->store();
+        $sessionId = str_repeat('2f', 16);
+        [$vector, $ctx, $tls, $registered] = $store->assessV2(
+            $this->observation(str_repeat('7', 32), 1, self::T0, 0, RiskEventKind::PreIssue, $sessionId),
+            'aa',
+            'tls13|http2',
+            null,
+        );
+        self::assertFalse($registered, 'without a registration payload no ledger entry is created');
+        self::assertSame('aa', $ctx, 'the tag records still apply');
+        self::assertSame(125, $vector->sourceFast);
+        self::assertNull($this->client->get($store->ledgerKey('dec-missing')));
+    }
+
+    /**
+     * The established-session assessment issues exactly one script call:
+     * the engine's full calibration-less assessment path (observation +
+     * first-seen tags + outcome registration) runs as a single evalsha
+     * once the script is loaded.
+     */
+    public function testEstablishedSessionAssessmentIssuesExactlyOneScriptCall(): void
+    {
+        $client = new CommandCountingClient(getenv('RISK_REDIS_URL'));
+        $store = new RedisRiskStateStore($client, namespace: 'count' . bin2hex(random_bytes(4)));
+        $engine = $this->engine($store);
+        $session = str_repeat('4a', 16);
+        $context = $this->context(RiskEventKind::PreIssue, $session);
+
+        // Prime: the first assessment loads the script (script load +
+        // evalsha) and establishes the session tag records.
+        $first = $engine->assessPreIssueV2($context, $this->v2(tag: 'aa', tlsTag: 'tls13|http2'));
+
+        // Established session: the whole assessment is ONE script call.
+        $before = $client->commands;
+        $second = $engine->assessPreIssueV2($context, $this->v2(tag: 'aa', tlsTag: 'tls13|http2'));
+        self::assertSame($before + 1, $client->commands, 'the established-session assessment must issue exactly ONE script call');
+
+        // And the decision's pending ledger entry exists with the exact
+        // decision score (the registration ran inside that one call).
+        $ns = $store->namespace();
+        $ledger = json_decode((string) $client->get("{kiwi:{$ns}}:outcome:{$second->decisionId}"), true);
+        self::assertSame('P', $ledger['o']);
+        self::assertSame($second->score, $ledger['score'], 'the consolidated ledger score must be the exact decision score');
+        self::assertNotSame($first->decisionId, $second->decisionId, 'each assessment registers its own decision');
+    }
+
+    private function engine(RiskStateStoreInterface $store): \KiwiCaptcha\Risk\AdaptiveRiskEngine
+    {
+        $keys = \KiwiCaptcha\Risk\RiskKeys::fromMaster(str_repeat(chr(0x42), 32));
+        $classifier = new \KiwiCaptcha\Risk\Network\CidrNetworkClassifier([
+            ['cidr' => '203.0.113.0/24', 'flags' => ['hosting']],
+        ]);
+        return new \KiwiCaptcha\Risk\AdaptiveRiskEngine(
+            store: $store,
+            classifier: $classifier,
+            identityFactory: new \KiwiCaptcha\Risk\RiskIdentityFactory($keys),
+            scorer: new \KiwiCaptcha\Risk\RiskScorer(),
+            policy: \KiwiCaptcha\Risk\RiskPolicy::fromConfig([
+                'version' => 3,
+                'weights' => (new \KiwiCaptcha\Risk\RiskWeights())->toArray(),
+                'scopes' => [1 => ['base_risk' => 100, 'minimum' => 'allow', 'post_solve_check' => false, 'degraded' => 'sha20']],
+                'global_floors' => [1 => 'sha16', 2 => 'sha18', 3 => 'sha20', 4 => 'sha20'],
+            ]),
+            keys: $keys,
+            breaker: new \KiwiCaptcha\Risk\Breaker\CircuitBreaker(),
+        );
+    }
+
+    private function context(RiskEventKind $event, ?string $sessionId = null): \KiwiCaptcha\Risk\RiskContext
+    {
+        return new \KiwiCaptcha\Risk\RiskContext(
+            scope: 1,
+            sourceIp: '203.0.113.27',
+            sessionId: $sessionId,
+            principalId: null,
+            event: $event,
+            networkFlags: (new \KiwiCaptcha\Risk\Network\CidrNetworkClassifier([['cidr' => '203.0.113.0/24', 'flags' => ['hosting']]]))->classify('203.0.113.27'),
+            resources: new \KiwiCaptcha\Risk\ResourcePressure(1000, 1000),
+        );
+    }
+
+    private function v2(bool $honeypotHit = false, ?string $tag = null, ?string $tlsTag = null): \KiwiCaptcha\Risk\RiskV2Context
+    {
+        return new \KiwiCaptcha\Risk\RiskV2Context(honeypotHit: $honeypotHit, clientContextTag: $tag, tlsTag: $tlsTag);
+    }
+}
+
+/** Predis client that counts every command executed (one round trip each). */
+final class CommandCountingClient extends Client
+{
+    public int $commands = 0;
+
+    public function executeCommand(CommandInterface $command)
+    {
+        $this->commands++;
+        return parent::executeCommand($command);
     }
 }

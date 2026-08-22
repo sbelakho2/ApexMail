@@ -187,7 +187,14 @@ final class RiskPolicy
      * contribution desc with ties in SignalVector order, deduped and
      * capped at 4 total.
      *
-     * @param int $cooldownUntilMs additional (store-provided) cooldown deadline; defaults to none
+     * @param int $cooldownUntilMs additional (store-provided) cooldown
+     *                              deadline; defaults to none.
+     * @param string|null $decisionId caller-supplied decision id (16-byte hex,
+     *                                used when the consolidated assessment
+     *                                registers the outcome atomically with
+     *                                the observation, so the returned
+     *                                decision carries the same id); null
+     *                                draws a fresh random id
      */
     public function decide(
         int $scope,
@@ -198,6 +205,7 @@ final class RiskPolicy
         int $nowMs,
         int $cooldownUntilMs = 0,
         ?ScopeActionHysteresis $hysteresis = null,
+        ?string $decisionId = null,
     ): RiskDecision {
         $plain = RiskAction::actionForScore($score);
         $bandAction = $hysteresis !== null ? $hysteresis->select($scope, $score, $plain, $nowMs) : $plain;
@@ -267,6 +275,7 @@ final class RiskPolicy
             globalLevel: $globalLevel,
             retryAfterMs: $retryAfterMs,
             band: intdiv(max(0, min(1000, $score)), 100),
+            decisionId: $decisionId,
         );
     }
 

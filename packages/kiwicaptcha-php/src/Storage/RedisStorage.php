@@ -205,7 +205,8 @@ LUA;
      * The verified-WAIT durability barrier (waitReplicas > 0) is
      * supported on standalone Redis connections only. A Predis client on
      * a replication aggregate (Sentinel or master-slave) or on a Redis
-     * cluster aggregate is refused at construction with waitReplicas > 0.
+     * cluster aggregate is refused at construction with waitReplicas > 0,
+     * and so is a standalone Predis client with command retries enabled.
      * WAIT is connection-affine: it counts replicas of the connection it
      * is sent on. A replication aggregate's failure retry executes the
      * WAIT on a replacement connection whose write offset is empty, so
@@ -227,17 +228,33 @@ LUA;
      *                            Async-replication failover can otherwise
      *                            lose a write or resurrect a consumed
      *                            record from a stale replica. Supported
-     *                            topology: standalone Redis only. A Predis
-     *                            client on a replication or cluster
-     *                            aggregate with waitReplicas > 0 is
-     *                            refused at construction (WAIT is
-     *                            connection-relative: a replication
+     *                            PHP client + topology + retry matrix:
+     *                            phpredis direct connection -> supported
+     *                            (not subject to the Predis topology and
+     *                            retry checks). Predis standalone with
+     *                            retries disabled (the default) ->
+     *                            supported: each durability-critical
+     *                            mutation is attempted exactly once on the
+     *                            connection whose WAIT establishes the
+     *                            replication offset. Predis standalone
+     *                            with retries enabled -> refused at
+     *                            construction: the vendored command-retry
+     *                            wrapper can transparently re-execute the
+     *                            Lua mutation after a lost response, so
+     *                            the returned result may describe the
+     *                            second invocation rather than the one
+     *                            that mutated. Predis Sentinel or
+     *                            master-slave replication aggregate with
+     *                            any retry setting -> refused: WAIT is
+     *                            connection-relative. A replication
      *                            aggregate's failure retry executes the
      *                            WAIT on a replacement connection whose
-     *                            write offset is empty. A cluster
+     *                            write offset is empty, and a cluster
      *                            aggregate cannot route a keyless WAIT by
-     *                            slot; keep waitReplicas = 0 on an
-     *                            aggregate.
+     *                            slot. Predis cluster aggregate with any
+     *                            retry setting -> refused. Keep
+     *                            waitReplicas = 0 on an aggregate or a
+     *                            retry-enabled standalone client.
      * @param int $waitTimeoutMs  wait timeout in milliseconds (default 100).
      * @param int $ttlMarginSecs  extra retention on the record beyond token
      *                            validity: TTL = expires_at - now + margin.
@@ -252,12 +269,14 @@ LUA;
         private readonly int $waitTimeoutMs = 100,
         private readonly int $ttlMarginSecs = 0,
     ) {
-        $this->refuseVerifiedWaitOnPredisAggregates();
+        $this->refuseVerifiedWaitOnUnsupportedPredisClients();
     }
 
     /**
-     * Refuse the verified-WAIT hardening on Predis aggregate clients
-     * (replication and cluster).
+     * Refuse the verified-WAIT hardening on Predis clients whose command
+     * dispatch can hide or re-execute the durability-critical write:
+     * replication aggregates, cluster aggregates, and retry-enabled
+     * standalone connections.
      *
      * WAIT is connection-relative: it counts replicas of the connection
      * it is sent on and carries no key. A Predis replication aggregate
@@ -277,15 +296,37 @@ LUA;
      * node. A fake-slot workaround would be unsafe (the aggregate would
      * send WAIT on a node other than the one that carried the write).
      *
+     * A standalone Predis client is refused when its connection
+     * parameters report command retries enabled. Predis 3.5.1 disables
+     * retries by default, but an explicit `retry` connection parameter
+     * arms the vendored retry machinery.
+     * {@see \Predis\Client::executeCommand()} then wraps every command
+     * on a standalone (non-aggregate, non-relay) connection in the
+     * configured policy, with `callWithRetry(...)` and a disconnect
+     * callback. A lost response makes the client disconnect, reconnect,
+     * and transparently re-execute the command, including the Lua eval
+     * that carries the durability-critical mutation. The first
+     * invocation may have performed the mutation while the returned
+     * result describes the second invocation. A delete-if-pending eval
+     * whose first execution performed the terminal DEL is retried into
+     * a 'missing' reply, and the verified WAIT that must follow the
+     * mutation is skipped although the deletion happened. The refusal
+     * applies exactly where the vendored retry wrapper engages, which
+     * {@see \Predis\Connection\Parameters::isDisabledRetry()} reports.
+     * A relay connection dispatches commands directly without the
+     * retry wrapper, and an in-memory stand-in without a real
+     * connection object has no retry configuration to inspect.
+     *
      * Supported topology is standalone Redis only. The checks target
      * {@see \Predis\Connection\Replication\ReplicationInterface}
-     * (implemented by SentinelReplication and MasterSlaveReplication)
-     * and {@see \Predis\Connection\Cluster\ClusterInterface}
+     * (implemented by SentinelReplication and MasterSlaveReplication),
+     * {@see \Predis\Connection\Cluster\ClusterInterface}
      * (implemented by the cluster aggregates), covering every Predis
-     * aggregate family. A future pinned-master implementation may
+     * aggregate family, and the retry state of a standalone node
+     * connection. A future pinned-master implementation may
      * restore Sentinel support.
      */
-    private function refuseVerifiedWaitOnPredisAggregates(): void
+    private function refuseVerifiedWaitOnUnsupportedPredisClients(): void
     {
         if ($this->waitReplicas <= 0 || !($this->client instanceof \Predis\Client)) {
             return;
@@ -299,6 +340,26 @@ LUA;
         if ($connection instanceof \Predis\Connection\Cluster\ClusterInterface) {
             throw new \InvalidArgumentException(
                 'RedisStorage: verified-WAIT durability (waitReplicas > 0) is not supported on a Predis Redis Cluster client — WAIT is connection-relative and cannot be routed by slot. The verified barrier supports standalone Redis connections only; use a standalone connection with waitReplicas > 0, or keep waitReplicas = 0 on a cluster.'
+            );
+        }
+        if ($connection === null) {
+            // An in-memory stand-in with no real connection object (the
+            // tests' FakePredisClient skips the parent constructor): there
+            // is no Parameters instance to carry a retry policy and the
+            // stand-in overrides the command dispatch itself, so the
+            // vendored retry wrapper never engages.
+            return;
+        }
+        if ($connection instanceof \Predis\Connection\RelayConnection) {
+            // A relay connection dispatches commands directly, bypassing
+            // the vendored retry wrapper (Predis\Client::executeCommand
+            // excludes relay connections), so an explicit retry parameter
+            // is inert there and cannot replay a mutation.
+            return;
+        }
+        if (!$connection->getParameters()->isDisabledRetry()) {
+            throw new \InvalidArgumentException(
+                'RedisStorage: verified-WAIT durability (waitReplicas > 0) is not supported on a retry-enabled standalone Predis client — verified-WAIT durability requires that a durability-critical mutation is attempted exactly once on the connection whose subsequent WAIT establishes the replication offset, and a retry-enabled standalone Predis client can transparently re-execute the Lua mutation after a lost response, so the returned result may describe the second invocation rather than the one that mutated: a delete-if-pending eval whose first execution performed the terminal DEL is retried into a \'missing\' reply, and the verified WAIT that must follow the mutation is skipped, leaving a burned challenge resurrectable. Retries must be disabled on the connection (remove the \'retry\' connection parameter), or keep waitReplicas = 0.'
             );
         }
     }

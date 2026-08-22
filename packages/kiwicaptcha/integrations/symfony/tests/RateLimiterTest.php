@@ -483,4 +483,46 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         self::assertSame(1, $limiter->check('198.51.100.7'));
         self::assertSame(-1, $limiter->check('198.51.100.8'), 'with the per-client cap off, the global cap still applies');
     }
+
+    public function testBucketedGlobalCardinalityStaysBoundedByTheWindowSeconds(): void
+    {
+        // The deployment-global limiter is a fixed set of per-window-second
+        // buckets, not one member per request: ten thousand admissions must
+        // never grow the global ZSET beyond the window length in seconds.
+        $client = new FakePredisClient();
+        $clock = 1_000_000_000.0; // epoch seconds
+        $client->setTimeMs($clock * 1000);
+        $limiter = new IssuanceRateLimiter(
+            maxChallenges: 1_000_000,
+            windowSecs: 60,
+            redis: $client,
+            globalMax: 1_000_000,
+            namespace: 'bounded-global',
+            pepper: 'pepper',
+            now: static fn (): float => $clock,
+        );
+
+        // One admission per distinct second across 10,000 seconds (cycling
+        // 250 identities so no per-client cap trips): a per-request-member
+        // global ZSET would hold 10,000 members.
+        for ($i = 0; $i < 10_000; $i++) {
+            $clock += 1.0;
+            $client->setTimeMs($clock * 1000);
+            self::assertSame(1, $limiter->check('198.51.100.'.($i % 250 + 1)), 'admission '.$i.' must be allowed');
+        }
+
+        $globalKey = 'kiwi:rl:global:bounded-global';
+        self::assertArrayHasKey($globalKey, $client->zsets, 'the global key must exist');
+        self::assertLessThanOrEqual(60, \count($client->zsets[$globalKey]), 'the global bucket cardinality must never exceed the window length in seconds');
+        self::assertLessThanOrEqual(60, $client->zcard($globalKey));
+        self::assertGreaterThan(1, $client->zcard($globalKey), 'the sliding window still holds the live seconds');
+
+        // The count semantics are unchanged: the retained bucket scores sum
+        // to the admissions inside the window (one per retained second).
+        $count = 0;
+        foreach ($client->zsets[$globalKey] as $member => $score) {
+            $count += (int) $score - (int) $member;
+        }
+        self::assertSame($client->zcard($globalKey), $count, 'each retained second contributes exactly its admissions to the window count');
+    }
 }

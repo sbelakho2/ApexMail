@@ -31,9 +31,17 @@ final class Config
 {
     /**
      * Hard ceiling for SHA-256 target bits. The browser/wasm solver caps
-     * at 20 bits (5,000,000 hashes; ~99.1% solve probability at 20,
-     * ~25.9% at 24), so higher difficulties would be unsolvable for
-     * legit clients and are rejected at construction.
+     * at 20 bits (5,000,000 hashes), so higher difficulties would be
+     * unsolvable for legit clients and are rejected at construction.
+     *
+     * The ceiling is not the baseline: at 20 a legitimate solve still
+     * fails within the 5,000,000-hash cap with probability ≈ 0.8494%
+     * (about 1 in 118). This core therefore keeps 20 as its library
+     * default, the strongest browser-solvable rung. The Symfony bundle,
+     * the user-facing default, issues 18 as the ordinary baseline
+     * (mean ≈ 262k hashes, p99 ≈ 1.21M, exhaustion within the cap
+     * ≈ 5.2×10⁻⁹), with 20 as the elevated rung reached via adaptive
+     * risk escalation.
      */
     public const MAX_SHA_TARGET_BITS = 20;
 

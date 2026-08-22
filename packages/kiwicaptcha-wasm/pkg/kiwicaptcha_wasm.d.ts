@@ -53,8 +53,8 @@ export function init_panic_hook(): void;
 
 /**
  * Search `[start_counter, start_counter + chunk_size)` for a counter whose
- * `Argon2id(prefix || decimal(counter), salt)` output has at least
- * `target_bits` leading zero bits. Returns the counter or -1.
+ * Argon2id hash of the prefix, the decimal counter and the salt has at
+ * least `target_bits` leading zero bits. Returns the counter or -1.
  *
  * `m_kib`/`t`/`p` are the Argon2id parameters; they must match the server's
  * issued challenge parameters exactly. Invalid parameters return -1 so the
@@ -64,23 +64,33 @@ export function solve_argon2_chunk(prefix_ptr: number, prefix_len: number, salt_
 
 /**
  * Search `[start_counter, start_counter + chunk_size)` for a counter whose
- * `SHA-256(prefix || decimal(counter) || salt)` output has at least
- * `target_bits` leading zero bits. Returns the counter or -1.
+ * SHA-256 hash of the prefix, the decimal counter and the salt has at
+ * least `target_bits` leading zero bits.
+ *
+ * The chunk is TIME-budgeted (≈ [`SHA_CHUNK_TIME_BUDGET_MS`] of wall
+ * time), so the caller yields back to the event loop at roughly constant
+ * latency regardless of the device. Return contract:
+ * - `counter >= 0`    — a solution at that counter;
+ * - `-1`              — no solution in the whole `chunk_size` window
+ *                       (the caller advances by `chunk_size`);
+ * - `-(scanned + 1)` (i.e. `<= -2`) — the time budget elapsed after
+ *   `scanned` hashes with no solution; the caller resumes at
+ *   `start_counter + scanned`, neither skipping nor redoing work.
  */
 export function solve_sha256_chunk(prefix_ptr: number, prefix_len: number, salt_ptr: number, salt_len: number, target_bits: number, start_counter: number, chunk_size: number): number;
 
 /**
- * The solver PROTOCOL/ABI VERSION (an integer is the
+ * The solver protocol/ABI version (an integer is the
  * clean primitive at the raw wasm-bindgen ABI boundary, where a String
  * return surfaces as a [ptr, len] tuple). The runtime handshake uses it
- * ONLY to prove that the driver, the worker and the WASM glue speak the
- * same protocol generation; it is NOT an exact-artifact identity. Exact
+ * only to prove that the driver, the worker and the WASM glue speak the
+ * same protocol generation; it is not an exact-artifact identity. Exact
  * byte identity is guaranteed by the release system: tag + SHA256SUMS +
  * SRI.txt + SLSA attestation.
  *
  * This value MUST equal `KIWI_SOLVER_PROTOCOL_VERSION` in
  * `assets/kiwi-worker.js` — the worker verifies the loaded wasm's
- * exported value against its constant BEFORE sending `ready`, so a
+ * exported value against its constant before sending `ready`, so a
  * mismatch fails closed instead of solving with a mismatched pair.
  */
 export function solver_protocol_version(): number;

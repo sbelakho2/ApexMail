@@ -27,14 +27,35 @@ interface PostSolveDispositionStore
     /**
      * Atomically claim the right to compute the nonce's disposition.
      *
-     * @return 'claimed'|'pending'|'taken_over'|'complete'
+     * The claim transition answers with the claim outcome AND the
+     * disposition record the caller needs for that outcome, so the
+     * common fresh path is exactly claim -> compute -> finalize: no
+     * separate read round-trip before or after the claim. The record
+     * travels inside the same transition the Lua/Array state machine
+     * performs (or the state it read), so a fallible caller read can
+     * never observe a different record than the one the claim decided
+     * on.
+     *
+     * @return array{0: 'claimed'|'pending'|'taken_over'|'complete', 1: ?PostSolveDispositionRecord}
      *         claimed:     the caller holds a fresh claim, missing
-     *                      going to pending(me).
+     *                      going to pending(me). The response carries the
+     *                      pending record (the consumed decision handle
+     *                      when a mapping was wired).
      *         pending:     pending with a live owner (me or another),
-     *                      busy.
+     *                      busy. No record is carried — the caller answers
+     *                      the retryable busy outcome without a read.
      *         taken_over:  the caller took over an expired-lease claim,
-     *                      reaching pending(me).
-     *         complete:    the final disposition is already persisted.
+     *                      reaching pending(me). The response carries the
+     *                      pending record with the original decision
+     *                      handle preserved.
+     *         complete:    the final disposition is already persisted. The
+     *                      response carries the complete record (the
+     *                      persisted disposition and decision handle).
+     *
+     * A corrupt existing record is refused fail-closed inside the claim
+     * transition: {@see MalformedPostSolveDispositionException}, never
+     * healed into valid state by a takeover, never answered as a valid
+     * disposition.
      *
      * @param string      $nonce       the verified challenge nonce (random
      *                                 security state).
@@ -62,7 +83,7 @@ interface PostSolveDispositionStore
      *
      * @throws \Throwable when the store is unavailable (fail closed)
      */
-    public function claim(string $nonce, string $owner, int $ttlSeconds, ?string $decisionKey = null): string;
+    public function claim(string $nonce, string $owner, int $ttlSeconds, ?string $decisionKey = null): array;
 
     /**
      * Read the current record behind a nonce, or null when absent/expired.

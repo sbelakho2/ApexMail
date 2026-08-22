@@ -24,22 +24,27 @@ use BelConsulting\KiwiCaptchaBundle\SiteVerify\RedisEval;
  * lease), pending+me -> 'pending', pending+other+live -> 'pending' (busy),
  * pending+other+expired -> takeover -> 'taken_over', complete ->
  * 'complete', so at most one owner computes a nonce's disposition. The
- * machine reads the existing state before touching anything else: a
- * complete claim, a busy claim and a takeover never touch the nonce ->
- * decision mapping key. Only the missing path consumes it, with getdel
- * inside the script and at most one winner, and persists the paired
- * decision id in the pending record in the same transition. A fallible
- * read before the claim can never lose the original handle; a caller
- * that does not become owner never consumes the mapping, and an owner
- * crash after the claim can never lose it either. The short fixed lease (15 s)
- * bounds the in-flight window, never the record TTL. The finalize is
- * atomic too: pending(me) -> complete, refused for a non-owner or a
- * non-pending record, so a crash-taken-over computation can never
- * overwrite a completed disposition and a replayed proof reproduces the
- * persisted final disposition. The pending record carries the original
- * decision handle the first owner's claim consumed; a takeover keeps it,
- * so a completed disposition survives the crash of its first owner with
- * the original decision id.
+ * claim response carries the claim outcome AND the record the caller
+ * needs (the pending record on claimed/taken_over, the complete record
+ * on complete), so the caller runs claim -> compute -> finalize with no
+ * separate read. The machine reads the existing state before touching
+ * anything else: a complete claim, a busy claim and a takeover never
+ * touch the nonce -> decision mapping key. Only the missing path
+ * consumes it, with getdel inside the script and at most one winner, and
+ * persists the paired decision id in the pending record in the same
+ * transition. A strict existing-record validation runs inside the claim
+ * before any transition: a corrupt record answers 'corrupt' and throws
+ * (fail closed), never healed into valid state by a takeover and never
+ * answered as a valid disposition. A fallible pre-read is no longer
+ * needed, so the common fresh path is exactly two interactions. The
+ * short fixed lease (15 s) bounds the in-flight window, never the record
+ * TTL. The finalize is atomic too: pending(me) -> complete, refused for
+ * a non-owner or a non-pending record, so a crash-taken-over computation
+ * can never overwrite a completed disposition and a replayed proof
+ * reproduces the persisted final disposition. The pending record carries
+ * the original decision handle the first owner's claim consumed; a
+ * takeover keeps it, so a completed disposition survives the crash of
+ * its first owner with the original decision id.
  *
  * Every record is decoded all-or-nothing against the strict schema, see
  * {@see self::decodeRecord()}: a missing/malformed field or a
@@ -76,65 +81,99 @@ final class RedisPostSolveDispositionStore implements PostSolveDispositionStore
      *             transfer).
      *   argv[1] = owner token, argv[2] = lease seconds, argv[3] = record
      *             TTL.
-     * Returns 'claimed' | 'pending' | 'taken_over' | 'complete'.
-     * The existing state is read first and answered without touching the
-     * decision key: complete -> 'complete'; pending+live other owner ->
-     * 'pending'; an expired-lease takeover -> 'taken_over'. A takeover
-     * preserves the existing record's decision_id, since it never
-     * GETDELs a fresh mapping. Only the missing path consumes the
-     * mapping, with getdel atomic with the creation and at most one
-     * winner, and persists the paired decision id in the pending record
-     * in the same transition. A fallible read before the claim can never
-     * lose the original handle; a caller that does not become owner never
-     * consumes the mapping, and an owner crash after the claim can never
-     * lose it either.
+     * Returns a JSON object {status, record}: status is
+     * 'claimed' | 'pending' | 'taken_over' | 'complete' | 'corrupt'. The
+     * record field carries the record the caller needs for that outcome:
+     * the pending record on claimed/taken_over (the consumed decision
+     * handle), and the complete record on complete. The caller then runs
+     * claim -> compute -> finalize with no separate read. The existing
+     * state is read first and answered without touching the decision key:
+     * complete -> 'complete'; pending+live other owner -> 'pending'; an
+     * expired-lease takeover -> 'taken_over'. A takeover preserves the
+     * existing record's decision_id, since it never GETDELs a fresh
+     * mapping. Only the missing path consumes the mapping, with getdel
+     * atomic with the creation and at most one winner, and persists the
+     * paired decision id in the pending record in the same transition.
+     * A corrupt existing record is refused fail-closed with 'corrupt'
+     * before any mutation. It is never healed into valid state by a
+     * takeover and never answered as a valid disposition. The complete
+     * record's disposition shape is validated by the store's strict
+     * decoder on the read-only response.
      */
     private const CLAIM_LUA = <<<'LUA'
 -- Post-solve disposition claim: single-writer per nonce.
 -- The existing state answers FIRST — complete/busy/takeover NEVER touch
 -- the nonce -> decision mapping; ONLY the missing path consumes it
--- (GETDEL) atomically with the pending-record creation.
+-- (GETDEL) atomically with the pending-record creation. The response
+-- carries the claim outcome AND the record the caller needs (the
+-- pending record on claimed/taken_over, the complete record on
+-- complete), so the caller performs claim -> compute -> finalize with
+-- no separate read. A corrupt existing record is refused fail-closed
+-- ('corrupt') before any mutation — never healed by a takeover, never
+-- answered as a valid disposition.
 local now = tonumber(redis.call('TIME')[1])
 local existing = redis.call('GET', KEYS[1])
-if existing then
-  local rec = cjson.decode(existing)
-  if rec['v'] ~= 1 and rec['v'] ~= 2 then
-    return 'pending'
+if not existing then
+  local decisionId = cjson.null
+  if KEYS[2] ~= '' then
+    local d = redis.call('GETDEL', KEYS[2])
+    if d then
+      local ok, decoded = pcall(cjson.decode, d)
+      if ok and type(decoded) == 'table' and type(decoded['decision_id']) == 'string' and decoded['decision_id'] ~= '' then
+        decisionId = decoded['decision_id']
+      end
+    end
   end
-  if rec['state'] == 'complete' then
-    return 'complete'
-  end
-  if rec['owner'] == ARGV[1] then
-    return 'pending'
-  end
-  if tonumber(rec['lease_until']) > now then
-    return 'pending'
-  end
+  local rec = {}
+  rec['v'] = 1
+  rec['state'] = 'pending'
   rec['owner'] = ARGV[1]
   rec['lease_until'] = now + tonumber(ARGV[2])
   rec['disposition'] = cjson.null
-  redis.call('SET', KEYS[1], cjson.encode(rec), 'KEEPTTL')
-  return 'taken_over'
+  rec['decision_id'] = decisionId
+  redis.call('SET', KEYS[1], cjson.encode(rec), 'EX', tonumber(ARGV[3]))
+  return cjson.encode({ status = 'claimed', record = rec })
 end
-local decisionId = cjson.null
-if KEYS[2] ~= '' then
-  local d = redis.call('GETDEL', KEYS[2])
-  if d then
-    local ok, decoded = pcall(cjson.decode, d)
-    if ok and type(decoded) == 'table' and type(decoded['decision_id']) == 'string' and decoded['decision_id'] ~= '' then
-      decisionId = decoded['decision_id']
-    end
-  end
+local rec = cjson.decode(existing)
+-- Strict existing-record validation (fail closed, never healed): an
+-- unknown schema or state, or a pending record without a well-shaped
+-- owner/lease/deferred disposition/decision handle, is corrupt and
+-- answers 'corrupt' before any transition. The complete record's
+-- disposition shape is validated by the store's strict decoder on the
+-- read-only response.
+if rec['v'] ~= 1 and rec['v'] ~= 2 then
+  return cjson.encode({ status = 'corrupt' })
 end
-local rec = {}
-rec['v'] = 1
-rec['state'] = 'pending'
+if rec['state'] == 'complete' then
+  return cjson.encode({ status = 'complete', record = rec })
+end
+if rec['state'] ~= 'pending' then
+  return cjson.encode({ status = 'corrupt' })
+end
+if type(rec['owner']) ~= 'string' or rec['owner'] == '' then
+  return cjson.encode({ status = 'corrupt' })
+end
+if type(rec['lease_until']) ~= 'number' then
+  return cjson.encode({ status = 'corrupt' })
+end
+if rec['disposition'] ~= nil and rec['disposition'] ~= cjson.null then
+  return cjson.encode({ status = 'corrupt' })
+end
+local decisionId = rec['decision_id']
+if decisionId ~= nil and decisionId ~= cjson.null and (type(decisionId) ~= 'string' or decisionId == '') then
+  return cjson.encode({ status = 'corrupt' })
+end
+if rec['owner'] == ARGV[1] then
+  return cjson.encode({ status = 'pending' })
+end
+if tonumber(rec['lease_until']) > now then
+  return cjson.encode({ status = 'pending' })
+end
 rec['owner'] = ARGV[1]
 rec['lease_until'] = now + tonumber(ARGV[2])
 rec['disposition'] = cjson.null
-rec['decision_id'] = decisionId
-redis.call('SET', KEYS[1], cjson.encode(rec), 'EX', tonumber(ARGV[3]))
-return 'claimed'
+redis.call('SET', KEYS[1], cjson.encode(rec), 'KEEPTTL')
+return cjson.encode({ status = 'taken_over', record = rec })
 LUA;
 
     /**
@@ -187,19 +226,17 @@ LUA;
     ) {
     }
 
-    public function claim(string $nonce, string $owner, int $ttlSeconds, ?string $decisionKey = null): string
+    public function claim(string $nonce, string $owner, int $ttlSeconds, ?string $decisionKey = null): array
     {
-        // strict pre-read: an existing record must strictly decode before
-        // the Lua machine may transition it — a corrupt server record
+        // The strict existing-record validation runs inside the claim
+        // Lua (fail closed before any transition) and the claim response
+        // carries the record the caller needs — a corrupt server record
         // throws (fail closed), it is never healed into valid state by a
-        // takeover and never answered as a valid disposition.
-        $existing = $this->redis->get($this->key($nonce));
-        if (\is_string($existing) && $existing !== '') {
-            self::decodeRecord($existing);
-        }
-
+        // takeover and never answered as a valid disposition, and the
+        // caller performs claim -> compute -> finalize with no separate
+        // read round-trip.
         $recordTtl = max(1, $this->ttlSecs > 0 ? $this->ttlSecs : $ttlSeconds);
-        $status = $this->evalScript(self::CLAIM_LUA, [
+        $payload = $this->evalScript(self::CLAIM_LUA, [
             $this->key($nonce),
             $decisionKey ?? '',
         ], [
@@ -208,9 +245,31 @@ LUA;
             (string) $recordTtl,
         ]);
 
-        return \is_string($status) && \in_array($status, ['claimed', 'pending', 'taken_over', 'complete'], true)
-            ? $status
-            : 'pending';
+        try {
+            $data = json_decode((string) $payload, true, 8, JSON_THROW_ON_ERROR);
+        } catch (\JsonException) {
+            throw new MalformedPostSolveDispositionException('post-solve disposition claim returned an unreadable response');
+        }
+        if (!\is_array($data) || !\is_string($data['status'] ?? null)) {
+            throw new MalformedPostSolveDispositionException('post-solve disposition claim returned an unreadable response');
+        }
+        if ($data['status'] === 'corrupt') {
+            throw new MalformedPostSolveDispositionException('post-solve disposition record is malformed');
+        }
+        if (!\in_array($data['status'], ['claimed', 'pending', 'taken_over', 'complete'], true)) {
+            // Defensive fallback for an unknown state-machine answer:
+            // fail closed, never defaulted into a valid outcome.
+            throw new MalformedPostSolveDispositionException(sprintf('post-solve disposition claim returned an unknown status (%s)', $data['status']));
+        }
+        $record = null;
+        if (isset($data['record']) && \is_array($data['record'])) {
+            // The carried record is strictly decoded (the complete
+            // disposition shape included) before it is returned, so a
+            // corrupt complete record fails closed on the read-only path.
+            $record = self::recordFromDecoded(self::validateDecoded($data['record']));
+        }
+
+        return [$data['status'], $record];
     }
 
     /**
@@ -236,26 +295,8 @@ LUA;
         if (!\is_string($raw) || $raw === '') {
             return null;
         }
-        $rec = self::decodeRecord($raw);
-        $decisionId = $rec['decision_id'] ?? null;
-        if ($rec['state'] === 'pending') {
-            return new PostSolveDispositionRecord('pending', $rec['owner'], $rec['lease_until'], null, $decisionId);
-        }
 
-        $disposition = $rec['disposition'];
-
-        return new PostSolveDispositionRecord(
-            'complete',
-            null,
-            null,
-            new PostSolveDisposition(
-                PostSolveDispositionKind::from($disposition['kind']),
-                $disposition['decision_id'] ?? null,
-                $disposition['chain_id'] ?? null,
-                $disposition['chain_expires_at'] ?? null,
-            ),
-            $decisionId,
-        );
+        return self::recordFromDecoded(self::decodeRecord($raw));
     }
 
     public function finalize(string $nonce, string $owner, PostSolveDisposition $disposition): bool
@@ -276,6 +317,30 @@ LUA;
     /**
      * The strict decode, all-or-nothing: a missing/malformed field or a
      * state-invariant violation throws
+     * {@see MalformedPostSolveDispositionException}, never defaults. The
+     * raw JSON is decoded then validated by {@see self::validateDecoded()}.
+     *
+     * @return array<string, mixed> the validated record
+     *
+     * @throws MalformedPostSolveDispositionException
+     */
+    private static function decodeRecord(string $raw): array
+    {
+        try {
+            $rec = json_decode($raw, true, 8, JSON_THROW_ON_ERROR);
+        } catch (\JsonException $e) {
+            throw new MalformedPostSolveDispositionException('post-solve disposition record is not valid JSON', 0, $e);
+        }
+        if (!\is_array($rec)) {
+            throw new MalformedPostSolveDispositionException('post-solve disposition record must be a JSON object');
+        }
+
+        return self::validateDecoded($rec);
+    }
+
+    /**
+     * The strict validation of a decoded record, all-or-nothing: a
+     * missing/malformed field or a state-invariant violation throws
      * {@see MalformedPostSolveDispositionException}, never defaults. An
      * unknown state never becomes pending, a corrupt kind never Pass, a
      * missing disposition never a silent pass, and a ChainRequired
@@ -293,20 +358,14 @@ LUA;
      * legacy excepted, and null outside it. The decision handle must be
      * a non-empty string or null in both states.
      *
+     * @param array<string, mixed> $rec
+     *
      * @return array<string, mixed> the validated record
      *
      * @throws MalformedPostSolveDispositionException
      */
-    private static function decodeRecord(string $raw): array
+    private static function validateDecoded(array $rec): array
     {
-        try {
-            $rec = json_decode($raw, true, 8, JSON_THROW_ON_ERROR);
-        } catch (\JsonException $e) {
-            throw new MalformedPostSolveDispositionException('post-solve disposition record is not valid JSON', 0, $e);
-        }
-        if (!\is_array($rec)) {
-            throw new MalformedPostSolveDispositionException('post-solve disposition record must be a JSON object');
-        }
         $version = $rec['v'] ?? null;
         if ($version !== 1 && $version !== 2) {
             throw new MalformedPostSolveDispositionException('post-solve disposition record schema version must be 1 or 2');
@@ -379,6 +438,35 @@ LUA;
         }
 
         return $rec;
+    }
+
+    /**
+     * Build the typed record from a validated decoded record (the
+     * pending claim state + owner + lease deadline + decision handle, or
+     * the complete state + persisted disposition + decision handle).
+     *
+     * @param array<string, mixed> $rec the strict-validated record
+     */
+    private static function recordFromDecoded(array $rec): PostSolveDispositionRecord
+    {
+        $decisionId = $rec['decision_id'] ?? null;
+        if ($rec['state'] === 'pending') {
+            return new PostSolveDispositionRecord('pending', $rec['owner'], $rec['lease_until'], null, $decisionId);
+        }
+        $disposition = $rec['disposition'];
+
+        return new PostSolveDispositionRecord(
+            'complete',
+            null,
+            null,
+            new PostSolveDisposition(
+                PostSolveDispositionKind::from($disposition['kind']),
+                $disposition['decision_id'] ?? null,
+                $disposition['chain_id'] ?? null,
+                $disposition['chain_expires_at'] ?? null,
+            ),
+            $decisionId,
+        );
     }
 
     /**
