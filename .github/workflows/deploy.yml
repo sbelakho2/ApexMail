@@ -131,10 +131,10 @@ jobs:
           # Must cover EVERY ghcr.io image referenced in docker-compose.prod.yml
           # (api-server mta imap-server mailstore worker enterprise
           #  tracking-service observability marketing status-server
-          #  billing-service).
+          #  billing-service sales-autopilot).
           canonical=(
             api-server mta imap-server mailstore worker enterprise tracking-service
-            observability marketing status-server billing-service
+            observability marketing status-server billing-service sales-autopilot
           )
           # Third-party images that are allowed as-is (pinned upstream images).
           allowed_third_party=(
@@ -354,6 +354,21 @@ jobs:
           push: true
           target: billing-service
           tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/billing-service:${{ github.sha }},${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/billing-service:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: mode=max
+          attestations: |
+            type=sbom,enabled=true
+            type=provenance,enabled=true
+
+      - name: Build and push sales-autopilot image
+        uses: docker/build-push-action@67a2d409c0a876cbe6b11854e3e25193efe4e62d # v6.12.0
+        with:
+          context: .
+          file: services/mail-server/Dockerfile
+          push: true
+          target: sales-autopilot
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/sales-autopilot:${{ github.sha }},${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/sales-autopilot:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
           provenance: mode=max

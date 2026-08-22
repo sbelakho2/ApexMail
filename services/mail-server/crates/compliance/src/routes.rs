@@ -1612,6 +1612,9 @@ mod tests {
                 verify_base_url: String::new(),
                 consent_signing_key: String::new(),
                 access_request_max_messages: 10_000,
+                system_from_address: "noreply@apexmail.ee".into(),
+                outbox_flush_batch: 25,
+                outbox_flush_max_attempts: 5,
             },
             secrets: crate::config::SecretsConfig {
                 encryption_key: String::new(),
@@ -2218,6 +2221,9 @@ mod tests {
             verify_base_url: String::new(),
             consent_signing_key: String::new(),
             access_request_max_messages: 10_000,
+            system_from_address: "noreply@apexmail.ee".into(),
+            outbox_flush_batch: 25,
+            outbox_flush_max_attempts: 5,
         }
     }
 

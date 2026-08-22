@@ -331,6 +331,9 @@ services:
       # is only correct when clients connect directly; behind the nginx edge
       # set it to the compose networks or the proxy IPs — see deploy docs).
       DDOS_TRUSTED_PROXIES: ${DDOS_TRUSTED_PROXIES:-}
+      # SES SNS notification topic allow-list (see deploy/DEPLOYMENT.md —
+      # without it the /v1/ses/notifications handler refuses everything).
+      SNS_ALLOWED_TOPIC_ARNS: ${SNS_ALLOWED_TOPIC_ARNS:-}
       # ── Database ──────────────────────────────────────────────────────────
       DB_HOST: postgres
       DB_PORT: 5432

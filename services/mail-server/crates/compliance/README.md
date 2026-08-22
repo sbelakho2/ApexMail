@@ -21,23 +21,35 @@ The rate limiter supports dual-mode operation: Redis-backed (primary) with in-me
 
 ## How DSR verification tokens reach data subjects (ops)
 
-This crate has **no mailer** — it never sends email. When a data-subject
-request is submitted (`POST /gdpr/submit`), the raw verification token is
-written to the `dsr_verification_outbox` table **in the same transaction** as
-the request (`gdpr_automation::submit_request`). The response reports
-`token_delivered: false` because delivery has not happened yet at submission
-time; it is a handoff:
+When a data-subject request is submitted (`POST /gdpr/submit`), the raw
+verification token is written to the `dsr_verification_outbox` table **in
+the same transaction** as the request (`gdpr_automation::submit_request`).
+The response reports `token_delivered: false` because delivery is queued
+asynchronously — the full flow is:
 
 1. `dsr_verification_outbox` row is created with status `pending`, the raw
    token, and the verify URL built from `GDPR_VERIFY_BASE_URL`.
-2. The services that own mail delivery (**api-server / worker**) drain
-   pending rows via `GdprAutomation::pending_verification_outbox(limit)`,
-   send the token to the subject, and confirm with
-   `GdprAutomation::mark_outbox(id)`.
-3. Until step 2 is wired on the api-server side, delivery is a **manual ops
-   step**: query pending rows and deliver the verify link. The token never
-   appears in API responses or logs.
-4. The retention sweep purges outbox rows once the request window
+2. The **outbox flush job** ([`src/dsr_outbox_flush.rs`](src/dsr_outbox_flush.rs),
+   cron job 7 in `src/bin/server.rs`, every 60s) drains the oldest pending
+   rows and queues each one as real mail through the platform's system-email
+   path: a `messages` audit row plus an `email_queue` row (both column
+   families, priority 5, tags `dsr-verification`) under the verified system
+   sender domain (`system_internal_tenant01` / `apexmail.ee`, resolved with
+   the same readiness predicate api-server's system sender uses). The
+   delivery worker then sends it like any other queued mail.
+3. The queue insert and the `status='sent'` outbox update commit in **one
+   transaction per row** (at-most-once queuing; concurrent flushers cannot
+   double-send). Failures increment `attempts` and retry on the next tick
+   until `COMPLIANCE_DSR_FLUSH_MAX_ATTEMPTS` (default 5), after which the
+   row parks as `failed`. If the system sender domain is not DKIM/SES-ready
+   the tick skips **without** burning attempts. The batch per tick is
+   bounded by `COMPLIANCE_DSR_FLUSH_BATCH` (default 25).
+4. The email body carries the verify URL and the raw token (the subject
+   needs both). Envelope sender: `COMPLIANCE_SYSTEM_FROM`
+   (default `noreply@apexmail.ee` — must live on the system domain or the
+   worker rejects the row). The token never appears in API responses or
+   logs.
+5. The retention sweep purges outbox rows once the request window
    (`GDPR_REQUEST_EXPIRATION_DAYS`, default 30) has passed — stale raw
    tokens do not linger.
 

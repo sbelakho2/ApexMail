@@ -21,9 +21,10 @@ use uuid::Uuid;
 /// HMAC-SHA256 type for consent certificate signing.
 type HmacSha256 = Hmac<Sha256>;
 
-/// DDL for the DSR verification outbox — the handoff point between this
-/// crate (which owns request state but cannot send mail) and the services
-/// that own mail delivery (api-server / worker). Applied by
+/// DDL for the DSR verification outbox — the handoff point between request
+/// intake (this module writes the raw token transactionally) and delivery
+/// (the crate's outbox flush job, `dsr_outbox_flush`, queues it as system
+/// email via `email_queue`; the delivery worker sends it). Applied by
 /// [`GdprAutomation::apply_outbox_migration`].
 pub const DSR_VERIFICATION_OUTBOX_MIGRATION: &str = r#"
 CREATE TABLE IF NOT EXISTS dsr_verification_outbox (
@@ -90,8 +91,8 @@ impl GdprAutomation {
     }
 
     /// Pending verification-token deliveries, oldest first — the queue the
-    /// mail-owning services (api-server / worker) drain. This crate never
-    /// sends mail itself.
+    /// crate's outbox flush job (`dsr_outbox_flush`) drains into
+    /// `email_queue` under the system sender.
     pub async fn pending_verification_outbox(
         &self,
         limit: i64,
@@ -133,11 +134,12 @@ impl GdprAutomation {
     ///
     /// D (outbox): the raw verification token is written to
     /// `dsr_verification_outbox` in the SAME transaction as the request —
-    /// this crate has no mailer, so delivery is a handoff: api-server /
-    /// worker read pending outbox rows ([`Self::pending_verification_outbox`]),
-    /// send the token to the subject, and mark it sent
-    /// ([`Self::mark_outbox_sent`]). Without the outbox row the subject can
-    /// never receive the token, so a failed write fails the submission.
+    /// without the outbox row the subject can never receive the token, so a
+    /// failed write fails the submission. Delivery is the flush job's half
+    /// of the handoff: `dsr_outbox_flush` reads pending rows
+    /// ([`Self::pending_verification_outbox`]), queues the verification
+    /// email into `email_queue` under the system sender, and marks it sent
+    /// ([`Self::mark_outbox_sent`] shape).
     pub async fn submit_request(
         &self,
         tenant_id: &str,

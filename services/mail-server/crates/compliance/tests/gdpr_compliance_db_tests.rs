@@ -263,6 +263,9 @@ fn test_gdpr_config() -> GdprConfig {
         verify_base_url: "https://gdpr.test.local".into(),
         consent_signing_key: "integration-test-signing-key-0123456789".into(),
         access_request_max_messages: 10_000,
+        system_from_address: "noreply@apexmail.ee".into(),
+        outbox_flush_batch: 25,
+        outbox_flush_max_attempts: 5,
     }
 }
 
@@ -1588,6 +1591,289 @@ async fn dsr_submit_writes_verification_outbox() {
             .await
             .unwrap();
     assert_eq!(status, "sent");
+}
+
+// ── D: DSR outbox flush — pending rows become real system email ────────────
+
+/// Minimal mail-pipeline shapes the flush job touches (mirrors the prod
+/// columns written by api-server's system_sender / the sales dispatcher):
+/// the system `domains` row, the `messages` audit row, and `email_queue`
+/// (both column families), plus the `gdpr_requests` CP mirror submit writes.
+const OUTBOX_FLUSH_SCHEMA: &str = r#"
+CREATE TABLE IF NOT EXISTS gdpr_requests (
+    id VARCHAR(26) PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    email TEXT NOT NULL,
+    request_type TEXT NOT NULL,
+    status TEXT NOT NULL,
+    token_hash TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL
+);
+CREATE TABLE IF NOT EXISTS domains (
+    id UUID PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    status TEXT NOT NULL,
+    dkim_enabled BOOLEAN NOT NULL DEFAULT false,
+    dkim_selector TEXT,
+    dkim_public_key TEXT,
+    dkim_private_key TEXT,
+    ses_verified BOOLEAN NOT NULL DEFAULT false
+);
+CREATE TABLE IF NOT EXISTS messages (
+    id UUID PRIMARY KEY,
+    tenant_id TEXT,
+    from_email TEXT NOT NULL,
+    to_emails JSONB NOT NULL,
+    subject TEXT,
+    html_body TEXT,
+    text_body TEXT,
+    status TEXT NOT NULL,
+    tags JSONB,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE TABLE IF NOT EXISTS email_queue (
+    id UUID PRIMARY KEY,
+    message_id UUID,
+    tenant_id TEXT,
+    domain_id UUID,
+    from_address TEXT NOT NULL,
+    to_addresses TEXT[] NOT NULL,
+    subject TEXT NOT NULL,
+    "from" TEXT,
+    "to" TEXT,
+    html TEXT,
+    text TEXT,
+    tags TEXT[],
+    metadata JSONB,
+    scheduled_at TIMESTAMPTZ,
+    priority INT NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'pending',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+"#;
+
+async fn flush_pool(test_name: &str) -> Option<PgPool> {
+    test_pool(test_name, &format!("{MAIN_SCHEMA}{OUTBOX_FLUSH_SCHEMA}")).await
+}
+
+/// The email_queue columns the round-trip test asserts on (clippy: factored
+/// out of the inline tuple).
+type QueuedEmailRow = (
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    Option<uuid::Uuid>,
+    String,
+    i32,
+    serde_json::Value,
+);
+
+async fn seed_system_domain(pool: &PgPool) -> uuid::Uuid {
+    let id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO domains \
+             (id, tenant_id, name, status, dkim_enabled, dkim_selector, \
+              dkim_public_key, dkim_private_key, ses_verified) \
+         VALUES ($1, 'system_internal_tenant01', 'apexmail.ee', 'verified', true, \
+                 'apexmail', 'pubkey', 'dkim:v1:encrypted', true)",
+    )
+    .bind(id)
+    .execute(pool)
+    .await
+    .unwrap();
+    id
+}
+
+/// The flush job queues the verification email through the platform's
+/// system-email path (messages + email_queue, system sender + domain),
+/// marks the outbox row sent transactionally, and is idempotent + bounded.
+#[tokio::test]
+async fn dsr_outbox_flush_queues_system_email_and_marks_sent() {
+    let Some(pool) = flush_pool("outbox_flush").await else {
+        return;
+    };
+    let gdpr = automation(pool.clone());
+    gdpr.apply_outbox_migration().await.expect("outbox table");
+    let domain_id = seed_system_domain(&pool).await;
+
+    let tenant = unique_tenant();
+    let subject = format!("flush-{}@x.com", Uuid::new_v4().simple());
+    let (request, token) = gdpr
+        .submit_request(
+            &tenant,
+            compliance::types::DataSubjectRequestType::Access,
+            &subject,
+        )
+        .await
+        .expect("submit succeeds");
+
+    let flusher =
+        compliance::dsr_outbox_flush::DsrOutboxFlusher::new(pool.clone(), test_gdpr_config());
+    let summary = flusher.flush_once().await.expect("flush runs");
+    assert_eq!(summary.queued, 1);
+    assert_eq!(summary.failed, 0);
+    assert!(!summary.skipped_sender_not_ready);
+
+    // The queue row carries BOTH column families under the system sender —
+    // exactly the shape the delivery worker claims (worker reads
+    // "from"/"to"/html/text; get_domain authorizes on domain_id+tenant_id).
+    let queued: QueuedEmailRow = sqlx::query_as(
+        "SELECT from_address, to_addresses[1], subject, \"from\", \"to\", html, text, \
+                domain_id::text, status, priority, metadata \
+         FROM email_queue",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(queued.0, "noreply@apexmail.ee");
+    assert_eq!(queued.1, subject);
+    assert_eq!(
+        queued.3, "noreply@apexmail.ee",
+        "\"from\" mirrors from_address"
+    );
+    assert_eq!(queued.4, subject, "\"to\" mirrors to_addresses[1]");
+    assert_eq!(
+        queued.7.map(|d| d.to_string()),
+        Some(domain_id.to_string()),
+        "queue row is authorized against the system domain"
+    );
+    assert_eq!(queued.8, "pending");
+    assert_eq!(queued.9, 5, "system-email priority");
+    assert_eq!(queued.10["request_id"], request.id.as_str());
+    assert_eq!(queued.10["source"], "compliance-dsr-outbox");
+    assert_eq!(queued.10["dsr_tenant"], tenant.as_str());
+    // The email delivers BOTH halves of verification: link + raw token.
+    assert!(
+        queued.5.contains("gdpr.test.local/gdpr/verify/"),
+        "html has the verify URL"
+    );
+    assert!(queued.5.contains(&token), "html has the raw token");
+    assert!(queued.6.contains(&token), "plain text has the raw token");
+
+    // The messages audit row exists and is queued under the system tenant.
+    let (msg_status, msg_tenant, msg_from): (String, String, String) =
+        sqlx::query_as("SELECT status, tenant_id, from_email FROM messages")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(msg_status, "queued");
+    assert_eq!(msg_tenant, "system_internal_tenant01");
+    assert_eq!(msg_from, "noreply@apexmail.ee");
+
+    // The outbox row is sent (same transaction), and a second tick neither
+    // re-queues nor double-inserts.
+    let (status, sent_at): (String, Option<chrono::DateTime<chrono::Utc>>) =
+        sqlx::query_as("SELECT status, sent_at FROM dsr_verification_outbox")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(status, "sent");
+    assert!(sent_at.is_some());
+
+    let again = flusher.flush_once().await.expect("second flush");
+    assert_eq!(again.queued, 0, "sent entries are never re-queued");
+    let queue_rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM email_queue")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(queue_rows, 1, "idempotent: exactly one queue row");
+}
+
+/// Without a ready system sender the tick skips (no attempts burned); with
+/// the sender ready but delivery persistently failing, attempts increment
+/// per tick and the row is parked as `failed` at the cap; the batch bound
+/// caps how many rows one tick touches.
+#[tokio::test]
+async fn dsr_outbox_flush_retries_then_caps_attempts() {
+    let Some(pool) = flush_pool("outbox_flush_retry").await else {
+        return;
+    };
+    let gdpr = automation(pool.clone());
+    gdpr.apply_outbox_migration().await.expect("outbox table");
+
+    let tenant = unique_tenant();
+    let emails: Vec<String> = (0..3)
+        .map(|i| format!("cap-{i}-{}@x.com", Uuid::new_v4().simple()))
+        .collect();
+    for email in &emails {
+        gdpr.submit_request(
+            &tenant,
+            compliance::types::DataSubjectRequestType::Access,
+            email,
+        )
+        .await
+        .expect("submit succeeds");
+    }
+
+    let mut cfg = test_gdpr_config();
+    cfg.outbox_flush_batch = 2; // bound: one tick touches at most 2 rows
+    cfg.outbox_flush_max_attempts = 3;
+    let flusher = compliance::dsr_outbox_flush::DsrOutboxFlusher::new(pool.clone(), cfg);
+
+    // No system domain row → infrastructure skip, attempts untouched.
+    let skipped = flusher.flush_once().await.expect("flush runs");
+    assert!(skipped.skipped_sender_not_ready);
+    assert_eq!(skipped.queued, 0);
+    let (pending, attempts): (i64, i64) = sqlx::query_as(
+        "SELECT COUNT(*), COALESCE(SUM(attempts), 0) FROM dsr_verification_outbox WHERE status = 'pending'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        (pending, attempts),
+        (3, 0),
+        "sender-not-ready burns no attempts"
+    );
+
+    // Sender ready, but the mail pipeline is broken (messages table gone) →
+    // per-row failure path: bounded batch, attempts increment, cap → failed.
+    seed_system_domain(&pool).await;
+    sqlx::query("DROP TABLE messages")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let first = flusher.flush_once().await.expect("flush runs");
+    assert_eq!(first.failed, 2, "batch bound caps the tick at 2 rows");
+    assert_eq!(first.queued, 0);
+    let statuses: Vec<(String, i32)> =
+        sqlx::query_as("SELECT status, attempts FROM dsr_verification_outbox ORDER BY created_at")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(statuses.iter().filter(|(s, _)| s == "pending").count(), 3);
+    assert!(statuses.iter().all(|(_, a)| *a == 1));
+
+    flusher.flush_once().await.expect("flush runs"); // attempts 2
+    flusher.flush_once().await.expect("flush runs"); // attempts 3 → cap → failed
+    let after: Vec<(String, i32)> =
+        sqlx::query_as("SELECT status, attempts FROM dsr_verification_outbox ORDER BY created_at")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert!(
+        after.iter().all(|(s, a)| s == "failed" && *a == 3),
+        "rows park as failed at the attempts cap: {after:?}"
+    );
+    // Failed rows leave the retry set entirely.
+    assert!(gdpr
+        .pending_verification_outbox(10)
+        .await
+        .unwrap()
+        .is_empty());
+    let queue_rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM email_queue")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(queue_rows, 0, "nothing was ever queued");
 }
 
 // ── B: breach notification workflow ────────────────────────────────────────

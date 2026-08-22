@@ -17,6 +17,7 @@ use compliance::breach_notification::BreachNotifier;
 use compliance::config::ComplianceConfig;
 use compliance::content_scanner::ContentScanner;
 use compliance::dsar_rate_limit::DsarRateLimiter;
+use compliance::dsr_outbox_flush::DsrOutboxFlusher;
 use compliance::gdpr_automation::GdprAutomation;
 use compliance::hipaa::HipaaService;
 use compliance::retention_sweep::RetentionSweeper;
@@ -187,8 +188,11 @@ async fn main() -> anyhow::Result<()> {
 
     // Start background cron jobs
     let cron_state = state.clone();
+    // D: DSR verification-outbox flush — queues pending tokens as real mail
+    // through the platform's system-email path (email_queue).
+    let outbox_flusher = DsrOutboxFlusher::new(db.clone(), config.gdpr.clone());
     let cron_handle = tokio::spawn(async move {
-        run_cron_jobs(cron_state).await;
+        run_cron_jobs(cron_state, outbox_flusher).await;
     });
 
     // Start HTTP server
@@ -237,20 +241,22 @@ async fn shutdown_signal() {
     info!("Shutdown signal received");
 }
 
-/// 6 background cron jobs:
+/// 7 background cron jobs:
 /// 1. GDPR queue processing — every 30s
 /// 2. Secret auto-rotation — every 60min
 /// 3. GDPR request expiry — every 5min
 /// 4. Audit archival — daily (every 24h)
 /// 5. Data retention enforcement (consents/exports) — daily (every 24h)
 /// 6. Retention sweep (H-6: registry-driven event-store purges + report) — daily
-async fn run_cron_jobs(state: Arc<AppState>) {
+/// 7. DSR verification-outbox flush (D: queue tokens as system email) — every 60s
+async fn run_cron_jobs(state: Arc<AppState>, outbox_flusher: DsrOutboxFlusher) {
     let mut gdpr_ticker = interval(Duration::from_secs(30));
     let mut rotation_ticker = interval(Duration::from_secs(3600));
     let mut expiry_ticker = interval(Duration::from_secs(300));
     let mut archive_ticker = interval(Duration::from_secs(86400));
     let mut retention_ticker = interval(Duration::from_secs(86400));
     let mut sweep_ticker = interval(Duration::from_secs(86400));
+    let mut outbox_flush_ticker = interval(Duration::from_secs(60));
 
     loop {
         tokio::select! {
@@ -309,6 +315,22 @@ async fn run_cron_jobs(state: Arc<AppState>) {
                             }
                             Err(e) => error!(error = %e, "Retention enforcement failed"),
                             _ => {}
+                        }
+                    }
+                    _ = outbox_flush_ticker.tick() => {
+                        // D: drain pending dsr_verification_outbox rows into
+                        // email_queue under the system sender. Bounded batch;
+                        // failures retry next tick until the attempts cap.
+                        match outbox_flusher.flush_once().await {
+                            Ok(summary) if summary.queued > 0 || summary.failed > 0 => {
+                                info!(
+                                    queued = summary.queued,
+                                    failed = summary.failed,
+                                    "DSR verification outbox flush completed"
+                                );
+                            }
+                            Ok(_) => {}
+                            Err(e) => error!(error = %e, "DSR verification outbox flush failed"),
                         }
                     }
                     _ = sweep_ticker.tick() => {

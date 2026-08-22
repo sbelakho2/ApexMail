@@ -104,6 +104,19 @@ pub struct GdprConfig {
     pub consent_signing_key: String,
     /// Maximum number of message events to include in access requests (was hardcoded 1000).
     pub access_request_max_messages: i64,
+    /// Envelope sender for DSR verification emails queued by the outbox
+    /// flush job (`dsr_outbox_flush`). MUST live on the platform's system
+    /// domain (apexmail.ee) — the worker rejects rows whose sender does not
+    /// match the verified system `domains` row.
+    /// Env: `COMPLIANCE_SYSTEM_FROM` (default `noreply@apexmail.ee`).
+    pub system_from_address: String,
+    /// How many pending outbox rows one flush tick may queue.
+    /// Env: `COMPLIANCE_DSR_FLUSH_BATCH` (default 25).
+    pub outbox_flush_batch: i64,
+    /// After this many failed delivery attempts an outbox row is marked
+    /// `failed` and no longer retried (retention purges it with the
+    /// request window). Env: `COMPLIANCE_DSR_FLUSH_MAX_ATTEMPTS` (default 5).
+    pub outbox_flush_max_attempts: i64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -267,6 +280,9 @@ impl ComplianceConfig {
                 verify_base_url: env_or("GDPR_VERIFY_BASE_URL", "https://gdpr.apexmail.ee"),
                 consent_signing_key: env_or("CONSENT_SIGNING_KEY", ""),
                 access_request_max_messages: env_i64("GDPR_ACCESS_MAX_MESSAGES", 10_000),
+                system_from_address: env_or("COMPLIANCE_SYSTEM_FROM", "noreply@apexmail.ee"),
+                outbox_flush_batch: env_i64("COMPLIANCE_DSR_FLUSH_BATCH", 25),
+                outbox_flush_max_attempts: env_i64("COMPLIANCE_DSR_FLUSH_MAX_ATTEMPTS", 5),
             },
 
             secrets: SecretsConfig {
@@ -379,6 +395,10 @@ mod tests {
         assert_eq!(cfg.audit.retention_days, 365);
         assert_eq!(cfg.gdpr.data_retention_days, 730);
         assert_eq!(cfg.secrets.rotation_days, 90);
+        // DSR outbox flush defaults (system sender on the platform domain).
+        assert_eq!(cfg.gdpr.system_from_address, "noreply@apexmail.ee");
+        assert_eq!(cfg.gdpr.outbox_flush_batch, 25);
+        assert_eq!(cfg.gdpr.outbox_flush_max_attempts, 5);
         // SEC-15: DSAR rate limit defaults
         assert_eq!(cfg.dsar_rate_limit.per_user, 1);
         assert_eq!(cfg.dsar_rate_limit.per_tenant, 100);
