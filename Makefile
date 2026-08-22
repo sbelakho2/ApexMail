@@ -3,8 +3,8 @@
 #
 # CANONICAL production deployment is CI/CD — see deploy/DEPLOYMENT.md (the
 # single source of truth):
-#   .github/workflows/deploy.yml builds all images and pushes them to GHCR,
-#   then .github/workflows/deploy-hetzner.yml SSHes to the host, renders the
+#   the self-hosted pipeline on the deploy host (ci/pipeline.sh) builds all
+#   images locally, runs the migration gate, then brings up the stack
 #   secrets, pulls the images and runs `docker compose up -d`.
 #
 # The targets below are a MANUAL FALLBACK for emergency hotfixes and local

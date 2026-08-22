@@ -98,6 +98,18 @@ cargo_vet() {
     (cd "$WS" && ci_check "cargo vet --locked" cargo vet --locked)
 }
 
+# --- Semgrep SAST (rust-check.yml SAST job — advisory) ----------------------------------
+# The declared-lane coverage is gitleaks + cargo-audit + Trivy; Semgrep adds
+# taint-flow rulesets on top. Advisory (as the GitHub SAST job was
+# continue-on-error) and loud-skips when the tool is absent — install with
+# `pip install semgrep` (ci/install.sh does not pin it; version drift between
+# hosts is acceptable for an advisory lane).
+semgrep_sast() {
+    ci_have_tool semgrep || { ci_warn "semgrep missing — SAST lane skipped (advisory; pip install semgrep)"; return "$CI_EXIT_OK"; }
+    (cd "$REPO_ROOT" && ci_check_advisory "semgrep SAST (p/default, p/rust)" \
+        semgrep scan --config p/default --config p/rust --error --quiet)
+}
+
 # --- Trivy image scans (deploy.yml scan steps) -------------------------------------------
 # Scans the images that exist locally (built by a previous images stage run).
 # The post-build authoritative gate lives in the images stage; this is the
@@ -205,6 +217,7 @@ stage_main() {
     gitleaks_scan
     cargo_audit
     cargo_vet
+    semgrep_sast
     migration_validation
     trivy_images
     cargo_outdated

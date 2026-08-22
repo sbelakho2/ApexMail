@@ -239,7 +239,7 @@ step "Step 5: Run database migrations (migrator one-shot job)"
 
 # P0 — the deploy-time migration gate. The migrator applies the sqlx chain
 # embedded in its image and exits; `up -d` below only runs when it succeeds
-# (same gate as .github/workflows/deploy-hetzner.yml). Profile `migrate` +
+# (the same gate the pipeline migrate stage runs). Profile `migrate` +
 # restart: no keep it out of the long-running stack.
 log "Running migrator (docker compose run --rm migrator)..."
 docker compose $COMPOSE_FILES --env-file "$ENV_FILE" --profile migrate run --rm migrator

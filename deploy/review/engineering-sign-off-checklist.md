@@ -33,14 +33,14 @@
 
 | Test Type | Status | Workflow |
 |-----------|--------|----------|
-| Broken links | [x] Pass | `.github/workflows/broken-link-check.yml` |
-| HTML validation | [x] Pass | `.github/workflows/html-validation.yml` |
-| Accessibility | [x] Pass | `.github/workflows/accessibility-check.yml` |
-| SEO audit | [x] Pass | `.github/workflows/seo-audit.yml` |
-| Performance budget | [x] Pass | `.github/workflows/performance-budget.yml` |
+| Broken links | [x] Pass | `.github/workflows-archive/broken-link-check.yml` |
+| HTML validation | [x] Pass | `.github/workflows-archive/html-validation.yml` |
+| Accessibility | [x] Pass | `.github/workflows-archive/accessibility-check.yml` |
+| SEO audit | [x] Pass | `.github/workflows-archive/seo-audit.yml` |
+| Performance budget | [x] Pass | `.github/workflows-archive/performance-budget.yml` |
 | Browser console | [x] Pass | `deploy/tests/browser-test.sh` |
 | Cross-browser desktop | [x] Pass | `deploy/tests/desktop-browser-test.sh` |
-| Mobile responsive | [x] Pass | `.github/workflows/mobile-qa.yml` |
+| Mobile responsive | [x] Pass | `.github/workflows-archive/mobile-qa.yml` |
 
 ## Known Limitations
 

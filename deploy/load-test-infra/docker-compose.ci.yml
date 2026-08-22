@@ -1,7 +1,7 @@
 # =============================================================================
 # ApexMail — CI Load-Gate Environment
 # =============================================================================
-# Used by .github/workflows/load-gate.yml ONLY.
+# Used by the manual load-gate runs ONLY (see ci/README.md §2; the GitHub workflow is archived).
 #
 # Brings up PostgreSQL + Redis + the REAL api-server image (built from the
 # repo's services/mail-server/Dockerfile) bound to localhost:3000, so the k6

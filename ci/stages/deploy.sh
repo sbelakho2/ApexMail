@@ -53,6 +53,32 @@ stage_main() {
     fi
     cd "$CI_DEPLOY_DIR"
 
+    # --- 0. digest manifest verification (images-stage tamper guard) ----------------
+    # The images stage recorded exactly what it built and gated. Refuse to
+    # bring up anything whose local image no longer matches that manifest
+    # (rebuilt/retagged/removed out-of-band between stages).
+    if [ -f "$RUN_DIR/image-digests.txt" ] && [ -n "${CI_SHA:-}" ]; then
+        _ns_d=${GHCR_NS:-ghcr.io/sbelakho2/apexmail}
+        _dig_err=0
+        while IFS=' ' read -r _svc _digests; do
+            [ -n "${_svc:-}" ] || continue
+            _now=$(docker image inspect "$_ns_d/$_svc:$CI_SHA" \
+                --format '{{join .RepoDigests " "}} {{.Id}}' 2>/dev/null) || _now=""
+            if [ "$_now" != "$_digests" ]; then
+                ci_err "image digest mismatch for $_svc:$CI_SHA — rebuilt or altered since the images stage; refusing to deploy"
+                _dig_err=1
+            fi
+        done <"$RUN_DIR/image-digests.txt"
+        [ "$_dig_err" -eq 0 ] || return "$CI_EXIT_FAIL"
+        if [ -f "$RUN_DIR/SHA256SUMS.images" ] && command -v sha256sum >/dev/null 2>&1; then
+            ( cd "$RUN_DIR" && sha256sum -c SHA256SUMS.images >/dev/null 2>&1 ) \
+                || { ci_err "image-digests.txt fails its SHA256SUMS.images signature"; return "$CI_EXIT_FAIL"; }
+        fi
+        ci_info "image digests match the images-stage manifest"
+    else
+        ci_warn "no image-digests.txt in this run (images stage skipped?) — deploying unverified digests"
+    fi
+
     publish_tls_certs
 
     ci_info "docker compose up -d --remove-orphans (canonical service set)"
@@ -80,6 +106,12 @@ stage_main() {
 
     # deploy.sh Step 7: drop dangling images left by the rebuild.
     docker image prune -f >/dev/null 2>&1 || true
+
+    # Record what is now live so a failed verify stage can roll back to the
+    # PREVIOUS sha (written only after a fully successful deploy).
+    if [ -n "${CI_SHA:-}" ]; then
+        printf '%s\n' "$CI_SHA" >"$CI_ROOT/.last-deployed-sha"
+    fi
 
     ci_info "deploy: stack recreated, nginx reloaded"
     return "$CI_EXIT_OK"

@@ -68,7 +68,26 @@ stage_main() {
         ci_warn "trivy missing — post-build vulnerability gate skipped (install with ci/install.sh)"
     fi
 
-    # --- 4. bounded :<sha> history ---------------------------------------------------
+    # --- 4. digest manifest (deploy-stage tamper guard) ------------------------------
+    # Record the exact RepoDigests/IDs the deploy will bring up. The deploy
+    # stage re-inspects the images and refuses to continue on any mismatch —
+    # nothing runs in production that this run did not build and gate.
+    ci_info "recording image digest manifest"
+    : >"$RUN_DIR/image-digests.txt"
+    for _svc in $CANONICAL_SERVICES $EXTRA_IMAGES; do
+        _digest=$(docker image inspect "$_ns/$_svc:$CI_SHA" \
+            --format '{{join .RepoDigests " "}} {{.Id}}' 2>/dev/null) || _digest=""
+        if [ -n "$_digest" ]; then
+            printf '%s %s\n' "$_svc" "$_digest" >>"$RUN_DIR/image-digests.txt"
+        else
+            ci_err "cannot inspect $_ns/$_svc:$CI_SHA for the digest manifest"
+            return "$CI_EXIT_FAIL"
+        fi
+    done
+    ( cd "$RUN_DIR" && sha256sum image-digests.txt > SHA256SUMS.images 2>/dev/null ) \
+        || ci_warn "sha256sum unavailable — digest manifest left unsigned (advisory)"
+
+    # --- 5. bounded :<sha> history ---------------------------------------------------
     _keep=${CI_KEEP_SHAS:-5}
     ci_info "pruning :<sha> image tags beyond the newest $_keep per service"
     for _svc in $CANONICAL_SERVICES $EXTRA_IMAGES; do

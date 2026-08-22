@@ -2,7 +2,7 @@
 
 ## Image / tag model (read first)
 
-CI (`.github/workflows/deploy.yml`) publishes **only** `:<short-sha>` and
+The pipeline images stage (`ci/stages/images.sh`) tags **only** `:<short-sha>` and
 `:latest` image tags to GHCR on each push to `main`. It **never** publishes
 `vX.Y.Z` version tags, so rollback is git-SHA based, not tag based. See
 [`DEPLOYMENT.md`](DEPLOYMENT.md) § "Tag strategy".

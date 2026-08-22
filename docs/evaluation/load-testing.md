@@ -33,7 +33,7 @@ This document defines the load-testing strategy for ApexMail. Every release that
 | k6 billing tests | [`services/mail-server/crates/load-tests/tests/k6/billing-load-test.js`](services/mail-server/crates/load-tests/tests/k6/billing-load-test.js) |
 | Baseline files | [`docs/evaluation/baselines/`](docs/evaluation/baselines/) |
 | Grafana dashboard | [`deploy/grafana/dashboards/load-testing-overview.json`](deploy/grafana/dashboards/load-testing-overview.json) |
-| CI workflow | [`.github/workflows/load-gate.yml`](.github/workflows/load-gate.yml) |
+| CI integration | manual/periodic (archived with the GitHub workflows — see `.github/workflows-archive/` and `ci/README.md` §2) |
 | Docker Compose environment | [`deploy/load-test-infra/docker-compose.yml`](deploy/load-test-infra/docker-compose.yml) |
 
 ### Running Load Tests
@@ -235,7 +235,7 @@ Key sections:
 
 ### CI Workflow
 
-Integrated into CI via [`.github/workflows/load-gate.yml`](.github/workflows/load-gate.yml):
+Load-gate invocation (manual; deliberately outside the deploy gate — see `ci/README.md` §2):
 
 ```yaml
 # Triggers:
@@ -363,7 +363,7 @@ Both crates intentionally avoid linking `api-server`:
 | [`docs/evaluation/baselines/README.md`](docs/evaluation/baselines/README.md) | Baseline format specification |
 | [`load-tests/README.md`](services/mail-server/crates/load-tests/README.md) | Load tests crate documentation |
 | [`perf-tests/README.md`](services/mail-server/crates/perf-tests/README.md) | Performance tests crate documentation |
-| [`.github/workflows/load-gate.yml`](.github/workflows/load-gate.yml) | CI load gate workflow |
+| `deploy/load-test-infra/` + k6 suites | load gate (manual/periodic) |
 | [`deploy/load-test-infra/docker-compose.yml`](deploy/load-test-infra/docker-compose.yml) | Load test Docker Compose environment |
 | [`deploy/load-test-infra/setup.sh`](deploy/load-test-infra/setup.sh) | Environment setup script |
 | [`scripts/compare-baseline.sh`](scripts/compare-baseline.sh) | Baseline comparison tool |

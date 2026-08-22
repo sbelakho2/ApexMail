@@ -71,11 +71,12 @@ pipeline.conf` (host) → environment variables (always win).
 
 ## 2. Workflow replacement map — every file in `.github/workflows/`
 
-The recommendation is to archive the GitHub workflows (move
-`.github/workflows/` → `.github/workflows-archive/`), which only the repo
-owner should do (this `ci/` directory deliberately does not touch `.github/`).
-The validate stage enforces that this table stays complete: if a workflow
-file exists without a row here, validation fails.
+The GitHub workflows are ARCHIVED (2026-08-22): `.github/workflows/` is
+intentionally empty and every file lives in `.github/workflows-archive/`
+with its own README. The validate stage enforces that this table stays
+complete: if a workflow file ever (re)appears in `.github/workflows/`
+without a row here, validation fails — restoring Actions by accident is a
+build break, by design.
 
 | Workflow | Verdict | Replaced by / why |
 |---|---|---|
@@ -186,8 +187,8 @@ The substitutes, in enforcement order:
 | PR status checks / check runs UI | gone with GitHub | §4: pre-push hook + `check-pr.sh` + host-enforced gating |
 | Branch protection rules | gone | same — plus the fetch stage's pushed-HEAD guarantee |
 | Dependabot + auto-merge | gone | manual `cargo update` → `check-pr.sh` full → push |
-| GHCR push + image provenance/SBOM attestation signatures | dropped (no registry by design) | local `:<sha>` tags; Trivy SPDX SBOMs per run (unsigned — add cosign later if needed) |
-| Semgrep SAST (`p/default`, `p/rust`, …) | not replicated | gitleaks + cargo-audit + cargo-deny + Trivy cover the repo's declared lanes; to add: `pip install semgrep && semgrep scan --config p/default --config p/rust --error` as an advisory check |
+| GHCR push + image provenance/SBOM attestation signatures | dropped (no registry by design) | local `:<sha>` tags + a SHA256SUMS digest manifest per run; the deploy stage refuses to bring up images whose digests do not match the manifest the images stage recorded (tamper/regression guard, SLSA-lite); Trivy SPDX SBOMs per run (unsigned — add cosign later if needed) |
+| Semgrep SAST (`p/default`, `p/rust`, …) | **replicated (advisory)** | `security` stage runs `semgrep scan --config p/default --config p/rust --error` when semgrep is installed; absent tooling degrades to a loud skip like every optional gate. gitleaks + cargo-audit + cargo-deny + Trivy run unconditionally. |
 | SARIF uploads to GitHub Security | gone | same reports as JSON/text in `ci/runs/<ts>/` |
 | GitHub runner isolation | inverted model | the pipeline runs on the deploy host as root bounded to repo code fetched over the deploy key; hardening in the unit (`PrivateTmp`, journald logging, socket-activation rate caps) |
 

@@ -8,16 +8,24 @@ superseded and do not exist in this repository anymore.
 
 ```
 push to main
-  → .github/workflows/deploy.yml      builds + pushes images to GHCR (:latest + :<sha>)
-  → .github/workflows/deploy-hetzner.yml   SSHes to the host, pulls :latest, `docker compose up -d`
+  → the host's pipeline timer (every 5 min, ci/pipeline.sh) fetches the ref
+  → 05 images    builds all images ON the host (:latest + :<short-sha>, Trivy-gated)
+  → 06 migrate   _sqlx_migrations backup + migrator one-shot
+  → 07 deploy    docker compose up -d + nginx reload
+  → 08 verify    per-service health, HTTP probes, SMTP banner, TLS
 ```
+
+GitHub Actions is decommissioned (archived under `.github/workflows-archive/`;
+the replacement map lives in `ci/README.md` §2). The pipeline running on the
+deploy host IS the CI and the deployer — there is no runner, no registry, and
+no SSH hop anymore.
 
 ## Deployment methods (when to use which)
 
 | Method | Command / trigger | Use when | Notes |
 |---|---|---|---|
-| **CI deploy (canonical)** | `gh workflow run "Deploy — Docker Build & Push"` then `Deploy — Hetzner` (auto-runs on success), or `gh workflow run "Deploy — Hetzner" --ref main` after images exist | Every production change | Builds + scans all images, runs the migration gate, verifies the rollout (per-service health + HTTP + SMTP checks). The ONLY supported production path. |
-| **CI redeploy without rebuild** | `Deploy — Hetzner` with `skip_pull=true` | Re-apply compose/env changes when images are already on the host | Still runs migrations + verification. |
+| **Pipeline deploy (canonical)** | push to `main`; the host timer runs `ci/pipeline.sh run` (or force it: `cd /opt/apexmail && ci/pipeline.sh run`) | Every production change | Builds + scans all images, runs the migration gate, verifies the rollout (per-service health + HTTP + SMTP checks). The ONLY supported production path. A red stage stops the line before deploy. |
+| **Pipeline stages without rebuild** | `ci/pipeline.sh run --stages migrate,deploy,verify` | Re-apply compose/env changes when images are already on the host | Still runs migrations + verification. |
 | **Manual fallback (emergency only)** | `make deploy DEPLOY_HOST=root@<host>` / `make deploy-service S=<svc> DEPLOY_HOST=…` | Hotfix when CI is unavailable | Builds images locally on the host via `deploy/scripts/deploy.sh` (never pushed to GHCR). Includes `billing-service`, `sales-autopilot` and the `migrator`; `GHCR_NS` is overridable (`make deploy … GHCR_NS=ghcr.io/<ns>/apexmail`). Runs the same migration gate. |
 | **Local production-parity smoke** | `tools/run-compose-smoke.sh full` | Pre-merge validation of the merged compose stack on a dev machine | Brings up the monitoring slice + a prod subset (api-server, enterprise, tracking, sales-autopilot, billing-service, nginx, postgres, redis, clickhouse) with throwaway secrets; verifies health endpoints, TLS vhosts and the sales 404 route; injects a synthetic alert end-to-end. Needs enough Docker VM RAM for the Rust image builds (~8 GB+). |
 

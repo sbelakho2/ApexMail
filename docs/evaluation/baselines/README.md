@@ -193,7 +193,7 @@ k6 run billing-load-test.js
    - `test` field referencing the test function name
    - `source` field referencing the crate and file path
 
-4. **Update the CI gate** thresholds in `.github/workflows/load-gate.yml` to include the new metric.
+4. **Update the load-gate** thresholds in the k6 suites under `deploy/load-test-infra/` to include the new metric.
 
 5. **Document the new metric** in [`docs/evaluation/load-testing.md`](docs/evaluation/load-testing.md) under the relevant test scenario section.
 

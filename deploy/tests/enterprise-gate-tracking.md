@@ -7,7 +7,7 @@
 
 | # | Requirement | Status | Evidence |
 |---|-------------|--------|----------|
-| 1 | Legal entity data is correct everywhere | [x] | `compliance/src/final_checklist.rs:108` — legal_entity_correct=true. Entity checks in `.github/workflows/legal-identity.yml` |
+| 1 | Legal entity data is correct everywhere | [x] | `compliance/src/final_checklist.rs:108` — legal_entity_correct=true. Entity checks in `.github/workflows-archive/legal-identity.yml` |
 | 2 | Obsolete company identifiers return zero results | [x] | `compliance/src/final_checklist.rs:109` — obsolete_identifiers_zero=true. Forbidden pattern scan in `tools/check-forbidden-patterns.sh` |
 | 3 | Legal pages are internally consistent | [x] | `compliance/src/final_checklist.rs:110` — legal_pages_consistent=true. `deploy/review/legal-sign-off-checklist.md` confirms 16 surfaces internally consistent |
 | 4 | Data-location statements match real architecture | [x] | `compliance/src/final_checklist.rs:111` — data_location_matches_architecture=true. EEA-only documented in architecture docs |
@@ -98,13 +98,13 @@ The site is enterprise-ready:
 | `deploy/review/engineering-sign-off-checklist.md` | Engineering review | 7, 9, 11-14, 30-32, 34 |
 | `deploy/review/commercial-sign-off-checklist.md` | Commercial review | 16-19, 35 |
 | `deploy/review/external-trust-test-plan.md` | Buyer review | 23-24 |
-| `.github/workflows/release-gates.yml` | Release CI | 30 |
-| `.github/workflows/broken-link-check.yml` | Link CI | QA |
-| `.github/workflows/html-validation.yml` | HTML CI | QA |
-| `.github/workflows/accessibility-check.yml` | A11y CI | 27 |
-| `.github/workflows/seo-audit.yml` | SEO CI | 28 |
-| `.github/workflows/performance-budget.yml` | Perf CI | 8, 29 |
-| `.github/workflows/mobile-qa.yml` | Mobile CI | 32 |
-| `.github/workflows/pricing-drift.yml` | Pricing CI | 16-18 |
-| `.github/workflows/claim-expiry-check.yml` | Claims CI | 23 |
-| `.github/workflows/legal-identity.yml` | Legal CI | 1-2 |
+| `.github/workflows-archive/release-gates.yml` | Release CI | 30 |
+| `.github/workflows-archive/broken-link-check.yml` | Link CI | QA |
+| `.github/workflows-archive/html-validation.yml` | HTML CI | QA |
+| `.github/workflows-archive/accessibility-check.yml` | A11y CI | 27 |
+| `.github/workflows-archive/seo-audit.yml` | SEO CI | 28 |
+| `.github/workflows-archive/performance-budget.yml` | Perf CI | 8, 29 |
+| `.github/workflows-archive/mobile-qa.yml` | Mobile CI | 32 |
+| `.github/workflows-archive/pricing-drift.yml` | Pricing CI | 16-18 |
+| `.github/workflows-archive/claim-expiry-check.yml` | Claims CI | 23 |
+| `.github/workflows-archive/legal-identity.yml` | Legal CI | 1-2 |

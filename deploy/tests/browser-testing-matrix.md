@@ -62,7 +62,7 @@
 
 ### Implementation
 - Responsive test: `deploy/tests/mobile-test.sh`
-- CI workflow: `.github/workflows/mobile-qa.yml`
+- CI status: archived with the GitHub workflows — run manually via `bash deploy/tests/mobile-test.sh` (see `ci/README.md` §2)
 
 ### Required Widths — All Tested
 | Width | Status |
@@ -108,5 +108,5 @@
 | `deploy/tests/browser-test.sh` | Console error & network failure detection |
 | `deploy/tests/desktop-browser-test.sh` | Cross-browser desktop compatibility |
 | `deploy/tests/mobile-test.sh` | Responsive/mobile layout validation |
-| `.github/workflows/mobile-qa.yml` | Mobile QA CI gate |
-| `.github/workflows/accessibility-check.yml` | WCAG 2.2 AA CI gate |
+| `deploy/tests/mobile-test.sh` | Mobile QA (manual) |
+| `tools/contrast-audit/gate.sh` (pipeline test stage) | WCAG 2.1 AA contrast gate |

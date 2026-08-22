@@ -407,7 +407,7 @@ helm uninstall apexmail-green -n apexmail-green
 ## 6. Automation: CI/CD Rollback Hooks
 
 ```yaml
-# .github/workflows/deploy.yml (excerpt)
+# ci/stages/images.sh (excerpt — the pipeline that replaced deploy.yml)
 deploy:
   steps:
     - name: Run smoke tests

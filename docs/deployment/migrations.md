@@ -10,7 +10,7 @@ docker compose -f docker-compose.yml -f docker-compose.prod.yml \
   --env-file .env --profile migrate run --rm migrator
 ```
 
-The CI publisher (`.github/workflows/deploy.yml`) builds the
+The pipeline images stage (`ci/stages/images.sh`) builds the
 `ghcr.io/<ns>/migrator` image in lockstep with the service images, so the
 embedded chain always matches the deployed binaries. The manual
 `sqlx migrate run --source services/mail-server/migrations` invocation with a

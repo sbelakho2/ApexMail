@@ -134,6 +134,52 @@ verify_remote_only() {
         "https://api.apexmail.ee/sales-api/u/healthcheck-probe" "404"
 }
 
+# Images that are optional per-sha (only these warn when missing during a
+# rollback; canonical stack services must ALL exist or the rollback aborts).
+EXTRA_ROLLBACK_IMAGES="${EXTRA_ROLLBACK_IMAGES:-}"
+
+# Rollback to the previously deployed :<sha> pins when the rollout probes
+# fail (CI_ROLLBACK_ON_VERIFY_FAIL, default 1). Migrations are NOT reverted —
+# they are additive/compatible by the migration gate's design; this restores
+# the previous APPLICATION images only.
+rollback_to_previous_sha() {
+    [ "${CI_ROLLBACK_ON_VERIFY_FAIL:-1}" = 1 ] || { ci_warn "auto-rollback disabled (CI_ROLLBACK_ON_VERIFY_FAIL=0)"; return 0; }
+    _rb_sha=""
+    [ -f "$CI_ROOT/.last-deployed-sha" ] && _rb_sha=$(cat "$CI_ROOT/.last-deployed-sha" 2>/dev/null)
+    if [ -z "$_rb_sha" ] || [ "$_rb_sha" = "${CI_SHA:-}" ]; then
+        ci_warn "no previous deployed sha to roll back to — leaving the current rollout in place"
+        return 0
+    fi
+    ci_err "verify FAILED — rolling back to previously deployed images :$_rb_sha"
+    _rb_ns=${GHCR_NS:-ghcr.io/sbelakho2/apexmail}
+    _rb_missing=0
+    for _svc in $STACK_SERVICES; do
+        if docker image inspect "$_rb_ns/$_svc:$_rb_sha" >/dev/null 2>&1; then
+            docker tag "$_rb_ns/$_svc:$_rb_sha" "$_rb_ns/$_svc:latest" >/dev/null 2>&1 \
+                || { ci_warn "retag failed for $_svc"; _rb_missing=1; }
+        else
+            # Extra images (migrator etc.) may legitimately not exist per sha.
+            case " $EXTRA_ROLLBACK_IMAGES " in
+                *" $_svc "*) ci_warn "image $_svc:$_rb_sha missing — not rolled back"; _rb_missing=1 ;;
+            esac
+        fi
+    done
+    if [ "$_rb_missing" = 1 ]; then
+        ci_warn "rollback incomplete for at least one service — keeping current stack (mixed versions are worse than a known-bad one with containers up)"
+        return 0
+    fi
+    if compose up -d --remove-orphans $STACK_SERVICES >>"$CI_STAGE_LOG" 2>&1; then
+        _i=1; while [ "$_i" -le 5 ]; do
+            compose exec -T nginx nginx -s reload >>"$CI_STAGE_LOG" 2>&1 && break
+            _i=$((_i + 1)); sleep 3
+        done
+        ci_err "ROLLBACK COMPLETE: stack restored to images :$_rb_sha (migrations NOT reverted — they are additive by design)"
+    else
+        ci_err "rollback compose up FAILED — the failed rollout is still running; intervene manually"
+    fi
+    return 0
+}
+
 stage_main() {
     if ! ci_on_deploy_host; then
         if [ "${CI_VERIFY_REMOTE:-0}" = 1 ]; then
@@ -144,12 +190,19 @@ stage_main() {
     fi
     cd "$CI_DEPLOY_DIR"
 
-    verify_stack_state
-    verify_http_local
-    verify_smtp
-    verify_ports
-    verify_tls_cert
-    verify_cache_coherence
+    if
+        verify_stack_state &&
+        verify_http_local &&
+        verify_smtp &&
+        verify_ports &&
+        verify_tls_cert &&
+        verify_cache_coherence
+    then
+        :
+    else
+        rollback_to_previous_sha
+        return "$CI_EXIT_FAIL"
+    fi
 
     ci_info "verify: rollout verified — services healthy, endpoints and SMTP answering"
     return "$CI_EXIT_OK"
