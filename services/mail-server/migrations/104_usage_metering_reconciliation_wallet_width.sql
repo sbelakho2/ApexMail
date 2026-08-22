@@ -93,6 +93,10 @@ ALTER TABLE wallet_reservations   ALTER COLUMN amount          TYPE BIGINT;
 -- Migration 101 computed the clamped subtraction in BIGINT but returned
 -- INTEGER, so any reserved balance above INT range still wrapped on the
 -- final cast. Make the whole path BIGINT.
+-- The BIGINT widening changes the function's return type, and Postgres
+-- refuses CREATE OR REPLACE across return types — drop the INTEGER-era
+-- signature first (databases where 104 created it fresh never see the drop).
+DROP FUNCTION IF EXISTS release_reserved_cents(INTEGER, INTEGER, INTEGER);
 CREATE OR REPLACE FUNCTION release_reserved_cents(
     reserved bigint,
     released_total bigint
