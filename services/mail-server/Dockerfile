@@ -3,9 +3,14 @@
 # Builds the Rust mail server services.
 
 # =============================================================================
-# Dependency Cache Stage
+# Dependency Cache Stages (cargo-chef)
 # =============================================================================
-FROM rust:1.93.1-slim-bookworm AS deps
+# The dependency layer is keyed on the CARGO MANIFESTS ONLY (recipe.json), so
+# source-only commits reuse the compiled-dependency cache instead of
+# re-resolving and rebuilding the world: any `cargo build` after the cook
+# starts from fully compiled third-party dependencies. Previously the deps
+# stage COPYed the entire crates tree, invalidating the cache on every commit.
+FROM rust:1.93.1-slim-bookworm AS chef
 
 WORKDIR /app/services/mail-server
 ENV CARGO_TARGET_DIR=/app/target
@@ -17,21 +22,37 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libssl-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy workspace manifests only (cacheable)
-COPY services/mail-server/Cargo.toml services/mail-server/Cargo.lock ./
-# This workspace relies on implicit src/lib.rs and src/main.rs targets, so
-# cargo metadata/fetch must see the full crate trees rather than manifests only.
-COPY services/mail-server/crates ./crates
-# The workspace migrations are embedded at compile time by the migrator crate
-# (sqlx::migrate! resolves ./../../migrations relative to crates/migrator).
-COPY services/mail-server/migrations ./migrations
+# cargo-chef itself is a layer of the base image: compiled once per toolchain.
+RUN cargo install cargo-chef --locked
+
+# --- planner: serialize the dependency graph from the real manifests -------------
+FROM chef AS planner
+COPY services/mail-server .
+COPY packages/kiwicaptcha /app/packages/kiwicaptcha
+RUN cargo chef prepare --recipe-path recipe.json
+
+# --- deps: compile third-party dependencies from the recipe (the cache layer) ----
+FROM chef AS deps
+COPY --from=planner /app/services/mail-server/recipe.json recipe.json
+# The recipe skeletonizes packages, but cargo must still be able to RESOLVE
+# the workspace graph before cooking. Two path dependencies live outside the
+# workspace member set and therefore need their manifests (plus stub sources
+# so implicit lib targets resolve) on disk:
+#   1. packages/kiwicaptcha        (api-server + integration-tests path dep)
+#   2. crates/imap-proto-patched   ([patch.crates-io] imap-proto)
+# CONTRACT: adding another external path dep or [patch] entry requires a
+# matching block here, or cargo chef cook fails at resolution.
+COPY services/mail-server/Cargo.lock ./Cargo.lock
+# kiwicaptcha: no external crate depends on it, so the manifest + stub is
+# enough for graph resolution (chef skeletonizes the dependents).
 COPY packages/kiwicaptcha/Cargo.toml /app/packages/kiwicaptcha/Cargo.toml
-# Create a dummy src/lib.rs so cargo can resolve the kiwicaptcha target during
-# the deps/fetch stage. The real source is copied in the builder stages below.
 RUN mkdir -p /app/packages/kiwicaptcha/src && \
     echo "#![allow(dead_code)] pub fn _placeholder() {}" > /app/packages/kiwicaptcha/src/lib.rs
-
-RUN cargo fetch --locked
+# imap-proto-patched: the EXTERNAL imap crate compiles against the patched
+# API during cook, so the real source must be present (and being a stable
+# vendored crate, caching its compilation is desirable).
+COPY services/mail-server/crates/imap-proto-patched ./crates/imap-proto-patched
+RUN cargo chef cook --release --recipe-path recipe.json
 
 # =============================================================================
 # Build Stage (API-only first)
@@ -40,20 +61,27 @@ RUN cargo fetch --locked
 # Docker builds using --target api-server don't compile every binary first.
 FROM deps AS api-server-builder
 
-COPY docs /app/docs
-COPY apps/marketing-zola/public /app/apps/marketing-zola/public
+# Real sources over the skeleton: everything cargo needs to build the binary.
+# static/css is required: ui-foundation embeds the marketing input.css at
+# compile time (MARKETING_INPUT_CSS include_str!).
+COPY services/mail-server .
 COPY packages/kiwicaptcha /app/packages/kiwicaptcha
 COPY packages/kiwicaptcha-wasm /app/packages/kiwicaptcha-wasm
+COPY docs /app/docs
+COPY apps/marketing-zola/public /app/apps/marketing-zola/public
+COPY apps/marketing-zola/static/css /app/apps/marketing-zola/static/css
 
 RUN cargo build --release --bin api-server
 
 # Shared builder for non-API runtime targets.
 FROM deps AS builder
 
-COPY docs /app/docs
-COPY apps/marketing-zola/public /app/apps/marketing-zola/public
+COPY services/mail-server .
 COPY packages/kiwicaptcha /app/packages/kiwicaptcha
 COPY packages/kiwicaptcha-wasm /app/packages/kiwicaptcha-wasm
+COPY docs /app/docs
+COPY apps/marketing-zola/public /app/apps/marketing-zola/public
+COPY apps/marketing-zola/static/css /app/apps/marketing-zola/static/css
 
 RUN cargo build --release
 
