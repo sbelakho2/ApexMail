@@ -96,6 +96,8 @@ ALTER TABLE wallet_reservations   ALTER COLUMN amount          TYPE BIGINT;
 -- The BIGINT widening changes the function's return type, and Postgres
 -- refuses CREATE OR REPLACE across return types — drop the INTEGER-era
 -- signature first (databases where 104 created it fresh never see the drop).
+DROP FUNCTION IF EXISTS release_reserved_cents(BIGINT, BIGINT);
+DROP FUNCTION IF EXISTS release_reserved_cents(INTEGER, INTEGER);
 DROP FUNCTION IF EXISTS release_reserved_cents(INTEGER, INTEGER, INTEGER);
 CREATE OR REPLACE FUNCTION release_reserved_cents(
     reserved bigint,
