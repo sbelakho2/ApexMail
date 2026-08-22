@@ -1294,8 +1294,8 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
      * claiming fingerprint. A custom atomic storage without the
      * identity-aware consume capability is refused, since the recovery
      * gate would silently refuse everything when no record could ever
-     * carry an identity; one without the atomic cleanup capability is
-     * refused too, since its read-then-delete cleanup can erase the
+     * carry an identity. A store without the atomic cleanup capability
+     * is refused too, since its read-then-delete cleanup can erase the
      * committed evidence under concurrency. Ordinary verification
      * remains compatible with any StorageInterface.
      * Fails closed at container compile time (a LogicException names the

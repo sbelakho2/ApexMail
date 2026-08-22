@@ -121,6 +121,11 @@ final class ArrayStorage implements AtomicStorageInterface, \KiwiCaptcha\Consume
      * missing, a pending record is deleted, and a consumed record is
      * kept untouched with its retained state riding back on the answer —
      * the same tri-state contract as the Redis backend's Lua script.
+     *
+     * No replica barrier: this backend has no replicas, so the verified
+     * WAIT durability contract of the Redis backend's delete-if-pending
+     * transition does not apply — there is nothing to replicate, and a
+     * delete cannot be resurrected by a promoted stale replica.
      */
     public function deleteIfPending(string $nonce): \KiwiCaptcha\DeleteIfPendingResult
     {

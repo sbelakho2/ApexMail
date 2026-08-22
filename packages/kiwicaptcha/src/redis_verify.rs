@@ -287,13 +287,16 @@ redis.call('SET', KEYS[1], updated, 'EX', ttl)
 return {updated, 1}
 "#;
 
-/// One Lua script for the best-effort outcome commit: stores
 /// One atomic delete-if-pending cleanup: GET decides — a missing record
 /// reports missing, a consumed record is returned verbatim and never
 /// deleted (the committed recovery evidence survives a racing redeem),
 /// and only a pending record is deleted (the one-shot cheap-failure
 /// policy). Closes the check-then-delete toctou of a separate
-/// `consumed_state` read followed by `DEL`.
+/// `consumed_state` read followed by `DEL`. The deleted-pending
+/// transition is durability-critical: [`RedisChallengeStore::delete_if_pending`]
+/// applies the same verified replica wait as the other transitions
+/// after it, so a promotion cannot resurrect a burned challenge from a
+/// replica that never saw the delete.
 const DELETE_IF_PENDING_LUA: &str = r#"
 -- kiwicaptcha delete-if-pending (atomic cleanup)
 local v = redis.call("GET", KEYS[1])
@@ -637,8 +640,9 @@ impl RedisChallengeStore {
 
     /// Require every durability-critical write to be acknowledged by
     /// `wait_replicas` replicas before the call returns: after the issuance
-    /// SET, after the pending→consumed transition, and after the
-    /// deterministic-result commit, a replica wait is issued with
+    /// SET, after the pending→consumed transition, after the
+    /// deterministic-result commit, and after the delete-if-pending
+    /// cleanup, a replica wait is issued with
     /// `replicas timeout_ms` and its acknowledgement count is verified.
     /// Fewer than `wait_replicas` acknowledged replicas fail the call
     /// closed with an error — the durability promise is unconditional, it
@@ -963,18 +967,44 @@ impl RedisChallengeStore {
     /// this cleanup is observed in its consumed state here and never
     /// erased. A consumed record's retained state is returned with the
     /// answer (no second lookup). `Err` is a genuine storage failure.
+    ///
+    /// When [`RedisChallengeStore::with_wait`] configured a replica wait,
+    /// the deleted-pending transition is barriered exactly like the other
+    /// durability-critical transitions: a replica wait is issued after the
+    /// DEL and the acknowledgement count is verified — fewer than
+    /// `wait_replicas` acked replicas fails the call closed. The delete of
+    /// a burned pending challenge must reach the configured replica count
+    /// before the cleanup reports success, or a promotion could resurrect
+    /// a challenge that must never be redeemed again. Missing and consumed
+    /// leave the record untouched, so they never wait.
     pub fn delete_if_pending(&self, nonce: &str) -> redis::RedisResult<DeleteIfPending> {
         let key = format!("{}{}", self.prefix, nonce);
+        let wait_replicas = self.wait_replicas;
+        let wait_timeout_ms = self.wait_timeout_ms;
         let mut conn = self.checkout()?;
-        let value = Self::run_command(&mut conn, |c| {
-            Self::invoke_script::<redis::Value>(
+        let result = Self::run_command(&mut conn, |c| {
+            let v = Self::invoke_script::<redis::Value>(
                 c,
                 &redis::Script::new(DELETE_IF_PENDING_LUA),
                 &key,
                 &[],
-            )
+            )?;
+            let parsed = parse_delete_if_pending(v);
+            // Durability barrier: only the deleted-pending transition
+            // mutated the store, so only it waits. The wait proves the
+            // DEL reached at least `wait_replicas` replicas; it does NOT
+            // constrain which replicas a future failover manager promotes
+            // — replay-safe promotion additionally requires the threshold
+            // to cover every eligible failover target or promotion
+            // gating. A barrier failure surfaces as an Err (the caller
+            // maps it to StorageUnavailable), which is exactly right: the
+            // delete happened but its durability is unconfirmed.
+            if matches!(parsed, DeleteIfPending::DeletedPending) && wait_replicas > 0 {
+                Self::wait_verified(c, wait_replicas, wait_timeout_ms)?;
+            }
+            Ok(parsed)
         })?;
-        Ok(parse_delete_if_pending(value))
+        Ok(result)
     }
 
     /// Best-effort persistence of the proof outcome for an already-consumed

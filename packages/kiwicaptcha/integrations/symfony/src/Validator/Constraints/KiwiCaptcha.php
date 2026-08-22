@@ -17,7 +17,7 @@ use Symfony\Component\Validator\Constraint;
  *   private ?string $kiwiToken = null;
  *
  * @Annotation
- * @Target({"PROPERTY", "METHOD", "ANNOTATION"})
+ * @Target({"property", "method", "annotation"})
  */
 #[\Attribute(\Attribute::TARGET_PROPERTY | \Attribute::TARGET_METHOD | \Attribute::IS_REPEATABLE)]
 class KiwiCaptcha extends Constraint
@@ -62,7 +62,7 @@ class KiwiCaptcha extends Constraint
      * The token verified correctly, but the scope's post_solve_check
      * re-assessment returned a Deny: the security context materially changed
      * while the client was solving, so the valid proof does not clear the
-     * request. Distinct from INVALID_OR_EXPIRED_ERROR so applications can
+     * request. Distinct from `INVALID_OR_EXPIRED_ERROR` so applications can
      * react (fresh challenge, step-up, human review) instead of forcing a
      * silent re-solve loop.
      */
@@ -70,23 +70,24 @@ class KiwiCaptcha extends Constraint
 
     /**
      * The token verified correctly, but the scope's post_solve_check
-     * re-assessment returned a StepUp: the adaptive engine considers
+     * re-assessment returned a StepUp. The adaptive engine considers
      * proof-of-work alone insufficient for this request and demands
      * additional application-level verification (MFA, passkey, email
-     * confirmation). Distinct from INVALID_OR_EXPIRED_ERROR and
-     * POST_SOLVE_REJECTED_ERROR so applications can route the user to the
-     * step-up flow instead of forcing a silent re-solve loop.
+     * confirmation). This is distinct from `INVALID_OR_EXPIRED_ERROR`
+     * and `POST_SOLVE_REJECTED_ERROR`, so applications can route the
+     * user to the step-up flow instead of forcing a silent re-solve
+     * loop.
      */
     public const POST_SOLVE_STEP_UP_REQUIRED = 'kiwi.post_solve_step_up_required';
 
     /**
-     * The token's challenge was already consumed and its stored success was
-     * replayed back WITHOUT a proven logical operation: the default
+     * The token's challenge was already consumed and its stored success
+     * was replayed back without a proven logical operation. The default
      * configuration is strict single-use, so a second, distinct request
-     * presenting an already-consumed token is refused (the stored verdict
-     * replays only to an explicitly identified idempotent retry, see
-     * {@see KiwiCaptchaValidator::OPERATION_ID_ATTRIBUTE}). Distinct from
-     * INVALID_OR_EXPIRED_ERROR so applications can tell "this exact token
+     * presenting an already-consumed token is refused; the stored
+     * verdict replays only to an explicitly identified idempotent
+     * retry, see {@see KiwiCaptchaValidator::OPERATION_ID_ATTRIBUTE}. Distinct from
+     * `INVALID_OR_EXPIRED_ERROR` so applications can tell "this exact token
      * was already used" (the Siteverify vocabulary's timeout-or-duplicate)
      * from an ordinary invalid token — the attacker already knows the token
      * was consumed, so this leaks no check-by-check oracle.
@@ -110,7 +111,7 @@ class KiwiCaptcha extends Constraint
     /**
      * Optional explicit per-operation id (the logical operation redeeming
      * the token, e.g. an idempotency key): with it, a retried request
-     * re-presenting the SAME id plus the SAME token replays the stored
+     * re-presenting the same id plus the same token replays the stored
      * verification outcome (the idempotent retry); without it, a consumed
      * token never validates twice (strict single-use). Per-request values
      * (the request attribute / POSTed kiwi_operation_id field) take

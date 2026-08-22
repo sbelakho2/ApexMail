@@ -80,7 +80,7 @@ final class SiteVerifyController
     private const MAX_RESPONSE_BYTES = 8192;
 
     /**
-     * The hard bound on the PENDING_SAME wait. A waiter that reaches this
+     * The hard bound on the `PENDING_SAME` wait. A waiter that reaches this
      * bound without a stored result and without winning the atomic
      * takeover is answered with the retryable provider `internal-error`;
      * it never enters the verifier without holding the current owner
@@ -134,7 +134,7 @@ final class SiteVerifyController
         private readonly ?\BelConsulting\KiwiCaptchaBundle\SiteVerify\SiteVerifyIdempotencyStore $idempotencyStore = null,
         /** Shared Redis log gate (optional): flood-bounded invalid-secret diagnostics. */
         private readonly \Predis\Client|\Redis|null $logGate = null,
-        /** Hard bound on the PENDING_SAME wait in seconds (see {@see self::IDEMPOTENCY_WAIT_SECS}). */
+        /** Hard bound on the ``PENDING_SAME`` wait in seconds (see {@see self::IDEMPOTENCY_WAIT_SECS}). */
         private readonly float $idempotencyWaitSecs = self::IDEMPOTENCY_WAIT_SECS,
         /**
          * The security-policy epoch (risk.policy_version): part of the
@@ -168,7 +168,7 @@ final class SiteVerifyController
         // enforced at container compile time.
         if ($idempotencyStore !== null && $this->idempotencyWaitSecs <= $idempotencyStore->leaseSeconds()) {
             throw new \LogicException(sprintf(
-                'KiwiCaptcha: the idempotency PENDING_SAME wait bound (%ss) must exceed the owner lease (%ss) — otherwise a crashed owner can never be taken over (the crash-recovery path is unreachable).',
+                'KiwiCaptcha: the idempotency `PENDING_SAME` wait bound (%ss) must exceed the owner lease (%ss) — otherwise a crashed owner can never be taken over (the crash-recovery path is unreachable).',
                 $this->idempotencyWaitSecs,
                 $idempotencyStore->leaseSeconds(),
             ));
@@ -368,10 +368,10 @@ final class SiteVerifyController
         // outcomes follow the decoded branch's conflict semantics: a
         // same-key entry bound to a different malformed response is a
         // conflict (the response hash is part of the claim identity), and
-        // a COMPLETE_SAME entry (same malformed hash) returns the stored
+        // a `COMPLETE_SAME` entry (same malformed hash) returns the stored
         // canonical result instead of re-finalizing. The owner lease is
         // the store's fixed configured lease (default 60s) and the waiter
-        // bound the configured PENDING_SAME bound (default 90s); neither
+        // bound the configured `PENDING_SAME` bound (default 90s); neither
         // is derived from this token's remaining signed validity, so
         // signed expiry affects only fresh redemptions, never the
         // retained-state reconstruction.
@@ -472,7 +472,7 @@ final class SiteVerifyController
             }
         }
 
-        // PENDING_SAME: another request with the same key and hash owns
+        // `PENDING_SAME`: another request with the same key and hash owns
         // verification. This request waits on the store only: it polls
         // stored() for completion and attempts an atomic takeover once
         // the owner's lease has expired. It never invokes the verifier

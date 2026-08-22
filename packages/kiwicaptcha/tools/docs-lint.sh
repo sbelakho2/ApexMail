@@ -2,10 +2,10 @@
 # docs-lint.sh — prose linter for the KiwiCaptcha packages' documentation
 # and (with --source) source comments; prints per-file violation counts
 # and a total. Advisory (always exits 0) unless a baseline is given:
-# --baseline FILE enforces the per-file rows AND the total — any scanned
+# --baseline file enforces the per-file rows AND the total — any scanned
 # file that exceeds its row (a scanned file without a row counts as a
 # new file with baseline 0) or a total that exceeds the baseline total
-# fails with exit 1; --update-baseline FILE regenerates the per-file set
+# fails with exit 1; --update-baseline file regenerates the per-file set
 # after deliberate rewrites. --integrity with an earlier baseline file
 # adds the committed-baseline integrity check: the committed baseline
 # (the file next to this script) is compared with that earlier baseline
@@ -31,7 +31,7 @@
 # product root files are scanned only when identifiable as the
 # product's (the README's first line is the "# KiwiCaptcha" identity
 # marker); unrelated repository root files are never scanned.
-# Checks: em-dash density, sentence length, ALL-CAPS prose, filler
+# Checks: em-dash density, sentence length, all-caps prose, filler
 # vocabulary, 'never/not' contrast saturation, bold-emphasis density,
 # nested parentheses, and duplicate sentences across the scanned files.
 
@@ -41,7 +41,7 @@ MAX_EM=2
 MAX_WORDS=40
 MAX_CONTRAST=2
 MAX_BOLD=2
-ALLOWLIST="WCAG HTTP HTTPS WASM HTML JSON HMAC NVDA SMIL POUR SLSA CORS QUIC OIDC UUID CIDR ASCII MUST POST PATCH OPTIONS CSRF SIGTERM A11Y SHA256SUMS HMAC-SHA IP-HMAC FAIL-CLOSED KIWI ARGV KEYS KEEPTTL EXPIRE TIME WAIT INCR DECR ZSET PING EVAL GETDEL ZCARD ZREM HGET SETNX TTL PHP-FPM GITHUB"
+ALLOWLIST="WCAG HTTP HTTPS WASM HTML JSON HMAC NVDA SMIL POUR SLSA CORS QUIC OIDC UUID CIDR ASCII MUST POST PATCH OPTIONS CSRF SIGTERM A11Y SHA256SUMS HMAC-SHA IP-HMAC FAIL-CLOSED KIWI ARGV KEYS KEEPTTL EXPIRE TIME WAIT INCR DECR ZSET PING EVAL GETDEL ZCARD ZREM HGET SETNX TTL PHP-FPM GITHUB README SECURITY FQCN TOCTOU"
 
 WITH_SOURCE=0
 BASELINE=""
@@ -137,7 +137,7 @@ if [ ! -d "$ROOT/packages" ]; then
   exit 0
 fi
 
-# The scan covers ONLY the five kiwicaptcha package families and the
+# The scan covers only the five kiwicaptcha package families and the
 # repository's human-facing root text; other packages/ entries (the
 # sdk families, the packages index) are never scanned. The root-level
 # roots are presence-gated: tests/browser (the Playwright specs and
@@ -247,7 +247,9 @@ function emit_sentences(  t, k, ns, s, n) {
     gsub(/[^A-Za-z0-9]+/, " ", n)
     gsub(/^ +| +$/, "", n)
     gsub(/  +/, " ", n)
-    if (n != "") print n
+    if (n == "") continue
+    if (n ~ /^[0-9]+$/) continue
+    print n
   }
 }
 function check_para(  t, s, k, ns, wc, n, i, tok, core, after, lw, m) {

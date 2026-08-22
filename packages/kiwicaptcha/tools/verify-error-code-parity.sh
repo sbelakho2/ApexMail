@@ -9,8 +9,9 @@
 #
 #   1. parse packages/kiwicaptcha-php/src/VerifyError.php for every
 #      `case X = 'code';` value;
-#   2. grep the code() mapping in packages/kiwicaptcha/src/verify.rs for
-#      every wire code it returns;
+#   2. extract every wire code the code() match in
+#      packages/kiwicaptcha/src/verify.rs returns — bounded to the
+#      code() match body, never a repo-wide `=> "..."` scan;
 #   3. fail on any PHP code absent from the Rust mapping, unless it is
 #      listed in the documented-divergence table below with a comment
 #      per divergence explaining why the twin does not exist.
@@ -83,8 +84,39 @@ php_codes=$($AWK_BIN '
   }
 ' "$PHP_ENUM")
 
-# Rust side: every string literal the code() match arm returns.
-rust_codes=$(grep -oE '=> "[a-z0-9_]+"' "$RUST_VERIFY" | sed 's/^=> "//; s/"$//')
+# Rust side: every string literal a code() match arm returns. The
+# extraction is bounded to the code() match body — the slice from the
+# `fn code` signature's match down to its closing brace — so a bare
+# repo-wide grep of `=> "..."` would also collect the same-looking
+# expressions from any unrelated function that ever appears.
+rust_codes=$($AWK_BIN '
+  BEGIN { in_code = 0; braces = 0 }
+  {
+    if (!in_code) {
+      if ($0 ~ /fn code\(/) { in_code = 1 }
+      next
+    }
+    line = $0
+    n = length(line)
+    i = 1
+    while (i <= n) {
+      ch = substr(line, i, 1)
+      if (ch == "{") {
+        braces++
+      } else if (ch == "}") {
+        braces--
+        if (braces == 0) { exit }
+      }
+      i++
+    }
+    if (match(line, /=>[ \t]+"[a-z0-9_]+"/)) {
+      s = substr(line, RSTART, RLENGTH)
+      sub(/^=>[ \t]+"/, "", s)
+      sub(/"$/, "", s)
+      print s
+    }
+  }
+' "$RUST_VERIFY")
 
 php_count=$(printf '%s\n' "$php_codes" | grep -c .)
 rust_count=$(printf '%s\n' "$rust_codes" | grep -c .)

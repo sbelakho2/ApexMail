@@ -130,13 +130,20 @@ LUA;
      */
     /**
      * Atomic delete-if-pending cleanup: ONE script decides missing /
-     * deleted-pending / consumed, closing the check-then-delete TOCTOU —
-     * a record a concurrent redeemer consumes between the caller's
+     * deleted-pending / consumed, closing the check-then-delete TOCTOU.
+     * A record a concurrent redeemer consumes between the caller's
      * decision and this cleanup is observed in its consumed state here
-     * and NEVER deleted (the committed recovery evidence survives).
+     * and never deleted (the committed recovery evidence survives).
      * Returns {'missing'}, {'deleted-pending'}, or {'consumed', json}
      * with the retained envelope (the caller decodes the consumed state
      * from the same bytes; no second lookup).
+     *
+     * The deleted-pending transition is durability-critical: a burned
+     * challenge that only vanished from the primary could reappear from
+     * a stale replica after promotion and be redeemed. It therefore
+     * carries the same verified WAIT contract as issuance, the
+     * pending→consumed transition and the result commit (a violated
+     * barrier raises {@see ReplicaWaitException}).
      */
     private const DELETE_IF_PENDING_SCRIPT = <<<'LUA'
 -- kiwicaptcha delete-if-pending (atomic cleanup)
@@ -145,6 +152,11 @@ LUA;
 -- re-encoded through cjson (large integers would switch to scientific
 -- notation). A consumed record is returned verbatim and kept; only a
 -- pending record is deleted.
+--
+-- The DEL is a durability-critical write: the caller applies the same
+-- verified WAIT barrier as the other transitions, so a burned challenge
+-- that only vanished from the primary can never be resurrected as
+-- pending by a promoted stale replica.
 local v = redis.call("GET", KEYS[1])
 if not v then
   return {'missing'}
@@ -192,7 +204,8 @@ LUA;
     /**
      * @param int $waitReplicas   when > 0, every durability-critical write
      *                            (issuance SET, the pending→consumed
-     *                            transition, the result commit) is followed
+     *                            transition, the result commit, the
+     *                            delete-if-pending deletion) is followed
      *                            by a Redis WAIT whose acknowledgement count
      *                            is verified. Fewer than waitReplicas acked
      *                            replicas raises {@see ReplicaWaitException}
@@ -368,11 +381,11 @@ LUA;
 
     /**
      * Extract the `"consumed_result": {...}` JSON object from a stored
-     * envelope with a brace-depth scanner — the same matching the consume
-     * Lua performs (CONSUME_SCRIPT): from the object's opening brace,
+     * envelope with a brace-depth scanner, the same matching the consume
+     * Lua performs (CONSUME_SCRIPT). From the object's opening brace,
      * nesting counts up on '{' and down on '}', and the object ends only
      * at the balancing '}'. A non-greedy regex would truncate at the
-     * FIRST '}' — e.g. a binding string containing braces (a foreign
+     * first '}' — e.g. a binding string containing braces (a foreign
      * writer; the PHP issuer's identifier alphabet excludes them today,
      * but the parser must not silently degrade a committed result to
      * resultless on one).
@@ -408,6 +421,21 @@ LUA;
         return null;
     }
 
+    /**
+     * The atomic cleanup transition: ONE script decides missing /
+     * deleted-pending / consumed (the same tri-state contract as
+     * {@see \KiwiCaptcha\AtomicDeleteIfPendingInterface}).
+     *
+     * The deleted-pending transition is durability-critical and carries
+     * the same verified WAIT contract as issuance, the pending-to-consumed
+     * transition and the result commit. The delete must reach the
+     * configured replica count before the caller may treat the challenge
+     * as burned, or a promoted stale replica could resurrect it as
+     * pending and let it be redeemed. A violated barrier surfaces the
+     * same fail-closed {@see ReplicaWaitException} as the other
+     * transitions. No WAIT is issued for missing or consumed, since no
+     * mutation occurred.
+     */
     public function deleteIfPending(string $nonce): \KiwiCaptcha\DeleteIfPendingResult
     {
         $key = $this->prefix.$nonce;
@@ -417,12 +445,29 @@ LUA;
         }
         $parts = array_values($raw);
         $state = (string) ($parts[0] ?? '');
-        if ($state === 'missing' || $state === 'deleted-pending') {
+        if ($state === 'missing') {
+            // No mutation occurred; the WAIT barrier only guards writes.
+            return new \KiwiCaptcha\DeleteIfPendingResult($state);
+        }
+        if ($state === 'deleted-pending') {
+            // Durability barrier: the delete must reach the configured
+            // replica count before the caller may treat the challenge as
+            // burned. The WAIT acknowledgement count proves that at least
+            // the configured number of replicas received the write; it
+            // does not constrain which replicas a future failover manager
+            // promotes. Replay-safe promotion additionally requires the
+            // threshold to cover every eligible failover target or
+            // promotion gating.
+            if ($this->waitReplicas > 0) {
+                $this->waitAndVerify('the delete-if-pending transition');
+            }
+
             return new \KiwiCaptcha\DeleteIfPendingResult($state);
         }
         // consumed: decode the retained envelope from the returned bytes
         // (the committed result and the recorded operation identity ride
-        // along — no second lookup).
+        // along — no second lookup). No WAIT: no mutation occurred, the
+        // record was already durably consumed.
         $json = (string) ($parts[1] ?? '');
         $record = $this->decode($json);
         if ($record === null) {

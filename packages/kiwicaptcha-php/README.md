@@ -129,7 +129,7 @@ screen signals; `minimal` mode reports only aggregate widget interaction
 counts, and `full` adds `navigator.webdriver` and at most 20 coarse
 250 ms timing samples.
 
-## Installation
+## Installing
 
 ```bash
 composer require kiwicaptcha/kiwicaptcha-php

@@ -326,7 +326,7 @@ profile. `p == 1` reflects libsodium's raw Argon2id interface, so both
 implementations verify identical hashes (PHP `Config` throws at construction;
 Rust issuance validates). Argon2id challenges are only issued/verified with
 parameters both sides can represent, so cross-language verification always
-works. SHA-256 mode has no such constraint.
+works. The SHA-256 mode has no such ceiling.
 
 Rust and PHP also share a language-neutral JSON record schema (the serde
 JSON of `ChallengeRecord`; same keys as PHP's `ChallengeRecord::toArray()`)

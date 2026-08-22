@@ -10,8 +10,8 @@
 #![cfg(feature = "redis")]
 
 use std::collections::BTreeSet;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Barrier};
+use std::sync::atomic::{AtomicI64, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Barrier, Mutex};
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -1870,6 +1870,267 @@ fn consume_and_commit_barriers_fail_closed_without_replicas() {
             .unwrap(),
         "the failed-barrier commit must not be re-committable"
     );
+}
+
+#[test]
+fn delete_if_pending_issues_the_verified_wait_only_on_deleted_pending() {
+    // A miniature Redis-protocol server records every issued command and
+    // answers the delete-if-pending Lua with the tri-state replies keyed
+    // on the nonce, so the WAIT barrier placement is observable: exactly
+    // the deleted-pending transition with wait_replicas > 0 issues WAIT
+    // (carrying the configured replica count and timeout, with the acked
+    // count verified against the threshold); missing, consumed and
+    // wait_replicas == 0 never wait — those outcomes leave the record
+    // untouched, so there is no durability barrier to satisfy. The same
+    // server then violates the acknowledgement (fewer acked than
+    // configured), and the delete path fails closed with the same
+    // durability failure the other transitions use. Hermetic: no Redis
+    // URL needed.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+
+    // The stored value a consumed record carries: the record JSON plus
+    // the runtime envelope, exactly as consume() writes it.
+    let issued = issue_challenge(
+        &sha_config(4),
+        "login",
+        IP,
+        now_unix(),
+        now_micros(),
+        0,
+        None,
+    )
+    .unwrap();
+    let mut consumed_json = serde_json::to_string(&issued.record).unwrap();
+    consumed_json.truncate(consumed_json.len() - 1);
+    consumed_json
+        .push_str(",\"state\":\"consumed\",\"consumed_result\":null,\"operation_identity\":null}");
+
+    let commands: Arc<Mutex<Vec<Vec<String>>>> = Arc::new(Mutex::new(Vec::new()));
+    // -1 = echo the requested replica count (the wait is satisfied);
+    // >= 0 = the ack count to reply (0 violates any configured barrier).
+    let wait_acks = Arc::new(AtomicI64::new(-1));
+    let server_commands = Arc::clone(&commands);
+    let server_acks = Arc::clone(&wait_acks);
+    std::thread::spawn(move || {
+        use std::io::{Read, Write};
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            let server_commands = Arc::clone(&server_commands);
+            let server_acks = Arc::clone(&server_acks);
+            let consumed_json = consumed_json.clone();
+            std::thread::spawn(move || {
+                let mut buf = Vec::new();
+                let mut tmp = [0u8; 4096];
+                // The redis crate invokes scripts by sha: the first
+                // sha-addressed invocation misses (no-script), the load
+                // command registers the script, and the retried
+                // invocation is answered with the scripted Lua reply.
+                let mut script_loaded = false;
+                loop {
+                    match stream.read(&mut tmp) {
+                        Ok(0) => return,
+                        Ok(n) => {
+                            buf.extend_from_slice(&tmp[..n]);
+                            while let Some((args, consumed)) = parse_resp_command(&buf) {
+                                buf.drain(..consumed);
+                                server_commands.lock().unwrap().push(args.clone());
+                                let reply = match args[0].as_str() {
+                                    "PING" => "+PONG\r\n".to_string(),
+                                    "EVALSHA" if !script_loaded => {
+                                        "-NOSCRIPT No matching script. Use EVAL.\r\n".to_string()
+                                    }
+                                    "EVALSHA" => {
+                                        let key = args.get(3).map(String::as_str).unwrap_or("");
+                                        if key.ends_with("-pending") {
+                                            "*1\r\n$15\r\ndeleted-pending\r\n".to_string()
+                                        } else if key.ends_with("-consumed") {
+                                            format!(
+                                                "*2\r\n$8\r\nconsumed\r\n${}\r\n{}\r\n",
+                                                consumed_json.len(),
+                                                consumed_json
+                                            )
+                                        } else {
+                                            "*1\r\n$7\r\nmissing\r\n".to_string()
+                                        }
+                                    }
+                                    "SCRIPT" => {
+                                        script_loaded = true;
+                                        "+OK\r\n".to_string()
+                                    }
+                                    "WAIT" => {
+                                        let acks = server_acks.load(Ordering::SeqCst);
+                                        let n = if acks >= 0 {
+                                            acks.to_string()
+                                        } else {
+                                            args.get(1)
+                                                .map(String::as_str)
+                                                .unwrap_or("0")
+                                                .to_string()
+                                        };
+                                        format!(":{n}\r\n")
+                                    }
+                                    _ => "+OK\r\n".to_string(),
+                                };
+                                stream.write_all(reply.as_bytes()).unwrap();
+                            }
+                        }
+                        Err(_) => return,
+                    }
+                }
+            });
+        }
+    });
+
+    let url = format!("redis://127.0.0.1:{port}/");
+    let barriered = store_for(&url, &prefix("delpend-wait")).with_wait(2, 1000);
+    // deleted-pending: the transition mutated the store, so WAIT is
+    // issued and the satisfied acknowledgement is accepted.
+    assert!(matches!(
+        barriered.delete_if_pending("nonce-a-pending").unwrap(),
+        DeleteIfPending::DeletedPending
+    ));
+    // missing and consumed: no mutation, so no wait (a wait here would
+    // hang the configured timeout and then fail closed on a 0 ack).
+    assert!(matches!(
+        barriered.delete_if_pending("nonce-b-missing").unwrap(),
+        DeleteIfPending::Missing
+    ));
+    assert!(matches!(
+        barriered.delete_if_pending("nonce-c-consumed").unwrap(),
+        DeleteIfPending::Consumed(_)
+    ));
+    // wait_replicas == 0 disables the barrier even on the deletion.
+    let unbarriered = store_for(&url, &prefix("delpend-nowait"));
+    assert!(matches!(
+        unbarriered.delete_if_pending("nonce-d-pending").unwrap(),
+        DeleteIfPending::DeletedPending
+    ));
+
+    // A violated acknowledgement (fewer than wait_replicas) fails closed
+    // on the delete path with the same durability failure as consume and
+    // commit: the delete happened but its durability is unconfirmed.
+    wait_acks.store(0, Ordering::SeqCst);
+    let barriered2 = store_for(&url, &prefix("delpend-wait2")).with_wait(2, 1000);
+    let err = barriered2
+        .delete_if_pending("nonce-e-pending")
+        .expect_err("a violated replica-wait barrier must fail closed on the delete path");
+    assert!(
+        err.to_string().contains("replica wait not satisfied"),
+        "unexpected error: {err}"
+    );
+
+    let recorded = commands.lock().unwrap().clone();
+    let waits: Vec<&Vec<String>> = recorded.iter().filter(|args| args[0] == "WAIT").collect();
+    assert_eq!(
+        waits.len(),
+        2,
+        "WAIT must be issued exactly on the deleted-pending transitions with wait_replicas > 0 (one satisfied, one violated); full command log: {recorded:?}"
+    );
+    for wait in &waits {
+        assert_eq!(wait[1], "2", "WAIT must carry the configured replica count");
+        assert_eq!(wait[2], "1000", "WAIT must carry the configured timeout");
+    }
+}
+
+#[test]
+fn delete_if_pending_barrier_fails_closed_without_replicas() {
+    // The delete-if-pending cleanup carries the same verified replica
+    // barrier as issuance / consume / commit — a promotion must never
+    // resurrect a burned pending challenge from a stale replica. Against
+    // a replica-less server the DEL lands on the primary, then the wait
+    // reports 0 acks and the call fails closed: the cleanup happened but
+    // its durability is unconfirmed. The no-mutation outcomes (missing,
+    // consumed) and wait_replicas == 0 never wait and succeed normally.
+    let Some(url) = redis_url() else { return };
+    let barrier_prefix = prefix("delpend-barrier");
+    let store = store_for(&url, &barrier_prefix).with_wait(1, 200);
+
+    // Pending -> deleted with a violated barrier: the DEL executed on the
+    // primary before the wait failed.
+    let issued = issue_challenge(
+        &sha_config(4),
+        "login",
+        IP,
+        now_unix(),
+        now_micros(),
+        0,
+        None,
+    )
+    .unwrap();
+    store_for(&url, &barrier_prefix)
+        .store(&issued.record)
+        .unwrap();
+    let err = store
+        .delete_if_pending(&issued.record.nonce)
+        .expect_err("delete_if_pending must fail closed when the DEL is not durably replicated");
+    assert!(
+        err.to_string().contains("replica wait not satisfied"),
+        "unexpected error: {err}"
+    );
+    let key = format!("{barrier_prefix}{}", issued.record.nonce);
+    let mut conn = redis::Client::open(url.clone())
+        .unwrap()
+        .get_connection()
+        .unwrap();
+    let raw: Option<String> = redis::cmd("GET").arg(&key).query(&mut conn).unwrap();
+    assert!(
+        raw.is_none(),
+        "the failed-barrier delete still executed the DEL on the primary"
+    );
+
+    // Missing: no mutation, no wait — the call succeeds even though the
+    // configured barrier could never be satisfied on this server.
+    assert!(matches!(
+        store.delete_if_pending("never-stored-nonce").unwrap(),
+        DeleteIfPending::Missing
+    ));
+
+    // Consumed: no mutation, no wait — the retained evidence survives.
+    let issued2 = issue_challenge(
+        &sha_config(4),
+        "login",
+        IP,
+        now_unix(),
+        now_micros(),
+        0,
+        None,
+    )
+    .unwrap();
+    store_for(&url, &barrier_prefix)
+        .store(&issued2.record)
+        .unwrap();
+    let consumed = store_for(&url, &barrier_prefix)
+        .consume(&issued2.record.nonce)
+        .unwrap()
+        .expect("pending record consumes");
+    assert!(consumed.first);
+    assert!(matches!(
+        store.delete_if_pending(&issued2.record.nonce).unwrap(),
+        DeleteIfPending::Consumed(_)
+    ));
+
+    // wait_replicas == 0 disables the barrier entirely: the pending
+    // record is deleted without any wait.
+    let issued3 = issue_challenge(
+        &sha_config(4),
+        "login",
+        IP,
+        now_unix(),
+        now_micros(),
+        0,
+        None,
+    )
+    .unwrap();
+    store_for(&url, &barrier_prefix)
+        .store(&issued3.record)
+        .unwrap();
+    assert!(matches!(
+        store_for(&url, &barrier_prefix)
+            .delete_if_pending(&issued3.record.nonce)
+            .unwrap(),
+        DeleteIfPending::DeletedPending
+    ));
 }
 
 #[test]

@@ -859,6 +859,77 @@ final class RedisStorageTest extends TestCase
         self::assertSame($identity, $result->consumed->operationIdentity);
     }
 
+    public function testDeleteIfPendingIssuesWaitOnlyOnTheDeletedPendingTransition(): void
+    {
+        // The deleted-pending transition is durability-critical: a
+        // burned challenge that only vanished from the primary could
+        // reappear from a stale replica after promotion and be redeemed.
+        // The verified WAIT barrier runs exactly when the Lua deleted a
+        // pending record — and only then: missing and consumed report no
+        // mutation, so no barrier is issued.
+        $client = $this->requirePredis();
+        $storage = new RedisStorage($client, waitReplicas: 2, waitTimeoutMs: 100);
+        $client->waitAck = 2;
+        $waits = fn (): int => \count(array_values(array_filter($client->calls, fn ($c) => $c[0] === 'WAIT')));
+
+        self::assertSame('missing', $storage->deleteIfPending('absent-nonce')->state);
+        self::assertSame(0, $waits(), 'WAIT must NOT be issued for missing (no mutation occurred)');
+
+        $storage->store($this->makeRecord('consumed-nonce')); // +1 WAIT (issuance)
+        $storage->consume('consumed-nonce'); // +1 WAIT (the pending->consumed transition)
+        self::assertSame('consumed', $storage->deleteIfPending('consumed-nonce')->state);
+        self::assertSame(2, $waits(), 'WAIT must NOT be issued for consumed (no mutation occurred)');
+
+        $storage->store($this->makeRecord('pending-nonce')); // +1 WAIT (issuance)
+        self::assertSame('deleted-pending', $storage->deleteIfPending('pending-nonce')->state);
+        $waitsList = array_values(array_filter($client->calls, fn ($c) => $c[0] === 'WAIT'));
+        self::assertCount(4, $waitsList, 'two stores + one consume + the deleted-pending transition must each issue the WAIT barrier');
+        self::assertSame([2, 100], $waitsList[3][1], 'WAIT must carry the configured numreplicas and timeout');
+    }
+
+    public function testDeleteIfPendingSkipsWaitWhenDisabled(): void
+    {
+        $client = $this->requirePredis();
+        $storage = new RedisStorage($client);
+        $storage->store($this->makeRecord());
+
+        self::assertSame('deleted-pending', $storage->deleteIfPending('redis-nonce-1')->state);
+
+        $waits = array_values(array_filter($client->calls, fn ($c) => $c[0] === 'WAIT'));
+        self::assertSame([], $waits, 'WAIT must not be issued when waitReplicas is 0');
+    }
+
+    public function testDeleteIfPendingFailsClosedBelowTheAckThreshold(): void
+    {
+        // A violated barrier on the delete-if-pending path surfaces the
+        // same durability failure as the other transitions: fewer than
+        // waitReplicas acked replicas raise ReplicaWaitException, because
+        // the primary-side delete alone does not prove a promoted stale
+        // replica cannot resurrect the pending state.
+        $client = $this->requirePredis();
+        $storage = new RedisStorage($client, waitReplicas: 1, waitTimeoutMs: 100);
+        $client->waitAck = 1;
+        $storage->store($this->makeRecord());
+
+        $client->waitAck = 0;
+        try {
+            $storage->deleteIfPending('redis-nonce-1');
+            self::fail('deleteIfPending must fail closed when the delete is not durably replicated');
+        } catch (\KiwiCaptcha\Storage\ReplicaWaitException $e) {
+            self::assertStringContainsString('0 of 1', $e->getMessage());
+            self::assertStringContainsString('delete-if-pending transition', $e->getMessage());
+        }
+
+        // The delete DID land on the primary despite the violated
+        // barrier (the fail-closed exception is the durable signal, not
+        // a rollback): the record is gone from the primary's view, so a
+        // retry observes missing and cannot re-delete.
+        self::assertNull($client->store['kiwicaptcha:redis-nonce-1'] ?? null);
+
+        $client->waitAck = 1;
+        self::assertSame('missing', $storage->deleteIfPending('redis-nonce-1')->state, 'the failed-barrier delete still removed the record on the primary');
+    }
+
     public function testRealRedisDeleteIfPendingRaceNeverErasesCommittedEvidence(): void
     {
         // The toctou the atomic primitive closes: a cheap-failing

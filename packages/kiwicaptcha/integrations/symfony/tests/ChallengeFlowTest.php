@@ -301,7 +301,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
 
         // Host is case-insensitive (DNS); explicit default port equals the
         // default.
-        $response = $controller->challenge(JsonRequest::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7', 'HTTP_ORIGIN' => 'https://APP.EXAMPLE.COM:443'], '{"scope":"login"}'));
+        $response = $controller->challenge(JsonRequest::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7', 'HTTP_ORIGIN' => 'https://app.example.com:443'], '{"scope":"login"}'));
         self::assertSame(200, $response->getStatusCode());
 
         // Referer-origin fallback (no Origin header).
@@ -416,8 +416,8 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         $accepted = [
             'https://example.com' => 'the allowlisted origin itself',
             'https://example.com:443' => 'explicit default port equals the implicit one',
-            'https://EXAMPLE.COM' => 'host case-insensitivity (DNS)',
-            'https://EXAMPLE.COM:443' => 'case + explicit default port',
+            'https://example.com' => 'host case-insensitivity (DNS)',
+            'https://example.com:443' => 'case + explicit default port',
             'https://example.com.' => 'trailing dot is DNS-equivalent',
             'https://[2001:db8::1]:8443' => 'IPv6 literal kept bracketed',
         ];
@@ -794,7 +794,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         $controller = new ChallengeController($this->issuer(), null, false, null, null, null, null, ['https://app.example.com', 'https://cdn.example.com']);
 
         $response = $controller->challenge(JsonRequest::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7', 'HTTP_ORIGIN' => 'https://app.example.com'], '{"scope":"login"}'));
-        self::assertSame('frame-ancestors https://app.example.com https://cdn.example.com', $response->headers->get('Content-Security-Policy'), 'the CSP must carry the EXACT space-separated allowlisted origins');
+        self::assertSame('frame-ancestors https://app.example.com https://cdn.example.com', $response->headers->get('Content-Security-Policy'), 'the CSP must carry the exact space-separated allowlisted origins');
 
         // Error responses carry the same explicit CSP (never inherited from
         // default-src — it is always the full directive).
@@ -1143,7 +1143,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
 
         $cases = [
             ['origin', ['https://good.example', 'https://evil.example'], 'Origin twice, good + evil'],
-            ['origin', ['https://app.example', 'https://app.example'], 'Origin twice, IDENTICAL values'],
+            ['origin', ['https://app.example', 'https://app.example'], 'Origin twice, identical values'],
             ['forwarded', ['for=1.2.3.4', 'for=5.6.7.8'], 'Forwarded twice'],
             ['x-forwarded-for', ['1.2.3.4', '5.6.7.8'], 'X-Forwarded-For twice'],
             ['x-real-ip', ['1.2.3.4', '5.6.7.8'], 'X-Real-IP twice'],

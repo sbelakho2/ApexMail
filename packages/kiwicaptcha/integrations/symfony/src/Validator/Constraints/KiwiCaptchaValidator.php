@@ -77,17 +77,18 @@ final class KiwiCaptchaValidator extends ConstraintValidator
      * `operationId` option. The id must be unique per logical operation.
      *
      * Replay semantics: by default (no explicit operation id) verification
-     * is strictly single-use — the core records an operation identity with
-     * the pending→consumed transition, but a fromStoredResult outcome is
-     * never accepted by this validator, so a consumed token cannot fund a
-     * second request however it is re-presented (the fallback identity is
-     * a function of the token itself, which every request holding the
-     * token can derive; it proves nothing about the operation). With an
-     * explicit operation id the same logical operation's retry — same id,
-     * same token — replays the stored committed success (IP/TTL/telemetry
-     * exempt: the committed outcome was durably recorded only after those
-     * checks passed). A different id, a different binding, or a different
-     * token is refused (AlreadyConsumed / RequestBindingMismatch).
+     * is strictly single-use. The core records an operation identity with
+     * the pending-to-consumed transition, but a fromStoredResult outcome
+     * is never accepted by this validator, so a consumed token cannot
+     * fund a second request however it is re-presented. The fallback
+     * identity is a function of the token itself, which every request
+     * holding the token can derive; it proves nothing about the
+     * operation. With an explicit operation id, the same logical
+     * operation's retry (same id, same token) replays the stored
+     * committed success; IP/TTL/telemetry are exempt because the
+     * committed outcome was durably recorded only after those checks
+     * passed. A different id, a different binding, or a different token
+     * is refused (AlreadyConsumed / RequestBindingMismatch).
      */
     public const OPERATION_ID_ATTRIBUTE = '_kiwi_captcha_operation_id';
 
@@ -421,7 +422,7 @@ final class KiwiCaptchaValidator extends ConstraintValidator
         //     (kiwi_operation_id — the request attribute, the POSTed field,
         //     or the constraint option; an idempotency-key-shaped value).
         //     The identity then carries an explicit operation-id component,
-        //     which is the ONLY component that authorizes the replay of a
+        //     which is the only component that authorizes the replay of a
         //     stored committed success (the idempotent retry);
         //  2. the canonical transaction binding when one resolves (the
         //     authority's server-owned value, or the raw request binding);
@@ -494,7 +495,7 @@ final class KiwiCaptchaValidator extends ConstraintValidator
         // The replay gate: a fromStoredResult outcome is the core handing
         // back the committed verdict of the attempt that consumed the
         // record. The stored success is an authorization grant, and the
-        // identity that unlocked it proves the SAME logical operation only
+        // identity that unlocked it proves the same logical operation only
         // when it carries an explicit operation-id component — the binding
         // and token-nonce components are derivable by any request holding
         // the token (a different form submission re-posting the token),
@@ -750,11 +751,11 @@ final class KiwiCaptchaValidator extends ConstraintValidator
     /**
      * Ambiguous-consume normalization: decide the outcome of a
      * ConsumeIndeterminate verification from the stored consumed record
-     * ({@see ConsumedStateReadableInterface::consumedState()}) instead of
-     * re-deriving, with no side effects. The normalized outcome flows
-     * through the same pipeline as any other verification, the replay
-     * gate, binding check, outstanding accounting and final disposition
-     * included:
+     * via {@see ConsumedStateReadableInterface::consumedState()},
+     * instead of re-deriving, with no side effects. The normalized
+     * outcome flows through the same pipeline as any other
+     * verification, including the replay gate, binding check,
+     * outstanding accounting and final disposition. The replay cases:
      *  - a stored valid result whose retained operation identity matches
      *    the identity this validation derived (constant-time comparison)
      *    yields a valid outcome carrying the consumed record's nonce and
@@ -919,18 +920,20 @@ final class KiwiCaptchaValidator extends ConstraintValidator
             // {@see PostSolveDispositionStore::claim()}).
             $decisionId = $this->consumeDecisionForToken($token);
 
-            return [$this->assessFinalDisposition($token, $outcome, $request, $constraint, $ip, $session, $nonce, $canonicalBinding, $decisionId, $requirement), false, $requirement];
+            $final = $this->assessFinalDisposition($token, $outcome, $request, $constraint, $ip, $session, $nonce, $canonicalBinding, $decisionId, $requirement);
+
+            return [$final, false, $requirement];
         }
 
         $owner = bin2hex(random_bytes(16));
         $ttl = Config::MAX_TTL_SECS + $this->postSolveDispositionTtlMarginSecs;
         try {
-            // Nonce -> decision consumption, atomic with the claim: the
-            // short-lived mapping is consumed (delete-on-read, at most
-            // one winner) inside the store's claim transition and the
+            // Nonce-to-decision consumption, atomic with the claim: the
+            // short-lived mapping is consumed, delete-on-read, with at
+            // most one winner, inside the store's claim transition. The
             // paired handle is persisted in the pending disposition
             // record; see {@see PostSolveDispositionStore::claim()}. An
-            // owner crash after the claim can never lose the original
+            // owner crash after the claim cannot lose the original
             // decision id, and a crash-taken-over computation completes
             // the disposition with it. On scopes without post_solve_check
             // the original pre-issue decision id becomes the request's
@@ -938,7 +941,8 @@ final class KiwiCaptchaValidator extends ConstraintValidator
             // On post_solve_check scopes the superseded mapping is still
             // consumed (cleanup) and the fresh post-solve decision
             // becomes the current confirmation target instead.
-            $claim = $this->dispositionStore->claim($nonce, $owner, $ttl, $this->risk?->decisionKeyFor($nonce));
+            $decisionKey = $this->risk?->decisionKeyFor($nonce);
+            $claim = $this->dispositionStore->claim($nonce, $owner, $ttl, $decisionKey);
         } catch (\Throwable $e) {
             throw new PostSolveDispositionUnavailableException('the post-solve disposition store is unavailable', 0, $e);
         }
@@ -1607,10 +1611,10 @@ final class KiwiCaptchaValidator extends ConstraintValidator
     }
 
     /**
-     * The canonical transaction binding of the request, resolved exactly
-     * once per validation, before the core verification runs, and
-     * threaded through every binding decision of the validation: the
-     * operation identity, the core's expected-request-binding
+     * The canonical transaction binding of the request is resolved
+     * exactly once per validation, before the core verification runs.
+     * It is threaded through every binding decision of the validation:
+     * the operation identity, the core's expected-request-binding
      * enforcement, the signed-record binding comparison, the stage-2
      * transaction lookup, the obligation lookup and the chain creation.
      * The authority is never consulted twice. With an authority
