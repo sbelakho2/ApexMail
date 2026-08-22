@@ -71,7 +71,23 @@ async fn main() -> anyhow::Result<()> {
 }
 
 /// Spawn background jobs for enterprise features
-fn spawn_background_jobs(state: Arc<AppState>, _db: sqlx::PgPool) {
+fn spawn_background_jobs(state: Arc<AppState>, db: sqlx::PgPool) {
+    // Job 0:QBR sending-metrics rollup — aggregates yesterday's events into
+    // ent_sending_metrics daily so generated QBRs carry real numbers (the
+    // hourly cadence catches up after downtime; the rollup is idempotent).
+    let qbr_db = db.clone();
+    tokio::spawn(async move {
+        let service = enterprise::qbr::QBRService::new(qbr_db);
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(3600));
+        loop {
+            interval.tick().await;
+            let yesterday = chrono::Utc::now().date_naive() - chrono::Duration::days(1);
+            if let Err(e) = service.rollup_daily_sending_metrics(yesterday).await {
+                tracing::error!(error = %e, day = %yesterday, "QBR metrics rollup failed");
+            }
+        }
+    });
+
     // Job 1:Check SLA breaches every 60 seconds
     let sla_state = state.clone();
     tokio::spawn(async move {
