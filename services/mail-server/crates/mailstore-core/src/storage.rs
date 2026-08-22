@@ -191,10 +191,24 @@ impl MessageStorage {
         }
     }
 
-    /// Initialize database tables
+    /// Initialize database tables.
+    ///
+    /// The embedded sqlx chain runs ONLY when MAILSTORE_RUN_EMBEDDED_MIGRATIONS
+    /// is set: on the shared production database the canonical workspace chain
+    /// (services/mail-server/migrations, applied by the migrator one-shot
+    /// before the stack starts) owns `_sqlx_migrations`, and two sqlx chains
+    /// sharing one database hard-fail each other's subset checks. The
+    /// standalone crate-local compose sets this flag for its private database.
     pub async fn initialize(&self) -> Result<()> {
-        MIGRATOR.run(&self.pool).await?;
-        info!("Mailstore tables initialized");
+        if std::env::var("MAILSTORE_RUN_EMBEDDED_MIGRATIONS")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
+        {
+            MIGRATOR.run(&self.pool).await?;
+            info!("Mailstore embedded migrations applied");
+        } else {
+            info!("Mailstore embedded migrations skipped (canonical chain owns the shared database)");
+        }
         Ok(())
     }
 
