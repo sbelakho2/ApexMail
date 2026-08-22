@@ -204,9 +204,9 @@ LUA;
     /**
      * The verified-WAIT durability barrier (waitReplicas > 0) is
      * supported on standalone and Sentinel Redis connections. A Predis
-     * client on a Redis CLUSTER aggregate cannot route WAIT (it is
-     * connection-relative and carries no key slot) and is refused at
-     * construction with waitReplicas > 0 — keep waitReplicas = 0 on a
+     * client on a Redis cluster aggregate cannot route WAIT, since it
+     * is connection-relative and carries no key slot, and is refused
+     * at construction with waitReplicas > 0. Keep waitReplicas = 0 on a
      * cluster (or use a standalone/Sentinel connection).
      *
      * @param int $waitReplicas   when > 0, every durability-critical write
@@ -224,8 +224,8 @@ LUA;
      *                            record from a stale replica. Supported
      *                            topologies: standalone and Sentinel Redis
      *                            connections. A Predis client on a Redis
-     *                            CLUSTER aggregate with waitReplicas > 0 is
-     *                            refused at construction (WAIT is
+     *                            cluster aggregate with waitReplicas > 0
+     *                            is refused at construction, since WAIT is
      *                            connection-relative and cannot be routed
      *                            by slot); keep waitReplicas = 0 on a
      *                            cluster.
@@ -249,10 +249,10 @@ LUA;
     /**
      * Refuse the verified-WAIT hardening on a Predis Redis Cluster client.
      *
-     * WAIT is connection-relative — it counts replicas of the connection
-     * it is sent on and carries no key — so a Redis CLUSTER aggregate
-     * cannot route it: Predis dispatches every command to a node by key
-     * slot, and a keyless raw WAIT has no slot, so the dispatch throws
+     * WAIT is connection-relative: it counts replicas of the connection
+     * it is sent on and carries no key. A Redis cluster aggregate
+     * cannot route it, since Predis dispatches every command to a node
+     * by key slot, and a keyless raw WAIT has no slot; the dispatch throws
      * instead of reaching any node. A fake-slot workaround would be
      * unsafe (the aggregate would send WAIT on a node other than the one
      * that carried the write), so the verified barrier is refused at
@@ -262,10 +262,10 @@ LUA;
      * Sentinel (and master-slave) replication aggregate resolves every
      * command to the current primary's real node connection, where WAIT
      * is well-defined. The check targets
-     * {@see \Predis\Connection\Cluster\ClusterInterface} — implemented
+     * {@see \Predis\Connection\Cluster\ClusterInterface}, implemented
      * only by the cluster aggregates (RedisCluster, PredisCluster, and
      * any custom cluster aggregate), never by the replication
-     * aggregates — so exactly the cluster case is refused.
+     * aggregates, so exactly the cluster case is refused.
      */
     private function refuseVerifiedWaitOnPredisCluster(): void
     {

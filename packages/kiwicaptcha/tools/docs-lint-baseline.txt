@@ -27,7 +27,6 @@
 0 packages/kiwicaptcha-php/src/PoWAlgorithm.php
 0 packages/kiwicaptcha-php/src/SolutionToken.php
 0 packages/kiwicaptcha-php/src/Storage/ArrayStorage.php
-0 packages/kiwicaptcha-php/src/Storage/AtomicDeleteIfPendingInterface.php
 0 packages/kiwicaptcha-php/src/Storage/Psr6Storage.php
 0 packages/kiwicaptcha-php/src/Storage/RedisStorage.php
 0 packages/kiwicaptcha-php/src/Storage/ReplicaWaitException.php

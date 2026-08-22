@@ -22,6 +22,9 @@ COPY services/mail-server/Cargo.toml services/mail-server/Cargo.lock ./
 # This workspace relies on implicit src/lib.rs and src/main.rs targets, so
 # cargo metadata/fetch must see the full crate trees rather than manifests only.
 COPY services/mail-server/crates ./crates
+# The workspace migrations are embedded at compile time by the migrator crate
+# (sqlx::migrate! resolves ./../../migrations relative to crates/migrator).
+COPY services/mail-server/migrations ./migrations
 COPY packages/kiwicaptcha/Cargo.toml /app/packages/kiwicaptcha/Cargo.toml
 # Create a dummy src/lib.rs so cargo can resolve the kiwicaptcha target during
 # the deps/fetch stage. The real source is copied in the builder stages below.

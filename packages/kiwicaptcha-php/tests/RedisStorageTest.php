@@ -179,7 +179,7 @@ final class RedisStorageTest extends TestCase
     public function testPredisClusterClientWithWaitReplicasIsRefusedAtConstruction(): void
     {
         // The verified-WAIT barrier is connection-relative: a Redis
-        // CLUSTER aggregate cannot route WAIT (it has no key slot), so
+        // A cluster aggregate cannot route WAIT (it has no key slot), so
         // the hardening combination is unusable and is refused at
         // construction — fail closed, before any write can run — not on
         // the first durability-critical write.
@@ -194,7 +194,7 @@ final class RedisStorageTest extends TestCase
 
         try {
             new RedisStorage($client, waitReplicas: 1);
-            self::fail('a Predis Redis Cluster client must be refused when waitReplicas > 0');
+            self::fail('a Predis Redis cluster client must be refused when waitReplicas > 0');
         } catch (\InvalidArgumentException $e) {
             self::assertStringContainsString('Predis Redis Cluster', $e->getMessage());
             self::assertStringContainsString('connection-relative', $e->getMessage());
