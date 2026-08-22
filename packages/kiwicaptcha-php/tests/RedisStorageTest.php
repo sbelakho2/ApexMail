@@ -225,7 +225,7 @@ final class RedisStorageTest extends TestCase
     {
         // The Sentinel replication aggregate wraps every command in
         // failure-retry logic: on a communication failure it wipes its
-        // server list, rediscovers the topology, and RETRIES the command
+        // server list, rediscovers the topology, and retries the command
         // on a NEW connection to the promoted node. The verified WAIT
         // travels through the same aggregate, so a primary failure
         // between the write and the WAIT retries the WAIT on a

@@ -776,6 +776,9 @@ services:
       # production: fail the deployment instead. (The jwt_secret Docker
       # secret stays declared for deployments that prefer mounting it.)
       JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be set in production}
+      # Production validation refuses to start without this key (log-stream
+      # destination credentials are encrypted at rest with it).
+      LOG_STREAM_ENCRYPTION_KEY: ${LOG_STREAM_ENCRYPTION_KEY:?LOG_STREAM_ENCRYPTION_KEY must be set in production}
       JWT_PUBLIC_KEY_PEM_FILE: /run/secrets/jwt_public_key_pem
     secrets:
       - postgres_password

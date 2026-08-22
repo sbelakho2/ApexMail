@@ -205,14 +205,14 @@ LUA;
      * The verified-WAIT durability barrier (waitReplicas > 0) is
      * supported on standalone Redis connections only. A Predis client on
      * a replication aggregate (Sentinel or master-slave) or on a Redis
-     * cluster aggregate is refused at construction with waitReplicas > 0:
-     * WAIT is connection-affine, counting replicas of the connection it
-     * is sent on, and a replication aggregate's failure retry executes
-     * the WAIT on a replacement connection whose write offset is empty —
-     * the acknowledgement would prove nothing about the original write's
-     * replication. A cluster aggregate cannot route a keyless WAIT at
-     * all. A future pinned-master implementation may restore Sentinel
-     * support; keep waitReplicas = 0 on an aggregate today.
+     * cluster aggregate is refused at construction with waitReplicas > 0.
+     * WAIT is connection-affine: it counts replicas of the connection it
+     * is sent on. A replication aggregate's failure retry executes the
+     * WAIT on a replacement connection whose write offset is empty, so
+     * the acknowledgement would prove nothing about the original
+     * write's replication. A cluster aggregate cannot route a keyless
+     * WAIT at all. A future pinned-master implementation may restore
+     * Sentinel support; keep waitReplicas = 0 on an aggregate today.
      *
      * @param int $waitReplicas   when > 0, every durability-critical write
      *                            (issuance, the pending→consumed
@@ -234,9 +234,9 @@ LUA;
      *                            connection-relative: a replication
      *                            aggregate's failure retry executes the
      *                            WAIT on a replacement connection whose
-     *                            write offset is empty, and a cluster
+     *                            write offset is empty. A cluster
      *                            aggregate cannot route a keyless WAIT by
-     *                            slot); keep waitReplicas = 0 on an
+     *                            slot; keep waitReplicas = 0 on an
      *                            aggregate.
      * @param int $waitTimeoutMs  wait timeout in milliseconds (default 100).
      * @param int $ttlMarginSecs  extra retention on the record beyond token
@@ -263,15 +263,15 @@ LUA;
      * it is sent on and carries no key. A Predis replication aggregate
      * (Sentinel or master-slave) wraps every command in failure-retry
      * logic: on a communication failure it wipes its server list,
-     * rediscovers the topology, and RETRIES the command on a NEW
+     * rediscovers the topology, and retries the command on a NEW
      * connection to the promoted node. The verified WAIT goes through
-     * the same aggregate, so a primary failure between the write and the
+     * the same aggregate. A primary failure between the write and the
      * WAIT retries the WAIT on a replacement connection whose write
-     * offset is zero — the acknowledgement would prove nothing about the
-     * original write's replication, yet the barrier would treat it as
-     * proof. The check therefore refuses the whole replication aggregate
-     * family with waitReplicas > 0, fail closed before any write can
-     * run. A Redis cluster aggregate is refused as well, since Predis
+     * offset is zero, so the acknowledgement would prove nothing about
+     * the original write's replication, yet the barrier would treat it
+     * as proof. The check therefore refuses the whole replication
+     * aggregate family with waitReplicas > 0, fail closed before any
+     * write can run. A Redis cluster aggregate is refused as well, since Predis
      * dispatches every command to a node by key slot and a keyless raw
      * WAIT has no slot; the dispatch throws instead of reaching any
      * node. A fake-slot workaround would be unsafe (the aggregate would
@@ -335,10 +335,10 @@ LUA;
 
     /**
      * Atomic consume transition. The verified WAIT durability barrier
-     * applies to the FRESH pending→consumed transition only (the write
-     * that actually happened): a replay of an already-consumed record or
-     * a missing record performs no write, so no WAIT is issued and an
-     * idempotent retry can never turn a replica outage into a storage
+     * applies to the fresh pending-to-consumed transition only, the
+     * write that actually happened. A replay of an already-consumed
+     * record or a missing record performs no write, so no WAIT is
+     * issued and an idempotent retry can never turn a replica outage into a storage
      * failure.
      */
     public function consume(string $nonce): ?ConsumedRecord
@@ -392,8 +392,8 @@ LUA;
     /**
      * Atomic consume transition recording the logical-operation identity
      * with the state flip. The verified WAIT durability barrier applies
-     * to the FRESH pending→consumed transition only (the write that
-     * actually happened): a replay of an already-consumed record or a
+     * to the fresh pending-to-consumed transition only, the write that
+     * actually happened. A replay of an already-consumed record or a
      * missing record performs no write, so no WAIT is issued and an
      * idempotent retry can never turn a replica outage into a storage
      * failure.
