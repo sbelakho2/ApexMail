@@ -21,6 +21,11 @@
 
 BEGIN;
 
+-- events pre-exists without these columns on runtime-provisioned
+-- (apexmail-db SCHEMA) databases — add them before widening.
+ALTER TABLE events ADD COLUMN IF NOT EXISTS domain_id TEXT;
+ALTER TABLE events ADD COLUMN IF NOT EXISTS campaign_id TEXT;
+
 ALTER TABLE events
     ALTER COLUMN domain_id TYPE TEXT;
 

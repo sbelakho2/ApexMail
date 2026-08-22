@@ -75,8 +75,11 @@ pub async fn test_pool(test_name: &str) -> Option<PgPool> {
 }
 
 fn shared_test_url() -> Option<url::Url> {
-    let raw = std::env::var("SALES_TEST_DATABASE_URL")
-        .unwrap_or_else(|_| "postgres://127.0.0.1:5432/apexmail_test".to_string());
+    // F6: no localhost default. A brew/compose postgres listening on the
+    // ambient 5432 made these tests run against an unrelated dev database;
+    // the env var must name the intended server explicitly (CI points it at
+    // an ephemeral container), otherwise the suite soft-skips.
+    let raw = std::env::var("SALES_TEST_DATABASE_URL").ok()?;
     url::Url::parse(&raw).ok()
 }
 
@@ -189,6 +192,23 @@ async fn apply_platform_migrations(pool: &PgPool) -> anyhow::Result<()> {
     let migrator = Migrator::new(temp_dir.clone()).await?;
     migrator.run(pool).await?;
     let _ = fs::remove_dir_all(temp_dir);
+
+    // F6 follow-up: `tools/migrations` still declares the platform campaign
+    // attribution columns as VARCHAR(26) (ULID-era), while the canonical
+    // chain (services/mail-server/migrations) and the production dispatcher
+    // target UUID campaign ids (`$5::uuid` in CAMPAIGN_EMAIL_QUEUE_INSERT_SQL
+    // overflows the varchar). Align the two drifted columns with the chain's
+    // shape so the gated dispatcher tests exercise the real contract. The
+    // table is empty at provisioning time; the USING NULL keeps the ALTER
+    // safe if a stale row ever survives.
+    sqlx::query(
+        "ALTER TABLE email_queue ALTER COLUMN campaign_id TYPE uuid USING NULL",
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query("ALTER TABLE messages ALTER COLUMN campaign_id TYPE uuid USING NULL")
+        .execute(pool)
+        .await?;
     Ok(())
 }
 

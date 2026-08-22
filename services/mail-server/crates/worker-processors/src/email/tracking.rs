@@ -435,8 +435,9 @@ pub fn rewrite_links(html: &str, job: &EmailJob, config: &TrackingConfig) -> Str
 mod tests {
     use super::*;
 
-    /// Serializes env-mutating tests (std::env is process-global).
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    /// Serializes env-mutating tests against every other module in this
+    /// crate (std::env is process-global; see `crate::test_support`).
+    use crate::test_support::ENV_LOCK;
     const TEST_SECRET: &str = "test-secret-key-32-bytes-minimum!!";
 
     fn with_test_secret() -> std::sync::MutexGuard<'static, ()> {

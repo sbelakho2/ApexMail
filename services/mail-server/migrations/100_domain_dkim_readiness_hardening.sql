@@ -10,6 +10,9 @@ ALTER TABLE domains ADD COLUMN IF NOT EXISTS dkim_public_key TEXT;
 ALTER TABLE domains ADD COLUMN IF NOT EXISTS dkim_private_key TEXT;
 ALTER TABLE domains ADD COLUMN IF NOT EXISTS dkim_enabled BOOLEAN NOT NULL DEFAULT false;
 ALTER TABLE domains ADD COLUMN IF NOT EXISTS ses_verified BOOLEAN NOT NULL DEFAULT false;
+-- verified is absent on runtime-provisioned (apexmail-db SCHEMA) domains —
+-- reconcile it so the readiness UPDATEs below apply on both shapes.
+ALTER TABLE domains ADD COLUMN IF NOT EXISTS verified BOOLEAN NOT NULL DEFAULT false;
 
 UPDATE domains
 SET verified = false

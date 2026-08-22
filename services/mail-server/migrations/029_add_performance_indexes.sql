@@ -48,6 +48,9 @@ END $$;
 DO $$
 BEGIN
   IF to_regclass('public.audit_logs') IS NOT NULL
+     AND EXISTS (SELECT 1 FROM information_schema.columns
+                 WHERE table_schema = 'public' AND table_name = 'audit_logs'
+                   AND column_name = 'user_id')
      AND NOT EXISTS (SELECT 1 FROM pg_class WHERE relname = 'idx_audit_logs_user_created') THEN
     EXECUTE format('CREATE INDEX IF NOT EXISTS idx_audit_logs_user_created
       ON audit_logs (user_id, created_at DESC)');
@@ -61,6 +64,9 @@ END $$;
 DO $$
 BEGIN
   IF to_regclass('public.domains') IS NOT NULL
+     AND EXISTS (SELECT 1 FROM information_schema.columns
+                 WHERE table_schema = 'public' AND table_name = 'domains'
+                   AND column_name = 'domain')
      AND NOT EXISTS (SELECT 1 FROM pg_class WHERE relname = 'idx_domains_domain') THEN
     EXECUTE format('CREATE INDEX IF NOT EXISTS idx_domains_domain
       ON domains (domain)');

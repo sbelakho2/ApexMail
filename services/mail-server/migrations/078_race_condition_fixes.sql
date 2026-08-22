@@ -34,10 +34,17 @@ BEGIN
             WHERE conname = 'webhook_queue_webhook_id_fkey'
               AND conrelid = 'public.webhook_queue'::regclass
         ) THEN
-            ALTER TABLE webhook_queue
-                ADD CONSTRAINT webhook_queue_webhook_id_fkey
-                FOREIGN KEY (webhook_id) REFERENCES webhooks(id) ON DELETE CASCADE;
-            RAISE NOTICE 'RC-002: Added cascading FK from webhook_queue to webhooks';
+            BEGIN
+                ALTER TABLE webhook_queue
+                    ADD CONSTRAINT webhook_queue_webhook_id_fkey
+                    FOREIGN KEY (webhook_id) REFERENCES webhooks(id) ON DELETE CASCADE;
+                RAISE NOTICE 'RC-002: Added cascading FK from webhook_queue to webhooks';
+            EXCEPTION WHEN OTHERS THEN
+                -- webhooks.id is UUID on runtime-provisioned (apexmail-db
+                -- SCHEMA) databases while webhook_queue.webhook_id is
+                -- VARCHAR(26) — "cannot be implemented"; skip tolerantly.
+                RAISE NOTICE 'RC-002: FK webhook_queue_webhook_id_fkey skipped (%)', SQLERRM;
+            END;
         END IF;
     END IF;
 END $$;

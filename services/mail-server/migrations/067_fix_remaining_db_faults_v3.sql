@@ -251,7 +251,12 @@ BEGIN
         END IF;
 
         -- Add composite index on (pool_id, status, day) for warmup progress queries
-        IF NOT EXISTS (
+        -- (pool_id is absent on runtime-provisioned ISP-catalog-shaped
+        -- isp_warmup_schedules — the apexmail-db SCHEMA shape)
+        IF EXISTS (SELECT 1 FROM information_schema.columns
+                   WHERE table_schema='public' AND table_name='isp_warmup_schedules'
+                     AND column_name='pool_id')
+           AND NOT EXISTS (
             SELECT 1 FROM pg_class WHERE relname = 'idx_isp_warmup_progress'
         ) THEN
             EXECUTE 'CREATE INDEX IF NOT EXISTS idx_isp_warmup_progress

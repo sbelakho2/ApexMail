@@ -2,8 +2,10 @@
 //!
 //! These tests exercise the HTTP surface end-to-end against a real Postgres
 //! instance when one is available. The target database is taken from
-//! `ENTERPRISE_TEST_DATABASE_URL` (default `postgres://127.0.0.1:5432/apexmail_test`).
-//! When the database is unreachable the tests **skip** (print a SKIP notice
+//! `ENTERPRISE_TEST_DATABASE_URL` (F6: no localhost default — an ambient
+//! brew/compose postgres on 5432 must not be probed implicitly; CI points
+//! the variable at an ephemeral container). When the variable is unset or
+//! the database is unreachable the tests **skip** (print a SKIP notice
 //! and return) so `cargo test` stays green in environments without Postgres.
 //!
 //! Schema bootstrap: the repo migrations that create the enterprise tables
@@ -147,8 +149,10 @@ CREATE TABLE IF NOT EXISTS tenants (
 "#;
 
 async fn try_setup() -> Option<TestApp> {
-    let url = std::env::var("ENTERPRISE_TEST_DATABASE_URL")
-        .unwrap_or_else(|_| "postgres://127.0.0.1:5432/apexmail_test".to_string());
+    // F6: no localhost default — an ambient brew/compose postgres on 5432
+    // must not be probed implicitly (CI points this variable at an ephemeral
+    // container; unset means skip).
+    let url = std::env::var("ENTERPRISE_TEST_DATABASE_URL").ok()?;
 
     let db = match tokio::time::timeout(
         std::time::Duration::from_secs(3),

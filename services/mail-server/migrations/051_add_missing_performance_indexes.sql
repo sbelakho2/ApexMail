@@ -49,7 +49,10 @@ END $$;
 -- =============================================================================
 DO $$
 BEGIN
-  IF NOT EXISTS (SELECT 1 FROM pg_class WHERE relname = 'idx_audit_logs_tenant_resource') THEN
+  IF EXISTS (SELECT 1 FROM information_schema.columns
+             WHERE table_schema = 'public' AND table_name = 'audit_logs'
+               AND column_name = 'resource')
+     AND NOT EXISTS (SELECT 1 FROM pg_class WHERE relname = 'idx_audit_logs_tenant_resource') THEN
     EXECUTE format('CREATE INDEX IF NOT EXISTS idx_audit_logs_tenant_resource
       ON audit_logs (tenant_id, resource, timestamp)');
   END IF;
@@ -77,6 +80,9 @@ END $$;
 DO $$
 BEGIN
   IF to_regclass('public.api_keys') IS NOT NULL
+     AND EXISTS (SELECT 1 FROM information_schema.columns
+                 WHERE table_schema = 'public' AND table_name = 'api_keys'
+                   AND column_name = 'revoked_at')
      AND NOT EXISTS (SELECT 1 FROM pg_class WHERE relname = 'idx_api_keys_tenant_revoked') THEN
     EXECUTE format('CREATE INDEX IF NOT EXISTS idx_api_keys_tenant_revoked
       ON api_keys (tenant_id, revoked_at)

@@ -317,8 +317,11 @@ mod tests {
             let path = format!("/attack/route-{i:06}-zz");
             seen.insert(endpoint_label(&path));
         }
+        // The bound is MAX_ENDPOINT_LABELS *retained* route classes plus the
+        // single `other` overflow value the retained set collapses into —
+        // 501 distinct observed labels, never more regardless of input count.
         assert!(
-            seen.len() <= MAX_ENDPOINT_LABELS,
+            seen.len() <= MAX_ENDPOINT_LABELS + 1,
             "distinct labels must stay bounded, got {}",
             seen.len()
         );

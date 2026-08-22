@@ -39,12 +39,26 @@ CREATE TABLE IF NOT EXISTS audit_chain_head (
     updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-INSERT INTO audit_chain_head (chain_id, head_hash, prev_hash, head_seq)
-SELECT 'global', latest.hash, latest.previous_hash, 1
-FROM (
-    SELECT hash, previous_hash
-    FROM audit_logs
-    ORDER BY timestamp DESC, id DESC
-    LIMIT 1
-) AS latest
-ON CONFLICT (chain_id) DO NOTHING;
+-- Backfill only from the canonical audit_logs shape (038/050): the seed
+-- reads previous_hash/timestamp, which runtime-provisioned (apexmail-db
+-- SCHEMA) audit_logs lacks. Skipping leaves the head NULL-rooted, which
+-- the append statement handles (prev_hash IS NULL for the first entry).
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM information_schema.columns
+               WHERE table_schema = 'public' AND table_name = 'audit_logs'
+                 AND column_name = 'previous_hash')
+       AND EXISTS (SELECT 1 FROM information_schema.columns
+                   WHERE table_schema = 'public' AND table_name = 'audit_logs'
+                     AND column_name = 'timestamp') THEN
+        INSERT INTO audit_chain_head (chain_id, head_hash, prev_hash, head_seq)
+        SELECT 'global', latest.hash, latest.previous_hash, 1
+        FROM (
+            SELECT hash, previous_hash
+            FROM audit_logs
+            ORDER BY timestamp DESC, id DESC
+            LIMIT 1
+        ) AS latest
+        ON CONFLICT (chain_id) DO NOTHING;
+    END IF;
+END $$;

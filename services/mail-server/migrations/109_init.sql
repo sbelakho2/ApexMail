@@ -64,10 +64,37 @@ ON mail_messages(account_id, mailbox_id, date DESC);
 CREATE INDEX IF NOT EXISTS idx_mail_messages_search
 ON mail_messages USING GIN (to_tsvector('english', subject || ' ' || COALESCE(text_body, '')));
 
-CREATE UNIQUE INDEX IF NOT EXISTS idx_mail_messages_mailbox_uid
-ON mail_messages(mailbox_id, uid);
+-- Partitioned (050+) shape requires unique indexes to include the partition
+-- key (created_at); the plain (mailstore-first) shape keeps the two-column
+-- unique. IF NOT EXISTS semantics: a no-op once either variant exists
+-- (same guard pattern as 002/097/102).
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = 'idx_mail_messages_mailbox_uid') THEN
+        IF EXISTS (SELECT 1 FROM pg_partitioned_table
+                   WHERE partrelid = 'mail_messages'::regclass) THEN
+            CREATE UNIQUE INDEX idx_mail_messages_mailbox_uid
+                ON mail_messages(mailbox_id, uid, created_at);
+        ELSE
+            CREATE UNIQUE INDEX idx_mail_messages_mailbox_uid
+                ON mail_messages(mailbox_id, uid);
+        END IF;
+    END IF;
+END $$;
 
 -- DI-006: Prevent duplicate messages with same Message-Id within the same mailbox
-CREATE UNIQUE INDEX IF NOT EXISTS idx_mail_messages_dedup
-ON mail_messages(account_id, mailbox_id, message_id)
-WHERE message_id IS NOT NULL AND message_id != '';
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = 'idx_mail_messages_dedup') THEN
+        IF EXISTS (SELECT 1 FROM pg_partitioned_table
+                   WHERE partrelid = 'mail_messages'::regclass) THEN
+            CREATE UNIQUE INDEX idx_mail_messages_dedup
+                ON mail_messages(account_id, mailbox_id, message_id, created_at)
+                WHERE message_id IS NOT NULL AND message_id != '';
+        ELSE
+            CREATE UNIQUE INDEX idx_mail_messages_dedup
+                ON mail_messages(account_id, mailbox_id, message_id)
+                WHERE message_id IS NOT NULL AND message_id != '';
+        END IF;
+    END IF;
+END $$;

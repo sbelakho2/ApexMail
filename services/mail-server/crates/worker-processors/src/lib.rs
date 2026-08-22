@@ -19,6 +19,21 @@ pub mod email;
 pub mod reply_handler;
 pub mod webhook;
 
+/// Single crate-wide lock serializing env-mutating tests.
+///
+/// `std::env` is process-global, and `cargo test` runs every test of this
+/// crate's binary in ONE process on parallel threads. Per-module locks do not
+/// exclude each other: `email::tracking` and `email::processor` both mutate
+/// `TRACKING_SECRET_KEY`, so a module-local lock let one test re-set the
+/// variable while another asserted its absence (ci/README.md §9 F10 — flaky
+/// under `cargo test`, invisible under nextest's process isolation). Every
+/// `#[cfg(test)]` module that calls `std::env::set_var`/`remove_var` must take
+/// this lock for the duration of the mutation AND the assertion.
+#[cfg(test)]
+pub(crate) mod test_support {
+    pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+}
+
 // Re-export main processor types
 pub use analytics::AnalyticsProcessor;
 pub use common::{ProcessorConfig, ProcessorError, ProcessorResult};

@@ -5,7 +5,6 @@ This ledger closes the WS-ALL M-58 coverage gap by assigning every crate that wa
 | Crate | Primary Surface | Existing Coverage | Required Verification |
 | --- | --- | --- | --- |
 | `ai-embeddings` | embedding generation, chunking, vector search routes | functional AI tests cover embedding/search workflows | `cargo test --manifest-path services/mail-server/Cargo.toml -p ai-embeddings --lib` and `cargo test --manifest-path services/mail-server/Cargo.toml -p functional-tests --test functional_ai` |
-| `bounce-analytics` | bounce aggregation worker and classification rollups | lib tests plus worker compile coverage | `cargo test --manifest-path services/mail-server/Cargo.toml -p bounce-analytics --lib` |
 | `devex-service` | onboarding, SDK management, webhook tester | service lib compile/test coverage | `cargo test --manifest-path services/mail-server/Cargo.toml -p devex-service --lib` |
 | `edge-cases` | EAI, attachment, calendar, and delivery edge-case parsing | service lib compile/test coverage | `cargo test --manifest-path services/mail-server/Cargo.toml -p edge-cases --lib` |
 | `fingerprint` | JA4/TLS and HTTP/2 fingerprint parsing | dedicated unit tests | `cargo test --manifest-path services/mail-server/Cargo.toml -p fingerprint` |

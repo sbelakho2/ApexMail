@@ -687,7 +687,11 @@ END $$;
 DO $$
 BEGIN
     IF to_regclass('public.audit_logs') IS NOT NULL THEN
-        IF NOT EXISTS (SELECT 1 FROM pg_class WHERE relname = 'idx_audit_logs_user_id') THEN
+        -- user_id is absent on runtime-provisioned (apexmail-db SCHEMA) audit_logs
+        IF EXISTS (SELECT 1 FROM information_schema.columns
+                   WHERE table_schema='public' AND table_name='audit_logs'
+                     AND column_name='user_id')
+           AND NOT EXISTS (SELECT 1 FROM pg_class WHERE relname = 'idx_audit_logs_user_id') THEN
             EXECUTE 'CREATE INDEX IF NOT EXISTS idx_audit_logs_user_id ON audit_logs(user_id)';
             RAISE NOTICE 'H-09/G-01.c: Created idx_audit_logs_user_id on audit_logs(user_id)';
         END IF;
@@ -785,7 +789,11 @@ BEGIN
         END IF;
 
         -- Create the correct index using actual column names
-        IF NOT EXISTS (
+        -- (resource/timestamp are absent on runtime-provisioned audit_logs)
+        IF EXISTS (SELECT 1 FROM information_schema.columns
+                   WHERE table_schema='public' AND table_name='audit_logs'
+                     AND column_name='resource')
+           AND NOT EXISTS (
             SELECT 1 FROM pg_class WHERE relname = 'idx_audit_logs_tenant_resource'
         ) THEN
             EXECUTE 'CREATE INDEX IF NOT EXISTS idx_audit_logs_tenant_resource

@@ -28,6 +28,12 @@ pub const GLOBALS_INPUT_CSS: &str = include_str!("../assets/globals.input.css");
 pub const MARKETING_INPUT_CSS: &str =
     include_str!("../../../../../apps/marketing-zola/static/css/input.css");
 
+/// Whether the embedded marketing pages are the REAL Zola build output
+/// (`apps/marketing-zola/public` present at compile time) rather than the
+/// build script's placeholders for a bare checkout (ci/README.md §9 F5).
+/// Tests that assert real page content should skip when this is `false`.
+pub const MARKETING_PUBLIC_BUILT: bool = cfg!(marketing_public_built);
+
 #[cfg(test)]
 mod tests {
     use super::{GLOBALS_CSS, GLOBALS_INPUT_CSS, MARKETING_INPUT_CSS};

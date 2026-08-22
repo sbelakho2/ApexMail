@@ -29,16 +29,35 @@ CREATE TABLE IF NOT EXISTS audit_logs (
     signature       TEXT        NOT NULL
 );
 
-CREATE INDEX IF NOT EXISTS idx_audit_logs_tenant_ts
-    ON audit_logs (tenant_id, timestamp DESC);
-CREATE INDEX IF NOT EXISTS idx_audit_logs_user_ts
-    ON audit_logs (user_id, timestamp DESC);
-CREATE INDEX IF NOT EXISTS idx_audit_logs_action_ts
-    ON audit_logs (action, timestamp DESC);
-CREATE INDEX IF NOT EXISTS idx_audit_logs_resource
-    ON audit_logs (resource, resource_id);
-CREATE INDEX IF NOT EXISTS idx_audit_logs_outcome
-    ON audit_logs (outcome) WHERE outcome <> 'success';
+-- Indexes assume the canonical audit_logs shape this migration creates. On
+-- runtime-provisioned databases audit_logs pre-exists with a different shape
+-- (no timestamp/user_id/resource/outcome columns) — CREATE TABLE IF NOT EXISTS
+-- is a no-op there, so guard each index on its columns existing.
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM information_schema.columns
+               WHERE table_schema = 'public' AND table_name = 'audit_logs'
+                 AND column_name = 'timestamp') THEN
+        CREATE INDEX IF NOT EXISTS idx_audit_logs_tenant_ts
+            ON audit_logs (tenant_id, timestamp DESC);
+        CREATE INDEX IF NOT EXISTS idx_audit_logs_user_ts
+            ON audit_logs (user_id, timestamp DESC);
+        CREATE INDEX IF NOT EXISTS idx_audit_logs_action_ts
+            ON audit_logs (action, timestamp DESC);
+    END IF;
+    IF EXISTS (SELECT 1 FROM information_schema.columns
+               WHERE table_schema = 'public' AND table_name = 'audit_logs'
+                 AND column_name = 'resource') THEN
+        CREATE INDEX IF NOT EXISTS idx_audit_logs_resource
+            ON audit_logs (resource, resource_id);
+    END IF;
+    IF EXISTS (SELECT 1 FROM information_schema.columns
+               WHERE table_schema = 'public' AND table_name = 'audit_logs'
+                 AND column_name = 'outcome') THEN
+        CREATE INDEX IF NOT EXISTS idx_audit_logs_outcome
+            ON audit_logs (outcome) WHERE outcome <> 'success';
+    END IF;
+END $$;
 
 CREATE TABLE IF NOT EXISTS audit_logs_archive (LIKE audit_logs INCLUDING ALL);
 

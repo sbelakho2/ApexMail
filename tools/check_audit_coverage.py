@@ -10,7 +10,8 @@ ROOT = Path(__file__).resolve().parents[1]
 LEDGER = ROOT / "docs/security/ws-all-audit-coverage.md"
 REQUIRED_CRATES = [
     "ai-embeddings",
-    "bounce-analytics",
+    # "bounce-analytics" removed: the workspace removed the crate (see
+    # deploy/DEPLOYMENT.md "Legacy / removed crates") — ci/README.md §9 F9.
     "devex-service",
     "edge-cases",
     "fingerprint",

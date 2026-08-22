@@ -6,6 +6,10 @@
 DO $$
 BEGIN
     IF to_regclass('public.audit_logs') IS NOT NULL
+       -- resource/user_id/details are absent on runtime-provisioned
+       -- (apexmail-db SCHEMA) audit_logs — skip FTS there.
+       AND EXISTS (SELECT 1 FROM information_schema.columns
+                   WHERE table_name = 'audit_logs' AND column_name = 'resource')
        AND NOT EXISTS (
            SELECT 1 FROM information_schema.columns
            WHERE table_name = 'audit_logs' AND column_name = 'fts_vector'

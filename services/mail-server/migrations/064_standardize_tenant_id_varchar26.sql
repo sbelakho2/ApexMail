@@ -83,6 +83,10 @@ CREATE TABLE IF NOT EXISTS tenants (
 
 ALTER TABLE tenants ADD COLUMN IF NOT EXISTS plan VARCHAR(50) NOT NULL DEFAULT 'starter';
 ALTER TABLE tenants ADD COLUMN IF NOT EXISTS status VARCHAR(50) NOT NULL DEFAULT 'pending';
+-- settings was only in the CREATE TABLE above — reconcile it on shapes where
+-- tenants pre-exists (e.g. apexmail-db SCHEMA-provisioned databases), or the
+-- 072 system-tenant seed INSERT fails on the missing column.
+ALTER TABLE tenants ADD COLUMN IF NOT EXISTS settings JSONB NOT NULL DEFAULT '{}'::jsonb;
 ALTER TABLE tenants ADD COLUMN IF NOT EXISTS metadata JSONB NOT NULL DEFAULT '{}'::jsonb;
 
 CREATE TEMP TABLE _tenant_id_map (

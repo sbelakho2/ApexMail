@@ -70,7 +70,12 @@ END $$;
 DO $$
 BEGIN
     IF to_regclass('public.templates') IS NOT NULL THEN
-        ALTER TABLE templates ALTER COLUMN slug DROP NOT NULL;
+        -- slug is absent on runtime-provisioned (apexmail-db SCHEMA) templates
+        IF EXISTS (SELECT 1 FROM information_schema.columns
+                   WHERE table_schema='public' AND table_name='templates'
+                     AND column_name='slug') THEN
+            ALTER TABLE templates ALTER COLUMN slug DROP NOT NULL;
+        END IF;
         ALTER TABLE templates ADD COLUMN IF NOT EXISTS status VARCHAR(20) DEFAULT 'active';
     END IF;
 END $$;

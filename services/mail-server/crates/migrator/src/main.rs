@@ -52,13 +52,18 @@ fn print_migrations() {
 
 /// Number of migrations already recorded in `_sqlx_migrations` (0 when the
 /// table does not exist yet, i.e. a fresh database before the first run).
+///
+/// `to_regclass(...)` returns a ROW with a NULL column (not zero rows) when
+/// the relation does not exist, so the scalar must decode as `Option<String>`
+/// — a plain `String` fails with "unexpected null" on a completely fresh
+/// database (pipeline finding F2).
 async fn applied_count(pool: &sqlx::PgPool) -> Result<i64> {
-    let table: Option<String> =
+    let table: Option<Option<String>> =
         sqlx::query_scalar("SELECT to_regclass('public._sqlx_migrations')::text")
             .fetch_optional(pool)
             .await
             .context("failed to check for _sqlx_migrations")?;
-    match table {
+    match table.flatten() {
         Some(_) => Ok(sqlx::query_scalar("SELECT count(*) FROM _sqlx_migrations")
             .fetch_one(pool)
             .await
@@ -189,6 +194,38 @@ mod tests {
         assert_eq!(applied as usize, MIGRATIONS.migrations.len());
         // Idempotency: a second run is a no-op that still succeeds.
         MIGRATIONS.run(&pool).await.expect("re-run migrations");
+        pool.close().await;
+    }
+
+    /// DB-gated regression test for the fresh-database NULL decode (F2):
+    /// `applied_count` runs BEFORE any migration has created
+    /// `_sqlx_migrations`, so `to_regclass` returns a row with a NULL column.
+    /// It must report 0 instead of failing to decode. Requires an EMPTY
+    /// `TEST_FRESH_DATABASE_URL` (the pipeline points it at an ephemeral
+    /// container); skipped when unset.
+    #[tokio::test]
+    async fn applied_count_on_a_completely_fresh_database_returns_zero() {
+        let Ok(url) = std::env::var("TEST_FRESH_DATABASE_URL") else {
+            eprintln!("skipping: TEST_FRESH_DATABASE_URL not set");
+            return;
+        };
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .expect("connect TEST_FRESH_DATABASE_URL");
+        // The database must be untouched: no ledger table yet.
+        let exists: Option<Option<String>> =
+            sqlx::query_scalar("SELECT to_regclass('public._sqlx_migrations')::text")
+                .fetch_optional(&pool)
+                .await
+                .expect("probe _sqlx_migrations");
+        assert!(
+            exists.flatten().is_none(),
+            "TEST_FRESH_DATABASE_URL must point at an empty database"
+        );
+        let count = applied_count(&pool).await.expect("applied_count on fresh DB");
+        assert_eq!(count, 0, "fresh database must report 0 applied migrations");
         pool.close().await;
     }
 }

@@ -10,7 +10,24 @@ ALTER TABLE mail_messages
 
 DROP INDEX IF EXISTS idx_mail_messages_dedup;
 
-CREATE UNIQUE INDEX IF NOT EXISTS idx_mail_messages_dedup
-    ON mail_messages(account_id, mailbox_id, message_id)
-    WHERE message_id IS NOT NULL AND message_id != ''
-      AND dedup_exempt = FALSE;
+-- Partitioned (050+) shape requires the partition key in unique indexes;
+-- the plain (mailstore-first) shape keeps the three-column unique. Same
+-- guard pattern as 097/102 (which this recreation mirrors).
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM pg_partitioned_table
+        WHERE partrelid = 'mail_messages'::regclass
+    ) THEN
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_mail_messages_dedup
+            ON mail_messages(account_id, mailbox_id, message_id, created_at)
+            WHERE message_id IS NOT NULL AND message_id != ''
+              AND dedup_exempt = FALSE;
+    ELSE
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_mail_messages_dedup
+            ON mail_messages(account_id, mailbox_id, message_id)
+            WHERE message_id IS NOT NULL AND message_id != ''
+              AND dedup_exempt = FALSE;
+    END IF;
+END
+$$;

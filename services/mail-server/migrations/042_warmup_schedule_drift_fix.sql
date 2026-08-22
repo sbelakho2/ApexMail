@@ -24,12 +24,21 @@ CREATE TABLE IF NOT EXISTS isp_warmup_schedules (
     UNIQUE (pool_id, day)
 );
 
-CREATE INDEX IF NOT EXISTS idx_isp_warmup_schedules_pool
-    ON isp_warmup_schedules (pool_id, day);
-
-CREATE INDEX IF NOT EXISTS idx_isp_warmup_schedules_active
-    ON isp_warmup_schedules (status, pool_id)
-    WHERE status IN ('pending', 'active');
+-- On runtime-provisioned databases isp_warmup_schedules pre-exists as the
+-- ISP catalog shape (no pool_id/day/status columns) — CREATE TABLE IF NOT
+-- EXISTS is a no-op there, so guard each index on its columns existing.
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM information_schema.columns
+               WHERE table_schema = 'public' AND table_name = 'isp_warmup_schedules'
+                 AND column_name = 'pool_id') THEN
+        CREATE INDEX IF NOT EXISTS idx_isp_warmup_schedules_pool
+            ON isp_warmup_schedules (pool_id, day);
+        CREATE INDEX IF NOT EXISTS idx_isp_warmup_schedules_active
+            ON isp_warmup_schedules (status, pool_id)
+            WHERE status IN ('pending', 'active');
+    END IF;
+END $$;
 
 -- ISP-level template catalog (decoupled from any pool).
 CREATE TABLE IF NOT EXISTS isp_warmup_templates (

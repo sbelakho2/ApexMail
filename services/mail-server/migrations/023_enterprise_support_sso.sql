@@ -200,9 +200,16 @@ BEGIN
             WHERE conname = 'sso_oidc_state_tenant_id_fkey'
               AND conrelid = 'public.sso_oidc_state'::regclass
         ) THEN
-            ALTER TABLE sso_oidc_state
-                ADD CONSTRAINT sso_oidc_state_tenant_id_fkey
-                FOREIGN KEY (tenant_id) REFERENCES tenants(id) ON DELETE CASCADE;
+            BEGIN
+                ALTER TABLE sso_oidc_state
+                    ADD CONSTRAINT sso_oidc_state_tenant_id_fkey
+                    FOREIGN KEY (tenant_id) REFERENCES tenants(id) ON DELETE CASCADE;
+            EXCEPTION WHEN OTHERS THEN
+                -- Same tolerance as the C-02 block below: on runtime-provisioned
+                -- databases tenants.id is UUID while sso_oidc_state.tenant_id is
+                -- VARCHAR(26) ("cannot be implemented"); 064 normalizes the types.
+                RAISE NOTICE 'FK sso_oidc_state_tenant_id_fkey skipped (%)', SQLERRM;
+            END;
         END IF;
     ELSE
         RAISE WARNING 'Migration 023: tenants table does not exist — skipping FK on sso_oidc_state.';

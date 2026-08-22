@@ -647,8 +647,9 @@ mod tests {
 
     /// Helper to connect to Redis for integration tests.
     async fn test_redis_connection() -> Option<redis::aio::ConnectionManager> {
-        let url = std::env::var("REDIS_TEST_URL")
-            .unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
+        // F6: no ambient 6379 default — the variable must name the Redis
+        // under test explicitly; unset means skip.
+        let url = std::env::var("REDIS_TEST_URL").ok()?;
 
         let client = redis::Client::open(url.as_str()).ok()?;
         match redis::aio::ConnectionManager::new(client).await {

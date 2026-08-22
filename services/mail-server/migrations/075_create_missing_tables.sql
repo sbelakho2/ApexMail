@@ -157,7 +157,16 @@ CREATE TABLE IF NOT EXISTS webhooks (
     updated_at                      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS idx_webhooks_tenant ON webhooks(tenant_id);
-CREATE INDEX IF NOT EXISTS idx_webhooks_enabled ON webhooks(enabled);
+-- enabled is absent on runtime-provisioned (apexmail-db SCHEMA) webhooks —
+-- CREATE TABLE IF NOT EXISTS is a no-op there, so guard the index.
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM information_schema.columns
+               WHERE table_schema='public' AND table_name='webhooks'
+                 AND column_name='enabled') THEN
+        CREATE INDEX IF NOT EXISTS idx_webhooks_enabled ON webhooks(enabled);
+    END IF;
+END $$;
 
 -- =============================================================================
 -- WEBHOOK QUEUE

@@ -462,8 +462,18 @@ BEGIN
         -- =============================================================================
         --
         -- Note: The spec designates "created_at" as the partition column, but the
-        -- actual column in the audit_logs schema is "timestamp" (representing when
-        -- the audit event was created). We partition on the existing column.
+        -- actual column in the audit_logs schema is "timestamp" (representing when the
+        -- audit event was created). We partition on the existing column.
+        
+        -- Shape guard: the conversion copies audit_logs_old positionally and
+        -- partitions on "timestamp", so it requires the canonical 038 shape.
+        -- On runtime-provisioned databases audit_logs pre-exists as the
+        -- apexmail-db SCHEMA shape (id UUID, actor_id, metadata, created_at —
+        -- no timestamp column); leave it unpartitioned there instead of
+        -- failing the whole chain.
+        IF EXISTS (SELECT 1 FROM information_schema.columns
+                   WHERE table_schema = 'public' AND table_name = 'audit_logs'
+                     AND column_name = 'timestamp') THEN
         
         ALTER TABLE audit_logs RENAME TO audit_logs_old;
         
@@ -566,6 +576,10 @@ BEGIN
             EXECUTE 'DROP TABLE IF EXISTS audit_logs_old';
             RAISE NOTICE 'audit_logs: old table dropped successfully';
         END $i$;
+        
+        ELSE
+            RAISE NOTICE '050: audit_logs is not the canonical (038) shape — skipping partition conversion';
+        END IF;
         
         -- =============================================================================
         -- 5. bounce_analytics_daily — Monthly RANGE on date

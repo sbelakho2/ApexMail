@@ -556,7 +556,12 @@ mod tests {
         // Optional integration check against a real Redis (skipped when
         // unreachable, so CI without Redis stays green). Started via
         // `redis-server` locally it proves the Redis code path end-to-end.
-        let url = std::env::var("REDIS_TEST_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".into());
+        // F6: no ambient 6379 default — the variable must name the Redis
+        // under test explicitly; unset means skip.
+        let Ok(url) = std::env::var("REDIS_TEST_URL") else {
+            eprintln!("skipping: REDIS_TEST_URL not set");
+            return;
+        };
         let pool = match deadpool_redis::Config::from_url(&url)
             .create_pool(Some(deadpool_redis::Runtime::Tokio1))
         {

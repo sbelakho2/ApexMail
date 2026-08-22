@@ -162,355 +162,355 @@ fn marketing_static_document(surface: &str, path: &str) -> Option<&'static str> 
 
     match path {
         "/" => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/index.html",
+            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/index.html"),
         )),
         "/about" => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/about/index.html",
+            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/about/index.html"),
         )),
         "/acceptable-use" => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/acceptable-use/index.html",
+            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/acceptable-use/index.html"),
         )),
         "/anti-spam" => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/anti-spam/index.html",
+            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/anti-spam/index.html"),
         )),
         "/api-explorer" => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/api-explorer/index.html",
+            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/api-explorer/index.html"),
         )),
         "/architecture" => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/architecture/index.html",
+            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/architecture/index.html"),
         )),
         "/case-studies" => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/case-studies/index.html",
+            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/case-studies/index.html"),
         )),
         "/compare" => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/compare/index.html",
+            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/compare/index.html"),
         )),
         "/compare/amazon-ses" => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/compare/amazon-ses/index.html",
+            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/compare/amazon-ses/index.html"),
         )),
         "/compare/mailgun" => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/compare/mailgun/index.html",
+            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/compare/mailgun/index.html"),
         )),
         "/compare/methodology" => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/compare/methodology/index.html",
+            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/compare/methodology/index.html"),
         )),
         "/compare/postmark" => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/compare/postmark/index.html",
+            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/compare/postmark/index.html"),
         )),
         "/compare/resend" => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/compare/resend/index.html",
+            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/compare/resend/index.html"),
         )),
         "/compare/sendgrid" => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/compare/sendgrid/index.html",
+            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/compare/sendgrid/index.html"),
         )),
         "/compliance" => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/compliance/index.html",
+            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/compliance/index.html"),
         )),
         "/contact" => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/contact/index.html",
+            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/contact/index.html"),
         )),
         "/contact/enterprise" => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/contact/enterprise/index.html",
+            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/contact/enterprise/index.html"),
         )),
         "/contact/sales" => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/contact/sales/index.html",
+            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/contact/sales/index.html"),
         )),
         "/contact/security" => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/contact/security/index.html",
+            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/contact/security/index.html"),
         )),
         "/cookies" => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/cookies/index.html",
+            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/cookies/index.html"),
         )),
         "/data-locations" => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/data-locations/index.html",
+            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/data-locations/index.html"),
         )),
         "/de" => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/de/index.html",
+            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/de/index.html"),
         )),
         "/de/about" => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/de/about/index.html",
+            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/de/about/index.html"),
         )),
         "/de/acceptable-use" => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/de/acceptable-use/index.html",
+            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/de/acceptable-use/index.html"),
         )),
         "/de/compare" => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/de/compare/index.html",
+            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/de/compare/index.html"),
         )),
         "/de/compliance" => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/de/compliance/index.html",
+            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/de/compliance/index.html"),
         )),
         "/de/contact" => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/de/contact/index.html",
+            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/de/contact/index.html"),
         )),
         "/de/cookies" => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/de/cookies/index.html",
+            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/de/cookies/index.html"),
         )),
         "/de/data-locations" => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/de/data-locations/index.html",
+            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/de/data-locations/index.html"),
         )),
         "/de/dpa" => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/de/dpa/index.html",
+            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/de/dpa/index.html"),
         )),
         "/de/features" => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/de/features/index.html",
+            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/de/features/index.html"),
         )),
         "/de/privacy" => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/de/privacy/index.html",
+            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/de/privacy/index.html"),
         )),
         "/de/private-cloud" => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/de/private-cloud/index.html",
+            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/de/private-cloud/index.html"),
         )),
         "/de/quickstart" => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/de/quickstart/index.html",
+            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/de/quickstart/index.html"),
         )),
         "/de/responsible-disclosure" => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/de/responsible-disclosure/index.html",
+            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/de/responsible-disclosure/index.html"),
         )),
         "/de/security" => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/de/security/index.html",
+            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/de/security/index.html"),
         )),
         "/de/sla" => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/de/sla/index.html",
+            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/de/sla/index.html"),
         )),
         "/de/solutions/enterprise" => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/de/solutions/enterprise/index.html",
+            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/de/solutions/enterprise/index.html"),
         )),
         "/de/status" => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/de/status/index.html",
+            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/de/status/index.html"),
         )),
         "/de/subprocessors" => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/de/subprocessors/index.html",
+            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/de/subprocessors/index.html"),
         )),
         "/de/terms" => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/de/terms/index.html",
+            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/de/terms/index.html"),
         )),
         "/docs" => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/docs/index.html",
+            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/docs/index.html"),
         )),
         "/docs/alerts" => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/docs/alerts/index.html",
+            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/docs/alerts/index.html"),
         )),
         "/docs/analytics" => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/docs/analytics/index.html",
+            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/docs/analytics/index.html"),
         )),
         "/docs/api" => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/docs/api/index.html",
+            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/docs/api/index.html"),
         )),
         "/docs/api/grader" => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/docs/api/grader/index.html",
+            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/docs/api/grader/index.html"),
         )),
         "/docs/api/openapi" => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/docs/api/openapi/index.html",
+            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/docs/api/openapi/index.html"),
         )),
         "/docs/sdks" => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/docs/sdks/index.html",
+            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/docs/sdks/index.html"),
         )),
         "/docs/webhooks" => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/docs/webhooks/index.html",
+            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/docs/webhooks/index.html"),
         )),
         "/dpa" => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/dpa/index.html",
+            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/dpa/index.html"),
         )),
         "/enterprise" => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/enterprise/index.html",
+            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/enterprise/index.html"),
         )),
         "/es" => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/es/index.html",
+            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/es/index.html"),
         )),
         "/es/about" => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/es/about/index.html",
+            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/es/about/index.html"),
         )),
         "/es/acceptable-use" => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/es/acceptable-use/index.html",
+            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/es/acceptable-use/index.html"),
         )),
         "/es/compare" => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/es/compare/index.html",
+            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/es/compare/index.html"),
         )),
         "/es/compliance" => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/es/compliance/index.html",
+            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/es/compliance/index.html"),
         )),
         "/es/contact" => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/es/contact/index.html",
+            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/es/contact/index.html"),
         )),
         "/es/cookies" => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/es/cookies/index.html",
+            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/es/cookies/index.html"),
         )),
         "/es/data-locations" => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/es/data-locations/index.html",
+            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/es/data-locations/index.html"),
         )),
         "/es/dpa" => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/es/dpa/index.html",
+            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/es/dpa/index.html"),
         )),
         "/es/features" => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/es/features/index.html",
+            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/es/features/index.html"),
         )),
         "/es/privacy" => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/es/privacy/index.html",
+            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/es/privacy/index.html"),
         )),
         "/es/private-cloud" => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/es/private-cloud/index.html",
+            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/es/private-cloud/index.html"),
         )),
         "/es/quickstart" => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/es/quickstart/index.html",
+            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/es/quickstart/index.html"),
         )),
         "/es/responsible-disclosure" => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/es/responsible-disclosure/index.html",
+            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/es/responsible-disclosure/index.html"),
         )),
         "/es/security" => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/es/security/index.html",
+            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/es/security/index.html"),
         )),
         "/es/sla" => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/es/sla/index.html",
+            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/es/sla/index.html"),
         )),
         "/es/solutions/enterprise" => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/es/solutions/enterprise/index.html",
+            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/es/solutions/enterprise/index.html"),
         )),
         "/es/status" => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/es/status/index.html",
+            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/es/status/index.html"),
         )),
         "/es/subprocessors" => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/es/subprocessors/index.html",
+            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/es/subprocessors/index.html"),
         )),
         "/es/terms" => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/es/terms/index.html",
+            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/es/terms/index.html"),
         )),
         "/features" => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/features/index.html",
+            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/features/index.html"),
         )),
         "/forensic" => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/forensic/index.html",
+            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/forensic/index.html"),
         )),
         "/fr" => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/fr/index.html",
+            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/fr/index.html"),
         )),
         "/fr/about" => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/fr/about/index.html",
+            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/fr/about/index.html"),
         )),
         "/fr/acceptable-use" => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/fr/acceptable-use/index.html",
+            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/fr/acceptable-use/index.html"),
         )),
         "/fr/compare" => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/fr/compare/index.html",
+            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/fr/compare/index.html"),
         )),
         "/fr/compliance" => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/fr/compliance/index.html",
+            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/fr/compliance/index.html"),
         )),
         "/fr/contact" => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/fr/contact/index.html",
+            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/fr/contact/index.html"),
         )),
         "/fr/cookies" => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/fr/cookies/index.html",
+            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/fr/cookies/index.html"),
         )),
         "/fr/data-locations" => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/fr/data-locations/index.html",
+            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/fr/data-locations/index.html"),
         )),
         "/fr/dpa" => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/fr/dpa/index.html",
+            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/fr/dpa/index.html"),
         )),
         "/fr/features" => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/fr/features/index.html",
+            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/fr/features/index.html"),
         )),
         "/fr/privacy" => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/fr/privacy/index.html",
+            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/fr/privacy/index.html"),
         )),
         "/fr/private-cloud" => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/fr/private-cloud/index.html",
+            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/fr/private-cloud/index.html"),
         )),
         "/fr/quickstart" => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/fr/quickstart/index.html",
+            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/fr/quickstart/index.html"),
         )),
         "/fr/responsible-disclosure" => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/fr/responsible-disclosure/index.html",
+            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/fr/responsible-disclosure/index.html"),
         )),
         "/fr/security" => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/fr/security/index.html",
+            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/fr/security/index.html"),
         )),
         "/fr/sla" => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/fr/sla/index.html",
+            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/fr/sla/index.html"),
         )),
         "/fr/solutions/enterprise" => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/fr/solutions/enterprise/index.html",
+            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/fr/solutions/enterprise/index.html"),
         )),
         "/fr/status" => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/fr/status/index.html",
+            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/fr/status/index.html"),
         )),
         "/fr/subprocessors" => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/fr/subprocessors/index.html",
+            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/fr/subprocessors/index.html"),
         )),
         "/fr/terms" => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/fr/terms/index.html",
+            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/fr/terms/index.html"),
         )),
         "/inbox-placement" => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/inbox-placement/index.html",
+            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/inbox-placement/index.html"),
         )),
         "/performance-methodology" => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/performance-methodology/index.html",
+            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/performance-methodology/index.html"),
         )),
         "/pricing" => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/pricing/index.html",
+            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/pricing/index.html"),
         )),
         "/pricing/calculator" => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/pricing/calculator/index.html",
+            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/pricing/calculator/index.html"),
         )),
         "/privacy" => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/privacy/index.html",
+            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/privacy/index.html"),
         )),
         "/privacy/do-not-sell" => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/privacy/do-not-sell/index.html",
+            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/privacy/do-not-sell/index.html"),
         )),
         "/private-cloud" => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/private-cloud/index.html",
+            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/private-cloud/index.html"),
         )),
         "/quickstart" => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/quickstart/index.html",
+            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/quickstart/index.html"),
         )),
         "/responsible-disclosure" => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/responsible-disclosure/index.html",
+            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/responsible-disclosure/index.html"),
         )),
         "/secure-email-for-regulated-saas" => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/secure-email-for-regulated-saas/index.html",
+            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/secure-email-for-regulated-saas/index.html"),
         )),
         "/security" => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/security/index.html",
+            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/security/index.html"),
         )),
         "/sla" => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/sla/index.html",
+            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/sla/index.html"),
         )),
         "/solutions" => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/solutions/index.html",
+            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/solutions/index.html"),
         )),
         "/solutions/enterprise" => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/solutions/enterprise/index.html",
+            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/solutions/enterprise/index.html"),
         )),
         "/solutions/high-volume-sending" => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/solutions/high-volume-sending/index.html",
+            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/solutions/high-volume-sending/index.html"),
         )),
         "/solutions/migration" => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/solutions/migration/index.html",
+            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/solutions/migration/index.html"),
         )),
         "/solutions/regulated-industries" => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/solutions/regulated-industries/index.html",
+            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/solutions/regulated-industries/index.html"),
         )),
         "/solutions/saas-platforms" => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/solutions/saas-platforms/index.html",
+            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/solutions/saas-platforms/index.html"),
         )),
         "/solutions/transactional-email" => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/solutions/transactional-email/index.html",
+            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/solutions/transactional-email/index.html"),
         )),
         "/status" => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/status/index.html",
+            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/status/index.html"),
         )),
         "/subprocessors" => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/subprocessors/index.html",
+            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/subprocessors/index.html"),
         )),
         "/terms" => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/terms/index.html",
+            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/terms/index.html"),
         )),
         "/api-console" => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/api-explorer/index.html",
+            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/api-explorer/index.html"),
         )),
         "/aup" => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/acceptable-use/index.html",
+            concat!(env!("APX_MARKETING_PUBLIC_DIR"), "/acceptable-use/index.html"),
         )),
         _ => None,
     }

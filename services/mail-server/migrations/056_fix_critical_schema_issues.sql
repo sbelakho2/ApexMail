@@ -256,7 +256,11 @@ BEGIN
         END IF;
 
         -- Create the correct index using actual column names
-        IF NOT EXISTS (SELECT 1 FROM pg_class WHERE relname = 'idx_audit_logs_tenant_resource') THEN
+        -- (resource/timestamp are absent on runtime-provisioned audit_logs)
+        IF EXISTS (SELECT 1 FROM information_schema.columns
+                   WHERE table_schema = 'public' AND table_name = 'audit_logs'
+                     AND column_name = 'resource')
+           AND NOT EXISTS (SELECT 1 FROM pg_class WHERE relname = 'idx_audit_logs_tenant_resource') THEN
             EXECUTE 'CREATE INDEX IF NOT EXISTS idx_audit_logs_tenant_resource
                      ON audit_logs (tenant_id, resource, timestamp)';
             RAISE NOTICE 'C-07: Created index idx_audit_logs_tenant_resource on (tenant_id, resource, timestamp)';
@@ -437,9 +441,18 @@ CREATE TABLE IF NOT EXISTS api_keys (
 );
 
 CREATE INDEX IF NOT EXISTS idx_api_keys_tenant_id ON api_keys (tenant_id, id);
-CREATE INDEX IF NOT EXISTS idx_api_keys_tenant_revoked
-    ON api_keys (tenant_id, revoked_at)
-    WHERE revoked_at IS NULL;
+-- revoked_at is absent on runtime-provisioned (apexmail-db SCHEMA) api_keys —
+-- CREATE TABLE IF NOT EXISTS is a no-op there, so guard the partial index.
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM information_schema.columns
+               WHERE table_schema='public' AND table_name='api_keys'
+                 AND column_name='revoked_at') THEN
+        CREATE INDEX IF NOT EXISTS idx_api_keys_tenant_revoked
+            ON api_keys (tenant_id, revoked_at)
+            WHERE revoked_at IS NULL;
+    END IF;
+END $$;
 CREATE INDEX IF NOT EXISTS idx_api_keys_prefix ON api_keys (key_prefix);
 
 -- =============================================================================
