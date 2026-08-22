@@ -13,7 +13,33 @@ struct UiQueryParams {
     status: Option<String>,
     message: Option<String>,
     signup_plan: Option<String>,
+    intent: Option<String>,
+    resource_id: Option<String>,
+    return_to: Option<String>,
+    sig: Option<String>,
+    /// `mfa=1` — step two of the multi-step SSR login (challenge form).
+    mfa_challenge: bool,
+    /// `refresh=10|30|60` — opt-in auto-refresh for live metrics pages.
+    /// Parsed ONLY for the pages in [`LIVE_METRICS_PATHS`]; every other
+    /// route ignores the parameter entirely.
+    refresh_secs: Option<u32>,
 }
+
+/// Paths that may opt into a `<meta http-equiv="refresh">` auto-reload.
+/// These render live operational metrics (queues, nodes, alerting, the
+/// event stream). No-JS liveness: the browser reloads the whole page on a
+/// timer; the "Pause" control is just the same page without the param.
+const LIVE_METRICS_PATHS: &[(&str, &str)] = &[
+    ("control-plane", "/infrastructure/queues"),
+    ("control-plane", "/infrastructure/nodes"),
+    ("control-plane", "/alerts"),
+    ("web", "/events"),
+    ("web", "/analytics"),
+];
+
+/// Auto-refresh intervals we are willing to serve (seconds). Anything else
+/// is ignored — a hostile `refresh=1` must not turn into a reload loop.
+const ALLOWED_REFRESH_SECS: &[u32] = &[10, 30, 60];
 
 const PUBLIC_SIGNUP_PLAN_IDS: &[&str] = &["free", "starter", "pro", "growth", "scale"];
 
@@ -43,6 +69,20 @@ fn parse_query_params(query: Option<&str>) -> UiQueryParams {
             "status" if !value.is_empty() => params.status = Some(value),
             "message" if !value.is_empty() => params.message = Some(value),
             "plan" if is_public_signup_plan(&value) => params.signup_plan = Some(value),
+            "intent" if !value.is_empty() => params.intent = Some(value),
+            "id" if !value.is_empty() => params.resource_id = Some(value),
+            "return_to" if !value.is_empty() => params.return_to = Some(value),
+            "sig" if !value.is_empty() => params.sig = Some(value),
+            "mfa" if value == "1" || value.eq_ignore_ascii_case("true") => {
+                params.mfa_challenge = true;
+            }
+            "refresh" => {
+                if let Ok(secs) = value.parse::<u32>() {
+                    if ALLOWED_REFRESH_SECS.contains(&secs) {
+                        params.refresh_secs = Some(secs);
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -275,11 +315,17 @@ fn normalize_marketing_static_document_uncached(document: &str) -> String {
     // paths are rewritten — canonical/Open-Graph/Schema URLs are left as
     // absolute references because they are SEO-significant identifiers.
     for absolute_origin in ["https://apexmail.ee", "https://cdn.apexmail.ee"] {
-        for asset_prefix in ["/css/", "/fonts/", "/images/", "/js/"] {
+        for asset_prefix in ["/css/", "/fonts/", "/images/"] {
             let absolute = format!("{absolute_origin}{asset_prefix}");
             normalized = normalized.replace(&absolute, asset_prefix);
         }
     }
+
+    // ZERO-JavaScript policy: strip every executable <script> element the
+    // Zola build baked in (theme bootstrap, footer status widget, API
+    // explorer, pricing calculator, analytics). JSON-LD data blocks
+    // (type="application/ld+json") are NOT executable and stay for SEO.
+    normalized = strip_executable_scripts(&normalized);
 
     if !contains_ascii_case_insensitive(&normalized, "</body>") {
         if let Some(index) = normalized.to_ascii_lowercase().rfind("</html>") {
@@ -296,6 +342,49 @@ fn normalize_marketing_static_document_uncached(document: &str) -> String {
     normalized
 }
 
+/// Remove every executable `<script>` element (inline or external) from an
+/// HTML document, preserving `<script type="application/ld+json">` data
+/// blocks. Served marketing pages therefore satisfy `script-src 'none'`
+/// regardless of what the static build embedded.
+pub fn strip_executable_scripts(document: &str) -> String {
+    let lower = document.to_ascii_lowercase();
+    let mut output = String::with_capacity(document.len());
+    let mut cursor = 0usize;
+    while let Some(start) = lower[cursor..].find("<script") {
+        output.push_str(&document[cursor..cursor + start]);
+        let tag_start = cursor + start;
+        let Some(tag_end_offset) = lower[tag_start..].find('>') else {
+            // Malformed: keep the remainder untouched.
+            output.push_str(&document[tag_start..]);
+            return output;
+        };
+        let tag_end = tag_start + tag_end_offset;
+        let opening_tag = &lower[tag_start..=tag_end];
+        let is_data_block = opening_tag.contains("application/ld+json")
+            || opening_tag.contains("application/json");
+        if is_data_block {
+            // Keep the whole element (opening tag, body, closing tag).
+            if let Some(close_offset) = lower[tag_end..].find("</script>") {
+                let close = tag_end + close_offset + "</script>".len();
+                output.push_str(&document[tag_start..close]);
+                cursor = close;
+            } else {
+                output.push_str(&document[tag_start..]);
+                return output;
+            }
+        } else if let Some(close_offset) = lower[tag_end..].find("</script>") {
+            // Drop the whole executable element.
+            cursor = tag_end + close_offset + "</script>".len();
+        } else {
+            // Executable script without a closing tag (e.g. a src= tag):
+            // drop through the end of the opening tag.
+            cursor = tag_end + 1;
+        }
+    }
+    output.push_str(&document[cursor.min(document.len())..]);
+    output
+}
+
 /// Renders the full HTML page for a given surface and path.
 /// Returns `None` if the route is not recognized.
 pub fn render_route(surface: &str, path: &str) -> Option<String> {
@@ -310,22 +399,41 @@ pub fn render_route_with_query(
     query: Option<&str>,
     csrf_secret: Option<&str>,
 ) -> Option<String> {
+    render_route_with_flash(surface, path, query, csrf_secret, &[])
+}
+
+/// Full render with PRG flash messages. The flash banners (success / field
+/// errors from the previous POST) are injected server-side — the console has
+/// ZERO JavaScript, so every dynamic behavior lives here in Rust:
+///
+/// - hidden `_csrf` inputs are injected into every `POST /web/*` form,
+/// - `/confirm?intent=…&id=…` destructive links get an HMAC signature,
+/// - flash banners render at the top of the page content.
+pub fn render_route_with_flash(
+    surface: &str,
+    path: &str,
+    query: Option<&str>,
+    csrf_secret: Option<&str>,
+    flash: &[crate::flash::FlashMessage],
+) -> Option<String> {
     // Normalise trailing slash at the top level so ALL surfaces handle /login/ etc.
     let path = if path.len() > 1 && path.ends_with('/') {
         &path[..path.len() - 1]
     } else {
         path
     };
+    let csrf_token = csrf_secret.map_or_else(String::new, crate::csrf::generate_csrf_token);
     let html = match surface {
         "web" => {
             let inner = render_inner(surface, path, query, csrf_secret)?;
-            match path {
+            let page = match path {
                 "/login" | "/signup" | "/forgot-password" | "/reset-password" | "/verify-email"
                 | "/" | "/not-found" => leptos_views::web_root_layout(&inner),
-                _ => {
-                    leptos_views::web_root_layout(&leptos_views::web_dashboard_layout(&inner, path))
-                }
-            }
+                _ => leptos_views::web_root_layout(&leptos_views::web_dashboard_layout_with_csrf(
+                    &inner, path, &csrf_token,
+                )),
+            };
+            page
         }
         "control-plane" => {
             let inner = render_inner(surface, path, query, csrf_secret)?;
@@ -338,6 +446,7 @@ pub fn render_route_with_query(
                         title,
                         description,
                         path,
+                        &csrf_token,
                     )
                 }
             };
@@ -351,7 +460,166 @@ pub fn render_route_with_query(
             })?,
         _ => return None,
     };
+    let html = render_flash_banners(html, flash);
+    let html = inject_csrf_and_sign_confirms(html, csrf_secret);
+    let html = inject_opt_in_auto_refresh(html, surface, path, query);
     Some(html)
+}
+
+/// Live-metrics opt-in auto-refresh: when a [`LIVE_METRICS_PATHS`] route is
+/// requested with `refresh=10|30|60`, inject a `<meta http-equiv="refresh">`
+/// into `<head>` plus a fixed status pill showing the interval with a
+/// "Pause" link (the same page without the parameter). Zero JavaScript —
+/// the browser's native meta-refresh does the reloading, and the user is
+/// always in control of stopping it.
+fn inject_opt_in_auto_refresh(
+    mut html: String,
+    surface: &str,
+    path: &str,
+    query: Option<&str>,
+) -> String {
+    if !LIVE_METRICS_PATHS.iter().any(|(s, p)| *s == surface && *p == path) {
+        return html;
+    }
+    let params = parse_query_params(query);
+    let Some(secs) = params.refresh_secs else {
+        return html;
+    };
+    let meta = format!("<meta http-equiv=\"refresh\" content=\"{secs}\" />");
+    if let Some(head_end) = html.find("</head>") {
+        html.insert_str(head_end, &meta);
+    } else if let Some(body_at) = html.find("<body") {
+        let insert_at = html[body_at..].find('>').map(|e| body_at + e + 1).unwrap_or(body_at);
+        html.insert_str(insert_at, &meta);
+    }
+    // Visible, non-scrolling control: interval + pause (same URL, no param).
+    let pill = format!(
+        "<div role=\"status\" class=\"fixed bottom-4 right-4 z-50 flex items-center gap-2 rounded-sm border border-surface-300 bg-card px-3 py-2 text-xs shadow-premium\"><span class=\"inline-block h-2 w-2 rounded-full bg-success-500\" aria-hidden=\"true\"></span><span class=\"font-bold\">Live — auto-refresh every {secs}s</span><a class=\"font-bold text-primary underline\" href=\"{path}\">Pause</a></div>"
+    );
+    if let Some(body_at) = html.find("<body") {
+        let insert_at = html[body_at..].find('>').map(|e| body_at + e + 1).unwrap_or(body_at);
+        html.insert_str(insert_at, &pill);
+    }
+    html
+}
+
+/// Insert the flash banners as the first element of the page content. Web
+/// pages get them just inside `<main>`; other surfaces right after `<body>`.
+fn render_flash_banners(mut html: String, flash: &[crate::flash::FlashMessage]) -> String {
+    if flash.is_empty() {
+        return html;
+    }
+    let banners = flash
+        .iter()
+        .map(|message| {
+            let (border, icon, label) = match message.kind {
+                crate::flash::FlashKind::Success => {
+                    ("border-success-300 bg-success-50 text-success-900", "✓", "Success")
+                }
+                crate::flash::FlashKind::Error => (
+                    "border-destructive/40 bg-destructive/10 text-destructive",
+                    "!",
+                    "Error",
+                ),
+                crate::flash::FlashKind::Info => {
+                    ("border-primary/30 bg-primary/10 text-primary", "i", "Notice")
+                }
+            };
+            format!(
+                "<div role=\"status\" aria-label=\"{label}\" class=\"apex-flash mb-6 flex items-start gap-3 rounded-sm border {border} px-4 py-3\"><span aria-hidden=\"true\" class=\"mt-0.5 font-bold\">{icon}</span><p class=\"text-sm font-medium\">{}</p></div>",
+                crate::shell::html_escape(&message.text),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("");
+    if let Some(idx) = html.find("<main id=\"app-main\"") {
+        let insert_at = html[idx..].find('>').map(|end| idx + end + 1).unwrap_or(idx);
+        html.insert_str(insert_at, &banners);
+    } else if let Some(idx) = html.find("<body") {
+        let insert_at = html[idx..].find('>').map(|end| idx + end + 1).unwrap_or(idx);
+        html.insert_str(insert_at, &banners);
+    }
+    html
+}
+
+/// Inject the hidden `_csrf` input into every native `POST /web/*` form and
+/// append an HMAC signature to every `/confirm` link. Pages render without
+/// secrets; this pass (running only when a server secret is available) makes
+/// every submission verifiable — no client-side code participates.
+fn inject_csrf_and_sign_confirms(mut html: String, csrf_secret: Option<&str>) -> String {
+    let Some(secret) = csrf_secret else {
+        return html;
+    };
+
+    // 1. Hidden CSRF inputs for /web POST forms that lack one.
+    let csrf_input = format!(
+        "<input type=\"hidden\" name=\"_csrf\" value=\"{}\" />",
+        crate::csrf::generate_csrf_token(secret),
+    );
+    let mut output = String::with_capacity(html.len() + 512);
+    let mut rest = html.as_str();
+    while let Some(start) = rest.find("<form ") {
+        let end = rest[start..].find('>').map(|offset| start + offset + 1).unwrap_or(rest.len());
+        let tag = &rest[start..end];
+        let posts_to_web = tag.contains("method=\"post\"") && tag.contains("action=\"/web/");
+        if posts_to_web && !rest[..end].contains("name=\"_csrf\"") {
+            output.push_str(&rest[..end]);
+            output.push_str(&csrf_input);
+        } else {
+            output.push_str(&rest[..end]);
+        }
+        rest = &rest[end..];
+    }
+    output.push_str(rest);
+    let html = output;
+
+    // 2. Sign /confirm links: /confirm?intent=X&id=Y[&return_to=Z] → &sig=…
+    let mut output = String::with_capacity(html.len() + 256);
+    let mut rest = html.as_str();
+    while let Some(start) = rest.find("/confirm?") {
+        let end = rest[start..]
+            .find('"')
+            .map(|offset| start + offset)
+            .unwrap_or(rest.len());
+        let link = &rest[start..end];
+        output.push_str(&rest[..start]);
+        if link.contains("sig=") {
+            output.push_str(link);
+        } else {
+            let intent = extract_query_param(link, "intent").unwrap_or_default();
+            let id = extract_query_param(link, "id").unwrap_or_default();
+            let now = chrono::Utc::now().timestamp();
+            let token = crate::flash::sign_confirmation_for_ttl(
+                secret,
+                &intent,
+                &id,
+                now,
+                crate::flash::CONFIRMATION_DEFAULT_TTL_SECS,
+            );
+            let mut signed = link.to_string();
+            signed.push_str("&sig=");
+            signed.push_str(&token);
+            output.push_str(&signed);
+        }
+        rest = &rest[end..];
+    }
+    output.push_str(rest);
+    output
+}
+
+/// Extract a URL-decoded query parameter value from a `/confirm?…` link.
+fn extract_query_param(link: &str, key: &str) -> Option<String> {
+    let query = link.split_once('?')?.1;
+    for pair in query.split('&') {
+        let (k, v) = pair.split_once('=')?;
+        // HTML-escaped links separate params with &amp;, so a split on '&'
+        // yields keys like "amp;id" — strip that prefix.
+        let k = k.strip_prefix("amp;").unwrap_or(k);
+        if k == key {
+            return Some(decode_query_component(v));
+        }
+    }
+    None
 }
 
 fn control_plane_route_context(path: &str) -> (&'static str, &'static str) {
@@ -415,7 +683,26 @@ fn render_inner(
 ) -> Option<String> {
     match surface {
         "web" => render_web(path, query, csrf_secret),
-        "control-plane" => render_control_plane(path, csrf_secret),
+        "control-plane" => {
+            // The CP login shares the web MFA challenge step (multi-step
+            // SSR login): `?mfa=1&email=…` renders the same challenge form.
+            if path == "/login" || path == "/login/" {
+                let params = parse_query_params(query);
+                if params.mfa_challenge {
+                    if let Some(email) = params.email.as_deref() {
+                        let token = csrf_secret.map_or_else(String::new, |secret| {
+                            crate::csrf::generate_csrf_token(secret)
+                        });
+                        return Some(leptos_views::web_login_mfa_challenge_page(
+                            &token,
+                            email,
+                            params.return_to.as_deref().unwrap_or("/dashboard"),
+                        ));
+                    }
+                }
+            }
+            render_control_plane(path, csrf_secret)
+        }
         "marketing" | "marketing-zola" => render_marketing(surface, path),
         _ => None,
     }
@@ -438,6 +725,17 @@ fn render_web(path: &str, query: Option<&str>, csrf_secret: Option<&str>) -> Opt
         "/" => leptos_views::web_home_page(),
         "/login" => {
             let token = csrf_secret.map_or_else(String::new, csrf_token);
+            // Multi-step SSR MFA: `?mfa=1&email=…` renders the challenge
+            // form (the password step redirected here after success).
+            if params.mfa_challenge {
+                if let Some(email) = params.email.as_deref() {
+                    return Some(leptos_views::web_login_mfa_challenge_page(
+                        &token,
+                        email,
+                        params.return_to.as_deref().unwrap_or("/dashboard"),
+                    ));
+                }
+            }
             leptos_views::web_login_page(&token)
         }
         "/signup" => {
@@ -457,6 +755,27 @@ fn render_web(path: &str, query: Option<&str>, csrf_secret: Option<&str>) -> Opt
                 &token,
             )
         }
+        "/confirm" => leptos_views::web_confirm_page(
+            params.intent.as_deref().unwrap_or(""),
+            params.resource_id.as_deref().unwrap_or(""),
+            params.return_to.as_deref().unwrap_or("/"),
+            params.sig.as_deref().unwrap_or(""),
+            params
+                .sig
+                .as_deref()
+                .and_then(|sig| {
+                    csrf_secret.map(|secret| {
+                        crate::flash::verify_confirmation(
+                            secret,
+                            sig,
+                            params.intent.as_deref().unwrap_or(""),
+                            params.resource_id.as_deref().unwrap_or(""),
+                            chrono::Utc::now().timestamp(),
+                        )
+                    })
+                })
+                .unwrap_or(false),
+        ),
         "/verify-email" => leptos_views::web_verify_email_page_with_state(
             params.token.as_deref(),
             params.email.as_deref(),
@@ -467,8 +786,13 @@ fn render_web(path: &str, query: Option<&str>, csrf_secret: Option<&str>) -> Opt
         // Legacy /legal/* paths are 301-style redirects to the canonical
         // marketing routes (kept so external links and old bookmarks keep
         // working). The page both meta-refreshes and carries rel=canonical.
-        "/legal/terms" => legal_redirect_page("/terms"),
-        "/legal/privacy" => legal_redirect_page("/privacy"),
+        "/legal/terms" => legal_redirect_page(MARKETING_ORIGIN, "/terms"),
+        "/legal/privacy" => legal_redirect_page(MARKETING_ORIGIN, "/privacy"),
+        // Canonical legal routes on the web host redirect to the marketing
+        // site (the auth footer links to them; without this they 404 on
+        // app.apexmail.ee).
+        "/terms" => legal_redirect_page(MARKETING_ORIGIN, "/terms"),
+        "/privacy" => legal_redirect_page(MARKETING_ORIGIN, "/privacy"),
         "/campaigns" => leptos_views::web_campaigns_page(),
         "/campaigns/new" => leptos_views::web_campaigns_new_page(),
         "/contacts" => leptos_views::web_contacts_page(),
@@ -510,19 +834,23 @@ fn render_web(path: &str, query: Option<&str>, csrf_secret: Option<&str>) -> Opt
 /// Minimal HTML redirect page for legacy URL aliases. Uses an immediate
 /// meta refresh plus rel=canonical (and a visible link for non-HTML UAs);
 /// served as a normal 200 page because the render pipeline returns HTML.
-fn legal_redirect_page(target: &str) -> String {
+const MARKETING_ORIGIN: &str = "https://apexmail.ee";
+
+fn legal_redirect_page(origin: &str, target: &str) -> String {
     format!(
         "<!DOCTYPE html>\
 <html lang=\"en\">\
 <head><meta charset=\"utf-8\"><title>Moved</title>\
-<meta http-equiv=\"refresh\" content=\"0; url={target}\">\
-<link rel=\"canonical\" href=\"{target}\">\
+<meta http-equiv=\"refresh\" content=\"0; url={origin}{target}\">\
+<link rel=\"canonical\" href=\"{origin}{target}\">\
 </head>\
 <body><main class=\"min-h-screen flex flex-col items-center justify-center gap-4 p-8 text-center\">\
 <h1 class=\"text-2xl font-bold\">This page has moved</h1>\
-<p class=\"text-sm\">The canonical location is <a class=\"font-bold underline\" href=\"{target}\">{target}</a>.</p>\
+<p class=\"text-sm\">The canonical location is <a class=\"font-bold underline\" href=\"{origin}{target}\">{origin}{target}</a>.</p>\
 </main></body>\
-</html>"
+</html>",
+        origin = crate::shell::html_escape(origin),
+        target = crate::shell::html_escape(target),
     )
 }
 
@@ -780,15 +1108,16 @@ mod tests {
         let campaigns = render_route("web", "/campaigns").expect("campaigns route should render");
         assert!(campaigns.contains("data-view-state=\"loading\""));
         assert!(campaigns.contains("data-pagination-storage-key=\"apexmail-ui:campaigns:page\""));
-        assert!(campaigns.contains("Delete campaign?"));
+        assert!(campaigns.contains("/confirm?intent=delete-campaign&amp;id=c_spring"));
+        assert!(campaigns.contains("action=\"/web/campaigns/delete-bulk\""));
 
         let contacts = render_route("web", "/contacts").expect("contacts route should render");
-        assert!(contacts.contains("2 contacts selected"));
-        assert!(contacts.contains("data-debounce-ms=\"300\""));
+        assert!(contacts.contains("Select rows to act on them in bulk"));
+        assert!(contacts.contains("name=\"ids\""));
         assert!(contacts.contains("data-pagination-storage-key=\"apexmail-ui:contacts:page\""));
 
         let lists = render_route("web", "/lists").expect("lists route should render");
-        assert!(lists.contains("Delete list?"));
+        assert!(lists.contains("/confirm?intent=delete-list&amp;id=l_vip"));
         assert!(lists.contains("data-pagination-storage-key=\"apexmail-ui:lists:page\""));
     }
 
@@ -802,8 +1131,8 @@ mod tests {
         let edit = render_route("web", "/lists/l_vip/edit")
             .expect("/lists/{id}/edit should render the list edit page");
         assert!(edit.contains("Edit List"));
-        assert!(edit.contains("data-api-action=\"/v1/lists/current\""));
-        assert!(edit.contains("data-api-method=\"PUT\""));
+        assert!(edit.contains("action=\"/web/lists/update\""));
+        assert!(edit.contains("method=\"post\""));
     }
 
     #[test]
@@ -811,12 +1140,12 @@ mod tests {
         let terms = render_route("web", "/legal/terms")
             .expect("/legal/terms should render a redirect page");
         assert!(terms.contains("http-equiv=\"refresh\""));
-        assert!(terms.contains("url=/terms"));
-        assert!(terms.contains("rel=\"canonical\" href=\"/terms\""));
+        assert!(terms.contains("url=https://apexmail.ee/terms"));
+        assert!(terms.contains("rel=\"canonical\" href=\"https://apexmail.ee/terms\""));
 
         let privacy = render_route("web", "/legal/privacy")
             .expect("/legal/privacy should render a redirect page");
-        assert!(privacy.contains("url=/privacy"));
+        assert!(privacy.contains("url=https://apexmail.ee/privacy"));
 
         // Unknown /legal/* aliases must NOT resolve.
         assert!(render_route("web", "/legal/unknown").is_none());
@@ -865,6 +1194,119 @@ mod tests {
         assert!(verify.contains("Continue to sign in"));
     }
 
+    // ─── Multi-step SSR MFA login (zero-JS challenge step) ─────────
+
+    #[test]
+    fn login_mfa_query_renders_the_server_side_challenge_form() {
+        // Step 2 of the PRG login: the password POST redirected here with
+        // a signed challenge cookie. The page must be the challenge form,
+        // NOT the password form, and carry no scripts.
+        let html = render_route_with_query(
+            "web",
+            "/login",
+            Some("mfa=1&email=ops%40apexmail.ee&return_to=%2Fcampaigns"),
+            Some("router-test-secret-0123456789"),
+        )
+        .expect("/login?mfa=1 must render");
+        assert!(html.contains("action=\"/web/auth/mfa/verify\""));
+        assert!(html.contains("name=\"email\" value=\"ops@apexmail.ee\""));
+        assert!(html.contains("name=\"return_to\" value=\"/campaigns\""));
+        assert!(html.contains("name=\"code\""));
+        assert!(html.contains("autocomplete=\"one-time-code\""));
+        assert!(html.contains("Two-factor verification required"));
+        // The password form must NOT be shown in the challenge step.
+        assert!(!html.contains("action=\"/web/auth/login\""));
+        assert!(!html.contains("id=\"password\""));
+        assert!(!html.contains("<script"));
+
+        // The control-plane login serves the same challenge step.
+        let cp = render_route_with_query(
+            "control-plane",
+            "/login",
+            Some("mfa=1&email=ops%40apexmail.ee"),
+            Some("router-test-secret-0123456789"),
+        )
+        .expect("cp /login?mfa=1 must render");
+        assert!(cp.contains("action=\"/web/auth/mfa/verify\""));
+        assert!(!cp.contains("<script"));
+    }
+
+    #[test]
+    fn login_without_mfa_query_keeps_the_password_form() {
+        let html = render_route_with_query("web", "/login", None, None).unwrap();
+        assert!(html.contains("action=\"/web/auth/login\""));
+        assert!(!html.contains("action=\"/web/auth/mfa/verify\""));
+        // mfa=1 without an email cannot render a bound challenge — fall
+        // back to the password form rather than a broken challenge page.
+        let no_email = render_route_with_query("web", "/login", Some("mfa=1"), None).unwrap();
+        assert!(no_email.contains("action=\"/web/auth/login\""));
+    }
+
+    #[test]
+    fn mfa_challenge_page_escapes_user_controlled_values() {
+        let html = leptos_views::web_login_mfa_challenge_page(
+            "token",
+            "ops@apexmail.ee\"><script>alert(1)</script>",
+            "/dashboard",
+        );
+        assert!(!html.contains("<script>alert(1)"));
+        assert!(html.contains("action=\"/web/auth/mfa/verify\""));
+        // Hostile return_to falls back to the safe default.
+        let hostile = leptos_views::web_login_mfa_challenge_page(
+            "token",
+            "ops@apexmail.ee",
+            "https://evil.example",
+        );
+        assert!(hostile.contains("name=\"return_to\" value=\"/dashboard\""));
+        assert!(!hostile.contains("evil.example"));
+    }
+
+    // ─── Live-metrics opt-in meta-refresh (zero-JS liveness) ────────
+
+    #[test]
+    fn live_metrics_pages_refresh_only_when_opted_in() {
+        // Opt-in adds the meta refresh + visible control with a Pause link.
+        let live = render_route_with_query(
+            "control-plane",
+            "/infrastructure/queues",
+            Some("refresh=30"),
+            None,
+        )
+        .unwrap();
+        assert!(live.contains("<meta http-equiv=\"refresh\" content=\"30\" />"));
+        assert!(live.contains("Live — auto-refresh every 30s"));
+        assert!(live.contains("href=\"/infrastructure/queues\">Pause</a>"));
+
+        let events = render_route_with_query("web", "/events", Some("refresh=10"), None).unwrap();
+        assert!(events.contains("<meta http-equiv=\"refresh\" content=\"10\" />"));
+
+        // Without the parameter the page is plain SSR (no reload loop).
+        let idle = render_route("control-plane", "/infrastructure/queues").unwrap();
+        assert!(!idle.contains("http-equiv=\"refresh\""));
+    }
+
+    #[test]
+    fn auto_refresh_is_rejected_off_the_allowlist() {
+        // Non-live pages never gain a meta refresh, whatever the query says.
+        for (surface, path) in [("web", "/campaigns"), ("web", "/login"), ("control-plane", "/tenants")] {
+            let html = render_route_with_query(surface, path, Some("refresh=30"), None).unwrap();
+            assert!(
+                !html.contains("http-equiv=\"refresh\""),
+                "{surface} {path} must not auto-refresh"
+            );
+        }
+        // Hostile intervals are ignored on live pages too.
+        for bad in ["refresh=1", "refresh=0", "refresh=300", "refresh=abc"] {
+            let html =
+                render_route_with_query("control-plane", "/infrastructure/queues", Some(bad), None)
+                    .unwrap();
+            assert!(
+                !html.contains("http-equiv=\"refresh\""),
+                "{bad} must not produce a refresh loop"
+            );
+        }
+    }
+
     #[test]
     fn signup_preserves_only_known_public_plan_selections() {
         let selected = render_route_with_query("web", "/signup", Some("plan=starter"), None)
@@ -878,160 +1320,312 @@ mod tests {
         assert!(!invalid.contains("data-signup-plan-intent"));
     }
 
+    // ── ZERO-JavaScript contract (the killer assertions) ─────────────
+
+    /// Every SSR route — web, control-plane, AND the Zola-built marketing
+    /// pages — must render without a single executable script element.
+    /// JSON-LD data blocks (non-executable, SEO) are the only exemption.
     #[test]
-    fn rendered_routes_only_allow_structured_data_script_tags() {
-        let forbidden_markers = [
-            " onclick=",
-            " onload=",
-            " onerror=",
-            " onsubmit=",
-            concat!("java", "script:"),
-        ];
-
+    fn no_executable_script_tags_in_any_rendered_route() {
         for route in ssr::ssr_routes() {
-            let html = render_route(route.surface, route.pattern).unwrap_or_else(|| {
-                panic!("missing view for [{}] {}", route.surface, route.pattern)
-            });
-
-            // Auth pages embed the KiwiCaptcha widget, whose inline driver
-            // implements the reCAPTCHA-style `?onload=<fn>` compat parameter.
-            // That JS contains the " onload=" substring inside code and
-            // comments — never as an HTML handler attribute (its own widget
-            // tests pin the escaped-nonce behavior). Strip the exact widget
-            // fragment before the marker scan so the compat code does not
-            // false-positive. Fails closed: if the widget markup ever changes
-            // so the strip misses, the raw markers trip again.
-            let kiwi_widget = kiwicaptcha::kiwi_widget_html_default();
-            let html_scannable = html.replace(&kiwi_widget, "");
-
-            for marker in forbidden_markers {
-                assert!(
-                    !html_scannable.contains(marker),
-                    "[{}] {} unexpectedly contains '{}'",
-                    route.surface,
-                    route.pattern,
-                    marker,
-                );
-            }
-
-            if html.contains("<script") {
-                for script in html.split("<script").skip(1) {
-                    let opening_tag = script.split('>').next().unwrap_or_default();
-                    let is_json_ld = opening_tag.contains("type=application/ld+json")
-                        || opening_tag.contains("type=\"application/ld+json\"");
-                    // External marketing scripts (Zola build output, served
-                    // same-origin under /js/ with a cachebust query).
-                    let is_allowed_marketing_js = opening_tag.contains("defer")
-                        && (opening_tag.contains("src=\"/js/apexmail-site.js")
-                            || opening_tag.contains("src=\"/js/api-explorer.js")
-                            || opening_tag
-                                .contains("src=\"/js/pricing-calculator.js"));
-                    // Inline theme bootstrap + toggle script emitted by ALL root
-                    // layouts (marketing, web, control-plane) via theme_script().
-                    // Reads the theme localStorage key to prevent FOUC, and
-                    // handles toggle clicks on [data-theme-toggle] buttons. The
-                    // web/control-plane shells use the namespaced
-                    // "apexmail-ui:theme" key, while the Zola-built marketing
-                    // site uses its legacy "apexmail-theme" key — accept both.
-                    let is_theme_script = !opening_tag.contains("src=")
-                        && script.contains("prefers-color-scheme:dark")
-                        && (script.contains("apexmail-ui:theme")
-                            || script.contains("apexmail-theme"));
-                    // Inline footer status indicator script baked into every
-                    // Zola-built marketing page. Self-contained IIFE that polls
-                    // the status page and toggles the `.footer-status-dot` /
-                    // `.footer-status-text` elements.
-                    let is_marketing_footer_status_script = !opening_tag.contains("src=")
-                        && script.contains("footer-status-dot")
-                        && script.contains("footer-status-text");
-                    // Inline interactive marketing widgets baked in by the Zola
-                    // build with a static-render nonce (`nonce=static-build`):
-                    // the API explorer console (`data-api-console-root`) and the
-                    // pricing calculator. Both are self-contained IIFEs with no
-                    // external dependencies.
-                    let is_marketing_static_widget_script = opening_tag.contains("nonce")
-                        && (script.contains("data-api-console-root")
-                            || script.contains("monthlyPrice"));
-                    // Inline mobile-menu toggle script injected by shell::mobile_menu_script()
-                    // into both web and control-plane shells. It is an inline self-contained IIFE
-                    // with no external dependencies and requires no separate CSP nonce exemption
-                    // because `script-src 'self' 'strict-dynamic'` covers the HTTP-header CSP.
-                    let is_mobile_menu_script = !opening_tag.contains("src=")
-                        && script.contains("data-mobile-menu-breakpoint")
-                        && script.contains("ResizeObserver");
-                    // Inline auth-form bridge script injected by `web_auth_form_script`
-                    // (shared by control-plane login). Self-contained IIFE that
-                    // converts native form submission to JSON for the auth handlers.
-                    let is_auth_form_script = !opening_tag.contains("src=")
-                        && script.contains("authBound")
-                        && script.contains("/v1/auth/");
-                    // Inline API-form hydration script injected by `api_form_script`
-                    // (emitted by `web_dashboard_layout` on every web dashboard
-                    // route). Self-contained IIFE that serializes
-                    // `form[data-api-form]` fields to JSON, POSTs them to the
-                    // form's `data-api-action` URL with the CSRF header, and
-                    // redirects on success. Pure Rust SSR, no external JS.
-                    let is_api_form_script = !opening_tag.contains("src=")
-                        && script.contains("apiAction")
-                        && script.contains("data-api-form");
-                    // Inline MFA management script injected by `control_plane_security_page`.
-                    // Self-contained IIFE that handles MFA setup flow (status check, QR code
-                    // display, TOTP verification, recovery codes) via the /v1/auth/mfa/* API.
-                    let is_mfa_management_script = !opening_tag.contains("src=")
-                        && script.contains("mfaChallengeToken")
-                        && script.contains("/v1/auth/mfa/");
-                    // Inline KiwiCaptcha proof-of-work widget script. Self-contained
-                    // IIFE that fetches a challenge from /api/kcaptcha/challenge,
-                    // solves the proof-of-work (WASM + JS fallback), and fills the
-                    // hidden token input. No external dependencies. The widget
-                    // driver references the challenge endpoint URL, and the WASM
-                    // embed is the generated solver bootstrap (base64 wasm), which
-                    // contains the `__kiwiCaptchaWasm` global and solver export
-                    // names. Both are inline, nonce-stamped scripts.
-                    let is_kiwi_widget_script = !opening_tag.contains("src=")
-                        && (script.contains("/api/kcaptcha/challenge")
-                            || script.contains("__kiwiCaptchaWasm"));
-                    // External client-side hydration script emitted by the web and
-                    // control-plane root layouts. It wires SSR tables/forms/buttons to the
-                    // JSON API and is served from /assets/console.js. Allowed only with
-                    // `defer` so it never blocks initial render.
-                    let is_console_js = opening_tag.contains("src=\"/assets/console.js")
-                        && opening_tag.contains("defer");
-                    let allowed = match route.surface {
-                        "marketing" | "marketing-zola" => {
-                            is_json_ld
-                                || is_allowed_marketing_js
-                                || is_theme_script
-                                || is_marketing_footer_status_script
-                                || is_marketing_static_widget_script
-                        }
-                        "web" | "control-plane" => {
-                            is_theme_script
-                                || is_mobile_menu_script
-                                || is_auth_form_script
-                                || is_api_form_script
-                                || is_mfa_management_script
-                                || is_kiwi_widget_script
-                                || is_console_js
-                        }
-                        _ => false,
-                    };
+            let html = render_route(route.surface, route.pattern)
+                .unwrap_or_else(|| panic!("missing view for [{}] {}", route.surface, route.pattern));
+            if let Some(index) = html.find("<script") {
+                // Find every script and prove each is a JSON-LD data block.
+                let mut cursor = index;
+                while let Some(rel) = html[cursor..].find("<script") {
+                    let at = cursor + rel;
+                    let end = html[at..].find('>').map(|o| at + o).unwrap_or(at);
+                    let opening = html[at..=end].to_ascii_lowercase();
                     assert!(
-                        allowed,
-                        "[{}] {} emitted an unexpected script tag: <script{}>",
-                        route.surface, route.pattern, opening_tag,
+                        opening.contains("application/ld+json"),
+                        "[{}] {} emitted an executable script tag: {}",
+                        route.surface,
+                        route.pattern,
+                        &html[at..(end + 1).min(html.len())],
                     );
-                    if opening_tag.contains("src=") {
-                        assert!(
-                            is_allowed_marketing_js || is_console_js,
-                            "[{}] {} emitted an unexpected external script tag: <script{}>",
-                            route.surface,
-                            route.pattern,
-                            opening_tag,
-                        );
-                    }
+                    cursor = end + 1;
                 }
             }
         }
+    }
+
+    /// No inline event handlers anywhere (onclick=, onload=, onerror=, …).
+    #[test]
+    fn no_inline_event_handlers_in_any_rendered_route() {
+        let handlers = [
+            " onclick=", " onload=", " onerror=", " onsubmit=", " onmouseover=",
+            " onfocus=", " onblur=", " onchange=", " oninput=", " onkeydown=",
+        ];
+        for route in ssr::ssr_routes() {
+            let html = render_route(route.surface, route.pattern).unwrap();
+            let lower = html.to_ascii_lowercase();
+            for handler in handlers {
+                assert!(
+                    !lower.contains(handler),
+                    "[{}] {} contains inline handler {}",
+                    route.surface,
+                    route.pattern,
+                    handler,
+                );
+            }
+        }
+    }
+
+    /// BLANKET zero-JS shape guard: NO rendered route may contain ANY
+    /// `on<name>="…"` event-handler attribute shape at all — not just the
+    /// ten spellings enumerated above. Scans for ` on` + ASCII letters +
+    /// `=` inside tag boundaries across every view the router can emit
+    /// (web, control-plane, and the built marketing pages).
+    #[test]
+    fn no_on_anything_attribute_shapes_in_any_rendered_route() {
+        for route in ssr::ssr_routes() {
+            let html = render_route(route.surface, route.pattern)
+                .unwrap_or_else(|| panic!("missing view for [{}] {}", route.surface, route.pattern));
+            let lower = html.to_ascii_lowercase();
+            let mut cursor = 0usize;
+            while let Some(rel) = lower[cursor..].find('<') {
+                let at = cursor + rel;
+                let Some(end_rel) = lower[at..].find('>') else { break };
+                let end = at + end_rel;
+                let tag = &lower[at..=end];
+                // Skip closing tags and doctype/PI/comment openers.
+                if !tag.starts_with("</") && !tag.starts_with("<!") {
+                    let mut scan = 1usize;
+                    while let Some(space_rel) = tag[scan..].find(' ') {
+                        let attr_start = scan + space_rel + 1;
+                        let rest = &tag[attr_start..];
+                        let name_len = rest
+                            .find(|c: char| c == '=' || c.is_whitespace() || c == '>')
+                            .unwrap_or(rest.len());
+                        let name = &rest[..name_len];
+                        if name.len() >= 3 && name.starts_with("on") {
+                            let after = &rest[name_len..];
+                            if after.starts_with('=') {
+                                panic!(
+                                    "[{}] {} emitted an on*= event handler attribute: {}",
+                                    route.surface,
+                                    route.pattern,
+                                    &html[at..(end + 1).min(html.len())],
+                                );
+                            }
+                        }
+                        scan = attr_start;
+                    }
+                }
+                cursor = end + 1;
+            }
+        }
+    }
+
+    /// Every form must be a real native submission: an action attribute
+    /// pointing at a known target and an explicit method.
+    #[test]
+    fn every_form_has_action_and_method() {
+        for route in ssr::ssr_routes() {
+            let html = render_route(route.surface, route.pattern).unwrap();
+            let lower = html.to_ascii_lowercase();
+            let mut cursor = 0usize;
+            while let Some(rel) = lower[cursor..].find("<form") {
+                let at = cursor + rel;
+                let end = lower[at..].find('>').map(|o| at + o).unwrap_or(at);
+                let tag = &lower[at..=end];
+                if !tag.contains("action=") {
+                    panic!(
+                        "[{}] {} has a form without an action: {}",
+                        route.surface, route.pattern, tag
+                    );
+                }
+                if !tag.contains("method=") {
+                    panic!(
+                        "[{}] {} has a form without a method: {}",
+                        route.surface, route.pattern, tag
+                    );
+                }
+                cursor = end + 1;
+            }
+        }
+    }
+
+    /// Every input inside a POST form must carry a name (or be the injected
+    /// _csrf) so the server actually receives the field.
+    #[test]
+    fn form_fields_carry_names() {
+        for route in ssr::ssr_routes() {
+            let html = render_route(route.surface, route.pattern).unwrap();
+            let lower = html.to_ascii_lowercase();
+            let mut cursor = 0usize;
+            while let Some(rel) = lower[cursor..].find("<form") {
+                let at = cursor + rel;
+                let open_end = lower[at..].find('>').map(|o| at + o).unwrap_or(at);
+                let close = lower[open_end..].find("</form>").map(|o| open_end + o);
+                let form_html = &html[open_end..close.map(|c| c).unwrap_or(html.len())];
+                let form_lower = form_html.to_ascii_lowercase();
+                if form_lower.contains("method=\"post\"") {
+                    let mut inner = 0usize;
+                    while let Some(irel) = form_lower[inner..].find("<input") {
+                        let iat = inner + irel;
+                        let iend = form_lower[iat..].find('>').map(|o| iat + o).unwrap_or(iat);
+                        let tag = &form_lower[iat..=iend];
+                        if !tag.contains("name=") && !tag.contains("type=\"submit\"")
+                            && !tag.contains("type=\"button\"") && !tag.contains("type=\"checkbox\"") {
+                            panic!(
+                                "[{}] {} POST form input missing name: {}",
+                                route.surface, route.pattern, tag
+                            );
+                        }
+                        inner = iend + 1;
+                    }
+                }
+                cursor = close.map(|c| c + "</form>".len()).unwrap_or(open_end + 1);
+            }
+        }
+    }
+
+    /// href hygiene: no javascript: URLs, no bare "#" fragments. In-page
+    /// skip links to real element ids (#app-main, #main-content, #top) are
+    /// the only permitted fragments.
+    #[test]
+    fn href_hygiene_no_js_urls_or_bare_fragments() {
+        let allowed_fragments = ["#app-main", "#main-content", "#top"];
+        for route in ssr::ssr_routes() {
+            let html = render_route(route.surface, route.pattern).unwrap();
+            let lower = html.to_ascii_lowercase();
+            let mut cursor = 0usize;
+            while let Some(rel) = lower[cursor..].find("href=\"") {
+                let at = cursor + rel + "href=\"".len();
+                let end = html[at..].find('"').map(|o| at + o).unwrap_or(at);
+                let href = &html[at..end];
+                assert!(
+                    !href.to_ascii_lowercase().starts_with("java"),
+                    "[{}] {} links javascript URL {href}",
+                    route.surface,
+                    route.pattern,
+                );
+                if href.starts_with('#') {
+                    assert!(
+                        allowed_fragments.contains(&href),
+                        "[{}] {} uses a non-skip-link fragment {href}",
+                        route.surface,
+                        route.pattern,
+                    );
+                }
+                cursor = end + 1;
+            }
+        }
+    }
+
+    /// Every console-internal link target must resolve to a known SSR route
+    /// (or an API endpoint / asset / mailto / absolute marketing URL).
+    #[test]
+    fn console_internal_links_resolve_to_known_routes() {
+        let surfaces = [("web", "web"), ("control-plane", "control-plane")];
+        for (surface, _) in surfaces {
+            for route in routing::surface_routes(surface) {
+                let html = render_route(surface, route.path).unwrap();
+                let lower = html.to_ascii_lowercase();
+                let mut cursor = 0usize;
+                while let Some(rel) = lower[cursor..].find("href=\"") {
+                    let at = cursor + rel + "href=\"".len();
+                    let end = html[at..].find('"').map(|o| at + o).unwrap_or(at);
+                    let href = html[at..end].to_string();
+                    let path_only = href.split('?').next().unwrap_or(&href);
+                    let is_internal = path_only.starts_with('/')
+                        && !path_only.starts_with("//")
+                        && !path_only.contains('.');
+                    if is_internal && !path_only.starts_with("/v1/")
+                        && !path_only.starts_with("/api/") && !path_only.starts_with("/web/")
+                        && !path_only.starts_with('#')
+                    {
+                        assert!(
+                            render_route(surface, path_only).is_some(),
+                            "[{}] {} links to unknown route {path_only}",
+                            surface,
+                            route.path,
+                        );
+                    }
+                    cursor = end + 1;
+                }
+            }
+        }
+    }
+
+    /// With a server secret, every POST /web form gains a hidden _csrf input
+    /// and every /confirm link gains an HMAC signature.
+    #[test]
+    fn csrf_and_confirm_signatures_are_injected() {
+        let secret = "router-test-secret-0123456789";
+        let campaigns = render_route_with_query("web", "/campaigns", None, Some(secret)).unwrap();
+        assert!(campaigns.contains("name=\"_csrf\""));
+        assert!(campaigns.contains("value=\""));
+        // Confirm links are signed and verifiable for their exact intent+id.
+        let sig_start = campaigns.find("sig=").expect("confirm link signed");
+        let tail = &campaigns[sig_start..];
+        let token: String = tail
+            .trim_start_matches("sig=")
+            .chars()
+            .take_while(|c| *c != '"')
+            .collect();
+
+        assert!(token.contains('.'));
+        assert!(crate::flash::verify_confirmation(
+            secret,
+            &token,
+            "delete-campaign",
+            "c_spring",
+            chrono::Utc::now().timestamp()
+        ));
+        // Cross-intent verification must fail.
+        assert!(!crate::flash::verify_confirmation(
+            secret,
+            &token,
+            "delete-list",
+            "c_spring",
+            chrono::Utc::now().timestamp()
+        ));
+
+        let contacts_new = render_route_with_query("web", "/contacts/new", None, Some(secret)).unwrap();
+        assert!(contacts_new.contains("name=\"_csrf\""));
+    }
+
+    /// Flash messages render as banners inside the page content.
+    #[test]
+    fn flash_messages_render_as_banners() {
+        let flash = vec![
+            crate::flash::FlashMessage::success("Campaign created."),
+            crate::flash::FlashMessage::error("Email is not valid."),
+        ];
+        let html = render_route_with_flash("web", "/campaigns", None, None, &flash).unwrap();
+        assert!(html.contains("Campaign created."));
+        assert!(html.contains("Email is not valid."));
+        assert!(html.contains("role=\"status\""));
+    }
+
+    /// Web-host /terms and /privacy redirect to the canonical marketing
+    /// origin instead of 404ing from the auth footer links.
+    #[test]
+    fn web_legal_routes_redirect_to_marketing_origin() {
+        for path in ["/terms", "/privacy"] {
+            let html = render_route("web", path)
+                .unwrap_or_else(|| panic!("web {path} should render a redirect"));
+            assert!(html.contains(&format!("url=https://apexmail.ee{path}")));
+            assert!(html.contains(&format!("rel=\"canonical\" href=\"https://apexmail.ee{path}\"")));
+        }
+    }
+
+    /// strip_executable_scripts removes JS but preserves JSON-LD.
+    #[test]
+    fn script_stripper_keeps_json_ld_and_drops_executables() {
+        let doc = "<html><head>\
+<script type=\"application/ld+json\">{ \"@context\": \"https://schema.org\" }</script>\
+<script>var x = 1;</script>\
+<script src=\"/js/apexmail-site.js\" defer></script>\
+</head><body><p>hi</p></body></html>";
+        let stripped = strip_executable_scripts(doc);
+        assert!(stripped.contains("application/ld+json"));
+        assert!(stripped.contains("schema.org"));
+        assert!(!stripped.contains("var x"));
+        assert!(!stripped.contains("apexmail-site.js"));
+        assert!(stripped.contains("<p>hi</p>"));
     }
 }

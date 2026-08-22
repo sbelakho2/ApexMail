@@ -137,10 +137,6 @@ fn normalize_fixture_html(html: &str) -> String {
         ("href=/fonts/", "href=fonts/"),
         ("href=\"https://apexmail.ee/fonts/", "href=\"fonts/"),
         ("href=https://apexmail.ee/fonts/", "href=fonts/"),
-        ("src=\"/js/", "src=\"js/"),
-        ("src=/js/", "src=js/"),
-        ("src=\"https://apexmail.ee/js/", "src=\"js/"),
-        ("src=https://apexmail.ee/js/", "src=js/"),
         ("src=\"/images/", "src=\"images/"),
         ("src=/images/", "src=images/"),
         ("src=\"https://apexmail.ee/images/", "src=\"images/"),
@@ -220,7 +216,7 @@ fn export_fixture_assets(out_dir: &Path) -> Result<(), Box<dyn std::error::Error
     )?;
 
     let marketing_public_dir = marketing_public_dir();
-    for asset_dir in ["css", "fonts", "images", "js"] {
+    for asset_dir in ["css", "fonts", "images"] {
         copy_dir_all(
             &marketing_public_dir.join(asset_dir),
             &out_dir.join(asset_dir),

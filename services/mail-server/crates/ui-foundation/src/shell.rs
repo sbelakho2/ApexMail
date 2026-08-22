@@ -59,50 +59,11 @@ pub fn toast_remove_delay_ms() -> usize {
 }
 
 pub fn header_shortcut_hint() -> &'static str {
-    "Cmd K"
+    "Search"
 }
 
 pub fn theme_storage_key() -> &'static str {
     "apexmail-ui:theme"
-}
-
-pub fn shell_shortcut_registry() -> &'static [(&'static str, &'static str)] {
-    const SHORTCUTS: &[(&str, &str)] = &[
-        ("mod+k", "global-search"),
-        ("mod+b", "toggle-sidebar"),
-        ("mod+shift+d", "toggle-theme"),
-    ];
-    SHORTCUTS
-}
-
-fn render_shortcut_contract() -> String {
-    let entries = shell_shortcut_registry()
-        .iter()
-        .map(|(shortcut, action)| {
-            format!("<span data-shortcut=\"{shortcut}\" data-shortcut-action=\"{action}\"></span>")
-        })
-        .collect::<Vec<_>>()
-        .join("");
-    format!(
-        "<section aria-label=\"Keyboard shortcuts\" data-keyboard-shortcuts>{entries}</section>"
-    )
-}
-
-/// Returns an inline `<script>` block that provides client-side interactivity
-/// for mobile sidebar toggling, used by both the Web Dashboard and Control
-/// Plane shells. Handles:
-/// - Click on the burger menu button toggles the mobile sidebar open/closed
-/// - Click on the backdrop overlay closes the sidebar
-/// - Escape key closes the sidebar
-/// - Resizing past the breakpoint closes the sidebar
-///
-/// The script tag will receive a CSP nonce via `inject_script_nonce` in
-/// `browser_html_response`, so it executes safely under the browser CSP.
-pub fn mobile_menu_script() -> String {
-    // Minified JS that provides click + keyboard + resize handling for mobile
-    // sidebars used by both the Web Dashboard and Control Plane shells.
-    let script = r#"(function(){'use strict';function e(e,t){var n=document.getElementById(e);if(n){var o=!n.classList.contains('-translate-x-full');n.classList.toggle('-translate-x-full'),n.classList.toggle('translate-x-0');var r=document.querySelector('[aria-controls="'+e+'"]');r&&r.setAttribute('aria-expanded',String(o))}}function t(e,t){var n=document.getElementById(e);n&&(n.classList.remove('-translate-x-full'),n.classList.add('translate-x-0'),document.querySelector('[aria-controls="'+e+'"]')&&document.querySelector('[aria-controls="'+e+'"]').setAttribute('aria-expanded','true'))}function n(e){var t=document.getElementById(e);t&&(t.classList.remove('translate-x-0'),t.classList.add('-translate-x-full'));var n=document.querySelector('[aria-controls="'+e+'"]');n&&(n.setAttribute('aria-expanded','false'),n.classList.remove('is-active'))}function o(o){var r=o.currentTarget,i=r.getAttribute('aria-controls');i&&(o.preventDefault(),o.stopPropagation(),r.classList.contains('is-active')?n(i):t(i),r.classList.toggle('is-active'))}function r(e){'Escape'!==e.key||function(){var e=document.querySelector('#mobile-sidebar.translate-x-0,#control-plane-mobile-sidebar.translate-x-0');e&&n(e.id)}()}document.querySelectorAll('[data-mobile-menu-breakpoint]').forEach(function(e){'BUTTON'===e.tagName&&e.addEventListener('click',o)}),document.addEventListener('keydown',r);var i=new ResizeObserver(function(){window.innerWidth>=768&&document.querySelectorAll('#mobile-sidebar.translate-x-0,#control-plane-mobile-sidebar.translate-x-0').forEach(function(e){n(e.id)})});i.observe(document.body)})();"#;
-    format!("<script>{script}</script>")
 }
 
 fn shell_icon(name: &str, class_name: &str) -> String {
@@ -180,7 +141,6 @@ pub struct ShellHeader<'a> {
 
 impl<'a> ShellHeader<'a> {
     pub fn render_html(&self) -> String {
-        let theme_icon = shell_icon("moon", "h-4 w-4");
         let safe_avatar = html_escape(self.avatar_fallback);
         let user = self.user_context.as_ref();
         let display_name = html_escape(user.map_or("ApexMail User", |u| u.display_name));
@@ -200,37 +160,32 @@ impl<'a> ShellHeader<'a> {
         format!(
             "<header class=\"apex-console-header sticky top-0 z-20 flex h-16 items-center justify-between border-b border-surface-200/60 bg-card px-8\">\
                 <div class=\"flex items-center gap-4\">\
-                    <button type=\"button\" class=\"md:hidden inline-flex h-10 w-10 items-center justify-center rounded-lg text-surface-500 hover:bg-surface-50 hover:text-surface-950 transition-colors\" aria-label=\"{menu_label} navigation menu\" aria-expanded=\"{expanded}\" aria-controls=\"mobile-sidebar\" data-mobile-menu-breakpoint=\"md\" data-shortcut=\"mod+b\">{menu_icon}</button>\
-                    <div class=\"relative hidden md:block\">\
-                        <button aria-label=\"Search\" data-shortcut=\"mod+k\" class=\"flex items-center gap-3 px-3 py-1.5 text-xs font-medium text-surface-400 bg-surface-50 border border-surface-200/60 rounded-lg hover:bg-surface-100 hover:text-surface-600 transition-all min-w-[200px]\">\
-                            <svg xmlns=\"http://www.w3.org/2000/svg\" width=\"14\" height=\"14\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2.5\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><circle cx=\"11\" cy=\"11\" r=\"8\"/><path d=\"m21 21-4.3-4.3\"/></svg>\
-                            <span>Search...</span>\
-                            <kbd class=\"ml-auto text-[10px] opacity-50 font-sans\">⌘K</kbd>\
-                        </button>\
-                    </div>\
+                    {mobile_toggle}\
+                    <form method=\"get\" action=\"/campaigns\" role=\"search\" class=\"relative hidden md:block\">\
+                        <label class=\"sr-only\" for=\"global-search\">Search campaigns</label>\
+                        <div class=\"flex items-center gap-2 px-3 py-1.5 text-xs font-medium text-surface-400 bg-surface-50 border border-surface-200/60 rounded-lg focus-within:border-primary min-w-[220px]\">\
+                            <svg xmlns=\"http://www.w3.org/2000/svg\" width=\"14\" height=\"14\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2.5\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\"><circle cx=\"11\" cy=\"11\" r=\"8\"/><path d=\"m21 21-4.3-4.3\"/></svg>\
+                            <input id=\"global-search\" type=\"search\" name=\"query\" placeholder=\"Search campaigns…\" class=\"bg-transparent outline-none text-surface-600 placeholder:text-surface-400 w-full\" />\
+                            <button type=\"submit\" class=\"text-[10px] font-bold uppercase tracking-widest text-surface-500 hover:text-surface-900 transition-colors\">Search</button>\
+                        </div>\
+                    </form>\
                 </div>\
                 <div class=\"flex items-center gap-4\">\
                     <div class=\"flex items-center gap-1 pr-4 border-r border-surface-100\" data-plan-label>\
                         <span class=\"text-[10px] font-semibold tracking-wide text-surface-400\">{plan_label}</span>\
                     </div>\
-                    <button type=\"button\" aria-label=\"Toggle dark mode\" data-theme-toggle=\"true\" class=\"inline-flex h-9 w-9 items-center justify-center rounded-lg text-surface-400 hover:bg-surface-50 hover:text-surface-950 transition-colors\">\
-                        {theme_icon}\
-                    </button>\
                     <div class=\"flex items-center gap-3 pl-2\">\
                         {identity_block}\
-                        <div class=\"apex-avatar relative flex shrink-0 h-9 w-9 rounded-full bg-primary/10 border border-primary/20 items-center justify-center\" role=\"button\" aria-label=\"User menu\" tabindex=\"0\">\
+                        <div class=\"apex-avatar relative flex shrink-0 h-9 w-9 rounded-full bg-primary/10 border border-primary/20 items-center justify-center\" aria-label=\"Signed in as {avatar}\">\
                             <span class=\"text-primary font-semibold text-xs tracking-tighter\">{avatar}</span>\
                         </div>\
                     </div>\
                 </div>\
             </header>",
-            menu_icon = shell_icon("menu", "h-5 w-5"),
-            menu_label = if self.mobile_menu_open { "Close" } else { "Open" },
-            expanded = if self.mobile_menu_open { "true" } else { "false" },
-            theme_icon = theme_icon,
-            avatar = safe_avatar,
+            mobile_toggle = shell_icon("menu", "h-5 w-5"),
             plan_label = plan_label,
             identity_block = identity_block,
+            avatar = safe_avatar,
         )
     }
 }
@@ -259,7 +214,7 @@ impl<'a> ImpersonationBanner<'a> {
         let safe_operator = html_escape(self.operator_name);
         let safe_time = html_escape(self.time_remaining);
         format!(
-            "<div class=\"fixed top-0 left-0 right-0 z-[100] bg-primary text-white border-b border-brand-700\" role=\"alert\" aria-live=\"polite\"><div class=\"max-w-7xl mx-auto px-6 py-2\"><div class=\"flex items-center justify-between\"><div class=\"flex items-center gap-6\"><div class=\"flex items-center gap-2 bg-white/10 px-2 py-0.5 rounded-full\"><span class=\"text-[10px] font-semibold uppercase tracking-[0.1em]\">Impersonation Active</span></div><div class=\"flex items-center gap-2 text-[11px] font-semibold tracking-tight\"><span class=\"opacity-70\">Tenant:</span><span class=\"bg-white/10 px-1.5 py-0.5 rounded-md\">{}</span></div><div class=\"hidden md:flex items-center gap-2 text-[11px] font-semibold tracking-tight\"><span class=\"opacity-70\">Operator:</span><span>{}</span></div></div><div class=\"flex items-center gap-6\">{}<div class=\"flex items-center gap-2 text-[11px] font-semibold tracking-tight\"><span class=\"opacity-70\">Expires:</span><span class=\"font-mono bg-white/20 px-1.5 py-0.5 rounded-md\">{}</span></div><form method=\"POST\" action=\"/v1/auth/impersonate/end\" data-api-form data-redirect=\"/cp\" class=\"inline\"><button type=\"submit\" class=\"px-3 py-1 bg-white text-primary rounded-md text-[11px] font-semibold hover:bg-surface-50 transition-colors\">{}</button></form></div></div></div></div>",
+            "<div class=\"fixed top-0 left-0 right-0 z-[100] bg-primary text-white border-b border-brand-700\" role=\"alert\" aria-live=\"polite\"><div class=\"max-w-7xl mx-auto px-6 py-2\"><div class=\"flex items-center justify-between\"><div class=\"flex items-center gap-6\"><div class=\"flex items-center gap-2 bg-white/10 px-2 py-0.5 rounded-full\"><span class=\"text-[10px] font-semibold uppercase tracking-[0.1em]\">Impersonation Active</span></div><div class=\"flex items-center gap-2 text-[11px] font-semibold tracking-tight\"><span class=\"opacity-70\">Tenant:</span><span class=\"bg-white/10 px-1.5 py-0.5 rounded-md\">{}</span></div><div class=\"hidden md:flex items-center gap-2 text-[11px] font-semibold tracking-tight\"><span class=\"opacity-70\">Operator:</span><span>{}</span></div></div><div class=\"flex items-center gap-6\">{}<div class=\"flex items-center gap-2 text-[11px] font-semibold tracking-tight\"><span class=\"opacity-70\">Expires:</span><span class=\"font-mono bg-white/20 px-1.5 py-0.5 rounded-md\">{}</span></div><form method=\"POST\" action=\"/web/auth/impersonate/end\" data-api-form data-redirect=\"/cp\" class=\"inline\"><button type=\"submit\" class=\"px-3 py-1 bg-white text-primary rounded-md text-[11px] font-semibold hover:bg-surface-50 transition-colors\">{}</button></form></div></div></div></div>",
             safe_tenant,
             safe_operator,
             error,
@@ -294,6 +249,9 @@ pub struct WebDashboardShell<'a> {
     pub impersonation_banner: Option<ImpersonationBanner<'a>>,
     pub toast_surface: Option<ToastSurface<'a>>,
     pub current_path: &'a str,
+    /// CSRF token for the sign-out form (native POST; injected by the
+    /// axum_router render pass).
+    pub csrf_token: &'a str,
 }
 
 impl<'a> WebDashboardShell<'a> {
@@ -303,70 +261,55 @@ impl<'a> WebDashboardShell<'a> {
         } else {
             "w-64"
         };
-        // Backdrop only exists while the menu is open; the mobile sidebar
-        // itself is ALWAYS in the DOM (mirroring the control-plane shell) —
-        // closed state is expressed with `-translate-x-full` so the burger
-        // button and mobile_menu_script() can toggle it client-side. Rendering
-        // it only when open meant SSR pages (which always render closed)
-        // shipped no mobile navigation at all.
-        let mobile_backdrop = if self.mobile_menu_open {
-            "<div class=\"fixed inset-0 z-40 bg-black/50 md:hidden\" aria-hidden=\"true\" data-close-on-escape=\"true\"></div>"
-                .to_string()
-        } else {
-            String::new()
-        };
-        let mobile_sidebar_translate = if self.mobile_menu_open {
-            ""
-        } else {
-            " -translate-x-full"
-        };
         let banner = self
             .impersonation_banner
             .as_ref()
             .map(ImpersonationBanner::render_html)
             .unwrap_or_default();
-        let shortcut_contract = render_shortcut_contract();
         let toast_surface = self
             .toast_surface
             .as_ref()
             .map(ToastSurface::render_html)
             .unwrap_or_default();
-        let sidebar_content = render_web_sidebar(self.current_path);
-        let mobile_script = mobile_menu_script();
+        let sidebar_content = render_web_sidebar(self.current_path, self.csrf_token);
+        // Zero-JS mobile navigation: a <details> disclosure. It is keyboard
+        // operable, focusable, and needs no script to open or close.
+        let menu_icon = shell_icon("menu", "h-5 w-5");
         let mobile_sidebar = format!(
-            "<div id=\"mobile-sidebar\" role=\"navigation\" aria-label=\"Mobile navigation\" data-mobile-menu-breakpoint=\"md\" data-close-on-escape=\"true\" tabindex=\"-1\" class=\"fixed inset-y-0 left-0 z-50 w-[min(20rem,calc(100vw-2rem))] md:hidden transition-transform duration-300{mobile_sidebar_translate}\"><aside class=\"h-full bg-card\">{sidebar_content}</aside></div>"
+            "<details class=\"apex-mobile-nav md:hidden fixed inset-y-0 left-0 z-50\" id=\"mobile-sidebar\">\
+            <summary class=\"absolute left-4 top-3 z-10 inline-flex h-10 w-10 items-center justify-center rounded-lg bg-card text-surface-500 hover:bg-surface-50 hover:text-surface-950 transition-colors border border-surface-200\" aria-label=\"Toggle navigation menu\" aria-controls=\"mobile-sidebar-panel\">{menu_icon}<span class=\"sr-only\">Menu</span></summary>\
+            <div id=\"mobile-sidebar-panel\" class=\"h-screen w-[min(20rem,calc(100vw-2rem))] bg-card border-r border-surface-200/60 overflow-y-auto pt-16\">{sidebar_content}</div>\
+            </details>",
+            menu_icon = menu_icon,
         );
 
         format!(
-            "<div class=\"apex-console-shell min-h-screen bg-[#fcfcfc] flex\" data-theme-mode=\"system\" data-theme-storage-key=\"{theme_key}\">\
-            {banner}{shortcut_contract}\
+            "<div class=\"apex-console-shell min-h-screen bg-[#fcfcfc] flex\" data-theme-storage-key=\"{theme_key}\">\
+            {banner}\
             <aside class=\"hidden md:flex flex-col fixed left-0 top-0 h-screen {sidebar_width} z-30 transition-all duration-300\" data-sidebar-storage-key=\"{sidebar_key}\" aria-label=\"Primary sidebar navigation\">\
                 {sidebar_content}\
             </aside>\
-            {mobile_backdrop}{mobile_sidebar}\
+            {mobile_sidebar}\
             <div class=\"flex-1 flex flex-col min-h-screen transition-all duration-300 ml-0 md:ml-{ml_val}\">\
                 {header}\
-                <main class=\"apex-console-main relative p-6 lg:p-10 flex-1\">\
+                <main class=\"apex-console-main relative p-6 lg:p-10 flex-1\" id=\"app-main\">\
                     <div class=\"max-w-7xl mx-auto\">\
                         {child_html}\
                     </div>\
                 </main>\
             </div>\
-            {toast_surface}{mobile_script}\
+            {toast_surface}\
             </div>",
             theme_key = theme_storage_key(),
             banner = banner,
-            shortcut_contract = shortcut_contract,
             sidebar_width = sidebar_width,
             sidebar_key = ui_store_persistence_key(),
             sidebar_content = sidebar_content,
-            mobile_backdrop = mobile_backdrop,
             mobile_sidebar = mobile_sidebar,
             ml_val = if self.sidebar_collapsed { "20" } else { "64" },
             header = self.header.render_html(),
             child_html = self.child_html,
             toast_surface = toast_surface,
-            mobile_script = mobile_script,
         )
     }
 }
@@ -386,6 +329,8 @@ pub struct ControlPlaneShell<'a> {
     pub banners: Vec<OperationalBanner<'a>>,
     pub child_html: &'a str,
     pub current_path: &'a str,
+    /// CSRF token for the sign-out form (native POST).
+    pub csrf_token: &'a str,
 }
 
 impl<'a> ControlPlaneShell<'a> {
@@ -403,60 +348,45 @@ impl<'a> ControlPlaneShell<'a> {
             .collect::<Vec<_>>()
             .join("");
 
-        let sidebar_content = render_cp_sidebar(self.current_path);
-        let mobile_script = mobile_menu_script();
-        let shortcut_contract = render_shortcut_contract();
+        let sidebar_content = render_cp_sidebar(self.current_path, self.csrf_token);
+        let menu_icon = shell_icon("menu", "h-5 w-5");
+        let mobile_sidebar = format!(
+            "<details class=\"apex-mobile-nav md:hidden fixed inset-y-0 left-0 z-50\" id=\"control-plane-mobile-sidebar\">\
+            <summary class=\"absolute left-4 top-3 z-10 inline-flex h-10 w-10 items-center justify-center rounded-lg bg-card text-surface-500 hover:bg-surface-50 hover:text-surface-950 transition-colors border border-surface-200\" aria-label=\"Toggle control plane navigation menu\" aria-controls=\"control-plane-mobile-panel\">{menu_icon}<span class=\"sr-only\">Menu</span></summary>\
+            <div id=\"control-plane-mobile-panel\" class=\"h-screen w-[min(20rem,calc(100vw-2rem))] bg-card border-r border-surface-200/60 overflow-y-auto pt-16\">{sidebar_content}</div>\
+            </details>",
+            menu_icon = menu_icon,
+        );
 
         format!(
-            "<div class=\"apex-cp-shell min-h-screen bg-[#fcfcfc] flex\" data-theme-mode=\"system\" data-theme-storage-key=\"{theme_key}\">\
-            {shortcut_contract}\
+            "<div class=\"apex-cp-shell min-h-screen bg-[#fcfcfc] flex\" data-theme-storage-key=\"{theme_key}\">\
             <aside class=\"hidden md:flex flex-col fixed left-0 top-0 h-screen w-64 z-30\" data-user-role=\"{role}\">\
                 {sidebar_content}\
             </aside>\
-            <div id=\"control-plane-mobile-sidebar\" role=\"navigation\" aria-label=\"Control plane mobile navigation\" data-mobile-menu-breakpoint=\"md\" data-close-on-escape=\"true\" tabindex=\"-1\" class=\"md:hidden fixed left-0 top-0 h-screen z-50 transition-transform duration-300 -translate-x-full\">\
-                <aside class=\"h-full w-[min(20rem,calc(100vw-2rem))] bg-card\">{sidebar_content}</aside>\
-            </div>\
+            {mobile_sidebar}\
             <div class=\"flex-1 flex flex-col min-h-screen ml-0 md:ml-64\">\
                 {banner_markup}\
-                <header class=\"h-16 border-b border-surface-200/60 bg-card flex items-center justify-between px-8 sticky top-0 z-20\">\
-                    <div class=\"flex items-center gap-4\">\
-                        <button type=\"button\" class=\"md:hidden inline-flex h-10 w-10 items-center justify-center rounded-lg text-surface-500 hover:bg-surface-50 hover:text-surface-950 transition-colors\" aria-label=\"{menu_label} navigation menu\" aria-expanded=\"{expanded}\" aria-controls=\"control-plane-mobile-sidebar\" data-mobile-menu-breakpoint=\"md\">{menu_icon}</button>\
-                        <div class=\"flex items-baseline gap-3 min-w-0\">\
-                            <h1 class=\"text-lg font-bold text-surface-950 tracking-tight\">{page_title}</h1>\
-                            <p class=\"hidden sm:block text-xs font-medium text-surface-400 truncate\">{page_description}</p>\
-                        </div>\
-                    </div>\
-                    <div class=\"flex items-center gap-6\">\
-                        <div class=\"hidden lg:flex items-center gap-2 px-3 py-1 bg-surface-50 rounded-full border border-surface-200/60\">\
-                            <span class=\"w-1.5 h-1.5 rounded-full bg-success-500 animate-pulse\"></span>\
-                            <span class=\"text-[10px] font-semibold uppercase tracking-widest text-surface-500\">Fleet Healthy</span>\
-                        </div>\
-                        <div class=\"flex items-center gap-2 text-xs font-semibold text-surface-500\">\
-                            <span class=\"opacity-50\">Role:</span>\
-                            <span class=\"text-primary\">{role}</span>\
-                        </div>\
+                <header class=\"h-16 border-b border-surface-200/60 bg-card flex items-center justify-between px-8 sticky top-0 z-20\"\
+                    <div class=\"flex items-baseline gap-3 min-w-0\">\
+                        <h1 class=\"text-lg font-bold text-surface-950 tracking-tight\">{page_title}</h1>\
+                        <p class=\"hidden sm:block text-xs font-medium text-surface-400 truncate\">{page_description}</p>\
                     </div>\
                 </header>\
-                <main class=\"p-8 flex-1\">\
+                <main class=\"p-8 flex-1\" id=\"app-main\">\
                     <div class=\"max-w-7xl mx-auto\">\
                         {child_html}\
                     </div>\
                 </main>\
             </div>\
-            {mobile_script}\
             </div>",
             theme_key = theme_storage_key(),
-            shortcut_contract = shortcut_contract,
             role = html_escape(self.user_role),
             sidebar_content = sidebar_content,
+            mobile_sidebar = mobile_sidebar,
             banner_markup = banner_markup,
             page_title = html_escape(self.page_title),
             page_description = html_escape(self.page_description),
-            menu_label = if self.mobile_menu_open { "Close" } else { "Open" },
-            expanded = if self.mobile_menu_open { "true" } else { "false" },
-            menu_icon = shell_icon("menu", "h-5 w-5"),
             child_html = self.child_html,
-            mobile_script = mobile_script,
         )
     }
 }
@@ -562,7 +492,7 @@ fn render_sidebar_content(
     )
 }
 
-fn render_web_sidebar(current_path: &str) -> String {
+fn render_web_sidebar(current_path: &str, csrf_token: &str) -> String {
     let main_items = [
         ("Dashboard", "/dashboard", "home"),
         ("Campaigns", "/campaigns", "mail"),
@@ -603,12 +533,13 @@ fn render_web_sidebar(current_path: &str) -> String {
          <div class=\"p-6 mb-4\"><div class=\"flex items-center gap-2\">\
          <span class=\"apex-sidebar-brand text-xl font-bold tracking-tighter transition-all hover:opacity-80\"><span class=\"text-primary\">Apex</span><span class=\"text-surface-950\">Mail</span></span></div></div>\
          <nav class=\"flex-1 overflow-y-auto\" data-sidebar=\"primary\" aria-label=\"Primary sidebar navigation\">{}</nav>\
-         <div class=\"p-4 border-t border-surface-100\"><form method=\"POST\" action=\"/v1/auth/logout\" data-api-form data-api-action=\"/v1/auth/logout\" data-redirect=\"/login\"><button type=\"submit\" class=\"flex w-full items-center gap-3 px-4 py-2 text-sm font-semibold rounded-md text-surface-500 hover:text-surface-950 hover:bg-surface-50 transition-colors\"><span>Sign Out</span></button></form></div></div>",
-        content
+         <div class=\"p-4 border-t border-surface-100\"><form method=\"POST\" action=\"/web/auth/logout\"><input type=\"hidden\" name=\"_csrf\" value=\"{csrf_token}\" /><button type=\"submit\" class=\"flex w-full items-center gap-3 px-4 py-2 text-sm font-semibold rounded-md text-surface-500 hover:text-surface-950 hover:bg-surface-50 transition-colors\"><span>Sign Out</span></button></form></div></div>",
+        content = content,
+        csrf_token = html_escape(csrf_token),
     )
 }
 
-fn render_cp_sidebar(current_path: &str) -> String {
+fn render_cp_sidebar(current_path: &str, csrf_token: &str) -> String {
     let items = [
         ("Overview", "/dashboard", "home"),
         ("Tenants", "/tenants", "building"),
@@ -665,8 +596,7 @@ mod tests {
         assert_eq!(theme_storage_key(), "apexmail-ui:theme");
         assert_eq!(toast_store_global(), "__apexmailToastStore__");
         assert_eq!(toast_remove_delay_ms(), 5000);
-        assert_eq!(header_shortcut_hint(), "Cmd K");
-        assert!(shell_shortcut_registry().contains(&("mod+k", "global-search")));
+        assert_eq!(header_shortcut_hint(), "Search");
     }
 
     #[test]
@@ -718,7 +648,7 @@ mod tests {
             ending_session: false,
         }
         .render_html();
-        assert!(banner.contains("action=\"/v1/auth/impersonate/end\""));
+        assert!(banner.contains("action=\"/web/auth/impersonate/end\""));
         assert!(banner.contains("method=\"POST\""));
         assert!(banner.contains("data-api-form"));
         assert!(banner.contains("Terminate"));
@@ -751,11 +681,12 @@ mod tests {
         // with the mod+k shortcut, theme toggle, avatar — no combobox input,
         // no unread badge. The notification count is surfaced via the toast
         // surface, not the header.
-        assert!(header.contains("aria-label=\"Search\""));
-        assert!(header.contains("data-shortcut=\"mod+k\""));
-        assert!(header.contains("data-theme-toggle=\"true\""));
-        assert!(header.contains("data-mobile-menu-breakpoint=\"md\""));
-        assert!(header.contains("aria-label=\"Open navigation menu\""));
+        assert!(header.contains("role=\"search\""));
+        assert!(header.contains("type=\"search\""));
+        assert!(!header.contains("data-theme-toggle"));
+        assert!(header.contains("for=\"global-search\""));
+        // The nav toggle lives on the <details><summary> in the shell body.
+        assert!(header.contains("role=\"search\""));
         assert!(banner.contains("Impersonation Active"));
         assert!(banner.contains("tenant_123"));
         assert!(banner.contains("Terminate"));
@@ -788,6 +719,7 @@ mod tests {
                 toasts: vec!["<div>Saved</div>"],
             }),
             current_path: "/dashboard",
+            csrf_token: "",
         }
         .render_html();
         let control = ControlPlaneShell {
@@ -801,6 +733,7 @@ mod tests {
             }],
             child_html: "<section>Ops</section>",
             current_path: "/dashboard",
+            csrf_token: "",
         }
         .render_html();
         let marketing = MarketingShell {
@@ -810,22 +743,22 @@ mod tests {
 
         assert!(web.contains("data-sidebar-storage-key=\"apexmail-ui\""));
         assert!(web.contains("data-theme-storage-key=\"apexmail-ui:theme\""));
-        assert!(web.contains("data-keyboard-shortcuts"));
-        assert!(web.contains("data-shortcut-action=\"toggle-theme\""));
-        assert!(web.contains("role=\"navigation\" aria-label=\"Mobile navigation\""));
+        assert!(!web.contains("<script"));
+        assert!(web.contains("<details"));
+        assert!(web.contains("aria-controls=\"mobile-sidebar-panel\""));
         assert!(web.contains("w-20"));
         assert!(web.contains("Dashboard"));
         assert!(web.contains("Could not end impersonation session."));
         assert!(web.contains("Saved"));
         assert!(control.contains("data-user-role=\"admin\""));
         assert!(control.contains("data-theme-storage-key=\"apexmail-ui:theme\""));
-        assert!(control.contains("data-keyboard-shortcuts"));
+        assert!(!control.contains("<script"));
         assert!(control.contains("Safe mode active"));
-        assert!(control.contains("aria-label=\"Close navigation menu\""));
-        assert!(control.contains("aria-controls=\"control-plane-mobile-sidebar\""));
+        assert!(control.contains("aria-label=\"Toggle control plane navigation menu\""));
+        assert!(control.contains("aria-controls=\"control-plane-mobile-panel\""));
         assert!(control.contains("Operations"));
         assert!(control.contains("Monitor the fleet."));
-        assert!(control.contains("-translate-x-full"));
+        assert!(control.contains("<summary"));
         assert!(control.contains("href=\"/dashboard\""));
         assert!(control.contains("href=\"/settings/security\""));
         assert!(!control.contains("href=\"/cp/tenants\""));
@@ -972,6 +905,7 @@ mod tests {
             }],
             child_html: "<section>Ops</section>",
             current_path: "/dashboard",
+            csrf_token: "",
         }
         .render_html();
         assert!(
@@ -1021,36 +955,15 @@ mod tests {
             impersonation_banner: None,
             toast_surface: None,
             current_path: "/dashboard",
+            csrf_token: "",
         }
         .render_html();
 
+        // Zero-JS mobile nav: a <details> disclosure that is always in the
+        // DOM, keyboard operable, and needs no script.
+        assert!(web.contains("<details"));
         assert!(web.contains("id=\"mobile-sidebar\""));
-        assert!(
-            web.contains("md:hidden transition-transform duration-300 -translate-x-full"),
-            "closed mobile sidebar must be translated off-canvas"
-        );
-        // No backdrop while closed.
-        assert!(!web.contains("bg-black/50"));
-
-        let open = WebDashboardShell {
-            mobile_menu_open: true,
-            header: ShellHeader {
-                search_query: "",
-                unread_count: 0,
-                avatar_fallback: "AM",
-                user_context: None,
-                mobile_menu_open: true,
-            },
-            impersonation_banner: None,
-            toast_surface: None,
-            ..web_shell_reference()
-        }
-        .render_html();
-        assert!(open.contains("bg-black/50"));
-        assert!(
-            open.contains("md:hidden transition-transform duration-300\"><aside"),
-            "open mobile sidebar must not carry -translate-x-full"
-        );
+        assert!(web.contains("<summary"));
     }
 
     fn web_shell_reference() -> WebDashboardShell<'static> {
@@ -1068,6 +981,7 @@ mod tests {
             impersonation_banner: None,
             toast_surface: None,
             current_path: "/dashboard",
+            csrf_token: "",
         }
     }
 
@@ -1084,8 +998,7 @@ mod tests {
             !web.contains("href=\"/logout\""),
             "logout must not be a plain GET link"
         );
-        assert!(web.contains("action=\"/v1/auth/logout\""));
-        assert!(web.contains("data-api-action=\"/v1/auth/logout\""));
-        assert!(web.contains("data-redirect=\"/login\""));
+        assert!(web.contains("action=\"/web/auth/logout\""));
+        assert!(web.contains("name=\"_csrf\""));
     }
 }

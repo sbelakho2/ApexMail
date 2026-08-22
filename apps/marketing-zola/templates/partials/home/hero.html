@@ -12,9 +12,13 @@
           <span class="block">{% if i18n_data and i18n_data[l] and i18n_data[l]["home"] and i18n_data[l]["home"]["hero_line1"] %}{{ i18n_data[l]["home"]["hero_line1"] }}{% else %}The Email API{% endif %}</span>
           <span class="block">{% if i18n_data and i18n_data[l] and i18n_data[l]["home"] and i18n_data[l]["home"]["hero_line2"] %}{{ i18n_data[l]["home"]["hero_line2"] }}{% else %}Built for{% endif %} <span class="block sm:inline text-brand-500">{% if i18n_data and i18n_data[l] and i18n_data[l]["home"] and i18n_data[l]["home"]["hero_highlight"] %}{{ i18n_data[l]["home"]["hero_highlight"] }}{% else %}Stability.{% endif %}</span></span>
         </h1>
-        <p class="text-surface-600 mb-10 max-w-xl text-lg leading-[1.5]">
+        {# A <div>, not a <p>: the build minifier omits optional end tags, and
+           a <p> directly followed by the benefits <ul> produced an invalid
+           nested <p><ul> shape in the served HTML. A div keeps the markup
+           unambiguous with identical styling. #}
+        <div class="text-surface-600 mb-10 max-w-xl text-lg leading-[1.5]">
           {% if i18n_data and i18n_data[l] and i18n_data[l]["home"] and i18n_data[l]["home"]["hero_subtitle"] %}{{ i18n_data[l]["home"]["hero_subtitle"] }}{% else %}Reliable, compliance-ready email infrastructure for mission-critical applications.{% endif %}
-        </p>
+        </div>
         <ul class="grid grid-cols-1 sm:grid-cols-2 gap-y-3 gap-x-8 mb-10">
           <li class="flex items-center gap-3 text-surface-600 text-sm">
             <svg xmlns="http://www.w3.org/2000/svg" class="w-5 h-5 text-brand-500 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>

@@ -274,7 +274,7 @@ fn migration_primitives_render_valid_html() {
         disabled: false,
         loading: false,
         left_icon: None,
-        right_icon: None,
+        right_icon: None, submit: true,
     };
     let html = btn.render_html();
     assert!(html.contains("<button"), "Button missing <button> tag");
@@ -346,31 +346,31 @@ fn migration_login_pages_preserve_field_ids() {
 fn migration_forms_have_action_attributes() {
     let login = leptos_views::web_login_page("");
     assert!(
-        login.contains("action=\"/v1/auth/login\""),
+        login.contains("action=\"/web/auth/login\""),
         "login missing action"
     );
 
     let signup = leptos_views::web_signup_page("");
     assert!(
-        signup.contains("action=\"/v1/auth/signup\""),
+        signup.contains("action=\"/web/auth/signup\""),
         "signup missing action"
     );
 
     let forgot = leptos_views::web_forgot_password_page("");
     assert!(
-        forgot.contains("action=\"/v1/auth/forgot-password\""),
+        forgot.contains("action=\"/web/auth/forgot-password\""),
         "forgot missing action"
     );
 
     let reset = leptos_views::web_reset_password_page();
     assert!(
-        reset.contains("action=\"/v1/auth/reset-password\""),
+        reset.contains("action=\"/web/auth/reset-password\""),
         "reset missing action"
     );
 
     let cp_login = leptos_views::control_plane_login_page("");
     assert!(
-        cp_login.contains("action=\"/api/auth/login\""),
+        cp_login.contains("action=\"/web/cp/login\""),
         "cp login missing action"
     );
 }

@@ -84,61 +84,13 @@
         </div>
       </div>
       <div class="mt-8 flex flex-col md:flex-row justify-between items-center gap-8">
-        {# Default state is neutral/unknown (grey) — never green until the live
-           status API actually confirms "operational". The live indicator is
-           populated client-side from status.apexmail.ee. #}
-        <div id="footer-status-container" class="flex items-center gap-6 text-xs font-bold tracking-widest text-surface-500" title="Live status at status.apexmail.ee">
-          <span class="flex items-center gap-2">
-            <span class="footer-status-dot w-1.5 h-1.5 inline-block bg-surface-400 status-unknown" aria-hidden="true"></span>
-            <span class="footer-status-text">{% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["status_unavailable"] %}{{ i18n_data[l]["footer"]["status_unavailable"] }}{% else %}Status unavailable{% endif %}</span>
-            <span class="text-surface-400">&middot;</span>
-            <a href="{{ config.extra.status_url }}" class="hover:text-brand-500 transition-colors">Live status at {{ config.extra.status_url | replace(from="https://", to="") }}</a>
-          </span>
+        {# Zero-JS policy: no client-side status polling. The honest static
+           presentation is a plain link to the live status page — no dot
+           implying a refresh that never happens. #}
+        <div id="footer-status-container" class="flex items-center gap-2 text-xs font-bold tracking-widest text-surface-500">
+          <a href="{{ config.extra.status_url }}" class="hover:text-brand-500 transition-colors">{% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["status_link"] %}{{ i18n_data[l]["footer"]["status_link"] }}{% else %}Service status{% endif %} &middot; {{ config.extra.status_url | replace(from="https://", to="") }}</a>
         </div>
       </div>
-      <script>
-      (function(){
-        var dot = document.querySelector('.footer-status-dot');
-        var text = document.querySelector('.footer-status-text');
-        var container = document.getElementById('footer-status-container');
-        var STATUS_API = '{{ config.extra.status_api_url | safe }}';
-
-        function setStatus(cls, label, linkHint) {
-          if (dot) { dot.className = 'footer-status-dot w-1.5 h-1.5 inline-block ' + cls; }
-          if (text) { text.textContent = label; }
-          if (container && linkHint) { container.title = linkHint; }
-        }
-
-        function fetchStatus() {
-          fetch(STATUS_API)
-            .then(function(r) {
-              if (!r.ok) throw new Error('HTTP ' + r.status);
-              return r.json();
-            })
-            .then(function(data) {
-              var status = (data && data.status) ? data.status : null;
-              if (status === 'operational') {
-                setStatus('status-ok bg-success-500', 'Operational', 'All systems operational');
-              } else if (status === 'degraded') {
-                setStatus('status-degraded bg-warning-500', 'Degraded', 'Some systems degraded');
-              } else if (status === 'outage') {
-                setStatus('status-down bg-danger-500', 'Service disruption', 'Active service disruption');
-              } else {
-                setStatus('status-unknown bg-surface-400', 'Status unavailable', 'Live status data could not be interpreted');
-              }
-            })
-            .catch(function() {
-              setStatus('status-unknown bg-surface-400', 'Status unavailable', 'Could not reach status API');
-            });
-        }
-
-        if (document.readyState === 'loading') {
-          document.addEventListener('DOMContentLoaded', fetchStatus);
-        } else {
-          fetchStatus();
-        }
-      })();
-      </script>
     </div>
   </div>
 </footer>

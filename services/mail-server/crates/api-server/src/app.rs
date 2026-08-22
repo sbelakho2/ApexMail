@@ -47,13 +47,33 @@ async fn handle_backpressure_error(error: BoxError) -> Response {
             .into_response();
     }
 
+    // Timeouts and transient overload degrade to 503 with a retry hint —
+    // never a raw error string or stack trace.
+    let timed_out = error
+        .to_string()
+        .to_lowercase()
+        .contains("timeout")
+        || error.to_string().to_lowercase().contains("elapsed");
+    if timed_out {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({
+                "error": {
+                    "code": "SERVICE_TIMEOUT",
+                    "message": "the request timed out — please retry in a moment"
+                }
+            })),
+        )
+            .into_response();
+    }
+
     tracing::error!(error = %error, "unexpected backpressure middleware error");
     (
-        StatusCode::INTERNAL_SERVER_ERROR,
+        StatusCode::SERVICE_UNAVAILABLE,
         Json(serde_json::json!({
             "error": {
-                "code": "INTERNAL_SERVER_ERROR",
-                "message": "request middleware failed"
+                "code": "SERVICE_OVERLOADED",
+                "message": "the service is busy — please retry in a moment"
             }
         })),
     )
@@ -363,6 +383,9 @@ pub fn build_app(state: AppState) -> Router {
         .nest("/api/csrf", routes::csrf::router())
         .nest("/api/kcaptcha", routes::kiwicaptcha::router())
         .nest("/v1/kcaptcha", routes::kiwicaptcha::router())
+        // Zero-JS console form routes (PRG twins). Public auth forms ride
+        // the same rate-limited stack as the JSON auth surface.
+        .merge(routes::web::public_router())
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             rate_limiter::public_rate_limit_middleware,
@@ -440,7 +463,6 @@ pub fn build_app(state: AppState) -> Router {
 
     let public = Router::<AppState>::new()
         .route("/assets/globals.css", get(browser_globals_css))
-        .route("/assets/console.js", get(browser_console_js))
         .route("/verify-email", get(browser_verify_email_page))
         // Permanent redirects for the legacy /legal/* paths (previously
         // interim HTML meta-refresh pages served by ui-foundation).
@@ -571,6 +593,8 @@ pub fn build_app(state: AppState) -> Router {
         .nest("/v1/dedicated-ips", routes::dedicated_ips::router())
         .nest("/v1/account", routes::account::router())
         .nest("/v1/stream", routes::stream_tokens::router())
+        // Zero-JS console form routes that require a session.
+        .merge(routes::web::authenticated_router())
         // Migrated auth routes (require session/auth)
         .nest("/v1/auth/impersonate", routes::impersonate::router())
         .nest("/v1/auth/telemetry", routes::telemetry::router())
@@ -677,6 +701,7 @@ async fn security_headers(
     req: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
+    let path = req.uri().path().to_string();
     let mut resp = next.run(req).await;
     let headers = resp.headers_mut();
     headers.insert("X-API-Version", HDR_API_VERSION.clone());
@@ -689,7 +714,7 @@ async fn security_headers(
     headers.insert("X-Content-Type-Options", HDR_CONTENT_TYPE_OPTIONS.clone());
     headers.insert("X-XSS-Protection", HDR_XSS_PROTECTION.clone());
     headers.insert("Referrer-Policy", HDR_REFERRER_POLICY.clone());
-    headers.insert("Cache-Control", HDR_CACHE_CONTROL.clone());
+    headers.insert("Cache-Control", static_asset_cache_control(&path));
     if !headers.contains_key("Content-Security-Policy") {
         headers.insert("Content-Security-Policy", HDR_CSP.clone());
     }
@@ -697,39 +722,52 @@ async fn security_headers(
     resp
 }
 
-fn generate_csp_nonce() -> String {
-    let mut nonce_bytes = [0_u8; 16];
-    use rand::TryRngCore;
-    rand::rngs::OsRng
-        .try_fill_bytes(&mut nonce_bytes)
-        .expect("OsRng should not fail");
-    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(nonce_bytes)
+/// Cache policy per request path.
+///
+/// Everything the api-server serves is either a private console page (never
+/// cacheable: `no-store`) or one of the marketing site's static assets.
+/// The static assets live at content-hashed or build-stamped URLs and MUST
+/// be cacheable — forcing `no-store` onto them made every page load
+/// re-download every stylesheet, font, and image. Two tiers:
+///
+/// - immutable build artifacts (`/css`, `/js`, `/fonts`, `/images`):
+///   `public, max-age=31536000, immutable`;
+/// - site-level files that change per build but must still be cacheable
+///   (`/manifest.json`, `/sitemap.xml`, `/robots.txt`, icons,
+///   autoconfig): `public, max-age=3600` (revalidated hourly).
+fn static_asset_cache_control(path: &str) -> HeaderValue {
+    let immutable = path.starts_with("/css/")
+        || path.starts_with("/js/")
+        || path.starts_with("/fonts/")
+        || path.starts_with("/images/");
+    let cacheable_file = matches!(
+        path,
+        "/manifest.json" | "/sitemap.xml" | "/robots.txt" | "/icon.svg" | "/favicon.ico"
+    ) || path.starts_with("/.well-known/")
+        || path == "/mail/config-v1.1.xml";
+    if immutable {
+        HeaderValue::from_static("public, max-age=31536000, immutable")
+    } else if cacheable_file {
+        HeaderValue::from_static("public, max-age=3600")
+    } else {
+        HDR_CACHE_CONTROL.clone()
+    }
 }
 
-fn browser_csp_header(nonce: &str) -> HeaderValue {
+fn browser_csp_header() -> HeaderValue {
     let analytics_img_src = std::env::var("ANALYTICS_IMAGE_SRC").ok();
-    browser_csp_header_with_sources(nonce, analytics_img_src.as_deref())
+    browser_csp_header_with_sources(analytics_img_src.as_deref())
 }
 
 #[allow(dead_code)]
-fn browser_csp_header_with_analytics(nonce: &str, analytics_img_src: Option<&str>) -> HeaderValue {
-    browser_csp_header_with_sources(nonce, analytics_img_src)
+fn browser_csp_header_with_analytics(analytics_img_src: Option<&str>) -> HeaderValue {
+    browser_csp_header_with_sources(analytics_img_src)
 }
 
-/// Build the browser Content-Security-Policy header.
-///
-/// `analytics_img_src` — optional HTTPS image source for analytics (e.g. Plausible).
-///
-/// KiwiCaptcha requires two deliberate carve-outs:
-/// - `'wasm-unsafe-eval'` on `script-src`: the widget's embedded WASM solver
-///   must be compilable. This is the precise, minimal directive — it permits
-///   WebAssembly compilation/instantiation while `eval`/`new Function` remain
-///   blocked (a nonce alone is not enough: wasm compilation is gated by the
-///   eval-related directives, not by script nonces).
-/// The widget is fully CSP3-compliant: it sets no inline styles (progress
-/// is driven by a data-progress attribute with stylesheet rules), so
-/// `style-src` stays strict.
-fn browser_csp_header_with_sources(nonce: &str, analytics_img_src: Option<&str>) -> HeaderValue {
+/// The browser surfaces ship ZERO JavaScript: `script-src 'none'` is the
+/// strongest possible script policy. Only stylesheet + image + font loads
+/// from same-origin (plus an optional HTTPS analytics image source) remain.
+fn browser_csp_header_with_sources(analytics_img_src: Option<&str>) -> HeaderValue {
     let analytics_img_src = analytics_img_src
         .map(str::trim)
         .filter(|src| !src.is_empty())
@@ -738,205 +776,21 @@ fn browser_csp_header_with_sources(nonce: &str, analytics_img_src: Option<&str>)
         .unwrap_or_default();
 
     HeaderValue::from_str(&format!(
-        "default-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'; connect-src 'self'; img-src 'self' data:{analytics_img_src}; font-src 'self' data:; manifest-src 'self'; style-src 'self' 'nonce-{nonce}'; style-src-attr 'unsafe-inline'; script-src 'self' 'nonce-{nonce}' 'wasm-unsafe-eval'; frame-src 'none'; object-src 'none'"
+        "default-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'; connect-src 'self'; img-src 'self' data:{analytics_img_src}; font-src 'self' data:; manifest-src 'self'; style-src 'self'; style-src-attr 'unsafe-inline'; script-src 'none'; frame-src 'none'; object-src 'none'"
     ))
     .expect("browser CSP should be valid")
 }
 
-/// Inline `<script>` content signatures that this application legitimately
-/// emits. `inject_script_nonce` only stamps tags whose leading content matches
-/// one of these signatures — anything else (e.g. a payload smuggled into a
-/// response by an injection bug) is left without a nonce, so the CSP blocks
-/// it. Signatures are stored whitespace-collapsed and matched the same way.
-///
-/// Sources:
-/// - `ui_foundation::leptos_views::theme_script` (web + control-plane layouts)
-/// - `ui_foundation::shell::mobile_menu_script` (both shells)
-/// - `ui_foundation::leptos_views::web_auth_form_script` (auth pages)
-/// - `ui_foundation::leptos_views::api_form_script` (dashboard layouts)
-/// - MFA management script (`control_plane_security_page`)
-/// - KiwiCaptcha widget WASM embed + driver (vendored crate resources)
-/// - Zola-built marketing pages: theme bootstrap, footer status dot,
-///   pricing calculator, API explorer console, JSON-LD structured data
-const KNOWN_SCRIPT_SIGNATURES: &[&str] = &[
-    "(function(){'use strict';var k='apexmail-ui:theme'",
-    "(function(){'use strict';function e(e,t)",
-    "(function(){var ALLOWED={",
-    "(function(){function csrf()",
-    "(function(){ let mfaChallengeToken",
-    "(function() { var encoder = new TextEncoder();",
-    "/* Generated by packages/kiwicaptcha-wasm/tools/embed",
-    "(function(){var e=localStorage.getItem('apexmail-theme');",
-    "(function(){ var dot = document.querySelector('.footer-status-dot');",
-    "(function () { 'use strict'; var plans = [",
-    "(function() { var root = document.querySelector('[data-api-console-root]');",
-    "{ \"@context\": \"https://schema.org\"",
-];
-
-/// Inline `<style>` content signatures. Only the KiwiCaptcha widget emits an
-/// inline `<style>` block today.
-const KNOWN_STYLE_SIGNATURES: &[&str] =
-    &["/* ========================================================================== KiwiCaptcha widget"];
-
-/// Same-origin external script sources the application itself references.
-/// External scripts are additionally covered by `script-src 'self'`, so the
-/// nonce is a no-op for them — but an attacker-injected `src` must not be
-/// stamped either.
-const KNOWN_SCRIPT_SRCS: &[&str] = &["/assets/console.js", "/js/apexmail-site.js"];
-
-/// The Zola build bakes the literal nonce `static-build` into its interactive
-/// widget scripts. That is not a nonce the browser will ever accept, so strip
-/// it before scanning; the re-stamp path then gives those known widgets the
-/// real per-response nonce.
-fn strip_static_build_nonce(html: &str) -> String {
-    if !html.contains("static-build") {
-        return html.to_string();
-    }
-    html.replace(" nonce=\"static-build\"", "")
-        .replace(" nonce=static-build", "")
-        .replace("nonce=\"static-build\"", "")
-        .replace("nonce=static-build", "")
-}
-
-/// Collapse all whitespace runs to single spaces (and trims the ends) so
-/// signature matching is robust against formatting differences between the
-/// Rust emitters and the vendored/Zola-built assets.
-fn collapse_whitespace(input: &str) -> String {
-    let mut collapsed = String::with_capacity(input.len());
-    let mut in_whitespace = false;
-    for character in input.chars() {
-        if character.is_whitespace() {
-            if !in_whitespace {
-                collapsed.push(' ');
-                in_whitespace = true;
-            }
-        } else {
-            collapsed.push(character);
-            in_whitespace = false;
-        }
-    }
-    collapsed.trim().to_string()
-}
-
-/// Check whether the leading content of a tag body matches one of the known
-/// server-authored signatures.
-fn matches_known_signature(body: &str, signatures: &[&str]) -> bool {
-    let head: String = body.chars().take(256).collect();
-    let collapsed = collapse_whitespace(&head);
-    signatures
-        .iter()
-        .any(|signature| collapsed.starts_with(signature))
-}
-
-/// Extract the value of the `src` attribute from a tag (quoted or unquoted)
-/// and decide whether it points at one of the known same-origin assets.
-fn has_known_script_src(lower_tag: &str) -> bool {
-    let Some(src_index) = lower_tag.find("src=") else {
-        return false;
-    };
-    let raw = &lower_tag[src_index + "src=".len()..];
-    let value = if let Some(rest) = raw.strip_prefix('"') {
-        rest.split('"').next().unwrap_or("")
-    } else if let Some(rest) = raw.strip_prefix('\'') {
-        rest.split('\'').next().unwrap_or("")
-    } else {
-        raw.split_whitespace().next().unwrap_or("")
-    };
-    KNOWN_SCRIPT_SRCS
-        .iter()
-        .any(|known| value.starts_with(known) || value.contains(known))
-}
-
-/// Stamp the per-response CSP nonce onto `<script>`/`<style>` opening tags,
-/// but ONLY onto tags this server authored:
-/// - tags that already carry a nonce are left untouched;
-/// - external scripts must reference a known same-origin asset;
-/// - inline blocks must start with a known server-authored signature
-///   (see `KNOWN_SCRIPT_SIGNATURES` / `KNOWN_STYLE_SIGNATURES`).
-///
-/// Anything else is deliberately left nonce-less — the browser CSP then
-/// blocks it, which is the correct outcome for injected markup.
-fn inject_nonce_for_tag(html: &str, nonce: &str, tag_name: &str) -> String {
-    let opening = format!("<{tag_name}");
-    let closing = format!("</{tag_name}");
-    let lower = html.to_ascii_lowercase();
-    let mut output = String::with_capacity(html.len() + (nonce.len() + 9) * 4);
-    let mut cursor = 0;
-
-    while let Some(relative_start) = lower[cursor..].find(&opening) {
-        let start = cursor + relative_start;
-        output.push_str(&html[cursor..start]);
-
-        let Some(relative_end) = lower[start..].find('>') else {
-            output.push_str(&html[start..]);
-            return output;
-        };
-
-        let end = start + relative_end;
-        let tag = &html[start..=end];
-        let lower_tag = &lower[start..=end];
-
-        if lower_tag.starts_with(&format!("</{tag_name}")) || lower_tag.contains(" nonce=") {
-            // Closing tag, or a tag that already has its own nonce.
-            output.push_str(tag);
-        } else {
-            let body_start = (end + 1).min(html.len());
-            let body_until_close = html[body_start..]
-                .find(&closing)
-                .map(|index| &html[body_start..body_start + index])
-                .unwrap_or(&html[body_start..]);
-            let is_known = if tag_name == "script" && lower_tag.contains("src=") {
-                has_known_script_src(lower_tag)
-            } else {
-                matches_known_signature(
-                    body_until_close,
-                    if tag_name == "script" {
-                        KNOWN_SCRIPT_SIGNATURES
-                    } else {
-                        KNOWN_STYLE_SIGNATURES
-                    },
-                )
-            };
-
-            if is_known {
-                output.push_str(&html[start..end]);
-                output.push_str(" nonce=\"");
-                output.push_str(nonce);
-                output.push_str("\">");
-            } else {
-                // Unknown authorship: leave the tag exactly as it was so the
-                // CSP blocks it instead of legitimizing it with our nonce.
-                output.push_str(tag);
-            }
-        }
-
-        cursor = end + 1;
-    }
-
-    output.push_str(&html[cursor..]);
-    output
-}
-
-fn inject_script_nonce(html: &str, nonce: &str) -> String {
-    inject_nonce_for_tag(html, nonce, "script")
-}
-
-fn inject_style_nonce(html: &str, nonce: &str) -> String {
-    inject_nonce_for_tag(html, nonce, "style")
-}
-
 fn browser_html_response(html: String) -> Response {
-    let nonce = generate_csp_nonce();
-    // The Zola-built marketing widgets ship a literal `nonce=static-build`
-    // placeholder; strip it first so the allowlist scanner re-stamps those
-    // known widgets with this response's real nonce.
-    let html = strip_static_build_nonce(&html);
-    let html = inject_script_nonce(&html, &nonce);
-    let html = inject_style_nonce(&html, &nonce);
+    // Zero-JS policy: the served document carries NO executable scripts.
+    // ui_foundation's render pass strips them for marketing static docs and
+    // this final defensive pass guarantees it even for hand-written HTML.
+    // The CSP pins `script-src 'none'` so nothing could execute regardless.
+    let html = ui_foundation::axum_router::strip_executable_scripts(&html);
     let mut response = Html(html).into_response();
     response
         .headers_mut()
-        .insert("Content-Security-Policy", browser_csp_header(&nonce));
+        .insert("Content-Security-Policy", browser_csp_header());
     response
 }
 
@@ -947,19 +801,6 @@ async fn browser_globals_css() -> impl IntoResponse {
             HeaderValue::from_static("text/css; charset=utf-8"),
         )],
         ui_foundation::GLOBALS_CSS,
-    )
-}
-
-/// Serve the console hydration script. Both root layouts emit
-/// `<script src="/assets/console.js" defer>`; `KNOWN_SCRIPT_SRCS` already
-/// allowlists that same-origin source for CSP nonce stamping.
-async fn browser_console_js() -> impl IntoResponse {
-    (
-        [(
-            CONTENT_TYPE,
-            HeaderValue::from_static("application/javascript; charset=utf-8"),
-        )],
-        ui_foundation::CONSOLE_JS,
     )
 }
 
@@ -1100,7 +941,7 @@ async fn browser_verify_email_page(
 ) -> Response {
     let host = headers.get(HOST).and_then(|value| value.to_str().ok());
     if !state.config.is_explicit_web_host(host) {
-        return not_found_response();
+        return branded_not_found(&state.config, host);
     }
     let surface = "web";
 
@@ -1160,12 +1001,32 @@ fn render_ui_response(
 
     let host = headers.get(HOST).and_then(|value| value.to_str().ok());
     let surface = config.ui_surface_for_host(host)?;
-    // Pass CSRF secret so auth forms receive real tokens during SSR
+    // Pass CSRF secret so the render pass can sign confirm links and embed
+    // hidden _csrf inputs in every POST /web form.
     let csrf_secret = Some(config.csrf_secret.as_str());
-    // KiwiCaptcha widget is self-contained — it fetches its challenge from
-    // /api/kcaptcha/challenge at runtime, so no SSR params are threaded here.
-    let html = ui_router::render_route_with_query(surface, uri.path(), uri.query(), csrf_secret)?;
-    Some(browser_html_response(html))
+    // PRG flash: the signed cookie from the previous POST renders as a
+    // banner (then the response clears it).
+    let flash = headers
+        .get(header::COOKIE)
+        .and_then(|value| value.to_str().ok())
+        .map(|cookies| routes::web::decode_flash_from_cookie_header(cookies, &config.csrf_secret))
+        .unwrap_or_default();
+    let html = ui_router::render_route_with_flash(
+        surface,
+        uri.path(),
+        uri.query(),
+        csrf_secret,
+        &flash,
+    )?;
+    let mut response = browser_html_response(html);
+    if !flash.is_empty() {
+        if let Ok(value) =
+            ui_foundation::flash::flash_clear_cookie(config.environment.is_production()).parse()
+        {
+            response.headers_mut().append(header::SET_COOKIE, value);
+        }
+    }
+    Some(response)
 }
 
 fn ui_route_requires_auth(surface: &str, path: &str) -> bool {
@@ -1332,21 +1193,50 @@ async fn fallback_handler(
         return not_found_response();
     }
 
-    // For non-API paths, return a proper HTML 404 page instead of JSON
+    // Browser surfaces get the branded, script-free 404 page.
+    branded_not_found(&state.config, request.headers().get(HOST).and_then(|v| v.to_str().ok()))
+}
+
+/// Branded, zero-JS 404 page: ui-foundation's not-found contract for the
+/// matching surface, with navigation back to safety.
+fn branded_not_found(config: &Config, host: Option<&str>) -> Response {
+    let surface = config
+        .ui_surface_for_host(host)
+        .or(config.ui_default_surface.as_deref())
+        .unwrap_or("web");
+    let inner = match surface {
+        "control-plane" => ui_foundation::leptos_views::control_plane_not_found_page(),
+        "marketing" | "marketing-zola" => ui_foundation::leptos_views::marketing_home_page(),
+        _ => ui_foundation::leptos_views::web_not_found_page(),
+    };
+    let page = format!(
+        "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Page Not Found — ApexMail</title><link rel=\"stylesheet\" href=\"/assets/globals.css\"></head><body class=\"antialiased bg-background text-surface-950\">{}</body></html>",
+        inner,
+    );
     (
         StatusCode::NOT_FOUND,
-        [(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8")],
-        axum::body::Body::from(
-            r#"<!DOCTYPE html><html><head><title>Page Not Found</title></head><body><h1>404 — Page Not Found</h1><p><a href="/">Go home</a></p></body></html>"#
-        ),
+        [(header::CONTENT_TYPE, "text/html; charset=utf-8".to_string())],
+        page,
     )
         .into_response()
 }
 
 // ─── Tests ─────────────────────────────────────────────────────
 
+/// Shared test fixtures (cfg(test)): one Config constructor for every
+/// in-crate test module.
+#[cfg(test)]
+pub(crate) mod test_support {
+    use super::*;
+
+    pub(crate) fn test_config() -> Config {
+        crate::app::tests::test_config_impl()
+    }
+}
+
 #[cfg(test)]
 mod tests {
+
     use super::*;
     use axum::body::{to_bytes, Body};
     use axum::http::{HeaderMap, HeaderValue, Request};
@@ -1359,6 +1249,12 @@ mod tests {
     use tower::ServiceExt;
 
     use crate::resilience::ResilientClient;
+
+    #[allow(dead_code)]
+    fn test_config() -> Config {
+        test_config_impl()
+    }
+
     use crate::ses_provider::SesIpProvider;
     use crate::state::AppStateInner;
 
@@ -1452,7 +1348,7 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 
-    fn test_config() -> Config {
+    pub(crate) fn test_config_impl() -> Config {
         Config {
             port: 3000,
             host: "0.0.0.0".into(),
@@ -1671,7 +1567,7 @@ mod tests {
         let body = response_body_string(response).await;
 
         assert!(body.contains("Operator console for discovery, outreach, and autopilot approvals."));
-        assert!(body.contains("Admin API session"));
+        assert!(body.contains("Same-origin operator session"));
     }
 
     #[tokio::test]
@@ -1700,9 +1596,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn serves_console_js_asset() {
-        let response = test_app()
-            .await
+    async fn console_js_asset_is_gone_and_csp_is_script_src_none() {
+        let app = test_app().await;
+
+        // The zero-JS console deleted /assets/console.js entirely.
+        let response = app
+            .clone()
             .oneshot(
                 Request::builder()
                     .uri("/assets/console.js")
@@ -1711,15 +1610,84 @@ mod tests {
             )
             .await
             .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
 
-        assert_eq!(response.status(), StatusCode::OK);
+        // Every browser-served HTML response pins script-src 'none'.
+        let page = app
+            .oneshot(
+                Request::builder()
+                    .uri("/login")
+                    .header(HOST, "app.apexmail.ee")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let csp = page
+            .headers()
+            .get("Content-Security-Policy")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
+        assert!(csp.contains("script-src 'none'"), "CSP was: {csp}");
+        let body = response_body_string(page).await;
+        assert!(!body.contains("<script"), "rendered page must contain no scripts");
+    }
+
+    #[tokio::test]
+    async fn branded_html_404_for_unknown_browser_routes() {
+        let app = test_app().await;
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/definitely-not-a-page")
+                    .header(HOST, "app.apexmail.ee")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
         assert_eq!(
-            response.headers().get(CONTENT_TYPE).unwrap(),
-            "application/javascript; charset=utf-8"
+            response.headers().get("content-type").unwrap(),
+            "text/html; charset=utf-8"
         );
-
         let body = response_body_string(response).await;
-        assert!(!body.trim().is_empty(), "console.js must not be empty");
+        assert!(body.contains("404"));
+        assert!(body.contains("Go Home"));
+        assert!(!body.contains("<script"));
+    }
+
+    #[tokio::test]
+    async fn web_form_login_rejects_bad_csrf_with_flash_redirect() {
+        let app = test_app().await;
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/web/auth/login")
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .header(HOST, "app.apexmail.ee")
+                    .body(Body::from("email=ops@apexmail.ee&password=x&_csrf=bad"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        // PRG: 303 back to the login page, never a 403 JSON dump.
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert_eq!(response.headers().get(header::LOCATION).unwrap(), "/login");
+        let set_cookie = response
+            .headers()
+            .get("set-cookie")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
+        assert!(set_cookie.contains("apexmail_flash="), "flash cookie missing");
+        // The flash payload is signed and decodes to a friendly message.
+        let flash = routes::web::decode_flash_from_cookie_header(&set_cookie, &test_config().csrf_secret);
+        assert!(!flash.is_empty());
+        assert_eq!(flash[0].kind, ui_foundation::flash::FlashKind::Error);
+        assert!(flash[0].text.contains("expired"));
     }
 
     #[tokio::test]
@@ -1855,98 +1823,137 @@ mod tests {
         assert!(body.contains("name=\"email\" value=\"owner@apexmail.ee\""));
     }
 
+    /// The nonce/signature script machinery was removed with the zero-JS
+    /// migration: nothing in the app should reference it again.
+    #[test]
+    fn no_script_nonce_machinery_remains() {
+        let source = include_str!("app.rs");
+        // Tokens are concatenated so this test's own source does not
+        // contain the names it guards against.
+        for forbidden in [
+            ["inject_script", "_nonce"].concat(),
+            ["inject_style", "_nonce"].concat(),
+            ["KNOWN_SCRIPT", "_SIGNATURES"].concat(),
+            ["KNOWN_SCRIPT", "_SRCS"].concat(),
+            ["generate_csp", "_nonce"].concat(),
+        ] {
+            assert!(
+                !source.contains(forbidden.as_str()),
+                "dead JS machinery re-introduced: {forbidden}"
+            );
+        }
+    }
+
     #[test]
     fn test_null_byte_detection() {
         assert!(apexmail_lib::validation::has_null_bytes("hello\0world"));
         assert!(!apexmail_lib::validation::has_null_bytes("hello_world"));
     }
 
+    /// Unit-level pin of the cache tiers: immutable build artifacts get a
+    /// one-year immutable cache; per-build site files get an hour; every
+    /// other path (console pages, API responses) stays `no-store`.
     #[test]
-    fn inject_script_nonce_only_touches_opening_script_tags() {
-        let html = r#"<html><head><script type="application/ld+json">{
-            "@context": "https://schema.org",
-            "@type": "Organization"
-        }</script><script nonce="keep">ok</script></head></html>"#;
-
-        let updated = inject_script_nonce(html, "nonce-123");
-
-        assert!(updated.contains(r#"<script type="application/ld+json" nonce="nonce-123">"#));
-        assert!(updated.contains(r#"<script nonce="keep">ok</script>"#));
-        assert_eq!(updated.matches("nonce=").count(), 2);
+    fn static_asset_cache_control_tiers() {
+        for immutable in ["/css/styles.css", "/js/none.js", "/fonts/Inter.woff2", "/images/logo.svg"] {
+            assert_eq!(
+                static_asset_cache_control(immutable),
+                "public, max-age=31536000, immutable",
+                "{immutable} must be immutably cacheable"
+            );
+        }
+        for cacheable in [
+            "/manifest.json",
+            "/sitemap.xml",
+            "/robots.txt",
+            "/icon.svg",
+            "/favicon.ico",
+            "/.well-known/autoconfig/mail/config-v1.1.xml",
+            "/mail/config-v1.1.xml",
+        ] {
+            assert_eq!(
+                static_asset_cache_control(cacheable),
+                "public, max-age=3600",
+                "{cacheable} must be cacheable"
+            );
+        }
+        for private in ["/login", "/dashboard", "/v1/messages", "/api/csrf/token", "/"] {
+            assert_eq!(
+                static_asset_cache_control(private),
+                "no-store, no-cache, must-revalidate",
+                "{private} must stay no-store"
+            );
+        }
     }
 
-    #[test]
-    fn inject_script_nonce_refuses_unknown_inline_scripts() {
-        // A script whose content does not match any server-authored signature
-        // (i.e. injected markup) must NOT receive the page nonce — the CSP
-        // blocks it instead.
-        let html = r#"<html><body><script>alert(document.cookie)</script></body></html>"#;
-        let updated = inject_script_nonce(html, "nonce-123");
-        assert!(
-            !updated.contains("nonce="),
-            "unknown inline script must not be stamped: {updated}"
-        );
-        assert!(updated.contains("<script>alert(document.cookie)</script>"));
+    /// End-to-end: the security middleware must NOT force `no-store` onto
+    /// the marketing static assets, while console pages keep it.
+    #[tokio::test]
+    async fn marketing_static_assets_are_cacheable_but_pages_are_not() {
+        let app = test_app().await;
+
+        let asset = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/css/styles.css")
+                    .header(HOST, "apexmail.ee")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let cache = asset
+            .headers()
+            .get("cache-control")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
+        assert_eq!(cache, "public, max-age=31536000, immutable");
+
+        let sitemap = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/sitemap.xml")
+                    .header(HOST, "apexmail.ee")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let cache = sitemap
+            .headers()
+            .get("cache-control")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
+        assert_eq!(cache, "public, max-age=3600");
+
+        let page = app
+            .oneshot(
+                Request::builder()
+                    .uri("/login")
+                    .header(HOST, "app.apexmail.ee")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let cache = page
+            .headers()
+            .get("cache-control")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
+        assert_eq!(cache, "no-store, no-cache, must-revalidate");
     }
 
-    #[test]
-    fn inject_script_nonce_refuses_unknown_external_scripts() {
-        let html =
-            r#"<html><body><script src="https://evil.example.com/x.js"></script></body></html>"#;
-        let updated = inject_script_nonce(html, "nonce-123");
-        assert!(
-            !updated.contains("nonce="),
-            "unknown src must not be stamped"
-        );
-        assert!(updated.contains(r#"<script src="https://evil.example.com/x.js">"#));
-    }
 
-    #[test]
-    fn inject_script_nonce_stamps_known_app_scripts() {
-        // theme_script (web + control-plane root layouts)
-        let theme = r#"<script>(function(){'use strict';var k='apexmail-ui:theme',d=document.documentElement;})();</script>"#;
-        assert!(inject_script_nonce(theme, "n1").contains("nonce=\"n1\""));
 
-        // api_form_script (dashboard layouts)
-        let api_form = r#"<script>(function(){function csrf(){var m=document.querySelector('meta[name=csrf-token]');}})();</script>"#;
-        assert!(inject_script_nonce(api_form, "n2").contains("nonce=\"n2\""));
 
-        // Known same-origin external console script is stamped.
-        let external = r#"<script src="/assets/console.js" defer></script>"#;
-        assert!(inject_script_nonce(external, "n3")
-            .contains(r#"<script src="/assets/console.js" defer nonce="n3">"#));
-    }
 
-    #[test]
-    fn static_build_placeholder_nonce_is_restamped() {
-        // The Zola marketing build ships `nonce=static-build`; it must be
-        // stripped and the known widget re-stamped with the real nonce.
-        let html = r#"<html><body><script nonce=static-build>(function() {
-  var root = document.querySelector('[data-api-console-root]');
-})();</script></body></html>"#;
-        let stripped = strip_static_build_nonce(html);
-        assert!(
-            !stripped.contains("static-build"),
-            "placeholder must be stripped"
-        );
 
-        let updated = inject_script_nonce(&stripped, "real-nonce");
-        assert!(updated.contains("<script nonce=\"real-nonce\">"));
-        assert!(!updated.contains("static-build"));
-    }
-
-    #[test]
-    fn inject_style_nonce_only_stamps_known_styles() {
-        let known = "<style>\n/* ==========================================================================\n   KiwiCaptcha widget — industry-aligned design system\n*/\n.kiwi-container{display:flex}\n</style>";
-        assert!(inject_style_nonce(known, "n1").contains("<style nonce=\"n1\">"));
-
-        let unknown = "<style>body{background:url(https://evil.example.com)}</style>";
-        let updated = inject_style_nonce(unknown, "n2");
-        assert!(
-            !updated.contains("nonce="),
-            "unknown style must not be stamped"
-        );
-    }
 
     #[tokio::test]
     async fn migrated_ui_route_inventory_renders_for_exposed_surfaces() {
@@ -2159,9 +2166,8 @@ mod tests {
             .and_then(|value| value.to_str().ok())
             .unwrap_or_default()
             .to_string();
-        assert!(verify_csp.contains("script-src 'self' 'nonce-"));
-        assert!(verify_csp.contains("'wasm-unsafe-eval'"));
-        assert!(verify_csp.contains("style-src 'self' 'nonce-"));
+        assert!(verify_csp.contains("script-src 'none'"));
+        assert!(verify_csp.contains("style-src 'self';"));
         let verify_body = response_body_string(verify_response).await;
         assert!(verify_body.contains("Verify your email"));
         assert!(verify_body.contains("Back to sign in"));
@@ -2202,29 +2208,33 @@ mod tests {
             .and_then(|value| value.to_str().ok())
             .unwrap_or_default()
             .to_string();
-        assert!(csp.contains("script-src 'self' 'nonce-"));
+        assert!(csp.contains("script-src 'none'"));
         assert!(csp.contains("img-src 'self' data:"));
         assert!(!csp.contains("plausible.apexmail.ee"));
 
         let body = response_body_string(response).await;
-        assert!(body.contains("<script type=application/ld+json nonce=\""));
-        assert!(!body.contains("<script type=application/ld+json>"));
+        // JSON-LD (non-executable SEO data) survives the zero-JS strip;
+        // nothing else does.
+        assert!(body.contains("<script type=application/ld+json"));
+        assert!(!body.contains("apexmail-site.js"));
+        assert!(!body.contains("api-explorer.js"));
+        assert!(!body.contains("pricing-calculator.js"));
     }
 
     #[test]
     fn browser_csp_accepts_configured_https_analytics_image_source() {
         let csp =
-            browser_csp_header_with_analytics("test-nonce", Some("https://analytics.example.com"));
+            browser_csp_header_with_analytics(Some("https://analytics.example.com"));
         let csp = csp.to_str().expect("csp header should be utf-8");
 
         assert!(csp.contains("img-src 'self' data: https://analytics.example.com"));
-        assert!(csp.contains("script-src 'self' 'nonce-test-nonce' 'wasm-unsafe-eval'"));
+        assert!(csp.contains("script-src 'none'"));
     }
 
     #[test]
     fn browser_csp_rejects_non_https_analytics_image_source() {
         let csp =
-            browser_csp_header_with_analytics("test-nonce", Some("http://analytics.example.com"));
+            browser_csp_header_with_analytics(Some("http://analytics.example.com"));
         let csp = csp.to_str().expect("csp header should be utf-8");
 
         assert!(csp.contains("img-src 'self' data:"));
@@ -2236,12 +2246,12 @@ mod tests {
         // KiwiCaptcha is fully same-origin: the inline nonce'd script and the
         // /api/kcaptcha/challenge endpoint are both covered by 'self'. The CSP
         // must NOT contain any external connect/script/frame sources for it.
-        let csp = browser_csp_header_with_sources("test-nonce", None);
+        let csp = browser_csp_header_with_sources(None);
         let csp = csp.to_str().expect("csp header should be utf-8");
 
         assert!(csp.contains("connect-src 'self';"));
-        assert!(csp.contains("script-src 'self' 'nonce-test-nonce' 'wasm-unsafe-eval'"));
-        assert!(csp.contains("style-src 'self' 'nonce-test-nonce'"));
+        assert!(csp.contains("script-src 'none'"));
+        assert!(csp.contains("style-src 'self';"));
         assert!(csp.contains("frame-src 'none'"));
         // No external hosts leaked into the CSP.
         assert!(!csp.contains("captcha.apexmail"));
@@ -2253,13 +2263,13 @@ mod tests {
         // style="..." attributes. Style attributes cannot carry nonces, and
         // they are far lower risk than script, so the CSP relaxes only the
         // style-src-attr directive while style-src stays nonce-gated.
-        let csp = browser_csp_header_with_sources("test-nonce", None);
+        let csp = browser_csp_header_with_sources(None);
         let csp = csp.to_str().expect("csp header should be utf-8");
 
         assert!(csp.contains("style-src-attr 'unsafe-inline'"));
         // The element style-src directive must remain nonce-only (the
         // 'unsafe-inline' must not have leaked into style-src itself).
-        assert!(csp.contains("style-src 'self' 'nonce-test-nonce';"));
+        assert!(csp.contains("style-src 'self';"));
     }
 
     #[tokio::test]

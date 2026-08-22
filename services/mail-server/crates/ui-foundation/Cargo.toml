@@ -27,9 +27,6 @@ base64.workspace = true
 uuid.workspace = true
 chrono.workspace = true
 
-# KiwiCaptcha — native Rust proof-of-work CAPTCHA (logo SVG)
-kiwicaptcha = { path = "../../../../packages/kiwicaptcha" }
-
 # Leptos UI framework (optional, gated behind features)
 leptos = { workspace = true, optional = true }
 leptos_router = { workspace = true, optional = true }

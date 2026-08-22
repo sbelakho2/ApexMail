@@ -368,7 +368,7 @@ mod tests {
             disabled: false,
             loading: false,
             left_icon: None,
-            right_icon: None,
+            right_icon: None, submit: true,
         };
         let html = btn.render_html();
         let html2 = btn.render_html();

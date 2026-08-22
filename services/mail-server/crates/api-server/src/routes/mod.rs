@@ -24,6 +24,7 @@ pub mod support;
 pub mod suppressions;
 pub(crate) mod system_sender;
 pub mod templates;
+pub mod web;
 pub mod webhooks;
 
 pub mod csrf;

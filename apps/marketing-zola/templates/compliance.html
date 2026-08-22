@@ -4,6 +4,10 @@
 {% block content %}
 {% include "partials/compliance/hero.html" %}
 
+{# Anchored Data Retention section — the privacy policy links to
+   /compliance/#data-retention, so this section must keep that id. #}
+{% include "partials/compliance/data-retention.html" %}
+
 {# Compliance Demo (static showcase, zero JS) #}
 {% include "partials/generated/compliance-demo-island.html" %}
 

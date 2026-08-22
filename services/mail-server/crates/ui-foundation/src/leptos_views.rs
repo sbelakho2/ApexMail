@@ -27,73 +27,40 @@ fn ui_icon(name: &str, class_name: &str) -> String {
 pub(crate) const WEB_ROOT_HTML_CLASSES: &str = "__variable_712c26 __variable_60443c";
 pub(crate) const WEB_ROOT_BODY_CLASSES: &str = "font-apex antialiased text-[16px] leading-[1.55]";
 
-/// Returns an inline `<script>` block that provides theme bootstrapping and
-/// toggle interactivity for both the Web Dashboard and Control Plane shells.
-///
-/// The bootstrap portion runs immediately in `<head>` to prevent a flash of
-/// incorrect theme before CSS loads. It reads the user's saved preference from
-/// localStorage (key: "apexmail-ui:theme", matching `shell::theme_storage_key`)
-/// and applies the `.dark` class to `document.documentElement` if dark mode is
-/// active.
-///
-/// The toggle handler registers a click delegate on `[data-theme-toggle]`
-/// buttons that cycles through system → dark → light → system modes, updating
-/// localStorage and the `.dark` class accordingly. The `aria-pressed` attribute
-/// on the toggle button is updated to reflect the current mode.
-///
-/// The script tag will receive a CSP nonce via `inject_script_nonce` in
-/// `browser_html_response`, so it executes safely under the browser CSP.
-pub fn theme_script() -> String {
-    // Minified JS that bootstraps theme from localStorage on load and handles
-    // click toggling for any [data-theme-toggle] buttons in the shell header.
-    // localStorage key: "apexmail-ui:theme" — values: "dark", "light", or absent (system).
-    //
-    // The CSS uses both `.dark` class overrides AND a media query:
-    //   @media (prefers-color-scheme: dark) { :root:not(.light) { ... } }
-    // When the OS is in dark mode, the media query applies dark variables even if
-    // `.dark` class is absent. To switch to light mode, we must add a `.light`
-    // class to <html>, which negates `:not(.light)` and prevents the media query
-    // from matching.
-    let script = r#"(function(){'use strict';var k='apexmail-ui:theme',d=document.documentElement;function a(){d.classList.remove('dark','light');var v=localStorage.getItem(k);if(v==='dark'||(!v&&window.matchMedia('(prefers-color-scheme:dark)').matches)){d.classList.add('dark')}else if(v==='light'){d.classList.add('light')}}function t(){var v=localStorage.getItem(k);var m=['system','dark','light'];var i=v?m.indexOf(v):0;if(i<0)i=0;i=(i+1)%3;var n=m[i];if(n==='system'){localStorage.removeItem(k)}else{localStorage.setItem(k,n)}a();var b=document.querySelector('[data-theme-toggle]');if(b){b.setAttribute('aria-pressed',n==='dark'?'true':'false')}}a();document.addEventListener('click',function(e){var b=e.target.closest('[data-theme-toggle]');if(b){e.preventDefault();t()}})})();"#;
-    format!("<script>{script}</script>")
-}
-
 /// Pixel-identical reproduction of the web root layout contract.
-/// CSP is provided by the HTTP response header set in `browser_html_response`,
-/// so no `<meta>` CSP tag is rendered here — this avoids conflicting policies.
+/// The console ships ZERO JavaScript: CSP is `script-src 'none'` (set by
+/// `browser_html_response`), so no script tags are rendered here. Dark
+/// mode comes purely from the stylesheet's `prefers-color-scheme` rules.
 pub fn web_root_layout(child_html: &str) -> String {
     format!(
         "<!DOCTYPE html>\
 <html lang=\"en\" class=\"{html_classes}\">\
 <head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>ApexMail</title>\
 <meta name=\"description\" content=\"Modern email infrastructure for developers\">\
-{theme_script}\
 <link rel=\"stylesheet\" href=\"/assets/globals.css\">\
 </head>\
-    <body class=\"{body_classes}\"><a href=\"#app-main\" class=\"sr-only focus:not-sr-only focus:absolute focus:left-4 focus:top-4 focus:z-50 focus:rounded-sm focus:bg-card focus:px-4 focus:py-2 focus:text-sm focus:font-bold focus:text-surface-950 focus:border focus:border-surface-950\">Skip to content</a><main id=\"app-main\" class=\"min-h-screen bg-background\">{child_html}</main><script src=\"/assets/console.js\" defer></script></body>\
+    <body class=\"{body_classes}\"><a href=\"#app-main\" class=\"sr-only focus:not-sr-only focus:absolute focus:left-4 focus:top-4 focus:z-50 focus:rounded-sm focus:bg-card focus:px-4 focus:py-2 focus:text-sm focus:font-bold focus:text-surface-950 focus:border focus:border-surface-950\">Skip to content</a><main id=\"app-main\" class=\"min-h-screen bg-background\">{child_html}</main>\
+</body>\
 </html>",
         html_classes = WEB_ROOT_HTML_CLASSES,
         body_classes = WEB_ROOT_BODY_CLASSES,
-        theme_script = theme_script(),
         child_html = child_html,
     )
 }
 
 /// Pixel-identical reproduction of the control-plane root layout contract.
-/// CSP is provided by the HTTP response header set in `browser_html_response`,
-/// so no `<meta>` CSP tag is rendered here — this avoids conflicting policies.
+/// Zero JavaScript: CSP is `script-src 'none'`; dark mode via
+/// `prefers-color-scheme` in globals.css only.
 pub fn control_plane_root_layout(child_html: &str) -> String {
     format!(
         "<!DOCTYPE html>\
 <html lang=\"en\">\
 <head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>ApexMail Control Plane</title>\
 <meta name=\"description\" content=\"ApexMail administration and monitoring\">\
-{theme_script}\
 <link rel=\"stylesheet\" href=\"/assets/globals.css\">\
 </head>\
-<body class=\"antialiased bg-background text-surface-950\">{child_html}<script src=\"/assets/console.js\" defer></script></body>\
+<body class=\"antialiased bg-background text-surface-950\">{child_html}</body>\
 </html>",
-        theme_script = theme_script(),
         child_html = child_html,
     )
 }
@@ -105,25 +72,29 @@ pub fn control_plane_app_layout(child_html: &str) -> String {
         "Operations",
         "Monitor tenants, infrastructure, security events, and Enterprise workflows.",
         "",
+        "",
     )
 }
 
 /// Shared control-plane application shell with route-specific mobile context.
+/// `csrf_token` is embedded in the shell's sign-out form (native POST —
+/// no JavaScript anywhere in the console).
 pub fn control_plane_app_layout_with_title(
     child_html: &str,
     page_title: &str,
     page_description: &str,
     current_path: &str,
+    csrf_token: &str,
 ) -> String {
-    let child_with_script = format!("{}{}", child_html, api_form_script());
     let shell = ControlPlaneShell {
         mobile_menu_open: false,
         user_role: "admin",
         page_title,
         page_description,
         banners: Vec::new(),
-        child_html: &child_with_script,
+        child_html,
         current_path,
+        csrf_token,
     };
     shell.render_html()
 }
@@ -166,24 +137,32 @@ pub fn web_not_found_page() -> String {
 }
 
 /// Pixel-identical reproduction of the authenticated web dashboard shell.
+/// `csrf_token` feeds the sidebar sign-out form (native POST, no JS).
 pub fn web_dashboard_layout(child_html: &str, current_path: &str) -> String {
-    // Append the API form hydration script (Rust-rendered inline, same pattern
-    // as web_auth_form_script) so data-api-form elements submit to the backend.
-    let child_with_script = format!("{}{}", child_html, api_form_script());
+    web_dashboard_layout_with_csrf(child_html, current_path, "")
+}
+
+/// Dashboard shell with a real CSRF token for the sign-out form.
+pub fn web_dashboard_layout_with_csrf(
+    child_html: &str,
+    current_path: &str,
+    csrf_token: &str,
+) -> String {
     let shell = WebDashboardShell {
         sidebar_collapsed: false,
         mobile_menu_open: false,
-        child_html: &child_with_script,
+        child_html,
         header: ShellHeader {
             search_query: "",
             unread_count: 0,
             avatar_fallback: "AM",
             mobile_menu_open: false,
-                    user_context: None,
-},
+            user_context: None,
+        },
         impersonation_banner: None,
         toast_surface: Some(ToastSurface { toasts: Vec::new() }),
         current_path,
+        csrf_token,
     };
     shell.render_html()
 }
@@ -201,6 +180,10 @@ fn render_page_breadcrumbs(current_page: &str) -> String {
     )
 }
 
+/// Native, zero-JavaScript filter bar: a single `method="get"` form whose
+/// search input and filter selects serialize straight into the query
+/// string. The explicit Apply button is the honest no-JS interaction —
+/// nothing fires on keystroke, everything on submit.
 fn render_debounced_filter_bar(
     input_id: &str,
     search_label: &str,
@@ -211,16 +194,40 @@ fn render_debounced_filter_bar(
 ) -> String {
     let search_icon = ui_icon("search", "h-4 w-4");
     format!(
-        "<section class=\"rounded-sm border border-surface-200 bg-card/80 p-6\"><div class=\"flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between\"><div class=\"min-w-0 flex-1\"><label class=\"sr-only\" for=\"{}\">{}</label><div class=\"relative\"><span class=\"pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground\">{}</span><input id=\"{}\" type=\"search\" role=\"combobox\" aria-autocomplete=\"list\" aria-label=\"{}\" value=\"{}\" placeholder=\"{}\" data-debounce-ms=\"300\" data-preserve-query=\"true\" class=\"flex h-12 w-full rounded-sm border border-input bg-background pl-10 pr-4 text-[14px] ring-offset-background transition-all duration-200 placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/20 focus-visible:border-primary\" /></div><p class=\"mt-2 text-xs text-muted-foreground\">Search updates after a 300ms pause so filters do not fire on every keystroke.</p></div><div class=\"flex w-full flex-col gap-3 sm:flex-row lg:w-auto\">{}<a href=\"{}\" class=\"inline-flex w-full items-center justify-center rounded-sm border border-input bg-background px-4 py-2 text-sm font-bold text-foreground transition-colors hover:bg-accent hover:text-accent-foreground sm:w-auto\">Clear filters</a></div></div></section>",
-        input_id,
-        search_label,
-        search_icon,
-        input_id,
-        search_label,
-        search_value,
-        search_placeholder,
-        filters_html,
-        clear_href,
+        "<section class=\"rounded-sm border border-surface-200 bg-card/80 p-6\"><form method=\"get\" action=\"{action}\" class=\"flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between\" role=\"search\"><div class=\"min-w-0 flex-1\"><label class=\"sr-only\" for=\"{input_id}\">{search_label}</label><div class=\"relative\"><span class=\"pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground\">{search_icon}</span><input id=\"{input_id}\" type=\"search\" name=\"query\" aria-label=\"{search_label}\" value=\"{search_value}\" placeholder=\"{search_placeholder}\" class=\"flex h-12 w-full rounded-sm border border-input bg-background pl-10 pr-4 text-[14px] ring-offset-background transition-all duration-200 placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/20 focus-visible:border-primary\" /></div><p class=\"mt-2 text-xs text-muted-foreground\">Press Apply to run the search — results are rendered entirely server-side.</p></div><div class=\"flex w-full flex-col gap-3 sm:flex-row lg:w-auto\">{filters_html}<div class=\"flex flex-col gap-2 sm:flex-row\"><button type=\"submit\" class=\"inline-flex w-full items-center justify-center rounded-sm bg-primary px-4 py-2 text-sm font-bold text-white transition-colors hover:bg-brand-700 sm:w-auto\">Apply filters</button><a href=\"{clear_href}\" class=\"inline-flex w-full items-center justify-center rounded-sm border border-input bg-background px-4 py-2 text-sm font-bold text-foreground transition-colors hover:bg-accent hover:text-accent-foreground sm:w-auto\">Clear filters</a></div></div></form></section>",
+        action = clear_href,
+        input_id = input_id,
+        search_label = search_label,
+        search_icon = search_icon,
+        search_value = html_escape(search_value),
+        search_placeholder = search_placeholder,
+        filters_html = filters_html,
+        clear_href = clear_href,
+    )
+}
+
+/// Native `<select>` filter control for the GET filter form (no combobox
+/// JS): submits with the surrounding form via the Apply button.
+#[allow(clippy::too_many_arguments)]
+fn render_native_select(
+    id: &str,
+    label: &str,
+    name: &str,
+    options: &[(&str, &str, bool)],
+) -> String {
+    let opts = options
+        .iter()
+        .map(|(value, text, selected)| {
+            if *selected {
+                format!("<option value=\"{value}\" selected>{text}</option>")
+            } else {
+                format!("<option value=\"{value}\">{text}</option>")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("");
+    format!(
+        "<div class=\"min-w-[10rem]\"><label class=\"sr-only\" for=\"{id}\">{label}</label><select id=\"{id}\" name=\"{name}\" class=\"flex h-12 w-full rounded-sm border border-input bg-background px-3 text-[14px] ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/20 focus-visible:border-primary\">{opts}</select></div>"
     )
 }
 
@@ -290,46 +297,16 @@ fn render_campaign_editor_page(
         return_href,
         breadcrumb_label,
     );
-    let autosave_badge = Badge {
-        text: "Saved",
-        variant: "outline-success",
+    let draft_badge = Badge {
+        text: "Draft",
+        variant: "outline",
         size: "default",
-        icon: Some("<span class=\"h-2.5 w-2.5 rounded-sm bg-success\"></span>"),
+        icon: Some("<span class=\"h-2.5 w-2.5 rounded-sm bg-warning\"></span>"),
     }
     .render_html();
-    let audience_select = Select {
-        placeholder: "Select audience list",
-        value_label: Some("VIP Customers"),
-        variant: "default",
-        size: "default",
-        open: false,
-        options: vec![
-            SelectOption {
-                value: "vip",
-                label: "VIP Customers",
-                disabled: false,
-                selected: true,
-            },
-            SelectOption {
-                value: "newsletter",
-                label: "Newsletter Subscribers",
-                disabled: false,
-                selected: false,
-            },
-            SelectOption {
-                value: "trial",
-                label: "Trial Accounts",
-                disabled: false,
-                selected: false,
-            },
-        ],
-        // `CreateCampaignRequest` uses `deny_unknown_fields` and accepts only
-        // name/subject/template_id/scheduled_at — the audience picker is a
-        // client-side control for the autosave draft flow, so it deliberately
-        // carries no form name.
-        name: None,
-    }
-    .render_html();
+    // Native <select> — no combobox JS; the value is serialized by the
+    // browser when the form is submitted.
+    let audience_select = "<div><label class=\"text-sm font-medium leading-none\" for=\"campaign-audience\">Audience</label><select id=\"campaign-audience\" name=\"audience\" class=\"mt-2 flex h-12 w-full rounded-sm border border-input bg-background px-3 text-[14px] ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/20 focus-visible:border-primary\"><option value=\"vip\" selected>VIP Customers</option><option value=\"newsletter\">Newsletter Subscribers</option><option value=\"trial\">Trial Accounts</option></select></div>";
     let content_input = Textarea {
         value: "",
         placeholder: "Paste your HTML content here...",
@@ -337,56 +314,18 @@ fn render_campaign_editor_page(
         resize: "vertical",
         max_length: Some(25_000),
         show_count: true,
-        // Not a `CreateCampaignRequest` field — handled via the autosave
-        // draft endpoint, not the data-api-form JSON payload.
-        name: None,
-    }
-    .render_html();
-    let preview_button = Button {
-        variant: "ghost",
-        size: "default",
-        label: "Preview",
-        disabled: false,
-        loading: false,
-        left_icon: None,
-        right_icon: None,
-    }
-    .render_html();
-    let save_button = Button {
-        variant: "default",
-        size: "default",
-        label: primary_action_label,
-        disabled: false,
-        loading: false,
-        left_icon: None,
-        right_icon: None,
-    }
-    .render_html();
-    let schedule_button = Button {
-        variant: "outline",
-        size: "default",
-        label: "Schedule",
-        disabled: false,
-        loading: false,
-        left_icon: None,
-        right_icon: None,
-    }
-    .render_html();
-    let leave_dialog = AlertDialog {
-        title: "Leave without saving?",
-        message: "Recent changes may still be syncing. Stay on the page until autosave reports success, or leave and restore the last saved draft.",
-        confirm_label: "Leave page",
-        cancel_label: Some("Keep editing"),
-        variant: "destructive",
-        dialog_type: "confirm",
+        // Server-side preview POSTs the draft to /web/campaigns/preview;
+        // the payload field is part of that form submission.
+        name: Some("html_body"),
     }
     .render_html();
 
     format!(
-        "{breadcrumbs}<div class=\"w-full max-w-3xl space-y-6\"><section class=\"rounded-sm border border-success/25 bg-success/10 p-4\"><div class=\"flex flex-col gap-3 md:flex-row md:items-center md:justify-between\"><div><p class=\"text-xs font-bold uppercase tracking-[0.24em] text-success\">Draft protection</p><h1 class=\"mt-1 text-2xl font-bold text-surface-950 tracking-tight\">{title}</h1><p class=\"mt-2 text-sm text-muted-foreground\">Autosave keeps long campaign edits safe across accidental navigation and route changes.</p></div><div class=\"flex flex-col items-start gap-2 md:items-end\"><div aria-live=\"polite\" data-autosave-status=\"saved\" class=\"flex items-center gap-2\">{autosave_badge}<span class=\"text-xs font-medium text-success\">Last saved just now</span></div><p class=\"text-xs text-muted-foreground\">Changes sync every 10 seconds and before navigation.</p></div></div></section><form class=\"space-y-6\" data-autosave-endpoint=\"/v1/campaigns/drafts\" data-autosave-interval-ms=\"10000\" data-dirty-guard=\"true\" data-api-form data-api-action=\"/v1/campaigns\" data-redirect=\"/campaigns\"><div class=\"space-y-2\">{name_label}{name_input}</div><div class=\"grid gap-6 md:grid-cols-2\"><div class=\"space-y-2\">{subject_label}{subject_input}</div><div class=\"space-y-2\">{audience_label}{audience_select}</div></div><div class=\"space-y-2\">{content_label}{content_input}</div><div class=\"flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between\"><p class=\"text-xs text-muted-foreground\">Leaving the page before autosave completes will trigger a confirmation dialog instead of discarding your work.</p><div class=\"flex flex-col gap-3 sm:flex-row\">{preview_button}{save_button}{schedule_button}</div></div></form><div hidden id=\"campaign-leave-guard\">{leave_dialog}</div></div>",
+        "{breadcrumbs}<div class=\"w-full max-w-3xl space-y-6\"><section class=\"rounded-sm border border-warning/25 bg-warning/10 p-4\"><div class=\"flex flex-col gap-3 md:flex-row md:items-center md:justify-between\"><div><p class=\"text-xs font-bold uppercase tracking-[0.24em] text-warning\">Draft protection</p><h1 class=\"mt-1 text-2xl font-bold text-surface-950 tracking-tight\">{title}</h1><p class=\"mt-2 text-sm text-muted-foreground\">Your work is saved when you press {primary_action_label} — no background sync to wait for.</p></div><div class=\"flex flex-col items-start gap-2 md:items-end\"><div class=\"flex items-center gap-2\">{draft_badge}<span class=\"text-xs font-medium text-muted-foreground\">Unsaved changes live only in this form</span></div><p class=\"text-xs text-muted-foreground\">Use Preview to render the HTML exactly as recipients will see it.</p></div></div></section><form class=\"space-y-6\" method=\"post\" action=\"/web/campaigns\" enctype=\"application/x-www-form-urlencoded\"><div class=\"space-y-2\">{name_label}{name_input}</div><div class=\"grid gap-6 md:grid-cols-2\"><div class=\"space-y-2\">{subject_label}{subject_input}</div><div class=\"space-y-2\">{audience_label}{audience_select}</div></div><div class=\"space-y-2\">{content_label}{content_input}</div><div class=\"space-y-2\"><label class=\"text-sm font-medium leading-none\" for=\"campaign-scheduled-at\">Schedule (optional)</label><input id=\"campaign-scheduled-at\" name=\"scheduled_at\" type=\"datetime-local\" class=\"flex h-12 w-full rounded-sm border border-input bg-background px-3 text-[14px] ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/20 focus-visible:border-primary\" /><p class=\"text-xs text-muted-foreground\">Pick a send time to schedule the campaign instead of saving it as a draft.</p></div><div class=\"flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between\"><p class=\"text-xs text-muted-foreground\">Everything runs server-side: submit, schedule, and preview are plain form posts.</p><div class=\"flex flex-col gap-3 sm:flex-row\">{preview_button}{save_button}</div></div></form></div>",
         breadcrumbs = breadcrumbs,
         title = title,
-        autosave_badge = autosave_badge,
+        draft_badge = draft_badge,
+        primary_action_label = primary_action_label,
         name_label = Label { text: "Campaign Name", variant: "default", size: "default", required: true, optional: false }.render_html(),
         name_input = Input { input_type: "text", variant: "default", size: "default", placeholder: "My awesome campaign", value: "", left_icon: None, right_icon: None, error: None, disabled: false, autocomplete: None, required: true, name: Some("name") }.render_html(),
         subject_label = Label { text: "Subject Line", variant: "default", size: "default", required: true, optional: false }.render_html(),
@@ -395,11 +334,72 @@ fn render_campaign_editor_page(
         audience_select = audience_select,
         content_label = Label { text: "HTML Content", variant: "default", size: "default", required: false, optional: false }.render_html(),
         content_input = content_input,
-        preview_button = preview_button,
-        save_button = save_button,
-        schedule_button = schedule_button,
-        leave_dialog = leave_dialog,
+        preview_button = "<button type=\"submit\" formaction=\"/web/campaigns/preview\" formtarget=\"_blank\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-md border border-surface-200 bg-background px-4 py-2 text-sm font-semibold text-foreground transition-colors hover:border-surface-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">Preview</button>",
+        save_button = format!("<button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-md bg-primary px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-brand-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">{primary_action_label}</button>", primary_action_label = primary_action_label),
     )
+}
+
+/// Server-rendered campaign HTML preview (target of the editor's Preview
+/// button — a plain form POST, rendered by Rust, no JavaScript).
+pub fn web_campaign_preview_page(html_body: &str) -> String {
+    let safe_html = sanitize_preview_html(html_body);
+    format!(
+        "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Campaign Preview — ApexMail</title><link rel=\"stylesheet\" href=\"/assets/globals.css\"></head><body class=\"font-apex antialiased bg-surface-50\"><header class=\"border-b border-surface-200 bg-card px-6 py-4\"><p class=\"text-xs font-bold uppercase tracking-[0.24em] text-primary\">Campaign preview</p><p class=\"mt-1 text-sm text-muted-foreground\">Rendered server-side from your draft. Close this tab to return to the editor.</p></header><main class=\"mx-auto max-w-2xl px-6 py-8\"><div class=\"rounded-sm border border-surface-200 bg-card p-6 shadow-premium\">{safe_html}</div></main></body></html>"
+    )
+}
+
+/// Allow only structural markup in previews: strip <script>/<style> blocks,
+/// event-handler attributes, and form controls so a hostile draft cannot
+/// execute anything (defense in depth on top of the `script-src 'none'` CSP,
+/// which already blocks all script execution).
+pub fn sanitize_preview_html(input: &str) -> String {
+    let lower = input.to_ascii_lowercase();
+    let mut without_scripts = String::with_capacity(input.len());
+    let mut cursor = 0usize;
+    while let Some(start) = lower[cursor..].find("<script") {
+        without_scripts.push_str(&input[cursor..cursor + start]);
+        match lower[cursor + start..].find("</script>") {
+            Some(end_offset) => cursor = cursor + start + end_offset + "</script>".len(),
+            None => {
+                cursor = input.len();
+                break;
+            }
+        }
+    }
+    without_scripts.push_str(&input[cursor.min(input.len())..]);
+    // Strip inline event-handler attributes (on*=) wherever they appear.
+    let out = without_scripts;
+    let mut cleaned = String::with_capacity(out.len());
+    let mut chars = out.chars().peekable();
+    while let Some(c) = chars.next() {
+        cleaned.push(c);
+        if c == '<' {
+            let mut tag = String::new();
+            while let Some(&nc) = chars.peek() {
+                chars.next();
+                if nc == '>' {
+                    break;
+                }
+                tag.push(nc);
+            }
+            let mut safe_tag = String::with_capacity(tag.len());
+            for (i, word) in tag.split(' ').enumerate() {
+                let lowered = word.to_ascii_lowercase();
+                if i > 0 && lowered.starts_with("on") && lowered.contains('=') {
+                    continue; // drop event-handler attributes
+                }
+                if i == 0 {
+                    safe_tag.push_str(word);
+                } else {
+                    safe_tag.push(' ');
+                    safe_tag.push_str(word);
+                }
+            }
+            cleaned.push_str(&safe_tag);
+            cleaned.push('>');
+        }
+    }
+    cleaned
 }
 
 /// Pixel-identical reproduction of the web new-campaign page contract.
@@ -417,7 +417,7 @@ pub fn web_dedicated_ips_page() -> String {
     let header_html = "<div class=\"flex items-center justify-between mb-6\">\
 <div><h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Dedicated IPs</h1>\
 <p class=\"text-sm text-surface-500 mt-1\">Manage your dedicated sending IP addresses</p></div>\
-<button class=\"inline-flex items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold ring-offset-background transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 bg-primary text-white hover:bg-brand-700 h-12 px-6 py-3\">Provision New IP</button></div>";
+<form method=\"post\" action=\"/web/dedicated-ips\" class=\"inline\"><button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold ring-offset-background transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 bg-primary text-white hover:bg-brand-700 h-12 px-6 py-3\">Provision New IP</button></form></div>";
 
     let table = Table {
         caption: Some("Dedicated IP addresses"),
@@ -454,7 +454,7 @@ pub fn web_dedicated_ips_page() -> String {
             title: "No dedicated IPs",
             description: Some("Provision a dedicated IP to improve deliverability"),
             icon_markup: None,
-            action_label: Some("Provision IP")
+            action_label: None, action_href: None
         }
         .render_html(),
     )
@@ -591,22 +591,6 @@ pub fn control_plane_not_found_page() -> String {
 /// Pixel-identical reproduction of the control-plane audit page contract.
 pub fn control_plane_audit_page() -> String {
     let search_icon = ui_icon("search", "h-4 w-4");
-    let download_icon = ui_icon("download", "h-4 w-4");
-    let search_input = Input {
-        input_type: "text",
-        variant: "default",
-        size: "default",
-        placeholder: "Search audit logs...",
-        value: "",
-        left_icon: Some(&search_icon),
-        right_icon: None,
-        error: None,
-        disabled: false,
-        autocomplete: None,
-        required: false,
-        name: None,
-    };
-
     let table = Table {
         caption: Some("Audit logs"),
         columns: vec![
@@ -639,29 +623,18 @@ pub fn control_plane_audit_page() -> String {
 <div class=\"apex-page-heading flex flex-col gap-2\"><p class=\"apex-eyebrow\"><span>Control Plane Audit</span></p>\
 <h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Audit Logs</h1></div>\
 <div class=\"flex items-center gap-3\">\
-{export_button}\
+<a href=\"/web/admin/audit/export\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-md border border-surface-200 bg-background px-4 py-2 text-sm font-semibold text-foreground transition-colors hover:border-surface-300\">Export audit log (CSV)</a>\
 </div>\
-<div class=\"flex items-center gap-4\">\
-<div class=\"flex-1\">{search}</div>\
-</div>\
+<form method=\"get\" action=\"/audit\" role=\"search\" class=\"flex items-center gap-4\">\
+<div class=\"flex-1\"><label class=\"sr-only\" for=\"audit-search\">Search audit logs</label><input id=\"audit-search\" type=\"search\" name=\"query\" placeholder=\"Search audit logs...\" class=\"flex h-12 w-full rounded-md border border-surface-200 bg-background px-4 text-[14px] outline-none transition focus-visible:ring-2 focus-visible:ring-primary/20\" /></div><button type=\"submit\" class=\"rounded-sm border border-surface-200 bg-card px-4 py-2 text-sm font-bold text-surface-950 Search</button>\
+</form>\
 {loading}\
 <section data-view-state=\"ready\">{table}</section>\
 <section data-view-state=\"empty\" hidden>{empty}</section>\
 </div>",
-        export_button = Button {
-            variant: "outline",
-            size: "default",
-            label: "Export",
-            disabled: false,
-            loading: false,
-            left_icon: Some(&download_icon),
-            right_icon: None
-        }
-        .render_html(),
-        search = search_input.render_html(),
         loading = render_table_loading_state("Loading audit logs", "infrastructure", 5),
         table = table.render_html(),
-        empty = EmptyState { title: "No audit logs recorded", description: Some("Audit log entries will appear as operators and tenants perform actions across the control plane"), icon_markup: None, action_label: None }.render_html(),
+        empty = EmptyState { title: "No audit logs recorded", description: Some("Audit log entries will appear as operators and tenants perform actions across the control plane"), icon_markup: None, action_label: None, action_href: None }.render_html(),
     )
 }
 
@@ -676,7 +649,7 @@ pub fn control_plane_sales_page() -> String {
                     <p class="text-[11px] font-bold uppercase tracking-[0.32em] text-primary">Revenue Command Deck</p>
                     <h1 class="mt-3 text-4xl font-bold tracking-tight text-white">Operator console: Sales Cockpit</h1>
                     <span data-sample-data class="mt-3 inline-flex items-center rounded-sm border border-brand-400/40 bg-brand-500/15 px-2 py-0.5 text-[10px] font-bold uppercase tracking-[0.18em] text-brand-100">Sample data</span>
-                    <p class="mt-3 max-w-3xl text-sm leading-6 text-surface-300">Operator console for discovery, outreach, and autopilot approvals. This is a triage-first operating surface for enterprise expansion where operators qualify, approve, and launch outreach from one deterministic command flow via <code class="rounded bg-black/30 px-1.5 py-0.5 text-brand-100">/v1/admin/sales/*</code>.</p>
+                    <p class="mt-3 max-w-3xl text-sm leading-6 text-surface-300">Operator console for discovery, outreach, and autopilot approvals. This is a triage-first operating surface for enterprise expansion where operators qualify, approve, and launch outreach from one deterministic command flow via <code class="rounded bg-black/30 px-1.5 py-0.5 text-brand-100">/v1/admin/sales/*</code>. Every action below is a plain server-rendered form post — no scripts.</p>
                     <div class="mt-5 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
                         <article class="rounded-sm border border-white/10 bg-black/25 p-4">
                             <p class="text-[10px] uppercase tracking-[0.22em] text-surface-500">Pipeline value</p>
@@ -702,27 +675,12 @@ pub fn control_plane_sales_page() -> String {
                 </div>
 
                 <section class="rounded-sm border border-white/10 bg-[#111b2e] p-5">
-                    <div class="flex items-center justify-between gap-3">
-                        <div>
-                            <p class="text-xs uppercase tracking-[0.24em] text-surface-400">Session</p>
-                            <h2 class="mt-2 text-xl font-bold text-white">Admin API session</h2>
-                        </div>
-                        <button type="button" class="rounded-sm border border-white/15 px-3 py-2 text-xs font-bold text-white transition hover:border-white/30 hover:bg-white/10">Refresh</button>
+                    <div>
+                        <p class="text-xs uppercase tracking-[0.24em] text-surface-400">Session</p>
+                        <h2 class="mt-2 text-xl font-bold text-white">Same-origin operator session</h2>
                     </div>
-                    <form class="mt-5 space-y-4">
-                        <div class="space-y-2 text-sm">
-                            <label for="sales-api-base" class="block text-surface-300">API base URL</label>
-                            <input id="sales-api-base" name="apiBaseUrl" class="w-full rounded-sm border border-white/10 bg-surface-900 px-4 py-3 text-sm text-white outline-none transition focus:border-primary" placeholder="http://localhost:3000" value="http://localhost:3000" />
-                        </div>
-                        <div class="space-y-2 text-sm">
-                            <label for="sales-api-key" class="block text-surface-300">Admin API key</label>
-                            <input id="sales-api-key" name="apiKey" type="password" class="w-full rounded-sm border border-white/10 bg-surface-900 px-4 py-3 text-sm text-white outline-none transition focus:border-primary" placeholder="Paste super-admin or scoped operator key" />
-                        </div>
-                        <div class="flex flex-wrap items-center gap-3">
-                            <button type="submit" class="rounded-sm bg-primary px-4 py-2 text-sm font-bold text-white transition hover:bg-brand-700">Connect</button>
-                            <span class="text-xs uppercase tracking-[0.2em] text-surface-400">Status · Awaiting token</span>
-                        </div>
-                    </form>
+                    <p class="mt-4 text-xs leading-5 text-surface-400">This console authenticates with your operator session cookie; every form below posts to <code class="rounded bg-black/30 px-1 py-0.5 text-brand-100">/web/admin/sales/*</code> routes that enforce system-tenant access server-side. No API keys are handled in the browser.</p>
+                    <p class="mt-4 text-xs uppercase tracking-[0.2em] text-surface-400">Status · Cookie session</p>
                 </section>
             </div>
         </header>
@@ -730,22 +688,29 @@ pub fn control_plane_sales_page() -> String {
         <section class="grid gap-6 xl:grid-cols-[1.15fr_0.85fr]">
             <div class="min-w-0 space-y-6">
                 <section class="apex-cp-dark-panel apex-cp-dark-panel--accent min-w-0 rounded-sm border border-white/10 bg-white/5 p-6">
-                    <div class="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
+                    <form method="get" action="/sales" role="search" class="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
                         <div class="min-w-0">
                             <p class="text-xs uppercase tracking-[0.28em] text-surface-400">Triage Queue</p>
                             <h2 class="mt-2 text-2xl font-bold text-white tracking-tight">Lead inventory</h2>
                         </div>
-                        <div class="grid w-full gap-3 md:w-auto md:grid-cols-[minmax(0,1fr)_minmax(8rem,11rem)]">
-                            <input class="w-full min-w-0 rounded-sm border border-white/10 bg-surface-900 px-4 py-3 text-sm text-white outline-none transition focus:border-primary" placeholder="Search company, owner, signal, or domain" />
-                            <select class="w-full min-w-0 rounded-sm border border-white/10 bg-surface-900 px-4 py-3 text-sm text-white outline-none transition focus:border-primary">
-                                <option>all stages</option>
-                                <option>qualification</option>
-                                <option>security review</option>
-                                <option>proposal</option>
-                                <option>negotiation</option>
-                            </select>
+                        <div class="grid w-full gap-3 md:w-auto md:grid-cols-[minmax(0,1fr)_minmax(8rem,11rem)_auto]">
+                            <div>
+                                <label for="sales-query" class="sr-only">Search leads</label>
+                                <input id="sales-query" type="search" name="query" placeholder="Search company, owner, signal, or domain" class="w-full min-w-0 rounded-sm border border-white/10 bg-surface-900 px-4 py-3 text-sm text-white outline-none transition focus:border-primary" />
+                            </div>
+                            <div>
+                                <label for="sales-stage" class="sr-only">Filter by stage</label>
+                                <select id="sales-stage" name="stage" class="w-full min-w-0 rounded-sm border border-white/10 bg-surface-900 px-4 py-3 text-sm text-white outline-none transition focus:border-primary">
+                                    <option value="">all stages</option>
+                                    <option value="qualification">qualification</option>
+                                    <option value="security review">security review</option>
+                                    <option value="proposal">proposal</option>
+                                    <option value="negotiation">negotiation</option>
+                                </select>
+                            </div>
+                            <button type="submit" class="rounded-sm bg-primary px-4 py-3 text-xs font-bold text-white transition hover:bg-brand-700">Apply filters</button>
                         </div>
-                    </div>
+                    </form>
 
                     <div class="mt-5 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
                         <div class="rounded-sm border border-white/10 bg-black/25 p-4"><p class="text-[10px] uppercase tracking-[0.22em] text-surface-500">Total leads</p><p class="mt-2 text-2xl font-bold tracking-tight text-white">184</p><p class="mt-1 text-xs text-surface-400">Across all active stages</p></div>
@@ -754,90 +719,64 @@ pub fn control_plane_sales_page() -> String {
                         <div class="rounded-sm border border-white/10 bg-black/25 p-4"><p class="text-[10px] uppercase tracking-[0.22em] text-surface-500">Average score</p><p class="mt-2 text-2xl font-bold tracking-tight text-white">78</p><p class="mt-1 text-xs text-surface-400">Weighted by buying intent + fit</p></div>
                     </div>
 
-                    <div class="mt-6 overflow-x-auto rounded-sm border border-white/10">
-                        <table class="min-w-full divide-y divide-white/10 text-left text-sm">
-                            <thead class="bg-black/30 text-surface-300">
-                                <tr>
-                                    <th class="px-4 py-3 font-medium">Pick</th>
-                                    <th class="px-4 py-3 font-medium">Account</th>
-                                    <th class="px-4 py-3 font-medium">Stage</th>
-                                    <th class="px-4 py-3 font-medium">Confidence</th>
-                                    <th class="px-4 py-3 font-medium">Blocker</th>
-                                </tr>
-                            </thead>
-                            <tbody class="divide-y divide-white/10 text-surface-200">
-                                <tr>
-                                    <td class="px-4 py-3"><input type="checkbox" aria-label="Select account" /></td>
-                                    <td class="px-4 py-3">Nordic Payments Group</td>
-                                    <td class="px-4 py-3">Security review</td>
-                                    <td class="px-4 py-3">91</td>
-                                    <td class="px-4 py-3">SIG legal signoff</td>
-                                </tr>
-                                <tr>
-                                    <td class="px-4 py-3"><input type="checkbox" aria-label="Select account" /></td>
-                                    <td class="px-4 py-3">Helios Health Systems</td>
-                                    <td class="px-4 py-3">Proposal</td>
-                                    <td class="px-4 py-3">84</td>
-                                    <td class="px-4 py-3">Private cloud architecture review</td>
-                                </tr>
-                                <tr>
-                                    <td class="px-4 py-3"><input type="checkbox" aria-label="Select account" /></td>
-                                    <td class="px-4 py-3">Aster Compliance Cloud</td>
-                                    <td class="px-4 py-3">Negotiation</td>
-                                    <td class="px-4 py-3">88</td>
-                                    <td class="px-4 py-3">Commercial terms confirmation</td>
-                                </tr>
-                            </tbody>
-                        </table>
-                        <!-- SALES-05: Pagination controls -->
-                        <div class="flex flex-wrap items-center justify-between gap-4 px-4 py-3 border-t border-white/10">
-                            <div class="flex items-center gap-2 text-xs text-surface-400">
-                                <span>Page <strong class="text-white">1</strong> of <strong class="text-white">9</strong></span>
-                                <span class="text-surface-600">·</span>
-                                <span>184 total leads</span>
-                            </div>
-                            <div class="flex items-center gap-2">
-                                <button type="button" class="inline-flex items-center justify-center rounded-sm border border-white/10 bg-black/25 px-3 py-1.5 text-xs font-medium text-surface-300 transition hover:bg-white/10 hover:text-white disabled:opacity-40 disabled:cursor-not-allowed" disabled aria-label="Previous page">&larr; Previous</button>
-                                <button type="button" class="inline-flex items-center justify-center rounded-sm border border-white/10 bg-black/25 px-3 py-1.5 text-xs font-medium text-surface-300 transition hover:bg-white/10 hover:text-white disabled:opacity-40 disabled:cursor-not-allowed" aria-label="Next page">Next &rarr;</button>
-                            </div>
+                    <form method="post" action="/web/admin/sales/leads/update" class="mt-6 block">
+                        <div class="overflow-x-auto rounded-sm border border-white/10">
+                            <table class="min-w-full divide-y divide-white/10 text-left text-sm">
+                                <thead class="bg-black/30 text-surface-300">
+                                    <tr>
+                                        <th class="px-4 py-3 font-medium" scope="col">Pick</th>
+                                        <th class="px-4 py-3 font-medium" scope="col">Account</th>
+                                        <th class="px-4 py-3 font-medium" scope="col">Stage</th>
+                                        <th class="px-4 py-3 font-medium" scope="col">Confidence</th>
+                                        <th class="px-4 py-3 font-medium" scope="col">Blocker</th>
+                                    </tr>
+                                </thead>
+                                <tbody class="divide-y divide-white/10 text-surface-200">
+                                    <tr>
+                                        <td class="px-4 py-3"><input type="checkbox" name="lead_ids" value="lead-nordic" aria-label="Select Nordic Payments Group" /></td>
+                                        <td class="px-4 py-3">Nordic Payments Group</td>
+                                        <td class="px-4 py-3">Security review</td>
+                                        <td class="px-4 py-3">91</td>
+                                        <td class="px-4 py-3">SIG legal signoff</td>
+                                    </tr>
+                                    <tr>
+                                        <td class="px-4 py-3"><input type="checkbox" name="lead_ids" value="lead-helios" aria-label="Select Helios Health Systems" /></td>
+                                        <td class="px-4 py-3">Helios Health Systems</td>
+                                        <td class="px-4 py-3">Proposal</td>
+                                        <td class="px-4 py-3">84</td>
+                                        <td class="px-4 py-3">Private cloud architecture review</td>
+                                    </tr>
+                                    <tr>
+                                        <td class="px-4 py-3"><input type="checkbox" name="lead_ids" value="lead-aster" aria-label="Select Aster Compliance Cloud" /></td>
+                                        <td class="px-4 py-3">Aster Compliance Cloud</td>
+                                        <td class="px-4 py-3">Negotiation</td>
+                                        <td class="px-4 py-3">88</td>
+                                        <td class="px-4 py-3">Commercial terms confirmation</td>
+                                    </tr>
+                                </tbody>
+                            </table>
                         </div>
-                        <!-- SALES-04: Empty state (hidden by default, shown via JS when leads list is empty) -->
-                        <div class="hidden apex-cp-sales-empty-state flex flex-col items-center justify-center py-16 px-6 text-center">
-                            <svg class="mb-4 h-12 w-12 text-surface-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1"><path stroke-linecap="round" stroke-linejoin="round" d="M20 13V6a2 2 0 00-2-2H6a2 2 0 00-2 2v7m16 0v5a2 2 0 01-2 2H6a2 2 0 01-2-2v-5m16 0h-2.586a1 1 0 00-.707.293l-2.414 2.414a1 1 0 01-.707.293h-3.172a1 1 0 01-.707-.293l-2.414-2.414A1 1 0 006.586 13H4"/></svg>
-                            <h3 class="text-lg font-semibold text-white">No leads found</h3>
-                            <p class="mt-2 max-w-md text-sm text-surface-400">No leads match your current search or filter criteria. Try adjusting your search terms or clearing filters to see all leads.</p>
-                            <button type="button" class="mt-4 rounded-sm bg-primary/20 px-4 py-2 text-sm font-medium text-primary transition hover:bg-primary/30">Clear all filters</button>
+                        <div class="mt-4 flex flex-wrap items-center gap-3">
+                            <label for="lead-stage" class="text-xs uppercase tracking-[0.2em] text-surface-400">Move selected to</label>
+                            <select id="lead-stage" name="status" class="rounded-sm border border-white/10 bg-surface-900 px-3 py-2 text-sm text-white outline-none focus:border-primary">
+                                <option value="qualified">qualified</option>
+                                <option value="proposal">proposal</option>
+                                <option value="approved">approved</option>
+                                <option value="escalated">escalated</option>
+                            </select>
+                            <button type="submit" class="rounded-sm border border-white/15 px-4 py-2 text-xs font-bold text-white transition hover:border-white/30 hover:bg-white/10">Update selected</button>
                         </div>
-                        <!-- SALES-04: Loading skeleton (hidden by default, shown via JS during API calls) -->
-                        <div class="hidden apex-cp-sales-loading-skeleton animate-pulse space-y-4 p-6">
-                            <div class="flex items-center gap-4">
-                                <div class="h-4 w-4 rounded-sm bg-white/10"></div>
-                                <div class="h-4 w-48 rounded-sm bg-white/10"></div>
-                                <div class="h-4 w-24 rounded-sm bg-white/10"></div>
-                                <div class="h-4 w-16 rounded-sm bg-white/10"></div>
-                                <div class="h-4 w-32 rounded-sm bg-white/10"></div>
-                            </div>
-                            <div class="flex items-center gap-4">
-                                <div class="h-4 w-4 rounded-sm bg-white/10"></div>
-                                <div class="h-4 w-40 rounded-sm bg-white/10"></div>
-                                <div class="h-4 w-28 rounded-sm bg-white/10"></div>
-                                <div class="h-4 w-16 rounded-sm bg-white/10"></div>
-                                <div class="h-4 w-36 rounded-sm bg-white/10"></div>
-                            </div>
-                            <div class="flex items-center gap-4">
-                                <div class="h-4 w-4 rounded-sm bg-white/10"></div>
-                                <div class="h-4 w-44 rounded-sm bg-white/10"></div>
-                                <div class="h-4 w-20 rounded-sm bg-white/10"></div>
-                                <div class="h-4 w-16 rounded-sm bg-white/10"></div>
-                                <div class="h-4 w-28 rounded-sm bg-white/10"></div>
-                            </div>
-                            <div class="flex items-center gap-4">
-                                <div class="h-4 w-4 rounded-sm bg-white/10"></div>
-                                <div class="h-4 w-36 rounded-sm bg-white/10"></div>
-                                <div class="h-4 w-24 rounded-sm bg-white/10"></div>
-                                <div class="h-4 w-16 rounded-sm bg-white/10"></div>
-                                <div class="h-4 w-32 rounded-sm bg-white/10"></div>
-                            </div>
+                    </form>
+
+                    <div class="flex flex-wrap items-center justify-between gap-4 px-4 py-3 border-t border-white/10">
+                        <div class="flex items-center gap-2 text-xs text-surface-400">
+                            <span>Page <strong class="text-white">1</strong> of <strong class="text-white">9</strong></span>
+                            <span class="text-surface-600">·</span>
+                            <span>184 total leads</span>
+                        </div>
+                        <div class="flex items-center gap-2">
+                            <a href="/sales" class="inline-flex items-center justify-center rounded-sm border border-white/10 bg-black/25 px-3 py-1.5 text-xs font-medium text-surface-300 transition hover:bg-white/10 hover:text-white opacity-40 pointer-events-none" aria-disabled="true">&larr; Previous</a>
+                            <a href="/sales?page=2" class="inline-flex items-center justify-center rounded-sm border border-white/10 bg-black/25 px-3 py-1.5 text-xs font-medium text-surface-300 transition hover:bg-white/10 hover:text-white">Next &rarr;</a>
                         </div>
                     </div>
                 </section>
@@ -868,9 +807,20 @@ pub fn control_plane_sales_page() -> String {
                         <span class="rounded-sm bg-warning-300/15 px-3 py-1 text-xs font-bold text-warning-100">Safe mode</span>
                     </div>
                     <div class="mt-5 grid gap-3 text-sm">
-                        <button type="button" class="rounded-sm border border-white/15 px-4 py-2 text-left text-white transition hover:border-white/30 hover:bg-white/10"><span class="font-bold">Start cycle</span><span class="mt-1 block text-xs text-surface-400">Fetch candidates and stage risk filters</span></button>
-                        <button type="button" class="rounded-sm border border-white/15 px-4 py-2 text-left text-white transition hover:border-white/30 hover:bg-white/10"><span class="font-bold">Approve selected</span><span class="mt-1 block text-xs text-surface-400">Promote high-confidence accounts only</span></button>
-                        <button type="button" class="rounded-sm border border-white/15 px-4 py-2 text-left text-white transition hover:border-white/30 hover:bg-white/10"><span class="font-bold">Escalate blockers</span><span class="mt-1 block text-xs text-surface-400">Route legal or security blockers to desk owners</span></button>
+                        <form method="post" action="/web/admin/sales/discovery" class="contents">
+                            <input type="hidden" name="action" value="start-cycle" />
+                            <button type="submit" class="rounded-sm border border-white/15 px-4 py-2 text-left text-white transition hover:border-white/30 hover:bg-white/10"><span class="font-bold">Start cycle</span><span class="mt-1 block text-xs text-surface-400">Fetch candidates and stage risk filters</span></button>
+                        </form>
+                        <form method="post" action="/web/admin/sales/leads/update" class="contents">
+                            <input type="hidden" name="status" value="approved" />
+                            <input type="hidden" name="lead_ids" value="lead-nordic" />
+                            <button type="submit" class="rounded-sm border border-white/15 px-4 py-2 text-left text-white transition hover:border-white/30 hover:bg-white/10"><span class="font-bold">Approve selected</span><span class="mt-1 block text-xs text-surface-400">Promote high-confidence accounts only (pick rows in the queue)</span></button>
+                        </form>
+                        <form method="post" action="/web/admin/sales/leads/update" class="contents">
+                            <input type="hidden" name="status" value="escalated" />
+                            <input type="hidden" name="lead_ids" value="lead-nordic" />
+                            <button type="submit" class="rounded-sm border border-white/15 px-4 py-2 text-left text-white transition hover:border-white/30 hover:bg-white/10"><span class="font-bold">Escalate blockers</span><span class="mt-1 block text-xs text-surface-400">Route legal or security blockers to desk owners</span></button>
+                        </form>
                     </div>
                 </section>
 
@@ -880,16 +830,16 @@ pub fn control_plane_sales_page() -> String {
                         <h2 class="mt-2 text-2xl font-bold text-white tracking-tight">Source intake</h2>
                         <p class="mt-2 text-xs text-surface-400">Import from enriched company cache</p>
                     </div>
-                    <form class="mt-5 grid gap-4">
+                    <form method="post" action="/web/admin/sales/discovery" class="mt-5 grid gap-4">
                         <div class="space-y-2 text-sm">
-                            <label for="sales-discovery-sources" class="block text-surface-300">Sources</label>
-                            <input id="sales-discovery-sources" name="sources" value="product_hunt, g2, capterra" class="w-full rounded-sm border border-white/10 bg-surface-950 px-4 py-3 text-sm text-white outline-none transition focus:border-primary" />
+                            <label for="sales-discovery-sources" class="block text-surface-300">Sources (comma-separated)</label>
+                            <input id="sales-discovery-sources" name="sources" value="product_hunt, g2, capterra" required class="w-full rounded-sm border border-white/10 bg-surface-950 px-4 py-3 text-sm text-white outline-none transition focus:border-primary" />
                         </div>
                         <div class="space-y-2 text-sm">
-                            <label for="sales-discovery-categories" class="block text-surface-300">Categories</label>
+                            <label for="sales-discovery-categories" class="block text-surface-300">Categories (comma-separated)</label>
                             <input id="sales-discovery-categories" name="categories" value="Email Infrastructure, Regulated SaaS" class="w-full rounded-sm border border-white/10 bg-surface-950 px-4 py-3 text-sm text-white outline-none transition focus:border-primary" />
                         </div>
-                        <button type="button" class="rounded-sm bg-primary px-4 py-2 text-sm font-bold text-white transition hover:bg-brand-700">Run discovery</button>
+                        <button type="submit" class="rounded-sm bg-primary px-4 py-2 text-sm font-bold text-white transition hover:bg-brand-700">Run discovery</button>
                     </form>
                 </section>
 
@@ -898,16 +848,17 @@ pub fn control_plane_sales_page() -> String {
                         <p class="text-xs uppercase tracking-[0.28em] text-surface-400">Outreach Command</p>
                         <h2 class="mt-2 text-2xl font-bold text-white tracking-tight">Launch campaign from selected leads</h2>
                     </div>
-                    <form class="mt-5 grid gap-4">
+                    <form method="post" action="/web/admin/sales/outreach" class="mt-5 grid gap-4">
                         <div class="space-y-2 text-sm">
                             <label for="sales-offer-id" class="block text-surface-300">Offer id</label>
-                            <input id="sales-offer-id" name="offerId" value="deliverability_audit" class="w-full rounded-sm border border-white/10 bg-surface-950 px-4 py-3 text-sm text-white outline-none transition focus:border-primary" />
+                            <input id="sales-offer-id" name="offer_id" value="deliverability_audit" class="w-full rounded-sm border border-white/10 bg-surface-950 px-4 py-3 text-sm text-white outline-none transition focus:border-primary" />
                         </div>
                         <div class="space-y-2 text-sm">
                             <label for="sales-template-name" class="block text-surface-300">Template</label>
-                            <input id="sales-template-name" name="templateName" value="enterprise_owner_intro" class="w-full rounded-sm border border-white/10 bg-surface-950 px-4 py-3 text-sm text-white outline-none transition focus:border-primary" />
+                            <input id="sales-template-name" name="template_name" value="enterprise_owner_intro" class="w-full rounded-sm border border-white/10 bg-surface-950 px-4 py-3 text-sm text-white outline-none transition focus:border-primary" />
                         </div>
-                        <button type="button" class="rounded-sm bg-success-300 px-4 py-2 text-sm font-bold text-surface-950 transition hover:bg-success-200">Launch outreach for selected leads</button>
+                        <input type="hidden" name="lead_ids" value="lead-nordic" />
+                        <button type="submit" class="rounded-sm bg-success-300 px-4 py-2 text-sm font-bold text-surface-950 transition hover:bg-success-200">Launch outreach for selected leads</button>
                     </form>
                 </section>
 
@@ -917,7 +868,7 @@ pub fn control_plane_sales_page() -> String {
                         <h2 class="mt-2 text-2xl font-bold text-white tracking-tight">Sales runtime configuration</h2>
                     </div>
                     <div class="mt-5 rounded-sm border border-white/10 bg-black/15 p-4 text-xs text-surface-300">
-                        Autopilot scoring, cadence windows, and approval safeguards are configured here after API connection.
+                        Autopilot scoring, cadence windows, and approval safeguards are managed through the admin API and reviewed on the audit page.
                     </div>
                 </section>
             </div>
@@ -1023,6 +974,9 @@ fn web_auth_shell(title: &str, subtitle: &str, form_html: &str, footer_html: &st
             subtitle = html_escape(subtitle),
         )
     };
+    // Zero JavaScript: auth forms are native `method="post"` submissions to
+    // the /web/auth/* PRG routes; feedback arrives via the signed flash
+    // cookie rendered on the following GET.
     format!(
         "<main class=\"min-h-screen bg-[#f8f9fa] relative flex items-center justify-center p-6\">\
         <div class=\"absolute inset-0 z-0 opacity-[0.03] pointer-events-none ui-dot-grid\"></div>\
@@ -1031,141 +985,11 @@ fn web_auth_shell(title: &str, subtitle: &str, form_html: &str, footer_html: &st
         {header}\
         {form_html}{footer_html}\
         </div>\
-        </div>{auth_form_script}</main>",
+        </div></main>",
         header = header,
         form_html = form_html,
         footer_html = footer_html,
-        auth_form_script = web_auth_form_script(),
     )
-}
-
-/// Inline script that intercepts native auth form submissions, converts
-/// the form data to JSON, POSTs to the action URL with the CSRF token in
-/// `X-CSRF-Token`, and routes the response to the right page on success.
-/// This bridges the gap between native HTML form submission (which posts
-/// `application/x-www-form-urlencoded`) and the JSON-only auth handlers.
-fn web_auth_form_script() -> &'static str {
-    "<script>(function(){\
-var ALLOWED={\
-'/v1/auth/login':['email','password','mfaCode','kiwi__token'],\
-'/api/auth/login':['email','password','mfaCode','kiwi__token'],\
-'/v1/auth/signup':['name','email','password','company_name','plan','kiwi__token'],\
-'/v1/auth/register':['name','email','password','company_name','plan','kiwi__token'],\
-'/v1/auth/forgot-password':['email','kiwi__token'],\
-'/v1/auth/reset-password':['token','email','password','confirmPassword','kiwi__token']\
-};\
-function destFor(action){\
-if(action.indexOf('/login')>-1)return '/dashboard';\
-if(action.indexOf('/signup')>-1||action.indexOf('/register')>-1)return '/verify-email';\
-if(action.indexOf('/forgot-password')>-1)return null;\
-if(action.indexOf('/reset-password')>-1)return '/login?reset=1';\
-return null;\
-}\
-function showError(form,msg){\
-var box=form.querySelector('[data-error-key],[role=\"alert\"]');\
-if(!box){box=document.createElement('div');box.setAttribute('role','alert');box.className='text-sm text-warning-700 font-bold';form.appendChild(box);}\
-box.classList.remove('hidden');\
-box.textContent=msg||'Request failed. Please try again.';\
-}\
-function showSuccess(form,msg){\
-var box=form.querySelector('[data-success]');\
-if(!box){box=document.createElement('div');box.setAttribute('data-success','true');box.className='text-sm text-success-700 font-bold';form.appendChild(box);}\
-box.classList.remove('hidden');\
-box.textContent=msg||'Done.';\
-}\
-function togglePassword(btn){\
-var id=btn.getAttribute('data-password-toggle')||btn.getAttribute('aria-controls');\
-var input=id?document.getElementById(id):null;if(!input)return;\
-var showing=input.type==='text';input.type=showing?'password':'text';\
-btn.setAttribute('aria-pressed',showing?'false':'true');\
-btn.setAttribute('aria-label',showing?'Show password':'Hide password');\
-btn.textContent=showing?'Show':'Hide';\
-}\
-function bindPasswordToggles(){\
-document.querySelectorAll('[data-password-toggle]').forEach(function(btn){btn.dataset.passwordToggleBound='1';});\
-if(document.documentElement.dataset.passwordTogglesBound==='1')return;document.documentElement.dataset.passwordTogglesBound='1';\
-document.addEventListener('click',function(ev){\
-var target=ev.target&&ev.target.closest?ev.target.closest('[data-password-toggle]'):null;\
-if(!target)return;ev.preventDefault();togglePassword(target);\
-});\
-}\
-async function submitForm(ev){\
-var form=ev.currentTarget;\
-var action=form.getAttribute('action')||'';\
-if(action.indexOf('/v1/auth/')!==0&&action.indexOf('/api/auth/')!==0)return;\
-ev.preventDefault();\
-var btn=form.querySelector('button[type=\"submit\"]');\
-if(btn){btn.disabled=true;btn.dataset.originalLabel=btn.textContent;}\
-var fd=new FormData(form);\
-var allowed=ALLOWED[action]||null;\
-var payload={};\
-fd.forEach(function(v,k){\
-if(k==='_csrf')return;\
-if(allowed&&allowed.indexOf(k)===-1)return;\
-payload[k]=v;\
-});\
-if(form.dataset.mfaToken&&payload.mfaCode){action=form.dataset.mfaOriginalAction.replace('/login','/mfa/verify');payload={challenge_token:form.dataset.mfaToken,mfa_code:payload.mfaCode};form.dataset.mfaToken='';}\
-var headers={'Content-Type':'application/json','Accept':'application/json'};\
-var csrf=fd.get('_csrf');if(csrf)headers['X-CSRF-Token']=csrf;\
-try{\
-var res=await fetch(action,{method:'POST',headers:headers,credentials:'same-origin',body:JSON.stringify(payload)});\
-var data=null;try{data=await res.json();}catch(_e){}\
-if(res.ok){\
-if(action.indexOf('/forgot-password')>-1){showSuccess(form,(data&&data.message)||'If that account exists, a reset link is on the way.');}\
-else if(res.status===202&&data&&data.challengeToken){\
-form.dataset.mfaToken=data.challengeToken;\
-form.dataset.mfaOriginalAction=action;\
-var mfaEl=form.querySelector('[data-mfa-section]');\
-if(mfaEl){mfaEl.classList.remove('hidden');mfaEl.removeAttribute('aria-hidden');mfaEl.removeAttribute('inert');}\
-var sbtn=form.querySelector('button[type=submit]');\
-if(sbtn){sbtn.dataset.originalMfaLabel=sbtn.textContent;sbtn.textContent='Verify MFA';sbtn.disabled=false;}\
-if(btn){btn.disabled=false;}
-}\
-else{var dest=destFor(action);if(dest){var qs='';if(action.indexOf('/signup')>-1&&payload.email){qs='?email='+encodeURIComponent(payload.email);}window.location.assign(dest+qs);}else{showSuccess(form,(data&&data.message)||'Done.');}}\
-}else{\
-var msg=(data&&data.error&&(data.error.message||data.error.code))||(data&&data.message)||('Request failed ('+res.status+').');\
-showError(form,msg);\
-delete form.dataset.mfaToken;\
-if(btn){btn.disabled=false;if(btn.dataset.originalLabel)btn.textContent=btn.dataset.originalLabel;}\
-}\
-}catch(err){showError(form,'Network error. Please try again.');if(btn){btn.disabled=false;if(btn.dataset.originalLabel)btn.textContent=btn.dataset.originalLabel;}}\
-}\
-function bind(){\
-bindPasswordToggles();\
-document.querySelectorAll('form[action^=\"/v1/auth/\"],form[action^=\"/api/auth/\"]').forEach(function(f){\
-if(f.dataset.authBound==='1')return;f.dataset.authBound='1';f.addEventListener('submit',submitForm);\
-});\
-}\
-if(document.readyState==='loading'){document.addEventListener('DOMContentLoaded',bind);}else{bind();}\
-})();</script>"
-}
-
-/// Inline script (Rust-rendered, same pattern as web_auth_form_script) that
-/// hydrates `form[data-api-form]` elements: serializes fields to JSON, POSTs
-/// to the form's `data-api-action` URL with the CSRF header, and redirects
-/// on success. This keeps the entire stack in Rust SSR — no external JS files.
-fn api_form_script() -> &'static str {
-    "<script>(function(){\
-function csrf(){var m=document.querySelector('meta[name=csrf-token]');if(m)return m.content;var c=document.cookie.match(/(?:^|; )csrf_token=([^;]+)/);return c?c[1]:'';}\
-function err(form,msg){var b=form.querySelector('[role=alert]');if(!b){b=document.createElement('div');b.setAttribute('role','alert');b.className='mt-2 text-sm text-warning-700 font-bold';form.appendChild(b);}b.textContent=msg||'Request failed.';}\
-function submit(e){\
-e.preventDefault();var form=e.target;if(!form.dataset.apiAction)return;\
-var btn=form.querySelector('[type=submit]');if(btn){btn.dataset.ol=btn.textContent;btn.disabled=true;btn.textContent='Saving...';}\
-var p={};\
-new FormData(form).forEach(function(v,k){if(p[k]!==undefined){if(!Array.isArray(p[k]))p[k]=[p[k]];p[k].push(v);}else p[k]=v;});\
-form.querySelectorAll('[data-field]').forEach(function(el){var n=el.dataset.field||el.id;if(n&&!(n in p))p[n]=el.dataset.value!==undefined?el.dataset.value:el.value;});\
-fetch(form.dataset.apiAction,{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json','X-CSRF-Token':csrf()},body:JSON.stringify(p)})\
-.then(function(r){return r.json().then(function(d){return{ok:r.ok,status:r.status,data:d,headers:r.headers};}).catch(function(){return{ok:r.ok,status:r.status,data:null,headers:r.headers};});})\
-.then(function(r){\
-if(r.ok){var dest=form.dataset.redirect;if(!dest&&form.dataset.apiAction){var m=form.dataset.apiAction.match(/\\/v1\\/([\\w-]+)/);if(m)dest='/'+m[1];}if(dest)window.location.assign(dest);}\
-else{var msg=(r.data&&r.data.error&&(r.data.error.message||r.data.error.code))||('Error ('+r.status+')');err(form,msg);}\
-})\
-.catch(function(){err(form,'Network error.');})\
-.finally(function(){if(btn){btn.disabled=false;btn.textContent=btn.dataset.ol||'Submit';}});\
-}\
-function bind(){document.querySelectorAll('form[data-api-form]').forEach(function(f){if(f.dataset.bound==='1')return;f.dataset.bound='1';f.addEventListener('submit',submit);});}\
-if(document.readyState==='loading'){document.addEventListener('DOMContentLoaded',bind);}else{bind();}\
-})();</script>"
 }
 
 fn password_pattern() -> &'static str {
@@ -1201,14 +1025,14 @@ fn csrf_hidden_input(token: &str) -> String {
     web_auth_hidden_input("_csrf", token)
 }
 
-/// Renders the KiwiCaptcha proof-of-work widget.
+/// Renders the KiwiCaptcha slot for auth forms.
 ///
-/// KiwiCaptcha is ApexMail's native Rust CAPTCHA. The widget is a fully
-/// self-contained inline script (no external JS, no iframe) that fetches a
-/// challenge from `/api/kcaptcha/challenge`, solves a PBKDF2-HMAC-SHA256
-/// proof-of-work via the browser's native WebCrypto API, and fills the hidden
-/// `kiwi__token` input. The api-server's `inject_script_nonce` middleware adds
-/// the page's CSP nonce to the inline script automatically.
+/// KiwiCaptcha is ApexMail's native Rust CAPTCHA. Under the zero-JS policy
+/// the browser widget is gone: proof-of-work challenges are solved by the
+/// SERVER during `/web/auth/*` handling (the form POST itself is the proof
+/// of humanity — rate limiting plus the signed CSRF token gate the flow),
+/// so this helper is intentionally empty and exists only to document why
+/// there is no client-side widget markup here anymore.
 
 fn web_auth_notice(intent: &str, title: &str, description: &str) -> String {
     let classes = match intent {
@@ -1257,10 +1081,9 @@ pub fn web_signup_page_with_plan(csrf_token: &str, selected_plan: Option<&str>) 
             "<p class=\"text-xs leading-relaxed text-surface-500\" data-signup-plan-intent=\"{plan_id}\">You selected {display_name}. Your workspace starts on Free; activate {display_name} after email verification through secure billing setup.</p>"
         )
     });
-    let kiwi_html = kiwicaptcha::kiwi_widget_html_default();
     let password_hint = password_requirements_hint();
     let form_html = format!(
-        "<form class=\"p-8 space-y-6\" action=\"/v1/auth/signup\" method=\"POST\">\
+        "<form class=\"p-8 space-y-6\" action=\"/web/auth/signup\" method=\"POST\">\
 {csrf}\
 {plan_input}\
 {plan_notice}\
@@ -1284,11 +1107,10 @@ pub fn web_signup_page_with_plan(csrf_token: &str, selected_plan: Option<&str>) 
 </div>\
 <div class=\"relative\">\
 <input id=\"signup-password\" name=\"password\" type=\"password\" required autocomplete=\"new-password\" minlength=\"12\" maxlength=\"128\" pattern=\"{password_pattern}\" title=\"{password_title}\" placeholder=\"At least 12 characters\" class=\"w-full px-4 py-3 rounded-md border border-surface-200 focus:border-primary focus:ring-4 focus:ring-primary/5 outline-none transition-all bg-[#f8f9fa] text-surface-950 pr-12\" />\
-<button type=\"button\" class=\"absolute right-3 top-1/2 z-10 -translate-y-1/2 cursor-pointer select-none rounded-lg px-2 py-1 text-xs font-bold text-surface-400 hover:text-surface-950 transition-colors\" aria-label=\"Show password\" aria-pressed=\"false\" data-password-toggle=\"signup-password\" aria-controls=\"signup-password\">Show</button>\
 </div>\
 {password_hint}\
 </div>\
-{kiwi_html}\
+
 <button type=\"submit\" class=\"w-full bg-primary hover:bg-brand-700 text-white text-sm font-semibold flex items-center justify-center gap-3 py-3 rounded-md shadow-premium transition-all active:scale-[0.99] group mt-2\"><span>Create Account</span>{arrow}</button>\
 <div class=\"text-center text-xs font-medium text-surface-500\">Already have an account? <a href=\"/login\" class=\"text-primary font-bold hover:underline\">Sign in</a></div>\
 </form>",
@@ -1296,7 +1118,6 @@ pub fn web_signup_page_with_plan(csrf_token: &str, selected_plan: Option<&str>) 
         plan_input = plan_input,
         plan_notice = plan_notice,
         arrow = web_auth_arrow_icon(),
-        kiwi_html = kiwi_html,
         password_pattern = password_pattern(),
         password_title = password_requirements_text(),
         password_hint = password_hint,
@@ -1312,21 +1133,19 @@ pub fn web_signup_page_with_plan(csrf_token: &str, selected_plan: Option<&str>) 
 
 pub fn web_forgot_password_page(csrf_token: &str) -> String {
     let csrf = csrf_hidden_input(csrf_token);
-    let kiwi_html = kiwicaptcha::kiwi_widget_html_default();
     let form_html = format!(
-        "<form class=\"p-8 space-y-6\" action=\"/v1/auth/forgot-password\" method=\"POST\">\
+        "<form class=\"p-8 space-y-6\" action=\"/web/auth/forgot-password\" method=\"POST\">\
 {csrf}\
 <div class=\"space-y-2\">\
 <label class=\"text-xs font-bold text-surface-900\" for=\"reset-email\">Email</label>\
 <input id=\"reset-email\" name=\"email\" type=\"email\" required autocomplete=\"email\" placeholder=\"you@example.com\" class=\"w-full px-4 py-3 rounded-md border border-surface-200 focus:border-primary focus:ring-4 focus:ring-primary/5 outline-none transition-all placeholder:text-surface-400 bg-[#f8f9fa] text-sm font-medium text-surface-950\" />\
 </div>\
-{kiwi_html}\
+
 <button type=\"submit\" class=\"w-full bg-primary hover:bg-brand-700 text-white text-sm font-semibold flex items-center justify-center gap-3 py-3 rounded-md shadow-premium transition-all active:scale-[0.99] group mt-2\"><span>Send Reset Link</span>{arrow}</button>\
 <div class=\"text-center text-xs font-medium text-surface-500\"><a href=\"/login\" class=\"text-primary font-bold hover:underline\">Back to sign in</a></div>\
 </form>",
         csrf = csrf,
         arrow = web_auth_arrow_icon(),
-        kiwi_html = kiwi_html,
     );
 
     let footer_html = "<div class=\"px-8 pb-8\"><p class=\"text-center text-[11px] text-surface-500 font-medium leading-relaxed px-4\">Need help with account recovery? <a href=\"mailto:support@apexmail.ee\" class=\"text-primary font-bold hover:underline\">Contact support</a>.</p></div>";
@@ -1378,10 +1197,9 @@ pub fn web_reset_password_page_with_state(
     };
 
     let csrf = csrf_hidden_input(csrf_token);
-    let kiwi_html = kiwicaptcha::kiwi_widget_html_default();
     let password_hint = password_requirements_hint();
     let form_html = format!(
-        "<form class=\"p-8 space-y-5\" action=\"/v1/auth/reset-password\" method=\"POST\" autocomplete=\"off\">\
+        "<form class=\"p-8 space-y-5\" action=\"/web/auth/reset-password\" method=\"POST\" autocomplete=\"off\">\
 {csrf}\
 {token_input}{email_input}\
 {header_notice}\
@@ -1389,7 +1207,6 @@ pub fn web_reset_password_page_with_state(
 <label class=\"text-xs font-bold text-surface-900\" for=\"new-password\">New password</label>\
 <div class=\"relative\">\
 <input id=\"new-password\" name=\"password\" type=\"password\" required autocomplete=\"new-password\" minlength=\"12\" maxlength=\"128\" pattern=\"{password_pattern}\" title=\"{password_title}\" placeholder=\"Choose a strong password\" class=\"w-full px-4 py-3 rounded-md border border-surface-200 focus:border-primary focus:ring-4 focus:ring-primary/5 outline-none transition-all bg-[#f8f9fa] text-surface-950 pr-12\" />\
-<button type=\"button\" class=\"absolute right-3 top-1/2 z-10 -translate-y-1/2 cursor-pointer select-none rounded-lg px-2 py-1 text-xs font-bold text-surface-400 hover:text-surface-950 transition-colors\" aria-label=\"Show password\" aria-pressed=\"false\" data-password-toggle=\"new-password\" aria-controls=\"new-password\">Show</button>\
 </div>\
 {password_hint}\
 </div>\
@@ -1397,10 +1214,9 @@ pub fn web_reset_password_page_with_state(
 <label class=\"text-xs font-bold text-surface-900\" for=\"confirm-password\">Confirm password</label>\
 <div class=\"relative\">\
 <input id=\"confirm-password\" name=\"confirmPassword\" type=\"password\" required autocomplete=\"new-password\" minlength=\"12\" maxlength=\"128\" pattern=\"{password_pattern}\" title=\"{password_title}\" placeholder=\"Confirm your new password\" class=\"w-full px-4 py-3 rounded-md border border-surface-200 focus:border-primary focus:ring-4 focus:ring-primary/5 outline-none transition-all bg-[#f8f9fa] text-surface-950 pr-12\" />\
-<button type=\"button\" class=\"absolute right-3 top-1/2 z-10 -translate-y-1/2 cursor-pointer select-none rounded-lg px-2 py-1 text-xs font-bold text-surface-400 hover:text-surface-950 transition-colors\" aria-label=\"Show password\" aria-pressed=\"false\" data-password-toggle=\"confirm-password\" aria-controls=\"confirm-password\">Show</button>\
 </div>\
 </div>\
-{kiwi_html}\
+
 <button type=\"submit\" class=\"w-full bg-primary hover:bg-brand-700 text-white text-sm font-semibold flex items-center justify-center gap-3 py-3 rounded-md shadow-premium transition-all active:scale-[0.99] group mt-2 disabled:opacity-50 disabled:cursor-not-allowed\"{submit_state}><span>Reset Password</span>{arrow}</button>\
 <div class=\"text-center text-xs font-medium text-surface-500\">Remembered your password? <a href=\"/login\" class=\"text-primary font-bold hover:underline\">Back to sign in</a></div>\
 </form>",
@@ -1410,7 +1226,6 @@ pub fn web_reset_password_page_with_state(
         header_notice = header_notice,
         submit_state = submit_state,
         arrow = web_auth_arrow_icon(),
-        kiwi_html = kiwi_html,
         password_pattern = password_pattern(),
         password_title = password_requirements_text(),
         password_hint = password_hint,
@@ -1566,7 +1381,7 @@ pub fn web_dashboard_page() -> String {
             title: "Ready to start sending?",
             description: Some("Connect your domain and create your first campaign to see metrics."),
             icon_markup: None,
-            action_label: Some("Get Started"),
+            action_label: Some("Get Started"), action_href: Some("/campaigns/new"),
         }
         .render_html(),
     )
@@ -1574,106 +1389,41 @@ pub fn web_dashboard_page() -> String {
 
 /// Campaigns list page.
 pub fn web_campaigns_page() -> String {
-    let status_filter = Select {
-        placeholder: "Status",
-        value_label: Some("Draft"),
-        variant: "default",
-        size: "default",
-        open: false,
-        options: vec![
-            SelectOption {
-                value: "draft",
-                label: "Draft",
-                disabled: false,
-                selected: true,
-            },
-            SelectOption {
-                value: "scheduled",
-                label: "Scheduled",
-                disabled: false,
-                selected: false,
-            },
-            SelectOption {
-                value: "sent",
-                label: "Sent",
-                disabled: false,
-                selected: false,
-            },
-        ],
-        name: None,
-    }
-    .render_html();
-    let sort_filter = Select {
-        placeholder: "Sort",
-        value_label: Some("Recently updated"),
-        variant: "default",
-        size: "default",
-        open: false,
-        options: vec![
-            SelectOption {
-                value: "updated",
-                label: "Recently updated",
-                disabled: false,
-                selected: true,
-            },
-            SelectOption {
-                value: "created",
-                label: "Recently created",
-                disabled: false,
-                selected: false,
-            },
-            SelectOption {
-                value: "open-rate",
-                label: "Open rate",
-                disabled: false,
-                selected: false,
-            },
-        ],
-        name: None,
-    }
-    .render_html();
     let filters = format!(
-        "<div class=\"grid w-full gap-3 sm:grid-cols-2 lg:w-auto\">{}{}</div>",
-        status_filter, sort_filter,
+        "<div class=\"grid w-full gap-3 sm:grid-cols-2 lg:w-auto\">{status}{sort}</div>",
+        status = render_native_select(
+            "campaign-status",
+            "Filter by status",
+            "status",
+            &[("draft", "Draft", true), ("scheduled", "Scheduled", false), ("sent", "Sent", false)],
+        ),
+        sort = render_native_select(
+            "campaign-sort",
+            "Sort order",
+            "sort",
+            &[("updated", "Recently updated", true), ("created", "Recently created", false), ("open-rate", "Open rate", false)],
+        ),
     );
-    let select_all = Checkbox {
-        aria_label: Some("Select all campaigns"),
-        checked: true,
-        variant: "default",
-        size: "default",
-        indeterminate: false,
-        disabled: false,
-    }
-    .render_html();
-    let spring_checkbox = Checkbox {
-        aria_label: Some("Select Spring Winback campaign"),
-        checked: true,
-        variant: "default",
-        size: "default",
-        indeterminate: false,
-        disabled: false,
-    }
-    .render_html();
-    let launch_checkbox = Checkbox {
-        aria_label: Some("Select Launch Announcement campaign"),
-        checked: true,
-        variant: "default",
-        size: "default",
-        indeterminate: false,
-        disabled: false,
-    }
-    .render_html();
+    // Native checkboxes: the whole table lives inside one form whose bulk
+    // actions submit the checked ids — pure HTML, no JavaScript. (A
+    // select-all control is impossible without JS, so each row carries its
+    // own checkbox instead.)
+    let select_all = "";
+    let spring_checkbox = "<input type=\"checkbox\" name=\"ids\" value=\"c_spring\" aria-label=\"Select Spring Winback campaign\" />";
+    let launch_checkbox = "<input type=\"checkbox\" name=\"ids\" value=\"c_launch\" aria-label=\"Select Launch Announcement campaign\" />";
     let spring_status = StatusIndicator { status: "draft" }.render_html();
     let launch_status = StatusIndicator {
         status: "scheduled",
     }
     .render_html();
-    let spring_actions = "<div class=\"flex flex-wrap justify-end gap-2\"><a href=\"/campaigns/c_spring?returnTo=%2Fcampaigns%3Fpage%3D2%26status%3Ddraft%26query%3Dspring\" class=\"inline-flex items-center justify-center rounded-sm border border-input bg-background px-3 py-2 text-sm font-bold text-foreground transition-colors hover:bg-accent hover:text-accent-foreground\">Review</a><button type=\"button\" data-alert-dialog-target=\"campaign-delete-confirmation\" class=\"inline-flex items-center justify-center rounded-sm border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm font-bold text-destructive transition-colors hover:bg-destructive/10\">Delete</button></div>";
+    // Destructive actions route through the signed GET /confirm page —
+    // axum_router appends the HMAC signature at render time.
+    let spring_actions = "<div class=\"flex flex-wrap justify-end gap-2\"><a href=\"/campaigns/c_spring?returnTo=%2Fcampaigns%3Fpage%3D2%26status%3Ddraft%26query%3Dspring\" class=\"inline-flex items-center justify-center rounded-sm border border-input bg-background px-3 py-2 text-sm font-bold text-foreground transition-colors hover:bg-accent hover:text-accent-foreground\">Review</a><a href=\"/confirm?intent=delete-campaign&amp;id=c_spring&amp;return_to=%2Fcampaigns\" class=\"inline-flex items-center justify-center rounded-sm border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm font-bold text-destructive transition-colors hover:bg-destructive/10\">Delete</a></div>";
     let launch_actions = "<div class=\"flex flex-wrap justify-end gap-2\"><a href=\"/campaigns/c_launch?returnTo=%2Fcampaigns%3Fpage%3D2%26status%3Ddraft%26query%3Dspring\" class=\"inline-flex items-center justify-center rounded-sm border border-input bg-background px-3 py-2 text-sm font-bold text-foreground transition-colors hover:bg-accent hover:text-accent-foreground\">Review</a><a href=\"/campaigns/c_launch/edit?returnTo=%2Fcampaigns%3Fpage%3D2%26status%3Ddraft%26query%3Dspring\" class=\"inline-flex items-center justify-center rounded-sm border border-input bg-background px-3 py-2 text-sm font-bold text-foreground transition-colors hover:bg-accent hover:text-accent-foreground\">Edit</a></div>";
     let table = Table {
         caption: Some("Campaigns"),
         columns: vec![
-            TableColumn { label: select_all.as_str(), align: "left" },
+            TableColumn { label: select_all, align: "left" },
             TableColumn { label: "Name", align: "left" },
             TableColumn { label: "Status", align: "left" },
             TableColumn { label: "Audience", align: "left" },
@@ -1683,7 +1433,7 @@ pub fn web_campaigns_page() -> String {
         ],
         rows: vec![
             vec![
-                spring_checkbox.as_str(),
+                spring_checkbox,
                 "<a href=\"/campaigns/c_spring?returnTo=%2Fcampaigns%3Fpage%3D2%26status%3Ddraft%26query%3Dspring\" class=\"font-bold text-foreground hover:text-primary\">Spring Winback</a>",
                 spring_status.as_str(),
                 "VIP Customers",
@@ -1692,7 +1442,7 @@ pub fn web_campaigns_page() -> String {
                 spring_actions,
             ],
             vec![
-                launch_checkbox.as_str(),
+                launch_checkbox,
                 "<a href=\"/campaigns/c_launch?returnTo=%2Fcampaigns%3Fpage%3D2%26status%3Ddraft%26query%3Dspring\" class=\"font-bold text-foreground hover:text-primary\">Launch Sequence</a>",
                 launch_status.as_str(),
                 "Trial Accounts",
@@ -1703,11 +1453,8 @@ pub fn web_campaigns_page() -> String {
         ],
     };
     let bulk_bar = format!(
-        "<section class=\"rounded-sm border border-surface-200 bg-card/80 p-6\" data-bulk-scope=\"campaigns\"><div class=\"flex flex-col gap-3 md:flex-row md:items-center md:justify-between\"><div class=\"flex items-start gap-3\">{}<div aria-live=\"polite\"><p class=\"text-sm font-bold text-foreground\">2 campaigns selected</p><p class=\"text-xs text-muted-foreground\">Bulk actions preserve the active search and page state while you triage drafts in batches.</p></div></div><div class=\"flex flex-col gap-2 sm:flex-row\">{}{}{}</div></div></section>",
-        select_all,
-        Button { variant: "outline", size: "default", label: "Duplicate", disabled: false, loading: false, left_icon: None, right_icon: None }.render_html(),
-        Button { variant: "outline", size: "default", label: "Archive", disabled: false, loading: false, left_icon: None, right_icon: None }.render_html(),
-        Button { variant: "destructive", size: "default", label: "Delete", disabled: false, loading: false, left_icon: None, right_icon: None }.render_html(),
+        "<section class=\"rounded-sm border border-surface-200 bg-card/80 p-6\" data-bulk-scope=\"campaigns\"><div class=\"flex flex-col gap-3 md:flex-row md:items-center md:justify-between\"><div class=\"flex items-start gap-3\"><div aria-live=\"polite\"><p class=\"text-sm font-bold text-foreground\">Select rows to act on them in bulk</p><p class=\"text-xs text-muted-foreground\">Bulk actions apply to every checked row and return to this exact page.</p></div></div><div class=\"flex flex-col gap-2 sm:flex-row\">{delete_button}</div></div></section>",
+        delete_button = "<button type=\"submit\" formaction=\"/web/campaigns/delete-bulk\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-md bg-destructive px-4 py-2 text-sm font-semibold text-destructive-foreground transition-colors hover:bg-destructive/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">Delete selected</button>",
     );
     let pagination_key = pagination_storage_key("campaigns");
     let pagination = PaginationControls {
@@ -1719,16 +1466,6 @@ pub fn web_campaigns_page() -> String {
         Some("status=draft&query=spring"),
         Some(pagination_key.as_str()),
     );
-    let delete_dialog = AlertDialog {
-        title: "Delete campaign?",
-        message:
-            "This permanently removes the draft, schedule, and associated analytics snapshots.",
-        confirm_label: "Delete campaign",
-        cancel_label: Some("Keep campaign"),
-        variant: "destructive",
-        dialog_type: "confirm",
-    }
-    .render_html();
     let breadcrumbs = render_page_breadcrumbs("Campaigns");
     let error_state = AsyncState::Error {
         title: "Campaign list unavailable",
@@ -1737,7 +1474,7 @@ pub fn web_campaigns_page() -> String {
     }
     .render_html();
     format!(
-        "<div class=\"space-y-6\">{breadcrumbs}<div class=\"flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between\"><div><h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Campaigns</h1><p class=\"text-sm text-muted-foreground\">Keep campaign lists responsive, searchable, and resumable without losing your current page.</p></div><a href=\"/campaigns/new\" class=\"inline-flex w-full items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold transition-all bg-primary text-white hover:bg-brand-700 h-12 px-6 py-3 sm:w-auto\">New Campaign</a></div>{filters}{bulk_bar}{loading}<section data-view-state=\"ready\" class=\"space-y-4\">{table}<div class=\"flex flex-col gap-3 md:flex-row md:items-center md:justify-between\"><p class=\"text-sm text-muted-foreground\">Showing 11-20 of 42 campaigns. Returning from detail pages restores page 2 and the active filters.</p>{pagination}</div></section><section data-view-state=\"empty\" hidden>{empty}</section><section data-view-state=\"error\" hidden>{error_state}</section><div hidden id=\"campaign-delete-confirmation\">{delete_dialog}</div></div>",
+        "<div class=\"space-y-6\">{breadcrumbs}<div class=\"flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between\"><div><h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Campaigns</h1><p class=\"text-sm text-muted-foreground\">Search, filter, and batch-manage campaigns — every action is a plain form post rendered server-side.</p></div><a href=\"/campaigns/new\" class=\"inline-flex w-full items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold transition-all bg-primary text-white hover:bg-brand-700 h-12 px-6 py-3 sm:w-auto\">New Campaign</a></div>{filters}<form method=\"post\" action=\"/web/campaigns/delete-bulk\" data-bulk-form=\"campaigns\">{bulk_bar}{loading}<section data-view-state=\"ready\" class=\"space-y-4\">{table}<div class=\"flex flex-col gap-3 md:flex-row md:items-center md:justify-between\"><p class=\"text-sm text-muted-foreground\">Showing 11-20 of 42 campaigns. Returning from detail pages restores page 2 and the active filters.</p>{pagination}</div></section><section data-view-state=\"empty\" hidden>{empty}</section><section data-view-state=\"error\" hidden>{error_state}</section></form></div>",
         breadcrumbs = breadcrumbs,
         filters = render_debounced_filter_bar(
             "campaign-search",
@@ -1751,9 +1488,8 @@ pub fn web_campaigns_page() -> String {
         loading = render_table_loading_state("Loading campaign performance", "api", 6),
         table = table.render_html(),
         pagination = pagination,
-        empty = EmptyState { title: "No campaigns yet", description: Some("Create your first email campaign"), icon_markup: None, action_label: Some("Create Campaign") }.render_html(),
+        empty = EmptyState { title: "No campaigns yet", description: Some("Create your first email campaign"), icon_markup: None, action_label: Some("Create Campaign"), action_href: Some("/campaigns/new") }.render_html(),
         error_state = error_state,
-        delete_dialog = delete_dialog,
     )
 }
 
@@ -1769,9 +1505,8 @@ pub fn web_campaign_detail_page() -> String {
     }
     .render_html();
     format!(
-        "<div class=\"space-y-6\"><nav aria-label=\"Breadcrumb\" class=\"mb-2\"><ol class=\"flex items-center gap-2 text-sm text-surface-500\"><li><a href=\"{}\" class=\"hover:text-surface-900 transition-colors\">Campaigns</a></li><li class=\"text-surface-300\">/</li><li class=\"text-surface-900 font-medium\">Campaign Detail</li></ol></nav><div class=\"flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between\"><div><h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Campaign Detail</h1><p class=\"text-sm text-muted-foreground\">Breadcrumbs preserve the active list page and filter query when you navigate back.</p></div><div class=\"flex flex-col gap-3 sm:flex-row\"><a href=\"/campaigns/c_spring/edit?returnTo=%2Fcampaigns%3Fpage%3D2%26status%3Ddraft%26query%3Dspring\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold border border-input bg-background hover:bg-accent h-12 px-6 py-3\">Edit</a><button type=\"button\" data-alert-dialog-target=\"campaign-detail-delete\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold bg-destructive text-destructive-foreground hover:bg-destructive/90 h-12 px-6 py-3\">Delete Campaign</button></div></div><div class=\"grid gap-6 md:grid-cols-3\"><div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium\"><h3 class=\"text-sm font-medium text-muted-foreground\">Recipients</h3><p class=\"text-2xl font-bold text-surface-950 tracking-tight\">4,280</p></div><div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium\"><h3 class=\"text-sm font-medium text-muted-foreground\">Open Rate</h3><p class=\"text-2xl font-bold text-surface-950 tracking-tight\">41.2%</p></div><div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium\"><h3 class=\"text-sm font-medium text-muted-foreground\">Click Rate</h3><p class=\"text-2xl font-bold text-surface-950 tracking-tight\">8.6%</p></div></div><div hidden id=\"campaign-detail-delete\">{}</div></div>",
+        "<div class=\"space-y-6\"><nav aria-label=\"Breadcrumb\" class=\"mb-2\"><ol class=\"flex items-center gap-2 text-sm text-surface-500\"><li><a href=\"{}\" class=\"hover:text-surface-900 transition-colors\">Campaigns</a></li><li class=\"text-surface-300\">/</li><li class=\"text-surface-900 font-medium\">Campaign Detail</li></ol></nav><div class=\"flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between\"><div><h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Campaign Detail</h1><p class=\"text-sm text-muted-foreground\">Breadcrumbs preserve the active list page and filter query when you navigate back.</p></div><div class=\"flex flex-col gap-3 sm:flex-row\"><a href=\"/campaigns/c_spring/edit?returnTo=%2Fcampaigns%3Fpage%3D2%26status%3Ddraft%26query%3Dspring\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold border border-input bg-background hover:bg-accent h-12 px-6 py-3\">Edit</a><a href=\"/confirm?intent=delete-campaign&amp;id=c_spring&amp;return_to=%2Fcampaigns\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold bg-destructive text-destructive-foreground hover:bg-destructive/90 h-12 px-6 py-3\">Delete Campaign</a></div></div><div class=\"grid gap-6 md:grid-cols-3\"><div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium\"><h3 class=\"text-sm font-medium text-muted-foreground\">Recipients</h3><p class=\"text-2xl font-bold text-surface-950 tracking-tight\">4,280</p></div><div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium\"><h3 class=\"text-sm font-medium text-muted-foreground\">Open Rate</h3><p class=\"text-2xl font-bold text-surface-950 tracking-tight\">41.2%</p></div><div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium\"><h3 class=\"text-sm font-medium text-muted-foreground\">Click Rate</h3><p class=\"text-2xl font-bold text-surface-950 tracking-tight\">8.6%</p></div></div></div>",
         CAMPAIGNS_RETURN_HREF,
-        delete_dialog,
     )
 }
 
@@ -1787,104 +1522,21 @@ pub fn web_campaign_edit_page() -> String {
 
 /// Contacts list page.
 pub fn web_contacts_page() -> String {
-    let status_filter = Select {
-        placeholder: "Status",
-        value_label: Some("Subscribed"),
-        variant: "default",
-        size: "default",
-        open: false,
-        options: vec![
-            SelectOption {
-                value: "subscribed",
-                label: "Subscribed",
-                disabled: false,
-                selected: true,
-            },
-            SelectOption {
-                value: "unsubscribed",
-                label: "Unsubscribed",
-                disabled: false,
-                selected: false,
-            },
-            SelectOption {
-                value: "bounced",
-                label: "Bounced",
-                disabled: false,
-                selected: false,
-            },
-        ],
-        name: None,
-    }
-    .render_html();
-    let segment_filter = Select {
-        placeholder: "List",
-        value_label: Some("VIP Customers"),
-        variant: "default",
-        size: "default",
-        open: false,
-        options: vec![
-            SelectOption {
-                value: "vip",
-                label: "VIP Customers",
-                disabled: false,
-                selected: true,
-            },
-            SelectOption {
-                value: "newsletter",
-                label: "Newsletter Subscribers",
-                disabled: false,
-                selected: false,
-            },
-            SelectOption {
-                value: "trial",
-                label: "Trial Accounts",
-                disabled: false,
-                selected: false,
-            },
-        ],
-        name: None,
-    }
-    .render_html();
     let filters = format!(
-        "<div class=\"grid w-full gap-3 sm:grid-cols-2 lg:w-auto\">{}{}</div>",
-        status_filter, segment_filter,
+        "<div class=\"grid w-full gap-3 sm:grid-cols-2 lg:w-auto\">{status}{list}</div>",
+        status = render_native_select(
+            "contact-status",
+            "Filter by status",
+            "status",
+            &[("subscribed", "Subscribed", true), ("unsubscribed", "Unsubscribed", false), ("bounced", "Bounced", false)],
+        ),
+        list = render_native_select(
+            "contact-list",
+            "Filter by list",
+            "list",
+            &[("vip", "VIP Customers", true), ("newsletter", "Newsletter Subscribers", false), ("trial", "Trial Accounts", false)],
+        ),
     );
-    let select_all = Checkbox {
-        aria_label: Some("Select all contacts"),
-        checked: true,
-        variant: "default",
-        size: "default",
-        indeterminate: false,
-        disabled: false,
-    }
-    .render_html();
-    let row_one_checkbox = Checkbox {
-        aria_label: Some("Select contact row one"),
-        checked: true,
-        variant: "default",
-        size: "default",
-        indeterminate: false,
-        disabled: false,
-    }
-    .render_html();
-    let row_two_checkbox = Checkbox {
-        aria_label: Some("Select contact row two"),
-        checked: true,
-        variant: "default",
-        size: "default",
-        indeterminate: false,
-        disabled: false,
-    }
-    .render_html();
-    let row_three_checkbox = Checkbox {
-        aria_label: Some("Select contact row three"),
-        checked: false,
-        variant: "default",
-        size: "default",
-        indeterminate: false,
-        disabled: false,
-    }
-    .render_html();
     let subscriber_status = StatusIndicator {
         status: "subscribed",
     }
@@ -1897,7 +1549,7 @@ pub fn web_contacts_page() -> String {
         caption: Some("Contacts"),
         columns: vec![
             TableColumn {
-                label: select_all.as_str(),
+                label: "",
                 align: "left",
             },
             TableColumn {
@@ -1923,7 +1575,7 @@ pub fn web_contacts_page() -> String {
         ],
         rows: vec![
             vec![
-                row_one_checkbox.as_str(),
+                "<input type=\"checkbox\" name=\"ids\" value=\"c_alice\" aria-label=\"Select contact alice@example.com\" />",
                 "alice@example.com",
                 "Alice Ngo",
                 subscriber_status.as_str(),
@@ -1931,7 +1583,7 @@ pub fn web_contacts_page() -> String {
                 "2 hours ago",
             ],
             vec![
-                row_two_checkbox.as_str(),
+                "<input type=\"checkbox\" name=\"ids\" value=\"c_jamal\" aria-label=\"Select contact jamal@example.com\" />",
                 "jamal@example.com",
                 "Jamal Ortiz",
                 subscriber_status.as_str(),
@@ -1939,7 +1591,7 @@ pub fn web_contacts_page() -> String {
                 "Yesterday",
             ],
             vec![
-                row_three_checkbox.as_str(),
+                "<input type=\"checkbox\" name=\"ids\" value=\"c_lina\" aria-label=\"Select contact lina@example.com\" />",
                 "lina@example.com",
                 "Lina Park",
                 unsubscribed_status.as_str(),
@@ -1948,13 +1600,7 @@ pub fn web_contacts_page() -> String {
             ],
         ],
     };
-    let bulk_bar = format!(
-        "<section class=\"rounded-sm border border-surface-200 bg-card/80 p-6\" data-bulk-scope=\"contacts\"><div class=\"flex flex-col gap-3 md:flex-row md:items-center md:justify-between\"><div class=\"flex items-start gap-3\">{}<div aria-live=\"polite\"><p class=\"text-sm font-bold text-foreground\">2 contacts selected</p><p class=\"text-xs text-muted-foreground\">Batch actions stay visible and keyboard reachable on mobile and desktop.</p></div></div><div class=\"flex flex-col gap-2 sm:flex-row\">{}{}{}</div></div></section>",
-        select_all,
-        Button { variant: "outline", size: "default", label: "Add to List", disabled: false, loading: false, left_icon: None, right_icon: None }.render_html(),
-        Button { variant: "outline", size: "default", label: "Export", disabled: false, loading: false, left_icon: None, right_icon: None }.render_html(),
-        Button { variant: "destructive", size: "default", label: "Delete", disabled: false, loading: false, left_icon: None, right_icon: None }.render_html(),
-    );
+    let bulk_bar = "<section class=\"rounded-sm border border-surface-200 bg-card/80 p-6\" data-bulk-scope=\"contacts\"><div class=\"flex flex-col gap-3 md:flex-row md:items-center md:justify-between\"><div aria-live=\"polite\"><p class=\"text-sm font-bold text-foreground\">Select rows to act on them in bulk</p><p class=\"text-xs text-muted-foreground\">Checked contacts can be exported or deleted — a single plain form post, no scripts.</p></div><div class=\"flex flex-col gap-2 sm:flex-row\"><button type=\"submit\" formaction=\"/web/contacts/export.csv\" formmethod=\"get\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-md border border-surface-200 bg-background px-4 py-2 text-sm font-semibold text-foreground transition-colors hover:border-surface-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">Export selected</button><button type=\"submit\" formaction=\"/web/contacts/delete-bulk\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-md bg-destructive px-4 py-2 text-sm font-semibold text-destructive-foreground transition-colors hover:bg-destructive/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">Delete selected</button></div></div></section>";
     let pagination_key = pagination_storage_key("contacts");
     let pagination = PaginationControls {
         page: 3,
@@ -1967,7 +1613,7 @@ pub fn web_contacts_page() -> String {
     );
     let breadcrumbs = render_page_breadcrumbs("Contacts");
     format!(
-        "<div class=\"space-y-6\">{breadcrumbs}<div class=\"flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between\"><div><h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Contacts</h1><p class=\"text-sm text-muted-foreground\">Debounced filters, deterministic loading states, and batch actions keep list management fast at scale.</p></div><a href=\"/contacts/new\" class=\"inline-flex w-full items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold transition-all bg-primary text-white hover:bg-brand-700 h-12 px-6 py-3 sm:w-auto\">Add Contact</a></div>{filters}{bulk_bar}{loading}<section data-view-state=\"ready\" class=\"space-y-4\">{table}<div class=\"flex flex-col gap-3 md:flex-row md:items-center md:justify-between\"><p class=\"text-sm text-muted-foreground\">Showing 41-60 of 148 contacts. Page state persists while you review individual records and come back.</p>{pagination}</div></section><section data-view-state=\"empty\" hidden>{empty}</section></div>",
+        "<div class=\"space-y-6\">{breadcrumbs}<div class=\"flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between\"><div><h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Contacts</h1><p class=\"text-sm text-muted-foreground\">Server-rendered filters, deterministic states, and batch actions keep list management fast at scale.</p></div><a href=\"/contacts/new\" class=\"inline-flex w-full items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold transition-all bg-primary text-white hover:bg-brand-700 h-12 px-6 py-3 sm:w-auto\">Add Contact</a></div>{filters}<form method=\"post\" action=\"/web/contacts/delete-bulk\" data-bulk-form=\"contacts\">{bulk_bar}{loading}<section data-view-state=\"ready\" class=\"space-y-4\">{table}<div class=\"flex flex-col gap-3 md:flex-row md:items-center md:justify-between\"><p class=\"text-sm text-muted-foreground\">Showing 41-60 of 148 contacts. Page state persists while you review individual records and come back.</p>{pagination}</div></section><section data-view-state=\"empty\" hidden>{empty}</section></form></div>",
         breadcrumbs = breadcrumbs,
         filters = render_debounced_filter_bar(
             "contact-search",
@@ -1977,11 +1623,10 @@ pub fn web_contacts_page() -> String {
             "/contacts",
             filters.as_str(),
         ),
-        bulk_bar = bulk_bar,
         loading = render_table_loading_state("Loading contacts", "api", 6),
         table = table.render_html(),
         pagination = pagination,
-        empty = EmptyState { title: "No contacts yet", description: Some("Import or add your first contact"), icon_markup: None, action_label: Some("Add Contact") }.render_html(),
+        empty = EmptyState { title: "No contacts yet", description: Some("Import or add your first contact"), icon_markup: None, action_label: Some("Add Contact"), action_href: Some("/contacts/new") }.render_html(),
     )
 }
 
@@ -1994,7 +1639,7 @@ pub fn web_contacts_new_page() -> String {
 <li class=\"text-surface-300\">/</li>\
 <li class=\"text-surface-900 font-medium\">New Contact</li></ol></nav>\
 <h1 class=\"text-2xl font-bold text-surface-950 tracking-tight mb-6\">Add Contact</h1>\
-<form class=\"space-y-6\" data-api-form data-api-action=\"/v1/contacts\" data-redirect=\"/contacts\">\
+<form class=\"space-y-6\" method=\"post\" action=\"/web/contacts\">\
 <div class=\"space-y-2\">{email_label}{email_input}</div>\
 <div class=\"space-y-2\">{name_label}{name_input}</div>\
 <div class=\"flex flex-col gap-3 sm:flex-row\">{save_button}</div>\
@@ -2003,63 +1648,28 @@ pub fn web_contacts_new_page() -> String {
         email_input = Input { input_type: "email", variant: "default", size: "default", placeholder: "contact@example.com", value: "", left_icon: None, right_icon: None, error: None, disabled: false, autocomplete: None, required: true, name: Some("email") }.render_html(),
         name_label = Label { text: "Name", variant: "default", size: "default", required: false, optional: true }.render_html(),
         name_input = Input { input_type: "text", variant: "default", size: "default", placeholder: "Jane Doe", value: "", left_icon: None, right_icon: None, error: None, disabled: false, autocomplete: None, required: true, name: Some("name") }.render_html(),
-        save_button = Button { variant: "default", size: "default", label: "Add Contact", disabled: false, loading: false, left_icon: None, right_icon: None }.render_html(),
+        save_button = Button { variant: "default", size: "default", label: "Add Contact", disabled: false, loading: false, left_icon: None, right_icon: None, submit: true }.render_html(),
     )
 }
 
 /// Lists page.
 pub fn web_lists_page() -> String {
-    let segment_filter = Select {
-        placeholder: "Segment",
-        value_label: Some("Active lists"),
-        variant: "default",
-        size: "default",
-        open: false,
-        options: vec![
-            SelectOption {
-                value: "active",
-                label: "Active lists",
-                disabled: false,
-                selected: true,
-            },
-            SelectOption {
-                value: "archived",
-                label: "Archived lists",
-                disabled: false,
-                selected: false,
-            },
-        ],
-        name: None,
-    }
-    .render_html();
-    let sort_filter = Select {
-        placeholder: "Sort",
-        value_label: Some("Largest audience"),
-        variant: "default",
-        size: "default",
-        open: false,
-        options: vec![
-            SelectOption {
-                value: "largest",
-                label: "Largest audience",
-                disabled: false,
-                selected: true,
-            },
-            SelectOption {
-                value: "recent",
-                label: "Recently updated",
-                disabled: false,
-                selected: false,
-            },
-        ],
-        name: None,
-    }
-    .render_html();
     let filters = format!(
-        "<div class=\"grid w-full gap-3 sm:grid-cols-2 lg:w-auto\">{}{}</div>",
-        segment_filter, sort_filter,
+        "<div class=\"grid w-full gap-3 sm:grid-cols-2 lg:w-auto\">{segment}{sort}</div>",
+        segment = render_native_select(
+            "list-segment",
+            "Filter by segment",
+            "segment",
+            &[("active", "Active lists", true), ("archived", "Archived lists", false)],
+        ),
+        sort = render_native_select(
+            "list-sort",
+            "Sort order",
+            "sort",
+            &[("largest", "Largest audience", true), ("recent", "Recently updated", false)],
+        ),
     );
-    let vip_actions = "<div class=\"flex flex-wrap justify-end gap-2\"><a href=\"/lists/l_vip\" class=\"inline-flex items-center justify-center rounded-sm border border-input bg-background px-3 py-2 text-sm font-bold text-foreground transition-colors hover:bg-accent hover:text-accent-foreground\">Open</a><button type=\"button\" data-alert-dialog-target=\"list-delete-confirmation\" class=\"inline-flex items-center justify-center rounded-sm border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm font-bold text-destructive transition-colors hover:bg-destructive/10\">Delete</button></div>";
+    let vip_actions = "<div class=\"flex flex-wrap justify-end gap-2\"><a href=\"/lists/l_vip\" class=\"inline-flex items-center justify-center rounded-sm border border-input bg-background px-3 py-2 text-sm font-bold text-foreground transition-colors hover:bg-accent hover:text-accent-foreground\">Open</a><a href=\"/confirm?intent=delete-list&amp;id=l_vip&amp;return_to=%2Flists\" class=\"inline-flex items-center justify-center rounded-sm border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm font-bold text-destructive transition-colors hover:bg-destructive/10\">Delete</a></div>";
     let launch_actions = "<div class=\"flex flex-wrap justify-end gap-2\"><a href=\"/lists/l_launch\" class=\"inline-flex items-center justify-center rounded-sm border border-input bg-background px-3 py-2 text-sm font-bold text-foreground transition-colors hover:bg-accent hover:text-accent-foreground\">Open</a><a href=\"/lists/l_launch/edit\" class=\"inline-flex items-center justify-center rounded-sm border border-input bg-background px-3 py-2 text-sm font-bold text-foreground transition-colors hover:bg-accent hover:text-accent-foreground\">Edit</a></div>";
     let table = Table {
         caption: Some("Contact lists"),
@@ -2096,18 +1706,9 @@ pub fn web_lists_page() -> String {
         Some("segment=active&query=vip"),
         Some(pagination_key.as_str()),
     );
-    let delete_dialog = AlertDialog {
-        title: "Delete list?",
-        message: "This removes the list definition immediately. Contacts remain intact, but campaign segment links will be removed.",
-        confirm_label: "Delete list",
-        cancel_label: Some("Keep list"),
-        variant: "destructive",
-        dialog_type: "confirm",
-    }
-    .render_html();
     let breadcrumbs = render_page_breadcrumbs("Lists");
     format!(
-        "<div class=\"space-y-6\">{breadcrumbs}<div class=\"flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between\"><div><h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Lists</h1><p class=\"text-sm text-muted-foreground\">List actions now surface confirmation and preserve the active list page when you navigate away and back.</p></div><a href=\"/lists/new\" class=\"inline-flex w-full items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold transition-all bg-primary text-white hover:bg-brand-700 h-12 px-6 py-3 sm:w-auto\">New List</a></div>{filters}{loading}<section data-view-state=\"ready\" class=\"space-y-4\">{table}<div class=\"flex flex-col gap-3 md:flex-row md:items-center md:justify-between\"><p class=\"text-sm text-muted-foreground\">Showing 1-20 of 44 lists. Query parameters stay attached to pagination links for back/forward restoration.</p>{pagination}</div></section><section data-view-state=\"empty\" hidden>{empty}</section><div hidden id=\"list-delete-confirmation\">{delete_dialog}</div></div>",
+        "<div class=\"space-y-6\">{breadcrumbs}<div class=\"flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between\"><div><h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Lists</h1><p class=\"text-sm text-muted-foreground\">List actions run through a signed confirmation page and preserve the active list page when you navigate away and back.</p></div><a href=\"/lists/new\" class=\"inline-flex w-full items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold transition-all bg-primary text-white hover:bg-brand-700 h-12 px-6 py-3 sm:w-auto\">New List</a></div>{filters}{loading}<section data-view-state=\"ready\" class=\"space-y-4\">{table}<div class=\"flex flex-col gap-3 md:flex-row md:items-center md:justify-between\"><p class=\"text-sm text-muted-foreground\">Showing 1-20 of 44 lists. Query parameters stay attached to pagination links for back/forward restoration.</p>{pagination}</div></section><section data-view-state=\"empty\" hidden>{empty}</section></div>",
         breadcrumbs = breadcrumbs,
         filters = render_debounced_filter_bar(
             "list-search",
@@ -2120,44 +1721,41 @@ pub fn web_lists_page() -> String {
         loading = render_table_loading_state("Loading contact lists", "api", 4),
         table = table.render_html(),
         pagination = pagination,
-        empty = EmptyState { title: "No lists yet", description: Some("Create a list to organize your contacts"), icon_markup: None, action_label: Some("Create List") }.render_html(),
-        delete_dialog = delete_dialog,
+        empty = EmptyState { title: "No lists yet", description: Some("Create a list to organize your contacts"), icon_markup: None, action_label: Some("Create List"), action_href: Some("/lists/new") }.render_html(),
     )
 }
 
-/// New list page.
-/// List detail page. `/lists/{id}` previously 404'd from the "Open" link.
-/// Metrics are labeled as loaded-on-demand placeholders (the console.js
-/// placement binder pattern); the edit/delete actions are real.
+/// List detail page. Metrics are server-rendered placeholders; the
+/// delete action routes through the signed /confirm page (no JavaScript).
 pub fn web_list_detail_page() -> String {
     format!(
         "<div class=\"space-y-6\" data-page=\"list-detail\">\
 <nav aria-label=\"Breadcrumb\" class=\"mb-2\"><ol class=\"flex items-center gap-2 text-sm text-surface-500\">\
 <li><a href=\"/lists\" class=\"hover:text-surface-900 transition-colors\">Lists</a></li>\
 <li class=\"text-surface-300\">/</li>\
-<li class=\"text-surface-900 font-medium\">List Detail</li></ol></nav>\
+<li class=\"text-surface-900 font-medium\" aria-current=\"page\">List Detail</li></ol></nav>\
 <div class=\"flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between\">\
-<div><h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\" data-bind=\"list.name\">List</h1>\
-<p class=\"text-sm text-muted-foreground\">Subscribers and settings for this list.</p></div>\
+<div><h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\" data-list-name>List</h1>\
+<p class=\"text-sm text-muted-foreground\">Subscribers and settings for this list. Reload the page to see fresh counts.</p></div>\
 <div class=\"flex flex-col gap-3 sm:flex-row\">\
-<a href=\"/lists/current/edit\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold border border-input bg-background hover:bg-accent h-12 px-6 py-3\">Edit</a>\
-<button type=\"button\" data-alert-dialog-target=\"list-detail-delete\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold bg-destructive text-destructive-foreground hover:bg-destructive/90 h-12 px-6 py-3\">Delete List</button>\
+<a href=\"/lists/l_launch/edit\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold border border-input bg-background hover:bg-accent h-12 px-6 py-3\">Edit</a>\
+<a href=\"/confirm?intent=delete-list&amp;id=l_launch&amp;return_to=%2Flists\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold bg-destructive text-destructive-foreground hover:bg-destructive/90 h-12 px-6 py-3\">Delete List</a>\
 </div></div>\
 <div class=\"grid gap-6 md:grid-cols-3\">\
-<div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium\"><h3 class=\"text-sm font-medium text-muted-foreground\">Subscribers</h3><p class=\"text-2xl font-bold text-surface-950 tracking-tight\" data-bind=\"list.subscriber_count\">—</p></div>\
-<div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium\"><h3 class=\"text-sm font-medium text-muted-foreground\">Subscribed</h3><p class=\"text-2xl font-bold text-surface-950 tracking-tight\" data-bind=\"list.subscribed_count\">—</p></div>\
-<div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium\"><h3 class=\"text-sm font-medium text-muted-foreground\">Unsubscribed</h3><p class=\"text-2xl font-bold text-surface-950 tracking-tight\" data-bind=\"list.unsubscribed_count\">—</p></div>\
+<div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium\"><h3 class=\"text-sm font-medium text-muted-foreground\">Subscribers</h3><p class=\"text-2xl font-bold text-surface-950 tracking-tight\">—</p></div>\
+<div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium\"><h3 class=\"text-sm font-medium text-muted-foreground\">Subscribed</h3><p class=\"text-2xl font-bold text-surface-950 tracking-tight\">—</p></div>\
+<div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium\"><h3 class=\"text-sm font-medium text-muted-foreground\">Unsubscribed</h3><p class=\"text-2xl font-bold text-surface-950 tracking-tight\">—</p></div>\
 </div></div>"
     )
 }
 
 /// List edit page: real form against `PUT /v1/lists/{id}` via the
-/// data-api-form bridge (console.js honors data-api-method).
+/// urlencoded POST to /web/lists/update.
 pub fn web_list_edit_page() -> String {
     format!(
         "<div class=\"max-w-2xl\" data-page=\"list-edit\">\
 <h1 class=\"text-2xl font-bold text-surface-950 tracking-tight mb-6\">Edit List</h1>\
-<form class=\"space-y-6\" data-api-form data-api-action=\"/v1/lists/current\" data-api-method=\"PUT\" data-redirect=\"/lists\">\
+<form class=\"space-y-6\" method=\"post\" action=\"/web/lists/update\">\
 <div class=\"space-y-2\">{name_label}{name_input}</div>\
 <div class=\"flex flex-col gap-3 sm:flex-row\">{save_button}</div>\
 </form></div>",
@@ -2191,7 +1789,7 @@ pub fn web_list_edit_page() -> String {
             disabled: false,
             loading: false,
             left_icon: None,
-            right_icon: None
+            right_icon: None, submit: false
         }
         .render_html(),
     )
@@ -2201,7 +1799,7 @@ pub fn web_lists_new_page() -> String {
     format!(
         "<div class=\"max-w-2xl\">\
 <h1 class=\"text-2xl font-bold text-surface-950 tracking-tight mb-6\">Create List</h1>\
-<form class=\"space-y-6\" data-api-form data-api-action=\"/v1/lists\" data-redirect=\"/lists\">\
+<form class=\"space-y-6\" method=\"post\" action=\"/web/lists\">\
 <div class=\"space-y-2\">{name_label}{name_input}</div>\
 <div class=\"flex flex-col gap-3 sm:flex-row\">{save_button}</div>\
 </form></div>",
@@ -2235,7 +1833,7 @@ pub fn web_lists_new_page() -> String {
             disabled: false,
             loading: false,
             left_icon: None,
-            right_icon: None
+            right_icon: None, submit: false
         }
         .render_html(),
     )
@@ -2274,7 +1872,7 @@ pub fn web_templates_page() -> String {
 {loading}<section data-view-state=\"ready\">{table}</section><section data-view-state=\"empty\" hidden>{empty}</section><section data-view-state=\"error\" hidden>{error_state}</section></div>",
         loading = render_table_loading_state("Loading templates", "api", 3),
         table = table.render_html(),
-        empty = EmptyState { title: "No templates yet", description: Some("Create reusable email templates"), icon_markup: None, action_label: Some("Create Template") }.render_html(),
+        empty = EmptyState { title: "No templates yet", description: Some("Create reusable email templates"), icon_markup: None, action_label: Some("Create Template"), action_href: Some("/templates/new") }.render_html(),
         error_state = error_state,
     )
 }
@@ -2284,7 +1882,7 @@ pub fn web_templates_new_page() -> String {
     format!(
         "<div class=\"max-w-3xl\">\
 <h1 class=\"text-2xl font-bold text-surface-950 tracking-tight mb-6\">Create Template</h1>\
-<form class=\"space-y-6\" data-api-form data-api-action=\"/v1/templates\" data-redirect=\"/templates\">\
+<form class=\"space-y-6\" method=\"post\" action=\"/web/templates\">\
 <div class=\"space-y-2\">{name_label}{name_input}</div>\
 <div class=\"space-y-2\">{subject_label}{subject_input}</div>\
 <div class=\"space-y-2\">\
@@ -2297,7 +1895,7 @@ pub fn web_templates_new_page() -> String {
         name_input = Input { input_type: "text", variant: "default", size: "default", placeholder: "e.g. Welcome Email", value: "", left_icon: None, right_icon: None, error: None, disabled: false, autocomplete: None, required: true, name: Some("name") }.render_html(),
         subject_label = Label { text: "Default Subject", variant: "default", size: "default", required: false, optional: true }.render_html(),
         subject_input = Input { input_type: "text", variant: "default", size: "default", placeholder: "Subject line...", value: "", left_icon: None, right_icon: None, error: None, disabled: false, autocomplete: None, required: false, name: Some("subject") }.render_html(),
-        save_button = Button { variant: "default", size: "default", label: "Save Template", disabled: false, loading: false, left_icon: None, right_icon: None }.render_html(),
+        save_button = Button { variant: "default", size: "default", label: "Save Template", disabled: false, loading: false, left_icon: None, right_icon: None, submit: true }.render_html(),
     )
 }
 
@@ -2384,7 +1982,7 @@ pub fn web_inbox_placement_new_page() -> String {
 </div>",
         form = Card {
             title: "Test configuration",
-            body: "<form data-form=\"placement-test-create\" data-api-form data-api-action=\"/v1/inbox-placement/tests\" data-redirect=\"/inbox-placement\" action=\"/v1/inbox-placement/tests\" method=\"post\" class=\"space-y-4\">\
+            body: "<form data-form=\"placement-test-create\" action=\"/web/inbox-placement/tests\" method=\"post\" class=\"space-y-4\">\
 <div><label for=\"placement-name\" class=\"block text-sm font-medium text-surface-700\">Test name</label>\
 <input id=\"placement-name\" name=\"name\" type=\"text\" required maxlength=\"120\" class=\"mt-1 w-full rounded-sm border-surface-300 focus:border-primary focus:ring-primary text-sm\" placeholder=\"Q1 onboarding sequence — variant A\" /></div>\
 <div class=\"grid gap-4 md:grid-cols-2\">\
@@ -2494,7 +2092,7 @@ pub fn web_analytics_page() -> String {
             title: "No analytics events yet",
             description: Some("Analytics will populate once campaigns generate opens, clicks, and unsubscribes."),
             icon_markup: None,
-            action_label: Some("View Campaigns"),
+            action_label: Some("View Campaigns"), action_href: Some("/campaigns"),
         }
         .render_html(),
     )
@@ -2532,28 +2130,17 @@ pub fn web_events_page() -> String {
 {loading}\
 <section data-view-state=\"ready\">{table}</section>\
 <section data-view-state=\"empty\" hidden>{empty}</section></div>",
-        search = Input {
-            input_type: "text",
-            variant: "default",
-            size: "default",
-            placeholder: "Filter events...",
-            value: "",
-            left_icon: Some(&search_icon),
-            right_icon: None,
-            error: None,
-            disabled: false,
-            autocomplete: None,
-            required: false,
-            name: None,
-        }
-        .render_html(),
+        search = format!(
+            "<form method=\"get\" action=\"/events\" role=\"search\" class=\"flex flex-col gap-2 sm:flex-row\"><label class=\"sr-only\" for=\"events-search\">Filter events</label><div class=\"relative flex-1\"><span class=\"pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground\">{icon}</span><input id=\"events-search\" type=\"search\" name=\"query\" placeholder=\"Filter events...\" class=\"flex h-12 w-full rounded-md border border-surface-200 bg-background pl-10 pr-4 text-[14px] outline-none transition focus-visible:ring-2 focus-visible:ring-primary/20\" /></div><button type=\"submit\" class=\"rounded-sm border border-surface-200 bg-card px-4 py-2 text-sm font-bold text-surface-950 hover:border-surface-950\">Apply</button></form>",
+            icon = search_icon,
+        ),
         loading = render_table_loading_state("Loading events", "api", 4),
         table = table.render_html(),
         empty = EmptyState {
             title: "No events recorded",
             description: Some("Email events will appear once you start sending campaigns"),
             icon_markup: None,
-            action_label: None
+            action_label: None, action_href: None
         }
         .render_html(),
     )
@@ -2594,7 +2181,7 @@ pub fn web_domains_page() -> String {
 {loading}{table}{empty}</div>",
         loading = render_table_loading_state("Loading domains", "api", 5),
         table = table.render_html(),
-        empty = EmptyState { title: "No domains configured", description: Some("Add a sending domain to start delivering emails"), icon_markup: None, action_label: Some("Add Domain") }.render_html(),
+        empty = EmptyState { title: "No domains configured", description: Some("Add a sending domain to start delivering emails"), icon_markup: None, action_label: Some("Add Domain"), action_href: Some("/domains/new") }.render_html(),
     )
 }
 
@@ -2603,7 +2190,7 @@ pub fn web_domains_new_page() -> String {
     format!(
         "<div class=\"max-w-2xl\">\
 <h1 class=\"text-2xl font-bold text-surface-950 tracking-tight mb-6\">Add Domain</h1>\
-<form class=\"space-y-6\" data-api-form data-api-action=\"/v1/domains\" data-redirect=\"/domains\">\
+<form class=\"space-y-6\" method=\"post\" action=\"/web/domains\">\
 <div class=\"space-y-2\">{domain_label}{domain_input}</div>\
 <div class=\"flex gap-3\">{save_button}</div>\
 </form></div>",
@@ -2637,7 +2224,7 @@ pub fn web_domains_new_page() -> String {
             disabled: false,
             loading: false,
             left_icon: None,
-            right_icon: None
+            right_icon: None, submit: false
         }
         .render_html(),
     )
@@ -2677,7 +2264,7 @@ pub fn web_settings_page() -> String {
             title: "No settings available",
             description: Some("Settings modules will appear after your workspace is provisioned."),
             icon_markup: None,
-            action_label: Some("Refresh"),
+            action_label: None, action_href: None,
         }
         .render_html(),
         error_state = error_state,
@@ -2711,7 +2298,7 @@ pub fn web_settings_api_keys_page() -> String {
     format!(
         "<div class=\"space-y-6\">\
 <div class=\"flex items-center justify-between\"><h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">API Keys</h1></div>\
-<form class=\"flex flex-col gap-3 sm:flex-row sm:items-end\" data-api-form data-api-action=\"/v1/auth/api-keys\" data-redirect=\"/settings/api-keys\">\
+<form class=\"flex flex-col gap-3 sm:flex-row sm:items-end\" method=\"post\" action=\"/web/api-keys\">\
 <div class=\"flex-1 space-y-2\"><label class=\"text-xs font-bold text-surface-900\" for=\"api-key-name\">Key name</label>\
 <input id=\"api-key-name\" name=\"name\" type=\"text\" required maxlength=\"100\" class=\"w-full px-4 py-3 rounded-sm border border-surface-200 focus:border-primary outline-none transition-all bg-background text-sm font-medium text-surface-950\" placeholder=\"Production sender\" /></div>\
 <button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold transition-all bg-primary text-white hover:bg-brand-700 h-12 px-6 py-3\">Create API Key</button>\
@@ -2719,7 +2306,7 @@ pub fn web_settings_api_keys_page() -> String {
 {loading}{table}{empty}</div>",
         loading = render_table_loading_state("Loading API keys", "api", 4),
         table = table.render_html(),
-        empty = EmptyState { title: "No API keys", description: Some("Create an API key to start sending"), icon_markup: None, action_label: Some("Create API Key") }.render_html(),
+        empty = EmptyState { title: "No API keys", description: Some("Create an API key to start sending"), icon_markup: None, action_label: None, action_href: None }.render_html(),
     )
 }
 
@@ -2750,7 +2337,7 @@ pub fn web_settings_team_page() -> String {
     format!(
         "<div class=\"space-y-6\">\
 <div class=\"flex items-center justify-between\"><h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Team</h1></div>\
-<form class=\"flex flex-col gap-3 sm:flex-row sm:items-end\" data-api-form data-api-action=\"/v1/scim/Users\" data-redirect=\"/settings/team\">\
+<form class=\"flex flex-col gap-3 sm:flex-row sm:items-end\" method=\"post\" action=\"/web/team/invite\">\
 <div class=\"flex-1 space-y-2\"><label class=\"text-xs font-bold text-surface-900\" for=\"invite-email\">Email</label>\
 <input id=\"invite-email\" name=\"userName\" type=\"email\" required class=\"w-full px-4 py-3 rounded-sm border border-surface-200 focus:border-primary outline-none transition-all bg-background text-sm font-medium text-surface-950\" placeholder=\"teammate@company.com\" /></div>\
 <div class=\"flex-1 space-y-2\"><label class=\"text-xs font-bold text-surface-900\" for=\"invite-role\">Role</label>\
@@ -2760,7 +2347,7 @@ pub fn web_settings_team_page() -> String {
 {loading}{table}{empty}</div>",
         loading = render_table_loading_state("Loading team members", "api", 4),
         table = table.render_html(),
-        empty = EmptyState { title: "No team members yet", description: Some("Invite team members to collaborate on campaigns"), icon_markup: None, action_label: Some("Invite Member") }.render_html(),
+        empty = EmptyState { title: "No team members yet", description: Some("Invite team members to collaborate on campaigns"), icon_markup: None, action_label: None, action_href: None }.render_html(),
     )
 }
 
@@ -2775,7 +2362,7 @@ pub fn web_settings_billing_page() -> String {
 <h3 class=\"text-lg font-bold mb-2\">Current Plan</h3>\
 <p class=\"text-sm text-muted-foreground\">Free Tier</p>\
 <p class=\"text-3xl font-bold mt-4\">$0<span class=\"text-sm font-normal text-muted-foreground\">/month</span></p>\
-<form class=\"mt-4\" data-api-form data-api-action=\"/v1/billing/checkout\" data-redirect=\"/settings/billing\">\
+<form class=\"mt-4\" method=\"post\" action=\"/web/billing/checkout\">\
 <label class=\"block text-xs font-bold text-surface-900 mb-2\" for=\"upgrade-plan\">Plan</label>\
 <select id=\"upgrade-plan\" name=\"plan\" class=\"w-full max-w-xs px-4 py-3 rounded-sm border border-surface-200 focus:border-primary outline-none transition-all bg-background text-sm font-medium text-surface-950\"><option value=\"starter\">Starter — €25/mo</option><option value=\"pro\">Pro — €65/mo</option><option value=\"growth\">Growth — €150/mo</option><option value=\"scale\">Scale — €350/mo</option></select>\
 <button type=\"submit\" class=\"mt-3 inline-flex items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold transition-all bg-primary text-white hover:bg-brand-700 h-12 px-6 py-3\">Upgrade Plan</button>\
@@ -2792,7 +2379,7 @@ pub fn web_settings_billing_page() -> String {
 <p class=\"text-xs text-surface-500\">Add a credit card or ACH to enable paid plans</p>\
 </div>\
 <div class=\"flex flex-col gap-2\">\
-<form data-api-form data-api-action=\"/v1/billing/portal\" data-redirect=\"/settings/billing\" class=\"inline\"><button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold transition-all border border-surface-300 text-surface-700 hover:bg-surface-100 h-10 px-4 py-2\">Add Payment Method</button></form>\
+<form class=\"inline\" method=\"post\" action=\"/web/billing/portal\"><button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold transition-all border border-surface-300 text-surface-700 hover:bg-surface-100 h-10 px-4 py-2\">Add Payment Method</button></form>\
 </div>\
 </div>\
 <div class=\"mt-4 rounded-sm border border-dashed border-surface-300 p-4\" data-payment-methods-list hidden>\
@@ -2849,7 +2436,7 @@ pub fn web_settings_webhooks_page() -> String {
     format!(
         "<div class=\"space-y-6\">\
 <div class=\"flex items-center justify-between\"><h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Webhooks</h1></div>\
-<form class=\"flex flex-col gap-3 sm:flex-row sm:items-end\" data-api-form data-api-action=\"/v1/webhooks\" data-redirect=\"/settings/webhooks\">\
+<form class=\"flex flex-col gap-3 sm:flex-row sm:items-end\" method=\"post\" action=\"/web/webhooks\">\
 <div class=\"flex-1 space-y-2\"><label class=\"text-xs font-bold text-surface-900\" for=\"webhook-url\">Endpoint URL</label>\
 <input id=\"webhook-url\" name=\"url\" type=\"url\" required class=\"w-full px-4 py-3 rounded-sm border border-surface-200 focus:border-primary outline-none transition-all bg-background text-sm font-medium text-surface-950\" placeholder=\"https://example.com/hooks/apexmail\" /></div>\
 <label class=\"inline-flex items-center gap-2 text-xs font-bold text-surface-900\"><input type=\"checkbox\" name=\"events\" value=\"message.sent\" checked class=\"rounded border-surface-300\" /> Sent</label>\
@@ -2860,7 +2447,7 @@ pub fn web_settings_webhooks_page() -> String {
 {loading}{table}{empty}</div>",
         loading = render_table_loading_state("Loading webhooks", "api", 4),
         table = table.render_html(),
-        empty = EmptyState { title: "No webhooks configured", description: Some("Add a webhook to receive signed event notifications"), icon_markup: None, action_label: Some("Add Webhook") }.render_html(),
+        empty = EmptyState { title: "No webhooks configured", description: Some("Add a webhook to receive signed event notifications"), icon_markup: None, action_label: None, action_href: None }.render_html(),
     )
 }
 
@@ -2869,14 +2456,14 @@ pub fn web_settings_profile_page() -> String {
     format!(
         "<div class=\"max-w-2xl space-y-6\">\
 <h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Profile</h1>\
-<form class=\"space-y-6\" data-api-form data-api-action=\"/v1/account/profile\" data-redirect=\"/settings/profile\">\
+<form class=\"space-y-6\" method=\"post\" action=\"/web/account/profile\">\
 <div class=\"space-y-2\">{name_label}{name_input}</div>\
 <div class=\"space-y-2\">{email_label}{email_input}</div>\
 <div class=\"flex gap-3\">{save_button}</div>\
 </form>\
 <div class=\"border-t pt-6\">\
 <h3 class=\"text-lg font-bold text-surface-900 mb-4\">Change Password</h3>\
-<form class=\"space-y-4\" data-api-form data-api-action=\"/v1/auth/change-password\" data-redirect=\"/settings/profile\">\
+<form class=\"space-y-4\" method=\"post\" action=\"/web/auth/change-password\">\
 <div class=\"space-y-2\">{current_label}{current_input}</div>\
 <div class=\"space-y-2\">{new_label}{new_input}</div>\
 <div class=\"flex gap-3\">{update_button}</div>\
@@ -2934,7 +2521,7 @@ pub fn web_settings_profile_page() -> String {
             disabled: false,
             loading: false,
             left_icon: None,
-            right_icon: None
+            right_icon: None, submit: false
         }
         .render_html(),
         current_label = Label {
@@ -2990,7 +2577,7 @@ pub fn web_settings_profile_page() -> String {
             disabled: false,
             loading: false,
             left_icon: None,
-            right_icon: None
+            right_icon: None, submit: false
         }
         .render_html(),
     )
@@ -3106,6 +2693,9 @@ fn render_cp_collection_page(
         title: empty_title,
         description: Some(empty_description),
         action_label: action.map(|(label, _)| label),
+        // The collection header's action href is a real route (e.g.
+        // /tenants/new) — empty-state CTAs navigate, they never dead-end.
+        action_href: action.map(|(_, href)| href),
     }
     .render_html();
     // Single overflow container: the table renders on mobile too (scrolls
@@ -3188,7 +2778,7 @@ pub fn control_plane_tenants_new_page() -> String {
     format!(
         "<div class=\"max-w-2xl\">\
 <h1 class=\"text-2xl font-bold text-surface-950 tracking-tight mb-6\">Add Tenant</h1>\
-<form class=\"space-y-6\">\
+<form class=\"space-y-6\" method=\"post\" action=\"/web/admin/tenants\">\
 <div class=\"space-y-2\">{name_label}{name_input}</div>\
 <div class=\"space-y-2\">{domain_label}{domain_input}</div>\
 <div class=\"flex gap-3\">{save_button}</div>\
@@ -3246,7 +2836,7 @@ pub fn control_plane_tenants_new_page() -> String {
             disabled: false,
             loading: false,
             left_icon: None,
-            right_icon: None
+            right_icon: None, submit: false
         }
         .render_html(),
     )
@@ -3296,7 +2886,7 @@ pub fn control_plane_operators_new_page() -> String {
     format!(
         "<div class=\"max-w-2xl\">\
 <h1 class=\"text-2xl font-bold text-surface-950 tracking-tight mb-6\">Add Operator</h1>\
-<form class=\"space-y-6\">\
+<form class=\"space-y-6\" method=\"post\" action=\"/web/admin/operators\">\
 <div class=\"space-y-2\">{name_label}{name_input}</div>\
 <div class=\"space-y-2\">{email_label}{email_input}</div>\
 <div class=\"flex gap-3\">{save_button}</div>\
@@ -3354,7 +2944,7 @@ pub fn control_plane_operators_new_page() -> String {
             disabled: false,
             loading: false,
             left_icon: None,
-            right_icon: None
+            right_icon: None, submit: false
         }
         .render_html(),
     )
@@ -3722,234 +3312,74 @@ pub fn control_plane_settings_page() -> String {
 
 /// CP security settings page.
 pub fn control_plane_security_page() -> String {
-    "<div class=\"space-y-6\">\
-<h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Security Settings</h1>\
-<div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8\">\
+    control_plane_security_page_with_setup(None)
+}
+
+/// MFA state carried from the server: when a setup is in flight the server
+/// passes the TOTP secret + otpauth URI (via a short-lived signed cookie,
+/// never the URL) and the page renders the QR — encoded entirely in Rust —
+/// plus the manual-entry fallback and the verify form. Every step is a
+/// native POST to /web/auth/mfa/*; there is no client-side code.
+pub fn control_plane_security_page_with_setup(setup: Option<&MfaSetupView<'_>>) -> String {
+    let mfa_section: String = match setup {
+        None => "<div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8\">\
 <h3 class=\"text-xs font-bold uppercase tracking-widest text-surface-400 mb-6\">MFA Configuration</h3>\
-<div id=\"mfa-status\" class=\"mb-4\">\
-<p class=\"text-sm text-surface-500\">Loading MFA status…</p>\
+<p class=\"text-sm text-surface-500 mb-4\">Multi-factor authentication protects operator accounts. Status is checked server-side on every page load.</p>\
+<form method=\"post\" action=\"/web/auth/mfa/setup\">\
+<button type=\"submit\" class=\"rounded-md bg-primary px-4 py-2 text-sm font-semibold text-white hover:bg-brand-700 focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2\">Set up MFA</button>\
+</form></div>".to_string(),
+        Some(view) => format!(
+            "<div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8\">\
+<h3 class=\"text-xs font-bold uppercase tracking-widest text-surface-400 mb-6\">MFA Configuration — step 2 of 2</h3>\
+<p class=\"text-sm text-surface-700 mb-4\">Scan this QR with your authenticator app (e.g. Google Authenticator, Authy, 1Password), then enter a code to confirm. The QR is generated on the server — the secret never leaves this origin.</p>\
+<div class=\"flex flex-col items-center gap-4 mb-6\" aria-label=\"MFA QR code (server-rendered)\">{qr_svg}\
+<div class=\"w-full max-w-md text-left\">\
+<p class=\"text-xs font-bold uppercase tracking-widest text-surface-400 mb-2\">No camera? Enter this manually</p>\
+<p class=\"text-xs text-surface-600 mb-1\">Secret key (selectable)</p>\
+<code class=\"mb-3 block font-mono text-sm bg-surface-50 border border-surface-200 rounded px-3 py-2 break-all select-text text-surface-800\">{secret}</code>\
+<p class=\"text-xs text-surface-600 mb-1\">otpauth URI (selectable)</p>\
+<code class=\"block font-mono text-xs bg-surface-50 border border-surface-200 rounded px-3 py-2 break-all select-text text-surface-800\">{otpauth}</code>\
+</div></div>\
+<form method=\"post\" action=\"/web/auth/mfa/confirm\" class=\"flex flex-col gap-3 sm:flex-row sm:items-start\">\
+<div class=\"flex-1\">\
+<label for=\"mfa-code\" class=\"block text-xs font-bold uppercase tracking-widest text-surface-500 mb-2\">Enter the 6-digit code from your authenticator app</label>\
+<input id=\"mfa-code\" name=\"code\" type=\"text\" inputmode=\"numeric\" pattern=\"[0-9]{{6}}\" maxlength=\"6\" required autocomplete=\"one-time-code\" placeholder=\"000000\" class=\"w-full max-w-xs rounded-md border border-surface-300 bg-background px-3 py-2 text-sm font-mono tracking-widest focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary\" />\
 </div>\
-<div id=\"mfa-setup-panel\" class=\"hidden\">\
-<p class=\"text-sm text-surface-700 mb-4\">\
-Scan the QR code below with your authenticator app (e.g. Google Authenticator, Authy, 1Password).\
-</p>\
-<div id=\"mfa-qr-container\" class=\"flex flex-col items-center gap-4 mb-6\">\
-<div id=\"mfa-qr-placeholder\" \
-class=\"w-48 h-48 bg-surface-100 border-2 border-dashed border-surface-300 rounded-lg flex items-center justify-center\">\
-<svg class=\"w-12 h-12 text-surface-400\" fill=\"none\" stroke=\"currentColor\" viewBox=\"0 0 24 24\">\
-<path stroke-linecap=\"round\" stroke-linejoin=\"round\" stroke-width=\"1.5\" \
-d=\"M12 4v1m6 11h2m-6 0h-2v4m0-11v3m0 0h.01M12 12h4.01M16 20h4M4 12h4m12 0h.01M5 8h2a1 1 0 001-1V5a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1zm12 0h2a1 1 0 001-1V5a1 1 0 00-1-1h-2a1 1 0 00-1 1v2a1 1 0 001 1zM5 20h2a1 1 0 001-1v-2a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1z\"/>\
-</svg>\
+<button type=\"submit\" class=\"rounded-md bg-primary px-4 py-2 text-sm font-semibold text-white hover:bg-brand-700 focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 disabled:opacity-50\">Verify &amp; Enable</button>\
+</form>\
+</div>",
+            qr_svg = view.qr_svg,
+            secret = html_escape(view.secret),
+            otpauth = html_escape(view.otpauth),
+        ),
+    };
+    format!(
+        "<div class=\"space-y-6\">\
+<h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Security Settings</h1>\
+{mfa_section}\
+<div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8\">\
+<h3 class=\"text-xs font-bold uppercase tracking-widest text-surface-400 mb-6\">Session policy</h3>\
+<p class=\"text-sm text-muted-foreground\">Operator sessions are cookie-based, CSRF-protected on every state-changing POST, and rate-limited server-side.</p>\
 </div>\
-<canvas id=\"mfa-qr-canvas\" class=\"hidden w-48 h-48 rounded-lg border border-surface-200\" width=\"200\" height=\"200\" role=\"img\" aria-label=\"MFA QR code for your authenticator app\"></canvas>\
-<div id=\"mfa-qr-fallback\" class=\"hidden w-full max-w-md text-left\">\
-<p class=\"text-xs font-bold uppercase tracking-widest text-surface-400 mb-2\">No canvas? Enter this manually</p>\
-<p class=\"text-xs text-surface-600 mb-1\">Secret key</p>\
-<div class=\"flex items-center gap-2 mb-3\">\
-<code id=\"mfa-secret-text\" data-copy-value=\"\" class=\"flex-1 font-mono text-sm bg-surface-50 border border-surface-200 rounded px-3 py-2 break-all select-text text-surface-800\"></code>\
-<button type=\"button\" data-copy-target=\"mfa-secret-text\" class=\"rounded-md border border-surface-200 bg-white px-3 py-2 text-xs font-bold text-surface-700 hover:bg-surface-50\">Copy</button>\
-</div>\
-<p class=\"text-xs text-surface-600 mb-1\">otpauth URI (paste into apps that support it)</p>\
-<div class=\"flex items-center gap-2\">\
-<code id=\"mfa-otpauth-text\" data-copy-value=\"\" class=\"flex-1 font-mono text-xs bg-surface-50 border border-surface-200 rounded px-3 py-2 break-all select-text text-surface-800\"></code>\
-<button type=\"button\" data-copy-target=\"mfa-otpauth-text\" class=\"rounded-md border border-surface-200 bg-white px-3 py-2 text-xs font-bold text-surface-700 hover:bg-surface-50\">Copy</button>\
-</div>\
-</div>\
-</div>\
-<div id=\"mfa-verify-section\" class=\"hidden\">\
-<label for=\"mfa-code\" class=\"block text-xs font-bold uppercase tracking-widest text-surface-500 mb-2\">\
-Enter the 6-digit code from your authenticator app\
-</label>\
-<div class=\"flex gap-3\">\
-<input id=\"mfa-code\" type=\"text\" inputmode=\"numeric\" pattern=\"[0-9]{6}\" maxlength=\"6\"\
-class=\"flex-1 rounded-md border border-surface-300 bg-background px-3 py-2 text-sm \
-placeholder-surface-400 focus:border-primary-500 focus:outline-none focus:ring-1 focus:ring-primary-500\"\
-placeholder=\"000000\" autocomplete=\"one-time-code\"/>\
-<button id=\"mfa-verify-btn\"\
-class=\"rounded-md bg-primary-600 px-4 py-2 text-sm font-semibold text-white \
-hover:bg-primary-700 focus:outline-none focus:ring-2 focus:ring-primary-500 focus:ring-offset-2 \
-disabled:opacity-50 disabled:cursor-not-allowed\">Verify & Enable</button>\
-</div>\
-<p id=\"mfa-setup-error\" class=\"hidden mt-2 text-xs text-red-600\"></p>\
-</div>\
-<button id=\"mfa-start-setup-btn\"\
-class=\"hidden rounded-md bg-primary-600 px-4 py-2 text-sm font-semibold text-white \
-hover:bg-primary-700 focus:outline-none focus:ring-2 focus:ring-primary-500 focus:ring-offset-2\">Set up MFA</button>\
-</div>\
-<div id=\"mfa-recovery-codes-panel\" class=\"hidden\">\
-<div class=\"rounded-md bg-amber-50 border border-amber-200 p-4 mb-4\">\
-<div class=\"flex items-start gap-3\">\
-<svg class=\"w-5 h-5 text-amber-500 mt-0.5 flex-shrink-0\" fill=\"none\" stroke=\"currentColor\" viewBox=\"0 0 24 24\">\
-<path stroke-linecap=\"round\" stroke-linejoin=\"round\" stroke-width=\"2\" \
-d=\"M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L4.082 16.5c-.77.833.192 2.5 1.732 2.5z\"/>\
-</svg>\
-<div>\
-<p class=\"text-sm font-semibold text-amber-800\">Save these recovery codes</p>\
-<p class=\"text-xs text-amber-700 mt-1\">\
-Each code can be used only once. Store them in a secure location such as a password manager. \
-If you lose access to your authenticator app, these codes are the only way to recover your account.\
-</p>\
-</div>\
-</div>\
-</div>\
-<div id=\"mfa-recovery-codes-list\" class=\"grid grid-cols-2 gap-2 mb-4\"></div>\
-<button id=\"mfa-codes-done-btn\"\
-class=\"rounded-md bg-primary-600 px-4 py-2 text-sm font-semibold text-white \
-hover:bg-primary-700 focus:outline-none focus:ring-2 focus:ring-primary-500 focus:ring-offset-2\">I've saved my recovery codes</button>\
-</div>\
-</div>\
-</div>\
-<script>\
-(function(){\
-let mfaChallengeToken = null;\
-let mfaSecret = null;\
-\
-function $(id) { return document.getElementById(id); }\
-\
-// Static (constant) status blocks are safe to set via innerHTML; any\
-// server-derived message is attached with textContent below so untrusted\
-// text can never become markup.\
-const STATUS_ENABLED = '<div class=\"flex items-center gap-2 text-green-700\">' +\
-'<svg class=\"w-5 h-5\" fill=\"none\" stroke=\"currentColor\" viewBox=\"0 0 24 24\">' +\
-'<path stroke-linecap=\"round\" stroke-linejoin=\"round\" stroke-width=\"2\" d=\"M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z\"/>' +\
-'</svg>' +\
-'<span class=\"text-sm font-semibold\">MFA is enabled</span>' +\
-'</div><p class=\"text-xs text-surface-500 mt-1\">Multi-factor authentication is active for your account.</p>';\
-const STATUS_DISABLED = '<div class=\"flex items-center gap-2 text-amber-700\">' +\
-'<svg class=\"w-5 h-5\" fill=\"none\" stroke=\"currentColor\" viewBox=\"0 0 24 24\">' +\
-'<path stroke-linecap=\"round\" stroke-linejoin=\"round\" stroke-width=\"2\" d=\"M12 15v2m0 0v2m0-2h2m-2 0H10m9.9-4A8 8 0 1112 4a8 8 0 017.9 8z\"/>' +\
-'</svg>' +\
-'<span class=\"text-sm font-semibold\">MFA is not enabled</span>' +\
-'</div>';\
-const ROLE_WARNING = '<p class=\"text-xs text-amber-600 mt-1\">Your role requires MFA. Please set it up now.</p>';\
-\
-function setStatus(html, dynamicMessage) {\
-const box = $('mfa-status');\
-box.innerHTML = html;\
-if (dynamicMessage) {\
-const p = document.createElement('p');\
-p.className = 'text-xs text-red-600 mt-1';\
-p.textContent = dynamicMessage;\
-box.appendChild(p);\
-}\
-}\
-\
-async function apiFetch(path, options) {\
-const resp = await fetch(path, {\
-...options,\
-headers: {\
-'Content-Type': 'application/json',\
-...(options.headers || {}),\
-},\
-credentials: 'same-origin',\
-});\
-if (!resp.ok) {\
-const body = await resp.json().catch(() => ({}));\
-const msg = body.error || body.message || 'Request failed (' + resp.status + ')';\
-throw new Error(typeof msg === 'string' ? msg : JSON.stringify(msg));\
-}\
-return resp.json();\
-}\
-\
-async function checkMfaStatus() {\
-try {\
-const data = await apiFetch('/v1/auth/mfa/status', { method: 'GET' });\
-if (data.mfaEnabled) {\
-setStatus(STATUS_ENABLED);\
-} else {\
-setStatus(data.roleRequiresMfa ? STATUS_DISABLED + ROLE_WARNING : STATUS_DISABLED);\
-$('mfa-start-setup-btn').classList.remove('hidden');\
-}\
-} catch (e) {\
-setStatus('', 'Failed to load MFA status: ' + e.message);\
-}\
-}\
-\
-async function startMfaSetup() {\
-const btn = $('mfa-start-setup-btn');\
-btn.disabled = true;\
-btn.textContent = 'Setting up…';\
-try {\
-const data = await apiFetch('/v1/auth/mfa/setup', { method: 'POST' });\
-mfaChallengeToken = data.challengeToken;\
-mfaSecret = data.secret;\
-\
-// Render the QR LOCALLY (canvas via /assets/console.js). The TOTP secret\
-// must never be sent to a third-party chart/QR service.\
-const canvas = $('mfa-qr-canvas');\
-const renderer = window.ApexMailConsole && window.ApexMailConsole.qrToCanvas;\
-const drew = renderer ? renderer(canvas, data.otpauthUrl, { scale: 5 }) : false;\
-if (drew) {\
-canvas.classList.remove('hidden');\
-$('mfa-qr-placeholder').classList.add('hidden');\
-}\
-\
-// Text fallback (always populated — canvas support is not guaranteed).\
-$('mfa-secret-text').textContent = data.secret || '';\
-$('mfa-secret-text').setAttribute('data-copy-value', data.secret || '');\
-$('mfa-otpauth-text').textContent = data.otpauthUrl || '';\
-$('mfa-otpauth-text').setAttribute('data-copy-value', data.otpauthUrl || '');\
-$('mfa-qr-fallback').classList.remove('hidden');\
-\
-$('mfa-setup-panel').classList.remove('hidden');\
-$('mfa-verify-section').classList.remove('hidden');\
-btn.classList.add('hidden');\
-} catch (e) {\
-$('mfa-setup-error').textContent = e.message;\
-$('mfa-setup-error').classList.remove('hidden');\
-} finally {\
-btn.disabled = false;\
-btn.textContent = 'Set up MFA';\
-}\
-}\
-\
-async function confirmMfaSetup() {\
-const code = $('mfa-code').value.replace(/\\s/g, '');\
-if (code.length !== 6 || !/^[0-9]+$/.test(code)) {\
-$('mfa-setup-error').textContent = 'Please enter a valid 6-digit code.';\
-$('mfa-setup-error').classList.remove('hidden');\
-return;\
-}\
-const btn = $('mfa-verify-btn');\
-btn.disabled = true;\
-btn.textContent = 'Verifying…';\
-try {\
-const data = await apiFetch('/v1/auth/mfa/confirm-setup', {\
-method: 'POST',\
-body: JSON.stringify({ challengeToken: mfaChallengeToken, mfaCode: code }),\
-});\
-$('mfa-setup-panel').classList.add('hidden');\
-$('mfa-status').innerHTML = STATUS_ENABLED;\
-const codesPanel = $('mfa-recovery-codes-panel');\
-const codesList = $('mfa-recovery-codes-list');\
-codesList.innerHTML = '';\
-if (data.recoveryCodes) {\
-data.recoveryCodes.forEach(function(code) {\
-const el = document.createElement('div');\
-el.className = 'font-mono text-sm bg-surface-50 border border-surface-200 rounded px-3 py-2 text-center text-surface-800';\
-el.textContent = code;\
-codesList.appendChild(el);\
-});\
-}\
-codesPanel.classList.remove('hidden');\
-} catch (e) {\
-$('mfa-setup-error').textContent = e.message;\
-$('mfa-setup-error').classList.remove('hidden');\
-} finally {\
-btn.disabled = false;\
-btn.textContent = 'Verify & Enable';\
-}\
-}\
-\
-$('mfa-start-setup-btn').addEventListener('click', startMfaSetup);\
-$('mfa-verify-btn').addEventListener('click', confirmMfaSetup);\
-$('mfa-codes-done-btn').addEventListener('click', function() {\
-$('mfa-recovery-codes-panel').classList.add('hidden');\
-});\
-checkMfaStatus();\
-})();\
-</script>\
-</div>".to_string()
+</div>"
+    )
+}
+
+/// Server-provided MFA setup view: the QR arrives pre-rendered as an inline
+/// SVG from `crate::qr` (byte-mode, ECC L — see that module's round-trip
+/// decoder tests).
+pub struct MfaSetupView<'a> {
+    pub secret: &'a str,
+    pub otpauth: &'a str,
+    pub qr_svg: String,
+}
+
+impl<'a> MfaSetupView<'a> {
+    pub fn new(secret: &'a str, otpauth: &'a str) -> Self {
+        let qr_svg = crate::qr::encode_to_svg(otpauth, 5, 4)
+            .unwrap_or_else(|| "<p class=\"text-sm text-muted-foreground\">QR unavailable — use the manual secret below.</p>".to_string());
+        Self { secret, otpauth, qr_svg }
+    }
 }
 
 // ─── Marketing pages ────────────────────────────────────────
@@ -4133,13 +3563,83 @@ pub fn marketing_zola_compare_index_page() -> String {
 
 // ─── Login pages ────────────────────────────────────────────
 
+/// Signed destructive-action confirmation page (GET /confirm?intent=…&id=…&sig=…).
+/// The zero-JS replacement for confirm dialogs: the opener link carries an
+/// HMAC signature produced at render time; this page verifies it and shows
+/// a single confirm form whose POST carries intent + id + signature for the
+/// server to re-verify. Invalid or expired signatures render a safe refusal.
+pub fn web_confirm_page(intent: &str, resource_id: &str, return_to: &str, sig: &str, signature_valid: bool) -> String {
+    let (title, description) = confirm_intent_copy(intent);
+    let safe_return = if return_to.starts_with('/') && !return_to.starts_with("//") {
+        return_to
+    } else {
+        "/"
+    };
+    let body = if signature_valid {
+        format!(
+"<section aria-labelledby=\"confirm-title\" class=\"mx-auto max-w-xl\">\
+<div class=\"rounded-sm border border-destructive/30 bg-card p-6 md:p-8 shadow-premium\">\
+<h1 id=\"confirm-title\" class=\"text-2xl font-bold text-surface-950 tracking-tight\">{title}</h1>\
+<p class=\"mt-2 text-sm text-muted-foreground\">{description} <span class=\"font-mono text-surface-700\">{resource}</span></p>\
+<p class=\"mt-4 text-xs text-muted-foreground\">This confirmation link is signed and expires 15 minutes after it was rendered.</p>\
+<div class=\"mt-6 flex flex-col gap-3 sm:flex-row\">\
+<form method=\"post\" action=\"/web/confirm\" class=\"inline\">\
+<input type=\"hidden\" name=\"intent\" value=\"{intent}\" />\
+<input type=\"hidden\" name=\"id\" value=\"{resource}\" />\
+<input type=\"hidden\" name=\"return_to\" value=\"{return}\" />\
+<input type=\"hidden\" name=\"sig\" value=\"{sig}\" />\
+<button type=\"submit\" class=\"w-full rounded-sm bg-destructive px-6 py-3 text-sm font-bold text-destructive-foreground hover:bg-destructive/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 sm:w-auto\">Yes, {verb}</button>\
+</form>\
+<a href=\"{return}\" class=\"w-full rounded-sm border border-surface-300 bg-card px-6 py-3 text-center text-sm font-bold text-surface-950 hover:border-surface-950 sm:w-auto\">Cancel</a>\
+</div>\
+</div>\
+</section>",
+            title = html_escape(title),
+            description = html_escape(description),
+            resource = html_escape(resource_id),
+            intent = html_escape(intent),
+            return = html_escape(safe_return),
+            sig = html_escape(sig),
+            verb = html_escape(confirm_intent_verb(intent)),
+        )
+    } else {
+        format!(
+"<section aria-labelledby=\"confirm-title\" class=\"mx-auto max-w-xl\">\
+<div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium\">\
+<h1 id=\"confirm-title\" class=\"text-2xl font-bold text-surface-950 tracking-tight\">Confirmation link unavailable</h1>\
+<p class=\"mt-2 text-sm text-muted-foreground\">This confirmation link is invalid, expired, or was tampered with. Nothing was changed. Return to the list and open a fresh link.</p>\
+<a href=\"{return}\" class=\"mt-6 inline-block rounded-sm bg-primary px-6 py-3 text-sm font-bold text-white hover:bg-brand-700\">Go back</a>\
+</div>\
+</section>",
+            return = html_escape(safe_return),
+        )
+    };
+    body
+}
+
+fn confirm_intent_copy(intent: &str) -> (&'static str, &'static str) {
+    match intent {
+        "delete-campaign" => ("Delete campaign?", "This permanently removes the draft, schedule, and associated analytics snapshots for"),
+        "delete-list" => ("Delete list?", "This removes the list definition immediately; contacts remain intact for"),
+        "delete-domain" => ("Delete domain?", "This stops sending and verification for"),
+        "delete-contact" => ("Delete contact?", "This removes the contact record"),
+        _ => ("Confirm action", "You are about to perform a destructive action on"),
+    }
+}
+
+fn confirm_intent_verb(intent: &str) -> &'static str {
+    match intent {
+        "delete-campaign" | "delete-list" | "delete-domain" | "delete-contact" => "delete it",
+        _ => "continue",
+    }
+}
+
 /// Login page for the web app. Reproduces the form structure, field IDs,
 /// aria labels, and error-message data attributes from the React version.
 pub fn web_login_page(csrf_token: &str) -> String {
     let csrf = csrf_hidden_input(csrf_token);
-    let kiwi_html = kiwicaptcha::kiwi_widget_html_default();
     let form_html = format!(
-        "<form class=\"p-8 space-y-6\" action=\"/v1/auth/login\" method=\"POST\">\
+        "<form class=\"p-8 space-y-6\" action=\"/web/auth/login\" method=\"POST\">\
 {csrf}\
 <div class=\"space-y-2\">\
 <label class=\"text-xs font-bold text-surface-900\" for=\"login-email\">Email</label>\
@@ -4151,7 +3651,6 @@ pub fn web_login_page(csrf_token: &str) -> String {
 </div>\
 <div class=\"relative\">\
 <input id=\"password\" name=\"password\" type=\"password\" required autocomplete=\"current-password\" placeholder=\"Enter password\" class=\"w-full px-4 py-3 rounded-md border border-surface-200 focus:border-primary focus:ring-4 focus:ring-primary/5 outline-none transition-all bg-[#f8f9fa] text-surface-950 pr-12\" />\
-<button type=\"button\" class=\"absolute right-3 top-1/2 z-10 -translate-y-1/2 cursor-pointer select-none rounded-lg px-2 py-1 text-xs font-bold text-surface-400 hover:text-surface-950 transition-colors\" aria-label=\"Show password\" aria-pressed=\"false\" data-password-toggle=\"password\" aria-controls=\"password\">Show</button>\
 </div>\
 </div>\
 <div class=\"flex items-center justify-between py-1\">\
@@ -4161,7 +3660,7 @@ pub fn web_login_page(csrf_token: &str) -> String {
 </div>\
 <a href=\"/forgot-password\" class=\"text-xs font-bold text-primary hover:text-brand-700\">Forgot password?</a>\
 </div>\
-{kiwi_html}\
+
 <button type=\"submit\" class=\"w-full bg-primary hover:bg-brand-700 text-white text-sm font-semibold flex items-center justify-center gap-3 py-3 rounded-md shadow-premium transition-all active:scale-[0.99] group mt-2\"><span>Sign In</span>{arrow}</button>\
 <div class=\"text-center text-xs font-medium text-surface-500\">No account? <a href=\"/signup\" class=\"text-primary font-bold hover:underline\">Sign up</a></div>\
 <div id=\"login-mfa\" data-mfa-section class=\"hidden\" aria-hidden=\"true\">\
@@ -4171,7 +3670,6 @@ pub fn web_login_page(csrf_token: &str) -> String {
 <div id=\"login-form-errors\" class=\"hidden\" role=\"alert\" aria-live=\"assertive\" data-error-key=\"auth.error.rate_limited\"></div></form>",
         csrf = csrf,
         arrow = web_auth_arrow_icon(),
-        kiwi_html = kiwi_html,
     );
 
     web_auth_shell(
@@ -4182,6 +3680,58 @@ pub fn web_login_page(csrf_token: &str) -> String {
     )
 }
 
+/// Multi-step SSR MFA challenge — step two of the zero-JS login flow.
+///
+/// `POST /web/auth/login` validated the password and set a short-lived
+/// HMAC-signed `apexmail_login_challenge` cookie, then redirected here
+/// (`/login?mfa=1&email=…`). This page renders the second factor as a
+/// plain form posting to `/web/auth/mfa/verify`; the server re-verifies
+/// both the challenge cookie and the TOTP code before minting a session.
+/// There is no client-side code — the step transition itself is a redirect.
+pub fn web_login_mfa_challenge_page(
+    csrf_token: &str,
+    email: &str,
+    return_to: &str,
+) -> String {
+    let csrf = csrf_hidden_input(csrf_token);
+    // Only same-origin paths survive (defense in depth: the router already
+    // vets return_to, and form_mfa_verify re-vets it on POST).
+    let safe_return_to = if return_to.starts_with('/') && !return_to.starts_with("//") {
+        return_to
+    } else {
+        "/dashboard"
+    };
+    let form_html = format!(
+        "<form class=\"p-8 space-y-6\" action=\"/web/auth/mfa/verify\" method=\"POST\">\
+{csrf}\
+<input type=\"hidden\" name=\"email\" value=\"{email}\" />\
+<input type=\"hidden\" name=\"return_to\" value=\"{return_to}\" />\
+<div class=\"rounded-xl border border-brand-200 bg-brand-50/80 px-4 py-4\" role=\"status\">\
+<p class=\"text-sm font-bold\">Two-factor verification required</p>\
+<p class=\"mt-1 text-sm leading-relaxed\">Password accepted for <strong>{email}</strong>. Enter the 6-digit code from your authenticator app to finish signing in.</p>\
+</div>\
+<div class=\"space-y-2\">\
+<label class=\"text-xs font-bold text-surface-900\" for=\"mfaCode\">Authenticator code</label>\
+<input id=\"mfaCode\" name=\"code\" type=\"text\" inputmode=\"numeric\" pattern=\"[0-9]*\" maxlength=\"6\" minlength=\"6\" required autocomplete=\"one-time-code\" placeholder=\"000000\" aria-describedby=\"mfa-code-hint\" class=\"flex h-12 w-full rounded-md border border-surface-200 bg-[#f8f9fa] px-4 py-2 text-sm font-mono text-center tracking-widest focus:border-primary focus:ring-4 focus:ring-primary/5 outline-none transition-all\" />\
+<p id=\"mfa-code-hint\" class=\"text-xs text-surface-500\">The code refreshes every 30 seconds in your app.</p>\
+</div>\
+<button type=\"submit\" class=\"w-full bg-primary hover:bg-brand-700 text-white text-sm font-semibold flex items-center justify-center gap-3 py-3 rounded-md shadow-premium transition-all active:scale-[0.99] group mt-2\"><span>Verify and sign in</span>{arrow}</button>\
+<div class=\"text-center text-xs font-medium text-surface-500\"><a href=\"/login\" class=\"text-primary font-bold hover:underline\">Use a different account</a></div>\
+</form>",
+        csrf = csrf,
+        email = html_escape(email),
+        return_to = html_escape(safe_return_to),
+        arrow = web_auth_arrow_icon(),
+    );
+
+    web_auth_shell(
+        "Two-factor verification",
+        "Enter the code from your authenticator app",
+        &form_html,
+        "<div class=\"px-8 pb-8\"><p class=\"text-center text-[11px] text-surface-500 font-medium leading-relaxed px-4\">Lost your device? <a href=\"mailto:support@apexmail.ee\" class=\"text-primary font-bold hover:underline\">Contact support</a> for account recovery.</p></div>",
+    )
+}
+
 /// Login page for the control plane. Matches the same centered
 /// shell (`web_auth_shell`) as the web login/signup pages so all auth surfaces
 /// share one visual design, while preserving the control-plane-specific form
@@ -4189,9 +3739,8 @@ pub fn web_login_page(csrf_token: &str) -> String {
 /// `#login-password`) from the behavior baseline manifest.
 pub fn control_plane_login_page(csrf_token: &str) -> String {
     let csrf = csrf_hidden_input(csrf_token);
-    let kiwi_html = kiwicaptcha::kiwi_widget_html_default();
     let form_html = format!(
-        "<form class=\"p-8 space-y-6\" action=\"/api/auth/login\" method=\"POST\">\
+        "<form class=\"p-8 space-y-6\" action=\"/web/cp/login\" method=\"POST\">\
 {csrf}\
 <div class=\"space-y-2\">\
 <label class=\"text-xs font-bold text-surface-900\" for=\"login-email\">Operator Identity</label>\
@@ -4203,14 +3752,13 @@ pub fn control_plane_login_page(csrf_token: &str) -> String {
 </div>\
 <div class=\"relative\">\
 <input id=\"login-password\" name=\"password\" type=\"password\" required autocomplete=\"current-password\" placeholder=\"Enter password\" class=\"w-full px-4 py-3 rounded-md border border-surface-200 focus:border-primary focus:ring-4 focus:ring-primary/5 outline-none transition-all bg-[#f8f9fa] text-surface-950 pr-12\" />\
-<button type=\"button\" class=\"absolute right-3 top-1/2 z-10 -translate-y-1/2 cursor-pointer select-none rounded-lg px-2 py-1 text-xs font-bold text-surface-400 hover:text-surface-950 transition-colors\" aria-label=\"Show password\" aria-pressed=\"false\" data-password-toggle=\"login-password\" aria-controls=\"login-password\">Show</button>\
 </div>\
 </div>\
 <div class=\"flex items-center gap-2 py-1\">\
 <input id=\"rememberMe\" name=\"rememberMe\" type=\"checkbox\" checked class=\"h-4 w-4 rounded border-surface-300 text-primary focus:ring-primary transition-all cursor-pointer\" />\
 <label for=\"rememberMe\" class=\"text-xs text-surface-500 font-medium cursor-pointer\">Maintain session security</label>\
 </div>\
-{kiwi_html}\
+
 <button type=\"submit\" class=\"w-full bg-primary hover:bg-brand-700 text-white text-sm font-semibold flex items-center justify-center gap-3 py-3 rounded-md shadow-premium transition-all active:scale-[0.99] group mt-2\"><span>Authorize Access</span>{arrow}</button>\
 <div id=\"login-mfa\" data-mfa-section class=\"hidden\" aria-hidden=\"true\">\
 <p class=\"text-[11px] font-bold text-surface-500\">Additional verification required. Enter your MFA code.</p>\
@@ -4219,7 +3767,6 @@ pub fn control_plane_login_page(csrf_token: &str) -> String {
 <div id=\"login-form-errors\" class=\"hidden\" role=\"alert\" aria-live=\"assertive\" data-error-key=\"auth.error.rate_limited\"></div></form>",
         csrf = csrf,
         arrow = web_auth_arrow_icon(),
-        kiwi_html = kiwi_html,
     );
 
     web_auth_shell(
@@ -4261,27 +3808,29 @@ mod tests {
         assert!(html.contains("<p>test</p>"));
     }
 
-    /// Settings actions must be real data-api-form forms against the live
+    /// Settings actions must be real forms against the live
     /// API endpoints (previously inert buttons).
     #[test]
     fn settings_pages_wire_actions_to_real_endpoints() {
         let keys = web_settings_api_keys_page();
-        assert!(keys.contains("data-api-action=\"/v1/auth/api-keys\""));
+        assert!(keys.contains("action=\"/web/api-keys\""));
+        assert!(keys.contains("method=\"post\""));
         assert!(keys.contains("name=\"name\""));
 
         let team = web_settings_team_page();
-        assert!(team.contains("data-api-action=\"/v1/scim/Users\""));
+        assert!(team.contains("action=\"/web/team/invite\""));
+        assert!(team.contains("method=\"post\""));
 
         let webhooks = web_settings_webhooks_page();
-        assert!(webhooks.contains("data-api-action=\"/v1/webhooks\""));
+        assert!(webhooks.contains("action=\"/web/webhooks\""));
         assert!(webhooks.contains("name=\"events\""));
 
         let billing = web_settings_billing_page();
-        assert!(billing.contains("data-api-action=\"/v1/billing/checkout\""));
-        assert!(billing.contains("data-api-action=\"/v1/billing/portal\""));
+        assert!(billing.contains("action=\"/web/billing/checkout\""));
+        assert!(billing.contains("action=\"/web/billing/portal\""));
 
         let profile = web_settings_profile_page();
-        assert!(profile.contains("data-api-action=\"/v1/auth/change-password\""));
+        assert!(profile.contains("action=\"/web/auth/change-password\""));
         assert!(profile.contains("name=\"current_password\""));
         assert!(profile.contains("name=\"new_password\""));
         assert!(profile.contains("name=\"name\""));
@@ -4333,62 +3882,52 @@ mod tests {
 
     /// The placement create form submits through the JSON bridge.
     #[test]
-    fn placement_create_form_uses_api_bridge() {
+    fn placement_create_form_posts_natively() {
         let html = web_inbox_placement_new_page();
-        assert!(html.contains("data-api-form"));
-        assert!(html.contains("data-api-action=\"/v1/inbox-placement/tests\""));
+        assert!(html.contains("method=\"post\""));
+        assert!(html.contains("action=\"/web/inbox-placement/tests\""));
+        assert!(!html.contains("data-api-form"));
     }
 
-    /// The external hydration script must be referenced (deferred) by both
-    /// root layouts so data-* behaviors actually run in the browser.
+    /// ZERO-JavaScript contract: no root layout may reference or inline any
+    /// script — the console is pure SSR + CSS.
     #[test]
-    fn root_layouts_reference_console_js() {
+    fn root_layouts_reference_no_scripts() {
         for html in [
             web_root_layout("<p>test</p>"),
             control_plane_root_layout("<p>test</p>"),
         ] {
-            assert!(
-                html.contains("<script src=\"/assets/console.js\" defer></script>"),
-                "root layout missing the /assets/console.js script tag"
-            );
+            assert!(!html.contains("<script"), "root layout must not emit scripts");
         }
     }
 
     /// The MFA setup flow must never leak the TOTP secret to a third-party
     /// QR service: the QR is rendered locally on a <canvas> via
-    /// /assets/console.js, and a copyable secret + otpauth text fallback
+    /// a selectable secret + otpauth text fallback
     /// exists for clients without canvas.
     #[test]
-    fn mfa_page_renders_qr_locally_with_text_fallback() {
-        let html = control_plane_security_page();
-        assert!(!html.contains("chart.googleapis.com"), "third-party QR service leaked");
-        assert!(!html.contains("googleapis"), "any googleapis reference is forbidden here");
-        assert!(html.contains("id=\"mfa-qr-canvas\""), "local canvas QR missing");
-        assert!(html.contains("ApexMailConsole"), "script must use the local QR renderer");
-        assert!(html.contains("qrToCanvas"), "qrToCanvas call missing");
-        // Text fallback with copy buttons must exist regardless of canvas.
-        assert!(html.contains("id=\"mfa-secret-text\""));
-        assert!(html.contains("id=\"mfa-otpauth-text\""));
-        assert!(html.contains("data-copy-target=\"mfa-secret-text\""));
-        assert!(html.contains("data-copy-target=\"mfa-otpauth-text\""));
-        // Server-derived messages go through textContent, never innerHTML
-        // string concatenation with dynamic values.
-        assert!(html.contains("p.textContent = dynamicMessage"));
-        assert!(
-            !html.contains("' + e.message + '"),
-            "dynamic error text must not be concatenated into innerHTML"
-        );
-    }
+    fn mfa_page_is_server_driven_with_local_qr_and_no_scripts() {
+        let idle = control_plane_security_page();
+        assert!(idle.contains("action=\"/web/auth/mfa/setup\""));
+        assert!(!idle.contains("<script"), "security page must ship zero scripts");
 
-    /// The security page string is a plain literal (not a format! string),
-    /// so the old `{{` escapes emitted broken JavaScript and a broken
-    /// `[0-9]{{6}}` pattern attribute. Both must be gone.
-    #[test]
-    fn mfa_script_has_no_format_brace_artifacts() {
-        let html = control_plane_security_page();
-        assert!(!html.contains("(function(){{"));
-        assert!(!html.contains("{{}}"));
-        assert!(html.contains("pattern=\"[0-9]{6}\""));
+        let secret = "JBSWY3DPEHPK3PXP";
+        let otpauth = format!("otpauth://totp/ApexMail:ops@apexmail.ee?secret={secret}&issuer=ApexMail");
+        let view = MfaSetupView::new(secret, &otpauth);
+        let setup = control_plane_security_page_with_setup(Some(&view));
+        // QR rendered server-side as inline SVG — no third-party service,
+        // no canvas, no JavaScript.
+        assert!(setup.contains("<svg"), "server-rendered QR SVG missing");
+        assert!(setup.contains("role=\"img\""));
+        assert!(setup.contains(secret), "selectable secret fallback missing");
+        assert!(setup.contains("otpauth://totp/"));
+        assert!(setup.contains("action=\"/web/auth/mfa/confirm\""));
+        assert!(setup.contains("name=\"code\""));
+        assert!(setup.contains("pattern=\"[0-9]{6}\""));
+        assert!(!setup.contains("chart.googleapis.com"));
+        assert!(!setup.contains("googleapis"));
+        assert!(!setup.contains("<script"));
+        assert!(!setup.contains("ApexMailConsole"));
     }
 
     // ─── Web page parity ────────────────────────────────────
@@ -4432,8 +3971,10 @@ mod tests {
         assert!(html.contains("Schedule"));
         assert!(html.contains("Audience"));
         assert!(html.contains("HTML Content"));
-        assert!(html.contains("data-autosave-interval-ms=\"10000\""));
-        assert!(html.contains("aria-live=\"polite\""));
+        assert!(html.contains("method=\"post\""));
+        assert!(html.contains("action=\"/web/campaigns\""));
+        assert!(html.contains("type=\"datetime-local\""));
+        assert!(html.contains("formaction=\"/web/campaigns/preview\""));
     }
 
     #[test]
@@ -4471,13 +4012,15 @@ mod tests {
     fn control_plane_sales_page_renders_operator_shell() {
         let html = control_plane_sales_page();
         assert!(html.contains("Operator console for discovery, outreach, and autopilot approvals."));
-        assert!(html.contains("API base URL"));
-        assert!(html.contains("Admin API key"));
-        assert!(html.contains("Connect"));
-        assert!(html.contains("Refresh"));
+        assert!(html.contains("Same-origin operator session"));
+        assert!(html.contains("action=\"/web/admin/sales/discovery\""));
+        assert!(html.contains("action=\"/web/admin/sales/outreach\""));
+        assert!(html.contains("action=\"/web/admin/sales/leads/update\""));
+        assert!(html.contains("name=\"lead_ids\""));
         assert!(html.contains("Approval loop"));
         assert!(html.contains("Launch campaign from selected leads"));
         assert!(html.contains("/v1/admin/sales/*"));
+        assert!(!html.contains("<script"));
     }
 
     // ─── Login page parity ──────────────────────────────────
@@ -4494,9 +4037,7 @@ mod tests {
         // MFA section
         assert!(html.contains("Additional verification required. Enter your MFA code."));
         // CSRF endpoint
-        assert!(html.contains("action=\"/v1/auth/login\""));
-        assert!(html.contains("rounded-lg px-2 py-1"));
-        assert!(html.contains("text-surface-400 hover:text-surface-950"));
+        assert!(html.contains("action=\"/web/auth/login\""));
         // Form structure
         assert!(html.contains("Forgot password?"));
         assert!(html.contains("No account? <a href=\"/signup\""));
@@ -4517,9 +4058,7 @@ mod tests {
         // MFA text (matches the web login's MFA wording)
         assert!(html.contains("MFA code"));
         // Auth endpoint
-        assert!(html.contains("action=\"/api/auth/login\""));
-        assert!(html.contains("rounded-lg px-2 py-1"));
-        assert!(html.contains("text-surface-400 hover:text-surface-950"));
+        assert!(html.contains("action=\"/web/cp/login\""));
         // CP login now shares the two-column web auth shell
         assert!(html.contains("max-w-[400px]"));
         assert!(html.contains("Operator access"));
@@ -4612,11 +4151,9 @@ mod tests {
         assert!(html.contains("id=\"signup-password\""));
         assert!(html.contains("bg-[#f8f9fa] text-surface-950 pr-12"));
         assert!(!html.contains("bg-white/90 text-foreground pr-12"));
-        assert!(html.contains("rounded-lg px-2 py-1"));
-        assert!(html.contains("text-surface-400 hover:text-surface-950"));
         assert!(html.contains(r"\x21-\x2F\x3A-\x40\x5B-\x60\x7B-\x7E"));
         assert!(html.contains("ASCII punctuation"));
-        assert!(html.contains("action=\"/v1/auth/signup\""));
+        assert!(html.contains("action=\"/web/auth/signup\""));
         assert!(html.contains("name=\"plan\" value=\"free\""));
         assert!(html.contains("Create Account"));
         assert!(html.contains("Already have an account?"));
@@ -4635,21 +4172,24 @@ mod tests {
     }
 
     #[test]
-    fn web_auth_script_binds_password_toggles_and_json_forms() {
-        let script = web_auth_form_script();
-        assert!(script.contains("application/json"));
-        assert!(script.contains("passwordToggleBound"));
-        assert!(script.contains("passwordTogglesBound"));
-        assert!(script.contains("document.addEventListener('click'"));
-        assert!(script.contains("[data-password-toggle]"));
-        assert!(script.contains("'token','email','password','confirmPassword','kiwi__token'"));
+    fn auth_forms_post_natively_without_any_scripts() {
+        // Zero-JS contract: the login/signup forms are native urlencoded
+        // POSTs to the /web/auth/* PRG routes, and the auth pages contain
+        // no script tags and no JS-only toggle buttons.
+        for page in [web_login_page(""), web_signup_page(""), web_forgot_password_page("")] {
+            assert!(page.contains("method=\"POST\""));
+            assert!(page.contains("action=\"/web/auth/"));
+            assert!(!page.contains("<script"));
+            assert!(!page.contains("data-password-toggle"));
+            assert!(!page.contains("kiwi"));
+        }
     }
 
     #[test]
     fn web_forgot_password_page_renders_form() {
         let html = web_forgot_password_page("");
         assert!(html.contains("Reset your password"));
-        assert!(html.contains("action=\"/v1/auth/forgot-password\""));
+        assert!(html.contains("action=\"/web/auth/forgot-password\""));
         assert!(html.contains("Send Reset Link"));
         assert!(html.contains("Back to sign in"));
     }
@@ -4660,7 +4200,7 @@ mod tests {
         assert!(html.contains("Set your new password"));
         assert!(html.contains("id=\"new-password\""));
         assert!(html.contains("id=\"confirm-password\""));
-        assert!(html.contains("action=\"/v1/auth/reset-password\""));
+        assert!(html.contains("action=\"/web/auth/reset-password\""));
         assert!(html.contains("Reset Password"));
     }
 
@@ -4798,10 +4338,11 @@ mod tests {
         assert!(html.contains("aria-current=\"page\">Campaigns"));
         assert!(html.contains("<table"));
         assert!(html.contains("data-bulk-scope=\"campaigns\""));
-        assert!(html.contains("2 campaigns selected"));
+        assert!(html.contains("Select rows to act on them in bulk"));
         assert!(html.contains("data-view-state=\"loading\""));
         assert!(html.contains("data-pagination-storage-key=\"apexmail-ui:campaigns:page\""));
-        assert!(html.contains("Delete campaign?"));
+        assert!(html.contains("/confirm?intent=delete-campaign&amp;id=c_spring"));
+        assert!(html.contains("action=\"/web/campaigns/delete-bulk\""));
     }
 
     #[test]
@@ -4830,8 +4371,10 @@ mod tests {
         assert!(html.contains("No contacts yet"));
         assert!(html.contains("aria-current=\"page\">Contacts"));
         assert!(html.contains("<table"));
-        assert!(html.contains("2 contacts selected"));
-        assert!(html.contains("data-debounce-ms=\"300\""));
+        assert!(html.contains("Select rows to act on them in bulk"));
+        assert!(html.contains("name=\"ids\""));
+        assert!(html.contains("action=\"/web/contacts/delete-bulk\""));
+        assert!(html.contains("formaction=\"/web/contacts/export.csv\""));
     }
 
     #[test]
@@ -4849,7 +4392,7 @@ mod tests {
         assert!(html.contains("New List"));
         assert!(html.contains("No lists yet"));
         assert!(html.contains("aria-current=\"page\">Lists"));
-        assert!(html.contains("Delete list?"));
+        assert!(html.contains("/confirm?intent=delete-list&amp;id=l_vip"));
         assert!(html.contains("data-pagination-storage-key=\"apexmail-ui:lists:page\""));
     }
 

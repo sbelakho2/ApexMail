@@ -251,6 +251,11 @@ pub struct Button<'a> {
     pub loading: bool,
     pub left_icon: Option<&'a str>,
     pub right_icon: Option<&'a str>,
+    /// `true` renders `type="submit"` (the button submits its form, e.g.
+    /// a Save button inside a `data-api-form`). `false` renders
+    /// `type="button"` so non-submit actions can never accidentally
+    /// trigger a form submission (the HTML default is `type="submit"`).
+    pub submit: bool,
 }
 
 impl<'a> Button<'a> {
@@ -260,6 +265,7 @@ impl<'a> Button<'a> {
         } else {
             ""
         };
+        let button_type = if self.submit { "submit" } else { "button" };
         let loading = if self.loading {
             "<svg class=\"mr-2 h-4 w-4 animate-spin\" viewBox=\"0 0 24 24\" fill=\"none\" aria-hidden=\"true\"><circle class=\"opacity-25\" cx=\"12\" cy=\"12\" r=\"10\" stroke=\"currentColor\" stroke-width=\"3\"></circle><path class=\"opacity-75\" fill=\"currentColor\" d=\"M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z\"></path></svg>"
         } else {
@@ -280,7 +286,7 @@ impl<'a> Button<'a> {
             String::new()
         };
         format!(
-            "<button class=\"inline-flex items-center justify-center whitespace-nowrap rounded-md text-[14px] font-sans font-semibold tracking-[0.01em] ring-offset-background transition-colors duration-150 ease-out !shadow-none hover:!shadow-none active:!shadow-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 {} {}\" data-variant=\"{}\" data-size=\"{}\"{}>{}{}{}{}</button>",
+            "<button type=\"{button_type}\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-md text-[14px] font-sans font-semibold tracking-[0.01em] ring-offset-background transition-colors duration-150 ease-out !shadow-none hover:!shadow-none active:!shadow-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 {} {}\" data-variant=\"{}\" data-size=\"{}\"{}>{}{}{}{}</button>",
             button_variant_class(self.variant),
             button_size_class(self.size),
             self.variant,
@@ -493,6 +499,9 @@ pub struct Select<'a> {
     /// `data-field`/`data-value` which the `data-api-form` hydration script
     /// reads as a fallback when serializing the form payload.
     pub name: Option<&'a str>,
+    /// When set, choosing an option re-navigates with this query parameter
+    /// updated (list-page filters) instead of only updating `data-value`.
+    pub filter_param: Option<&'a str>,
 }
 
 impl<'a> Select<'a> {
@@ -509,6 +518,10 @@ impl<'a> Select<'a> {
             .map(|name| {
                 format!(" name=\"{name}\" data-field=\"{name}\" data-value=\"{selected_value}\"")
             })
+            .unwrap_or_default();
+        let filter_attrs = self
+            .filter_param
+            .map(|param| format!(" data-filter-param=\"{param}\""))
             .unwrap_or_default();
         let listbox_id = "select-listbox";
         let active_id = if self.open {
@@ -556,7 +569,7 @@ impl<'a> Select<'a> {
             )
         } else {
             // Options are always in the DOM (hidden when closed) so the
-            // console.js combobox toggle can open any select client-side.
+            // hidden when closed)
             let items = self
                 .options
                 .iter()
@@ -591,9 +604,10 @@ impl<'a> Select<'a> {
         };
 
         format!(
-            "<div data-open=\"{}\"{}><button type=\"button\" role=\"combobox\" aria-expanded=\"{}\" aria-controls=\"{}\" aria-haspopup=\"listbox\"{}{} class=\"flex w-full items-center justify-between rounded-md border border-surface-200 bg-background px-3 py-2 text-[14px] ring-offset-background placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary disabled:cursor-not-allowed disabled:opacity-50 [&>span]:line-clamp-1 transition-all duration-200 {} {}\" data-variant=\"{}\" data-size=\"{}\"><span>{}</span><span class=\"h-4 w-4 opacity-50\">⌄</span></button>{}</div>",
+            "<div data-open=\"{}\"{}{}><button type=\"button\" role=\"combobox\" aria-expanded=\"{}\" aria-controls=\"{}\" aria-haspopup=\"listbox\"{}{} class=\"flex w-full items-center justify-between rounded-md border border-surface-200 bg-background px-3 py-2 text-[14px] ring-offset-background placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary disabled:cursor-not-allowed disabled:opacity-50 [&>span]:line-clamp-1 transition-all duration-200 {} {}\" data-variant=\"{}\" data-size=\"{}\"><span>{}</span><span class=\"h-4 w-4 opacity-50\">⌄</span></button>{}</div>",
             self.open,
             name_attrs,
+            filter_attrs,
             expanded, listbox_id,
             activedescendant,
             trigger_keyboard_attrs,
@@ -892,13 +906,21 @@ pub struct EmptyState<'a> {
     pub title: &'a str,
     pub description: Option<&'a str>,
     pub action_label: Option<&'a str>,
+    /// When set, the action renders as a real link to this route (e.g.
+    /// "/campaigns/new") instead of a dead button — empty-state CTAs must
+    /// navigate somewhere that exists.
+    pub action_href: Option<&'a str>,
 }
 
 impl<'a> EmptyState<'a> {
     pub fn render_html(&self) -> String {
         let icon = self.icon_markup.map(|icon| format!("<div class=\"mb-4 flex h-16 w-16 items-center justify-center rounded-lg bg-muted/50 border border-border/50\">{}</div>", icon)).unwrap_or_default();
         let description = self.description.map(|text| format!("<p class=\"mx-auto max-w-[320px] text-sm text-muted-foreground leading-relaxed\">{}</p>", text)).unwrap_or_default();
-        let action = self.action_label.map(|label| format!("<button class=\"inline-flex items-center justify-center whitespace-nowrap rounded-md text-[14px] font-sans font-semibold tracking-[0.01em] border border-surface-200 bg-background text-foreground hover:border-surface-300 h-10 px-3 text-sm min-h-[44px] mt-6\">{}</button>", label)).unwrap_or_default();
+        let action = match (self.action_label, self.action_href) {
+            (Some(label), Some(href)) => format!("<a href=\"{}\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-md text-[14px] font-sans font-semibold tracking-[0.01em] border border-surface-200 bg-background text-foreground hover:border-surface-300 hover:bg-accent hover:text-accent-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 h-10 px-3 text-sm min-h-[44px] mt-6\">{}</a>", href, label),
+            (Some(label), None) => format!("<button type=\"button\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-md text-[14px] font-sans font-semibold tracking-[0.01em] border border-surface-200 bg-background text-foreground hover:border-surface-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 h-10 px-3 text-sm min-h-[44px] mt-6\">{}</button>", label),
+            _ => String::new(),
+        };
         format!(
             "<div class=\"apex-empty-state flex flex-col items-center justify-center py-12 px-6 text-center animate-in fade-in zoom-in-95 duration-500\">{}<h3 class=\"text-[17px] font-bold text-foreground mb-2\">{}</h3>{}{}</div>",
             icon,
@@ -956,6 +978,7 @@ impl<'a> AsyncState<'a> {
                 title,
                 description: Some(description),
                 action_label: *retry_label,
+                action_href: None,
             }
             .render_html(),
             Self::Empty {
@@ -967,6 +990,7 @@ impl<'a> AsyncState<'a> {
                 title,
                 description: Some(description),
                 action_label: *action_label,
+                action_href: None,
             }
             .render_html(),
         }
@@ -2688,7 +2712,7 @@ mod tests {
             disabled: false,
             loading: false,
             left_icon: None,
-            right_icon: None,
+            right_icon: None, submit: true,
         };
         let input = Input {
             input_type: "email",
@@ -2727,6 +2751,7 @@ mod tests {
             loading: false,
             left_icon: Some("<svg></svg>"),
             right_icon: Some("<svg></svg>"),
+            submit: false,
         }
         .render_html();
 
@@ -2753,6 +2778,7 @@ mod tests {
             loading: true,
             left_icon: Some("<svg></svg>"),
             right_icon: Some("<svg></svg>"),
+            submit: false,
         }
         .render_html();
         let icon_only = Button {
@@ -2762,7 +2788,7 @@ mod tests {
             disabled: false,
             loading: false,
             left_icon: Some("<svg></svg>"),
-            right_icon: None,
+            right_icon: None, submit: true,
         }
         .render_html();
 
@@ -2781,7 +2807,7 @@ mod tests {
             disabled: false,
             loading: false,
             left_icon: None,
-            right_icon: None,
+            right_icon: None, submit: true,
         }
         .render_html();
 
@@ -2904,6 +2930,7 @@ mod tests {
                 selected: true,
             }],
             name: Some("audience"),
+            filter_param: None,
         }
         .render_html();
         // The custom combobox is not a native <select>; the name is exposed
@@ -3025,9 +3052,10 @@ mod tests {
                 selected: true,
             }],
             name: Some("plan"),
+            filter_param: None,
         }
         .render_html();
-        // The listbox is present but hidden so console.js can toggle it.
+        // The listbox is present but hidden (closed state).
         assert!(html.contains("role=\"listbox\""));
         assert!(html.contains("hidden"));
         assert!(html.contains("data-value=\"starter\""));
@@ -3123,6 +3151,7 @@ mod tests {
                 },
             ],
             name: None,
+            filter_param: None,
         }
         .render_html();
 
@@ -3213,7 +3242,7 @@ mod tests {
             icon_markup: Some("<span class=\"h-8 w-8\">☆</span>"),
             title: "No campaigns yet",
             description: Some("Create your first campaign to get started."),
-            action_label: Some("Create campaign"),
+            action_label: Some("Create campaign"), action_href: None,
         }
         .render_html();
 
