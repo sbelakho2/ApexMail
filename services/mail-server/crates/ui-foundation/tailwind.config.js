@@ -98,10 +98,10 @@ module.exports = {
       },
       boxShadow: {
         premium:
-          '0 1px 2px rgb(15 17 22 / 0.04), 0 6px 16px rgb(15 17 22 / 0.06)',
-        'premium-sm': '0 1px 2px rgb(15 17 22 / 0.04)',
+          '0 1px 2px rgb(9 9 11 / 0.04), 0 6px 16px rgb(9 9 11 / 0.06)',
+        'premium-sm': '0 1px 2px rgb(9 9 11 / 0.04)',
         'premium-hover':
-          '0 1px 2px rgb(15 17 22 / 0.05), 0 10px 24px rgb(15 17 22 / 0.09)',
+          '0 1px 2px rgb(9 9 11 / 0.05), 0 10px 24px rgb(9 9 11 / 0.09)',
         inner: 'inset 0 2px 4px 0 rgb(0 0 0 / 0.05)',
       },
       transitionTimingFunction: {

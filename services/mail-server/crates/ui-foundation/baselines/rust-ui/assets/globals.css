@@ -555,6 +555,16 @@ video {
 }
 
 :root {
+  /* Brand palette — ApexMail red & black (RESTORED 2026-08-21).
+       The "reference design" pass (ffc54b4a, 2026-07-31) swapped the brand
+       to coral red (#dd524c) with blue-tinted slate neutrals; the brand
+       palette is the deep red (#dc2626) on neutral zinc (near-black
+       #09090b) that shipped before it:
+       - brand accent is deep red (#dc2626 = 220 38 38)
+       - primary text is neutral near-black zinc-950 (#09090b)
+       - panels/cards are pure white (#ffffff)
+       - borders are zinc-200 (#e4e4e7)
+       - muted text is zinc-400 (#71717a) */
   --background: 255 255 255;
   --foreground: 9 9 11;
   --card: 255 255 255;
@@ -636,11 +646,11 @@ video {
   --font-sans: 'Inter Variable', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
   --font-display: 'Inter Variable', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
   --font-mono: 'JetBrains Mono Variable', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
-  --radius: 0px;
-  --radius-sm: 0px;
-  --radius-md: 2px;
-  --radius-lg: 4px;
-  --radius-xl: 6px;
+  --radius: 8px;
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-xl: 16px;
   --radius-full: 9999px;
 }
 
@@ -670,6 +680,36 @@ video {
   --surface-800: 228 228 231;
   --surface-900: 244 244 245;
   --surface-950: 250 250 250;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not(.light) {
+    --background: 9 9 11;
+    --foreground: 250 250 250;
+    --card: 18 18 21;
+    --card-foreground: 250 250 250;
+    --popover: 9 9 11;
+    --popover-foreground: 250 250 250;
+    --secondary: 24 24 27;
+    --secondary-foreground: 250 250 250;
+    --muted: 24 24 27;
+    --muted-foreground: 161 161 170;
+    --accent: 24 24 27;
+    --accent-foreground: 250 250 250;
+    --border: 39 39 42;
+    --input: 39 39 42;
+    --surface-50: 9 9 11;
+    --surface-100: 24 24 27;
+    --surface-200: 39 39 42;
+    --surface-300: 63 63 70;
+    --surface-400: 82 82 91;
+    --surface-500: 113 113 122;
+    --surface-600: 161 161 170;
+    --surface-700: 212 212 216;
+    --surface-800: 228 228 231;
+    --surface-900: 244 244 245;
+    --surface-950: 250 250 250;
+  }
 }
 
 html {
@@ -760,17 +800,16 @@ a {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-md);
   --tw-bg-opacity: 1;
   background-color: rgb(var(--primary) / var(--tw-bg-opacity, 1));
   padding-left: 1.25rem;
   padding-right: 1.25rem;
-  padding-top: 0.75rem;
-  padding-bottom: 0.75rem;
+  padding-top: 0.625rem;
+  padding-bottom: 0.625rem;
   font-size: 0.875rem;
   line-height: 1.25rem;
-  font-weight: 700;
-  text-transform: uppercase;
+  font-weight: 600;
   --tw-text-opacity: 1;
   color: rgb(255 255 255 / var(--tw-text-opacity, 1));
   transition-property: all;
@@ -787,7 +826,7 @@ a {
 }
 
 .apex-card {
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-lg);
   border-width: 1px;
   --tw-border-opacity: 1;
   border-color: rgb(var(--surface-200) / var(--tw-border-opacity, 1));
@@ -795,15 +834,25 @@ a {
   background-color: rgb(255 255 255 / var(--tw-bg-opacity, 1));
   transition-property: all;
   transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
-  transition-duration: 300ms;
+  transition-duration: 200ms;
   transition-timing-function: cubic-bezier(0.23, 1, 0.32, 1);
+}
+
+.dark .apex-card {
+  background-color: rgb(var(--card) / var(--tw-bg-opacity, 1));
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not(.light) .apex-card {
+    background-color: rgb(var(--card) / var(--tw-bg-opacity, 1));
+  }
 }
 
 .apex-card:hover {
   --tw-border-opacity: 1;
-  border-color: rgb(var(--surface-950) / var(--tw-border-opacity, 1));
-  --tw-shadow: 0 10px 30px rgba(0, 0, 0, 0.08), 0 1px 3px rgba(0, 0, 0, 0.05);
-  --tw-shadow-colored: 0 10px 30px var(--tw-shadow-color), 0 1px 3px var(--tw-shadow-color);
+  border-color: rgb(var(--surface-300) / var(--tw-border-opacity, 1));
+  --tw-shadow: 0 1px 2px rgb(9 9 11 / 0.04), 0 6px 16px rgb(9 9 11 / 0.06);
+  --tw-shadow-colored: 0 1px 2px var(--tw-shadow-color), 0 6px 16px var(--tw-shadow-color);
   box-shadow: var(--tw-ring-offset-shadow, 0 0 #0000), var(--tw-ring-shadow, 0 0 #0000), var(--tw-shadow);
 }
 
@@ -822,35 +871,29 @@ a {
 
 .apex-console-shell,
   .apex-cp-shell {
-  color: rgb(var(--surface-950));
-  background: #f6f6f3;
+  color: rgb(var(--foreground));
+  background: rgb(var(--background));
   font-feature-settings: 'tnum' 1, 'ss01' 1;
 }
 
 .apex-console-main,
   .apex-cp-main {
-  background-color: #f6f6f3;
-  /* Whisper-soft graph-paper texture instead of a visible grid — gives an instrument-panel
-       feel without bleeding through cards. */
-  background-image:
-      linear-gradient(rgba(9, 9, 11, 0.018) 1px, transparent 1px),
-      linear-gradient(90deg, rgba(9, 9, 11, 0.018) 1px, transparent 1px),
-      radial-gradient(circle at top, rgba(9, 9, 11, 0.015), transparent 60%);
-  background-size: 80px 80px, 80px 80px, 100% 480px;
-  background-attachment: local, local, scroll;
+  /* Flat content canvas (#f8f9fa) — no texture, matching the reference's
+       clean minimal background. */
+  background-color: rgb(var(--background));
 }
 
 .apex-console-content,
   .apex-cp-page-frame {
-  max-width: 1120px;
+  max-width: 1400px;
   margin-left: auto;
   margin-right: auto;
 }
 
 .apex-console-header {
   min-height: 72px;
-  border-color: rgba(9, 9, 11, 0.1);
-  box-shadow: 0 1px 0 rgba(9, 9, 11, 0.04);
+  border-color: rgb(var(--border));
+  box-shadow: 0 1px 0 rgb(var(--foreground) / 0.04);
 }
 
 .apex-console-search input,
@@ -875,22 +918,16 @@ a {
   box-shadow: 0 0 0 3px rgb(var(--primary) / 0.12);
 }
 
+/* Sidebars are white (reference design) — NOT dark. Cool hairline border on
+     the right edge separates them from the #f8f9fa content canvas. */
+
 .apex-console-sidebar.apex-console-sidebar,
   .apex-cp-sidebar.apex-cp-sidebar {
   position: relative;
   overflow: hidden;
-  background: #09090b;
-  color: #fff;
-  border-right: 1px solid rgba(255, 255, 255, 0.1);
-}
-
-.apex-console-sidebar::before,
-  .apex-cp-sidebar::before {
-  content: '';
-  position: absolute;
-  inset: 0 0 auto;
-  height: 3px;
-  background: rgb(var(--primary));
+  background: rgb(var(--card));
+  color: rgb(var(--foreground));
+  border-right: 1px solid rgb(var(--border));
 }
 
 .apex-logo-mark {
@@ -900,29 +937,28 @@ a {
 }
 
 .apex-sidebar-brand {
-  color: #fff;
-  text-transform: uppercase;
-  letter-spacing: 0;
+  color: rgb(var(--foreground));
+  letter-spacing: -0.01em;
 }
 
 .apex-console-sidebar .border-surface-100,
   .apex-console-sidebar .border-t,
   .apex-cp-sidebar .border-t,
   .apex-cp-sidebar .border-b {
-  border-color: rgba(255, 255, 255, 0.1);
+  border-color: rgb(var(--border));
 }
 
 .apex-console-sidebar a,
   .apex-cp-sidebar a,
   .apex-sidebar-link,
   .apex-cp-sidebar-link {
-  min-height: 44px;
+  min-height: 40px;
   border: 1px solid transparent;
-  color: rgba(255, 255, 255, 0.72);
-  text-transform: uppercase;
-  font-size: 0.76rem;
-  line-height: 1rem;
-  font-weight: 700;
+  color: rgb(var(--surface-600));
+  text-transform: none;
+  font-size: 0.875rem;
+  line-height: 1.25rem;
+  font-weight: 500;
   letter-spacing: 0;
 }
 
@@ -930,20 +966,33 @@ a {
   .apex-cp-sidebar a:hover,
   .apex-sidebar-link:hover,
   .apex-cp-sidebar-link:hover {
-  border-color: rgba(255, 255, 255, 0.16);
-  background: rgba(255, 255, 255, 0.08);
-  color: #fff;
+  border-color: transparent;
+  background: rgb(var(--surface-100));
+  color: rgb(var(--foreground));
 }
 
 .apex-console-sidebar .text-surface-500,
   .apex-console-sidebar .text-\[10px\],
   .apex-cp-sidebar .text-white\/40 {
-  color: rgba(255, 255, 255, 0.42);
+  color: rgb(var(--surface-500));
 }
 
 .apex-console-sidebar .rounded-full {
   border-radius: var(--radius-sm);
-  background: rgba(255, 255, 255, 0.08);
+  background: rgb(var(--surface-100));
+}
+
+/* Active nav item — subtle brand-red tint with a red icon. The icon turns
+     red via the .text-primary class set on the active link's icon wrapper in
+     shell.rs. */
+
+.apex-nav-active {
+  background: rgb(var(--brand-50));
+  border-color: rgb(var(--brand-100));
+}
+
+.apex-nav-active:hover {
+  background: rgb(var(--brand-100));
 }
 
 .apex-page-hero {
@@ -952,36 +1001,16 @@ a {
   gap: 2rem;
   min-height: 200px;
   overflow: hidden;
-  border: 1px solid #18181b;
-  /* Sculpted gradient instead of flat black so the hero feels engineered, not stamped. */
-  background:
-      radial-gradient(120% 80% at 0% 0%, rgba(255, 255, 255, 0.06), transparent 55%),
-      linear-gradient(135deg, #0b0b0e 0%, #09090b 55%, #050507 100%);
-  color: #fff;
+  border: 1px solid rgb(var(--border));
+  border-radius: var(--radius-lg);
+  /* Reference (Correct Design.png): one white hero card — flat surface, hairline
+       border, a single subtle ambient shadow. No gradient, no accent strip. */
+  background: #fff;
+  color: rgb(var(--foreground));
   padding: 2rem;
   box-shadow:
-      inset 0 1px 0 rgba(255, 255, 255, 0.05),
-      0 24px 60px rgba(9, 9, 11, 0.18);
-}
-
-.apex-page-hero::before {
-  content: '';
-  position: absolute;
-  left: 0;
-  top: 0;
-  bottom: 0;
-  width: 6px;
-  background: rgb(var(--primary));
-}
-
-.apex-page-hero::after {
-  content: '';
-  position: absolute;
-  left: 2rem;
-  right: 2rem;
-  bottom: 1.25rem;
-  height: 1px;
-  background: rgba(255, 255, 255, 0.1);
+      0 1px 2px rgb(9 9 11 / 0.04),
+      0 6px 16px rgb(9 9 11 / 0.06);
 }
 
 .apex-eyebrow {
@@ -991,9 +1020,9 @@ a {
   color: rgb(var(--primary));
   font-size: 0.72rem;
   line-height: 1rem;
-  font-weight: 800;
+  font-weight: 700;
   text-transform: uppercase;
-  letter-spacing: 0.18em;
+  letter-spacing: 0.12em;
 }
 
 .apex-eyebrow::before {
@@ -1013,16 +1042,15 @@ a {
   margin-top: 1rem;
   max-width: 720px;
   font-size: 2.25rem;
-  line-height: 0.98;
-  font-weight: 900;
-  text-transform: uppercase;
-  letter-spacing: -0.005em;
+  line-height: 1.05;
+  font-weight: 800;
+  letter-spacing: -0.01em;
 }
 
 .apex-hero-copy {
   margin-top: 1rem;
   max-width: 620px;
-  color: rgba(255, 255, 255, 0.68);
+  color: rgb(var(--surface-500));
   font-size: 0.98rem;
   line-height: 1.65;
 }
@@ -1036,29 +1064,28 @@ a {
 
 .apex-hero-stat-grid div {
   min-height: 88px;
-  border: 1px solid rgba(255, 255, 255, 0.14);
-  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgb(var(--border));
+  background: rgb(var(--surface-50));
   padding: 1rem;
 }
 
 .apex-hero-stat-grid span {
   display: block;
-  color: rgba(255, 255, 255, 0.48);
+  color: rgb(var(--surface-500));
   font-size: 0.64rem;
   line-height: 1rem;
-  font-weight: 800;
+  font-weight: 700;
   text-transform: uppercase;
-  letter-spacing: 0.18em;
+  letter-spacing: 0.12em;
 }
 
 .apex-hero-stat-grid strong {
   display: block;
   margin-top: 0.65rem;
-  color: #fff;
+  color: rgb(var(--foreground));
   font-size: 1.5rem;
   line-height: 1.2;
-  font-weight: 900;
-  text-transform: uppercase;
+  font-weight: 800;
 }
 
 .apex-card.apex-card,
@@ -1068,27 +1095,9 @@ a {
   position: relative;
   border-color: rgba(9, 9, 11, 0.14);
   background: #fff;
-  box-shadow: 0 1px 0 rgba(9, 9, 11, 0.05), 0 18px 44px rgba(9, 9, 11, 0.06);
-}
-
-.apex-card.apex-card::before,
-  .apex-panel::before,
-  .apex-signal-card::before {
-  content: '';
-  position: absolute;
-  left: -1px;
-  top: -1px;
-  bottom: -1px;
-  width: 3px;
-  background: rgb(var(--primary));
-  opacity: 0;
-  transition: opacity 160ms ease-out;
-}
-
-.apex-card.apex-card:hover::before,
-  .apex-panel:hover::before,
-  .apex-signal-card:hover::before {
-  opacity: 1;
+  box-shadow:
+      0 1px 2px rgb(9 9 11 / 0.04),
+      0 6px 16px rgb(9 9 11 / 0.06);
 }
 
 .apex-card.apex-card h3,
@@ -1113,12 +1122,12 @@ a {
 .apex-table thead,
   .apex-table thead tr,
   .apex-table thead th {
-  background: #09090b;
+  background: transparent;
 }
 
 .apex-table th {
-  color: rgba(255, 255, 255, 0.74);
-  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+  color: rgb(var(--surface-500));
+  border-bottom: 1px solid rgb(var(--border));
   text-transform: uppercase;
   letter-spacing: 0.12em;
 }
@@ -1164,8 +1173,8 @@ a {
   color: rgb(var(--surface-950));
   font-size: 2rem;
   line-height: 1.05;
-  font-weight: 900;
-  text-transform: uppercase;
+  font-weight: 800;
+  letter-spacing: -0.01em;
 }
 
 .apex-ops-board p {
@@ -1213,9 +1222,10 @@ a {
 .apex-lane-grid strong {
   margin-top: 1.25rem;
   color: rgb(var(--surface-950));
-  font-size: 0.95rem;
+  font-size: 0.75rem;
   line-height: 1.2;
-  font-weight: 900;
+  font-weight: 700;
+  letter-spacing: 0.08em;
   text-transform: uppercase;
 }
 
@@ -1264,48 +1274,30 @@ a {
 
 /* ─── Premium upgrades (cards, tables, dashboard hero, chart frames) ────── */
 
-/* Lift the apex-card / apex-panel / apex-signal-card with a layered surface,
-     a hairline accent strip on the side, and a sharper drop shadow. The accent
-     strip is always visible (low opacity), and intensifies on hover. */
+/* Reference design: flat white surface, hairline border, one subtle ambient
+     shadow. No gradient, no accent strip, no heavy lift on hover — the border
+     darkens slightly instead. */
 
 .apex-card.apex-card,
   .apex-panel,
   .apex-signal-card,
   .apex-ops-board {
-  background:
-      linear-gradient(180deg, #ffffff 0%, #fbfbfa 100%);
+  background: #ffffff;
   box-shadow:
-      inset 0 1px 0 rgba(255, 255, 255, 0.9),
-      0 1px 0 rgba(9, 9, 11, 0.04),
-      0 14px 38px rgba(9, 9, 11, 0.06),
-      0 2px 6px rgba(9, 9, 11, 0.03);
+      0 1px 2px rgb(9 9 11 / 0.04),
+      0 6px 16px rgb(9 9 11 / 0.06);
   transition:
       box-shadow 200ms cubic-bezier(0.23, 1, 0.32, 1),
-      border-color 200ms ease-out,
-      transform 200ms ease-out;
+      border-color 200ms ease-out;
 }
 
 .apex-card.apex-card:hover,
   .apex-panel:hover,
   .apex-signal-card:hover {
-  border-color: rgba(9, 9, 11, 0.22);
+  border-color: rgba(9, 9, 11, 0.16);
   box-shadow:
-      inset 0 1px 0 rgba(255, 255, 255, 0.95),
-      0 1px 0 rgba(9, 9, 11, 0.06),
-      0 22px 52px rgba(9, 9, 11, 0.10),
-      0 4px 10px rgba(9, 9, 11, 0.05);
-}
-
-.apex-card.apex-card::before,
-  .apex-panel::before,
-  .apex-signal-card::before {
-  opacity: 0.18;
-}
-
-.apex-card.apex-card:hover::before,
-  .apex-panel:hover::before,
-  .apex-signal-card:hover::before {
-  opacity: 1;
+      0 1px 2px rgb(9 9 11 / 0.05),
+      0 10px 24px rgb(9 9 11 / 0.09);
 }
 
 .apex-signal-card {
@@ -1325,27 +1317,25 @@ a {
   letter-spacing: -0.01em;
 }
 
-/* Inventory panel — softer, more refined table head */
+/* Inventory panel — table chassis stays a white card with a hairline border */
 
 .apex-table-wrap {
-  border: 0;
-  background: transparent;
+  border: 1px solid rgb(var(--border));
+  background: #fff;
 }
 
 .apex-table thead,
   .apex-table thead tr,
   .apex-table thead th {
-  background:
-      linear-gradient(180deg, #18181b 0%, #09090b 100%);
+  background: transparent;
 }
 
 .apex-table thead th {
-  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
-  box-shadow: inset 0 -1px 0 rgba(var(--primary), 0.45);
+  border-bottom: 1px solid rgb(var(--border));
 }
 
 .apex-table th {
-  color: rgba(255, 255, 255, 0.78);
+  color: rgb(var(--surface-500));
   text-transform: uppercase;
   letter-spacing: 0.14em;
   font-size: 0.66rem;
@@ -1387,7 +1377,7 @@ a {
 .apex-empty-state {
   min-height: 240px;
   background:
-      radial-gradient(80% 80% at 50% 0%, rgba(var(--primary), 0.04), transparent 70%);
+      radial-gradient(80% 80% at 50% 0%, rgb(var(--primary) / 0.04), transparent 70%);
   border: 1px dashed rgba(9, 9, 11, 0.14);
   border-radius: 0.125rem;
 }
@@ -1405,18 +1395,18 @@ a {
   border-radius: 0.125rem;
 }
 
-/* Control-plane dashboard hero (replaces former white card-in-card layout) */
+/* Control-plane dashboard hero — clean white card matching the reference
+     (Correct Design.png): white panel, cool hairline border, subtle shadow. */
 
 .apex-cp-hero {
   position: relative;
-  border: 1px solid rgba(9, 9, 11, 0.14);
-  border-radius: 0.125rem;
-  background:
-      linear-gradient(180deg, #ffffff 0%, #fafaf8 100%);
+  border: 1px solid rgb(var(--border));
+  border-radius: var(--radius-md);
+  background: rgb(var(--card));
   box-shadow:
       inset 0 1px 0 rgba(255, 255, 255, 0.95),
-      0 1px 0 rgba(9, 9, 11, 0.04),
-      0 18px 44px rgba(9, 9, 11, 0.06);
+      0 1px 0 rgba(15, 17, 22, 0.03),
+      0 18px 44px rgba(15, 17, 22, 0.06);
 }
 
 .apex-cp-hero::before {
@@ -1433,18 +1423,20 @@ a {
   position: relative;
 }
 
+/* Side panel is light (not dark) to match the reference design. */
+
 .apex-cp-hero-side {
   position: relative;
   background:
-      radial-gradient(120% 100% at 100% 0%, rgba(255, 255, 255, 0.05), transparent 55%),
-      linear-gradient(135deg, #0b0b0e 0%, #09090b 60%, #050507 100%);
-  border-top: 1px solid rgba(9, 9, 11, 0.14);
+      radial-gradient(120% 100% at 100% 0%, rgb(var(--accent) / 0.6), transparent 55%),
+      rgb(var(--card));
+  border-top: 1px solid rgb(var(--border));
 }
 
 @media (min-width: 1024px) {
   .apex-cp-hero-side {
     border-top: 0;
-    border-left: 1px solid rgba(9, 9, 11, 0.14);
+    border-left: 1px solid rgb(var(--border));
   }
 }
 
@@ -1457,16 +1449,15 @@ a {
   border-color: rgba(255, 255, 255, 0.28);
 }
 
-/* Stat tiles inside the CP hero — borderless ghost tiles with hairline accent. */
+/* Stat tiles — white cards with a brand-red hairline accent. */
 
 .apex-cp-stat-tile {
   position: relative;
   padding: 0.95rem 1rem 1.05rem;
-  background:
-      linear-gradient(180deg, rgba(255, 255, 255, 0.6) 0%, rgba(250, 250, 249, 0.9) 100%);
-  border: 1px solid rgba(9, 9, 11, 0.08);
-  border-radius: 0.125rem;
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.9);
+  background: rgb(var(--card));
+  border: 1px solid rgb(var(--border));
+  border-radius: var(--radius-md);
+  box-shadow: 0 1px 2px rgb(9 9 11 / 0.04);
   overflow: hidden;
   transition: border-color 160ms ease-out, transform 160ms ease-out, box-shadow 160ms ease-out;
 }
@@ -1479,26 +1470,26 @@ a {
   bottom: 0;
   width: 2px;
   background: rgb(var(--primary));
-  opacity: 0.55;
+  opacity: 0.7;
 }
 
 .apex-cp-stat-tile[data-tone='warn']::before {
-  background: rgb(var(--warning-500, 234 179 8));
-  opacity: 0.85;
+  background: rgb(var(--warning-500, 245 158 11));
+  opacity: 0.9;
 }
 
 .apex-cp-stat-tile:hover {
   transform: translateY(-1px);
-  border-color: rgba(9, 9, 11, 0.18);
+  border-color: rgb(var(--surface-300));
   box-shadow:
-      inset 0 1px 0 rgba(255, 255, 255, 0.95),
-      0 8px 18px rgba(9, 9, 11, 0.06);
+      0 1px 2px rgb(9 9 11 / 0.04),
+      0 8px 18px rgb(9 9 11 / 0.07);
 }
 
 .apex-cp-stat-label {
-  font-size: 0.64rem;
-  font-weight: 800;
-  letter-spacing: 0.22em;
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.14em;
   text-transform: uppercase;
   color: rgb(var(--surface-500));
 }
@@ -1543,11 +1534,10 @@ a {
 
 .apex-cp-region-row {
   position: relative;
-  border: 1px solid rgba(9, 9, 11, 0.08);
-  border-radius: 0.125rem;
-  background:
-      linear-gradient(180deg, rgba(255, 255, 255, 0.6) 0%, rgba(250, 250, 249, 0.9) 100%);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.9);
+  border: 1px solid rgb(var(--border));
+  border-radius: var(--radius-md);
+  background: rgb(var(--card));
+  box-shadow: 0 1px 2px rgb(9 9 11 / 0.04);
 }
 
 /* Web console hero \u2014 same chassis as page-hero but slightly more restrained. */
@@ -1705,7 +1695,7 @@ a {
 }
 
 .apex-cp-sales table thead th {
-  border-bottom: 1px solid rgba(220, 38, 38, 0.35);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.12);
   font-size: 0.65rem;
   font-weight: 800;
   letter-spacing: 0.18em;
@@ -1743,6 +1733,10 @@ a {
 
 .visible {
   visibility: visible;
+}
+
+.invisible {
+  visibility: hidden;
 }
 
 .static {
@@ -1795,6 +1789,10 @@ a {
   bottom: 0.5rem;
 }
 
+.bottom-4 {
+  bottom: 1rem;
+}
+
 .left-0 {
   left: 0px;
 }
@@ -1809,6 +1807,10 @@ a {
 
 .left-3 {
   left: 0.75rem;
+}
+
+.left-4 {
+  left: 1rem;
 }
 
 .left-\[50\%\] {
@@ -1847,6 +1849,10 @@ a {
   top: 0.5rem;
 }
 
+.top-3 {
+  top: 0.75rem;
+}
+
 .top-4 {
   top: 1rem;
 }
@@ -1859,12 +1865,20 @@ a {
   top: 100%;
 }
 
+.z-0 {
+  z-index: 0;
+}
+
 .z-10 {
   z-index: 10;
 }
 
-.z-40 {
-  z-index: 40;
+.z-20 {
+  z-index: 20;
+}
+
+.z-30 {
+  z-index: 30;
 }
 
 .z-50 {
@@ -1903,12 +1917,8 @@ a {
   margin-bottom: 0px;
 }
 
-.mb-0\.5 {
-  margin-bottom: 0.125rem;
-}
-
-.mb-10 {
-  margin-bottom: 2.5rem;
+.mb-1 {
+  margin-bottom: 0.25rem;
 }
 
 .mb-12 {
@@ -1963,20 +1973,16 @@ a {
   margin-right: 0.5rem;
 }
 
+.mt-0 {
+  margin-top: 0px;
+}
+
 .mt-1 {
   margin-top: 0.25rem;
 }
 
-.mt-1\.5 {
-  margin-top: 0.375rem;
-}
-
 .mt-10 {
   margin-top: 2.5rem;
-}
-
-.mt-12 {
-  margin-top: 3rem;
 }
 
 .mt-2 {
@@ -1997,10 +2003,6 @@ a {
 
 .mt-6 {
   margin-top: 1.5rem;
-}
-
-.mt-8 {
-  margin-top: 2rem;
 }
 
 .block {
@@ -2031,6 +2033,10 @@ a {
   display: grid;
 }
 
+.contents {
+  display: contents;
+}
+
 .hidden {
   display: none;
 }
@@ -2045,10 +2051,6 @@ a {
 
 .h-1 {
   height: 0.25rem;
-}
-
-.h-1\.5 {
-  height: 0.375rem;
 }
 
 .h-10 {
@@ -2071,20 +2073,12 @@ a {
   height: 0.5rem;
 }
 
-.h-2\.5 {
-  height: 0.625rem;
-}
-
 .h-20 {
   height: 5rem;
 }
 
 .h-3 {
   height: 0.75rem;
-}
-
-.h-3\.5 {
-  height: 0.875rem;
 }
 
 .h-4 {
@@ -2109,6 +2103,10 @@ a {
 
 .h-8 {
   height: 2rem;
+}
+
+.h-9 {
+  height: 2.25rem;
 }
 
 .h-\[calc\(100\%-2rem\)\] {
@@ -2137,6 +2135,10 @@ a {
 
 .max-h-screen {
   max-height: 100vh;
+}
+
+.min-h-\[160px\] {
+  min-height: 160px;
 }
 
 .min-h-\[180px\] {
@@ -2175,8 +2177,8 @@ a {
   min-height: 100vh;
 }
 
-.w-1\.5 {
-  width: 0.375rem;
+.w-1 {
+  width: 0.25rem;
 }
 
 .w-10 {
@@ -2203,10 +2205,6 @@ a {
   width: 0.5rem;
 }
 
-.w-2\.5 {
-  width: 0.625rem;
-}
-
 .w-20 {
   width: 5rem;
 }
@@ -2221,10 +2219,6 @@ a {
 
 .w-3 {
   width: 0.75rem;
-}
-
-.w-3\.5 {
-  width: 0.875rem;
 }
 
 .w-4 {
@@ -2247,12 +2241,20 @@ a {
   width: 1.5rem;
 }
 
+.w-60 {
+  width: 15rem;
+}
+
 .w-64 {
   width: 16rem;
 }
 
 .w-7 {
   width: 1.75rem;
+}
+
+.w-72 {
+  width: 18rem;
 }
 
 .w-8 {
@@ -2263,12 +2265,12 @@ a {
   width: 20rem;
 }
 
-.w-\[280px\] {
-  width: 280px;
+.w-9 {
+  width: 2.25rem;
 }
 
-.w-\[min\(20rem\2c calc\(100vw-2rem\)\)\] {
-  width: min(20rem,calc(100vw - 2rem));
+.w-\[280px\] {
+  width: 280px;
 }
 
 .w-full {
@@ -2279,8 +2281,12 @@ a {
   min-width: 0px;
 }
 
-.min-w-5 {
-  min-width: 1.25rem;
+.min-w-\[10rem\] {
+  min-width: 10rem;
+}
+
+.min-w-\[220px\] {
+  min-width: 220px;
 }
 
 .min-w-\[44px\] {
@@ -2327,12 +2333,8 @@ a {
   max-width: 320px;
 }
 
-.max-w-\[480px\] {
-  max-width: 480px;
-}
-
-.max-w-\[520px\] {
-  max-width: 520px;
+.max-w-\[400px\] {
+  max-width: 400px;
 }
 
 .max-w-\[calc\(100\%-2rem\)\] {
@@ -2353,6 +2355,10 @@ a {
 
 .max-w-sm {
   max-width: 24rem;
+}
+
+.max-w-xl {
+  max-width: 36rem;
 }
 
 .max-w-xs {
@@ -2385,11 +2391,6 @@ a {
 
 .-translate-x-1\/2 {
   --tw-translate-x: -50%;
-  transform: translate(var(--tw-translate-x), var(--tw-translate-y)) rotate(var(--tw-rotate)) skewX(var(--tw-skew-x)) skewY(var(--tw-skew-y)) scaleX(var(--tw-scale-x)) scaleY(var(--tw-scale-y));
-}
-
-.-translate-x-full {
-  --tw-translate-x: -100%;
   transform: translate(var(--tw-translate-x), var(--tw-translate-y)) rotate(var(--tw-rotate)) skewX(var(--tw-skew-x)) skewY(var(--tw-skew-y)) scaleX(var(--tw-scale-x)) scaleY(var(--tw-scale-y));
 }
 
@@ -2475,6 +2476,18 @@ a {
           user-select: none;
 }
 
+.select-text {
+  -webkit-user-select: text;
+     -moz-user-select: text;
+          user-select: text;
+}
+
+.select-all {
+  -webkit-user-select: all;
+     -moz-user-select: all;
+          user-select: all;
+}
+
 .resize-none {
   resize: none;
 }
@@ -2519,8 +2532,16 @@ a {
   align-items: flex-start;
 }
 
+.items-end {
+  align-items: flex-end;
+}
+
 .items-center {
   align-items: center;
+}
+
+.items-baseline {
+  align-items: baseline;
 }
 
 .justify-start {
@@ -2547,20 +2568,12 @@ a {
   gap: 0.25rem;
 }
 
-.gap-1\.5 {
-  gap: 0.375rem;
-}
-
 .gap-10 {
   gap: 2.5rem;
 }
 
 .gap-2 {
   gap: 0.5rem;
-}
-
-.gap-20 {
-  gap: 5rem;
 }
 
 .gap-3 {
@@ -2604,18 +2617,6 @@ a {
   --tw-space-y-reverse: 0;
   margin-top: calc(0.25rem * calc(1 - var(--tw-space-y-reverse)));
   margin-bottom: calc(0.25rem * var(--tw-space-y-reverse));
-}
-
-.space-y-1\.5 > :not([hidden]) ~ :not([hidden]) {
-  --tw-space-y-reverse: 0;
-  margin-top: calc(0.375rem * calc(1 - var(--tw-space-y-reverse)));
-  margin-bottom: calc(0.375rem * var(--tw-space-y-reverse));
-}
-
-.space-y-10 > :not([hidden]) ~ :not([hidden]) {
-  --tw-space-y-reverse: 0;
-  margin-top: calc(2.5rem * calc(1 - var(--tw-space-y-reverse)));
-  margin-bottom: calc(2.5rem * var(--tw-space-y-reverse));
 }
 
 .space-y-2 > :not([hidden]) ~ :not([hidden]) {
@@ -2707,12 +2708,28 @@ a {
   overflow-wrap: break-word;
 }
 
+.break-all {
+  word-break: break-all;
+}
+
 .rounded {
-  border-radius: 0.25rem;
+  border-radius: var(--radius);
+}
+
+.rounded-2xl {
+  border-radius: var(--radius-xl);
 }
 
 .rounded-full {
   border-radius: 9999px;
+}
+
+.rounded-lg {
+  border-radius: var(--radius-lg);
+}
+
+.rounded-md {
+  border-radius: var(--radius-md);
 }
 
 .rounded-none {
@@ -2721,6 +2738,10 @@ a {
 
 .rounded-sm {
   border-radius: var(--radius-sm);
+}
+
+.rounded-xl {
+  border-radius: var(--radius-xl);
 }
 
 .border {
@@ -2765,8 +2786,13 @@ a {
   border-color: rgb(var(--brand-200) / var(--tw-border-opacity, 1));
 }
 
-.border-brand-200\/60 {
-  border-color: rgb(var(--brand-200) / 0.6);
+.border-brand-300 {
+  --tw-border-opacity: 1;
+  border-color: rgb(var(--brand-300) / var(--tw-border-opacity, 1));
+}
+
+.border-brand-400\/40 {
+  border-color: rgb(var(--brand-400) / 0.4);
 }
 
 .border-brand-700 {
@@ -2789,6 +2815,10 @@ a {
 
 .border-destructive\/30 {
   border-color: rgb(var(--destructive) / 0.3);
+}
+
+.border-destructive\/40 {
+  border-color: rgb(var(--destructive) / 0.4);
 }
 
 .border-input {
@@ -2819,13 +2849,24 @@ a {
   border-color: rgb(var(--success) / var(--tw-border-opacity, 1));
 }
 
+.border-success-100 {
+  --tw-border-opacity: 1;
+  border-color: rgb(var(--success-100) / var(--tw-border-opacity, 1));
+}
+
 .border-success-200 {
   --tw-border-opacity: 1;
   border-color: rgb(var(--success-200) / var(--tw-border-opacity, 1));
 }
 
-.border-success\/25 {
-  border-color: rgb(var(--success) / 0.25);
+.border-success-300 {
+  --tw-border-opacity: 1;
+  border-color: rgb(var(--success-300) / var(--tw-border-opacity, 1));
+}
+
+.border-success-50 {
+  --tw-border-opacity: 1;
+  border-color: rgb(var(--success-50) / var(--tw-border-opacity, 1));
 }
 
 .border-success\/30 {
@@ -2854,10 +2895,6 @@ a {
   border-color: rgb(var(--surface-200) / 0.6);
 }
 
-.border-surface-200\/80 {
-  border-color: rgb(var(--surface-200) / 0.8);
-}
-
 .border-surface-300 {
   --tw-border-opacity: 1;
   border-color: rgb(var(--surface-300) / var(--tw-border-opacity, 1));
@@ -2871,11 +2908,6 @@ a {
 .border-surface-800 {
   --tw-border-opacity: 1;
   border-color: rgb(var(--surface-800) / var(--tw-border-opacity, 1));
-}
-
-.border-surface-950 {
-  --tw-border-opacity: 1;
-  border-color: rgb(var(--surface-950) / var(--tw-border-opacity, 1));
 }
 
 .border-transparent {
@@ -2893,6 +2925,10 @@ a {
 
 .border-warning\/20 {
   border-color: rgb(var(--warning) / 0.2);
+}
+
+.border-warning\/25 {
+  border-color: rgb(var(--warning) / 0.25);
 }
 
 .border-warning\/30 {
@@ -2923,21 +2959,6 @@ a {
   border-top-color: transparent;
 }
 
-.bg-\[\#0f1726\] {
-  --tw-bg-opacity: 1;
-  background-color: rgb(15 23 38 / var(--tw-bg-opacity, 1));
-}
-
-.bg-\[\#11192a\] {
-  --tw-bg-opacity: 1;
-  background-color: rgb(17 25 42 / var(--tw-bg-opacity, 1));
-}
-
-.bg-\[\#111b2e\] {
-  --tw-bg-opacity: 1;
-  background-color: rgb(17 27 46 / var(--tw-bg-opacity, 1));
-}
-
 .bg-background {
   --tw-bg-opacity: 1;
   background-color: rgb(var(--background) / var(--tw-bg-opacity, 1));
@@ -2953,10 +2974,6 @@ a {
 
 .bg-black\/15 {
   background-color: rgb(0 0 0 / 0.15);
-}
-
-.bg-black\/20 {
-  background-color: rgb(0 0 0 / 0.2);
 }
 
 .bg-black\/25 {
@@ -2975,13 +2992,40 @@ a {
   background-color: rgb(0 0 0 / 0.5);
 }
 
+.bg-brand-100 {
+  --tw-bg-opacity: 1;
+  background-color: rgb(var(--brand-100) / var(--tw-bg-opacity, 1));
+}
+
+.bg-brand-50 {
+  --tw-bg-opacity: 1;
+  background-color: rgb(var(--brand-50) / var(--tw-bg-opacity, 1));
+}
+
 .bg-brand-50\/80 {
   background-color: rgb(var(--brand-50) / 0.8);
+}
+
+.bg-brand-500 {
+  --tw-bg-opacity: 1;
+  background-color: rgb(var(--brand-500) / var(--tw-bg-opacity, 1));
+}
+
+.bg-brand-500\/15 {
+  background-color: rgb(var(--brand-500) / 0.15);
 }
 
 .bg-card {
   --tw-bg-opacity: 1;
   background-color: rgb(var(--card) / var(--tw-bg-opacity, 1));
+}
+
+.bg-card\/80 {
+  background-color: rgb(var(--card) / 0.8);
+}
+
+.bg-card\/90 {
+  background-color: rgb(var(--card) / 0.9);
 }
 
 .bg-current {
@@ -3037,6 +3081,10 @@ a {
   background-color: rgb(var(--muted) / 0.3);
 }
 
+.bg-muted\/40 {
+  background-color: rgb(var(--muted) / 0.4);
+}
+
 .bg-muted\/50 {
   background-color: rgb(var(--muted) / 0.5);
 }
@@ -3053,6 +3101,10 @@ a {
 
 .bg-primary\/10 {
   background-color: rgb(var(--primary) / 0.1);
+}
+
+.bg-primary\/5 {
+  background-color: rgb(var(--primary) / 0.05);
 }
 
 .bg-red-500 {
@@ -3074,9 +3126,24 @@ a {
   background-color: rgb(var(--success) / var(--tw-bg-opacity, 1));
 }
 
+.bg-success-100 {
+  --tw-bg-opacity: 1;
+  background-color: rgb(var(--success-100) / var(--tw-bg-opacity, 1));
+}
+
+.bg-success-200 {
+  --tw-bg-opacity: 1;
+  background-color: rgb(var(--success-200) / var(--tw-bg-opacity, 1));
+}
+
 .bg-success-300 {
   --tw-bg-opacity: 1;
   background-color: rgb(var(--success-300) / var(--tw-bg-opacity, 1));
+}
+
+.bg-success-50 {
+  --tw-bg-opacity: 1;
+  background-color: rgb(var(--success-50) / var(--tw-bg-opacity, 1));
 }
 
 .bg-success-50\/80 {
@@ -3105,6 +3172,10 @@ a {
   background-color: rgb(var(--surface-100) / var(--tw-bg-opacity, 1));
 }
 
+.bg-surface-100\/50 {
+  background-color: rgb(var(--surface-100) / 0.5);
+}
+
 .bg-surface-200 {
   --tw-bg-opacity: 1;
   background-color: rgb(var(--surface-200) / var(--tw-bg-opacity, 1));
@@ -3119,12 +3190,13 @@ a {
   background-color: rgb(var(--surface-50) / var(--tw-bg-opacity, 1));
 }
 
-.bg-surface-50\/30 {
-  background-color: rgb(var(--surface-50) / 0.3);
-}
-
 .bg-surface-50\/95 {
   background-color: rgb(var(--surface-50) / 0.95);
+}
+
+.bg-surface-800 {
+  --tw-bg-opacity: 1;
+  background-color: rgb(var(--surface-800) / var(--tw-bg-opacity, 1));
 }
 
 .bg-surface-800\/20 {
@@ -3144,9 +3216,17 @@ a {
   background-color: rgb(var(--surface-900) / var(--tw-bg-opacity, 1));
 }
 
+.bg-surface-900\/50 {
+  background-color: rgb(var(--surface-900) / 0.5);
+}
+
 .bg-surface-950 {
   --tw-bg-opacity: 1;
   background-color: rgb(var(--surface-950) / var(--tw-bg-opacity, 1));
+}
+
+.bg-surface-950\/50 {
+  background-color: rgb(var(--surface-950) / 0.5);
 }
 
 .bg-transparent {
@@ -3200,31 +3280,8 @@ a {
   background-color: rgb(255 255 255 / 0.05);
 }
 
-.bg-white\/80 {
-  background-color: rgb(255 255 255 / 0.8);
-}
-
 .bg-white\/90 {
   background-color: rgb(255 255 255 / 0.9);
-}
-
-.bg-gradient-to-br {
-  background-image: linear-gradient(to bottom right, var(--tw-gradient-stops));
-}
-
-.from-surface-50 {
-  --tw-gradient-from: rgb(var(--surface-50) / 1) var(--tw-gradient-from-position);
-  --tw-gradient-to: rgb(var(--surface-50) / 0) var(--tw-gradient-to-position);
-  --tw-gradient-stops: var(--tw-gradient-from), var(--tw-gradient-to);
-}
-
-.via-background {
-  --tw-gradient-to: rgb(var(--background) / 0)  var(--tw-gradient-to-position);
-  --tw-gradient-stops: var(--tw-gradient-from), rgb(var(--background) / 1) var(--tw-gradient-via-position), var(--tw-gradient-to);
-}
-
-.to-brand-50\/40 {
-  --tw-gradient-to: rgb(var(--brand-50) / 0.4) var(--tw-gradient-to-position);
 }
 
 .fill-muted-foreground {
@@ -3240,12 +3297,12 @@ a {
   padding: 0.25rem;
 }
 
-.p-1\.5 {
-  padding: 0.375rem;
-}
-
 .p-10 {
   padding: 2.5rem;
+}
+
+.p-12 {
+  padding: 3rem;
 }
 
 .p-2 {
@@ -3254,10 +3311,6 @@ a {
 
 .p-3 {
   padding: 0.75rem;
-}
-
-.p-3\.5 {
-  padding: 0.875rem;
 }
 
 .p-4 {
@@ -3284,11 +3337,6 @@ a {
 .px-1 {
   padding-left: 0.25rem;
   padding-right: 0.25rem;
-}
-
-.px-1\.5 {
-  padding-left: 0.375rem;
-  padding-right: 0.375rem;
 }
 
 .px-10 {
@@ -3326,19 +3374,14 @@ a {
   padding-right: 2rem;
 }
 
-.py-0\.5 {
-  padding-top: 0.125rem;
-  padding-bottom: 0.125rem;
+.py-0 {
+  padding-top: 0px;
+  padding-bottom: 0px;
 }
 
 .py-1 {
   padding-top: 0.25rem;
   padding-bottom: 0.25rem;
-}
-
-.py-1\.5 {
-  padding-top: 0.375rem;
-  padding-bottom: 0.375rem;
 }
 
 .py-12 {
@@ -3366,14 +3409,14 @@ a {
   padding-bottom: 5rem;
 }
 
+.py-24 {
+  padding-top: 6rem;
+  padding-bottom: 6rem;
+}
+
 .py-3 {
   padding-top: 0.75rem;
   padding-bottom: 0.75rem;
-}
-
-.py-3\.5 {
-  padding-top: 0.875rem;
-  padding-bottom: 0.875rem;
 }
 
 .py-4 {
@@ -3391,8 +3434,13 @@ a {
   padding-bottom: 1.5rem;
 }
 
-.pb-10 {
-  padding-bottom: 2.5rem;
+.py-8 {
+  padding-top: 2rem;
+  padding-bottom: 2rem;
+}
+
+.pb-0 {
+  padding-bottom: 0px;
 }
 
 .pb-3 {
@@ -3409,6 +3457,10 @@ a {
 
 .pl-10 {
   padding-left: 2.5rem;
+}
+
+.pl-2 {
+  padding-left: 0.5rem;
 }
 
 .pl-8 {
@@ -3445,10 +3497,6 @@ a {
 
 .pt-2 {
   padding-top: 0.5rem;
-}
-
-.pt-24 {
-  padding-top: 6rem;
 }
 
 .pt-4 {
@@ -3557,6 +3605,10 @@ a {
   font-size: 17px;
 }
 
+.text-\[9px\] {
+  font-size: 9px;
+}
+
 .text-base {
   font-size: 1rem;
   line-height: 1.5rem;
@@ -3610,6 +3662,11 @@ a {
   font-style: italic;
 }
 
+.tabular-nums {
+  --tw-numeric-spacing: tabular-nums;
+  font-variant-numeric: var(--tw-ordinal) var(--tw-slashed-zero) var(--tw-numeric-figure) var(--tw-numeric-spacing) var(--tw-numeric-fraction);
+}
+
 .leading-5 {
   line-height: 1.25rem;
 }
@@ -3620,18 +3677,6 @@ a {
 
 .leading-8 {
   line-height: 2rem;
-}
-
-.leading-\[1\.1\] {
-  line-height: 1.1;
-}
-
-.leading-\[1\.55\] {
-  line-height: 1.55;
-}
-
-.leading-\[1\.6\] {
-  line-height: 1.6;
 }
 
 .leading-none {
@@ -3650,40 +3695,12 @@ a {
   line-height: 1.25;
 }
 
-.tracking-\[0\.01em\] {
-  letter-spacing: 0.01em;
-}
-
 .tracking-\[0\.12em\] {
   letter-spacing: 0.12em;
 }
 
 .tracking-\[0\.16em\] {
   letter-spacing: 0.16em;
-}
-
-.tracking-\[0\.18em\] {
-  letter-spacing: 0.18em;
-}
-
-.tracking-\[0\.22em\] {
-  letter-spacing: 0.22em;
-}
-
-.tracking-\[0\.24em\] {
-  letter-spacing: 0.24em;
-}
-
-.tracking-\[0\.28em\] {
-  letter-spacing: 0.28em;
-}
-
-.tracking-\[0\.2em\] {
-  letter-spacing: 0.2em;
-}
-
-.tracking-\[0\.32em\] {
-  letter-spacing: 0.32em;
 }
 
 .tracking-tight {
@@ -3709,6 +3726,11 @@ a {
 .text-brand-100 {
   --tw-text-opacity: 1;
   color: rgb(var(--brand-100) / var(--tw-text-opacity, 1));
+}
+
+.text-brand-600 {
+  --tw-text-opacity: 1;
+  color: rgb(var(--brand-600) / var(--tw-text-opacity, 1));
 }
 
 .text-brand-700 {
@@ -3748,6 +3770,11 @@ a {
 .text-info-400 {
   --tw-text-opacity: 1;
   color: rgb(var(--info-400) / var(--tw-text-opacity, 1));
+}
+
+.text-info-700 {
+  --tw-text-opacity: 1;
+  color: rgb(var(--info-700) / var(--tw-text-opacity, 1));
 }
 
 .text-muted-foreground {
@@ -3804,6 +3831,11 @@ a {
   color: rgb(var(--success-500) / var(--tw-text-opacity, 1));
 }
 
+.text-success-600 {
+  --tw-text-opacity: 1;
+  color: rgb(var(--success-600) / var(--tw-text-opacity, 1));
+}
+
 .text-success-700 {
   --tw-text-opacity: 1;
   color: rgb(var(--success-700) / var(--tw-text-opacity, 1));
@@ -3847,6 +3879,11 @@ a {
 .text-surface-700 {
   --tw-text-opacity: 1;
   color: rgb(var(--surface-700) / var(--tw-text-opacity, 1));
+}
+
+.text-surface-800 {
+  --tw-text-opacity: 1;
+  color: rgb(var(--surface-800) / var(--tw-text-opacity, 1));
 }
 
 .text-surface-900 {
@@ -3894,10 +3931,6 @@ a {
   color: rgb(255 255 255 / var(--tw-text-opacity, 1));
 }
 
-.text-white\/40 {
-  color: rgb(255 255 255 / 0.4);
-}
-
 .text-white\/55 {
   color: rgb(255 255 255 / 0.55);
 }
@@ -3927,6 +3960,10 @@ a {
   -moz-osx-font-smoothing: grayscale;
 }
 
+.opacity-25 {
+  opacity: 0.25;
+}
+
 .opacity-40 {
   opacity: 0.4;
 }
@@ -3943,14 +3980,12 @@ a {
   opacity: 0.7;
 }
 
-.opacity-90 {
-  opacity: 0.9;
+.opacity-75 {
+  opacity: 0.75;
 }
 
-.\!shadow-none {
-  --tw-shadow: 0 0 #0000 !important;
-  --tw-shadow-colored: 0 0 #0000 !important;
-  box-shadow: var(--tw-ring-offset-shadow, 0 0 #0000), var(--tw-ring-shadow, 0 0 #0000), var(--tw-shadow) !important;
+.opacity-90 {
+  opacity: 0.9;
 }
 
 .shadow {
@@ -3972,21 +4007,26 @@ a {
 }
 
 .shadow-premium {
-  --tw-shadow: 0 10px 30px rgba(0, 0, 0, 0.08), 0 1px 3px rgba(0, 0, 0, 0.05);
-  --tw-shadow-colored: 0 10px 30px var(--tw-shadow-color), 0 1px 3px var(--tw-shadow-color);
+  --tw-shadow: 0 1px 2px rgb(9 9 11 / 0.04), 0 6px 16px rgb(9 9 11 / 0.06);
+  --tw-shadow-colored: 0 1px 2px var(--tw-shadow-color), 0 6px 16px var(--tw-shadow-color);
   box-shadow: var(--tw-ring-offset-shadow, 0 0 #0000), var(--tw-ring-shadow, 0 0 #0000), var(--tw-shadow);
 }
 
 .shadow-premium-hover {
-  --tw-shadow: 0 20px 40px rgba(0, 0, 0, 0.12);
-  --tw-shadow-colored: 0 20px 40px var(--tw-shadow-color);
+  --tw-shadow: 0 1px 2px rgb(9 9 11 / 0.05), 0 10px 24px rgb(9 9 11 / 0.09);
+  --tw-shadow-colored: 0 1px 2px var(--tw-shadow-color), 0 10px 24px var(--tw-shadow-color);
   box-shadow: var(--tw-ring-offset-shadow, 0 0 #0000), var(--tw-ring-shadow, 0 0 #0000), var(--tw-shadow);
 }
 
-.shadow-premium-sm {
-  --tw-shadow: 0 4px 12px rgba(0, 0, 0, 0.05);
-  --tw-shadow-colored: 0 4px 12px var(--tw-shadow-color);
+.shadow-sm {
+  --tw-shadow: 0 1px 2px 0 rgb(0 0 0 / 0.05);
+  --tw-shadow-colored: 0 1px 2px 0 var(--tw-shadow-color);
   box-shadow: var(--tw-ring-offset-shadow, 0 0 #0000), var(--tw-ring-shadow, 0 0 #0000), var(--tw-shadow);
+}
+
+.shadow-primary\/20 {
+  --tw-shadow-color: rgb(var(--primary) / 0.2);
+  --tw-shadow: var(--tw-shadow-colored);
 }
 
 .outline-none {
@@ -4008,6 +4048,12 @@ a {
 
 .outline-warning {
   outline-color: rgb(var(--warning) / 1);
+}
+
+.ring {
+  --tw-ring-offset-shadow: var(--tw-ring-inset) 0 0 0 var(--tw-ring-offset-width) var(--tw-ring-offset-color);
+  --tw-ring-shadow: var(--tw-ring-inset) 0 0 0 calc(3px + var(--tw-ring-offset-width)) var(--tw-ring-color);
+  box-shadow: var(--tw-ring-offset-shadow), var(--tw-ring-shadow), var(--tw-shadow, 0 0 #0000);
 }
 
 .ring-0 {
@@ -4144,16 +4190,694 @@ a {
   transition-timing-function: cubic-bezier(0, 0, 0.2, 1);
 }
 
+.ease-premium {
+  transition-timing-function: cubic-bezier(0.23, 1, 0.32, 1);
+}
+
+.dark .bg-white {
+  background-color: rgb(var(--card) / var(--tw-bg-opacity, 1));
+}
+
+.dark .bg-white\/80 {
+  background-color: rgb(var(--card) / 0.8);
+}
+
+.dark .bg-white\/90 {
+  background-color: rgb(var(--card) / 0.9);
+}
+
+.dark .bg-surface-950 {
+  background-color: rgb(9 9 11 / var(--tw-bg-opacity, 1)) !important;
+}
+
+.dark .bg-surface-900 {
+  background-color: rgb(24 24 27 / var(--tw-bg-opacity, 1)) !important;
+}
+
+.dark .bg-surface-800 {
+  background-color: rgb(39 39 42 / var(--tw-bg-opacity, 1)) !important;
+}
+
+.dark [class~="bg-surface-950/50"] {
+  background-color: rgb(9 9 11 / 0.5) !important;
+}
+
+.dark [class~="bg-surface-900/50"] {
+  background-color: rgb(24 24 27 / 0.5) !important;
+}
+
+.dark [class~="bg-surface-100/50"],
+  .dark [class~="hover:bg-surface-100/50"]:hover {
+  background-color: rgb(24 24 27 / 0.5) !important;
+}
+
+.dark .bg-success-300.text-surface-950,
+  .dark .bg-success-200.text-surface-950,
+  .dark .bg-success-100.text-surface-950 {
+  color: rgb(9 9 11) !important;
+  -webkit-text-fill-color: rgb(9 9 11) !important;
+}
+
+.dark .hover\:bg-surface-950:hover {
+  background-color: rgb(9 9 11 / var(--tw-bg-opacity, 1)) !important;
+}
+
+.dark .hover\:bg-surface-900:hover {
+  background-color: rgb(24 24 27 / var(--tw-bg-opacity, 1)) !important;
+}
+
+.dark .hover\:bg-surface-800:hover {
+  background-color: rgb(39 39 42 / var(--tw-bg-opacity, 1)) !important;
+}
+
+.dark .border-surface-950,
+  .dark .border-surface-900,
+  .dark .border-surface-800 {
+  border-color: rgb(63 63 70 / var(--tw-border-opacity, 1)) !important;
+}
+
+.dark .text-brand-700 {
+  color: rgb(var(--brand-400) / var(--tw-text-opacity, 1));
+}
+
+.dark .text-warning-700 {
+  color: rgb(var(--warning-400) / var(--tw-text-opacity, 1));
+}
+
+.dark .text-success-700 {
+  color: rgb(var(--success-400) / var(--tw-text-opacity, 1));
+}
+
+.dark .text-info-700 {
+  color: rgb(var(--info-400) / var(--tw-text-opacity, 1));
+}
+
+.dark .text-primary {
+  color: rgb(var(--brand-400) / var(--tw-text-opacity, 1)) !important;
+}
+
+.dark .apex-auth-notice {
+  color: rgb(var(--foreground)) !important;
+  border-color: rgba(255, 255, 255, 0.14) !important;
+  background-color: rgb(var(--card) / 0.92) !important;
+}
+
+.dark .apex-auth-notice p {
+  color: inherit !important;
+}
+
+.dark .apex-auth-notice[data-intent="success"] {
+  color: rgb(220 252 231) !important;
+  border-color: rgb(var(--success-400) / 0.5) !important;
+  background-color: rgb(20 83 45 / 0.28) !important;
+}
+
+.dark .apex-auth-notice[data-intent="warning"] {
+  color: rgb(254 243 199) !important;
+  border-color: rgb(var(--warning-400) / 0.52) !important;
+  background-color: rgb(120 53 15 / 0.3) !important;
+}
+
+.dark .apex-auth-notice[data-intent="error"] {
+  color: rgb(254 226 226) !important;
+  border-color: rgb(var(--brand-400) / 0.58) !important;
+  background-color: rgb(127 29 29 / 0.3) !important;
+}
+
+.dark .apex-auth-notice[data-intent="info"] {
+  color: rgb(207 250 254) !important;
+  border-color: rgb(var(--info-500) / 0.5) !important;
+  background-color: rgb(8 51 68 / 0.32) !important;
+}
+
+.dark .text-surface-50,
+  .dark .text-surface-100,
+  .dark .text-surface-200,
+  .dark .text-surface-300 {
+  color: rgb(228 228 231 / var(--tw-text-opacity, 1)) !important;
+}
+
+.dark .text-surface-400,
+  .dark .text-surface-500 {
+  color: rgb(161 161 170 / var(--tw-text-opacity, 1)) !important;
+}
+
+.dark .apex-console-shell .text-surface-50,
+  .dark .apex-console-shell .text-surface-100,
+  .dark .apex-console-shell .text-surface-200,
+  .dark .apex-console-shell .text-surface-300,
+  .dark .apex-cp-shell .text-surface-50,
+  .dark .apex-cp-shell .text-surface-100,
+  .dark .apex-cp-shell .text-surface-200,
+  .dark .apex-cp-shell .text-surface-300 {
+  color: rgb(228 228 231 / var(--tw-text-opacity, 1)) !important;
+}
+
+.dark .apex-console-shell .text-surface-400,
+  .dark .apex-console-shell .text-surface-500,
+  .dark .apex-cp-shell .text-surface-400,
+  .dark .apex-cp-shell .text-surface-500 {
+  color: rgb(161 161 170 / var(--tw-text-opacity, 1)) !important;
+}
+
+.dark .apex-console-shell,
+  .dark .apex-cp-shell {
+  color: rgb(var(--foreground));
+  background: rgb(var(--background));
+}
+
+.dark .apex-console-main,
+  .dark .apex-cp-main {
+  background-color: rgb(var(--background));
+  background-image:
+      radial-gradient(circle at top, rgb(var(--primary) / 0.12), transparent 38%),
+      linear-gradient(rgba(255, 255, 255, 0.025) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(255, 255, 255, 0.025) 1px, transparent 1px);
+  background-size: 100% 520px, 80px 80px, 80px 80px;
+  background-attachment: scroll, local, local;
+}
+
+.dark .apex-console-header {
+  background: rgb(var(--card));
+  border-color: rgba(255, 255, 255, 0.1);
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.04);
+}
+
+.dark .apex-console-search input,
+  .dark .apex-console-shell input,
+  .dark .apex-console-shell textarea,
+  .dark .apex-console-shell select,
+  .dark .apex-cp-shell input,
+  .dark .apex-cp-shell textarea,
+  .dark .apex-cp-shell select {
+  background-color: rgb(var(--card));
+  border-color: rgba(255, 255, 255, 0.12);
+  color: rgb(var(--foreground));
+  -webkit-text-fill-color: rgb(var(--foreground));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+}
+
+.dark .apex-console-search input:focus,
+  .dark .apex-console-shell input:focus,
+  .dark .apex-console-shell textarea:focus,
+  .dark .apex-console-shell select:focus,
+  .dark .apex-cp-shell input:focus,
+  .dark .apex-cp-shell textarea:focus,
+  .dark .apex-cp-shell select:focus {
+  border-color: rgb(var(--primary));
+  box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.04),
+      0 0 0 3px rgb(var(--primary) / 0.22);
+}
+
+.dark .apex-card.apex-card,
+  .dark .apex-panel,
+  .dark .apex-signal-card,
+  .dark .apex-ops-board {
+  background: rgb(var(--card));
+  border-color: rgba(255, 255, 255, 0.1) !important;
+  box-shadow:
+      0 1px 2px rgb(0 0 0 / 0.24),
+      0 8px 20px rgb(0 0 0 / 0.3);
+}
+
+.dark .apex-card.apex-card:hover,
+  .dark .apex-panel:hover,
+  .dark .apex-signal-card:hover {
+  border-color: rgba(255, 255, 255, 0.16) !important;
+  box-shadow:
+      0 1px 2px rgb(0 0 0 / 0.28),
+      0 12px 28px rgb(0 0 0 / 0.38);
+}
+
+.dark .apex-page-hero {
+  background: rgb(var(--card));
+  border-color: rgba(255, 255, 255, 0.1);
+  color: #fff;
+  box-shadow:
+      0 1px 2px rgb(0 0 0 / 0.24),
+      0 8px 20px rgb(0 0 0 / 0.3);
+}
+
+.dark .apex-hero-copy,
+  .dark .apex-hero-stat-grid span {
+  color: rgb(var(--surface-600));
+}
+
+.dark .apex-hero-stat-grid strong {
+  color: #fff;
+}
+
+.dark .apex-table-wrap {
+  background: rgb(var(--card));
+  border-color: rgba(255, 255, 255, 0.1);
+}
+
+.dark .apex-table thead,
+  .dark .apex-table thead tr,
+  .dark .apex-table thead th {
+  background: linear-gradient(180deg, #18181b 0%, #0b0b0d 100%);
+}
+
+.dark .apex-table th {
+  color: rgba(255, 255, 255, 0.78);
+  border-bottom-color: rgba(255, 255, 255, 0.08);
+}
+
+.dark .apex-table td {
+  border-color: rgba(255, 255, 255, 0.08);
+}
+
+.dark .apex-table tbody tr:hover {
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.dark .apex-inventory-head {
+  background:
+      linear-gradient(180deg, rgba(255, 255, 255, 0.035) 0%, rgba(255, 255, 255, 0.015) 100%),
+      rgb(var(--card));
+}
+
+.dark .apex-inventory-empty,
+  .dark .apex-chart-empty {
+  background:
+      radial-gradient(70% 70% at 50% 20%, rgb(var(--primary) / 0.08), transparent 70%);
+}
+
+.dark .apex-empty-state {
+  background:
+      radial-gradient(80% 80% at 50% 0%, rgb(var(--primary) / 0.10), transparent 70%);
+  border-color: rgba(255, 255, 255, 0.16);
+}
+
+.dark .apex-chart-card {
+  background:
+      linear-gradient(180deg, rgba(255, 255, 255, 0.035) 0%, rgba(255, 255, 255, 0.015) 100%),
+      rgb(var(--card));
+}
+
+.dark .apex-cp-hero {
+  border-color: rgba(255, 255, 255, 0.1);
+  background:
+      radial-gradient(120% 80% at 0% 0%, rgb(var(--primary) / 0.12), transparent 56%),
+      linear-gradient(180deg, #18181b 0%, #101012 100%);
+  box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.07),
+      0 24px 58px rgba(0, 0, 0, 0.42),
+      0 2px 8px rgba(0, 0, 0, 0.28);
+}
+
+.dark .apex-cp-hero-side {
+  border-color: rgba(255, 255, 255, 0.1);
+  background:
+      radial-gradient(120% 100% at 100% 0%, rgb(var(--primary) / 0.12), transparent 60%),
+      linear-gradient(135deg, #111114 0%, #09090b 66%, #050507 100%);
+}
+
+.dark .apex-cp-stat-tile,
+  .dark .apex-cp-region-row {
+  background:
+      linear-gradient(180deg, rgba(255, 255, 255, 0.045) 0%, rgba(255, 255, 255, 0.018) 100%),
+      rgb(24 24 27);
+  border-color: rgba(255, 255, 255, 0.1);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
+}
+
+.dark .apex-cp-stat-tile:hover {
+  border-color: rgba(255, 255, 255, 0.18);
+  box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.08),
+      0 12px 24px rgba(0, 0, 0, 0.28);
+}
+
+.dark .apex-cp-stat-label,
+  .dark .apex-cp-stat-help {
+  color: rgb(var(--muted-foreground));
+}
+
+.dark .apex-cp-stat-value {
+  color: rgb(var(--foreground));
+}
+
+.dark .apex-cp-launch-step:hover {
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.dark input.bg-background,
+  .dark input.bg-white\/90,
+  .dark textarea.bg-background,
+  .dark select.bg-background {
+  background-color: rgb(var(--background) / var(--tw-bg-opacity, 1)) !important;
+  color: rgb(var(--foreground) / var(--tw-text-opacity, 1)) !important;
+  -webkit-text-fill-color: rgb(var(--foreground) / var(--tw-text-opacity, 1)) !important;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not(.light) .bg-white {
+    background-color: rgb(var(--card) / var(--tw-bg-opacity, 1));
+  }
+
+  :root:not(.light) .bg-white\/80 {
+    background-color: rgb(var(--card) / 0.8);
+  }
+
+  :root:not(.light) .bg-white\/90 {
+    background-color: rgb(var(--card) / 0.9);
+  }
+
+  :root:not(.light) .bg-surface-950 {
+    background-color: rgb(9 9 11 / var(--tw-bg-opacity, 1)) !important;
+  }
+
+  :root:not(.light) .bg-surface-900 {
+    background-color: rgb(24 24 27 / var(--tw-bg-opacity, 1)) !important;
+  }
+
+  :root:not(.light) .bg-surface-800 {
+    background-color: rgb(39 39 42 / var(--tw-bg-opacity, 1)) !important;
+  }
+
+  :root:not(.light) [class~="bg-surface-950/50"] {
+    background-color: rgb(9 9 11 / 0.5) !important;
+  }
+
+  :root:not(.light) [class~="bg-surface-900/50"] {
+    background-color: rgb(24 24 27 / 0.5) !important;
+  }
+
+  :root:not(.light) [class~="bg-surface-100/50"],
+    :root:not(.light) [class~="hover:bg-surface-100/50"]:hover {
+    background-color: rgb(24 24 27 / 0.5) !important;
+  }
+
+  :root:not(.light) .bg-success-300.text-surface-950,
+    :root:not(.light) .bg-success-200.text-surface-950,
+    :root:not(.light) .bg-success-100.text-surface-950 {
+    color: rgb(9 9 11) !important;
+    -webkit-text-fill-color: rgb(9 9 11) !important;
+  }
+
+  :root:not(.light) .hover\:bg-surface-950:hover {
+    background-color: rgb(9 9 11 / var(--tw-bg-opacity, 1)) !important;
+  }
+
+  :root:not(.light) .hover\:bg-surface-900:hover {
+    background-color: rgb(24 24 27 / var(--tw-bg-opacity, 1)) !important;
+  }
+
+  :root:not(.light) .hover\:bg-surface-800:hover {
+    background-color: rgb(39 39 42 / var(--tw-bg-opacity, 1)) !important;
+  }
+
+  :root:not(.light) .border-surface-950,
+    :root:not(.light) .border-surface-900,
+    :root:not(.light) .border-surface-800 {
+    border-color: rgb(63 63 70 / var(--tw-border-opacity, 1)) !important;
+  }
+
+  :root:not(.light) .text-brand-700 {
+    color: rgb(var(--brand-400) / var(--tw-text-opacity, 1));
+  }
+
+  :root:not(.light) .text-warning-700 {
+    color: rgb(var(--warning-400) / var(--tw-text-opacity, 1));
+  }
+
+  :root:not(.light) .text-success-700 {
+    color: rgb(var(--success-400) / var(--tw-text-opacity, 1));
+  }
+
+  :root:not(.light) .text-info-700 {
+    color: rgb(var(--info-400) / var(--tw-text-opacity, 1));
+  }
+
+  :root:not(.light) .text-primary {
+    color: rgb(var(--brand-400) / var(--tw-text-opacity, 1)) !important;
+  }
+
+  :root:not(.light) .apex-auth-notice {
+    color: rgb(var(--foreground)) !important;
+    border-color: rgba(255, 255, 255, 0.14) !important;
+    background-color: rgb(var(--card) / 0.92) !important;
+  }
+
+  :root:not(.light) .apex-auth-notice p {
+    color: inherit !important;
+  }
+
+  :root:not(.light) .apex-auth-notice[data-intent="success"] {
+    color: rgb(220 252 231) !important;
+    border-color: rgb(var(--success-400) / 0.5) !important;
+    background-color: rgb(20 83 45 / 0.28) !important;
+  }
+
+  :root:not(.light) .apex-auth-notice[data-intent="warning"] {
+    color: rgb(254 243 199) !important;
+    border-color: rgb(var(--warning-400) / 0.52) !important;
+    background-color: rgb(120 53 15 / 0.3) !important;
+  }
+
+  :root:not(.light) .apex-auth-notice[data-intent="error"] {
+    color: rgb(254 226 226) !important;
+    border-color: rgb(var(--brand-400) / 0.58) !important;
+    background-color: rgb(127 29 29 / 0.3) !important;
+  }
+
+  :root:not(.light) .apex-auth-notice[data-intent="info"] {
+    color: rgb(207 250 254) !important;
+    border-color: rgb(var(--info-500) / 0.5) !important;
+    background-color: rgb(8 51 68 / 0.32) !important;
+  }
+
+  :root:not(.light) .text-surface-50,
+    :root:not(.light) .text-surface-100,
+    :root:not(.light) .text-surface-200,
+    :root:not(.light) .text-surface-300 {
+    color: rgb(228 228 231 / var(--tw-text-opacity, 1)) !important;
+  }
+
+  :root:not(.light) .text-surface-400,
+    :root:not(.light) .text-surface-500 {
+    color: rgb(161 161 170 / var(--tw-text-opacity, 1)) !important;
+  }
+
+  :root:not(.light) .apex-console-shell .text-surface-50,
+    :root:not(.light) .apex-console-shell .text-surface-100,
+    :root:not(.light) .apex-console-shell .text-surface-200,
+    :root:not(.light) .apex-console-shell .text-surface-300,
+    :root:not(.light) .apex-cp-shell .text-surface-50,
+    :root:not(.light) .apex-cp-shell .text-surface-100,
+    :root:not(.light) .apex-cp-shell .text-surface-200,
+    :root:not(.light) .apex-cp-shell .text-surface-300 {
+    color: rgb(228 228 231 / var(--tw-text-opacity, 1)) !important;
+  }
+
+  :root:not(.light) .apex-console-shell .text-surface-400,
+    :root:not(.light) .apex-console-shell .text-surface-500,
+    :root:not(.light) .apex-cp-shell .text-surface-400,
+    :root:not(.light) .apex-cp-shell .text-surface-500 {
+    color: rgb(161 161 170 / var(--tw-text-opacity, 1)) !important;
+  }
+
+  :root:not(.light) .apex-console-shell,
+    :root:not(.light) .apex-cp-shell {
+    color: rgb(var(--foreground));
+    background: rgb(var(--background));
+  }
+
+  :root:not(.light) .apex-console-main,
+    :root:not(.light) .apex-cp-main {
+    background-color: rgb(var(--background));
+    background-image:
+        radial-gradient(circle at top, rgb(var(--primary) / 0.12), transparent 38%),
+        linear-gradient(rgba(255, 255, 255, 0.025) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(255, 255, 255, 0.025) 1px, transparent 1px);
+    background-size: 100% 520px, 80px 80px, 80px 80px;
+    background-attachment: scroll, local, local;
+  }
+
+  :root:not(.light) .apex-console-header {
+    background: rgb(var(--card));
+    border-color: rgba(255, 255, 255, 0.1);
+    box-shadow: 0 1px 0 rgba(255, 255, 255, 0.04);
+  }
+
+  :root:not(.light) .apex-console-search input,
+    :root:not(.light) .apex-console-shell input,
+    :root:not(.light) .apex-console-shell textarea,
+    :root:not(.light) .apex-console-shell select,
+    :root:not(.light) .apex-cp-shell input,
+    :root:not(.light) .apex-cp-shell textarea,
+    :root:not(.light) .apex-cp-shell select {
+    background-color: rgb(var(--card));
+    border-color: rgba(255, 255, 255, 0.12);
+    color: rgb(var(--foreground));
+    -webkit-text-fill-color: rgb(var(--foreground));
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  }
+
+  :root:not(.light) .apex-console-search input:focus,
+    :root:not(.light) .apex-console-shell input:focus,
+    :root:not(.light) .apex-console-shell textarea:focus,
+    :root:not(.light) .apex-console-shell select:focus,
+    :root:not(.light) .apex-cp-shell input:focus,
+    :root:not(.light) .apex-cp-shell textarea:focus,
+    :root:not(.light) .apex-cp-shell select:focus {
+    border-color: rgb(var(--primary));
+    box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.04),
+        0 0 0 3px rgb(var(--primary) / 0.22);
+  }
+
+  :root:not(.light) .apex-card.apex-card,
+    :root:not(.light) .apex-panel,
+    :root:not(.light) .apex-signal-card,
+    :root:not(.light) .apex-ops-board {
+    background: rgb(var(--card));
+    border-color: rgba(255, 255, 255, 0.1) !important;
+    box-shadow:
+        0 1px 2px rgb(0 0 0 / 0.24),
+        0 8px 20px rgb(0 0 0 / 0.3);
+  }
+
+  :root:not(.light) .apex-card.apex-card:hover,
+    :root:not(.light) .apex-panel:hover,
+    :root:not(.light) .apex-signal-card:hover {
+    border-color: rgba(255, 255, 255, 0.16) !important;
+    box-shadow:
+        0 1px 2px rgb(0 0 0 / 0.28),
+        0 12px 28px rgb(0 0 0 / 0.38);
+  }
+
+  :root:not(.light) .apex-page-hero {
+    background: rgb(var(--card));
+    border-color: rgba(255, 255, 255, 0.1);
+    color: #fff;
+    box-shadow:
+        0 1px 2px rgb(0 0 0 / 0.24),
+        0 8px 20px rgb(0 0 0 / 0.3);
+  }
+
+  :root:not(.light) .apex-hero-copy,
+    :root:not(.light) .apex-hero-stat-grid span {
+    color: rgb(var(--surface-600));
+  }
+
+  :root:not(.light) .apex-hero-stat-grid strong {
+    color: #fff;
+  }
+
+  :root:not(.light) .apex-table-wrap {
+    background: rgb(var(--card));
+    border-color: rgba(255, 255, 255, 0.1);
+  }
+
+  :root:not(.light) .apex-table thead,
+    :root:not(.light) .apex-table thead tr,
+    :root:not(.light) .apex-table thead th {
+    background: linear-gradient(180deg, #18181b 0%, #0b0b0d 100%);
+  }
+
+  :root:not(.light) .apex-table th {
+    color: rgba(255, 255, 255, 0.78);
+    border-bottom-color: rgba(255, 255, 255, 0.08);
+  }
+
+  :root:not(.light) .apex-table td {
+    border-color: rgba(255, 255, 255, 0.08);
+  }
+
+  :root:not(.light) .apex-table tbody tr:hover {
+    background: rgba(255, 255, 255, 0.04);
+  }
+
+  :root:not(.light) .apex-inventory-head {
+    background:
+        linear-gradient(180deg, rgba(255, 255, 255, 0.035) 0%, rgba(255, 255, 255, 0.015) 100%),
+        rgb(var(--card));
+  }
+
+  :root:not(.light) .apex-inventory-empty,
+    :root:not(.light) .apex-chart-empty {
+    background:
+        radial-gradient(70% 70% at 50% 20%, rgb(var(--primary) / 0.08), transparent 70%);
+  }
+
+  :root:not(.light) .apex-empty-state {
+    background:
+        radial-gradient(80% 80% at 50% 0%, rgb(var(--primary) / 0.10), transparent 70%);
+    border-color: rgba(255, 255, 255, 0.16);
+  }
+
+  :root:not(.light) .apex-chart-card {
+    background:
+        linear-gradient(180deg, rgba(255, 255, 255, 0.035) 0%, rgba(255, 255, 255, 0.015) 100%),
+        rgb(var(--card));
+  }
+
+  :root:not(.light) .apex-cp-hero {
+    border-color: rgba(255, 255, 255, 0.1);
+    background:
+        radial-gradient(120% 80% at 0% 0%, rgb(var(--primary) / 0.12), transparent 56%),
+        linear-gradient(180deg, #18181b 0%, #101012 100%);
+    box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.07),
+        0 24px 58px rgba(0, 0, 0, 0.42),
+        0 2px 8px rgba(0, 0, 0, 0.28);
+  }
+
+  :root:not(.light) .apex-cp-hero-side {
+    border-color: rgba(255, 255, 255, 0.1);
+    background:
+        radial-gradient(120% 100% at 100% 0%, rgb(var(--primary) / 0.12), transparent 60%),
+        linear-gradient(135deg, #111114 0%, #09090b 66%, #050507 100%);
+  }
+
+  :root:not(.light) .apex-cp-stat-tile,
+    :root:not(.light) .apex-cp-region-row {
+    background:
+        linear-gradient(180deg, rgba(255, 255, 255, 0.045) 0%, rgba(255, 255, 255, 0.018) 100%),
+        rgb(24 24 27);
+    border-color: rgba(255, 255, 255, 0.1);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
+  }
+
+  :root:not(.light) .apex-cp-stat-tile:hover {
+    border-color: rgba(255, 255, 255, 0.18);
+    box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.08),
+        0 12px 24px rgba(0, 0, 0, 0.28);
+  }
+
+  :root:not(.light) .apex-cp-stat-label,
+    :root:not(.light) .apex-cp-stat-help {
+    color: rgb(var(--muted-foreground));
+  }
+
+  :root:not(.light) .apex-cp-stat-value {
+    color: rgb(var(--foreground));
+  }
+
+  :root:not(.light) .apex-cp-launch-step:hover {
+    background: rgba(255, 255, 255, 0.04);
+  }
+
+  :root:not(.light) input.bg-background,
+    :root:not(.light) input.bg-white\/90,
+    :root:not(.light) textarea.bg-background,
+    :root:not(.light) select.bg-background {
+    background-color: rgb(var(--background) / var(--tw-bg-opacity, 1)) !important;
+    color: rgb(var(--foreground) / var(--tw-text-opacity, 1)) !important;
+    -webkit-text-fill-color: rgb(var(--foreground) / var(--tw-text-opacity, 1)) !important;
+  }
+}
+
 .transition-premium {
   transition-property: color, background-color, border-color, text-decoration-color, fill, stroke, opacity, box-shadow, transform, filter, -webkit-backdrop-filter;
   transition-property: color, background-color, border-color, text-decoration-color, fill, stroke, opacity, box-shadow, transform, filter, backdrop-filter;
   transition-property: color, background-color, border-color, text-decoration-color, fill, stroke, opacity, box-shadow, transform, filter, backdrop-filter, -webkit-backdrop-filter;
   transition-duration: 180ms;
   transition-timing-function: cubic-bezier(0.23, 1, 0.32, 1);
-}
-
-.shadow-premium-primary\/25 {
-  box-shadow: 0 18px 36px rgb(var(--primary) / 0.25);
 }
 
 .shadow-premium-black\/30 {
@@ -4176,12 +4900,6 @@ a {
   --tw-space-y-reverse: 0;
   margin-top: calc(0.25rem * calc(1 - var(--tw-space-y-reverse)));
   margin-bottom: calc(0.25rem * var(--tw-space-y-reverse));
-}
-
-.space-y-1\.5 > :not([hidden]):not(.hidden):not(.sr-only) ~ :not([hidden]):not(.hidden):not(.sr-only) {
-  --tw-space-y-reverse: 0;
-  margin-top: calc(0.375rem * calc(1 - var(--tw-space-y-reverse)));
-  margin-bottom: calc(0.375rem * var(--tw-space-y-reverse));
 }
 
 .space-y-2 > :not([hidden]):not(.hidden):not(.sr-only) ~ :not([hidden]):not(.hidden):not(.sr-only) {
@@ -4279,11 +4997,6 @@ a {
   font-display: swap;
 }
 
-
-  .apex-cp-sidebar .\[\&_tr\]\:border-b tr {
-  border-color: rgba(255, 255, 255, 0.1);
-}
-
 .file\:border-0::file-selector-button {
   border-width: 0px;
 }
@@ -4319,6 +5032,75 @@ a {
 .placeholder\:text-surface-400::placeholder {
   --tw-text-opacity: 1;
   color: rgb(var(--surface-400) / var(--tw-text-opacity, 1));
+}
+
+.dark .placeholder\:text-surface-400::-moz-placeholder {
+  color: rgb(161 161 170 / var(--tw-text-opacity, 1)) !important;
+}
+
+.dark .placeholder\:text-surface-400::placeholder {
+  color: rgb(161 161 170 / var(--tw-text-opacity, 1)) !important;
+}
+
+.dark .apex-console-shell .placeholder\:text-surface-400::-moz-placeholder, .dark .apex-cp-shell .placeholder\:text-surface-400::-moz-placeholder {
+  color: rgb(161 161 170 / var(--tw-text-opacity, 1)) !important;
+}
+
+.dark .apex-console-shell .placeholder\:text-surface-400::placeholder,
+  .dark .apex-cp-shell .placeholder\:text-surface-400::placeholder {
+  color: rgb(161 161 170 / var(--tw-text-opacity, 1)) !important;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not(.light) .placeholder\:text-surface-400::-moz-placeholder {
+    color: rgb(161 161 170 / var(--tw-text-opacity, 1)) !important;
+  }
+  :root:not(.light) .placeholder\:text-surface-400::placeholder {
+    color: rgb(161 161 170 / var(--tw-text-opacity, 1)) !important;
+  }
+
+  :root:not(.light) .apex-console-shell .placeholder\:text-surface-400::-moz-placeholder, :root:not(.light) .apex-cp-shell .placeholder\:text-surface-400::-moz-placeholder {
+    color: rgb(161 161 170 / var(--tw-text-opacity, 1)) !important;
+  }
+
+  :root:not(.light) .apex-console-shell .placeholder\:text-surface-400::placeholder,
+    :root:not(.light) .apex-cp-shell .placeholder\:text-surface-400::placeholder {
+    color: rgb(161 161 170 / var(--tw-text-opacity, 1)) !important;
+  }
+
+  :root:not(.light) .placeholder\:text-surface-400::-moz-placeholder {
+    color: rgb(161 161 170 / var(--tw-text-opacity, 1)) !important;
+  }
+
+  :root:not(.light) .placeholder\:text-surface-400::placeholder {
+    color: rgb(161 161 170 / var(--tw-text-opacity, 1)) !important;
+  }
+
+  :root:not(.light) .apex-console-shell .placeholder\:text-surface-400::-moz-placeholder, :root:not(.light) .apex-cp-shell .placeholder\:text-surface-400::-moz-placeholder {
+    color: rgb(161 161 170 / var(--tw-text-opacity, 1)) !important;
+  }
+
+  :root:not(.light) .apex-console-shell .placeholder\:text-surface-400::placeholder,
+    :root:not(.light) .apex-cp-shell .placeholder\:text-surface-400::placeholder {
+    color: rgb(161 161 170 / var(--tw-text-opacity, 1)) !important;
+  }
+
+  :root:not(.light) .placeholder\:text-surface-400::-moz-placeholder {
+    color: rgb(161 161 170 / var(--tw-text-opacity, 1)) !important;
+  }
+
+  :root:not(.light) .placeholder\:text-surface-400::placeholder {
+    color: rgb(161 161 170 / var(--tw-text-opacity, 1)) !important;
+  }
+
+  :root:not(.light) .apex-console-shell .placeholder\:text-surface-400::-moz-placeholder, :root:not(.light) .apex-cp-shell .placeholder\:text-surface-400::-moz-placeholder {
+    color: rgb(161 161 170 / var(--tw-text-opacity, 1)) !important;
+  }
+
+  :root:not(.light) .apex-console-shell .placeholder\:text-surface-400::placeholder,
+    :root:not(.light) .apex-cp-shell .placeholder\:text-surface-400::placeholder {
+    color: rgb(161 161 170 / var(--tw-text-opacity, 1)) !important;
+  }
 }
 
 .after\:absolute::after {
@@ -4358,11 +5140,6 @@ a {
   transform: translate(var(--tw-translate-x), var(--tw-translate-y)) rotate(var(--tw-rotate)) skewX(var(--tw-skew-x)) skewY(var(--tw-skew-y)) scaleX(var(--tw-scale-x)) scaleY(var(--tw-scale-y));
 }
 
-.after\:content-\[\\\"\\\"\]::after {
-  --tw-content: \"\";
-  content: var(--tw-content);
-}
-
 .last\:border-0:last-child {
   border-width: 0px;
 }
@@ -4395,6 +5172,11 @@ a {
 
 .autofill\:\[-webkit-text-fill-color\:inherit\]:autofill {
   -webkit-text-fill-color: inherit;
+}
+
+.focus-within\:border-primary:focus-within {
+  --tw-border-opacity: 1;
+  border-color: rgb(var(--primary) / var(--tw-border-opacity, 1));
 }
 
 .hover\:scale-110:hover {
@@ -4496,9 +5278,8 @@ a {
   background-color: rgb(var(--surface-100) / var(--tw-bg-opacity, 1));
 }
 
-.hover\:bg-surface-200:hover {
-  --tw-bg-opacity: 1;
-  background-color: rgb(var(--surface-200) / var(--tw-bg-opacity, 1));
+.hover\:bg-surface-100\/50:hover {
+  background-color: rgb(var(--surface-100) / 0.5);
 }
 
 .hover\:bg-surface-50:hover {
@@ -4529,15 +5310,6 @@ a {
   color: rgb(var(--brand-700) / var(--tw-text-opacity, 1));
 }
 
-.hover\:text-foreground:hover {
-  --tw-text-opacity: 1;
-  color: rgb(var(--foreground) / var(--tw-text-opacity, 1));
-}
-
-.hover\:text-foreground\/80:hover {
-  color: rgb(var(--foreground) / 0.8);
-}
-
 .hover\:text-primary:hover {
   --tw-text-opacity: 1;
   color: rgb(var(--primary) / var(--tw-text-opacity, 1));
@@ -4546,11 +5318,6 @@ a {
 .hover\:text-surface-200:hover {
   --tw-text-opacity: 1;
   color: rgb(var(--surface-200) / var(--tw-text-opacity, 1));
-}
-
-.hover\:text-surface-600:hover {
-  --tw-text-opacity: 1;
-  color: rgb(var(--surface-600) / var(--tw-text-opacity, 1));
 }
 
 .hover\:text-surface-900:hover {
@@ -4580,20 +5347,142 @@ a {
   opacity: 1;
 }
 
+.hover\:opacity-80:hover {
+  opacity: 0.8;
+}
+
 .hover\:opacity-90:hover {
   opacity: 0.9;
 }
 
-.hover\:\!shadow-none:hover {
-  --tw-shadow: 0 0 #0000 !important;
-  --tw-shadow-colored: 0 0 #0000 !important;
-  box-shadow: var(--tw-ring-offset-shadow, 0 0 #0000), var(--tw-ring-shadow, 0 0 #0000), var(--tw-shadow) !important;
+.hover\:shadow-md:hover {
+  --tw-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1);
+  --tw-shadow-colored: 0 4px 6px -1px var(--tw-shadow-color), 0 2px 4px -2px var(--tw-shadow-color);
+  box-shadow: var(--tw-ring-offset-shadow, 0 0 #0000), var(--tw-ring-shadow, 0 0 #0000), var(--tw-shadow);
 }
 
 .hover\:shadow-premium-hover:hover {
-  --tw-shadow: 0 20px 40px rgba(0, 0, 0, 0.12);
-  --tw-shadow-colored: 0 20px 40px var(--tw-shadow-color);
+  --tw-shadow: 0 1px 2px rgb(9 9 11 / 0.05), 0 10px 24px rgb(9 9 11 / 0.09);
+  --tw-shadow-colored: 0 1px 2px var(--tw-shadow-color), 0 10px 24px var(--tw-shadow-color);
   box-shadow: var(--tw-ring-offset-shadow, 0 0 #0000), var(--tw-ring-shadow, 0 0 #0000), var(--tw-shadow);
+}
+
+.dark .hover\:bg-surface-800:hover {
+  background-color: rgb(39 39 42 / var(--tw-bg-opacity, 1)) !important;
+}
+
+.dark .hover\:text-surface-950:hover.bg-success-300,
+  .dark .hover\:text-surface-950:hover.bg-success-200,
+  .dark .hover\:text-surface-950:hover.bg-success-100 {
+  color: rgb(9 9 11) !important;
+  -webkit-text-fill-color: rgb(9 9 11) !important;
+}
+
+
+  .dark .hover\:bg-success-200:hover.text-surface-950 {
+  color: rgb(9 9 11) !important;
+  -webkit-text-fill-color: rgb(9 9 11) !important;
+}
+
+.dark .hover\:text-surface-950:hover.bg-success-300,
+  .dark .hover\:text-surface-950:hover.bg-success-200,
+  .dark .hover\:text-surface-950:hover.bg-success-100 {
+  color: rgb(9 9 11) !important;
+  -webkit-text-fill-color: rgb(9 9 11) !important;
+}
+
+.dark .hover\:border-surface-950:hover {
+  border-color: rgb(63 63 70 / var(--tw-border-opacity, 1)) !important;
+}
+
+.dark .hover\:text-brand-700:hover {
+  color: rgb(var(--brand-400) / var(--tw-text-opacity, 1));
+}
+
+.dark .hover\:text-primary:hover {
+  color: rgb(var(--brand-400) / var(--tw-text-opacity, 1)) !important;
+}
+
+
+  .dark .hover\:text-surface-200:hover {
+  color: rgb(228 228 231 / var(--tw-text-opacity, 1)) !important;
+}
+
+
+  .dark .apex-console-shell .hover\:text-surface-200:hover,
+  .dark .apex-cp-shell .hover\:text-surface-200:hover {
+  color: rgb(228 228 231 / var(--tw-text-opacity, 1)) !important;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not(.light) .hover\:bg-surface-800:hover {
+    background-color: rgb(39 39 42 / var(--tw-bg-opacity, 1)) !important;
+  }
+
+  :root:not(.light) .hover\:text-surface-950:hover.bg-success-300,
+    :root:not(.light) .hover\:text-surface-950:hover.bg-success-200,
+    :root:not(.light) .hover\:text-surface-950:hover.bg-success-100 {
+    color: rgb(9 9 11) !important;
+    -webkit-text-fill-color: rgb(9 9 11) !important;
+  }
+
+  
+    :root:not(.light) .hover\:bg-success-200:hover.text-surface-950 {
+    color: rgb(9 9 11) !important;
+    -webkit-text-fill-color: rgb(9 9 11) !important;
+  }
+
+  :root:not(.light) .hover\:text-surface-950:hover.bg-success-300,
+    :root:not(.light) .hover\:text-surface-950:hover.bg-success-200,
+    :root:not(.light) .hover\:text-surface-950:hover.bg-success-100 {
+    color: rgb(9 9 11) !important;
+    -webkit-text-fill-color: rgb(9 9 11) !important;
+  }
+
+  :root:not(.light) .hover\:border-surface-950:hover {
+    border-color: rgb(63 63 70 / var(--tw-border-opacity, 1)) !important;
+  }
+
+  :root:not(.light) .hover\:text-brand-700:hover {
+    color: rgb(var(--brand-400) / var(--tw-text-opacity, 1));
+  }
+
+  :root:not(.light) .hover\:text-primary:hover {
+    color: rgb(var(--brand-400) / var(--tw-text-opacity, 1)) !important;
+  }
+
+  
+    :root:not(.light) .hover\:text-surface-200:hover {
+    color: rgb(228 228 231 / var(--tw-text-opacity, 1)) !important;
+  }
+
+  
+    :root:not(.light) .apex-console-shell .hover\:text-surface-200:hover,
+    :root:not(.light) .apex-cp-shell .hover\:text-surface-200:hover {
+    color: rgb(228 228 231 / var(--tw-text-opacity, 1)) !important;
+  }
+
+  
+    :root:not(.light) .hover\:text-surface-200:hover {
+    color: rgb(228 228 231 / var(--tw-text-opacity, 1)) !important;
+  }
+
+  
+    :root:not(.light) .apex-console-shell .hover\:text-surface-200:hover,
+    :root:not(.light) .apex-cp-shell .hover\:text-surface-200:hover {
+    color: rgb(228 228 231 / var(--tw-text-opacity, 1)) !important;
+  }
+
+  
+    :root:not(.light) .hover\:text-surface-200:hover {
+    color: rgb(228 228 231 / var(--tw-text-opacity, 1)) !important;
+  }
+
+  
+    :root:not(.light) .apex-console-shell .hover\:text-surface-200:hover,
+    :root:not(.light) .apex-cp-shell .hover\:text-surface-200:hover {
+    color: rgb(228 228 231 / var(--tw-text-opacity, 1)) !important;
+  }
 }
 
 .focus\:not-sr-only:focus {
@@ -4646,9 +5535,9 @@ a {
   border-color: rgb(var(--surface-950) / var(--tw-border-opacity, 1));
 }
 
-.focus\:bg-accent:focus {
+.focus\:bg-card:focus {
   --tw-bg-opacity: 1;
-  background-color: rgb(var(--accent) / var(--tw-bg-opacity, 1));
+  background-color: rgb(var(--card) / var(--tw-bg-opacity, 1));
 }
 
 .focus\:bg-destructive\/10:focus {
@@ -4658,11 +5547,6 @@ a {
 .focus\:bg-surface-100:focus {
   --tw-bg-opacity: 1;
   background-color: rgb(var(--surface-100) / var(--tw-bg-opacity, 1));
-}
-
-.focus\:bg-white:focus {
-  --tw-bg-opacity: 1;
-  background-color: rgb(255 255 255 / var(--tw-bg-opacity, 1));
 }
 
 .focus\:px-4:focus {
@@ -4682,11 +5566,6 @@ a {
 
 .focus\:font-bold:focus {
   font-weight: 700;
-}
-
-.focus\:text-accent-foreground:focus {
-  --tw-text-opacity: 1;
-  color: rgb(var(--accent-foreground) / var(--tw-text-opacity, 1));
 }
 
 .focus\:text-destructive:focus {
@@ -4709,6 +5588,12 @@ a {
   outline-offset: 2px;
 }
 
+.focus\:ring-1:focus {
+  --tw-ring-offset-shadow: var(--tw-ring-inset) 0 0 0 var(--tw-ring-offset-width) var(--tw-ring-offset-color);
+  --tw-ring-shadow: var(--tw-ring-inset) 0 0 0 calc(1px + var(--tw-ring-offset-width)) var(--tw-ring-color);
+  box-shadow: var(--tw-ring-offset-shadow), var(--tw-ring-shadow), var(--tw-shadow, 0 0 #0000);
+}
+
 .focus\:ring-2:focus {
   --tw-ring-offset-shadow: var(--tw-ring-inset) 0 0 0 var(--tw-ring-offset-width) var(--tw-ring-offset-color);
   --tw-ring-shadow: var(--tw-ring-inset) 0 0 0 calc(2px + var(--tw-ring-offset-width)) var(--tw-ring-color);
@@ -4724,10 +5609,6 @@ a {
 .focus\:ring-primary:focus {
   --tw-ring-opacity: 1;
   --tw-ring-color: rgb(var(--primary) / var(--tw-ring-opacity, 1));
-}
-
-.focus\:ring-primary\/10:focus {
-  --tw-ring-color: rgb(var(--primary) / 0.1);
 }
 
 .focus\:ring-primary\/20:focus {
@@ -4751,6 +5632,30 @@ a {
   --tw-ring-offset-width: 2px;
 }
 
+.dark .focus\:text-surface-950:focus.bg-success-300,
+  .dark .focus\:text-surface-950:focus.bg-success-200,
+  .dark .focus\:text-surface-950:focus.bg-success-100 {
+  color: rgb(9 9 11) !important;
+  -webkit-text-fill-color: rgb(9 9 11) !important;
+}
+
+.dark .focus\:border-surface-950:focus {
+  border-color: rgb(63 63 70 / var(--tw-border-opacity, 1)) !important;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not(.light) .focus\:text-surface-950:focus.bg-success-300,
+    :root:not(.light) .focus\:text-surface-950:focus.bg-success-200,
+    :root:not(.light) .focus\:text-surface-950:focus.bg-success-100 {
+    color: rgb(9 9 11) !important;
+    -webkit-text-fill-color: rgb(9 9 11) !important;
+  }
+
+  :root:not(.light) .focus\:border-surface-950:focus {
+    border-color: rgb(63 63 70 / var(--tw-border-opacity, 1)) !important;
+  }
+}
+
 .focus-visible\:border-primary:focus-visible {
   --tw-border-opacity: 1;
   border-color: rgb(var(--primary) / var(--tw-border-opacity, 1));
@@ -4759,11 +5664,6 @@ a {
 .focus-visible\:border-success:focus-visible {
   --tw-border-opacity: 1;
   border-color: rgb(var(--success) / var(--tw-border-opacity, 1));
-}
-
-.focus-visible\:border-surface-950:focus-visible {
-  --tw-border-opacity: 1;
-  border-color: rgb(var(--surface-950) / var(--tw-border-opacity, 1));
 }
 
 .focus-visible\:outline-none:focus-visible {
@@ -4804,18 +5704,6 @@ a {
   transform: translate(var(--tw-translate-x), var(--tw-translate-y)) rotate(var(--tw-rotate)) skewX(var(--tw-skew-x)) skewY(var(--tw-skew-y)) scaleX(var(--tw-scale-x)) scaleY(var(--tw-scale-y));
 }
 
-.active\:scale-\[0\.99\]:active {
-  --tw-scale-x: 0.99;
-  --tw-scale-y: 0.99;
-  transform: translate(var(--tw-translate-x), var(--tw-translate-y)) rotate(var(--tw-rotate)) skewX(var(--tw-skew-x)) skewY(var(--tw-skew-y)) scaleX(var(--tw-scale-x)) scaleY(var(--tw-scale-y));
-}
-
-.active\:\!shadow-none:active {
-  --tw-shadow: 0 0 #0000 !important;
-  --tw-shadow-colored: 0 0 #0000 !important;
-  box-shadow: var(--tw-ring-offset-shadow, 0 0 #0000), var(--tw-ring-shadow, 0 0 #0000), var(--tw-shadow) !important;
-}
-
 .disabled\:pointer-events-none:disabled {
   pointer-events: none;
 }
@@ -4824,22 +5712,8 @@ a {
   cursor: not-allowed;
 }
 
-.disabled\:bg-surface-300:disabled {
-  --tw-bg-opacity: 1;
-  background-color: rgb(var(--surface-300) / var(--tw-bg-opacity, 1));
-}
-
-.disabled\:text-surface-600:disabled {
-  --tw-text-opacity: 1;
-  color: rgb(var(--surface-600) / var(--tw-text-opacity, 1));
-}
-
 .disabled\:opacity-50:disabled {
   opacity: 0.5;
-}
-
-.disabled\:shadow-premium-none:disabled {
-  box-shadow: none;
 }
 
 .group:hover .group-hover\:scale-105 {
@@ -4858,76 +5732,6 @@ a {
 
 .data-\[disabled\]\:pointer-events-none[data-disabled] {
   pointer-events: none;
-}
-
-.data-\[state\=active\]\:border-primary[data-state="active"] {
-  --tw-border-opacity: 1;
-  border-color: rgb(var(--primary) / var(--tw-border-opacity, 1));
-}
-
-.data-\[state\=checked\]\:border-destructive[data-state="checked"] {
-  --tw-border-opacity: 1;
-  border-color: rgb(var(--destructive) / var(--tw-border-opacity, 1));
-}
-
-.data-\[state\=checked\]\:border-primary[data-state="checked"] {
-  --tw-border-opacity: 1;
-  border-color: rgb(var(--primary) / var(--tw-border-opacity, 1));
-}
-
-.data-\[state\=checked\]\:border-success[data-state="checked"] {
-  --tw-border-opacity: 1;
-  border-color: rgb(var(--success) / var(--tw-border-opacity, 1));
-}
-
-.data-\[state\=active\]\:bg-background[data-state="active"] {
-  --tw-bg-opacity: 1;
-  background-color: rgb(var(--background) / var(--tw-bg-opacity, 1));
-}
-
-.data-\[state\=active\]\:bg-primary[data-state="active"] {
-  --tw-bg-opacity: 1;
-  background-color: rgb(var(--primary) / var(--tw-bg-opacity, 1));
-}
-
-.data-\[state\=checked\]\:bg-destructive[data-state="checked"] {
-  --tw-bg-opacity: 1;
-  background-color: rgb(var(--destructive) / var(--tw-bg-opacity, 1));
-}
-
-.data-\[state\=checked\]\:bg-primary[data-state="checked"] {
-  --tw-bg-opacity: 1;
-  background-color: rgb(var(--primary) / var(--tw-bg-opacity, 1));
-}
-
-.data-\[state\=checked\]\:bg-success[data-state="checked"] {
-  --tw-bg-opacity: 1;
-  background-color: rgb(var(--success) / var(--tw-bg-opacity, 1));
-}
-
-.data-\[state\=unchecked\]\:bg-muted[data-state="unchecked"] {
-  --tw-bg-opacity: 1;
-  background-color: rgb(var(--muted) / var(--tw-bg-opacity, 1));
-}
-
-.data-\[state\=active\]\:text-foreground[data-state="active"] {
-  --tw-text-opacity: 1;
-  color: rgb(var(--foreground) / var(--tw-text-opacity, 1));
-}
-
-.data-\[state\=active\]\:text-white[data-state="active"] {
-  --tw-text-opacity: 1;
-  color: rgb(255 255 255 / var(--tw-text-opacity, 1));
-}
-
-.data-\[state\=checked\]\:text-destructive-foreground[data-state="checked"] {
-  --tw-text-opacity: 1;
-  color: rgb(var(--destructive-foreground) / var(--tw-text-opacity, 1));
-}
-
-.data-\[state\=checked\]\:text-white[data-state="checked"] {
-  --tw-text-opacity: 1;
-  color: rgb(255 255 255 / var(--tw-text-opacity, 1));
 }
 
 .data-\[disabled\]\:opacity-50[data-disabled] {
@@ -4971,6 +5775,14 @@ a {
     flex-direction: column;
   }
 
+  .sm\:items-start {
+    align-items: flex-start;
+  }
+
+  .sm\:items-end {
+    align-items: flex-end;
+  }
+
   .sm\:items-center {
     align-items: center;
   }
@@ -4979,8 +5791,8 @@ a {
     justify-content: space-between;
   }
 
-  .sm\:rounded-sm {
-    border-radius: var(--radius-sm);
+  .sm\:rounded-lg {
+    border-radius: var(--radius-lg);
   }
 
   .sm\:px-6 {
@@ -5009,6 +5821,18 @@ a {
 }
 
 @media (min-width: 768px) {
+  .md\:ml-16 {
+    margin-left: 4rem;
+  }
+
+  .md\:ml-56 {
+    margin-left: 14rem;
+  }
+
+  .md\:ml-60 {
+    margin-left: 15rem;
+  }
+
   .md\:ml-64 {
     margin-left: 16rem;
   }
@@ -5019,10 +5843,6 @@ a {
 
   .md\:flex {
     display: flex;
-  }
-
-  .md\:inline-flex {
-    display: inline-flex;
   }
 
   .md\:hidden {
@@ -5049,10 +5869,6 @@ a {
     grid-template-columns: repeat(4, minmax(0, 1fr));
   }
 
-  .md\:grid-cols-\[minmax\(0\2c 1fr\)_minmax\(8rem\2c 11rem\)\] {
-    grid-template-columns: minmax(0,1fr) minmax(8rem,11rem);
-  }
-
   .md\:flex-row {
     flex-direction: row;
   }
@@ -5067,10 +5883,6 @@ a {
 
   .md\:justify-between {
     justify-content: space-between;
-  }
-
-  .md\:p-6 {
-    padding: 1.5rem;
   }
 
   .md\:p-8 {
@@ -5091,17 +5903,9 @@ a {
     padding-top: 2rem;
     padding-bottom: 2rem;
   }
-
-  .md\:pt-8 {
-    padding-top: 2rem;
-  }
 }
 
 @media (min-width: 1024px) {
-  .lg\:block {
-    display: block;
-  }
-
   .lg\:flex {
     display: flex;
   }
@@ -5114,10 +5918,6 @@ a {
     height: 5rem;
   }
 
-  .lg\:w-80 {
-    width: 20rem;
-  }
-
   .lg\:w-auto {
     width: auto;
   }
@@ -5128,22 +5928,6 @@ a {
 
   .lg\:grid-cols-4 {
     grid-template-columns: repeat(4, minmax(0, 1fr));
-  }
-
-  .lg\:grid-cols-\[1\.05fr_0\.95fr\] {
-    grid-template-columns: 1.05fr 0.95fr;
-  }
-
-  .lg\:grid-cols-\[1\.1fr_0\.9fr\] {
-    grid-template-columns: 1.1fr 0.9fr;
-  }
-
-  .lg\:grid-cols-\[1\.25fr_0\.75fr\] {
-    grid-template-columns: 1.25fr 0.75fr;
-  }
-
-  .lg\:grid-cols-\[1\.2fr_0\.8fr\] {
-    grid-template-columns: 1.2fr 0.8fr;
   }
 
   .lg\:flex-row {
@@ -5174,8 +5958,8 @@ a {
     border-top-width: 0px;
   }
 
-  .lg\:p-8 {
-    padding: 2rem;
+  .lg\:p-10 {
+    padding: 2.5rem;
   }
 
   .lg\:px-8 {
@@ -5192,36 +5976,11 @@ a {
   .xl\:grid-cols-4 {
     grid-template-columns: repeat(4, minmax(0, 1fr));
   }
+}
 
-  .xl\:grid-cols-\[1\.05fr_0\.95fr\] {
-    grid-template-columns: 1.05fr 0.95fr;
+@media (prefers-color-scheme: dark) {
+  .dark\:bg-gray-900 {
+    --tw-bg-opacity: 1;
+    background-color: rgb(17 24 39 / var(--tw-bg-opacity, 1));
   }
-
-  .xl\:grid-cols-\[1\.15fr_0\.85fr\] {
-    grid-template-columns: 1.15fr 0.85fr;
-  }
-
-  .xl\:grid-cols-\[1\.2fr_0\.8fr\] {
-    grid-template-columns: 1.2fr 0.8fr;
-  }
-}
-
-.\[\&\>span\]\:line-clamp-1>span {
-  overflow: hidden;
-  display: -webkit-box;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 1;
-}
-
-.\[\&\[data-state\=open\]\>svg\]\:rotate-180[data-state=open]>svg {
-  --tw-rotate: 180deg;
-  transform: translate(var(--tw-translate-x), var(--tw-translate-y)) rotate(var(--tw-rotate)) skewX(var(--tw-skew-x)) skewY(var(--tw-skew-y)) scaleX(var(--tw-scale-x)) scaleY(var(--tw-scale-y));
-}
-
-.\[\&_tr\:last-child\]\:border-0 tr:last-child {
-  border-width: 0px;
-}
-
-.\[\&_tr\]\:border-b tr {
-  border-bottom-width: 1px;
 }

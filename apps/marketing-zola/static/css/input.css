@@ -63,25 +63,26 @@
   --font-display: 'Fraunces Variable', ui-serif, serif;
   --font-mono: 'JetBrains Mono Variable', ui-monospace, monospace;
 
-  /* Core Brand Colors — Apex Indigo (premium-tech lineage: Stripe/Linear/Proton).
-     Chosen over the legacy red because red reads as "danger/error" in
-     infrastructure/security products; indigo carries trust + distinctiveness.
-     The previous red scale is preserved as the dedicated --danger-* palette
-     below so destructive actions finally get their own semantics. */
-  --brand-50: 238 242 255;
-  --brand-100: 224 231 255;
-  --brand-200: 199 210 254;
-  --brand-300: 165 180 252;
-  --brand-400: 129 140 248;
-  --brand-500: 99 102 241;     /* Apex Indigo (#6366F1) */
-  --brand-600: 79 70 229;
-  --brand-700: 67 56 202;
-  --brand-800: 55 48 163;
-  --brand-900: 49 46 129;
-  --brand-950: 30 27 75;
+  /* Core Brand Colors — Brand Red (RESTORED 2026-08-21).
+     The "premium-tech" pass (b874f4f9, 2026-08-11) switched the brand to
+     Apex Indigo (#6366F1); the ApexMail brand is the red scale below
+     (accent #EF4444, deep #DC2626) paired with the near-black zinc
+     surfaces. A dedicated --danger-* scale keeps destructive semantics
+     distinct from the brand even though both are red. */
+  --brand-50: 254 242 242;
+  --brand-100: 254 226 226;
+  --brand-200: 254 202 202;
+  --brand-300: 252 165 165;
+  --brand-400: 248 113 113;
+  --brand-500: 239 68 68;     /* Brand Red (#EF4444) */
+  --brand-600: 220 38 38;     /* Brand Deep Red (#DC2626) */
+  --brand-700: 185 28 28;
+  --brand-800: 153 27 27;
+  --brand-900: 127 29 29;
+  --brand-950: 69 10 10;
 
   /* Primary — matches brand-500 */
-  --primary: 99 102 241;
+  --primary: 239 68 68;
 
   /* Semantic brand tokens (audit 1.4) — single source of truth for the
      "brand accent", "brand surface tint", and "brand-on-text" concepts
@@ -90,9 +91,9 @@
   --brand-surface: var(--brand-50);
   --brand-text: var(--brand-700);
 
-  /* Danger — dedicated red scale (previously aliased to --brand-*).
-     --danger / --destructive / --error now reference this scale instead
-     of brand, so destructive buttons render red instead of brand-indigo. */
+  /* Danger — dedicated red scale (kept from the indigo era so destructive
+     actions keep their own semantic scale now that the brand is red again).
+     --danger / --destructive / --error reference this scale. */
   --danger-50: 254 242 242;
   --danger-100: 254 226 226;
   --danger-200: 254 202 202;
@@ -159,7 +160,7 @@
   --info-900: 22 78 99;
   --info: 8 145 178;
 
-  --destructive: var(--danger-600);   /* red — was aliased to brand */
+  --destructive: var(--danger-600);   /* red — deliberately same family as brand (the brand IS red) */
   --error: var(--danger-600);
 
   /* Spacing (8px modular grid) */
@@ -185,8 +186,8 @@
   --radius-2xl: 16px;
 
   /* Brand gradient — applied to primary buttons, headings, and accent elements.
-     Updated to the indigo brand scale. */
-  --brand-gradient: linear-gradient(135deg, #6366f1, #4338ca);
+     Restored to the red brand scale (#DC2626 → #991B1B). */
+  --brand-gradient: linear-gradient(135deg, #dc2626, #991b1b);
 
   /* Theme transition speed */
   --theme-transition-duration: 200ms;
@@ -236,7 +237,7 @@ html.dark {
   background-color: rgb(var(--brand-600));
   border-color: rgb(var(--brand-700));
   color: #fff;
-  box-shadow: inset 0 -1px 0 rgb(49 46 129 / 0.45);
+  box-shadow: inset 0 -1px 0 rgb(127 29 29 / 0.45);
 }
 
 .apex-brand-mark svg {
@@ -267,16 +268,16 @@ html.dark .bg-white\/5 {
 }
 
 html.dark .bg-brand-50 {
-  background-color: rgb(30 27 75 / var(--tw-bg-opacity, 0.72)) !important;
+  background-color: rgb(69 10 10 / var(--tw-bg-opacity, 0.72)) !important;
 }
 html.dark .bg-brand-100 {
-  background-color: rgb(30 27 75 / var(--tw-bg-opacity, 0.82)) !important;
+  background-color: rgb(69 10 10 / var(--tw-bg-opacity, 0.82)) !important;
 }
 html.dark .bg-brand-50\/50 {
-  background-color: rgb(30 27 75 / 0.52) !important;
+  background-color: rgb(69 10 10 / 0.52) !important;
 }
 html.dark .bg-brand-50\/20 {
-  background-color: rgb(30 27 75 / 0.34) !important;
+  background-color: rgb(69 10 10 / 0.34) !important;
 }
 html.dark .bg-success-50 {
   background-color: rgb(20 83 45 / var(--tw-bg-opacity, 0.35)) !important;
@@ -307,8 +308,8 @@ html.dark .from-surface-100 {
   --tw-gradient-stops: var(--tw-gradient-from), var(--tw-gradient-to) !important;
 }
 html.dark .from-brand-50 {
-  --tw-gradient-from: rgb(30 27 75 / 0.62) var(--tw-gradient-from-position) !important;
-  --tw-gradient-to: rgb(30 27 75 / 0) var(--tw-gradient-to-position) !important;
+  --tw-gradient-from: rgb(69 10 10 / 0.62) var(--tw-gradient-from-position) !important;
+  --tw-gradient-to: rgb(69 10 10 / 0) var(--tw-gradient-to-position) !important;
   --tw-gradient-stops: var(--tw-gradient-from), var(--tw-gradient-to) !important;
 }
 html.dark .via-white,
@@ -318,8 +319,8 @@ html.dark .via-surface-100 {
   --tw-gradient-stops: var(--tw-gradient-from), rgb(9 9 11 / 1) var(--tw-gradient-via-position), var(--tw-gradient-to) !important;
 }
 html.dark .via-brand-50 {
-  --tw-gradient-to: rgb(30 27 75 / 0) var(--tw-gradient-to-position) !important;
-  --tw-gradient-stops: var(--tw-gradient-from), rgb(30 27 75 / 0.42) var(--tw-gradient-via-position), var(--tw-gradient-to) !important;
+  --tw-gradient-to: rgb(69 10 10 / 0) var(--tw-gradient-to-position) !important;
+  --tw-gradient-stops: var(--tw-gradient-from), rgb(69 10 10 / 0.42) var(--tw-gradient-via-position), var(--tw-gradient-to) !important;
 }
 html.dark .to-white,
 html.dark .to-surface-50,
@@ -327,7 +328,7 @@ html.dark .to-surface-100 {
   --tw-gradient-to: rgb(9 9 11 / 1) var(--tw-gradient-to-position) !important;
 }
 html.dark .to-brand-50 {
-  --tw-gradient-to: rgb(30 27 75 / 0.42) var(--tw-gradient-to-position) !important;
+  --tw-gradient-to: rgb(69 10 10 / 0.42) var(--tw-gradient-to-position) !important;
 }
 
 html.dark .bg-surface-950 {
@@ -437,16 +438,16 @@ html.dark .cookie-consent-banner {
   }
 
   .bg-brand-50 {
-    background-color: rgb(30 27 75 / var(--tw-bg-opacity, 0.72)) !important;
+    background-color: rgb(69 10 10 / var(--tw-bg-opacity, 0.72)) !important;
   }
   .bg-brand-100 {
-    background-color: rgb(30 27 75 / var(--tw-bg-opacity, 0.82)) !important;
+    background-color: rgb(69 10 10 / var(--tw-bg-opacity, 0.82)) !important;
   }
   .bg-brand-50\/50 {
-    background-color: rgb(30 27 75 / 0.52) !important;
+    background-color: rgb(69 10 10 / 0.52) !important;
   }
   .bg-brand-50\/20 {
-    background-color: rgb(30 27 75 / 0.34) !important;
+    background-color: rgb(69 10 10 / 0.34) !important;
   }
   .bg-success-50 {
     background-color: rgb(20 83 45 / var(--tw-bg-opacity, 0.35)) !important;
@@ -477,8 +478,8 @@ html.dark .cookie-consent-banner {
     --tw-gradient-stops: var(--tw-gradient-from), var(--tw-gradient-to) !important;
   }
   .from-brand-50 {
-    --tw-gradient-from: rgb(30 27 75 / 0.62) var(--tw-gradient-from-position) !important;
-    --tw-gradient-to: rgb(30 27 75 / 0) var(--tw-gradient-to-position) !important;
+    --tw-gradient-from: rgb(69 10 10 / 0.62) var(--tw-gradient-from-position) !important;
+    --tw-gradient-to: rgb(69 10 10 / 0) var(--tw-gradient-to-position) !important;
     --tw-gradient-stops: var(--tw-gradient-from), var(--tw-gradient-to) !important;
   }
   .via-white,
@@ -488,8 +489,8 @@ html.dark .cookie-consent-banner {
     --tw-gradient-stops: var(--tw-gradient-from), rgb(9 9 11 / 1) var(--tw-gradient-via-position), var(--tw-gradient-to) !important;
   }
   .via-brand-50 {
-    --tw-gradient-to: rgb(30 27 75 / 0) var(--tw-gradient-to-position) !important;
-    --tw-gradient-stops: var(--tw-gradient-from), rgb(30 27 75 / 0.42) var(--tw-gradient-via-position), var(--tw-gradient-to) !important;
+    --tw-gradient-to: rgb(69 10 10 / 0) var(--tw-gradient-to-position) !important;
+    --tw-gradient-stops: var(--tw-gradient-from), rgb(69 10 10 / 0.42) var(--tw-gradient-via-position), var(--tw-gradient-to) !important;
   }
   .to-white,
   .to-surface-50,
@@ -497,7 +498,7 @@ html.dark .cookie-consent-banner {
     --tw-gradient-to: rgb(9 9 11 / 1) var(--tw-gradient-to-position) !important;
   }
   .to-brand-50 {
-    --tw-gradient-to: rgb(30 27 75 / 0.42) var(--tw-gradient-to-position) !important;
+    --tw-gradient-to: rgb(69 10 10 / 0.42) var(--tw-gradient-to-position) !important;
   }
 
   .bg-surface-950 {

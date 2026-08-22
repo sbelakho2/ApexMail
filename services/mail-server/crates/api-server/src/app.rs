@@ -386,6 +386,9 @@ pub fn build_app(state: AppState) -> Router {
         // Zero-JS console form routes (PRG twins). Public auth forms ride
         // the same rate-limited stack as the JSON auth surface.
         .merge(routes::web::public_router(state.clone()))
+        // No-JS cookie consent endpoint (marketing banner links here).
+        // Same public rate-limit stack = the light per-IP bucketing.
+        .merge(routes::web::consent_router())
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             rate_limiter::public_rate_limit_middleware,
@@ -798,6 +801,27 @@ fn browser_html_response(html: String) -> Response {
     response
 }
 
+/// No-JS cookie banner state: when the apexmail_consent cookie (set by
+/// GET/POST /consent with Domain=.apexmail.ee) is present, flip the
+/// banner's marker attribute to "recorded" so the stylesheet collapses
+/// it. This mirrors the marketing container's nginx sub_filter variant
+/// (map on $cookie_apexmail_consent) — same cookie, same attribute,
+/// same CSS rule — so the banner behaves identically on both serving
+/// paths. Non-marketing documents simply do not contain the marker and
+/// pass through unchanged.
+fn apply_recorded_consent_state(html: String, headers: &HeaderMap) -> String {
+    let has_consent = headers
+        .get(header::COOKIE)
+        .and_then(|value| value.to_str().ok())
+        .map(routes::web::cookie_header_has_consent)
+        .unwrap_or(false);
+    if !has_consent {
+        return html;
+    }
+    html.replace("data-consent-state=\"pending\"", "data-consent-state=\"recorded\"")
+        .replace("data-consent-state=pending", "data-consent-state=recorded")
+}
+
 async fn browser_globals_css() -> impl IntoResponse {
     (
         [(
@@ -1022,6 +1046,7 @@ fn render_ui_response(
         csrf_secret,
         &flash,
     )?;
+    let html = apply_recorded_consent_state(html, headers);
     let mut response = browser_html_response(html);
     if !flash.is_empty() {
         if let Ok(value) =
@@ -1114,6 +1139,7 @@ async fn render_ui_response_with_state(
         &flash,
         route_data.as_ref(),
     )?;
+    let html = apply_recorded_consent_state(html, headers);
     let mut response = browser_html_response(html);
     if !flash.is_empty() {
         if let Ok(value) =
@@ -1884,6 +1910,157 @@ mod tests {
         assert!(!flash.is_empty());
         assert_eq!(flash[0].kind, ui_foundation::flash::FlashKind::Error);
         assert!(flash[0].text.contains("expired"));
+    }
+
+    #[tokio::test]
+    async fn consent_endpoint_records_choice_and_redirects_safely() {
+        let app = test_app().await;
+
+        // GET with the banner's exact link shape (percent-encoded return_to).
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/consent?choice=all&return_to=https%3A%2F%2Fapexmail.ee%2Fpricing")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FOUND);
+        assert_eq!(
+            response.headers().get(header::LOCATION).unwrap(),
+            "https://apexmail.ee/pricing"
+        );
+        let set_cookie = response
+            .headers()
+            .get("set-cookie")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
+        assert!(set_cookie.starts_with("apexmail_consent=all;"), "{set_cookie}");
+        assert!(set_cookie.contains("Domain=.apexmail.ee"));
+        assert!(set_cookie.contains("Max-Age=31536000"));
+        assert!(set_cookie.contains("HttpOnly"));
+
+        // Open redirect: off-family return_to falls back to "/" (consent is
+        // still recorded — the redirect target is what must be safe).
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/consent?choice=all&return_to=https%3A%2F%2Fevil.example%2Ftrap")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FOUND);
+        assert_eq!(response.headers().get(header::LOCATION).unwrap(), "/");
+
+        // POST form twin: necessary-only records the distinct value.
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/consent")
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(Body::from("choice=necessary&return_to=/pricing"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FOUND);
+        assert_eq!(response.headers().get(header::LOCATION).unwrap(), "/pricing");
+        let set_cookie = response
+            .headers()
+            .get("set-cookie")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
+        assert!(set_cookie.starts_with("apexmail_consent=necessary;"), "{set_cookie}");
+
+        // Unknown choice: redirect WITHOUT writing any cookie (the banner
+        // stays pending instead of silently downgrading recorded consent).
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/consent?choice=everything&return_to=/")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FOUND);
+        assert!(response.headers().get("set-cookie").is_none());
+    }
+
+    #[tokio::test]
+    async fn marketing_page_hides_banner_when_consent_cookie_present() {
+        let app = test_app().await;
+
+        // Fresh visitor: banner pending (visible).
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/")
+                    .header(HOST, "apexmail.ee")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_body_string(response).await;
+        assert!(
+            body.contains("data-consent-state=pending")
+                || body.contains("data-consent-state=\"pending\""),
+            "fresh visitor must see the pending banner"
+        );
+
+        // Consent recorded: the api-server flips the same attribute the
+        // marketing container's nginx sub_filter variant flips.
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/")
+                    .header(HOST, "apexmail.ee")
+                    .header(header::COOKIE, "apexmail_consent=necessary")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_body_string(response).await;
+        assert!(
+            body.contains("data-consent-state=recorded")
+                || body.contains("data-consent-state=\"recorded\""),
+            "recorded consent must flip the banner state server-side"
+        );
+        assert!(!body.contains("data-consent-state=pending"));
+
+        // An unrelated cookie must NOT flip the state.
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/")
+                    .header(HOST, "apexmail.ee")
+                    .header(header::COOKIE, "session=abc")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = response_body_string(response).await;
+        assert!(
+            body.contains("data-consent-state=pending")
+                || body.contains("data-consent-state=\"pending\""),
+            "unrelated cookies must leave the banner pending"
+        );
     }
 
     #[tokio::test]

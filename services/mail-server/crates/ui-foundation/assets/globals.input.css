@@ -36,58 +36,61 @@
 
 @layer base {
   :root {
-    /* Reference design (Correct Design.png) tokens:
-       - content canvas is a cool light gray (#f8f9fa)
-       - panels/cards/sidebar are pure white (#ffffff)
-       - brand accent is coral red (#dd524c), not the deep #dc2626
-       - primary text is blue-tinted near-black (#0f1116), not neutral zinc
-       - borders are cool gray (#e2e3e5)
-       - muted text is slate (#5a6473) */
-    --background: 248 249 250;
-    --foreground: 15 17 22;
+    /* Brand palette — ApexMail red & black (RESTORED 2026-08-21).
+       The "reference design" pass (ffc54b4a, 2026-07-31) swapped the brand
+       to coral red (#dd524c) with blue-tinted slate neutrals; the brand
+       palette is the deep red (#dc2626) on neutral zinc (near-black
+       #09090b) that shipped before it:
+       - brand accent is deep red (#dc2626 = 220 38 38)
+       - primary text is neutral near-black zinc-950 (#09090b)
+       - panels/cards are pure white (#ffffff)
+       - borders are zinc-200 (#e4e4e7)
+       - muted text is zinc-400 (#71717a) */
+    --background: 255 255 255;
+    --foreground: 9 9 11;
     --card: 255 255 255;
-    --card-foreground: 15 17 22;
+    --card-foreground: 9 9 11;
     --popover: 255 255 255;
-    --popover-foreground: 15 17 22;
-    --primary: 221 82 76;
+    --popover-foreground: 9 9 11;
+    --primary: 220 38 38;
     --primary-foreground: 255 255 255;
-    --secondary: 241 243 245;
-    --secondary-foreground: 15 17 22;
-    --muted: 241 243 245;
-    --muted-foreground: 90 100 115;
-    --accent: 241 243 245;
-    --accent-foreground: 15 17 22;
-    --destructive: 221 82 76;
+    --secondary: 244 244 245;
+    --secondary-foreground: 9 9 11;
+    --muted: 244 244 245;
+    --muted-foreground: 113 113 122;
+    --accent: 244 244 245;
+    --accent-foreground: 9 9 11;
+    --destructive: 220 38 38;
     --destructive-foreground: 255 255 255;
     --warning: 217 119 6;
-    --border: 226 227 229;
-    --input: 226 227 229;
-    --ring: 221 82 76;
-    --error: 221 82 76;
+    --border: 228 228 231;
+    --input: 228 228 231;
+    --ring: 220 38 38;
+    --error: 220 38 38;
 
-    --surface-50: 249 250 251;
-    --surface-100: 243 244 246;
-    --surface-200: 226 229 233;
-    --surface-300: 207 211 217;
-    --surface-400: 152 160 171;
-    --surface-500: 110 119 132;
-    --surface-600: 75 84 99;
-    --surface-700: 55 63 76;
-    --surface-800: 31 37 49;
-    --surface-900: 18 22 31;
-    --surface-950: 11 14 21;
+    --surface-50: 250 250 250;
+    --surface-100: 244 244 245;
+    --surface-200: 228 228 231;
+    --surface-300: 212 212 216;
+    --surface-400: 161 161 170;
+    --surface-500: 113 113 122;
+    --surface-600: 82 82 91;
+    --surface-700: 63 63 70;
+    --surface-800: 39 39 42;
+    --surface-900: 24 24 27;
+    --surface-950: 9 9 11;
 
-    --brand-50: 252 243 242;
-    --brand-100: 253 228 226;
-    --brand-200: 251 201 199;
-    --brand-300: 247 164 161;
-    --brand-400: 241 117 112;
-    --brand-500: 221 82 76;
-    --brand-600: 195 60 54;
-    --brand-700: 162 45 41;
-    --brand-800: 135 41 38;
-    --brand-900: 112 41 39;
-    --brand-950: 61 19 17;
+    --brand-50: 254 242 242;
+    --brand-100: 254 226 226;
+    --brand-200: 254 202 202;
+    --brand-300: 252 165 165;
+    --brand-400: 248 113 113;
+    --brand-500: 220 38 38;
+    --brand-600: 185 28 28;
+    --brand-700: 153 27 27;
+    --brand-800: 127 29 29;
+    --brand-900: 69 10 10;
+    --brand-950: 45 10 10;
 
     --success-50: 240 253 244;
     --success-100: 220 252 231;
@@ -388,9 +391,9 @@
     background: rgb(var(--surface-100));
   }
 
-  /* Active nav item — subtle coral tint (#fcf3f2) with coral icon, matching the
-     reference design's restrained active state. The icon turns coral via the
-     .text-primary class set on the active link's icon wrapper in shell.rs. */
+  /* Active nav item — subtle brand-red tint with a red icon. The icon turns
+     red via the .text-primary class set on the active link's icon wrapper in
+     shell.rs. */
   .apex-nav-active {
     background: rgb(var(--brand-50));
     border-color: rgb(var(--brand-100));
@@ -413,8 +416,8 @@
     color: rgb(var(--foreground));
     padding: 2rem;
     box-shadow:
-      0 1px 2px rgb(15 17 22 / 0.04),
-      0 6px 16px rgb(15 17 22 / 0.06);
+      0 1px 2px rgb(9 9 11 / 0.04),
+      0 6px 16px rgb(9 9 11 / 0.06);
   }
 
   .apex-eyebrow {
@@ -500,8 +503,8 @@
     border-color: rgba(9, 9, 11, 0.14);
     background: #fff;
     box-shadow:
-      0 1px 2px rgb(15 17 22 / 0.04),
-      0 6px 16px rgb(15 17 22 / 0.06);
+      0 1px 2px rgb(9 9 11 / 0.04),
+      0 6px 16px rgb(9 9 11 / 0.06);
   }
 
   .apex-card.apex-card h3,
@@ -687,8 +690,8 @@
   .apex-ops-board {
     background: #ffffff;
     box-shadow:
-      0 1px 2px rgb(15 17 22 / 0.04),
-      0 6px 16px rgb(15 17 22 / 0.06);
+      0 1px 2px rgb(9 9 11 / 0.04),
+      0 6px 16px rgb(9 9 11 / 0.06);
     transition:
       box-shadow 200ms cubic-bezier(0.23, 1, 0.32, 1),
       border-color 200ms ease-out;
@@ -699,8 +702,8 @@
   .apex-signal-card:hover {
     border-color: rgba(9, 9, 11, 0.16);
     box-shadow:
-      0 1px 2px rgb(15 17 22 / 0.05),
-      0 10px 24px rgb(15 17 22 / 0.09);
+      0 1px 2px rgb(9 9 11 / 0.05),
+      0 10px 24px rgb(9 9 11 / 0.09);
   }
 
   .apex-signal-card {
@@ -847,14 +850,14 @@
     border-color: rgba(255, 255, 255, 0.28);
   }
 
-  /* Stat tiles — white cards with a coral hairline accent (reference design). */
+  /* Stat tiles — white cards with a brand-red hairline accent. */
   .apex-cp-stat-tile {
     position: relative;
     padding: 0.95rem 1rem 1.05rem;
     background: rgb(var(--card));
     border: 1px solid rgb(var(--border));
     border-radius: var(--radius-md);
-    box-shadow: 0 1px 2px rgb(15 17 22 / 0.04);
+    box-shadow: 0 1px 2px rgb(9 9 11 / 0.04);
     overflow: hidden;
     transition: border-color 160ms ease-out, transform 160ms ease-out, box-shadow 160ms ease-out;
   }
@@ -879,8 +882,8 @@
     transform: translateY(-1px);
     border-color: rgb(var(--surface-300));
     box-shadow:
-      0 1px 2px rgb(15 17 22 / 0.04),
-      0 8px 18px rgb(15 17 22 / 0.07);
+      0 1px 2px rgb(9 9 11 / 0.04),
+      0 8px 18px rgb(9 9 11 / 0.07);
   }
 
   .apex-cp-stat-label {
@@ -934,7 +937,7 @@
     border: 1px solid rgb(var(--border));
     border-radius: var(--radius-md);
     background: rgb(var(--card));
-    box-shadow: 0 1px 2px rgb(15 17 22 / 0.04);
+    box-shadow: 0 1px 2px rgb(9 9 11 / 0.04);
   }
 
   /* Web console hero \u2014 same chassis as page-hero but slightly more restrained. */

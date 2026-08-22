@@ -383,14 +383,31 @@ pub struct CookieConsentBanner {
     pub visible: bool,
 }
 
+/// Name of the consent cookie set by the api-server's `/consent`
+/// endpoint (Domain=.apexmail.ee, 1-year expiry). The marketing
+/// container's nginx maps `$cookie_apexmail_consent` to the
+/// banner-hidden page variant; the api-server makes the same
+/// `data-consent-state` flip when it serves marketing documents.
+pub const CONSENT_COOKIE_NAME: &str = "apexmail_consent";
+
+/// The no-JS consent endpoint (on the api host). The banner's choices
+/// are plain links: the marketing CSP pins `form-action 'self'`, which
+/// would block a cross-origin POST form to this endpoint.
+pub const CONSENT_ENDPOINT_PATH: &str = "/consent";
+
 impl CookieConsentBanner {
     pub fn render_html(&self) -> String {
         if !self.visible {
             return String::new();
         }
 
+        // data-consent-state="pending" is the server-side visibility
+        // marker: whoever serves this markup (nginx sub_filter on the
+        // static host, or the api-server render path) flips it to
+        // "recorded" when the consent cookie is present, and the
+        // stylesheet collapses the banner. No script is involved.
         format!(
-            "<div class=\"fixed inset-x-0 bottom-0 z-50 border-t border-surface-200 bg-surface-50/95 backdrop-blur px-4 py-3\" data-consent-key=\"{}\"><div class=\"mx-auto flex max-w-6xl flex-col gap-3 sm:flex-row sm:items-center sm:justify-between\"><p class=\"text-sm text-surface-600\">We use essential cookies and privacy-friendly analytics to improve ApexMail. See our <a href=\"/cookies\" class=\"font-bold text-surface-900 underline\">Cookie Policy</a>.</p><button type=\"button\" class=\"btn-primary px-4 py-2 text-sm\">Accept</button></div></div>",
+            "<div class=\"fixed inset-x-0 bottom-0 z-50 border-t border-surface-200 bg-surface-50/95 backdrop-blur px-4 py-3\" data-consent-key=\"{}\" data-consent-state=\"pending\"><div class=\"mx-auto flex max-w-6xl flex-col gap-3 sm:flex-row sm:items-center sm:justify-between\"><p class=\"text-sm text-surface-600\">We use essential cookies and privacy-friendly analytics to improve ApexMail. See our <a href=\"/cookies\" class=\"font-bold text-surface-900 underline\">Cookie Policy</a>.</p><div class=\"flex items-center gap-2\"><a href=\"{CONSENT_ENDPOINT_PATH}?choice=necessary\" rel=\"nofollow\" class=\"inline-flex items-center justify-center rounded-md border border-surface-300 bg-card px-4 py-2 text-sm font-semibold text-surface-950 transition-all duration-200 ease-premium\">Necessary only</a><a href=\"{CONSENT_ENDPOINT_PATH}?choice=all\" rel=\"nofollow\" class=\"btn-primary px-4 py-2 text-sm\">Accept</a></div></div></div>",
             cookie_consent_storage_key(),
         )
     }
@@ -597,6 +614,23 @@ mod tests {
         assert!(api_console.contains("Endpoints"));
         assert!(api_console.contains("/v1/messages"));
         assert!(api_console.contains("queued"));
+    }
+
+    #[test]
+    fn cookie_banner_is_no_js_with_real_consent_links() {
+        // site.js is gone: every choice must be a real navigation to the
+        // /consent endpoint (never an inert type="button").
+        let cookie = CookieConsentBanner { visible: true }.render_html();
+        assert!(!cookie.contains("<button"), "inert button survived the no-JS rework");
+        assert!(cookie.contains("href=\"/consent?choice=necessary\""));
+        assert!(cookie.contains("href=\"/consent?choice=all\""));
+        // Server-side visibility marker the nginx/api-server flip targets.
+        assert!(cookie.contains("data-consent-state=\"pending\""));
+        // Hidden banner renders nothing.
+        assert!(CookieConsentBanner { visible: false }.render_html().is_empty());
+        // The shared cookie name must match the nginx map key
+        // ($cookie_apexmail_consent) and the api-server's constant.
+        assert_eq!(CONSENT_COOKIE_NAME, "apexmail_consent");
     }
 
     #[test]

@@ -255,6 +255,22 @@ html.dark #deploy-byoc:checked ~ .deploy-tabs [for="deploy-byoc"] {
   display: none;
 }
 
+/* ── Cookie banner recorded-consent state (no-JS) ─────────────
+   After a choice is made, the api-server /consent endpoint sets the
+   apexmail_consent cookie (Domain=.apexmail.ee). Because the site is
+   static, hiding the banner is server-side: the marketing container's
+   nginx serves a sub_filter variant that flips the banner's
+   data-consent-state attribute from "pending" to "recorded" whenever
+   the cookie is present (and the api-server makes the same flip when
+   it serves these pages directly). This rule collapses the banner —
+   and restores the back-to-top link the banner suppressed. */
+#cookie-consent-banner[data-consent-state="recorded"] {
+  display: none !important;
+}
+#cookie-consent-banner[data-consent-state="recorded"] ~ #back-to-top {
+  display: inline-flex;
+}
+
 /* ── Status page auto-refresh indicator ──────────────────────── */
 .status-refresh-notice {
   font-size: 0.75rem;

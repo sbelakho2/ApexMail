@@ -45,12 +45,13 @@ pub(crate) use data::load_page_data;
 
 use std::collections::HashMap;
 
-use axum::extract::{Form, State};
+use axum::extract::{Form, Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::Router;
 use chrono::Utc;
+use serde::Deserialize;
 use serde_json::json;
 use uuid::Uuid;
 
@@ -80,6 +81,149 @@ pub fn public_router(state: AppState) -> Router<AppState> {
             state.clone(),
             web_form_rejection_middleware,
         ))
+}
+
+// ─── Cookie consent (no-JS marketing banner) ─────────────────────
+//
+// The zero-JavaScript rework deleted the marketing site's
+// apexmail-site.js, which owned the cookie-banner click handler — the
+// banner's buttons became inert. The no-JS replacement: the banner
+// renders real links to GET /consent (POST accepted for parity), the
+// handler records the choice in a first-party cookie scoped to the
+// whole apexmail.ee family, and the browser is redirected back to the
+// page it came from. Banner visibility afterwards is decided
+// server-side from the cookie (nginx sub_filter variant on the static
+// marketing host; the same attribute flip here when the api-server
+// serves the marketing documents itself).
+
+/// Name of the consent cookie. Set with `Domain=.apexmail.ee` so it is
+/// shared by the marketing host and every console host; read by nginx
+/// (`$cookie_apexmail_consent`) and this server to hide the banner.
+pub const CONSENT_COOKIE_NAME: &str = "apexmail_consent";
+/// Dot-prefixed so the cookie applies to apexmail.ee and all subdomains.
+const CONSENT_COOKIE_DOMAIN: &str = ".apexmail.ee";
+/// One year, per the cookie policy.
+const CONSENT_COOKIE_MAX_AGE_SECS: i64 = 365 * 24 * 60 * 60;
+
+#[derive(Debug, Default, Deserialize)]
+pub struct ConsentRequest {
+    pub choice: Option<String>,
+    pub return_to: Option<String>,
+}
+
+/// Normalize a requested consent choice to the recorded cookie value.
+/// "dismiss" is the old site.js semantics: record a choice, enable
+/// nothing — i.e. necessary-only. Unknown values record nothing (the
+/// caller must not set the cookie for them).
+pub fn normalize_consent_choice(choice: Option<&str>) -> Option<&'static str> {
+    match choice.map(str::trim) {
+        Some("all") => Some("all"),
+        Some("necessary") => Some("necessary"),
+        Some("dismiss") => Some("necessary"),
+        _ => None,
+    }
+}
+
+/// Validate a `return_to` target for the consent redirect. Allowed:
+/// same-origin relative paths (`/…`, never `//…`) and absolute HTTPS
+/// URLs on the apexmail.ee host family (the banner lives on
+/// apexmail.ee but the endpoint is api.apexmail.ee, so the return hop
+/// is always cross-host within the family). Everything else — open
+/// redirects, other domains, plain HTTP — falls back to `/`.
+pub fn consent_safe_return_to(return_to: Option<&str>) -> String {
+    let Some(value) = return_to.map(str::trim).filter(|v| !v.is_empty()) else {
+        return "/".to_string();
+    };
+
+    if value.starts_with('/') && !value.starts_with("//") {
+        return value.to_string();
+    }
+
+    let Ok(url) = url::Url::parse(value) else {
+        return "/".to_string();
+    };
+    if url.scheme() != "https" {
+        return "/".to_string();
+    }
+    let host = url.host_str().map(str::to_ascii_lowercase);
+    match host.as_deref() {
+        Some("apexmail.ee") | Some("www.apexmail.ee") => url.to_string(),
+        Some(host) if host.ends_with(".apexmail.ee") => url.to_string(),
+        _ => "/".to_string(),
+    }
+}
+
+/// Does a Cookie header carry a non-empty consent cookie? Shared by the
+/// api-server's marketing-page render path (hide the banner when
+/// present) and tests.
+pub fn cookie_header_has_consent(cookie_header: &str) -> bool {
+    cookie_header.split(';').any(|pair| {
+        match pair.split_once('=') {
+            Some((name, value)) => {
+                name.trim() == CONSENT_COOKIE_NAME && !value.trim().is_empty()
+            }
+            None => false,
+        }
+    })
+}
+
+/// Build the Set-Cookie header value recording a consent choice.
+pub fn consent_set_cookie(value: &str, secure: bool) -> String {
+    format!(
+        "{CONSENT_COOKIE_NAME}={value}; Domain={CONSENT_COOKIE_DOMAIN}; Path=/; Max-Age={CONSENT_COOKIE_MAX_AGE_SECS}; SameSite=Lax; HttpOnly{}",
+        if secure { "; Secure" } else { "" }
+    )
+}
+
+/// Shared GET/POST behavior: record the choice, redirect back.
+fn consent_respond(request: ConsentRequest, config: &Config) -> Response {
+    let return_to = consent_safe_return_to(request.return_to.as_deref());
+
+    // Unknown/absent choice: do not touch consent state — send the user
+    // back with the banner still pending (no cookie is written).
+    let Some(value) = normalize_consent_choice(request.choice.as_deref()) else {
+        return (
+            StatusCode::FOUND,
+            [(header::LOCATION, return_to)],
+        )
+            .into_response();
+    };
+
+    let mut response = (
+        StatusCode::FOUND,
+        [(header::LOCATION, return_to)],
+    )
+        .into_response();
+    if let Ok(cookie) = consent_set_cookie(value, is_secure(config)).parse() {
+        response.headers_mut().insert(header::SET_COOKIE, cookie);
+    }
+    response
+}
+
+/// GET /consent?choice={all|necessary}&return_to=… — the no-JS banner's
+/// links (plain navigations; the marketing CSP's `form-action 'self'`
+/// forbids cross-origin form posts).
+async fn consent_get(
+    State(state): State<AppState>,
+    Query(request): Query<ConsentRequest>,
+) -> Response {
+    consent_respond(request, &state.config)
+}
+
+/// POST /consent — same behavior for form-driven callers.
+async fn consent_post(
+    State(state): State<AppState>,
+    Form(request): Form<ConsentRequest>,
+) -> Response {
+    consent_respond(request, &state.config)
+}
+
+/// Public consent router (GET + POST). Mounted in `app.rs` inside the
+/// rate-limited public stack — per-IP/path buckets are the light touch
+/// this state-lite endpoint wants.
+pub fn consent_router() -> Router<AppState> {
+    Router::new()
+        .route("/consent", get(consent_get).post(consent_post))
 }
 
 /// Authenticated form routes. Mounted inside the `authenticated` stack so
@@ -2387,6 +2531,141 @@ mod tests {
         assert_eq!(safe_return_to(&form, "/dashboard"), "/dashboard");
         form.insert("return_to".to_string(), "/contacts?page=2".to_string());
         assert_eq!(safe_return_to(&form, "/dashboard"), "/contacts?page=2");
+    }
+
+    #[test]
+    fn consent_choices_normalize_to_distinct_cookie_values() {
+        assert_eq!(normalize_consent_choice(Some("all")), Some("all"));
+        assert_eq!(normalize_consent_choice(Some("necessary")), Some("necessary"));
+        // "dismiss" was the deleted site.js semantics: record, enable nothing.
+        assert_eq!(normalize_consent_choice(Some("dismiss")), Some("necessary"));
+        // Whitespace is tolerated; anything else records nothing.
+        assert_eq!(normalize_consent_choice(Some(" all ")), Some("all"));
+        assert_eq!(normalize_consent_choice(Some("garbage")), None);
+        assert_eq!(normalize_consent_choice(Some("")), None);
+        assert_eq!(normalize_consent_choice(None), None);
+    }
+
+    #[test]
+    fn consent_return_to_allows_only_apexmail_family_https() {
+        // Relative same-origin paths pass through.
+        assert_eq!(consent_safe_return_to(Some("/pricing")), "/pricing");
+        assert_eq!(
+            consent_safe_return_to(Some("/de/cookies/")),
+            "/de/cookies/"
+        );
+        // Absolute apexmail.ee-family HTTPS URLs pass through (the banner
+        // lives on apexmail.ee, this endpoint on api.apexmail.ee).
+        assert_eq!(
+            consent_safe_return_to(Some("https://apexmail.ee/pricing")),
+            "https://apexmail.ee/pricing"
+        );
+        assert_eq!(
+            consent_safe_return_to(Some("https://www.apexmail.ee/")),
+            "https://www.apexmail.ee/"
+        );
+        assert_eq!(
+            consent_safe_return_to(Some("https://app.apexmail.ee/dashboard")),
+            "https://app.apexmail.ee/dashboard"
+        );
+        // Open redirects are rejected and fall back to "/".
+        assert_eq!(consent_safe_return_to(Some("https://evil.example")), "/");
+        assert_eq!(
+            consent_safe_return_to(Some("https://evil.example/?u=https://apexmail.ee")),
+            "/"
+        );
+        // Scheme downgrades and lookalike suffix hosts are rejected.
+        assert_eq!(
+            consent_safe_return_to(Some("http://apexmail.ee/pricing")),
+            "/"
+        );
+        assert_eq!(
+            consent_safe_return_to(Some("https://notapexmail.ee/pricing")),
+            "/"
+        );
+        assert_eq!(
+            consent_safe_return_to(Some("https://apexmail.ee.evil.io/")),
+            "/"
+        );
+        // Protocol-relative and garbage values never leak through.
+        assert_eq!(consent_safe_return_to(Some("//evil.example")), "/");
+        assert_eq!(consent_safe_return_to(Some("javascript:alert(1)")), "/");
+        assert_eq!(consent_safe_return_to(Some("")), "/");
+        assert_eq!(consent_safe_return_to(None), "/");
+    }
+
+    #[test]
+    fn consent_cookie_carries_domain_expiry_and_distinct_values() {
+        let all = consent_set_cookie("all", true);
+        assert!(all.starts_with("apexmail_consent=all;"), "{all}");
+        // Applies to the marketing host, not just the api host.
+        assert!(all.contains("Domain=.apexmail.ee"));
+        // One year.
+        assert!(all.contains("Max-Age=31536000"));
+        assert!(all.contains("Path=/"));
+        assert!(all.contains("HttpOnly"));
+        assert!(all.contains("SameSite=Lax"));
+        assert!(all.contains("Secure"));
+        // Distinct recorded value for the necessary-only choice.
+        let necessary = consent_set_cookie("necessary", true);
+        assert!(necessary.starts_with("apexmail_consent=necessary;"));
+        assert_ne!(all, necessary);
+        // Non-production omits Secure (local dev over http).
+        assert!(!consent_set_cookie("all", false).contains("Secure"));
+    }
+
+    #[test]
+    fn consent_respond_sets_cookie_and_redirects_for_known_choices() {
+        let config = test_config();
+        let response = consent_respond(
+            ConsentRequest {
+                choice: Some("all".into()),
+                return_to: Some("https://apexmail.ee/pricing".into()),
+            },
+            &config,
+        );
+        assert_eq!(response.status(), StatusCode::FOUND);
+        assert_eq!(
+            response.headers().get(header::LOCATION).unwrap(),
+            "https://apexmail.ee/pricing"
+        );
+        let cookie = response
+            .headers()
+            .get(header::SET_COOKIE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default();
+        assert!(cookie.starts_with("apexmail_consent=all;"));
+        assert!(cookie.contains("Domain=.apexmail.ee"));
+        assert!(cookie.contains("Max-Age=31536000"));
+    }
+
+    #[test]
+    fn consent_respond_unknown_choice_writes_no_cookie() {
+        let config = test_config();
+        let response = consent_respond(
+            ConsentRequest {
+                choice: Some("everything".into()),
+                return_to: Some("/pricing".into()),
+            },
+            &config,
+        );
+        assert_eq!(response.status(), StatusCode::FOUND);
+        assert_eq!(response.headers().get(header::LOCATION).unwrap(), "/pricing");
+        assert!(response.headers().get(header::SET_COOKIE).is_none());
+    }
+
+    #[test]
+    fn consent_cookie_header_detection() {
+        assert!(cookie_header_has_consent("apexmail_consent=all"));
+        assert!(cookie_header_has_consent("session=abc; apexmail_consent=necessary"));
+        assert!(cookie_header_has_consent(
+            "session=abc;apexmail_consent=all; other=1"
+        ));
+        // Absent or empty-valued cookie does NOT hide the banner.
+        assert!(!cookie_header_has_consent("session=abc"));
+        assert!(!cookie_header_has_consent("apexmail_consent="));
+        assert!(!cookie_header_has_consent("xapexmail_consent=all"));
+        assert!(!cookie_header_has_consent(""));
     }
 
     #[test]

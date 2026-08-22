@@ -8,13 +8,13 @@
     "cms_schema": "Markdown frontmatter in content/ directory",
     "authentication": "Same CP login flow at /admin/",
     "analytics": "Same Plausible-compatible analytics host (disabled flag for staging)",
-    "cookie_consent": "Same Tera template partials/cookie-consent.html",
+    "cookie_consent": "Same Tera template partials/cookie-consent.html — no-JS links to the api-server /consent endpoint, banner hidden server-side via the consent cookie",
     "legal_footer": "Same footer partial with dynamic company data",
     "pricing_logic": "Same config.toml [extra.pricing_plans]",
     "api_documentation": "Same Markdown content/docs/ rendering",
     "responsive_breakpoints": "Same Tailwind config (sm:640, md:768, lg:1024, xl:1280)",
     "status_page": "Same status page template at /status/",
-    "form_validation": "Same client-side validation in apexmail-site.js"
+    "form_validation": "Same server-rendered (zero-JS) forms — apexmail-site.js was deleted in the zero-JS rework"
   },
   "prohibited_shortcuts": {
     "placeholder_legal": false,

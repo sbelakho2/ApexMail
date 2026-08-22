@@ -1,11 +1,26 @@
-{# ── Cookie Consent Banner (i18n-aware) ───────────────────────── #}
-{# The banner stays visible until static/js/apexmail-site.js      #}
-{# stores an explicit configured consent choice and hides it.     #}
-{# Uses Zola's trans() macro for multilingual label support.      #}
-{# ───────────────────────────────────────────────────────────── #}
+{# ── Cookie Consent Banner (i18n-aware, ZERO JavaScript) ──────── #}
+{# The zero-JS rework deleted static/js/apexmail-site.js, whose      #}
+{# click handler made these buttons work. The no-JS replacement:     #}
+{# each choice is a real link to the api-server /consent endpoint,   #}
+{# which sets the apexmail_consent cookie (Domain=.apexmail.ee,      #}
+{# 1-year expiry) and 302s back to this page.                        #}
+{#                                                                   #}
+{# Banner visibility after a choice is ALSO server-side: the         #}
+{# marketing container's nginx maps $cookie_apexmail_consent to an   #}
+{# internal sub_filter server that flips data-consent-state="pending"#}
+{# to "recorded" (CSS collapses the banner); the api-server does     #}
+{# the same flip when it serves these pages directly. No script is   #}
+{# involved on any path.                                             #}
+{#                                                                   #}
+{# Links are GET navigations (not cross-origin POST forms) because   #}
+{# the marketing vhost's CSP pins form-action 'self' — a form to     #}
+{# api.apexmail.ee would be blocked by the browser. Plain <a>        #}
+{# navigations are not restricted by form-action.                    #}
+{# ───────────────────────────────────────────────────────────────── #}
 
 {% set consent_choices = config.extra.cookie_consent_choices | default(value=[]) %}
 {% set consent_lang = lang | default(value=config.default_language) %}
+{% set consent_return_to = current_url | default(value=config.base_url) | urlencode %}
 
 {% if consent_lang == "de" %}
   {% set consent_heading = "Cookie-Einstellungen" %}
@@ -44,7 +59,8 @@
   aria-label="Cookie consent"
   aria-labelledby="cookie-consent-heading"
   aria-describedby="cookie-consent-copy"
-  data-focus-trap="true"
+  data-consent-state="pending"
+  data-consent-endpoint="{{ config.extra.api_url | default(value='https://api.apexmail.ee') }}/consent"
   data-cookie-consent-cookie-name="{{ config.extra.cookie_consent_cookie_name | default(value='apexmail_cookie_consent') }}"
   data-analytics-enabled="{{ config.extra.analytics_enabled | default(value=false) }}"
   class="cookie-consent-banner"
@@ -64,13 +80,21 @@
     <div class="cookie-consent-actions">
       {% if consent_choices | length > 0 %}
         {% for choice in consent_choices %}
-          <button
-            type="button"
+          {# Map a configured choice to the /consent `choice` parameter.
+             Both "necessary" and "dismiss" record a necessary-only consent
+             (the deleted site.js treated dismiss as "store the choice,
+             enable nothing"), so both map to choice=necessary. #}
+          {% if choice.value == "all" %}
+            {% set consent_param = "all" %}
+          {% else %}
+            {% set consent_param = "necessary" %}
+          {% endif %}
+          <a
+            href="{{ config.extra.api_url | default(value='https://api.apexmail.ee') }}/consent?choice={{ consent_param }}&amp;return_to={{ consent_return_to }}"
+            rel="nofollow"
             data-cookie-consent-choice
             data-cookie-consent-value="{{ choice.value }}"
             data-cookie-consent-analytics="{{ choice.analytics | default(value=false) }}"
-            {% if loop.first %}data-focus-initial="true"{% endif %}
-            {% if loop.last %}data-focus-final="true"{% endif %}
             class="cookie-consent-button
               {%- if choice.primary | default(value=false) %} cookie-consent-button--primary
               {%- else %} cookie-consent-button--secondary
@@ -85,15 +109,15 @@
             {%- else -%}
               {{- choice.label | default(value=choice.value) -}}
             {%- endif -%}
-          </button>
+          </a>
         {% endfor %}
       {% else %}
-        <button type="button" data-cookie-consent-choice data-cookie-consent-value="reject_all" data-cookie-consent-analytics="false" data-focus-initial="true" class="cookie-consent-button cookie-consent-button--secondary">
+        <a href="{{ config.extra.api_url | default(value='https://api.apexmail.ee') }}/consent?choice=necessary&amp;return_to={{ consent_return_to }}" rel="nofollow" data-cookie-consent-choice data-cookie-consent-value="necessary" data-cookie-consent-analytics="false" class="cookie-consent-button cookie-consent-button--secondary">
           {{- consent_necessary -}}
-        </button>
-        <button type="button" data-cookie-consent-choice data-cookie-consent-value="all" data-cookie-consent-analytics="true" data-focus-final="true" class="cookie-consent-button cookie-consent-button--primary">
+        </a>
+        <a href="{{ config.extra.api_url | default(value='https://api.apexmail.ee') }}/consent?choice=all&amp;return_to={{ consent_return_to }}" rel="nofollow" data-cookie-consent-choice data-cookie-consent-value="all" data-cookie-consent-analytics="true" class="cookie-consent-button cookie-consent-button--primary">
           {{- consent_accept_all -}}
-        </button>
+        </a>
       {% endif %}
     </div>
     <div class="mt-1">

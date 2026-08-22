@@ -90,7 +90,7 @@ textarea:focus-visible {
   align-items: center;
   justify-content: center;
   min-height: 120px;
-  border-radius: 2px;
+  border-radius: var(--radius-sm);
   background: rgb(var(--surface-50));
   border: 1px solid rgb(var(--surface-200));
   animation: pulse 1.5s ease-in-out infinite;
@@ -189,6 +189,24 @@ details.faq-item[open] .faq-icon {
   color: white;
   box-shadow: 0 1px 2px 0 rgba(0,0,0,0.05);
 }
+html.dark #deploy-shared:checked ~ .deploy-tabs [for="deploy-shared"],
+html.dark #deploy-dedicated:checked ~ .deploy-tabs [for="deploy-dedicated"],
+html.dark #deploy-private:checked ~ .deploy-tabs [for="deploy-private"],
+html.dark #deploy-byoc:checked ~ .deploy-tabs [for="deploy-byoc"] {
+  background-color: rgb(var(--brand-700));
+  border-color: rgb(var(--brand-500));
+  color: rgb(255 255 255);
+}
+@media (prefers-color-scheme: dark) {
+  html:not(.light) #deploy-shared:checked ~ .deploy-tabs [for="deploy-shared"],
+  html:not(.light) #deploy-dedicated:checked ~ .deploy-tabs [for="deploy-dedicated"],
+  html:not(.light) #deploy-private:checked ~ .deploy-tabs [for="deploy-private"],
+  html:not(.light) #deploy-byoc:checked ~ .deploy-tabs [for="deploy-byoc"] {
+    background-color: rgb(var(--brand-700));
+    border-color: rgb(var(--brand-500));
+    color: rgb(255 255 255);
+  }
+}
 #deploy-shared:checked ~ .deploy-panels #panel-shared,
 #deploy-dedicated:checked ~ .deploy-panels #panel-dedicated,
 #deploy-private:checked ~ .deploy-panels #panel-private,
@@ -235,6 +253,22 @@ details.faq-item[open] .faq-icon {
 
 #cookie-consent-banner:not([hidden]) ~ #back-to-top {
   display: none;
+}
+
+/* ── Cookie banner recorded-consent state (no-JS) ─────────────
+   After a choice is made, the api-server /consent endpoint sets the
+   apexmail_consent cookie (Domain=.apexmail.ee). Because the site is
+   static, hiding the banner is server-side: the marketing container's
+   nginx serves a sub_filter variant that flips the banner's
+   data-consent-state attribute from "pending" to "recorded" whenever
+   the cookie is present (and the api-server makes the same flip when
+   it serves these pages directly). This rule collapses the banner —
+   and restores the back-to-top link the banner suppressed. */
+#cookie-consent-banner[data-consent-state="recorded"] {
+  display: none !important;
+}
+#cookie-consent-banner[data-consent-state="recorded"] ~ #back-to-top {
+  display: inline-flex;
 }
 
 /* ── Status page auto-refresh indicator ──────────────────────── */
