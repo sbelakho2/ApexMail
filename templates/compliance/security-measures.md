@@ -126,7 +126,7 @@ This document serves as Annex 1 to the [Data Processing Agreement (DPA)](../lega
 - Structured logging for all services with correlation IDs.
 - Prometheus metrics collection with Grafana dashboards.
 - Alertmanager alerts for security events, errors, and threshold violations.
-- Logs retained for 90 days (730 days for Enterprise).
+- Logs retained per the retention registry (30 days by default, up to 365 days for Enterprise); security audit logs retained 365 days by default (`AUDIT_RETENTION_DAYS`).
 - Logs include: authentication events, API calls, administrative actions, security events, error conditions.
 - Logs do not contain: plaintext passwords, full API keys, full payment card numbers.
 
@@ -151,7 +151,7 @@ This document serves as Annex 1 to the [Data Processing Agreement (DPA)](../lega
 
 ## 9. Business Continuity and Disaster Recovery
 
-- Daily automated backups with 30-day retention.
+- Automated backups (weekly full, daily incremental) with a configured retention window (default 90 days) and automated retention cleanup.
 - Multi-zone deployment within primary region.
 - Recovery Time Objective (RTO): 4 hours.
 - Recovery Point Objective (RPO): 24 hours.

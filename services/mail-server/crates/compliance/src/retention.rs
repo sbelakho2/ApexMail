@@ -1,4 +1,3 @@
-use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -58,6 +57,12 @@ pub enum BYOCRetention {
 #[derive(Debug, Clone)]
 pub struct RetentionRegistry {
     categories: HashMap<String, RetentionDefinition>,
+}
+
+impl Default for RetentionRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl RetentionRegistry {
@@ -723,7 +728,7 @@ mod tests {
         let r = registry();
         let content_categories = ["RET-001", "RET-005", "RET-006", "RET-014", "RET-015", "RET-022", "RET-023"];
         for id in content_categories {
-            let cat = r.get(id).expect(&format!("{} should exist", id));
+            let cat = r.get(id).unwrap_or_else(|| panic!("{} should exist", id));
             assert!(cat.zero_retention_allowed, "{} should allow zero retention", cat.category_name);
         }
     }

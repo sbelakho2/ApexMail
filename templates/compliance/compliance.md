@@ -26,7 +26,7 @@ A standard [Data Processing Agreement (DPA)](../legal/dpa.md) is publicly availa
 - Technical and organizational measures (see [Security Measures](security-measures.md))
 - Subprocessor management obligations
 - Data subject request assistance
-- Breach notification obligations (within 48 hours of discovery)
+- Breach notification obligations (without undue delay after discovery, per DPA §10)
 - Deletion and return of data at contract end
 - Audit and inspection rights
 
@@ -42,7 +42,7 @@ ApexMail uses the following categories of subprocessors. The full list with name
 | Payment Processing (Stripe) | Billing | Payment information (not stored by ApexMail) |
 | Customer Support | Ticket management | Account metadata, support history |
 
-All subprocessors are bound by data processing agreements with terms no less protective than ApexMail's DPA. Subprocessor changes are communicated to customers at least 30 days in advance.
+All subprocessors are bound by data processing agreements with terms no less protective than ApexMail's DPA. Subprocessor changes are communicated to customers at least 14 days in advance (per DPA §5.3).
 
 ### Data Subject Rights Support
 
@@ -56,16 +56,17 @@ ApexMail provides the following mechanisms to assist customers in fulfilling dat
 | Right of Restriction | Customer can pause processing for specific domains or accounts |
 | Right of Portability | Data export in machine-readable JSON/CSV format via API |
 | Right to Object | Customer can cease sending to specific recipients via suppression lists |
-| Automated Decisions | ApexMail does not perform automated decision-making on personal data |
+| Automated Decisions | ApexMail operates automated risk scoring and abuse controls on sending behaviour (bounce/complaint rates, content signatures, sending patterns) that can rate-limit or flag accounts. These are operational safeguards, not solely-automated decisions with legal or similarly significant effects; human review is available on request (Privacy Policy §3.11) |
 
 Customers should direct DSR requests to their account administrator. ApexMail will assist within 14 calendar days of receipt.
 
 ### Deletion Process
 
 - Account owners can initiate full data deletion from the dashboard (Settings > Account > Delete Account).
-- Deletion is irreversible after a 7-day grace period.
-- Message content, metadata, events, templates, domains, and API keys are permanently deleted within 30 days.
-- Backup data expires according to the standard retention rotation (maximum 12 months).
+- Deletion follows the configured 30-day grace period (`GDPR_DELETION_GRACE_PERIOD`); after that the request is irreversible.
+- Data-subject erasure requests (GDPR Art. 17) run through the verified-request pipeline: subject-scoped rows are deleted from the profile, event, consent and contact stores; billing records with statutory retention are anonymized (the subject's identifiers are replaced with an irreversible redaction marker) rather than deleted; suppression entries are retained to keep opt-outs enforceable. A per-store deletion confirmation certificate records exactly what was deleted, anonymized, or retained.
+- Event logs, message data, templates, domains, and API keys are deleted within 30 days.
+- Backup data expires according to the backup retention rotation (a configured window, default 90 days — no backup tier is kept beyond that).
 - A deletion confirmation certificate is provided upon request.
 
 ### Export Process
@@ -76,9 +77,10 @@ Customers should direct DSR requests to their account administrator. ApexMail wi
 
 ### Breach Notification
 
-- ApexMail notifies customers of a confirmed personal data breach without undue delay and no later than 48 hours after discovery (per DPA).
+- ApexMail notifies customers of a confirmed personal data breach without undue delay after discovery (per DPA §10; the DPA commits to "without undue delay", not a fixed hourly guarantee).
 - The notification includes: nature of the breach, categories and approximate number of affected records, likely consequences, measures taken or proposed.
-- Data Protection Lead assesses regulatory notification obligations. The Estonian Data Protection Inspectorate (AKI) is notified within 72 hours if the breach is likely to result in risk to data subjects.
+- Breaches are tracked in the platform's breach workflow, which records the discovery timestamp and derives the regulatory deadlines from it: 72 hours (GDPR Art. 33 notification to the supervisory authority) and 60 days (HIPAA breach-notification rule). Each notification step is audit-logged and a signed notification document is produced.
+- The Estonian Data Protection Inspectorate (AKI) is notified within 72 hours of discovery if the breach is likely to result in risk to data subjects.
 - Affected data subjects are notified without undue delay if the breach is likely to result in high risk.
 
 ### Data Location
@@ -106,30 +108,30 @@ The supplied deployment configuration targets European Union / European Economic
 
 ### Current Status
 
-**Not currently available.** ApexMail is focused on EU data protection compliance (GDPR). HIPAA compliance is not part of the current roadmap.
+**Not HIPAA-audited.** ApexMail has not undergone a HIPAA security-rule audit or attestation and does not represent itself as a HIPAA-compliant provider. ApexMail's compliance program is focused on EU data protection (GDPR).
 
 ### BAA Availability
 
-A [Business Associate Agreement (BAA) template](../../docs/compliance/baa-template.md) is available for customers who require HIPAA-equivalent contractual protections under EU regulatory frameworks. The BAA template can be adapted for specific regulatory requirements upon request.
+The platform provides BAA signing machinery for Enterprise tenants: a Business Associate Agreement can be executed and countersigned through the compliance endpoints (the BAA lifecycle `draft → requested → signed → countersigned → active → terminated` is tracked per tenant, and every state transition is recorded in a tamper-evident event log). A [BAA template](../../docs/compliance/baa-template.md) is also available for customers who require HIPAA-equivalent contractual protections under EU regulatory frameworks.
 
-### Which Plans May Be Eligible in the Future
+Executing a BAA is a contractual control only — it does not amount to a HIPAA compliance attestation.
 
-If HIPAA compliance were to be added in the future, it would apply to:
+### Which Plans May Be Eligible
+
 - **Eligible plans**: Enterprise and Dedicated Tenant only.
 - **Eligible deployment**: Private Cloud or dedicated infrastructure.
 - **Not eligible**: Free, Developer, Pro, Growth, Business (shared multi-tenant infrastructure).
 
 ### Current Restrictions
 
-- Protected Health Information (PHI) should not be sent through ApexMail in its current state.
-- No Business Associate Agreement is in effect.
+- Protected Health Information (PHI) must not be sent through ApexMail unless an executed BAA is in place for the tenant.
 - No HIPAA security rule compliance attestation is available.
-- Customers requiring HIPAA compliance should discuss alternative arrangements with our sales team.
+- Customers requiring a HIPAA attestation should discuss alternative arrangements with our sales team.
 
-### Required Customer Configuration (If Available in Future)
+### Required Customer Configuration
 
-If HIPAA support is offered, customers would need to:
-- Execute a BAA before sending PHI.
+Tenants with an executed BAA would need to:
+- Execute the BAA before sending PHI (available via the compliance endpoints).
 - Use a Dedicated Tenant or Private Cloud deployment.
 - Configure data retention to align with HIPAA requirements.
 - Disable features that log message content in accessible logs.
@@ -212,7 +214,7 @@ The timeline is credible and resourced:
 
 ### CCPA / CPRA
 
-ApexMail is an EU-based company. CCPA/CPRA assessment is available upon request for customers who process California residents' data through the platform. As a service provider (processor), ApexMail does not sell personal information and processes data only for the purpose of providing the email delivery service.
+ApexMail is an EU-based company. CCPA/CPRA assessment is available upon request for customers who process California residents' data through the platform. As a service provider (processor), ApexMail does not sell personal information and processes data only for the purpose of providing the email delivery service. Requests routed through the platform's data-subject-request pipeline follow a 30-day request window (unverified requests expire after 30 days), consistent with the GDPR timelines the service implements; California's 45-day statutory maximum is not exceeded by that window.
 
 ### UK GDPR
 

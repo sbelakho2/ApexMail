@@ -470,9 +470,9 @@ async fn erasure_is_scoped_to_the_data_subject() {
     // The persisted result also records the partial flag.
     assert_eq!(result_json.unwrap()["partial"], true);
     let cert = result.deletion_confirmation.expect("certificate present");
-    assert_eq!(cert["stores"].as_array().unwrap().iter().any(|s| {
+    assert!(cert["stores"].as_array().unwrap().iter().any(|s| {
         s["store"] == "contact_list_members" && s["status"] == "skipped_missing_table"
-    }), true);
+    }));
     assert!(
         !cert["confirmation"]
             .as_str()
@@ -803,14 +803,14 @@ async fn download_test_state(pool: PgPool) -> std::sync::Arc<compliance::routes:
                 banned_domains: vec![],
             },
         ),
-        audit_logger: compliance::audit_logger::AuditLogger::new(
+        audit_logger: std::sync::Arc::new(compliance::audit_logger::AuditLogger::new(
             pool.clone(),
             AuditConfig {
                 retention_days: 365,
                 hash_chain_enabled: true,
                 signing_key: "integration-audit-key-0123456789abcdef".into(),
             },
-        ),
+        )),
         secret_manager: compliance::secret_manager::SecretManager::new(
             pool.clone(),
             compliance::config::SecretsConfig {
@@ -824,6 +824,25 @@ async fn download_test_state(pool: PgPool) -> std::sync::Arc<compliance::routes:
         soc2: compliance::soc2::Soc2Service::new(pool.clone()),
         hipaa: compliance::hipaa::HipaaService::new(pool.clone(), b"test".to_vec()),
         trust: compliance::trust_portal::TrustPortalService::new(pool.clone()),
+        breach: compliance::breach_notification::BreachNotifier::new(
+            pool.clone(),
+            std::sync::Arc::new(compliance::audit_logger::AuditLogger::new(
+                pool.clone(),
+                AuditConfig {
+                    retention_days: 365,
+                    hash_chain_enabled: true,
+                    signing_key: "integration-audit-key-0123456789abcdef".into(),
+                },
+            )),
+            vec![],
+            b"integration-breach-key".to_vec(),
+        ),
+        retention_sweeper: compliance::retention_sweep::RetentionSweeper::new(
+            pool.clone(),
+            7,
+            30,
+            365,
+        ),
         config: test_compliance_config(),
         db: pool.clone(),
         redis: dummy_redis(),
@@ -892,6 +911,7 @@ fn test_compliance_config() -> compliance::config::ComplianceConfig {
             max_versions_to_keep: 10,
         },
         dsar_rate_limit: compliance::config::DsarRateLimitConfig::default(),
+        breach_notification_emails: vec![],
     }
 }
 
@@ -1249,4 +1269,414 @@ async fn queue_recovery_sweep_requeues_stuck_entries() {
         !processing_after.contains(&stale),
         "processed entry must leave the processing list"
     );
+}
+
+// ── H-6: retention sweep enforcement ───────────────────────────────────────
+
+/// Extra schema for sweep tests: canonical `tenants` table (with legal_hold)
+/// and timestamp columns on the tracking/engagement stores.
+const SWEEP_EXTRA_SCHEMA: &str = r#"
+CREATE TABLE IF NOT EXISTS tenants (
+    id VARCHAR(26) PRIMARY KEY,
+    name VARCHAR(255) NOT NULL DEFAULT '',
+    slug VARCHAR(100) NOT NULL DEFAULT '',
+    plan VARCHAR(50) NOT NULL DEFAULT 'free',
+    status VARCHAR(20) NOT NULL DEFAULT 'active',
+    settings JSONB NOT NULL DEFAULT '{}',
+    metadata JSONB NOT NULL DEFAULT '{}',
+    legal_hold BOOLEAN NOT NULL DEFAULT false,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+ALTER TABLE tracking_events
+    ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+ALTER TABLE engagement_events
+    ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+"#;
+
+/// A tenant id that fits tenants.id VARCHAR(26).
+fn short_tenant() -> String {
+    format!("t{}", &Uuid::new_v4().simple().to_string()[..20])
+}
+
+async fn sweep_pool(test_name: &str) -> Option<PgPool> {
+    let pool = test_pool(test_name, MAIN_SCHEMA).await?;
+    sqlx::raw_sql(SWEEP_EXTRA_SCHEMA)
+        .execute(&pool)
+        .await
+        .expect("sweep extra schema");
+    Some(pool)
+}
+
+/// H-6: the sweep deletes expired event rows per the registry's default
+/// durations, skips tenants on legal hold, purges expired gdpr_exports and
+/// stale outbox rows, archives old audit logs, and writes an observable
+/// retention_report row.
+#[tokio::test]
+async fn retention_sweep_enforces_durations_and_respects_legal_holds() {
+    let Some(pool) = sweep_pool("sweep").await else {
+        return;
+    };
+    let tenant_a = short_tenant(); // normal
+    let tenant_b = short_tenant(); // legal hold
+    for (id, held) in [(&tenant_a, false), (&tenant_b, true)] {
+        sqlx::query(
+            "INSERT INTO tenants (id, name, slug, plan, legal_hold)
+             VALUES ($1, 'n', $1, 'free', $2)",
+        )
+        .bind(id)
+        .bind(held)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+
+    // Expired (>30d per RET-007/009/010 defaults) and fresh rows per tenant.
+    for tenant in [&tenant_a, &tenant_b] {
+        for (table, col) in [
+            ("message_events", "recipient_email"),
+            ("tracking_events", "email"),
+            ("engagement_events", "email"),
+        ] {
+            for age_days in [40i64, 5] {
+                sqlx::query(&format!(
+                    "INSERT INTO {table} ({col}, tenant_id, created_at)
+                     VALUES ($1, $2, NOW() - ($3 || ' days')::interval)"
+                ))
+                .bind(format!("u-{}@x.com", &tenant[..6]))
+                .bind(tenant)
+                .bind(age_days.to_string())
+                .execute(&pool)
+                .await
+                .unwrap();
+            }
+        }
+    }
+
+    // gdpr_exports: one expired (8d > 7d window), one fresh.
+    for age_days in [8i64, 1] {
+        sqlx::query(
+            "INSERT INTO gdpr_exports
+               (id, request_id, tenant_id, email, data, export_url, expires_at, created_at)
+             VALUES ($1,'r',$2,'e@x.com','{}'::jsonb,'u', NOW() + INTERVAL '1 day',
+                     NOW() - ($3 || ' days')::interval)",
+        )
+        .bind(Uuid::new_v4().to_string())
+        .bind(&tenant_a)
+        .bind(age_days.to_string())
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+
+    // Audit entries to be archived (audit_retention_days = 0 → all live rows).
+    let audit = compliance::audit_logger::AuditLogger::new(
+        pool.clone(),
+        AuditConfig {
+            retention_days: 0,
+            hash_chain_enabled: true,
+            signing_key: "sweep-audit-key-0123456789abcdef".into(),
+        },
+    );
+    audit.initialize().await.expect("audit init");
+    let ctx = LogContext {
+        tenant_id: Some(tenant_a.clone()),
+        user_id: None,
+        session_id: None,
+        ip_address: None,
+        user_agent: None,
+    };
+    for i in 0..2 {
+        audit
+            .log(
+                AuditAction::Read,
+                AuditResource::Subscriber,
+                Some(&format!("sweep-{i}")),
+                serde_json::json!({"i": i}),
+                AuditOutcome::Success,
+                None,
+                &ctx,
+            )
+            .await
+            .unwrap();
+    }
+
+    let sweeper = compliance::retention_sweep::RetentionSweeper::new(pool.clone(), 7, 30, 0);
+    sweeper.apply_migration().await.expect("report table");
+    let report = sweeper.run_sweep(&audit).await.expect("sweep runs");
+
+    // Expired rows for tenant_a deleted; tenant_b (legal hold) retained;
+    // fresh rows for both retained.
+    for (table, col) in [
+        ("message_events", "recipient_email"),
+        ("tracking_events", "email"),
+        ("engagement_events", "email"),
+    ] {
+        let email = format!("u-{}@x.com", &tenant_a[..6]);
+        let remaining_a: i64 = sqlx::query_scalar(&format!(
+            "SELECT COUNT(*) FROM {table} WHERE {col} = $1"
+        ))
+        .bind(&email)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(remaining_a, 1, "{table}: only the fresh row survives for the unheld tenant");
+
+        let email_b = format!("u-{}@x.com", &tenant_b[..6]);
+        let remaining_b: i64 = sqlx::query_scalar(&format!(
+            "SELECT COUNT(*) FROM {table} WHERE {col} = $1"
+        ))
+        .bind(&email_b)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(remaining_b, 2, "{table}: legal-hold tenant rows must survive");
+    }
+
+    // Exports: only the fresh one remains.
+    let exports: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM gdpr_exports")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(exports, 1, "expired gdpr_exports must be purged (7d window)");
+    assert_eq!(report.gdpr_exports_deleted, 1);
+
+    // Audit rows moved to the archive by the sweep (via archive()).
+    let live: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM audit_logs")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(live, 0, "audit rows past AUDIT_RETENTION_DAYS are archived");
+    let archived: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM audit_logs_archive")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(archived, 2);
+    assert_eq!(report.audit_logs_archived, 2);
+
+    // Per-category report numbers: considered 2 (a + b expired), deleted 1,
+    // skipped_legal_hold 1 — for every swept store.
+    for cat in &report.categories {
+        assert_eq!(cat.considered, 2, "{}: considered both tenants' expired rows", cat.store);
+        assert_eq!(cat.deleted, 1, "{}: deleted the unheld tenant's row", cat.store);
+        assert_eq!(cat.skipped_legal_hold, 1, "{}: held tenant's row skipped", cat.store);
+        assert_eq!(cat.retention_days, 30, "{}: registry default drives the cutoff", cat.store);
+        assert_eq!(
+            cat.legal_hold_check,
+            compliance::retention_sweep::LegalHoldCheck::TenantsTable
+        );
+    }
+    assert_eq!(report.categories.len(), 3);
+
+    // Out-of-scope stores are listed with their registry durations.
+    let oos: Vec<&str> = report.out_of_scope.iter().map(|s| s.store).collect();
+    assert_eq!(oos, vec!["clickhouse_analytics", "backups", "mailstore_blobs"]);
+
+    // The run is observable: one retention_report row carrying the JSON.
+    let (ran_rows, tier): (i64, String) =
+        sqlx::query_as("SELECT COUNT(*), MAX(plan_tier) FROM retention_report")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(ran_rows, 1, "one retention_report row per run");
+    assert_eq!(tier, "default");
+    let persisted: serde_json::Value =
+        sqlx::query_scalar("SELECT report FROM retention_report")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(persisted["categories"].as_array().unwrap().len(), 3);
+    assert_eq!(persisted["out_of_scope"].as_array().unwrap().len(), 3);
+}
+
+/// Missing event stores are reported as skipped — never silently counted.
+#[tokio::test]
+async fn retention_sweep_reports_missing_stores() {
+    // MAIN_SCHEMA has message_events but a deployment without tracking_events.
+    let Some(pool) = test_pool("sweep_missing", MAIN_SCHEMA).await else {
+        return;
+    };
+    sqlx::query("DROP TABLE tracking_events")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let audit = compliance::audit_logger::AuditLogger::new(
+        pool.clone(),
+        AuditConfig {
+            retention_days: 365,
+            hash_chain_enabled: true,
+            signing_key: "sweep-missing-key-0123456789abcdef".into(),
+        },
+    );
+    audit.initialize().await.expect("audit init");
+
+    let sweeper = compliance::retention_sweep::RetentionSweeper::new(pool.clone(), 7, 30, 365);
+    sweeper.apply_migration().await.expect("report table");
+    let report = sweeper.run_sweep(&audit).await.expect("sweep runs");
+
+    let tracking = report
+        .categories
+        .iter()
+        .find(|c| c.store == "tracking_events")
+        .unwrap();
+    assert_eq!(
+        tracking.status,
+        compliance::retention_sweep::SweepStatus::SkippedMissingStore
+    );
+    assert_eq!(tracking.deleted, 0);
+    // No tenants table in this deployment — reported honestly.
+    assert_eq!(
+        tracking.legal_hold_check,
+        compliance::retention_sweep::LegalHoldCheck::TenantsTableMissing
+    );
+}
+
+// ── D: DSR verification outbox ─────────────────────────────────────────────
+
+/// Submit writes the raw token to dsr_verification_outbox (same transaction),
+/// the worker queue drains pending entries, and mark_outbox_sent completes
+/// the handoff.
+#[tokio::test]
+async fn dsr_submit_writes_verification_outbox() {
+    let Some(pool) = test_pool("outbox", MAIN_SCHEMA).await else {
+        return;
+    };
+    let gdpr = automation(pool.clone());
+    gdpr.apply_outbox_migration().await.expect("outbox table");
+
+    let tenant = unique_tenant();
+    let subject = format!("outbox-{}@x.com", Uuid::new_v4().simple());
+    let (request, token) = gdpr
+        .submit_request(&tenant, compliance::types::DataSubjectRequestType::Access, &subject)
+        .await
+        .expect("submit succeeds");
+
+    // Exactly one pending outbox row for the request, carrying the raw token
+    // (the requests table stores only its SHA-256 hash) and the verify URL.
+    let pending = gdpr.pending_verification_outbox(10).await.unwrap();
+    assert_eq!(pending.len(), 1);
+    let entry = &pending[0];
+    assert_eq!(entry.request_id, request.id);
+    assert_eq!(entry.email, subject);
+    assert_eq!(entry.status, "pending");
+    assert!(entry.sent_at.is_none());
+    assert_eq!(entry.verification_token, token, "raw token must be queued for delivery");
+
+    // The queued token is the one that verifies the request (its SHA-256
+    // matches the stored verification_token_hash — checked in SQL to avoid
+    // the Redis enqueue path inside verify_request).
+    let hash_matches: bool = sqlx::query_scalar(
+        "SELECT verification_token_hash = encode(sha256($2::bytea), 'hex') \
+         FROM data_subject_requests WHERE id = $1",
+    )
+    .bind(&request.id)
+    .bind(token.as_bytes())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(hash_matches, "outbox token must hash to the request's stored token hash");
+
+    // Mark-sent completes the handoff; the queue drains.
+    gdpr.mark_outbox_sent(&entry.id).await.unwrap();
+    let after = gdpr.pending_verification_outbox(10).await.unwrap();
+    assert!(after.is_empty(), "sent entries leave the pending queue");
+    let status: String =
+        sqlx::query_scalar("SELECT status FROM dsr_verification_outbox WHERE id = $1")
+            .bind(&entry.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(status, "sent");
+}
+
+// ── B: breach notification workflow ────────────────────────────────────────
+
+/// The breach workflow records reports with GDPR 72h / HIPAA 60-day
+/// deadlines, audits each transition, and signs the notification document.
+#[tokio::test]
+async fn breach_workflow_tracks_lifecycle_and_deadlines() {
+    let Some(pool) = test_pool("breach", MAIN_SCHEMA).await else {
+        return;
+    };
+    let audit = std::sync::Arc::new(compliance::audit_logger::AuditLogger::new(
+        pool.clone(),
+        AuditConfig {
+            retention_days: 365,
+            hash_chain_enabled: true,
+            signing_key: "breach-audit-key-0123456789abcdef".into(),
+        },
+    ));
+    audit.initialize().await.expect("audit init");
+    let notifier = compliance::breach_notification::BreachNotifier::new(
+        pool.clone(),
+        audit.clone(),
+        vec!["dpo@example.com".into()],
+        b"breach-test-signing-key".to_vec(),
+    );
+    notifier.apply_migration().await.expect("breach table");
+
+    let tenant = short_tenant();
+    let report = notifier
+        .report_breach(
+            compliance::breach_notification::BreachReportInput {
+                tenant_id: tenant.clone(),
+                affected_records: 1500,
+                data_types: vec!["email".into(), "name".into()],
+                description: "Unauthorized access to mailing list database".into(),
+                severity: "HIGH".into(),
+            },
+            "db-test",
+        )
+        .await
+        .expect("breach reported");
+
+    assert_eq!(report.status, "active");
+    assert_eq!(report.severity, "high", "severity is normalized");
+    let discovered = report.discovered_at;
+    let gdpr_deadline = report.gdpr_deadline.expect("gdpr deadline");
+    let hipaa_deadline = report.hipaa_deadline.expect("hipaa deadline");
+    assert_eq!(
+        (gdpr_deadline - discovered).num_hours(),
+        72,
+        "GDPR deadline is 72h after discovery"
+    );
+    assert_eq!(
+        (hipaa_deadline - discovered).num_days(),
+        60,
+        "HIPAA deadline is 60 days after discovery"
+    );
+    let doc = report
+        .notification_document
+        .as_ref()
+        .expect("signed notification document stored");
+    assert!(doc.get("signature").is_some(), "document is signed");
+    assert_eq!(doc["severity"], "high");
+
+    // Lifecycle transitions are audited and reflected in status.
+    let notified = notifier.notify_dpa(&report.id, "db-test").await.unwrap();
+    assert_eq!(notified.status, "notified_dpa");
+    assert!(notified.dpa_notified_at.is_some());
+
+    let subjects = notifier.notify_subjects(&report.id, "db-test").await.unwrap();
+    assert_eq!(subjects.status, "notified_subjects");
+    assert!(subjects.subjects_notified_at.is_some());
+
+    let resolved = notifier.resolve(&report.id, "db-test").await.unwrap();
+    assert_eq!(resolved.status, "resolved");
+    assert!(resolved.resolved_at.is_some());
+
+    // The audit trail records the report and every transition.
+    let audit_rows: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM audit_logs WHERE resource_id = $1")
+            .bind(&report.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(audit_rows, 4, "report + dpa + subjects + resolve audited");
+
+    // Tenant listing finds the report.
+    let listed = notifier.list_for_tenant(&tenant, None).await.unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].id, report.id);
 }

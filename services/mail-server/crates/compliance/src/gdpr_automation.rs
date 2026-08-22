@@ -21,6 +21,46 @@ use uuid::Uuid;
 /// HMAC-SHA256 type for consent certificate signing.
 type HmacSha256 = Hmac<Sha256>;
 
+/// DDL for the DSR verification outbox — the handoff point between this
+/// crate (which owns request state but cannot send mail) and the services
+/// that own mail delivery (api-server / worker). Applied by
+/// [`GdprAutomation::apply_outbox_migration`].
+pub const DSR_VERIFICATION_OUTBOX_MIGRATION: &str = r#"
+CREATE TABLE IF NOT EXISTS dsr_verification_outbox (
+    id TEXT PRIMARY KEY,
+    request_id TEXT NOT NULL,
+    tenant_id TEXT NOT NULL,
+    email TEXT NOT NULL,
+    -- Raw token is required for delivery; data_subject_requests stores only
+    -- the SHA-256 hash. Rows are purged by the retention sweep once the
+    -- request window (request_expiration_days) has passed.
+    verification_token TEXT NOT NULL,
+    verify_url TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    attempts INTEGER NOT NULL DEFAULT 0,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    sent_at TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS idx_dsr_outbox_pending
+    ON dsr_verification_outbox (status, created_at)
+    WHERE status = 'pending';
+"#;
+
+/// One pending verification-token delivery in the outbox.
+#[derive(Debug, Clone, serde::Serialize, sqlx::FromRow)]
+pub struct DsrOutboxEntry {
+    pub id: String,
+    pub request_id: String,
+    pub tenant_id: String,
+    pub email: String,
+    pub verification_token: String,
+    pub verify_url: String,
+    pub status: String,
+    pub attempts: i32,
+    pub created_at: chrono::DateTime<Utc>,
+    pub sent_at: Option<chrono::DateTime<Utc>>,
+}
+
 use crate::config::GdprConfig;
 use crate::types::*;
 
@@ -37,7 +77,67 @@ impl GdprAutomation {
 
     // ── Request Lifecycle ────────────────────────────────────
 
+    /// Ensure the `dsr_verification_outbox` table exists (idempotent).
+    /// Called at server startup; the compliance crate owns no numbered
+    /// migration files.
+    pub async fn apply_outbox_migration(&self) -> Result<(), String> {
+        sqlx::raw_sql(DSR_VERIFICATION_OUTBOX_MIGRATION)
+            .execute(&self.db)
+            .await
+            .map_err(|e| format!("dsr_verification_outbox migration error: {e}"))?;
+        info!("dsr_verification_outbox table ensured");
+        Ok(())
+    }
+
+    /// Pending verification-token deliveries, oldest first — the queue the
+    /// mail-owning services (api-server / worker) drain. This crate never
+    /// sends mail itself.
+    pub async fn pending_verification_outbox(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<DsrOutboxEntry>, String> {
+        let rows: Vec<DsrOutboxEntry> = sqlx::query_as(
+            "SELECT id, request_id, tenant_id, email, verification_token,
+                    verify_url, status, attempts, created_at, sent_at
+             FROM dsr_verification_outbox
+             WHERE status = 'pending'
+             ORDER BY created_at
+             LIMIT $1",
+        )
+        .bind(limit)
+        .fetch_all(&self.db)
+        .await
+        .map_err(|e| format!("DB error: {e}"))?;
+        Ok(rows)
+    }
+
+    /// Mark an outbox entry as sent (called by the mail-owning service after
+    /// successful delivery).
+    pub async fn mark_outbox_sent(&self, id: &str) -> Result<(), String> {
+        let updated = sqlx::query(
+            "UPDATE dsr_verification_outbox
+             SET status = 'sent', sent_at = NOW()
+             WHERE id = $1 AND status = 'pending'",
+        )
+        .bind(id)
+        .execute(&self.db)
+        .await
+        .map_err(|e| format!("DB error: {e}"))?;
+        if updated.rows_affected() != 1 {
+            return Err(format!("outbox entry {id} not pending"));
+        }
+        Ok(())
+    }
+
     /// Submit a new data-subject request. Returns request + verification token.
+    ///
+    /// D (outbox): the raw verification token is written to
+    /// `dsr_verification_outbox` in the SAME transaction as the request —
+    /// this crate has no mailer, so delivery is a handoff: api-server /
+    /// worker read pending outbox rows ([`Self::pending_verification_outbox`]),
+    /// send the token to the subject, and mark it sent
+    /// ([`Self::mark_outbox_sent`]). Without the outbox row the subject can
+    /// never receive the token, so a failed write fails the submission.
     pub async fn submit_request(
         &self,
         tenant_id: &str,
@@ -49,6 +149,13 @@ impl GdprAutomation {
         let token_hash = sha256_hex(&token);
         let now = Utc::now();
         let expires_at = now + Duration::days(self.config.request_expiration_days);
+        let verify_url = format!("{}/gdpr/verify/{}", self.config.verify_base_url, id);
+
+        let mut tx = self
+            .db
+            .begin()
+            .await
+            .map_err(|e| format!("DB error: {e}"))?;
 
         sqlx::query(
             "INSERT INTO data_subject_requests
@@ -63,9 +170,28 @@ impl GdprAutomation {
         .bind(&token_hash)
         .bind(now)
         .bind(expires_at)
-        .execute(&self.db)
+        .execute(&mut *tx)
         .await
         .map_err(|e| format!("DB error: {e}"))?;
+
+        sqlx::query(
+            "INSERT INTO dsr_verification_outbox
+               (id, request_id, tenant_id, email, verification_token,
+                verify_url, status, attempts, created_at)
+             VALUES ($1,$2,$3,$4,$5,$6,'pending',0,$7)",
+        )
+        .bind(Uuid::new_v4().to_string())
+        .bind(&id)
+        .bind(tenant_id)
+        .bind(email)
+        .bind(&token)
+        .bind(&verify_url)
+        .bind(now)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| format!("DB error (dsr_verification_outbox): {e}"))?;
+
+        tx.commit().await.map_err(|e| format!("DB error: {e}"))?;
 
         let request = DataSubjectRequest {
             id,

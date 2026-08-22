@@ -23,7 +23,8 @@ type HmacSha256 = Hmac<Sha256>;
 
 pub const BREACH_REPORTS_MIGRATION: &str = r#"
 CREATE TABLE IF NOT EXISTS breach_reports (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    -- TEXT id: the module generates and binds Uuid::new_v4().to_string()
+    id TEXT PRIMARY KEY,
     tenant_id VARCHAR(26) NOT NULL,
     discovered_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     affected_records INTEGER NOT NULL,
@@ -118,7 +119,7 @@ impl BreachNotifier {
     }
 
     pub async fn apply_migration(&self) -> Result<(), String> {
-        sqlx::query(BREACH_REPORTS_MIGRATION)
+        sqlx::raw_sql(BREACH_REPORTS_MIGRATION)
             .execute(&self.db)
             .await
             .map_err(|e| format!("Migration error: {e}"))?;
@@ -455,6 +456,7 @@ impl BreachNotifier {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn build_notification_document(
         &self,
         id: &str,
@@ -625,8 +627,10 @@ mod tests {
     #[test]
     fn test_breach_report_migration_sql() {
         assert!(BREACH_REPORTS_MIGRATION.contains("CREATE TABLE IF NOT EXISTS breach_reports"));
-        assert!(BREACH_REPORTS_MIGRATION.contains("gen_random_uuid()"));
+        // TEXT id — the module binds Uuid::new_v4().to_string() everywhere.
+        assert!(BREACH_REPORTS_MIGRATION.contains("id TEXT PRIMARY KEY"));
         assert!(BREACH_REPORTS_MIGRATION.contains("idx_breach_reports_tenant_id"));
+        assert!(BREACH_REPORTS_MIGRATION.contains("idx_breach_reports_status"));
     }
 
     #[test]

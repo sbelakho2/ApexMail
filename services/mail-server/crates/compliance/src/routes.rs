@@ -21,6 +21,7 @@ use tower_http::cors::CorsLayer;
 use tracing::error;
 
 use crate::audit_logger::AuditLogger;
+use crate::breach_notification::BreachNotifier;
 use crate::config::ComplianceConfig;
 use crate::content_scanner::ContentScanner;
 use crate::dsar_rate_limit::{DsarRateLimitStatus, DsarRateLimiter};
@@ -38,12 +39,19 @@ use crate::types::*;
 pub struct AppState {
     pub risk_engine: RiskScoringEngine,
     pub content_scanner: ContentScanner,
-    pub audit_logger: AuditLogger,
+    /// Shared behind an Arc so the breach notifier participates in the SAME
+    /// audit hash-chain state as the rest of the service (the chain lock and
+    /// last-hash cache are per-logger-instance).
+    pub audit_logger: Arc<AuditLogger>,
     pub secret_manager: SecretManager,
     pub gdpr: GdprAutomation,
     pub soc2: Soc2Service,
     pub hipaa: HipaaService,
     pub trust: TrustPortalService,
+    /// Internal breach-report workflow (GDPR 72h / HIPAA 60-day deadlines).
+    pub breach: BreachNotifier,
+    /// H-6: retention sweep — registry-driven purges + retention_report rows.
+    pub retention_sweeper: crate::retention_sweep::RetentionSweeper,
     pub config: ComplianceConfig,
     pub db: PgPool,
     pub redis: RedisPool,
@@ -136,6 +144,13 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         // G: real download route for stored access exports (export_url
         // points here via export_base_url).
         .route("/gdpr/exports/{id}", get(gdpr_download_export))
+        // Internal breach-report workflow (GDPR 72h / HIPAA 60-day
+        // deadlines): audited lifecycle, signed notification documents.
+        .route("/breaches", post(breach_report))
+        .route("/breaches/{tenant_id}", get(breach_list))
+        .route("/breaches/{id}/notify-dpa", post(breach_notify_dpa))
+        .route("/breaches/{id}/notify-subjects", post(breach_notify_subjects))
+        .route("/breaches/{id}/resolve", post(breach_resolve))
         // SOC2 / HIPAA / Trust Portal
         .merge(crate::admin_routes::admin_router())
         .merge(crate::admin_routes::public_trust_router())
@@ -902,14 +917,17 @@ async fn gdpr_submit_request(
     {
         Ok((request, _verification_token)) => {
             // C: the raw verification token and its hash must NEVER appear in
-            // the HTTP response. This crate has no mailer, so the token is
-            // not delivered out-of-band here: log a redacted notice for ops
-            // and flag `token_delivered: false` so delivery is visibly manual.
-            tracing::warn!(
+            // the HTTP response. This crate has no mailer: the token was
+            // written to dsr_verification_outbox in the same transaction as
+            // the request, and api-server / worker own the actual sending
+            // (documented handoff — see the crate README). token_delivered
+            // stays false because THIS service has not delivered anything.
+            tracing::info!(
                 request_id = %request.id,
                 email = %mail_common::pii::redact_email(email),
                 token_delivered = false,
-                "GDPR verification token NOT delivered — no mailer configured in the compliance crate; manual delivery required"
+                delivery = "outbox_handoff",
+                "GDPR verification token queued in dsr_verification_outbox — mail delivery owned by api-server/worker"
             );
             // L1: consume submission quota only on success.
             state
@@ -925,8 +943,8 @@ async fn gdpr_submit_request(
                 requested_at: request.requested_at,
                 expires_at: request.expires_at,
                 verification: serde_json::json!({
-                    "method": "token_delivery_pending",
-                    "instructions": "The verification token is delivered to the data subject by the platform operator; it is never returned by this API.",
+                    "method": "outbox_handoff",
+                    "instructions": "The verification token has been queued in dsr_verification_outbox for delivery by the platform's mail services (api-server/worker). It is never returned by this API.",
                 }),
                 token_delivered: false,
             };
@@ -1219,6 +1237,111 @@ pub async fn gdpr_download_export(
     Ok(response)
 }
 
+// ── Breach notification endpoints (internal workflow) ─────────────────────
+
+/// POST /breaches — record a new breach report and open the notification
+/// workflow. The report tracks the GDPR 72-hour and HIPAA 60-day deadlines
+/// from discovery and stores a signed notification document.
+async fn breach_report(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<crate::breach_notification::BreachReportInput>,
+) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
+    verify_bearer(&headers, &state.config).map_err(|(c, m)| err_json(c, m))?;
+    if body.tenant_id.trim().is_empty() {
+        return Err(err_json(StatusCode::BAD_REQUEST, "Missing tenant_id"));
+    }
+    if body.description.trim().is_empty() {
+        return Err(err_json(StatusCode::BAD_REQUEST, "Missing description"));
+    }
+    match state.breach.report_breach(body, "compliance-api").await {
+        Ok(report) => Ok(created_json(report)),
+        Err(e) => {
+            error!("Breach report failed: {e}");
+            Err(err_json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to record breach report",
+            ))
+        }
+    }
+}
+
+/// GET /breaches/{tenant_id} — list breach reports for a tenant.
+async fn breach_list(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    axum::extract::Path(tenant_id): axum::extract::Path<String>,
+) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
+    verify_bearer(&headers, &state.config).map_err(|(c, m)| err_json(c, m))?;
+    match state.breach.list_for_tenant(&tenant_id, None).await {
+        Ok(reports) => Ok(ok_json(serde_json::json!({ "reports": reports }))),
+        Err(e) => {
+            error!("Breach list failed: {e}");
+            Err(err_json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to list breach reports",
+            ))
+        }
+    }
+}
+
+/// POST /breaches/{id}/notify-dpa — record supervisory-authority notification.
+async fn breach_notify_dpa(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    axum::extract::Path(breach_id): axum::extract::Path<String>,
+) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
+    verify_bearer(&headers, &state.config).map_err(|(c, m)| err_json(c, m))?;
+    match state.breach.notify_dpa(&breach_id, "compliance-api").await {
+        Ok(report) => Ok(ok_json(report)),
+        Err(e) => {
+            error!("Breach DPA notification failed: {e}");
+            Err(err_json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to record DPA notification",
+            ))
+        }
+    }
+}
+
+/// POST /breaches/{id}/notify-subjects — record data-subject notification.
+async fn breach_notify_subjects(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    axum::extract::Path(breach_id): axum::extract::Path<String>,
+) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
+    verify_bearer(&headers, &state.config).map_err(|(c, m)| err_json(c, m))?;
+    match state.breach.notify_subjects(&breach_id, "compliance-api").await {
+        Ok(report) => Ok(ok_json(report)),
+        Err(e) => {
+            error!("Breach subject notification failed: {e}");
+            Err(err_json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to record subject notification",
+            ))
+        }
+    }
+}
+
+/// POST /breaches/{id}/resolve — close a breach report.
+async fn breach_resolve(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    axum::extract::Path(breach_id): axum::extract::Path<String>,
+) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
+    verify_bearer(&headers, &state.config).map_err(|(c, m)| err_json(c, m))?;
+    match state.breach.resolve(&breach_id, "compliance-api").await {
+        Ok(report) => Ok(ok_json(report)),
+        Err(e) => {
+            error!("Breach resolve failed: {e}");
+            Err(err_json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to resolve breach report",
+            ))
+        }
+    }
+}
+
 // ── DOI (Double Opt-In) endpoint bodies ───────────────────────────────────
 
 /// Request body for `POST /gdpr/initiate-doi`.
@@ -1496,6 +1619,7 @@ mod tests {
                 max_versions_to_keep: 0,
             },
             dsar_rate_limit: crate::config::DsarRateLimitConfig::default(),
+            breach_notification_emails: vec![],
         }
     }
 
@@ -2121,16 +2245,29 @@ mod tests {
         let config = test_config("cmpl-doi-test-token");
         let db = dummy_pool();
         let redis = dummy_redis();
+        let audit_logger = Arc::new(AuditLogger::new(db.clone(), config.audit.clone()));
         Arc::new(AppState {
             risk_engine: RiskScoringEngine::new(db.clone(), config.clone()),
             content_scanner: ContentScanner::new(db.clone(), test_content_config()),
-            audit_logger: AuditLogger::new(db.clone(), config.audit.clone()),
+            audit_logger: audit_logger.clone(),
             secret_manager: SecretManager::new(db.clone(), config.secrets.clone())
                 .expect("SecretManager construction should succeed with test salt"),
             gdpr: test_gdpr_automation(),
             soc2: crate::soc2::Soc2Service::new(db.clone()),
             hipaa: crate::hipaa::HipaaService::new(db.clone(), b"test-baa-key".to_vec()),
             trust: crate::trust_portal::TrustPortalService::new(db.clone()),
+            breach: crate::breach_notification::BreachNotifier::new(
+                db.clone(),
+                audit_logger,
+                vec![],
+                b"test-breach-signing-key".to_vec(),
+            ),
+            retention_sweeper: crate::retention_sweep::RetentionSweeper::new(
+                db.clone(),
+                config.gdpr.export_expiration_days,
+                config.gdpr.request_expiration_days,
+                config.audit.retention_days,
+            ),
             config: config.clone(),
             db: db.clone(),
             redis: redis.clone(),

@@ -20,6 +20,10 @@ pub struct ComplianceConfig {
     /// DSAR-specific rate limiting configuration.
     /// SEC-15: Stricter rate limits for Data Subject Access Request endpoints.
     pub dsar_rate_limit: DsarRateLimitConfig,
+
+    /// Email addresses notified (via the breach workflow's ops log) when a
+    /// breach report is recorded. BREACH_NOTIFICATION_EMAILS, comma-separated.
+    pub breach_notification_emails: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -287,6 +291,12 @@ impl ComplianceConfig {
                     .parse()
                     .unwrap_or(3600),
             },
+
+            breach_notification_emails: env_or("BREACH_NOTIFICATION_EMAILS", "")
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect(),
         }
     }
 }

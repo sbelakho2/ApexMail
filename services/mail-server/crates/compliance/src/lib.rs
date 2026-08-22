@@ -1,11 +1,14 @@
 #![deny(unsafe_code)]
 pub mod admin_routes;
 pub mod audit_logger;
+pub mod breach_notification;
 pub mod config;
 pub mod content_scanner;
 pub mod dsar_rate_limit;
 pub mod gdpr_automation;
 pub mod hipaa;
+pub mod retention;
+pub mod retention_sweep;
 pub mod risk_scoring;
 pub mod routes;
 pub mod secret_manager;

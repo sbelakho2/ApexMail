@@ -40,7 +40,7 @@ Provision of the ApexMail email infrastructure service, including sending, recei
 
 ### 2.5 Duration
 
-For the term of the Agreement plus the post-termination retention period specified in the Privacy Policy (30 days for account data, up to 90 days for email content, up to 730 days for event logs for Enterprise customers).
+For the term of the Agreement plus the post-termination retention period specified in the Privacy Policy (30 days for account data). Email content and event metadata follow the retention categories of ApexMail's retention policy: message content defaults to 7 days and event metadata to 30 days, both plan-dependent and capped at 365 days for Enterprise customers.
 
 ## 3. Confidentiality
 
@@ -180,9 +180,10 @@ In lieu of an on-site audit, ApexMail may provide:
 ## 12. Deletion and Return of Data
 
 Upon termination of the Service:
+
 - Customer may export Personal Data within 30 days using provided export tools.
 - ApexMail shall delete all remaining copies of Personal Data unless retention is required by EU or Member State law.
-- Deletion is performed in accordance with NIST SP 800-88 guidelines.
+- Deletion is performed as follows: Personal Data is deleted row-level from the primary processing stores through ApexMail's erasure pipeline; records subject to statutory retention (e.g., billing) have the data subject's identifiers replaced with an irreversible redaction marker (anonymization) instead of deletion; opt-out (suppression) records are retained to keep suppression enforceable; audit records are moved to an archive store for their retention period. Copies in backups become inaccessible through the encrypted backup rotation, which retains no backup beyond the configured retention window (default 90 days). This is a logical-deletion and rotation process; ApexMail does not perform physical media sanitization under NIST SP 800-88 as part of standard service termination.
 
 ## 13. Liability
 

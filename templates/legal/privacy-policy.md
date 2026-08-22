@@ -67,7 +67,7 @@ We process personal data about the following categories of individuals.
 | Legal basis | Contract performance (GDPR Art. 6(1)(b)) — we act as processor on behalf of our customer (the data controller) |
 | Processor or recipient | Hetzner (infrastructure — Germany, Finland), AWS SES (delivery transport — EU region), Redis (caching — Hetzner Germany), ClickHouse (analytics — Hetzner Germany) |
 | Location | EU data centers (Hetzner Germany, Finland) — PostgreSQL (Germany), Redis (Germany), file storage (Germany) |
-| Retention | Email content: 30 days (configurable up to 90 days for Enterprise); Event logs: 90 days (730 days for Enterprise); Configurable per customer contract |
+| Retention | Email content: 7 days by default (plan-dependent, up to 365 days for Enterprise); Event metadata: 30 days by default (up to 365 days for Enterprise); billing records 7 years per Estonian accounting law; Configurable per customer contract within plan limits |
 | Rights | Exercised via the data controller (ApexMail customer); We assist controllers with DSR fulfillment |
 
 ### 2.5 Support Contacts

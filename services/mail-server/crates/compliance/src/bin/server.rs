@@ -13,11 +13,13 @@ use tokio::time::{interval, Duration};
 use tracing::{error, info};
 
 use compliance::audit_logger::AuditLogger;
+use compliance::breach_notification::BreachNotifier;
 use compliance::config::ComplianceConfig;
 use compliance::content_scanner::ContentScanner;
 use compliance::dsar_rate_limit::DsarRateLimiter;
 use compliance::gdpr_automation::GdprAutomation;
 use compliance::hipaa::HipaaService;
+use compliance::retention_sweep::RetentionSweeper;
 use compliance::risk_scoring::RiskScoringEngine;
 use compliance::routes::{create_router, AppState};
 use compliance::secret_manager::SecretManager;
@@ -83,19 +85,53 @@ async fn main() -> anyhow::Result<()> {
     // Build services
     let risk_engine = RiskScoringEngine::new(db.clone(), config.clone());
     let content_scanner = ContentScanner::new(db.clone(), config.content.clone());
-    let audit_logger = AuditLogger::new(db.clone(), config.audit.clone());
+    // Shared behind an Arc so the breach notifier participates in the same
+    // audit hash-chain state as the rest of the service.
+    let audit_logger = Arc::new(AuditLogger::new(db.clone(), config.audit.clone()));
     let secret_manager =
         SecretManager::new(db.clone(), config.secrets.clone()).map_err(|e| anyhow::anyhow!(e))?;
     let gdpr = GdprAutomation::new(db.clone(), redis.clone(), config.gdpr.clone());
     let soc2 = Soc2Service::new(db.clone());
     let hipaa = HipaaService::new(db.clone(), config.auth_token.as_bytes().to_vec());
     let trust = TrustPortalService::new(db.clone());
+    let breach = BreachNotifier::new(
+        db.clone(),
+        audit_logger.clone(),
+        config.breach_notification_emails.clone(),
+        config.audit.signing_key.clone().into_bytes(),
+    );
+    // H-6: retention sweep — enforces the RET-001..023 registry durations
+    // for the stores this crate owns and writes a retention_report row per run.
+    let retention_sweeper = RetentionSweeper::new(
+        db.clone(),
+        config.gdpr.export_expiration_days,
+        config.gdpr.request_expiration_days,
+        config.audit.retention_days,
+    );
 
     // Seed SOC2 control catalog (idempotent — uses INSERT ... ON CONFLICT).
     if let Err(e) = soc2.seed_default_controls().await {
         error!("Failed to seed SOC2 controls: {e}");
     } else {
         info!("SOC2 control catalog seeded");
+    }
+
+    // Ensure crate-owned tables exist (idempotent DDL; the compliance crate
+    // owns no numbered migration files).
+    if let Err(e) = gdpr.apply_outbox_migration().await {
+        error!("Failed to ensure dsr_verification_outbox: {e}");
+    } else {
+        info!("dsr_verification_outbox ensured");
+    }
+    if let Err(e) = breach.apply_migration().await {
+        error!("Failed to ensure breach_reports: {e}");
+    } else {
+        info!("breach_reports ensured");
+    }
+    if let Err(e) = retention_sweeper.apply_migration().await {
+        error!("Failed to ensure retention_report: {e}");
+    } else {
+        info!("retention_report ensured");
     }
 
     let http_client = reqwest::Client::builder()
@@ -117,11 +153,13 @@ async fn main() -> anyhow::Result<()> {
         soc2,
         hipaa,
         trust,
+        breach,
         config: config.clone(),
         db: db.clone(),
         redis: redis.clone(),
         http_client,
         dsar_rate_limiter,
+        retention_sweeper,
     });
 
     // Build router with middleware
@@ -199,17 +237,20 @@ async fn shutdown_signal() {
     info!("Shutdown signal received");
 }
 
-/// 5 background cron jobs:/// 1. GDPR queue processing — every 30s
+/// 6 background cron jobs:
+/// 1. GDPR queue processing — every 30s
 /// 2. Secret auto-rotation — every 60min
 /// 3. GDPR request expiry — every 5min
 /// 4. Audit archival — daily (every 24h)
-/// 5. Data retention enforcement — daily (every 24h)
+/// 5. Data retention enforcement (consents/exports) — daily (every 24h)
+/// 6. Retention sweep (H-6: registry-driven event-store purges + report) — daily
 async fn run_cron_jobs(state: Arc<AppState>) {
     let mut gdpr_ticker = interval(Duration::from_secs(30));
     let mut rotation_ticker = interval(Duration::from_secs(3600));
     let mut expiry_ticker = interval(Duration::from_secs(300));
     let mut archive_ticker = interval(Duration::from_secs(86400));
     let mut retention_ticker = interval(Duration::from_secs(86400));
+    let mut sweep_ticker = interval(Duration::from_secs(86400));
 
     loop {
         tokio::select! {
@@ -268,6 +309,32 @@ async fn run_cron_jobs(state: Arc<AppState>) {
                             }
                             Err(e) => error!(error = %e, "Retention enforcement failed"),
                             _ => {}
+                        }
+                    }
+                    _ = sweep_ticker.tick() => {
+                        // H-6: enforce the RET-001..023 registry durations for
+                        // the stores this crate owns (event tables, gdpr_exports,
+                        // audit_logs via archive(), dsr outbox) and persist a
+                        // retention_report row making the policy observable.
+                        match state.retention_sweeper.run_sweep(&state.audit_logger).await {
+                            Ok(report) => {
+                                let deleted: i64 =
+                                    report.categories.iter().map(|c| c.deleted).sum();
+                                let held: i64 = report
+                                    .categories
+                                    .iter()
+                                    .map(|c| c.skipped_legal_hold)
+                                    .sum();
+                                info!(
+                                    deleted,
+                                    skipped_legal_hold = held,
+                                    exports = report.gdpr_exports_deleted,
+                                    outbox_purged = report.dsr_outbox_purged,
+                                    audit_archived = report.audit_logs_archived,
+                                    "Retention sweep completed — retention_report row written"
+                                );
+                            }
+                            Err(e) => error!(error = %e, "Retention sweep failed"),
                         }
                     }
                 }

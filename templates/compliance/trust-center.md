@@ -69,14 +69,14 @@ ApexMail provides transactional email infrastructure with EU/EEA-oriented deploy
 - **Application monitoring**: Prometheus metrics for all services, including request rates, error rates, latency percentiles, queue depth, and connection counts. Custom application metrics for business operations (messages processed, delivery attempts, bounce rates).
 - **Infrastructure monitoring**: Host-level metrics (CPU, memory, disk, network) collected via node_exporter. Database metrics (connections, query performance, replication lag) via postgres_exporter. Probe-based external monitoring from multiple geographic locations via blackbox_exporter.
 - **Security alerting**: Alerts for: failed authentication spikes, new admin user creation, API key creation, permission changes, WAF rule triggers, IDS/IPS alerts, DDoS detection events, certificate expiry, and secret-scanning hits. All security alerts page the on-call engineer.
-- **Log retention**: Application and access logs retained for 90 days (730 days for Enterprise). Security audit logs retained for 365 days minimum. Logs are immutable once written. Log archives are encrypted at rest.
+- **Log retention**: Application and access logs retained per the retention registry (30 days by default, up to 365 days for Enterprise). Security audit logs retained for 365 days minimum (configurable via `AUDIT_RETENTION_DAYS`). Logs are immutable once written. Log archives are encrypted at rest.
 - **On-call process**: 24/7/365 on-call rotation with primary and secondary responders. Alerts are routed via Alertmanager to PagerDuty. On-call handoff occurs at 09:00 UTC daily with documented status transfer.
 - **Incident escalation**: Escalation from primary to secondary on-call after 15 minutes without acknowledgment. Escalation to SRE lead after 30 minutes. Escalation to CTO after 1 hour. See [Incident Response Policy](incident-response.md).
 
 ### Backups and Recovery
 
-- **Backup frequency**: Full database backups daily at 02:00 UTC. Continuous WAL archiving for point-in-time recovery. Configuration backups on every change via infrastructure-as-code repository commits.
-- **Backup retention**: Daily backups retained for 30 days. Weekly backups retained for 90 days. Monthly backups retained for 12 months. WAL archives retained for 7 days.
+- **Backup frequency**: Weekly full backups (Sundays 02:00 UTC) with daily incremental backups and continuous WAL archiving. Configuration backups on every change via infrastructure-as-code repository commits. Backups retained for the configured window (default 90 days).
+- **Backup retention**: Backups are retained for a configured window (`BACKUP_RETENTION_DAYS`, default 90 days) and purged by an automated daily cleanup; analytics-store backups default to 30 days. WAL archives retained for 7 days. No backup tier is kept beyond the configured retention window.
 - **Restore testing**: Full database restore tested monthly in an isolated environment. Backup integrity verified automatically after each backup completes (checksum validation). Restore test results are logged and reviewed.
 - **Recovery Point Objective (RPO)**: 24 hours for full database restore from daily backups. Point-in-time recovery available within the 7-day WAL archive window (near-real-time).
 - **Recovery Time Objective (RTO)**: 4 hours for critical services (API, SMTP, queue). 8 hours for non-critical services (dashboard, analytics). Cross-region failover available for Enterprise within 2 hours.
@@ -84,9 +84,9 @@ ApexMail provides transactional email infrastructure with EU/EEA-oriented deploy
 
 ### Data Deletion
 
-- **Account-deletion process**: Account owners can request full account deletion via the dashboard or support. Deletion is irreversible. All customer data (messages, templates, domains, API keys, events, logs) is permanently deleted within 30 days of request. A 7-day grace period allows cancellation of deletion requests.
+- **Account-deletion process**: Account owners can request full account deletion via the dashboard or support. Deletion follows the configured 30-day grace period (`GDPR_DELETION_GRACE_PERIOD`), after which it is irreversible. Customer data (messages, templates, domains, API keys, events, logs) is deleted within 30 days of the request. A 30-day grace window allows cancellation of deletion requests.
 - **Message-data deletion**: Message content and metadata are permanently deleted within 30 days of account deletion or per the configured retention period (whichever is shorter). SMTP logs and delivery receipts are deleted on the same schedule.
-- **Backup expiry**: Backups containing deleted customer data are expired as part of the normal retention rotation (30-day daily, 90-day weekly, 12-month monthly). No backup is retained beyond 12 months for deleted account data.
+- **Backup expiry**: Backups containing deleted customer data are expired as part of the normal retention rotation (a configured window, default 90 days). No backup is retained beyond that window for deleted account data.
 - **Log retention**: See Logging and Monitoring section above. Logs containing customer data are purged at the end of their retention period.
 - **Legal retention exceptions**: Where a legal obligation (e.g., tax records, court order) requires retention beyond the standard deletion period, affected data is quarantined and access is restricted to designated legal/compliance personnel only. The customer is notified if legally permitted.
 

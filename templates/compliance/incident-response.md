@@ -149,7 +149,7 @@ For personal data breaches (per GDPR Art. 4(12)):
 4. If breach is likely to result in high risk:
    - Affected data subjects notified without undue delay.
 5. If ApexMail is acting as processor:
-   - Data controller (Customer) notified without undue delay (within 48 hours per DPA).
+   - Data controller (Customer) notified without undue delay (per DPA §10). The platform's breach workflow records the discovery timestamp and derives the regulatory deadlines from it (72 hours GDPR authority notification, 60 days HIPAA).
 6. All breach notifications, actions, and decisions documented.
 
 ## 8. Testing
