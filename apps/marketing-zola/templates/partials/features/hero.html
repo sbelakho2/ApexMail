@@ -24,7 +24,7 @@
           {% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["hero_cta_trial"] %}{{ i18n_data[l]["features"]["hero_cta_trial"] }}{% else %}Start Free{% endif %}
           <svg class="w-4 h-4 group-hover:translate-x-1 transition-transform" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
         </a>
-        <a href="/pricing/" class="btn-secondary btn-secondary--lg flex items-center gap-2">
+        <a href="{{ lp }}/pricing/" class="btn-secondary btn-secondary--lg flex items-center gap-2">
           {% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["hero_cta_pricing"] %}{{ i18n_data[l]["features"]["hero_cta_pricing"] }}{% else %}View Pricing{% endif %}
         </a>
       </div>
@@ -34,17 +34,17 @@
         <div class="animate-in text-center">
           <div class="text-3xl lg:text-4xl font-bold text-surface-950 mb-2 tracking-tight">99.9%</div>
           <div class="text-sm text-surface-500 font-medium">{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["stat_uptime"] %}{{ i18n_data[l]["features"]["stat_uptime"] }}{% else %}Uptime SLA (Scale and Enterprise plans){% endif %}</div>
-          <div class="text-xs text-surface-400 mt-1"><a href="/sla/" class="hover:text-brand-500 transition-colors">{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["stat_uptime_link"] %}{{ i18n_data[l]["features"]["stat_uptime_link"] }}{% else %}Service credits{% endif %}</a></div>
+          <div class="text-xs text-surface-400 mt-1"><a href="{{ lp }}/sla/" class="hover:text-brand-500 transition-colors">{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["stat_uptime_link"] %}{{ i18n_data[l]["features"]["stat_uptime_link"] }}{% else %}Service credits{% endif %}</a></div>
         </div>
         <div class="animate-in text-center">
           <div class="text-3xl lg:text-4xl font-bold text-surface-950 mb-2 tracking-tight">{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["stat_latency_value"] %}{{ i18n_data[l]["features"]["stat_latency_value"] }}{% else %}P95 &le; 500ms{% endif %}</div>
           <div class="text-sm text-surface-500 font-medium">{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["stat_api_latency"] %}{{ i18n_data[l]["features"]["stat_api_latency"] }}{% else %}API Latency (gateway){% endif %}</div>
-          <div class="text-xs text-surface-400 mt-1"><a href="/performance-methodology/" class="hover:text-brand-500 transition-colors">{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["stat_latency_link"] %}{{ i18n_data[l]["features"]["stat_latency_link"] }}{% else %}Measured methodology{% endif %}</a></div>
+          <div class="text-xs text-surface-400 mt-1"><a href="{{ lp }}/performance-methodology/" class="hover:text-brand-500 transition-colors">{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["stat_latency_link"] %}{{ i18n_data[l]["features"]["stat_latency_link"] }}{% else %}Measured methodology{% endif %}</a></div>
         </div>
         <div class="animate-in text-center">
           <div class="text-3xl lg:text-4xl font-bold text-surface-950 mb-2 tracking-tight">{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["stat_gdpr_value"] %}{{ i18n_data[l]["features"]["stat_gdpr_value"] }}{% else %}EU-Hosted{% endif %}</div>
           <div class="text-sm text-surface-500 font-medium">{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["stat_gdpr_label"] %}{{ i18n_data[l]["features"]["stat_gdpr_label"] }}{% else %}GDPR-Aligned Infrastructure{% endif %}</div>
-          <div class="text-xs text-surface-400 mt-1"><a href="/compliance/" class="hover:text-brand-500 transition-colors">{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["stat_gdpr_link"] %}{{ i18n_data[l]["features"]["stat_gdpr_link"] }}{% else %}Compliance details{% endif %}</a></div>
+          <div class="text-xs text-surface-400 mt-1"><a href="{{ lp }}/compliance/" class="hover:text-brand-500 transition-colors">{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["stat_gdpr_link"] %}{{ i18n_data[l]["features"]["stat_gdpr_link"] }}{% else %}Compliance details{% endif %}</a></div>
         </div>
         <div class="animate-in text-center">
           <div class="text-3xl lg:text-4xl font-bold text-surface-950 mb-2 tracking-tight">0</div>

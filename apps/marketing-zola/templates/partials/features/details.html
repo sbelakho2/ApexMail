@@ -79,7 +79,7 @@ print(status.status)  # 'delivered'</code></pre>
             </li>
             {% endfor %}
           </ul>
-          <a href="/compliance/" class="inline-flex items-center gap-2 text-surface-950 font-semibold hover:text-brand-700 transition-colors">
+          <a href="{{ lp }}/compliance/" class="inline-flex items-center gap-2 text-surface-950 font-semibold hover:text-brand-700 transition-colors">
             {% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["detail_compliance_cta"] %}{{ i18n_data[l]["features"]["detail_compliance_cta"] }}{% else %}Learn About Compliance{% endif %}
             <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
           </a>
@@ -248,7 +248,7 @@ console.log(events); // delivered, opened, clicked...</code></pre>
                 <span class="text-sm text-surface-600"><strong>{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["inbox_cap_4_title"] %}{{ i18n_data[l]["features"]["inbox_cap_4_title"] }}{% else %}Retention Analytics{% endif %}</strong> — {% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["inbox_cap_4_desc"] %}{{ i18n_data[l]["features"]["inbox_cap_4_desc"] }}{% else %}Historical trend analysis with per-provider breakdowns to track deliverability improvements over time.{% endif %}</span>
               </li>
             </ul>
-            <a href="/inbox-placement/" class="inline-flex items-center gap-2 text-surface-950 font-semibold hover:text-brand-700 transition-colors">
+            <a href="{{ lp }}/inbox-placement/" class="inline-flex items-center gap-2 text-surface-950 font-semibold hover:text-brand-700 transition-colors">
               {% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["inbox_cta"] %}{{ i18n_data[l]["features"]["inbox_cta"] }}{% else %}Explore the API{% endif %}
               <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 8l4 4m0 0l-4 4m4-4H3"/></svg>
             </a>

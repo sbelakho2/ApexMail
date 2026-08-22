@@ -86,7 +86,8 @@
       "status_operational": "Alle Systeme betriebsbereit",
       "status_degraded": "Teilweise Beeinträchtigung",
       "status_disruption": "Dienstunterbrechung",
-      "status_unavailable": "Statusdaten nicht verfügbar"
+      "status_unavailable": "Statusdaten nicht verfügbar",
+      "status_link": "Systemstatus"
     },
     "cta": {
       "heading_1": "Bereit für",
@@ -101,7 +102,11 @@
       "trust_uptime": "99,9 % Uptime SLA (Enterprise)",
       "trust_soc2": "SOC 2-Zertifizierung derzeit nicht verfügbar",
       "trust_gdpr": "DSGVO-Verarbeitung (EWR-gehostet)",
-      "trust_support": "Prioritäts-Support (Growth+)"
+      "trust_support": "Prioritäts-Support (Growth+)",
+      "cta_primary": "Kostenlos starten",
+      "cta_secondary": "Architektur-Review buchen",
+      "feature_no_card": "Keine Kreditkarte erforderlich",
+      "heading": "Bereit für bessere E-Mails?"
     },
     "security": {
       "eyebrow": "Sicherheitsarchitektur",
@@ -284,7 +289,37 @@
       "inbox_cap_3_desc": "Zusammengesetzte Bewertung mit Gewichtung von Inbox-Rate (50%), Werbung (10%), Spam-Strafe (15%), Abwesend-Strafe (10%), Authentifizierungsrate (10%) und Zustellgeschwindigkeit (5%).",
       "inbox_cap_4_title": "Retentions-Analytik",
       "inbox_cap_4_desc": "Historische Trendanalyse mit Aufschlüsselung pro Anbieter zur Verfolgung von Zustellbarkeitsverbesserungen im Zeitverlauf.",
-      "inbox_cta": "API erkunden"
+      "inbox_cta": "API erkunden",
+      "cat_email_api": "E-Mail-API",
+      "cat_security": "Sicherheit",
+      "detail_deliv_benefit_1": "E-Mail-Grader mit A+-Note",
+      "detail_deliv_benefit_2": "DNS-Prüfung und Authentifizierung",
+      "detail_deliv_benefit_3": "Reputationsüberwachung",
+      "detail_deliv_cta": "Grader ausprobieren",
+      "detail_deliv_desc": "Zustellbarkeitsanalyse mit Bewertung",
+      "detail_deliv_title": "Zustellbarkeits-Einblicke",
+      "f_analytics_desc": "Detaillierte E-Mail-Analyse",
+      "f_analytics_title": "Analytik",
+      "f_api_desc": "Senden Sie E-Mails über eine einfache REST-API",
+      "f_api_title": "REST-API",
+      "f_dedicated_desc": "Dedizierte IPs für hohe Volumina",
+      "f_dedicated_title": "Dedizierte IPs",
+      "f_dmarc_desc": "DMARC-Berichte und Compliance",
+      "f_dmarc_title": "DMARC",
+      "f_rbac_desc": "Rollenbasierte Zugriffssteuerung",
+      "f_rbac_title": "RBAC",
+      "f_smtp_desc": "Nutzen Sie Ihren bestehenden SMTP-Client",
+      "f_smtp_title": "SMTP-Relay",
+      "f_tracking_desc": "Verfolgung von Öffnungen und Klicks",
+      "f_tracking_title": "Öffnungs-Tracking",
+      "f_warmup_desc": "Automatisches IP-Warm-up",
+      "f_warmup_title": "IP-Warm-up",
+      "stat_api_latency": "API-Latenz (Gateway)",
+      "stat_gdpr_link": "Compliance-Details",
+      "stat_uptime": "Uptime-SLA (Scale- und Enterprise-Tarife)",
+      "stat_uptime_link": "Service-Credits",
+      "stat_latency_value": "P95 ≤ 500ms",
+      "stat_latency_link": "Messmethodik"
     },
     "pricing": {
       "save_annual": "Sparen Sie 10 % bei jährlicher Abrechnung in allen Self-Service-Tarifen",
@@ -382,7 +417,13 @@
       "email_grader_desc": "Erhalten Sie eine deterministische Buchstabennote mit Zustellbarkeitsprüfungen Ihrer DNS, Authentifizierung, Inhalte und Reputation. Kostenlos für alle ApexMail-Kunden.",
       "email_grader_cta": "API ausprobieren",
       "email_grader_learn": "Mehr erfahren",
-      "email_grader_grade": "Deterministische Note"
+      "email_grader_grade": "Deterministische Note",
+      "email_grader_badge": "Systemfunktion",
+      "email_grader_cta_primary": "API ausprobieren",
+      "email_grader_cta_secondary": "Mehr erfahren",
+      "email_grader_description": "Erhalten Sie eine deterministische Note mit Zustellbarkeitsprüfungen Ihrer DNS, Authentifizierung, Inhalte und Reputation.",
+      "email_grader_grade_label": "Deterministische Note",
+      "email_grader_title": "E-Mail-Zustellbarkeits-Grader"
     },
     "home_features": {
       "eyebrow": "Funktionsumfang",
@@ -404,7 +445,8 @@
       "card_7_title": "E-Mail-Grader",
       "card_7_desc": "Bewerten Sie Ihre E-Mail-Zustellbarkeit mit deterministischen DNS-, Authentifizierungs-, Inhalts- und Reputationsprüfungen.",
       "card_8_title": "Inbox-Platzierung",
-      "card_8_desc": "Testen Sie die Zustellbarkeit bei Gmail, Outlook, Yahoo, iCloud, AOL und Zoho. Erkennt automatisch die Platzierung im Posteingang, in Werbung und Spam."
+      "card_8_desc": "Testen Sie die Zustellbarkeit bei Gmail, Outlook, Yahoo, iCloud, AOL und Zoho. Erkennt automatisch die Platzierung im Posteingang, in Werbung und Spam.",
+      "heading": "Alles für den Versand"
     },
     "home_comparison": {
       "eyebrow": "Marktpositionierung",
@@ -440,11 +482,36 @@
       "row_infrastructure_apex": "Isoliert",
       "row_infrastructure_sendgrid": "Geteilt",
       "row_infrastructure_postmark": "Geteilt",
-      "cta_full_comparison": "Vollständigen Vergleich ansehen"
+      "cta_full_comparison": "Vollständigen Vergleich ansehen",
+      "apexmail_col": "ApexMail",
+      "caption": "Startseiten-Vergleich zwischen ApexMail, SendGrid und Postmark.",
+      "postmark_col": "Postmark",
+      "row_audit": "Audit-Trail",
+      "row_audit_apexmail": "Persistent",
+      "row_audit_postmark": "45 Tage",
+      "row_audit_sendgrid": "30 Tage",
+      "row_gdpr_apexmail": "EWR-gehostet, AVV inklusive",
+      "row_hipaa_apexmail": "Derzeit nicht angeboten",
+      "row_infra": "Infrastruktur",
+      "row_infra_apexmail": "Isoliert",
+      "row_infra_postmark": "Geteilt",
+      "row_infra_sendgrid": "Geteilt",
+      "row_private_cloud_apexmail": "Verfügbar",
+      "row_tracking": "Zustellverfolgung",
+      "row_tracking_apexmail": "Deterministisch",
+      "row_tracking_postmark": "Ereignisbasiert",
+      "row_tracking_sendgrid": "Ereignisbasiert",
+      "see_full": "Vollständigen Vergleich ansehen",
+      "sendgrid_col": "SendGrid"
     },
     "a11y": {
       "skip_to_main": "Zum Hauptinhalt springen",
-      "back_to_top": "Zurück nach oben"
+      "back_to_top": "Zurück nach oben",
+      "toggle_nav": "Navigationsmenü umschalten",
+      "home_link": "ApexMail Startseite",
+      "cookie_consent": "Cookie-Hinweis",
+      "testimonials": "Kundenstimmen",
+      "latency_region": "Relativer Latenzvergleich nach Bereitstellungsszenario"
     },
     "private_cloud": {
       "hero_badge": "Bereitstellungsoptionen",
@@ -506,7 +573,13 @@
       "region_label": "Kundengewählte Cloud-Region",
       "private_subnet": "Privates Subnetz",
       "public_subnet": "Öffentliches Subnetz",
-      "dedicated_ip_pool": "Dedizierter IP-Pool"
+      "dedicated_ip_pool": "Dedizierter IP-Pool",
+      "benefit_1": "Dedizierte Infrastruktur",
+      "benefit_2": "Privates Netzwerk",
+      "benefit_3": "Dedizierte IPs",
+      "benefit_4": "Individuelles SLA",
+      "cta": "Angebot anfordern",
+      "hero_title": "Private Cloud"
     },
     "compliance": {
       "hero_badge": "Compliance-Infrastruktur",
@@ -540,7 +613,10 @@
       "hero_outage": "Dienstunterbrechung",
       "subscribe_title": "Updates abonnieren",
       "subscribe_desc": "Erhalten Sie Status-Updates per E-Mail oder Webhook.",
-      "subscribe_button": "Abonnieren"
+      "subscribe_button": "Abonnieren",
+      "description": "Echtzeit-Überwachung der ApexMail-Dienste.",
+      "subtitle": "Systemstatus in Echtzeit",
+      "title": "Status"
     },
     "security_page": {
       "hero_badge": "Sicherheitsarchitektur",
@@ -571,7 +647,9 @@
       "hero_subtitle": "Sehen Sie, wie Teams ApexMail für geschäftskritische E-Mail-Infrastruktur nutzen.",
       "cta_title": "Ihre Geschichte hier",
       "cta_subtitle": "Nutzen Sie ApexMail für geschäftskritische E-Mails? Wir würden gerne Ihre Geschichte erzählen.",
-      "cta_button": "Kontakt aufnehmen"
+      "cta_button": "Kontakt aufnehmen",
+      "subtitle": "So nutzen Teams ApexMail",
+      "title": "Anwendungsfälle"
     },
     "forensic": {
       "hero_badge": "Entwickler-Tools",
@@ -580,7 +658,9 @@
       "hero_cta": "Forensik-Tools erkunden",
       "cta_title": "Zustellungsprobleme?",
       "cta_subtitle": "Nutzen Sie unsere Forensik-Tools zur Diagnose von SPF-, DKIM-, DMARC- und MX-Problemen.",
-      "cta_button": "Tools testen"
+      "cta_button": "Tools testen",
+      "subtitle": "Diagnostizieren Sie E-Mail-Zustellungsprobleme",
+      "title": "Forensik-Tools"
     },
     "api_console": {
       "hero_badge": "Entwickler-Tools",
@@ -588,7 +668,8 @@
       "hero_subtitle": "Erkunden und testen Sie die ApexMail-API direkt im Browser.",
       "hero_cta": "API erkunden",
       "cta_title": "Bereit zum Coden?",
-      "cta_button": "Dokumentation ansehen"
+      "cta_button": "Dokumentation ansehen",
+      "cta_subtitle": "Erkunden Sie die API-Struktur"
     },
     "calculator": {
       "hero_title": "Preisrechner",
@@ -705,7 +786,8 @@
       "status_page": "Page de statut",
       "status_unavailable": "Données de statut indisponibles",
       "tagline": "Une infrastructure email qui assure la conformité et la livraison fiable de vos emails.",
-      "use_cases": "Cas d'usage"
+      "use_cases": "Cas d'usage",
+      "status_link": "État du service"
     },
     "cta": {
       "heading_1": "Prêt à envoyer",
@@ -931,7 +1013,13 @@
       "detail_deliv_benefit_1": "Évaluateur d'email avec notation A+",
       "detail_deliv_benefit_2": "Vérification DNS et authentification",
       "detail_deliv_benefit_3": "Surveillance de la réputation",
-      "detail_deliv_cta": "Essayer l'évaluateur"
+      "detail_deliv_cta": "Essayer l'évaluateur",
+      "stat_api_latency": "Latence API (passerelle)",
+      "stat_gdpr_link": "Détails de conformité",
+      "stat_uptime": "SLA de disponibilité (forfaits Scale et Enterprise)",
+      "stat_uptime_link": "Crédits de service",
+      "stat_latency_value": "P95 ≤ 500ms",
+      "stat_latency_link": "Méthodologie de mesure"
     },
     "pricing": {
       "save_annual": "Économisez 10 % avec la facturation annuelle sur tous les forfaits en libre-service",
@@ -1039,7 +1127,12 @@
     },
     "a11y": {
       "back_to_top": "Retour en haut",
-      "skip_to_main": "Aller au contenu"
+      "skip_to_main": "Aller au contenu",
+      "toggle_nav": "Ouvrir le menu de navigation",
+      "home_link": "Accueil ApexMail",
+      "cookie_consent": "Avis cookies",
+      "testimonials": "Témoignages clients",
+      "latency_region": "Comparaison relative de la latence par scénario de déploiement"
     },
     "api_console": {
       "hero_title": "Explorateur API",
@@ -1393,7 +1486,8 @@
       "status_page": "Página de estado",
       "status_unavailable": "Datos de estado no disponibles",
       "tagline": "Infraestructura de email que garantiza el cumplimiento normativo y la entrega fiable de sus emails.",
-      "use_cases": "Casos de uso"
+      "use_cases": "Casos de uso",
+      "status_link": "Estado del servicio"
     },
     "cta": {
       "heading_1": "¿Listo para enviar",
@@ -1619,7 +1713,13 @@
       "detail_deliv_benefit_1": "Evaluador de email con calificación A+",
       "detail_deliv_benefit_2": "Verificación DNS y autenticación",
       "detail_deliv_benefit_3": "Monitoreo de reputación",
-      "detail_deliv_cta": "Probar el evaluador"
+      "detail_deliv_cta": "Probar el evaluador",
+      "stat_api_latency": "Latencia de API (pasarela)",
+      "stat_gdpr_link": "Detalles de cumplimiento",
+      "stat_uptime": "SLA de disponibilidad (planes Scale y Enterprise)",
+      "stat_uptime_link": "Créditos por incumplimiento",
+      "stat_latency_value": "P95 ≤ 500ms",
+      "stat_latency_link": "Metodología de medición"
     },
     "pricing": {
       "save_annual": "Ahorre un 10 % con facturación anual en todos los planes de autoservicio",
@@ -1727,7 +1827,12 @@
     },
     "a11y": {
       "back_to_top": "Volver arriba",
-      "skip_to_main": "Ir al contenido"
+      "skip_to_main": "Ir al contenido",
+      "toggle_nav": "Alternar el menú de navegación",
+      "home_link": "Inicio de ApexMail",
+      "cookie_consent": "Aviso de cookies",
+      "testimonials": "Testimonios de clientes",
+      "latency_region": "Comparación relativa de latencia por escenario de implementación"
     },
     "api_console": {
       "hero_title": "Explorador API",
@@ -1829,7 +1934,9 @@
       "cta_subtitle": "¿Usa ApexMail para emails de misión crítica? Nos encantaría contar su historia.",
       "cta_title": "Su historia aquí",
       "hero_subtitle": "Vea cómo los equipos usan ApexMail para infraestructura de email de misión crítica.",
-      "hero_title": "Casos de clientes"
+      "hero_title": "Casos de clientes",
+      "subtitle": "Cómo los equipos usan ApexMail",
+      "title": "Casos de uso"
     },
     "compare": {
       "cta_button": "Obtener ayuda con la migración",
@@ -1862,7 +1969,9 @@
       "hero_badge": "Herramientas para desarrolladores",
       "hero_cta": "Explorar las herramientas forenses",
       "hero_subtitle": "Diagnostique los problemas de entrega de email con comprobaciones deterministas.",
-      "hero_title": "Herramientas forenses"
+      "hero_title": "Herramientas forenses",
+      "subtitle": "Diagnostique los problemas de entrega de email",
+      "title": "Herramientas forenses"
     },
     "pricing_page": {
       "hero_contact": "Contactar con ventas",
@@ -1930,7 +2039,13 @@
       "security_shared_desc": "Infraestructura multi-tenant con aislamiento lógico. Adecuada para la mayoría de aplicaciones SaaS.",
       "security_shared_title": "Shared Cloud",
       "security_subtitle": "Cada modelo de despliegue ofrece aislamiento escalonado para sus cargas de trabajo.",
-      "security_title": "Netzwerkisolation & Seguridad"
+      "security_title": "Netzwerkisolation & Seguridad",
+      "benefit_1": "Infraestructura dedicada",
+      "benefit_2": "Red privada",
+      "benefit_3": "IP dedicadas",
+      "benefit_4": "SLA personalizado",
+      "cta": "Solicitar presupuesto",
+      "hero_title": "Nube Privada"
     },
     "security_page": {
       "cta_button": "Solicitar documentación",
@@ -1958,7 +2073,10 @@
       "hero_title": "Estado del sistema",
       "subscribe_button": "Suscribirse",
       "subscribe_desc": "Reciba actualizaciones de estado por email o webhook.",
-      "subscribe_title": "Suscribirse a las actualizaciones"
+      "subscribe_title": "Suscribirse a las actualizaciones",
+      "description": "Supervisión en tiempo real de los servicios de ApexMail.",
+      "subtitle": "Estado del servicio en tiempo real",
+      "title": "Estado"
     },
     "home_testimonials": {
       "heading_1": "Hecho para",

@@ -27,7 +27,7 @@ Wir verarbeiten Daten gemäß DSGVO Art. 6 Abs. 1 lit. b) (Vertragserfüllung), 
 
 ## 4. Datenspeicherung
 
-Die bereitgestellte Konfiguration zielt für Kern-E-Mail-Daten und Telemetriespeicher auf EWR-Regionen. Aktive Standorte, aktivierte Unterauftragsverarbeiter und Übertragungsgarantien hängen von der bereitgestellten Umgebung und dem anwendbaren Vertrag ab. Eine vollständige Aufschlüsselung und den Bestätigungsprozess finden Sie auf unserer Seite [Datenstandorte](/data-locations/).
+Die bereitgestellte Konfiguration zielt für Kern-E-Mail-Daten und Telemetriespeicher auf EWR-Regionen. Aktive Standorte, aktivierte Unterauftragsverarbeiter und Übertragungsgarantien hängen von der bereitgestellten Umgebung und dem anwendbaren Vertrag ab. Eine vollständige Aufschlüsselung und den Bestätigungsprozess finden Sie auf unserer Seite [Datenstandorte](/de/data-locations/).
 
 ### Zusammenfassende Standort-Matrix
 
@@ -77,7 +77,7 @@ Wenn Sie der Ansicht sind, dass unsere Verarbeitung Ihrer personenbezogenen Date
 
 ## 8. Cookies
 
-Siehe unsere [Cookie-Richtlinie](/cookies/) für Details zu Cookies und Tracking.
+Siehe unsere [Cookie-Richtlinie](/de/cookies/) für Details zu Cookies und Tracking.
 
 ## 9. Kontakt
 

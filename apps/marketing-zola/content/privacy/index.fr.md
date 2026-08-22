@@ -27,7 +27,7 @@ Nous traitons les données en vertu du RGPD Article 6(1)(b) (exécution du contr
 
 ## 4. Stockage des données
 
-La configuration fournie cible des régions de l'EEE pour les données de messagerie principales et le stockage de télémétrie. Les emplacements actifs, sous-traitants activés et garanties de transfert dépendent de l'environnement déployé et de l'accord applicable. Pour une ventilation complète et le processus de confirmation, consultez notre page [Emplacements des données](/data-locations/).
+La configuration fournie cible des régions de l'EEE pour les données de messagerie principales et le stockage de télémétrie. Les emplacements actifs, sous-traitants activés et garanties de transfert dépendent de l'environnement déployé et de l'accord applicable. Pour une ventilation complète et le processus de confirmation, consultez notre page [Emplacements des données](/fr/data-locations/).
 
 ### Tableau récapitulatif des emplacements
 
@@ -77,7 +77,7 @@ Si vous estimez que notre traitement de vos données personnelles enfreint le RG
 
 ## 8. Cookies
 
-Consultez notre [Politique de cookies](/cookies/) pour plus de détails sur les cookies et le suivi.
+Consultez notre [Politique de cookies](/fr/cookies/) pour plus de détails sur les cookies et le suivi.
 
 ## 9. Contact
 

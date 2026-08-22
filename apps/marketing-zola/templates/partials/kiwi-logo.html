@@ -27,7 +27,7 @@
 
 {% set mark_size = mark_size | default(value=32) %}
 
-<a href="/" class="flex items-center gap-2.5 group" aria-label="ApexMail home">
+<a href="{{ lp }}/" class="flex items-center gap-2.5 group" aria-label="{% if i18n_data and i18n_data[l] and i18n_data[l]["a11y"] and i18n_data[l]["a11y"]["home_link"] %}{{ i18n_data[l]["a11y"]["home_link"] }}{% else %}ApexMail home{% endif %}">
   {# Kiwi mark — full variant with eye + legs. currentColor lets it inherit #}
   {# text-brand-600 from the parent so it tracks the brand accent and dark  #}
   {# mode without separate dark variants.                                    #}

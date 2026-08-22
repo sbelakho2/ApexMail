@@ -41,7 +41,7 @@
           {% if i18n_data and i18n_data[l] and i18n_data[l]["cta"] and i18n_data[l]["cta"]["cta_button"] %}{{ i18n_data[l]["cta"]["cta_button"] }}{% else %}Start Free{% endif %}
           <svg class="w-4 h-4 ml-2" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
         </a>
-        <a href="/private-cloud/" class="btn-secondary btn-secondary--lg w-full sm:w-auto">
+        <a href="{{ lp }}/private-cloud/" class="btn-secondary btn-secondary--lg w-full sm:w-auto">
           {% if i18n_data and i18n_data[l] and i18n_data[l]["cta"] and i18n_data[l]["cta"]["cta_enterprise"] %}{{ i18n_data[l]["cta"]["cta_enterprise"] }}{% else %}Book Architecture Review{% endif %}
         </a>
       </div>

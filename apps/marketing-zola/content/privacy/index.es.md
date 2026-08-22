@@ -27,7 +27,7 @@ Tratamos los datos según el RGPD Artículo 6(1)(b) (ejecución del contrato), A
 
 ## 4. Almacenamiento de datos
 
-La configuración proporcionada apunta a regiones del EEE para los datos principales de correo y el almacenamiento de telemetría. Las ubicaciones activas, los subprocesadores habilitados y las garantías de transferencia dependen del entorno implementado y del acuerdo aplicable. Para un desglose completo y el proceso de confirmación, consulte nuestra página [Ubicaciones de datos](/data-locations/).
+La configuración proporcionada apunta a regiones del EEE para los datos principales de correo y el almacenamiento de telemetría. Las ubicaciones activas, los subprocesadores habilitados y las garantías de transferencia dependen del entorno implementado y del acuerdo aplicable. Para un desglose completo y el proceso de confirmación, consulte nuestra página [Ubicaciones de datos](/es/data-locations/).
 
 ### Matriz resumen de ubicaciones
 
@@ -77,7 +77,7 @@ Si considera que nuestro tratamiento de sus datos personales infringe el RGPD, t
 
 ## 8. Cookies
 
-Consulte nuestra [Política de cookies](/cookies/) para más detalles sobre cookies y seguimiento.
+Consulte nuestra [Política de cookies](/es/cookies/) para más detalles sobre cookies y seguimiento.
 
 ## 9. Contacto
 

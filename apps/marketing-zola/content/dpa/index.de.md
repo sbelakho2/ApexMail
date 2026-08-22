@@ -60,7 +60,7 @@ Der Auftragsverarbeiter benachrichtigt den Verantwortlichen mindestens **30 Tage
 
 ## 6. Internationale Übermittlungen
 
-Die bereitgestellte Konfiguration zielt für Kerninfrastruktur und Telemetrie-Objektspeicher auf EU/EWR-Regionen. Aktive Anbieter und Standorte hängen von der Bereitstellung ab; siehe die [Datenstandorte](/data-locations/) Seite für eine vollständige kategorieweise Matrix. Personenbezogene Daten werden nicht ohne angemessene Garantien (Standardvertragsklauseln oder einen Angemessenheitsbeschluss gemäß Artikel 45) außerhalb des EWR übermittelt.
+Die bereitgestellte Konfiguration zielt für Kerninfrastruktur und Telemetrie-Objektspeicher auf EU/EWR-Regionen. Aktive Anbieter und Standorte hängen von der Bereitstellung ab; siehe die [Datenstandorte](/de/data-locations/) Seite für eine vollständige kategorieweise Matrix. Personenbezogene Daten werden nicht ohne angemessene Garantien (Standardvertragsklauseln oder einen Angemessenheitsbeschluss gemäß Artikel 45) außerhalb des EWR übermittelt.
 
 ## 7. Sicherheitsmaßnahmen
 

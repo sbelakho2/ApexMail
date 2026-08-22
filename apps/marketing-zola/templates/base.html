@@ -7,6 +7,11 @@
 {# partials can read these — Tera macros do NOT see the caller's scope.    #}
 {%- set_global i18n_data = load_data(path="data/i18n.json", format="json", required=false) -%}
 {%- set_global l = lang | default(value=config.default_language) -%}
+{# Locale URL prefix: "" for the default language, "/de" etc. for
+   translated trees — every internal link prefixes with {{ lp }} so locale
+   pages stay inside their language except deliberately shared paths. #}
+{%- set_global lp = "" -%}
+{%- if l and l != config.default_language -%}{%- set_global lp = "/" ~ l -%}{%- endif -%}
 
 <!DOCTYPE html>
 <html lang="{{ lang | default(value=config.default_language) }}" dir="ltr" id="top" data-theme="apex" class="scroll-smooth">
@@ -104,7 +109,7 @@
 </head>
 <body class="antialiased min-h-screen safe-area-inset-bottom flex flex-col">
   <a href="#main-content" id="skip-to-content" tabindex="1">{% if i18n_data and i18n_data[l] and i18n_data[l]["a11y"] and i18n_data[l]["a11y"]["skip_to_main"] %}{{ i18n_data[l]["a11y"]["skip_to_main"] }}{% else %}Skip to main content{% endif %}</a>
-  <input type="checkbox" id="nav-toggle" class="nav-toggle-input" aria-label="Toggle navigation menu" />
+  <input type="checkbox" id="nav-toggle" class="nav-toggle-input" aria-label="{% if i18n_data and i18n_data[l] and i18n_data[l]["a11y"] and i18n_data[l]["a11y"]["toggle_nav"] %}{{ i18n_data[l]["a11y"]["toggle_nav"] }}{% else %}Toggle navigation menu{% endif %}" />
   {% include "partials/header.html" %}
   <main id="main-content" class="flex-1 scroll-mt-16 lg:scroll-mt-20" tabindex="-1">
     {% block content %}{% endblock content %}

@@ -24,7 +24,7 @@
         {# Design audit item 10: the private button grammar is absorbed —
            primary actions use .btn-primary, dark-surface secondaries use
            .btn-secondary--invert (defined in input.css). #}
-        <a href="/pricing/" class="btn-primary">
+        <a href="{{ lp }}/pricing/" class="btn-primary">
           {% if i18n_data and i18n_data[l] and i18n_data[l]["not_found"] and i18n_data[l]["not_found"]["pricing"] %}{{ i18n_data[l]["not_found"]["pricing"] }}{% else %}View Pricing{% endif %}
         </a>
         <a href="/docs/" class="btn-secondary--invert">

@@ -37,11 +37,11 @@ Sie müssen bei der Kontoerstellung genaue und vollständige Informationen angeb
 
 ## 5. Akzeptable Nutzung
 
-Die Nutzung des Dienstes unterliegt unserer [Richtlinie zur akzeptablen Nutzung](/acceptable-use/). Verstöße können zur sofortigen Aussetzung oder Kündigung führen.
+Die Nutzung des Dienstes unterliegt unserer [Richtlinie zur akzeptablen Nutzung](/de/acceptable-use/). Verstöße können zur sofortigen Aussetzung oder Kündigung führen.
 
 ## 6. Datenverarbeitung
 
-Wir verarbeiten Daten gemäß unserer [Datenschutzerklärung](/privacy/) und [Auftragsverarbeitungsvereinbarung](/dpa/), in Übereinstimmung mit der DSGVO und dem geltenden estnischen und EU-Datenschutzrecht.
+Wir verarbeiten Daten gemäß unserer [Datenschutzerklärung](/de/privacy/) und [Auftragsverarbeitungsvereinbarung](/de/dpa/), in Übereinstimmung mit der DSGVO und dem geltenden estnischen und EU-Datenschutzrecht.
 
 ## 7. Zahlungsbedingungen
 
@@ -80,7 +80,7 @@ Gemäß Artikel 16 lit. m) der Richtlinie 2011/83/EU besteht das Widerrufsrecht 
 
 ## 9. SLA
 
-Kunden des Scale- und Enterprise-Tarifs unterliegen unserer [Service Level Agreement](/sla/). Andere Tarife werden nach bestem Bemühen ohne garantierte Verfügbarkeitszusage bereitgestellt, sofern nicht schriftlich anders vereinbart.
+Kunden des Scale- und Enterprise-Tarifs unterliegen unserer [Service Level Agreement](/de/sla/). Andere Tarife werden nach bestem Bemühen ohne garantierte Verfügbarkeitszusage bereitgestellt, sofern nicht schriftlich anders vereinbart.
 
 ## 10. Haftungsbeschränkung
 

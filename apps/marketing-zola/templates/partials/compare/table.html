@@ -40,7 +40,7 @@
             </div>
             {% for row in section.rows %}
               <div class="grid grid-cols-4 gap-4 px-6 py-4 border-b border-surface-100 hover:bg-surface-50/30 transition-colors">
-                <div class="text-sm font-medium text-surface-900 self-center min-w-0">{{ row.feature }}</div>
+                <div class="text-sm font-medium text-surface-900 self-center min-w-0 [overflow-wrap:anywhere]">{{ row.feature }}</div>
                 <div class="text-center text-sm self-center min-w-0 [overflow-wrap:anywhere]">{{ row.apex | safe }}</div>
                 <div class="text-center text-sm self-center min-w-0 [overflow-wrap:anywhere]">{{ row.comp | safe }}</div>
                 <div class="text-center text-sm self-center min-w-0">

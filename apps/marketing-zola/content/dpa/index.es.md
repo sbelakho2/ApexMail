@@ -60,7 +60,7 @@ El Encargado del tratamiento notificará al Responsable del tratamiento con al m
 
 ## 6. Transferencias internacionales
 
-La configuración proporcionada apunta a regiones de la UE/EEE para la infraestructura principal y el almacenamiento de objetos de telemetría. Los proveedores y ubicaciones activos dependen de la implementación; consulte la página [Ubicaciones de datos](/data-locations/) para una matriz completa categoría por categoría. No se transfieren datos personales fuera del EEE sin garantías adecuadas (Cláusulas Contractuales Tipo o una decisión de adecuación en virtud del Artículo 45).
+La configuración proporcionada apunta a regiones de la UE/EEE para la infraestructura principal y el almacenamiento de objetos de telemetría. Los proveedores y ubicaciones activos dependen de la implementación; consulte la página [Ubicaciones de datos](/es/data-locations/) para una matriz completa categoría por categoría. No se transfieren datos personales fuera del EEE sin garantías adecuadas (Cláusulas Contractuales Tipo o una decisión de adecuación en virtud del Artículo 45).
 
 ## 7. Medidas de seguridad
 

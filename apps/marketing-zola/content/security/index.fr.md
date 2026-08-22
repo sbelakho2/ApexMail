@@ -129,9 +129,9 @@ L'intégrité du système est vérifiée par des contrôles automatisés et réc
 
 ## Liens connexes
 
-- [Centre de conformité](/compliance)
+- [Centre de conformité](/fr/compliance)
 - [Aperçu de l'architecture](/architecture)
-- [Politique de confidentialité](/privacy)
-- [Accord de traitement des données](/dpa)
-- [Politique d'utilisation acceptable](/acceptable-use)
-- [Divulgation responsable](/responsible-disclosure)
+- [Politique de confidentialité](/fr/privacy)
+- [Accord de traitement des données](/fr/dpa)
+- [Politique d'utilisation acceptable](/fr/acceptable-use)
+- [Divulgation responsable](/fr/responsible-disclosure)

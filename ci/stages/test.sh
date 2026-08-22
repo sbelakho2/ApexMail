@@ -201,6 +201,24 @@ run_layout_gates() {
         python3 tools/contrast-audit/tag-balance.py) || { ci_err "tag-balance gate FAILED — see per-page output above"; return "$CI_EXIT_FAIL"; }
 }
 
+# --- 8c. i18n completeness gate ----------------------------------------------------------
+# tools/i18n-audit.py enforces the localization contract: i18n.json key parity
+# across de/fr/es, every template-referenced key present and non-empty, no
+# value equal to its English default (untranslated prose), no mixed-language
+# links on locale pages, and every template-linked page carrying all three
+# translations. Requires the marketing site to be built (self-provisions via
+# zola build when zola is present, mirroring the other marketing gates).
+run_i18n_gate() {
+    command -v python3 >/dev/null 2>&1 || { ci_warn "python3 missing — i18n gate skipped"; return "$CI_EXIT_OK"; }
+    [ -f "$REPO_ROOT/apps/marketing-zola/data/i18n.json" ] || { ci_warn "marketing i18n data missing — i18n gate skipped"; return "$CI_EXIT_OK"; }
+    if [ ! -f "$REPO_ROOT/apps/marketing-zola/public/index.html" ]; then
+        command -v zola >/dev/null 2>&1 || { ci_warn "marketing public/ not built and zola missing — i18n gate skipped"; return "$CI_EXIT_OK"; }
+        (cd "$REPO_ROOT/apps/marketing-zola" && zola build >/dev/null 2>&1) || { ci_err "zola build failed for i18n gate"; return "$CI_EXIT_FAIL"; }
+    fi
+    (cd "$REPO_ROOT" && ci_check "i18n completeness gate (tools/i18n-audit.py)" \
+        python3 tools/i18n-audit.py) || { ci_err "i18n gate FAILED — see output above"; return "$CI_EXIT_FAIL"; }
+}
+
 # --- formatting gate ------------------------------------------------------------
 # cargo fmt --check is NEW compared to rust-check.yml (GitHub never ran it).
 # The tree currently carries committed fmt drift (README §9 F7), so the gate
@@ -295,6 +313,7 @@ stage_main() {
     run_php_tests
     run_contrast_gate
     run_layout_gates
+    run_i18n_gate
 
     ci_ephem_cleanup
     ci_info "test: all suites green"

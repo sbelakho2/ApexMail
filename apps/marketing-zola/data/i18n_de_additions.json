@@ -1,0 +1,102 @@
+{
+  "de": {
+    "api_console": {
+      "cta_subtitle": "Erkunden Sie die API-Struktur"
+    },
+    "case_studies": {
+      "subtitle": "So nutzen Teams ApexMail",
+      "title": "Anwendungsfälle"
+    },
+    "cta": {
+      "cta_primary": "Kostenlos starten",
+      "cta_secondary": "Architektur-Review buchen",
+      "feature_no_card": "Keine Kreditkarte erforderlich",
+      "heading": "Bereit für bessere E-Mails?"
+    },
+    "features": {
+      "cat_email_api": "E-Mail-API",
+      "cat_security": "Sicherheit",
+      "detail_deliv_benefit_1": "E-Mail-Grader mit A+-Note",
+      "detail_deliv_benefit_2": "DNS-Prüfung und Authentifizierung",
+      "detail_deliv_benefit_3": "Reputationsüberwachung",
+      "detail_deliv_cta": "Grader ausprobieren",
+      "detail_deliv_desc": "Zustellbarkeitsanalyse mit Bewertung",
+      "detail_deliv_title": "Zustellbarkeits-Einblicke",
+      "f_analytics_desc": "Detaillierte E-Mail-Analyse",
+      "f_analytics_title": "Analytik",
+      "f_api_desc": "Senden Sie E-Mails über eine einfache REST-API",
+      "f_api_title": "REST-API",
+      "f_dedicated_desc": "Dedizierte IPs für hohe Volumina",
+      "f_dedicated_title": "Dedizierte IPs",
+      "f_dmarc_desc": "DMARC-Berichte und Compliance",
+      "f_dmarc_title": "DMARC",
+      "f_rbac_desc": "Rollenbasierte Zugriffssteuerung",
+      "f_rbac_title": "RBAC",
+      "f_smtp_desc": "Nutzen Sie Ihren bestehenden SMTP-Client",
+      "f_smtp_title": "SMTP-Relay",
+      "f_tracking_desc": "Verfolgung von Öffnungen und Klicks",
+      "f_tracking_title": "Öffnungs-Tracking",
+      "f_warmup_desc": "Automatisches IP-Warm-up",
+      "f_warmup_title": "IP-Warm-up",
+      "stat_api_latency": "API-Latenz (Gateway)",
+      "stat_gdpr_link": "Compliance-Details",
+      "stat_uptime": "Uptime-SLA (Scale- und Enterprise-Tarife)",
+      "stat_uptime_link": "Service-Credits",
+      "stat_latency_value": "P95 ≤ 500ms",
+      "stat_latency_link": "Messmethodik"
+    },
+    "footer": {
+      "status_link": "Systemstatus"
+    },
+    "forensic": {
+      "subtitle": "Diagnostizieren Sie E-Mail-Zustellungsprobleme",
+      "title": "Forensik-Tools"
+    },
+    "home": {
+      "email_grader_badge": "Systemfunktion",
+      "email_grader_cta_primary": "API ausprobieren",
+      "email_grader_cta_secondary": "Mehr erfahren",
+      "email_grader_description": "Erhalten Sie eine deterministische Note mit Zustellbarkeitsprüfungen Ihrer DNS, Authentifizierung, Inhalte und Reputation.",
+      "email_grader_grade_label": "Deterministische Note",
+      "email_grader_title": "E-Mail-Zustellbarkeits-Grader"
+    },
+    "home_comparison": {
+      "apexmail_col": "ApexMail",
+      "caption": "Startseiten-Vergleich zwischen ApexMail, SendGrid und Postmark.",
+      "postmark_col": "Postmark",
+      "row_audit": "Audit-Trail",
+      "row_audit_apexmail": "Persistent",
+      "row_audit_postmark": "45 Tage",
+      "row_audit_sendgrid": "30 Tage",
+      "row_gdpr_apexmail": "EWR-gehostet, AVV inklusive",
+      "row_hipaa_apexmail": "Derzeit nicht angeboten",
+      "row_infra": "Infrastruktur",
+      "row_infra_apexmail": "Isoliert",
+      "row_infra_postmark": "Geteilt",
+      "row_infra_sendgrid": "Geteilt",
+      "row_private_cloud_apexmail": "Verfügbar",
+      "row_tracking": "Zustellverfolgung",
+      "row_tracking_apexmail": "Deterministisch",
+      "row_tracking_postmark": "Ereignisbasiert",
+      "row_tracking_sendgrid": "Ereignisbasiert",
+      "see_full": "Vollständigen Vergleich ansehen",
+      "sendgrid_col": "SendGrid"
+    },
+    "home_features": {
+      "heading": "Alles für den Versand"
+    },
+    "private_cloud": {
+      "benefit_1": "Dedizierte Infrastruktur",
+      "benefit_2": "Privates Netzwerk",
+      "benefit_3": "Dedizierte IPs",
+      "benefit_4": "Individuelles SLA",
+      "cta": "Angebot anfordern",
+      "hero_title": "Private Cloud"
+    },
+    "status": {
+      "description": "Echtzeit-Überwachung der ApexMail-Dienste.",
+      "subtitle": "Systemstatus in Echtzeit",
+      "title": "Status"
+    }
+  }
+}

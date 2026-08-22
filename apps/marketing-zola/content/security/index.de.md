@@ -129,9 +129,9 @@ Die Systemintegrität wird durch automatisierte, wiederkehrende Prüfungen im ge
 
 ## Verwandte Themen
 
-- [Compliance Center](/compliance)
+- [Compliance Center](/de/compliance)
 - [Architekturübersicht](/architecture)
-- [Datenschutzerklärung](/privacy)
-- [Datenverarbeitungsvereinbarung](/dpa)
-- [Richtlinie zur akzeptablen Nutzung](/acceptable-use)
-- [Responsible Disclosure](/responsible-disclosure)
+- [Datenschutzerklärung](/de/privacy)
+- [Datenverarbeitungsvereinbarung](/de/dpa)
+- [Richtlinie zur akzeptablen Nutzung](/de/acceptable-use)
+- [Responsible Disclosure](/de/responsible-disclosure)

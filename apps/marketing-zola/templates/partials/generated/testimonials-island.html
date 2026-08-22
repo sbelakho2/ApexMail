@@ -2,7 +2,7 @@
 {# All testimonials visible in horizontal scroll container.        #}
 {# Uses CSS scroll-snap for smooth swiping on mobile/desktop.     #}
 
-<section class="py-20 lg:py-32 relative overflow-hidden bg-surface-100" role="region" aria-label="Customer testimonials">
+<section class="py-20 lg:py-32 relative overflow-hidden bg-surface-100" role="region" aria-label="{% if i18n_data and i18n_data[l] and i18n_data[l]["a11y"] and i18n_data[l]["a11y"]["testimonials"] %}{{ i18n_data[l]["a11y"]["testimonials"] }}{% else %}Customer testimonials{% endif %}">
   <div class="relative max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
     <div class="text-center mb-12">
       <h2 class="section-title mb-4">

@@ -19,7 +19,7 @@
     </div>
 
     <div class="bg-surface-50 border border-surface-200 rounded-lg p-8">
-      <div class="space-y-8" role="region" aria-label="Relative latency comparison by deployment scenario">
+      <div class="space-y-8" role="region" aria-label="{% if i18n_data and i18n_data[l] and i18n_data[l]["a11y"] and i18n_data[l]["a11y"]["latency_region"] %}{{ i18n_data[l]["a11y"]["latency_region"] }}{% else %}Relative latency comparison by deployment scenario{% endif %}">
 
         {# Private Cloud — Same VPC #}
         <div class="space-y-2">

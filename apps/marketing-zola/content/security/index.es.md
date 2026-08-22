@@ -129,9 +129,9 @@ La integridad del sistema se verifica mediante controles automatizados y recurre
 
 ## Relacionado
 
-- [Centro de cumplimiento](/compliance)
+- [Centro de cumplimiento](/es/compliance)
 - [Resumen de arquitectura](/architecture)
-- [Política de privacidad](/privacy)
-- [Acuerdo de procesamiento de datos](/dpa)
-- [Política de uso aceptable](/acceptable-use)
-- [Divulgación responsable](/responsible-disclosure)
+- [Política de privacidad](/es/privacy)
+- [Acuerdo de procesamiento de datos](/es/dpa)
+- [Política de uso aceptable](/es/acceptable-use)
+- [Divulgación responsable](/es/responsible-disclosure)

@@ -60,7 +60,7 @@ Le Sous-traitant notifiera le Responsable du traitement au moins **30 jours** av
 
 ## 6. Transferts internationaux
 
-La configuration fournie cible des régions de l'UE/EEE pour l'infrastructure principale et le stockage d'objets de télémétrie. Les fournisseurs et emplacements actifs dépendent du déploiement ; consultez la page [Emplacements des données](/data-locations/) pour une matrice complète catégorie par catégorie. Aucune donnée personnelle n'est transférée hors de l'EEE sans garanties appropriées (Clauses contractuelles types ou décision d'adéquation en vertu de l'Article 45).
+La configuration fournie cible des régions de l'UE/EEE pour l'infrastructure principale et le stockage d'objets de télémétrie. Les fournisseurs et emplacements actifs dépendent du déploiement ; consultez la page [Emplacements des données](/fr/data-locations/) pour une matrice complète catégorie par catégorie. Aucune donnée personnelle n'est transférée hors de l'EEE sans garanties appropriées (Clauses contractuelles types ou décision d'adéquation en vertu de l'Article 45).
 
 ## 7. Mesures de sécurité
 

@@ -55,10 +55,10 @@
        macros::methodology_note; the homepage table must not be the only
        comparison without sourcing disclosure. Same disclosure pattern. #}
     <div class="callout mt-12">
-      <p class="text-xs text-surface-500 leading-relaxed"><strong>Methodology:</strong> Feature comparisons are based on publicly available documentation, pricing pages, and official sources. Plans compared: ApexMail self-service tiers and SendGrid and Postmark standard plans. Last verified: 2026-07-30. Data may change; verify with each provider's current documentation. See our <a href="/compare/methodology/" class="text-brand-600 hover:text-brand-700 underline">comparison methodology</a> for sourcing details and the <a href="/compare/" class="text-brand-600 hover:text-brand-700 underline">full comparison</a> for plan-level detail.</p>
+      <p class="text-xs text-surface-500 leading-relaxed"><strong>Methodology:</strong> Feature comparisons are based on publicly available documentation, pricing pages, and official sources. Plans compared: ApexMail self-service tiers and SendGrid and Postmark standard plans. Last verified: 2026-07-30. Data may change; verify with each provider's current documentation. See our <a href="{{ lp }}/compare/methodology/" class="text-brand-600 hover:text-brand-700 underline">comparison methodology</a> for sourcing details and the <a href="{{ lp }}/compare/" class="text-brand-600 hover:text-brand-700 underline">full comparison</a> for plan-level detail.</p>
     </div>
     <div class="text-center mt-12">
-      <a href="/compare/" class="inline-flex items-center gap-2 text-brand-500 font-bold hover:text-brand-700 transition-all hover:gap-3 group">
+      <a href="{{ lp }}/compare/" class="inline-flex items-center gap-2 text-brand-500 font-bold hover:text-brand-700 transition-all hover:gap-3 group">
         {% if i18n_data and i18n_data[l] and i18n_data[l]["home_comparison"] and i18n_data[l]["home_comparison"]["cta_full_comparison"] %}{{ i18n_data[l]["home_comparison"]["cta_full_comparison"] }}{% else %}See full comparison{% endif %}
         <svg xmlns="http://www.w3.org/2000/svg" class="w-4 h-4 transition-transform group-hover:translate-x-1" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
       </a>

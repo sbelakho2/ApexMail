@@ -60,7 +60,7 @@
 <div
   id="cookie-consent-banner"
   role="region"
-  aria-label="Cookie consent"
+  aria-label="{% if i18n_data and i18n_data[l] and i18n_data[l]["a11y"] and i18n_data[l]["a11y"]["cookie_consent"] %}{{ i18n_data[l]["a11y"]["cookie_consent"] }}{% else %}Cookie consent{% endif %}"
   data-consent-state="pending"
   data-consent-endpoint="{{ config.extra.api_url | default(value='https://api.apexmail.ee') }}/consent"
   data-cookie-consent-cookie-name="{{ config.extra.cookie_consent_cookie_name | default(value='apexmail_cookie_consent') }}"

@@ -37,11 +37,11 @@ Debe proporcionar información precisa y completa al crear una cuenta. Usted es 
 
 ## 5. Uso aceptable
 
-El uso del Servicio está sujeto a nuestra [Política de uso aceptable](/acceptable-use/). Su violación puede dar lugar a la suspensión o rescisión inmediata.
+El uso del Servicio está sujeto a nuestra [Política de uso aceptable](/es/acceptable-use/). Su violación puede dar lugar a la suspensión o rescisión inmediata.
 
 ## 6. Tratamiento de datos
 
-Tratamos los datos de acuerdo con nuestra [Política de privacidad](/privacy/) y nuestro [Acuerdo de procesamiento de datos](/dpa/), en cumplimiento del RGPD y la legislación aplicable de protección de datos de Estonia y la UE.
+Tratamos los datos de acuerdo con nuestra [Política de privacidad](/es/privacy/) y nuestro [Acuerdo de procesamiento de datos](/es/dpa/), en cumplimiento del RGPD y la legislación aplicable de protección de datos de Estonia y la UE.
 
 ## 7. Condiciones de pago
 
@@ -80,7 +80,7 @@ De conformidad con el Artículo 16(m) de la Directiva 2011/83/UE, el derecho de 
 
 ## 9. SLA
 
-Los clientes de los planes Scale y Enterprise están cubiertos por nuestro [Acuerdo de nivel de servicio](/sla/). Los demás planes se proporcionan sobre la base del mejor esfuerzo, sin compromiso de disponibilidad garantizada, salvo acuerdo escrito en contrario.
+Los clientes de los planes Scale y Enterprise están cubiertos por nuestro [Acuerdo de nivel de servicio](/es/sla/). Los demás planes se proporcionan sobre la base del mejor esfuerzo, sin compromiso de disponibilidad garantizada, salvo acuerdo escrito en contrario.
 
 ## 10. Limitación de responsabilidad
 

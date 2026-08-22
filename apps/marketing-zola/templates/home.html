@@ -24,7 +24,7 @@
         <p class="text-lg text-surface-600 max-w-xl mb-8">{% if i18n_data and i18n_data[l] and i18n_data[l]["home"] and i18n_data[l]["home"]["email_grader_desc"] %}{{ i18n_data[l]["home"]["email_grader_desc"] }}{% else %}Get a deterministic letter grade with deliverability checks of your DNS, authentication, content, and reputation. Free for all ApexMail customers.{% endif %}</p>
         <div class="flex flex-col sm:flex-row gap-4">
           <a href="/docs/api/grader/" class="btn-primary">{% if i18n_data and i18n_data[l] and i18n_data[l]["home"] and i18n_data[l]["home"]["email_grader_cta"] %}{{ i18n_data[l]["home"]["email_grader_cta"] }}{% else %}Try the API{% endif %}</a>
-          <a href="/features/#email-grader" class="btn-secondary">{% if i18n_data and i18n_data[l] and i18n_data[l]["home"] and i18n_data[l]["home"]["email_grader_learn"] %}{{ i18n_data[l]["home"]["email_grader_learn"] }}{% else %}Learn more{% endif %}</a>
+          <a href="{{ lp }}/features/#email-grader" class="btn-secondary">{% if i18n_data and i18n_data[l] and i18n_data[l]["home"] and i18n_data[l]["home"]["email_grader_learn"] %}{{ i18n_data[l]["home"]["email_grader_learn"] }}{% else %}Learn more{% endif %}</a>
         </div>
       </div>
       <div class="flex-1 w-full">

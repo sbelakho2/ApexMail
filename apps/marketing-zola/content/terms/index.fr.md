@@ -37,11 +37,11 @@ Vous devez fournir des informations exactes et complètes lors de la création d
 
 ## 5. Utilisation acceptable
 
-L'utilisation du Service est soumise à notre [Politique d'utilisation acceptable](/acceptable-use/). Toute violation peut entraîner une suspension ou une résiliation immédiate.
+L'utilisation du Service est soumise à notre [Politique d'utilisation acceptable](/fr/acceptable-use/). Toute violation peut entraîner une suspension ou une résiliation immédiate.
 
 ## 6. Traitement des données
 
-Nous traitons les données conformément à notre [Politique de confidentialité](/privacy/) et à notre [Accord de traitement des données](/dpa/), en conformité avec le RGPD et le droit applicable en matière de protection des données en Estonie et dans l'UE.
+Nous traitons les données conformément à notre [Politique de confidentialité](/fr/privacy/) et à notre [Accord de traitement des données](/fr/dpa/), en conformité avec le RGPD et le droit applicable en matière de protection des données en Estonie et dans l'UE.
 
 ## 7. Conditions de paiement
 
@@ -80,7 +80,7 @@ Conformément à l'Article 16(m) de la Directive 2011/83/UE, le droit de rétrac
 
 ## 9. SLA
 
-Les clients des forfaits Scale et Enterprise sont couverts par notre [Service Level Agreement](/sla/). Les autres forfaits sont fournis sur la base des meilleurs efforts, sans engagement de disponibilité garanti, sauf accord écrit contraire.
+Les clients des forfaits Scale et Enterprise sont couverts par notre [Service Level Agreement](/fr/sla/). Les autres forfaits sont fournis sur la base des meilleurs efforts, sans engagement de disponibilité garanti, sauf accord écrit contraire.
 
 ## 10. Limitation de responsabilité
 
