@@ -176,7 +176,7 @@ fn pagination_storage_key(scope: &str) -> String {
 
 fn render_page_breadcrumbs(current_page: &str) -> String {
     format!(
-        "<nav aria-label=\"Breadcrumb\" class=\"mb-2\"><ol class=\"flex items-center gap-2 text-sm text-surface-500\"><li><a href=\"/\" class=\"hover:text-surface-900 transition-colors\">Dashboard</a></li><li class=\"text-surface-300\">/</li><li class=\"text-surface-900 font-medium\" aria-current=\"page\">{}</li></ol></nav>",
+        "<nav aria-label=\"Breadcrumb\" class=\"mb-2\"><ol class=\"flex items-center gap-2 text-sm text-surface-500\"><li><a href=\"/\" class=\"hover:text-surface-900 transition-colors\">Dashboard</a></li><li class=\"text-surface-400\">/</li><li class=\"text-surface-900 font-medium\" aria-current=\"page\">{}</li></ol></nav>",
         current_page,
     )
 }
@@ -537,7 +537,7 @@ fn render_campaign_editor_page(
     primary_action_label: &str,
 ) -> String {
     let breadcrumbs = format!(
-        "<nav aria-label=\"Breadcrumb\" class=\"mb-6\"><ol class=\"flex items-center gap-2 text-sm text-surface-500\"><li><a href=\"{}\" class=\"hover:text-surface-900 transition-colors\">Campaigns</a></li><li class=\"text-surface-300\">/</li><li class=\"text-surface-900 font-medium\">{}</li></ol></nav>",
+        "<nav aria-label=\"Breadcrumb\" class=\"mb-6\"><ol class=\"flex items-center gap-2 text-sm text-surface-500\"><li><a href=\"{}\" class=\"hover:text-surface-900 transition-colors\">Campaigns</a></li><li class=\"text-surface-400\">/</li><li class=\"text-surface-900 font-medium\">{}</li></ol></nav>",
         return_href,
         breadcrumb_label,
     );
@@ -890,7 +890,7 @@ pub fn control_plane_sales_page() -> String {
         <header class="apex-cp-dark-hero rounded-sm border border-white/10 bg-black/25 p-6 shadow-premium-black/30">
             <div class="grid gap-6 xl:grid-cols-[1.2fr_0.8fr]">
                 <div>
-                    <p class="text-[11px] font-bold uppercase tracking-[0.32em] text-primary">Revenue Command Deck</p>
+                    <p class="text-[11px] font-bold uppercase tracking-[0.32em] text-brand-400">Revenue Command Deck</p>
                     <h1 class="mt-3 text-4xl font-bold tracking-tight text-white">Operator console: Sales Cockpit</h1>
                     <span data-sample-data class="mt-3 inline-flex items-center rounded-sm border border-brand-400/40 bg-brand-500/15 px-2 py-0.5 text-[10px] font-bold uppercase tracking-[0.18em] text-brand-100">Sample data</span>
                     <p class="mt-3 max-w-3xl text-sm leading-6 text-surface-300">Operator console for discovery, outreach, and autopilot approvals. This is a triage-first operating surface for enterprise expansion where operators qualify, approve, and launch outreach from one deterministic command flow via <code class="rounded bg-black/30 px-1.5 py-0.5 text-brand-100">/v1/admin/sales/*</code>. Every action below is a plain server-rendered form post — no scripts.</p>
@@ -1222,7 +1222,7 @@ fn web_auth_shell(title: &str, subtitle: &str, form_html: &str, footer_html: &st
     // the /web/auth/* PRG routes; feedback arrives via the signed flash
     // cookie rendered on the following GET.
     format!(
-        "<main class=\"min-h-screen bg-[#f8f9fa] relative flex items-center justify-center p-6\">\
+        "<main class=\"min-h-screen bg-surface-50 relative flex items-center justify-center p-6\">\
         <div class=\"absolute inset-0 z-0 opacity-[0.03] pointer-events-none ui-dot-grid\"></div>\
         <div class=\"relative z-10 w-full max-w-[400px]\">\
         <div class=\"bg-white rounded-xl shadow-premium border border-surface-200/60 overflow-hidden\">\
@@ -1334,23 +1334,23 @@ pub fn web_signup_page_with_plan(csrf_token: &str, selected_plan: Option<&str>) 
 <div class=\"grid grid-cols-1 sm:grid-cols-2 gap-4\">\
 <div class=\"space-y-2\">\
 <label class=\"text-xs font-bold text-surface-900\" for=\"signup-name\">Full name</label>\
-<input id=\"signup-name\" name=\"name\" type=\"text\" required autocomplete=\"name\" placeholder=\"Jane Doe\" class=\"w-full px-4 py-3 rounded-md border border-surface-200 focus:border-primary focus:ring-4 focus:ring-primary/5 outline-none transition-all placeholder:text-surface-400 bg-[#f8f9fa] text-sm font-medium text-surface-950\" />\
+<input id=\"signup-name\" name=\"name\" type=\"text\" required autocomplete=\"name\" placeholder=\"Jane Doe\" class=\"w-full px-4 py-3 rounded-md border border-surface-200 focus:border-primary focus:ring-4 focus:ring-primary/5 outline-none transition-all placeholder:text-muted-foreground bg-surface-50 text-sm font-medium text-surface-950\" />\
 </div>\
 <div class=\"space-y-2\">\
 <label class=\"text-xs font-bold text-surface-900\" for=\"signup-company\">Company</label>\
-<input id=\"signup-company\" name=\"company_name\" type=\"text\" required autocomplete=\"organization\" placeholder=\"Acme Inc.\" maxlength=\"100\" class=\"w-full px-4 py-3 rounded-md border border-surface-200 focus:border-primary focus:ring-4 focus:ring-primary/5 outline-none transition-all placeholder:text-surface-400 bg-[#f8f9fa] text-sm font-medium text-surface-950\" />\
+<input id=\"signup-company\" name=\"company_name\" type=\"text\" required autocomplete=\"organization\" placeholder=\"Acme Inc.\" maxlength=\"100\" class=\"w-full px-4 py-3 rounded-md border border-surface-200 focus:border-primary focus:ring-4 focus:ring-primary/5 outline-none transition-all placeholder:text-muted-foreground bg-surface-50 text-sm font-medium text-surface-950\" />\
 </div>\
 </div>\
 <div class=\"space-y-2\">\
 <label class=\"text-xs font-bold text-surface-900\" for=\"signup-email\">Email</label>\
-<input id=\"signup-email\" name=\"email\" type=\"email\" required autocomplete=\"email\" placeholder=\"you@example.com\" class=\"w-full px-4 py-3 rounded-md border border-surface-200 focus:border-primary focus:ring-4 focus:ring-primary/5 outline-none transition-all placeholder:text-surface-400 bg-[#f8f9fa] text-sm font-medium text-surface-950\" />\
+<input id=\"signup-email\" name=\"email\" type=\"email\" required autocomplete=\"email\" placeholder=\"you@example.com\" class=\"w-full px-4 py-3 rounded-md border border-surface-200 focus:border-primary focus:ring-4 focus:ring-primary/5 outline-none transition-all placeholder:text-muted-foreground bg-surface-50 text-sm font-medium text-surface-950\" />\
 </div>\
 <div class=\"space-y-2\">\
 <div class=\"flex items-center justify-between\">\
 <label class=\"text-xs font-bold text-surface-900\" for=\"signup-password\">Password</label>\
 </div>\
 <div class=\"relative\">\
-<input id=\"signup-password\" name=\"password\" type=\"password\" required autocomplete=\"new-password\" minlength=\"12\" maxlength=\"128\" pattern=\"{password_pattern}\" title=\"{password_title}\" placeholder=\"At least 12 characters\" class=\"w-full px-4 py-3 rounded-md border border-surface-200 focus:border-primary focus:ring-4 focus:ring-primary/5 outline-none transition-all bg-[#f8f9fa] text-surface-950 pr-12\" />\
+<input id=\"signup-password\" name=\"password\" type=\"password\" required autocomplete=\"new-password\" minlength=\"12\" maxlength=\"128\" pattern=\"{password_pattern}\" title=\"{password_title}\" placeholder=\"At least 12 characters\" class=\"w-full px-4 py-3 rounded-md border border-surface-200 focus:border-primary focus:ring-4 focus:ring-primary/5 outline-none transition-all bg-surface-50 text-surface-950 pr-12\" />\
 </div>\
 {password_hint}\
 </div>\
@@ -1382,7 +1382,7 @@ pub fn web_forgot_password_page(csrf_token: &str) -> String {
 {csrf}\
 <div class=\"space-y-2\">\
 <label class=\"text-xs font-bold text-surface-900\" for=\"reset-email\">Email</label>\
-<input id=\"reset-email\" name=\"email\" type=\"email\" required autocomplete=\"email\" placeholder=\"you@example.com\" class=\"w-full px-4 py-3 rounded-md border border-surface-200 focus:border-primary focus:ring-4 focus:ring-primary/5 outline-none transition-all placeholder:text-surface-400 bg-[#f8f9fa] text-sm font-medium text-surface-950\" />\
+<input id=\"reset-email\" name=\"email\" type=\"email\" required autocomplete=\"email\" placeholder=\"you@example.com\" class=\"w-full px-4 py-3 rounded-md border border-surface-200 focus:border-primary focus:ring-4 focus:ring-primary/5 outline-none transition-all placeholder:text-muted-foreground bg-surface-50 text-sm font-medium text-surface-950\" />\
 </div>\
 
 <button type=\"submit\" class=\"w-full bg-primary hover:bg-brand-700 text-white text-sm font-semibold flex items-center justify-center gap-3 py-3 rounded-md shadow-premium transition-all active:scale-[0.99] group mt-2\"><span>Send Reset Link</span>{arrow}</button>\
@@ -1450,14 +1450,14 @@ pub fn web_reset_password_page_with_state(
 <div class=\"space-y-2\">\
 <label class=\"text-xs font-bold text-surface-900\" for=\"new-password\">New password</label>\
 <div class=\"relative\">\
-<input id=\"new-password\" name=\"password\" type=\"password\" required autocomplete=\"new-password\" minlength=\"12\" maxlength=\"128\" pattern=\"{password_pattern}\" title=\"{password_title}\" placeholder=\"Choose a strong password\" class=\"w-full px-4 py-3 rounded-md border border-surface-200 focus:border-primary focus:ring-4 focus:ring-primary/5 outline-none transition-all bg-[#f8f9fa] text-surface-950 pr-12\" />\
+<input id=\"new-password\" name=\"password\" type=\"password\" required autocomplete=\"new-password\" minlength=\"12\" maxlength=\"128\" pattern=\"{password_pattern}\" title=\"{password_title}\" placeholder=\"Choose a strong password\" class=\"w-full px-4 py-3 rounded-md border border-surface-200 focus:border-primary focus:ring-4 focus:ring-primary/5 outline-none transition-all bg-surface-50 text-surface-950 pr-12\" />\
 </div>\
 {password_hint}\
 </div>\
 <div class=\"space-y-2\">\
 <label class=\"text-xs font-bold text-surface-900\" for=\"confirm-password\">Confirm password</label>\
 <div class=\"relative\">\
-<input id=\"confirm-password\" name=\"confirmPassword\" type=\"password\" required autocomplete=\"new-password\" minlength=\"12\" maxlength=\"128\" pattern=\"{password_pattern}\" title=\"{password_title}\" placeholder=\"Confirm your new password\" class=\"w-full px-4 py-3 rounded-md border border-surface-200 focus:border-primary focus:ring-4 focus:ring-primary/5 outline-none transition-all bg-[#f8f9fa] text-surface-950 pr-12\" />\
+<input id=\"confirm-password\" name=\"confirmPassword\" type=\"password\" required autocomplete=\"new-password\" minlength=\"12\" maxlength=\"128\" pattern=\"{password_pattern}\" title=\"{password_title}\" placeholder=\"Confirm your new password\" class=\"w-full px-4 py-3 rounded-md border border-surface-200 focus:border-primary focus:ring-4 focus:ring-primary/5 outline-none transition-all bg-surface-50 text-surface-950 pr-12\" />\
 </div>\
 </div>\
 
@@ -1749,7 +1749,7 @@ pub fn web_campaign_detail_page() -> String {
     }
     .render_html();
     format!(
-        "<div class=\"space-y-6\"><nav aria-label=\"Breadcrumb\" class=\"mb-2\"><ol class=\"flex items-center gap-2 text-sm text-surface-500\"><li><a href=\"{}\" class=\"hover:text-surface-900 transition-colors\">Campaigns</a></li><li class=\"text-surface-300\">/</li><li class=\"text-surface-900 font-medium\">Campaign Detail</li></ol></nav><div class=\"flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between\"><div><h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Campaign Detail</h1><p class=\"text-sm text-muted-foreground\">Breadcrumbs preserve the active list page and filter query when you navigate back.</p></div><div class=\"flex flex-col gap-3 sm:flex-row\"><a href=\"/campaigns/c_spring/edit?returnTo=%2Fcampaigns%3Fpage%3D2%26status%3Ddraft%26query%3Dspring\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold border border-input bg-background hover:bg-accent h-12 px-6 py-3\">Edit</a><a href=\"/confirm?intent=delete-campaign&amp;id=c_spring&amp;return_to=%2Fcampaigns\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold bg-destructive text-destructive-foreground hover:bg-destructive/90 h-12 px-6 py-3\">Delete Campaign</a></div></div><div class=\"grid gap-6 md:grid-cols-3\"><div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium\"><h3 class=\"text-sm font-medium text-muted-foreground\">Recipients</h3><p class=\"text-2xl font-bold text-surface-950 tracking-tight\">4,280</p></div><div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium\"><h3 class=\"text-sm font-medium text-muted-foreground\">Open Rate</h3><p class=\"text-2xl font-bold text-surface-950 tracking-tight\">41.2%</p></div><div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium\"><h3 class=\"text-sm font-medium text-muted-foreground\">Click Rate</h3><p class=\"text-2xl font-bold text-surface-950 tracking-tight\">8.6%</p></div></div></div>",
+        "<div class=\"space-y-6\"><nav aria-label=\"Breadcrumb\" class=\"mb-2\"><ol class=\"flex items-center gap-2 text-sm text-surface-500\"><li><a href=\"{}\" class=\"hover:text-surface-900 transition-colors\">Campaigns</a></li><li class=\"text-surface-400\">/</li><li class=\"text-surface-900 font-medium\">Campaign Detail</li></ol></nav><div class=\"flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between\"><div><h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Campaign Detail</h1><p class=\"text-sm text-muted-foreground\">Breadcrumbs preserve the active list page and filter query when you navigate back.</p></div><div class=\"flex flex-col gap-3 sm:flex-row\"><a href=\"/campaigns/c_spring/edit?returnTo=%2Fcampaigns%3Fpage%3D2%26status%3Ddraft%26query%3Dspring\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold border border-input bg-background hover:bg-accent h-12 px-6 py-3\">Edit</a><a href=\"/confirm?intent=delete-campaign&amp;id=c_spring&amp;return_to=%2Fcampaigns\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold bg-destructive text-destructive-foreground hover:bg-destructive/90 h-12 px-6 py-3\">Delete Campaign</a></div></div><div class=\"grid gap-6 md:grid-cols-3\"><div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium\"><h3 class=\"text-sm font-medium text-muted-foreground\">Recipients</h3><p class=\"text-2xl font-bold text-surface-950 tracking-tight\">4,280</p></div><div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium\"><h3 class=\"text-sm font-medium text-muted-foreground\">Open Rate</h3><p class=\"text-2xl font-bold text-surface-950 tracking-tight\">41.2%</p></div><div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium\"><h3 class=\"text-sm font-medium text-muted-foreground\">Click Rate</h3><p class=\"text-2xl font-bold text-surface-950 tracking-tight\">8.6%</p></div></div></div>",
         CAMPAIGNS_RETURN_HREF,
     )
 }
@@ -1906,7 +1906,7 @@ pub fn web_contacts_new_page() -> String {
         "<div class=\"max-w-2xl\">\
 <nav aria-label=\"Breadcrumb\" class=\"mb-6\"><ol class=\"flex items-center gap-2 text-sm text-surface-500\">\
 <li><a href=\"/contacts\" class=\"hover:text-surface-900 transition-colors\">Contacts</a></li>\
-<li class=\"text-surface-300\">/</li>\
+<li class=\"text-surface-400\">/</li>\
 <li class=\"text-surface-900 font-medium\">New Contact</li></ol></nav>\
 <h1 class=\"text-2xl font-bold text-surface-950 tracking-tight mb-6\">Add Contact</h1>\
 <form class=\"space-y-6\" method=\"post\" action=\"/web/contacts\">\
@@ -2002,7 +2002,7 @@ pub fn web_list_detail_page() -> String {
         "<div class=\"space-y-6\" data-page=\"list-detail\">\
 <nav aria-label=\"Breadcrumb\" class=\"mb-2\"><ol class=\"flex items-center gap-2 text-sm text-surface-500\">\
 <li><a href=\"/lists\" class=\"hover:text-surface-900 transition-colors\">Lists</a></li>\
-<li class=\"text-surface-300\">/</li>\
+<li class=\"text-surface-400\">/</li>\
 <li class=\"text-surface-900 font-medium\" aria-current=\"page\">List Detail</li></ol></nav>\
 <div class=\"flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between\">\
 <div><h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\" data-list-name>List</h1>\
@@ -2189,7 +2189,7 @@ pub fn web_reports_deliverability_page() -> String {
         "<div class=\"space-y-6\">\
 <nav aria-label=\"Breadcrumb\" class=\"mb-2\"><ol class=\"flex items-center gap-2 text-sm text-surface-500\">\
 <li><a href=\"/reports\" class=\"hover:text-surface-900 transition-colors\">Reports</a></li>\
-<li class=\"text-surface-300\">/</li>\
+<li class=\"text-surface-400\">/</li>\
 <li class=\"text-surface-900 font-medium\">Deliverability</li></ol></nav>\
 <h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Deliverability Report</h1>\
 <div class=\"grid gap-4 md:grid-cols-4\">\
@@ -2214,7 +2214,7 @@ pub fn web_inbox_placement_page() -> String {
         "<div class=\"space-y-6\" data-page=\"inbox-placement\">\
 <nav aria-label=\"Breadcrumb\" class=\"mb-2\"><ol class=\"flex items-center gap-2 text-sm text-surface-500\">\
 <li><a href=\"/dashboard\" class=\"hover:text-surface-900 transition-colors\">Dashboard</a></li>\
-<li class=\"text-surface-300\">/</li>\
+<li class=\"text-surface-400\">/</li>\
 <li class=\"text-surface-900 font-medium\">Inbox Placement</li></ol></nav>\
 <div class=\"flex items-center justify-between\">\
 <div><h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Inbox Placement</h1>\
@@ -2244,7 +2244,7 @@ pub fn web_inbox_placement_new_page() -> String {
         "<div class=\"space-y-6\" data-page=\"inbox-placement-new\">\
 <nav aria-label=\"Breadcrumb\" class=\"mb-2\"><ol class=\"flex items-center gap-2 text-sm text-surface-500\">\
 <li><a href=\"/inbox-placement\" class=\"hover:text-surface-900 transition-colors\">Inbox Placement</a></li>\
-<li class=\"text-surface-300\">/</li>\
+<li class=\"text-surface-400\">/</li>\
 <li class=\"text-surface-900 font-medium\">New test</li></ol></nav>\
 <h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Run a new placement test</h1>\
 <p class=\"text-sm text-surface-600\">We'll send your message to active seed inboxes at the providers you select and report inbox vs. spam folder placement.</p>\
@@ -2292,7 +2292,7 @@ pub fn web_inbox_placement_detail_page() -> String {
         "<div class=\"space-y-6\" data-page=\"inbox-placement-detail\">\
 <nav aria-label=\"Breadcrumb\" class=\"mb-2\"><ol class=\"flex items-center gap-2 text-sm text-surface-500\">\
 <li><a href=\"/inbox-placement\" class=\"hover:text-surface-900 transition-colors\">Inbox Placement</a></li>\
-<li class=\"text-surface-300\">/</li>\
+<li class=\"text-surface-400\">/</li>\
 <li class=\"text-surface-900 font-medium\">Test detail</li></ol></nav>\
 <div class=\"flex flex-col md:flex-row md:items-center md:justify-between gap-4\">\
 <div><h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Loading test…</h1>\
@@ -3230,9 +3230,9 @@ pub fn control_plane_discovery_page() -> String {
 <div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium\">\
 <h3 class=\"text-xs font-bold uppercase tracking-widest text-surface-400 mb-6\">Registered Services</h3>\
 <div class=\"space-y-3\">\
-<div class=\"flex items-center justify-between p-3 bg-muted/50 rounded-sm\"><span class=\"font-medium\">MTA</span><span class=\"inline-flex items-center gap-2 text-sm text-success-500\"><span class=\"h-2 w-2 rounded-full bg-success-500\" aria-hidden=\"true\"></span>Healthy</span></div>\
-<div class=\"flex items-center justify-between p-3 bg-muted/50 rounded-sm\"><span class=\"font-medium\">SMTP Inbound</span><span class=\"inline-flex items-center gap-2 text-sm text-success-500\"><span class=\"h-2 w-2 rounded-full bg-success-500\" aria-hidden=\"true\"></span>Healthy</span></div>\
-<div class=\"flex items-center justify-between p-3 bg-muted/50 rounded-sm\"><span class=\"font-medium\">Analytics</span><span class=\"inline-flex items-center gap-2 text-sm text-success-500\"><span class=\"h-2 w-2 rounded-full bg-success-500\" aria-hidden=\"true\"></span>Healthy</span></div>\
+<div class=\"flex items-center justify-between p-3 bg-muted/50 rounded-sm\"><span class=\"font-medium\">MTA</span><span class=\"inline-flex items-center gap-2 text-sm text-success-700\"><span class=\"h-2 w-2 rounded-full bg-success-500\" aria-hidden=\"true\"></span>Healthy</span></div>\
+<div class=\"flex items-center justify-between p-3 bg-muted/50 rounded-sm\"><span class=\"font-medium\">SMTP Inbound</span><span class=\"inline-flex items-center gap-2 text-sm text-success-700\"><span class=\"h-2 w-2 rounded-full bg-success-500\" aria-hidden=\"true\"></span>Healthy</span></div>\
+<div class=\"flex items-center justify-between p-3 bg-muted/50 rounded-sm\"><span class=\"font-medium\">Analytics</span><span class=\"inline-flex items-center gap-2 text-sm text-success-700\"><span class=\"h-2 w-2 rounded-full bg-success-500\" aria-hidden=\"true\"></span>Healthy</span></div>\
 </div></div></div>".to_string()
 }
 
@@ -3898,14 +3898,14 @@ pub fn web_login_page(csrf_token: &str) -> String {
 {csrf}\
 <div class=\"space-y-2\">\
 <label class=\"text-xs font-bold text-surface-900\" for=\"login-email\">Email</label>\
-<input id=\"login-email\" name=\"email\" type=\"email\" required autocomplete=\"username\" placeholder=\"you@example.com\" class=\"w-full px-4 py-3 rounded-md border border-surface-200 focus:border-primary focus:ring-4 focus:ring-primary/5 outline-none transition-all placeholder:text-surface-400 bg-[#f8f9fa] text-sm font-medium text-surface-950\" />\
+<input id=\"login-email\" name=\"email\" type=\"email\" required autocomplete=\"username\" placeholder=\"you@example.com\" class=\"w-full px-4 py-3 rounded-md border border-surface-200 focus:border-primary focus:ring-4 focus:ring-primary/5 outline-none transition-all placeholder:text-muted-foreground bg-surface-50 text-sm font-medium text-surface-950\" />\
 </div>\
 <div class=\"space-y-2\">\
 <div class=\"flex items-center justify-between\">\
 <label class=\"text-xs font-bold text-surface-900\" for=\"password\">Password</label>\
 </div>\
 <div class=\"relative\">\
-<input id=\"password\" name=\"password\" type=\"password\" required autocomplete=\"current-password\" placeholder=\"Enter password\" class=\"w-full px-4 py-3 rounded-md border border-surface-200 focus:border-primary focus:ring-4 focus:ring-primary/5 outline-none transition-all bg-[#f8f9fa] text-surface-950 pr-12\" />\
+<input id=\"password\" name=\"password\" type=\"password\" required autocomplete=\"current-password\" placeholder=\"Enter password\" class=\"w-full px-4 py-3 rounded-md border border-surface-200 focus:border-primary focus:ring-4 focus:ring-primary/5 outline-none transition-all bg-surface-50 text-surface-950 pr-12\" />\
 </div>\
 </div>\
 <div class=\"flex items-center justify-between py-1\">\
@@ -3963,7 +3963,7 @@ pub fn web_login_mfa_challenge_page(
 </div>\
 <div class=\"space-y-2\">\
 <label class=\"text-xs font-bold text-surface-900\" for=\"mfaCode\">Authenticator code</label>\
-<input id=\"mfaCode\" name=\"code\" type=\"text\" inputmode=\"numeric\" pattern=\"[0-9]*\" maxlength=\"6\" minlength=\"6\" required autocomplete=\"one-time-code\" placeholder=\"000000\" aria-describedby=\"mfa-code-hint\" class=\"flex h-12 w-full rounded-md border border-surface-200 bg-[#f8f9fa] px-4 py-2 text-sm font-mono text-center tracking-widest focus:border-primary focus:ring-4 focus:ring-primary/5 outline-none transition-all\" />\
+<input id=\"mfaCode\" name=\"code\" type=\"text\" inputmode=\"numeric\" pattern=\"[0-9]*\" maxlength=\"6\" minlength=\"6\" required autocomplete=\"one-time-code\" placeholder=\"000000\" aria-describedby=\"mfa-code-hint\" class=\"flex h-12 w-full rounded-md border border-surface-200 bg-surface-50 px-4 py-2 text-sm font-mono text-center tracking-widest focus:border-primary focus:ring-4 focus:ring-primary/5 outline-none transition-all\" />\
 <p id=\"mfa-code-hint\" class=\"text-xs text-surface-500\">The code refreshes every 30 seconds in your app.</p>\
 </div>\
 <button type=\"submit\" class=\"w-full bg-primary hover:bg-brand-700 text-white text-sm font-semibold flex items-center justify-center gap-3 py-3 rounded-md shadow-premium transition-all active:scale-[0.99] group mt-2\"><span>Verify and sign in</span>{arrow}</button>\
@@ -3995,14 +3995,14 @@ pub fn control_plane_login_page(csrf_token: &str) -> String {
 {csrf}\
 <div class=\"space-y-2\">\
 <label class=\"text-xs font-bold text-surface-900\" for=\"login-email\">Operator Identity</label>\
-<input id=\"login-email\" name=\"email\" type=\"text\" required autocomplete=\"username\" placeholder=\"Email or username\" class=\"w-full px-4 py-3 rounded-md border border-surface-200 focus:border-primary focus:ring-4 focus:ring-primary/5 outline-none transition-all placeholder:text-surface-400 bg-[#f8f9fa] text-sm font-medium text-surface-950\" />\
+<input id=\"login-email\" name=\"email\" type=\"text\" required autocomplete=\"username\" placeholder=\"Email or username\" class=\"w-full px-4 py-3 rounded-md border border-surface-200 focus:border-primary focus:ring-4 focus:ring-primary/5 outline-none transition-all placeholder:text-muted-foreground bg-surface-50 text-sm font-medium text-surface-950\" />\
 </div>\
 <div class=\"space-y-2\">\
 <div class=\"flex items-center justify-between\">\
 <label class=\"text-xs font-bold text-surface-900\" for=\"login-password\">Access Password</label>\
 </div>\
 <div class=\"relative\">\
-<input id=\"login-password\" name=\"password\" type=\"password\" required autocomplete=\"current-password\" placeholder=\"Enter password\" class=\"w-full px-4 py-3 rounded-md border border-surface-200 focus:border-primary focus:ring-4 focus:ring-primary/5 outline-none transition-all bg-[#f8f9fa] text-surface-950 pr-12\" />\
+<input id=\"login-password\" name=\"password\" type=\"password\" required autocomplete=\"current-password\" placeholder=\"Enter password\" class=\"w-full px-4 py-3 rounded-md border border-surface-200 focus:border-primary focus:ring-4 focus:ring-primary/5 outline-none transition-all bg-surface-50 text-surface-950 pr-12\" />\
 </div>\
 </div>\
 <div class=\"flex items-center gap-2 py-1\">\
@@ -4399,7 +4399,7 @@ mod tests {
         assert!(html.contains("id=\"signup-name\""));
         assert!(html.contains("id=\"signup-email\""));
         assert!(html.contains("id=\"signup-password\""));
-        assert!(html.contains("bg-[#f8f9fa] text-surface-950 pr-12"));
+        assert!(html.contains("bg-surface-50 text-surface-950 pr-12"));
         assert!(!html.contains("bg-white/90 text-foreground pr-12"));
         assert!(html.contains(r"\x21-\x2F\x3A-\x40\x5B-\x60\x7B-\x7E"));
         assert!(html.contains("ASCII punctuation"));

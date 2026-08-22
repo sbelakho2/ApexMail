@@ -15,6 +15,9 @@ html { scroll-behavior: smooth; }
 }
 
 /* ── Skip Link ──────────────────────────────────────────────── */
+/* The skip link carries BOTH the id and the class; this id-scoped rule wins
+   the cascade, so its background must be the brand red the class rule
+   intends — white-on-white made the focused link invisible (1:1). */
 #skip-to-content {
   position: absolute;
   left: -9999px;
@@ -22,8 +25,8 @@ html { scroll-behavior: smooth; }
   z-index: 60;
   padding: 0.75rem 1rem;
   border-radius: 0;
-  background: white;
-  color: rgb(var(--surface-950));
+  background: rgb(var(--brand-600));
+  color: #fff;
   border: 1px solid rgb(var(--surface-950));
   font-weight: bold;
   text-transform: uppercase;
@@ -41,7 +44,7 @@ html { scroll-behavior: smooth; }
   z-index: 10000;
   padding: 12px 24px;
   border-radius: 0;
-  background: rgb(var(--primary));
+  background: rgb(var(--brand-600));
   color: white !important;
   font-size: 13px;
   font-weight: 700;

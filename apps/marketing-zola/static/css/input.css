@@ -233,6 +233,96 @@ html.dark {
   --surface-950: 250 250 250;
 }
 
+/* ── WCAG 2.1 AA contrast fixes (light theme) ───────────────────────────
+   Every color below is an EXISTING step of the zinc neutral / brand red /
+   success / warning / info scales — no new hues. In light mode:
+     - muted text: zinc-400 (#a1a1aa, 2.46-2.56:1 on light surfaces) and
+       zinc-500 (4.35:1 on zinc-100) step to zinc-600 (#52525b, ~7:1);
+     - brand-500 as text (3.8:1 on white) steps to brand-600, and
+       brand-500/600 on light red tints (4.4:1) step to brand-700;
+     - success-600 (3.3:1) → success-700, info-600 (3.4:1) → info-700,
+       warning-600 (2.9:1 on white, 2.7:1 on amber tints) → warning-800.
+   The html.dark block above/below and the prefers-color-scheme: dark
+   block further down (equal or higher specificity, later in the file)
+   keep the dark values, so these rules are light-only in effect. */
+.text-surface-400 { color: rgb(82 82 91 / var(--tw-text-opacity, 1)) !important; }
+.text-surface-500 { color: rgb(82 82 91 / var(--tw-text-opacity, 1)) !important; }
+.text-brand-500 { color: rgb(185 28 28 / var(--tw-text-opacity, 1)) !important; }
+.text-red-500 { color: rgb(185 28 28 / var(--tw-text-opacity, 1)) !important; }
+.text-success-600 { color: rgb(21 128 61 / var(--tw-text-opacity, 1)) !important; }
+.text-info-600 { color: rgb(14 116 144 / var(--tw-text-opacity, 1)) !important; }
+.text-warning-600 { color: rgb(146 64 14 / var(--tw-text-opacity, 1)) !important; }
+
+/* brand-600 on light red-tinted surfaces (bg-brand-50/100) is
+   4.4:1 — step to brand-700 (>= 5.3:1 on those tints). Both the
+   descendant and the same-element (chip) shapes occur in templates. */
+.bg-brand-50 .text-brand-600,
+.bg-brand-100 .text-brand-600,
+.bg-brand-50.text-brand-600,
+.bg-brand-100.text-brand-600 {
+  color: rgb(185 28 28 / var(--tw-text-opacity, 1)) !important;
+}
+
+/* Permanently-dark surfaces: bg-surface-950/900/800 and .code-block keep
+   near-black backgrounds in BOTH themes, so muted text inside them stays
+   zinc-400, red accents step to brand-400, and children that inherit the
+   page foreground get zinc-100 instead of zinc-950 (which was 1.1:1 on
+   these panels in light mode). Same values the dark blocks use. */
+.bg-surface-950 .text-surface-400,
+.bg-surface-950 .text-surface-500,
+.bg-surface-950 .text-surface-600,
+.bg-surface-900 .text-surface-400,
+.bg-surface-900 .text-surface-500,
+.bg-surface-900 .text-surface-600,
+.bg-surface-800 .text-surface-400,
+.bg-surface-800 .text-surface-500,
+.bg-surface-800 .text-surface-600,
+.code-block .text-surface-400,
+.code-block .text-surface-500,
+.code-block .text-surface-600 {
+  color: rgb(161 161 170 / var(--tw-text-opacity, 1)) !important;
+}
+
+.bg-surface-950 .text-brand-500,
+.bg-surface-950 .text-brand-600,
+.bg-surface-900 .text-brand-500,
+.bg-surface-900 .text-brand-600,
+.bg-surface-800 .text-brand-500,
+.bg-surface-800 .text-brand-600,
+.code-block .text-brand-500,
+.code-block .text-brand-600 {
+  color: rgb(248 113 113 / var(--tw-text-opacity, 1)) !important;
+}
+
+.bg-surface-950,
+.bg-surface-900,
+.bg-surface-800,
+.code-block {
+  color: rgb(244 244 245);
+}
+
+/* .prose pins h1-h4/strong to zinc-950 explicitly; inside the
+   permanently-dark panels that is 1.1:1 — repin them to zinc-100. */
+.bg-surface-950 h1, .bg-surface-950 h2, .bg-surface-950 h3, .bg-surface-950 h4,
+.bg-surface-950 strong, .bg-surface-950 th,
+.bg-surface-900 h1, .bg-surface-900 h2, .bg-surface-900 h3, .bg-surface-900 h4,
+.bg-surface-900 strong, .bg-surface-900 th,
+.bg-surface-800 h1, .bg-surface-800 h2, .bg-surface-800 h3, .bg-surface-800 h4,
+.bg-surface-800 strong, .bg-surface-800 th,
+.code-block h1, .code-block h2, .code-block h3, .code-block h4,
+.code-block strong, .code-block th {
+  color: rgb(244 244 245);
+}
+
+/* Placeholder text is muted text and must clear AA (the UA default
+   54%-gray is 2.5:1 on white). The token flips per theme:
+   zinc-600 light / zinc-400 dark. */
+input::placeholder,
+textarea::placeholder {
+  color: rgb(var(--surface-600));
+  opacity: 1;
+}
+
 .apex-brand-mark {
   background-color: rgb(var(--brand-600));
   border-color: rgb(var(--brand-700));
@@ -379,6 +469,23 @@ html.dark .border-surface-900,
 html.dark .border-surface-800 {
   border-color: rgb(63 63 70 / var(--tw-border-opacity, 1)) !important;
 }
+html.dark .text-brand-500,
+html.dark .text-brand-600,
+html.dark .text-red-500 {
+  color: rgb(248 113 113 / var(--tw-text-opacity, 1)) !important;
+}
+/* Dark counterpart of the red-tint scope above: bg-brand-50/100 become
+   deep red in dark, so the text steps to brand-300 (>= 9:1). */
+html.dark .bg-brand-50 .text-brand-500,
+html.dark .bg-brand-100 .text-brand-500,
+html.dark .bg-brand-50 .text-brand-600,
+html.dark .bg-brand-100 .text-brand-600,
+html.dark .bg-brand-50.text-brand-500,
+html.dark .bg-brand-100.text-brand-500,
+html.dark .bg-brand-50.text-brand-600,
+html.dark .bg-brand-100.text-brand-600 {
+  color: rgb(252 165 165 / var(--tw-text-opacity, 1)) !important;
+}
 html.dark .text-brand-700 {
   color: rgb(var(--brand-300) / var(--tw-text-opacity, 1)) !important;
 }
@@ -393,6 +500,9 @@ html.dark .text-warning-800 {
 html.dark .text-success-600,
 html.dark .text-success-700 {
   color: rgb(var(--success-300) / var(--tw-text-opacity, 1)) !important;
+}
+html.dark .text-info-600 {
+  color: rgb(34 211 238 / var(--tw-text-opacity, 1)) !important;
 }
 html.dark .text-info-700 {
   color: rgb(var(--info-400) / var(--tw-text-opacity, 1)) !important;
@@ -549,6 +659,23 @@ html.dark .cookie-consent-banner {
   .border-surface-800 {
     border-color: rgb(63 63 70 / var(--tw-border-opacity, 1)) !important;
   }
+  .text-brand-500,
+  .text-brand-600,
+  .text-red-500 {
+    color: rgb(248 113 113 / var(--tw-text-opacity, 1)) !important;
+  }
+  /* Dark counterpart of the light red-tint scope (bg-brand-50/100 are
+     deep red here): step to brand-300. */
+  .bg-brand-50 .text-brand-500,
+  .bg-brand-100 .text-brand-500,
+  .bg-brand-50 .text-brand-600,
+  .bg-brand-100 .text-brand-600,
+  .bg-brand-50.text-brand-500,
+  .bg-brand-100.text-brand-500,
+  .bg-brand-50.text-brand-600,
+  .bg-brand-100.text-brand-600 {
+    color: rgb(252 165 165 / var(--tw-text-opacity, 1)) !important;
+  }
   .text-brand-700 {
     color: rgb(var(--brand-300) / var(--tw-text-opacity, 1)) !important;
   }
@@ -563,6 +690,9 @@ html.dark .cookie-consent-banner {
   .text-success-600,
   .text-success-700 {
     color: rgb(var(--success-300) / var(--tw-text-opacity, 1)) !important;
+  }
+  .text-info-600 {
+    color: rgb(34 211 238 / var(--tw-text-opacity, 1)) !important;
   }
   .text-info-700 {
     color: rgb(var(--info-400) / var(--tw-text-opacity, 1)) !important;
@@ -764,6 +894,14 @@ html.dark :focus-visible {
     filter: brightness(0.9);
   }
 
+  /* The inverse (white) CTA variant: `background-color` cannot override the
+     brand-gradient `background-image` above, so the gradient kept painting
+     under the zinc-950 text (pixel-confirmed AA failure). Drop the image. */
+  .btn-primary.\!bg-white,
+  .btn-primary.\!bg-surface-100 {
+    background-image: none;
+  }
+
   .btn-secondary {
     @apply px-6 py-3 border border-surface-200 hover:border-surface-950 hover:bg-surface-50 bg-surface-50 text-surface-950 font-semibold rounded-lg transition-premium tracking-tight text-sm;
     min-height: 44px;
@@ -831,7 +969,7 @@ html.dark :focus-visible {
   }
 
   .prose th {
-    @apply px-4 py-3 bg-surface-100 border border-surface-200 text-[10px] font-bold tracking-widest text-surface-400;
+    @apply px-4 py-3 bg-surface-100 border border-surface-200 text-[10px] font-bold tracking-widest text-surface-600;
   }
 
   .prose td {
@@ -1114,32 +1252,50 @@ html.dark :focus-visible {
   }
 }
 
-/* Apex Syntax Theme (Syntect/Giallo compatible) */
-.z-code { @apply text-surface-100 bg-surface-950; }
-.z-comment { @apply text-surface-500 italic; }
-.z-keyword { @apply text-brand-400 font-bold; }
-.z-string { @apply text-brand-200; }
-.z-constant { @apply text-brand-500; }
-.z-entity { @apply text-surface-100; }
-.z-support { @apply text-brand-400; }
-.z-variable { @apply text-surface-100; }
-.z-punctuation { @apply text-surface-400; }
+/* Apex Syntax Theme (Syntect/Giallo compatible).
+   Code blocks are near-black (bg-surface-950 via .prose pre / .code-block)
+   in BOTH themes, so the token mapping below uses the dark-appropriate
+   zinc/brand steps year-round. Every rule carries !important because the
+   build-time generated giallo.css (Zola's "github-light" palette) loads
+   AFTER this stylesheet and would otherwise repaint light-theme token
+   colors — dark blues/dark grays — onto the dark blocks (1.4-4.4:1). */
+.z-code { color: rgb(244 244 245) !important; background-color: rgb(9 9 11) !important; }
+.z-comment { color: rgb(161 161 170) !important; font-style: italic; }
+.z-keyword { color: rgb(248 113 113) !important; font-weight: 700; }
+.z-string { color: rgb(254 202 202) !important; }
+.z-constant { color: rgb(248 113 113) !important; }
+.z-entity { color: rgb(244 244 245) !important; }
+.z-support { color: rgb(248 113 113) !important; }
+.z-variable { color: rgb(244 244 245) !important; }
+.z-punctuation { color: rgb(161 161 170) !important; }
+.z-storage { color: rgb(248 113 113) !important; }
+.z-source { color: rgb(244 244 245) !important; }
+.z-meta { color: rgb(161 161 170) !important; }
+.z-markup { color: rgb(244 244 245) !important; }
+.z-invalid { color: rgb(248 113 113) !important; }
+.z-message { color: rgb(248 113 113) !important; }
+.z-brackethighlighter { color: rgb(161 161 170) !important; }
+.z-carriage-return { color: rgb(244 244 245) !important; background-color: rgb(220 38 38) !important; }
+.z-hl { background-color: rgb(24 24 27) !important; }
+.giallo-ln { color: rgb(161 161 170) !important; }
 
-/* Prism/Code highlighting (Manual/Legacy) */
+/* Prism/Code highlighting (Manual/Legacy) — same dark-block mapping. */
 .code-highlight {
-  @apply text-brand-500 font-bold;
+  color: rgb(248 113 113) !important;
+  font-weight: 700;
 }
 
 .code-string {
-  @apply text-brand-300;
+  color: rgb(252 165 165) !important;
 }
 
 .code-keyword {
-  @apply text-brand-400;
+  color: rgb(248 113 113) !important;
 }
 
 .code-comment {
-  @apply text-surface-500 italic;
+  color: rgb(161 161 170) !important;
+  font-style: italic;
 }
 
 @media (prefers-color-scheme: dark) {

@@ -118,7 +118,7 @@ between buckets by editing `ci/stages/validate.sh` (`ci_check` ↔
 |---|---|---|---|
 | 1 | fetch | 180 s | 2 s (HTTPS fetch + pushed-HEAD check) |
 | 2 | validate | 1800 s | 45–150 s (zola build + pricing/legal/a11y/seo gates dominate) |
-| 3 | test | 5400 s | **247 s total**: fmt+clippy gates ~25 s, nextest 5410 tests 200 s, 3 PHP suites ~35 s |
+| 3 | test | 5400 s | **247 s total**: fmt+clippy gates ~25 s, nextest 5410 tests 200 s, 3 PHP suites ~35 s, WCAG AA contrast gate ~2.5 min (after the PHP suites; loud-skip when node/playwright are absent) |
 | 4 | security | 2700 s | **172 s**: gitleaks ~10 s (full-history first scan ~3.5 min), cargo audit ~10 s, fresh-DB migration validation ~60 s |
 | 5 | images | 10800 s | host-only (Rust docker build; `deploy.sh --build-only` timing) |
 | 6 | migrate | 600 s | host-only (migrator one-shot, seconds) |

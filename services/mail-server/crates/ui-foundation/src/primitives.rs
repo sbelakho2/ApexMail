@@ -1872,7 +1872,7 @@ fn badge_variant_class(variant: &str) -> &'static str {
         "error" => {
             "border-transparent bg-destructive text-destructive-foreground hover:bg-destructive/90 "
         }
-        "info" => "border-transparent bg-info text-info-foreground hover:bg-info/90 ",
+        "info" => "border-transparent bg-info-700 text-white hover:bg-info-700/90 ",
         "ghost" => "border-transparent bg-muted text-muted-foreground hover:bg-muted/80",
         "outline-success" => "text-foreground border-success/35 bg-success/15",
         "outline-warning" => "text-foreground border-warning/35 bg-warning/20",

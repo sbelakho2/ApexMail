@@ -576,7 +576,10 @@ video {
   --secondary: 244 244 245;
   --secondary-foreground: 9 9 11;
   --muted: 244 244 245;
-  --muted-foreground: 113 113 122;
+  /* zinc-600 (#52525b) not zinc-500: muted text must clear AA (4.5:1) even
+       on zinc-100/amber-tinted surfaces, where zinc-500 lands at 4.3-4.4:1.
+       Dark mode keeps zinc-400 below. */
+  --muted-foreground: 82 82 91;
   --accent: 244 244 245;
   --accent-foreground: 9 9 11;
   --destructive: 220 38 38;
@@ -846,6 +849,10 @@ a {
   :root:not(.light) .apex-card {
     background-color: rgb(var(--card) / var(--tw-bg-opacity, 1));
   }
+
+  /* AA dark-mode steps (media-query twin of the .dark block above). */
+
+  /* Eyebrows: brand-600 on near-black is 4.1:1 in dark — brand-400 (media twin). */
 }
 
 .apex-card:hover {
@@ -3049,14 +3056,14 @@ a {
   background-color: rgb(var(--destructive) / 0.05);
 }
 
-.bg-info {
-  --tw-bg-opacity: 1;
-  background-color: rgb(var(--info) / var(--tw-bg-opacity, 1));
-}
-
 .bg-info-500 {
   --tw-bg-opacity: 1;
   background-color: rgb(var(--info-500) / var(--tw-bg-opacity, 1));
+}
+
+.bg-info-700 {
+  --tw-bg-opacity: 1;
+  background-color: rgb(var(--info-700) / var(--tw-bg-opacity, 1));
 }
 
 .bg-muted {
@@ -3728,6 +3735,11 @@ a {
   color: rgb(var(--brand-100) / var(--tw-text-opacity, 1));
 }
 
+.text-brand-400 {
+  --tw-text-opacity: 1;
+  color: rgb(var(--brand-400) / var(--tw-text-opacity, 1));
+}
+
 .text-brand-600 {
   --tw-text-opacity: 1;
   color: rgb(var(--brand-600) / var(--tw-text-opacity, 1));
@@ -4194,6 +4206,87 @@ a {
   transition-timing-function: cubic-bezier(0.23, 1, 0.32, 1);
 }
 
+/* ── WCAG 2.1 AA contrast fixes (light theme) ─────────────────────────
+     Every color below is an EXISTING step of the zinc neutral or brand red
+     scales — no new hues. In light mode:
+       - zinc-400 (#a1a1aa) as muted text is 2.56:1 on white → step to
+         zinc-600 (#52525b, 7:1). zinc-500 lands at 4.35:1 on zinc-100 →
+         also steps to zinc-600.
+       - brand-600 (#dc2626) destructive/red text is 4.1-4.5:1 on red-tinted
+         surfaces → step to brand-700 (#b91c1c).
+       - warning-600 amber text is 2.9:1 → step to warning-800 (#92400e).
+     The .dark and :root:not(.light) blocks below carry higher specificity
+     and keep the dark values (zinc-400 on near-black = 7.3:1, brand-400 =
+     7.2:1, warning-400 = 11.9:1), so these plain rules are light-only in
+     effect without needing a theme guard. */
+
+.text-surface-400 {
+  color: rgb(82 82 91 / var(--tw-text-opacity, 1)) !important;
+}
+
+.text-surface-500 {
+  color: rgb(82 82 91 / var(--tw-text-opacity, 1)) !important;
+}
+
+.text-destructive {
+  color: rgb(185 28 28 / var(--tw-text-opacity, 1)) !important;
+}
+
+.text-warning {
+  color: rgb(146 64 14 / var(--tw-text-opacity, 1)) !important;
+}
+
+/* Permanently-dark surfaces (bg-surface-950/900/800 stay near-black in
+     BOTH themes — sales cockpit panels, code chips): muted text on them
+     stays zinc-400 and default-inheriting children get zinc-100 regardless
+     of theme. Same values the dark blocks use, so themes stay consistent. */
+
+.bg-surface-950 .text-surface-400,
+  .bg-surface-950 .text-surface-500,
+  .bg-surface-950 .text-surface-600,
+  .bg-surface-900 .text-surface-400,
+  .bg-surface-900 .text-surface-500,
+  .bg-surface-900 .text-surface-600,
+  .bg-surface-800 .text-surface-400,
+  .bg-surface-800 .text-surface-500,
+  .bg-surface-800 .text-surface-600 {
+  color: rgb(161 161 170 / var(--tw-text-opacity, 1)) !important;
+}
+
+.bg-surface-950,
+  .bg-surface-900,
+  .bg-surface-800 {
+  color: rgb(244 244 245);
+}
+
+/* Placeholder text is muted text and must clear AA too. The token flips
+     per theme (zinc-600 in light, zinc-400 in dark); inputs on the
+     permanently-dark surfaces pin zinc-400 regardless of theme. */
+
+input::-moz-placeholder, textarea::-moz-placeholder {
+  color: rgb(var(--surface-600));
+  opacity: 1;
+}
+
+input::placeholder,
+  textarea::placeholder {
+  color: rgb(var(--surface-600));
+  opacity: 1;
+}
+
+.bg-surface-950 input::-moz-placeholder, .bg-surface-950 textarea::-moz-placeholder, .bg-surface-900 input::-moz-placeholder, .bg-surface-900 textarea::-moz-placeholder, .bg-surface-800 input::-moz-placeholder, .bg-surface-800 textarea::-moz-placeholder {
+  color: rgb(161 161 170);
+}
+
+.bg-surface-950 input::placeholder,
+  .bg-surface-950 textarea::placeholder,
+  .bg-surface-900 input::placeholder,
+  .bg-surface-900 textarea::placeholder,
+  .bg-surface-800 input::placeholder,
+  .bg-surface-800 textarea::placeholder {
+  color: rgb(161 161 170);
+}
+
 .dark .bg-white {
   background-color: rgb(var(--card) / var(--tw-bg-opacity, 1));
 }
@@ -4272,8 +4365,49 @@ a {
   color: rgb(var(--info-400) / var(--tw-text-opacity, 1));
 }
 
+/* AA dark-mode steps: red/amber 600-step text is ~4.1:1 on near-black →
+     brand-400 / warning-400 (existing steps). */
+
+.dark .text-destructive {
+  color: rgb(var(--brand-400) / var(--tw-text-opacity, 1)) !important;
+}
+
+.dark .text-warning {
+  color: rgb(var(--warning-400) / var(--tw-text-opacity, 1)) !important;
+}
+
+/* Active nav pill and red-tinted chips: light brand-50/100 backgrounds
+     become deep red in dark so brand-400 text keeps >= 6.5:1. */
+
+.dark .bg-brand-50 {
+  background-color: rgb(var(--brand-950) / var(--tw-bg-opacity, 1)) !important;
+}
+
+.dark .bg-brand-100 {
+  background-color: rgb(var(--brand-900) / var(--tw-bg-opacity, 1)) !important;
+}
+
+/* Success-tinted chips stay light green otherwise (1.7:1 with the light
+     success-400 text mapped in dark) — map to the success-900 step blend. */
+
+.dark .bg-success-50 {
+  background-color: rgb(20 83 45 / 0.35) !important;
+}
+
 .dark .text-primary {
   color: rgb(var(--brand-400) / var(--tw-text-opacity, 1)) !important;
+}
+
+/* Eyebrows paint brand-600 text on near-black in dark (4.1:1) — step the
+     whole eyebrow (text + marker) to brand-400. */
+
+.dark .apex-eyebrow,
+  .dark .apex-page-heading .apex-eyebrow {
+  color: rgb(var(--brand-400));
+}
+
+.dark .apex-eyebrow::before {
+  background: rgb(var(--brand-400));
 }
 
 .dark .apex-auth-notice {
@@ -4611,8 +4745,41 @@ a {
     color: rgb(var(--info-400) / var(--tw-text-opacity, 1));
   }
 
+  /* AA dark-mode steps (media-query twin of the .dark block above). */
+
+  :root:not(.light) .text-destructive {
+    color: rgb(var(--brand-400) / var(--tw-text-opacity, 1)) !important;
+  }
+
+  :root:not(.light) .text-warning {
+    color: rgb(var(--warning-400) / var(--tw-text-opacity, 1)) !important;
+  }
+
+  :root:not(.light) .bg-brand-50 {
+    background-color: rgb(var(--brand-950) / var(--tw-bg-opacity, 1)) !important;
+  }
+
+  :root:not(.light) .bg-brand-100 {
+    background-color: rgb(var(--brand-900) / var(--tw-bg-opacity, 1)) !important;
+  }
+
+  :root:not(.light) .bg-success-50 {
+    background-color: rgb(20 83 45 / 0.35) !important;
+  }
+
   :root:not(.light) .text-primary {
     color: rgb(var(--brand-400) / var(--tw-text-opacity, 1)) !important;
+  }
+
+  /* Eyebrows: brand-600 on near-black is 4.1:1 in dark — brand-400 (media twin). */
+
+  :root:not(.light) .apex-eyebrow,
+    :root:not(.light) .apex-page-heading .apex-eyebrow {
+    color: rgb(var(--brand-400));
+  }
+
+  :root:not(.light) .apex-eyebrow::before {
+    background: rgb(var(--brand-400));
   }
 
   :root:not(.light) .apex-auth-notice {
@@ -5024,85 +5191,6 @@ a {
   color: rgb(var(--muted-foreground) / var(--tw-text-opacity, 1));
 }
 
-.placeholder\:text-surface-400::-moz-placeholder {
-  --tw-text-opacity: 1;
-  color: rgb(var(--surface-400) / var(--tw-text-opacity, 1));
-}
-
-.placeholder\:text-surface-400::placeholder {
-  --tw-text-opacity: 1;
-  color: rgb(var(--surface-400) / var(--tw-text-opacity, 1));
-}
-
-.dark .placeholder\:text-surface-400::-moz-placeholder {
-  color: rgb(161 161 170 / var(--tw-text-opacity, 1)) !important;
-}
-
-.dark .placeholder\:text-surface-400::placeholder {
-  color: rgb(161 161 170 / var(--tw-text-opacity, 1)) !important;
-}
-
-.dark .apex-console-shell .placeholder\:text-surface-400::-moz-placeholder, .dark .apex-cp-shell .placeholder\:text-surface-400::-moz-placeholder {
-  color: rgb(161 161 170 / var(--tw-text-opacity, 1)) !important;
-}
-
-.dark .apex-console-shell .placeholder\:text-surface-400::placeholder,
-  .dark .apex-cp-shell .placeholder\:text-surface-400::placeholder {
-  color: rgb(161 161 170 / var(--tw-text-opacity, 1)) !important;
-}
-
-@media (prefers-color-scheme: dark) {
-  :root:not(.light) .placeholder\:text-surface-400::-moz-placeholder {
-    color: rgb(161 161 170 / var(--tw-text-opacity, 1)) !important;
-  }
-  :root:not(.light) .placeholder\:text-surface-400::placeholder {
-    color: rgb(161 161 170 / var(--tw-text-opacity, 1)) !important;
-  }
-
-  :root:not(.light) .apex-console-shell .placeholder\:text-surface-400::-moz-placeholder, :root:not(.light) .apex-cp-shell .placeholder\:text-surface-400::-moz-placeholder {
-    color: rgb(161 161 170 / var(--tw-text-opacity, 1)) !important;
-  }
-
-  :root:not(.light) .apex-console-shell .placeholder\:text-surface-400::placeholder,
-    :root:not(.light) .apex-cp-shell .placeholder\:text-surface-400::placeholder {
-    color: rgb(161 161 170 / var(--tw-text-opacity, 1)) !important;
-  }
-
-  :root:not(.light) .placeholder\:text-surface-400::-moz-placeholder {
-    color: rgb(161 161 170 / var(--tw-text-opacity, 1)) !important;
-  }
-
-  :root:not(.light) .placeholder\:text-surface-400::placeholder {
-    color: rgb(161 161 170 / var(--tw-text-opacity, 1)) !important;
-  }
-
-  :root:not(.light) .apex-console-shell .placeholder\:text-surface-400::-moz-placeholder, :root:not(.light) .apex-cp-shell .placeholder\:text-surface-400::-moz-placeholder {
-    color: rgb(161 161 170 / var(--tw-text-opacity, 1)) !important;
-  }
-
-  :root:not(.light) .apex-console-shell .placeholder\:text-surface-400::placeholder,
-    :root:not(.light) .apex-cp-shell .placeholder\:text-surface-400::placeholder {
-    color: rgb(161 161 170 / var(--tw-text-opacity, 1)) !important;
-  }
-
-  :root:not(.light) .placeholder\:text-surface-400::-moz-placeholder {
-    color: rgb(161 161 170 / var(--tw-text-opacity, 1)) !important;
-  }
-
-  :root:not(.light) .placeholder\:text-surface-400::placeholder {
-    color: rgb(161 161 170 / var(--tw-text-opacity, 1)) !important;
-  }
-
-  :root:not(.light) .apex-console-shell .placeholder\:text-surface-400::-moz-placeholder, :root:not(.light) .apex-cp-shell .placeholder\:text-surface-400::-moz-placeholder {
-    color: rgb(161 161 170 / var(--tw-text-opacity, 1)) !important;
-  }
-
-  :root:not(.light) .apex-console-shell .placeholder\:text-surface-400::placeholder,
-    :root:not(.light) .apex-cp-shell .placeholder\:text-surface-400::placeholder {
-    color: rgb(161 161 170 / var(--tw-text-opacity, 1)) !important;
-  }
-}
-
 .after\:absolute::after {
   content: var(--tw-content);
   position: absolute;
@@ -5230,8 +5318,8 @@ a {
   background-color: rgb(var(--destructive) / 0.9);
 }
 
-.hover\:bg-info\/90:hover {
-  background-color: rgb(var(--info) / 0.9);
+.hover\:bg-info-700\/90:hover {
+  background-color: rgb(var(--info-700) / 0.9);
 }
 
 .hover\:bg-muted\/40:hover {
@@ -5367,6 +5455,22 @@ a {
   box-shadow: var(--tw-ring-offset-shadow, 0 0 #0000), var(--tw-ring-shadow, 0 0 #0000), var(--tw-shadow);
 }
 
+.hover\:bg-surface-800:hover .text-surface-400,.hover\:bg-surface-800:hover .text-surface-500,.hover\:bg-surface-800:hover .text-surface-600 {
+  color: rgb(161 161 170 / var(--tw-text-opacity, 1)) !important;
+}
+
+.hover\:bg-surface-800:hover {
+  color: rgb(244 244 245);
+}
+
+.hover\:bg-surface-800:hover input::-moz-placeholder, .hover\:bg-surface-800:hover textarea::-moz-placeholder {
+  color: rgb(161 161 170);
+}
+
+.hover\:bg-surface-800:hover input::placeholder,.hover\:bg-surface-800:hover textarea::placeholder {
+  color: rgb(161 161 170);
+}
+
 .dark .hover\:bg-surface-800:hover {
   background-color: rgb(39 39 42 / var(--tw-bg-opacity, 1)) !important;
 }
@@ -5419,12 +5523,20 @@ a {
     background-color: rgb(39 39 42 / var(--tw-bg-opacity, 1)) !important;
   }
 
+  /* AA dark-mode steps (media-query twin of the .dark block above). */
+
+  /* Eyebrows: brand-600 on near-black is 4.1:1 in dark — brand-400 (media twin). */
+
   :root:not(.light) .hover\:text-surface-950:hover.bg-success-300,
     :root:not(.light) .hover\:text-surface-950:hover.bg-success-200,
     :root:not(.light) .hover\:text-surface-950:hover.bg-success-100 {
     color: rgb(9 9 11) !important;
     -webkit-text-fill-color: rgb(9 9 11) !important;
   }
+
+  /* AA dark-mode steps (media-query twin of the .dark block above). */
+
+  /* Eyebrows: brand-600 on near-black is 4.1:1 in dark — brand-400 (media twin). */
 
   
     :root:not(.light) .hover\:bg-success-200:hover.text-surface-950 {
@@ -5432,6 +5544,10 @@ a {
     -webkit-text-fill-color: rgb(9 9 11) !important;
   }
 
+  /* AA dark-mode steps (media-query twin of the .dark block above). */
+
+  /* Eyebrows: brand-600 on near-black is 4.1:1 in dark — brand-400 (media twin). */
+
   :root:not(.light) .hover\:text-surface-950:hover.bg-success-300,
     :root:not(.light) .hover\:text-surface-950:hover.bg-success-200,
     :root:not(.light) .hover\:text-surface-950:hover.bg-success-100 {
@@ -5439,28 +5555,48 @@ a {
     -webkit-text-fill-color: rgb(9 9 11) !important;
   }
 
+  /* AA dark-mode steps (media-query twin of the .dark block above). */
+
+  /* Eyebrows: brand-600 on near-black is 4.1:1 in dark — brand-400 (media twin). */
+
+  :root:not(.light) .hover\:text-surface-950:hover.bg-success-300,
+    :root:not(.light) .hover\:text-surface-950:hover.bg-success-200,
+    :root:not(.light) .hover\:text-surface-950:hover.bg-success-100 {
+    color: rgb(9 9 11) !important;
+    -webkit-text-fill-color: rgb(9 9 11) !important;
+  }
+
+  /* AA dark-mode steps (media-query twin of the .dark block above). */
+
+  /* Eyebrows: brand-600 on near-black is 4.1:1 in dark — brand-400 (media twin). */
+
   :root:not(.light) .hover\:border-surface-950:hover {
     border-color: rgb(63 63 70 / var(--tw-border-opacity, 1)) !important;
   }
+
+  /* AA dark-mode steps (media-query twin of the .dark block above). */
+
+  /* Eyebrows: brand-600 on near-black is 4.1:1 in dark — brand-400 (media twin). */
 
   :root:not(.light) .hover\:text-brand-700:hover {
     color: rgb(var(--brand-400) / var(--tw-text-opacity, 1));
   }
 
+  /* AA dark-mode steps (media-query twin of the .dark block above). */
+
+  /* Eyebrows: brand-600 on near-black is 4.1:1 in dark — brand-400 (media twin). */
+
+  /* AA dark-mode steps (media-query twin of the .dark block above). */
+
   :root:not(.light) .hover\:text-primary:hover {
     color: rgb(var(--brand-400) / var(--tw-text-opacity, 1)) !important;
   }
 
-  
-    :root:not(.light) .hover\:text-surface-200:hover {
-    color: rgb(228 228 231 / var(--tw-text-opacity, 1)) !important;
-  }
+  /* Eyebrows: brand-600 on near-black is 4.1:1 in dark — brand-400 (media twin). */
 
-  
-    :root:not(.light) .apex-console-shell .hover\:text-surface-200:hover,
-    :root:not(.light) .apex-cp-shell .hover\:text-surface-200:hover {
-    color: rgb(228 228 231 / var(--tw-text-opacity, 1)) !important;
-  }
+  /* AA dark-mode steps (media-query twin of the .dark block above). */
+
+  /* Eyebrows: brand-600 on near-black is 4.1:1 in dark — brand-400 (media twin). */
 
   
     :root:not(.light) .hover\:text-surface-200:hover {
@@ -5472,6 +5608,25 @@ a {
     :root:not(.light) .apex-cp-shell .hover\:text-surface-200:hover {
     color: rgb(228 228 231 / var(--tw-text-opacity, 1)) !important;
   }
+
+  /* AA dark-mode steps (media-query twin of the .dark block above). */
+
+  /* Eyebrows: brand-600 on near-black is 4.1:1 in dark — brand-400 (media twin). */
+
+  
+    :root:not(.light) .hover\:text-surface-200:hover {
+    color: rgb(228 228 231 / var(--tw-text-opacity, 1)) !important;
+  }
+
+  
+    :root:not(.light) .apex-console-shell .hover\:text-surface-200:hover,
+    :root:not(.light) .apex-cp-shell .hover\:text-surface-200:hover {
+    color: rgb(228 228 231 / var(--tw-text-opacity, 1)) !important;
+  }
+
+  /* AA dark-mode steps (media-query twin of the .dark block above). */
+
+  /* Eyebrows: brand-600 on near-black is 4.1:1 in dark — brand-400 (media twin). */
 
   
     :root:not(.light) .hover\:text-surface-200:hover {
@@ -5632,6 +5787,10 @@ a {
   --tw-ring-offset-width: 2px;
 }
 
+.focus\:text-destructive:focus {
+  color: rgb(185 28 28 / var(--tw-text-opacity, 1)) !important;
+}
+
 .dark .focus\:text-surface-950:focus.bg-success-300,
   .dark .focus\:text-surface-950:focus.bg-success-200,
   .dark .focus\:text-surface-950:focus.bg-success-100 {
@@ -5643,6 +5802,10 @@ a {
   border-color: rgb(63 63 70 / var(--tw-border-opacity, 1)) !important;
 }
 
+.dark .focus\:text-destructive:focus {
+  color: rgb(var(--brand-400) / var(--tw-text-opacity, 1)) !important;
+}
+
 @media (prefers-color-scheme: dark) {
   :root:not(.light) .focus\:text-surface-950:focus.bg-success-300,
     :root:not(.light) .focus\:text-surface-950:focus.bg-success-200,
@@ -5651,9 +5814,47 @@ a {
     -webkit-text-fill-color: rgb(9 9 11) !important;
   }
 
+  /* AA dark-mode steps (media-query twin of the .dark block above). */
+
+  /* Eyebrows: brand-600 on near-black is 4.1:1 in dark — brand-400 (media twin). */
+
+  :root:not(.light) .focus\:text-surface-950:focus.bg-success-300,
+    :root:not(.light) .focus\:text-surface-950:focus.bg-success-200,
+    :root:not(.light) .focus\:text-surface-950:focus.bg-success-100 {
+    color: rgb(9 9 11) !important;
+    -webkit-text-fill-color: rgb(9 9 11) !important;
+  }
+
+  /* AA dark-mode steps (media-query twin of the .dark block above). */
+
+  /* Eyebrows: brand-600 on near-black is 4.1:1 in dark — brand-400 (media twin). */
+
+  :root:not(.light) .focus\:text-surface-950:focus.bg-success-300,
+    :root:not(.light) .focus\:text-surface-950:focus.bg-success-200,
+    :root:not(.light) .focus\:text-surface-950:focus.bg-success-100 {
+    color: rgb(9 9 11) !important;
+    -webkit-text-fill-color: rgb(9 9 11) !important;
+  }
+
+  /* AA dark-mode steps (media-query twin of the .dark block above). */
+
+  /* Eyebrows: brand-600 on near-black is 4.1:1 in dark — brand-400 (media twin). */
+
   :root:not(.light) .focus\:border-surface-950:focus {
     border-color: rgb(63 63 70 / var(--tw-border-opacity, 1)) !important;
   }
+
+  /* AA dark-mode steps (media-query twin of the .dark block above). */
+
+  /* Eyebrows: brand-600 on near-black is 4.1:1 in dark — brand-400 (media twin). */
+
+  /* AA dark-mode steps (media-query twin of the .dark block above). */
+
+  :root:not(.light) .focus\:text-destructive:focus {
+    color: rgb(var(--brand-400) / var(--tw-text-opacity, 1)) !important;
+  }
+
+  /* Eyebrows: brand-600 on near-black is 4.1:1 in dark — brand-400 (media twin). */
 }
 
 .focus-visible\:border-primary:focus-visible {

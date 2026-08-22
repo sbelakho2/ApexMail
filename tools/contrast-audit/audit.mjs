@@ -187,7 +187,8 @@ const COLLECTOR = `(() => {
     const rect = el.getBoundingClientRect();
     const bbox = [Math.round(rect.left + sx), Math.round(rect.top + sy), Math.round(rect.width), Math.round(rect.height)];
     const info = bgInfo(el);
-    const disabled = el.disabled === true || el.getAttribute('aria-disabled') === 'true';
+    const disabled = el.disabled === true || el.getAttribute('aria-disabled') === 'true'
+      || !!(el.closest && el.closest('button:disabled, input:disabled, select:disabled, textarea:disabled, [aria-disabled="true"]'));
     const svg = !!el.closest('svg');
     // ---- direct text
     let text = '';
@@ -495,6 +496,77 @@ async function auditTask(browser, port, task, results) {
     process.stderr.write(`  ERR ${surface} ${route} [${theme}]: ${entry.error}\\n`);
   } finally {
     await ctx.close().catch(() => {});
+  }
+}
+
+// ---------------------------------------------------------------- gate mode
+// `node audit.mjs --gate` (or AUDIT_GATE=1): CI gate over a representative
+// subset — every console + control-plane fixture route (all three themes)
+// plus a curated top-20 of the marketing pages (both themes). ZERO AA text
+// failures allowed; any page load error also fails the gate. Writes
+// reports/gate-report.json and exits nonzero on failure.
+const GATE = process.argv.includes('--gate') || process.env.AUDIT_GATE === '1';
+// Marketing pages chosen to cover every systemic contrast pattern: code
+// blocks (zola/giallo), prose tables (th), footer address, skip link, dark
+// panels, brand-tinted chips, status notices, compare tables, locales.
+const GATE_MARKETING = new Set([
+  '/', '/pricing/', '/features/', '/docs/webhooks/', '/docs/sdks/', '/docs/api/',
+  '/quickstart/', '/api-explorer/', '/forensic/', '/inbox-placement/',
+  '/private-cloud/', '/status/', '/about/', '/architecture/', '/security/',
+  '/compare/', '/compare/postmark/', '/secure-email-for-regulated-saas/',
+  '/de/', '/404.html',
+]);
+if (GATE) {
+  const REPORTS_DIR = path.join(ROOT, 'reports');
+  fs.mkdirSync(REPORTS_DIR, { recursive: true });
+  const reportPath = path.join(REPORTS_DIR, 'gate-report.json');
+  const failed = [];
+  let aaTotal = 0;
+  try {
+    const pages = buildInventory()
+      .filter(p => p.surface !== 'marketing' || GATE_MARKETING.has(p.route));
+    const themesFor = (s) => (s === 'marketing' ? ['light', 'dark'] : ['light', 'dark', 'dark-class']);
+    const tasks = [];
+    for (const p of pages) for (const t of themesFor(p.surface)) tasks.push({ ...p, theme: t });
+    process.stderr.write(`[gate] auditing ${pages.length} pages, ${tasks.length} page-theme runs\n`);
+    const t0 = Date.now();
+    const { server, port } = await startServer();
+    const browser = await chromium.launch({ channel: 'chromium' });
+    const results = [];
+    let idx = 0;
+    async function worker() {
+      while (idx < tasks.length) {
+        const t = tasks[idx++];
+        await auditTask(browser, port, t, results, { gate: true });
+      }
+    }
+    await Promise.all(Array.from({ length: WORKERS }, worker));
+    await browser.close();
+    server.close();
+    for (const run of results) {
+      if (run.error) { failed.push({ surface: run.surface, page: run.page, theme: run.theme, error: run.error }); continue; }
+      const aa = (run.violations || []).filter(v => v.verdict === 'fail-aa');
+      aaTotal += aa.reduce((a, v) => a + v.occurrences, 0);
+      if (aa.length) {
+        failed.push({
+          surface: run.surface, page: run.page, theme: run.theme,
+          groups: aa.length,
+          occurrences: aa.reduce((a, v) => a + v.occurrences, 0),
+          worst: Math.min(...aa.map(v => v.ratio)),
+          examples: aa.slice(0, 3).map(v => `${v.selector} "${(v.text || '').slice(0, 40)}" ${v.fg.join(',')} on ${v.bg.join(',')} @${v.ratio}`),
+        });
+      }
+    }
+    const seconds = ((Date.now() - t0) / 1000).toFixed(1);
+    const ok = failed.length === 0 && aaTotal === 0;
+    fs.writeFileSync(reportPath, JSON.stringify({ generated: new Date().toISOString(), ok, aaFailures: aaTotal, failedRuns: failed.length, seconds: Number(seconds), failed }, null, 1));
+    process.stderr.write(`[gate] ${ok ? 'PASS' : 'FAIL'} — AA failures: ${aaTotal} across ${failed.length} runs (${pages.length} pages, ${tasks.length} runs, ${seconds}s)\n`);
+    if (!ok) for (const f of failed.slice(0, 20)) process.stderr.write(`[gate]   ${f.surface} ${f.page} [${f.theme}] ${f.groups} groups / ${f.occurrences} occurrences${f.examples && f.examples.length ? ' — e.g. ' + f.examples[0] : ' — ' + (f.error || '')}\n`);
+    process.stderr.write(`[gate] report: ${reportPath}\n`);
+    process.exit(ok ? 0 : 1);
+  } catch (e) {
+    console.error('[gate] audit crashed:', e);
+    process.exit(1);
   }
 }
 

@@ -168,6 +168,20 @@ run_php_tests() {
     done
 }
 
+# --- 8. WCAG AA contrast gate -----------------------------------------------------------
+# Pixel-confirmed contrast gate (tools/contrast-audit/gate.sh → audit.mjs
+# --gate): console + control-plane fixtures in all three themes plus the
+# marketing top-20, zero AA text failures required. Skips loudly (warn, not
+# fail) when the toolchain is absent so runners without playwright/chromium
+# cannot silently pass but also do not hard-block.
+run_contrast_gate() {
+    command -v node >/dev/null 2>&1 || { ci_warn "node missing — WCAG contrast gate skipped"; return "$CI_EXIT_OK"; }
+    [ -x "$REPO_ROOT/tools/contrast-audit/gate.sh" ] || { ci_warn "tools/contrast-audit/gate.sh missing — WCAG contrast gate skipped"; return "$CI_EXIT_OK"; }
+    [ -d "$REPO_ROOT/tools/contrast-audit/node_modules/playwright" ] || { ci_warn "tools/contrast-audit/node_modules missing — run '(cd tools/contrast-audit && npm install)'; WCAG contrast gate skipped"; return "$CI_EXIT_OK"; }
+    (cd "$REPO_ROOT" && ci_check "WCAG AA contrast gate (tools/contrast-audit/gate.sh)" \
+        sh tools/contrast-audit/gate.sh) || { ci_err "contrast gate FAILED — see tools/contrast-audit/reports/gate-report.json"; return "$CI_EXIT_FAIL"; }
+}
+
 # --- formatting gate ------------------------------------------------------------
 # cargo fmt --check is NEW compared to rust-check.yml (GitHub never ran it).
 # The tree currently carries committed fmt drift (README §9 F7), so the gate
@@ -260,6 +274,7 @@ stage_main() {
     cargo_tool_gates
     run_cargo_tests
     run_php_tests
+    run_contrast_gate
 
     ci_ephem_cleanup
     ci_info "test: all suites green"

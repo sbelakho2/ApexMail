@@ -165,7 +165,7 @@ impl<'a> ShellHeader<'a> {
                         <label class=\"sr-only\" for=\"global-search\">Search campaigns</label>\
                         <div class=\"flex items-center gap-2 px-3 py-1.5 text-xs font-medium text-surface-400 bg-surface-50 border border-surface-200/60 rounded-lg focus-within:border-primary min-w-[220px]\">\
                             <svg xmlns=\"http://www.w3.org/2000/svg\" width=\"14\" height=\"14\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2.5\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\"><circle cx=\"11\" cy=\"11\" r=\"8\"/><path d=\"m21 21-4.3-4.3\"/></svg>\
-                            <input id=\"global-search\" type=\"search\" name=\"query\" placeholder=\"Search campaigns…\" class=\"bg-transparent outline-none text-surface-600 placeholder:text-surface-400 w-full\" />\
+                            <input id=\"global-search\" type=\"search\" name=\"query\" placeholder=\"Search campaigns…\" class=\"bg-transparent outline-none text-surface-600 placeholder:text-muted-foreground w-full\" />\
                             <button type=\"submit\" class=\"text-[10px] font-bold uppercase tracking-widest text-surface-500 hover:text-surface-900 transition-colors\">Search</button>\
                         </div>\
                     </form>\
@@ -177,7 +177,7 @@ impl<'a> ShellHeader<'a> {
                     <div class=\"flex items-center gap-3 pl-2\">\
                         {identity_block}\
                         <div class=\"apex-avatar relative flex shrink-0 h-9 w-9 rounded-full bg-primary/10 border border-primary/20 items-center justify-center\" aria-label=\"Signed in as {avatar}\">\
-                            <span class=\"text-primary font-semibold text-xs tracking-tighter\">{avatar}</span>\
+                            <span class=\"text-brand-700 font-semibold text-xs tracking-tighter\">{avatar}</span>\
                         </div>\
                     </div>\
                 </div>\
@@ -465,12 +465,12 @@ fn render_sidebar_content(
             let active_class = " aria-current=\"page\"";
 
             let classes = if is_active {
-                "flex items-center gap-3 px-3 py-2 text-sm font-semibold transition-all rounded-md bg-brand-50 text-primary"
+                "flex items-center gap-3 px-3 py-2 text-sm font-semibold transition-all rounded-md bg-brand-50 text-brand-700"
             } else {
                 "flex items-center gap-3 px-3 py-2 text-sm font-medium transition-all rounded-md text-surface-600 hover:text-surface-950 hover:bg-surface-50"
             };
 
-            let icon_color = if is_active { "text-primary" } else { "text-surface-400" };
+            let icon_color = if is_active { "text-brand-700" } else { "text-surface-400" };
             let icon_wrap = format!(
                 "<span class=\"w-5 h-5 flex items-center justify-center transition-colors {}\">{}</span>",
                 icon_color, icon
