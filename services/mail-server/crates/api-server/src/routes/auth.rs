@@ -3621,7 +3621,7 @@ mod tests {
             "login",
             "1.2.3.4",
             now_unix,
-            now_unix * 1_000_000_000,
+            now_unix * 1_000_000,
             0,
             None,
         )
