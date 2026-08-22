@@ -1,0 +1,24 @@
+[Unit]
+Description=ApexMail CI webhook receiver (socket-activated, one request per instance)
+Documentation=file:///opt/apexmail/ci/README.md
+Requires=apexmail-pipeline-webhook.socket
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/apexmail
+Environment=HOME=/root
+Environment=PATH=/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+# stdin/stdout are the socket connection handed over by systemd.
+StandardInput=socket
+StandardOutput=socket
+StandardError=journal
+ExecStart=/opt/apexmail/ci/units/webhook-handler.sh
+# A wedged handler must not hold the socket forever.
+TimeoutStartSec=30
+TimeoutStopSec=10
+# socket activation restarts per connection; no Restart= on purpose.
+
+[Install]
+Also=apexmail-pipeline-webhook.socket
+WantedBy=multi-user.target

@@ -1,0 +1,16 @@
+[Unit]
+Description=ApexMail CI webhook socket (127.0.0.1:8088 — front with nginx SSH tunnel or local curl only)
+Documentation=file:///opt/apexmail/ci/README.md
+
+[Socket]
+ListenStream=127.0.0.1:8088
+# One service instance per accepted connection.
+Accept=yes
+# Bound the queue so a flood of hooks cannot spawn unbounded services.
+MaxConnections=4
+Backlog=8
+KeepAlive=true
+NoDelay=true
+
+[Install]
+WantedBy=sockets.target

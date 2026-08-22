@@ -1,0 +1,52 @@
+#!/bin/sh
+# =============================================================================
+# ci/hooks/pre-push.example — git pre-push hook (the PR-check substitute).
+# =============================================================================
+# Installs the fast validation lane (the `validate` stage: compose contract,
+# drift guards, panic paths, legal identity, pricing drift, marketing build)
+# before every push. Full test+security runs happen in the pipeline after the
+# push — the deploy host refuses to deploy anything that fails them.
+#
+# Install (one time):
+#   cp ci/hooks/pre-push.example .git/hooks/pre-push
+#   chmod +x .git/hooks/pre-push
+#
+# Configure via env:
+#   APEXMAIL_PREPUSH_MODE=fast|full   fast = validate (default, ~1-3 min)
+#                                    full = validate,test,security (~15 min)
+#   APEXMAIL_PREPUSH_SKIP_REFS       space-separated ref globs to skip
+#                                    (default none). Example: refs/heads/wip-*
+#
+# Exit non-zero blocks the push.
+# =============================================================================
+set -eu
+
+REPO_HOOK_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd -P)
+CI_DIR=$REPO_HOOK_DIR/ci
+[ -x "$CI_DIR/check-pr.sh" ] || {
+    echo "pre-push: $CI_DIR/check-pr.sh not found — skipping validation" >&2
+    exit 0
+}
+
+MODE=${APEXMAIL_PREPUSH_MODE:-fast}
+
+# The hook receives lines of: <local ref> <local sha> <remote ref> <remote sha>
+while read -r _local_ref _local_sha _remote_ref _remote_sha; do
+    [ -n "$_local_ref" ] || continue
+    for _skip in ${APEXMAIL_PREPUSH_SKIP_REFS:-}; do
+        case $_local_ref in
+            $_skip)
+                echo "pre-push: $_local_ref matches APEXMAIL_PREPUSH_SKIP_REFS — skipping" >&2
+                continue 2
+                ;;
+        esac
+    done
+    echo "pre-push: validating $_local_ref ($_local_sha) [$MODE]" >&2
+    if [ "$MODE" = full ]; then
+        "$CI_DIR/check-pr.sh" --allow-dirty "$_local_sha"
+    else
+        "$CI_DIR/check-pr.sh" --fast --allow-dirty "$_local_sha"
+    fi
+done
+
+exit 0

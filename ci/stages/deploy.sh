@@ -1,0 +1,88 @@
+#!/bin/sh
+# =============================================================================
+# ci/stages/deploy.sh — stage 7: recreate the stack.
+# =============================================================================
+# Replaces deploy-hetzner.yml's "Apply stack" + "Reload nginx" (+ deploy.sh
+# Steps 4/6/7/8): TLS material refresh, `docker compose up -d` over the
+# canonical service set, and a retried graceful nginx reload so upstream
+# container IPs are re-resolved.
+#
+# Deploy decision (see ci/README.md): deploy/scripts/deploy.sh is NOT invoked
+# for the up-step because it has no "up without rebuilding and without
+# re-running the migrator" flag — this pipeline already ran build (images
+# stage) and the migration gate (migrate stage), so re-running deploy.sh
+# --no-build would repeat the migrator and its cleanup passes. The four
+# commands below replicate deploy.sh Steps 4/6/8 and the Hetzner workflow's
+# Apply/Reload steps exactly; the images stage reuses deploy.sh's build
+# verbatim.
+#
+# Skips (exit 75) off-host.
+# =============================================================================
+set -eu
+
+. "${CI_ROOT:-$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd -P)}/lib.sh"
+
+# Canonical production service set (deploy-hetzner.yml "Apply stack" order).
+STACK_SERVICES="api-server mta imap-server mailstore worker enterprise tracking
+                observability marketing status-server billing-service sales-autopilot
+                postgres-backup nginx certbot postgres redis clickhouse"
+
+compose() {
+    docker compose -f docker-compose.yml -f docker-compose.prod.yml --env-file .env "$@"
+}
+
+# deploy.sh Step 4: publish the live LE cert at the ssl tree root nginx reads.
+publish_tls_certs() {
+    _live=$CI_DEPLOY_DIR/deploy/nginx/ssl/live/apexmail.ee
+    _root=$CI_DEPLOY_DIR/deploy/nginx/ssl
+    if [ -f "$_live/fullchain.pem" ] && [ -f "$_live/privkey.pem" ]; then
+        install -m 644 "$_live/fullchain.pem" "$_root/fullchain.pem"
+        install -m 600 "$_live/privkey.pem" "$_root/privkey.pem"
+        [ -f "$_live/chain.pem" ] && install -m 644 "$_live/chain.pem" "$_root/ca-chain.pem"
+        chown :101 "$_root/privkey.pem" 2>/dev/null || true
+        chmod 640 "$_root/privkey.pem"
+        ci_info "TLS certificates published from live/apexmail.ee"
+    else
+        ci_info "no live/ LE cert yet — keeping existing certs (certbot will populate)"
+    fi
+}
+
+stage_main() {
+    if ! ci_on_deploy_host; then
+        ci_skip_stage "deploy stage runs only on the deploy host ($CI_DEPLOY_DIR)"
+    fi
+    cd "$CI_DEPLOY_DIR"
+
+    publish_tls_certs
+
+    ci_info "docker compose up -d --remove-orphans (canonical service set)"
+    if ! ci_run_logged compose up -d --remove-orphans $STACK_SERVICES; then
+        ci_err "docker compose up failed — see log; previous containers keep running"
+        return "$CI_EXIT_FAIL"
+    fi
+
+    # Graceful reload, retried: nginx caches upstream DNS at worker start and
+    # recreated backends get new container IPs (deploy-hetzner.yml Reload step).
+    ci_info "reloading nginx (re-resolve upstreams)"
+    _reloaded=0
+    _i=1
+    while [ "$_i" -le 5 ]; do
+        if compose exec -T nginx nginx -s reload >>"$CI_STAGE_LOG" 2>&1; then
+            ci_info "nginx reload OK (attempt $_i)"
+            _reloaded=1
+            break
+        fi
+        ci_warn "nginx reload attempt $_i failed (nginx may still be starting); retrying"
+        _i=$((_i + 1))
+        sleep 3
+    done
+    [ "$_reloaded" = 1 ] || { ci_err "nginx did not reload after 5 attempts"; return "$CI_EXIT_FAIL"; }
+
+    # deploy.sh Step 7: drop dangling images left by the rebuild.
+    docker image prune -f >/dev/null 2>&1 || true
+
+    ci_info "deploy: stack recreated, nginx reloaded"
+    return "$CI_EXIT_OK"
+}
+
+stage_main

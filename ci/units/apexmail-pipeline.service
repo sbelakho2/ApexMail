@@ -1,0 +1,38 @@
+[Unit]
+Description=ApexMail self-hosted CI/CD pipeline (one run; started by timer or webhook)
+Documentation=file:///opt/apexmail/ci/README.md
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+# Only one pipeline run may exist at any time (the runner also holds its own
+# lock; this is defence in depth for manual `systemctl start` invocations).
+RefuseManualStop=no
+
+[Service]
+Type=oneshot
+# The pipeline runs as root: it must read /opt/apexmail/.env (0600), render
+# secrets, and drive docker compose. Attack surface is bounded by the fact
+# that it executes only repo code fetched over the deploy key.
+User=root
+WorkingDirectory=/opt/apexmail
+Environment=HOME=/root
+# cargo/sqlx/cargo-audit live in /root/.cargo/bin; keep sbin for docker.
+Environment=PATH=/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=CI_RUN_FROM_SYSTEMD=1
+# --skip-unchanged: the 5-minute poll becomes a no-op in seconds when
+# origin/main has not moved since the last green run (fetch stage detects it).
+ExecStart=/opt/apexmail/ci/pipeline.sh run --lock-wait 0 --skip-unchanged
+# Hardening that a root oneshot still allows:
+NoNewPrivileges=no
+PrivateTmp=true
+ProtectSystem=false
+ProtectHome=false
+# Runs can be long (cargo build + tests); systemd timeout above the sum of
+# stage timeouts is handled per-stage by the runner itself.
+TimeoutStartSec=6h
+# Journald keeps stdout/stderr; the runner also writes ci/runs/<ts>/.
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
