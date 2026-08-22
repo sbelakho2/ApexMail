@@ -191,6 +191,30 @@ impl GdprAutomation {
         .await
         .map_err(|e| format!("DB error (dsr_verification_outbox): {e}"))?;
 
+        // CP visibility (surgical mirror): the control plane's admin
+        // dashboard (gdpr_pending count) and admin/gdpr.rs list read the
+        // `gdpr_requests` table, which nothing previously wrote — pending
+        // counts were structurally zero. Same transaction: if the mirror
+        // fails, the DSR intake fails with it rather than silently
+        // disappearing from the CP. The id column is VARCHAR(26), so the
+        // 36-char UUID cannot be reused; a prefixed 22-hex id fits exactly.
+        let cp_request_id = format!("gdr_{}", &Uuid::new_v4().simple().to_string()[..22]);
+        sqlx::query(
+            "INSERT INTO gdpr_requests
+               (id, tenant_id, email, request_type, status, token_hash, created_at, updated_at)
+             VALUES ($1,$2,$3,$4,'pending',$5,$6,$6)
+             ON CONFLICT (id) DO NOTHING",
+        )
+        .bind(&cp_request_id)
+        .bind(tenant_id)
+        .bind(email)
+        .bind(request_type.to_string())
+        .bind(&token_hash)
+        .bind(now)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| format!("DB error (gdpr_requests mirror): {e}"))?;
+
         tx.commit().await.map_err(|e| format!("DB error: {e}"))?;
 
         let request = DataSubjectRequest {
@@ -2759,3 +2783,11 @@ mod tests {
     }
 
 }
+    #[test]
+    fn gdpr_requests_mirror_id_fits_varchar_26() {
+        // The CP gdpr_requests.id column is VARCHAR(26): "gdr_" + 22 hex.
+        let cp_request_id = format!("gdr_{}", &Uuid::new_v4().simple().to_string()[..22]);
+        assert_eq!(cp_request_id.len(), 26);
+        assert!(cp_request_id.starts_with("gdr_"));
+    }
+

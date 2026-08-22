@@ -44,6 +44,11 @@ pub struct AppState {
     pub service_token: String,
     pub redis_pool: Option<Arc<RedisPool>>,
     pub metrics_handle: Option<PrometheusHandle>,
+    /// Optional Postgres pool. When attached, ingested alertmanager alerts
+    /// are ALSO persisted into the `system_alerts` table so the control
+    /// plane's SSE alert stream, dashboard risk counts, and system-health
+    /// surfaces see them (previously nothing ever wrote that table).
+    pub db_pool: Option<sqlx::PgPool>,
 }
 
 impl AppState {
@@ -64,6 +69,7 @@ impl AppState {
             service_token,
             redis_pool: None,
             metrics_handle: None,
+            db_pool: None,
         }
     }
 
@@ -76,6 +82,12 @@ impl AppState {
     /// Attach the Prometheus recorder handle for the `/metrics` endpoint.
     pub fn with_metrics_handle(mut self, handle: PrometheusHandle) -> Self {
         self.metrics_handle = Some(handle);
+        self
+    }
+
+    /// Attach the Postgres pool used to persist alerts into `system_alerts`.
+    pub fn with_db_pool(mut self, pool: sqlx::PgPool) -> Self {
+        self.db_pool = Some(pool);
         self
     }
 }
@@ -288,6 +300,12 @@ async fn alerts_ingest(
     State(state): State<AppState>,
     Json(payload): Json<AlertmanagerWebhook>,
 ) -> StatusCode {
+    // Persist firing/resolved alerts into system_alerts so the control
+    // plane surfaces (CP SSE alert stream, dashboard risk counts,
+    // system-health alerts) observe alertmanager traffic. Best-effort: a
+    // persistence failure never breaks the in-memory ingest.
+    persist_alerts_to_system_alerts(&state.db_pool, &payload.alerts).await;
+
     let alerts = payload
         .alerts
         .into_iter()
@@ -295,6 +313,94 @@ async fn alerts_ingest(
         .collect();
     state.alerts.ingest_external_alerts(alerts);
     StatusCode::ACCEPTED
+}
+
+/// Map an alertmanager severity label onto system_alerts' CHECK-constrained
+/// values ('info' | 'warning' | 'critical'). Unknown labels degrade to
+/// 'info' rather than violating the constraint.
+fn system_alerts_severity(labels: &HashMap<String, String>) -> &'static str {
+    match labels.get("severity").map(String::as_str) {
+        Some("critical") => "critical",
+        Some("warning") | Some("page") => "warning",
+        _ => "info",
+    }
+}
+
+/// Persist ingested alertmanager alerts into the shared `system_alerts`
+/// table (columns added in migration 108: component / source /
+/// fingerprint). Firing alerts are inserted idempotently (unique on
+/// (source, fingerprint)); resolved alerts acknowledge their row so they
+/// stop counting toward unacknowledged risk in the CP dashboard.
+async fn persist_alerts_to_system_alerts(
+    pool: &Option<sqlx::PgPool>,
+    alerts: &[AlertmanagerAlert],
+) {
+    let Some(db) = pool else {
+        // No pool configured — the CP surfaces stay empty, logged once per
+        // ingest so operators notice the missing DATABASE_URL wiring.
+        tracing::debug!("no database pool attached — skipping system_alerts persistence");
+        return;
+    };
+
+    for alert in alerts {
+        let rule_name = alert
+            .labels
+            .get("alertname")
+            .cloned()
+            .unwrap_or_else(|| "alertmanager".to_string());
+        let message = alert
+            .annotations
+            .get("summary")
+            .or_else(|| alert.annotations.get("description"))
+            .cloned()
+            .unwrap_or_else(|| rule_name.clone());
+        let component = alert
+            .labels
+            .get("component")
+            .or_else(|| alert.labels.get("job"))
+            .cloned();
+        let severity = system_alerts_severity(&alert.labels);
+        // The unique index requires a non-NULL fingerprint for external
+        // sources; fall back to a hash-free stable value when Alertmanager
+        // omitted one (rare, but the column must not be NULL for dedup).
+        let fingerprint = alert
+            .fingerprint
+            .clone()
+            .unwrap_or_else(|| format!("{rule_name}:{}", component.clone().unwrap_or_default()));
+
+        let result = if alert.status == "resolved" {
+            sqlx::query(
+                "UPDATE system_alerts
+                 SET acknowledged = true, acknowledged_at = NOW()
+                 WHERE source = 'alertmanager' AND fingerprint = $1 AND acknowledged = false",
+            )
+            .bind(&fingerprint)
+            .execute(db)
+            .await
+        } else {
+            sqlx::query(
+                "INSERT INTO system_alerts
+                    (alert_type, message, severity, component, source, fingerprint)
+                 VALUES ($1, $2, $3, $4, 'alertmanager', $5)
+                 ON CONFLICT DO NOTHING",
+            )
+            .bind(&rule_name)
+            .bind(&message)
+            .bind(severity)
+            .bind(&component)
+            .bind(&fingerprint)
+            .execute(db)
+            .await
+        };
+
+        if let Err(error) = result {
+            tracing::warn!(
+                error = %error,
+                alert = %rule_name,
+                "failed to persist alert into system_alerts"
+            );
+        }
+    }
 }
 
 async fn slos_list(State(state): State<AppState>) -> Json<Vec<crate::slo::SloComplianceResult>> {
@@ -746,4 +852,43 @@ mod tests {
         assert_eq!(json.len(), 1);
         assert_eq!(json[0]["rule_name"], "SchemaAlert");
     }
+    #[test]
+    fn system_alerts_severity_maps_to_check_constraint_values() {
+        let mut labels = HashMap::new();
+        labels.insert("severity".to_string(), "critical".to_string());
+        assert_eq!(system_alerts_severity(&labels), "critical");
+
+        labels.insert("severity".to_string(), "warning".to_string());
+        assert_eq!(system_alerts_severity(&labels), "warning");
+
+        // Unknown labels degrade to 'info' — the column CHECK only allows
+        // info/warning/critical.
+        labels.insert("severity".to_string(), "catastrophic".to_string());
+        assert_eq!(system_alerts_severity(&labels), "info");
+
+        let empty: HashMap<String, String> = HashMap::new();
+        assert_eq!(system_alerts_severity(&empty), "info");
+    }
+
+    #[tokio::test]
+    async fn persist_alerts_without_pool_is_a_no_op_not_an_error() {
+        // No DB pool attached (deployment without DATABASE wiring) — the
+        // ingest path must still succeed for every alert.
+        let alert = AlertmanagerAlert {
+            status: "firing".into(),
+            labels: HashMap::from([
+                ("alertname".to_string(), "NoPool".to_string()),
+                ("severity".to_string(), "critical".to_string()),
+            ]),
+            annotations: HashMap::from([("summary".to_string(), "no pool".to_string())]),
+            starts_at: None,
+            ends_at: None,
+            fingerprint: Some("no-pool-1".into()),
+            generator_url: None,
+            value_string: None,
+        };
+
+        persist_alerts_to_system_alerts(&None, &[alert]).await;
+    }
+
 }

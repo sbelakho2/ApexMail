@@ -55,12 +55,23 @@ pub struct RevenueStats {
     pub arr: f64,
     pub arr_growth: f64,
     pub ltv: f64,
-    pub cac: f64,
+    /// Customer acquisition cost. Omitted (not zero) when no marketing-spend
+    /// data has been recorded — a zero would be a fabricated metric.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cac: Option<f64>,
     pub churn_rate: f64,
-    pub expansion_revenue: f64,
+    /// Expansion revenue from plan changes. Omitted when no plan-change
+    /// history source exists (the `plan.changed` audit action is never
+    /// emitted and stripe webhook events store no plan payload).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expansion_revenue: Option<f64>,
     pub new_customers: i64,
-    pub upgrades: i64,
-    pub downgrades: i64,
+    /// Plan-change upgrade count. Omitted for the same reason as
+    /// `expansion_revenue`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub upgrades: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub downgrades: Option<i64>,
     pub churned: i64,
 }
 
@@ -70,7 +81,6 @@ pub struct MonthlyData {
     pub month: String,
     pub mrr: f64,
     pub new_mrr: f64,
-    pub expansion_mrr: f64,
     pub churned_mrr: f64,
 }
 
@@ -88,6 +98,8 @@ pub struct RevenueResponse {
     pub stats: RevenueStats,
     pub monthly_data: Vec<MonthlyData>,
     pub revenue_by_plan: Vec<PlanRevenue>,
+    /// Honest data-omission notes surfaced to the caller.
+    pub notes: Vec<String>,
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -102,18 +114,6 @@ struct SubscriptionRevenueRow {
     price_yearly: i64,
 }
 
-#[derive(Debug, sqlx::FromRow)]
-struct PlanChangeRevenueRow {
-    logged_at: DateTime<Utc>,
-    change_type: Option<String>,
-    billing_interval: Option<String>,
-    previous_price_monthly: i64,
-    previous_price_yearly: i64,
-    new_price_monthly: i64,
-    new_price_yearly: i64,
-    net_amount: Option<i64>,
-}
-
 fn is_active_subscription_status(status: &str) -> bool {
     matches!(status, "active" | "trialing" | "past_due")
 }
@@ -122,9 +122,12 @@ fn is_yearly_interval(interval: &str) -> bool {
     interval.eq_ignore_ascii_case("yearly") || interval.eq_ignore_ascii_case("year")
 }
 
+/// Monthly-normalized price with round-half-up yearly math, mirroring
+/// billing-service's `yearly_price_to_monthly_mrr` (a yearly €25 000 plan
+/// counts as 2 083 cents/month instead of truncating to 2 082).
 fn monthly_price_cents(interval: &str, price_monthly: i64, price_yearly: i64) -> i64 {
     if is_yearly_interval(interval) {
-        price_yearly / 12
+        (price_yearly + 6) / 12
     } else {
         price_monthly
     }
@@ -175,19 +178,13 @@ fn recent_month_starts(now: DateTime<Utc>, count: u32) -> Vec<DateTime<Utc>> {
         .collect()
 }
 
-fn plan_change_delta_cents(change: &PlanChangeRevenueRow) -> i64 {
-    let interval = change.billing_interval.as_deref().unwrap_or("monthly");
-
-    monthly_price_cents(interval, change.new_price_monthly, change.new_price_yearly)
-        - monthly_price_cents(
-            interval,
-            change.previous_price_monthly,
-            change.previous_price_yearly,
-        )
-}
-
+/// Subscriptions are read from `stripe_subscriptions` — the table the
+/// billing-service webhook writers populate (the legacy `subscriptions`
+/// table has no writer) — joined via `tenants.plan` to `plans` pricing,
+/// mirroring billing-service's `get_mrr_report` pattern. `cancel_expr` is
+/// validated at the call site to be a known column ref or a safe CASE
+/// expression.
 fn build_subscription_revenue_sql(has_billing_interval: bool, cancel_expr: &str) -> String {
-    // cancel_expr is validated at the call site to be either a known column ref or a safe CASE expression
     let billing_interval_expr = if has_billing_interval {
         "COALESCE(NULLIF(s.billing_interval, ''), 'monthly')"
     } else {
@@ -196,56 +193,35 @@ fn build_subscription_revenue_sql(has_billing_interval: bool, cancel_expr: &str)
 
     format!(
         "SELECT s.tenant_id::text as tenant_id,
-                COALESCE(NULLIF(s.plan_name, ''), 'free') as plan_name,
+                COALESCE(NULLIF(s.plan, ''), NULLIF(t.plan, ''), 'free') as plan_name,
                 {billing_interval_expr} as billing_interval,
                 s.status,
                 s.created_at,
                 {cancel_expr} as canceled_at,
                 COALESCE(p.price_monthly, 0) as price_monthly,
                 COALESCE(p.price_yearly, 0) as price_yearly
-         FROM subscriptions s
-         LEFT JOIN plans p ON p.name = s.plan_name"
+         FROM stripe_subscriptions s
+         JOIN tenants t ON t.id = s.tenant_id
+         LEFT JOIN plans p ON p.name = t.plan"
     )
-}
-
-fn build_plan_change_sql(audit_time_col: &str) -> Result<String, ApiError> {
-    let audit_time_col = validated_column(audit_time_col)?;
-    Ok(format!(
-        "SELECT a.{audit_time_col} as logged_at,
-                a.details->>'changeType' as change_type,
-                a.details->>'billingInterval' as billing_interval,
-                COALESCE(previous_plan.price_monthly, 0) as previous_price_monthly,
-                COALESCE(previous_plan.price_yearly, 0) as previous_price_yearly,
-                COALESCE(new_plan.price_monthly, 0) as new_price_monthly,
-                COALESCE(new_plan.price_yearly, 0) as new_price_yearly,
-                CASE
-                    WHEN jsonb_typeof(a.details->'proration'->'netAmount') = 'number'
-                    THEN (a.details->'proration'->>'netAmount')::bigint
-                    ELSE NULL
-                END as net_amount
-         FROM audit_logs a
-         LEFT JOIN plans previous_plan ON previous_plan.name = a.details->>'previousPlan'
-         LEFT JOIN plans new_plan ON new_plan.name = a.details->>'newPlan'
-         WHERE a.action = 'plan.changed'
-           AND a.details IS NOT NULL
-           AND a.{audit_time_col} >= $1"
-    ))
 }
 
 fn audit_log_spend_sql(audit_time_col: &str) -> Result<String, ApiError> {
     let audit_time_col = validated_column(audit_time_col)?;
     Ok(format!(
-        "SELECT COALESCE(SUM(
-            CASE
-                WHEN jsonb_typeof(details->'spendCents') = 'number'
-                THEN (details->>'spendCents')::bigint
-                WHEN jsonb_typeof(details->'acquisitionCostCents') = 'number'
-                THEN (details->>'acquisitionCostCents')::bigint
-                WHEN jsonb_typeof(details->'marketingSpendCents') = 'number'
-                THEN (details->>'marketingSpendCents')::bigint
-                ELSE 0
-            END
-        ), 0)::bigint
+        "SELECT
+            COUNT(*)::bigint as rows,
+            COALESCE(SUM(
+                CASE
+                    WHEN jsonb_typeof(details->'spendCents') = 'number'
+                    THEN (details->>'spendCents')::bigint
+                    WHEN jsonb_typeof(details->'acquisitionCostCents') = 'number'
+                    THEN (details->>'acquisitionCostCents')::bigint
+                    WHEN jsonb_typeof(details->'marketingSpendCents') = 'number'
+                    THEN (details->>'marketingSpendCents')::bigint
+                    ELSE 0
+                END
+            ), 0)::bigint as cents
          FROM audit_logs
          WHERE action IN (
             'marketing.spend.recorded',
@@ -257,10 +233,13 @@ fn audit_log_spend_sql(audit_time_col: &str) -> Result<String, ApiError> {
     ))
 }
 
+/// Marketing spend since `cutoff`. Returns `Ok(None)` when no spend source
+/// has any rows — the CAC block is then omitted from the response instead
+/// of reporting a fabricated zero.
 async fn marketing_spend_cents_since(
     db: &sqlx::PgPool,
     cutoff: DateTime<Utc>,
-) -> Result<i64, ApiError> {
+) -> Result<Option<i64>, ApiError> {
     if table_exists(db, "marketing_spend").await {
         let time_col = if column_exists(db, "marketing_spend", "spent_at").await {
             Some(validated_column("spent_at")?)
@@ -283,18 +262,24 @@ async fn marketing_spend_cents_since(
         if let Some(amount_col) = amount_col {
             let sql = if let Some(time_col) = time_col {
                 format!(
-                    "SELECT COALESCE(SUM({amount_col}), 0)::bigint
+                    "SELECT COUNT(*)::bigint as rows,
+                            COALESCE(SUM({amount_col}), 0)::bigint as cents
                      FROM marketing_spend
                      WHERE {time_col} >= $1"
                 )
             } else {
-                format!("SELECT COALESCE(SUM({amount_col}), 0)::bigint FROM marketing_spend")
+                format!(
+                    "SELECT COUNT(*)::bigint as rows,
+                            COALESCE(SUM({amount_col}), 0)::bigint as cents
+                     FROM marketing_spend"
+                )
             };
-            let mut query = sqlx::query_scalar::<_, i64>(&sql);
+            let mut query = sqlx::query_as::<_, (i64, i64)>(&sql);
             if time_col.is_some() {
                 query = query.bind(cutoff);
             }
-            return Ok(query.fetch_one(db).await?);
+            let (rows, cents) = query.fetch_one(db).await?;
+            return Ok((rows > 0).then_some(cents));
         }
     }
 
@@ -305,20 +290,22 @@ async fn marketing_spend_cents_since(
             validated_column("created_at")?
         };
         let sql = audit_log_spend_sql(audit_time_col)?;
-        return Ok(sqlx::query_scalar::<_, i64>(&sql)
+        let (rows, cents): (i64, i64) = sqlx::query_as(&sql)
             .bind(cutoff)
             .fetch_one(db)
-            .await?);
+            .await?;
+        return Ok((rows > 0).then_some(cents));
     }
 
-    Ok(0)
+    Ok(None)
 }
 
-fn calculate_cac(marketing_spend_cents: i64, new_customers: i64) -> f64 {
-    if new_customers <= 0 {
-        0.0
-    } else {
-        cents_to_dollars(marketing_spend_cents) / new_customers as f64
+/// CAC from real spend data. `None` when spend data is absent (omitted, not
+/// zero) or when there are no new customers to attribute the spend to.
+fn calculate_cac(marketing_spend_cents: Option<i64>, new_customers: i64) -> Option<f64> {
+    match (marketing_spend_cents, new_customers) {
+        (Some(cents), n) if n > 0 => Some(cents_to_dollars(cents) / n as f64),
+        _ => None,
     }
 }
 
@@ -333,28 +320,27 @@ async fn get_revenue(
     let now = Utc::now();
     let cutoff_30 = now - Duration::days(30);
     let month_starts = recent_month_starts(now, 6);
-    let earliest_month = month_starts
-        .first()
-        .copied()
-        .unwrap_or_else(|| month_start(now));
+    let mut notes: Vec<String> = Vec::new();
 
-    let subscriptions =
-        if table_exists(db, "subscriptions").await && table_exists(db, "plans").await {
-            let has_billing_interval = column_exists(db, "subscriptions", "billing_interval").await;
-            let cancel_expr = if column_exists(db, "subscriptions", "canceled_at").await {
-                validated_column("s.canceled_at")?
-            } else {
-                // Hardcoded CASE expression - not from user input, safe from injection
-                "CASE WHEN s.status = 'canceled' THEN s.updated_at ELSE NULL END"
-            };
-            let sql = build_subscription_revenue_sql(has_billing_interval, cancel_expr);
-
-            sqlx::query_as::<_, SubscriptionRevenueRow>(&sql)
-                .fetch_all(db)
-                .await?
+    let subscriptions = if table_exists(db, "stripe_subscriptions").await
+        && table_exists(db, "plans").await
+    {
+        let has_billing_interval =
+            column_exists(db, "stripe_subscriptions", "billing_interval").await;
+        let cancel_expr = if column_exists(db, "stripe_subscriptions", "canceled_at").await {
+            validated_column("s.canceled_at")?
         } else {
-            Vec::new()
+            // Hardcoded CASE expression - not from user input, safe from injection
+            "CASE WHEN s.status = 'canceled' THEN s.updated_at ELSE NULL END"
         };
+        let sql = build_subscription_revenue_sql(has_billing_interval, cancel_expr);
+
+        sqlx::query_as::<_, SubscriptionRevenueRow>(&sql)
+            .fetch_all(db)
+            .await?
+    } else {
+        Vec::new()
+    };
 
     let tenant_plan_counts: HashMap<String, i64> = if table_exists(db, "tenants").await {
         sqlx::query_as::<_, (String, i64)>(
@@ -371,21 +357,15 @@ async fn get_revenue(
         HashMap::new()
     };
 
-    let plan_changes = if table_exists(db, "audit_logs").await && table_exists(db, "plans").await {
-        let audit_time_col = if column_exists(db, "audit_logs", "timestamp").await {
-            validated_column("timestamp")?
-        } else {
-            validated_column("created_at")?
-        };
-        let sql = build_plan_change_sql(audit_time_col)?;
-
-        sqlx::query_as::<_, PlanChangeRevenueRow>(&sql)
-            .bind(earliest_month)
-            .fetch_all(db)
-            .await?
-    } else {
-        Vec::new()
-    };
+    // Plan-change velocity (upgrades/downgrades/expansion MRR) is omitted:
+    // the `plan.changed` audit action it was derived from is never emitted
+    // by any writer, and stripe_webhook_events stores only event ids/types
+    // (no plan payload) — there is no honest data source to derive from.
+    notes.push(
+        "plan-change velocity (upgrades, downgrades, expansion revenue) omitted: no writer \
+         records plan-change history"
+            .into(),
+    );
 
     let current_mrr_cents: i64 = subscriptions
         .iter()
@@ -469,6 +449,11 @@ async fn get_revenue(
         0
     };
     let marketing_spend_cents = marketing_spend_cents_since(db, cutoff_30).await?;
+    if marketing_spend_cents.is_none() {
+        notes.push(
+            "CAC omitted: no marketing-spend rows recorded (a zero CAC would be fabricated)".into(),
+        );
+    }
 
     let mut revenue_by_plan_cents = HashMap::<String, i64>::new();
     for row in subscriptions
@@ -515,42 +500,6 @@ async fn get_revenue(
             .then_with(|| left.plan.cmp(&right.plan))
     });
 
-    let mut expansion_by_month = HashMap::<DateTime<Utc>, i64>::new();
-    let mut upgrades = 0i64;
-    let mut downgrades = 0i64;
-    let mut expansion_revenue_cents = 0i64;
-
-    for change in &plan_changes {
-        let delta_cents = plan_change_delta_cents(change);
-        let positive_delta = if delta_cents > 0 {
-            delta_cents
-        } else if delta_cents == 0 {
-            change.net_amount.unwrap_or(0).max(0)
-        } else {
-            0
-        };
-        let is_upgrade = matches!(change.change_type.as_deref(), Some("upgrade"))
-            || (change.change_type.is_none() && delta_cents > 0);
-        let is_downgrade = matches!(change.change_type.as_deref(), Some("downgrade"))
-            || (change.change_type.is_none() && delta_cents < 0);
-
-        if change.logged_at >= cutoff_30 {
-            if is_upgrade {
-                upgrades += 1;
-            }
-            if is_downgrade {
-                downgrades += 1;
-            }
-            expansion_revenue_cents += positive_delta;
-        }
-
-        if positive_delta > 0 {
-            *expansion_by_month
-                .entry(month_start(change.logged_at))
-                .or_default() += positive_delta;
-        }
-    }
-
     let monthly_data: Vec<MonthlyData> = month_starts
         .into_iter()
         .map(|month_start| {
@@ -592,9 +541,6 @@ async fn get_revenue(
                 month: month_start.format("%b").to_string(),
                 mrr: cents_to_dollars(mrr_cents),
                 new_mrr: cents_to_dollars(new_mrr_cents),
-                expansion_mrr: cents_to_dollars(
-                    *expansion_by_month.get(&month_start).unwrap_or(&0),
-                ),
                 churned_mrr: cents_to_dollars(churned_mrr_cents),
             }
         })
@@ -612,14 +558,17 @@ async fn get_revenue(
             ltv,
             cac,
             churn_rate,
-            expansion_revenue: cents_to_dollars(expansion_revenue_cents),
+            // No plan-change history source exists (see note above) — these
+            // are omitted rather than reported as zero.
+            expansion_revenue: None,
+            upgrades: None,
+            downgrades: None,
             new_customers,
-            upgrades,
-            downgrades,
             churned,
         },
         monthly_data,
         revenue_by_plan,
+        notes,
     }))
 }
 
@@ -636,19 +585,23 @@ mod tests {
     }
 
     #[test]
-    fn revenue_plan_change_delta_cents_uses_recurring_delta() {
-        let change = PlanChangeRevenueRow {
-            logged_at: Utc::now(),
-            change_type: Some("upgrade".into()),
-            billing_interval: Some("yearly".into()),
-            previous_price_monthly: 2_500,
-            previous_price_yearly: 25_000,
-            new_price_monthly: 6_500,
-            new_price_yearly: 65_000,
-            net_amount: Some(5_000),
-        };
+    fn revenue_yearly_rounding_is_round_half_up() {
+        // Mirrors billing-service's yearly_price_to_monthly_mrr: a yearly
+        // €25 000 plan is 2 083 cents/month, not a truncated 2 082.
+        assert_eq!(monthly_price_cents("yearly", 0, 25_000), 2_083);
+        assert_eq!(monthly_price_cents("year", 0, 24_000), 2_000);
+    }
 
-        assert_eq!(plan_change_delta_cents(&change), 3_333);
+    #[test]
+    fn revenue_subscription_sql_reads_stripe_subscriptions() {
+        let sql =
+            build_subscription_revenue_sql(true, "CASE WHEN s.status = 'canceled' THEN s.updated_at ELSE NULL END");
+
+        assert!(sql.contains("FROM stripe_subscriptions s"));
+        assert!(sql.contains("JOIN tenants t ON t.id = s.tenant_id"));
+        assert!(sql.contains("LEFT JOIN plans p ON p.name = t.plan"));
+        assert!(sql.contains("COALESCE(NULLIF(s.plan, ''), NULLIF(t.plan, ''), 'free')"));
+        assert!(!sql.contains("FROM subscriptions\n"));
     }
 
     #[test]
@@ -657,9 +610,13 @@ mod tests {
     }
 
     #[test]
-    fn revenue_calculate_cac_uses_marketing_spend_per_new_customer() {
-        assert_eq!(calculate_cac(12_500, 5), 25.0);
-        assert_eq!(calculate_cac(12_500, 0), 0.0);
+    fn revenue_calculate_cac_requires_real_spend_data() {
+        // With recorded spend: real division.
+        assert_eq!(calculate_cac(Some(12_500), 5), Some(25.0));
+        // Without spend data the metric is omitted, never a fabricated zero.
+        assert_eq!(calculate_cac(None, 5), None);
+        // Spend but no new customers: not attributable.
+        assert_eq!(calculate_cac(Some(12_500), 0), None);
     }
 
     #[test]

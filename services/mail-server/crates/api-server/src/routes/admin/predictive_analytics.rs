@@ -151,6 +151,71 @@ fn parse_window_days(window: &str) -> i64 {
     }
 }
 
+/// Default sending-pipeline queue capacity: the backlog depth at which the
+/// worker's email processor starts load-shedding (BackpressureConfig
+/// default `max_backlog` in worker-processors). Overridable so deployments
+/// that tune the worker can keep analytics in sync.
+const DEFAULT_EMAIL_MAX_BACKLOG: i64 = 10_000;
+
+/// Configured queue capacity (max backlog) from the environment. This is
+/// the same capacity knob the worker's backpressure uses, read here so the
+/// control plane reports utilization against real provisioning.
+fn configured_queue_capacity() -> i64 {
+    std::env::var("EMAIL_MAX_BACKLOG")
+        .ok()
+        .and_then(|v| v.trim().parse::<i64>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(DEFAULT_EMAIL_MAX_BACKLOG)
+}
+
+/// Queue utilization as a percentage of the configured capacity
+/// (0-100+, values above 100 mean the backlog exceeds the load-shedding
+/// threshold). Previously a hardcoded 0.0 placeholder.
+fn compute_capacity_utilization(queue_depth: i64, capacity: i64) -> f64 {
+    if capacity <= 0 {
+        return 0.0;
+    }
+    (queue_depth as f64 / capacity as f64) * 100.0
+}
+
+/// Days until the queue reaches its configured capacity. Some(0) when the
+/// backlog already exceeds capacity; None otherwise because we do not track
+/// backlog-growth history to project a date from (previously a hardcoded
+/// None placeholder — still honest, now for a documented reason).
+fn days_until_capacity_limit(queue_depth: i64, capacity: i64) -> Option<i64> {
+    if capacity > 0 && queue_depth >= capacity {
+        Some(0)
+    } else {
+        None
+    }
+}
+
+/// Forecast confidence derived from the observed variability of daily send
+/// volumes: the coefficient of variation (stdev / mean) over the trend
+/// window. With fewer than two daily data points there is nothing to
+/// estimate variability from, so the interval is reported as unestimated —
+/// never a fabricated "±15%".
+fn forecast_confidence_interval(daily_volumes: &[i64]) -> String {
+    if daily_volumes.len() < 2 {
+        return "unestimated (insufficient daily-volume history)".into();
+    }
+    let n = daily_volumes.len() as f64;
+    let mean = daily_volumes.iter().map(|&v| v as f64).sum::<f64>() / n;
+    if mean <= f64::EPSILON {
+        return "unestimated (no send volume)".into();
+    }
+    let variance = daily_volumes
+        .iter()
+        .map(|&v| {
+            let d = v as f64 - mean;
+            d * d
+        })
+        .sum::<f64>()
+        / n;
+    let cv = variance.sqrt() / mean;
+    format!("±{:.0}% (30-day daily-volume variability)", (cv * 100.0).round())
+}
+
 fn classify_risk(days: i64, has_sub: bool, bounce_rate: f64) -> String {
     if days > 60 && has_sub {
         "critical".into()
@@ -176,12 +241,14 @@ async fn get_predictive_analytics(
     let now = chrono::Utc::now();
 
     // ─── Churn Risk ─────────────────────────────────────────────────────
+    // Subscription existence reads stripe_subscriptions — the table billing
+    // webhooks write (the legacy `subscriptions` table has no writer).
     let inactive: Vec<InactiveTenantRow> = sqlx::query_as(
         "SELECT
             t.id::text as tenant_id,
             COALESCE(EXTRACT(EPOCH FROM (NOW() - MAX(m.created_at))) / 86400, 365)::bigint as days_inactive,
             MAX(m.created_at) as last_message_at,
-            EXISTS(SELECT 1 FROM subscriptions s WHERE s.tenant_id::text = t.id::text AND s.status IN ('active', 'trialing', 'past_due')) as has_subscription,
+            EXISTS(SELECT 1 FROM stripe_subscriptions s WHERE s.tenant_id::text = t.id::text AND s.status IN ('active', 'trialing', 'past_due')) as has_subscription,
             CASE
                 WHEN COUNT(*) FILTER (WHERE m.status IN ('sent', 'delivered', 'bounced', 'failed')) > 0
                 THEN COUNT(*) FILTER (WHERE m.status IN ('bounced', 'failed'))::float8
@@ -195,7 +262,7 @@ async fn get_predictive_analytics(
          WHERE t.status = 'active'
          GROUP BY t.id
          HAVING COALESCE(EXTRACT(EPOCH FROM (NOW() - MAX(m.created_at))) / 86400, 365) > 14
-            OR EXISTS(SELECT 1 FROM subscriptions s WHERE s.tenant_id::text = t.id::text AND s.status = 'canceled')
+            OR EXISTS(SELECT 1 FROM stripe_subscriptions s WHERE s.tenant_id::text = t.id::text AND s.status = 'canceled')
          ORDER BY days_inactive DESC
          LIMIT 100",
     )
@@ -438,7 +505,7 @@ async fn get_predictive_analytics(
         "SELECT COUNT(*)::bigint FROM (
             SELECT t.id
             FROM tenants t
-            JOIN subscriptions s ON s.tenant_id::text = t.id::text
+            JOIN stripe_subscriptions s ON s.tenant_id::text = t.id::text
             WHERE s.status IN ('active', 'trialing', 'past_due')
               AND NOT EXISTS (
                 SELECT 1 FROM messages m WHERE m.tenant_id::text = t.id::text
@@ -465,13 +532,16 @@ async fn get_predictive_analytics(
     }
 
     // ─── Volume Forecast ─────────────────────────────────────────────────
+    // Confidence interval derived from the observed 30-day daily-volume
+    // variability (coefficient of variation) — not a hardcoded constant.
+    let daily_volumes: Vec<i64> = trend_30.iter().map(|p| p.volume).collect();
     let forecast = VolumeForecast {
         current_volume: current_monthly,
         projected_next_week: (current_daily as f64 * 7.0 * (1.0 + weekly_growth.max(-0.5)))
             .round() as i64,
         projected_next_month: projected_30,
         projected_next_quarter: projected_90,
-        confidence_interval: "±15%".into(),
+        confidence_interval: forecast_confidence_interval(&daily_volumes),
     };
 
     Ok(Json(PredictiveAnalyticsResponse {
@@ -514,8 +584,14 @@ async fn get_predictive_analytics(
             projected_30d_volume: projected_30,
             projected_90d_volume: projected_90,
             weekly_growth_rate: weekly_growth,
-            capacity_utilization_pct: 0.0,
-            days_until_capacity_limit: None,
+            capacity_utilization_pct: compute_capacity_utilization(
+                current_queue,
+                configured_queue_capacity(),
+            ),
+            days_until_capacity_limit: days_until_capacity_limit(
+                current_queue,
+                configured_queue_capacity(),
+            ),
         },
         anomalies,
         forecast,
@@ -536,7 +612,7 @@ async fn get_churn_risk(
             t.id::text as tenant_id,
             COALESCE(EXTRACT(EPOCH FROM (NOW() - MAX(m.created_at))) / 86400, 365)::bigint as days_inactive,
             MAX(m.created_at) as last_message_at,
-            EXISTS(SELECT 1 FROM subscriptions s WHERE s.tenant_id::text = t.id::text AND s.status IN ('active', 'trialing', 'past_due')) as has_subscription,
+            EXISTS(SELECT 1 FROM stripe_subscriptions s WHERE s.tenant_id::text = t.id::text AND s.status IN ('active', 'trialing', 'past_due')) as has_subscription,
             CASE
                 WHEN COUNT(*) FILTER (WHERE m.status IN ('sent', 'delivered', 'bounced', 'failed')) > 0
                 THEN COUNT(*) FILTER (WHERE m.status IN ('bounced', 'failed'))::float8
@@ -720,6 +796,17 @@ async fn get_capacity_planning(
         current_daily as f64
     };
 
+    // Queue depth vs the configured capacity the worker load-sheds at —
+    // real utilization instead of the previous 0.0 placeholder.
+    let queue_depth: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*)::bigint FROM email_queue
+         WHERE status IN ('pending', 'processing')",
+    )
+    .fetch_one(db)
+    .await
+    .unwrap_or(0);
+    let capacity = configured_queue_capacity();
+
     Ok(Json(CapacityPlanning {
         current_daily_volume: current_daily,
         current_monthly_volume: current_monthly,
@@ -728,8 +815,8 @@ async fn get_capacity_planning(
         projected_30d_volume: (avg_daily * 30.0 * (1.0 + weekly_growth.max(-0.5))).round() as i64,
         projected_90d_volume: (avg_daily * 90.0 * (1.0 + weekly_growth.max(-0.5))).round() as i64,
         weekly_growth_rate: weekly_growth,
-        capacity_utilization_pct: 0.0,
-        days_until_capacity_limit: None,
+        capacity_utilization_pct: compute_capacity_utilization(queue_depth, capacity),
+        days_until_capacity_limit: days_until_capacity_limit(queue_depth, capacity),
     }))
 }
 
@@ -916,5 +1003,48 @@ mod tests {
         let growth = -0.8f64;
         let adj = growth.max(-0.5);
         assert!((adj + 1.0) > 0.0);
+    }
+
+    #[test]
+    fn capacity_utilization_computes_against_configured_backlog() {
+        // 2_500 pending against a 10_000 capacity (worker default) → 25%.
+        assert!((compute_capacity_utilization(2_500, 10_000) - 25.0).abs() < 0.001);
+        // Over-capacity backlogs report above 100 rather than being clamped.
+        assert!(compute_capacity_utilization(12_000, 10_000) > 100.0);
+        // Degenerate capacity is safe.
+        assert_eq!(compute_capacity_utilization(500, 0), 0.0);
+    }
+
+    #[test]
+    fn configured_queue_capacity_uses_env_and_positive_default() {
+        // Default mirrors the worker's BackpressureConfig max_backlog.
+        std::env::remove_var("EMAIL_MAX_BACKLOG");
+        assert_eq!(configured_queue_capacity(), DEFAULT_EMAIL_MAX_BACKLOG);
+        assert_eq!(DEFAULT_EMAIL_MAX_BACKLOG, 10_000);
+    }
+
+    #[test]
+    fn days_until_capacity_limit_only_fires_when_backlog_full() {
+        assert_eq!(days_until_capacity_limit(10_000, 10_000), Some(0));
+        assert_eq!(days_until_capacity_limit(11_000, 10_000), Some(0));
+        // Without backlog-growth history a projection date is honestly None.
+        assert_eq!(days_until_capacity_limit(9_999, 10_000), None);
+    }
+
+    #[test]
+    fn forecast_confidence_interval_derives_from_volume_variability() {
+        // Flat volumes → ±0% variability.
+        let flat = forecast_confidence_interval(&[100, 100, 100, 100]);
+        assert!(flat.starts_with("±0%"), "got {flat}");
+
+        // Volatile volumes → a non-zero interval derived from the CV.
+        let volatile = forecast_confidence_interval(&[10, 200, 50, 140]);
+        assert!(volatile.starts_with("±"), "got {volatile}");
+        assert!(!volatile.contains("±15%"), "must not be the old hardcoded interval");
+
+        // Too little history → honest "unestimated", not a made-up number.
+        assert!(forecast_confidence_interval(&[42]).contains("insufficient"));
+        assert!(forecast_confidence_interval(&[]).contains("insufficient"));
+        assert!(forecast_confidence_interval(&[0, 0]).contains("no send volume"));
     }
 }

@@ -145,6 +145,16 @@ async fn main() {
         }
     };
 
+    // ── Postgres pool (system_alerts persistence) ──────────────────────
+    // Lazy-connect: the alert ingest persists best-effort, so an initially
+    // unreachable database degrades gracefully instead of failing startup.
+    let db_url = config.db_url();
+    let db_pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(config.db_pool_max.min(5))
+        .acquire_timeout(Duration::from_secs(5))
+        .connect_lazy(&db_url)
+        .ok();
+
     // ── Core state ─────────────────────────────────────────────────────
 
     let default_buckets = config.metrics.histogram_buckets.clone();
@@ -160,6 +170,22 @@ async fn main() {
     )
     .with_redis_pool(redis_pool.clone())
     .with_metrics_handle(metrics_handle);
+
+    let state = match db_pool {
+        Some(pool) => {
+            tracing::info!(
+                db_url = %redact_url_credentials(&db_url),
+                "system_alerts persistence enabled (alertmanager alerts are mirrored to Postgres)"
+            );
+            state.with_db_pool(pool)
+        }
+        None => {
+            tracing::warn!(
+                "no Postgres pool — ingested alerts stay in-memory only (CP system_alerts surfaces will remain empty)"
+            );
+            state
+        }
+    };
 
     // ── Default SLOs ───────────────────────────────────────────────────
 

@@ -144,6 +144,55 @@ fn parse_period_days(period: &str) -> i64 {
     }
 }
 
+/// Average engagement-session count per active user over the last 30 days,
+/// computed from real events: a "session" is an active day (distinct
+/// tenant + day with at least one event), so this is the mean number of
+/// active days per active tenant. Returns 0.0 when there is no event data —
+/// never a fabricated constant.
+async fn avg_session_count_per_user(db: &sqlx::PgPool) -> f64 {
+    sqlx::query_scalar::<_, Option<f64>>(
+        "SELECT COUNT(DISTINCT (tenant_id, DATE(timestamp)))::float8
+              / NULLIF(COUNT(DISTINCT tenant_id), 0)
+         FROM events
+         WHERE timestamp >= NOW() - INTERVAL '30 days'",
+    )
+    .fetch_one(db)
+    .await
+    .ok()
+    .flatten()
+    .unwrap_or(0.0)
+}
+
+/// Trials started in the window — a trial is a stripe_subscriptions row
+/// with a non-NULL trial_end.
+const TRIALS_STARTED_SQL: &str =
+    "SELECT COUNT(*)::bigint FROM stripe_subscriptions
+         WHERE trial_end IS NOT NULL
+           AND created_at >= NOW() - $1::interval";
+
+/// Converted trials — the trial period ended (trial_end < NOW()) and the
+/// subscription is still paying (status active/past_due). The previous
+/// formulation selected rows that were simultaneously `status = 'active'`
+/// AND `status = 'trialing'` on a single-row-per-subscription table, which
+/// can never match (self-negating).
+const TRIALS_CONVERTED_SQL: &str =
+    "SELECT COUNT(*)::bigint FROM stripe_subscriptions
+         WHERE trial_end IS NOT NULL
+           AND trial_end < NOW()
+           AND status IN ('active', 'past_due')
+           AND created_at >= NOW() - $1::interval";
+
+/// Mean trial-to-paid duration over converted trials. Payment for a
+/// converted trial begins at trial_end, so time-to-paid is
+/// trial_end - created_at. NULL when there are no converted trials.
+const AVG_TRIAL_TO_PAID_SQL: &str =
+    "SELECT AVG(EXTRACT(EPOCH FROM (trial_end - created_at)) / 86400)
+         FROM stripe_subscriptions
+         WHERE trial_end IS NOT NULL
+           AND trial_end < NOW()
+           AND status IN ('active', 'past_due')
+           AND created_at >= NOW() - $1::interval";
+
 async fn get_growth_analytics(
     State(state): State<AppState>,
     auth: AuthUser,
@@ -358,51 +407,44 @@ async fn get_growth_analytics(
     .unwrap_or(0);
 
     // ─── Trial Conversion ───────────────────────────────────────────────
-    let trials_started: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*)::bigint FROM subscriptions
-         WHERE status = 'trialing'
-           AND created_at >= NOW() - $1::interval",
-    )
-    .bind(&interval)
-    .fetch_one(db)
-    .await
-    .unwrap_or(0);
+    // Computed from stripe_subscriptions' period/status semantics (the table
+    // the billing webhook writers populate). See the SQL constants above.
+    let trials_started: i64 = sqlx::query_scalar(TRIALS_STARTED_SQL)
+        .bind(&interval)
+        .fetch_one(db)
+        .await
+        .unwrap_or(0);
 
-    let trials_converted: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*)::bigint FROM subscriptions
-         WHERE status = 'active'
-           AND created_at >= NOW() - $1::interval
-           AND id IN (
-             SELECT id FROM subscriptions WHERE status = 'trialing'
-           )",
-    )
-    .bind(&interval)
-    .fetch_one(db)
-    .await
-    .unwrap_or(0);
+    let trials_converted: i64 = sqlx::query_scalar(TRIALS_CONVERTED_SQL)
+        .bind(&interval)
+        .fetch_one(db)
+        .await
+        .unwrap_or(0);
 
-    // Re-query: trials that converted
-    let converted_trials: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*)::bigint FROM subscriptions
-         WHERE status IN ('active', 'past_due')
-           AND (SELECT COUNT(*) FROM audit_logs
-                WHERE action = 'subscription.trial_converted'
-                  AND resource_id = subscriptions.tenant_id::text
-                  AND timestamp >= NOW() - $1::interval) > 0",
-    )
-    .bind(&interval)
-    .fetch_one(db)
-    .await
-    .unwrap_or(0);
+    // Average trial-to-paid duration from real conversion timestamps
+    // (trial_end - created_at over converted trials). NULL when no
+    // converted trial exists — never a fabricated constant.
+    let avg_trial_to_paid_days: Option<f64> = sqlx::query_scalar::<_, Option<f64>>(AVG_TRIAL_TO_PAID_SQL)
+        .bind(&interval)
+        .fetch_one(db)
+        .await
+        .ok()
+        .flatten();
 
-    // Trial conversion by plan
+    // Trial conversion by plan (subscription plan, falling back to the
+    // tenant's current plan)
     let trial_by_plan: Vec<TrialPlanConversion> = sqlx::query_as::<_, (String, i64, i64)>(
-        "SELECT COALESCE(NULLIF(plan_name, ''), 'free'),
+        "SELECT COALESCE(NULLIF(s.plan, ''), NULLIF(t.plan, ''), 'free'),
                 COUNT(*)::bigint,
-                COUNT(*) FILTER (WHERE status = 'active')::bigint
-         FROM subscriptions
-         WHERE status IN ('trialing', 'active')
-           AND created_at >= NOW() - $1::interval
+                COUNT(*) FILTER (
+                    WHERE s.trial_end IS NOT NULL
+                      AND s.trial_end < NOW()
+                      AND s.status IN ('active', 'past_due')
+                )::bigint
+         FROM stripe_subscriptions s
+         LEFT JOIN tenants t ON t.id = s.tenant_id
+         WHERE s.trial_end IS NOT NULL
+           AND s.created_at >= NOW() - $1::interval
          GROUP BY 1 ORDER BY 2 DESC",
     )
     .bind(&interval)
@@ -423,8 +465,10 @@ async fn get_growth_analytics(
     .collect();
 
     // ─── Customer Lifecycle ─────────────────────────────────────────────
+    // All lifecycle counts read stripe_subscriptions (one row per tenant,
+    // kept current by billing webhooks).
     let new_cust_30d: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*)::bigint FROM subscriptions
+        "SELECT COUNT(*)::bigint FROM stripe_subscriptions
          WHERE status IN ('active', 'trialing', 'past_due')
            AND created_at >= NOW() - INTERVAL '30 days'",
     )
@@ -433,7 +477,7 @@ async fn get_growth_analytics(
     .unwrap_or(0);
 
     let active_cust: i64 = sqlx::query_scalar(
-        "SELECT COUNT(DISTINCT tenant_id)::bigint FROM subscriptions
+        "SELECT COUNT(DISTINCT tenant_id)::bigint FROM stripe_subscriptions
          WHERE status IN ('active', 'trialing', 'past_due')",
     )
     .fetch_one(db)
@@ -441,9 +485,9 @@ async fn get_growth_analytics(
     .unwrap_or(0);
 
     let churned_30d: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*)::bigint FROM subscriptions
+        "SELECT COUNT(DISTINCT tenant_id)::bigint FROM stripe_subscriptions
          WHERE status = 'canceled'
-           AND updated_at >= NOW() - INTERVAL '30 days'",
+           AND COALESCE(canceled_at, updated_at) >= NOW() - INTERVAL '30 days'",
     )
     .fetch_one(db)
     .await
@@ -457,16 +501,16 @@ async fn get_growth_analytics(
 
     let retention = 1.0 - churn_rate;
 
-    // Avg customer lifetime from billing_audit_log or subscriptions
-    let avg_lifetime_days: Option<(f64,)> = sqlx::query_as(
+    // Avg customer lifetime from real subscription ages (active/paying only)
+    let avg_lifetime_days: Option<f64> = sqlx::query_scalar::<_, Option<f64>>(
         "SELECT AVG(EXTRACT(EPOCH FROM (NOW() - created_at)) / 86400)
-         FROM subscriptions WHERE status IN ('active', 'past_due')",
+         FROM stripe_subscriptions WHERE status IN ('active', 'past_due')",
     )
-    .fetch_optional(db)
+    .fetch_one(db)
     .await
     .ok()
     .flatten()
-    .and_then(|(v,): (f64,)| if v > 0.0 { Some((v,)) } else { None });
+    .filter(|v| *v > 0.0);
 
     Ok(Json(GrowthAnalyticsResponse {
         signups: SignupStats {
@@ -496,17 +540,17 @@ async fn get_growth_analytics(
             dau_mau_ratio: if mau > 0 { dau as f64 / mau as f64 } else { 0.0 },
             wau,
             monthly_active_tenants,
-            avg_session_count_per_user: 0.0,
+            avg_session_count_per_user: avg_session_count_per_user(db).await,
         },
         trial_conversion: TrialConversionStats {
             trials_started,
-            trials_converted: converted_trials.max(trials_converted),
+            trials_converted,
             conversion_rate: if trials_started > 0 {
                 trials_converted as f64 / trials_started as f64
             } else {
                 0.0
             },
-            avg_trial_to_paid_days: 14.0,
+            avg_trial_to_paid_days: avg_trial_to_paid_days.unwrap_or(0.0),
             conversion_by_plan: trial_by_plan,
         },
         lifecycle: CustomerLifecycle {
@@ -516,9 +560,7 @@ async fn get_growth_analytics(
             churn_rate_30d: churn_rate,
             retained_customers_30d: active_cust - churned_30d,
             retention_rate_30d: retention,
-            avg_customer_lifetime_days: avg_lifetime_days
-                .map(|(v,)| v)
-                .unwrap_or(0.0),
+            avg_customer_lifetime_days: avg_lifetime_days.unwrap_or(0.0),
         },
     }))
 }
@@ -690,7 +732,7 @@ async fn get_engagement_metrics(
         dau_mau_ratio: if mau > 0 { dau as f64 / mau as f64 } else { 0.0 },
         wau,
         monthly_active_tenants,
-        avg_session_count_per_user: 0.0,
+        avg_session_count_per_user: avg_session_count_per_user(db).await,
     }))
 }
 
@@ -747,5 +789,33 @@ mod tests {
             avg_session_count_per_user: 0.0,
         };
         assert_eq!(metrics.dau_mau_ratio, 0.0);
+    }
+
+    #[test]
+    fn trial_sql_reads_stripe_subscriptions_with_period_semantics() {
+        // The legacy table had no writer; all trial SQL must read
+        // stripe_subscriptions and use trial_end period semantics.
+        for sql in [TRIALS_STARTED_SQL, TRIALS_CONVERTED_SQL, AVG_TRIAL_TO_PAID_SQL] {
+            assert!(sql.contains("FROM stripe_subscriptions"));
+            assert!(sql.contains("trial_end IS NOT NULL"));
+            assert!(!sql.contains("FROM subscriptions\n"));
+        }
+    }
+
+    #[test]
+    fn trial_converted_sql_is_not_self_negating() {
+        // The old query demanded status = 'active' AND membership in a
+        // status = 'trialing' set of the SAME single-row table — impossible.
+        assert!(!TRIALS_CONVERTED_SQL.contains("id IN"));
+        assert!(TRIALS_CONVERTED_SQL.contains("trial_end < NOW()"));
+        assert!(TRIALS_CONVERTED_SQL.contains("status IN ('active', 'past_due')"));
+    }
+
+    #[test]
+    fn avg_trial_to_paid_is_derived_not_constant() {
+        // Must be computed from trial_end - created_at, and there must be no
+        // hardcoded 14.0-day constant anywhere in the SQL.
+        assert!(AVG_TRIAL_TO_PAID_SQL.contains("trial_end - created_at"));
+        assert!(!AVG_TRIAL_TO_PAID_SQL.contains("14"));
     }
 }

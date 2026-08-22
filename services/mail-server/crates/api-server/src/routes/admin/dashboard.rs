@@ -93,6 +93,12 @@ async fn fetch_count_or_zero(db: &sqlx::PgPool, sql: &str) -> i64 {
         .unwrap_or(0)
 }
 
+/// MRR computed from `stripe_subscriptions` — the table the billing-service
+/// webhook writers actually populate — mirroring the proven pattern in
+/// billing-service `routes.rs` (`get_mrr_report`): joined via
+/// `tenants.plan` to `plans` pricing, with yearly prices normalized to
+/// monthly via `ROUND(price_yearly / 12.0)` (round-half-up, not truncation).
+/// The legacy `subscriptions` table has no writer and always read as zero.
 fn build_subscription_mrr_sql(has_billing_interval: bool) -> String {
     let billing_interval_expr = if has_billing_interval {
         "COALESCE(NULLIF(s.billing_interval, ''), 'monthly')"
@@ -103,22 +109,23 @@ fn build_subscription_mrr_sql(has_billing_interval: bool) -> String {
     format!(
         "SELECT COALESCE(SUM(
                 CASE
-                    WHEN {billing_interval_expr} IN ('year', 'yearly') THEN COALESCE(p.price_yearly, 0) / 12
-                    ELSE COALESCE(p.price_monthly, 0)
+                    WHEN {billing_interval_expr} IN ('year', 'yearly') THEN ROUND(p.price_yearly / 12.0)::bigint
+                    ELSE p.price_monthly
                 END
             ), 0)::bigint
-         FROM subscriptions s
-         LEFT JOIN plans p ON p.name = s.plan_name
+         FROM stripe_subscriptions s
+         JOIN tenants t ON t.id = s.tenant_id
+         JOIN plans p ON p.name = t.plan
          WHERE s.status IN ('active', 'trialing', 'past_due')"
     )
 }
 
 async fn fetch_dashboard_mrr(db: &sqlx::PgPool) -> f64 {
-    if !(table_exists(db, "subscriptions").await && table_exists(db, "plans").await) {
+    if !(table_exists(db, "stripe_subscriptions").await && table_exists(db, "plans").await) {
         return 0.0;
     }
 
-    let has_billing_interval = column_exists(db, "subscriptions", "billing_interval").await;
+    let has_billing_interval = column_exists(db, "stripe_subscriptions", "billing_interval").await;
     let sql = build_subscription_mrr_sql(has_billing_interval);
 
     sqlx::query_scalar::<_, i64>(&sql)
@@ -414,9 +421,12 @@ mod tests {
     fn dashboard_subscription_mrr_sql_uses_plan_prices() {
         let sql = build_subscription_mrr_sql(true);
 
-        assert!(sql.contains("FROM subscriptions s"));
-        assert!(sql.contains("LEFT JOIN plans p"));
-        assert!(sql.contains("price_yearly"));
+        // Reads the table billing actually writes, with proper yearly rounding.
+        assert!(sql.contains("FROM stripe_subscriptions s"));
+        assert!(sql.contains("JOIN tenants t ON t.id = s.tenant_id"));
+        assert!(sql.contains("JOIN plans p ON p.name = t.plan"));
+        assert!(sql.contains("ROUND(p.price_yearly / 12.0)::bigint"));
         assert!(sql.contains("billing_interval"));
+        assert!(!sql.contains("FROM subscriptions"), "must not read the writerless legacy table");
     }
 }

@@ -72,9 +72,13 @@ async fn query_dashboard_snapshot(db: &sqlx::PgPool) -> DashboardSsePayload {
         0
     };
 
-    let mrr = if table_exists(db, "subscriptions").await && table_exists(db, "plans").await {
+    // MRR from stripe_subscriptions — the table the billing webhook writers
+    // populate — mirroring billing-service's get_mrr_report pattern (tenants.plan
+    // → plans pricing, ROUND(price_yearly / 12.0) yearly normalization).
+    // The legacy `subscriptions` table has no writer and always read as zero.
+    let mrr = if table_exists(db, "stripe_subscriptions").await && table_exists(db, "plans").await {
         let has_billing_interval =
-            crate::routes::helpers::column_exists(db, "subscriptions", "billing_interval").await;
+            crate::routes::helpers::column_exists(db, "stripe_subscriptions", "billing_interval").await;
 
         let billing_interval_expr = if has_billing_interval {
             "COALESCE(NULLIF(s.billing_interval, ''), 'monthly')"
@@ -85,12 +89,13 @@ async fn query_dashboard_snapshot(db: &sqlx::PgPool) -> DashboardSsePayload {
         let sql = format!(
             "SELECT COALESCE(SUM(
                     CASE
-                        WHEN {billing_interval_expr} IN ('year', 'yearly') THEN COALESCE(p.price_yearly, 0) / 12
-                        ELSE COALESCE(p.price_monthly, 0)
+                        WHEN {billing_interval_expr} IN ('year', 'yearly') THEN ROUND(p.price_yearly / 12.0)::bigint
+                        ELSE p.price_monthly
                     END
                 ), 0)::bigint
-             FROM subscriptions s
-             LEFT JOIN plans p ON p.name = s.plan_name
+             FROM stripe_subscriptions s
+             JOIN tenants t ON t.id = s.tenant_id
+             JOIN plans p ON p.name = t.plan
              WHERE s.status IN ('active', 'trialing', 'past_due')"
         );
 
@@ -176,6 +181,15 @@ struct AlertSsePayload {
     acknowledged: bool,
 }
 
+/// system_alerts has no `timestamp` column — its time column is `created_at`
+/// (and `component` only exists after migration 108; fall back to
+/// alert_type). The query aliases both, mirroring system_health.rs.
+const NEW_ALERTS_SQL: &str = "SELECT id::text, severity, COALESCE(component, alert_type) as component, message, created_at AS timestamp, acknowledged
+         FROM system_alerts
+         WHERE created_at > $1
+         ORDER BY created_at ASC
+         LIMIT 50";
+
 async fn query_new_alerts(
     db: &sqlx::PgPool,
     since: DateTime<Utc>,
@@ -184,16 +198,11 @@ async fn query_new_alerts(
         return Ok(Vec::new());
     }
 
-    let rows: Vec<(String, String, String, String, DateTime<Utc>, bool)> = sqlx::query_as(
-        "SELECT id::text, severity, COALESCE(component, '') as component, message, timestamp, acknowledged
-         FROM system_alerts
-         WHERE timestamp > $1
-         ORDER BY timestamp ASC
-         LIMIT 50",
-    )
-    .bind(since)
-    .fetch_all(db)
-    .await?;
+    let rows: Vec<(String, String, String, String, DateTime<Utc>, bool)> =
+        sqlx::query_as(NEW_ALERTS_SQL)
+            .bind(since)
+            .fetch_all(db)
+            .await?;
 
     Ok(rows
         .into_iter()
@@ -288,4 +297,18 @@ async fn sse_alerts(
             .interval(Duration::from_secs(15))
             .text("keep-alive"),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn alerts_sql_aliases_real_system_alerts_columns() {
+        // system_alerts has created_at (not timestamp) and gained `component`
+        // in migration 108 — the query must reference real columns only.
+        assert!(NEW_ALERTS_SQL.contains("created_at AS timestamp"));
+        assert!(NEW_ALERTS_SQL.contains("COALESCE(component, alert_type)"));
+        assert!(!NEW_ALERTS_SQL.contains("WHERE timestamp"));
+    }
 }

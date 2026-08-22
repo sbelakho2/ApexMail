@@ -72,6 +72,25 @@ impl QBRService {
         Self { db }
     }
 
+    /// Roll one day of `events` into `ent_sending_metrics` (one row per
+    /// account/day). The table previously had no writer, so every QBR
+    /// `gather_quarter_metrics` read returned zeros. Idempotent: the day's
+    /// existing rows are replaced within the same statement snapshot.
+    ///
+    /// Returns the number of account-day rows written.
+    pub async fn rollup_daily_sending_metrics(
+        &self,
+        day: chrono::NaiveDate,
+    ) -> Result<u64, String> {
+        let result = sqlx::query(daily_sending_metrics_rollup_sql())
+            .bind(day)
+            .execute(&self.db)
+            .await
+            .map_err(|e| format!("Rollup sending metrics: {e}"))?;
+
+        Ok(result.rows_affected())
+    }
+
     /// Schedule a new QBR
     pub async fn schedule(
         &self,
@@ -348,6 +367,39 @@ impl QBRService {
 
 // ── Pure Functions ──────────────────────────────────────────────────────
 
+/// The daily `ent_sending_metrics` rollup statement (see
+/// [`QBRService::rollup_daily_sending_metrics`]): aggregates the canonical
+/// `events` table per (tenant, day) and replaces that day's rows so the
+/// rollup is idempotent.
+const fn daily_sending_metrics_rollup_sql() -> &'static str {
+    r#"
+    WITH agg AS (
+        SELECT tenant_id AS account_id,
+               DATE(timestamp) AS period_start,
+               COUNT(*) FILTER (WHERE event_type = 'sent') AS sent,
+               COUNT(*) FILTER (WHERE event_type = 'delivered') AS delivered,
+               COUNT(*) FILTER (WHERE event_type = 'bounced') AS bounced,
+               COUNT(*) FILTER (WHERE event_type = 'opened') AS opened,
+               COUNT(*) FILTER (WHERE event_type = 'clicked') AS clicked
+        FROM events
+        WHERE timestamp >= $1::date
+          AND timestamp < ($1::date + INTERVAL '1 day')
+        GROUP BY 1, 2
+    ),
+    cleared AS (
+        DELETE FROM ent_sending_metrics e
+        USING agg a
+        WHERE e.account_id = a.account_id
+          AND e.period_start >= $1::date
+          AND e.period_start < ($1::date + INTERVAL '1 day')
+    )
+    INSERT INTO ent_sending_metrics
+        (id, account_id, period_start, sent, delivered, bounced, opened, clicked)
+    SELECT gen_random_uuid(), account_id, period_start, sent, delivered, bounced, opened, clicked
+    FROM agg
+    "#
+}
+
 /// Calculate goal progress:((current - baseline) / (target - baseline)) * 100
 pub fn calculate_goal_progress(baseline: f64, target: f64, current: f64) -> f64 {
     let range = target - baseline;
@@ -597,6 +649,25 @@ pub fn current_quarter() -> (String, i32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rollup_sql_aggregates_all_five_event_types_idempotently() {
+        let sql = daily_sending_metrics_rollup_sql();
+
+        // Covers every metric column gather_quarter_metrics sums.
+        for event_type in ["sent", "delivered", "bounced", "opened", "clicked"] {
+            assert!(
+                sql.contains(&format!("event_type = '{event_type}'")),
+                "must aggregate '{event_type}' events"
+            );
+        }
+        // Replaces the day's rows so re-running the rollup is idempotent.
+        assert!(sql.contains("DELETE FROM ent_sending_metrics"));
+        assert!(sql.contains("INSERT INTO ent_sending_metrics"));
+        // Bucketed per account (tenant) and day.
+        assert!(sql.contains("GROUP BY 1, 2"));
+        assert!(sql.contains("tenant_id AS account_id"));
+    }
 
     #[test]
     fn percentile_is_clamped_to_0_100() {

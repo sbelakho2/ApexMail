@@ -5,6 +5,11 @@
 //! 2. Processes SES bounce notifications → auto-suppresses hard bounces.
 //! 3. Processes SES complaint notifications → auto-suppresses complainants.
 //! 4. Processes SES delivery notifications → updates message status.
+//! 5. Processes SES open/click notifications → increments message stats.
+//!
+//! Every terminal event also writes an analytics `events` row ('delivered',
+//! 'complained', 'opened', 'clicked') so the admin analytics surfaces that
+//! bucket on the events table see SES traffic.
 //!
 //! ## Endpoint
 //!
@@ -12,7 +17,9 @@
 //!
 //! ## Setup
 //!
-//! In AWS SES → Configuration Set → Event destinations → add SNS topic.
+//! In AWS SES → Configuration Set → Event destinations → add SNS topic
+//! (enable the Delivery, Open and Click event types in addition to Bounce
+//! and Complaint).
 //! In SNS → Subscription → HTTPS → `https://api.apexmail.ee/v1/ses/notifications`.
 
 use axum::extract::State;
@@ -80,6 +87,8 @@ struct SesEvent {
     bounce: Option<SesBounce>,
     complaint: Option<SesComplaint>,
     delivery: Option<SesDelivery>,
+    open: Option<SesOpen>,
+    click: Option<SesClick>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -164,6 +173,26 @@ struct SesDelivery {
     processing_time_millis: Option<u64>,
     recipients: Option<Vec<String>>,
     smtp_response: Option<String>,
+}
+
+/// SES Open event payload (user_agent/ip only when event publishing
+/// includes open/tracking metadata).
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SesOpen {
+    timestamp: Option<String>,
+    user_agent: Option<String>,
+    ip_address: Option<String>,
+}
+
+/// SES Click event payload.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SesClick {
+    timestamp: Option<String>,
+    link: Option<String>,
+    user_agent: Option<String>,
+    ip_address: Option<String>,
 }
 
 // ─── Handler ───────────────────────────────────────────────────
@@ -576,6 +605,8 @@ async fn handle_notification(state: &AppState, msg: &SnsMessage) -> Result<Statu
         "Bounce" => process_bounce(state, &event).await?,
         "Complaint" => process_complaint(state, &event).await?,
         "Delivery" => process_delivery(state, &event).await?,
+        "Open" => process_open(state, &event).await?,
+        "Click" => process_click(state, &event).await?,
         "Send" => {
             debug!(ses_message_id = ?event.mail.as_ref().and_then(|m| m.message_id.as_ref()), "SES Send event");
         }
@@ -597,6 +628,48 @@ fn extract_apexmail_header(mail: &SesMail, header_name: &str) -> Option<String> 
         .iter()
         .find(|h| h.name == header_name)
         .map(|h| h.value.clone())
+}
+
+/// Strip any "msg_" prefix from an X-ApexMail-MessageId header value so it
+/// can be matched against messages.id / events.message_id.
+fn normalize_message_id(msg_id: &str) -> &str {
+    msg_id.strip_prefix("msg_").unwrap_or(msg_id)
+}
+
+/// Insert an analytics `events` row for a terminal SES event. Mirrors the
+/// worker's event inserts (id `evt_<uuid>`, type 'delivered'/'complained'/
+/// 'opened'/'clicked') so the admin analytics surfaces bucketing on the
+/// events table see SES traffic. Best-effort: a failure is logged, never
+/// propagated (SNS must still receive 200 so the notification is not
+/// retried/duplicated).
+#[expect(clippy::too_many_arguments)]
+async fn insert_analytics_event(
+    state: &AppState,
+    tenant_id: &str,
+    message_id: &str,
+    event_type: &str,
+    recipient: Option<&str>,
+    link_url: Option<&str>,
+    user_agent: Option<&str>,
+    ip_address: Option<&str>,
+) {
+    if let Err(e) = sqlx::query(
+        "INSERT INTO events (id, tenant_id, message_id, event_type, recipient, link_url, user_agent, ip_address, timestamp)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())",
+    )
+    .bind(format!("evt_{}", uuid::Uuid::new_v4()))
+    .bind(tenant_id)
+    .bind(normalize_message_id(message_id))
+    .bind(event_type)
+    .bind(recipient)
+    .bind(link_url)
+    .bind(user_agent)
+    .bind(ip_address)
+    .execute(&state.db)
+    .await
+    {
+        warn!(event_type = %event_type, message_id = %message_id, error = %e, "Failed to record SES analytics event");
+    }
 }
 
 // ─── Bounce processing ────────────────────────────────────────
@@ -769,6 +842,22 @@ async fn process_complaint(state: &AppState, event: &SesEvent) -> Result<(), Api
                     }
                 }
 
+                // Analytics event — one 'complained' row per complained
+                // message (delivery_analytics' complaint rate reads these).
+                if let (Some(ref msg_id), Some(ref tid)) = (&apexmail_message_id, &tenant_id) {
+                    insert_analytics_event(
+                        state,
+                        tid,
+                        msg_id,
+                        "complained",
+                        Some(email),
+                        None,
+                        None,
+                        None,
+                    )
+                    .await;
+                }
+
                 // Queue webhook
                 if let Some(ref tid) = tenant_id {
                     let payload = serde_json::json!({
@@ -823,6 +912,17 @@ async fn process_delivery(state: &AppState, event: &SesEvent) -> Result<(), ApiE
         }
     }
 
+    // Analytics event — one 'delivered' row per message so the events-table
+    // surfaces (admin analytics, engagement metrics) observe SES deliveries.
+    if let (Some(ref msg_id), Some(ref tid)) = (&apexmail_message_id, &tenant_id) {
+        let recipient = delivery
+            .recipients
+            .as_ref()
+            .and_then(|r| r.first())
+            .map(String::as_str);
+        insert_analytics_event(state, tid, msg_id, "delivered", recipient, None, None, None).await;
+    }
+
     // Queue webhook
     if let Some(ref tid) = tenant_id {
         let payload = serde_json::json!({
@@ -834,6 +934,145 @@ async fn process_delivery(state: &AppState, event: &SesEvent) -> Result<(), ApiE
             "timestamp": delivery.timestamp,
         });
         queue_webhook_event(state, tid, "email.delivered", &payload).await;
+    }
+
+    Ok(())
+}
+
+// ─── Open / Click processing ──────────────────────────────────
+
+/// Extract the recipient from the SES mail destination (Open/Click events
+/// carry no recipient of their own).
+fn ses_recipient(event: &SesEvent) -> Option<String> {
+    event
+        .mail
+        .as_ref()
+        .and_then(|m| m.destination.as_ref())
+        .and_then(|d| d.first())
+        .cloned()
+}
+
+/// Process an SES Open notification: record an 'opened' analytics event and
+/// increment the message's open counters — mirroring the tracking-service
+/// processor's messages update (open_count +1, first_opened_at backfill).
+async fn process_open(state: &AppState, event: &SesEvent) -> Result<(), ApiError> {
+    let open = event
+        .open
+        .as_ref()
+        .ok_or_else(|| ApiError::Validation(vec!["Open event missing details".into()]))?;
+
+    let mail = event.mail.as_ref();
+    let apexmail_message_id = mail.and_then(|m| extract_apexmail_header(m, "X-ApexMail-MessageId"));
+    let tenant_id = mail.and_then(|m| extract_apexmail_header(m, "X-ApexMail-TenantId"));
+
+    debug!(
+        ses_message_id = ?mail.and_then(|m| m.message_id.as_ref()),
+        "SES open tracked"
+    );
+
+    if let (Some(ref msg_id), Some(ref tid)) = (&apexmail_message_id, &tenant_id) {
+        // Mirror tracking-service processor.rs: open_count += 1,
+        // first_opened_at backfilled on the first open.
+        if let Err(e) = sqlx::query(
+            "UPDATE messages SET
+                open_count = open_count + 1,
+                first_opened_at = COALESCE(first_opened_at, NOW()),
+                updated_at = NOW()
+             WHERE id = $1::uuid AND tenant_id = $2",
+        )
+        .bind(normalize_message_id(msg_id))
+        .bind(tid)
+        .execute(&state.db)
+        .await
+        {
+            warn!(message_id = %msg_id, error = %e, "Failed to update open stats");
+        }
+
+        insert_analytics_event(
+            state,
+            tid,
+            msg_id,
+            "opened",
+            ses_recipient(event).as_deref(),
+            None,
+            open.user_agent.as_deref(),
+            open.ip_address.as_deref(),
+        )
+        .await;
+    }
+
+    // Queue webhook
+    if let Some(ref tid) = tenant_id {
+        let payload = serde_json::json!({
+            "event": "email.opened",
+            "messageId": apexmail_message_id,
+            "userAgent": open.user_agent,
+            "timestamp": open.timestamp,
+        });
+        queue_webhook_event(state, tid, "email.opened", &payload).await;
+    }
+
+    Ok(())
+}
+
+/// Process an SES Click notification: record a 'clicked' analytics event and
+/// increment the message's click counters (click_count +1, first_clicked_at
+/// backfill), mirroring the tracking-service processor.
+async fn process_click(state: &AppState, event: &SesEvent) -> Result<(), ApiError> {
+    let click = event
+        .click
+        .as_ref()
+        .ok_or_else(|| ApiError::Validation(vec!["Click event missing details".into()]))?;
+
+    let mail = event.mail.as_ref();
+    let apexmail_message_id = mail.and_then(|m| extract_apexmail_header(m, "X-ApexMail-MessageId"));
+    let tenant_id = mail.and_then(|m| extract_apexmail_header(m, "X-ApexMail-TenantId"));
+
+    debug!(
+        ses_message_id = ?mail.and_then(|m| m.message_id.as_ref()),
+        link = ?click.link,
+        "SES click tracked"
+    );
+
+    if let (Some(ref msg_id), Some(ref tid)) = (&apexmail_message_id, &tenant_id) {
+        if let Err(e) = sqlx::query(
+            "UPDATE messages SET
+                click_count = click_count + 1,
+                first_clicked_at = COALESCE(first_clicked_at, NOW()),
+                updated_at = NOW()
+             WHERE id = $1::uuid AND tenant_id = $2",
+        )
+        .bind(normalize_message_id(msg_id))
+        .bind(tid)
+        .execute(&state.db)
+        .await
+        {
+            warn!(message_id = %msg_id, error = %e, "Failed to update click stats");
+        }
+
+        insert_analytics_event(
+            state,
+            tid,
+            msg_id,
+            "clicked",
+            ses_recipient(event).as_deref(),
+            click.link.as_deref(),
+            click.user_agent.as_deref(),
+            click.ip_address.as_deref(),
+        )
+        .await;
+    }
+
+    // Queue webhook
+    if let Some(ref tid) = tenant_id {
+        let payload = serde_json::json!({
+            "event": "email.clicked",
+            "messageId": apexmail_message_id,
+            "link": click.link,
+            "userAgent": click.user_agent,
+            "timestamp": click.timestamp,
+        });
+        queue_webhook_event(state, tid, "email.clicked", &payload).await;
     }
 
     Ok(())
@@ -981,6 +1220,64 @@ mod tests {
         assert_eq!(event.event_type, "Delivery");
         let delivery = event.delivery.unwrap();
         assert_eq!(delivery.processing_time_millis, Some(1200));
+    }
+
+    #[test]
+    fn test_parse_ses_open_and_click_events() {
+        let open: SesEvent = serde_json::from_str(
+            r#"{
+            "eventType": "Open",
+            "mail": {
+                "messageId": "ses-msg-open",
+                "destination": ["user@example.com"],
+                "headers": [
+                    {"name": "X-ApexMail-MessageId", "value": "msg_abc"},
+                    {"name": "X-ApexMail-TenantId", "value": "tenant-1"}
+                ]
+            },
+            "open": {
+                "timestamp": "2026-02-27T13:00:00Z",
+                "userAgent": "Mozilla/5.0",
+                "ipAddress": "203.0.113.9"
+            }
+        }"#,
+        )
+        .unwrap();
+        assert_eq!(open.event_type, "Open");
+        let open_payload = open.open.as_ref().unwrap();
+        assert_eq!(open_payload.user_agent.as_deref(), Some("Mozilla/5.0"));
+        // The recipient is derived from the mail destination.
+        assert_eq!(ses_recipient(&open).as_deref(), Some("user@example.com"));
+
+        let click: SesEvent = serde_json::from_str(
+            r#"{
+            "eventType": "Click",
+            "mail": {
+                "messageId": "ses-msg-click",
+                "destination": ["user@example.com"],
+                "headers": [
+                    {"name": "X-ApexMail-MessageId", "value": "abc"},
+                    {"name": "X-ApexMail-TenantId", "value": "tenant-1"}
+                ]
+            },
+            "click": {
+                "timestamp": "2026-02-27T14:00:00Z",
+                "link": "https://example.com/pricing",
+                "userAgent": "Mozilla/5.0",
+                "ipAddress": "203.0.113.9"
+            }
+        }"#,
+        )
+        .unwrap();
+        assert_eq!(click.event_type, "Click");
+        let click_payload = click.click.as_ref().unwrap();
+        assert_eq!(click_payload.link.as_deref(), Some("https://example.com/pricing"));
+    }
+
+    #[test]
+    fn test_normalize_message_id_strips_prefix() {
+        assert_eq!(normalize_message_id("msg_abc"), "abc");
+        assert_eq!(normalize_message_id("abc"), "abc");
     }
 
     #[test]

@@ -369,6 +369,20 @@ impl ObservabilityConfig {
         }
     }
 
+    /// Build a Postgres connection URL (credentials percent-encoded the same
+    /// way as [`Self::redis_url`]) for the `system_alerts` persistence pool
+    /// attached in bin/server.rs.
+    pub fn db_url(&self) -> String {
+        format!(
+            "postgres://{}:{}@{}:{}/{}",
+            urlencoding::encode(&self.db_user),
+            urlencoding::encode(&self.db_password),
+            self.db_host,
+            self.db_port,
+            self.database
+        )
+    }
+
     pub fn validate(&self) -> Result<(), String> {
         if self.port == 0 {
             return Err("OBSERVABILITY_PORT must be > 0".into());

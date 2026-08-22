@@ -206,10 +206,17 @@ pub struct CrossTenantPlansResponse {
     pub plans: Vec<PlanBreakdown>,
     pub total_revenue: f64,
     pub total_tenants: i64,
-    pub upgrade_count_30d: i64,
-    pub downgrade_count_30d: i64,
-    pub velocity: f64,
+    /// Plan-change upgrade count. Omitted (not zero): the `plan.changed`
+    /// audit action these were derived from is never emitted by any writer.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub upgrade_count_30d: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub downgrade_count_30d: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub velocity: Option<f64>,
     pub avg_tenant_lifetime_days: f64,
+    /// Honest data-omission notes surfaced to the caller.
+    pub notes: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -221,8 +228,10 @@ pub struct PlanBreakdown {
     pub monthly_revenue: f64,
     pub revenue_share: f64,
     pub avg_lifetime_days: f64,
-    pub upgrades_30d: i64,
-    pub downgrades_30d: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub upgrades_30d: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub downgrades_30d: Option<i64>,
 }
 
 fn monthly_revenue_cents(
@@ -231,8 +240,10 @@ fn monthly_revenue_cents(
     price_yearly: i64,
 ) -> i64 {
     match billing_interval {
+        // Round-half-up yearly normalization, mirroring billing-service's
+        // yearly_price_to_monthly_mrr (no truncation).
         Some(interval) if interval.eq_ignore_ascii_case("yearly") || interval.eq_ignore_ascii_case("year") => {
-            price_yearly / 12
+            (price_yearly + 6) / 12
         }
         _ => price_monthly,
     }
@@ -249,12 +260,10 @@ async fn get_cross_tenant_plans(
     require_scopes(&auth, &["*"])?;
 
     let db = &state.db;
-    let cutoff_30 = Utc::now() - Duration::days(30);
 
     let has_tenants = table_exists(db, "tenants").await;
-    let has_subs = table_exists(db, "subscriptions").await;
+    let has_subs = table_exists(db, "stripe_subscriptions").await;
     let has_plans = table_exists(db, "plans").await;
-    let has_audit = table_exists(db, "audit_logs").await;
 
     let plan_tenant_counts: HashMap<String, i64> = if has_tenants {
         sqlx::query_as::<_, (String, i64)>(
@@ -273,7 +282,6 @@ async fn get_cross_tenant_plans(
     #[derive(Debug, sqlx::FromRow)]
     struct SubRow {
         plan_name: String,
-        tenant_id: String,
         status: String,
         billing_interval: Option<String>,
         price_monthly: i64,
@@ -281,8 +289,12 @@ async fn get_cross_tenant_plans(
         created_at: DateTime<Utc>,
     }
 
+    // Subscriptions are read from stripe_subscriptions (the table billing
+    // webhooks write), joined via tenants.plan to plans pricing — mirroring
+    // billing-service's get_mrr_report pattern with proper yearly rounding.
     let subscriptions = if has_subs && has_plans {
-        let has_billing_interval = column_exists(db, "subscriptions", "billing_interval").await;
+        let has_billing_interval =
+            column_exists(db, "stripe_subscriptions", "billing_interval").await;
         let billing_col = if has_billing_interval {
             "COALESCE(NULLIF(s.billing_interval, ''), 'monthly')"
         } else {
@@ -303,15 +315,15 @@ async fn get_cross_tenant_plans(
         };
 
         let sql = format!(
-            "SELECT COALESCE(NULLIF(s.plan_name, ''), 'free') as plan_name,
-                    s.tenant_id::text as tenant_id,
+            "SELECT COALESCE(NULLIF(s.plan, ''), NULLIF(t.plan, ''), 'free') as plan_name,
                     s.status,
                     {billing_col} as billing_interval,
                     {price_monthly_col} as price_monthly,
                     {price_yearly_col} as price_yearly,
                     s.created_at
-             FROM subscriptions s
-             LEFT JOIN plans p ON p.name = s.plan_name"
+             FROM stripe_subscriptions s
+             JOIN tenants t ON t.id = s.tenant_id
+             LEFT JOIN plans p ON p.name = t.plan"
         );
 
         sqlx::query_as::<_, SubRow>(&sql)
@@ -322,29 +334,14 @@ async fn get_cross_tenant_plans(
         Vec::new()
     };
 
-    let plan_changes: Vec<(String, String, DateTime<Utc>)> = if has_audit {
-        let audit_time_col = if column_exists(db, "audit_logs", "timestamp").await {
-            "timestamp"
-        } else {
-            "created_at"
-        };
-        let sql = format!(
-            "SELECT COALESCE(a.details->>'previousPlan', 'unknown'),
-                    COALESCE(a.details->>'newPlan', 'unknown'),
-                    a.{audit_time_col}
-             FROM audit_logs a
-             WHERE a.action = 'plan.changed'
-               AND a.details IS NOT NULL
-               AND a.{audit_time_col} >= $1",
-        );
-        sqlx::query_as::<_, (String, String, DateTime<Utc>)>(&sql)
-            .bind(cutoff_30)
-            .fetch_all(db)
-            .await
-            .unwrap_or_default()
-    } else {
-        Vec::new()
-    };
+    // Plan-change velocity is omitted with an honest note: the `plan.changed`
+    // audit action it was derived from is never emitted by any writer, and
+    // stripe_webhook_events stores only event ids/types (no plan payload).
+    let notes: Vec<String> = vec![
+        "plan-change velocity (upgrades, downgrades, velocity) omitted: no writer \
+         records plan-change history"
+            .into(),
+    ];
 
     let mut plan_revenue: HashMap<String, i64> = HashMap::new();
     let mut plan_active_subs: HashMap<String, i64> = HashMap::new();
@@ -369,26 +366,6 @@ async fn get_cross_tenant_plans(
                 .entry(plan.clone())
                 .or_default()
                 .push(lifetime);
-        }
-    }
-
-    let mut plan_upgrades: HashMap<String, i64> = HashMap::new();
-    let mut plan_downgrades: HashMap<String, i64> = HashMap::new();
-    let mut total_upgrades = 0i64;
-    let mut total_downgrades = 0i64;
-
-    for (prev, next, _ts) in &plan_changes {
-        let is_upgrade = plan_revenue.get(next).unwrap_or(&0) > plan_revenue.get(prev).unwrap_or(&0);
-        let is_downgrade =
-            plan_revenue.get(next).unwrap_or(&0) < plan_revenue.get(prev).unwrap_or(&0);
-
-        if is_upgrade {
-            *plan_upgrades.entry(next.clone()).or_default() += 1;
-            total_upgrades += 1;
-        }
-        if is_downgrade {
-            *plan_downgrades.entry(prev.clone()).or_default() += 1;
-            total_downgrades += 1;
         }
     }
 
@@ -431,8 +408,6 @@ async fn get_cross_tenant_plans(
                 Some(vals) if !vals.is_empty() => vals.iter().sum::<f64>() / vals.len() as f64,
                 _ => 0.0,
             };
-            let upgrades = plan_upgrades.get(&plan).copied().unwrap_or(0);
-            let downgrades = plan_downgrades.get(&plan).copied().unwrap_or(0);
 
             PlanBreakdown {
                 plan,
@@ -441,8 +416,9 @@ async fn get_cross_tenant_plans(
                 monthly_revenue,
                 revenue_share,
                 avg_lifetime_days: avg_lifetime,
-                upgrades_30d: upgrades,
-                downgrades_30d: downgrades,
+                // No plan-change history source exists (see note).
+                upgrades_30d: None,
+                downgrades_30d: None,
             }
         })
         .collect();
@@ -454,20 +430,15 @@ async fn get_cross_tenant_plans(
             .then_with(|| a.plan.cmp(&b.plan))
     });
 
-    let velocity = if total_tenants_count > 0 {
-        (total_upgrades - total_downgrades) as f64 / total_tenants_count as f64
-    } else {
-        0.0
-    };
-
     Ok(Json(CrossTenantPlansResponse {
         plans,
         total_revenue: cents_to_dollars(total_revenue_cents),
         total_tenants: total_tenants_count,
-        upgrade_count_30d: total_upgrades,
-        downgrade_count_30d: total_downgrades,
-        velocity,
+        upgrade_count_30d: None,
+        downgrade_count_30d: None,
+        velocity: None,
         avg_tenant_lifetime_days,
+        notes,
     }))
 }
 
@@ -516,7 +487,7 @@ async fn get_cross_tenant_growth(
 
     let has_messages = table_exists(db, "messages").await;
     let has_tenants = table_exists(db, "tenants").await;
-    let has_subs = table_exists(db, "subscriptions").await;
+    let has_subs = table_exists(db, "stripe_subscriptions").await;
     let has_plans = table_exists(db, "plans").await;
 
     let total_emails_daily = if has_messages {
@@ -608,9 +579,9 @@ async fn get_cross_tenant_growth(
         .unwrap_or(0)
     } else if has_subs {
         sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*)::bigint FROM subscriptions
+            "SELECT COUNT(*)::bigint FROM stripe_subscriptions
              WHERE status = 'canceled'
-               AND updated_at >= $1",
+               AND COALESCE(canceled_at, updated_at) >= $1",
         )
         .bind(cutoff_30)
         .fetch_one(db)
@@ -627,7 +598,10 @@ async fn get_cross_tenant_growth(
     };
 
     let platform_revenue_growth_rate = if has_subs && has_plans {
-        let has_billing_interval = column_exists(db, "subscriptions", "billing_interval").await;
+        // MRR growth from stripe_subscriptions (billing's writer table),
+        // mirroring billing-service's get_mrr_report pattern.
+        let has_billing_interval =
+            column_exists(db, "stripe_subscriptions", "billing_interval").await;
         let billing_expr = if has_billing_interval {
             "COALESCE(NULLIF(s.billing_interval, ''), 'monthly')"
         } else {
@@ -637,24 +611,26 @@ async fn get_cross_tenant_growth(
         let sql_current = format!(
             "SELECT COALESCE(SUM(
                     CASE
-                        WHEN {billing_expr} IN ('year', 'yearly') THEN COALESCE(p.price_yearly, 0) / 12
-                        ELSE COALESCE(p.price_monthly, 0)
+                        WHEN {billing_expr} IN ('year', 'yearly') THEN ROUND(p.price_yearly / 12.0)::bigint
+                        ELSE p.price_monthly
                     END
                 ), 0)::bigint
-             FROM subscriptions s
-             LEFT JOIN plans p ON p.name = s.plan_name
+             FROM stripe_subscriptions s
+             JOIN tenants t ON t.id = s.tenant_id
+             JOIN plans p ON p.name = t.plan
              WHERE s.status IN ('active', 'trialing', 'past_due')"
         );
 
         let sql_previous = format!(
             "SELECT COALESCE(SUM(
                     CASE
-                        WHEN {billing_expr} IN ('year', 'yearly') THEN COALESCE(p.price_yearly, 0) / 12
-                        ELSE COALESCE(p.price_monthly, 0)
+                        WHEN {billing_expr} IN ('year', 'yearly') THEN ROUND(p.price_yearly / 12.0)::bigint
+                        ELSE p.price_monthly
                     END
                 ), 0)::bigint
-             FROM subscriptions s
-             LEFT JOIN plans p ON p.name = s.plan_name
+             FROM stripe_subscriptions s
+             JOIN tenants t ON t.id = s.tenant_id
+             JOIN plans p ON p.name = t.plan
              WHERE s.status IN ('active', 'trialing', 'past_due')
                AND s.created_at < $1"
         );
@@ -727,4 +703,40 @@ async fn get_cross_tenant_growth(
         emails_timeline_daily: emails_timeline,
         signups_timeline_daily: signups_timeline,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn monthly_revenue_cents_rounds_yearly_half_up() {
+        // Yearly €25 000 → 2 083 cents/month (not truncated 2 082),
+        // mirroring billing-service's yearly normalization.
+        assert_eq!(monthly_revenue_cents(Some("yearly"), 2_500, 25_000), 2_083);
+        assert_eq!(monthly_revenue_cents(Some("year"), 2_500, 25_000), 2_083);
+        assert_eq!(monthly_revenue_cents(Some("monthly"), 2_500, 25_000), 2_500);
+        assert_eq!(monthly_revenue_cents(None, 2_500, 25_000), 2_500);
+    }
+
+    #[test]
+    fn plans_response_omits_velocity_without_a_data_source() {
+        let response = CrossTenantPlansResponse {
+            plans: Vec::new(),
+            total_revenue: 0.0,
+            total_tenants: 0,
+            upgrade_count_30d: None,
+            downgrade_count_30d: None,
+            velocity: None,
+            avg_tenant_lifetime_days: 0.0,
+            notes: Vec::new(),
+        };
+
+        // Omitted (None), not a fabricated zero velocity.
+        assert!(response.velocity.is_none());
+        assert!(response.upgrade_count_30d.is_none());
+        let json = serde_json::to_value(&response).unwrap();
+        assert!(json.get("velocity").is_none());
+        assert!(json.get("upgradeCount30d").is_none());
+    }
 }

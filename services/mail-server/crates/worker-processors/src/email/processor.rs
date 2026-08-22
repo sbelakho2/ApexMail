@@ -79,6 +79,16 @@ const SUPPRESSED_UPDATE_SQL: &str = r#"
     WHERE id = $2::uuid
 "#;
 
+/// D: mirror of the SES notification handler's message transition
+/// (api-server ses_notifications.rs updates messages.status on delivery
+/// events). The SMTP path has no out-of-band notifications, so an accepted
+/// send IS the terminal message state: 'queued' → 'sent'. Only rows still in
+/// 'queued' transition — never crouch 'bounced'/'delivered' set elsewhere.
+const MESSAGES_SENT_UPDATE_SQL: &str = r#"
+    UPDATE messages SET status = 'sent', updated_at = NOW()
+    WHERE id = $1::uuid AND tenant_id = $2 AND status = 'queued'
+"#;
+
 /// G.3c: duplicate-window reclaim bookkeeping — drop the recipient from the
 /// pending set and append it to an auditable `possibly_sent` metadata list.
 const POSSIBLY_SENT_UPDATE_SQL: &str = r#"
@@ -750,6 +760,23 @@ impl EmailProcessor {
 
         // Send email
         let send_result = self.transport.send(&email).await;
+
+        // Per-attempt delivery log (email_delivery_log) — the table
+        // delivery_analytics' latency percentiles and billing's usage ingest
+        // read; previously no runtime writer existed, so those surfaces were
+        // structurally zero. Best-effort: a logging failure must not fail
+        // the send path.
+        match &send_result {
+            Ok(result) => {
+                self.record_delivery_attempt(job, true, Some(&result.response), None)
+                    .await;
+            }
+            Err(error) => {
+                self.record_delivery_attempt(job, false, None, Some(&error.to_string()))
+                    .await;
+            }
+        }
+
         let outcome: ProcessorResult<()> = match send_result {
             Ok(result) => {
                 self.smtp_circuit_breaker.record_success();
@@ -1023,6 +1050,45 @@ impl EmailProcessor {
         })
     }
 
+    /// Record one row per delivery attempt in `email_delivery_log`
+    /// (schema: migrations 001/050). Readers: delivery_analytics'
+    /// latency percentiles (JOIN email_queue ON eq.id = dl.email_id,
+    /// dl.attempted_at, dl.success, dl.smtp_response) and billing's
+    /// usage ingest (success rows by attempted_at day, tenant via the
+    /// queue). Best-effort by design — never fails the send.
+    async fn record_delivery_attempt(
+        &self,
+        job: &EmailJob,
+        success: bool,
+        smtp_response: Option<&str>,
+        error_message: Option<&str>,
+    ) {
+        if let Err(e) = sqlx::query(
+            r#"
+            INSERT INTO email_delivery_log
+                (email_id, attempt_number, smtp_response, success, error_message, attempted_at, status)
+            VALUES ($1::uuid, $2, $3, $4, $5, NOW(), $6)
+            "#,
+        )
+        .bind(&job.id)
+        // job.attempt is 0-based; attempt_number is 1-based.
+        .bind(job.attempt + 1)
+        .bind(smtp_response)
+        .bind(success)
+        .bind(error_message)
+        .bind(if success { "sent" } else { "failed" })
+        .execute(&self.db)
+        .await
+        {
+            warn!(
+                job_id = %job.id,
+                attempt = job.attempt + 1,
+                error = %e,
+                "Failed to record delivery attempt in email_delivery_log"
+            );
+        }
+    }
+
     /// Handle successful send.
     ///
     /// A queue row can carry MULTIPLE recipients (FIX-8 expands it into one
@@ -1094,6 +1160,46 @@ impl EmailProcessor {
         .bind(&job.to)
         .execute(&self.db)
         .await?;
+
+        // Stamp the transport actually used on the message row
+        // (messages.headers X-Mail-Provider + the transport column) so
+        // delivery_analytics' provider breakdown buckets real sends instead
+        // of everything landing in 'unknown'. Best-effort: a legacy
+        // non-UUID message id must not fail the send.
+        if let Err(e) = sqlx::query(
+            r#"
+            UPDATE messages SET
+                headers = COALESCE(headers, '{}'::jsonb)
+                    || jsonb_build_object('X-Mail-Provider', $1::text),
+                transport = $1::text,
+                updated_at = NOW()
+            WHERE id = $2::uuid AND tenant_id = $3
+            "#,
+        )
+        .bind(transport_provider_label(&self.config.transport_type))
+        .bind(&job.message_id)
+        .bind(&job.tenant_id)
+        .execute(&self.db)
+        .await
+        {
+            warn!(
+                message_id = %job.message_id,
+                error = %e,
+                "Failed to stamp X-Mail-Provider on message row"
+            );
+        }
+
+        // D: transition the audit `messages` row 'queued' → 'sent' (the SMTP
+        // counterpart of the SES delivery-notification handler). Best-effort
+        // parse: a legacy job without a UUID message id skips the transition
+        // rather than failing the (already successful) send handling.
+        if let Ok(message_uuid) = uuid::Uuid::parse_str(&job.message_id) {
+            sqlx::query(MESSAGES_SENT_UPDATE_SQL)
+                .bind(message_uuid)
+                .bind(&job.tenant_id)
+                .execute(&self.db)
+                .await?;
+        }
 
         // FIX-9/M56: feed the FBL server's complaint-rate alerting. The
         // `mta:reputation:{domain}:{date}` "sent" counter was never written
@@ -1479,6 +1585,16 @@ use base64::Engine;
 /// (feedback_loop.rs: `mta:reputation:{domain}:{YYYY-MM-DD}`, field "sent").
 fn reputation_sent_key(domain: &str, date: &str) -> String {
     format!("mta:reputation:{domain}:{date}")
+}
+
+/// Provider label stamped on `messages.headers['X-Mail-Provider']` at send
+/// time, matching the values delivery_analytics' provider breakdown buckets
+/// on ('ses' / 'smtp').
+fn transport_provider_label(transport_type: &TransportType) -> &'static str {
+    match transport_type {
+        TransportType::Ses => "ses",
+        _ => "smtp",
+    }
 }
 
 /// Envelope-sender domain used for per-domain reputation counters.
@@ -2103,6 +2219,127 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------------
+    // B: tracking rewrite gate honors the env-driven enabled flag
+    // ---------------------------------------------------------------------------
+
+    /// Serializes env-mutating tests (std::env is process-global).
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Builds an EmailProcessor around a lazy (never-connected) pair of pools
+    /// with the given tracking config. The SES transport keeps `prepare_email`
+    /// off the DKIM path, so no key material is needed.
+    async fn make_processor_with_tracking(
+        tracking: crate::common::TrackingConfig,
+    ) -> EmailProcessor {
+        let db = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect_lazy("postgres://localhost/unused")
+            .unwrap();
+        let redis = deadpool_redis::Config::from_url("redis://127.0.0.1:6379")
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .unwrap();
+        let config = EmailConfig {
+            tracking,
+            ..Default::default()
+        };
+        EmailProcessor::new(db, redis, config).await.unwrap()
+    }
+
+    fn tracking_gate_job() -> EmailJob {
+        EmailJob {
+            id: "job-1".into(),
+            message_id: "msg-1".into(),
+            tenant_id: "tenant-1".into(),
+            domain_id: "domain-1".into(),
+            from: "sender@example.com".into(),
+            to: "recipient@example.com".into(),
+            subject: "Hello".into(),
+            html: Some(r#"<html><body><a href="https://example.com/x">x</a></body></html>"#.into()),
+            text: None,
+            headers: None,
+            attachments: None,
+            campaign_id: None,
+            tags: None,
+            metadata: None,
+            scheduled_at: None,
+            attempt: 1,
+            created_at: Utc::now(),
+        }
+    }
+
+    fn tracking_gate_domain() -> Domain {
+        Domain {
+            id: "domain-1".into(),
+            tenant_id: "tenant-1".into(),
+            domain: "example.com".into(),
+            dkim_selector: None,
+            dkim_public_key: None,
+            dkim_private_key: None,
+            warmup_enabled: false,
+            warmup_day: 0,
+            return_path: None,
+        }
+    }
+
+    /// B: with `enabled: false` the gate in `prepare_email` must leave the
+    /// HTML byte-identical — no pixel, no link rewriting.
+    #[tokio::test]
+    async fn tracking_gate_disabled_leaves_html_untouched() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // The env secret must not matter when the gate is closed.
+        std::env::set_var("TRACKING_SECRET_KEY", "k".repeat(40));
+
+        let processor = make_processor_with_tracking(crate::common::TrackingConfig {
+            enabled: false,
+            ..crate::common::TrackingConfig::default()
+        })
+        .await;
+
+        let job = tracking_gate_job();
+        let domain = tracking_gate_domain();
+        let prepared = processor.prepare_email(&job, &domain).unwrap();
+        assert_eq!(
+            prepared.html.as_deref(),
+            job.html.as_deref(),
+            "disabled tracking must not rewrite the HTML"
+        );
+
+        std::env::remove_var("TRACKING_SECRET_KEY");
+    }
+
+    /// B: with `enabled: true` (and the shared secret configured) the gate
+    /// lets the pixel + link rewriters run.
+    #[tokio::test]
+    async fn tracking_gate_enabled_rewrites_html() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("TRACKING_SECRET_KEY", "k".repeat(40));
+
+        let processor = make_processor_with_tracking(crate::common::TrackingConfig {
+            enabled: true,
+            base_url: "https://track.example.com".into(),
+            open_pixel_path: "/o".into(),
+            click_redirect_path: "/c".into(),
+            secret_key: None,
+        })
+        .await;
+
+        let job = tracking_gate_job();
+        let domain = tracking_gate_domain();
+        let prepared = processor.prepare_email(&job, &domain).unwrap();
+        let html = prepared.html.unwrap();
+        assert!(
+            html.contains("https://track.example.com/o/"),
+            "open pixel must be embedded: {html}"
+        );
+        assert!(
+            html.contains("https://track.example.com/c/"),
+            "links must be rewritten: {html}"
+        );
+
+        std::env::remove_var("TRACKING_SECRET_KEY");
+    }
+
+    // ---------------------------------------------------------------------------
     // FIX-8: multi-recipient job expansion
     // ---------------------------------------------------------------------------
 
@@ -2327,6 +2564,14 @@ mod tests {
     }
 
     #[test]
+    fn test_transport_provider_label_matches_delivery_analytics_buckets() {
+        // delivery_analytics buckets on headers->>'X-Mail-Provider'; the
+        // values stamped at send time must be the canonical 'ses'/'smtp'.
+        assert_eq!(transport_provider_label(&TransportType::Ses), "ses");
+        assert_eq!(transport_provider_label(&TransportType::Smtp), "smtp");
+    }
+
+    #[test]
     fn test_envelope_domain() {
         assert_eq!(envelope_domain("sender@example.com"), Some("example.com"));
         assert_eq!(
@@ -2414,6 +2659,31 @@ mod tests {
         assert!(
             sql.contains("THEN 'sent' ELSE status END"),
             "row completes when pending empties"
+        );
+    }
+
+    /// D: the audit `messages` row must follow the queue row: an accepted
+    /// SMTP send transitions status 'queued' → 'sent' (mirroring the SES
+    /// delivery-notification handler), scoped to tenant and ONLY from
+    /// 'queued' so bounce/complaint states set by other paths win.
+    #[test]
+    fn messages_sent_update_transitions_only_queued_rows() {
+        let sql = MESSAGES_SENT_UPDATE_SQL;
+        assert!(
+            sql.contains("SET status = 'sent'"),
+            "must set the terminal sent status"
+        );
+        assert!(
+            sql.contains("status = 'queued'"),
+            "transition must be conditional on the current status"
+        );
+        assert!(
+            sql.contains("tenant_id = $2"),
+            "must be tenant-scoped"
+        );
+        assert!(
+            sql.contains("id = $1::uuid"),
+            "must key on the message UUID"
         );
     }
 

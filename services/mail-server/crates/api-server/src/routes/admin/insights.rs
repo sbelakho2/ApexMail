@@ -685,6 +685,30 @@ async fn get_trends(
     Ok(Json(trends))
 }
 
+/// Counts active tenants with no verified sending domain. The domains
+/// table's column is `verified` (migration 052) — the previous query read a
+/// non-existent `d.is_verified`, which errored the count to 0 (via
+/// unwrap_or(0)) so this recommendation could never fire.
+const UNVERIFIED_DOMAINS_SQL: &str = "SELECT COUNT(DISTINCT t.id)::bigint
+         FROM tenants t
+         LEFT JOIN domains d ON d.tenant_id::text = t.id::text AND d.verified = true
+         WHERE t.status = 'active' AND d.id IS NULL";
+
+/// The unverified-domains onboarding recommendation, built from the tenant
+/// count. Returns None when every active tenant has a verified domain.
+fn unverified_domains_recommendation(unverified: i64) -> Option<Recommendation> {
+    (unverified > 0).then(|| Recommendation {
+        category: "growth".into(),
+        priority: "medium".into(),
+        title: "Onboarding: tenants without verified domains".into(),
+        description: format!(
+            "{} active tenants have no verified sending domain. Send onboarding nudges to improve activation rate.",
+            unverified
+        ),
+        actionable: true,
+    })
+}
+
 async fn get_recommendations(
     State(state): State<AppState>,
     auth: AuthUser,
@@ -725,32 +749,19 @@ async fn get_recommendations(
     }
 
     // Check for tenants without verified domains
-    let unverified: i64 = sqlx::query_scalar(
-        "SELECT COUNT(DISTINCT t.id)::bigint
-         FROM tenants t
-         LEFT JOIN domains d ON d.tenant_id::text = t.id::text AND d.is_verified = true
-         WHERE t.status = 'active' AND d.id IS NULL",
-    )
-    .fetch_one(db)
-    .await
-    .unwrap_or(0);
+    let unverified: i64 = sqlx::query_scalar(UNVERIFIED_DOMAINS_SQL)
+        .fetch_one(db)
+        .await
+        .unwrap_or(0);
 
-    if unverified > 0 {
-        recommendations.push(Recommendation {
-            category: "growth".into(),
-            priority: "medium".into(),
-            title: "Onboarding: tenants without verified domains".into(),
-            description: format!(
-                "{} active tenants have no verified sending domain. Send onboarding nudges to improve activation rate.",
-                unverified
-            ),
-            actionable: true,
-        });
+    if let Some(recommendation) = unverified_domains_recommendation(unverified) {
+        recommendations.push(recommendation);
     }
 
-    // Check for stale trials
+    // Check for stale trials (stripe_subscriptions — the table billing
+    // webhooks write; the legacy `subscriptions` table has no writer)
     let stale_trials: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*)::bigint FROM subscriptions
+        "SELECT COUNT(*)::bigint FROM stripe_subscriptions
          WHERE status = 'trialing'
            AND created_at < NOW() - INTERVAL '30 days'",
     )
@@ -806,6 +817,28 @@ mod tests {
         let (pct, dir) = calc_change_pct(100.0, 100.0);
         assert!((pct - 0.0).abs() < 0.01);
         assert_eq!(dir, "flat");
+    }
+
+    #[test]
+    fn unverified_domains_sql_reads_real_verified_column() {
+        // The column is `verified` (migration 052); `d.is_verified` never
+        // existed, so the count always errored to zero.
+        assert!(UNVERIFIED_DOMAINS_SQL.contains("d.verified = true"));
+        assert!(!UNVERIFIED_DOMAINS_SQL.contains("is_verified"));
+    }
+
+    #[test]
+    fn unverified_domains_recommendation_fires_for_seeded_unverified_domain() {
+        // A tenant with an unverified domain (count > 0) → fires.
+        let recommendation =
+            unverified_domains_recommendation(1).expect("must fire when a tenant lacks a verified domain");
+        assert_eq!(recommendation.category, "growth");
+        assert_eq!(recommendation.priority, "medium");
+        assert!(recommendation.actionable);
+        assert!(recommendation.description.contains("1 active tenants"));
+
+        // All tenants verified → no recommendation.
+        assert!(unverified_domains_recommendation(0).is_none());
     }
 
     #[test]
