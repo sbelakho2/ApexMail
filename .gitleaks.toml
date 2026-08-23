@@ -92,6 +92,18 @@ paths = [
     "(^|/)docs/api/authentication[.]md$",
     "(^|/)docs/support-playbooks/ip-allowlist-security-controls[.]md$",
     "(^|/)apps/marketing-zola/content/docs/api/index[.]md$",
+    #
+    # 2026-08-23 curl-auth-header triage (97 hits, every one reviewed: the
+    # rule fires on DOCUMENTED curl examples — `-H "Authorization: Bearer
+    # <your-key>"` placeholders in docs, README quickstarts, and the
+    # marketing/sales-autopilot example consoles; none is a credential):
+    "^README[.]md$",
+    "(^|/)docs/enterprise/(compliance|support|sub-accounts|qbr|whitelabel|template-approval|private-cloud|sso|log-streaming)[.]md$",
+    "(^|/)docs/user-guide/(getting-started|troubleshooting)[.]md$",
+    "(^|/)docs/(quickstart|deployment/quickstart|api/streaming)[.]md$",
+    "(^|/)apps/marketing/src/components/(api-console/InteractiveConsole|home/LiveAPIConsole)[.]tsx$",
+    "(^|/)apps/sales-autopilot/src/campaigns/(error-encyclopedia|activation-path)[.]ts$",
+    "(^|/)apps/marketing-zola/public/docs/api/index[.]html$",
 ]
 
 # NOTE on breadth: the entries above are directory-anchored for suites whose

@@ -101,6 +101,14 @@ run_cargo_tests() {
         _test_env="$_test_env TEST_REDIS_URL=redis://127.0.0.1:1"
     fi
 
+    # macOS (this dev host): rustls-native-certs reads the platform store
+    # via the Security framework, which yields nothing in non-GUI shells —
+    # the AWS SDK's TLS provider then panics ("no valid root certificates").
+    # A portable PEM bundle (present on macOS and Linux) restores it.
+    if [ -f /etc/ssl/cert.pem ] && [ -z "${SSL_CERT_FILE:-}" ]; then
+        _test_env="$_test_env SSL_CERT_FILE=/etc/ssl/cert.pem"
+    fi
+
     ci_info "running cargo tests --workspace ($(printf '%s' "$_test_env" | tr ' ' ','))"
     # rust-check.yml ran `cargo nextest run --workspace --all-targets` —
     # nextest isolates every test in its own process, which matters here:
