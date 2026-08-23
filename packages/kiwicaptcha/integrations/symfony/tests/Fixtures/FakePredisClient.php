@@ -132,8 +132,6 @@ final class FakePredisClient extends \Predis\Client
             'GETDEL' => $this->fakeGetdel($arguments),
             'SET' => $this->fakeSet($arguments),
             'HINCRBYFLOAT' => $this->fakeHincrbyfloat($arguments),
-            'HINCRBY' => $this->fakeHincrby($arguments),
-            'HDEL' => $this->fakeHdel($arguments),
             'HGETALL' => $this->fakeHgetall($arguments),
             'HSET' => $this->fakeHset($arguments),
             'HGET' => $this->fakeHget($arguments),
@@ -203,39 +201,6 @@ final class FakePredisClient extends \Predis\Client
         $this->hashes[$key][$field] = ($this->hashes[$key][$field] ?? 0.0) + $delta;
 
         return (string) $this->hashes[$key][$field];
-    }
-
-    /**
-     * hincrby: bump one hash field by an integer (the bucketed global
-     * limiter's per-second admission count) and return the new value.
-     */
-    private function fakeHincrby(array $arguments): int
-    {
-        $key = (string) $arguments[0];
-        $field = (string) $arguments[1];
-        $delta = (int) $arguments[2];
-        $this->hashes[$key] ??= [];
-        $this->hashes[$key][$field] = ($this->hashes[$key][$field] ?? 0) + $delta;
-
-        return (int) $this->hashes[$key][$field];
-    }
-
-    /** hdel: drop one or more hash fields (the pruned bucket counts). */
-    private function fakeHdel(array $arguments): int
-    {
-        $key = (string) $arguments[0];
-        $removed = 0;
-        foreach (\array_slice($arguments, 1) as $field) {
-            if (isset($this->hashes[$key][(string) $field])) {
-                unset($this->hashes[$key][(string) $field]);
-                $removed++;
-            }
-        }
-        if (isset($this->hashes[$key]) && $this->hashes[$key] === []) {
-            unset($this->hashes[$key]);
-        }
-
-        return $removed;
     }
 
     /**
@@ -362,20 +327,6 @@ final class FakePredisClient extends \Predis\Client
         return $this->zsets[$key][$member];
     }
 
-    /**
-     * The bucketed global window count: the sum of the retained seconds'
-     * hash counts (mirrors the Lua sum of HGET over the ZSET members).
-     */
-    private function bucketCount(string $key, string $hashKey): int
-    {
-        $total = 0;
-        foreach ($this->zsets[$key] ?? [] as $member => $score) {
-            $total += (int) ($this->hashes[$hashKey][$member] ?? 0);
-        }
-
-        return $total;
-    }
-
     /** @param list<mixed> $arguments */
     private function fakeZrem(array $arguments): int
     {
@@ -451,14 +402,18 @@ final class FakePredisClient extends \Predis\Client
 
         if (str_contains($script, 'Outstanding challenge issuance')) {
             // OutstandingChallenges::issue: keys[1] per-source counter,
-            // keys[2] the global LIVE-outstanding ZSET; argv[1] source cap,
-            // argv[2] global cap, argv[3] TTL seconds, argv[4] absolute
-            // expiry (the ZSET score), argv[5] the minted nonce (the
-            // member). GET the source cap -> prune expired live members ->
-            // refuse 0/-1 before anything is written -> INCR + EXPIRE the
-            // source counter and `ZADD` the nonce at its absolute expiry.
+            // keys[2] the global LIVE-outstanding ZSET, keys[3] the
+            // issuance sidecar (nonce -> source pseudonym); argv[1] source
+            // cap, argv[2] global cap, argv[3] TTL seconds, argv[4]
+            // absolute expiry (the ZSET score), argv[5] the minted nonce
+            // (the member), argv[6] the source pseudonym. GET the source
+            // cap -> prune expired live members -> refuse 0/-1 before
+            // anything is written -> INCR + EXPIRE the source counter,
+            // `ZADD` the nonce at its absolute expiry and SET the sidecar
+            // (same EX).
             $source = (string) $keys[0];
             $global = (string) $keys[1];
+            $sidecar = (string) $keys[2];
             $sourceCap = (int) $rest[0];
             $globalCap = (int) $rest[1];
             $ttl = (int) $rest[2];
@@ -472,22 +427,26 @@ final class FakePredisClient extends \Predis\Client
             $this->fakeIncr([$source]);
             $this->fakePexpire([$source, $ttl * 1000]);
             $this->fakeZadd([$global, (string) $rest[3], (string) $rest[4]]);
+            $this->fakeSet([$sidecar, (string) $rest[5], 'EX', $ttl]);
 
             return 1;
         }
 
         if (str_contains($script, 'Outstanding challenge solve')) {
             // OutstandingChallenges::solved: keys[1] per-source counter,
-            // keys[2] the global live ZSET; argv[1] the solved nonce ('' =
-            // none). Best-effort DECR floored at 0 + ZREM the nonce.
+            // keys[2] the global live ZSET, keys[3] the issuance sidecar;
+            // argv[1] the solved nonce ('' = none). Best-effort DECR
+            // floored at 0 + ZREM the nonce + DEL the sidecar.
             $source = (string) $keys[0];
             $global = (string) $keys[1];
+            $sidecar = (string) $keys[2];
             $v = $this->counters[$source] ?? 0;
             if ($v > 0) {
                 $this->fakeDecr([$source]);
             }
             if ((string) $rest[0] !== '') {
                 $this->fakeZrem([$global, (string) $rest[0]]);
+                $this->fakeDel([$sidecar]);
             }
 
             return $v - 1;
@@ -495,18 +454,21 @@ final class FakePredisClient extends \Predis\Client
 
         if (str_contains($script, 'Outstanding challenge aborted')) {
             // OutstandingChallenges::abortedBeforeHandoff: keys[1]
-            // per-source counter, keys[2] the global live ZSET; argv[1]
-            // the abandoned nonce ('' = none). Best-effort DECR floored at
-            // 0 + ZREM the nonce; returns 1 (rollback never changes the
+            // per-source counter, keys[2] the global live ZSET, keys[3]
+            // the issuance sidecar; argv[1] the abandoned nonce ('' =
+            // none). Best-effort DECR floored at 0 + ZREM the nonce + DEL
+            // the sidecar; returns 1 (rollback never changes the
             // response).
             $source = (string) $keys[0];
             $global = (string) $keys[1];
+            $sidecar = (string) $keys[2];
             $v = $this->counters[$source] ?? 0;
             if ($v > 0) {
                 $this->fakeDecr([$source]);
             }
             if ((string) $rest[0] !== '') {
                 $this->fakeZrem([$global, (string) $rest[0]]);
+                $this->fakeDel([$sidecar]);
             }
 
             return 1;
@@ -514,9 +476,28 @@ final class FakePredisClient extends \Predis\Client
 
         if (str_contains($script, 'Outstanding challenge cancelled')) {
             // OutstandingChallenges::cancelled: keys[1] the global live
-            // ZSET; argv[1] the cancelled nonce. Best-effort idempotent
-            // ZREM.
-            return $this->fakeZrem([(string) $keys[0], (string) $rest[0]]);
+            // ZSET, keys[2] the issuance sidecar; argv[1] the cancelled
+            // nonce, argv[2] the outstanding key prefix. One-shot gate:
+            // only when the ZREM actually removed the member (1) is the
+            // sidecar read, the original source counter decremented
+            // (floored at 0 — the canceller's IP never participates) and
+            // the sidecar DELeted. A duplicate cancel (ZREM == 0) is a
+            // no-op.
+            $live = (string) $keys[0];
+            $sidecar = (string) $keys[1];
+            $removed = $this->fakeZrem([$live, (string) $rest[0]]);
+            if ($removed === 1) {
+                $sourceHex = $this->strings[$sidecar] ?? null;
+                if ($sourceHex !== null) {
+                    $counter = (string) $rest[1].$sourceHex;
+                    if (($this->counters[$counter] ?? 0) > 0) {
+                        $this->fakeDecr([$counter]);
+                    }
+                    $this->fakeDel([$sidecar]);
+                }
+            }
+
+            return $removed;
         }
 
         if (str_contains($script, 'Outstanding challenge cancellation admission')) {
@@ -1013,47 +994,28 @@ final class FakePredisClient extends \Predis\Client
             return $this->fakeZrem([$keys[0], $rest[0]]);
         }
 
-        // TIME-based scripts: semaphore acquire (1 key), the bucketed
-        // global-only limiter (2 keys: ZSET + counts hash), the full
-        // bucketed rate limiter (3 keys) or the epoch-rotated variant
-        // (4 keys). `now` mirrors the Lua time read.
+        // TIME-based scripts: `now` mirrors the Lua time read.
         $now = $this->timeMs();
 
-        if (str_contains($script, "HINCRBY', KEYS[")) {
-            // The separated bucketed global limiter: the ZSET member is
-            // the wall-clock second and its score is that same second
-            // (the pruning timestamp only); the per-second admission
-            // count lives in the counts hash. Prune the ZSET by the
-            // cutoff second, drop the pruned seconds' hash fields, then
-            // enforce the caps on the summed retained counts.
-            $twoKey = \count($keys) === 2;
-            $globalZset = (string) $keys[\count($keys) - 2];
-            $globalHash = (string) $keys[\count($keys) - 1];
-            $globalMax = (int) $rest[$twoKey ? 0 : 1];
-            $windowMs = (int) $rest[$twoKey ? 1 : 2];
-            $cutoff = $now - $windowMs;
-            $bucket = (string) floor($now / 1000);
-            $pruneMax = (string) floor($cutoff / 1000);
-            $pruned = [];
-            foreach ($this->zsets[$globalZset] ?? [] as $member => $score) {
-                if ($score <= (float) $pruneMax) {
-                    $pruned[] = $member;
-                }
+        if (str_contains($script, 'exact-ms sliding window')) {
+            // The exact-ms rate limiter scripts: the global-only variant
+            // (1 key: the global ZSET), the full limiter (2 keys: the
+            // per-client ZSET + the global ZSET) and the epoch-rotated
+            // variant (3 keys: previous + current client ZSETs + the
+            // global ZSET). Every ZSET carries one member per admitted
+            // request scored at the exact admission ms (Redis TIME):
+            // prune each ZSET at <= now - window, refuse on ZCARD, then
+            // `ZADD` the exact-time member.
+            $keyCount = \count($keys);
+            $globalMax = (int) $rest[$keyCount === 1 ? 0 : 1];
+            $windowMs = (int) $rest[$keyCount === 1 ? 1 : 2];
+            foreach ($keys as $k) {
+                $this->fakeZremrangebyscore([$k, '-inf', (string) ($now - $windowMs)]);
             }
-            foreach ($pruned as $member) {
-                unset($this->zsets[$globalZset][$member]);
-                unset($this->hashes[$globalHash][$member]);
-            }
-            if (isset($this->zsets[$globalZset]) && $this->zsets[$globalZset] === []) {
-                unset($this->zsets[$globalZset]);
-            }
-            if (!$twoKey) {
+            if ($keyCount !== 1) {
                 // Per-client cap: the full limiter checks the current
                 // client key, the rotated variant the previous + current.
-                $clientKeys = \count($keys) === 3 ? [(string) $keys[0]] : [(string) $keys[0], (string) $keys[1]];
-                foreach ($clientKeys as $clientKey) {
-                    $this->fakeZremrangebyscore([$clientKey, '-inf', (string) $cutoff]);
-                }
+                $clientKeys = $keyCount === 2 ? [(string) $keys[0]] : [(string) $keys[0], (string) $keys[1]];
                 $clientCount = 0;
                 foreach ($clientKeys as $clientKey) {
                     $clientCount += $this->zcard($clientKey);
@@ -1062,14 +1024,15 @@ final class FakePredisClient extends \Predis\Client
                     return 0;
                 }
             }
-            if ($this->bucketCount($globalZset, $globalHash) >= $globalMax) {
+            if ($this->zcard((string) $keys[$keyCount - 1]) >= $globalMax) {
                 return -1;
             }
-            if (!$twoKey) {
-                $this->fakeZadd([(string) $keys[\count($keys) === 3 ? 0 : 1], (string) $now, (string) $rest[3]]);
+            if ($keyCount === 1) {
+                $this->fakeZadd([(string) $keys[0], (string) $now, (string) $rest[2]]);
+            } else {
+                $this->fakeZadd([(string) $keys[$keyCount === 2 ? 0 : 1], (string) $now, (string) $rest[3]]);
+                $this->fakeZadd([(string) $keys[$keyCount - 1], (string) $now, (string) $rest[4]]);
             }
-            $this->fakeZadd([$globalZset, $bucket, $bucket]);
-            $this->fakeHincrby([$globalHash, $bucket, 1]);
             foreach ($keys as $k) {
                 $this->fakePexpire([$k, (string) ($windowMs + 1000)]);
             }
@@ -1093,9 +1056,8 @@ final class FakePredisClient extends \Predis\Client
             return 1;
         }
 
-        // Legacy limiter shapes (pre-separation score = second + count)
-        // are not used by the bundle anymore; the `HINCRBY` branch above is
-        // the canonical emulation for the current scripts.
+        // The exact-ms limiter branch above is the canonical emulation
+        // for the current scripts.
         return 1;
     }
 }

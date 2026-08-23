@@ -11,9 +11,15 @@
 //! context, never from accumulated state.
 //!
 //! Value 21 is the cancellation surface: a server-issued challenge that
-//! was cancelled before any verification. The state script restores the
-//! issue-debt contribution of the cancelled challenge (`iss − 1000`, clamped
-//! at 0) without the solve's other effects.
+//! was cancelled before any verification. The event is risk-neutral: the
+//! state script applies NO change, so the issued-and-abandoned challenge
+//! keeps its issue-debt contribution (`iss`, which decays naturally and is
+//! repaid only by an actual `SolveSuccess`). The kind stays for
+//! observability — the cancellation is a resource-lifecycle operation
+//! (the record is terminalized and the live-cap bookkeeping freed), never
+//! a debt refund. Cancellation is client-influenceable (the endpoint
+//! accepts possession of a pending nonce), so it must never erase the
+//! issued-but-unsolved signal.
 
 use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
@@ -273,7 +279,8 @@ mod tests {
             (18, "honeypot_triggered"),
             (19, "decoy_endpoint_touched"),
             (20, "decoy_field_submitted"),
-            // Cancellation surface (debt restoration, no solve effects).
+            // Cancellation surface (risk-neutral observability, no state
+            // mutation).
             (21, "challenge_cancelled"),
         ];
         for (i, (value, name)) in expected.iter().enumerate() {

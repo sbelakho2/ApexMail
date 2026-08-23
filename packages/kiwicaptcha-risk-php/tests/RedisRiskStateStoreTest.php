@@ -375,6 +375,109 @@ final class RedisRiskStateStoreTest extends TestCase
         self::assertGreaterThan(0, $preissue->globalPressure);
     }
 
+    /**
+     * The ChallengeCancelled risk-neutrality contract: a cancellation
+     * applies no state change, so the issued-and-abandoned challenge
+     * keeps its issue-debt contribution. The raw iss channel moves only
+     * by the natural leak (40 raw/s) inside the real elapsed bracket,
+     * never by a −1000 refund (a debt-restoring arm would have clamped
+     * it to 0). The raw channel is read from the Lua state hash itself,
+     * exactly like the parity assertions.
+     */
+    public function testCancellationIsRiskNeutral(): void
+    {
+        $store = $this->store();
+        $source = str_repeat('b', 32);
+        $ns = $store->namespace();
+        $stateKey = "{kiwi:{$ns}}:risk:src:12345:{$source}";
+        $rawIss = fn (): int => (int) $this->client->hget($stateKey, 'iss');
+
+        $t0 = $this->redisNowMs();
+        $store->observe($this->observationWithSource($source, str_repeat('1', 32), RiskEventKind::ChallengeIssued));
+        $t1 = $this->redisNowMs();
+        self::assertSame(1000, $rawIss(), 'the issuance leaves exactly one unit of issue debt');
+
+        $t2 = $this->redisNowMs();
+        $cancelled = $store->observe($this->observationWithSource($source, str_repeat('2', 32), RiskEventKind::ChallengeCancelled));
+        $t3 = $this->redisNowMs();
+        $leak = static fn (int $elapsedMs): int => max(0, 1000 - intdiv($elapsedMs * 40, 1000));
+        self::assertGreaterThanOrEqual($leak($t3 - $t0), $rawIss(), 'the cancellation must not subtract the issue debt');
+        self::assertLessThanOrEqual($leak(max(0, $t2 - $t1)), $rawIss(), 'the debt can only decay with real time, never be refunded');
+        self::assertGreaterThan(0, $rawIss(), 'the issued-and-abandoned challenge keeps its issue-debt contribution');
+        self::assertSame(intdiv($rawIss() * 1000, 6000), $cancelled->issueDebt, 'the returned vector mirrors the unchanged raw channel');
+        self::assertSame(0, $cancelled->sourceFast, 'feedback events are never velocity');
+    }
+
+    /**
+     * Adversarial shape: the cancellation is attributed to a different
+     * source identity (B) than the one that issued the challenge (A).
+     * Neither identity's debt changes: A's raw iss is exactly its
+     * post-issue value (B's observation never touches A's state hash) and
+     * B's stays zero.
+     */
+    public function testCancellationFromAnotherSourceIsRiskNeutralForBothIdentities(): void
+    {
+        $store = $this->store();
+        $ns = $store->namespace();
+        $sourceA = str_repeat('b', 32);
+        $sourceB = str_repeat('c', 32);
+        $rawIss = fn (string $source): int => (int) $this->client->hget("{kiwi:{$ns}}:risk:src:12345:{$source}", 'iss');
+
+        $store->observe($this->observationWithSource($sourceA, str_repeat('1', 32), RiskEventKind::ChallengeIssued));
+        self::assertSame(1000, $rawIss($sourceA), 'source A holds the issued debt');
+        self::assertSame(0, $rawIss($sourceB), 'source B has no debt');
+
+        $store->observe($this->observationWithSource($sourceB, str_repeat('2', 32), RiskEventKind::ChallengeCancelled));
+        self::assertSame(1000, $rawIss($sourceA), "a cancellation from B never touches A's issue debt (exact — A's hash is untouched)");
+        self::assertSame(0, $rawIss($sourceB), "B's debt is unchanged");
+    }
+
+    /**
+     * Repeated cancellations move the raw issue-debt channel only by the
+     * natural leak inside the real elapsed bracket — never by repeated
+     * −1000 steps, so a client cannot erase its issued-but-unsolved
+     * signal by cancelling.
+     */
+    public function testRepeatedCancellationsNeverRefundTheDebt(): void
+    {
+        $store = $this->store();
+        $source = str_repeat('b', 32);
+        $ns = $store->namespace();
+        $stateKey = "{kiwi:{$ns}}:risk:src:12345:{$source}";
+        $rawIss = fn (): int => (int) $this->client->hget($stateKey, 'iss');
+
+        $store->observe($this->observationWithSource($source, str_repeat('1', 32), RiskEventKind::ChallengeIssued));
+        self::assertSame(1000, $rawIss());
+        $t2 = $this->redisNowMs();
+        for ($i = 2; $i <= 6; $i++) {
+            $store->observe($this->observationWithSource($source, str_pad((string) $i, 32, '0', STR_PAD_LEFT), RiskEventKind::ChallengeCancelled));
+        }
+        $t3 = $this->redisNowMs();
+        $leak = static fn (int $elapsedMs): int => max(0, 1000 - intdiv($elapsedMs * 40, 1000));
+        self::assertGreaterThanOrEqual($leak($t3 - $t2), $rawIss(), 'five cancellations move the debt by at most natural decay');
+        self::assertLessThanOrEqual(1000, $rawIss());
+        self::assertGreaterThan(0, $rawIss(), 'repeated cancellations never erase the issued-and-abandoned signal');
+    }
+
+    /**
+     * A real SolveSuccess still repays the debt (the existing behavior is
+     * untouched): the raw iss clamps at zero after the solve, whatever the
+     * real elapsed window was.
+     */
+    public function testSolveStillRepaysTheIssueDebt(): void
+    {
+        $store = $this->store();
+        $source = str_repeat('b', 32);
+        $ns = $store->namespace();
+        $stateKey = "{kiwi:{$ns}}:risk:src:12345:{$source}";
+        $rawIss = fn (): int => (int) $this->client->hget($stateKey, 'iss');
+
+        $store->observe($this->observationWithSource($source, str_repeat('1', 32), RiskEventKind::ChallengeIssued));
+        self::assertSame(1000, $rawIss());
+        $store->observe($this->observationWithSource($source, str_repeat('2', 32), RiskEventKind::SolveSuccess));
+        self::assertSame(0, $rawIss(), 'a real SolveSuccess still repays the debt (clamped at zero)');
+    }
+
     public function testGlobalHysteresis(): void
     {
         // Storm: each PreIssue adds 2000 raw (rf 1000 + rs 1000); 32 events

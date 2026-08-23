@@ -15,6 +15,14 @@ use KiwiCaptcha\Risk\RiskKeys;
  *   {kiwi:<ns>}:outstanding:<hex>          per-source counter.
  *   {kiwi:<ns>}:outstanding:global:live    deployment-wide live-outstanding
  *                                          membership (a Redis ZSET).
+ *   {kiwi:<ns>}:outstanding:nonce:<nonce>  issuance sidecar: pairs the
+ *                                          nonce with its original source
+ *                                          pseudonym (the per-source
+ *                                          counter's hex key suffix), so a
+ *                                          later cancellation can release
+ *                                          exactly the source that issued
+ *                                          the challenge, and never the
+ *                                          canceller's.
  *   {kiwi:<ns>}:cancel:<hex>               per-source cancellation window.
  *
  * The source identity is the hex form of
@@ -40,7 +48,16 @@ use KiwiCaptcha\Risk\RiskKeys;
  * cumulative high-water mark, so sustained traffic can no longer
  * accumulate issuance refusals. The per-source counter keeps its existing
  * INCR/DECR semantics (solves and proven-not-handed-off rollbacks
- * decrement it best-effort, floored at 0).
+ * decrement it best-effort, floored at 0). A client cancellation now
+ * returns the original source's slot too. The issuance sidecar
+ * (`outstanding:nonce:<nonce>`) pairs the nonce with the source
+ * pseudonym that issued it. The cancellation's one-shot script
+ * decrements exactly that counter when the nonce was still a live
+ * member. The canceller's own IP is never used for the decrement, since
+ * the identity would be wrong and the request client-controlled. Only
+ * the sidecar's original source is released, and only when the global
+ * member actually existed. A duplicate cancel is a no-op, so the counter
+ * can never be double-decremented.
  *
  * The `ZREMRANGEBYSCORE` prune is bounded by the ZSET's own size: a
  * member is removed exactly when its score fell below the current time.
@@ -71,11 +88,13 @@ use KiwiCaptcha\Risk\RiskKeys;
  * Cancellation, see {@see cancelled()}: the server side of the
  * exhaustion->debt feedback break. A widget that abandons a challenge
  * (its bounded solve search exhausted on a stochastic tail) tells the
- * server, which removes the nonce from the live membership. The
+ * server. The server removes the nonce from the live membership and
+ * returns the original source's outstanding slot, the one that issued
+ * the challenge. The canceller's own slot is never released. The
  * abandoned challenge then stops counting against the deployment cap
- * while its record stays retained until its TTL. The record's own
- * pending->cancelled transition is the storage layer's, see the
- * CancellableStorageInterface capability.
+ * and the source quota while its record stays retained until its TTL.
+ * The record's own pending->cancelled transition is the storage layer's,
+ * see the CancellableStorageInterface capability.
  *
  * Failure behavior: a Redis error on issuance is never swallowed: the
  * caller (challenge controller) refuses issuance when the counter cannot
@@ -86,26 +105,32 @@ use KiwiCaptcha\Risk\RiskKeys;
 final class OutstandingChallenges
 {
     /**
-     * Atomic check + increment + live-membership add:
+     * Atomic check + increment + live-membership add + source sidecar:
      *   KEYS[1] = {kiwi:<ns>}:outstanding:<hex>   (per-source counter).
      *   KEYS[2] = {kiwi:<ns>}:outstanding:global:live (live-outstanding ZSET).
+     *   KEYS[3] = {kiwi:<ns>}:outstanding:nonce:<nonce> (issuance sidecar).
      *   ARGV[1] = per-source cap.
      *   ARGV[2] = global cap (live-outstanding members).
      *   ARGV[3] = TTL in seconds (challenge lifetime + ttl margin) for the
-     *             per-source counter.
-     *   ARGV[4] = the challenge's absolute expiry (epoch seconds) — the
-     *             ZSET score, so a member dies exactly when its challenge
-     *             expires and is never refreshed.
-     *   ARGV[5] = the minted challenge nonce — the ZSET member.
-     * Prunes expired members with `ZREMRANGEBYSCORE` -inf now (bounded
-     * by the ZSET's size), refuses (0 = source cap, -1 = global cap)
-     * before any admission write, then INCR + EXPIRE the per-source
-     * counter and `ZADD` the nonce at its absolute expiry. A challenge is
-     * only returned to the client when the script admitted it, so the
-     * counters can never silently exceed the caps through concurrency.
+     *             per-source counter and the sidecar.
+     *   ARGV[4] = the challenge's absolute expiry in epoch seconds. This
+     *             is the ZSET score, so a member dies exactly when its
+     *             challenge expires and is never refreshed.
+     *   ARGV[5] = the minted challenge nonce, which is the ZSET member.
+     *   ARGV[6] = the issuing source's pseudonym (the per-source counter's
+     *             hex suffix, an HMAC and never a raw IP). It is stored in
+     *             the sidecar so a later cancellation releases exactly
+     *             this source's slot.
+     * Prunes expired members with `ZREMRANGEBYSCORE` -inf now, bounded by
+     * the ZSET's size. Refuses (0 = source cap, -1 = global cap) before
+     * any admission write. Then INCR + EXPIRE the per-source counter,
+     * `ZADD` the nonce at its absolute expiry and `SET` the sidecar (same
+     * EX as the counter). A challenge is only returned to the client when
+     * the script admitted it, so the counters can never silently exceed
+     * the caps through concurrency.
      */
     private const ISSUE_SCRIPT = <<<'LUA'
--- Outstanding challenge issuance: atomic cap check + INCR + EXPIRE + live-membership ZADD
+-- Outstanding challenge issuance: atomic cap check + INCR + EXPIRE + live-membership ZADD + source sidecar
 local src = tonumber(redis.call('GET', KEYS[1]) or '0')
 local t = redis.call('TIME')
 local now = tonumber(t[1])
@@ -115,63 +140,98 @@ if redis.call('ZCARD', KEYS[2]) >= tonumber(ARGV[2]) then return -1 end
 redis.call('INCR', KEYS[1])
 redis.call('EXPIRE', KEYS[1], tonumber(ARGV[3]))
 redis.call('ZADD', KEYS[2], tonumber(ARGV[4]), ARGV[5])
+redis.call('SET', KEYS[3], ARGV[6], 'EX', tonumber(ARGV[3]))
 return 1
 LUA;
 
     /**
-     * Best-effort per-source decrement + live-membership removal after a
-     * valid verification.
+     * Best-effort per-source decrement + live-membership removal + sidecar
+     * cleanup after a valid verification.
      * KEYS[1] = the per-source counter.
      * KEYS[2] = the global live-outstanding ZSET.
+     * KEYS[3] = the issuance sidecar (nonce -> source pseudonym).
      * ARGV[1] = the solved challenge nonce ('' = none; the caller without
-     *           the nonce still decrements the per-source counter).
+     *           the nonce still decrements the per-source counter and
+     *           leaves the sidecar to expire on its EX).
      * Floored at 0: a DECR can never drive the counter negative, and a
      * verification after the counter expired must not fabricate a negative
      * outstanding count that later admits extra issuances. The ZREM is
-     * idempotent (a member that expired away removes nothing).
+     * idempotent (a member that expired away removes nothing). The
+     * sidecar is pure cleanup: the solve already ZREMs the membership and
+     * DECRs the source, so the pair is dropped when the nonce is known.
      */
     private const SOLVED_SCRIPT = <<<'LUA'
--- Outstanding challenge solve: best-effort DECR floored at 0 + live-membership ZREM
+-- Outstanding challenge solve: best-effort DECR floored at 0 + live-membership ZREM + sidecar DEL
 local v = tonumber(redis.call('GET', KEYS[1]) or '0')
 if v > 0 then redis.call('DECR', KEYS[1]) end
-if ARGV[1] ~= '' then redis.call('ZREM', KEYS[2], ARGV[1]) end
+if ARGV[1] ~= '' then
+    redis.call('ZREM', KEYS[2], ARGV[1])
+    redis.call('DEL', KEYS[3])
+end
 return v - 1
 LUA;
 
     /**
-     * Best-effort per-source decrement + live-membership removal when an
-     * admitted challenge was proven not handed out (the controller's
-     * proven-not-handed-out failure paths — mint/metadata/chain-state
-     * failures).
+     * Best-effort per-source decrement + live-membership removal + sidecar
+     * cleanup when an admitted challenge was proven not handed out (the
+     * controller's proven-not-handed-out failure paths — mint/metadata/
+     * chain-state failures).
      * KEYS[1] = the per-source counter.
      * KEYS[2] = the global live-outstanding ZSET.
+     * KEYS[3] = the issuance sidecar (nonce -> source pseudonym).
      * ARGV[1] = the abandoned challenge nonce ('' = none).
      * Floored at 0: a DECR can never drive the counter negative. The ZREM
      * is idempotent. Best-effort like solved(): a failed rollback never
      * changes the response; the membership decays by its expiry scores and
-     * the per-source counter by its EXPIRE otherwise.
+     * the per-source counter by its EXPIRE otherwise. The sidecar is pure
+     * cleanup, dropped with the pair when the nonce is known.
      */
     private const ABORTED_SCRIPT = <<<'LUA'
--- Outstanding challenge aborted before handoff: best-effort DECR floored at 0 + live-membership ZREM
+-- Outstanding challenge aborted before handoff: best-effort DECR floored at 0 + live-membership ZREM + sidecar DEL
 local v = tonumber(redis.call('GET', KEYS[1]) or '0')
 if v > 0 then redis.call('DECR', KEYS[1]) end
-if ARGV[1] ~= '' then redis.call('ZREM', KEYS[2], ARGV[1]) end
+if ARGV[1] ~= '' then
+    redis.call('ZREM', KEYS[2], ARGV[1])
+    redis.call('DEL', KEYS[3])
+end
 return 1
 LUA;
 
     /**
-     * Best-effort live-membership removal for a client-cancelled
-     * challenge (the cancellation endpoint's ZREM half; the record's
-     * pending->cancelled transition is the storage layer's).
+     * One-shot live-membership removal + ORIGINAL-source slot release for
+     * a client-cancelled challenge (the cancellation endpoint's ZREM
+     * half; the record's pending->cancelled transition is the storage
+     * layer's).
      * KEYS[1] = the global live-outstanding ZSET.
+     * KEYS[2] = the issuance sidecar (nonce -> source pseudonym).
      * ARGV[1] = the cancelled challenge nonce.
-     * The ZREM is idempotent; a failure leaves the member to expire by its
-     * score (fail-closed: the cap is overcounted, never undercounted).
+     * ARGV[2] = the outstanding key prefix (up to and including
+     *           `outstanding:`), so the original per-source counter key
+     *           is reconstructed from the sidecar's pseudonym.
+     * One-shot gate: only when the `ZREM` actually removed the member
+     * (1) does the script read the sidecar, DECR the original source
+     * counter (floored at 0, like the solve/abort semantics) and DEL the
+     * sidecar. A duplicate cancel (ZREM == 0, the member was already
+     * removed by a solve, an abort, an expiry or the first cancellation)
+     * performs nothing: the source counter can never be
+     * double-decremented. The canceller's request IP is never used: the
+     * source is the sidecar's original issuer. A failure leaves the
+     * member to expire by its score and the counter by its EXPIRE
+     * (fail-closed: the caps are overcounted, never undercounted).
      */
     private const CANCELLED_SCRIPT = <<<'LUA'
--- Outstanding challenge cancelled: live-membership ZREM (best-effort)
-redis.call('ZREM', KEYS[1], ARGV[1])
-return 1
+-- Outstanding challenge cancelled: one-shot ZREM-gated release of the ORIGINAL source slot + sidecar DEL
+local removed = redis.call('ZREM', KEYS[1], ARGV[1])
+if removed == 1 then
+    local source = redis.call('GET', KEYS[2])
+    if source then
+        local counter = ARGV[2] .. source
+        local v = tonumber(redis.call('GET', counter) or '0')
+        if v > 0 then redis.call('DECR', counter) end
+        redis.call('DEL', KEYS[2])
+    end
+end
+return removed
 LUA;
 
     /**
@@ -256,13 +316,17 @@ LUA;
     }
 
     /**
-     * Admit one issued challenge: atomic check of both caps against the
-     * live membership, then INCR + EXPIRE the per-source counter and
-     * `ZADD` the minted nonce at its absolute expiry. The challenge must
-     * already be minted: the ZSET member is the nonce and its score the
-     * expiry, which exist only once the record is minted. The admission
-     * runs before handoff, so a refused admission never hands out (the
-     * caller discards the minted record).
+     * Admit one issued challenge. The script atomically checks both caps
+     * against the live membership, then INCR + EXPIRE the per-source
+     * counter. `ZADD` the minted nonce at its absolute expiry, and `SET`
+     * the issuance sidecar (the nonce -> original source pseudonym, same
+     * EX as the counter). The challenge must already be minted: the ZSET
+     * member is the nonce and its score the expiry, which exist only once
+     * the record is minted. The admission runs before handoff, so a
+     * refused admission never hands out (the caller discards the minted
+     * record). The sidecar stores only the HMAC source pseudonym, never a
+     * raw IP, and lets the cancellation path release exactly the source
+     * that issued the challenge.
      *
      * @param string $clientIp        the canonical client IP.
      * @param string $nonce           the minted challenge's nonce (the
@@ -272,7 +336,8 @@ LUA;
      *                                member dies exactly when the challenge
      *                                expires).
      * @param int    $challengeTtlSecs the challenge lifetime, seconds (the
-     *                                per-source counter EXPIRE basis).
+     *                                per-source counter + sidecar EXPIRE
+     *                                basis).
      *
      * @return int 1 = admitted, 0 = per-source cap reached, -1 = global cap
      *              reached (no admission write on refusal; expired members
@@ -287,27 +352,34 @@ LUA;
         $ttl = $challengeTtlSecs + $this->ttlMarginSecs;
         $source = $this->sourceKey($clientIp);
         $global = $this->keyPrefix.'global:live';
+        $sidecar = $this->keyPrefix.'nonce:'.$nonce;
 
-        return (int) $this->eval(self::ISSUE_SCRIPT, [$source, $global], [
+        return (int) $this->eval(self::ISSUE_SCRIPT, [$source, $global, $sidecar], [
             (string) $this->maxPerSource,
             (string) $this->maxGlobal,
             (string) max(1, $ttl),
             (string) $expiresAtSecs,
             $nonce,
+            substr($source, \strlen($this->keyPrefix)),
         ]);
     }
 
     /**
-     * Best-effort per-source decrement + live-membership removal after a
-     * valid verification. The solved nonce removes exactly the solved
-     * challenge from the global membership. Never throws: a failed
-     * decrement must never break a valid solve (the counter only decays by
-     * its EXPIRE and the membership by its expiry scores otherwise).
+     * Best-effort per-source decrement + live-membership removal + sidecar
+     * cleanup after a valid verification. The solved nonce removes exactly
+     * the solved challenge from the global membership and drops its
+     * issuance sidecar. Never throws: a failed decrement must never break
+     * a valid solve (the counter only decays by its EXPIRE and the
+     * membership by its expiry scores otherwise).
      */
     public function solved(string $clientIp, ?string $nonce = null): void
     {
         try {
-            $this->eval(self::SOLVED_SCRIPT, [$this->sourceKey($clientIp), $this->keyPrefix.'global:live'], [$nonce ?? '']);
+            $this->eval(self::SOLVED_SCRIPT, [
+                $this->sourceKey($clientIp),
+                $this->keyPrefix.'global:live',
+                $this->keyPrefix.'nonce:'.($nonce ?? ''),
+            ], [$nonce ?? '']);
         } catch (\Throwable) {
             // Best-effort: an unavailable counter must never fail a valid
             // solve.
@@ -315,22 +387,26 @@ LUA;
     }
 
     /**
-     * Best-effort per-source decrement + live-membership removal when an
-     * admitted challenge was proven never handed out (the controller's
-     * proven-not-handed-out failure paths). The source slot is returned
-     * so a crashed issuance does not silently consume the source's
-     * stockpile budget. The nonce leaves the deployment-wide live
+     * Best-effort per-source decrement + live-membership removal + sidecar
+     * cleanup when an admitted challenge was proven never handed out (the
+     * controller's proven-not-handed-out failure paths). The source slot
+     * is returned so a crashed issuance does not silently consume the
+     * source's stockpile budget. The nonce leaves the deployment-wide live
      * membership so an abandoned challenge never counts against the
-     * global cap. Never throws: a failed rollback must never change the
-     * issuance response. The caller must not call this for an
-     * indeterminate failure (the chain state cannot be read after a
-     * thrown issuance transition — the challenge may be the authoritative
-     * issued stage-2).
+     * global cap, and its issuance sidecar is dropped. Never throws: a
+     * failed rollback must never change the issuance response. The caller
+     * must not call this for an indeterminate failure (the chain state
+     * cannot be read after a thrown issuance transition — the challenge
+     * may be the authoritative issued stage-2).
      */
     public function abortedBeforeHandoff(string $clientIp, ?string $nonce = null): void
     {
         try {
-            $this->eval(self::ABORTED_SCRIPT, [$this->sourceKey($clientIp), $this->keyPrefix.'global:live'], [$nonce ?? '']);
+            $this->eval(self::ABORTED_SCRIPT, [
+                $this->sourceKey($clientIp),
+                $this->keyPrefix.'global:live',
+                $this->keyPrefix.'nonce:'.($nonce ?? ''),
+            ], [$nonce ?? '']);
         } catch (\Throwable) {
             // Best-effort: an unavailable counter must never change the
             // response; the membership decays by its expiry scores and the
@@ -339,16 +415,23 @@ LUA;
     }
 
     /**
-     * Best-effort live-membership removal for a client-cancelled
-     * challenge. Called by the cancellation endpoint after the record's
-     * atomic pending->cancelled transition (CancellableStorageInterface);
-     * idempotent — cancelling a nonce with no live member (never issued,
-     * expired away, or already removed by a solve/abort) is a no-op.
+     * One-shot live-membership removal + original-source slot release for
+     * a client-cancelled challenge. Called by the cancellation endpoint
+     * after the record's atomic pending->cancelled transition
+     * (CancellableStorageInterface). The ZREM gate makes it idempotent:
+     * cancelling a nonce with no live member (never issued, expired away,
+     * or already removed by a solve/abort/cancellation) is a no-op. The
+     * original source counter (from the issuance sidecar, never the
+     * canceller's IP) is decremented exactly once per issued challenge
+     * and can never go negative (floored at 0).
      */
     public function cancelled(string $nonce): void
     {
         try {
-            $this->eval(self::CANCELLED_SCRIPT, [$this->keyPrefix.'global:live'], [$nonce]);
+            $this->eval(self::CANCELLED_SCRIPT, [
+                $this->keyPrefix.'global:live',
+                $this->keyPrefix.'nonce:'.$nonce,
+            ], [$nonce, $this->keyPrefix]);
         } catch (\Throwable) {
             // Best-effort: a failed removal never changes the cancellation
             // response; the member expires by its score (fail-closed: the

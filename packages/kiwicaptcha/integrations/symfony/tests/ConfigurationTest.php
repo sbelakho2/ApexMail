@@ -91,6 +91,22 @@ final class ConfigurationTest extends TestCase
         $this->process(['argon_m_kib' => 1]);
     }
 
+    public function testRateLimitWindowSecsDefaultsAndBounds(): void
+    {
+        self::assertSame(60, $this->process()['rate_limit_window_secs'], 'rate_limit_window_secs defaults to 60');
+        self::assertSame(1, $this->process(['rate_limit_window_secs' => 1])['rate_limit_window_secs']);
+        self::assertSame(3600, $this->process(['rate_limit_window_secs' => 3600])['rate_limit_window_secs'], 'the one-hour maximum is accepted');
+    }
+
+    public function testRateLimitWindowSecsAboveTheOneHourMaximumIsRejected(): void
+    {
+        // The operational bound: the exact-ms global limiter prunes on
+        // every admission, so an unbounded window would be a stale,
+        // weakened limit — the tree refuses anything past one hour.
+        $this->expectException(InvalidConfigurationException::class);
+        $this->process(['rate_limit_window_secs' => 3601]);
+    }
+
     public function testAuditDefaultsArePrivacyFirst(): void
     {
         $processed = $this->process();

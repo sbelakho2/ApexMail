@@ -127,13 +127,15 @@
 --                                 an individual visitor)
 --   RiskDenied (17)             → no state mutation (a risk decision that
 --                                 already denied must not be double-counted)
---   ChallengeCancelled (21)     → restore the issue-debt contribution of a
---                                 cancelled challenge (iss −1000, clamped at
---                                 0) WITHOUT the solve's other effects: no
---                                 trust credit, no solve counters — a
---                                 cancelled challenge must not punish the
---                                 next issuance like an unpaid one, and
---                                 must not reward like a solved one
+--   ChallengeCancelled (21)     → risk-neutral (no state change): an
+--                                 issued challenge that was cancelled keeps
+--                                 its issue-debt contribution — the
+--                                 issued-and-abandoned signal decays
+--                                 naturally, and only an actual
+--                                 SolveSuccess repays it. The event kind
+--                                 stays for observability: cancellation is
+--                                 a resource-lifecycle operation, never a
+--                                 debt refund
 --
 -- Only PreIssue counts as a REQUEST for velocity purposes; feedback events
 -- mutate only their own channels.
@@ -268,11 +270,12 @@ local function apply_feedback(s, event, scope)
         -- deliberately nothing: the global state carries the pressure
     elseif event == 17 then       -- RiskDenied: already scored, no-op
         -- deliberately nothing
-    elseif event == 21 then       -- ChallengeCancelled: restore the issue
-        -- debt of the cancelled challenge (mirrors ChallengeIssued's +1000
-        -- with −1000, clamped at 0) WITHOUT the solve's other effects —
-        -- no trust credit and no solve counters.
-        s.iss = math.max(0, s.iss - 1000)
+    elseif event == 21 then       -- ChallengeCancelled: risk-neutral
+        -- Deliberately nothing: the issued-and-abandoned challenge keeps
+        -- its issue-debt contribution (the signal decays naturally; only
+        -- an actual SolveSuccess repays it). The event kind stays for
+        -- observability — the cancellation is a resource-lifecycle
+        -- operation, never a debt refund.
     end
 end
 

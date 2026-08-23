@@ -34,10 +34,12 @@ use Symfony\Component\HttpFoundation\JsonResponse;
 
 /**
  * The bounded cancellation endpoint, the server side of the
- * exhaustion->debt feedback break: a widget that abandons a challenge tells
- * the server to retire the record (pending -> cancelled) and release the
- * deployment-wide live-outstanding slot. The endpoint is idempotent (an
- * unknown, expired or already-cancelled nonce answers the same success; a
+ * exhaustion->debt feedback break. A widget that abandons a challenge
+ * tells the server to retire the record (pending -> cancelled) and
+ * release the deployment-wide live-outstanding slot and the original
+ * source's outstanding slot, the source that issued the challenge and
+ * never the canceller's. The endpoint is idempotent (an unknown, expired
+ * or already-cancelled nonce answers the same success; a
  * consumed/finalized record is never cancelled), never returns record
  * contents, and is POST-only, bounded, origin-checked and per-source
  * rate-limited like the challenge endpoint.
@@ -46,14 +48,23 @@ use Symfony\Component\HttpFoundation\JsonResponse;
  * atomic pending->cancelled flip of {@see ArrayStorage} and
  * {@see RedisStorage} (both implement
  * {@see \KiwiCaptcha\CancellableStorageInterface}) decides the outcome
- * in one storage operation. The deployment-wide slot is released only
- * for a record the storage actually cancelled: a fresh flip or an
- * already-cancelled record. A consumed or missing nonce answers the same
- * idempotent success without freeing anything. A storage that cannot
- * establish the cancellation (e.g. {@see Psr6Storage}, which cannot
- * express the atomic flip) fails closed with the retryable 503 and frees
- * nothing. Freeing the global gate while the record stays pending and
- * redeemable would be an anti-stockpiling bypass.
+ * in one storage operation. The slots are released only for a record the
+ * storage actually cancelled, whether a fresh flip or an
+ * already-cancelled one, and only while the nonce was still a live
+ * member. The one-shot gate ensures a duplicate cancel can never
+ * double-decrement the source counter. A consumed or missing nonce
+ * answers the same idempotent success without freeing anything. A
+ * storage that cannot establish the cancellation (e.g.
+ * {@see Psr6Storage}, which cannot express the atomic flip) fails closed
+ * with the retryable 503 and frees nothing. Freeing the global gate
+ * while the record stays pending and redeemable would be an
+ * anti-stockpiling bypass.
+ *
+ * The ChallengeCancelled risk event is risk-neutral: it is recorded for
+ * observability on the fresh pending->cancelled transition, and the
+ * state script applies no change. The issue debt of the abandoned
+ * challenge is never refunded, since it decays naturally and only an
+ * actual solve repays it.
  */
 final class ChallengeCancellationTest extends TestCase
 {
@@ -445,12 +456,13 @@ final class ChallengeCancellationTest extends TestCase
 
     public function testFreshCancellationRecordsChallengeCancelledOnceWithNonceDerivedIdempotency(): void
     {
-        // The ChallengeCancelled risk event (the issue-debt restoration)
+        // The ChallengeCancelled risk event (risk-neutral observability —
+        // the issue debt of the abandoned challenge is never refunded)
         // fires exactly once, on the first fresh pending->cancelled
         // transition, against the same identities the issuance recorded
         // (the continuity session rides the cancellation request), with an
         // event id derived from the nonce — the idempotency identity that
-        // makes a repeated cancellation unable to re-subtract the debt.
+        // makes a repeated cancellation unable to record it twice.
         $stack = $this->riskStack();
         $controller = $stack['controller'];
         $store = $stack['store'];
@@ -476,15 +488,15 @@ final class ChallengeCancellationTest extends TestCase
         $cancelled = array_values(array_filter($store->observations, static fn ($o): bool => $o->event === RiskEventKind::ChallengeCancelled));
         self::assertCount(1, $cancelled, 'a fresh pending->cancelled transition records the event exactly once');
         $event = $cancelled[0];
-        self::assertSame($issued[0]->sourceId, $event->sourceId, 'the cancellation event restores the same source identity\'s debt');
-        self::assertSame($issued[0]->sessionId, $event->sessionId, 'the cancellation event restores the same session identity\'s debt');
+        self::assertSame($issued[0]->sourceId, $event->sourceId, 'the cancellation event carries the same source identity as the issuance');
+        self::assertSame($issued[0]->sessionId, $event->sessionId, 'the cancellation event carries the same session identity as the issuance');
         self::assertSame($issued[0]->scope, $event->scope, 'the cancellation event rides the issued scope');
         $expectedId = hash_hmac('sha256', pack('N', $issued[0]->scope).chr(RiskEventKind::ChallengeCancelled->value).$nonce, RiskKeys::fromMaster(self::SECRET)->event);
         self::assertSame($expectedId, $event->eventId, 'the event id is the nonce-derived idempotency identity (scope and event domain separated)');
 
         // Repeated idempotent cancellation requests (already-cancelled
-        // outcomes) never record the event again: the debt can never be
-        // re-subtracted by a replay.
+        // outcomes) never record the event again: the observability event
+        // can never be amplified by a replay.
         $repeat = JsonRequest::create(
             '/challenge/cancel',
             'POST',
@@ -504,7 +516,7 @@ final class ChallengeCancellationTest extends TestCase
     {
         // The event fires only for the fresh pending->cancelled transition:
         // a consumed (finalized) record and a never-issued nonce perform no
-        // cancellation and must never subtract the debt.
+        // cancellation and must never record the observability event.
         $stack = $this->riskStack();
         $controller = $stack['controller'];
         $store = $stack['store'];
@@ -516,5 +528,180 @@ final class ChallengeCancellationTest extends TestCase
 
         $cancelled = array_values(array_filter($store->observations, static fn ($o): bool => $o->event === RiskEventKind::ChallengeCancelled));
         self::assertSame([], $cancelled, 'consumed and unknown nonces never record the ChallengeCancelled event');
+    }
+
+    public function testIssuanceWritesTheOriginalSourceSidecar(): void
+    {
+        // On a successful issuance the sidecar pairs the nonce with the
+        // original source pseudonym (the HMAC — never a raw IP) under the
+        // same hash tag, with the same TTL basis as the per-source
+        // counter, so a later cancellation can release exactly that
+        // source's slot.
+        $client = new FakePredisClient();
+        $outstanding = new OutstandingChallenges($client, self::OUTSTANDING_PREFIX, RiskKeys::fromMaster(self::SECRET), 5, 100, 0);
+        $controller = $this->controller($outstanding, new ArrayStorage());
+
+        $nonce = $this->issue($controller, '198.51.100.7');
+        $sourceKey = $outstanding->sourceKey('198.51.100.7');
+        $sidecarKey = self::OUTSTANDING_PREFIX.'nonce:'.$nonce;
+        self::assertSame(
+            substr($sourceKey, \strlen(self::OUTSTANDING_PREFIX)),
+            $client->strings[$sidecarKey],
+            'the sidecar stores the issuing source\'s HMAC pseudonym only'
+        );
+        self::assertArrayHasKey($sidecarKey, $client->expirations, 'the sidecar carries an EX (the counter\'s TTL basis)');
+    }
+
+    public function testCancellationReturnsTheOriginalSourceCounterSlot(): void
+    {
+        // A fresh cancellation frees the global member AND decrements the
+        // original source counter (the one that issued the challenge),
+        // then deletes the sidecar: the dead challenge no longer occupies
+        // the source quota, so a cancel-and-retry client cannot be refused
+        // by its own dead challenges.
+        $storage = new ArrayStorage();
+        $client = new FakePredisClient();
+        $outstanding = new OutstandingChallenges($client, self::OUTSTANDING_PREFIX, RiskKeys::fromMaster(self::SECRET), 5, 100, 0);
+        $controller = $this->controller($outstanding, $storage);
+
+        $nonce = $this->issue($controller, '198.51.100.7');
+        $sourceKey = $outstanding->sourceKey('198.51.100.7');
+        $sidecarKey = self::OUTSTANDING_PREFIX.'nonce:'.$nonce;
+        self::assertSame(1, $client->counters[$sourceKey], 'the issuance increments the per-source counter');
+        self::assertArrayHasKey($nonce, $client->zsets[$this->liveKey()], 'the issued nonce is a live member');
+        self::assertArrayHasKey($sidecarKey, $client->strings, 'the issuance wrote the sidecar');
+
+        self::assertSame(200, $this->cancel($controller, $nonce, '198.51.100.7')->getStatusCode());
+        self::assertSame(0, $client->counters[$sourceKey], 'the cancellation decrements the ORIGINAL source counter');
+        self::assertArrayNotHasKey($nonce, $client->zsets[$this->liveKey()] ?? [], 'the cancelled nonce leaves the live membership');
+        self::assertArrayNotHasKey($sidecarKey, $client->strings, 'the cancellation deletes the sidecar');
+    }
+
+    public function testCancellationFromAnotherSourceReturnsTheOriginalSourceSlot(): void
+    {
+        // Adversarial shape: the cancellation request arrives from a
+        // different source than the one that issued the challenge. The
+        // original source's counter must be decremented (the slot the
+        // challenge actually occupies) and the canceller's counter must
+        // stay untouched — the request IP never participates in the
+        // release.
+        $storage = new ArrayStorage();
+        $client = new FakePredisClient();
+        $outstanding = new OutstandingChallenges($client, self::OUTSTANDING_PREFIX, RiskKeys::fromMaster(self::SECRET), 5, 100, 0);
+        $controller = $this->controller($outstanding, $storage);
+
+        $nonce = $this->issue($controller, '198.51.100.7');
+        $sourceA = $outstanding->sourceKey('198.51.100.7');
+        $sourceB = $outstanding->sourceKey('203.0.113.9');
+        self::assertSame(1, $client->counters[$sourceA], 'source A holds the issued slot');
+        self::assertArrayNotHasKey($sourceB, $client->counters, 'source B never issued anything');
+
+        self::assertSame(200, $this->cancel($controller, $nonce, '203.0.113.9')->getStatusCode());
+        self::assertSame(0, $client->counters[$sourceA], 'the ORIGINAL source (A) slot is returned');
+        self::assertArrayNotHasKey($sourceB, $client->counters, "the canceller's source (B) counter is never touched");
+        self::assertArrayNotHasKey(self::OUTSTANDING_PREFIX.'nonce:'.$nonce, $client->strings, 'the sidecar is deleted');
+    }
+
+    public function testDuplicateCancellationNeverDoubleDecrements(): void
+    {
+        // The one-shot gate: only the cancellation that actually removed
+        // the live member decrements the original source counter. A
+        // repeated cancellation (already-cancelled outcome, ZREM == 0) is
+        // a no-op — the counter can never be double-decremented or driven
+        // negative.
+        $storage = new ArrayStorage();
+        $client = new FakePredisClient();
+        $outstanding = new OutstandingChallenges($client, self::OUTSTANDING_PREFIX, RiskKeys::fromMaster(self::SECRET), 5, 100, 0);
+        $controller = $this->controller($outstanding, $storage);
+
+        $nonce = $this->issue($controller, '198.51.100.7');
+        $sourceKey = $outstanding->sourceKey('198.51.100.7');
+
+        self::assertSame(200, $this->cancel($controller, $nonce, '198.51.100.7')->getStatusCode());
+        self::assertSame(0, $client->counters[$sourceKey]);
+        for ($i = 0; $i < 3; $i++) {
+            self::assertSame(200, $this->cancel($controller, $nonce, '198.51.100.7')->getStatusCode());
+            self::assertSame(0, $client->counters[$sourceKey], 'a duplicate cancel never re-decrements the original source counter');
+        }
+        self::assertArrayNotHasKey(self::OUTSTANDING_PREFIX.'nonce:'.$nonce, $client->strings, 'the sidecar is gone after the first cancellation');
+    }
+
+    public function testConsumedCancellationNeverReleasesTheSourceSlot(): void
+    {
+        // A consumed (finalized) record performs no cancellation: the
+        // controller does not invoke the one-shot release, so the global
+        // member, the source counter and the sidecar all stay (the slot
+        // belongs to a finalized challenge).
+        $storage = new ArrayStorage();
+        $client = new FakePredisClient();
+        $outstanding = new OutstandingChallenges($client, self::OUTSTANDING_PREFIX, RiskKeys::fromMaster(self::SECRET), 5, 100, 0);
+        $controller = $this->controller($outstanding, $storage);
+
+        $nonce = $this->issue($controller, '198.51.100.7');
+        $sourceKey = $outstanding->sourceKey('198.51.100.7');
+        self::assertNotNull($storage->consume($nonce), 'the challenge is consumed before the cancellation attempt');
+
+        self::assertSame(200, $this->cancel($controller, $nonce, '198.51.100.7')->getStatusCode());
+        self::assertSame(1, $client->counters[$sourceKey], 'a consumed record never decrements the source counter');
+        self::assertArrayHasKey($nonce, $client->zsets[$this->liveKey()], 'a consumed record never frees the live membership');
+        self::assertArrayHasKey(self::OUTSTANDING_PREFIX.'nonce:'.$nonce, $client->strings, 'the sidecar survives the no-op cancellation');
+    }
+
+    public function testSolveRemovesTheSidecarAndReturnsTheSourceSlot(): void
+    {
+        // The solve path: a verified challenge already ZREMs the
+        // membership and DECRs the source; the sidecar is pure cleanup
+        // and must be dropped with the pair.
+        $client = new FakePredisClient();
+        $outstanding = new OutstandingChallenges($client, self::OUTSTANDING_PREFIX, RiskKeys::fromMaster(self::SECRET), 5, 100, 0);
+
+        $nonce = 'A'.str_repeat('a', 43);
+        self::assertSame(1, $outstanding->issue('198.51.100.7', $nonce, time() + 120, 120));
+        $sourceKey = $outstanding->sourceKey('198.51.100.7');
+        $sidecarKey = self::OUTSTANDING_PREFIX.'nonce:'.$nonce;
+        self::assertSame(1, $client->counters[$sourceKey]);
+        self::assertArrayHasKey($sidecarKey, $client->strings, 'the issuance wrote the sidecar');
+
+        $outstanding->solved('198.51.100.7', $nonce);
+        self::assertSame(0, $client->counters[$sourceKey], 'a valid solve decrements the source counter');
+        self::assertArrayNotHasKey($nonce, $client->zsets[$this->liveKey()] ?? [], 'a valid solve removes the nonce from the live membership');
+        self::assertArrayNotHasKey($sidecarKey, $client->strings, 'a valid solve deletes the sidecar');
+    }
+
+    public function testAbortRemovesTheSidecarAndReturnsTheSourceSlot(): void
+    {
+        // The proven pre-handoff abort path: the source slot is returned,
+        // the nonce leaves the live membership and the sidecar is deleted
+        // with the pair.
+        $client = new FakePredisClient();
+        $outstanding = new OutstandingChallenges($client, self::OUTSTANDING_PREFIX, RiskKeys::fromMaster(self::SECRET), 5, 100, 0);
+
+        $nonce = 'B'.str_repeat('b', 43);
+        self::assertSame(1, $outstanding->issue('198.51.100.7', $nonce, time() + 120, 120));
+        $sourceKey = $outstanding->sourceKey('198.51.100.7');
+        $sidecarKey = self::OUTSTANDING_PREFIX.'nonce:'.$nonce;
+        self::assertArrayHasKey($sidecarKey, $client->strings);
+
+        $outstanding->abortedBeforeHandoff('198.51.100.7', $nonce);
+        self::assertSame(0, $client->counters[$sourceKey], 'the abort returns the source slot');
+        self::assertArrayNotHasKey($nonce, $client->zsets[$this->liveKey()] ?? [], 'the abort removes the nonce from the live membership');
+        self::assertArrayNotHasKey($sidecarKey, $client->strings, 'the abort deletes the sidecar');
+    }
+
+    public function testCancellationNeverDrivesTheSourceCounterNegative(): void
+    {
+        // Floor assertion: a sidecar pointing at a counter that already
+        // decayed (or was consumed elsewhere) can never drive the counter
+        // below zero — the one-shot Lua decrements only a positive value.
+        $client = new FakePredisClient();
+        $outstanding = new OutstandingChallenges($client, self::OUTSTANDING_PREFIX, RiskKeys::fromMaster(self::SECRET), 5, 100, 0);
+
+        $nonce = 'C'.str_repeat('c', 43);
+        self::assertSame(1, $outstanding->issue('198.51.100.7', $nonce, time() + 120, 120));
+        $sourceKey = $outstanding->sourceKey('198.51.100.7');
+        $client->counters[$sourceKey] = 0; // the counter expired/decayed before the cancellation
+
+        $outstanding->cancelled($nonce);
+        self::assertSame(0, $client->counters[$sourceKey], 'the decrement is floored at 0');
     }
 }

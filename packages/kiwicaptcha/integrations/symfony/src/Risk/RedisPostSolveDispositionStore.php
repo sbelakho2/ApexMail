@@ -65,24 +65,30 @@ use KiwiCaptcha\Storage\ReplicaWaitException;
  * Redis observe one machine.
  *
  * Replica durability: with `waitReplicas > 0` every fresh mutating
- * transition (the claim's record creation and the finalize's
- * completion) is followed by a verified Redis WAIT on the same
- * connection, with the acknowledgement count checked against the
- * threshold. This matches the fail-closed contract of the core
+ * transition is followed by a verified Redis WAIT on the same
+ * connection. This covers the claim's record creation, the
+ * expired-lease takeover's owner transfer and the finalize's
+ * completion. The acknowledgement count is checked against the
+ * threshold. This matches
+ * the fail-closed contract of the core
  * {@see \KiwiCaptcha\Storage\RedisStorage}. Fewer than waitReplicas
  * acknowledged replicas raise {@see ReplicaWaitException}. The caller
  * never learns a success that was not replicated, so a Deny/StepUp/
  * ChainRequired disposition can never be reported as persisted and
  * then vanish on promotion. A lost final disposition would let the
  * same logical operation retry, win a fresh claim and recompute. The
- * non-mutating paths (a complete/busy claim, an expired-lease
- * takeover, a refused finalize, and every read) perform no write and
- * never WAIT. An idempotent retry can therefore never turn a replica
- * outage into a storage failure. The verified barrier supports the
- * same standalone-connection matrix as the core. A Predis replication
- * aggregate (Sentinel or master-slave), a Predis cluster aggregate and
- * a retry-enabled standalone Predis client are refused at construction
- * with waitReplicas > 0.
+ * takeover's owner transfer is the same durability-relevant write as
+ * the record creation. Under failover a promoted replica may still
+ * hold the superseded owner's expired state, and an un-replicated
+ * takeover would let a second owner win the same nonce. The
+ * single-writer invariant needs the barrier too. The non-mutating
+ * paths (a complete/busy claim, a refused finalize, and every read)
+ * perform no write and never WAIT. An idempotent retry can therefore
+ * never turn a replica outage into a storage failure. The verified
+ * barrier supports the same standalone-connection matrix as the core.
+ * A Predis replication aggregate (Sentinel or master-slave), a Predis
+ * cluster aggregate and a retry-enabled standalone Predis client are
+ * refused at construction with waitReplicas > 0.
  */
 final class RedisPostSolveDispositionStore implements PostSolveDispositionStore
 {
@@ -241,21 +247,25 @@ LUA;
      *                                             per-call claim TTL.
      * @param int                   $waitReplicas  when > 0, every fresh
      *                                             mutating transition (the
-     *                                             claim's record creation and
-     *                                             the finalize's completion)
-     *                                             is followed by a Redis WAIT
-     *                                             whose acknowledgement count
-     *                                             is verified. Fewer than
-     *                                             waitReplicas acked replicas
-     *                                             raise
+     *                                             claim's record creation,
+     *                                             the expired-lease
+     *                                             takeover's owner transfer
+     *                                             and the finalize's
+     *                                             completion) is followed
+     *                                             by a Redis WAIT whose
+     *                                             acknowledgement count is
+     *                                             verified. Fewer than
+     *                                             waitReplicas acked
+     *                                             replicas raise
      *                                             {@see ReplicaWaitException}.
      *                                             This is fail-closed: the
      *                                             caller never learns a
      *                                             success that was not
-     *                                             replicated. The non-mutating
-     *                                             paths (a complete/busy
-     *                                             claim, a takeover, a refused
-     *                                             finalize, reads) never WAIT.
+     *                                             replicated. The
+     *                                             non-mutating paths (a
+     *                                             complete/busy claim, a
+     *                                             refused finalize, reads)
+     *                                             never WAIT.
      *                                             Supported on standalone
      *                                             Redis connections only, the
      *                                             same matrix as the core
@@ -308,14 +318,19 @@ LUA;
             // fail closed, never defaulted into a valid outcome.
             throw new MalformedPostSolveDispositionException(sprintf('post-solve disposition claim returned an unknown status (%s)', $data['status']));
         }
-        // Durability barrier: the verified WAIT runs only for the fresh
-        // record creation ('claimed') — the write the barrier exists to
-        // replicate (the pending record and the decision-mapping
-        // consumption landed in one Lua). A complete/busy claim or an
-        // expired-lease takeover performed no fresh write, so no WAIT is
-        // issued: an idempotent retry must never turn a replica outage
-        // into a storage failure.
-        if ($this->waitReplicas > 0 && $data['status'] === 'claimed') {
+        // Durability barrier: the verified WAIT runs for both fresh
+        // mutations — the record creation ('claimed', the pending record
+        // and the decision-mapping consumption landed in one Lua) and
+        // the expired-lease takeover ('taken_over', the owner transfer
+        // landed as a SET ... KEEPTTL in the same Lua). The takeover is
+        // a state-changing write like the creation: under failover a
+        // promoted replica may still hold the superseded owner's expired
+        // state, so an un-replicated takeover could let a second owner
+        // win the same nonce and duplicate the owner-scoped computation.
+        // The non-mutating paths (a complete/busy claim) performed no
+        // write, so no WAIT is issued: an idempotent retry must never
+        // turn a replica outage into a storage failure.
+        if ($this->waitReplicas > 0 && \in_array($data['status'], ['claimed', 'taken_over'], true)) {
             $this->waitAndVerify('the post-solve disposition claim');
         }
         $record = null;

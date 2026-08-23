@@ -14,16 +14,16 @@ use PHPUnit\Framework\TestCase;
 /**
  * The post-solve disposition store's verified replica-WAIT durability
  * barrier (waitReplicas > 0) is exercised against an in-memory Redis
- * fake with a controllable WAIT acknowledgement count. A fresh mutating
- * transition (the claim's record creation, the finalize's completion)
- * issues exactly one WAIT on the same connection and fails closed when
- * fewer than waitReplicas replicas acknowledged it. The caller never
- * learns a success that was not replicated, so a returned
+ * fake with a controllable WAIT acknowledgement count. Every fresh
+ * mutating transition — the claim's record creation, the expired-lease
+ * takeover's owner transfer, the finalize's completion — issues exactly
+ * one WAIT on the same connection and fails closed when fewer than
+ * waitReplicas replicas acknowledged it. The caller never learns a
+ * success that was not replicated, so a returned
  * Deny/StepUp/ChainRequired can never be reported as persisted and then
  * vanish on promotion. The non-mutating paths (busy/complete claims,
- * expired-lease takeovers, refused finalizes, reads) never WAIT, and the
- * in-memory Array store observes the same machine without any barrier
- * (no replicas).
+ * refused finalizes, reads) never WAIT, and the in-memory Array store
+ * observes the same machine without any barrier (no replicas).
  */
 final class RedisPostSolveDispositionDurabilityTest extends TestCase
 {
@@ -114,7 +114,60 @@ final class RedisPostSolveDispositionDurabilityTest extends TestCase
         self::assertCount(1, $this->waits($fake), 'the failed claim issued exactly one WAIT');
     }
 
-    public function testTakeoverBusyCompleteRefusalsAndReadsNeverWait(): void
+    public function testExpiredLeaseTakeoverIssuesExactlyOneWait(): void
+    {
+        $fake = new DispositionWaitRedisFake();
+        $seed = new RedisPostSolveDispositionStore($fake, self::NAMESPACE, 300);
+        $store = new RedisPostSolveDispositionStore($fake, self::NAMESPACE, 300, 1, 100);
+        $nonce = bin2hex(random_bytes(16));
+        $seed->claim($nonce, 'owner-a', 300);
+
+        // The lease expires; a new owner's claim takes the record over —
+        // a fresh owner-transfer write (SET ... KEEPTTL) like the record
+        // creation, so the takeover must hit the barrier: under failover
+        // a promoted replica may still hold the superseded owner's
+        // expired state, and an un-replicated takeover would let a second
+        // owner win the same nonce.
+        $rec = json_decode((string) $fake->strings[$this->key($nonce)], true, 8, JSON_THROW_ON_ERROR);
+        $rec['lease_until'] = 1;
+        $fake->strings[$this->key($nonce)] = (string) json_encode($rec, JSON_THROW_ON_ERROR);
+        $fake->calls = [];
+        self::assertSame('taken_over', $store->claim($nonce, 'owner-d', 300)[0]);
+
+        $waits = $this->waits($fake);
+        self::assertCount(1, $waits, 'an expired-lease takeover (a fresh owner transfer) issues exactly ONE WAIT: '.json_encode($fake->calls));
+        self::assertSame(['WAIT', [1, 100]], $waits[0], 'the WAIT carries (waitReplicas, waitTimeoutMs) on the same connection');
+        self::assertSame('owner-d', $store->read($nonce)?->owner, 'the takeover moved the claim to the new owner before the barrier');
+    }
+
+    public function testViolatedAckFailsClosedAfterTheExpiredLeaseTakeover(): void
+    {
+        // The replica set never acknowledges: the takeover must NOT
+        // return a new owner that was not replicated — the barrier raises
+        // ReplicaWaitException, so a second node cannot proceed from a
+        // promoted replica that still holds the superseded owner's
+        // expired state.
+        $fake = new DispositionWaitRedisFake();
+        $seed = new RedisPostSolveDispositionStore($fake, self::NAMESPACE, 300);
+        $nonce = bin2hex(random_bytes(16));
+        $seed->claim($nonce, 'owner-a', 300);
+        $rec = json_decode((string) $fake->strings[$this->key($nonce)], true, 8, JSON_THROW_ON_ERROR);
+        $rec['lease_until'] = 1;
+        $fake->strings[$this->key($nonce)] = (string) json_encode($rec, JSON_THROW_ON_ERROR);
+        $fake->calls = [];
+        $fake->waitAck = 0;
+
+        $store = new RedisPostSolveDispositionStore($fake, self::NAMESPACE, 300, 1, 100);
+        try {
+            $store->claim($nonce, 'owner-d', 300);
+            self::fail('a takeover whose owner transfer was not replicated must fail closed');
+        } catch (ReplicaWaitException $e) {
+            self::assertStringContainsString('acknowledged 0 of 1 requested replicas after the post-solve disposition claim', $e->getMessage());
+        }
+        self::assertCount(1, $this->waits($fake), 'the failed takeover issued exactly one WAIT — the barrier ran after the fresh mutation');
+    }
+
+    public function testBusyCompleteRefusalsAndReadsNeverWait(): void
     {
         $fake = new DispositionWaitRedisFake();
         $seed = new RedisPostSolveDispositionStore($fake, self::NAMESPACE, 300);
@@ -133,21 +186,9 @@ final class RedisPostSolveDispositionDurabilityTest extends TestCase
         self::assertSame('complete', $store->claim($nonce, 'owner-c', 300)[0]);
         self::assertCount(0, $this->waits($fake), 'a complete claim performs no write and never WAITs');
 
-        // Expired-lease takeover: a transient claim, never a terminal
-        // write — the retry re-takes-over after the lease expiry, so the
-        // takeover arm does not WAIT.
-        $takeoverNonce = bin2hex(random_bytes(16));
-        $seed->claim($takeoverNonce, 'owner-a', 300);
-        $rec = json_decode((string) $fake->strings[$this->key($takeoverNonce)], true, 8, JSON_THROW_ON_ERROR);
-        $rec['lease_until'] = 1;
-        $fake->strings[$this->key($takeoverNonce)] = (string) json_encode($rec, JSON_THROW_ON_ERROR);
-        $fake->calls = [];
-        self::assertSame('taken_over', $store->claim($takeoverNonce, 'owner-d', 300)[0]);
-        self::assertCount(0, $this->waits($fake), 'an expired-lease takeover does not WAIT');
-
         // A refused finalize (non-owner) is an atomic no-op, no WAIT.
         $fake->calls = [];
-        self::assertFalse($store->finalize($takeoverNonce, 'owner-x', new PostSolveDisposition(PostSolveDispositionKind::Pass)));
+        self::assertFalse($store->finalize($nonce, 'owner-x', new PostSolveDisposition(PostSolveDispositionKind::Pass)));
         self::assertCount(0, $this->waits($fake), 'a refused finalize is not a mutation and never WAITs');
 
         // A finalize against a complete record is refused, no WAIT.
@@ -157,7 +198,7 @@ final class RedisPostSolveDispositionDurabilityTest extends TestCase
 
         // Reads never WAIT.
         $fake->calls = [];
-        self::assertNotNull($store->read($takeoverNonce));
+        self::assertNotNull($store->read($nonce));
         self::assertNull($store->read(bin2hex(random_bytes(16))));
         self::assertCount(0, $this->waits($fake), 'a read never WAITs');
     }

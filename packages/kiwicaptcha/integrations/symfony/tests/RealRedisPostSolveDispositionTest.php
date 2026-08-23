@@ -365,11 +365,42 @@ final class RealRedisPostSolveDispositionTest extends TestCase
         $counting->disconnect();
     }
 
-    public function testTakeoverBusyCompleteAndRefusedFinalizeNeverWaitAgainstRealRedis(): void
+    public function testTakeoverWaitsAndFailsClosedOnAViolatedAckAgainstRealRedis(): void
+    {
+        // THE takeover barrier proof on real Redis: with waitReplicas=1
+        // against a replica-less server the expired-lease takeover issues
+        // exactly one WAIT (acknowledged 0) and raises
+        // ReplicaWaitException — the new owner is never told to compute
+        // from an owner transfer that was not replicated, so a promoted
+        // replica holding the superseded owner's expired state cannot
+        // yield a second owner for the same nonce.
+        $counting = $this->countingClient();
+        $seed = new RedisPostSolveDispositionStore($counting, 'ci-postsolve-wait-takeover');
+        $nonce = bin2hex(random_bytes(16));
+        self::assertSame('claimed', $seed->claim($nonce, 'owner-a', 305)[0]);
+        $takeoverKey = '{kiwi:ci-postsolve-wait-takeover}:postsolve:'.$nonce;
+        $rec = json_decode((string) $this->client->get($takeoverKey), true);
+        self::assertIsArray($rec);
+        $rec['lease_until'] = time() - 1;
+        $this->client->set($takeoverKey, (string) json_encode($rec), 'KEEPTTL');
+        $counting->commands = [];
+
+        $hardened = new RedisPostSolveDispositionStore($counting, 'ci-postsolve-wait-takeover', 0, 1, 100);
+        try {
+            $hardened->claim($nonce, 'owner-d', 305);
+            self::fail('a takeover whose owner transfer was not replicated must fail closed');
+        } catch (ReplicaWaitException $e) {
+            self::assertStringContainsString('acknowledged 0 of 1 requested replicas after the post-solve disposition claim', $e->getMessage());
+        }
+        self::assertCount(1, $counting->waits(), 'the failed takeover issued exactly one WAIT — the barrier ran after the fresh mutation');
+        $counting->disconnect();
+    }
+
+    public function testBusyCompleteAndRefusedFinalizeNeverWaitAgainstRealRedis(): void
     {
         // The non-mutating paths never hit the barrier: a busy claim, a
-        // complete claim, an expired-lease takeover and a refused
-        // finalize perform no fresh write and issue no WAIT.
+        // complete claim and a refused finalize perform no fresh write
+        // and issue no WAIT.
         $counting = $this->countingClient();
         $seed = new RedisPostSolveDispositionStore($counting, 'ci-postsolve-wait-nmw');
         $hardened = new RedisPostSolveDispositionStore($counting, 'ci-postsolve-wait-nmw', 0, 1, 100);
@@ -385,19 +416,8 @@ final class RealRedisPostSolveDispositionTest extends TestCase
         self::assertSame('complete', $hardened->claim($nonce, 'owner-c', 305)[0], 'a replay claim reproduces the terminal record');
         self::assertCount(0, $counting->waits(), 'a complete claim never WAITs');
 
-        $takeoverNonce = bin2hex(random_bytes(16));
-        $seed->claim($takeoverNonce, 'owner-a', 305);
-        $takeoverKey = '{kiwi:ci-postsolve-wait-nmw}:postsolve:'.$takeoverNonce;
-        $rec = json_decode((string) $this->client->get($takeoverKey), true);
-        self::assertIsArray($rec);
-        $rec['lease_until'] = time() - 1;
-        $this->client->set($takeoverKey, (string) json_encode($rec), 'KEEPTTL');
         $counting->commands = [];
-        self::assertSame('taken_over', $hardened->claim($takeoverNonce, 'owner-d', 305)[0]);
-        self::assertCount(0, $counting->waits(), 'an expired-lease takeover never WAITs');
-
-        $counting->commands = [];
-        self::assertFalse($hardened->finalize($takeoverNonce, 'owner-x', new PostSolveDisposition(PostSolveDispositionKind::Pass)));
+        self::assertFalse($hardened->finalize($nonce, 'owner-x', new PostSolveDisposition(PostSolveDispositionKind::Pass)));
         self::assertFalse($hardened->finalize($nonce, 'owner-c', new PostSolveDisposition(PostSolveDispositionKind::Pass)));
         self::assertCount(0, $counting->waits(), 'a refused finalize is not a mutation and never WAITs');
         $counting->disconnect();

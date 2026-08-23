@@ -484,92 +484,83 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         self::assertSame(-1, $limiter->check('198.51.100.8'), 'with the per-client cap off, the global cap still applies');
     }
 
-    public function testBucketedGlobalCardinalityStaysBoundedByTheWindowSeconds(): void
+    public function testExactMsGlobalCardinalityStaysBoundedByTheGlobalCap(): void
     {
-        // The deployment-global limiter is a fixed set of per-window-second
-        // buckets, not one member per request: ten thousand admissions must
-        // never grow the global ZSET beyond the window length in seconds.
+        // The deployment-global limiter stores one exact-time member per
+        // admitted request: ten thousand admissions within one window must
+        // never grow the global ZSET beyond the global cap (the 1001st
+        // admission is refused), and every member carries its exact
+        // admission millisecond as the score.
         $client = new FakePredisClient();
         $clock = 1_000_000_000.0; // epoch seconds
-        $client->setTimeMs($clock * 1000);
-        $limiter = new IssuanceRateLimiter(
-            maxChallenges: 1_000_000,
-            windowSecs: 60,
-            redis: $client,
-            globalMax: 1_000_000,
-            namespace: 'bounded-global',
-            pepper: 'pepper',
-            now: static fn (): float => $clock,
-        );
-
-        // One admission per distinct second across 10,000 seconds (cycling
-        // 250 identities so no per-client cap trips): a per-request-member
-        // global ZSET would hold 10,000 members.
-        for ($i = 0; $i < 10_000; $i++) {
-            $clock += 1.0;
-            $client->setTimeMs($clock * 1000);
-            self::assertSame(1, $limiter->check('198.51.100.'.($i % 250 + 1)), 'admission '.$i.' must be allowed');
-        }
-
-        $globalKey = 'kiwi:rl:global:bounded-global';
-        self::assertArrayHasKey($globalKey, $client->zsets, 'the global key must exist');
-        self::assertLessThanOrEqual(60, \count($client->zsets[$globalKey]), 'the global bucket cardinality must never exceed the window length in seconds');
-        self::assertLessThanOrEqual(60, $client->zcard($globalKey));
-        self::assertGreaterThan(1, $client->zcard($globalKey), 'the sliding window still holds the live seconds');
-
-        // The count semantics are unchanged: the retained seconds' hash
-        // counts sum to the admissions inside the window (one per retained
-        // second), while the ZSET score is the second itself — the pruning
-        // timestamp only.
-        $globalCountsKey = $globalKey.':counts';
-        self::assertArrayHasKey($globalCountsKey, $client->hashes, 'the global counts hash must exist under the same key family');
-        $count = 0;
-        foreach ($client->hashes[$globalCountsKey] ?? [] as $second => $c) {
-            self::assertArrayHasKey($second, $client->zsets[$globalKey], 'every counted second is a retained ZSET member');
-            $count += (int) $c;
-        }
-        self::assertSame($client->zcard($globalKey), $count, 'each retained second contributes exactly its admissions to the window count');
-        foreach ($client->zsets[$globalKey] as $member => $score) {
-            self::assertSame((float) $member, $score, 'the bucket score is the second itself — the pruning timestamp, never the count');
-        }
-    }
-
-    public function testBucketedGlobalBoundaryRequestIsCountedAtTheCutoffEdge(): void
-    {
-        // The adversarial window boundary with a one-request bucket: the
-        // request lands exactly at a second boundary, then the clock
-        // advances so the cutoff slides to the request minus epsilon,
-        // exactly on it, and past it. The boundary request must be counted
-        // while it is inside the window (cutoff - epsilon refuses the
-        // next check) and drop out exactly at the cutoff — the ZSET score
-        // is the pruning timestamp alone, so the first in-window second is
-        // never pruned and a slid-out second never lingers.
-        $client = new FakePredisClient();
-        $clock = 1_000_000_000.0; // the request's second boundary (T0)
         $client->setTimeMs($clock * 1000);
         $limiter = new IssuanceRateLimiter(
             maxChallenges: 0,
             windowSecs: 60,
             redis: $client,
-            globalMax: 1,
-            namespace: 'boundary-global',
+            globalMax: 1000,
+            namespace: 'bounded-global',
             pepper: 'pepper',
             now: static fn (): float => $clock,
         );
-        self::assertSame(1, $limiter->check('198.51.100.7'), 'the one-request bucket fills the global cap');
-        $globalKey = 'kiwi:rl:global:boundary-global';
-        self::assertSame(['1000000000' => 1000000000.0], $client->zsets[$globalKey], 'the bucket member is the second and its score is that same second');
-        self::assertSame(['1000000000' => 1], $client->hashes[$globalKey.':counts'], 'the admission count lives in the hash field keyed by the second');
+
+        $allowed = 0;
+        for ($i = 0; $i < 10_000; $i++) {
+            // Distinct exact-ms admissions inside one window: the 1001st
+            // must be refused — the member count is bounded by the cap,
+            // never by the window or the request volume.
+            $client->setTimeMs($clock * 1000 + $i);
+            if ($limiter->check('198.51.100.'.($i % 250 + 1)) === 1) {
+                $allowed++;
+            }
+        }
+
+        $globalKey = 'kiwi:rl:global:bounded-global';
+        self::assertArrayHasKey($globalKey, $client->zsets, 'the global key must exist');
+        self::assertSame(1000, $allowed, 'exactly the cap\'s worth of admissions are allowed');
+        self::assertSame(1000, $client->zcard($globalKey), 'the global ZSET never exceeds the cap — one exact-time member per admission');
+        self::assertSame(9_000, 10_000 - $allowed, 'every admission beyond the cap is refused');
+        foreach ($client->zsets[$globalKey] as $member => $score) {
+            self::assertGreaterThanOrEqual($clock * 1000, $score, 'every member is scored at its exact admission ms');
+            self::assertLessThanOrEqual($clock * 1000 + 999, $score, 'every member is scored at its exact admission ms');
+        }
+    }
+
+    public function testExactMsGlobalBoundaryRequestIsCountedAtTheCutoffEdge(): void
+    {
+        // THE adversarial exact-ms boundary: a request at T fills the
+        // global cap. A request at T + 900ms (still inside the window)
+        // must be counted — the member's timestamp is exact, so a
+        // millisecond-precision window cannot slip a request past a
+        // second-granular bucket. A request at T + W + 100ms (window plus
+        // 100ms) must NOT be counted — the member has slid out at
+        // millisecond precision.
+        $client = new FakePredisClient();
+        $t0Ms = 1_000_000_000_500.0; // the exact admission ms (T)
+        $client->setTimeMs($t0Ms);
+        $limiter = new IssuanceRateLimiter(
+            maxChallenges: 0,
+            windowSecs: 60,
+            redis: $client,
+            globalMax: 1,
+            namespace: 'exact-boundary-global',
+            pepper: 'pepper',
+            now: static fn (): float => $t0Ms / 1000,
+        );
+        self::assertSame(1, $limiter->check('198.51.100.7'), 'the first admission fills the global cap');
+        $globalKey = 'kiwi:rl:global:exact-boundary-global';
+        self::assertCount(1, $client->zsets[$globalKey], 'exactly one member exists after the first admission');
+        $member = array_key_first($client->zsets[$globalKey]);
+        self::assertSame($t0Ms, $client->zsets[$globalKey][$member], 'the member is scored at its exact admission ms');
 
         // Each probe runs against its own namespace, seeded with exactly
-        // the bucket the limiter wrote (asserted above), so the probe
+        // the member the limiter wrote (asserted above), so the probe
         // itself never disturbs the state under test: it only observes
-        // whether the boundary request still counts toward the cap.
-        $probe = static function (float $at, string $namespace, int $expected, string $why) use ($client): void {
+        // whether the T request still counts toward the cap.
+        $probe = static function (float $atMs, string $namespace, int $expected, string $why) use ($client, $member, $t0Ms): void {
             $key = 'kiwi:rl:global:'.$namespace;
-            $client->zsets[$key] = ['1000000000' => 1000000000.0];
-            $client->hashes[$key.':counts'] = ['1000000000' => 1];
-            $client->setTimeMs($at * 1000);
+            $client->zsets[$key] = [$member => $t0Ms];
+            $client->setTimeMs($atMs);
             $probeLimiter = new IssuanceRateLimiter(
                 maxChallenges: 0,
                 windowSecs: 60,
@@ -577,31 +568,34 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
                 globalMax: 1,
                 namespace: $namespace,
                 pepper: 'pepper',
-                now: static fn (): float => $at,
+                now: static fn (): float => $atMs / 1000,
             );
             self::assertSame($expected, $probeLimiter->check('198.51.100.8'), $why);
         };
 
-        // cutoff = T0 - 1ms: the request is still inside the window — the
-        // bucket must be counted and the probe refused.
-        $probe(1_000_000_059.999, 'boundary-edge-in', -1, 'the boundary request must be counted at cutoff minus epsilon');
+        // T + 900ms: still inside the window — the exact-ms member is
+        // counted and the probe is refused.
+        $probe($t0Ms + 900.0, 'exact-edge-in', -1, 'a request 900ms after T is still counted — the exact-ms member is in the window');
 
-        // cutoff = T0 exactly: the request is at the window edge
-        // (exclusive) — the bucket has slid out and the cap is free.
-        $probe(1_000_000_060.0, 'boundary-edge-at', 1, 'the request at the exact cutoff is out of the window');
+        // cutoff - epsilon: still counted.
+        $probe($t0Ms + 60_000.0 - 1.0, 'exact-edge-cutoff-min', -1, 'a request at cutoff minus 1ms still counts the T member');
 
-        // cutoff = T0 + 1ms: out of the window.
-        $probe(1_000_000_060.001, 'boundary-edge-past', 1, 'the request past the cutoff is out of the window');
+        // cutoff exactly: the member at the exact cutoff has slid out.
+        $probe($t0Ms + 60_000.0, 'exact-edge-cutoff', 1, 'a request at the exact cutoff does not count the T member');
+
+        // cutoff + epsilon: out.
+        $probe($t0Ms + 60_000.0 + 1.0, 'exact-edge-cutoff-plus', 1, 'a request 1ms past the cutoff does not count the T member');
+
+        // T + W + 100ms (window plus 100ms): out.
+        $probe($t0Ms + 60_100.0, 'exact-edge-past', 1, 'a request at T + W + 100ms does not count the T member');
     }
 
-    public function testBucketedGlobalCutoffSecondIsPrunedTogetherWithItsCount(): void
+    public function testExactMsGlobalPruneDropsSlidOutMembers(): void
     {
-        // A burst bucket whose second has slid out of the window must be
-        // pruned with its hash count: the separated representation keeps
-        // the pruning exact (no boundary over-count from a retained burst
-        // bucket). Two requests in the same second, then the window
-        // slides fully past that second — both requests are out, so the
-        // cap must be free.
+        // A burst of two admissions at T fills the cap; the window then
+        // slides past T (the cutoff reaches T exactly): both members are
+        // pruned by the same `ZREMRANGEBYSCORE` on the next admission, so
+        // the cap is free — no slid-out member lingers.
         $client = new FakePredisClient();
         $clock = 1_000_000_000.0;
         $client->setTimeMs($clock * 1000);
@@ -610,27 +604,21 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
             windowSecs: 60,
             redis: $client,
             globalMax: 2,
-            namespace: 'boundary-burst',
+            namespace: 'exact-burst',
             pepper: 'pepper',
             now: static fn (): float => $clock,
         );
+        $globalKey = 'kiwi:rl:global:exact-burst';
         self::assertSame(1, $limiter->check('198.51.100.1'));
         self::assertSame(1, $limiter->check('198.51.100.2'));
-        $globalKey = 'kiwi:rl:global:boundary-burst';
-        $burstCount = 0;
-        foreach ($client->hashes[$globalKey.':counts'] ?? [] as $c) {
-            $burstCount += (int) $c;
-        }
-        self::assertSame(2, $burstCount, 'the burst second holds both admissions');
+        self::assertSame(2, $client->zcard($globalKey), 'two admissions = two exact-time members');
+        self::assertSame(-1, $limiter->check('198.51.100.3'), 'the cap is full while both members are inside the window');
 
-        // The window slides so the cutoff reaches the burst second exactly
-        // (exclusive edge): both burst requests are out of the window, so
-        // the whole bucket (member + hash count) must be pruned and the
-        // cap must be free — no boundary over-count from a retained burst.
+        // The window slides so the cutoff reaches T exactly (exclusive
+        // edge): both burst members are pruned and the cap is free.
         $clock = 1_000_000_060.0;
         $client->setTimeMs($clock * 1000);
-        self::assertSame(1, $limiter->check('198.51.100.3'), 'a slid-out burst bucket never counts toward the cap');
-        self::assertArrayNotHasKey('1000000000', $client->zsets[$globalKey] ?? [], 'the burst second is pruned from the ZSET');
-        self::assertArrayNotHasKey('1000000000', $client->hashes[$globalKey.':counts'] ?? [], 'the pruned second\'s hash count is dropped in the same script');
+        self::assertSame(1, $limiter->check('198.51.100.3'), 'both slid-out members are pruned — the cap is free');
+        self::assertSame(1, $client->zcard($globalKey), 'the admission leaves exactly its own member');
     }
 }

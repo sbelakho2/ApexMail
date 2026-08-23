@@ -235,11 +235,22 @@ final class RealRedisIntegrationTest extends TestCase
         self::assertGreaterThanOrEqual(60, $ttl, 'the counter TTL = challenge lifetime (60) + ttl margin (5)');
         self::assertLessThanOrEqual(65, $ttl);
 
-        // A valid solve decrements the per-source counter (floored at 0)
-        // and removes the nonce from the live membership.
+        // The issuance sidecar pairs each nonce with the original source
+        // pseudonym (the HMAC hex, never a raw IP), same hash tag and the
+        // same TTL basis as the counter.
+        $sidecarA = '{kiwi:ci}:outstanding:nonce:'.$nonceA;
+        self::assertSame(substr($sourceKey, \strlen('{kiwi:ci}:outstanding:')), (string) $this->client->get($sidecarA), 'the sidecar stores the issuing source\'s pseudonym');
+        $sidecarTtl = $this->client->ttl($sidecarA);
+        self::assertGreaterThanOrEqual(60, $sidecarTtl, 'the sidecar EX = challenge lifetime (60) + ttl margin (5)');
+        self::assertLessThanOrEqual(65, $sidecarTtl);
+
+        // A valid solve decrements the per-source counter (floored at 0),
+        // removes the nonce from the live membership and deletes the
+        // sidecar.
         $outstanding->solved('198.51.100.7', $nonceA);
         self::assertSame('2', (string) $this->client->get($sourceKey));
         self::assertSame(2, $this->client->zcard('{kiwi:ci}:outstanding:global:live'));
+        self::assertNull($this->client->get($sidecarA), 'a valid solve deletes the issuance sidecar');
         $outstanding->solved('198.51.100.7', $nonceB);
         $outstanding->solved('198.51.100.7', $nonceC);
         $outstanding->solved('198.51.100.7', base64_encode(random_bytes(32)));
@@ -248,6 +259,44 @@ final class RealRedisIntegrationTest extends TestCase
 
         // The cap frees when the membership drops: a new issuance is admitted.
         self::assertSame(1, $outstanding->issue('198.51.100.7', base64_encode(random_bytes(32)), $now + 60, 60));
+    }
+
+    public function testCancellationReleasesTheOriginalSourceSlotAgainstRealRedis(): void
+    {
+        // The one-shot cancellation against real Redis: the global member
+        // is freed AND the original source counter (the one that issued
+        // the challenge, from the sidecar — the canceller's identity never
+        // participates) is decremented exactly once, floored at 0. A
+        // duplicate cancel (ZREM == 0) is a no-op.
+        $secret = '0123456789abcdef0123456789abcdef';
+        $outstanding = new OutstandingChallenges($this->client, '{kiwi:ci}:outstanding:', RiskKeys::fromMaster($secret), 3, 100, 5);
+        $now = time();
+        $nonce = base64_encode(random_bytes(32));
+        $otherNonce = base64_encode(random_bytes(32));
+
+        self::assertSame(1, $outstanding->issue('198.51.100.7', $nonce, $now + 60, 60));
+        $sourceA = $outstanding->sourceKey('198.51.100.7');
+        $sourceB = $outstanding->sourceKey('203.0.113.9');
+        $sidecar = '{kiwi:ci}:outstanding:nonce:'.$nonce;
+        self::assertSame('1', (string) $this->client->get($sourceA), 'the issuance increments source A');
+        self::assertSame(1, $this->client->zcard('{kiwi:ci}:outstanding:global:live'));
+        self::assertNotNull($this->client->get($sidecar));
+
+        // An unrelated issuance for another source: the cancellation of
+        // A's nonce must never touch B's counter.
+        self::assertSame(1, $outstanding->issue('203.0.113.9', $otherNonce, $now + 60, 60));
+        self::assertSame('1', (string) $this->client->get($sourceB));
+
+        $outstanding->cancelled($nonce);
+        self::assertSame('0', (string) $this->client->get($sourceA), 'the cancellation returns the ORIGINAL source (A) slot');
+        self::assertSame('1', (string) $this->client->get($sourceB), "the cancelling source (B) is untouched — the request identity never participates");
+        self::assertSame(1, $this->client->zcard('{kiwi:ci}:outstanding:global:live'), 'only A\'s nonce leaves the live membership');
+        self::assertNull($this->client->get($sidecar), 'the cancellation deletes the sidecar');
+
+        // Duplicate cancel: ZREM == 0 -> no double-decrement, never negative.
+        $outstanding->cancelled($nonce);
+        $outstanding->cancelled($nonce);
+        self::assertSame('0', (string) $this->client->get($sourceA), 'a duplicate cancel never re-decrements the original source counter');
     }
 
     public function testSemaphoreWaitersGuardAgainstRealRedis(): void
@@ -412,13 +461,15 @@ final class RealRedisIntegrationTest extends TestCase
         $flaky->throwOnConsume = false;
     }
 
-    public function testFreshCancellationRestoresTheIssueDebtAgainstRealRedis(): void
+    public function testFreshCancellationIsRiskNeutralAgainstRealRedis(): void
     {
         // The end-to-end debt loop with the real risk-v1 Lua: issuance
         // records ChallengeIssued (issue debt on the source identity), a
         // fresh pending->cancelled transition records ChallengeCancelled
-        // and restores the debt, and a repeated idempotent cancellation
-        // never re-subtracts. The debt channel is read from the Lua state
+        // but the event is risk-neutral — the issue debt of the abandoned
+        // challenge stays (only natural decay moves it; only an actual
+        // solve repays it), and a repeated idempotent cancellation never
+        // moves it either. The debt channel is read from the Lua state
         // hash itself (the same keys the risk-state tests assert against).
         $secret = '0123456789abcdef0123456789abcdef';
         $namespace = 'ci:cancel-debt:'.bin2hex(random_bytes(4));
@@ -440,24 +491,51 @@ final class RealRedisIntegrationTest extends TestCase
         $issuer = new Issuer(new Config(secretKey: $secret, targetBits: 8, ttlSecs: 120), $storage);
         $controller = new \BelConsulting\KiwiCaptchaBundle\Controller\ChallengeController($issuer, null, false, $gateway, new \BelConsulting\KiwiCaptchaBundle\Risk\ContinuityCookie(), null, null, [], false, $storage);
 
-        $issue = $controller->challenge(\BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\JsonRequest::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], '{"scope":"login"}'));
-        self::assertSame(200, $issue->getStatusCode());
-        $nonce = json_decode((string) $issue->getContent(), true)['nonce'];
-
         $now = (int) $this->client->time()[0];
         $sourceId = $identityFactory->sourceId('198.51.100.7', $now);
         $stateKey = '{kiwi:'.$namespace.'}:risk:src:'.intdiv($now, 900).':'.$sourceId;
         $issueDebt = fn (): int => (int) $this->client->hget($stateKey, 'iss');
-        self::assertGreaterThan(0, $issueDebt(), 'the issuance must leave issue debt on the source identity');
+        $redisNowMs = fn (): int => (($t = $this->client->time()) ? ((int) $t[0]) * 1000 + intdiv((int) $t[1], 1000) : 0);
 
+        // The exact decay bracket: the Lua's internal elapsed time between
+        // two script executions is bounded by the Redis-clock readings
+        // around them (iss leaks at 40 raw/s, so the bracket spans only
+        // the real ms the calls took; minElapsed = t2 - t1, maxElapsed =
+        // t3 - t0 in the standard bracketed form).
+        $leak = static fn (int $raw, int $elapsedMs): int => max(0, $raw - intdiv($elapsedMs * 40, 1000));
+
+        $t0 = $redisNowMs();
+        $issue = $controller->challenge(\BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\JsonRequest::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], '{"scope":"login"}'));
+        $t1 = $redisNowMs();
+        self::assertSame(200, $issue->getStatusCode());
+        $nonce = json_decode((string) $issue->getContent(), true)['nonce'];
+        self::assertGreaterThan(0, $issueDebt(), 'the issuance must leave issue debt on the source identity');
+        $debtAfterIssue = $issueDebt();
+
+        $t2 = $redisNowMs();
         $cancel = $controller->cancel(\BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\JsonRequest::create('/challenge/cancel', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], json_encode(['nonce' => $nonce], JSON_THROW_ON_ERROR)));
+        $t3 = $redisNowMs();
         self::assertSame(200, $cancel->getStatusCode());
-        self::assertSame(0, $issueDebt(), 'the fresh cancellation restores the issue debt (clamped at zero)');
+
+        // The debt is NOT refunded: the raw iss after the cancellation is
+        // the post-issue value decayed only by the real elapsed window —
+        // never a −1000 step (a debt-restoring arm would have clamped it
+        // to 0).
+        $debtAfterCancel = $issueDebt();
+        self::assertGreaterThanOrEqual($leak($debtAfterIssue, $t3 - $t0), $debtAfterCancel, 'the cancellation must not subtract the issue debt');
+        self::assertLessThanOrEqual($leak($debtAfterIssue, max(0, $t2 - $t1)), $debtAfterCancel, 'the debt can only decay with real time, never be refunded');
+        self::assertGreaterThan(0, $debtAfterCancel, 'the issued-and-abandoned challenge keeps its issue-debt contribution');
 
         // The repeated idempotent cancellation performs no fresh
-        // transition and fires no second event: the debt stays restored.
+        // transition and fires no second event: the debt stays at its
+        // naturally decayed value (never a further −1000).
+        $r0 = $t3;
+        $r1 = $redisNowMs();
         self::assertSame(200, $controller->cancel(\BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\JsonRequest::create('/challenge/cancel', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], json_encode(['nonce' => $nonce], JSON_THROW_ON_ERROR)))->getStatusCode());
-        self::assertSame(0, $issueDebt(), 'a repeated cancellation never re-subtracts the restored debt');
+        $r2 = $redisNowMs();
+        $debtAfterRepeat = $issueDebt();
+        self::assertGreaterThanOrEqual($leak($debtAfterCancel, $r2 - $r0), $debtAfterRepeat, 'a repeated cancellation never subtracts the debt');
+        self::assertLessThanOrEqual($leak($debtAfterCancel, max(0, $r1 - $t3)), $debtAfterRepeat);
     }
 }
 

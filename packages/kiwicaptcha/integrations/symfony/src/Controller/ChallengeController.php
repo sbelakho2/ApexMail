@@ -1358,25 +1358,29 @@ final class ChallengeController
      * (its bounded solve search exhausted on a stochastic tail) tells the
      * server to retire the record and release the deployment-wide
      * live-outstanding slot the abandoned challenge was holding. Mirrors
-     * the challenge endpoint's hardening — POST-only, a bounded JSON body
+     * the challenge endpoint's hardening: POST-only, a bounded JSON body
      * carrying the challenge nonce, the same origin checks, a bounded
      * per-source limiter, and the private no-store envelope.
      *
      * Idempotent: an unknown, expired or already-cancelled nonce answers
      * the same success, and a consumed (finalized) challenge is never
-     * cancelled — the storage's atomic pending->cancelled transition
+     * cancelled. The storage's atomic pending->cancelled transition
      * decides ({@see \KiwiCaptcha\CancellableStorageInterface}), and the
      * response only ever acknowledges the cancellation, never record
      * contents. A fresh pending->cancelled transition also records the
-     * ChallengeCancelled risk event (the issue-debt restoration) exactly
-     * once per nonce, keyed on a nonce-derived idempotency identity;
-     * repeated idempotent requests never re-subtract the debt. The
-     * deployment-wide live-outstanding slot is released only
-     * when the storage actually cancelled the record: a fresh
-     * pending->cancelled flip or an already-cancelled record (the
-     * idempotent retry of an interrupted cancellation). A consumed or
-     * missing nonce answers the same success without freeing anything. A
-     * storage that cannot establish the cancellation (not a
+     * ChallengeCancelled risk event exactly once per nonce, keyed on a
+     * nonce-derived idempotency identity. The event is risk-neutral:
+     * observability only, since the issue debt of the abandoned challenge
+     * is never refunded; it decays naturally and only an actual solve
+     * repays it. The deployment-wide live-outstanding slot and the
+     * original source's outstanding slot are released only when the
+     * storage actually cancelled the record and the nonce was still a
+     * live member. The one-shot cancellation frees the global member and
+     * decrements exactly the source that issued the challenge, from the
+     * issuance sidecar and never the canceller's IP, at most once. A
+     * duplicate cancel is a no-op. A consumed or missing nonce answers
+     * the same success without freeing anything. A storage that cannot
+     * establish the cancellation (not a
      * {@see \KiwiCaptcha\CancellableStorageInterface}) fails closed with
      * the retryable 503 and frees nothing: freeing the global gate while
      * the record stays pending and redeemable would be an
@@ -1568,11 +1572,12 @@ final class ChallengeController
         }
 
         // Risk attribution of a fresh cancellation: the ChallengeCancelled
-        // risk event restores the issue-debt of the abandoned challenge,
-        // so it carries the same source/session/scope signals as the
-        // original ChallengeIssued. The continuity session is read without
-        // minting (the cancellation response never sets a cookie), and the
-        // issued scope comes from the pending record — a server-internal
+        // risk event is risk-neutral (observability only — the issue debt
+        // of the abandoned challenge is never refunded), but it still
+        // carries the same source/session/scope signals as the original
+        // ChallengeIssued. The continuity session is read without minting
+        // (the cancellation response never sets a cookie), and the issued
+        // scope comes from the pending record — a server-internal
         // bookkeeping read only: the response still carries no record
         // contents, and the fresh-outcome gate below keeps the event from
         // firing for anything but this call's own pending->cancelled flip.
@@ -1612,11 +1617,15 @@ final class ChallengeController
             // The ChallengeCancelled risk event fires only on the first
             // fresh pending->cancelled transition (wasCancelledNow):
             // repeated idempotent cancellations, consumed records and
-            // unknown nonces never re-subtract the issue-debt. The
-            // idempotency identity is derived from the nonce, so even
-            // concurrent duplicate flips record the event at most once per
-            // nonce (the engine's dedupe key). Best-effort: a risk-backend
-            // failure never breaks a completed cancellation.
+            // unknown nonces never record it again. The idempotency
+            // identity is derived from the nonce, so even concurrent
+            // duplicate flips record the event at most once per nonce
+            // (the engine's dedupe key). The event is risk-neutral: it
+            // performs no state mutation, so the cancelled challenge's
+            // issue debt keeps its issued-and-abandoned contribution
+            // (it decays naturally; only an actual solve repays it).
+            // Best-effort: a risk-backend failure never breaks a
+            // completed cancellation.
             if ($result !== null && $result->wasCancelledNow() && $this->risk !== null && $cancelledScope !== null) {
                 try {
                     $this->risk->challengeCancelled($cancelledScope, $clientIp, $riskSession, $nonce);
@@ -1625,18 +1634,24 @@ final class ChallengeController
                 }
             }
 
-            // Release the deployment-wide live-outstanding slot only when
-            // the record was actually cancelled: a fresh pending->cancelled
-            // transition (cancelled-now) or an already-cancelled record
-            // (cancelled — the idempotent retry of an interrupted
-            // cancellation: the record is dead, so the slot it held is
-            // released). A consumed (finalized) record and a
-            // missing/expired nonce performed no cancellation: nothing is
-            // freed, and the response stays the idempotent success without
-            // implying a cancellation that did not happen (the slot belongs
-            // to a finalized or never-issued challenge). Best-effort and
-            // idempotent on the release itself; a failure leaves the member
-            // to expire by its score.
+            // Release the deployment-wide live-outstanding slot AND the
+            // original source's outstanding slot only when the record was
+            // actually cancelled: a fresh pending->cancelled transition
+            // (cancelled-now) or an already-cancelled record (the
+            // idempotent retry of an interrupted cancellation: the record
+            // is dead, so the slots it held are released). The one-shot
+            // cancellation releases the global member and decrements
+            // exactly the source that issued the challenge (from the
+            // issuance sidecar — never the canceller's IP) when the
+            // member actually existed; a duplicate cancel is a no-op, so
+            // the counter can never be double-decremented. A consumed
+            // (finalized) record and a missing/expired nonce performed no
+            // cancellation: nothing is freed, and the response stays the
+            // idempotent success without implying a cancellation that did
+            // not happen (the slot belongs to a finalized or never-issued
+            // challenge). Best-effort and idempotent on the release
+            // itself; a failure leaves the member to expire by its score
+            // and the counter by its EXPIRE.
             if ($result !== null && $result->state !== 'consumed') {
                 $this->outstanding?->cancelled($nonce);
             }

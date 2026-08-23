@@ -157,6 +157,7 @@
 0 packages/kiwicaptcha-risk/src/signals.rs
 0 packages/kiwicaptcha-risk/src/store.rs
 0 packages/kiwicaptcha-risk/tests/common/mod.rs
+0 packages/kiwicaptcha-risk/tests/debt.rs
 0 packages/kiwicaptcha-risk/tests/fuzz.rs
 0 packages/kiwicaptcha-risk/tests/keyslot.rs
 0 packages/kiwicaptcha-risk/tests/perf.rs
@@ -341,8 +342,6 @@
 0 packages/kiwicaptcha/tools/docs-lint.sh
 0 packages/kiwicaptcha/tools/verify-error-code-parity.sh
 0 protocol/risk-v1/README.md
-0 tests/browser/playwright.a11y.config.mjs
-0 tests/browser/playwright.config.mjs
 0 tests/browser/router.php
 0 tests/browser/specs/a11y.spec.mjs
 0 tests/browser/specs/chaining.spec.mjs
