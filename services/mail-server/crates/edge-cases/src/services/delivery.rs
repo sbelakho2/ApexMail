@@ -10,7 +10,7 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use std::sync::OnceLock;
-use trust_dns_resolver::config::{ResolverConfig, ResolverOpts};
+use trust_dns_resolver::config::ResolverConfig;
 use trust_dns_resolver::TokioResolver;
 
 use crate::config::{LoopDetectionConfig, RetryConfig, AUTO_SUBMITTED_VALUES};

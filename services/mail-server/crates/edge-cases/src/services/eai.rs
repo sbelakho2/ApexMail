@@ -9,7 +9,7 @@ use std::time::Duration;
 use moka::sync::Cache;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
-use trust_dns_resolver::config::{ResolverConfig, ResolverOpts};
+use trust_dns_resolver::config::ResolverConfig;
 use trust_dns_resolver::TokioResolver;
 use unicode_normalization::UnicodeNormalization;
 
