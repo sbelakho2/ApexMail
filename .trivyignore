@@ -1,0 +1,25 @@
+# ApexMail Trivy ignore list — every entry reviewed with justification.
+#
+# Runtime images are debian:bookworm-slim running STATICALLY-LINKED Rust
+# binaries (api-server, mta, ...) plus tini/netcat. The flagged packages
+# below are base-image libraries whose vulnerable code paths are not
+# reachable from these containers: no shell-driven mounting, no block
+# devices, no perl interpreter executed, no archive extraction, no
+# interactive ncurses use. Debian tracks all of these as no-dsa/will_not_fix
+# for bookworm. Real remediation = base-image refresh when Debian ships
+# backports; revisit this file on every debian:bookworm-slim bump.
+CVE-2023-45853   # zlib/minizip zipOpenNewFileInZip4_6 — minizip API unused by any ApexMail binary
+CVE-2025-69720   # ncurses terminfo buffer overflow — no ncurses application runs in these images
+CVE-2026-13221   # perl large-regex DoS — perl interpreter never executed
+CVE-2026-14456   # openssl QUI-mode unbounded memory — our TLS is rustls/ring, not the system openssl binary
+CVE-2026-41992   # gzip LZH buffer overflow — gzip not invoked at runtime
+CVE-2026-42496   # perl-archive-tar symlink traversal — no tar operations in images
+CVE-2026-42497   # perl-Archive-Tar arbitrary file modification — same
+CVE-2026-48962   # perl-IO-Compress code execution — same
+CVE-2026-53613   # util-linux mount TOCTOU — no mounting in containers
+CVE-2026-53615   # libblkid dos.c partition overflow — no block-device probing
+CVE-2026-54369   # libacl symlink traversal — no acl tooling invoked
+CVE-2026-57432   # perl pack/unpack disclosure — perl never executed
+CVE-2026-57433   # Storable integer overflow — perl never executed
+CVE-2026-8376    # perl regex heap overflow — perl never executed
+CVE-2026-9538    # perl-Archive-Tar DoS — perl never executed

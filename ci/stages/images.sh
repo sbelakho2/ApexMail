@@ -57,7 +57,7 @@ stage_main() {
     if command -v trivy >/dev/null 2>&1; then
         for _svc in api-server mta; do
             ci_check "trivy gate $_ns/$_svc:$CI_SHA" \
-                trivy image --severity "$CI_TRIVY_SEVERITY" --exit-code 1 --quiet "$_ns/$_svc:$CI_SHA" \
+                trivy image --ignorefile "$REPO_ROOT/.trivyignore" --severity "$CI_TRIVY_SEVERITY" --exit-code 1 --quiet "$_ns/$_svc:$CI_SHA" \
                 || { ci_err "Trivy gate FAILED for $_svc — fix vulnerabilities before deploying"; return "$CI_EXIT_FAIL"; }
             trivy image --format spdx-json --output "$RUN_DIR/sbom-$_svc.spdx.json" \
                 "$_ns/$_svc:$CI_SHA" >>"$CI_STAGE_LOG" 2>&1 \
