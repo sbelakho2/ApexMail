@@ -173,7 +173,7 @@ if ! $NO_BUILD; then
     # NOTE: pdf-renderer is dev-profile-only (docker-compose.yml profiles:
     # ["dev","full-stack"]), is NOT part of the production stack, and its
     # Dockerfile is not buildable from this context — skip it here.
-    for separate_svc in marketing tracking-service; do
+    for separate_svc in marketing tracking-service postgres-backup; do
         should_build=false
         if [[ -z "$SERVICES_TO_BUILD" ]] || echo "$SERVICES_TO_BUILD" | grep -q "$separate_svc"; then
             should_build=true
@@ -193,6 +193,12 @@ if ! $NO_BUILD; then
                             -f "${DEPLOY_DIR}/deploy/Dockerfile.tracking" \
                             "${DEPLOY_DIR}" 2>&1 | tail -2
                     fi
+                    ;;
+                postgres-backup)
+                    log "Building: ${GHCR_NS}/postgres-backup:latest"
+                    docker build --tag "${GHCR_NS}/postgres-backup:latest" \
+                        -f "${DEPLOY_DIR}/deploy/hardening/Dockerfile.postgres-backup" \
+                        "${DEPLOY_DIR}/deploy/hardening" 2>&1 | tail -2
                     ;;
             esac
         fi

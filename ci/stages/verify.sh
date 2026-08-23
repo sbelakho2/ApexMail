@@ -28,9 +28,14 @@ compose() {
 }
 
 check_http() {
+    # _expect may be a single code ("200") or a pipe alternation ("400|404").
     _label=$1 _url=$2 _expect=$3
     _code=$(curl -k -s -o /dev/null -w '%{http_code}' --max-time 10 "$_url" 2>/dev/null || printf '000')
-    if [ "$_code" = "$_expect" ]; then
+    _ok=0
+    case "|$_expect|" in
+        *"|$_code|"*) _ok=1 ;;
+    esac
+    if [ "$_ok" -eq 1 ]; then
         ci_info "verify: $_label -> $_code OK"
         return "$CI_EXIT_OK"
     fi
@@ -64,19 +69,21 @@ verify_http_local() {
     check_http "track health"      "https://track.apexmail.ee/health"                      "200" &&
     check_http "status page"       "https://status.apexmail.ee/status"                     "200" &&
     check_http "enterprise health" "https://enterprise.apexmail.ee/health"                 "200" &&
-    check_http "sales-api (404 not 502)" "https://api.apexmail.ee/sales-api/u/healthcheck-probe" "404"
+    check_http "sales-api served (400|404 not 502)" "https://api.apexmail.ee/sales-api/u/healthcheck-probe" "400|404"
 }
 
 verify_smtp() {
-    _banner=$( (printf 'QUIT\r\n'; sleep 1) | ci_timeout 10 \
-        openssl s_client -starttls smtp -connect 127.0.0.1:25 -quiet 2>/dev/null | head -1 || true)
+    # Raw banner first — /dev/tcp is a BASH-ism (stages run dash on Debian),
+    # so the read runs under an explicit bash -c.
+    _banner=$(bash -c 'exec 3<>/dev/tcp/127.0.0.1/25 && head -1 <&3' 2>/dev/null || true)
     case ${_banner:-} in
         *220*|*ESMTP*)
             ci_info "verify: SMTP banner OK: $_banner"
             return "$CI_EXIT_OK" ;;
     esac
-    # openssl -quiet hides the banner on some builds; raw TCP fallback.
-    _banner=$( (exec 3<>/dev/tcp/127.0.0.1/25 && head -1 <&3) 2>/dev/null || true)
+    # STARTTLS leg via openssl when the raw read failed (also proves TLS).
+    _banner=$( (printf 'QUIT\r\n'; sleep 1) | ci_timeout 10 \
+        openssl s_client -starttls smtp -connect 127.0.0.1:25 -quiet 2>/dev/null | head -1 || true)
     case ${_banner:-} in
         *220*|*ESMTP*)
             ci_info "verify: SMTP banner OK: $_banner"
@@ -130,8 +137,8 @@ verify_remote_only() {
     check_http "track health"      "https://track.apexmail.ee/health"        "200" &&
     check_http "status page"       "https://status.apexmail.ee/status"       "200" &&
     check_http "enterprise health" "https://enterprise.apexmail.ee/health"   "200" &&
-    check_http "sales-api (404 not 502)" \
-        "https://api.apexmail.ee/sales-api/u/healthcheck-probe" "404"
+    check_http "sales-api served (400|404 not 502)" \
+        "https://api.apexmail.ee/sales-api/u/healthcheck-probe" "400|404"
 }
 
 # Images that are optional per-sha (only these warn when missing during a

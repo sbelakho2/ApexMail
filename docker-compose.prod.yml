@@ -976,8 +976,25 @@ services:
         max_attempts: 5
 
   postgres-backup:
-    image: prodrigestivill/postgres-backup-local:16-alpine
+    # Stock image + openssl/rsync baked in (the runtime `apk add` fallback is
+    # unreachable on the no-egress data_internal network, which silently
+    # produced UNENCRYPTED backups; see Dockerfile.postgres-backup).
+    build:
+      context: ./deploy/hardening
+      dockerfile: Dockerfile.postgres-backup
+    image: ${GHCR_NS:-ghcr.io/sbelakho2/apexmail}/postgres-backup:latest
     restart: unless-stopped
+    # The stock image healthcheck curls a web endpoint that only the stock
+    # entrypoint starts; the encrypt scheduler runs no web server. Health =
+    # the scheduler loop is alive AND a backup exists within the last 25h.
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pgrep -f postgres-backup-encrypt.sh >/dev/null && test -n "$$(find /backups -name '*.enc' -mmin -1500 2>/dev/null)"
+      interval: 5m
+      timeout: 10s
+      retries: 3
+      start_period: 2m
     depends_on:
       postgres:
         condition: service_healthy

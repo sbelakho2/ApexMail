@@ -63,7 +63,7 @@ stage_main() {
         while IFS=' ' read -r _svc _digests; do
             [ -n "${_svc:-}" ] || continue
             _now=$(docker image inspect "$_ns_d/$_svc:$CI_SHA" \
-                --format '{{join .RepoDigests " "}} {{.Id}}' 2>/dev/null) || _now=""
+                --format '{{.Id}}' 2>/dev/null) || _now=""
             if [ "$_now" != "$_digests" ]; then
                 ci_err "image digest mismatch for $_svc:$CI_SHA — rebuilt or altered since the images stage; refusing to deploy"
                 _dig_err=1

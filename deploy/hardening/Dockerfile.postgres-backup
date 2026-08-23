@@ -1,0 +1,9 @@
+# postgres-backup with openssl + rsync baked in.
+#
+# The encryption entrypoint (postgres-backup-encrypt.sh) needs openssl to
+# encrypt and rsync for the optional offsite mirror. The stock image lacks
+# both, and the container runs on a NO-EGRESS network by policy — the
+# script's runtime `apk add` fallback can never reach a CDN, so without this
+# image the scheduler silently stores PLAINTEXT database dumps.
+FROM prodrigestivill/postgres-backup-local:16-alpine
+RUN apk add --no-cache openssl rsync

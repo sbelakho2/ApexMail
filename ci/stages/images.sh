@@ -69,14 +69,14 @@ stage_main() {
     fi
 
     # --- 4. digest manifest (deploy-stage tamper guard) ------------------------------
-    # Record the exact RepoDigests/IDs the deploy will bring up. The deploy
+    # Record the exact image content IDs the deploy will bring up. The deploy
     # stage re-inspects the images and refuses to continue on any mismatch —
     # nothing runs in production that this run did not build and gate.
     ci_info "recording image digest manifest"
     : >"$RUN_DIR/image-digests.txt"
     for _svc in $CANONICAL_SERVICES $EXTRA_IMAGES; do
         _digest=$(docker image inspect "$_ns/$_svc:$CI_SHA" \
-            --format '{{join .RepoDigests " "}} {{.Id}}' 2>/dev/null) || _digest=""
+            --format '{{.Id}}' 2>/dev/null) || _digest=""
         if [ -n "$_digest" ]; then
             printf '%s %s\n' "$_svc" "$_digest" >>"$RUN_DIR/image-digests.txt"
         else
