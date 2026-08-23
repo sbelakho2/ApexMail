@@ -76,6 +76,24 @@ namespace KiwiCaptcha;
  * result was durably recorded only after the original final expiry
  * check passed. Ordinary replays of a consumed-without-result record
  * still report ConsumeIndeterminate.
+ *
+ * A cancelled record (the terminal marker of
+ * {@see \KiwiCaptcha\CancellableStorageInterface::cancel()}) fails
+ * verification closed. The pending→cancelled flip is the write the
+ * storage refuses to undo.
+ *
+ * The consume transition reports the cancelled record as missing, so it
+ * is never consumable. The retained-state reads never surface it.
+ *
+ * A cheap-failure cleanup never deletes it; the record is retained
+ * until its TTL.
+ *
+ * A well-formed token for a cancelled record resolves to the pinned
+ * deterministic failure {@see VerifyError::RecordNotFound}, the
+ * verifier's equivalent of an unavailable or non-consumable record. A
+ * cheap-phase failure keeps its own verdict. In every interleaving a
+ * cancelled record is never redeemable and can never produce a
+ * successful outcome.
  */
 final class Verifier
 {

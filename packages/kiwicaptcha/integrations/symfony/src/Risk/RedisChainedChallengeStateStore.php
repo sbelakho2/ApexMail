@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace BelConsulting\KiwiCaptchaBundle\Risk;
 
 use KiwiCaptcha\Risk\RiskAction;
+use KiwiCaptcha\Storage\ReplicaWaitException;
 
 /**
  * Redis-backed chained-challenge state store implementing the transactional
@@ -16,6 +17,31 @@ use KiwiCaptcha\Risk\RiskAction;
  * see {@see self::decodeState()}: a corrupt record never becomes a
  * defaulted one. The full state machine is documented in
  * docs/chained-challenges.md.
+ *
+ * Replica durability: with `waitReplicas > 0` every fresh mutating
+ * transition is followed by a verified Redis WAIT on the same
+ * connection whose acknowledgement count is checked against the
+ * threshold. The covered transitions are the chain/obligation creation,
+ * the issued transition, the terminal verified / step_up_required /
+ * denied transitions, the obligation-bound transaction
+ * terminalizations, the obligation removal and the rearm. This matches
+ * the fail-closed contract of the core
+ * {@see \KiwiCaptcha\Storage\RedisStorage}. Fewer than waitReplicas
+ * acknowledged replicas raise {@see ReplicaWaitException}. The caller
+ * never learns a success that was not replicated, so a returned
+ * Deny/StepUp (or a cleared obligation) can never be reported as
+ * persisted and then vanish on promotion. A lost terminal transition
+ * would let the same logical operation retry against a stale replica
+ * and issue or pass. The non-mutating paths (reads, the owner-scoped
+ * reservation, the release, idempotent same-state replays and refusals)
+ * perform no fresh write and never WAIT. The reservation is a
+ * short-lease transient claim, not a terminal state. An idempotent
+ * retry can therefore never turn a replica outage into a storage
+ * failure. The verified barrier supports the same standalone-connection
+ * matrix as the core. A Predis replication aggregate (Sentinel or
+ * master-slave), a Predis cluster aggregate and a retry-enabled
+ * standalone Predis client are refused at construction with
+ * waitReplicas > 0.
  */
 final class RedisChainedChallengeStateStore implements TransactionalChainedChallengeStateStore
 {
@@ -45,7 +71,12 @@ final class RedisChainedChallengeStateStore implements TransactionalChainedChall
      * reassessment is stronger, never lowering. The obligation points at
      * a missing/corrupt chain -> compare-delete the stale mapping and
      * create the chain fresh (the retry is inside the script — a stale
-     * mapping can never block a transaction).
+     * mapping can never block a transaction). The reply is a two-element
+     * table {chainId, mutated}: `mutated` is 1 exactly when the script
+     * performed a write (the fresh creation, the stale-mapping repair or
+     * the rank raise). It is 0 when the script only returned the
+     * existing chain. The caller applies the verified WAIT durability
+     * barrier to the mutating arms only.
      */
     private const CREATE_OR_GET_OBLIGATION_LUA = <<<'LUA'
 -- Chain obligation create-or-get (chain + obligation, one hash tag).
@@ -62,8 +93,9 @@ if existing then
         rec['requiredRank'] = newRank
         rec['requiredAction'] = ARGV[5]
         redis.call('SET', ARGV[11] .. existing, cjson.encode(rec), 'KEEPTTL')
+        return {existing, 1}
       end
-      return existing
+      return {existing, 0}
     end
   end
   -- stale mapping: compare-delete + create fresh in the SAME script.
@@ -93,7 +125,7 @@ end
 local ttl = tonumber(ARGV[10])
 redis.call('SET', KEYS[1], cjson.encode(rec), 'EX', ttl)
 redis.call('SET', KEYS[2], ARGV[2], 'EX', ttl)
-return ARGV[2]
+return {ARGV[2], 1}
 LUA;
 
     /**
@@ -527,20 +559,61 @@ LUA;
     /**
      * Compare-delete the obligation mapping only while it still points at
      * this chainId (a re-created chain of the same transaction must never
-     * be unlinked by a stale delete).
+     * be unlinked by a stale delete). Returns 1 when the mapping was
+     * deleted (a fresh mutation), 0 when it did not point at this chain —
+     * the caller applies the verified WAIT durability barrier to the
+     * deletion only.
      */
     private const DELETE_OBLIGATION_LUA = <<<'LUA'
 -- Chain obligation compare-delete: only while it still points at this chain.
 if redis.call('GET', KEYS[1]) == ARGV[1] then
   redis.call('DEL', KEYS[1])
+  return 1
 end
-return 1
+return 0
 LUA;
 
+    /**
+     * @param \Predis\Client|\Redis $redis         the Redis client shared with
+     *                                             the risk state.
+     * @param string                $namespace     the risk namespace (the
+     *                                             hash-tag discriminator).
+     * @param int                   $waitReplicas  when > 0, every fresh
+     *                                             mutating transition is
+     *                                             followed by a Redis WAIT
+     *                                             whose acknowledgement count
+     *                                             is verified. The covered
+     *                                             transitions are the
+     *                                             chain/obligation creation,
+     *                                             the issued transition, the
+     *                                             terminal verified /
+     *                                             step_up_required / denied
+     *                                             transitions, the obligation
+     *                                             removal and the rearm.
+     *                                             Fewer than waitReplicas
+     *                                             acked replicas raise
+     *                                             {@see ReplicaWaitException}.
+     *                                             This is fail-closed: the
+     *                                             caller never learns a
+     *                                             success that was not
+     *                                             replicated. The non-mutating
+     *                                             paths (reads, reservations,
+     *                                             releases, same-state
+     *                                             replays, refusals) never
+     *                                             WAIT. Supported on
+     *                                             standalone Redis connections
+     *                                             only, the same matrix as the
+     *                                             core RedisStorage.
+     * @param int                   $waitTimeoutMs WAIT timeout in ms (default
+     *                                             100).
+     */
     public function __construct(
         private readonly \Predis\Client|\Redis $redis,
         private readonly string $namespace = 'kiwi',
+        private readonly int $waitReplicas = 0,
+        private readonly int $waitTimeoutMs = 100,
     ) {
+        $this->refuseVerifiedWaitOnUnsupportedPredisClients();
     }
 
     public function create(string $chainId, string $stage1Nonce, string $scope, int $ttlSecs, ?string $requestBinding = null, ?string $requiredAction = null, int $policyVersion = 1): void
@@ -574,6 +647,13 @@ LUA;
             ], JSON_THROW_ON_ERROR),
             max(1, $ttlSecs),
         );
+        // Durability barrier: the fresh chain-state write must reach the
+        // configured replica count before the caller hands out a ticket,
+        // or a promoted stale replica could re-open the transaction at
+        // stage 1.
+        if ($this->waitReplicas > 0) {
+            $this->waitAndVerify('the chain-state creation');
+        }
     }
 
     public function createWithObligation(string $chainId, string $obligationId, string $stage1Nonce, string $scope, ?string $requestBinding, string $requiredAction, int $policyVersion, int $ttlSecs): void
@@ -608,6 +688,13 @@ LUA;
             $ttl,
         );
         $this->setWithTtl($this->obligationKey($obligationId), $chainId, $ttl);
+        // Durability barrier: the fresh chain + obligation write must
+        // reach the configured replica count before the caller hands out
+        // a ticket — a lost obligation would let the transaction restart
+        // at stage 1 after a promotion.
+        if ($this->waitReplicas > 0) {
+            $this->waitAndVerify('the chain creation with its obligation');
+        }
     }
 
     public function createOrGetObligation(string $obligationId, string $chainId, string $stage1Nonce, string $scope, string $requestBinding, string $requiredAction, int $requiredRank, int $policyVersion, int $expiresAt, int $ttlSecs): string
@@ -615,7 +702,7 @@ LUA;
         if (preg_match(self::OBLIGATION_PATTERN, $obligationId) !== 1) {
             throw new \InvalidArgumentException('obligationId must be 64 lowercase hex characters');
         }
-        $chainId = (string) $this->evalScript(self::CREATE_OR_GET_OBLIGATION_LUA, [
+        $reply = $this->evalScript(self::CREATE_OR_GET_OBLIGATION_LUA, [
             $this->key($chainId),
             $this->obligationKey($obligationId),
         ], [
@@ -631,8 +718,24 @@ LUA;
             (string) max(1, $ttlSecs),
             self::key(''),
         ]);
+        // The script answers {chainId, mutated}: `mutated` is 1 exactly
+        // when it performed a write (the fresh creation, the stale-mapping
+        // repair or the rank raise), 0 when it only returned the existing
+        // chain. Lua tables are 1-indexed; normalize before destructuring.
+        $parts = \is_array($reply) ? array_values($reply) : [];
+        $resolved = \is_string($parts[0] ?? null) ? $parts[0] : $chainId;
+        $mutated = (int) ($parts[1] ?? 0) === 1;
 
-        return $chainId;
+        // Durability barrier: the verified WAIT runs only when the script
+        // actually wrote (fresh creation / stale-mapping repair / rank
+        // raise). A pure recovery of the existing chain performed no
+        // write, so no WAIT is issued: an idempotent retry must never
+        // turn a replica outage into a storage failure.
+        if ($this->waitReplicas > 0 && $mutated) {
+            $this->waitAndVerify('the obligation create-or-get');
+        }
+
+        return $resolved;
     }
 
     public function obligationChainId(string $obligationId): ?string
@@ -678,10 +781,20 @@ LUA;
     {
         $this->assertLiveRecord($chainId);
         $result = $this->evalScript(self::MARK_ISSUED_LUA, [$this->key($chainId)], [$ownerToken, $stage2Nonce]);
-
-        return \is_string($result) && \in_array($result, ['issued_new', 'issued_same', 'verified_same', 'conflict', 'not_owner', 'missing'], true)
+        $status = \is_string($result) && \in_array($result, ['issued_new', 'issued_same', 'verified_same', 'conflict', 'not_owner', 'missing'], true)
             ? $result
             : 'missing';
+
+        // Durability barrier: the fresh reserved -> issued transition must
+        // reach the configured replica count before the caller hands the
+        // stage-2 challenge out, or a promoted stale replica could re-mint
+        // the chain. Same-state replays and refusals performed no write
+        // and never WAIT.
+        if ($this->waitReplicas > 0 && $status === 'issued_new') {
+            $this->waitAndVerify('the issued transition');
+        }
+
+        return $status;
     }
 
     public function markVerified(string $chainId, string $stage2Nonce): string
@@ -694,30 +807,63 @@ LUA;
             $this->key($chainId),
             $this->obligationKey((string) $record['obligationId']),
         ], [$stage2Nonce, $chainId]);
-
-        return \is_string($result) && \in_array($result, ['verified_new', 'verified_same', 'conflict', 'missing'], true)
+        $status = \is_string($result) && \in_array($result, ['verified_new', 'verified_same', 'conflict', 'missing'], true)
             ? $result
             : 'missing';
+
+        // Durability barrier: the fresh terminal issued -> verified write
+        // (and its atomic obligation deletion) must reach the configured
+        // replica count before the caller reports the chain ended, or a
+        // promoted stale replica could resurrect the open obligation.
+        // Same-state replays and refusals performed no write and never
+        // WAIT.
+        if ($this->waitReplicas > 0 && $status === 'verified_new') {
+            $this->waitAndVerify('the verified transition');
+        }
+
+        return $status;
     }
 
     public function markStepUpRequired(string $chainId, string $stage2Nonce): string
     {
         $this->assertLiveRecord($chainId);
         $result = $this->evalScript(self::MARK_STEP_UP_REQUIRED_LUA, [$this->key($chainId)], [$stage2Nonce]);
-
-        return \is_string($result) && \in_array($result, ['step_up_required_new', 'step_up_required_same', 'conflict', 'missing'], true)
+        $status = \is_string($result) && \in_array($result, ['step_up_required_new', 'step_up_required_same', 'conflict', 'missing'], true)
             ? $result
             : 'missing';
+
+        // Durability barrier: the fresh terminal issued ->
+        // step_up_required write must reach the configured replica count
+        // before the caller reports the step-up, or a promoted stale
+        // replica could re-issue the chain — a returned StepUp must never
+        // silently become issuable. Same-state replays and refusals
+        // performed no write and never WAIT.
+        if ($this->waitReplicas > 0 && $status === 'step_up_required_new') {
+            $this->waitAndVerify('the step-up-required transition');
+        }
+
+        return $status;
     }
 
     public function markDenied(string $chainId, string $stage2Nonce): string
     {
         $this->assertLiveRecord($chainId);
         $result = $this->evalScript(self::MARK_DENIED_LUA, [$this->key($chainId)], [$stage2Nonce]);
-
-        return \is_string($result) && \in_array($result, ['denied_new', 'denied_same', 'conflict', 'missing'], true)
+        $status = \is_string($result) && \in_array($result, ['denied_new', 'denied_same', 'conflict', 'missing'], true)
             ? $result
             : 'missing';
+
+        // Durability barrier: the fresh terminal issued -> denied write
+        // must reach the configured replica count before the caller
+        // reports the denial, or a promoted stale replica could re-issue
+        // the chain — a returned Deny must never silently become
+        // issuable. Same-state replays and refusals performed no write
+        // and never WAIT.
+        if ($this->waitReplicas > 0 && $status === 'denied_new') {
+            $this->waitAndVerify('the denied transition');
+        }
+
+        return $status;
     }
 
     public function markTransactionDenied(string $chainId, string $obligationId): string
@@ -730,10 +876,21 @@ LUA;
             $this->key($chainId),
             $this->obligationKey($obligationId),
         ], [$chainId, $obligationId]);
-
-        return \is_string($result) && \in_array($result, ['denied_new', 'denied_same', 'conflict', 'already_verified', 'already_completed', 'obligation_moved', 'missing'], true)
+        $status = \is_string($result) && \in_array($result, ['denied_new', 'denied_same', 'conflict', 'already_verified', 'already_completed', 'obligation_moved', 'missing'], true)
             ? $result
             : 'missing';
+
+        // Durability barrier: the fresh obligation-bound transaction
+        // terminalization (open obligation -> denied) must reach the
+        // configured replica count before the caller reports the denial,
+        // or a promoted stale replica could re-open the transaction. The
+        // idempotent same-state replay and the refusals performed no
+        // write and never WAIT.
+        if ($this->waitReplicas > 0 && $status === 'denied_new') {
+            $this->waitAndVerify('the transaction denial terminalization');
+        }
+
+        return $status;
     }
 
     public function markTransactionStepUpRequired(string $chainId, string $obligationId): string
@@ -746,23 +903,54 @@ LUA;
             $this->key($chainId),
             $this->obligationKey($obligationId),
         ], [$chainId, $obligationId]);
-
-        return \is_string($result) && \in_array($result, ['step_up_required_new', 'step_up_required_same', 'conflict', 'already_verified', 'already_completed', 'obligation_moved', 'missing'], true)
+        $status = \is_string($result) && \in_array($result, ['step_up_required_new', 'step_up_required_same', 'conflict', 'already_verified', 'already_completed', 'obligation_moved', 'missing'], true)
             ? $result
             : 'missing';
+
+        // Durability barrier: the fresh obligation-bound transaction
+        // terminalization (open obligation -> step_up_required) must
+        // reach the configured replica count before the caller reports
+        // the step-up, or a promoted stale replica could re-open the
+        // transaction. The idempotent same-state replay and the refusals
+        // performed no write and never WAIT.
+        if ($this->waitReplicas > 0 && $status === 'step_up_required_new') {
+            $this->waitAndVerify('the transaction step-up terminalization');
+        }
+
+        return $status;
     }
 
     public function rearmIssued(string $chainId, string $expectedStage2Nonce): bool
     {
         $this->assertLiveRecord($chainId);
         $rearmed = $this->evalScript(self::REARM_LUA, [$this->key($chainId)], [$expectedStage2Nonce]);
+        $success = $rearmed === true || $rearmed === 1;
 
-        return $rearmed === true || $rearmed === 1;
+        // Durability barrier: the fresh issued -> available rearm must
+        // reach the configured replica count before the caller mints a
+        // fresh stage-2 challenge, or a promoted stale replica could
+        // resurrect the rearmed chain as issued. A refused rearm is an
+        // atomic no-op and never WAITs.
+        if ($this->waitReplicas > 0 && $success) {
+            $this->waitAndVerify('the chain rearm');
+        }
+
+        return $success;
     }
 
     public function deleteObligation(string $chainId, string $obligationId): void
     {
-        $this->evalScript(self::DELETE_OBLIGATION_LUA, [$this->obligationKey($obligationId)], [$chainId]);
+        $deleted = $this->evalScript(self::DELETE_OBLIGATION_LUA, [$this->obligationKey($obligationId)], [$chainId]);
+
+        // Durability barrier: the fresh obligation deletion must reach
+        // the configured replica count before the caller treats the
+        // transaction as ended, or a promoted stale replica could
+        // resurrect the obligation and re-open the transaction. A
+        // compare-delete that did not point at this chain is an atomic
+        // no-op and never WAITs.
+        if ($this->waitReplicas > 0 && ($deleted === true || $deleted === 1)) {
+            $this->waitAndVerify('the obligation deletion');
+        }
     }
 
     public function complete(string $chainId, string $ownerToken, string $stage2Nonce): ?array
@@ -775,8 +963,19 @@ LUA;
         if (!\is_string($raw) || $raw === '') {
             return null;
         }
+        $completed = self::wire(self::decodeState($raw));
 
-        return self::wire(self::decodeState($raw));
+        // Durability barrier: the deprecated legacy completion is the
+        // historical name of the issued transition — the fresh
+        // reserved -> completed write must reach the configured replica
+        // count before the caller hands the challenge out, the same
+        // contract as markIssued(). A refused completion (non-owner /
+        // non-reserved) is an atomic no-op and never WAITs.
+        if ($this->waitReplicas > 0) {
+            $this->waitAndVerify('the chain completion');
+        }
+
+        return $completed;
     }
 
     /**
@@ -970,5 +1169,104 @@ LUA;
 
         // Predis signature: eval($script, $numkeys, ...$keysAndArgs)
         return $this->redis->eval($script, \count($keys), ...$keys, ...$args);
+    }
+
+    /**
+     * Block until at least waitReplicas replicas acknowledged the previous
+     * write, and fail closed when they did not.
+     *
+     * Redis WAIT returns the number of replicas that processed the write
+     * (0 on a replica-less server). The barrier asserts that number
+     * against the configured threshold, the same fail-closed check as the
+     * core RedisStorage. With `waitReplicas > 0` the durability promise
+     * is unconditional. A lagging or unreachable replica set raises
+     * {@see ReplicaWaitException} instead of silently downgrading the
+     * guarantee. The WAIT runs on the same connection that performed the
+     * mutation, so the acknowledgement count is about that write's
+     * replication.
+     */
+    private function waitAndVerify(string $what): void
+    {
+        if ($this->redis instanceof \Redis) {
+            // phpredis has no typed wait method; rawCommand sends the
+            // command directly.
+            $acked = $this->redis->rawCommand('WAIT', $this->waitReplicas, $this->waitTimeoutMs);
+        } else {
+            // Predis removed the typed wait() method from its command
+            // profile; executeRaw is the raw-command escape hatch (the same
+            // semantics as phpredis rawCommand).
+            $acked = $this->redis->executeRaw(['WAIT', $this->waitReplicas, $this->waitTimeoutMs]);
+        }
+        if ($acked === false || $acked === null) {
+            throw new ReplicaWaitException(sprintf(
+                'Redis WAIT failed after %s (waitReplicas=%d, timeout=%dms)',
+                $what,
+                $this->waitReplicas,
+                $this->waitTimeoutMs,
+            ));
+        }
+        if ((int) $acked < $this->waitReplicas) {
+            throw new ReplicaWaitException(sprintf(
+                'Redis WAIT acknowledged %d of %d requested replicas after %s',
+                (int) $acked,
+                $this->waitReplicas,
+                $what,
+            ));
+        }
+    }
+
+    /**
+     * Refuse the verified-WAIT hardening on Predis clients whose command
+     * dispatch can hide or re-execute the durability-critical write: the
+     * same refusal the core RedisStorage applies.
+     *
+     * WAIT is connection-relative: it counts replicas of the connection
+     * it is sent on and carries no key. A Predis replication aggregate
+     * (Sentinel or master-slave) wraps every command in failure-retry
+     * logic that can re-execute the WAIT on a replacement connection
+     * whose write offset is zero, so the acknowledgement would prove
+     * nothing about the original write's replication. A Redis cluster
+     * aggregate cannot route a keyless raw WAIT by slot. A retry-enabled
+     * standalone Predis client can transparently re-execute the Lua
+     * mutation after a lost response, so the returned result may describe
+     * the second invocation rather than the one that mutated. Supported
+     * topology is standalone Redis only; keep waitReplicas = 0 on an
+     * aggregate or a retry-enabled standalone client.
+     */
+    private function refuseVerifiedWaitOnUnsupportedPredisClients(): void
+    {
+        if ($this->waitReplicas <= 0 || !($this->redis instanceof \Predis\Client)) {
+            return;
+        }
+        $connection = $this->redis->getConnection();
+        if ($connection instanceof \Predis\Connection\Replication\ReplicationInterface) {
+            throw new \InvalidArgumentException(
+                'RedisChainedChallengeStateStore: verified-WAIT durability (waitReplicas > 0) is not supported on a Predis replication aggregate (Sentinel or master-slave) — WAIT is connection-affine, counting replicas of the connection it is sent on, and the aggregate\'s failure retry executes the WAIT on a replacement connection whose write offset is empty, so the acknowledgement proves nothing about the original write\'s replication. The verified barrier supports standalone Redis connections only; use a standalone connection with waitReplicas > 0, or keep waitReplicas = 0 on an aggregate.'
+            );
+        }
+        if ($connection instanceof \Predis\Connection\Cluster\ClusterInterface) {
+            throw new \InvalidArgumentException(
+                'RedisChainedChallengeStateStore: verified-WAIT durability (waitReplicas > 0) is not supported on a Predis Redis Cluster client — WAIT is connection-relative and cannot be routed by slot. The verified barrier supports standalone Redis connections only; use a standalone connection with waitReplicas > 0, or keep waitReplicas = 0 on a cluster.'
+            );
+        }
+        if ($connection === null) {
+            // An in-memory stand-in with no real connection object (the
+            // tests' fake clients skip the parent constructor): there is
+            // no Parameters instance to carry a retry policy and the
+            // stand-in overrides the command dispatch itself, so the
+            // vendored retry wrapper never engages.
+            return;
+        }
+        if ($connection instanceof \Predis\Connection\RelayConnection) {
+            // A relay connection dispatches commands directly, bypassing
+            // the vendored retry wrapper, so an explicit retry parameter
+            // is inert there and cannot replay a mutation.
+            return;
+        }
+        if (!$connection->getParameters()->isDisabledRetry()) {
+            throw new \InvalidArgumentException(
+                'RedisChainedChallengeStateStore: verified-WAIT durability (waitReplicas > 0) is not supported on a retry-enabled standalone Predis client — verified-WAIT durability requires that a durability-critical mutation is attempted exactly once on the connection whose subsequent WAIT establishes the replication offset, and a retry-enabled standalone Predis client can transparently re-execute the Lua mutation after a lost response. Retries must be disabled on the connection (remove the \'retry\' connection parameter), or keep waitReplicas = 0.'
+            );
+        }
     }
 }

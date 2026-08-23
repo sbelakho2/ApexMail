@@ -15,6 +15,11 @@ use KiwiCaptcha\Risk\RiskAction;
  * caller-provided clock so TTL and lease expiry are enforceable (mirroring
  * redis TIME). The full state machine is documented in
  * docs/chained-challenges.md.
+ *
+ * Replica durability: the in-memory store has NO replicas — the state is
+ * the process's own memory, so there is no Redis WAIT barrier and no
+ * replica acknowledgement to verify (single-process test/dev semantics).
+ * The state machine is otherwise identical to the Redis store's.
  */
 final class ArrayChainedChallengeStateStore implements TransactionalChainedChallengeStateStore
 {

@@ -9,6 +9,7 @@ use BelConsulting\KiwiCaptchaBundle\DependencyInjection\KiwiCaptchaExtension;
 use BelConsulting\KiwiCaptchaBundle\Risk\ArrayChainedChallengeStateStore;
 use BelConsulting\KiwiCaptchaBundle\Risk\ChainedChallengeTicketService;
 use BelConsulting\KiwiCaptchaBundle\Risk\RedisChainedChallengeStateStore;
+use BelConsulting\KiwiCaptchaBundle\Risk\RedisPostSolveDispositionStore;
 use BelConsulting\KiwiCaptchaBundle\Risk\RiskGateway;
 use BelConsulting\KiwiCaptchaBundle\Twig\KiwiCaptchaRuntime;
 use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\FakePredisClient;
@@ -286,5 +287,45 @@ final class ChainingWiringTest extends TestCase
         $container = $this->load(['chaining' => ['enabled' => true, 'hmac_secret' => str_repeat('h', 32)], 'request_binding_authority' => self::BINDING_AUTHORITY]);
 
         self::assertSame(str_repeat('h', 32), $container->getDefinition(ChainedChallengeTicketService::class)->getArgument(1));
+    }
+
+    public function testChainAndDispositionStoresReceiveTheWaitReplicasKnobs(): void
+    {
+        // The risk.redis replica-durability knobs flow into both stores,
+        // the same knobs that harden the challenge storage: the chain
+        // state store and the post-solve disposition store must verify
+        // the configured replica acknowledgement on their fresh mutating
+        // transitions.
+        $container = $this->load([
+            'chaining' => ['enabled' => true],
+            'request_binding_authority' => self::BINDING_AUTHORITY,
+            'redis' => ['wait_replicas' => 2, 'wait_timeout_ms' => 500],
+        ]);
+
+        $chainArgs = $container->getDefinition(RedisChainedChallengeStateStore::class)->getArguments();
+        self::assertInstanceOf(Reference::class, $chainArgs[0], 'the chain store receives the Redis client');
+        self::assertSame(2, $chainArgs[2], 'wait_replicas must reach the Redis chain state store');
+        self::assertSame(500, $chainArgs[3], 'wait_timeout_ms must reach the Redis chain state store');
+
+        $dispositionArgs = $container->getDefinition(RedisPostSolveDispositionStore::class)->getArguments();
+        self::assertInstanceOf(Reference::class, $dispositionArgs[0], 'the disposition store receives the Redis client');
+        self::assertSame(2, $dispositionArgs[3], 'wait_replicas must reach the Redis disposition store');
+        self::assertSame(500, $dispositionArgs[4], 'wait_timeout_ms must reach the Redis disposition store');
+    }
+
+    public function testChainAndDispositionStoresDefaultToWaitDisabled(): void
+    {
+        // No risk.redis knobs configured: the stores stay at the built-in
+        // defaults (wait_replicas 0, wait_timeout_ms 100) — the same
+        // byte-identical behavior as a deployment that never opts in.
+        $container = $this->load(['chaining' => ['enabled' => true], 'request_binding_authority' => self::BINDING_AUTHORITY]);
+
+        $chainArgs = $container->getDefinition(RedisChainedChallengeStateStore::class)->getArguments();
+        self::assertSame(0, $chainArgs[2], 'wait_replicas defaults to 0 (WAIT disabled)');
+        self::assertSame(100, $chainArgs[3], 'wait_timeout_ms defaults to 100');
+
+        $dispositionArgs = $container->getDefinition(RedisPostSolveDispositionStore::class)->getArguments();
+        self::assertSame(0, $dispositionArgs[3], 'wait_replicas defaults to 0 (WAIT disabled)');
+        self::assertSame(100, $dispositionArgs[4], 'wait_timeout_ms defaults to 100');
     }
 }

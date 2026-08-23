@@ -31,6 +31,18 @@ use Psr\Cache\CacheItemPoolInterface;
  * through {@see self::inspectConsumedEnvelope()}, a clearly-named
  * inspection method kept off the capability interfaces.
  *
+ * The same fused-transition constraint leaves
+ * {@see \KiwiCaptcha\CancellableStorageInterface} unimplemented too: a
+ * PSR-6 pool cannot express the atomic pending→cancelled flip. The read
+ * and the write are separate pool round trips, so a racing consume or a
+ * racing store could overwrite a cancellation and resurrect the pending
+ * state. That resurrection is exactly what the atomic transition exists
+ * to close. A PSR-6 backend therefore cannot establish a cancellation,
+ * and the cancellation endpoint fails closed on it: a slot is never
+ * freed for a record that stays pending and redeemable. Use
+ * {@see ArrayStorage} or {@see RedisStorage} where cancellation is
+ * required.
+ *
  * Important limitation: PSR-6 cannot express an atomic get-and-transition,
  * so `consume()` is not atomic under concurrency. Two racing requests can
  * both observe the pending state before either marks it consumed, and

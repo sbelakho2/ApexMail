@@ -32,6 +32,15 @@
   // the normal fast path.
   var KIWI_SOLVE_DEADLINE_MARGIN_MS = 500;
 
+  // ── Abandonment-notify cooldown ─────────────────────────────────────
+  // The exhausted/deadline abandonment path tells the server about the
+  // abandoned challenge (a bounded POST to {challenge endpoint}/cancel,
+  // fire-and-forget). The notification is rate-limited per widget: once
+  // per nonce, plus this cooldown window between notifications, so a
+  // retry loop can never spam the cancellation endpoint (which is
+  // per-source limited server-side too).
+  var KIWI_CANCEL_COOLDOWN_MS = 5000;
+
   // ── Argon2id worker source (embedded) ───────────────────────────────
   // Same-origin Web Worker for the memory-hard Argon2id solver. The worker
   // must run off the main thread (each 64 MiB hash blocks the UI for tens of
@@ -1409,6 +1418,34 @@
       setHint(kiwiT("hintProtected"));
       setProgress(0);
     }
+    // Abandoned-challenge notification (the exhaustion/deadline path): a
+    // fire-and-forget bounded POST to {challenge endpoint}/cancel carrying
+    // the abandoned nonce, so the server can retire the record and restore
+    // its issue-debt. Failures are ignored (the server is best-effort);
+    // the notification is rate-limited per widget (once per nonce, plus
+    // the cooldown window), so a retry loop can never spam the endpoint,
+    // and it always carries the nonce of the challenge this widget just
+    // abandoned — never the fresh nonce of a later re-acquire.
+    var lastCancelNotifyAt = 0;
+    var lastCancelNonce = "";
+    function kiwiNotifyCancel(endpoint, nonce) {
+      var now = Date.now();
+      if (nonce === lastCancelNonce) return;
+      if (now - lastCancelNotifyAt < KIWI_CANCEL_COOLDOWN_MS) return;
+      lastCancelNotifyAt = now;
+      lastCancelNonce = nonce;
+      try {
+        fetch(endpoint + "/cancel", {
+          method: "POST",
+          credentials: "same-origin",
+          cache: "no-store",
+          redirect: "error",
+          referrerPolicy: "no-referrer",
+          headers: { "Accept": "application/json", "Content-Type": "application/json" },
+          body: JSON.stringify({ nonce: nonce }),
+        }).catch(function () {});
+      } catch (e) {}
+    }
     // Failure recovery: an error never leaves the widget stuck in
     // "failed" — it resets to idle, retries a bounded number of times
     // with backoff, then settles idle and reacquires on the next
@@ -1699,6 +1736,16 @@
         telemetry.stop();
       } catch (e) {
         if (!kiwiGenerationCurrent(widgetId, gen)) return;
+        // The abandonment path: the bounded search exhausted or the solve
+        // deadline passed, so the challenge is abandoned. The server is
+        // informed (fire-and-forget, rate-limited) for the abandoned
+        // nonce only — a transport failure or a user reset never sends
+        // the notification (the challenge may still be pending, and a
+        // cancelled generation must not report a challenge it never
+        // owned).
+        if (data && typeof data.nonce === "string" && (e.message === "Expired" || e.message === "Exhausted")) {
+          kiwiNotifyCancel(endpoint, data.nonce);
+        }
         fail(e.message);
       }
     }

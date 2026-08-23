@@ -34,16 +34,19 @@ use KiwiCaptcha\StorageInterface;
  * logical-operation identity written in the same transition as the state
  * flip via
  * {@see OperationIdentityAwareStorageInterface::consumeWithOperationIdentity()}),
- * exposed on the consumed read.
+ * exposed on the consumed read. The envelope also carries the terminal
+ * `cancelled` marker of
+ * {@see \KiwiCaptcha\CancellableStorageInterface::cancel()}; a cancelled
+ * record is unverifiable and retained until deletion.
  */
-final class ArrayStorage implements AtomicStorageInterface, \KiwiCaptcha\ConsumedStateReadableInterface, OperationIdentityAwareStorageInterface, \KiwiCaptcha\AtomicDeleteIfPendingInterface
+final class ArrayStorage implements AtomicStorageInterface, \KiwiCaptcha\ConsumedStateReadableInterface, OperationIdentityAwareStorageInterface, \KiwiCaptcha\AtomicDeleteIfPendingInterface, \KiwiCaptcha\CancellableStorageInterface
 {
-    /** @var array<string, array{record: ChallengeRecord, consumed: bool, result: ConsumedResult|null, operationIdentity: string|null}> */
+    /** @var array<string, array{record: ChallengeRecord, consumed: bool, cancelled: bool, result: ConsumedResult|null, operationIdentity: string|null}> */
     private array $records = [];
 
     public function store(ChallengeRecord $record): void
     {
-        $this->records[$record->nonce] = ['record' => $record, 'consumed' => false, 'result' => null, 'operationIdentity' => null];
+        $this->records[$record->nonce] = ['record' => $record, 'consumed' => false, 'cancelled' => false, 'result' => null, 'operationIdentity' => null];
     }
 
     public function find(string $nonce): ?ChallengeRecord
@@ -55,6 +58,13 @@ final class ArrayStorage implements AtomicStorageInterface, \KiwiCaptcha\Consume
     {
         $entry = $this->records[$nonce] ?? null;
         if ($entry === null) {
+            return null;
+        }
+        if (($entry['cancelled'] ?? false)) {
+            // A cancelled record is never consumable: the one-shot
+            // transition reports it as missing, mirroring the Redis
+            // backend's raw-splice gsub failure (the verifier then fails
+            // the token closed instead of ever redeeming it).
             return null;
         }
         if ($entry['consumed']) {
@@ -75,6 +85,9 @@ final class ArrayStorage implements AtomicStorageInterface, \KiwiCaptcha\Consume
         $validated = OperationIdentity::validate($operationIdentity);
         $entry = $this->records[$nonce] ?? null;
         if ($entry === null) {
+            return null;
+        }
+        if (($entry['cancelled'] ?? false)) {
             return null;
         }
         if ($entry['consumed']) {
@@ -120,7 +133,8 @@ final class ArrayStorage implements AtomicStorageInterface, \KiwiCaptcha\Consume
      * sequence is de-facto atomic here. A missing record reports
      * missing, a pending record is deleted, and a consumed record is
      * kept untouched with its retained state riding back on the answer —
-     * the same tri-state contract as the Redis backend's Lua script.
+     * the same tri-state contract as the Redis backend's Lua script. A
+     * cancelled record is kept too: dead but retained until its TTL.
      *
      * No replica barrier: this backend has no replicas, so the verified
      * WAIT durability contract of the Redis backend's delete-if-pending
@@ -139,8 +153,38 @@ final class ArrayStorage implements AtomicStorageInterface, \KiwiCaptcha\Consume
                 new ConsumedRecord($entry['record'], false, true, $entry['result'], $entry['operationIdentity']),
             );
         }
+        if (($entry['cancelled'] ?? false)) {
+            // A cancelled record is dead but retained until its TTL — the
+            // cleanup never deletes it, so a cancellation can never be
+            // resurrected as pending (mirrors the Redis backend's
+            // delete-if-pending script).
+            return new \KiwiCaptcha\DeleteIfPendingResult('cancelled');
+        }
         unset($this->records[$nonce]);
 
         return new \KiwiCaptcha\DeleteIfPendingResult('deleted-pending');
+    }
+
+    /**
+     * The atomic cancellation transition (in-process de-facto atomic, like
+     * the other transitions here): a pending record is marked cancelled
+     * and kept; a consumed record is finalized and never cancellable; an
+     * already-cancelled record is idempotent; a missing record is null.
+     */
+    public function cancel(string $nonce): ?\KiwiCaptcha\CancellationResult
+    {
+        $entry = $this->records[$nonce] ?? null;
+        if ($entry === null) {
+            return null;
+        }
+        if ($entry['consumed']) {
+            return new \KiwiCaptcha\CancellationResult('consumed');
+        }
+        if (($entry['cancelled'] ?? false)) {
+            return new \KiwiCaptcha\CancellationResult('cancelled');
+        }
+        $this->records[$nonce]['cancelled'] = true;
+
+        return new \KiwiCaptcha\CancellationResult('cancelled-now');
     }
 }

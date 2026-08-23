@@ -30,6 +30,22 @@
 //! never fund a second operation; the deterministic invalid outcome
 //! (`valid = false`) replays without an identity, since it grants nothing.
 //!
+//! # Cancelled-state transition
+//!
+//! A pending record can also be flipped to the terminal `state =
+//! "cancelled"` marker via [`RedisChallengeStore::cancel`] — the widget
+//! abandoned the challenge and the server retires the record: dead but
+//! retained until its TTL, exactly the storage envelope the PHP core
+//! writes (`CancellableStorageInterface` parity). A cancelled record is
+//! unconsumable (the consume transition reports it as missing →
+//! [`VerifyError::RecordNotFound`], the verifier's fail-closed equivalent
+//! of an unavailable record), never recoverable (the consumed-state reads
+//! never surface it), and never eagerly deleted (the delete-if-pending
+//! cleanup keeps it). The fresh pending→cancelled flip is
+//! durability-critical and carries the same verified replica wait as the
+//! other transitions, so a cancelled record can never resurrect as pending
+//! on a promoted stale replica.
+//!
 //! [`ProductionVerifier`] implements the PHP verifier's check order with
 //! atomic single-use enforced by the consumed-state transition:
 //!
@@ -274,7 +290,13 @@ if string.find(v, '"state":"consumed"', 1, true) then
     return {v, 0}
 end
 local updated, n = string.gsub(v, '"state":"pending"', '"state":"consumed"', 1)
-if n ~= 1 then return false end
+if n ~= 1 then
+    -- A cancelled record (or any other non-pending state) is never
+    -- consumable: the gsub finds no pending marker, so the transition
+    -- reports the record as missing (nil) and the verifier fails the
+    -- token closed instead of ever redeeming it.
+    return false
+end
 if ARGV[1] ~= '' then
     local withIdentity, m = string.gsub(updated, '"operation_identity":null', '"operation_identity":' .. ARGV[1], 1)
     if m == 1 then
@@ -289,9 +311,11 @@ return {updated, 1}
 
 /// One atomic delete-if-pending cleanup: GET decides — a missing record
 /// reports missing, a consumed record is returned verbatim and never
-/// deleted (the committed recovery evidence survives a racing redeem),
-/// and only a pending record is deleted (the one-shot cheap-failure
-/// policy). Closes the check-then-delete toctou of a separate
+/// deleted (the committed recovery evidence survives a racing redeem), a
+/// cancelled record is returned verbatim and never deleted either (dead
+/// but retained until its TTL — a cancellation can never be resurrected as
+/// pending), and only a pending record is deleted (the one-shot
+/// cheap-failure policy). Closes the check-then-delete toctou of a separate
 /// `consumed_state` read followed by `DEL`. The deleted-pending
 /// transition is durability-critical: [`RedisChallengeStore::delete_if_pending`]
 /// applies the same verified replica wait as the other transitions
@@ -306,8 +330,63 @@ end
 if string.find(v, '"state":"consumed"', 1, true) then
   return {'consumed', v}
 end
+if string.find(v, '"state":"cancelled"', 1, true) then
+  return {'cancelled', v}
+end
 redis.call("DEL", KEYS[1])
 return {'deleted-pending'}
+"#;
+
+/// One atomic cancellation transition: the pending record is flipped to
+/// the terminal `state = "cancelled"` marker in place, splicing the raw
+/// bytes (the record's own JSON is never re-encoded, matching the
+/// raw-splice rule of the consume script and staying byte-compatible
+/// with the PHP `cancel` script), or the terminal state is observed:
+///
+/// Returns (as a Redis array reply):
+/// - missing key → `false`, Lua nil → Redis null → `Ok(None)` upstream.
+///   A cancellation of a never-issued or expired nonce is idempotent
+///   success.
+/// - `['consumed']` — the record is finalized (a solved challenge can
+///   never be cancelled);
+/// - `['cancelled']` — already cancelled (idempotent);
+/// - `['cancelled-now']` — this call performed the pending→cancelled
+///   flip.
+///
+/// The record's original TTL is preserved on the re-SET, so the cancelled
+/// record is retained until its natural expiry — the one-shot marker is
+/// the state, not absence. The fresh flip is durability-critical (a
+/// cancelled record must never resurrect as pending on a promoted stale
+/// replica), so [`RedisChallengeStore::cancel`] applies the same verified
+/// replica wait as the other transitions after it.
+const CANCEL_TRANSITION_LUA: &str = r#"
+-- kiwicaptcha cancel transition (atomic pending -> cancelled)
+--
+-- CRITICAL: the record is NEVER re-encoded through cjson — re-encoding
+-- rewrites large integers (issued_at_ns ~ 1.7e15) in scientific notation
+-- and breaks both strict parsers. The state field is spliced into the
+-- RAW stored JSON string (store() always writes the exact
+-- `"state":"pending"` marker), mirroring the consume transition. A
+-- consumed record is terminal and never cancellable; a cancelled record
+-- is idempotent. The flip preserves the key TTL.
+local v = redis.call("GET", KEYS[1])
+if not v then
+  return false
+end
+if string.find(v, '"state":"consumed"', 1, true) then
+  return {'consumed'}
+end
+if string.find(v, '"state":"cancelled"', 1, true) then
+  return {'cancelled'}
+end
+local ttl = redis.call("TTL", KEYS[1])
+if ttl < 1 then ttl = 1 end
+local updated, n = string.gsub(v, '"state":"pending"', '"state":"cancelled"', 1)
+if n ~= 1 then
+  return false
+end
+redis.call("SET", KEYS[1], updated, "EX", ttl)
+return {'cancelled-now'}
 "#;
 
 /// `consumed_result = {valid, binding}` exactly once, only when the record
@@ -345,12 +424,31 @@ pub enum DeleteIfPending {
     Missing,
     /// The record was pending and has been deleted (one-shot policy).
     DeletedPending,
+    /// The record was cancelled and is never deleted: dead but retained
+    /// until its TTL. No consumed state rides along — the cancelled state
+    /// is not consumed evidence (mirrors the PHP
+    /// `DeleteIfPendingResult('cancelled')`).
+    Cancelled,
     /// The record was already consumed and is never deleted; the
     /// retained consumed state (committed result + operation identity)
     /// is returned so the caller needs no second lookup. Boxed: the
     /// consumed state dominates the enum's size, and the common paths
-    /// (missing / deleted-pending) stay pointer-sized.
+    /// (missing / deleted-pending / cancelled) stay pointer-sized.
     Consumed(Box<ConsumedState>),
+}
+
+/// The outcome of the atomic pending → cancelled transition via
+/// [`RedisChallengeStore::cancel`], mirroring the PHP
+/// `CancellationResult` states.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CancelResult {
+    /// This call performed the pending → cancelled flip (the one-shot
+    /// cancellation; durability-barriered like the other transitions).
+    CancelledNow,
+    /// The record was already cancelled — idempotent, no write performed.
+    Cancelled,
+    /// The record is consumed (finalized) and was never cancelled.
+    Consumed,
 }
 
 /// The result of the consumed-state transition.
@@ -411,8 +509,8 @@ pub struct StoredConsumedResult {
 /// parse); the transition flag comes from the Lua reply.
 struct StoredChallenge {
     record: ChallengeRecord,
-    /// The envelope's `state` marker ("pending" | "consumed"), when the
-    /// stored value carries one.
+    /// The envelope's `state` marker ("pending" | "consumed" |
+    /// "cancelled"), when the stored value carries one.
     state: Option<String>,
     consumed_result: Option<StoredConsumedResult>,
     operation_identity: Option<String>,
@@ -497,9 +595,32 @@ fn parse_consume(value: redis::Value) -> Option<ConsumeResult> {
         operation_identity: stored.operation_identity,
     })
 }
+
+/// Parse the Lua cancel-transition reply into a [`CancelResult`]: `nil`
+/// → `None` (missing key); `['cancelled-now']` / `['cancelled']` /
+/// `['consumed']` → the corresponding terminal-state answer. Anything
+/// else is a storage-protocol failure (read as missing, matching the
+/// lenient corrupt-key rule).
+fn parse_cancel(value: redis::Value) -> Option<CancelResult> {
+    let redis::Value::Array(items) = value else {
+        return None;
+    };
+    let state = match items.first() {
+        Some(redis::Value::BulkString(bytes)) => String::from_utf8_lossy(bytes).into_owned(),
+        Some(redis::Value::SimpleString(s)) => s.clone(),
+        _ => return None,
+    };
+    match state.as_str() {
+        "cancelled-now" => Some(CancelResult::CancelledNow),
+        "cancelled" => Some(CancelResult::Cancelled),
+        "consumed" => Some(CancelResult::Consumed),
+        _ => None,
+    }
+}
+
 /// Decode the delete-if-pending Lua reply: `['missing']`,
-/// `['deleted-pending']`, or `['consumed', <json>]`. Anything else is a
-/// storage-protocol failure.
+/// `['deleted-pending']`, `['cancelled', <json>]`, or `['consumed', <json>]`.
+/// Anything else is a storage-protocol failure.
 fn parse_delete_if_pending(value: redis::Value) -> DeleteIfPending {
     let redis::Value::Array(items) = value else {
         return DeleteIfPending::Missing;
@@ -510,6 +631,7 @@ fn parse_delete_if_pending(value: redis::Value) -> DeleteIfPending {
         _ => return DeleteIfPending::Missing,
     };
     match state.as_str() {
+        "cancelled" => DeleteIfPending::Cancelled,
         "consumed" => {
             let raw = match items.get(1) {
                 Some(redis::Value::BulkString(bytes)) => {
@@ -642,8 +764,10 @@ impl RedisChallengeStore {
     /// `wait_replicas` replicas before the call returns: after the issuance
     /// SET, after a fresh pending→consumed transition (a consumed-before
     /// replay — or a missing key — performs no write and therefore no
-    /// wait), after the deterministic-result commit, and after the
-    /// delete-if-pending cleanup, a replica wait is issued with
+    /// wait), after a fresh pending→cancelled transition (an
+    /// already-cancelled or consumed record performs no write and
+    /// therefore no wait), after the deterministic-result commit, and
+    /// after the delete-if-pending cleanup, a replica wait is issued with
     /// `replicas timeout_ms` and its acknowledgement count is verified.
     /// Fewer than `wait_replicas` acknowledged replicas fail the call
     /// closed with an error — the durability promise is unconditional, it
@@ -861,6 +985,9 @@ impl RedisChallengeStore {
     ///   (the committed result, or
     ///   [`VerifyError::ConsumeIndeterminate`] when no outcome was committed
     ///   yet — the previous consumer crashed between transition and commit).
+    /// - `cancelled` → the record is dead but retained; the transition
+    ///   reports it as missing, `Ok(None)`, RecordNotFound, and it is
+    ///   never consumable.
     /// - missing → `Ok(None)` (RecordNotFound).
     ///
     /// When [`RedisChallengeStore::with_wait`] configured a replica wait,
@@ -979,12 +1106,14 @@ impl RedisChallengeStore {
     }
 
     /// The atomic delete-if-pending cleanup — ONE Lua script decides
-    /// missing / deleted-pending / consumed and performs the delete,
-    /// closing the check-then-delete toctou: a record a concurrent
+    /// missing / deleted-pending / cancelled / consumed and performs the
+    /// delete, closing the check-then-delete toctou: a record a concurrent
     /// redeemer consumes (and commits) between the caller's decision and
     /// this cleanup is observed in its consumed state here and never
     /// erased. A consumed record's retained state is returned with the
-    /// answer (no second lookup). `Err` is a genuine storage failure.
+    /// answer (no second lookup); a cancelled record is dead but retained
+    /// until its TTL and is never erased either. `Err` is a genuine
+    /// storage failure.
     ///
     /// When [`RedisChallengeStore::with_wait`] configured a replica wait,
     /// the deleted-pending transition is barriered exactly like the other
@@ -1018,6 +1147,65 @@ impl RedisChallengeStore {
             // maps it to StorageUnavailable), which is exactly right: the
             // delete happened but its durability is unconfirmed.
             if matches!(parsed, DeleteIfPending::DeletedPending) && wait_replicas > 0 {
+                Self::wait_verified(c, wait_replicas, wait_timeout_ms)?;
+            }
+            Ok(parsed)
+        })?;
+        Ok(result)
+    }
+
+    /// The atomic pending → cancelled transition — the
+    /// `CancellableStorageInterface::cancel()` mirror. ONE Lua script on
+    /// the server:
+    /// - `pending` → the record is kept with `state = "cancelled"` and
+    ///   [`CancelResult::CancelledNow`] is returned — this call retired
+    ///   the challenge (the widget abandoned it);
+    /// - `cancelled` → [`CancelResult::Cancelled`] (idempotent);
+    /// - `consumed` → [`CancelResult::Consumed`] — a finalized record is
+    ///   never cancelled;
+    /// - missing → `Ok(None)` (a cancellation of a never-issued or
+    ///   expired nonce is idempotent success upstream).
+    ///
+    /// The cancelled record is retained until its original TTL — the
+    /// one-shot marker is the state, not absence. It is unconsumable (a
+    /// later `consume()` reads it as missing), never recoverable via
+    /// `consumed_state()`, and never eagerly deleted via
+    /// `delete_if_pending()`.
+    ///
+    /// When [`RedisChallengeStore::with_wait`] configured a replica wait,
+    /// the verified wait applies to the fresh pending→cancelled transition
+    /// only: the flip must reach the configured replica count before the
+    /// caller may report the cancellation, or a promoted stale replica
+    /// could resurrect the pending record and let it be redeemed. An
+    /// already-cancelled replay, a consumed record and a missing key
+    /// perform no write, so they never wait — a replica outage cannot turn
+    /// an idempotent retry into a failure.
+    pub fn cancel(&self, nonce: &str) -> redis::RedisResult<Option<CancelResult>> {
+        let key = format!("{}{}", self.prefix, nonce);
+        let wait_replicas = self.wait_replicas;
+        let wait_timeout_ms = self.wait_timeout_ms;
+        let mut conn = self.checkout()?;
+        let result = Self::run_command(&mut conn, |c| {
+            let v = Self::invoke_script::<redis::Value>(
+                c,
+                &redis::Script::new(CANCEL_TRANSITION_LUA),
+                &key,
+                &[],
+            )?;
+            let parsed = parse_cancel(v);
+            // Durability barrier: only the fresh pending → cancelled
+            // transition mutated the store, so only it waits. The wait
+            // proves that at least N replicas acknowledged the write; it
+            // does NOT constrain which replicas a future failover manager
+            // promotes — replay-safe promotion additionally requires the
+            // threshold to cover every eligible failover target or
+            // promotion gating. A barrier failure surfaces as an Err,
+            // which is exactly right: the flip happened but its durability
+            // is unconfirmed. An already-cancelled replay, a consumed
+            // record and a missing key performed no write, so they never
+            // wait: a replica outage cannot turn an idempotent retry into
+            // a failure.
+            if matches!(parsed, Some(CancelResult::CancelledNow)) && wait_replicas > 0 {
                 Self::wait_verified(c, wait_replicas, wait_timeout_ms)?;
             }
             Ok(parsed)
@@ -1495,7 +1683,14 @@ impl ProductionVerifier {
                     // stands — the identity-gated replay never overrides it.
                     return VerifyOutcome::Invalid(e);
                 }
-                Ok(DeleteIfPending::DeletedPending) | Ok(DeleteIfPending::Missing) => {
+                Ok(DeleteIfPending::DeletedPending)
+                | Ok(DeleteIfPending::Missing)
+                | Ok(DeleteIfPending::Cancelled) => {
+                    // Missing, or the pending record was atomically
+                    // deleted, or the record is cancelled (dead but
+                    // retained — the cleanup never deletes it): the
+                    // one-shot verdict stands and the cancelled record is
+                    // never resurrectable.
                     return VerifyOutcome::Invalid(e);
                 }
                 Err(_) => {
@@ -2044,7 +2239,8 @@ mod tests {
         let counter = solve_for_test(&issued.record).expect("4-bit sha solves");
         let issued_at_ns = issued.record.issued_at_ns;
 
-        let store = RedisChallengeStore::new(redis::Client::open(url).unwrap(), prefix.clone());
+        let store =
+            RedisChallengeStore::new(redis::Client::open(url.clone()).unwrap(), prefix.clone());
         store.store(&issued.record).unwrap();
         let verifier = ProductionVerifier::new(store, SECRET).with_now_fn(fake_now);
 
@@ -2083,6 +2279,193 @@ mod tests {
         // panics and never allocates beyond the value itself).
         let at_cap = "A".repeat(MAX_STORED_RECORD_JSON_BYTES);
         assert!(decode_stored(&at_cap).is_none());
+    }
+
+    // ── cancellation transition (pending → cancelled) ────────────────
+
+    #[test]
+    fn cancel_flips_pending_to_cancelled_and_keeps_the_record() {
+        // The atomic pending→cancelled flip: the record is kept with the
+        // terminal `state = "cancelled"` marker until its TTL — the one-shot
+        // marker is the state, not absence. The stored JSON bytes are
+        // spliced, never re-encoded (issued_at_ns survives byte-exactly).
+        let Some(url) = redis_url() else { return };
+        let prefix = format!("kiwitest:cancel-flip:{}:", std::process::id());
+        let issued = issue_challenge(
+            &sha_config(4),
+            "login",
+            IP,
+            now_unix(),
+            now_micros(),
+            0,
+            None,
+        )
+        .unwrap();
+        let store =
+            RedisChallengeStore::new(redis::Client::open(url.clone()).unwrap(), prefix.clone());
+        store.store(&issued.record).unwrap();
+
+        assert_eq!(
+            store.cancel(&issued.record.nonce).unwrap(),
+            Some(CancelResult::CancelledNow),
+            "a fresh pending record is cancelled by this call"
+        );
+        assert_eq!(
+            store.cancel(&issued.record.nonce).unwrap(),
+            Some(CancelResult::Cancelled),
+            "an already-cancelled record is idempotent"
+        );
+
+        let key = format!("{prefix}{}", issued.record.nonce);
+        let mut conn = redis::Client::open(url.clone())
+            .unwrap()
+            .get_connection()
+            .unwrap();
+        let raw: String = redis::cmd("GET").arg(&key).query(&mut conn).unwrap();
+        let stored: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(
+            stored["state"], "cancelled",
+            "the flip must persist state=cancelled in the stored JSON"
+        );
+        assert_eq!(
+            stored["issued_at_ns"], issued.record.issued_at_ns,
+            "issued_at_ns must survive the cancellation byte-exactly (no cjson re-encode)"
+        );
+
+        // The cancelled record is retained: find() still reads the record
+        // (the state-agnostic peek), exactly like the PHP reader.
+        let found = store
+            .find(&issued.record.nonce)
+            .unwrap()
+            .expect("the cancelled record is retained until its TTL");
+        assert_eq!(found.nonce, issued.record.nonce);
+    }
+
+    #[test]
+    fn cancel_is_refused_for_consumed_and_null_for_missing() {
+        // A consumed (finalized) record is never cancelled; a missing
+        // record is Ok(None) — the idempotent-success upstream contract.
+        let Some(url) = redis_url() else { return };
+        let prefix = format!("kiwitest:cancel-consumed:{}:", std::process::id());
+        let issued = issue_challenge(
+            &sha_config(4),
+            "login",
+            IP,
+            now_unix(),
+            now_micros(),
+            0,
+            None,
+        )
+        .unwrap();
+        let store =
+            RedisChallengeStore::new(redis::Client::open(url.clone()).unwrap(), prefix.clone());
+        store.store(&issued.record).unwrap();
+        let consumed = store
+            .consume(&issued.record.nonce)
+            .unwrap()
+            .expect("pending record consumes");
+        assert!(consumed.first);
+
+        assert_eq!(
+            store.cancel(&issued.record.nonce).unwrap(),
+            Some(CancelResult::Consumed),
+            "a consumed/finalized record is never cancelled"
+        );
+        assert!(store.cancel("never-stored-nonce").unwrap().is_none());
+
+        // The consumed evidence survives the refused cancellation.
+        let key = format!("{prefix}{}", issued.record.nonce);
+        let mut conn = redis::Client::open(url.clone())
+            .unwrap()
+            .get_connection()
+            .unwrap();
+        let raw: String = redis::cmd("GET").arg(&key).query(&mut conn).unwrap();
+        let stored: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(stored["state"], "consumed");
+    }
+
+    #[test]
+    fn cancelled_record_is_unconsumable_and_fails_verification_closed() {
+        // The fail-closed contract: a cancelled record is never
+        // consumable, never recoverable, never verifiable — a genuinely
+        // valid solution for it resolves to RecordNotFound (the verifier's
+        // equivalent of an unavailable record), and the retained-state
+        // reads and the cleanup never surface or delete it.
+        let Some(url) = redis_url() else { return };
+        let prefix = format!("kiwitest:cancel-verify:{}:", std::process::id());
+        let issued = issue_challenge(
+            &sha_config(4),
+            "login",
+            IP,
+            now_unix(),
+            now_micros(),
+            0,
+            None,
+        )
+        .unwrap();
+        let counter = solve_for_test(&issued.record).expect("4-bit sha solves");
+        let issued_at_ns = issued.record.issued_at_ns;
+        let store =
+            RedisChallengeStore::new(redis::Client::open(url.clone()).unwrap(), prefix.clone());
+        store.store(&issued.record).unwrap();
+        assert_eq!(
+            store.cancel(&issued.record.nonce).unwrap(),
+            Some(CancelResult::CancelledNow)
+        );
+
+        // Unconsumable: the consume transition reports the cancelled
+        // record as missing.
+        assert!(
+            store.consume(&issued.record.nonce).unwrap().is_none(),
+            "a cancelled record is never consumable"
+        );
+        // Never recoverable: the consumed-state read never surfaces it.
+        assert!(
+            store
+                .consumed_state(&issued.record.nonce)
+                .unwrap()
+                .is_none(),
+            "a cancelled record is never recoverable"
+        );
+        // Never committed: the result commit refuses it.
+        assert!(
+            !store
+                .commit_result(&issued.record.nonce, true, None)
+                .unwrap(),
+            "a cancelled record can never carry a committed outcome"
+        );
+        // Never eagerly deleted: the cleanup keeps it (dead until TTL).
+        assert!(matches!(
+            store.delete_if_pending(&issued.record.nonce).unwrap(),
+            DeleteIfPending::Cancelled
+        ));
+        let key = format!("{prefix}{}", issued.record.nonce);
+        let mut conn = redis::Client::open(url.clone())
+            .unwrap()
+            .get_connection()
+            .unwrap();
+        let raw: String = redis::cmd("GET").arg(&key).query(&mut conn).unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&raw).unwrap()["state"],
+            "cancelled",
+            "the cleanup never deletes a cancelled record"
+        );
+
+        // Never verifiable: a genuinely valid solution fails closed with
+        // RecordNotFound — never a successful redemption.
+        let verifier = ProductionVerifier::new(store, SECRET);
+        assert_eq!(
+            verifier.verify(
+                &encode_token(&issued.record.nonce, counter),
+                "login",
+                IP,
+                issued_at_ns + 1_000_000,
+                None,
+                None,
+            ),
+            VerifyOutcome::Invalid(VerifyError::RecordNotFound),
+            "a valid token for a cancelled record fails closed as RecordNotFound"
+        );
     }
 
     #[test]

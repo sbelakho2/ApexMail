@@ -4,10 +4,15 @@ declare(strict_types=1);
 
 namespace BelConsulting\KiwiCaptchaBundle\Tests;
 
+use BelConsulting\KiwiCaptchaBundle\Risk\ArrayChainedChallengeStateStore;
+use BelConsulting\KiwiCaptchaBundle\Risk\ChainIssuedResult;
+use BelConsulting\KiwiCaptchaBundle\Risk\ChainReservationResult;
+use BelConsulting\KiwiCaptchaBundle\Risk\ChainVerifiedResult;
 use BelConsulting\KiwiCaptchaBundle\Risk\ChainedChallengeTicketService;
 use BelConsulting\KiwiCaptchaBundle\Risk\MalformedChainedChallengeStateException;
 use BelConsulting\KiwiCaptchaBundle\Risk\RedisChainedChallengeStateStore;
 use KiwiCaptcha\Risk\RiskAction;
+use KiwiCaptcha\Storage\ReplicaWaitException;
 use PHPUnit\Framework\TestCase;
 
 /**
@@ -34,16 +39,23 @@ final class RedisChainedChallengeStateStoreTest extends TestCase
         return new RedisChainedChallengeStateStore($this->fake, 'kiwi-test');
     }
 
+    private function waitingStore(int $waitReplicas = 1, int $waitTimeoutMs = 100): RedisChainedChallengeStateStore
+    {
+        $this->fake = new ChainRedisFake();
+
+        return new RedisChainedChallengeStateStore($this->fake, 'kiwi-test', $waitReplicas, $waitTimeoutMs);
+    }
+
     private function makeNonce(): string
     {
         return base64_encode(random_bytes(32));
     }
 
     /** @return array{0: ChainedChallengeTicketService, 1: \BelConsulting\KiwiCaptchaBundle\Risk\ChainRequirement} */
-    private function issueRequirement(RedisChainedChallengeStateStore $store): array
+    private function issueRequirement(RedisChainedChallengeStateStore $store, string $binding = 'tx-binding'): array
     {
         $service = new ChainedChallengeTicketService($store, self::SECRET, 300, 15, null, fn (): int => $this->fake->clockSecs());
-        $requirement = $service->requireStage2($this->makeNonce(), 'login', 'tx-binding', 1, RiskAction::Argon32, 1300);
+        $requirement = $service->requireStage2($this->makeNonce(), 'login', $binding, 1, RiskAction::Argon32, 1300);
 
         return [$service, $requirement];
     }
@@ -192,6 +204,258 @@ final class RedisChainedChallengeStateStoreTest extends TestCase
         $this->expectException(MalformedChainedChallengeStateException::class);
         $store->read($chainId);
     }
+
+    public function testTerminalTransitionsWaitOnTheFreshMutationOnly(): void
+    {
+        // THE verified-WAIT gating of the chain terminal transitions: the
+        // fresh issued -> verified / step_up_required / denied writes (and
+        // the issued transition) WAIT for the configured replica count;
+        // the idempotent same-state replays and the refusals perform no
+        // write and never WAIT.
+        $store = $this->waitingStore();
+        [, $requirement] = $this->issueRequirement($store);
+        self::assertCount(1, $this->fake->waits(), 'the obligation create-or-get (fresh chain creation) WAITs');
+        $chainId = $requirement->chainId;
+        $nonce = $this->makeNonce();
+        $this->fake->calls = [];
+
+        // A reservation is a short-lease transient claim, never a
+        // terminal write: no WAIT.
+        self::assertSame('available', $store->reserve($chainId, 'owner-a', 15));
+        self::assertCount(0, $this->fake->waits(), 'a reservation never WAITs');
+
+        self::assertSame('issued_new', $store->markIssued($chainId, 'owner-a', $nonce));
+        self::assertCount(1, $this->fake->waits(), 'the fresh issued transition WAITs');
+        $this->fake->calls = [];
+        self::assertSame('issued_same', $store->markIssued($chainId, 'owner-a', $nonce));
+        self::assertCount(0, $this->fake->waits(), 'an idempotent same-state replay never WAITs');
+
+        self::assertSame('verified_new', $store->markVerified($chainId, $nonce));
+        self::assertCount(1, $this->fake->waits(), 'the fresh terminal verified transition WAITs');
+        $this->fake->calls = [];
+        self::assertSame('verified_same', $store->markVerified($chainId, $nonce));
+        self::assertCount(0, $this->fake->waits(), 'the verified same-state replay never WAITs');
+        self::assertSame('conflict', $store->markVerified($chainId, $this->makeNonce()));
+        self::assertCount(0, $this->fake->waits(), 'a conflict refusal never WAITs');
+    }
+
+    public function testStepUpDeniedAndTransactionTerminalizationsWaitOnTheFreshMutation(): void
+    {
+        $store = $this->waitingStore();
+        $nonce = $this->makeNonce();
+
+        // step-up: the fresh terminal write WAITs, the same-state replay
+        // and the conflict refusal never do.
+        [$stepUpService, $stepUpRequirement] = $this->issueRequirement($store, 'tx-stepup');
+        $stepUpChainId = $stepUpRequirement->chainId;
+        $this->fake->calls = [];
+        self::assertSame('available', $store->reserve($stepUpChainId, 'owner-a', 15));
+        self::assertSame('issued_new', $store->markIssued($stepUpChainId, 'owner-a', $nonce));
+        $this->fake->calls = [];
+        self::assertSame('step_up_required_new', $store->markStepUpRequired($stepUpChainId, $nonce));
+        self::assertCount(1, $this->fake->waits(), 'the fresh terminal step-up transition WAITs');
+        $this->fake->calls = [];
+        self::assertSame('step_up_required_same', $store->markStepUpRequired($stepUpChainId, $nonce));
+        self::assertCount(0, $this->fake->waits(), 'the step-up same-state replay never WAITs');
+        self::assertSame('conflict', $store->markStepUpRequired($stepUpChainId, $this->makeNonce()));
+        self::assertCount(0, $this->fake->waits(), 'a step-up conflict refusal never WAITs');
+
+        // denied: fresh chain (available -> issued -> denied).
+        [$denyService, $denyRequirement] = $this->issueRequirement($store, 'tx-deny');
+        $denyChainId = $denyRequirement->chainId;
+        $this->fake->calls = [];
+        self::assertSame('available', $store->reserve($denyChainId, 'owner-a', 15));
+        self::assertSame('issued_new', $store->markIssued($denyChainId, 'owner-a', $nonce));
+        $this->fake->calls = [];
+        self::assertSame('denied_new', $store->markDenied($denyChainId, $nonce));
+        self::assertCount(1, $this->fake->waits(), 'the fresh terminal denied transition WAITs');
+        $this->fake->calls = [];
+        self::assertSame('denied_same', $store->markDenied($denyChainId, $nonce));
+        self::assertCount(0, $this->fake->waits(), 'the denied same-state replay never WAITs');
+
+        // obligation-bound transaction terminalizations: fresh write
+        // WAITs, idempotent replay and refusals never do.
+        [$txDenyService, $txDenyRequirement] = $this->issueRequirement($store, 'tx-tdeny');
+        $txDenyObligationId = $txDenyService->obligationIdFor('login', 'tx-tdeny', 1);
+        $this->fake->calls = [];
+        self::assertSame('denied_new', $store->markTransactionDenied($txDenyRequirement->chainId, $txDenyObligationId));
+        self::assertCount(1, $this->fake->waits(), 'the fresh transaction denial terminalization WAITs');
+        $this->fake->calls = [];
+        self::assertSame('denied_same', $store->markTransactionDenied($txDenyRequirement->chainId, $txDenyObligationId));
+        self::assertCount(0, $this->fake->waits(), 'the repeated transaction denial never WAITs');
+
+        [$txStepService, $txStepRequirement] = $this->issueRequirement($store, 'tx-tstepup');
+        $txStepObligationId = $txStepService->obligationIdFor('login', 'tx-tstepup', 1);
+        $this->fake->calls = [];
+        self::assertSame('step_up_required_new', $store->markTransactionStepUpRequired($txStepRequirement->chainId, $txStepObligationId));
+        self::assertCount(1, $this->fake->waits(), 'the fresh transaction step-up terminalization WAITs');
+        $this->fake->calls = [];
+        self::assertSame('step_up_required_same', $store->markTransactionStepUpRequired($txStepRequirement->chainId, $txStepObligationId));
+        self::assertCount(0, $this->fake->waits(), 'the repeated transaction step-up never WAITs');
+        self::assertSame('conflict', $store->markTransactionStepUpRequired($txDenyRequirement->chainId, $txDenyObligationId));
+        self::assertCount(0, $this->fake->waits(), 'a terminal-conflict refusal never WAITs');
+        self::assertNotSame($stepUpChainId, $denyChainId, 'each terminalization drives its own chain');
+    }
+
+    public function testRearmAndObligationDeletionWaitOnTheFreshMutation(): void
+    {
+        $store = $this->waitingStore();
+        [, $requirement] = $this->issueRequirement($store);
+        $chainId = $requirement->chainId;
+        $nonce = $this->makeNonce();
+        $this->fake->calls = [];
+
+        self::assertSame('available', $store->reserve($chainId, 'owner-a', 15));
+        self::assertSame('issued_new', $store->markIssued($chainId, 'owner-a', $nonce));
+        $this->fake->calls = [];
+        self::assertFalse($store->rearmIssued($chainId, $this->makeNonce()), 'a rearm with a different nonce is an atomic no-op');
+        self::assertCount(0, $this->fake->waits(), 'a refused rearm never WAITs');
+        self::assertTrue($store->rearmIssued($chainId, $nonce));
+        self::assertCount(1, $this->fake->waits(), 'the fresh rearm WAITs');
+        $this->fake->calls = [];
+
+        // The obligation deletion: only the fresh compare-delete that
+        // actually deleted WAITs; the no-op second delete never does.
+        $obligationId = (string) $store->read($chainId)['obligationId'];
+        $store->deleteObligation($chainId, $obligationId);
+        self::assertCount(1, $this->fake->waits(), 'the fresh obligation deletion WAITs');
+        $this->fake->calls = [];
+        $store->deleteObligation($chainId, $obligationId);
+        self::assertCount(0, $this->fake->waits(), 'a compare-delete that deleted nothing never WAITs');
+    }
+
+    public function testNonMutatingPathsNeverWait(): void
+    {
+        $store = $this->waitingStore();
+        [$service, $requirement] = $this->issueRequirement($store);
+        $chainId = $requirement->chainId;
+        $this->fake->calls = [];
+
+        // reads
+        self::assertIsArray($store->read($chainId));
+        self::assertSame($chainId, $store->obligationChainId($service->obligationIdFor('login', 'tx-binding', 1)));
+        self::assertCount(0, $this->fake->waits(), 'reads never WAIT');
+
+        // reservation arms: available / retry / busy / taken_over
+        self::assertSame('available', $store->reserve($chainId, 'owner-a', 15));
+        self::assertSame('retry', $store->reserve($chainId, 'owner-a', 15));
+        self::assertSame('busy', $store->reserve($chainId, 'owner-b', 15));
+        self::assertCount(0, $this->fake->waits(), 'the reservation arms never WAIT');
+        $this->fake->setTimeMs(1_016_000.0);
+        self::assertSame('taken_over', $store->reserve($chainId, 'owner-b', 15));
+        self::assertCount(0, $this->fake->waits(), 'an expired-lease takeover never WAITs');
+        $store->release($chainId, 'owner-b');
+        self::assertCount(0, $this->fake->waits(), 'a release never WAITs');
+
+        // refusals: not_owner / conflict / missing
+        self::assertSame('not_owner', $store->markIssued($chainId, 'owner-x', $this->makeNonce()));
+        self::assertSame('conflict', $store->markDenied($chainId, $this->makeNonce()));
+        self::assertSame('missing', $store->markDenied('no-such-chain', $this->makeNonce()));
+        self::assertSame('missing', $store->reserve('no-such-chain', 'owner-a', 15));
+        self::assertCount(0, $this->fake->waits(), 'the refusals never WAIT');
+    }
+
+    public function testViolatedAckFailsClosedAfterTheFreshMutation(): void
+    {
+        // A returned Deny must never be reported without replication: the
+        // replica set never acknowledges, so the fresh denied transition
+        // raises ReplicaWaitException after exactly one WAIT — the caller
+        // cannot treat the chain as terminal.
+        $store = $this->waitingStore();
+        [, $requirement] = $this->issueRequirement($store);
+        $chainId = $requirement->chainId;
+        $nonce = $this->makeNonce();
+        self::assertSame('available', $store->reserve($chainId, 'owner-a', 15));
+        self::assertSame('issued_new', $store->markIssued($chainId, 'owner-a', $nonce));
+        $this->fake->calls = [];
+        $this->fake->waitAck = 0;
+
+        try {
+            $store->markDenied($chainId, $nonce);
+            self::fail('a terminal transition whose write was not replicated must fail closed');
+        } catch (ReplicaWaitException $e) {
+            self::assertStringContainsString('acknowledged 0 of 1 requested replicas after the denied transition', $e->getMessage());
+        }
+        self::assertCount(1, $this->fake->waits(), 'the failed terminal transition issued exactly one WAIT');
+
+        // The create-or-get fresh creation fails closed the same way.
+        $this->fake->calls = [];
+        try {
+            $store->createOrGetObligation(str_repeat('a', 64), 'chain-wait-b', $this->makeNonce(), 'login', '', 'sha18', 1, 1, 1300, 300);
+            self::fail('an obligation creation whose write was not replicated must fail closed');
+        } catch (ReplicaWaitException $e) {
+            self::assertStringContainsString('after the obligation create-or-get', $e->getMessage());
+        }
+        self::assertCount(1, $this->fake->waits(), 'the failed create-or-get issued exactly one WAIT');
+    }
+
+    public function testCreateOrGetObligationWaitsOnlyWhenItMutates(): void
+    {
+        $store = $this->waitingStore();
+        [$service, $requirement] = $this->issueRequirement($store);
+        self::assertCount(1, $this->fake->waits(), 'the fresh obligation create-or-get WAITs');
+        $this->fake->calls = [];
+
+        // Same-floor recovery of the existing chain: no write -> no WAIT.
+        $recovered = $service->requireStage2($this->makeNonce(), 'login', 'tx-binding', 1, RiskAction::Argon32, 1300);
+        self::assertSame($requirement->chainId, $recovered->chainId);
+        self::assertCount(0, $this->fake->waits(), 'a non-mutating create-or-get recovery never WAITs');
+
+        // A stronger reassessment raises the floor: a fresh write -> WAIT.
+        $raised = $service->requireStage2($this->makeNonce(), 'login', 'tx-binding', 1, RiskAction::Argon64, 1300);
+        self::assertSame($requirement->chainId, $raised->chainId);
+        self::assertCount(1, $this->fake->waits(), 'the rank-raising create-or-get mutation WAITs');
+    }
+
+    public function testArrayStoreObservesTheSameMachineWithoutTheReplicaBarrier(): void
+    {
+        // The in-memory store has no replicas: the identical terminal
+        // sequence produces the identical outcomes and there is no WAIT
+        // concept to invoke (single-process semantics).
+        $array = new ArrayChainedChallengeStateStore(now: static fn (): float => 1000.0);
+        $service = new ChainedChallengeTicketService($array, self::SECRET, 300, 15, null, static fn (): int => 1000);
+        $requirement = $service->requireStage2($this->makeNonce(), 'login', 'tx-array', 1, RiskAction::Argon32, 1300);
+        $obligationId = $service->obligationIdFor('login', 'tx-array', 1);
+        $nonce = $this->makeNonce();
+
+        self::assertSame(ChainReservationResult::Available, $service->reserveStage2($requirement->chainId, 'owner-a'));
+        self::assertSame(ChainIssuedResult::IssuedNew, $service->markIssued($requirement->chainId, 'owner-a', $nonce));
+        self::assertSame(ChainVerifiedResult::DeniedNew, $service->markDenied($requirement->chainId, $nonce));
+        self::assertSame(ChainVerifiedResult::DeniedSame, $service->markDenied($requirement->chainId, $nonce), 'idempotent, exactly like the Redis machine');
+        self::assertSame('denied', $service->requirementFor($requirement->chainId)?->state, 'the terminal record is kept');
+        self::assertSame($requirement->chainId, $service->findOpenRequirement('login', 'tx-array', 1)?->chainId, 'the obligation mapping is KEPT');
+        self::assertSame(ChainReservationResult::Denied, $service->reserveStage2($requirement->chainId, 'owner-b'));
+        self::assertSame(ChainVerifiedResult::DeniedSame, $service->markTransactionDenied($requirement->chainId, $obligationId), 'a repeated same-kind terminalization is idempotent');
+        self::assertSame(ChainVerifiedResult::Conflict, $service->markTransactionStepUpRequired($requirement->chainId, $obligationId), 'the OTHER terminal disposition can never flip a terminal chain');
+    }
+
+    public function testVerifiedWaitRefusesUnsupportedPredisTopologiesAtConstruction(): void
+    {
+        // The same fail-closed construction matrix as the core
+        // RedisStorage: the verified barrier is connection-relative, so a
+        // Predis replication aggregate is refused before any write can
+        // run.
+        $aggregate = new \Predis\Connection\Replication\MasterSlaveReplication();
+        $client = new class($aggregate) extends \Predis\Client {
+            public function __construct(private readonly \Predis\Connection\Replication\ReplicationInterface $connection)
+            {
+            }
+
+            public function getConnection()
+            {
+                return $this->connection;
+            }
+        };
+
+        try {
+            new RedisChainedChallengeStateStore($client, 'kiwi-test', 1, 100);
+            self::fail('a Predis replication aggregate with waitReplicas > 0 must be refused at construction');
+        } catch (\InvalidArgumentException $e) {
+            self::assertStringContainsString('replication aggregate', $e->getMessage());
+        }
+        // waitReplicas = 0 stays supported on any client.
+        self::assertInstanceOf(RedisChainedChallengeStateStore::class, new RedisChainedChallengeStateStore($client, 'kiwi-test'));
+    }
 }
 
 /**
@@ -214,6 +478,12 @@ final class ChainRedisFake extends \Predis\Client
     /** @var array<string, int> expire deadlines in ms */
     public array $expirations = [];
 
+    /** @var list<array{0: string, 1: list<mixed>}> every command issued, WAIT included */
+    public array $calls = [];
+
+    /** The WAIT acknowledgement count to answer (violated when < waitReplicas). */
+    public int $waitAck = 1;
+
     private float $clockMs = 1_000_000.0;
 
     public function clockSecs(): int
@@ -232,8 +502,16 @@ final class ChainRedisFake extends \Predis\Client
         $this->clockMs = $ms;
     }
 
+    /** @return list<array{0: string, 1: list<mixed>}> the WAIT commands issued */
+    public function waits(): array
+    {
+        return array_values(array_filter($this->calls, static fn (array $c): bool => $c[0] === 'WAIT'));
+    }
+
     public function __call($commandID, $arguments)
     {
+        $this->calls[] = [strtoupper((string) $commandID), $arguments];
+
         return match (strtoupper((string) $commandID)) {
             'GET' => $this->strings[(string) $arguments[0]] ?? null,
             'SET' => $this->fakeSet($arguments),
@@ -242,6 +520,14 @@ final class ChainRedisFake extends \Predis\Client
             'EVAL' => $this->fakeEval($arguments),
             default => throw new \LogicException('unexpected command '.$commandID),
         };
+    }
+
+    /** The raw-command escape hatch the store's verified WAIT uses. */
+    public function executeRaw(array $arguments, &$error = null): mixed
+    {
+        $this->calls[] = [strtoupper((string) ($arguments[0] ?? '')), \array_slice($arguments, 1)];
+
+        return $this->waitAck;
     }
 
     private function fakeSet(array $arguments): ?string
@@ -301,6 +587,18 @@ final class ChainRedisFake extends \Predis\Client
         if (str_contains($script, 'Chain verification')) {
             return $this->luaMarkVerified($keys, $args);
         }
+        if (str_contains($script, 'Chain step-up')) {
+            return $this->luaMarkStepUpRequired($keys[0], $args);
+        }
+        if (str_contains($script, 'Chain denial')) {
+            return $this->luaMarkDenied($keys[0], $args);
+        }
+        if (str_contains($script, 'Transaction denial')) {
+            return $this->luaTransactionDenied($keys, $args);
+        }
+        if (str_contains($script, 'Transaction step-up')) {
+            return $this->luaTransactionStepUpRequired($keys, $args);
+        }
         if (str_contains($script, 'Chain rearm')) {
             return $this->luaRearm($keys[0], $args);
         }
@@ -317,7 +615,7 @@ final class ChainRedisFake extends \Predis\Client
         throw new \LogicException('unexpected script');
     }
 
-    private function luaCreateOrGet(array $keys, array $args): string
+    private function luaCreateOrGet(array $keys, array $args): array
     {
         $obligationKey = $keys[1];
         $chainKey = $keys[0];
@@ -334,9 +632,11 @@ final class ChainRedisFake extends \Predis\Client
                         $rec['requiredRank'] = $newRank;
                         $rec['requiredAction'] = (string) $args[4];
                         $this->strings[$prefix.$chainId] = (string) json_encode($rec, JSON_THROW_ON_ERROR);
+
+                        return [$chainId, 1];
                     }
 
-                    return $chainId;
+                    return [$chainId, 0];
                 }
             }
             if (($this->strings[$obligationKey] ?? null) === $chainId) {
@@ -365,7 +665,7 @@ final class ChainRedisFake extends \Predis\Client
         $this->strings[$obligationKey] = (string) $args[1];
         $this->expirations[$obligationKey] = (int) ($this->clockMs + $ttl * 1000);
 
-        return (string) $args[1];
+        return [(string) $args[1], 1];
     }
 
     private function luaReserve(string $key, array $args): string
@@ -464,6 +764,122 @@ final class ChainRedisFake extends \Predis\Client
         }
 
         return 'verified_new';
+    }
+
+    private function luaMarkStepUpRequired(string $key, array $args): string
+    {
+        $existing = $this->strings[$key] ?? null;
+        if ($existing === null) {
+            return 'missing';
+        }
+        $rec = json_decode($existing, true, 8, JSON_THROW_ON_ERROR);
+        if ($rec['state'] === 'step_up_required') {
+            return $rec['stage2Nonce'] === $args[0] ? 'step_up_required_same' : 'conflict';
+        }
+        if (($rec['state'] !== 'issued' && $rec['state'] !== 'completed') || $rec['stage2Nonce'] !== $args[0]) {
+            return 'conflict';
+        }
+        $rec['state'] = 'step_up_required';
+        $this->strings[$key] = (string) json_encode($rec, JSON_THROW_ON_ERROR);
+
+        return 'step_up_required_new';
+    }
+
+    private function luaMarkDenied(string $key, array $args): string
+    {
+        $existing = $this->strings[$key] ?? null;
+        if ($existing === null) {
+            return 'missing';
+        }
+        $rec = json_decode($existing, true, 8, JSON_THROW_ON_ERROR);
+        if ($rec['state'] === 'denied') {
+            return $rec['stage2Nonce'] === $args[0] ? 'denied_same' : 'conflict';
+        }
+        if (($rec['state'] !== 'issued' && $rec['state'] !== 'completed') || $rec['stage2Nonce'] !== $args[0]) {
+            return 'conflict';
+        }
+        $rec['state'] = 'denied';
+        $this->strings[$key] = (string) json_encode($rec, JSON_THROW_ON_ERROR);
+
+        return 'denied_new';
+    }
+
+    private function luaTransactionDenied(array $keys, array $args): string
+    {
+        $key = $keys[0];
+        $obligationKey = $keys[1];
+        $existing = $this->strings[$key] ?? null;
+        if ($existing === null) {
+            return 'missing';
+        }
+        $rec = json_decode($existing, true, 8, JSON_THROW_ON_ERROR);
+        if (($rec['obligationId'] ?? null) !== $args[1]) {
+            return 'obligation_moved';
+        }
+        $mapped = $this->strings[$obligationKey] ?? null;
+        if ($mapped === null) {
+            return 'already_completed';
+        }
+        if ($mapped !== $args[0]) {
+            return 'obligation_moved';
+        }
+        if ($rec['state'] === 'denied') {
+            return 'denied_same';
+        }
+        if ($rec['state'] === 'step_up_required') {
+            return 'conflict';
+        }
+        if ($rec['state'] === 'verified') {
+            return 'already_verified';
+        }
+        if (!\in_array($rec['state'], ['available', 'reserved', 'issued', 'completed'], true)) {
+            return 'conflict';
+        }
+        $rec['state'] = 'denied';
+        $rec['owner'] = null;
+        $rec['leaseUntil'] = null;
+        $this->strings[$key] = (string) json_encode($rec, JSON_THROW_ON_ERROR);
+
+        return 'denied_new';
+    }
+
+    private function luaTransactionStepUpRequired(array $keys, array $args): string
+    {
+        $key = $keys[0];
+        $obligationKey = $keys[1];
+        $existing = $this->strings[$key] ?? null;
+        if ($existing === null) {
+            return 'missing';
+        }
+        $rec = json_decode($existing, true, 8, JSON_THROW_ON_ERROR);
+        if (($rec['obligationId'] ?? null) !== $args[1]) {
+            return 'obligation_moved';
+        }
+        $mapped = $this->strings[$obligationKey] ?? null;
+        if ($mapped === null) {
+            return 'already_completed';
+        }
+        if ($mapped !== $args[0]) {
+            return 'obligation_moved';
+        }
+        if ($rec['state'] === 'step_up_required') {
+            return 'step_up_required_same';
+        }
+        if ($rec['state'] === 'denied') {
+            return 'conflict';
+        }
+        if ($rec['state'] === 'verified') {
+            return 'already_verified';
+        }
+        if (!\in_array($rec['state'], ['available', 'reserved', 'issued', 'completed'], true)) {
+            return 'conflict';
+        }
+        $rec['state'] = 'step_up_required';
+        $rec['owner'] = null;
+        $rec['leaseUntil'] = null;
+        $this->strings[$key] = (string) json_encode($rec, JSON_THROW_ON_ERROR);
+
+        return 'step_up_required_new';
     }
 
     private function luaRearm(string $key, array $args): bool

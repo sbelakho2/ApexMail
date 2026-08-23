@@ -20,7 +20,11 @@ namespace BelConsulting\KiwiCaptchaBundle\Tests\Fixtures;
  *  - eval: interprets the bundle's Lua scripts by their shape — semaphore
  *    acquire/release, outstanding-challenge issue/solve, the rate
  *    limiter, calibration confirm/correction and the outcome-ledger
- *    confirm/correct, mirroring the scripts' semantics.
+ *    confirm/correct, mirroring the scripts' semantics. It also
+ *    interprets the kiwicaptcha core's consume, cancel,
+ *    delete-if-pending and commit-result scripts, so the same fake
+ *    drives the core RedisStorage for the cancellation endpoint's
+ *    record transitions.
  *
  * Every call is recorded in {@see FakePredisClient::$calls} so tests can
  * assert on the Redis commands issued.
@@ -128,6 +132,8 @@ final class FakePredisClient extends \Predis\Client
             'GETDEL' => $this->fakeGetdel($arguments),
             'SET' => $this->fakeSet($arguments),
             'HINCRBYFLOAT' => $this->fakeHincrbyfloat($arguments),
+            'HINCRBY' => $this->fakeHincrby($arguments),
+            'HDEL' => $this->fakeHdel($arguments),
             'HGETALL' => $this->fakeHgetall($arguments),
             'HSET' => $this->fakeHset($arguments),
             'HGET' => $this->fakeHget($arguments),
@@ -197,6 +203,39 @@ final class FakePredisClient extends \Predis\Client
         $this->hashes[$key][$field] = ($this->hashes[$key][$field] ?? 0.0) + $delta;
 
         return (string) $this->hashes[$key][$field];
+    }
+
+    /**
+     * hincrby: bump one hash field by an integer (the bucketed global
+     * limiter's per-second admission count) and return the new value.
+     */
+    private function fakeHincrby(array $arguments): int
+    {
+        $key = (string) $arguments[0];
+        $field = (string) $arguments[1];
+        $delta = (int) $arguments[2];
+        $this->hashes[$key] ??= [];
+        $this->hashes[$key][$field] = ($this->hashes[$key][$field] ?? 0) + $delta;
+
+        return (int) $this->hashes[$key][$field];
+    }
+
+    /** hdel: drop one or more hash fields (the pruned bucket counts). */
+    private function fakeHdel(array $arguments): int
+    {
+        $key = (string) $arguments[0];
+        $removed = 0;
+        foreach (\array_slice($arguments, 1) as $field) {
+            if (isset($this->hashes[$key][(string) $field])) {
+                unset($this->hashes[$key][(string) $field]);
+                $removed++;
+            }
+        }
+        if (isset($this->hashes[$key]) && $this->hashes[$key] === []) {
+            unset($this->hashes[$key]);
+        }
+
+        return $removed;
     }
 
     /**
@@ -324,15 +363,14 @@ final class FakePredisClient extends \Predis\Client
     }
 
     /**
-     * The bucketed global window count: the sum of each retained bucket's
-     * admission count, where a bucket's score is its second plus the
-     * admissions that landed in it (mirrors the Lua sum of score - second).
+     * The bucketed global window count: the sum of the retained seconds'
+     * hash counts (mirrors the Lua sum of HGET over the ZSET members).
      */
-    private function bucketCount(string $key): int
+    private function bucketCount(string $key, string $hashKey): int
     {
         $total = 0;
         foreach ($this->zsets[$key] ?? [] as $member => $score) {
-            $total += (int) $score - (int) $member;
+            $total += (int) ($this->hashes[$hashKey][$member] ?? 0);
         }
 
         return $total;
@@ -497,6 +535,114 @@ final class FakePredisClient extends \Predis\Client
             }
             $this->fakeZadd([$window, (string) $now, $requestId]);
             $this->fakePexpire([$window, (string) ($windowMs + 1000)]);
+
+            return 1;
+        }
+
+        if (str_starts_with($script, '-- kiwicaptcha consume transition')) {
+            // The core RedisStorage consume-transition script: a pending
+            // record is flipped to consumed and kept; a consumed record
+            // replays (consumed_before); a cancelled record is never
+            // consumable (reported missing); ARGV[1] is the JSON-escaped
+            // operation identity ('' = none) spliced with the state flip.
+            $key = (string) $keys[0];
+            if (!isset($this->strings[$key])) {
+                return null;
+            }
+            $raw = $this->strings[$key];
+            $obj = json_decode($raw, true);
+            if (!\is_array($obj)) {
+                return null;
+            }
+            if (($obj['state'] ?? 'pending') === 'cancelled') {
+                return null;
+            }
+            if (($obj['state'] ?? 'pending') === 'consumed') {
+                $res = $obj['consumed_result'] ?? null;
+
+                return [$raw, 0, 1, $res !== null ? json_encode($res, JSON_UNESCAPED_SLASHES) : ''];
+            }
+            $obj['state'] = 'consumed';
+            if (($rest[0] ?? '') !== '') {
+                $obj['operation_identity'] = json_decode((string) $rest[0], true, flags: JSON_THROW_ON_ERROR);
+            }
+            $this->strings[$key] = json_encode($obj, JSON_UNESCAPED_SLASHES);
+
+            return [$this->strings[$key], 1, 0, ''];
+        }
+
+        if (str_starts_with($script, '-- kiwicaptcha cancel transition')) {
+            // The core RedisStorage cancel-transition script: a pending
+            // record is flipped to the terminal cancelled marker and kept;
+            // a consumed record is finalized and never cancellable; an
+            // already-cancelled record is idempotent; a missing record is
+            // nil.
+            $key = (string) $keys[0];
+            if (!isset($this->strings[$key])) {
+                return null;
+            }
+            $obj = json_decode($this->strings[$key], true);
+            if (!\is_array($obj)) {
+                return null;
+            }
+            if (($obj['state'] ?? 'pending') === 'consumed') {
+                return ['consumed'];
+            }
+            if (($obj['state'] ?? 'pending') === 'cancelled') {
+                return ['cancelled'];
+            }
+            $obj['state'] = 'cancelled';
+            $this->strings[$key] = json_encode($obj, JSON_UNESCAPED_SLASHES);
+
+            return ['cancelled-now'];
+        }
+
+        if (str_starts_with($script, '-- kiwicaptcha delete-if-pending (atomic cleanup)')) {
+            // The core RedisStorage delete-if-pending script: missing
+            // reports missing; a consumed record is returned verbatim and
+            // kept; a cancelled record is returned verbatim and kept too
+            // (dead but retained until its TTL); only a pending record is
+            // deleted.
+            $key = (string) $keys[0];
+            if (!isset($this->strings[$key])) {
+                return ['missing'];
+            }
+            $raw = $this->strings[$key];
+            $obj = json_decode($raw, true);
+            if (!\is_array($obj)) {
+                return ['missing'];
+            }
+            if (($obj['state'] ?? 'pending') === 'consumed') {
+                return ['consumed', $raw];
+            }
+            if (($obj['state'] ?? 'pending') === 'cancelled') {
+                return ['cancelled', $raw];
+            }
+            unset($this->strings[$key]);
+
+            return ['deleted-pending'];
+        }
+
+        if (str_starts_with($script, '-- kiwicaptcha commit result')) {
+            // The core RedisStorage commit-result script: stores
+            // {valid, binding} on a consumed record without a result yet;
+            // 1 on success, 0 otherwise (missing, pending or cancelled).
+            $key = (string) $keys[0];
+            if (!isset($this->strings[$key])) {
+                return 0;
+            }
+            $obj = json_decode($this->strings[$key], true);
+            if (!\is_array($obj) || ($obj['state'] ?? 'pending') !== 'consumed') {
+                return 0;
+            }
+            if (isset($obj['consumed_result']) && $obj['consumed_result'] !== null) {
+                return 0;
+            }
+            $obj['consumed_result'] = [
+                'valid' => ($rest[0] ?? '0') === '1',
+                'binding' => ($rest[2] ?? '0') === '1' ? (string) ($rest[1] ?? '') : null,
+            ];
+            $this->strings[$key] = json_encode($obj, JSON_UNESCAPED_SLASHES);
 
             return 1;
         }
@@ -868,29 +1014,65 @@ final class FakePredisClient extends \Predis\Client
         }
 
         // TIME-based scripts: semaphore acquire (1 key), the bucketed
-        // global-only limiter (1 key) or the full bucketed rate limiter
-        // (2/3 keys). `now` mirrors the Lua time read.
+        // global-only limiter (2 keys: ZSET + counts hash), the full
+        // bucketed rate limiter (3 keys) or the epoch-rotated variant
+        // (4 keys). `now` mirrors the Lua time read.
         $now = $this->timeMs();
 
-        if (str_contains($script, "ZINCRBY', KEYS[1], 1, bucket") || str_contains($script, 'ZINCRBY", KEYS[1], 1, bucket')) {
-            // Bucketed global-only rate limiter: prune the per-second
-            // buckets (score = second + count), enforce the cap on the
-            // window count, then anchor the current second's bucket at its
-            // second and `ZINCRBY` its count.
-            $key = (string) $keys[0];
-            $globalMax = (int) $rest[0];
-            $windowMs = (int) $rest[1];
+        if (str_contains($script, "HINCRBY', KEYS[")) {
+            // The separated bucketed global limiter: the ZSET member is
+            // the wall-clock second and its score is that same second
+            // (the pruning timestamp only); the per-second admission
+            // count lives in the counts hash. Prune the ZSET by the
+            // cutoff second, drop the pruned seconds' hash fields, then
+            // enforce the caps on the summed retained counts.
+            $twoKey = \count($keys) === 2;
+            $globalZset = (string) $keys[\count($keys) - 2];
+            $globalHash = (string) $keys[\count($keys) - 1];
+            $globalMax = (int) $rest[$twoKey ? 0 : 1];
+            $windowMs = (int) $rest[$twoKey ? 1 : 2];
             $cutoff = $now - $windowMs;
             $bucket = (string) floor($now / 1000);
-            $this->fakeZremrangebyscore([$key, '-inf', (string) (floor($cutoff / 1000) + 1)]);
-            if ($this->bucketCount($key) >= $globalMax) {
+            $pruneMax = (string) floor($cutoff / 1000);
+            $pruned = [];
+            foreach ($this->zsets[$globalZset] ?? [] as $member => $score) {
+                if ($score <= (float) $pruneMax) {
+                    $pruned[] = $member;
+                }
+            }
+            foreach ($pruned as $member) {
+                unset($this->zsets[$globalZset][$member]);
+                unset($this->hashes[$globalHash][$member]);
+            }
+            if (isset($this->zsets[$globalZset]) && $this->zsets[$globalZset] === []) {
+                unset($this->zsets[$globalZset]);
+            }
+            if (!$twoKey) {
+                // Per-client cap: the full limiter checks the current
+                // client key, the rotated variant the previous + current.
+                $clientKeys = \count($keys) === 3 ? [(string) $keys[0]] : [(string) $keys[0], (string) $keys[1]];
+                foreach ($clientKeys as $clientKey) {
+                    $this->fakeZremrangebyscore([$clientKey, '-inf', (string) $cutoff]);
+                }
+                $clientCount = 0;
+                foreach ($clientKeys as $clientKey) {
+                    $clientCount += $this->zcard($clientKey);
+                }
+                if ($clientCount >= (int) $rest[0]) {
+                    return 0;
+                }
+            }
+            if ($this->bucketCount($globalZset, $globalHash) >= $globalMax) {
                 return -1;
             }
-            if (!isset($this->zsets[$key][$bucket])) {
-                $this->fakeZadd([$key, $bucket, $bucket]);
+            if (!$twoKey) {
+                $this->fakeZadd([(string) $keys[\count($keys) === 3 ? 0 : 1], (string) $now, (string) $rest[3]]);
             }
-            $this->fakeZincrby([$key, 1, $bucket]);
-            $this->fakePexpire([$key, (string) ($windowMs + 1000)]);
+            $this->fakeZadd([$globalZset, $bucket, $bucket]);
+            $this->fakeHincrby([$globalHash, $bucket, 1]);
+            foreach ($keys as $k) {
+                $this->fakePexpire([$k, (string) ($windowMs + 1000)]);
+            }
 
             return 1;
         }
@@ -911,68 +1093,9 @@ final class FakePredisClient extends \Predis\Client
             return 1;
         }
 
-        // Rate limiter (2 keys): prune the per-client window and the
-        // bucketed global window, per-client cap, then global cap.
-        if ($numKeys === 2) {
-            $clientKey = (string) $keys[0];
-            $globalKey = (string) $keys[1];
-            $clientMax = (int) $rest[0];
-            $globalMax = (int) $rest[1];
-            $windowMs = (int) $rest[2];
-            $requestId = (string) $rest[3];
-            $cutoff = $now - $windowMs;
-            $bucket = (string) floor($now / 1000);
-            $this->fakeZremrangebyscore([$clientKey, '-inf', (string) $cutoff]);
-            $this->fakeZremrangebyscore([$globalKey, '-inf', (string) (floor($cutoff / 1000) + 1)]);
-            if ($this->zcard($clientKey) >= $clientMax) {
-                return 0;
-            }
-            if ($this->bucketCount($globalKey) >= $globalMax) {
-                return -1;
-            }
-            $this->fakeZadd([$clientKey, (string) $now, $requestId]);
-            if (!isset($this->zsets[$globalKey][$bucket])) {
-                $this->fakeZadd([$globalKey, $bucket, $bucket]);
-            }
-            $this->fakeZincrby([$globalKey, 1, $bucket]);
-            $this->fakePexpire([$clientKey, (string) ($windowMs + 1000)]);
-            $this->fakePexpire([$globalKey, (string) ($windowMs + 1000)]);
-
-            return 1;
-        }
-
-        // Epoch-rotated limiter (3 keys): clientPrev, clientCur, and ONE
-        // stable global zset. Only the client keys are per-epoch; the
-        // global budget is shared by every client regardless of epoch and
-        // uses the same bucketed structure.
-        $clientPrev = (string) $keys[0];
-        $clientCur = (string) $keys[1];
-        $global = (string) $keys[2];
-        $clientMax = (int) $rest[0];
-        $globalMax = (int) $rest[1];
-        $windowMs = (int) $rest[2];
-        $requestId = (string) $rest[3];
-        $cutoff = $now - $windowMs;
-        foreach ([$clientPrev, $clientCur] as $k) {
-            $this->fakeZremrangebyscore([$k, '-inf', (string) $cutoff]);
-        }
-        $this->fakeZremrangebyscore([$global, '-inf', (string) (floor($cutoff / 1000) + 1)]);
-        if ($this->zcard($clientPrev) + $this->zcard($clientCur) >= $clientMax) {
-            return 0;
-        }
-        if ($this->bucketCount($global) >= $globalMax) {
-            return -1;
-        }
-        $this->fakeZadd([$clientCur, (string) $now, $requestId]);
-        $bucket = (string) floor($now / 1000);
-        if (!isset($this->zsets[$global][$bucket])) {
-            $this->fakeZadd([$global, $bucket, $bucket]);
-        }
-        $this->fakeZincrby([$global, 1, $bucket]);
-        foreach ([$clientPrev, $clientCur, $global] as $k) {
-            $this->fakePexpire([$k, (string) ($windowMs + 1000)]);
-        }
-
+        // Legacy limiter shapes (pre-separation score = second + count)
+        // are not used by the bundle anymore; the `HINCRBY` branch above is
+        // the canonical emulation for the current scripts.
         return 1;
     }
 }

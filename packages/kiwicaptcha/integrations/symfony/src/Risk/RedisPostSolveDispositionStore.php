@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace BelConsulting\KiwiCaptchaBundle\Risk;
 
 use BelConsulting\KiwiCaptchaBundle\SiteVerify\RedisEval;
+use KiwiCaptcha\Storage\ReplicaWaitException;
 
 /**
  * Redis-backed durable post-solve disposition store.
@@ -62,6 +63,26 @@ use BelConsulting\KiwiCaptchaBundle\SiteVerify\RedisEval;
  * requires a positive chain_expires_at, the forward-looking v2
  * acceptance. The same decode runs on the in-memory store, so Array and
  * Redis observe one machine.
+ *
+ * Replica durability: with `waitReplicas > 0` every fresh mutating
+ * transition (the claim's record creation and the finalize's
+ * completion) is followed by a verified Redis WAIT on the same
+ * connection, with the acknowledgement count checked against the
+ * threshold. This matches the fail-closed contract of the core
+ * {@see \KiwiCaptcha\Storage\RedisStorage}. Fewer than waitReplicas
+ * acknowledged replicas raise {@see ReplicaWaitException}. The caller
+ * never learns a success that was not replicated, so a Deny/StepUp/
+ * ChainRequired disposition can never be reported as persisted and
+ * then vanish on promotion. A lost final disposition would let the
+ * same logical operation retry, win a fresh claim and recompute. The
+ * non-mutating paths (a complete/busy claim, an expired-lease
+ * takeover, a refused finalize, and every read) perform no write and
+ * never WAIT. An idempotent retry can therefore never turn a replica
+ * outage into a storage failure. The verified barrier supports the
+ * same standalone-connection matrix as the core. A Predis replication
+ * aggregate (Sentinel or master-slave), a Predis cluster aggregate and
+ * a retry-enabled standalone Predis client are refused at construction
+ * with waitReplicas > 0.
  */
 final class RedisPostSolveDispositionStore implements PostSolveDispositionStore
 {
@@ -210,20 +231,46 @@ return true
 LUA;
 
     /**
-     * @param \Predis\Client|\Redis $redis      the Redis client shared with
-     *                                          the risk state
-     * @param string                $namespace  the risk namespace (the
-     *                                          hash-tag discriminator)
-     * @param int                   $ttlSecs    the record TTL (the extension
-     *                                          wires Config::MAX_TTL_secs +
-     *                                          ttl margin); 0 = use the
-     *                                          per-call claim TTL
+     * @param \Predis\Client|\Redis $redis         the Redis client shared with
+     *                                             the risk state.
+     * @param string                $namespace     the risk namespace (the
+     *                                             hash-tag discriminator).
+     * @param int                   $ttlSecs       the record TTL (the extension
+     *                                             wires Config::MAX_TTL_secs +
+     *                                             ttl margin). 0 = use the
+     *                                             per-call claim TTL.
+     * @param int                   $waitReplicas  when > 0, every fresh
+     *                                             mutating transition (the
+     *                                             claim's record creation and
+     *                                             the finalize's completion)
+     *                                             is followed by a Redis WAIT
+     *                                             whose acknowledgement count
+     *                                             is verified. Fewer than
+     *                                             waitReplicas acked replicas
+     *                                             raise
+     *                                             {@see ReplicaWaitException}.
+     *                                             This is fail-closed: the
+     *                                             caller never learns a
+     *                                             success that was not
+     *                                             replicated. The non-mutating
+     *                                             paths (a complete/busy
+     *                                             claim, a takeover, a refused
+     *                                             finalize, reads) never WAIT.
+     *                                             Supported on standalone
+     *                                             Redis connections only, the
+     *                                             same matrix as the core
+     *                                             RedisStorage.
+     * @param int                   $waitTimeoutMs WAIT timeout in ms (default
+     *                                             100).
      */
     public function __construct(
         private readonly \Predis\Client|\Redis $redis,
         private readonly string $namespace = 'kiwi',
         private readonly int $ttlSecs = 0,
+        private readonly int $waitReplicas = 0,
+        private readonly int $waitTimeoutMs = 100,
     ) {
+        $this->refuseVerifiedWaitOnUnsupportedPredisClients();
     }
 
     public function claim(string $nonce, string $owner, int $ttlSeconds, ?string $decisionKey = null): array
@@ -261,6 +308,16 @@ LUA;
             // fail closed, never defaulted into a valid outcome.
             throw new MalformedPostSolveDispositionException(sprintf('post-solve disposition claim returned an unknown status (%s)', $data['status']));
         }
+        // Durability barrier: the verified WAIT runs only for the fresh
+        // record creation ('claimed') — the write the barrier exists to
+        // replicate (the pending record and the decision-mapping
+        // consumption landed in one Lua). A complete/busy claim or an
+        // expired-lease takeover performed no fresh write, so no WAIT is
+        // issued: an idempotent retry must never turn a replica outage
+        // into a storage failure.
+        if ($this->waitReplicas > 0 && $data['status'] === 'claimed') {
+            $this->waitAndVerify('the post-solve disposition claim');
+        }
         $record = null;
         if (isset($data['record']) && \is_array($data['record'])) {
             // The carried record is strictly decoded (the complete
@@ -289,6 +346,105 @@ LUA;
         return $this->redis->eval($script, \count($keys), ...$keys, ...$args);
     }
 
+    /**
+     * Block until at least waitReplicas replicas acknowledged the previous
+     * write, and fail closed when they did not.
+     *
+     * Redis WAIT returns the number of replicas that processed the write
+     * (0 on a replica-less server). The barrier asserts that number
+     * against the configured threshold, the same fail-closed check as the
+     * core RedisStorage. With `waitReplicas > 0` the durability promise
+     * is unconditional. A lagging or unreachable replica set raises
+     * {@see ReplicaWaitException} instead of silently downgrading the
+     * guarantee. The WAIT runs on the same connection that performed the
+     * mutation, so the acknowledgement count is about that write's
+     * replication.
+     */
+    private function waitAndVerify(string $what): void
+    {
+        if ($this->redis instanceof \Redis) {
+            // phpredis has no typed wait method; rawCommand sends the
+            // command directly.
+            $acked = $this->redis->rawCommand('WAIT', $this->waitReplicas, $this->waitTimeoutMs);
+        } else {
+            // Predis removed the typed wait() method from its command
+            // profile; executeRaw is the raw-command escape hatch (the same
+            // semantics as phpredis rawCommand).
+            $acked = $this->redis->executeRaw(['WAIT', $this->waitReplicas, $this->waitTimeoutMs]);
+        }
+        if ($acked === false || $acked === null) {
+            throw new ReplicaWaitException(sprintf(
+                'Redis WAIT failed after %s (waitReplicas=%d, timeout=%dms)',
+                $what,
+                $this->waitReplicas,
+                $this->waitTimeoutMs,
+            ));
+        }
+        if ((int) $acked < $this->waitReplicas) {
+            throw new ReplicaWaitException(sprintf(
+                'Redis WAIT acknowledged %d of %d requested replicas after %s',
+                (int) $acked,
+                $this->waitReplicas,
+                $what,
+            ));
+        }
+    }
+
+    /**
+     * Refuse the verified-WAIT hardening on Predis clients whose command
+     * dispatch can hide or re-execute the durability-critical write: the
+     * same refusal the core RedisStorage applies.
+     *
+     * WAIT is connection-relative: it counts replicas of the connection
+     * it is sent on and carries no key. A Predis replication aggregate
+     * (Sentinel or master-slave) wraps every command in failure-retry
+     * logic that can re-execute the WAIT on a replacement connection
+     * whose write offset is zero, so the acknowledgement would prove
+     * nothing about the original write's replication. A Redis cluster
+     * aggregate cannot route a keyless raw WAIT by slot. A retry-enabled
+     * standalone Predis client can transparently re-execute the Lua
+     * mutation after a lost response, so the returned result may describe
+     * the second invocation rather than the one that mutated. Supported
+     * topology is standalone Redis only; keep waitReplicas = 0 on an
+     * aggregate or a retry-enabled standalone client.
+     */
+    private function refuseVerifiedWaitOnUnsupportedPredisClients(): void
+    {
+        if ($this->waitReplicas <= 0 || !($this->redis instanceof \Predis\Client)) {
+            return;
+        }
+        $connection = $this->redis->getConnection();
+        if ($connection instanceof \Predis\Connection\Replication\ReplicationInterface) {
+            throw new \InvalidArgumentException(
+                'RedisPostSolveDispositionStore: verified-WAIT durability (waitReplicas > 0) is not supported on a Predis replication aggregate (Sentinel or master-slave) — WAIT is connection-affine, counting replicas of the connection it is sent on, and the aggregate\'s failure retry executes the WAIT on a replacement connection whose write offset is empty, so the acknowledgement proves nothing about the original write\'s replication. The verified barrier supports standalone Redis connections only; use a standalone connection with waitReplicas > 0, or keep waitReplicas = 0 on an aggregate.'
+            );
+        }
+        if ($connection instanceof \Predis\Connection\Cluster\ClusterInterface) {
+            throw new \InvalidArgumentException(
+                'RedisPostSolveDispositionStore: verified-WAIT durability (waitReplicas > 0) is not supported on a Predis Redis Cluster client — WAIT is connection-relative and cannot be routed by slot. The verified barrier supports standalone Redis connections only; use a standalone connection with waitReplicas > 0, or keep waitReplicas = 0 on a cluster.'
+            );
+        }
+        if ($connection === null) {
+            // An in-memory stand-in with no real connection object (the
+            // tests' fake clients skip the parent constructor): there is
+            // no Parameters instance to carry a retry policy and the
+            // stand-in overrides the command dispatch itself, so the
+            // vendored retry wrapper never engages.
+            return;
+        }
+        if ($connection instanceof \Predis\Connection\RelayConnection) {
+            // A relay connection dispatches commands directly, bypassing
+            // the vendored retry wrapper, so an explicit retry parameter
+            // is inert there and cannot replay a mutation.
+            return;
+        }
+        if (!$connection->getParameters()->isDisabledRetry()) {
+            throw new \InvalidArgumentException(
+                'RedisPostSolveDispositionStore: verified-WAIT durability (waitReplicas > 0) is not supported on a retry-enabled standalone Predis client — verified-WAIT durability requires that a durability-critical mutation is attempted exactly once on the connection whose subsequent WAIT establishes the replication offset, and a retry-enabled standalone Predis client can transparently re-execute the Lua mutation after a lost response. Retries must be disabled on the connection (remove the \'retry\' connection parameter), or keep waitReplicas = 0.'
+            );
+        }
+    }
+
     public function read(string $nonce): ?PostSolveDispositionRecord
     {
         $raw = $this->redis->get($this->key($nonce));
@@ -305,8 +461,22 @@ LUA;
             $owner,
             (string) json_encode(self::wire($disposition), JSON_THROW_ON_ERROR),
         ]);
+        $finalized = $ok === true || $ok === 1;
 
-        return $ok === true || $ok === 1;
+        // Durability barrier: a completed disposition that only lives on
+        // the primary would be lost on promotion, letting the same logical
+        // operation retry, win a fresh claim and recompute — which may
+        // now resolve to a different final disposition. The finalize
+        // therefore returns success only once the fresh pending -> complete
+        // write reached the configured replica count; a violated barrier
+        // raises {@see ReplicaWaitException} (fail closed: never a success
+        // that was not replicated). A refused finalize (non-owner or
+        // non-pending) performed no write and never WAITs.
+        if ($finalized && $this->waitReplicas > 0) {
+            $this->waitAndVerify('the post-solve disposition finalize');
+        }
+
+        return $finalized;
     }
 
     private function key(string $nonce): string

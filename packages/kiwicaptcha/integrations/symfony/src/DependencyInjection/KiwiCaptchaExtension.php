@@ -785,7 +785,19 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
                 }
                 $chainStoreRedis = $riskRedis ?? $redisRef;
                 if ($chainStoreRedis !== null) {
-                    $container->setDefinition(RedisChainedChallengeStateStore::class, new Definition(RedisChainedChallengeStateStore::class, [$chainStoreRedis, $namespace]));
+                    // The risk.redis replica-durability knobs
+                    // (wait_replicas / wait_timeout_ms) flow into the
+                    // Redis chain state store, the same knobs that harden
+                    // the challenge storage: every fresh mutating chain
+                    // transition WAITs for the configured replica count
+                    // before the caller learns success (a returned
+                    // Deny/StepUp must survive a promotion).
+                    $container->setDefinition(RedisChainedChallengeStateStore::class, new Definition(RedisChainedChallengeStateStore::class, [
+                        $chainStoreRedis,
+                        $namespace,
+                        $riskConfig['redis']['wait_replicas'],
+                        $riskConfig['redis']['wait_timeout_ms'],
+                    ]));
                     $chainStoreRef = new Reference(RedisChainedChallengeStateStore::class);
                 } else {
                     $container->setDefinition(ArrayChainedChallengeStateStore::class, new Definition(ArrayChainedChallengeStateStore::class, []));
@@ -1099,10 +1111,19 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
         $dispositionRedis = $riskRedis ?? $redisRef;
         $dispositionTtlSecs = Config::MAX_TTL_SECS + $riskConfig['redis']['ttl_margin_secs'];
         if ($dispositionRedis !== null) {
+            // The risk.redis replica-durability knobs
+            // (wait_replicas / wait_timeout_ms) flow into the disposition
+            // store too, the same knobs that harden the challenge
+            // storage: the claim's record creation and the finalize's
+            // completion WAIT for the configured replica count before the
+            // caller learns success (a returned Deny/StepUp/ChainRequired
+            // must survive a promotion).
             $container->setDefinition(RedisPostSolveDispositionStore::class, new Definition(RedisPostSolveDispositionStore::class, [
                 $dispositionRedis,
                 $namespace,
                 $dispositionTtlSecs,
+                $riskConfig['redis']['wait_replicas'],
+                $riskConfig['redis']['wait_timeout_ms'],
             ]));
             $dispositionStoreRef = new Reference(RedisPostSolveDispositionStore::class);
         } else {

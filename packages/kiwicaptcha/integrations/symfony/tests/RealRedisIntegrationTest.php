@@ -411,6 +411,54 @@ final class RealRedisIntegrationTest extends TestCase
         self::assertSame(['invalid_or_expired'], $validate('op-123', 'txn-OTHER'), 'a different binding derives a different identity — refused');
         $flaky->throwOnConsume = false;
     }
+
+    public function testFreshCancellationRestoresTheIssueDebtAgainstRealRedis(): void
+    {
+        // The end-to-end debt loop with the real risk-v1 Lua: issuance
+        // records ChallengeIssued (issue debt on the source identity), a
+        // fresh pending->cancelled transition records ChallengeCancelled
+        // and restores the debt, and a repeated idempotent cancellation
+        // never re-subtracts. The debt channel is read from the Lua state
+        // hash itself (the same keys the risk-state tests assert against).
+        $secret = '0123456789abcdef0123456789abcdef';
+        $namespace = 'ci:cancel-debt:'.bin2hex(random_bytes(4));
+        $keys = RiskKeys::fromMaster($secret);
+        $identityFactory = new \KiwiCaptcha\Risk\RiskIdentityFactory($keys);
+        $classifier = new \KiwiCaptcha\Risk\Network\CidrNetworkClassifier([]);
+        $policy = \KiwiCaptcha\Risk\RiskPolicy::fromConfig([
+            'version' => \KiwiCaptcha\Risk\RiskPolicy::CONTRACT_VERSION,
+            'weights' => [],
+            'scopes' => [
+                1 => ['base_risk' => 100, 'minimum' => 'allow', 'post_solve_check' => false, 'degraded' => 'allow'],
+            ],
+        ]);
+        $store = new \KiwiCaptcha\Risk\Storage\RedisRiskStateStore($this->client, namespace: $namespace);
+        $engine = new \KiwiCaptcha\Risk\AdaptiveRiskEngine($store, $classifier, $identityFactory, new \KiwiCaptcha\Risk\RiskScorer(), $policy, $keys);
+        $resolver = new \BelConsulting\KiwiCaptchaBundle\Risk\RiskProfileResolver(PoWAlgorithm::Sha256, 8);
+        $gateway = new \BelConsulting\KiwiCaptchaBundle\Risk\RiskGateway($engine, $classifier, $resolver, ['login' => 1], policy: $policy);
+        $storage = new RedisStorage($this->client, 'ci:cancel-debt:');
+        $issuer = new Issuer(new Config(secretKey: $secret, targetBits: 8, ttlSecs: 120), $storage);
+        $controller = new \BelConsulting\KiwiCaptchaBundle\Controller\ChallengeController($issuer, null, false, $gateway, new \BelConsulting\KiwiCaptchaBundle\Risk\ContinuityCookie(), null, null, [], false, $storage);
+
+        $issue = $controller->challenge(\BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\JsonRequest::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], '{"scope":"login"}'));
+        self::assertSame(200, $issue->getStatusCode());
+        $nonce = json_decode((string) $issue->getContent(), true)['nonce'];
+
+        $now = (int) $this->client->time()[0];
+        $sourceId = $identityFactory->sourceId('198.51.100.7', $now);
+        $stateKey = '{kiwi:'.$namespace.'}:risk:src:'.intdiv($now, 900).':'.$sourceId;
+        $issueDebt = fn (): int => (int) $this->client->hget($stateKey, 'iss');
+        self::assertGreaterThan(0, $issueDebt(), 'the issuance must leave issue debt on the source identity');
+
+        $cancel = $controller->cancel(\BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\JsonRequest::create('/challenge/cancel', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], json_encode(['nonce' => $nonce], JSON_THROW_ON_ERROR)));
+        self::assertSame(200, $cancel->getStatusCode());
+        self::assertSame(0, $issueDebt(), 'the fresh cancellation restores the issue debt (clamped at zero)');
+
+        // The repeated idempotent cancellation performs no fresh
+        // transition and fires no second event: the debt stays restored.
+        self::assertSame(200, $controller->cancel(\BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\JsonRequest::create('/challenge/cancel', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], json_encode(['nonce' => $nonce], JSON_THROW_ON_ERROR)))->getStatusCode());
+        self::assertSame(0, $issueDebt(), 'a repeated cancellation never re-subtracts the restored debt');
+    }
 }
 
 /**

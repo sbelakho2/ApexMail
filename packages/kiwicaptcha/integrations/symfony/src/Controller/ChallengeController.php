@@ -1367,8 +1367,21 @@ final class ChallengeController
      * cancelled — the storage's atomic pending->cancelled transition
      * decides ({@see \KiwiCaptcha\CancellableStorageInterface}), and the
      * response only ever acknowledges the cancellation, never record
-     * contents. The per-source limiter is the anti-stockpiling layer's
-     * own cancellation window; see
+     * contents. A fresh pending->cancelled transition also records the
+     * ChallengeCancelled risk event (the issue-debt restoration) exactly
+     * once per nonce, keyed on a nonce-derived idempotency identity;
+     * repeated idempotent requests never re-subtract the debt. The
+     * deployment-wide live-outstanding slot is released only
+     * when the storage actually cancelled the record: a fresh
+     * pending->cancelled flip or an already-cancelled record (the
+     * idempotent retry of an interrupted cancellation). A consumed or
+     * missing nonce answers the same success without freeing anything. A
+     * storage that cannot establish the cancellation (not a
+     * {@see \KiwiCaptcha\CancellableStorageInterface}) fails closed with
+     * the retryable 503 and frees nothing: freeing the global gate while
+     * the record stays pending and redeemable would be an
+     * anti-stockpiling bypass. The per-source limiter is the
+     * anti-stockpiling layer's own cancellation window; see
      * {@see OutstandingChallenges::cancellationAdmission()}. When that
      * layer is not wired, the endpoint stays bounded by the body ceiling,
      * the nonce shape and the origin checks.
@@ -1554,6 +1567,28 @@ final class ChallengeController
             );
         }
 
+        // Risk attribution of a fresh cancellation: the ChallengeCancelled
+        // risk event restores the issue-debt of the abandoned challenge,
+        // so it carries the same source/session/scope signals as the
+        // original ChallengeIssued. The continuity session is read without
+        // minting (the cancellation response never sets a cookie), and the
+        // issued scope comes from the pending record — a server-internal
+        // bookkeeping read only: the response still carries no record
+        // contents, and the fresh-outcome gate below keeps the event from
+        // firing for anything but this call's own pending->cancelled flip.
+        $riskSession = $this->continuityCookie?->read($request);
+        $cancelledScope = null;
+        if ($this->risk !== null && $this->storage instanceof \KiwiCaptcha\CancellableStorageInterface) {
+            try {
+                $cancelledRecord = $this->storage->find($nonce);
+                $cancelledScope = $cancelledRecord !== null ? $cancelledRecord->scope : null;
+            } catch (\Throwable) {
+                // Best-effort attribution: without the scope the event is
+                // skipped, never a failed cancellation.
+                $cancelledScope = null;
+            }
+        }
+
         // The record transition: the atomic pending->cancelled flip
         // (CancellableStorageInterface) decides missing / consumed /
         // already-cancelled / cancelled-now in one storage operation. A
@@ -1564,7 +1599,7 @@ final class ChallengeController
         // one.
         if ($this->storage instanceof \KiwiCaptcha\CancellableStorageInterface) {
             try {
-                $this->storage->cancel($nonce);
+                $result = $this->storage->cancel($nonce);
             } catch (\Throwable $e) {
                 error_log(sprintf('kiwicaptcha: challenge cancellation failed for nonce %s: %s', $nonce, $e->getMessage()));
 
@@ -1573,12 +1608,52 @@ final class ChallengeController
                     Response::HTTP_SERVICE_UNAVAILABLE,
                 );
             }
-        }
 
-        // Release the deployment-wide live-outstanding slot the abandoned
-        // challenge was holding (best-effort, idempotent; a failure leaves
-        // the member to expire by its score — fail closed).
-        $this->outstanding?->cancelled($nonce);
+            // The ChallengeCancelled risk event fires only on the first
+            // fresh pending->cancelled transition (wasCancelledNow):
+            // repeated idempotent cancellations, consumed records and
+            // unknown nonces never re-subtract the issue-debt. The
+            // idempotency identity is derived from the nonce, so even
+            // concurrent duplicate flips record the event at most once per
+            // nonce (the engine's dedupe key). Best-effort: a risk-backend
+            // failure never breaks a completed cancellation.
+            if ($result !== null && $result->wasCancelledNow() && $this->risk !== null && $cancelledScope !== null) {
+                try {
+                    $this->risk->challengeCancelled($cancelledScope, $clientIp, $riskSession, $nonce);
+                } catch (\Throwable $e) {
+                    error_log(sprintf('kiwicaptcha: ChallengeCancelled feedback failed for nonce %s: %s', $nonce, $e->getMessage()));
+                }
+            }
+
+            // Release the deployment-wide live-outstanding slot only when
+            // the record was actually cancelled: a fresh pending->cancelled
+            // transition (cancelled-now) or an already-cancelled record
+            // (cancelled — the idempotent retry of an interrupted
+            // cancellation: the record is dead, so the slot it held is
+            // released). A consumed (finalized) record and a
+            // missing/expired nonce performed no cancellation: nothing is
+            // freed, and the response stays the idempotent success without
+            // implying a cancellation that did not happen (the slot belongs
+            // to a finalized or never-issued challenge). Best-effort and
+            // idempotent on the release itself; a failure leaves the member
+            // to expire by its score.
+            if ($result !== null && $result->state !== 'consumed') {
+                $this->outstanding?->cancelled($nonce);
+            }
+        } else {
+            // Fail closed: this storage cannot establish the cancellation
+            // (no atomic pending->cancelled transition — e.g. a PSR-6
+            // pool). Freeing the deployment-wide live-outstanding slot
+            // while the record stays pending and redeemable would be an
+            // anti-stockpiling bypass, so the endpoint answers the
+            // retryable 503 and frees nothing; the operator must wire a
+            // CancellableStorageInterface backend (ArrayStorage,
+            // RedisStorage) for the cancellation endpoint.
+            return $this->privateJson(
+                ['error' => ['code' => 'SERVICE_UNAVAILABLE', 'message' => 'Challenge cancellation is temporarily unavailable. Try again later.']],
+                Response::HTTP_SERVICE_UNAVAILABLE,
+            );
+        }
 
         return $this->privateJson(['cancelled' => true], Response::HTTP_OK);
     }

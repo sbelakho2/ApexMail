@@ -116,8 +116,8 @@ For each release:
 The widget driver embeds a solver protocol id constant, a protocol/ABI generation label, not an artifact identity:
 
 ```js
-var KIWI_SOLVER_PROTOCOL_ID = "2026-08-r1";   // widget-driver.js
-var KIWI_SOLVER_PROTOCOL_VERSION = 1;           // integer, checked against
+var KIWI_SOLVER_PROTOCOL_ID = "2026-08-r2";   // widget-driver.js
+var KIWI_SOLVER_PROTOCOL_VERSION = 2;           // integer, checked against
                                                 // the wasm export
 ```
 
@@ -125,8 +125,8 @@ Exact byte identity is guaranteed by the release tag + `SHA256SUMS` + `SRI.txt` 
 
 The worker (both the standalone `kiwi-worker.js` and the copy embedded in the driver) declares the same constant and reports it in its handshake messages:
 
-- on startup: `{ type: "ready", v: 1, buildId: "2026-08-r1" }`
-- on success: `{ type: "done", v: 1, counter: <n>, buildId: "2026-08-r1" }`
+- on startup: `{ type: "ready", v: 1, buildId: "2026-08-r2" }`
+- on success: `{ type: "done", v: 1, counter: <n>, buildId: "2026-08-r2" }`
 
 The driver validates the worker's protocol id against its own constant (and the worker validates the wasm's integer protocol version).
 On a mismatch the widget enters the controlled `kiwi:solver-mismatch` state with a clear error message and never accepts a solution from the mismatched worker.

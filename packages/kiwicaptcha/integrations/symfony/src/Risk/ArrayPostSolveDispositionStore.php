@@ -48,6 +48,11 @@ namespace BelConsulting\KiwiCaptchaBundle\Risk;
  * runs on the read path and before every claim transition: a corrupt
  * server record throws (fail closed) and is never healed into valid
  * state by a takeover.
+ *
+ * Replica durability: the in-memory store has NO replicas — the state is
+ * the process's own memory, so there is no Redis WAIT barrier and no
+ * replica acknowledgement to verify (single-process test/dev semantics).
+ * The state machine is otherwise identical to the Redis store's.
  */
 final class ArrayPostSolveDispositionStore implements PostSolveDispositionStore
 {

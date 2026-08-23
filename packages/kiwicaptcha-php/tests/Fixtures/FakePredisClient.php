@@ -14,7 +14,13 @@ namespace KiwiCaptcha\Tests\Fixtures;
  *
  *  - consume-transition script: marks the stored record consumed (keeps
  *    it) and returns {json, consumed_now, consumed_before, result_json};
- *    the one-shot transition, not a delete.
+ *    the one-shot transition, not a delete. A cancelled record is never
+ *    consumable: the script reports it as missing (nil).
+ *  - cancel-transition script: flips a pending record to the terminal
+ *    cancelled marker (kept until its TTL) and returns
+ *    {state: cancelled-now | cancelled | consumed}; missing is nil.
+ *  - delete-if-pending script: missing / deleted-pending / cancelled
+ *    (kept) / consumed (kept, verbatim).
  *  - commit-result script: stores {valid, binding} on a consumed record
  *    without a result yet; returns 1/0.
  *  - WAIT: returns {@see FakePredisClient::$waitAck} (default 0; a real
@@ -116,8 +122,10 @@ final class FakePredisClient extends \Predis\Client
         // Consume transition: mark consumed, keep the record. ARGV[1] is
         // the JSON-escaped operation identity ('' = none); it lands in
         // the same write as the state flip, mirroring the real Lua
-        // splice.
-        if (str_contains($script, 'consume transition')) {
+        // splice. A cancelled record is never consumable: the transition
+        // reports it as missing (nil), mirroring the real Lua's failed
+        // pending-marker splice.
+        if (str_starts_with($script, '-- kiwicaptcha consume transition')) {
             $key = (string) $keys[0];
             if (!isset($this->store[$key])) {
                 return null;
@@ -128,6 +136,9 @@ final class FakePredisClient extends \Predis\Client
             } catch (\JsonException) {
                 // The real Lua pcall-wraps the decode: corrupt values
                 // degrade to "missing" instead of erroring the eval.
+                return null;
+            }
+            if (($obj['state'] ?? 'pending') === 'cancelled') {
                 return null;
             }
             if (($obj['state'] ?? 'pending') === 'consumed') {
@@ -147,9 +158,11 @@ final class FakePredisClient extends \Predis\Client
         }
 
         // Delete-if-pending (atomic cleanup): missing reports missing;
-        // a consumed record is returned verbatim and kept; only a
-        // pending record is deleted — mirroring the real Lua tristate.
-        if (str_contains($script, 'delete-if-pending (atomic cleanup)')) {
+        // a consumed record is returned verbatim and kept; a cancelled
+        // record is returned verbatim and kept too (dead but retained
+        // until its TTL); only a pending record is deleted — mirroring
+        // the real Lua.
+        if (str_starts_with($script, '-- kiwicaptcha delete-if-pending (atomic cleanup)')) {
             $key = (string) $keys[0];
             if (!isset($this->store[$key])) {
                 return ['missing'];
@@ -164,14 +177,47 @@ final class FakePredisClient extends \Predis\Client
             if (($obj['state'] ?? 'pending') === 'consumed') {
                 return ['consumed', $raw];
             }
+            if (($obj['state'] ?? 'pending') === 'cancelled') {
+                return ['cancelled', $raw];
+            }
             unset($this->store[$key]);
 
             return ['deleted-pending'];
         }
 
+        // Cancel transition (atomic pending -> cancelled): a missing
+        // record is nil, a consumed record is finalized and never
+        // cancellable ('consumed'), an already-cancelled record is
+        // idempotent ('cancelled'), and a pending record is flipped to
+        // the terminal cancelled marker and kept ('cancelled-now') —
+        // mirroring the real Lua splice.
+        if (str_starts_with($script, '-- kiwicaptcha cancel transition')) {
+            $key = (string) $keys[0];
+            if (!isset($this->store[$key])) {
+                return null;
+            }
+            $raw = $this->store[$key];
+            try {
+                $obj = json_decode($raw, true, flags: JSON_THROW_ON_ERROR);
+            } catch (\JsonException) {
+                // Corrupt values degrade to "missing" like the real Lua.
+                return null;
+            }
+            if (($obj['state'] ?? 'pending') === 'consumed') {
+                return ['consumed'];
+            }
+            if (($obj['state'] ?? 'pending') === 'cancelled') {
+                return ['cancelled'];
+            }
+            $obj['state'] = 'cancelled';
+            $this->store[$key] = json_encode($obj, JSON_UNESCAPED_SLASHES);
+
+            return ['cancelled-now'];
+        }
+
         // Commit result: only on a consumed record without a
         // result yet. ARGV = [valid, binding, has_binding].
-        if (str_contains($script, 'commit result')) {
+        if (str_starts_with($script, '-- kiwicaptcha commit result')) {
             $key = (string) $keys[0];
             if (!isset($this->store[$key])) {
                 return 0;

@@ -16,6 +16,7 @@ use BelConsulting\KiwiCaptchaBundle\Risk\RedisChainedChallengeStateStore;
 use BelConsulting\KiwiCaptchaBundle\Risk\RedisPostSolveDispositionStore;
 use BelConsulting\KiwiCaptchaBundle\Risk\RiskGateway;
 use BelConsulting\KiwiCaptchaBundle\Risk\RiskProfileResolver;
+use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\CommandCountingRedisClient;
 use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\FakeRiskStateStore;
 use BelConsulting\KiwiCaptchaBundle\Validator\Constraints\KiwiCaptcha;
 use BelConsulting\KiwiCaptchaBundle\Validator\Constraints\KiwiCaptchaValidator;
@@ -33,6 +34,7 @@ use KiwiCaptcha\Risk\RiskScorer;
 use KiwiCaptcha\Risk\SignalVector;
 use KiwiCaptcha\SolutionToken;
 use KiwiCaptcha\Storage\RedisStorage;
+use KiwiCaptcha\Storage\ReplicaWaitException;
 use KiwiCaptcha\Verifier;
 use PHPUnit\Framework\TestCase;
 use Symfony\Component\HttpFoundation\Request;
@@ -308,6 +310,97 @@ final class RealRedisPostSolveDispositionTest extends TestCase
         $counting->disconnect();
 
         self::assertSame(PostSolveDispositionKind::Deny, $dispositions->read($challenge->nonce)?->disposition?->kind, 'the denial is durably persisted');
+    }
+
+// ── the verified replica-WAIT durability barrier ────────────────────────────
+
+    /**
+     * A real-Redis counting client on the CI port (the same connection
+     * shape as the store wiring).
+     */
+    private function countingClient(): CommandCountingRedisClient
+    {
+        return new CommandCountingRedisClient('tcp://127.0.0.1:6399', ['timeout' => 2.0, 'read_write_timeout' => 2.0]);
+    }
+
+    public function testFreshFinalizeWaitsAndFailsClosedOnAViolatedAckAgainstRealRedis(): void
+    {
+        // THE fail-closed proof on real Redis: with waitReplicas=1
+        // against a replica-less server the fresh finalize issues exactly
+        // one WAIT (acknowledged 0) and raises ReplicaWaitException — the
+        // finalize never returns a success that was not replicated, so a
+        // returned Deny can never be reported as persisted and then
+        // vanish on promotion (the same logical operation would retry,
+        // win a fresh claim and recompute).
+        $counting = $this->countingClient();
+        $seed = new RedisPostSolveDispositionStore($counting, 'ci-postsolve-wait');
+        $nonce = bin2hex(random_bytes(16));
+        self::assertSame('claimed', $seed->claim($nonce, 'owner-a', 305)[0]);
+        $counting->commands = [];
+
+        $hardened = new RedisPostSolveDispositionStore($counting, 'ci-postsolve-wait', 0, 1, 100);
+        try {
+            $hardened->finalize($nonce, 'owner-a', new PostSolveDisposition(PostSolveDispositionKind::Deny));
+            self::fail('a finalize whose write was not replicated must fail closed');
+        } catch (ReplicaWaitException $e) {
+            self::assertStringContainsString('acknowledged 0 of 1 requested replicas after the post-solve disposition finalize', $e->getMessage());
+        }
+        self::assertCount(1, $counting->waits(), 'the failed finalize issued exactly one WAIT — the barrier ran after the fresh mutation');
+        $counting->disconnect();
+    }
+
+    public function testFreshClaimRecordCreationWaitsAndFailsClosedOnAViolatedAckAgainstRealRedis(): void
+    {
+        $counting = $this->countingClient();
+        $hardened = new RedisPostSolveDispositionStore($counting, 'ci-postsolve-wait-claim', 0, 1, 100);
+        $nonce = bin2hex(random_bytes(16));
+
+        try {
+            $hardened->claim($nonce, 'owner-a', 305);
+            self::fail('a claim whose record creation was not replicated must fail closed');
+        } catch (ReplicaWaitException $e) {
+            self::assertStringContainsString('acknowledged 0 of 1 requested replicas after the post-solve disposition claim', $e->getMessage());
+        }
+        self::assertCount(1, $counting->waits(), 'the failed claim issued exactly one WAIT');
+        $counting->disconnect();
+    }
+
+    public function testTakeoverBusyCompleteAndRefusedFinalizeNeverWaitAgainstRealRedis(): void
+    {
+        // The non-mutating paths never hit the barrier: a busy claim, a
+        // complete claim, an expired-lease takeover and a refused
+        // finalize perform no fresh write and issue no WAIT.
+        $counting = $this->countingClient();
+        $seed = new RedisPostSolveDispositionStore($counting, 'ci-postsolve-wait-nmw');
+        $hardened = new RedisPostSolveDispositionStore($counting, 'ci-postsolve-wait-nmw', 0, 1, 100);
+        $nonce = bin2hex(random_bytes(16));
+        self::assertSame('claimed', $seed->claim($nonce, 'owner-a', 305)[0]);
+
+        $counting->commands = [];
+        self::assertSame('pending', $hardened->claim($nonce, 'owner-b', 305)[0], 'a live lease is busy');
+        self::assertCount(0, $counting->waits(), 'a busy claim never WAITs');
+
+        $seed->finalize($nonce, 'owner-a', new PostSolveDisposition(PostSolveDispositionKind::Pass));
+        $counting->commands = [];
+        self::assertSame('complete', $hardened->claim($nonce, 'owner-c', 305)[0], 'a replay claim reproduces the terminal record');
+        self::assertCount(0, $counting->waits(), 'a complete claim never WAITs');
+
+        $takeoverNonce = bin2hex(random_bytes(16));
+        $seed->claim($takeoverNonce, 'owner-a', 305);
+        $takeoverKey = '{kiwi:ci-postsolve-wait-nmw}:postsolve:'.$takeoverNonce;
+        $rec = json_decode((string) $this->client->get($takeoverKey), true);
+        self::assertIsArray($rec);
+        $rec['lease_until'] = time() - 1;
+        $this->client->set($takeoverKey, (string) json_encode($rec), 'KEEPTTL');
+        $counting->commands = [];
+        self::assertSame('taken_over', $hardened->claim($takeoverNonce, 'owner-d', 305)[0]);
+        self::assertCount(0, $counting->waits(), 'an expired-lease takeover never WAITs');
+
+        $counting->commands = [];
+        self::assertFalse($hardened->finalize($takeoverNonce, 'owner-x', new PostSolveDisposition(PostSolveDispositionKind::Pass)));
+        self::assertFalse($hardened->finalize($nonce, 'owner-c', new PostSolveDisposition(PostSolveDispositionKind::Pass)));
+        self::assertCount(0, $counting->waits(), 'a refused finalize is not a mutation and never WAITs');
+        $counting->disconnect();
     }
 
     public function testChainRequiredDispositionWireShapeAgainstRealRedis(): void

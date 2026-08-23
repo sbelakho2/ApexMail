@@ -842,6 +842,22 @@ final class RiskGateway
     }
 
     /**
+     * Server-derived signal: an issued challenge was cancelled before any
+     * verification (the exhaustion/deadline abandonment path). Records
+     * RiskEventKind::ChallengeCancelled, which restores the issue-debt
+     * contribution of the cancelled challenge (iss − 1000, clamped at 0)
+     * without the solve's other effects (no trust credit, no solve
+     * counters). The controller fires it only on the fresh
+     * pending->cancelled transition and passes a nonce-derived idempotency
+     * key, so repeated idempotent cancellation requests can never
+     * re-subtract the debt.
+     */
+    public function challengeCancelled(string $scope, string $ip, ?string $session = null, ?string $idempotencyKey = null): ?EventReceipt
+    {
+        return $this->recordFeedback(RiskEventKind::ChallengeCancelled, $scope, $ip, $session, $idempotencyKey, null);
+    }
+
+    /**
      * The challenge profile the decision demands (null = issue as configured).
      */
     public function decisionProfile(RiskDecision $decision): ?ChallengeProfile

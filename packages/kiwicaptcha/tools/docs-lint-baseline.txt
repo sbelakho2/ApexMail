@@ -39,6 +39,7 @@
 0 packages/kiwicaptcha-php/src/VerifyError.php
 0 packages/kiwicaptcha-php/src/VerifyOutcome.php
 0 packages/kiwicaptcha-php/tests/Argon2CeilingsTest.php
+0 packages/kiwicaptcha-php/tests/CancellationTest.php
 0 packages/kiwicaptcha-php/tests/ChallengeProfileTest.php
 0 packages/kiwicaptcha-php/tests/CompositionalReplayPrecedenceTest.php
 0 packages/kiwicaptcha-php/tests/ConfigTest.php
@@ -261,6 +262,7 @@
 0 packages/kiwicaptcha/integrations/symfony/tests/ClientContextTagTest.php
 0 packages/kiwicaptcha/integrations/symfony/tests/ClientIpResolverTest.php
 0 packages/kiwicaptcha/integrations/symfony/tests/ConfigurationTest.php
+0 packages/kiwicaptcha/integrations/symfony/tests/Fixtures/CommandCountingRedisClient.php
 0 packages/kiwicaptcha/integrations/symfony/tests/Fixtures/ConsumedStateStorage.php
 0 packages/kiwicaptcha/integrations/symfony/tests/Fixtures/FakePredisClient.php
 0 packages/kiwicaptcha/integrations/symfony/tests/Fixtures/FakePrincipalResolver.php
@@ -307,6 +309,7 @@
 0 packages/kiwicaptcha/integrations/symfony/tests/RealRedisSiteVerifyRecoveryTest.php
 0 packages/kiwicaptcha/integrations/symfony/tests/RedisAdmissionSemaphoreTest.php
 0 packages/kiwicaptcha/integrations/symfony/tests/RedisChainedChallengeStateStoreTest.php
+0 packages/kiwicaptcha/integrations/symfony/tests/RedisPostSolveDispositionDurabilityTest.php
 0 packages/kiwicaptcha/integrations/symfony/tests/RedisRiskHealthProviderTest.php
 0 packages/kiwicaptcha/integrations/symfony/tests/RedisSemaphoreWiringTest.php
 0 packages/kiwicaptcha/integrations/symfony/tests/ResultReceiptTest.php

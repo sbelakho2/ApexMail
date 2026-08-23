@@ -31,22 +31,29 @@ use KiwiCaptcha\OperationIdentityAwareStorageInterface;
  * Records are stored as JSON in the canonical `ChallengeRecord` wire
  * keys schema, which is language-neutral: a Rust service using the same
  * Redis instance can read them and vice versa. The JSON is wrapped with
- * the three runtime fields `state` ("pending"|"consumed"),
+ * the three runtime fields `state` ("pending"|"consumed"|"cancelled"),
  * `consumed_result` (null | {valid, binding}) and `operation_identity`
  * (null | a bounded <= 128-byte logical-operation identity recorded
  * atomically with the pending→consumed transition via
- * {@see OperationIdentityAwareStorageInterface}). The runtime fields are
+ * {@see OperationIdentityAwareStorageInterface}). The `cancelled` state
+ * is the terminal marker of
+ * {@see \KiwiCaptcha\CancellableStorageInterface::cancel()}. A pending
+ * record flipped to cancelled is dead. The consume transition refuses
+ * it, the consumed-state reads never surface it, and the
+ * delete-if-pending cleanup never deletes it; the record is retained
+ * until its TTL. The fresh flip carries the same verified replica wait
+ * as the other durability-critical transitions. The runtime fields are
  * storage-layer additions after the canonical parse: `decode()` strips
  * them before {@see ChallengeRecord::fromArray()} so the strict
  * serde-mirror parser never sees them. That preserves deny_unknown_fields
  * parity with the Rust reader, which strips them the same way. The
- * record's TTL is the key expiration; the consume transition preserves
+ * record's TTL is the key expiration; every state transition preserves
  * it.
  *
  * Implements {@see \KiwiCaptcha\AtomicStorageInterface}: the fused
  * read-transition makes consume() strict single-use under concurrency.
  */
-final class RedisStorage implements AtomicStorageInterface, \KiwiCaptcha\ConsumedStateReadableInterface, OperationIdentityAwareStorageInterface, \KiwiCaptcha\AtomicDeleteIfPendingInterface
+final class RedisStorage implements AtomicStorageInterface, \KiwiCaptcha\ConsumedStateReadableInterface, OperationIdentityAwareStorageInterface, \KiwiCaptcha\AtomicDeleteIfPendingInterface, \KiwiCaptcha\CancellableStorageInterface
 {
     /**
      * Atomic consume transition: GET the record; if present and not yet
@@ -95,6 +102,10 @@ else
   if ttl < 1 then ttl = 1 end
   local updated, n = string.gsub(v, '"state":"pending"', '"state":"consumed"', 1)
   if n ~= 1 then
+    -- A cancelled record (or any other non-pending state) is never
+    -- consumable: the gsub finds no pending marker, so the transition
+    -- reports the record as missing (nil) and the verifier fails the
+    -- token closed instead of ever redeeming it.
     return nil
   end
   if ARGV[1] ~= '' then
@@ -150,8 +161,10 @@ LUA;
 --
 -- Same raw-splice rules as CONSUME_SCRIPT: the stored JSON is never
 -- re-encoded through cjson (large integers would switch to scientific
--- notation). A consumed record is returned verbatim and kept; only a
--- pending record is deleted.
+-- notation). A consumed record is returned verbatim and kept. A
+-- cancelled record is returned verbatim and kept too: the cancelled
+-- challenge is dead but retained until its TTL, never eagerly deleted.
+-- Only a pending record is deleted.
 --
 -- The DEL is a durability-critical write: the caller applies the same
 -- verified WAIT barrier as the other transitions, so a burned challenge
@@ -164,8 +177,52 @@ end
 if string.find(v, '"state":"consumed"', 1, true) then
   return {'consumed', v}
 end
+if string.find(v, '"state":"cancelled"', 1, true) then
+  return {'cancelled', v}
+end
 redis.call("DEL", KEYS[1])
 return {'deleted-pending'}
+LUA;
+
+    /**
+     * Atomic cancellation transition: GET the record and decide. A
+     * missing record returns nil. A consumed record is finalized and is
+     * never cancelled ({'consumed'}). An already-cancelled record is
+     * idempotent ({'cancelled'}). A pending record is flipped to
+     * `"state":"cancelled"` in place, preserving the key TTL, and
+     * returns {'cancelled-now'}. The same raw-splice rule as the consume
+     * script applies: the stored JSON is never re-encoded through cjson.
+     * The record is kept until its TTL. The cancelled marker is the
+     * replay and redemption protection, not absence.
+     */
+    private const CANCEL_SCRIPT = <<<'LUA'
+-- kiwicaptcha cancel transition
+--
+-- CRITICAL: the record is NEVER re-encoded through cjson — re-encoding
+-- rewrites large integers (issued_at_ns ~ 1.7e15) in scientific notation
+-- and breaks both strict parsers. The state field is spliced into the
+-- RAW stored JSON string (store() always writes the exact
+-- `"state":"pending"` marker), mirroring the consume transition. A
+-- consumed record is terminal and never cancellable; a cancelled record
+-- is idempotent. The flip preserves the key TTL.
+local v = redis.call("GET", KEYS[1])
+if not v then
+  return nil
+end
+if string.find(v, '"state":"consumed"', 1, true) then
+  return {'consumed'}
+end
+if string.find(v, '"state":"cancelled"', 1, true) then
+  return {'cancelled'}
+end
+local ttl = redis.call("TTL", KEYS[1])
+if ttl < 1 then ttl = 1 end
+local updated, n = string.gsub(v, '"state":"pending"', '"state":"cancelled"', 1)
+if n ~= 1 then
+  return nil
+end
+redis.call("SET", KEYS[1], updated, "EX", ttl)
+return {'cancelled-now'}
 LUA;
 
     private const COMMIT_SCRIPT = <<<'LUA'
@@ -582,8 +639,10 @@ LUA;
 
     /**
      * The atomic cleanup transition: ONE script decides missing /
-     * deleted-pending / consumed (the same tri-state contract as
-     * {@see \KiwiCaptcha\AtomicDeleteIfPendingInterface}).
+     * deleted-pending / consumed / cancelled (the same contract as
+     * {@see \KiwiCaptcha\AtomicDeleteIfPendingInterface}, plus the
+     * cancelled state: a cancelled record is dead but retained until its
+     * TTL, exactly like a consumed one).
      *
      * The deleted-pending transition is durability-critical and carries
      * the same verified WAIT contract as issuance, the pending-to-consumed
@@ -592,8 +651,8 @@ LUA;
      * as burned, or a promoted stale replica could resurrect it as
      * pending and let it be redeemed. A violated barrier surfaces the
      * same fail-closed {@see ReplicaWaitException} as the other
-     * transitions. No WAIT is issued for missing or consumed, since no
-     * mutation occurred.
+     * transitions. No WAIT is issued for missing, consumed or cancelled,
+     * since no mutation occurred.
      */
     public function deleteIfPending(string $nonce): \KiwiCaptcha\DeleteIfPendingResult
     {
@@ -623,6 +682,14 @@ LUA;
 
             return new \KiwiCaptcha\DeleteIfPendingResult($state);
         }
+        if ($state === 'cancelled') {
+            // A cancelled record is dead but retained until its TTL — the
+            // cleanup never deletes it, so a cancellation can never be
+            // resurrected as pending by a promoted stale replica. No
+            // ConsumedRecord rides along: the cancelled state is not
+            // consumed evidence. No WAIT: no mutation occurred.
+            return new \KiwiCaptcha\DeleteIfPendingResult('cancelled');
+        }
         // consumed: decode the retained envelope from the returned bytes
         // (the committed result and the recorded operation identity ride
         // along — no second lookup). No WAIT: no mutation occurred, the
@@ -639,6 +706,46 @@ LUA;
         }
 
         return new \KiwiCaptcha\DeleteIfPendingResult('consumed', new ConsumedRecord($record, false, true, $result, $this->decodeIdentity($json)));
+    }
+
+    /**
+     * The atomic cancellation transition: pending -> cancelled in ONE
+     * script, closing the check-then-flip TOCTOU. A record a concurrent
+     * redeemer consumes between the caller's decision and the flip is
+     * observed in its consumed state here and never cancelled. A missing
+     * record returns null (a cancellation of a never-issued or expired
+     * nonce is idempotent success upstream); a consumed record returns
+     * {'consumed'} (finalized — never cancellable); an already-cancelled
+     * record returns {'cancelled'} (idempotent); the pending->cancelled
+     * flip returns {'cancelled-now'}.
+     *
+     * The pending->cancelled transition is durability-critical and
+     * carries the same verified WAIT contract as the other transitions:
+     * a cancelled challenge that only vanished from the primary could
+     * resurrect as pending on a promoted stale replica and be redeemed.
+     * The flip must reach the configured replica count before the caller
+     * may report the cancellation. No WAIT is issued for missing,
+     * consumed or already-cancelled, since no mutation occurred.
+     */
+    public function cancel(string $nonce): ?\KiwiCaptcha\CancellationResult
+    {
+        $key = $this->prefix.$nonce;
+        $raw = $this->evalScript(self::CANCEL_SCRIPT, [$key], 1);
+        if ($raw === false || $raw === null || !\is_array($raw)) {
+            return null;
+        }
+        $parts = array_values($raw);
+        $state = (string) ($parts[0] ?? '');
+        if ($state === 'cancelled-now') {
+            // Durability barrier: the flip must reach the configured
+            // replica count before the caller may treat the challenge as
+            // cancelled (see the method docblock).
+            if ($this->waitReplicas > 0) {
+                $this->waitAndVerify('the pending→cancelled transition');
+            }
+        }
+
+        return new \KiwiCaptcha\CancellationResult($state);
     }
 
     public function commitResult(string $nonce, bool $valid, ?string $binding): bool

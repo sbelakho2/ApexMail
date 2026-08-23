@@ -19,8 +19,8 @@ use kiwicaptcha::challenge::{
     issue_challenge, BindingMode, ChallengeConfig, ChallengeRecord, PoWAlgorithm,
 };
 use kiwicaptcha::redis_verify::{
-    AdmissionError, ArgonAdmissionGate, ArgonLease, DeleteIfPending, ProductionVerifier,
-    RedisChallengeStore, StoredConsumedResult, DEFAULT_POOL_SIZE,
+    AdmissionError, ArgonAdmissionGate, ArgonLease, CancelResult, DeleteIfPending,
+    ProductionVerifier, RedisChallengeStore, StoredConsumedResult, DEFAULT_POOL_SIZE,
 };
 use kiwicaptcha::token::SolutionToken;
 use kiwicaptcha::verify::{solve_for_test, VerifyError, VerifyOutcome};
@@ -2300,6 +2300,237 @@ fn consume_issues_the_verified_wait_only_on_the_fresh_transition() {
         assert_eq!(wait[1], "2", "WAIT must carry the configured replica count");
         assert_eq!(wait[2], "1000", "WAIT must carry the configured timeout");
     }
+}
+
+#[test]
+fn cancel_issues_the_verified_wait_only_on_the_fresh_transition() {
+    // A miniature Redis-protocol server records every issued command and
+    // answers the cancel-transition Lua with the state replies keyed on
+    // the nonce, so the WAIT barrier placement is observable: exactly the
+    // fresh pending→cancelled flip with wait_replicas > 0 issues WAIT
+    // (carrying the configured replica count and timeout, with the acked
+    // count verified against the threshold); an already-cancelled replay,
+    // a consumed record, a missing key and wait_replicas == 0 never wait —
+    // those outcomes leave the stored value untouched, so there is no
+    // durability barrier to satisfy. The same server then violates the
+    // acknowledgement (fewer acked than configured), and the fresh flip
+    // fails closed with the same durability failure the other transitions
+    // use. Hermetic: no Redis URL needed.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+
+    let commands: Arc<Mutex<Vec<Vec<String>>>> = Arc::new(Mutex::new(Vec::new()));
+    // -1 = echo the requested replica count (the wait is satisfied);
+    // >= 0 = the ack count to reply (0 violates any configured barrier).
+    let wait_acks = Arc::new(AtomicI64::new(-1));
+    let server_commands = Arc::clone(&commands);
+    let server_acks = Arc::clone(&wait_acks);
+    std::thread::spawn(move || {
+        use std::io::{Read, Write};
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            let server_commands = Arc::clone(&server_commands);
+            let server_acks = Arc::clone(&server_acks);
+            std::thread::spawn(move || {
+                let mut buf = Vec::new();
+                let mut tmp = [0u8; 4096];
+                // The redis crate invokes scripts by sha: the first
+                // sha-addressed invocation misses (no-script), the load
+                // command registers the script, and the retried
+                // invocation is answered with the scripted Lua reply.
+                let mut script_loaded = false;
+                loop {
+                    match stream.read(&mut tmp) {
+                        Ok(0) => return,
+                        Ok(n) => {
+                            buf.extend_from_slice(&tmp[..n]);
+                            while let Some((args, consumed)) = parse_resp_command(&buf) {
+                                buf.drain(..consumed);
+                                server_commands.lock().unwrap().push(args.clone());
+                                let reply = match args[0].as_str() {
+                                    "PING" => "+PONG\r\n".to_string(),
+                                    "EVALSHA" if !script_loaded => {
+                                        "-NOSCRIPT No matching script. Use EVAL.\r\n".to_string()
+                                    }
+                                    "EVALSHA" => {
+                                        let key = args.get(3).map(String::as_str).unwrap_or("");
+                                        if key.ends_with("-pending") {
+                                            "*1\r\n$13\r\ncancelled-now\r\n".to_string()
+                                        } else if key.ends_with("-cancelled") {
+                                            "*1\r\n$9\r\ncancelled\r\n".to_string()
+                                        } else if key.ends_with("-consumed") {
+                                            "*1\r\n$8\r\nconsumed\r\n".to_string()
+                                        } else {
+                                            "$-1\r\n".to_string()
+                                        }
+                                    }
+                                    "SCRIPT" => {
+                                        script_loaded = true;
+                                        "+OK\r\n".to_string()
+                                    }
+                                    "WAIT" => {
+                                        let acks = server_acks.load(Ordering::SeqCst);
+                                        let n = if acks >= 0 {
+                                            acks.to_string()
+                                        } else {
+                                            args.get(1)
+                                                .map(String::as_str)
+                                                .unwrap_or("0")
+                                                .to_string()
+                                        };
+                                        format!(":{n}\r\n")
+                                    }
+                                    _ => "+OK\r\n".to_string(),
+                                };
+                                stream.write_all(reply.as_bytes()).unwrap();
+                            }
+                        }
+                        Err(_) => return,
+                    }
+                }
+            });
+        }
+    });
+
+    let url = format!("redis://127.0.0.1:{port}/");
+    let barriered = store_for(&url, &prefix("cancel-wait")).with_wait(2, 1000);
+    // Fresh pending→cancelled: the flip mutated the store, so WAIT is
+    // issued and the satisfied acknowledgement is accepted.
+    assert_eq!(
+        barriered.cancel("nonce-a-pending").unwrap(),
+        Some(CancelResult::CancelledNow)
+    );
+    // Already-cancelled replay: no mutation, so no wait (a wait here would
+    // hang the configured timeout and then fail closed on a 0 ack).
+    assert_eq!(
+        barriered.cancel("nonce-b-cancelled").unwrap(),
+        Some(CancelResult::Cancelled)
+    );
+    // Consumed: no mutation, no wait.
+    assert_eq!(
+        barriered.cancel("nonce-c-consumed").unwrap(),
+        Some(CancelResult::Consumed)
+    );
+    // Missing: no mutation, no wait.
+    assert!(barriered.cancel("nonce-d-missing").unwrap().is_none());
+    // wait_replicas == 0 disables the barrier even on the fresh flip.
+    let unbarriered = store_for(&url, &prefix("cancel-nowait"));
+    assert_eq!(
+        unbarriered.cancel("nonce-e-pending").unwrap(),
+        Some(CancelResult::CancelledNow)
+    );
+
+    // A violated acknowledgement (fewer than wait_replicas) fails closed
+    // on the fresh-flip path with the same durability failure as consume
+    // and delete: the flip happened but its durability is unconfirmed.
+    wait_acks.store(0, Ordering::SeqCst);
+    let barriered2 = store_for(&url, &prefix("cancel-wait2")).with_wait(2, 1000);
+    let err = barriered2
+        .cancel("nonce-f-pending")
+        .expect_err("a violated replica-wait barrier must fail closed on the fresh cancellation");
+    assert!(
+        err.to_string().contains("replica wait not satisfied"),
+        "unexpected error: {err}"
+    );
+
+    let recorded = commands.lock().unwrap().clone();
+    let waits: Vec<&Vec<String>> = recorded.iter().filter(|args| args[0] == "WAIT").collect();
+    assert_eq!(
+        waits.len(),
+        2,
+        "WAIT must be issued exactly on the fresh cancellations with wait_replicas > 0 (one satisfied, one violated); full command log: {recorded:?}"
+    );
+    for wait in &waits {
+        assert_eq!(wait[1], "2", "WAIT must carry the configured replica count");
+        assert_eq!(wait[2], "1000", "WAIT must carry the configured timeout");
+    }
+}
+
+#[test]
+fn php_written_cancelled_envelope_reads_as_dead_in_rust() {
+    // The reader tolerance: a record whose envelope carries the cancelled
+    // marker exactly as the PHP core's cancel transition writes it (the
+    // same `"state":"cancelled"` splice, bytes untouched) must behave
+    // equivalently on the Rust side — unconsumable, never recoverable,
+    // never eagerly deleted, and verification of a genuine solution fails
+    // closed as RecordNotFound.
+    let Some(url) = redis_url() else { return };
+    let prefix = prefix("php-cancelled");
+    let issued = issue_challenge(
+        &sha_config(4),
+        "login",
+        IP,
+        now_unix(),
+        now_micros(),
+        0,
+        None,
+    )
+    .unwrap();
+    let counter = solve_for_test(&issued.record).expect("4-bit sha solves");
+
+    let mut value = serde_json::to_string(&issued.record).unwrap();
+    value.truncate(value.len() - 1);
+    // The envelope exactly as the PHP cancel Lua splice writes it.
+    value
+        .push_str(",\"state\":\"cancelled\",\"consumed_result\":null,\"operation_identity\":null}");
+    let key = format!("{prefix}{}", issued.record.nonce);
+    let mut conn = redis::Client::open(url.clone())
+        .unwrap()
+        .get_connection()
+        .unwrap();
+    let _: () = redis::cmd("SET")
+        .arg(&key)
+        .arg(&value)
+        .query(&mut conn)
+        .unwrap();
+
+    let store = store_for(&url, &prefix);
+    // The state-agnostic peek still reads the retained record (exactly
+    // like PHP find()).
+    let found = store
+        .find(&issued.record.nonce)
+        .unwrap()
+        .expect("the cancelled record is retained until its TTL");
+    assert_eq!(found.nonce, issued.record.nonce);
+
+    // Unconsumable: the consume transition reports it as missing.
+    assert!(
+        store.consume(&issued.record.nonce).unwrap().is_none(),
+        "a PHP-cancelled record is never consumable in Rust"
+    );
+    // Never recoverable: the consumed-state read never surfaces it.
+    assert!(store
+        .consumed_state(&issued.record.nonce)
+        .unwrap()
+        .is_none());
+    // Never eagerly deleted: the cleanup keeps the dead record.
+    assert!(matches!(
+        store.delete_if_pending(&issued.record.nonce).unwrap(),
+        DeleteIfPending::Cancelled
+    ));
+    let raw: String = redis::cmd("GET").arg(&key).query(&mut conn).unwrap();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&raw).unwrap()["state"],
+        "cancelled",
+        "the cleanup never deletes a cancelled record"
+    );
+    // Already-cancelled cancellation is idempotent.
+    assert_eq!(
+        store.cancel(&issued.record.nonce).unwrap(),
+        Some(CancelResult::Cancelled)
+    );
+
+    // Never verifiable: a genuine solution fails closed as RecordNotFound.
+    let verifier = verifier_for(&url, &prefix);
+    assert_eq!(
+        verify_at(
+            &verifier,
+            &encode_token(&issued.record.nonce, counter),
+            issued.record.issued_at_ns
+        ),
+        VerifyOutcome::Invalid(VerifyError::RecordNotFound),
+        "a valid token for a PHP-cancelled record fails closed as RecordNotFound"
+    );
 }
 
 #[test]

@@ -15,6 +15,7 @@ use BelConsulting\KiwiCaptchaBundle\Risk\RedisChainedChallengeStateStore;
 use BelConsulting\KiwiCaptchaBundle\Risk\RiskGateway;
 use BelConsulting\KiwiCaptchaBundle\Risk\RiskProfileResolver;
 use BelConsulting\KiwiCaptchaBundle\Risk\TransactionalChainedChallengeStateStore;
+use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\CommandCountingRedisClient;
 use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\FakeRiskStateStore;
 use KiwiCaptcha\Config;
 use KiwiCaptcha\Issuer;
@@ -27,6 +28,7 @@ use KiwiCaptcha\Risk\RiskKeys;
 use KiwiCaptcha\Risk\RiskPolicy;
 use KiwiCaptcha\Risk\RiskScorer;
 use KiwiCaptcha\Storage\ArrayStorage;
+use KiwiCaptcha\Storage\ReplicaWaitException;
 use KiwiCaptcha\StorageInterface;
 use PHPUnit\Framework\TestCase;
 use Symfony\Component\HttpFoundation\Request;
@@ -673,5 +675,70 @@ final class RealRedisChainedChallengeTest extends TestCase
         self::assertSame($otherObligationId, $store->read($other->chainId)['obligationId'], 'the record carries its own obligation id');
         self::assertSame('obligation_moved', $store->markTransactionDenied($other->chainId, $obligationId), 'a mismatched obligation id is refused — the record does not agree');
         self::assertSame('available', $service->requirementFor($other->chainId)?->state, 'the record is untouched');
+    }
+
+    public function testTerminalTransitionsFailClosedOnAViolatedAckAgainstRealRedis(): void
+    {
+        // THE fail-closed proof on real Redis: with waitReplicas=1
+        // against a replica-less server every fresh terminal transition
+        // (denied / verified / step-up-required) issues exactly one WAIT
+        // (acknowledged 0) and raises ReplicaWaitException — a returned
+        // Deny/StepUp/Pass can never be reported without replication, so
+        // it cannot silently become issuable after a promotion. The
+        // idempotent same-state replays and the reservation perform no
+        // fresh write and never WAIT.
+        $counting = new CommandCountingRedisClient(self::REDIS_URL);
+        $seed = new RedisChainedChallengeStateStore($counting, self::NAMESPACE);
+        $hardened = new RedisChainedChallengeStateStore($counting, self::NAMESPACE, 1, 100);
+        $service = new ChainedChallengeTicketService($seed, self::SECRET, 300, 15);
+        $expiry = time() + 300;
+        $nonce = $this->stageNonce('stage2-nonce');
+
+        // denied: the fresh terminal write fails closed after exactly one
+        // WAIT; the same-state replay and the reserve never WAIT.
+        $denied = $service->requireStage2($this->nonce(), 'login', 'txn-wait-deny', 1, RiskAction::Argon32, $expiry);
+        self::assertSame(ChainReservationResult::Available, $service->reserveStage2($denied->chainId, 'owner-a'));
+        self::assertSame(ChainIssuedResult::IssuedNew, $service->markIssued($denied->chainId, 'owner-a', $nonce));
+        $counting->commands = [];
+        try {
+            $hardened->markDenied($denied->chainId, $nonce);
+            self::fail('a denied transition whose write was not replicated must fail closed');
+        } catch (ReplicaWaitException $e) {
+            self::assertStringContainsString('acknowledged 0 of 1 requested replicas after the denied transition', $e->getMessage());
+        }
+        self::assertCount(1, $counting->waits(), 'the failed denied transition issued exactly one WAIT');
+        $counting->commands = [];
+        self::assertSame(ChainVerifiedResult::DeniedSame, $service->markDenied($denied->chainId, $nonce), 'the terminal denial is idempotent');
+        self::assertSame(ChainReservationResult::Denied, $service->reserveStage2($denied->chainId, 'owner-b'));
+        self::assertCount(0, $counting->waits(), 'the same-state replay and the reserve never WAIT');
+
+        // verified: the fresh terminal write fails closed after exactly
+        // one WAIT (the atomic obligation deletion rides the same write).
+        $verified = $service->requireStage2($this->nonce(), 'login', 'txn-wait-verified', 1, RiskAction::Argon32, $expiry);
+        self::assertSame(ChainReservationResult::Available, $service->reserveStage2($verified->chainId, 'owner-a'));
+        self::assertSame(ChainIssuedResult::IssuedNew, $service->markIssued($verified->chainId, 'owner-a', $nonce));
+        $counting->commands = [];
+        try {
+            $hardened->markVerified($verified->chainId, $nonce);
+            self::fail('a verified transition whose write was not replicated must fail closed');
+        } catch (ReplicaWaitException $e) {
+            self::assertStringContainsString('acknowledged 0 of 1 requested replicas after the verified transition', $e->getMessage());
+        }
+        self::assertCount(1, $counting->waits(), 'the failed verified transition issued exactly one WAIT');
+
+        // step-up: the fresh terminal write fails closed after exactly
+        // one WAIT.
+        $stepUp = $service->requireStage2($this->nonce(), 'login', 'txn-wait-stepup', 1, RiskAction::Argon32, $expiry);
+        self::assertSame(ChainReservationResult::Available, $service->reserveStage2($stepUp->chainId, 'owner-a'));
+        self::assertSame(ChainIssuedResult::IssuedNew, $service->markIssued($stepUp->chainId, 'owner-a', $nonce));
+        $counting->commands = [];
+        try {
+            $hardened->markStepUpRequired($stepUp->chainId, $nonce);
+            self::fail('a step-up transition whose write was not replicated must fail closed');
+        } catch (ReplicaWaitException $e) {
+            self::assertStringContainsString('acknowledged 0 of 1 requested replicas after the step-up-required transition', $e->getMessage());
+        }
+        self::assertCount(1, $counting->waits(), 'the failed step-up transition issued exactly one WAIT');
+        $counting->disconnect();
     }
 }
