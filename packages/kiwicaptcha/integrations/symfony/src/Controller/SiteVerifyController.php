@@ -163,6 +163,16 @@ final class SiteVerifyController
         private readonly int $policyVersion = 0,
         ?\KiwiCaptcha\ConsumedOutcomeRecovery $recovery = null,
         /**
+         * Anti-stockpiling accounting (wired when the risk layer is
+         * enabled): every successful Siteverify redemption releases the
+         * solved nonce's ORIGINAL source slot and its live-outstanding
+         * membership, exactly like native verification. The release is
+         * one-shot and nonce-authoritative, so recovery and retry paths
+         * are safe to call it too. Null (risk disabled, fixtures) keeps
+         * the provider surface free of accounting.
+         */
+        private readonly ?\BelConsulting\KiwiCaptchaBundle\Security\OutstandingChallenges $outstanding = null,
+        /**
          * The security-epoch monitor (wired by the container, mirroring
          * the native controller): refreshed at the start of every
          * authenticated verification, so a worker that only serves
@@ -976,6 +986,11 @@ final class SiteVerifyController
     private function outcomeToCanonical(VerifyOutcome $outcome): array|JsonResponse
     {
         if ($outcome->isOk()) {
+            // The solved nonce releases its ORIGINAL source slot and the
+            // live-outstanding membership (one-shot, nonce-authoritative —
+            // safe on reconstruction and resume paths too).
+            $this->outstanding?->solved($outcome->nonce());
+
             return $this->canonicalSuccess($outcome);
         }
 

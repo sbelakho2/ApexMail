@@ -3090,7 +3090,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         $verifier = new Verifier($storage);
         [, $monitor] = $this->monitorFixture($verifier, 2, 3, static fn (): float => 0.0);
         $store = new ArraySiteVerifyIdempotencyStore();
-        $controller = new SiteVerifyController($verifier, self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $storage, null, null, $store, null, 90.0, 2, null, $monitor);
+        $controller = new SiteVerifyController($verifier, self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $storage, null, null, $store, null, 90.0, 2, null, null, $monitor);
         $uuid = 'f47ac10b-58cc-4372-a567-0e02b2c3d479';
 
         $response = $controller->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
@@ -3138,7 +3138,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         self::assertTrue($monitor->isStale(), 'precondition: the monitor is stale');
 
         $store = new ArraySiteVerifyIdempotencyStore();
-        $controller = new SiteVerifyController($verifier, self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $storage, null, null, $store, null, 90.0, 1, null, $monitor);
+        $controller = new SiteVerifyController($verifier, self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $storage, null, null, $store, null, 90.0, 1, null, null, $monitor);
         $uuid = 'f47ac10b-58cc-4372-a567-0e02b2c3d479';
         $backendId = hash('sha256', self::SITEVERIFY_SECRET.'|login|1');
 
@@ -3255,7 +3255,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         };
         $ownerVerifier = new Verifier($lostReply);
         [$redis, $monitor] = $this->monitorFixture($ownerVerifier, 1, 1, $monitorClock);
-        $owner = new SiteVerifyController($ownerVerifier, self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $lostReply, null, null, $store, null, 5.0, 1, null, $monitor);
+        $owner = new SiteVerifyController($ownerVerifier, self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $lostReply, null, null, $store, null, 5.0, 1, null, null, $monitor);
         $ownerResponse = $owner->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
             'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
         ]));

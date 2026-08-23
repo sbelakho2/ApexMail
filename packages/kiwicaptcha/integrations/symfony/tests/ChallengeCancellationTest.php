@@ -662,7 +662,7 @@ final class ChallengeCancellationTest extends TestCase
         self::assertSame(1, $client->counters[$sourceKey]);
         self::assertArrayHasKey($sidecarKey, $client->strings, 'the issuance wrote the sidecar');
 
-        $outstanding->solved('198.51.100.7', $nonce);
+        $outstanding->solved($nonce);
         self::assertSame(0, $client->counters[$sourceKey], 'a valid solve decrements the source counter');
         self::assertArrayNotHasKey($nonce, $client->zsets[$this->liveKey()] ?? [], 'a valid solve removes the nonce from the live membership');
         self::assertArrayNotHasKey($sidecarKey, $client->strings, 'a valid solve deletes the sidecar');

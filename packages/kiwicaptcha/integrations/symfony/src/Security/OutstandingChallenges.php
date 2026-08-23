@@ -157,18 +157,26 @@ LUA;
      * verification after the counter expired must not fabricate a negative
      * outstanding count that later admits extra issuances. The ZREM is
      * idempotent (a member that expired away removes nothing). The
-     * sidecar is pure cleanup: the solve already ZREMs the membership and
-     * DECRs the source, so the pair is dropped when the nonce is known.
+     * The release is ONE-SHOT and NONCE-AUTHORITATIVE: the request's IP
+     * plays no role (a challenge issued through source A and solved from
+     * source B must release A's slot, never B's — IP binding may be
+     * disabled). Duplicate solves are harmless: only the removal of the
+     * nonce from the live membership releases anything.
      */
     private const SOLVED_SCRIPT = <<<'LUA'
--- Outstanding challenge solve: best-effort DECR floored at 0 + live-membership ZREM + sidecar DEL
-local v = tonumber(redis.call('GET', KEYS[1]) or '0')
-if v > 0 then redis.call('DECR', KEYS[1]) end
-if ARGV[1] ~= '' then
-    redis.call('ZREM', KEYS[2], ARGV[1])
-    redis.call('DEL', KEYS[3])
+-- Outstanding challenge solve: one-shot release of the ORIGINAL source
+-- slot, gated on the live-membership removal.
+local removed = redis.call('ZREM', KEYS[1], ARGV[1])
+if removed == 1 then
+  local source = redis.call('GET', KEYS[2])
+  if source and source ~= '' then
+    local ck = ARGV[2] .. source
+    local v = tonumber(redis.call('GET', ck) or '0')
+    if v > 0 then redis.call('DECR', ck) end
+    redis.call('DEL', KEYS[2])
+  end
 end
-return v - 1
+return removed
 LUA;
 
     /**
@@ -365,21 +373,29 @@ LUA;
     }
 
     /**
-     * Best-effort per-source decrement + live-membership removal + sidecar
-     * cleanup after a valid verification. The solved nonce removes exactly
-     * the solved challenge from the global membership and drops its
-     * issuance sidecar. Never throws: a failed decrement must never break
-     * a valid solve (the counter only decays by its EXPIRE and the
-     * membership by its expiry scores otherwise).
+     * One-shot, nonce-authoritative release: removes the solved nonce
+     * from the live membership, and only when the removal actually
+     * happened, reads the nonce's issuance sidecar and decrements the
+     * ORIGINAL source counter (floored at 0), then drops the sidecar. The
+     * caller's IP is never used; a duplicate solve (ZREM == 0) releases
+     * nothing. Never throws: a failed release must never break a valid
+     * solve (the counter and the membership decay by their expiries
+     * otherwise).
+     *
+     * KEYS[1] = the global live-outstanding ZSET.
+     * KEYS[2] = the nonce's issuance sidecar.
+     * ARGV[1] = the solved nonce.
+     * ARGV[2] = the per-source counter key prefix (the sidecar holds the
+     *           original source pseudonym; all keys share the {kiwi:<ns>}
+     *           hash slot).
      */
-    public function solved(string $clientIp, ?string $nonce = null): void
+    public function solved(string $nonce): void
     {
         try {
             $this->eval(self::SOLVED_SCRIPT, [
-                $this->sourceKey($clientIp),
                 $this->keyPrefix.'global:live',
-                $this->keyPrefix.'nonce:'.($nonce ?? ''),
-            ], [$nonce ?? '']);
+                $this->keyPrefix.'nonce:'.$nonce,
+            ], [$nonce, $this->keyPrefix]);
         } catch (\Throwable) {
             // Best-effort: an unavailable counter must never fail a valid
             // solve.

@@ -376,13 +376,16 @@ final class ValidatorTest extends TestCase
         $outstanding = new OutstandingChallenges($client, '{kiwi:validator-test}:outstanding:', RiskKeys::fromMaster(self::SECRET), 3, 100, 0);
 
         // Two outstanding challenges for the source (the 3rd would hit the cap).
-        self::assertSame(1, $outstanding->issue('198.51.100.7', 'nonce-a', time() + 120, 120));
-        self::assertSame(1, $outstanding->issue('198.51.100.7', 'nonce-b', time() + 120, 120));
+        $challengeA = $this->issuer->issue('login', '198.51.100.7');
+        $challengeB = $this->issuer->issue('login', '198.51.100.7');
+        self::assertSame(1, $outstanding->issue('198.51.100.7', $challengeA->nonce, time() + 120, 120));
+        self::assertSame(1, $outstanding->issue('198.51.100.7', $challengeB->nonce, time() + 120, 120));
         $sourceKey = $outstanding->sourceKey('198.51.100.7');
         self::assertSame(2, $client->counters[$sourceKey]);
 
-        // A valid solve decrements the per-source counter (best-effort).
-        $challenge = $this->issuer->issue('login', '198.51.100.7');
+        // A valid solve of an actually-issued nonce releases its ORIGINAL
+        // source slot (the nonce-authoritative one-shot model).
+        $challenge = $challengeA;
         usleep(($challenge->minDurationMs + 10) * 1000);
         $token = $this->solveToken($challenge->prefix, $challenge->salt, $challenge->targetBits, $challenge->nonce);
 

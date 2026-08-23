@@ -216,6 +216,14 @@ LUA;
         if ($this->maxChallenges <= 0 && ($this->redis === null || $this->globalMax <= 0)) {
             return 1;
         }
+        // Global-only mode short-circuits BEFORE any client identity is
+        // computed or rotated: with maxChallenges == 0 and globalMax > 0
+        // the deployment-wide budget is the only limit, so no per-client
+        // pseudonym is ever derived and no client key is ever written
+        // (even when rotation is enabled).
+        if ($this->redis !== null && $this->maxChallenges <= 0 && $this->globalMax > 0) {
+            return $this->checkRedisGlobalOnly();
+        }
         // An unknown client IP must never bypass the limit: bucket it with
         // the other unidentifiable clients instead (conservative, shared
         // budget). The IP itself is never used as a key — only the HMAC.
@@ -294,9 +302,9 @@ LUA;
         // no client identity and is shared by every client — rotating it
         // would silently turn the deployment-wide budget into per-client
         // budgets.
-        $clientPrev = 'kiwi:rl:client:'.$this->namespace.':'.$identityPrev;
-        $clientCur = 'kiwi:rl:client:'.$this->namespace.':'.$identityCur;
-        $global = 'kiwi:rl:global:'.$this->namespace;
+        $clientPrev = '{kiwi:rl:'.$this->namespace.'}:client:'.$identityPrev;
+        $clientCur = '{kiwi:rl:'.$this->namespace.'}:client:'.$identityCur;
+        $global = '{kiwi:rl:'.$this->namespace.'}:global';
         $windowMs = $this->windowSecs * 1000;
         $requestId = bin2hex(random_bytes(16));
         $clientMax = $this->maxChallenges > 0 ? $this->maxChallenges : \PHP_INT_MAX;
@@ -339,7 +347,7 @@ LUA;
 
     private function checkRedisGlobalOnly(): int
     {
-        $globalKey = 'kiwi:rl:global:'.$this->namespace;
+        $globalKey = '{kiwi:rl:'.$this->namespace.'}:global';
         $windowMs = $this->windowSecs * 1000;
         $globalMax = $this->globalMax > 0 ? $this->globalMax : \PHP_INT_MAX;
         $requestId = bin2hex(random_bytes(16));
@@ -416,8 +424,8 @@ LUA;
 
     private function checkRedis(string $identity): int
     {
-        $clientKey = 'kiwi:rl:client:'.$this->namespace.':'.$identity;
-        $globalKey = 'kiwi:rl:global:'.$this->namespace;
+        $clientKey = '{kiwi:rl:'.$this->namespace.'}:client:'.$identity;
+        $globalKey = '{kiwi:rl:'.$this->namespace.'}:global';
         $windowMs = $this->windowSecs * 1000;
         $requestId = bin2hex(random_bytes(16));
         $clientMax = $this->maxChallenges > 0 ? $this->maxChallenges : \PHP_INT_MAX;

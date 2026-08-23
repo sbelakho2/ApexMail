@@ -564,7 +564,7 @@ final class KiwiCaptchaValidator extends ConstraintValidator
         // stored-result retry: the original verification already
         // decremented it.
         if (!$this->isStoredResult($outcome)) {
-            $this->outstanding?->solved((string) ($clientIp ?? ''));
+            $this->outstanding?->solved($outcome->nonce());
         }
 
         // One final-disposition path: the core's retained result must

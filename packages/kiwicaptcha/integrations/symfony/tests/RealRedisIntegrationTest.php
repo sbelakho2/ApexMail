@@ -247,13 +247,13 @@ final class RealRedisIntegrationTest extends TestCase
         // A valid solve decrements the per-source counter (floored at 0),
         // removes the nonce from the live membership and deletes the
         // sidecar.
-        $outstanding->solved('198.51.100.7', $nonceA);
+        $outstanding->solved($nonceA);
         self::assertSame('2', (string) $this->client->get($sourceKey));
         self::assertSame(2, $this->client->zcard('{kiwi:ci}:outstanding:global:live'));
         self::assertNull($this->client->get($sidecarA), 'a valid solve deletes the issuance sidecar');
-        $outstanding->solved('198.51.100.7', $nonceB);
-        $outstanding->solved('198.51.100.7', $nonceC);
-        $outstanding->solved('198.51.100.7', base64_encode(random_bytes(32)));
+        $outstanding->solved($nonceB);
+        $outstanding->solved($nonceC);
+        $outstanding->solved(base64_encode(random_bytes(32)));
         self::assertSame('0', (string) $this->client->get($sourceKey), 'the decrement must never drive the counter negative');
         self::assertSame(0, $this->client->zcard('{kiwi:ci}:outstanding:global:live'), 'every solved nonce leaves the live membership');
 

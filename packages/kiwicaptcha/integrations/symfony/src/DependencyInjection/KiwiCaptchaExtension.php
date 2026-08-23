@@ -1030,6 +1030,7 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             null, // idempotency wait bound (default)
             $config['risk']['policy_version'] ?? 1, // security-policy epoch in the idempotency identity
         ]))
+            ->setArgument('$outstanding', $riskConfig['enabled'] ? new Reference('kiwi_captcha.risk.outstanding') : null)
             // The security-epoch monitor drives the identity and the
             // fail-closed check: the effective epoch (the monitor's
             // per-request refresh) binds the idempotency backend identity,

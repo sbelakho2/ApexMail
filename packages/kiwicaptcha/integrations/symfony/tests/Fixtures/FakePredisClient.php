@@ -433,19 +433,24 @@ final class FakePredisClient extends \Predis\Client
         }
 
         if (str_contains($script, 'Outstanding challenge solve')) {
-            // OutstandingChallenges::solved: keys[1] per-source counter,
-            // keys[2] the global live ZSET, keys[3] the issuance sidecar;
-            // argv[1] the solved nonce ('' = none). Best-effort DECR
-            // floored at 0 + ZREM the nonce + DEL the sidecar.
-            $source = (string) $keys[0];
-            $global = (string) $keys[1];
-            $sidecar = (string) $keys[2];
-            $v = $this->counters[$source] ?? 0;
-            if ($v > 0) {
-                $this->fakeDecr([$source]);
-            }
-            if ((string) $rest[0] !== '') {
-                $this->fakeZrem([$global, (string) $rest[0]]);
+            // OutstandingChallenges::solved: keys[1] the global live ZSET,
+            // keys[2] the nonce sidecar; argv[1] the solved nonce,
+            // argv[2] the per-source counter prefix. One-shot,
+            // nonce-authoritative: only the removal of the nonce from the
+            // live membership releases the ORIGINAL source's counter
+            // (floored at 0) and deletes the sidecar; the caller's IP is
+            // never used.
+            $global = (string) $keys[0];
+            $sidecar = (string) $keys[1];
+            $nonce = (string) $rest[0];
+            $removed = $this->fakeZrem([$global, $nonce]);
+            if ($removed === 1 && isset($this->strings[$sidecar])) {
+                $source = (string) $this->strings[$sidecar];
+                $counterKey = (string) $rest[1].$source;
+                $v = $this->counters[$counterKey] ?? 0;
+                if ($v > 0) {
+                    $this->fakeDecr([$counterKey]);
+                }
                 $this->fakeDel([$sidecar]);
             }
 

@@ -358,6 +358,7 @@ final class SiteVerifyConcurrencyTest extends TestCase
                         90.0, // waiter bound (default) > the store's fixed 60s lease
                         0, // static epoch — the monitor's effective epoch must win
                         null,
+                        null,
                         $monitor,
                     );
                     $response = $controller->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [

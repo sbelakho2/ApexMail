@@ -1692,11 +1692,12 @@ final class ChainedChallengeTest extends TestCase
         $risk = $this->riskStack();
         $controller = $this->chainController($storage, $this->chainService(new ArrayChainedChallengeStateStore()), $risk['gateway'], outstanding: $outstanding);
 
-        $controller->challenge($this->challengeRequest('{"scope":"login"}'));
-        $outstanding->solved('198.51.100.7');
+        $response = $controller->challenge($this->challengeRequest('{"scope":"login"}'));
+        $nonce = json_decode((string) $response->getContent(), true)['nonce'];
+        $outstanding->solved($nonce);
         $sourceKey = '{kiwi:chain-test}:outstanding:'.hash_hmac('sha256', Issuer::canonicalIpFamily('198.51.100.7'), RiskKeys::fromMaster(self::SECRET)->event);
         self::assertSame(0, $client->counters[$sourceKey] ?? 0, 'a valid solve decrements the per-source slot');
-        self::assertSame(1, \count($client->zsets['{kiwi:chain-test}:outstanding:global:live'] ?? []), 'a solve without a nonce leaves the live-outstanding membership intact (the member dies at its expiry score)');
+        self::assertSame(0, \count($client->zsets['{kiwi:chain-test}:outstanding:global:live'] ?? []), 'a nonce-authoritative solve removes the member from the live membership');
     }
 
     public function testAdmittedMintFailureRollsBackTheSlot(): void
@@ -4386,6 +4387,9 @@ final class AbortAwareFakeRedis extends \Predis\Client
     /** @var array<string, array<string, float>> live-outstanding membership: key => nonce => score */
     public array $zsets = [];
 
+    /** @var array<string, string> plain strings (the nonce sidecars) */
+    public array $strings = [];
+
     public function __construct()
     {
         // Deliberately skip the parent constructor: no connection setup.
@@ -4403,11 +4407,13 @@ final class AbortAwareFakeRedis extends \Predis\Client
 
         if (str_contains($script, 'Outstanding challenge issuance')) {
             // OutstandingChallenges::issue: keys[1] per-source counter,
-            // keys[2] the global LIVE-outstanding ZSET; argv[1] source cap,
-            // argv[2] global cap, argv[3] TTL seconds, argv[4] absolute
-            // expiry (the score), argv[5] the minted nonce (the member).
+            // keys[2] the global LIVE-outstanding ZSET, keys[3] the nonce
+            // sidecar; argv[1] source cap, argv[2] global cap, argv[3] TTL
+            // seconds, argv[4] absolute expiry (the score), argv[5] the
+            // minted nonce (the member), argv[6] the source pseudonym.
             $source = (string) $keys[0];
             $global = (string) $keys[1];
+            $sidecar = (string) $keys[2];
             if (($this->counters[$source] ?? 0) >= (int) $rest[0]) {
                 return 0;
             }
@@ -4416,23 +4422,52 @@ final class AbortAwareFakeRedis extends \Predis\Client
             }
             $this->counters[$source] = ($this->counters[$source] ?? 0) + 1;
             $this->zsets[$global][(string) $rest[4]] = (float) $rest[3];
+            $this->strings[$sidecar] = (string) $rest[5];
 
             return 1;
         }
 
-        if (str_contains($script, 'Outstanding challenge solve') || str_contains($script, 'Outstanding challenge aborted')) {
-            // OutstandingChallenges::solved / ::abortedBeforeHandoff:
-            // keys[1] per-source counter, keys[2] the global live ZSET;
-            // argv[1] the nonce ('' = none). Best-effort decr floored at 0
-            // + ZREM the nonce.
+        if (str_contains($script, 'Outstanding challenge solve')) {
+            // OutstandingChallenges::solved: keys[1] the global live ZSET,
+            // keys[2] the nonce sidecar; argv[1] the solved nonce,
+            // argv[2] the per-source counter prefix. One-shot,
+            // nonce-authoritative: only the removal of the nonce from the
+            // live membership releases the ORIGINAL source's counter
+            // (floored at 0) and deletes the sidecar.
+            $global = (string) $keys[0];
+            $sidecar = (string) $keys[1];
+            $nonce = (string) $rest[0];
+            if (isset($this->zsets[$global][$nonce])) {
+                unset($this->zsets[$global][$nonce]);
+                if (isset($this->strings[$sidecar])) {
+                    $source = (string) $this->strings[$sidecar];
+                    $counterKey = (string) $rest[1].$source;
+                    $v = $this->counters[$counterKey] ?? 0;
+                    if ($v > 0) {
+                        $this->counters[$counterKey] = $v - 1;
+                    }
+                    unset($this->strings[$sidecar]);
+                }
+            }
+
+            return 1;
+        }
+
+        if (str_contains($script, 'Outstanding challenge aborted')) {
+            // OutstandingChallenges::abortedBeforeHandoff: keys[1] the
+            // per-source counter, keys[2] the global live ZSET, keys[3]
+            // the nonce sidecar; argv[1] the nonce. Best-effort DECR
+            // floored at 0 + ZREM + sidecar DEL.
             $source = (string) $keys[0];
             $global = (string) $keys[1];
+            $sidecar = (string) $keys[2];
             $v = $this->counters[$source] ?? 0;
             if ($v > 0) {
                 $this->counters[$source] = $v - 1;
             }
             if ((string) $rest[0] !== '') {
                 unset($this->zsets[$global][(string) $rest[0]]);
+                unset($this->strings[$sidecar]);
             }
 
             return 1;
