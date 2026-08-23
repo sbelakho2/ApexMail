@@ -53,6 +53,15 @@ _ci_ts() { date -u '+%Y-%m-%dT%H:%M:%SZ'; }
 ci_log()  { printf '[%s] [ci] %s\n' "$(_ci_ts)" "$*"; }
 ci_info() { printf '[%s] [info] %s\n' "$(_ci_ts)" "$*"; }
 ci_warn() { printf '[%s] [warn] %s\n' "$(_ci_ts)" "$*" >&2; }
+
+# PATH hardening: rustup-installed cargo lives in ~/.cargo/bin, which is
+# absent from non-interactive shells (plain ssh commands) and systemd units.
+case ":$PATH:" in
+    *":$HOME/.cargo/bin:"*) ;;
+    *) [ -d "$HOME/.cargo/bin" ] && PATH="$HOME/.cargo/bin:$PATH" && export PATH ;;
+esac
+command -v cargo >/dev/null 2>&1 || command -v "$HOME/.cargo/bin/cargo" >/dev/null 2>&1 || \
+    ci_warn "cargo not on PATH — test/validate stages will fail (install rustup via ci/install.sh)"
 ci_err()  { printf '[%s] [ERROR] %s\n' "$(_ci_ts)" "$*" >&2; }
 
 # Die with an error message (exit CI_EXIT_FAIL).

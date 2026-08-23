@@ -109,10 +109,16 @@ install_gitleaks() {
 
 install_trivy() {
     have trivy && { log "trivy present: $(trivy --version | head -1)"; return 0; }
-    _v=0.58.2
+    # v0.58.x never existed as a tag — the original pin 404'd. v0.74.0 is the
+    # current release with the Linux-64bit tarball asset.
+    _v=0.74.0
+    _arch=64bit
+    case "$(uname -m)" in
+        aarch64|arm64) _arch=ARM64 ;;
+    esac
     _tmp=$(mktemp -d)
-    log "installing trivy v$_v"
-    curl -sSL "https://github.com/aquasecurity/trivy/releases/download/v$_v/trivy_${_v}_Linux-64bit.tar.gz" \
+    log "installing trivy v$_v (${_arch})"
+    curl -sSLf "https://github.com/aquasecurity/trivy/releases/download/v$_v/trivy_${_v}_Linux-${_arch}.tar.gz" \
         | tar xz -C "$_tmp"
     install -m 0755 "$_tmp/trivy" /usr/local/bin/trivy
     rm -rf "$_tmp"
