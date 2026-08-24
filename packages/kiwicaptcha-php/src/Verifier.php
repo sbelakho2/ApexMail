@@ -308,10 +308,14 @@ final class Verifier
      *                                     different identity is
      *                                     AlreadyConsumed.
      * @param string|null $expectedRequestBinding the application transaction
-     *                                     binding the record's signed
+     *                                     binding a BOUND record's signed
      *                                     request_binding must equal, enforced
-     *                                     before the consume. A record without
-     *                                     a binding, or with a different one,
+     *                                     before the consume. An EXPLICITLY
+     *                                     UNBOUND record (request_binding
+     *                                     null, BindingMode::None) is
+     *                                     permitted regardless of the
+     *                                     expected binding; a record with a
+     *                                     different one,
      *                                     is rejected with
      *                                     RequestBindingMismatch. Null (the
      *                                     default) keeps the current behavior:

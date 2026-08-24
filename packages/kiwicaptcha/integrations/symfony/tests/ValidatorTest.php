@@ -378,8 +378,8 @@ final class ValidatorTest extends TestCase
         // Two outstanding challenges for the source (the 3rd would hit the cap).
         $challengeA = $this->issuer->issue('login', '198.51.100.7');
         $challengeB = $this->issuer->issue('login', '198.51.100.7');
-        self::assertSame(1, $outstanding->issue('198.51.100.7', $challengeA->nonce, time() + 120, 120));
-        self::assertSame(1, $outstanding->issue('198.51.100.7', $challengeB->nonce, time() + 120, 120));
+        self::assertSame(1, $outstanding->issue('198.51.100.7', $challengeA->nonce, 120));
+        self::assertSame(1, $outstanding->issue('198.51.100.7', $challengeB->nonce, 120));
         $sourceKey = $outstanding->sourceKey('198.51.100.7');
         self::assertSame(2, $client->counters[$sourceKey]);
 
@@ -568,7 +568,7 @@ final class ValidatorTest extends TestCase
         $storage = new ArrayStorage();
         $issuer = new Issuer(new Config(secretKey: self::SECRET, targetBits: 8), $storage);
         $challenge = $issuer->issue('login', '198.51.100.7');
-        self::assertSame(1, $outstanding->issue('198.51.100.7', $challenge->nonce, time() + 120, 120));
+        self::assertSame(1, $outstanding->issue('198.51.100.7', $challenge->nonce, 120));
         $sourceKey = $outstanding->sourceKey('198.51.100.7');
         self::assertSame(1, $client->counters[$sourceKey]);
 
@@ -603,6 +603,37 @@ final class ValidatorTest extends TestCase
         // stored-result retry repairs the accounting.
         self::assertCount(0, $engine->validate($dto), 'the stored-result retry recovers the same success');
         self::assertSame(0, $client->counters[$sourceKey], 'the stored-result retry repairs the release');
+    }
+
+    public function testReleaseSidecarReadFailureIsBestEffort(): void
+    {
+        // P2: the ENTIRE release — the plain sidecar GET included — sits
+        // inside the exception boundary, so a Redis failure on the read
+        // can never fail a valid solve (the memberships decay by their
+        // deadlines and the same logical operation's retry re-releases).
+        $client = new FakePredisClient();
+        $outstanding = new OutstandingChallenges($client, '{kiwi:validator-test}:outstanding:', RiskKeys::fromMaster(self::SECRET), 3, 100, 0);
+        $storage = new ArrayStorage();
+        $issuer = new Issuer(new Config(secretKey: self::SECRET, targetBits: 8), $storage);
+        $challenge = $issuer->issue('login', '198.51.100.7');
+        self::assertSame(1, $outstanding->issue('198.51.100.7', $challenge->nonce, 120));
+        usleep(($challenge->minDurationMs + 10) * 1000);
+        $token = $this->solveToken($challenge->prefix, $challenge->salt, $challenge->targetBits, $challenge->nonce);
+
+        $stack = new RequestStack();
+        $stack->push(Request::create('/', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7']));
+        $validator = new KiwiCaptchaValidator(new Verifier($storage), $stack, self::SECRET, false, null, null, $outstanding);
+        $factory = new ConstraintValidatorFactory([KiwiCaptchaValidator::class => $validator]);
+        $engine = Validation::createValidatorBuilder()->setConstraintValidatorFactory($factory)->getValidator();
+        $dto = new class {
+            public ?string $captcha = null;
+        };
+        $dto->captcha = $token;
+        $meta = $engine->getMetadataFor($dto::class);
+        $meta->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
+
+        $client->failCommand = 'GET';
+        self::assertCount(0, $engine->validate($dto), 'a failed sidecar GET never fails a valid solve');
     }
 
     public function testPostFieldFallbackCarriesTheBindingWithoutTheAttribute(): void

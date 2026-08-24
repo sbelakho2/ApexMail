@@ -104,10 +104,14 @@ final class RedisPostSolveDispositionStore implements PostSolveDispositionStore
      * Single-Lua claim: one atomic transition per nonce.
      *   keys[1] = {kiwi:<ns>}:postsolve:<nonce>.
      *   keys[2] = the nonce -> decision mapping key
-     *             ({kiwi:<ns>}:decision:<nonce>), '' = none (no decision
-     *             transfer).
+     *             ({kiwi:<ns>}:decision:<nonce>); when there is none, the
+     *             RECORD KEY itself is declared in its place — a real
+     *             same-slot key, never an empty placeholder (an empty
+     *             string has its own hash slot and would break the EVAL
+     *             on Cluster) — and the ARGV[4] flag gates it.
      *   argv[1] = owner token, argv[2] = lease seconds, argv[3] = record
-     *             TTL.
+     *             TTL, argv[4] = 1 when KEYS[2] is a live decision
+     *             mapping, else 0 (the placeholder must not be read).
      * Returns a JSON object {status, record}: status is
      * 'claimed' | 'pending' | 'taken_over' | 'complete' | 'corrupt'. The
      * record field carries the record the caller needs for that outcome:
@@ -142,7 +146,7 @@ local now = tonumber(redis.call('TIME')[1])
 local existing = redis.call('GET', KEYS[1])
 if not existing then
   local decisionId = cjson.null
-  if KEYS[2] ~= '' then
+  if tonumber(ARGV[4]) == 1 then
     local d = redis.call('GETDEL', KEYS[2])
     if d then
       local ok, decoded = pcall(cjson.decode, d)
@@ -293,13 +297,18 @@ LUA;
         // caller performs claim -> compute -> finalize with no separate
         // read round-trip.
         $recordTtl = max(1, $this->ttlSecs > 0 ? $this->ttlSecs : $ttlSeconds);
+        $recordKey = $this->key($nonce);
+        // A real same-slot placeholder, never an empty string: when there
+        // is no decision mapping the record key itself is declared in
+        // KEYS[2] and the ARGV[4] flag keeps the script from touching it.
         $payload = $this->evalScript(self::CLAIM_LUA, [
-            $this->key($nonce),
-            $decisionKey ?? '',
+            $recordKey,
+            $decisionKey ?? $recordKey,
         ], [
             $owner,
             (string) self::LEASE_SECS,
             (string) $recordTtl,
+            $decisionKey !== null ? '1' : '0',
         ]);
 
         try {

@@ -4460,15 +4460,17 @@ final class AbortAwareFakeRedis extends \Predis\Client
             $global = (string) $keys[1];
             $sidecar = (string) $keys[2];
             $pseudonym = (string) $rest[5];
-            $this->fakeZremrangebyscoreMember($sourceZset, (int) floor($this->timeMs() / 1000));
+            $now = (int) floor($this->timeMs() / 1000);
+            $liveUntil = $now + (int) $rest[3];
+            $this->fakeZremrangebyscoreMember($sourceZset, $now);
             if ($this->sourceCount($sourceZset) >= (int) $rest[0]) {
                 return 0;
             }
             if (\count($this->zsets[$global] ?? []) >= (int) $rest[1]) {
                 return -1;
             }
-            $this->zsets[$sourceZset][(string) $rest[4]] = (float) $rest[3];
-            $this->zsets[$global][(string) $rest[4]] = (float) $rest[3];
+            $this->zsets[$sourceZset][(string) $rest[4]] = (float) $liveUntil;
+            $this->zsets[$global][(string) $rest[4]] = (float) $liveUntil;
             $this->strings[$sidecar] = $pseudonym;
             $this->mirrorSourceCount($sourceZset);
 

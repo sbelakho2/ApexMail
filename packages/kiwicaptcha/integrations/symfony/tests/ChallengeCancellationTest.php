@@ -665,16 +665,16 @@ final class ChallengeCancellationTest extends TestCase
         $longA = 'A'.str_repeat('a', 43);
         $short = 'B'.str_repeat('b', 43);
         $longC = 'C'.str_repeat('c', 43);
-        self::assertSame(1, $outstanding->issue('198.51.100.7', $longA, $base + 300, 300));
-        self::assertSame(1, $outstanding->issue('198.51.100.7', $short, $base + 1, 1));
-        self::assertSame(0, $outstanding->issue('198.51.100.7', $longC, $base + 300, 300), 'the per-source bound of 2 is a HARD cap on live members');
+        self::assertSame(1, $outstanding->issue('198.51.100.7', $longA, 300));
+        self::assertSame(1, $outstanding->issue('198.51.100.7', $short, 1));
+        self::assertSame(0, $outstanding->issue('198.51.100.7', $longC, 300), 'the per-source bound of 2 is a HARD cap on live members');
 
         // The short-lived member expires on its own schedule; the
         // long-lived challenge keeps its slot — the short TTL can never
         // reset the source bound's lifetime.
         $client->setTimeMs(1_700_000_002_000);
         $longD = 'D'.str_repeat('d', 43);
-        self::assertSame(1, $outstanding->issue('198.51.100.7', $longD, $base + 300, 300), 'the expired short-lived member freed exactly one slot');
+        self::assertSame(1, $outstanding->issue('198.51.100.7', $longD, 300), 'the expired short-lived member freed exactly one slot');
         self::assertSame(0, $outstanding->issue('198.51.100.7', 'E'.str_repeat('e', 43), $base + 300, 300), 'the two long-lived members still occupy the bound');
 
         // The count is the source ZSET's ZCARD after the score prune: a
@@ -703,7 +703,7 @@ final class ChallengeCancellationTest extends TestCase
         $outstanding = new OutstandingChallenges($client, self::OUTSTANDING_PREFIX, RiskKeys::fromMaster(self::SECRET), 5, 100, 0);
 
         $nonce = 'B'.str_repeat('b', 43);
-        self::assertSame(1, $outstanding->issue('198.51.100.7', $nonce, time() + 120, 120));
+        self::assertSame(1, $outstanding->issue('198.51.100.7', $nonce, 120));
         $sourceA = $outstanding->sourceKey('198.51.100.7');
         $sourceB = $outstanding->sourceKey('203.0.113.9');
         self::assertSame(1, $client->counters[$sourceA]);
@@ -728,7 +728,7 @@ final class ChallengeCancellationTest extends TestCase
         $outstanding = new OutstandingChallenges($client, self::OUTSTANDING_PREFIX, RiskKeys::fromMaster(self::SECRET), 5, 100, 0);
 
         $nonce = 'A'.str_repeat('a', 43);
-        self::assertSame(1, $outstanding->issue('198.51.100.7', $nonce, time() + 120, 120));
+        self::assertSame(1, $outstanding->issue('198.51.100.7', $nonce, 120));
         $sourceKey = $outstanding->sourceKey('198.51.100.7');
         $sidecarKey = self::OUTSTANDING_PREFIX.'nonce:'.$nonce;
         self::assertSame(1, $client->counters[$sourceKey]);
@@ -749,7 +749,7 @@ final class ChallengeCancellationTest extends TestCase
         $outstanding = new OutstandingChallenges($client, self::OUTSTANDING_PREFIX, RiskKeys::fromMaster(self::SECRET), 5, 100, 0);
 
         $nonce = 'B'.str_repeat('b', 43);
-        self::assertSame(1, $outstanding->issue('198.51.100.7', $nonce, time() + 120, 120));
+        self::assertSame(1, $outstanding->issue('198.51.100.7', $nonce, 120));
         $sourceKey = $outstanding->sourceKey('198.51.100.7');
         $sidecarKey = self::OUTSTANDING_PREFIX.'nonce:'.$nonce;
         self::assertArrayHasKey($sidecarKey, $client->strings);
@@ -769,7 +769,7 @@ final class ChallengeCancellationTest extends TestCase
         $outstanding = new OutstandingChallenges($client, self::OUTSTANDING_PREFIX, RiskKeys::fromMaster(self::SECRET), 5, 100, 0);
 
         $nonce = 'C'.str_repeat('c', 43);
-        self::assertSame(1, $outstanding->issue('198.51.100.7', $nonce, time() + 120, 120));
+        self::assertSame(1, $outstanding->issue('198.51.100.7', $nonce, 120));
         $sourceKey = $outstanding->sourceKey('198.51.100.7');
         $client->counters[$sourceKey] = 0; // the counter expired/decayed before the cancellation
 

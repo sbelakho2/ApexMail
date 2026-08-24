@@ -1225,7 +1225,6 @@ final class ChallengeController
             $admitted = $this->outstanding->issue(
                 $clientIp,
                 $challenge->nonce,
-                $this->now() + $challenge->ttlSecs,
                 max(1, $challenge->ttlSecs),
             );
             if ($admitted !== 1) {

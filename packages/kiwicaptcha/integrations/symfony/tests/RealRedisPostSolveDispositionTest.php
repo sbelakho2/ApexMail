@@ -312,6 +312,31 @@ final class RealRedisPostSolveDispositionTest extends TestCase
         self::assertSame(PostSolveDispositionKind::Deny, $dispositions->read($challenge->nonce)?->disposition?->kind, 'the denial is durably persisted');
     }
 
+    public function testClaimWithoutDecisionKeyDeclaresNoEmptyKeysAgainstRealRedis(): void
+    {
+        // P1 topology: the risk-disabled Redis-Cluster failure — the
+        // claim must never declare '' as a KEYS argument (an empty string
+        // has its own hash slot). The record key itself is the same-slot
+        // placeholder and the ARGV flag gates it.
+        $counting = $this->countingClient();
+        $store = new RedisPostSolveDispositionStore($counting, 'ci-postsolve-nokey');
+        $nonce = base64_encode(random_bytes(32));
+
+        [$status] = $store->claim($nonce, 'owner-a', 305, null);
+        self::assertSame('claimed', $status, 'a risk-disabled claim (no decision key) succeeds');
+
+        $evals = array_values(array_filter($counting->commands, static fn (array $c): bool => $c[0] === 'EVAL'));
+        self::assertCount(1, $evals, 'the claim is exactly one EVAL');
+        $args = $evals[0][1];
+        $numKeys = (int) $args[1];
+        $keys = array_slice($args, 2, $numKeys);
+        foreach ($keys as $key) {
+            self::assertNotSame('', $key, 'no claim EVAL key may be an empty string');
+        }
+        self::assertSame($keys[0], $keys[1], 'the placeholder is the record key itself (same hash slot)');
+        $counting->disconnect();
+    }
+
 // ── the verified replica-WAIT durability barrier ────────────────────────────
 
     /**

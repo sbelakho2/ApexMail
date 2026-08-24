@@ -15,20 +15,32 @@ use KiwiCaptcha\Risk\RiskKeys;
  *   {kiwi:<ns>}:outstanding:<hex>       the per-source LIVE membership: a
  *                                       ZSET per source, member = the
  *                                       challenge nonce, score = the
- *                                       challenge's absolute expiry. The
+ *                                       challenge's Redis-clock deadline
+ *                                       (Redis TIME + the RELATIVE
+ *                                       challenge lifetime). The
  *                                       per-source bound is the source
  *                                       ZSET's ZCARD after pruning expired
  *                                       members by score — a WELL-DEFINED
- *                                       score-range primitive (unlike
- *                                       lex-range counting, which Redis
- *                                       only defines for equal-score
- *                                       members): a short-TTL challenge
- *                                       can never shorten the lifetime of
- *                                       the source's other outstanding
+ *                                       score-range primitive: a
+ *                                       short-TTL challenge can never
+ *                                       shorten the lifetime of the
+ *                                       source's other outstanding
  *                                       challenges, and each member
  *                                       expires on its own schedule.
+ *                                       The key itself carries a Redis
+ *                                       key TTL (EXPIREAT = latest member
+ *                                       deadline + the cleanup margin), so
+ *                                       an abandoned source's key can
+ *                                       never accumulate in Redis: the
+ *                                       stale-key retention is bounded by
+ *                                       the longest live member plus the
+ *                                       margin, and the keyed source
+ *                                       pseudonym disappears with the
+ *                                       challenge lifecycle.
  *   {kiwi:<ns>}:outstanding:global:live deployment-wide live-outstanding
- *                                       membership (a Redis ZSET).
+ *                                       membership (a Redis ZSET, the same
+ *                                       Redis-clock deadlines, the same
+ *                                       key-level cleanup TTL).
  *   {kiwi:<ns>}:outstanding:nonce:<nonce>  issuance sidecar: pairs the
  *                                       nonce with its original source
  *                                       pseudonym (the per-source ZSET's
@@ -47,35 +59,57 @@ use KiwiCaptcha\Risk\RiskKeys;
  * master secret by RiskKeys::fromMaster), shared with the risk engine's
  * own event-id pseudonyms, never a raw identifier.
  *
+ * Clock domain: the ENTIRE outstanding accounting lives in the Redis
+ * clock domain. {@see issue()} receives the RELATIVE challenge lifetime,
+ * never a PHP-clock absolute expiry; the Lua reads Redis TIME, computes
+ * the member deadlines (now + lifetime), prunes with the same Redis now,
+ * and EXPIREATs the keys against the same deadlines. The authoritative
+ * challenge record's PHP-clock expiry is deliberately NOT reproduced:
+ * a PHP/Redis clock skew can therefore never expire a still-valid member
+ * early (the accounting stays conservative by at most the skew plus the
+ * mint -> admit interval). Every member's score is its own deadline, so
+ * it dies exactly when the accounting says it dies and is never
+ * refreshed.
+ *
  * The global accounting is an expiry-aware membership, not a cumulative
  * counter: {@see issue()} runs one atomic Lua that prunes expired members
  * with `ZREMRANGEBYSCORE` -inf now and refuses when ZCARD >= the global
  * cap. It then `ZADD`s the minted challenge's nonce scored at its
- * absolute expiry (expires_at, never a refreshed now + TTL). The
- * membership is therefore genuinely "currently live unresolved
- * challenges". A solve via {@see solved()}, a proven-not-handed-off
- * issuance failure via {@see abortedBeforeHandoff()} and a client
- * cancellation via {@see cancelled()} all ZREM the nonce. A member can
- * never outlive its challenge: the score expires it even if every removal
- * path fails. The global cap is a real bound on live challenges, not a
- * cumulative high-water mark, so sustained traffic can no longer
- * accumulate issuance refusals. The per-source bound is the same model,
- * one ZSET per source (the key is the source's own hex pseudonym, computed
- * in PHP on the issuance side and resolved from the sidecar by a plain
- * read on the release side — never constructed inside a script): the
- * issuance script prunes the source ZSET by score and refuses when ZCARD
- * >= the per-source cap, so heterogeneous challenge TTLs cannot reset the
- * source bound's lifetime and expired challenges stop counting
- * immediately. A client cancellation returns the original source's slot
- * too. The issuance sidecar (`outstanding:nonce:<nonce>`) pairs the
- * nonce with the source pseudonym that issued it. The release is
- * one-shot: the live-membership ZREM is the gate, only then is the
- * sidecar read and the ORIGINAL source's ZSET member released. The
- * releaser's own identity is never used, since the identity would be
- * wrong and the request client-controlled. Only the sidecar's original
- * source is released, and only when the global member actually existed.
- * A duplicate release is a no-op, so nothing can ever be
- * double-released.
+ * Redis-clock deadline. The membership is therefore genuinely "currently
+ * live unresolved challenges". A solve via {@see solved()}, a
+ * proven-not-handed-off issuance failure via
+ * {@see abortedBeforeHandoff()} and a client cancellation via
+ * {@see cancelled()} all ZREM the nonce. A member can never outlive its
+ * challenge: the score expires it even if every removal path fails. The
+ * global cap is a real bound on live challenges, not a cumulative
+ * high-water mark. The per-source bound is the same model, one ZSET per
+ * source (the key is the source's own hex pseudonym, computed in PHP on
+ * the issuance side and resolved from the sidecar by a plain read on the
+ * release side — never constructed inside a script): the issuance script
+ * prunes the source ZSET by score and refuses when ZCARD >= the
+ * per-source cap, so heterogeneous challenge TTLs cannot reset the source
+ * bound's lifetime and expired challenges stop counting immediately.
+ * A client cancellation returns the original source's slot too. The
+ * issuance sidecar (`outstanding:nonce:<nonce>`) pairs the nonce with
+ * the source pseudonym that issued it. The release is one-shot: the
+ * live-membership ZREM is the gate, only then is the sidecar read and
+ * the ORIGINAL source's ZSET member released. The releaser's own
+ * identity is never used, since the identity would be wrong and the
+ * request client-controlled. Only the sidecar's original source is
+ * released, and only when the global member actually existed. A
+ * duplicate release is a no-op, so nothing can ever be double-released.
+ *
+ * Key-level retention: the ZSET SCORES are the real expiries (a score
+ * older than Redis now is dead data, and every prune removes it), but a
+ * ZSET key is NOT deleted automatically — without a key TTL, an abandoned
+ * source's key (whose name carries the keyed source pseudonym) would stay
+ * in Redis forever. Every admission therefore EXPIREATs the source ZSET
+ * and the global ZSET at the LATEST live member's deadline plus the
+ * cleanup margin (the configured ttl margin), so the key outlives its
+ * longest member by exactly the margin and can never accumulate. Because
+ * the deadline is derived from the newest member (ZREVRANGE of the max
+ * score), the key TTL only ever extends, never shortens, a still-live
+ * membership.
  *
  * The `ZREMRANGEBYSCORE` prune is bounded by the ZSET's own size: a
  * member is removed exactly when its score fell below the current time.
@@ -102,7 +136,11 @@ use KiwiCaptcha\Risk\RiskKeys;
  * successfully. The nonce is the authoritative member identity, so the
  * solve removes exactly the challenge that was solved. The call is
  * idempotent and safe on retries: only the first removal releases
- * anything.
+ * anything. Best-effort by contract: the whole operation — the sidecar
+ * read included — sits inside the exception boundary, so a Redis failure
+ * can never fail a valid solve; the memberships decay by their deadlines
+ * and the same logical operation's later successful observation
+ * re-releases.
  *
  * Aborted before handoff, see {@see abortedBeforeHandoff()}: when a
  * challenge was admitted but proven never handed out (a
@@ -132,13 +170,14 @@ use KiwiCaptcha\Risk\RiskKeys;
  * caller (challenge controller) refuses issuance when the counter cannot
  * be consulted (fail closed: no challenge without a checked stockpile
  * bound). The verification-side release is best-effort (a failed release
- * never breaks a valid solve; the memberships decay by their expiry
- * scores — fail-closed, the caps are overcounted, never undercounted).
+ * never breaks a valid solve; the memberships decay by their Redis-clock
+ * deadlines — fail-closed, the caps are overcounted, never undercounted).
  */
 final class OutstandingChallenges
 {
     /**
-     * Atomic check + admit + live-membership add + source sidecar:
+     * Atomic check + admit + live-membership add + source sidecar + key
+     * retention:
      *   KEYS[1] = {kiwi:<ns>}:outstanding:<hex> (the issuing source's
      *             membership ZSET — one key per source, computed in PHP
      *             from the caller's canonical IP, never inside the script).
@@ -146,46 +185,67 @@ final class OutstandingChallenges
      *   KEYS[3] = {kiwi:<ns>}:outstanding:nonce:<nonce> (issuance sidecar).
      *   ARGV[1] = per-source cap.
      *   ARGV[2] = global cap (live-outstanding members).
-     *   ARGV[3] = TTL in seconds (challenge lifetime + ttl margin) for the
-     *             sidecar only. The per-source bound has NO scalar expiry
-     *             to reset: its members expire by their absolute scores.
-     *   ARGV[4] = the challenge's absolute expiry in epoch seconds. This
-     *             is the ZSET score, so a member dies exactly when its
-     *             challenge expires and is never refreshed.
+     *   ARGV[3] = sidecar TTL in seconds (challenge lifetime + ttl
+     *             margin). The memberships have NO scalar expiry to
+     *             reset: their members expire by their Redis-clock
+     *             deadlines.
+     *   ARGV[4] = the RELATIVE challenge lifetime in seconds. The
+     *             membership deadlines are computed inside the script as
+     *             Redis TIME + lifetime, so the accounting never expires
+     *             a valid member early under PHP/Redis clock skew (the
+     *             authoritative record's PHP-clock expiry is deliberately
+     *             not reproduced; the accounting stays conservative).
      *   ARGV[5] = the minted challenge nonce, the ZSET member.
      *   ARGV[6] = the issuing source's pseudonym (an HMAC and never a raw
      *             IP). It is stored in the sidecar so a later release
      *             returns exactly this source's slot.
+     *   ARGV[7] = the cleanup margin in seconds: the source and global
+     *             ZSETs are EXPIREAT'd at the latest live member's
+     *             deadline plus this margin, so abandoned keys can never
+     *             accumulate in Redis (the scores remain the real
+     *             expiries; the key TTL only bounds stale-key retention).
      * Prunes expired members with `ZREMRANGEBYSCORE` -inf now, bounded by
      * the ZSETs' sizes, and counts the source's LIVE members with ZCARD —
      * a score-range primitive with well-defined semantics under the
-     * members' differing expiry scores (lex-range counting is only
-     * defined for equal-score members and must not gate a hard bound).
-     * Refuses (0 = source cap, -1 = global cap) before any admission
-     * write. A challenge issued with a short TTL expires from the source
-     * membership on its own schedule and can never shorten the lifetime
-     * of the source's other outstanding challenges (the scalar EXPIRE of
-     * the earlier design reset the whole per-source counter to the
-     * newest TTL, a hard bound that the configuration's heterogeneous
-     * sitekey TTLs could bypass). Then `ZADD`s both memberships and
-     * `SET`s the sidecar. A challenge is only returned to the client when
-     * the script admitted it, so the bounds can never silently exceed the
-     * caps through concurrency.
+     * members' differing deadlines. Refuses (0 = source cap, -1 = global
+     * cap) before any admission write. A challenge issued with a short
+     * TTL expires from the source membership on its own schedule and can
+     * never shorten the lifetime of the source's other outstanding
+     * challenges. Then `ZADD`s both memberships, `SET`s the sidecar and
+     * refreshes both keys' EXPIREAT to the latest deadline plus the
+     * margin. A challenge is only returned to the client when the script
+     * admitted it, so the bounds can never silently exceed the caps
+     * through concurrency.
      */
     private const ISSUE_SCRIPT = <<<'LUA'
 -- Outstanding challenge issuance: atomic per-source live ZCARD cap check
 -- (score-pruned) + global live cap check + memberships ZADD + source
--- sidecar. The per-source bound is the source's LIVE membership, so no
--- scalar TTL can ever be reset by a heterogeneous challenge.
+-- sidecar + key-level retention. All deadlines come from Redis TIME plus
+-- the RELATIVE challenge lifetime, so the accounting can never expire a
+-- valid member early under PHP/Redis clock skew.
 local t = redis.call('TIME')
 local now = tonumber(t[1])
+local liveUntil = now + tonumber(ARGV[4])
 redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', now)
 if redis.call('ZCARD', KEYS[1]) >= tonumber(ARGV[1]) then return 0 end
 redis.call('ZREMRANGEBYSCORE', KEYS[2], '-inf', now)
 if redis.call('ZCARD', KEYS[2]) >= tonumber(ARGV[2]) then return -1 end
-redis.call('ZADD', KEYS[1], tonumber(ARGV[4]), ARGV[5])
-redis.call('ZADD', KEYS[2], tonumber(ARGV[4]), ARGV[5])
+redis.call('ZADD', KEYS[1], liveUntil, ARGV[5])
+redis.call('ZADD', KEYS[2], liveUntil, ARGV[5])
 redis.call('SET', KEYS[3], ARGV[6], 'EX', tonumber(ARGV[3]))
+-- Key-level retention: a ZSET score is data, not a key expiry — without a
+-- key TTL an abandoned source's key (whose name carries the keyed source
+-- pseudonym) would stay in Redis forever. EXPIREAT at the LATEST live
+-- member's deadline plus the cleanup margin; the newest member's deadline
+-- is the max score, so the key TTL only extends, never shortens.
+local latest = redis.call('ZREVRANGE', KEYS[1], 0, 0, 'WITHSCORES')
+if #latest == 2 then
+  redis.call('EXPIREAT', KEYS[1], math.floor(tonumber(latest[2])) + tonumber(ARGV[7]))
+end
+local latestGlobal = redis.call('ZREVRANGE', KEYS[2], 0, 0, 'WITHSCORES')
+if #latestGlobal == 2 then
+  redis.call('EXPIREAT', KEYS[2], math.floor(tonumber(latestGlobal[2])) + tonumber(ARGV[7]))
+end
 return 1
 LUA;
 
@@ -274,14 +334,18 @@ LUA;
      * @param int                   $maxGlobal       deployment-wide cap on live
      *                                               outstanding challenges
      *                                               (risk.max_outstanding_challenges_global).
-     * @param int                   $ttlMarginSecs   extra retention on the
-     *                                               sidecar beyond token
-     *                                               validity
-     *                                               (risk.redis.ttl_margin_secs).
-     *                                               The memberships expire by
-     *                                               their absolute expiry
-     *                                               scores, never by this
-     *                                               margin.
+     * @param int                   $ttlMarginSecs   extra retention beyond
+     *                                               token validity: the
+     *                                               sidecar EX basis AND the
+     *                                               key-level cleanup margin
+     *                                               (the source/global ZSETs
+     *                                               are EXPIREAT'd at the
+     *                                               latest live member's
+     *                                               deadline plus this
+     *                                               margin). The memberships
+     *                                               expire by their
+     *                                               Redis-clock deadlines,
+     *                                               never by this margin.
      */
     public function __construct(
         private readonly \Redis|\Predis\Client $redis,
@@ -326,24 +390,29 @@ LUA;
      * against the LIVE memberships (pruned of expired members, so a
      * heterogeneous challenge TTL can never reset the source bound's
      * lifetime), then adds the minted nonce to the per-source and global
-     * memberships (scored at its absolute expiry) and writes the issuance
-     * sidecar (the nonce -> original source pseudonym). The challenge
-     * must already be minted: the ZSET members are the nonce and their
-     * scores the expiry, which exist only once the record is minted. The
-     * admission runs before handoff, so a refused admission never hands
-     * out (the caller discards the minted record). The sidecar stores
-     * only the HMAC source pseudonym, never a raw IP, and lets the
-     * release paths return exactly the source that issued the challenge.
+     * memberships scored at its Redis-clock deadline (Redis TIME + the
+     * RELATIVE lifetime — the accounting stays in one clock domain and
+     * can never expire a still-valid member early under PHP/Redis clock
+     * skew), writes the issuance sidecar (the nonce -> original source
+     * pseudonym) and refreshes both keys' EXPIREAT to the latest deadline
+     * plus the cleanup margin, so an abandoned source's key can never
+     * accumulate. The challenge must already be minted: the ZSET members
+     * are the nonce and their scores the deadlines, which exist only once
+     * the record is minted. The admission runs before handoff, so a
+     * refused admission never hands out (the caller discards the minted
+     * record). The sidecar stores only the HMAC source pseudonym, never
+     * a raw IP, and lets the release paths return exactly the source that
+     * issued the challenge.
      *
-     * @param string $clientIp        the canonical client IP.
-     * @param string $nonce           the minted challenge's nonce (the
-     *                                live-membership member).
-     * @param int    $expiresAtSecs   the challenge's absolute expiry, epoch
-     *                                seconds (the membership score, so the
-     *                                member dies exactly when the challenge
-     *                                expires).
-     * @param int    $challengeTtlSecs the challenge lifetime, seconds (the
-     *                                 sidecar EXPIRE basis).
+     * @param string $clientIp         the canonical client IP.
+     * @param string $nonce            the minted challenge's nonce (the
+     *                                 live-membership member).
+     * @param int    $challengeTtlSecs the RELATIVE challenge lifetime,
+     *                                 seconds. The membership deadline is
+     *                                 computed from Redis TIME inside the
+     *                                 script, so the accounting is
+     *                                 conservative under clock skew and
+     *                                 never expires a valid member early.
      *
      * @return int 1 = admitted, 0 = per-source cap reached, -1 = global cap
      *              reached (no admission write on refusal; expired members
@@ -353,7 +422,7 @@ LUA;
      *                    refuses issuance rather than minting an unchecked
      *                    challenge)
      */
-    public function issue(string $clientIp, string $nonce, int $expiresAtSecs, int $challengeTtlSecs): int
+    public function issue(string $clientIp, string $nonce, int $challengeTtlSecs): int
     {
         $ttl = $challengeTtlSecs + $this->ttlMarginSecs;
         $sourceZset = $this->sourceKey($clientIp);
@@ -364,9 +433,10 @@ LUA;
             (string) $this->maxPerSource,
             (string) $this->maxGlobal,
             (string) max(1, $ttl),
-            (string) $expiresAtSecs,
+            (string) max(1, $challengeTtlSecs),
             $nonce,
             substr($sourceZset, \strlen($this->keyPrefix)),
+            (string) $this->ttlMarginSecs,
         ]);
     }
 
@@ -376,32 +446,18 @@ LUA;
      * happened, reads the nonce's issuance sidecar and releases the
      * ORIGINAL source's ZSET member, then drops the sidecar. The caller's
      * IP is never used; a duplicate solve (ZREM == 0) releases nothing.
-     * The per-source ZSET key is resolved here from a plain sidecar read
-     * (the sidecar's pseudonym is a key SUFFIX, never a script-derived
-     * key name) and handed to the script as a declared key, which
-     * re-verifies it. Never throws: a failed release must never break a
-     * valid solve (the memberships decay by their expiries otherwise —
+     * The per-source ZSET key is resolved from a plain sidecar read (the
+     * sidecar's pseudonym is a key SUFFIX, never a script-derived key
+     * name) and handed to the script as a declared key, which re-verifies
+     * it. Best-effort BY CONTRACT: the sidecar read and the script both
+     * sit inside the exception boundary, so a Redis failure can never
+     * fail a valid solve (the memberships decay by their deadlines
+     * otherwise, and the same logical operation's retry re-releases —
      * fail-closed, the caps are overcounted, never undercounted).
      */
     public function solved(string $nonce): void
     {
-        $sidecar = $this->keyPrefix.'nonce:'.$nonce;
-        $source = $this->redis->get($sidecar);
-        if (!\is_string($source) || $source === '') {
-            // No sidecar: the challenge was never admitted or its release
-            // already happened — nothing to gate on, nothing to release.
-            return;
-        }
-        try {
-            $this->eval(self::RELEASE_SCRIPT, [
-                $this->keyPrefix.'global:live',
-                $sidecar,
-                $this->keyPrefix.$source,
-            ], [$nonce, $source]);
-        } catch (\Throwable) {
-            // Best-effort: an unavailable membership must never fail a
-            // valid solve.
-        }
+        $this->release($nonce);
     }
 
     /**
@@ -414,7 +470,8 @@ LUA;
      * silently consume the source's stockpile budget. The nonce leaves
      * the deployment-wide live membership so an abandoned challenge
      * never counts against the global cap, and its issuance sidecar is
-     * dropped. Never throws: a failed rollback must never change the
+     * dropped. Best-effort by contract (the whole operation sits inside
+     * the exception boundary): a failed rollback must never change the
      * issuance response. The caller must not call this for an
      * indeterminate failure (the chain state cannot be read after a
      * thrown issuance transition — the challenge may be the
@@ -426,22 +483,7 @@ LUA;
         if ($nonce === null || $nonce === '') {
             return;
         }
-        $sidecar = $this->keyPrefix.'nonce:'.$nonce;
-        $source = $this->redis->get($sidecar);
-        if (!\is_string($source) || $source === '') {
-            return;
-        }
-        try {
-            $this->eval(self::RELEASE_SCRIPT, [
-                $this->keyPrefix.'global:live',
-                $sidecar,
-                $this->keyPrefix.$source,
-            ], [$nonce, $source]);
-        } catch (\Throwable) {
-            // Best-effort: an unavailable membership must never change
-            // the response; the memberships decay by their expiry scores
-            // otherwise.
-        }
+        $this->release($nonce);
     }
 
     /**
@@ -453,25 +495,13 @@ LUA;
      * or already removed by a solve/abort/cancellation) is a no-op. The
      * original source ZSET member (from the issuance sidecar, never the
      * canceller's IP) is released exactly once per issued challenge.
+     * Best-effort by contract: the storage transition may already have
+     * committed before a Redis accounting failure, and the cancellation
+     * response must still succeed.
      */
     public function cancelled(string $nonce): void
     {
-        $sidecar = $this->keyPrefix.'nonce:'.$nonce;
-        $source = $this->redis->get($sidecar);
-        if (!\is_string($source) || $source === '') {
-            return;
-        }
-        try {
-            $this->eval(self::RELEASE_SCRIPT, [
-                $this->keyPrefix.'global:live',
-                $sidecar,
-                $this->keyPrefix.$source,
-            ], [$nonce, $source]);
-        } catch (\Throwable) {
-            // Best-effort: a failed removal never changes the cancellation
-            // response; the member expires by its score (fail-closed: the
-            // cap is overcounted, never undercounted).
-        }
+        $this->release($nonce);
     }
 
     /**
@@ -491,6 +521,36 @@ LUA;
             (string) self::CANCELLATION_WINDOW_MS,
             bin2hex(random_bytes(16)),
         ]) === 1;
+    }
+
+    /**
+     * The one best-effort release primitive shared by solve, cancellation
+     * and aborted-before-handoff: EVERYTHING — the plain sidecar read and
+     * the declared-key script — sits inside the exception boundary, so a
+     * Redis failure can never break the caller's success path. The
+     * memberships decay by their Redis-clock deadlines otherwise
+     * (fail-closed: the caps are overcounted, never undercounted) and the
+     * same logical operation's later successful observation re-releases.
+     */
+    private function release(string $nonce): void
+    {
+        try {
+            $sidecar = $this->keyPrefix.'nonce:'.$nonce;
+            $source = $this->redis->get($sidecar);
+            if (!\is_string($source) || $source === '') {
+                // No sidecar: the challenge was never admitted or its
+                // release already happened — nothing to gate on, nothing
+                // to release.
+                return;
+            }
+            $this->eval(self::RELEASE_SCRIPT, [
+                $this->keyPrefix.'global:live',
+                $sidecar,
+                $this->keyPrefix.$source,
+            ], [$nonce, $source]);
+        } catch (\Throwable) {
+            // Best-effort by contract.
+        }
     }
 
     /**

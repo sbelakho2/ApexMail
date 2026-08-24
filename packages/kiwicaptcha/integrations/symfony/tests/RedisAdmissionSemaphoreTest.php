@@ -183,6 +183,37 @@ final class RedisAdmissionSemaphoreTest extends TestCase
         self::assertSame(0, $this->leases($client));
     }
 
+    public function testUnscopedAcquireAndReleaseDeclareNoEmptyKeys(): void
+    {
+        // P3 topology hardening: an unscoped acquire/release must never
+        // declare '' as a KEYS argument (an empty string has its own hash
+        // slot and breaks the EVAL on Redis Cluster) — the global lease
+        // set key is the same-slot placeholder, gated by the ARGV flags.
+        $client = new FakePredisClient();
+        $semaphore = new RedisAdmissionSemaphore($client, 3, 'empty-key-guard');
+
+        $token = $semaphore->acquire();
+        self::assertNotNull($token);
+        $evals = array_values(array_filter($client->calls, static fn (array $c): bool => $c[0] === 'EVAL'));
+        self::assertNotSame([], $evals, 'the acquire must issue one EVAL');
+        foreach ($evals as $call) {
+            $args = $call[1];
+            $numKeys = (int) $args[1];
+            foreach (array_slice($args, 2, $numKeys) as $key) {
+                self::assertNotSame('', $key, 'no acquire EVAL key may be an empty string');
+            }
+        }
+
+        $semaphore->release($token);
+        $evals = array_values(array_filter($client->calls, static fn (array $c): bool => $c[0] === 'EVAL'));
+        $last = $evals[count($evals) - 1];
+        $args = $last[1];
+        $numKeys = (int) $args[1];
+        foreach (array_slice($args, 2, $numKeys) as $key) {
+            self::assertNotSame('', $key, 'no release EVAL key may be an empty string');
+        }
+    }
+
     public function testCapacityAndUsageExposeLiveSlots(): void
     {
         $client = $this->requirePredis();

@@ -244,6 +244,16 @@ final class FakePredisClient extends \Predis\Client
      * armed exactly once). Accepts both Predis argument shapes: flat
      * ('EX', ttl, 'NX') and the options-array form.
      */
+    /**
+     * Test hook for the EXPIREAT the issuance script applies to the
+     * membership keys (the key-level retention: the key dies at the
+     * latest member deadline + margin).
+     */
+    private function fakeExpireatMs(string $key, int $ms): void
+    {
+        $this->expirations[$key] = $ms;
+    }
+
     private function fakeSet(array $arguments): ?string
     {
         $key = (string) $arguments[0];
@@ -415,33 +425,41 @@ final class FakePredisClient extends \Predis\Client
             // membership ZSET (member = <source>:<nonce>, score = absolute
             // expiry), keys[2] the global LIVE-outstanding ZSET, keys[3]
             // the issuance sidecar (nonce -> source pseudonym); argv[1]
-            // source cap, argv[2] global cap, argv[3] TTL seconds, argv[4]
-            // absolute expiry (the ZSET score), argv[5] the minted nonce,
-            // argv[6] the source pseudonym. Prune the SOURCE's ZSET by
-            // score -> ZCARD cap -> global ZCARD cap -> `ZADD` both
-            // memberships + SET the sidecar (EX). No scalar counter
-            // exists: the source bound is its LIVE membership (a
-            // well-defined score-range count), so a heterogeneous
-            // challenge TTL can never reset it.
+            // source cap, argv[2] global cap, argv[3] sidecar TTL seconds,
+            // argv[4] the RELATIVE challenge lifetime (the membership
+            // deadlines are the FAKE Redis clock + lifetime), argv[5] the
+            // minted nonce, argv[6] the source pseudonym, argv[7] the
+            // cleanup margin. Prune the SOURCE's ZSET by score -> ZCARD
+            // cap -> global ZCARD cap -> `ZADD` both memberships (scored
+            // at the fake-clock deadline) + SET the sidecar (EX) +
+            // EXPIREAT both keys at the latest deadline + margin. No
+            // scalar counter exists: the source bound is its LIVE
+            // membership (a well-defined score-range count), so a
+            // heterogeneous challenge TTL can never reset it, and the key
+            // TTLs bound stale-key retention.
             $sourceZset = (string) $keys[0];
             $global = (string) $keys[1];
             $sidecar = (string) $keys[2];
             $sourceCap = (int) $rest[0];
             $globalCap = (int) $rest[1];
             $ttl = (int) $rest[2];
-            $now = (string) floor($this->timeMs() / 1000);
+            $now = (int) floor($this->timeMs() / 1000);
+            $liveUntil = $now + (int) $rest[3];
+            $cleanupMargin = (int) $rest[6];
             $pseudonym = (string) $rest[5];
-            $this->fakeZremrangebyscore([$sourceZset, '-inf', $now]);
+            $this->fakeZremrangebyscore([$sourceZset, '-inf', (string) $now]);
             if ($this->zcard($sourceZset) >= $sourceCap) {
                 return 0;
             }
-            $this->fakeZremrangebyscore([$global, '-inf', $now]);
+            $this->fakeZremrangebyscore([$global, '-inf', (string) $now]);
             if ($this->zcard($global) >= $globalCap) {
                 return -1;
             }
-            $this->fakeZadd([$sourceZset, (string) $rest[3], (string) $rest[4]]);
-            $this->fakeZadd([$global, (string) $rest[3], (string) $rest[4]]);
+            $this->fakeZadd([$sourceZset, (string) $liveUntil, (string) $rest[4]]);
+            $this->fakeZadd([$global, (string) $liveUntil, (string) $rest[4]]);
             $this->fakeSet([$sidecar, $pseudonym, 'EX', $ttl]);
+            $this->fakeExpireatMs($sourceZset, ($liveUntil + $cleanupMargin) * 1000);
+            $this->fakeExpireatMs($global, ($liveUntil + $cleanupMargin) * 1000);
             $this->mirrorSourceCount($sourceZset);
 
             return 1;

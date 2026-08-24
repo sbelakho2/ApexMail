@@ -43,7 +43,11 @@ final class RedisAdmissionSemaphore implements VerificationAdmissionGate
      * budget:
      *   KEYS[1]  = lease set key (global).
      *   KEYS[2]  = waiters counter key.
-     *   KEYS[3]  = per-scope lease set key ('' = no scope).
+     *   KEYS[3]  = per-scope lease set key; the GLOBAL lease set key is
+     *              declared in its place when there is no scope (a real
+     *              same-slot key, never an empty placeholder — an empty
+     *              string has its own hash slot and would break the EVAL
+     *              on Cluster), gated by ARGV[6].
      *   ARGV[1]  = max concurrent leases (global cap).
      *   ARGV[2]  = lease lifetime in ms (LEASE_MS).
      *   ARGV[3]  = unique lease token.
@@ -111,7 +115,9 @@ LUA;
      * so stale releases cannot remove a newer lease.
      *
      * KEYS[1] = lease set key (global)
-     * KEYS[2] = per-scope lease set key ('' = no scope)
+     * KEYS[2] = per-scope lease set key; the GLOBAL lease set key is
+     *           declared in its place when there is no scope (a real
+     *           same-slot key, never an empty placeholder)
      * ARGV[1] = lease token to release
      * ARGV[2] = 1 when KEYS[2] is a live per-scope set, else 0
      */
@@ -225,7 +231,7 @@ LUA;
         }
         $result = $this->eval(
             self::ACQUIRE_SCRIPT,
-            [$this->key, $this->waitersKey, $scopeKey],
+            [$this->key, $this->waitersKey, $scopeKey !== '' ? $scopeKey : $this->key],
             [(string) $this->maxConcurrent, (string) $this->leaseMs, $token, (string) $this->maxWaiters, (string) $this->maxPerScope, $hasScope ? '1' : '0'],
         );
 
@@ -249,7 +255,7 @@ LUA;
                 $hasScope = true;
             }
         }
-        $this->eval(self::RELEASE_SCRIPT, [$this->key, $scopeKey], [$lease, $hasScope ? '1' : '0']);
+        $this->eval(self::RELEASE_SCRIPT, [$this->key, $scopeKey !== '' ? $scopeKey : $this->key], [$lease, $hasScope ? '1' : '0']);
     }
 
     /** The configured concurrency cap (0 = disabled). */

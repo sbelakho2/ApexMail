@@ -176,7 +176,7 @@ final class SiteVerifyTest extends TestCase
         $issuer = new Issuer(new Config(secretKey: self::SECRET, algorithm: PoWAlgorithm::Sha256, targetBits: 8, ttlSecs: 120), $storage);
         $challenge = $issuer->issue('login', '198.51.100.7');
         $outstanding = new OutstandingChallenges($client, '{kiwi:siteverify-outstanding}:outstanding:', RiskKeys::fromMaster(self::SECRET), 5, 100, 0);
-        self::assertSame(1, $outstanding->issue('198.51.100.7', $challenge->nonce, time() + 120, 120));
+        self::assertSame(1, $outstanding->issue('198.51.100.7', $challenge->nonce, 120));
         $sourceKey = $outstanding->sourceKey('198.51.100.7');
         self::assertSame(1, $client->counters[$sourceKey], 'the issued challenge holds the source slot');
 
@@ -208,6 +208,64 @@ final class SiteVerifyTest extends TestCase
         self::assertSame(0, $client->counters[$sourceKey], 'the FRESH Siteverify success releases the original source slot');
         self::assertArrayNotHasKey($challenge->nonce, $client->zsets['{kiwi:siteverify-outstanding}:outstanding:global:live'] ?? [], 'the nonce leaves the live membership');
         self::assertArrayNotHasKey('{kiwi:siteverify-outstanding}:outstanding:nonce:'.$challenge->nonce, $client->strings, 'the sidecar is dropped');
+    }
+
+    public function testCompleteSameRetryRepairsTheOutstandingRelease(): void
+    {
+        // P2: a same-operation retry that observes the stored success
+        // (CompleteSame) re-releases through the single success-return
+        // helper, repairing a transient failure of the original
+        // verification's release.
+        $client = new FakePredisClient();
+        $storage = new ArrayStorage();
+        $issuer = new Issuer(new Config(secretKey: self::SECRET, algorithm: PoWAlgorithm::Sha256, targetBits: 8, ttlSecs: 120), $storage);
+        $challenge = $issuer->issue('login', '198.51.100.7');
+        $outstanding = new OutstandingChallenges($client, '{kiwi:siteverify-outstanding}:outstanding:', RiskKeys::fromMaster(self::SECRET), 5, 100, 0);
+        self::assertSame(1, $outstanding->issue('198.51.100.7', $challenge->nonce, 120));
+        $sourceKey = $outstanding->sourceKey('198.51.100.7');
+        self::assertSame(1, $client->counters[$sourceKey]);
+
+        $solution = $this->solve($challenge->prefix, $challenge->salt, $challenge->targetBits);
+        usleep(($challenge->minDurationMs + 10) * 1000);
+        $token = SolutionToken::create($challenge->nonce, $solution, 5000, [])->encode();
+
+        $idem = new ArraySiteVerifyIdempotencyStore();
+        $controller = new SiteVerifyController(
+            new Verifier($storage),
+            self::SECRET,
+            [self::SITEVERIFY_SECRET => 'login'],
+            $storage,
+            null,
+            null,
+            $idem,
+            null,
+            90.0,
+            0,
+            null,
+            $outstanding,
+        );
+        $request = fn (): Request => Request::create('/kiwi-captcha/siteverify', 'POST', [
+            'secret' => self::SITEVERIFY_SECRET,
+            'response' => $token,
+            'remoteip' => '198.51.100.7',
+            'idempotency_key' => '223e4567-e89b-42d3-a456-426614174099',
+        ]);
+
+        // First redemption: the verification succeeds but the release
+        // fails transiently (a Redis outage) — the response is still the
+        // success.
+        $client->failCommand = 'EVAL';
+        $first = $controller->siteverify($request());
+        $client->failCommand = null;
+        self::assertSame(200, $first->getStatusCode());
+        self::assertTrue(json_decode((string) $first->getContent(), true)['success']);
+        self::assertSame(1, $client->counters[$sourceKey], 'the transient failure left the slot charged');
+
+        // The same logical operation retries: CompleteSame observes the
+        // stored success and re-releases.
+        $retry = $controller->siteverify($request());
+        self::assertSame(200, $retry->getStatusCode());
+        self::assertSame(0, $client->counters[$sourceKey], 'the CompleteSame stored-success observation repairs the release');
     }
 
     public function testDisabledWithoutConfiguredSecret(): void

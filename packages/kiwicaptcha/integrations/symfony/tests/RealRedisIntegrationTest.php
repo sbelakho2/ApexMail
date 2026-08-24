@@ -224,14 +224,32 @@ final class RealRedisIntegrationTest extends TestCase
         $nonceC = base64_encode(random_bytes(32));
 
         // Three issuances admitted, the 4th refused by the per-source cap.
-        self::assertSame(1, $outstanding->issue('198.51.100.7', $nonceA, $now + 60, 60));
-        self::assertSame(1, $outstanding->issue('198.51.100.7', $nonceB, $now + 60, 60));
-        self::assertSame(1, $outstanding->issue('198.51.100.7', $nonceC, $now + 60, 60));
-        self::assertSame(0, $outstanding->issue('198.51.100.7', base64_encode(random_bytes(32)), $now + 60, 60), 'the 4th outstanding challenge of one source must be refused');
+        self::assertSame(1, $outstanding->issue('198.51.100.7', $nonceA, 60));
+        self::assertSame(1, $outstanding->issue('198.51.100.7', $nonceB, 60));
+        self::assertSame(1, $outstanding->issue('198.51.100.7', $nonceC, 60));
+        self::assertSame(0, $outstanding->issue('198.51.100.7', base64_encode(random_bytes(32)), 60), 'the 4th outstanding challenge of one source must be refused');
 
         $sourceKey = $outstanding->sourceKey('198.51.100.7');
         self::assertSame(3, $this->client->zcard($sourceKey), 'the per-source bound counts the three LIVE members (ZCARD after the score prune — well-defined under the members\' differing expiry scores)');
         self::assertSame(3, $this->client->zcard('{kiwi:ci}:outstanding:global:live'), 'the live-outstanding membership holds the three admitted nonces');
+
+        // Key-level retention (P1): a ZSET score is data, not a key
+        // expiry — the admission EXPIREATs both membership keys at the
+        // latest member deadline + margin, so an abandoned source's key
+        // (whose name carries the keyed source pseudonym) can never
+        // accumulate in Redis.
+        self::assertGreaterThan(0, $this->client->ttl($sourceKey), 'the source ZSET key carries a key-level EXPIREAT');
+        self::assertGreaterThan(0, $this->client->ttl('{kiwi:ci}:outstanding:global:live'), 'the global ZSET key carries a key-level EXPIREAT');
+
+        // Clock domain (P1/P2): the member deadlines are computed from
+        // Redis TIME + the RELATIVE lifetime inside the script, so the
+        // score sits at approximately Redis-now + 60 — a PHP/Redis clock
+        // skew can never expire a still-valid member early.
+        [$redisSecs] = $this->client->time();
+        $score = $this->client->zscore($sourceKey, $nonceA);
+        self::assertNotNull($score, 'the admitted nonce is a member of the source ZSET');
+        self::assertGreaterThanOrEqual($redisSecs + 55, $score, 'the member deadline is Redis-now + the relative TTL');
+        self::assertLessThanOrEqual($redisSecs + 65, $score);
 
         // The issuance sidecar pairs each nonce with the original source
         // pseudonym (the HMAC hex, never a raw IP), same hash tag, EX =
@@ -255,7 +273,7 @@ final class RealRedisIntegrationTest extends TestCase
         self::assertSame(0, $this->client->zcard('{kiwi:ci}:outstanding:global:live'), 'every solved nonce leaves the live membership');
 
         // The cap frees when the membership drops: a new issuance is admitted.
-        self::assertSame(1, $outstanding->issue('198.51.100.7', base64_encode(random_bytes(32)), $now + 60, 60));
+        self::assertSame(1, $outstanding->issue('198.51.100.7', base64_encode(random_bytes(32)), 60));
     }
 
     public function testMixedExpiryScoresCountExactlyAgainstRealRedis(): void
@@ -276,14 +294,14 @@ final class RealRedisIntegrationTest extends TestCase
         $n3 = base64_encode(random_bytes(32));
 
         // 1 short-lived (1s) + 2 long-lived (300s) members for source A.
-        self::assertSame(1, $outstanding->issue('198.51.100.7', $n1, $now + 1, 1));
-        self::assertSame(1, $outstanding->issue('198.51.100.7', $n2, $now + 300, 300));
-        self::assertSame(1, $outstanding->issue('198.51.100.7', $n3, $now + 300, 300));
-        self::assertSame(0, $outstanding->issue('198.51.100.7', base64_encode(random_bytes(32)), $now + 300, 300), 'the 4th member is refused under MIXED expiry scores — the count is exact');
+        self::assertSame(1, $outstanding->issue('198.51.100.7', $n1, 1));
+        self::assertSame(1, $outstanding->issue('198.51.100.7', $n2, 300));
+        self::assertSame(1, $outstanding->issue('198.51.100.7', $n3, 300));
+        self::assertSame(0, $outstanding->issue('198.51.100.7', base64_encode(random_bytes(32)), 300), 'the 4th member is refused under MIXED expiry scores — the count is exact');
         self::assertSame(3, $this->client->zcard($sourceA), 'the per-source count is exactly the three live members with differing scores');
 
         // The bound is per-source: B issues freely and never leaks into A.
-        self::assertSame(1, $outstanding->issue('203.0.113.9', base64_encode(random_bytes(32)), $now + 300, 300));
+        self::assertSame(1, $outstanding->issue('203.0.113.9', base64_encode(random_bytes(32)), 300));
         self::assertSame(1, $this->client->zcard($sourceB));
         self::assertSame(3, $this->client->zcard($sourceA), 'source B\'s member never counts against source A\'s bound');
 
@@ -306,7 +324,7 @@ final class RealRedisIntegrationTest extends TestCase
         $nonce = base64_encode(random_bytes(32));
         $otherNonce = base64_encode(random_bytes(32));
 
-        self::assertSame(1, $outstanding->issue('198.51.100.7', $nonce, $now + 60, 60));
+        self::assertSame(1, $outstanding->issue('198.51.100.7', $nonce, 60));
         $sourceA = $outstanding->sourceKey('198.51.100.7');
         $sourceB = $outstanding->sourceKey('203.0.113.9');
         $sidecar = '{kiwi:ci}:outstanding:nonce:'.$nonce;
@@ -316,7 +334,7 @@ final class RealRedisIntegrationTest extends TestCase
 
         // An unrelated issuance for another source: the cancellation of
         // A's nonce must never touch B's member.
-        self::assertSame(1, $outstanding->issue('203.0.113.9', $otherNonce, $now + 60, 60));
+        self::assertSame(1, $outstanding->issue('203.0.113.9', $otherNonce, 60));
         self::assertSame(1, $this->client->zcard($sourceB));
 
         $outstanding->cancelled($nonce);

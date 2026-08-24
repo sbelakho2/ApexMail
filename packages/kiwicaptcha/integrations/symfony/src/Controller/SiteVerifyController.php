@@ -492,8 +492,15 @@ final class SiteVerifyController
                 } catch (\Throwable) {
                     return $this->internalErrorResponse();
                 }
+                if ($stored !== null) {
+                    if (($stored['success'] ?? false) === true) {
+                        return $this->releaseAndJsonResponse($token->nonce, $this->canonicalizeResponse($stored));
+                    }
 
-                return new JsonResponse($stored !== null ? $this->canonicalizeResponse($stored) : ['success' => false, 'error-codes' => ['timeout-or-duplicate']]);
+                    return new JsonResponse($this->canonicalizeResponse($stored));
+                }
+
+                return new JsonResponse(['success' => false, 'error-codes' => ['timeout-or-duplicate']]);
             }
             if ($claim === IdempotencyClaim::Claimed) {
                 $claimedAt = microtime(true);
@@ -596,6 +603,14 @@ final class SiteVerifyController
                 $backoffMs = min($backoffMs * 2, self::PENDING_SAME_POLL_MAX_MS);
             }
             if ($stored !== null) {
+                if (($stored['success'] ?? false) === true) {
+                    // The waiter observes the owner's committed success:
+                    // the release is retried here too, so a transient
+                    // release failure on the original verification is
+                    // repaired by this same-logical-operation observation.
+                    return $this->releaseAndJsonResponse($token->nonce, $this->canonicalizeResponse($stored));
+                }
+
                 return new JsonResponse($this->canonicalizeResponse($stored));
             }
         }
@@ -679,6 +694,12 @@ final class SiteVerifyController
                     return $failed;
                 }
             }
+            if ($reconstructed->isOk()) {
+                // The crash-recovery success releases too: a crash
+                // between the original consume/commit and its release is
+                // repaired by the first later successful reconstruction.
+                return $this->releaseAndJsonResponse($reconstructed->nonce(), $canonical);
+            }
 
             return new JsonResponse($canonical);
         }
@@ -703,6 +724,9 @@ final class SiteVerifyController
                 if ($failed !== null) {
                     return $failed;
                 }
+            }
+            if ($resumeOutcome->isOk()) {
+                return $this->releaseAndJsonResponse($resumeOutcome->nonce(), $canonical);
             }
 
             return new JsonResponse($canonical);
@@ -747,19 +771,6 @@ final class SiteVerifyController
             // the HTTP compatibility boundary as a 500.
             return $this->internalErrorResponse();
         }
-        // The single lifecycle release: EVERY accepted successful
-        // outcome — the fresh verification, a reconstruction, a resume,
-        // a stored-result duplicate and the ownership-lost fallback alike
-        // — releases the solved nonce's ORIGINAL source slot and its
-        // live-outstanding membership through the same idempotent,
-        // nonce-authoritative hook (one-shot, ZREM-gated: a repeated call
-        // for an already-released nonce is a no-op, so the release can
-        // never double-fire). This deliberately does not live inside
-        // response-construction helpers: the ordinary fresh-success path
-        // must never bypass it.
-        if ($outcome->isOk()) {
-            $this->outstanding?->solved($outcome->nonce());
-        }
         if ($claimOwner !== null) {
             try {
                 $stillOwns = $this->confirmOwnership($backendId, $idempotencyKey, $claimOwner);
@@ -782,6 +793,10 @@ final class SiteVerifyController
                     return $this->internalErrorResponse();
                 }
                 if ($stored !== null) {
+                    if (($stored['success'] ?? false) === true) {
+                        return $this->releaseAndJsonResponse($token->nonce, $this->canonicalizeResponse($stored));
+                    }
+
                     return new JsonResponse($this->canonicalizeResponse($stored));
                 }
 
@@ -824,7 +839,7 @@ final class SiteVerifyController
                 }
             }
 
-            return new JsonResponse($canonical);
+            return $this->releaseAndJsonResponse($outcome->nonce(), $canonical);
         }
 
         if ($outcome->isOk()) {
@@ -840,7 +855,7 @@ final class SiteVerifyController
                 }
             }
 
-            return new JsonResponse($canonical);
+            return $this->releaseAndJsonResponse($outcome->nonce(), $canonical);
         }
 
         $error = $outcome->error();
@@ -996,6 +1011,28 @@ final class SiteVerifyController
      * canonical array when the success-shape reads hit a storage outage,
      * since a storage failure after consumption must never 500.
      */
+    /**
+     * The single successful-outcome return path: releases the solved
+     * nonce's ORIGINAL outstanding slot and its live-outstanding
+     * membership (idempotent, nonce-authoritative, best-effort — a
+     * transient release failure is repaired by the same logical
+     * operation's later successful observation, since the ZREM-gated
+     * release is a no-op once released) and returns the canonical
+     * response. EVERY accepted successful outcome routes through here —
+     * the fresh verification, a reconstruction, a resume, a stored-result
+     * duplicate, and every cached stored success a same-operation retry
+     * observes (CompleteSame, PendingSame waiter, ownership-lost fallback
+     * alike, with the already-decoded token's nonce) — so the ordinary
+     * fresh-success path can never bypass the release and the
+     * crash-recovery and waiter paths repair a failed one.
+     */
+    private function releaseAndJsonResponse(string $nonce, array $canonical): JsonResponse
+    {
+        $this->outstanding?->solved($nonce);
+
+        return new JsonResponse($canonical);
+    }
+
     private function outcomeToCanonical(VerifyOutcome $outcome): array|JsonResponse
     {
         if ($outcome->isOk()) {
