@@ -428,6 +428,9 @@ final class RollbackFakeRedis extends \Predis\Client
     /** @var array<string, array<string, float>> live-outstanding membership: key => nonce => score */
     public array $zsets = [];
 
+    /** @var array<string, string> plain strings (the nonce sidecars) */
+    public array $strings = [];
+
     public function __construct()
     {
         // Deliberately skip the parent constructor: no connection setup.
@@ -444,42 +447,72 @@ final class RollbackFakeRedis extends \Predis\Client
         $rest = \array_slice($arguments, 2 + $numKeys);
 
         if (str_contains($script, 'Outstanding challenge issuance')) {
-            // OutstandingChallenges::issue: keys[1] per-source counter,
-            // keys[2] the global LIVE-outstanding ZSET; argv[1] source cap,
-            // argv[2] global cap, argv[3] TTL seconds, argv[4] absolute
-            // expiry (the score), argv[5] the minted nonce (the member).
-            $source = (string) $keys[0];
+            // OutstandingChallenges::issue: keys[1] the per-source
+            // membership ZSET (member = <source>:<nonce>, score = absolute
+            // expiry), keys[2] the global LIVE-outstanding ZSET, keys[3]
+            // the nonce sidecar; argv[1] source cap, argv[2] global cap,
+            // argv[3] TTL seconds, argv[4] absolute expiry (the score),
+            // argv[5] the minted nonce, argv[6] the source pseudonym.
+            $sourceZset = (string) $keys[0];
             $global = (string) $keys[1];
-            if (($this->counters[$source] ?? 0) >= (int) $rest[0]) {
+            $sidecar = (string) $keys[2];
+            $pseudonym = (string) $rest[5];
+            if ($this->sourceCount($sourceZset, $pseudonym) >= (int) $rest[0]) {
                 return 0;
             }
             if (\count($this->zsets[$global] ?? []) >= (int) $rest[1]) {
                 return -1;
             }
-            $this->counters[$source] = ($this->counters[$source] ?? 0) + 1;
+            $this->zsets[$sourceZset][$pseudonym.':'.(string) $rest[4]] = (float) $rest[3];
             $this->zsets[$global][(string) $rest[4]] = (float) $rest[3];
+            $this->strings[$sidecar] = $pseudonym;
+            $this->mirrorSourceCount($sourceZset, $pseudonym);
 
             return 1;
         }
 
-        if (str_contains($script, 'Outstanding challenge solve') || str_contains($script, 'Outstanding challenge aborted')) {
+        if (str_contains($script, 'Outstanding challenge release')) {
             // OutstandingChallenges::solved / ::abortedBeforeHandoff:
-            // keys[1] per-source counter, keys[2] the global live ZSET;
-            // argv[1] the nonce ('' = none). Best-effort decr floored at 0
-            // + ZREM the nonce.
-            $source = (string) $keys[0];
-            $global = (string) $keys[1];
-            $v = $this->counters[$source] ?? 0;
-            if ($v > 0) {
-                $this->counters[$source] = $v - 1;
-            }
-            if ((string) $rest[0] !== '') {
-                unset($this->zsets[$global][(string) $rest[0]]);
+            // keys[1] the global live ZSET, keys[2] the nonce sidecar,
+            // keys[3] the per-source membership ZSET; argv[1] the released
+            // nonce. One-shot, nonce-authoritative.
+            $global = (string) $keys[0];
+            $sidecar = (string) $keys[1];
+            $sourceZset = (string) $keys[2];
+            $nonce = (string) $rest[0];
+            $removed = 0;
+            if (isset($this->zsets[$global][$nonce])) {
+                unset($this->zsets[$global][$nonce]);
+                $removed = 1;
+                if (isset($this->strings[$sidecar])) {
+                    $source = (string) $this->strings[$sidecar];
+                    unset($this->zsets[$sourceZset][$source.':'.$nonce]);
+                    unset($this->strings[$sidecar]);
+                    $this->mirrorSourceCount($sourceZset, $source);
+                }
             }
 
-            return 1;
+            return $removed;
         }
 
         throw new \LogicException('unexpected script');
+    }
+
+    private function sourceCount(string $sourceZset, string $pseudonym): int
+    {
+        $count = 0;
+        foreach ($this->zsets[$sourceZset] ?? [] as $member => $score) {
+            $member = (string) $member;
+            if (str_starts_with($member, $pseudonym.':')) {
+                ++$count;
+            }
+        }
+
+        return $count;
+    }
+
+    private function mirrorSourceCount(string $sourceZset, string $pseudonym): void
+    {
+        $this->counters[str_replace('source', '', $sourceZset).$pseudonym] = $this->sourceCount($sourceZset, $pseudonym);
     }
 }

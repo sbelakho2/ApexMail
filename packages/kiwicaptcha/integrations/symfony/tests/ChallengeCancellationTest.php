@@ -647,6 +647,71 @@ final class ChallengeCancellationTest extends TestCase
         self::assertArrayHasKey(self::OUTSTANDING_PREFIX.'nonce:'.$nonce, $client->strings, 'the sidecar survives the no-op cancellation');
     }
 
+    public function testHeterogeneousChallengeTtlsNeverResetThePerSourceBound(): void
+    {
+        // P1 regression: the old scalar per-source counter reset its
+        // whole EXPIRE to the newest challenge's TTL, so a 1-second
+        // sitekey challenge could wipe the source bound for 300-second
+        // challenges and admit unbounded issuance from that source. The
+        // per-source representation is an expiry-aware membership: only
+        // the member whose score passed expires, and the bound counts
+        // exactly the LIVE members.
+        $client = new FakePredisClient();
+        $client->setTimeMs(1_700_000_000_000);
+        $outstanding = new OutstandingChallenges($client, '{kiwi:ttl-test}:outstanding:', RiskKeys::fromMaster(self::SECRET), 2, 100, 0);
+        $base = 1_700_000_000;
+        $sourceZset = '{kiwi:ttl-test}:outstanding:source';
+        $pseudonym = substr($outstanding->sourceKey('198.51.100.7'), \strlen('{kiwi:ttl-test}:outstanding:'));
+
+        $longA = 'A'.str_repeat('a', 43);
+        $short = 'B'.str_repeat('b', 43);
+        $longC = 'C'.str_repeat('c', 43);
+        self::assertSame(1, $outstanding->issue('198.51.100.7', $longA, $base + 300, 300));
+        self::assertSame(1, $outstanding->issue('198.51.100.7', $short, $base + 1, 1));
+        self::assertSame(0, $outstanding->issue('198.51.100.7', $longC, $base + 300, 300), 'the per-source bound of 2 is a HARD cap on live members');
+
+        // The short-lived member expires on its own schedule; the
+        // long-lived challenge keeps its slot — the short TTL can never
+        // reset the source bound's lifetime.
+        $client->setTimeMs(1_700_000_002_000);
+        $longD = 'D'.str_repeat('d', 43);
+        self::assertSame(1, $outstanding->issue('198.51.100.7', $longD, $base + 300, 300), 'the expired short-lived member freed exactly one slot');
+        self::assertSame(0, $outstanding->issue('198.51.100.7', 'E'.str_repeat('e', 43), $base + 300, 300), 'the two long-lived members still occupy the bound');
+
+        $sourceMembers = array_values(array_filter(
+            array_keys($client->zsets[$sourceZset] ?? []),
+            static fn (string $m): bool => str_starts_with($m, $pseudonym.':'),
+        ));
+        self::assertCount(2, $sourceMembers, 'the source membership holds exactly the two LIVE members');
+        self::assertStringContainsString($longA, implode('|', $sourceMembers), 'the long-lived member is still live');
+        self::assertStringNotContainsString($short, implode('|', $sourceMembers), 'the short-lived member expired from the membership');
+    }
+
+    public function testAbortFromAnotherSourceReturnsTheOriginalSourceSlot(): void
+    {
+        // The abort is nonce-authoritative like solve and cancel: the
+        // ORIGINAL issuer's slot is released from the issuance sidecar,
+        // never the rollback's own source.
+        $client = new FakePredisClient();
+        $outstanding = new OutstandingChallenges($client, self::OUTSTANDING_PREFIX, RiskKeys::fromMaster(self::SECRET), 5, 100, 0);
+
+        $nonce = 'B'.str_repeat('b', 43);
+        self::assertSame(1, $outstanding->issue('198.51.100.7', $nonce, time() + 120, 120));
+        $sourceA = $outstanding->sourceKey('198.51.100.7');
+        $sourceB = $outstanding->sourceKey('203.0.113.9');
+        self::assertSame(1, $client->counters[$sourceA]);
+
+        $outstanding->abortedBeforeHandoff($nonce);
+        self::assertSame(0, $client->counters[$sourceA], 'the ORIGINAL source slot is returned');
+        self::assertArrayNotHasKey($sourceB, $client->counters, 'the rollback request source never participates');
+
+        // A duplicate abort (no live member left) is a no-op: the
+        // membership can never be double-released.
+        $outstanding->abortedBeforeHandoff($nonce);
+        self::assertSame(0, $client->counters[$sourceA], 'a duplicate abort never re-releases');
+        self::assertArrayNotHasKey(self::OUTSTANDING_PREFIX.'nonce:'.$nonce, $client->strings, 'the sidecar is gone after the first abort');
+    }
+
     public function testSolveRemovesTheSidecarAndReturnsTheSourceSlot(): void
     {
         // The solve path: a verified challenge already ZREMs the
@@ -682,7 +747,7 @@ final class ChallengeCancellationTest extends TestCase
         $sidecarKey = self::OUTSTANDING_PREFIX.'nonce:'.$nonce;
         self::assertArrayHasKey($sidecarKey, $client->strings);
 
-        $outstanding->abortedBeforeHandoff('198.51.100.7', $nonce);
+        $outstanding->abortedBeforeHandoff($nonce);
         self::assertSame(0, $client->counters[$sourceKey], 'the abort returns the source slot');
         self::assertArrayNotHasKey($nonce, $client->zsets[$this->liveKey()] ?? [], 'the abort removes the nonce from the live membership');
         self::assertArrayNotHasKey($sidecarKey, $client->strings, 'the abort deletes the sidecar');

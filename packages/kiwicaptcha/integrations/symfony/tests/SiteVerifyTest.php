@@ -5,6 +5,8 @@ declare(strict_types=1);
 namespace BelConsulting\KiwiCaptchaBundle\Tests;
 
 use BelConsulting\KiwiCaptchaBundle\Controller\SiteVerifyController;
+use BelConsulting\KiwiCaptchaBundle\Security\OutstandingChallenges;
+use KiwiCaptcha\Risk\RiskKeys;
 use BelConsulting\KiwiCaptchaBundle\Risk\SecurityEpochMonitor;
 use BelConsulting\KiwiCaptchaBundle\SiteVerify\IdempotencyClaim;
 use BelConsulting\KiwiCaptchaBundle\SiteVerify\SiteVerifyMetadata;
@@ -158,6 +160,54 @@ final class SiteVerifyTest extends TestCase
         } while (Verifier::leadingZeroBits($hash) < $record->targetBits);
 
         return \KiwiCaptcha\SolutionToken::create($record->nonce, $counter - 1, 5000, [])->encode();
+    }
+
+    public function testFreshSuccessReleasesTheOutstandingSlot(): void
+    {
+        // P1/P2 regression: the ordinary FRESH-success Siteverify path
+        // must run the same idempotent solved(nonce) lifecycle release
+        // as every other successful outcome — the release used to live
+        // only in outcomeToCanonical(), which the fresh path bypasses, so
+        // a provider-style client could redeem valid challenges and still
+        // hit the per-source outstanding cap as though they remained
+        // unsolved.
+        $client = new FakePredisClient();
+        $storage = new ArrayStorage();
+        $issuer = new Issuer(new Config(secretKey: self::SECRET, algorithm: PoWAlgorithm::Sha256, targetBits: 8, ttlSecs: 120), $storage);
+        $challenge = $issuer->issue('login', '198.51.100.7');
+        $outstanding = new OutstandingChallenges($client, '{kiwi:siteverify-outstanding}:outstanding:', RiskKeys::fromMaster(self::SECRET), 5, 100, 0);
+        self::assertSame(1, $outstanding->issue('198.51.100.7', $challenge->nonce, time() + 120, 120));
+        $sourceKey = $outstanding->sourceKey('198.51.100.7');
+        self::assertSame(1, $client->counters[$sourceKey], 'the issued challenge holds the source slot');
+
+        $solution = $this->solve($challenge->prefix, $challenge->salt, $challenge->targetBits);
+        usleep(($challenge->minDurationMs + 10) * 1000);
+        $token = SolutionToken::create($challenge->nonce, $solution, 5000, [])->encode();
+
+        $controller = new SiteVerifyController(
+            new Verifier($storage),
+            self::SECRET,
+            [self::SITEVERIFY_SECRET => 'login'],
+            $storage,
+            null,
+            null,
+            null,
+            null,
+            90.0,
+            0,
+            null,
+            $outstanding,
+        );
+        $response = $controller->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+            'secret' => self::SITEVERIFY_SECRET,
+            'response' => $token,
+            'remoteip' => '198.51.100.7',
+        ]));
+        self::assertSame(200, $response->getStatusCode());
+        self::assertTrue(json_decode((string) $response->getContent(), true)['success']);
+        self::assertSame(0, $client->counters[$sourceKey], 'the FRESH Siteverify success releases the original source slot');
+        self::assertArrayNotHasKey($challenge->nonce, $client->zsets['{kiwi:siteverify-outstanding}:outstanding:global:live'] ?? [], 'the nonce leaves the live membership');
+        self::assertArrayNotHasKey('{kiwi:siteverify-outstanding}:outstanding:nonce:'.$challenge->nonce, $client->strings, 'the sidecar is dropped');
     }
 
     public function testDisabledWithoutConfiguredSecret(): void

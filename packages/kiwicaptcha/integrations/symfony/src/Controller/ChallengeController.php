@@ -1761,8 +1761,9 @@ final class ChallengeController
     /**
      * Return an admitted outstanding slot when the challenge was proven
      * never handed out (OutstandingChallenges::abortedBeforeHandoff: the
-     * per-source counter is decremented best-effort, floored at 0, and the
-     * nonce leaves the global live-outstanding membership). Composed by
+     * nonce-authoritative one-shot release — the nonce leaves the global
+     * live membership and the ORIGINAL source membership from the
+     * issuance sidecar, never this request's own source). Composed by
      * {@see self::rollbackIssuanceAttempt()}, the single
      * proven-not-handed-off cleanup primitive. The caller must not roll
      * back for an indeterminate failure.
@@ -1773,9 +1774,10 @@ final class ChallengeController
             return;
         }
         try {
-            $this->outstanding?->abortedBeforeHandoff($clientIp, $nonce);
+            $this->outstanding?->abortedBeforeHandoff($nonce);
         } catch (\Throwable) {
-            // Best-effort; the counter decays by its EXPIRE otherwise.
+            // Best-effort; the memberships decay by their expiry scores
+            // otherwise.
         }
     }
 

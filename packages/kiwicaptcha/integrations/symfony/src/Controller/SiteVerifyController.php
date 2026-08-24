@@ -747,6 +747,19 @@ final class SiteVerifyController
             // the HTTP compatibility boundary as a 500.
             return $this->internalErrorResponse();
         }
+        // The single lifecycle release: EVERY accepted successful
+        // outcome — the fresh verification, a reconstruction, a resume,
+        // a stored-result duplicate and the ownership-lost fallback alike
+        // — releases the solved nonce's ORIGINAL source slot and its
+        // live-outstanding membership through the same idempotent,
+        // nonce-authoritative hook (one-shot, ZREM-gated: a repeated call
+        // for an already-released nonce is a no-op, so the release can
+        // never double-fire). This deliberately does not live inside
+        // response-construction helpers: the ordinary fresh-success path
+        // must never bypass it.
+        if ($outcome->isOk()) {
+            $this->outstanding?->solved($outcome->nonce());
+        }
         if ($claimOwner !== null) {
             try {
                 $stillOwns = $this->confirmOwnership($backendId, $idempotencyKey, $claimOwner);
@@ -986,11 +999,8 @@ final class SiteVerifyController
     private function outcomeToCanonical(VerifyOutcome $outcome): array|JsonResponse
     {
         if ($outcome->isOk()) {
-            // The solved nonce releases its ORIGINAL source slot and the
-            // live-outstanding membership (one-shot, nonce-authoritative —
-            // safe on reconstruction and resume paths too).
-            $this->outstanding?->solved($outcome->nonce());
-
+            // The release happens once, at the single lifecycle hook in
+            // siteverify(), before any response construction.
             return $this->canonicalSuccess($outcome);
         }
 

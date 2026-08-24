@@ -407,6 +407,47 @@ final class RedisChainedChallengeStateStoreTest extends TestCase
         self::assertCount(1, $this->fake->waits(), 'the rank-raising create-or-get mutation WAITs');
     }
 
+    public function testCreateOrGetObligationMovedMappingConverges(): void
+    {
+        // The pointed-at chain is a DECLARED key resolved from a plain
+        // read and re-verified inside the script: when a concurrent
+        // create-or-get moves the mapping between the read and the
+        // script, the script answers 'moved' and the caller re-reads and
+        // retries — the resolution converges on the moved chain instead
+        // of silently creating a second chain.
+        $store = $this->store();
+        $chainId = 'chain-'.base64_encode(random_bytes(32));
+        $obligationId = hash('sha256', 'txn-moved');
+        $movedChainId = 'chain-'.base64_encode(random_bytes(32));
+        $nonce = $this->makeNonce();
+        $ttl = 300;
+        $expires = (int) $this->fake->clockSecs() + $ttl;
+
+        // Pre-create the moved chain + move the obligation mapping exactly
+        // once (simulating a concurrent request that created its chain and
+        // won the mapping).
+        $movedKey = '{kiwi:kiwi-test}:chain:'.$movedChainId;
+        $obligationKey = '{kiwi:kiwi-test}:chain-obligation:'.$obligationId;
+        $movedRec = [
+            'v' => 2, 'stage1Nonce' => $nonce, 'scope' => 'login',
+            'obligationId' => $obligationId, 'requiredAction' => 'sha16',
+            'requiredRank' => RiskAction::from('sha16')->rank(), 'policyVersion' => 1,
+            'chainDepth' => 2, 'state' => 'available', 'owner' => null,
+            'leaseUntil' => null, 'stage2Nonce' => null,
+            'requestBinding' => null, 'expiresAt' => $expires,
+        ];
+        $this->fake->strings[$movedKey] = (string) json_encode($movedRec, JSON_THROW_ON_ERROR);
+        $this->fake->onCreateOrGet = function () use ($obligationKey, $movedChainId): void {
+            $this->fake->onCreateOrGet = null;
+            $this->fake->strings[$obligationKey] = $movedChainId;
+            $this->fake->expirations[$obligationKey] = (int) ($this->fake->clockSecs() * 1000 + 300 * 1000);
+        };
+
+        $resolved = $store->createOrGetObligation($obligationId, $chainId, $nonce, 'login', '', 'sha16', RiskAction::from('sha16')->rank(), 1, $expires, $ttl);
+        self::assertSame($movedChainId, $resolved, 'the retry converges on the chain the mapping moved to');
+        self::assertSame($movedChainId, $store->obligationChainId($obligationId), 'the mapping still points at the moved chain');
+    }
+
     public function testArrayStoreObservesTheSameMachineWithoutTheReplicaBarrier(): void
     {
         // The in-memory store has no replicas: the identical terminal
@@ -615,15 +656,24 @@ final class ChainRedisFake extends \Predis\Client
         throw new \LogicException('unexpected script');
     }
 
+    /** @var null|\Closure test hook: fires at the top of the create-or-get emulation (mapping-move races). */
+    public ?\Closure $onCreateOrGet = null;
+
     private function luaCreateOrGet(array $keys, array $args): array
     {
-        $obligationKey = $keys[1];
+        if ($this->onCreateOrGet !== null) {
+            ($this->onCreateOrGet)();
+        }
         $chainKey = $keys[0];
-        $prefix = (string) $args[10];
+        $obligationKey = $keys[1];
+        $pointedKey = $keys[2];
+        $pointedChainId = (string) $args[10];
         $existing = $this->strings[$obligationKey] ?? null;
         if ($existing !== null) {
-            $chainId = $existing;
-            $chained = $this->strings[$prefix.$chainId] ?? null;
+            if ($existing !== $pointedChainId) {
+                return [$pointedChainId, 0, 'moved'];
+            }
+            $chained = $this->strings[$pointedKey] ?? null;
             if ($chained !== null) {
                 $rec = json_decode($chained, true, 8, JSON_THROW_ON_ERROR);
                 if (isset($rec['requiredRank']) && \is_int($rec['requiredRank'])) {
@@ -631,15 +681,15 @@ final class ChainRedisFake extends \Predis\Client
                     if ($newRank > $rec['requiredRank']) {
                         $rec['requiredRank'] = $newRank;
                         $rec['requiredAction'] = (string) $args[4];
-                        $this->strings[$prefix.$chainId] = (string) json_encode($rec, JSON_THROW_ON_ERROR);
+                        $this->strings[$pointedKey] = (string) json_encode($rec, JSON_THROW_ON_ERROR);
 
-                        return [$chainId, 1];
+                        return [$pointedChainId, 1, ''];
                     }
 
-                    return [$chainId, 0];
+                    return [$pointedChainId, 0, ''];
                 }
             }
-            if (($this->strings[$obligationKey] ?? null) === $chainId) {
+            if (($this->strings[$obligationKey] ?? null) === $pointedChainId) {
                 unset($this->strings[$obligationKey], $this->expirations[$obligationKey]);
             }
         }
@@ -665,7 +715,7 @@ final class ChainRedisFake extends \Predis\Client
         $this->strings[$obligationKey] = (string) $args[1];
         $this->expirations[$obligationKey] = (int) ($this->clockMs + $ttl * 1000);
 
-        return [(string) $args[1], 1];
+        return [(string) $args[1], 1, ''];
     }
 
     private function luaReserve(string $key, array $args): string

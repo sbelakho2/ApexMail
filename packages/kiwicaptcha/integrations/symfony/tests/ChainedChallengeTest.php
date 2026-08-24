@@ -1547,6 +1547,10 @@ final class ChainedChallengeTest extends TestCase
         $storage->consume($newNonce);
         $storage->commitResult($newNonce, false, null);
         $sourceKey = '{kiwi:chain-test}:outstanding:'.hash_hmac('sha256', Issuer::canonicalIpFamily('198.51.100.7'), RiskKeys::fromMaster(self::SECRET)->event);
+        $pseudonym = substr($sourceKey, \strlen('{kiwi:chain-test}:outstanding:'));
+        for ($i = 0; $i < 5; ++$i) {
+            $client->zsets['{kiwi:chain-test}:outstanding:source'][$pseudonym.':seed'.$i] = 9999999999.0;
+        }
         $client->counters[$sourceKey] = 5;
 
         $third = $controller->challenge($this->challengeRequest(json_encode(['scope' => 'login', 'chain_ticket' => $ticket], JSON_THROW_ON_ERROR)));
@@ -4395,6 +4399,38 @@ final class AbortAwareFakeRedis extends \Predis\Client
         // Deliberately skip the parent constructor: no connection setup.
     }
 
+    private function sourceCount(string $sourceZset, string $pseudonym): int
+    {
+        $count = 0;
+        foreach ($this->zsets[$sourceZset] ?? [] as $member => $score) {
+            $member = (string) $member;
+            if (str_starts_with($member, $pseudonym.':')) {
+                ++$count;
+            }
+        }
+
+        return $count;
+    }
+
+    private function mirrorSourceCount(string $sourceZset, string $pseudonym): void
+    {
+        $this->counters[str_replace('source', '', $sourceZset).$pseudonym] = $this->sourceCount($sourceZset, $pseudonym);
+    }
+
+    private function fakeZremMember(string $key, string $member): int
+    {
+        if (isset($this->zsets[$key][$member])) {
+            unset($this->zsets[$key][$member]);
+            if ($this->zsets[$key] === []) {
+                unset($this->zsets[$key]);
+            }
+
+            return 1;
+        }
+
+        return 0;
+    }
+
     public function __call($commandID, $arguments)
     {
         if (strtoupper((string) $commandID) !== 'EVAL') {
@@ -4406,71 +4442,52 @@ final class AbortAwareFakeRedis extends \Predis\Client
         $rest = \array_slice($arguments, 2 + $numKeys);
 
         if (str_contains($script, 'Outstanding challenge issuance')) {
-            // OutstandingChallenges::issue: keys[1] per-source counter,
-            // keys[2] the global LIVE-outstanding ZSET, keys[3] the nonce
-            // sidecar; argv[1] source cap, argv[2] global cap, argv[3] TTL
-            // seconds, argv[4] absolute expiry (the score), argv[5] the
-            // minted nonce (the member), argv[6] the source pseudonym.
-            $source = (string) $keys[0];
+            // OutstandingChallenges::issue: keys[1] the per-source
+            // membership ZSET (member = <source>:<nonce>, score = absolute
+            // expiry), keys[2] the global LIVE-outstanding ZSET, keys[3]
+            // the nonce sidecar; argv[1] source cap, argv[2] global cap,
+            // argv[3] TTL seconds, argv[4] absolute expiry (the score),
+            // argv[5] the minted nonce, argv[6] the source pseudonym.
+            $sourceZset = (string) $keys[0];
             $global = (string) $keys[1];
             $sidecar = (string) $keys[2];
-            if (($this->counters[$source] ?? 0) >= (int) $rest[0]) {
+            $pseudonym = (string) $rest[5];
+            if ($this->sourceCount($sourceZset, $pseudonym) >= (int) $rest[0]) {
                 return 0;
             }
             if (\count($this->zsets[$global] ?? []) >= (int) $rest[1]) {
                 return -1;
             }
-            $this->counters[$source] = ($this->counters[$source] ?? 0) + 1;
+            $this->zsets[$sourceZset][$pseudonym.':'.(string) $rest[4]] = (float) $rest[3];
             $this->zsets[$global][(string) $rest[4]] = (float) $rest[3];
-            $this->strings[$sidecar] = (string) $rest[5];
+            $this->strings[$sidecar] = $pseudonym;
+            $this->mirrorSourceCount($sourceZset, $pseudonym);
 
             return 1;
         }
 
-        if (str_contains($script, 'Outstanding challenge solve')) {
-            // OutstandingChallenges::solved: keys[1] the global live ZSET,
-            // keys[2] the nonce sidecar; argv[1] the solved nonce,
-            // argv[2] the per-source counter prefix. One-shot,
-            // nonce-authoritative: only the removal of the nonce from the
-            // live membership releases the ORIGINAL source's counter
-            // (floored at 0) and deletes the sidecar.
+        if (str_contains($script, 'Outstanding challenge release')) {
+            // OutstandingChallenges::solved / ::cancelled /
+            // ::abortedBeforeHandoff: keys[1] the global live ZSET,
+            // keys[2] the nonce sidecar, keys[3] the per-source membership
+            // ZSET; argv[1] the released nonce. One-shot,
+            // nonce-authoritative: only the ZREM of the nonce from the
+            // live membership releases the ORIGINAL source's membership
+            // (member <source>:<nonce>) and deletes the sidecar; the
+            // caller's IP is never used.
             $global = (string) $keys[0];
             $sidecar = (string) $keys[1];
+            $sourceZset = (string) $keys[2];
             $nonce = (string) $rest[0];
-            if (isset($this->zsets[$global][$nonce])) {
-                unset($this->zsets[$global][$nonce]);
-                if (isset($this->strings[$sidecar])) {
-                    $source = (string) $this->strings[$sidecar];
-                    $counterKey = (string) $rest[1].$source;
-                    $v = $this->counters[$counterKey] ?? 0;
-                    if ($v > 0) {
-                        $this->counters[$counterKey] = $v - 1;
-                    }
-                    unset($this->strings[$sidecar]);
-                }
-            }
-
-            return 1;
-        }
-
-        if (str_contains($script, 'Outstanding challenge aborted')) {
-            // OutstandingChallenges::abortedBeforeHandoff: keys[1] the
-            // per-source counter, keys[2] the global live ZSET, keys[3]
-            // the nonce sidecar; argv[1] the nonce. Best-effort DECR
-            // floored at 0 + ZREM + sidecar DEL.
-            $source = (string) $keys[0];
-            $global = (string) $keys[1];
-            $sidecar = (string) $keys[2];
-            $v = $this->counters[$source] ?? 0;
-            if ($v > 0) {
-                $this->counters[$source] = $v - 1;
-            }
-            if ((string) $rest[0] !== '') {
-                unset($this->zsets[$global][(string) $rest[0]]);
+            $removed = $this->fakeZremMember($global, $nonce);
+            if ($removed === 1 && isset($this->strings[$sidecar])) {
+                $source = (string) $this->strings[$sidecar];
+                $this->fakeZremMember($sourceZset, $source.':'.$nonce);
                 unset($this->strings[$sidecar]);
+                $this->mirrorSourceCount($sourceZset, $source);
             }
 
-            return 1;
+            return $removed;
         }
 
         throw new \LogicException('unexpected script');

@@ -70,21 +70,33 @@ final class RedisChainedChallengeStateStore implements TransactionalChainedChall
      * chain id, raising the requiredRank/requiredAction when the new
      * reassessment is stronger, never lowering. The obligation points at
      * a missing/corrupt chain -> compare-delete the stale mapping and
-     * create the chain fresh (the retry is inside the script — a stale
-     * mapping can never block a transaction). The reply is a two-element
-     * table {chainId, mutated}: `mutated` is 1 exactly when the script
-     * performed a write (the fresh creation, the stale-mapping repair or
-     * the rank raise). It is 0 when the script only returned the
-     * existing chain. The caller applies the verified WAIT durability
-     * barrier to the mutating arms only.
+     * create the chain fresh (a stale mapping can never block a
+     * transaction). The pointed-at chain is a DECLARED key (KEYS[3]),
+     * resolved by the caller from a plain read and re-verified inside
+     * the script, so no key name is constructed from stored data; a
+     * mapping that moved between the read and the script answers
+     * 'moved' and the caller retries (bounded, fail-closed on
+     * exhaustion). The reply is a three-element table {chainId, mutated,
+     * verdict}: `mutated` is 1 exactly when the script performed a write
+     * (the fresh creation, the stale-mapping repair or the rank raise).
+     * It is 0 when the script only returned the existing chain. The
+     * caller applies the verified WAIT durability barrier to the
+     * mutating arms only.
      */
     private const CREATE_OR_GET_OBLIGATION_LUA = <<<'LUA'
 -- Chain obligation create-or-get (chain + obligation, one hash tag).
-local existing = redis.call('GET', KEYS[2])
-if existing then
-  -- The chain the obligation POINTS AT (the value is the bare chain id;
-  -- the chain key is derived from the prefix — same hash tag).
-  local chained = redis.call('GET', ARGV[11] .. existing)
+-- EVERY key the script touches is a declared KEYS argument: KEYS[3] is the
+-- chain the obligation mapping points at, resolved by the caller from a
+-- plain read and RE-VERIFIED inside the script (a mapping that no longer
+-- equals the caller's read answers 'moved' and the caller retries), so no
+-- key name is ever constructed from stored data — the EVAL contract holds
+-- on sharded/proxied/Redis Cloud topologies too.
+local mapped = redis.call('GET', KEYS[2])
+if mapped then
+  if mapped ~= ARGV[11] then
+    return {ARGV[11], 0, 'moved'}
+  end
+  local chained = redis.call('GET', KEYS[3])
   if chained then
     local ok, rec = pcall(cjson.decode, chained)
     if ok and type(rec) == 'table' and tonumber(rec['requiredRank']) then
@@ -92,14 +104,14 @@ if existing then
       if newRank > tonumber(rec['requiredRank']) then
         rec['requiredRank'] = newRank
         rec['requiredAction'] = ARGV[5]
-        redis.call('SET', ARGV[11] .. existing, cjson.encode(rec), 'KEEPTTL')
-        return {existing, 1}
+        redis.call('SET', KEYS[3], cjson.encode(rec), 'KEEPTTL')
+        return {ARGV[11], 1, ''}
       end
-      return {existing, 0}
+      return {ARGV[11], 0, ''}
     end
   end
   -- stale mapping: compare-delete + create fresh in the SAME script.
-  if redis.call('GET', KEYS[2]) == existing then
+  if redis.call('GET', KEYS[2]) == ARGV[11] then
     redis.call('DEL', KEYS[2])
   end
 end
@@ -125,7 +137,7 @@ end
 local ttl = tonumber(ARGV[10])
 redis.call('SET', KEYS[1], cjson.encode(rec), 'EX', ttl)
 redis.call('SET', KEYS[2], ARGV[2], 'EX', ttl)
-return {ARGV[2], 1}
+return {ARGV[2], 1, ''}
 LUA;
 
     /**
@@ -702,40 +714,60 @@ LUA;
         if (preg_match(self::OBLIGATION_PATTERN, $obligationId) !== 1) {
             throw new \InvalidArgumentException('obligationId must be 64 lowercase hex characters');
         }
-        $reply = $this->evalScript(self::CREATE_OR_GET_OBLIGATION_LUA, [
-            $this->key($chainId),
-            $this->obligationKey($obligationId),
-        ], [
-            $obligationId,
-            $chainId,
-            $stage1Nonce,
-            $scope,
-            $requiredAction,
-            (string) $requiredRank,
-            (string) $policyVersion,
-            $requestBinding,
-            (string) $expiresAt,
-            (string) max(1, $ttlSecs),
-            self::key(''),
-        ]);
-        // The script answers {chainId, mutated}: `mutated` is 1 exactly
-        // when it performed a write (the fresh creation, the stale-mapping
-        // repair or the rank raise), 0 when it only returned the existing
-        // chain. Lua tables are 1-indexed; normalize before destructuring.
-        $parts = \is_array($reply) ? array_values($reply) : [];
-        $resolved = \is_string($parts[0] ?? null) ? $parts[0] : $chainId;
-        $mutated = (int) ($parts[1] ?? 0) === 1;
+        $chainKey = $this->key($chainId);
+        $obligationKey = $this->obligationKey($obligationId);
 
-        // Durability barrier: the verified WAIT runs only when the script
-        // actually wrote (fresh creation / stale-mapping repair / rank
-        // raise). A pure recovery of the existing chain performed no
-        // write, so no WAIT is issued: an idempotent retry must never
-        // turn a replica outage into a storage failure.
-        if ($this->waitReplicas > 0 && $mutated) {
-            $this->waitAndVerify('the obligation create-or-get');
+        // The pointed-at chain is resolved from a plain read and passed as
+        // a declared key; a concurrent create-or-get that moved the
+        // mapping between the read and the script answers 'moved' and the
+        // loop re-reads and retries (bounded, then fail-closed — a
+        // silently wrong chain must never be returned).
+        for ($attempt = 0; $attempt < 3; ++$attempt) {
+            $existing = $this->obligationChainId($obligationId);
+            $reply = $this->evalScript(self::CREATE_OR_GET_OBLIGATION_LUA, [
+                $chainKey,
+                $obligationKey,
+                $this->key($existing ?? $chainId),
+            ], [
+                $obligationId,
+                $chainId,
+                $stage1Nonce,
+                $scope,
+                $requiredAction,
+                (string) $requiredRank,
+                (string) $policyVersion,
+                $requestBinding,
+                (string) $expiresAt,
+                (string) max(1, $ttlSecs),
+                $existing ?? $chainId,
+            ]);
+            // The script answers {chainId, mutated, verdict}: `mutated` is
+            // 1 exactly when it performed a write (the fresh creation, the
+            // stale-mapping repair or the rank raise), 0 when it only
+            // returned the existing chain, and `verdict` is 'moved' when
+            // the mapping changed between the caller's read and the
+            // script. Lua tables are 1-indexed; normalize before
+            // destructuring.
+            $parts = \is_array($reply) ? array_values($reply) : [];
+            if ((string) ($parts[2] ?? '') !== 'moved') {
+                $resolved = \is_string($parts[0] ?? null) ? $parts[0] : $chainId;
+                $mutated = (int) ($parts[1] ?? 0) === 1;
+
+                // Durability barrier: the verified WAIT runs only when the
+                // script actually wrote (fresh creation / stale-mapping
+                // repair / rank raise). A pure recovery of the existing
+                // chain performed no write, so no WAIT is issued: an
+                // idempotent retry must never turn a replica outage into
+                // a storage failure.
+                if ($this->waitReplicas > 0 && $mutated) {
+                    $this->waitAndVerify('the obligation create-or-get');
+                }
+
+                return $resolved;
+            }
         }
 
-        return $resolved;
+        throw new \RuntimeException('the obligation create-or-get could not converge: the mapping kept moving');
     }
 
     public function obligationChainId(string $obligationId): ?string

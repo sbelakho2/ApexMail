@@ -529,6 +529,82 @@ final class ValidatorTest extends TestCase
         self::assertCount(0, $engine->validate($dto), 'an unbound record must pass regardless of the request binding');
     }
 
+    public function testBindingMismatchFailsBeforeTheConsume(): void
+    {
+        // P2/P3 regression: the request-binding enforcement moved into the
+        // core's PRE-CONSUME phase. A wrong-transaction proof must fail
+        // without consuming the challenge (no deterministic result is
+        // committed and nothing is released), so the valid proof is not
+        // burned by the mismatch.
+        $storage = new ArrayStorage();
+        $challenge = $this->issueBoundChallenge('txn-alpha', $storage);
+        usleep(($challenge->minDurationMs + 10) * 1000);
+        $token = $this->solveToken($challenge->prefix, $challenge->salt, $challenge->targetBits, $challenge->nonce);
+
+        [$engine] = $this->buildBindingEngine(requestBinding: 'txn-OTHER');
+        $dto = new class {
+            public ?string $captcha = null;
+        };
+        $dto->captcha = $token;
+        $meta = $engine->getMetadataFor($dto::class);
+        $meta->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
+
+        $violations = $engine->validate($dto);
+        self::assertCount(1, $violations, 'the wrong-transaction proof is refused');
+        self::assertSame(KiwiCaptcha::INVALID_OR_EXPIRED_ERROR, $violations[0]->getCode());
+        self::assertNull($storage->consumedState($challenge->nonce), 'the binding mismatch fails BEFORE the consume — the challenge is never consumed or burned');
+    }
+
+    public function testStoredResultRetryRepairsTheOutstandingRelease(): void
+    {
+        // P2 regression: the release used to be skipped for stored-result
+        // retries, so a transient release failure during the original
+        // verification could never be repaired by the same logical
+        // operation's retry. solved() is idempotent and ZREM-gated, so
+        // EVERY accepted successful outcome — stored-result retries
+        // included — re-releases.
+        $client = new FakePredisClient();
+        $outstanding = new OutstandingChallenges($client, '{kiwi:validator-test}:outstanding:', RiskKeys::fromMaster(self::SECRET), 3, 100, 0);
+        $storage = new ArrayStorage();
+        $issuer = new Issuer(new Config(secretKey: self::SECRET, targetBits: 8), $storage);
+        $challenge = $issuer->issue('login', '198.51.100.7');
+        self::assertSame(1, $outstanding->issue('198.51.100.7', $challenge->nonce, time() + 120, 120));
+        $sourceKey = $outstanding->sourceKey('198.51.100.7');
+        self::assertSame(1, $client->counters[$sourceKey]);
+
+        usleep(($challenge->minDurationMs + 10) * 1000);
+        $token = $this->solveToken($challenge->prefix, $challenge->salt, $challenge->targetBits, $challenge->nonce);
+
+        $verifier = new Verifier($storage);
+        $stack = new RequestStack();
+        $request = Request::create('/', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7']);
+        $request->attributes->set(KiwiCaptchaValidator::REQUEST_BINDING_ATTRIBUTE, 'txn-123');
+        $request->attributes->set(KiwiCaptchaValidator::OPERATION_ID_ATTRIBUTE, 'op-retry-1');
+        $stack->push($request);
+        $validator = new KiwiCaptchaValidator($verifier, $stack, self::SECRET, false, null, null, $outstanding, null, $storage);
+        $factory = new ConstraintValidatorFactory([KiwiCaptchaValidator::class => $validator]);
+        $engine = Validation::createValidatorBuilder()->setConstraintValidatorFactory($factory)->getValidator();
+        $dto = new class {
+            public ?string $captcha = null;
+        };
+        $dto->captcha = $token;
+        $meta = $engine->getMetadataFor($dto::class);
+        $meta->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
+
+        // The original verification succeeds but the release fails (a
+        // transient Redis outage): the solve must still be accepted.
+        $client->failCommand = 'EVAL';
+        self::assertCount(0, $engine->validate($dto), 'a transient release failure never fails a valid solve');
+        $client->failCommand = null;
+        self::assertSame(1, $client->counters[$sourceKey], 'the transient failure left the slot charged');
+
+        // The same logical operation retries: the core recovers the
+        // committed success and the validator re-releases — the
+        // stored-result retry repairs the accounting.
+        self::assertCount(0, $engine->validate($dto), 'the stored-result retry recovers the same success');
+        self::assertSame(0, $client->counters[$sourceKey], 'the stored-result retry repairs the release');
+    }
+
     public function testPostFieldFallbackCarriesTheBindingWithoutTheAttribute(): void
     {
         // The documented attribute is preferred, but the plain POSTed field

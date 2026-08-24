@@ -462,7 +462,20 @@ final class KiwiCaptchaValidator extends ConstraintValidator
         // regular failed verification — fail closed as a captcha violation.
         // The operation identity is recorded with the pending→consumed
         // transition and gates the replay of the stored success.
-        $outcome = $this->verifier->verify($value, $this->secretKey, $constraint->scope, $clientIp, null, $this->enforceTelemetry, $operationIdentity);
+        //
+        // The transaction binding is enforced by the CORE, before the
+        // one-shot consume: the canonical binding resolved above is
+        // passed as the expected request binding, so a bound challenge
+        // verified under the wrong transaction fails BEFORE its proof is
+        // consumed and burned, and the outstanding release never fires
+        // for it. The core's contract keeps BindingMode::None intact: an
+        // explicitly unbound record (null binding) is permitted
+        // regardless of the presented canonical binding; only a record
+        // that actually carries a binding must equal the expected one.
+        // The post-consume comparison below stays as a defensive
+        // backstop for the configuration-drift case (a bound record
+        // verified with no canonical binding configured).
+        $outcome = $this->verifier->verify($value, $this->secretKey, $constraint->scope, $clientIp, null, $this->enforceTelemetry, $operationIdentity, $canonicalBinding);
 
         // Ambiguous-consume deterministic retry: ConsumeIndeterminate
         // means the consume transition may have happened but its response
@@ -558,14 +571,18 @@ final class KiwiCaptchaValidator extends ConstraintValidator
         }
 
         // Resource accounting: the PoW is solved regardless of the later
-        // risk disposition — the source's outstanding challenge counter
-        // is decremented (best-effort, floored at 0) exactly once,
-        // before the final-disposition resolution. Skipped for a
-        // stored-result retry: the original verification already
-        // decremented it.
-        if (!$this->isStoredResult($outcome)) {
-            $this->outstanding?->solved($outcome->nonce());
-        }
+        // risk disposition — the solved nonce's ORIGINAL source slot and
+        // its live-outstanding membership are released through the
+        // idempotent, nonce-authoritative hook (one-shot, ZREM-gated).
+        // It runs for EVERY accepted successful outcome, stored-result
+        // retries included: a transient release failure during the
+        // original verification must be repaired by the same logical
+        // operation's retry (the deterministic committed result is
+        // recovered, the stored-result outcome re-releases, and only the
+        // nonce's first live-membership removal releases anything — a
+        // repeated release is a no-op). This fails conservatively: the
+        // caps are overcounted, never undercounted.
+        $this->outstanding?->solved($outcome->nonce());
 
         // One final-disposition path: the core's retained result must
         // answer "was the PoW cryptographically valid?" — never "should

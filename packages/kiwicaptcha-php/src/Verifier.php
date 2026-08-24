@@ -1289,16 +1289,17 @@ final class Verifier
         }
 
         // 4b. Application transaction binding: when the caller supplies
-        //     the expected request binding, the record's signed
-        //     request_binding must equal it exactly, compared in constant
-        //     time. The record is authoritative: a record without a
-        //     binding when one is expected is a mismatch (the caller
-        //     demanded a bound transaction and this challenge is not
-        //     bound to any). Null (the default) keeps the current
-        //     behavior — the binding is returned in the outcome, never
-        //     enforced.
-        if ($expectedRequestBinding !== null) {
-            if ($record->requestBinding === null || !hash_equals($record->requestBinding, $expectedRequestBinding)) {
+        //     the expected request binding, a record that actually
+        //     carries a binding must equal it exactly, compared in
+        //     constant time. An EXPLICITLY UNBOUND record (requestBinding
+        //     null — issued under BindingMode::None) is permitted
+        //     regardless of the presented canonical binding: the
+        //     challenge's contract carries no transaction anchor, so the
+        //     application's binding expectation simply does not apply to
+        //     it. Null (the default) keeps the current behavior — the
+        //     binding is returned in the outcome, never enforced.
+        if ($expectedRequestBinding !== null && $record->requestBinding !== null) {
+            if (!hash_equals($record->requestBinding, $expectedRequestBinding)) {
                 return VerifyError::RequestBindingMismatch;
             }
         }

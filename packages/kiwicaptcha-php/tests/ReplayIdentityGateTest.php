@@ -177,15 +177,19 @@ final class ReplayIdentityGateTest extends TestCase
         self::assertNull($storage->find($record->nonce), 'a PENDING record failing a cheap check is deleted per the one-shot policy');
     }
 
-    public function testExpectedRequestBindingWithAnUnboundRecordIsRejected(): void
+    public function testExpectedRequestBindingWithAnUnboundRecordIsPermitted(): void
     {
-        // No binding when one is expected: the caller demanded a bound
-        // transaction and this challenge is not bound to any.
+        // An explicitly unbound record (BindingMode::None at issuance)
+        // carries no transaction anchor: the presented canonical binding
+        // does not apply to it, so the expected-binding enforcement must
+        // permit it — the pre-consume enforcement exists for BOUND
+        // challenges, and rejecting unbound ones would break
+        // binding_mode=none deployments.
         [$storage, $record, $token] = $this->issueAndSolve();
         $verifier = new Verifier($storage, now: static fn (): int => self::ISSUED_AT);
 
         $outcome = $verifier->verify($token, Vectors::SECRET, 'login', '198.51.100.7', expectedRequestBinding: 'txn-123');
-        self::assertSame(VerifyError::RequestBindingMismatch, $outcome->error, 'a record without a binding when one is expected is a mismatch');
+        self::assertTrue($outcome->isOk(), 'an explicitly unbound record is permitted under any expected binding');
     }
 
     public function testNullExpectedRequestBindingLeavesTheBindingUnenforced(): void
