@@ -660,8 +660,7 @@ final class ChallengeCancellationTest extends TestCase
         $client->setTimeMs(1_700_000_000_000);
         $outstanding = new OutstandingChallenges($client, '{kiwi:ttl-test}:outstanding:', RiskKeys::fromMaster(self::SECRET), 2, 100, 0);
         $base = 1_700_000_000;
-        $sourceZset = '{kiwi:ttl-test}:outstanding:source';
-        $pseudonym = substr($outstanding->sourceKey('198.51.100.7'), \strlen('{kiwi:ttl-test}:outstanding:'));
+        $sourceZset = $outstanding->sourceKey('198.51.100.7');
 
         $longA = 'A'.str_repeat('a', 43);
         $short = 'B'.str_repeat('b', 43);
@@ -678,13 +677,21 @@ final class ChallengeCancellationTest extends TestCase
         self::assertSame(1, $outstanding->issue('198.51.100.7', $longD, $base + 300, 300), 'the expired short-lived member freed exactly one slot');
         self::assertSame(0, $outstanding->issue('198.51.100.7', 'E'.str_repeat('e', 43), $base + 300, 300), 'the two long-lived members still occupy the bound');
 
-        $sourceMembers = array_values(array_filter(
-            array_keys($client->zsets[$sourceZset] ?? []),
-            static fn (string $m): bool => str_starts_with($m, $pseudonym.':'),
-        ));
+        // The count is the source ZSET's ZCARD after the score prune: a
+        // well-defined score-range count under the members' DIFFERING
+        // expiry scores (lex-range counting is only defined for
+        // equal-score members and must never gate a hard bound).
+        $sourceMembers = array_keys($client->zsets[$sourceZset] ?? []);
         self::assertCount(2, $sourceMembers, 'the source membership holds exactly the two LIVE members');
-        self::assertStringContainsString($longA, implode('|', $sourceMembers), 'the long-lived member is still live');
-        self::assertStringNotContainsString($short, implode('|', $sourceMembers), 'the short-lived member expired from the membership');
+        self::assertContains($longA, $sourceMembers, 'the long-lived member is still live');
+        self::assertNotContains($short, $sourceMembers, 'the short-lived member expired from the membership');
+        self::assertSame(2, $client->counters[$sourceZset], 'the mirrored per-source count is exact under mixed expiries');
+
+        // Another source's members never leak into this source's bound.
+        $otherZset = $outstanding->sourceKey('203.0.113.9');
+        self::assertSame(1, $outstanding->issue('203.0.113.9', 'F'.str_repeat('f', 43), $base + 300, 300));
+        self::assertSame(2, $client->counters[$sourceZset], 'source B\'s member never counts against source A\'s bound');
+        self::assertSame(1, $client->counters[$otherZset], 'source B holds exactly its own member');
     }
 
     public function testAbortFromAnotherSourceReturnsTheOriginalSourceSlot(): void

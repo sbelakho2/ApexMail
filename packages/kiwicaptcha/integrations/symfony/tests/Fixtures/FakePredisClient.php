@@ -91,35 +91,13 @@ final class FakePredisClient extends \Predis\Client
     }
 
     /**
-     * ZLEXCOUNT over the lex interval [min, max]: the count of members
-     * whose full member string lies in [min, max] (the ZSET is stored as
-     * member => score, so the lex order is the raw member string order).
+     * Test-facing mirror of the per-source live count (the source ZSET's
+     * ZCARD) under the `counters[<sourceKey>]` key, so assertions keep
+     * reading the per-source slot count.
      */
-    public function zlexcount(string $key, string $min, string $max): int
+    private function mirrorSourceCount(string $sourceZset): void
     {
-        $count = 0;
-        // The inclusive-marker `[` is not part of the interval; the lex
-        // range is the raw bound strings.
-        $min = substr($min, 1);
-        $max = substr($max, 1);
-        foreach ($this->zsets[$key] ?? [] as $member => $score) {
-            $member = (string) $member;
-            if ($member >= $min && $member <= $max) {
-                ++$count;
-            }
-        }
-
-        return $count;
-    }
-
-    /**
-     * Test-facing mirror of the per-source live count (the ZLEXCOUNT of
-     * the source membership ZSET) under the legacy `counters[<sourceKey>]`
-     * key, so assertions keep reading the per-source slot count.
-     */
-    private function mirrorSourceCount(string $sourceZset, string $pseudonym): void
-    {
-        $this->counters[str_replace('source', '', $sourceZset).$pseudonym] = $this->zlexcount($sourceZset, '['.$pseudonym.':', '['.$pseudonym.':'.chr(255));
+        $this->counters[$sourceZset] = $this->zcard($sourceZset);
     }
 
     /** Members of a sorted set ordered by score (live leases/hits). */
@@ -439,11 +417,12 @@ final class FakePredisClient extends \Predis\Client
             // the issuance sidecar (nonce -> source pseudonym); argv[1]
             // source cap, argv[2] global cap, argv[3] TTL seconds, argv[4]
             // absolute expiry (the ZSET score), argv[5] the minted nonce,
-            // argv[6] the source pseudonym. Prune expired members ->
-            // per-source ZLEXCOUNT cap -> global ZCARD cap -> `ZADD` both
+            // argv[6] the source pseudonym. Prune the SOURCE's ZSET by
+            // score -> ZCARD cap -> global ZCARD cap -> `ZADD` both
             // memberships + SET the sidecar (EX). No scalar counter
-            // exists: the source bound is its live membership, so a
-            // heterogeneous challenge TTL can never reset it.
+            // exists: the source bound is its LIVE membership (a
+            // well-defined score-range count), so a heterogeneous
+            // challenge TTL can never reset it.
             $sourceZset = (string) $keys[0];
             $global = (string) $keys[1];
             $sidecar = (string) $keys[2];
@@ -453,17 +432,17 @@ final class FakePredisClient extends \Predis\Client
             $now = (string) floor($this->timeMs() / 1000);
             $pseudonym = (string) $rest[5];
             $this->fakeZremrangebyscore([$sourceZset, '-inf', $now]);
-            if ($this->zlexcount($sourceZset, '['.$pseudonym.':', '['.$pseudonym.':'.chr(255)) >= $sourceCap) {
+            if ($this->zcard($sourceZset) >= $sourceCap) {
                 return 0;
             }
             $this->fakeZremrangebyscore([$global, '-inf', $now]);
             if ($this->zcard($global) >= $globalCap) {
                 return -1;
             }
-            $this->fakeZadd([$sourceZset, (string) $rest[3], $pseudonym.':'.(string) $rest[4]]);
+            $this->fakeZadd([$sourceZset, (string) $rest[3], (string) $rest[4]]);
             $this->fakeZadd([$global, (string) $rest[3], (string) $rest[4]]);
             $this->fakeSet([$sidecar, $pseudonym, 'EX', $ttl]);
-            $this->mirrorSourceCount($sourceZset, $pseudonym);
+            $this->mirrorSourceCount($sourceZset);
 
             return 1;
         }
@@ -471,23 +450,24 @@ final class FakePredisClient extends \Predis\Client
         if (str_contains($script, 'Outstanding challenge release')) {
             // OutstandingChallenges::solved / ::cancelled /
             // ::abortedBeforeHandoff: keys[1] the global live ZSET,
-            // keys[2] the nonce sidecar, keys[3] the per-source membership
-            // ZSET; argv[1] the released nonce. One-shot,
+            // keys[2] the nonce sidecar, keys[3] the ORIGINAL source's
+            // membership ZSET (the caller's plain-read resolution);
+            // argv[1] the released nonce, argv[2] the caller-resolved
+            // source pseudonym (re-verified against the sidecar). One-shot,
             // nonce-authoritative: only the ZREM of the nonce from the
-            // live membership releases the ORIGINAL source's membership
-            // (member <source>:<nonce>) and deletes the sidecar; the
-            // caller's IP is never used. A duplicate release (ZREM == 0)
-            // is a no-op.
+            // live membership releases the ORIGINAL source's member and
+            // deletes the sidecar; the caller's IP is never used. A
+            // duplicate release (ZREM == 0) is a no-op.
             $live = (string) $keys[0];
             $sidecar = (string) $keys[1];
             $sourceZset = (string) $keys[2];
             $nonce = (string) $rest[0];
+            $expectedSource = (string) $rest[1];
             $removed = $this->fakeZrem([$live, $nonce]);
-            if ($removed === 1 && isset($this->strings[$sidecar])) {
-                $source = (string) $this->strings[$sidecar];
-                $this->fakeZrem([$sourceZset, $source.':'.$nonce]);
+            if ($removed === 1 && isset($this->strings[$sidecar]) && (string) $this->strings[$sidecar] === $expectedSource) {
+                $this->fakeZrem([$sourceZset, $nonce]);
                 $this->fakeDel([$sidecar]);
-                $this->mirrorSourceCount($sourceZset, $source);
+                $this->mirrorSourceCount($sourceZset);
             }
 
             return $removed;

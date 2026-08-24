@@ -12,28 +12,30 @@ use KiwiCaptcha\Risk\RiskKeys;
  * deployment-wide.
  *
  * Keys (one hash-tag family {kiwi:<ns>}, Cluster safe):
- *   {kiwi:<ns>}:outstanding:source      the per-source live membership: a
- *                                       single ZSET for every source, member
- *                                       `<source-pseudonym>:<nonce>`, score
- *                                       the challenge's absolute expiry. The
- *                                       per-source bound is the lex count of
- *                                       that source's members after pruning
- *                                       expired ones, so the bound is
- *                                       EXPIRY-AWARE: a short-TTL challenge
+ *   {kiwi:<ns>}:outstanding:<hex>       the per-source LIVE membership: a
+ *                                       ZSET per source, member = the
+ *                                       challenge nonce, score = the
+ *                                       challenge's absolute expiry. The
+ *                                       per-source bound is the source
+ *                                       ZSET's ZCARD after pruning expired
+ *                                       members by score — a WELL-DEFINED
+ *                                       score-range primitive (unlike
+ *                                       lex-range counting, which Redis
+ *                                       only defines for equal-score
+ *                                       members): a short-TTL challenge
  *                                       can never shorten the lifetime of
  *                                       the source's other outstanding
- *                                       challenges (the old scalar counter
- *                                       EXPIRE reset the whole counter to
- *                                       the newest challenge's TTL, a
- *                                       per-source hard-cap bypass).
+ *                                       challenges, and each member
+ *                                       expires on its own schedule.
  *   {kiwi:<ns>}:outstanding:global:live deployment-wide live-outstanding
  *                                       membership (a Redis ZSET).
  *   {kiwi:<ns>}:outstanding:nonce:<nonce>  issuance sidecar: pairs the
  *                                       nonce with its original source
- *                                       pseudonym, so a later release can
- *                                       return exactly the source that
- *                                       issued the challenge, and never the
- *                                       releaser's.
+ *                                       pseudonym (the per-source ZSET's
+ *                                       hex key suffix), so a later
+ *                                       release can return exactly the
+ *                                       source that issued the challenge,
+ *                                       and never the releaser's.
  *   {kiwi:<ns>}:cancel:<hex>            per-source cancellation window.
  *
  * The source identity is the hex form of
@@ -57,15 +59,18 @@ use KiwiCaptcha\Risk\RiskKeys;
  * never outlive its challenge: the score expires it even if every removal
  * path fails. The global cap is a real bound on live challenges, not a
  * cumulative high-water mark, so sustained traffic can no longer
- * accumulate issuance refusals. The per-source bound is the same model:
- * the source membership ZSET prunes expired members and counts the live
- * ones per source with ZLEXCOUNT, so heterogeneous challenge TTLs cannot
- * reset the source bound's lifetime and expired challenges stop counting
+ * accumulate issuance refusals. The per-source bound is the same model,
+ * one ZSET per source (the key is the source's own hex pseudonym, computed
+ * in PHP on the issuance side and resolved from the sidecar by a plain
+ * read on the release side — never constructed inside a script): the
+ * issuance script prunes the source ZSET by score and refuses when ZCARD
+ * >= the per-source cap, so heterogeneous challenge TTLs cannot reset the
+ * source bound's lifetime and expired challenges stop counting
  * immediately. A client cancellation returns the original source's slot
  * too. The issuance sidecar (`outstanding:nonce:<nonce>`) pairs the
  * nonce with the source pseudonym that issued it. The release is
  * one-shot: the live-membership ZREM is the gate, only then is the
- * sidecar read and the ORIGINAL source's membership released. The
+ * sidecar read and the ORIGINAL source's ZSET member released. The
  * releaser's own identity is never used, since the identity would be
  * wrong and the request client-controlled. Only the sidecar's original
  * source is released, and only when the global member actually existed.
@@ -74,20 +79,22 @@ use KiwiCaptcha\Risk\RiskKeys;
  *
  * The `ZREMRANGEBYSCORE` prune is bounded by the ZSET's own size: a
  * member is removed exactly when its score fell below the current time.
- * Both ZSETs are bounded by the global cap plus, transiently, the
- * requests between the prune and their `ZADD`; see the issuance script.
- * The `global:live` key is deliberately named apart from the legacy
- * `global` counter key, so a deployment rolling out this accounting
- * never reads a `WRONGTYPE` on the legacy key type while its string
- * counter is still decaying.
+ * All ZSETs are bounded by the global cap plus, transiently, the requests
+ * between the prune and their `ZADD`; see the issuance script. The
+ * `global:live` key is deliberately named apart from the legacy `global`
+ * counter key, so a deployment rolling out this accounting never reads a
+ * `WRONGTYPE` on the legacy key type while its string counter is still
+ * decaying.
  *
  * Every script accesses ONLY keys supplied as KEYS arguments: no
  * programmatically generated key names, no key names derived from stored
- * data. The source pseudonym read from the sidecar becomes a ZSET
- * MEMBER (the source membership's member encoding `source:nonce`), never
- * a key name, so the scripts stay inside the EVAL contract on sharded /
- * proxied / Redis Cloud topologies as well as standalone and OSS Cluster
- * (all keys share the one {kiwi:<ns>} hash slot).
+ * data. The release side resolves the per-source ZSET key in PHP from a
+ * plain sidecar GET (the sidecar's value is the hex pseudonym; the key is
+ * the prefix + that hex) and passes it as a declared KEYS argument; the
+ * script re-verifies the sidecar against that resolved source before
+ * touching the ZSET. The scripts therefore stay inside the EVAL contract
+ * on sharded / proxied / Redis Cloud topologies as well as standalone
+ * and OSS Cluster (all keys share the one {kiwi:<ns>} hash slot).
  *
  * Verification, see {@see solved()}: one-shot, nonce-authoritative
  * release of the solved nonce from the live membership, the original
@@ -132,9 +139,9 @@ final class OutstandingChallenges
 {
     /**
      * Atomic check + admit + live-membership add + source sidecar:
-     *   KEYS[1] = {kiwi:<ns>}:outstanding:source (the per-source
-     *             membership ZSET, one declared key for every source —
-     *             the source is a MEMBER prefix, never a key name).
+     *   KEYS[1] = {kiwi:<ns>}:outstanding:<hex> (the issuing source's
+     *             membership ZSET — one key per source, computed in PHP
+     *             from the caller's canonical IP, never inside the script).
      *   KEYS[2] = {kiwi:<ns>}:outstanding:global:live (live-outstanding ZSET).
      *   KEYS[3] = {kiwi:<ns>}:outstanding:nonce:<nonce> (issuance sidecar).
      *   ARGV[1] = per-source cap.
@@ -145,39 +152,38 @@ final class OutstandingChallenges
      *   ARGV[4] = the challenge's absolute expiry in epoch seconds. This
      *             is the ZSET score, so a member dies exactly when its
      *             challenge expires and is never refreshed.
-     *   ARGV[5] = the minted challenge nonce, which is the global ZSET
-     *             member and the `<source>:<nonce>` source member suffix.
+     *   ARGV[5] = the minted challenge nonce, the ZSET member.
      *   ARGV[6] = the issuing source's pseudonym (an HMAC and never a raw
-     *             IP). It is the source member prefix and is stored in the
-     *             sidecar so a later release returns exactly this
-     *             source's slot.
+     *             IP). It is stored in the sidecar so a later release
+     *             returns exactly this source's slot.
      * Prunes expired members with `ZREMRANGEBYSCORE` -inf now, bounded by
-     * the ZSETs' sizes. Refuses (0 = source cap, -1 = global cap) before
-     * any admission write. The per-source count is the source's live
-     * membership (ZLEXCOUNT of the `[<source>:` lex range): a challenge
-     * issued with a short TTL expires from the source membership on its
-     * own schedule and can never shorten the lifetime of the source's
-     * other outstanding challenges (the scalar EXPIRE of the previous
-     * design reset the whole per-source counter to the newest TTL, a hard
-     * bound that the configuration's heterogeneous sitekey TTLs could
-     * bypass). Then `ZADD`s both memberships and `SET`s the sidecar. A
-     * challenge is only returned to the client when the script admitted
-     * it, so the bounds can never silently exceed the caps through
-     * concurrency.
+     * the ZSETs' sizes, and counts the source's LIVE members with ZCARD —
+     * a score-range primitive with well-defined semantics under the
+     * members' differing expiry scores (lex-range counting is only
+     * defined for equal-score members and must not gate a hard bound).
+     * Refuses (0 = source cap, -1 = global cap) before any admission
+     * write. A challenge issued with a short TTL expires from the source
+     * membership on its own schedule and can never shorten the lifetime
+     * of the source's other outstanding challenges (the scalar EXPIRE of
+     * the earlier design reset the whole per-source counter to the
+     * newest TTL, a hard bound that the configuration's heterogeneous
+     * sitekey TTLs could bypass). Then `ZADD`s both memberships and
+     * `SET`s the sidecar. A challenge is only returned to the client when
+     * the script admitted it, so the bounds can never silently exceed the
+     * caps through concurrency.
      */
     private const ISSUE_SCRIPT = <<<'LUA'
--- Outstanding challenge issuance: atomic per-source live ZLEXCOUNT cap check
--- + global live cap check + memberships ZADD + source sidecar. The per-source
--- bound is the source's LIVE membership (members expire by their absolute
--- scores), so no scalar TTL can ever be reset by a heterogeneous challenge.
+-- Outstanding challenge issuance: atomic per-source live ZCARD cap check
+-- (score-pruned) + global live cap check + memberships ZADD + source
+-- sidecar. The per-source bound is the source's LIVE membership, so no
+-- scalar TTL can ever be reset by a heterogeneous challenge.
 local t = redis.call('TIME')
 local now = tonumber(t[1])
 redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', now)
-local src = redis.call('ZLEXCOUNT', KEYS[1], '[' .. ARGV[6] .. ':', '[' .. ARGV[6] .. ':\xff')
-if tonumber(src) >= tonumber(ARGV[1]) then return 0 end
+if redis.call('ZCARD', KEYS[1]) >= tonumber(ARGV[1]) then return 0 end
 redis.call('ZREMRANGEBYSCORE', KEYS[2], '-inf', now)
 if redis.call('ZCARD', KEYS[2]) >= tonumber(ARGV[2]) then return -1 end
-redis.call('ZADD', KEYS[1], tonumber(ARGV[4]), ARGV[6] .. ':' .. ARGV[5])
+redis.call('ZADD', KEYS[1], tonumber(ARGV[4]), ARGV[5])
 redis.call('ZADD', KEYS[2], tonumber(ARGV[4]), ARGV[5])
 redis.call('SET', KEYS[3], ARGV[6], 'EX', tonumber(ARGV[3]))
 return 1
@@ -187,31 +193,37 @@ LUA;
      * The single nonce-authoritative release, shared by solve, client
      * cancellation and proven-not-handed-off issuance abort: the
      * live-membership ZREM is the ONE-SHOT gate; only its removal reads
-     * the issuance sidecar, releases the ORIGINAL source's membership
-     * (the `<source>:<nonce>` member — the source pseudonym is a member
-     * prefix, never a key name) and deletes the sidecar. The caller's
-     * identity plays no role (a challenge issued through source A and
-     * released from source B must release A's slot, never B's — IP
-     * binding may be disabled). Duplicate releases are harmless: only
-     * the removal of the nonce from the live membership releases
-     * anything, and a member that expired away removes nothing. Every
-     * accessed key is a declared KEYS argument — no dynamically
-     * discovered key names, so the script honors the EVAL contract on
-     * standalone, OSS Cluster and stricter sharded/proxied topologies.
+     * the issuance sidecar, releases the ORIGINAL source's ZSET member
+     * and deletes the sidecar. The caller's identity plays no role (a
+     * challenge issued through source A and released from source B must
+     * release A's slot, never B's — IP binding may be disabled).
+     * Duplicate releases are harmless: only the removal of the nonce from
+     * the live membership releases anything, and a member that expired
+     * away removes nothing. Every accessed key is a declared KEYS
+     * argument — the per-source ZSET key (KEYS[3]) is resolved by the
+     * caller from a plain sidecar read, never constructed from stored
+     * data inside the script, and the script re-verifies the sidecar
+     * against the caller's resolved source (ARGV[2]) before touching it,
+     * so the EVAL contract holds on standalone, OSS Cluster and stricter
+     * sharded/proxied topologies.
      *   KEYS[1] = the global live-outstanding ZSET.
      *   KEYS[2] = the nonce's issuance sidecar.
-     *   KEYS[3] = the per-source membership ZSET.
+     *   KEYS[3] = the ORIGINAL source's membership ZSET (the caller's
+     *             plain-read resolution; re-verified inside the script).
      *   ARGV[1] = the released challenge nonce.
+     *   ARGV[2] = the source pseudonym the caller resolved (must equal
+     *             the sidecar's value for the release to proceed).
      */
     private const RELEASE_SCRIPT = <<<'LUA'
 -- Outstanding challenge release (solve / cancel / aborted-before-handoff):
--- one-shot ZREM-gated release of the ORIGINAL source's membership + sidecar
--- DEL. All keys are declared; the sidecar's source is a ZSET member prefix.
+-- one-shot ZREM-gated release of the ORIGINAL source's ZSET member +
+-- sidecar DEL. All keys are declared; the source resolution is re-verified
+-- against the sidecar.
 local removed = redis.call('ZREM', KEYS[1], ARGV[1])
 if removed == 1 then
   local source = redis.call('GET', KEYS[2])
-  if source and source ~= '' then
-    redis.call('ZREM', KEYS[3], source .. ':' .. ARGV[1])
+  if source and source ~= '' and source == ARGV[2] then
+    redis.call('ZREM', KEYS[3], ARGV[1])
     redis.call('DEL', KEYS[2])
   end
 end
@@ -282,8 +294,8 @@ LUA;
     }
 
     /**
-     * The per-source pseudonym for a client IP: the raw IP never appears
-     * in Redis, only the hex form of
+     * The per-source membership ZSET key for a client IP: the raw IP never
+     * appears in Redis, only the hex form of
      * hmac_sha256(canonical-ip-bytes, keys->event).
      * An unparseable IP (or an empty one) is bucketed with the other
      * unidentifiable sources under a constant tag (conservative shared
@@ -298,6 +310,15 @@ LUA;
         }
 
         return $this->keyPrefix.hash_hmac('sha256', $identity, $this->keys->event);
+    }
+
+    /**
+     * The per-source pseudonym (the hex HMAC) for a client IP — the
+     * sourceKey() suffix, what the issuance sidecar stores.
+     */
+    public function sourcePseudonym(string $clientIp): string
+    {
+        return substr($this->sourceKey($clientIp), \strlen($this->keyPrefix));
     }
 
     /**
@@ -335,8 +356,7 @@ LUA;
     public function issue(string $clientIp, string $nonce, int $expiresAtSecs, int $challengeTtlSecs): int
     {
         $ttl = $challengeTtlSecs + $this->ttlMarginSecs;
-        $source = $this->sourceKey($clientIp);
-        $sourceZset = $this->keyPrefix.'source';
+        $sourceZset = $this->sourceKey($clientIp);
         $global = $this->keyPrefix.'global:live';
         $sidecar = $this->keyPrefix.'nonce:'.$nonce;
 
@@ -346,7 +366,7 @@ LUA;
             (string) max(1, $ttl),
             (string) $expiresAtSecs,
             $nonce,
-            substr($source, \strlen($this->keyPrefix)),
+            substr($sourceZset, \strlen($this->keyPrefix)),
         ]);
     }
 
@@ -354,21 +374,30 @@ LUA;
      * One-shot, nonce-authoritative release: removes the solved nonce
      * from the live membership, and only when the removal actually
      * happened, reads the nonce's issuance sidecar and releases the
-     * ORIGINAL source's membership (floored by its own expiry scores),
-     * then drops the sidecar. The caller's IP is never used; a duplicate
-     * solve (ZREM == 0) releases nothing. Never throws: a failed release
-     * must never break a valid solve (the memberships decay by their
-     * expiries otherwise — fail-closed, the caps are overcounted, never
-     * undercounted).
+     * ORIGINAL source's ZSET member, then drops the sidecar. The caller's
+     * IP is never used; a duplicate solve (ZREM == 0) releases nothing.
+     * The per-source ZSET key is resolved here from a plain sidecar read
+     * (the sidecar's pseudonym is a key SUFFIX, never a script-derived
+     * key name) and handed to the script as a declared key, which
+     * re-verifies it. Never throws: a failed release must never break a
+     * valid solve (the memberships decay by their expiries otherwise —
+     * fail-closed, the caps are overcounted, never undercounted).
      */
     public function solved(string $nonce): void
     {
+        $sidecar = $this->keyPrefix.'nonce:'.$nonce;
+        $source = $this->redis->get($sidecar);
+        if (!\is_string($source) || $source === '') {
+            // No sidecar: the challenge was never admitted or its release
+            // already happened — nothing to gate on, nothing to release.
+            return;
+        }
         try {
             $this->eval(self::RELEASE_SCRIPT, [
                 $this->keyPrefix.'global:live',
-                $this->keyPrefix.'nonce:'.$nonce,
-                $this->keyPrefix.'source',
-            ], [$nonce]);
+                $sidecar,
+                $this->keyPrefix.$source,
+            ], [$nonce, $source]);
         } catch (\Throwable) {
             // Best-effort: an unavailable membership must never fail a
             // valid solve.
@@ -380,7 +409,7 @@ LUA;
      * never handed out (the controller's proven-not-handed-out failure
      * paths): the exact same one-shot model as solve and cancellation —
      * the nonce's live membership is removed and only that removal
-     * releases the original source's membership and drops the sidecar.
+     * releases the original source's ZSET member and drops the sidecar.
      * The source slot is returned so a crashed issuance does not
      * silently consume the source's stockpile budget. The nonce leaves
      * the deployment-wide live membership so an abandoned challenge
@@ -397,12 +426,17 @@ LUA;
         if ($nonce === null || $nonce === '') {
             return;
         }
+        $sidecar = $this->keyPrefix.'nonce:'.$nonce;
+        $source = $this->redis->get($sidecar);
+        if (!\is_string($source) || $source === '') {
+            return;
+        }
         try {
             $this->eval(self::RELEASE_SCRIPT, [
                 $this->keyPrefix.'global:live',
-                $this->keyPrefix.'nonce:'.$nonce,
-                $this->keyPrefix.'source',
-            ], [$nonce]);
+                $sidecar,
+                $this->keyPrefix.$source,
+            ], [$nonce, $source]);
         } catch (\Throwable) {
             // Best-effort: an unavailable membership must never change
             // the response; the memberships decay by their expiry scores
@@ -417,17 +451,22 @@ LUA;
      * (CancellableStorageInterface). The ZREM gate makes it idempotent:
      * cancelling a nonce with no live member (never issued, expired away,
      * or already removed by a solve/abort/cancellation) is a no-op. The
-     * original source membership (from the issuance sidecar, never the
+     * original source ZSET member (from the issuance sidecar, never the
      * canceller's IP) is released exactly once per issued challenge.
      */
     public function cancelled(string $nonce): void
     {
+        $sidecar = $this->keyPrefix.'nonce:'.$nonce;
+        $source = $this->redis->get($sidecar);
+        if (!\is_string($source) || $source === '') {
+            return;
+        }
         try {
             $this->eval(self::RELEASE_SCRIPT, [
                 $this->keyPrefix.'global:live',
-                $this->keyPrefix.'nonce:'.$nonce,
-                $this->keyPrefix.'source',
-            ], [$nonce]);
+                $sidecar,
+                $this->keyPrefix.$source,
+            ], [$nonce, $source]);
         } catch (\Throwable) {
             // Best-effort: a failed removal never changes the cancellation
             // response; the member expires by its score (fail-closed: the

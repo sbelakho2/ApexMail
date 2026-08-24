@@ -438,6 +438,9 @@ final class RollbackFakeRedis extends \Predis\Client
 
     public function __call($commandID, $arguments)
     {
+        if (strtoupper((string) $commandID) === 'GET') {
+            return $this->strings[(string) $arguments[0]] ?? null;
+        }
         if (strtoupper((string) $commandID) !== 'EVAL') {
             throw new \LogicException('unexpected command '.$commandID);
         }
@@ -457,16 +460,16 @@ final class RollbackFakeRedis extends \Predis\Client
             $global = (string) $keys[1];
             $sidecar = (string) $keys[2];
             $pseudonym = (string) $rest[5];
-            if ($this->sourceCount($sourceZset, $pseudonym) >= (int) $rest[0]) {
+            if ($this->sourceCount($sourceZset) >= (int) $rest[0]) {
                 return 0;
             }
             if (\count($this->zsets[$global] ?? []) >= (int) $rest[1]) {
                 return -1;
             }
-            $this->zsets[$sourceZset][$pseudonym.':'.(string) $rest[4]] = (float) $rest[3];
+            $this->zsets[$sourceZset][(string) $rest[4]] = (float) $rest[3];
             $this->zsets[$global][(string) $rest[4]] = (float) $rest[3];
             $this->strings[$sidecar] = $pseudonym;
-            $this->mirrorSourceCount($sourceZset, $pseudonym);
+            $this->mirrorSourceCount($sourceZset);
 
             return 1;
         }
@@ -474,21 +477,22 @@ final class RollbackFakeRedis extends \Predis\Client
         if (str_contains($script, 'Outstanding challenge release')) {
             // OutstandingChallenges::solved / ::abortedBeforeHandoff:
             // keys[1] the global live ZSET, keys[2] the nonce sidecar,
-            // keys[3] the per-source membership ZSET; argv[1] the released
-            // nonce. One-shot, nonce-authoritative.
+            // keys[3] the ORIGINAL source's membership ZSET; argv[1] the
+            // released nonce, argv[2] the caller-resolved source. One-shot,
+            // nonce-authoritative.
             $global = (string) $keys[0];
             $sidecar = (string) $keys[1];
             $sourceZset = (string) $keys[2];
             $nonce = (string) $rest[0];
+            $expectedSource = (string) $rest[1];
             $removed = 0;
             if (isset($this->zsets[$global][$nonce])) {
                 unset($this->zsets[$global][$nonce]);
                 $removed = 1;
-                if (isset($this->strings[$sidecar])) {
-                    $source = (string) $this->strings[$sidecar];
-                    unset($this->zsets[$sourceZset][$source.':'.$nonce]);
+                if (isset($this->strings[$sidecar]) && (string) $this->strings[$sidecar] === $expectedSource) {
+                    unset($this->zsets[$sourceZset][$nonce]);
                     unset($this->strings[$sidecar]);
-                    $this->mirrorSourceCount($sourceZset, $source);
+                    $this->mirrorSourceCount($sourceZset);
                 }
             }
 
@@ -498,21 +502,13 @@ final class RollbackFakeRedis extends \Predis\Client
         throw new \LogicException('unexpected script');
     }
 
-    private function sourceCount(string $sourceZset, string $pseudonym): int
+    private function sourceCount(string $sourceZset): int
     {
-        $count = 0;
-        foreach ($this->zsets[$sourceZset] ?? [] as $member => $score) {
-            $member = (string) $member;
-            if (str_starts_with($member, $pseudonym.':')) {
-                ++$count;
-            }
-        }
-
-        return $count;
+        return \count($this->zsets[$sourceZset] ?? []);
     }
 
-    private function mirrorSourceCount(string $sourceZset, string $pseudonym): void
+    private function mirrorSourceCount(string $sourceZset): void
     {
-        $this->counters[str_replace('source', '', $sourceZset).$pseudonym] = $this->sourceCount($sourceZset, $pseudonym);
+        $this->counters[$sourceZset] = $this->sourceCount($sourceZset);
     }
 }

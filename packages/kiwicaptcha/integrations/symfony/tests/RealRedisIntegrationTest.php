@@ -230,16 +230,14 @@ final class RealRedisIntegrationTest extends TestCase
         self::assertSame(0, $outstanding->issue('198.51.100.7', base64_encode(random_bytes(32)), $now + 60, 60), 'the 4th outstanding challenge of one source must be refused');
 
         $sourceKey = $outstanding->sourceKey('198.51.100.7');
-        $pseudonym = substr($sourceKey, \strlen('{kiwi:ci}:outstanding:'));
-        self::assertNull($this->client->get($sourceKey), 'the per-source representation is a membership, never a scalar counter');
-        self::assertSame(3, $this->client->zlexcount('{kiwi:ci}:outstanding:source', '['.$pseudonym.':', '['.$pseudonym.':'.chr(255)), 'the per-source bound counts the three LIVE members');
+        self::assertSame(3, $this->client->zcard($sourceKey), 'the per-source bound counts the three LIVE members (ZCARD after the score prune — well-defined under the members\' differing expiry scores)');
         self::assertSame(3, $this->client->zcard('{kiwi:ci}:outstanding:global:live'), 'the live-outstanding membership holds the three admitted nonces');
 
         // The issuance sidecar pairs each nonce with the original source
         // pseudonym (the HMAC hex, never a raw IP), same hash tag, EX =
         // challenge lifetime + ttl margin.
         $sidecarA = '{kiwi:ci}:outstanding:nonce:'.$nonceA;
-        self::assertSame($pseudonym, (string) $this->client->get($sidecarA), 'the sidecar stores the issuing source\'s pseudonym');
+        self::assertSame(substr($sourceKey, \strlen('{kiwi:ci}:outstanding:')), (string) $this->client->get($sidecarA), 'the sidecar stores the issuing source\'s pseudonym');
         $sidecarTtl = $this->client->ttl($sidecarA);
         self::assertGreaterThanOrEqual(60, $sidecarTtl, 'the sidecar EX = challenge lifetime (60) + ttl margin (5)');
         self::assertLessThanOrEqual(65, $sidecarTtl);
@@ -247,17 +245,52 @@ final class RealRedisIntegrationTest extends TestCase
         // A valid solve removes the nonce from BOTH memberships (the
         // one-shot, nonce-authoritative release) and deletes the sidecar.
         $outstanding->solved($nonceA);
-        self::assertSame(2, $this->client->zlexcount('{kiwi:ci}:outstanding:source', '['.$pseudonym.':', '['.$pseudonym.':'.chr(255)), 'the solve releases the original source member');
+        self::assertSame(2, $this->client->zcard($sourceKey), 'the solve releases the original source member');
         self::assertSame(2, $this->client->zcard('{kiwi:ci}:outstanding:global:live'));
         self::assertNull($this->client->get($sidecarA), 'a valid solve deletes the issuance sidecar');
         $outstanding->solved($nonceB);
         $outstanding->solved($nonceC);
         $outstanding->solved(base64_encode(random_bytes(32)));
-        self::assertSame(0, $this->client->zlexcount('{kiwi:ci}:outstanding:source', '['.$pseudonym.':', '['.$pseudonym.':'.chr(255)), 'every released member leaves the source membership');
+        self::assertSame(0, $this->client->zcard($sourceKey), 'every released member leaves the source membership');
         self::assertSame(0, $this->client->zcard('{kiwi:ci}:outstanding:global:live'), 'every solved nonce leaves the live membership');
 
         // The cap frees when the membership drops: a new issuance is admitted.
         self::assertSame(1, $outstanding->issue('198.51.100.7', base64_encode(random_bytes(32)), $now + 60, 60));
+    }
+
+    public function testMixedExpiryScoresCountExactlyAgainstRealRedis(): void
+    {
+        // The flagged concern: lex-range counting (ZLEXCOUNT) is only
+        // defined for equal-score members, so a hard cap gated on it is
+        // unsound under the members' differing expiry scores. The
+        // per-source bound is a SCORE-range count — ZCARD after
+        // ZREMRANGEBYSCORE — which is exact under any score mix.
+        $this->client->flushall();
+        $secret = '0123456789abcdef0123456789abcdef';
+        $outstanding = new OutstandingChallenges($this->client, '{kiwi:ci}:outstanding:', RiskKeys::fromMaster($secret), 3, 100, 0);
+        $now = time();
+        $sourceA = $outstanding->sourceKey('198.51.100.7');
+        $sourceB = $outstanding->sourceKey('203.0.113.9');
+        $n1 = base64_encode(random_bytes(32));
+        $n2 = base64_encode(random_bytes(32));
+        $n3 = base64_encode(random_bytes(32));
+
+        // 1 short-lived (1s) + 2 long-lived (300s) members for source A.
+        self::assertSame(1, $outstanding->issue('198.51.100.7', $n1, $now + 1, 1));
+        self::assertSame(1, $outstanding->issue('198.51.100.7', $n2, $now + 300, 300));
+        self::assertSame(1, $outstanding->issue('198.51.100.7', $n3, $now + 300, 300));
+        self::assertSame(0, $outstanding->issue('198.51.100.7', base64_encode(random_bytes(32)), $now + 300, 300), 'the 4th member is refused under MIXED expiry scores — the count is exact');
+        self::assertSame(3, $this->client->zcard($sourceA), 'the per-source count is exactly the three live members with differing scores');
+
+        // The bound is per-source: B issues freely and never leaks into A.
+        self::assertSame(1, $outstanding->issue('203.0.113.9', base64_encode(random_bytes(32)), $now + 300, 300));
+        self::assertSame(1, $this->client->zcard($sourceB));
+        self::assertSame(3, $this->client->zcard($sourceA), 'source B\'s member never counts against source A\'s bound');
+
+        // A solve of one long-lived member drops the count exactly.
+        $outstanding->solved($n2);
+        self::assertSame(2, $this->client->zcard($sourceA), 'the release removes exactly one member');
+        self::assertSame(1, $this->client->zcard($sourceB), 'source B\'s member is untouched');
     }
 
     public function testCancellationReleasesTheOriginalSourceSlotAgainstRealRedis(): void
@@ -276,28 +309,26 @@ final class RealRedisIntegrationTest extends TestCase
         self::assertSame(1, $outstanding->issue('198.51.100.7', $nonce, $now + 60, 60));
         $sourceA = $outstanding->sourceKey('198.51.100.7');
         $sourceB = $outstanding->sourceKey('203.0.113.9');
-        $pseudoA = substr($sourceA, \strlen('{kiwi:ci}:outstanding:'));
-        $pseudoB = substr($sourceB, \strlen('{kiwi:ci}:outstanding:'));
         $sidecar = '{kiwi:ci}:outstanding:nonce:'.$nonce;
-        self::assertSame(1, $this->client->zlexcount('{kiwi:ci}:outstanding:source', '['.$pseudoA.':', '['.$pseudoA.':'.chr(255)), 'the issuance holds A\'s member');
+        self::assertSame(1, $this->client->zcard($sourceA), 'the issuance holds A\'s member');
         self::assertSame(1, $this->client->zcard('{kiwi:ci}:outstanding:global:live'));
         self::assertNotNull($this->client->get($sidecar));
 
         // An unrelated issuance for another source: the cancellation of
         // A's nonce must never touch B's member.
         self::assertSame(1, $outstanding->issue('203.0.113.9', $otherNonce, $now + 60, 60));
-        self::assertSame(1, $this->client->zlexcount('{kiwi:ci}:outstanding:source', '['.$pseudoB.':', '['.$pseudoB.':'.chr(255)));
+        self::assertSame(1, $this->client->zcard($sourceB));
 
         $outstanding->cancelled($nonce);
-        self::assertSame(0, $this->client->zlexcount('{kiwi:ci}:outstanding:source', '['.$pseudoA.':', '['.$pseudoA.':'.chr(255)), 'the cancellation returns the ORIGINAL source (A) slot');
-        self::assertSame(1, $this->client->zlexcount('{kiwi:ci}:outstanding:source', '['.$pseudoB.':', '['.$pseudoB.':'.chr(255)), 'the cancelling source (B) is untouched — the request identity never participates');
+        self::assertSame(0, $this->client->zcard($sourceA), 'the cancellation returns the ORIGINAL source (A) slot');
+        self::assertSame(1, $this->client->zcard($sourceB), 'the cancelling source (B) is untouched — the request identity never participates');
         self::assertSame(1, $this->client->zcard('{kiwi:ci}:outstanding:global:live'), 'only A\'s nonce leaves the live membership');
         self::assertNull($this->client->get($sidecar), 'the cancellation deletes the sidecar');
 
         // Duplicate cancel: ZREM == 0 -> nothing is released twice.
         $outstanding->cancelled($nonce);
         $outstanding->cancelled($nonce);
-        self::assertSame(0, $this->client->zlexcount('{kiwi:ci}:outstanding:source', '['.$pseudoA.':', '['.$pseudoA.':'.chr(255)), 'a duplicate cancel never re-releases the original source member');
+        self::assertSame(0, $this->client->zcard($sourceA), 'a duplicate cancel never re-releases the original source member');
     }
 
     public function testSemaphoreWaitersGuardAgainstRealRedis(): void

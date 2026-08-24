@@ -1547,9 +1547,8 @@ final class ChainedChallengeTest extends TestCase
         $storage->consume($newNonce);
         $storage->commitResult($newNonce, false, null);
         $sourceKey = '{kiwi:chain-test}:outstanding:'.hash_hmac('sha256', Issuer::canonicalIpFamily('198.51.100.7'), RiskKeys::fromMaster(self::SECRET)->event);
-        $pseudonym = substr($sourceKey, \strlen('{kiwi:chain-test}:outstanding:'));
         for ($i = 0; $i < 5; ++$i) {
-            $client->zsets['{kiwi:chain-test}:outstanding:source'][$pseudonym.':seed'.$i] = 9999999999.0;
+            $client->zsets[$sourceKey]['seed'.$i] = 9999999999.0;
         }
         $client->counters[$sourceKey] = 5;
 
@@ -4399,22 +4398,28 @@ final class AbortAwareFakeRedis extends \Predis\Client
         // Deliberately skip the parent constructor: no connection setup.
     }
 
-    private function sourceCount(string $sourceZset, string $pseudonym): int
+    private function sourceCount(string $sourceZset): int
     {
-        $count = 0;
-        foreach ($this->zsets[$sourceZset] ?? [] as $member => $score) {
-            $member = (string) $member;
-            if (str_starts_with($member, $pseudonym.':')) {
-                ++$count;
-            }
-        }
-
-        return $count;
+        return \count($this->zsets[$sourceZset] ?? []);
     }
 
-    private function mirrorSourceCount(string $sourceZset, string $pseudonym): void
+    private function mirrorSourceCount(string $sourceZset): void
     {
-        $this->counters[str_replace('source', '', $sourceZset).$pseudonym] = $this->sourceCount($sourceZset, $pseudonym);
+        $this->counters[$sourceZset] = $this->sourceCount($sourceZset);
+    }
+
+    private function timeMs(): float
+    {
+        return (float) (time() * 1000);
+    }
+
+    private function fakeZremrangebyscoreMember(string $key, int $nowSecs): void
+    {
+        foreach ($this->zsets[$key] ?? [] as $member => $score) {
+            if ((float) $score <= $nowSecs) {
+                unset($this->zsets[$key][$member]);
+            }
+        }
     }
 
     private function fakeZremMember(string $key, string $member): int
@@ -4433,6 +4438,9 @@ final class AbortAwareFakeRedis extends \Predis\Client
 
     public function __call($commandID, $arguments)
     {
+        if (strtoupper((string) $commandID) === 'GET') {
+            return $this->strings[(string) $arguments[0]] ?? null;
+        }
         if (strtoupper((string) $commandID) !== 'EVAL') {
             throw new \LogicException('unexpected command '.$commandID);
         }
@@ -4452,16 +4460,17 @@ final class AbortAwareFakeRedis extends \Predis\Client
             $global = (string) $keys[1];
             $sidecar = (string) $keys[2];
             $pseudonym = (string) $rest[5];
-            if ($this->sourceCount($sourceZset, $pseudonym) >= (int) $rest[0]) {
+            $this->fakeZremrangebyscoreMember($sourceZset, (int) floor($this->timeMs() / 1000));
+            if ($this->sourceCount($sourceZset) >= (int) $rest[0]) {
                 return 0;
             }
             if (\count($this->zsets[$global] ?? []) >= (int) $rest[1]) {
                 return -1;
             }
-            $this->zsets[$sourceZset][$pseudonym.':'.(string) $rest[4]] = (float) $rest[3];
+            $this->zsets[$sourceZset][(string) $rest[4]] = (float) $rest[3];
             $this->zsets[$global][(string) $rest[4]] = (float) $rest[3];
             $this->strings[$sidecar] = $pseudonym;
-            $this->mirrorSourceCount($sourceZset, $pseudonym);
+            $this->mirrorSourceCount($sourceZset);
 
             return 1;
         }
@@ -4469,22 +4478,23 @@ final class AbortAwareFakeRedis extends \Predis\Client
         if (str_contains($script, 'Outstanding challenge release')) {
             // OutstandingChallenges::solved / ::cancelled /
             // ::abortedBeforeHandoff: keys[1] the global live ZSET,
-            // keys[2] the nonce sidecar, keys[3] the per-source membership
-            // ZSET; argv[1] the released nonce. One-shot,
-            // nonce-authoritative: only the ZREM of the nonce from the
-            // live membership releases the ORIGINAL source's membership
-            // (member <source>:<nonce>) and deletes the sidecar; the
-            // caller's IP is never used.
+            // keys[2] the nonce sidecar, keys[3] the ORIGINAL source's
+            // membership ZSET; argv[1] the released nonce, argv[2] the
+            // caller-resolved source (re-verified against the sidecar).
+            // One-shot, nonce-authoritative: only the ZREM of the nonce
+            // from the live membership releases the ORIGINAL source's
+            // member and deletes the sidecar; the caller's IP is never
+            // used.
             $global = (string) $keys[0];
             $sidecar = (string) $keys[1];
             $sourceZset = (string) $keys[2];
             $nonce = (string) $rest[0];
+            $expectedSource = (string) $rest[1];
             $removed = $this->fakeZremMember($global, $nonce);
-            if ($removed === 1 && isset($this->strings[$sidecar])) {
-                $source = (string) $this->strings[$sidecar];
-                $this->fakeZremMember($sourceZset, $source.':'.$nonce);
+            if ($removed === 1 && isset($this->strings[$sidecar]) && (string) $this->strings[$sidecar] === $expectedSource) {
+                $this->fakeZremMember($sourceZset, $nonce);
                 unset($this->strings[$sidecar]);
-                $this->mirrorSourceCount($sourceZset, $source);
+                $this->mirrorSourceCount($sourceZset);
             }
 
             return $removed;
