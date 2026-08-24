@@ -6,6 +6,7 @@ namespace BelConsulting\KiwiCaptchaBundle\Security;
 
 use KiwiCaptcha\Issuer;
 use KiwiCaptcha\Risk\RiskKeys;
+use KiwiCaptcha\Storage\ReplicaWaitException;
 
 /**
  * Anti-stockpiling: bounded outstanding unsolved challenges per source and
@@ -346,6 +347,43 @@ LUA;
      *                                               expire by their
      *                                               Redis-clock deadlines,
      *                                               never by this margin.
+     * @param int                   $waitReplicas    when > 0, a SUCCESSFUL
+     *                                               admission (the source/
+     *                                               global memberships + the
+     *                                               sidecar landed) is
+     *                                               followed by a verified
+     *                                               Redis WAIT whose
+     *                                               acknowledgement count is
+     *                                               checked — the challenge
+     *                                               is only handed out once
+     *                                               the admission write
+     *                                               reached the configured
+     *                                               replica count, so an
+     *                                               asymmetric failover can
+     *                                               never resurrect a
+     *                                               valid-but-unaccounted
+     *                                               challenge record (which
+     *                                               would let redemptions
+     *                                               exceed the hard
+     *                                               outstanding caps).
+     *                                               Fewer than waitReplicas
+     *                                               acked replicas raise
+     *                                               {@see ReplicaWaitException}.
+     *                                               Supported on standalone
+     *                                               Redis connections only,
+     *                                               the same matrix as the
+     *                                               core RedisStorage and
+     *                                               the disposition store.
+     *                                               The RELEASE side stays
+     *                                               best-effort and never
+     *                                               WAITs: a lost release
+     *                                               write overcounts
+     *                                               (fail-closed), so the
+     *                                               success path never
+     *                                               depends on replica
+     *                                               acknowledgement.
+     * @param int                   $waitTimeoutMs   WAIT timeout in ms (default
+     *                                               100).
      */
     public function __construct(
         private readonly \Redis|\Predis\Client $redis,
@@ -354,7 +392,10 @@ LUA;
         private readonly int $maxPerSource,
         private readonly int $maxGlobal,
         private readonly int $ttlMarginSecs = 0,
+        private readonly int $waitReplicas = 0,
+        private readonly int $waitTimeoutMs = 100,
     ) {
+        $this->refuseVerifiedWaitOnUnsupportedPredisClients();
     }
 
     /**
@@ -429,7 +470,7 @@ LUA;
         $global = $this->keyPrefix.'global:live';
         $sidecar = $this->keyPrefix.'nonce:'.$nonce;
 
-        return (int) $this->eval(self::ISSUE_SCRIPT, [$sourceZset, $global, $sidecar], [
+        $admitted = (int) $this->eval(self::ISSUE_SCRIPT, [$sourceZset, $global, $sidecar], [
             (string) $this->maxPerSource,
             (string) $this->maxGlobal,
             (string) max(1, $ttl),
@@ -438,6 +479,17 @@ LUA;
             substr($sourceZset, \strlen($this->keyPrefix)),
             (string) $this->ttlMarginSecs,
         ]);
+
+        // Durability barrier: only the admission WRITE needs the
+        // guarantee (undercount prevention — an un-replicated admission
+        // would let a promotion resurrect a valid-but-unaccounted
+        // challenge); a refused admission performed no write and never
+        // WAITs.
+        if ($admitted === 1 && $this->waitReplicas > 0) {
+            $this->waitAndVerify('the outstanding admission');
+        }
+
+        return $admitted;
     }
 
     /**
@@ -550,6 +602,81 @@ LUA;
             ], [$nonce, $source]);
         } catch (\Throwable) {
             // Best-effort by contract.
+        }
+    }
+
+    /**
+     * Block until at least waitReplicas replicas acknowledged the previous
+     * write, and fail closed when they did not (the same contract as the
+     * core RedisStorage and the disposition store).
+     */
+    private function waitAndVerify(string $what): void
+    {
+        if ($this->redis instanceof \Redis) {
+            $acked = $this->redis->rawCommand('WAIT', $this->waitReplicas, $this->waitTimeoutMs);
+        } else {
+            $acked = $this->redis->executeRaw(['WAIT', $this->waitReplicas, $this->waitTimeoutMs]);
+        }
+        if ($acked === false || $acked === null) {
+            throw new ReplicaWaitException(sprintf(
+                'Redis WAIT failed after %s (waitReplicas=%d, timeout=%dms)',
+                $what,
+                $this->waitReplicas,
+                $this->waitTimeoutMs,
+            ));
+        }
+        if ((int) $acked < $this->waitReplicas) {
+            throw new ReplicaWaitException(sprintf(
+                'Redis WAIT acknowledged %d of %d requested replicas after %s',
+                (int) $acked,
+                $this->waitReplicas,
+                $what,
+            ));
+        }
+    }
+
+    /**
+     * Refuse the verified-WAIT hardening on Predis clients whose command
+     * dispatch can hide or re-execute the durability-critical write (the
+     * same refusal the core RedisStorage and the disposition store
+     * apply): WAIT is connection-relative, so a replication aggregate's
+     * failure retry can re-execute the WAIT on a replacement connection
+     * whose write offset is empty, a cluster aggregate cannot route a
+     * keyless WAIT, and a retry-enabled standalone client can
+     * transparently re-execute the Lua mutation after a lost response.
+     * Supported topology is standalone Redis only.
+     */
+    private function refuseVerifiedWaitOnUnsupportedPredisClients(): void
+    {
+        if ($this->waitReplicas <= 0 || !($this->redis instanceof \Predis\Client)) {
+            return;
+        }
+        $connection = $this->redis->getConnection();
+        if ($connection instanceof \Predis\Connection\Replication\ReplicationInterface) {
+            throw new \InvalidArgumentException(
+                'OutstandingChallenges: verified-WAIT durability (waitReplicas > 0) is not supported on a Predis replication aggregate (Sentinel or master-slave) — WAIT is connection-affine, counting replicas of the connection it is sent on, and the aggregate\'s failure retry executes the WAIT on a replacement connection whose write offset is empty. The verified barrier supports standalone Redis connections only; use a standalone connection with waitReplicas > 0, or keep waitReplicas = 0 on an aggregate.'
+            );
+        }
+        if ($connection instanceof \Predis\Connection\Cluster\ClusterInterface) {
+            throw new \InvalidArgumentException(
+                'OutstandingChallenges: verified-WAIT durability (waitReplicas > 0) is not supported on a Predis Redis Cluster client — WAIT is connection-relative and cannot be routed by slot. The verified barrier supports standalone Redis connections only; use a standalone connection with waitReplicas > 0, or keep waitReplicas = 0 on a cluster.'
+            );
+        }
+        if ($connection === null) {
+            // An in-memory stand-in with no real connection object (the
+            // tests' fake clients skip the parent constructor): there is
+            // no Parameters instance to carry a retry policy and the
+            // stand-in overrides the command dispatch itself, so the
+            // vendored retry wrapper never engages.
+            return;
+        }
+        if ($connection instanceof \Predis\Connection\RelayConnection) {
+            return;
+        }
+        if (!$connection->getParameters()->isDisabledRetry()) {
+            throw new \InvalidArgumentException(
+                'OutstandingChallenges: verified-WAIT durability (waitReplicas > 0) is not supported on a retry-enabled standalone Predis client — verified-WAIT durability requires that a durability-critical mutation is attempted exactly once on the connection whose subsequent WAIT establishes the replication offset. Retries must be disabled on the connection (remove the \'retry\' connection parameter), or keep waitReplicas = 0.'
+            );
         }
     }
 

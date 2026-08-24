@@ -658,15 +658,23 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             $issuanceCounterRef = new Reference('kiwi_captcha.risk.issuance_counter');
 
             // Anti-stockpiling: bounded outstanding unsolved challenges per
-            // source + deployment-wide. One atomic Lua checks both caps
-            // before incrementing ({kiwi:<ns>}:outstanding:<hex> — the
+            // source + deployment-wide. The accounting is an expiry-aware
+            // MEMBERSHIP, not a counter: one atomic Lua prunes expired
+            // members and checks both caps against the LIVE memberships
+            // ({kiwi:<ns>}:outstanding:<hex> — the per-source ZSET, the
             // source identity is HMAC(canonical ip, RiskKeys::event), so
             // the raw IP never appears in Redis — and
-            // {kiwi:<ns>}:outstanding:global), EXPIRE = challenge lifetime
-            // + risk.redis.ttl_margin_secs. The controller refuses
-            // issuance with the 429 risk-denied response when a cap is
-            // reached; a valid verification decrements the per-source
-            // counter.
+            // {kiwi:<ns>}:outstanding:global:live), scores each member at
+            // its Redis-clock deadline (Redis TIME + the relative
+            // challenge lifetime, which includes the verifier's permitted
+            // future-issuance skew), EXPIREATs both keys at the latest
+            // member deadline + risk.redis.ttl_margin_secs, and applies
+            // the configured replica-durability barrier to a successful
+            // admission. The controller refuses issuance with the 429
+            // risk-denied response when a cap is reached; a successful
+            // verification, a client cancellation or a
+            // proven-not-handed-off issuance removes the nonce from both
+            // memberships (one-shot, nonce-authoritative).
             $container->setDefinition('kiwi_captcha.risk.outstanding', new Definition(OutstandingChallenges::class, [
                 $riskRedis,
                 sprintf('{kiwi:%s}:outstanding:', $namespace),
@@ -674,6 +682,18 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
                 $riskConfig['max_outstanding_challenges'],
                 $riskConfig['max_outstanding_challenges_global'],
                 $riskConfig['redis']['ttl_margin_secs'],
+                // The risk.redis replica-durability knobs
+                // (wait_replicas / wait_timeout_ms) flow into the
+                // outstanding admission too, the same knobs that harden
+                // the challenge storage: a successful admission write
+                // (the source/global memberships + the sidecar) WAITs for
+                // the configured replica count before the challenge is
+                // handed out, so a promotion can never resurrect a
+                // valid-but-unaccounted challenge record (asymmetric
+                // failover would otherwise let redemptions exceed the
+                // hard outstanding caps).
+                $riskConfig['redis']['wait_replicas'],
+                $riskConfig['redis']['wait_timeout_ms'],
             ]));
             $outstandingRef = new Reference('kiwi_captcha.risk.outstanding');
 
@@ -971,6 +991,16 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             // max-stale fail-closed check: a stale central policy read
             // refuses issuance with 503 `SERVICE_UNAVAILABLE`.
             ->setArgument('$epochMonitor', new Reference(SecurityEpochMonitor::class))
+            // The authoritative transaction-binding resolver: when
+            // configured, every Siteverify redemption enforces the same
+            // pre-consume binding contract as the native path (the
+            // resolved binding feeds the core's expected request binding
+            // AND the idempotency identity). Without an authority there
+            // is no server-side transaction input; the endpoint then
+            // cannot enforce a binding, which is why the mixed
+            // configuration (authority + siteverify) is wired here
+            // rather than silently turning request binding off.
+            ->setArgument('$bindingAuthority', $bindingAuthorityRef)
             // The configured challenge TTL lets the anti-
             // stockpiling admission run before the challenge state is
             // created (the quota checks all precede the storage write).

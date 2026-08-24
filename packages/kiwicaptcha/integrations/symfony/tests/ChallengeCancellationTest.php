@@ -647,6 +647,37 @@ final class ChallengeCancellationTest extends TestCase
         self::assertArrayHasKey(self::OUTSTANDING_PREFIX.'nonce:'.$nonce, $client->strings, 'the sidecar survives the no-op cancellation');
     }
 
+    public function testOutstandingAdmissionFailureIsARolledBackPrivate503(): void
+    {
+        // P2: a Redis failure during the post-mint admission (or a
+        // violated verified-WAIT barrier) is resolved by rolling the
+        // ENTIRE issuance attempt back — the private structured 503,
+        // the minted record discarded, the admission aborted
+        // (one-shot/idempotent), nothing handed out — never an uncaught
+        // exception and never a minted-but-never-handed-out record.
+        $storage = new ArrayStorage();
+        $client = new FakePredisClient();
+        $outstanding = new OutstandingChallenges($client, '{kiwi:rollback503-test}:outstanding:', RiskKeys::fromMaster(self::SECRET), 5, 100, 0);
+        $controller = $this->controller($outstanding, $storage);
+
+        $client->failCommand = 'EVAL';
+        $response = $controller->challenge(JsonRequest::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], '{"scope":"login"}'));
+        self::assertSame(503, $response->getStatusCode(), 'the admission failure answers the private structured 503');
+        self::assertSame('SERVICE_UNAVAILABLE', json_decode((string) $response->getContent(), true)['error']['code']);
+
+        // The minted record was discarded and the membership was never
+        // admitted (or was cleaned by the idempotent abort).
+        $records = (new \ReflectionObject($storage))->getProperty('records');
+        self::assertCount(0, $records->getValue($storage), 'the failed issuance discards its minted record');
+        $client->failCommand = null;
+        self::assertSame(0, $client->counters[$outstanding->sourceKey('198.51.100.7')] ?? 0, 'nothing was admitted');
+
+        // The retry succeeds once the backend recovers.
+        $retry = $controller->challenge(JsonRequest::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], '{"scope":"login"}'));
+        self::assertSame(200, $retry->getStatusCode(), 'a retry after the outage succeeds');
+        self::assertSame(1, $client->counters[$outstanding->sourceKey('198.51.100.7')] ?? 0);
+    }
+
     public function testHeterogeneousChallengeTtlsNeverResetThePerSourceBound(): void
     {
         // P1 regression: the old scalar per-source counter reset its

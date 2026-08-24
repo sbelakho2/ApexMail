@@ -1028,12 +1028,12 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
                 return $this->inner->leaseSeconds();
             }
 
-            public function claim(string $backendId, string $idempotencyKey, string $responseHash, int $ttlSeconds, string $remoteipFingerprint, ?int $leaseSeconds = null): array
+            public function claim(string $backendId, string $idempotencyKey, string $responseHash, int $ttlSeconds, string $remoteipFingerprint, ?int $leaseSeconds = null, ?string $binding = null): array
             {
                 return $this->inner->claim($backendId, $idempotencyKey, $responseHash, $ttlSeconds, $remoteipFingerprint, $leaseSeconds);
             }
 
-            public function takeover(string $backendId, string $idempotencyKey, string $responseHash, int $ttlSeconds, string $remoteipFingerprint, ?int $leaseSeconds = null): array
+            public function takeover(string $backendId, string $idempotencyKey, string $responseHash, int $ttlSeconds, string $remoteipFingerprint, ?int $leaseSeconds = null, ?string $binding = null): array
             {
                 return $this->inner->takeover($backendId, $idempotencyKey, $responseHash, $ttlSeconds, $remoteipFingerprint, $leaseSeconds);
             }
@@ -1077,7 +1077,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
             self::assertNotNull($consumed->consumedResult, 'the committed outcome must be readable');
             self::assertSame(true, $consumed->consumedResult->valid, 'the committed outcome must be the owner success');
             self::assertSame(
-                hash('sha256', $backendId."\0".$uuid."\0".hash('sha256', $token)."\0"."ip:127.0.0.1"),
+                hash('sha256', $backendId."\0".$uuid."\0".hash('sha256', $token)."\0"."ip:127.0.0.1"."\0"."\0no-binding"),
                 $consumed->operationIdentity,
                 'the consumed record carries the ACTUAL atomic consume winner\'s identity on real Redis',
             );
@@ -1205,7 +1205,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
             $consumed = $storage->consumedState($challenge->nonce);
             self::assertNotNull($consumed);
             self::assertSame(
-                hash('sha256', $backendId."\0".$uuidA."\0".hash('sha256', $token)."\0"."ip:127.0.0.1"),
+                hash('sha256', $backendId."\0".$uuidA."\0".hash('sha256', $token)."\0"."ip:127.0.0.1"."\0"."\0no-binding"),
                 $consumed->operationIdentity,
                 'the consumed record must carry A\'s operation identity (the ACTUAL atomic consume winner)',
             );
@@ -1286,12 +1286,12 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
                     return $this->inner->leaseSeconds();
                 }
 
-                public function claim(string $backendId, string $idempotencyKey, string $responseHash, int $ttlSeconds, string $remoteipFingerprint, ?int $leaseSeconds = null): array
+                public function claim(string $backendId, string $idempotencyKey, string $responseHash, int $ttlSeconds, string $remoteipFingerprint, ?int $leaseSeconds = null, ?string $binding = null): array
                 {
                     return $this->inner->claim($backendId, $idempotencyKey, $responseHash, $ttlSeconds, $remoteipFingerprint, $leaseSeconds);
                 }
 
-                public function takeover(string $backendId, string $idempotencyKey, string $responseHash, int $ttlSeconds, string $remoteipFingerprint, ?int $leaseSeconds = null): array
+                public function takeover(string $backendId, string $idempotencyKey, string $responseHash, int $ttlSeconds, string $remoteipFingerprint, ?int $leaseSeconds = null, ?string $binding = null): array
                 {
                     return $this->inner->takeover($backendId, $idempotencyKey, $responseHash, $ttlSeconds, $remoteipFingerprint, $leaseSeconds);
                 }
@@ -1397,12 +1397,12 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
                     return $this->inner->leaseSeconds();
                 }
 
-                public function claim(string $backendId, string $idempotencyKey, string $responseHash, int $ttlSeconds, string $remoteipFingerprint, ?int $leaseSeconds = null): array
+                public function claim(string $backendId, string $idempotencyKey, string $responseHash, int $ttlSeconds, string $remoteipFingerprint, ?int $leaseSeconds = null, ?string $binding = null): array
                 {
                     return $this->inner->claim($backendId, $idempotencyKey, $responseHash, $ttlSeconds, $remoteipFingerprint, $leaseSeconds);
                 }
 
-                public function takeover(string $backendId, string $idempotencyKey, string $responseHash, int $ttlSeconds, string $remoteipFingerprint, ?int $leaseSeconds = null): array
+                public function takeover(string $backendId, string $idempotencyKey, string $responseHash, int $ttlSeconds, string $remoteipFingerprint, ?int $leaseSeconds = null, ?string $binding = null): array
                 {
                     return $this->inner->takeover($backendId, $idempotencyKey, $responseHash, $ttlSeconds, $remoteipFingerprint, $leaseSeconds);
                 }
@@ -1434,7 +1434,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
             $consumed = $storage->consumedState($challenge->nonce);
             self::assertNotNull($consumed);
             self::assertSame(
-                hash('sha256', $backendId1."\0".$uuid."\0".hash('sha256', $token)."\0"."ip:127.0.0.1"),
+                hash('sha256', $backendId1."\0".$uuid."\0".hash('sha256', $token)."\0"."ip:127.0.0.1"."\0"."\0no-binding"),
                 $consumed->operationIdentity,
                 'the consumed record carries secret-1\'s fingerprint (the backendId is inside it)',
             );
@@ -1540,12 +1540,12 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
                             return $this->inner->leaseSeconds();
                         }
 
-                        public function claim(string $backendId, string $idempotencyKey, string $responseHash, int $ttlSeconds, string $remoteipFingerprint, ?int $leaseSeconds = null): array
+                        public function claim(string $backendId, string $idempotencyKey, string $responseHash, int $ttlSeconds, string $remoteipFingerprint, ?int $leaseSeconds = null, ?string $binding = null): array
                         {
                             return $this->inner->claim($backendId, $idempotencyKey, $responseHash, $ttlSeconds, $remoteipFingerprint, $leaseSeconds);
                         }
 
-                        public function takeover(string $backendId, string $idempotencyKey, string $responseHash, int $ttlSeconds, string $remoteipFingerprint, ?int $leaseSeconds = null): array
+                        public function takeover(string $backendId, string $idempotencyKey, string $responseHash, int $ttlSeconds, string $remoteipFingerprint, ?int $leaseSeconds = null, ?string $binding = null): array
                         {
                             return $this->inner->takeover($backendId, $idempotencyKey, $responseHash, $ttlSeconds, $remoteipFingerprint, $leaseSeconds);
                         }
@@ -1640,8 +1640,8 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         $consumed = $storage->consumedState($challenge->nonce);
         self::assertNotNull($consumed, 'the winner must leave the challenge record in place (consumed, not deleted)');
         self::assertNotNull($consumed->consumedResult, 'the winner must commit its result');
-        $fingerprintA = hash('sha256', $backendId."\0".$uuidA."\0".hash('sha256', $token)."\0"."ip:127.0.0.1");
-        $fingerprintB = hash('sha256', $backendId."\0".$uuidB."\0".hash('sha256', $token)."\0"."ip:127.0.0.1");
+        $fingerprintA = hash('sha256', $backendId."\0".$uuidA."\0".hash('sha256', $token)."\0"."ip:127.0.0.1"."\0"."\0no-binding");
+        $fingerprintB = hash('sha256', $backendId."\0".$uuidB."\0".hash('sha256', $token)."\0"."ip:127.0.0.1"."\0"."\0no-binding");
         self::assertContains($consumed->operationIdentity, [$fingerprintA, $fingerprintB], 'the consumed record must carry the WINNER\'s fingerprint');
         $winnerUuid = $consumed->operationIdentity === $fingerprintA ? $uuidA : $uuidB;
         $loserUuid = $winnerUuid === $uuidA ? $uuidB : $uuidA;
@@ -1713,7 +1713,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         $idemKeyK = '{kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuidK;
         $idemKeyK2 = '{kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuidK2;
         $probe->del([$idemKeyK, $idemKeyK2]);
-        $fingerprintK = hash('sha256', $backendId."\0".$uuidK."\0".hash('sha256', $token)."\0"."ip:127.0.0.1");
+        $fingerprintK = hash('sha256', $backendId."\0".$uuidK."\0".hash('sha256', $token)."\0"."ip:127.0.0.1"."\0"."\0no-binding");
 
         try {
             // A short fixed store lease (3s) with a waiter bound above it
@@ -1744,12 +1744,12 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
                     return $this->inner->leaseSeconds();
                 }
 
-                public function claim(string $backendId, string $idempotencyKey, string $responseHash, int $ttlSeconds, string $remoteipFingerprint, ?int $leaseSeconds = null): array
+                public function claim(string $backendId, string $idempotencyKey, string $responseHash, int $ttlSeconds, string $remoteipFingerprint, ?int $leaseSeconds = null, ?string $binding = null): array
                 {
                     return $this->inner->claim($backendId, $idempotencyKey, $responseHash, $ttlSeconds, $remoteipFingerprint, $leaseSeconds);
                 }
 
-                public function takeover(string $backendId, string $idempotencyKey, string $responseHash, int $ttlSeconds, string $remoteipFingerprint, ?int $leaseSeconds = null): array
+                public function takeover(string $backendId, string $idempotencyKey, string $responseHash, int $ttlSeconds, string $remoteipFingerprint, ?int $leaseSeconds = null, ?string $binding = null): array
                 {
                     return $this->inner->takeover($backendId, $idempotencyKey, $responseHash, $ttlSeconds, $remoteipFingerprint, $leaseSeconds);
                 }
@@ -2080,7 +2080,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
             $consumed = $storage->consumedState($challenge->nonce);
             self::assertNotNull($consumed, 'the transition executed — the token IS consumed');
             self::assertSame(
-                hash('sha256', $backendId."\0".$uuid."\0".hash('sha256', $token)."\0"."ip:127.0.0.1"),
+                hash('sha256', $backendId."\0".$uuid."\0".hash('sha256', $token)."\0"."ip:127.0.0.1"."\0"."\0no-binding"),
                 $consumed->operationIdentity,
                 'the consumed record carries the operation identity of the ACTUAL atomic consume winner on real Redis',
             );

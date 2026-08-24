@@ -403,7 +403,7 @@ final class RedisAdmissionSemaphoreTest extends TestCase
     /** The per-scope lease set key of a namespace + scope (mirrors the semaphore's derivation). */
     private function scopeKey(string $scope, string $namespace = 'default'): string
     {
-        return '{kiwicaptcha:argon2:leases:'.$namespace.'}:'.$scope;
+        return '{kiwicaptcha:argon2:leases:'.$namespace.'}:'.hash('sha256', $scope);
     }
 
     public function testOneScopeFillsItsBudgetAndAnotherScopeStillAcquires(): void
@@ -465,22 +465,41 @@ final class RedisAdmissionSemaphoreTest extends TestCase
         $semaphore = new RedisAdmissionSemaphore($client, 10, 'scope-token', self::LEASE_MS, 64, 2);
 
         $token = $semaphore->acquire('login');
-        self::assertMatchesRegularExpression('/^[0-9a-f]{32}\.login$/', $token, 'a scoped lease token carries the sanitized scope suffix (release rebuilds the scope key from it)');
+        self::assertMatchesRegularExpression('/^[0-9a-f]{32}\.'.preg_quote(hash('sha256', 'login'), '/').'$/', $token, 'a scoped lease token carries the HASHED scope suffix (release rebuilds the scope key from it)');
 
         $unscoped = $semaphore->acquire();
         self::assertMatchesRegularExpression('/^[0-9a-f]{32}$/', $unscoped, 'an unscoped acquire keeps the plain hex token');
     }
 
-    public function testHostileScopeNamesAreSanitizedIntoTheKey(): void
+    public function testHostileScopeNamesHashIntoTheKey(): void
     {
         $client = $this->requirePredis();
-        $semaphore = new RedisAdmissionSemaphore($client, 10, 'scope-sanitize', self::LEASE_MS, 64, 2);
+        $semaphore = new RedisAdmissionSemaphore($client, 10, 'scope-hash', self::LEASE_MS, 64, 2);
 
+        // The scope is hashed, never lossily sanitized: hostile characters
+        // cannot collapse distinct scopes (tenant:a vs tenant_a must stay
+        // independent per-tenant budgets).
         $token = $semaphore->acquire('my/scope:weird|login');
         self::assertIsString($token);
-        self::assertSame(1, $client->zcard($this->scopeKey('my_scope_weird_login', 'scope-sanitize')), 'hostile scope characters collapse to underscores in the per-scope key');
+        self::assertSame(1, $client->zcard($this->scopeKey('my/scope:weird|login', 'scope-hash')), 'the per-scope key is the hash of the EXACT scope string');
         $semaphore->release($token);
-        self::assertSame(0, $client->zcard($this->scopeKey('my_scope_weird_login', 'scope-sanitize')));
+        self::assertSame(0, $client->zcard($this->scopeKey('my/scope:weird|login', 'scope-hash')));
+    }
+
+    public function testDistinctScopesNeverCollideInThePerScopeBudget(): void
+    {
+        // P3: a lossy sanitization collapsed tenant:a and tenant_a into one
+        // per-tenant budget — one scope could starve the other. The hashed
+        // scope keeps them independent.
+        $client = $this->requirePredis();
+        $semaphore = new RedisAdmissionSemaphore($client, 100, 'scope-collide', self::LEASE_MS, 64, 1);
+
+        $a = $semaphore->acquire('tenant:a');
+        self::assertIsString($a);
+        self::assertNull($semaphore->acquire('tenant:a'), 'tenant:a fills its own budget of 1');
+        self::assertIsString($semaphore->acquire('tenant_a'), 'tenant_a has its OWN budget — the scopes never collide');
+        self::assertSame(1, $client->zcard($this->scopeKey('tenant:a', 'scope-collide')), 'tenant:a holds exactly its member');
+        self::assertSame(1, $client->zcard($this->scopeKey('tenant_a', 'scope-collide')), 'tenant_a holds exactly its member');
     }
 
     public function testScopeBudgetKeysAreIndependentAcrossNamespaces(): void

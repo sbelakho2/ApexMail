@@ -198,7 +198,7 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
             $consumed = $storage->consumedState($nonce);
             self::assertNotNull($consumed, 'the transition EXECUTED on real Redis');
             self::assertSame(
-                hash('sha256', $backendId."\0".$uuid."\0".hash('sha256', $token)."\0"."ip:127.0.0.1"),
+                hash('sha256', $backendId."\0".$uuid."\0".hash('sha256', $token)."\0"."ip:127.0.0.1"."\0"."\0no-binding"),
                 $consumed->operationIdentity,
                 'the operation identity lands atomically with the real-Redis state flip',
             );
@@ -277,7 +277,7 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
             $consumed = $storage->consumedState($nonce);
             self::assertNotNull($consumed, 'the transition EXECUTED on real Redis');
             self::assertSame(
-                hash('sha256', $effectiveBackendId."\0".$uuid."\0".hash('sha256', $token)."\0"."ip:127.0.0.1"),
+                hash('sha256', $effectiveBackendId."\0".$uuid."\0".hash('sha256', $token)."\0"."ip:127.0.0.1"."\0"."\0no-binding"),
                 $consumed->operationIdentity,
                 'the operation identity lands atomically with the real-Redis state flip under the EFFECTIVE-epoch backend identity',
             );
@@ -346,7 +346,7 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
             $consumed = $storage->consumedState($nonce);
             self::assertNotNull($consumed, 'the lost-reply 503 must come from the EXECUTED transition — the record must be consumed');
             self::assertSame(
-                hash('sha256', $backendId."\0".$uuid."\0".hash('sha256', $wrongToken)."\0"."ip:127.0.0.1"),
+                hash('sha256', $backendId."\0".$uuid."\0".hash('sha256', $wrongToken)."\0"."ip:127.0.0.1"."\0"."\0no-binding"),
                 $consumed->operationIdentity,
                 'the identity lands atomically with the state flip',
             );
@@ -403,7 +403,7 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
             $consumed = $storage->consumedState($nonce);
             self::assertNotNull($consumed, 'the lost-reply 503 must come from the EXECUTED transition — the record must be consumed');
             self::assertSame(
-                hash('sha256', $backendId."\0".$uuid."\0".hash('sha256', $token)."\0"."ip:127.0.0.1"),
+                hash('sha256', $backendId."\0".$uuid."\0".hash('sha256', $token)."\0"."ip:127.0.0.1"."\0"."\0no-binding"),
                 $consumed->operationIdentity,
             );
             self::assertNull($consumed->consumedResult, 'precondition: nothing committed yet');
@@ -480,14 +480,14 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
                 return $this->inner->leaseSeconds();
             }
 
-            public function claim(string $backendId, string $idempotencyKey, string $responseHash, int $ttlSeconds, string $remoteipFingerprint, ?int $leaseSeconds = null): array
+            public function claim(string $backendId, string $idempotencyKey, string $responseHash, int $ttlSeconds, string $remoteipFingerprint, ?int $leaseSeconds = null, ?string $binding = null): array
             {
-                return $this->inner->claim($backendId, $idempotencyKey, $responseHash, $ttlSeconds, $remoteipFingerprint, $leaseSeconds);
+                return $this->inner->claim($backendId, $idempotencyKey, $responseHash, $ttlSeconds, $remoteipFingerprint, $leaseSeconds, $binding);
             }
 
-            public function takeover(string $backendId, string $idempotencyKey, string $responseHash, int $ttlSeconds, string $remoteipFingerprint, ?int $leaseSeconds = null): array
+            public function takeover(string $backendId, string $idempotencyKey, string $responseHash, int $ttlSeconds, string $remoteipFingerprint, ?int $leaseSeconds = null, ?string $binding = null): array
             {
-                return $this->inner->takeover($backendId, $idempotencyKey, $responseHash, $ttlSeconds, $remoteipFingerprint, $leaseSeconds);
+                return $this->inner->takeover($backendId, $idempotencyKey, $responseHash, $ttlSeconds, $remoteipFingerprint, $leaseSeconds, $binding);
             }
 
             public function renew(string $backendId, string $idempotencyKey, string $owner): bool
@@ -517,7 +517,7 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
             $consumed = $storage->consumedState($nonce);
             self::assertNotNull($consumed, 'the owner\'s transition EXECUTED on real Redis');
             self::assertSame(
-                hash('sha256', $backendId."\0".$uuid."\0".hash('sha256', $token)."\0"."ip:127.0.0.1"),
+                hash('sha256', $backendId."\0".$uuid."\0".hash('sha256', $token)."\0"."ip:127.0.0.1"."\0"."\0no-binding"),
                 $consumed->operationIdentity,
                 'the operation identity lands atomically with the real-Redis state flip',
             );
@@ -578,7 +578,7 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
             self::assertSame(503, $ownerResponse->getStatusCode());
             $consumed = $storage->consumedState($nonce);
             self::assertNotNull($consumed);
-            self::assertSame(hash('sha256', $backendId."\0".$uuidA."\0".hash('sha256', $token)."\0"."ip:127.0.0.1"), $consumed->operationIdentity);
+            self::assertSame(hash('sha256', $backendId."\0".$uuidA."\0".hash('sha256', $token)."\0"."ip:127.0.0.1"."\0"."\0no-binding"), $consumed->operationIdentity);
             self::assertNull($consumed->consumedResult);
 
             // UUID B: fresh claim -> ConsumeIndeterminate -> 503 (no
@@ -637,7 +637,7 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
             self::assertSame(503, $ownerResponse->getStatusCode());
             $consumed = $storage->consumedState($nonce);
             self::assertNotNull($consumed, 'the lost-reply 503 must come from the EXECUTED transition — the record must be consumed');
-            self::assertSame(hash('sha256', $backendId1."\0".$uuid."\0".hash('sha256', $token)."\0"."ip:127.0.0.1"), $consumed->operationIdentity);
+            self::assertSame(hash('sha256', $backendId1."\0".$uuid."\0".hash('sha256', $token)."\0"."ip:127.0.0.1"."\0"."\0no-binding"), $consumed->operationIdentity);
             self::assertNull($consumed->consumedResult, 'consumed_result must be null — the derivation never ran');
 
             // Secret 2: fresh claim in secret-2's namespace -> Consume-
@@ -815,7 +815,7 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
             $consumed = $storage->consumedState($nonce);
             self::assertNotNull($consumed, 'the lost-reply 503 must come from the EXECUTED transition — the record must be consumed');
             self::assertSame(
-                hash('sha256', $backendId."\0".$uuid."\0".hash('sha256', $token)."\0"."ip:127.0.0.1"),
+                hash('sha256', $backendId."\0".$uuid."\0".hash('sha256', $token)."\0"."ip:127.0.0.1"."\0"."\0no-binding"),
                 $consumed->operationIdentity,
             );
             self::assertNull($consumed->consumedResult, 'precondition: nothing committed yet');
@@ -876,7 +876,7 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
             $consumed = $storage->consumedState($nonce);
             self::assertNotNull($consumed, 'the lost-reply 503 must come from the EXECUTED transition — the record must be consumed');
             self::assertSame(
-                hash('sha256', $backendId."\0".$uuid."\0".hash('sha256', $token)."\0"."ip:127.0.0.1"),
+                hash('sha256', $backendId."\0".$uuid."\0".hash('sha256', $token)."\0"."ip:127.0.0.1"."\0"."\0no-binding"),
                 $consumed->operationIdentity,
             );
             self::assertNull($consumed->consumedResult, 'precondition: nothing committed yet');
@@ -963,7 +963,7 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
         $probe->del([$idemKey]);
         $store = new RedisSiteVerifyIdempotencyStore($probe, 'kiwicaptcha', 1);
         $lost = $this->lostConsumeReplyStorage($storage);
-        $fingerprint = hash('sha256', $backendId."\0".$uuid."\0".hash('sha256', $token)."\0"."ip:127.0.0.1");
+        $fingerprint = hash('sha256', $backendId."\0".$uuid."\0".hash('sha256', $token)."\0"."ip:127.0.0.1"."\0"."\0no-binding");
 
         try {
             $owner = new SiteVerifyController(new Verifier($lost), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $lost, null, null, $store, null, 5.0);

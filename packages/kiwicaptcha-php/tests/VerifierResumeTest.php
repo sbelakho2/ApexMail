@@ -45,7 +45,7 @@ final class VerifierResumeTest extends TestCase
     private const CLIENT_IP = '198.51.100.7';
 
     /** @return array{0: ArrayStorage, 1: ChallengeRecord, 2: string} */
-    private function issueAndSolve(int $targetBits = 8): array
+    private function issueAndSolve(int $targetBits = 8, ?string $requestBinding = null): array
     {
         $storage = new ArrayStorage();
         $issuer = new Issuer(
@@ -53,7 +53,7 @@ final class VerifierResumeTest extends TestCase
             $storage,
             now: static fn (): int => self::ISSUED_AT,
         );
-        $challenge = $issuer->issue('login', self::CLIENT_IP);
+        $challenge = $issuer->issue('login', self::CLIENT_IP, $requestBinding);
         $record = $storage->find($challenge->nonce);
         self::assertNotNull($record);
 
@@ -494,6 +494,23 @@ final class VerifierResumeTest extends TestCase
         $after = $storage->consumedState($record->nonce);
         self::assertNotNull($after?->consumedResult, 'the near-expiry resume must commit');
         self::assertTrue($after->consumedResult->valid);
+    }
+
+    public function testResumeEnforcesTheExpectedRequestBindingBeforeDerivation(): void
+    {
+        // The resumed-operation path enforces the same pre-derivation
+        // transaction-binding contract as the ordinary verify: a BOUND
+        // record must equal the expected binding, and an explicitly
+        // unbound record is permitted regardless of the expected binding.
+        [$inner, $record, $token] = $this->issueAndSolve(requestBinding: 'txn-1');
+        $inner->consumeWithOperationIdentity($record->nonce, $this->identity('bound-resume'));
+        $verifier = new Verifier($inner, now: static fn (): int => self::ISSUED_AT);
+
+        $mismatch = $verifier->resumeConsumedOperation($token, Vectors::SECRET, $this->identity('bound-resume'), 'login', self::CLIENT_IP, 'txn-OTHER');
+        self::assertSame(VerifyError::RequestBindingMismatch, $mismatch->error, 'a bound record under the wrong transaction is refused before any derivation');
+
+        $match = $verifier->resumeConsumedOperation($token, Vectors::SECRET, $this->identity('bound-resume'), 'login', self::CLIENT_IP, 'txn-1');
+        self::assertTrue($match->isOk(), 'the exact bound transaction resumes');
     }
 
     public function testCommittedResultRecoveryPastSignedExpiryStillSucceeds(): void

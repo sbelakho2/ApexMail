@@ -5,7 +5,11 @@ declare(strict_types=1);
 namespace BelConsulting\KiwiCaptchaBundle\Tests;
 
 use BelConsulting\KiwiCaptchaBundle\Controller\SiteVerifyController;
+use BelConsulting\KiwiCaptchaBundle\Risk\RequestBindingAuthorityInterface;
 use BelConsulting\KiwiCaptchaBundle\Security\OutstandingChallenges;
+use BelConsulting\KiwiCaptchaBundle\Security\RedisAdmissionSemaphore;
+use BelConsulting\KiwiCaptchaBundle\Security\RequestScopeAdmissionGate;
+use KiwiCaptcha\VerificationAdmissionGate;
 use KiwiCaptcha\Risk\RiskKeys;
 use BelConsulting\KiwiCaptchaBundle\Risk\SecurityEpochMonitor;
 use BelConsulting\KiwiCaptchaBundle\SiteVerify\IdempotencyClaim;
@@ -22,6 +26,7 @@ use KiwiCaptcha\SolutionToken;
 use KiwiCaptcha\Verifier;
 use PHPUnit\Framework\TestCase;
 use Symfony\Component\HttpFoundation\JsonResponse;
+use Symfony\Component\HttpFoundation\RequestStack;
 use Symfony\Component\HttpFoundation\Request;
 
 /**
@@ -102,9 +107,9 @@ final class SiteVerifyTest extends TestCase
      * The logical-operation identity a controller records for a claim
      * (must mirror the controller's fingerprint formula exactly).
      */
-    private function fingerprint(string $backendId, ?string $idempotencyKey, string $response, ?string $remoteIp): string
+    private function fingerprint(string $backendId, ?string $idempotencyKey, string $response, ?string $remoteIp, ?string $canonicalBinding = null): string
     {
-        return hash('sha256', $backendId."\0".($idempotencyKey ?? "\0no-key")."\0".hash('sha256', $response)."\0".$this->remoteipFingerprintForTest($remoteIp));
+        return hash('sha256', $backendId."\0".($idempotencyKey ?? "\0no-key")."\0".hash('sha256', $response)."\0".$this->remoteipFingerprintForTest($remoteIp)."\0".($canonicalBinding ?? "\0no-binding"));
     }
 
     private function remoteipFingerprintForTest(?string $remoteIp): string
@@ -266,6 +271,156 @@ final class SiteVerifyTest extends TestCase
         $retry = $controller->siteverify($request());
         self::assertSame(200, $retry->getStatusCode());
         self::assertSame(0, $client->counters[$sourceKey], 'the CompleteSame stored-success observation repairs the release');
+    }
+
+    public function testSiteVerifyEnforcesTheAuthoritativeTransactionBinding(): void
+    {
+        // P1: the transaction-binding security boundary must hold on the
+        // provider-compatible endpoint too — a proof cryptographically
+        // anchored to transaction A must never succeed for transaction B,
+        // and the mismatch must fail BEFORE the consume.
+        $storage = new ArrayStorage();
+        $issuer = new Issuer(new Config(secretKey: self::SECRET, algorithm: PoWAlgorithm::Sha256, targetBits: 8, ttlSecs: 120), $storage);
+        $challenge = $issuer->issue('login', '198.51.100.7', 'txn-A');
+        $solution = $this->solve($challenge->prefix, $challenge->salt, $challenge->targetBits);
+        usleep(($challenge->minDurationMs + 10) * 1000);
+        $token = SolutionToken::create($challenge->nonce, $solution, 5000, [])->encode();
+
+        // The authority resolves THIS transaction's binding (txn-B) from
+        // its own trusted inputs — the siteverify request carries none.
+        $authority = new class implements RequestBindingAuthorityInterface {
+            public function resolve(Request $request, string $scope, ?string $presentedBinding): ?string
+            {
+                return 'txn-B';
+            }
+        };
+        $controller = new SiteVerifyController(new Verifier($storage), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $storage, null, null, null, null, 90.0, 0, null, null, null, $authority);
+        $response = $controller->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+            'secret' => self::SITEVERIFY_SECRET,
+            'response' => $token,
+            'remoteip' => '198.51.100.7',
+        ]));
+        self::assertSame(200, $response->getStatusCode());
+        $json = json_decode((string) $response->getContent(), true);
+        self::assertFalse($json['success'], 'a proof anchored to txn-A must never succeed for txn-B');
+        self::assertSame(['invalid-input-response'], $json['error-codes']);
+        self::assertNull($storage->consumedState($challenge->nonce), 'the binding mismatch fails BEFORE the consume — the challenge is never burned');
+    }
+
+    public function testIdempotencyEntryCannotBeReusedAcrossTransactionBindings(): void
+    {
+        // P1: the canonical binding is part of the idempotency identity —
+        // the same UUID under a different authoritative transaction
+        // context is a conflict, never a cached success.
+        $storage = new ArrayStorage();
+        $issuer = new Issuer(new Config(secretKey: self::SECRET, algorithm: PoWAlgorithm::Sha256, targetBits: 8, ttlSecs: 120), $storage);
+        $challenge = $issuer->issue('login', '198.51.100.7', 'txn-A');
+        $solution = $this->solve($challenge->prefix, $challenge->salt, $challenge->targetBits);
+        usleep(($challenge->minDurationMs + 10) * 1000);
+        $token = SolutionToken::create($challenge->nonce, $solution, 5000, [])->encode();
+
+        $binding = 'txn-A';
+        $authority = new class($binding) implements RequestBindingAuthorityInterface {
+            public string $binding;
+
+            public int $calls = 0;
+
+            public function __construct(string $binding)
+            {
+                $this->binding = $binding;
+            }
+
+            public function resolve(Request $request, string $scope, ?string $presentedBinding): ?string
+            {
+                ++$this->calls;
+                return $this->binding;
+            }
+        };
+        $idem = new ArraySiteVerifyIdempotencyStore();
+        $controller = new SiteVerifyController(new Verifier($storage), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $storage, null, null, $idem, null, 90.0, 0, null, null, null, $authority);
+        $request = fn (): Request => Request::create('/kiwi-captcha/siteverify', 'POST', [
+            'secret' => self::SITEVERIFY_SECRET,
+            'response' => $token,
+            'remoteip' => '198.51.100.7',
+            'idempotency_key' => '223e4567-e89b-42d3-a456-426614174088',
+        ]);
+
+        // The matching transaction context succeeds.
+        $first = $controller->siteverify($request());
+        $refl = new \ReflectionObject($idem);
+        $recordsProp = $refl->getProperty('records');
+        var_dump('DEBUG-RECORDS', $recordsProp->getValue($idem));
+        self::assertSame(200, $first->getStatusCode());
+        self::assertTrue(json_decode((string) $first->getContent(), true)['success']);
+
+        // The same UUID under transaction B is a conflict (the binding is
+        // part of the claim identity) — never the cached success.
+        var_dump('DEBUG-CALLS-AFTER-FIRST', $authority->calls);
+        $authority->binding = 'txn-B';
+        $second = $controller->siteverify($request());
+        var_dump('DEBUG-CALLS-AFTER-SECOND', $authority->calls);
+        var_dump('DEBUG-SECOND', $second->getStatusCode(), (string) $second->getContent());
+        self::assertSame(400, $second->getStatusCode(), 'a changed transaction binding under the same idempotency UUID is a conflict');
+        self::assertFalse(json_decode((string) $second->getContent(), true)['success']);
+    }
+
+    public function testSiteVerifyStampsTheScopeForTheArgonPerScopeBudget(): void
+    {
+        // P2: the Siteverify endpoint must attribute every redemption to
+        // the expected scope for the Argon per-scope admission budget —
+        // without the stamped scope attribute, all Siteverify Argon work
+        // would fall into the unscoped global-only path and one busy
+        // scope could starve the others.
+        $storage = new ArrayStorage();
+        $issuer = new Issuer(new Config(
+            secretKey: self::SECRET,
+            algorithm: PoWAlgorithm::Argon2id,
+            mKib: 64,
+            t: 3,
+            p: 1,
+            argon2TargetBits: 4,
+        ), $storage);
+        $challenge = $issuer->issue('login', '198.51.100.7');
+        usleep(($challenge->minDurationMs + 10) * 1000);
+        $counter = 0;
+        do {
+            $h = sodium_crypto_pwhash(32, $challenge->prefix.$counter, base64_decode($challenge->salt, true), 3, 64 * 1024, SODIUM_CRYPTO_PWHASH_ALG_ARGON2ID13);
+            $counter++;
+        } while (Verifier::leadingZeroBits($h) < $challenge->targetBits);
+        --$counter;
+        $token = SolutionToken::create($challenge->nonce, $counter, 5000, [])->encode();
+
+        $client = new FakePredisClient();
+        $semaphore = new RedisAdmissionSemaphore($client, 4, 'siteverify-argon', 45_000, 64, 1);
+        $stack = new RequestStack();
+        $gate = new RequestScopeAdmissionGate($semaphore, $stack);
+        $request = Request::create('/kiwi-captcha/siteverify', 'POST', [
+            'secret' => self::SITEVERIFY_SECRET,
+            'response' => $token,
+            'remoteip' => '198.51.100.7',
+        ]);
+        $stack->push($request);
+        $controller = new SiteVerifyController(new Verifier($storage, $gate), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $storage, null, null, null, null, 90.0, 0, null, null, null);
+
+        $response = $controller->siteverify($request);
+        self::assertSame(200, $response->getStatusCode());
+        self::assertTrue(json_decode((string) $response->getContent(), true)['success']);
+
+        // The acquire EVAL's per-scope KEYS[3] must be the SCOPE's own
+        // lease set — not the unscoped global placeholder — proving the
+        // endpoint stamped the expected scope for the Argon per-scope
+        // budget (one busy scope can never starve the others through the
+        // provider surface).
+        // The acquire EVAL is the only three-key EVAL (global lease set,
+        // waiters counter, per-scope set).
+        $acquires = array_values(array_filter($client->calls, static fn (array $c): bool => $c[0] === 'EVAL' && (int) ($c[1][1] ?? 0) === 3));
+        self::assertNotSame([], $acquires, 'the Argon redemption must consult the admission gate');
+        $last = $acquires[count($acquires) - 1];
+        $args = $last[1];
+        $numKeys = (int) $args[1];
+        $keys = array_slice($args, 2, $numKeys);
+        self::assertSame('{kiwicaptcha:argon2:leases:siteverify-argon}:'.hash('sha256', 'login'), $keys[2], 'the Siteverify endpoint stamps the expected scope for the Argon per-scope budget');
+        self::assertNull($request->attributes->get(RequestScopeAdmissionGate::SCOPE_ATTRIBUTE), 'the scope attribute is restored after the verification');
     }
 
     public function testDisabledWithoutConfiguredSecret(): void
@@ -896,12 +1051,12 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
                 return $this->inner->leaseSeconds();
             }
 
-            public function claim(string $backendId, string $idempotencyKey, string $responseHash, int $ttlSeconds, string $remoteipFingerprint, ?int $leaseSeconds = null): array
+            public function claim(string $backendId, string $idempotencyKey, string $responseHash, int $ttlSeconds, string $remoteipFingerprint, ?int $leaseSeconds = null, ?string $binding = null): array
             {
                 return $this->inner->claim($backendId, $idempotencyKey, $responseHash, $ttlSeconds, $remoteipFingerprint, $leaseSeconds);
             }
 
-            public function takeover(string $backendId, string $idempotencyKey, string $responseHash, int $ttlSeconds, string $remoteipFingerprint, ?int $leaseSeconds = null): array
+            public function takeover(string $backendId, string $idempotencyKey, string $responseHash, int $ttlSeconds, string $remoteipFingerprint, ?int $leaseSeconds = null, ?string $binding = null): array
             {
                 $this->takeovers[] = microtime(true);
 
@@ -1266,12 +1421,12 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
                 return $this->inner->leaseSeconds();
             }
 
-            public function claim(string $backendId, string $idempotencyKey, string $responseHash, int $ttlSeconds, string $remoteipFingerprint, ?int $leaseSeconds = null): array
+            public function claim(string $backendId, string $idempotencyKey, string $responseHash, int $ttlSeconds, string $remoteipFingerprint, ?int $leaseSeconds = null, ?string $binding = null): array
             {
                 return $this->inner->claim($backendId, $idempotencyKey, $responseHash, $ttlSeconds, $remoteipFingerprint, $leaseSeconds);
             }
 
-            public function takeover(string $backendId, string $idempotencyKey, string $responseHash, int $ttlSeconds, string $remoteipFingerprint, ?int $leaseSeconds = null): array
+            public function takeover(string $backendId, string $idempotencyKey, string $responseHash, int $ttlSeconds, string $remoteipFingerprint, ?int $leaseSeconds = null, ?string $binding = null): array
             {
                 return $this->inner->takeover($backendId, $idempotencyKey, $responseHash, $ttlSeconds, $remoteipFingerprint, $leaseSeconds);
             }
@@ -1437,12 +1592,12 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
                 return $this->inner->leaseSeconds();
             }
 
-            public function claim(string $backendId, string $idempotencyKey, string $responseHash, int $ttlSeconds, string $remoteipFingerprint, ?int $leaseSeconds = null): array
+            public function claim(string $backendId, string $idempotencyKey, string $responseHash, int $ttlSeconds, string $remoteipFingerprint, ?int $leaseSeconds = null, ?string $binding = null): array
             {
                 return $this->inner->claim($backendId, $idempotencyKey, $responseHash, $ttlSeconds, $remoteipFingerprint, $leaseSeconds);
             }
 
-            public function takeover(string $backendId, string $idempotencyKey, string $responseHash, int $ttlSeconds, string $remoteipFingerprint, ?int $leaseSeconds = null): array
+            public function takeover(string $backendId, string $idempotencyKey, string $responseHash, int $ttlSeconds, string $remoteipFingerprint, ?int $leaseSeconds = null, ?string $binding = null): array
             {
                 return $this->inner->takeover($backendId, $idempotencyKey, $responseHash, $ttlSeconds, $remoteipFingerprint, $leaseSeconds);
             }
@@ -1517,7 +1672,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         $storage = new ArrayStorage();
         [$token] = $this->issuedToken($storage);
         $throwing = new class implements \BelConsulting\KiwiCaptchaBundle\SiteVerify\SiteVerifyIdempotencyStore {
-            public function claim(string $backendId, string $idempotencyKey, string $responseHash, int $ttlSeconds, string $remoteipFingerprint, ?int $leaseSeconds = null): array
+            public function claim(string $backendId, string $idempotencyKey, string $responseHash, int $ttlSeconds, string $remoteipFingerprint, ?int $leaseSeconds = null, ?string $binding = null): array
             {
                 throw new \RuntimeException('idempotency store outage');
             }
@@ -1536,7 +1691,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
                 return null;
             }
 
-            public function takeover(string $backendId, string $idempotencyKey, string $responseHash, int $ttlSeconds, string $remoteipFingerprint, ?int $leaseSeconds = null): array
+            public function takeover(string $backendId, string $idempotencyKey, string $responseHash, int $ttlSeconds, string $remoteipFingerprint, ?int $leaseSeconds = null, ?string $binding = null): array
             {
                 return [IdempotencyClaim::StillPending, null];
             }
@@ -1582,12 +1737,12 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
                 return $this->inner->leaseSeconds();
             }
 
-            public function claim(string $backendId, string $idempotencyKey, string $responseHash, int $ttlSeconds, string $remoteipFingerprint, ?int $leaseSeconds = null): array
+            public function claim(string $backendId, string $idempotencyKey, string $responseHash, int $ttlSeconds, string $remoteipFingerprint, ?int $leaseSeconds = null, ?string $binding = null): array
             {
                 return $this->inner->claim($backendId, $idempotencyKey, $responseHash, $ttlSeconds, $remoteipFingerprint, $leaseSeconds);
             }
 
-            public function takeover(string $backendId, string $idempotencyKey, string $responseHash, int $ttlSeconds, string $remoteipFingerprint, ?int $leaseSeconds = null): array
+            public function takeover(string $backendId, string $idempotencyKey, string $responseHash, int $ttlSeconds, string $remoteipFingerprint, ?int $leaseSeconds = null, ?string $binding = null): array
             {
                 return $this->inner->takeover($backendId, $idempotencyKey, $responseHash, $ttlSeconds, $remoteipFingerprint, $leaseSeconds);
             }
@@ -1685,7 +1840,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
             }
         };
         $throwingIdem = new class implements \BelConsulting\KiwiCaptchaBundle\SiteVerify\SiteVerifyIdempotencyStore {
-            public function claim(string $backendId, string $idempotencyKey, string $responseHash, int $ttlSeconds, string $remoteipFingerprint, ?int $leaseSeconds = null): array
+            public function claim(string $backendId, string $idempotencyKey, string $responseHash, int $ttlSeconds, string $remoteipFingerprint, ?int $leaseSeconds = null, ?string $binding = null): array
             {
                 throw new \RuntimeException('idempotency store outage');
             }
@@ -1704,7 +1859,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
                 return null;
             }
 
-            public function takeover(string $backendId, string $idempotencyKey, string $responseHash, int $ttlSeconds, string $remoteipFingerprint, ?int $leaseSeconds = null): array
+            public function takeover(string $backendId, string $idempotencyKey, string $responseHash, int $ttlSeconds, string $remoteipFingerprint, ?int $leaseSeconds = null, ?string $binding = null): array
             {
                 return [IdempotencyClaim::StillPending, null];
             }
@@ -1762,12 +1917,12 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
                 return $this->inner->leaseSeconds();
             }
 
-            public function claim(string $backendId, string $idempotencyKey, string $responseHash, int $ttlSeconds, string $remoteipFingerprint, ?int $leaseSeconds = null): array
+            public function claim(string $backendId, string $idempotencyKey, string $responseHash, int $ttlSeconds, string $remoteipFingerprint, ?int $leaseSeconds = null, ?string $binding = null): array
             {
                 return $this->inner->claim($backendId, $idempotencyKey, $responseHash, $ttlSeconds, $remoteipFingerprint, $leaseSeconds);
             }
 
-            public function takeover(string $backendId, string $idempotencyKey, string $responseHash, int $ttlSeconds, string $remoteipFingerprint, ?int $leaseSeconds = null): array
+            public function takeover(string $backendId, string $idempotencyKey, string $responseHash, int $ttlSeconds, string $remoteipFingerprint, ?int $leaseSeconds = null, ?string $binding = null): array
             {
                 return $this->inner->takeover($backendId, $idempotencyKey, $responseHash, $ttlSeconds, $remoteipFingerprint, $leaseSeconds);
             }
@@ -1857,12 +2012,12 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
                 return $this->inner->leaseSeconds();
             }
 
-            public function claim(string $backendId, string $idempotencyKey, string $responseHash, int $ttlSeconds, string $remoteipFingerprint, ?int $leaseSeconds = null): array
+            public function claim(string $backendId, string $idempotencyKey, string $responseHash, int $ttlSeconds, string $remoteipFingerprint, ?int $leaseSeconds = null, ?string $binding = null): array
             {
                 return $this->inner->claim($backendId, $idempotencyKey, $responseHash, $ttlSeconds, $remoteipFingerprint, $leaseSeconds);
             }
 
-            public function takeover(string $backendId, string $idempotencyKey, string $responseHash, int $ttlSeconds, string $remoteipFingerprint, ?int $leaseSeconds = null): array
+            public function takeover(string $backendId, string $idempotencyKey, string $responseHash, int $ttlSeconds, string $remoteipFingerprint, ?int $leaseSeconds = null, ?string $binding = null): array
             {
                 return $this->inner->takeover($backendId, $idempotencyKey, $responseHash, $ttlSeconds, $remoteipFingerprint, $leaseSeconds);
             }
@@ -1981,12 +2136,12 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
                 return $this->inner->leaseSeconds();
             }
 
-            public function claim(string $backendId, string $idempotencyKey, string $responseHash, int $ttlSeconds, string $remoteipFingerprint, ?int $leaseSeconds = null): array
+            public function claim(string $backendId, string $idempotencyKey, string $responseHash, int $ttlSeconds, string $remoteipFingerprint, ?int $leaseSeconds = null, ?string $binding = null): array
             {
                 return $this->inner->claim($backendId, $idempotencyKey, $responseHash, $ttlSeconds, $remoteipFingerprint, $leaseSeconds);
             }
 
-            public function takeover(string $backendId, string $idempotencyKey, string $responseHash, int $ttlSeconds, string $remoteipFingerprint, ?int $leaseSeconds = null): array
+            public function takeover(string $backendId, string $idempotencyKey, string $responseHash, int $ttlSeconds, string $remoteipFingerprint, ?int $leaseSeconds = null, ?string $binding = null): array
             {
                 return $this->inner->takeover($backendId, $idempotencyKey, $responseHash, $ttlSeconds, $remoteipFingerprint, $leaseSeconds);
             }

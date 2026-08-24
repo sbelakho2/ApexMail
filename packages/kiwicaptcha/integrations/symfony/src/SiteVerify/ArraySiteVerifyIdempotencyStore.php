@@ -31,7 +31,7 @@ final class ArraySiteVerifyIdempotencyStore implements SiteVerifyIdempotencyStor
         $this->now = $now ?? static fn (): int => time();
     }
 
-    public function claim(string $backendId, string $idempotencyKey, string $responseHash, int $ttlSeconds, string $remoteipFingerprint, ?int $leaseSeconds = null): array
+    public function claim(string $backendId, string $idempotencyKey, string $responseHash, int $ttlSeconds, string $remoteipFingerprint, ?int $leaseSeconds = null, ?string $binding = null): array
     {
         $key = $this->key($backendId, $idempotencyKey);
         $existing = $this->records[$key] ?? null;
@@ -41,6 +41,7 @@ final class ArraySiteVerifyIdempotencyStore implements SiteVerifyIdempotencyStor
             $this->records[$key] = [
                 'hash' => $responseHash,
                 'remoteip_fingerprint' => $remoteipFingerprint,
+                'binding' => $binding,
                 'state' => 'pending',
                 'owner' => $owner,
                 'result' => null,
@@ -49,7 +50,11 @@ final class ArraySiteVerifyIdempotencyStore implements SiteVerifyIdempotencyStor
 
             return [IdempotencyClaim::Claimed, $owner];
         }
-        if ($existing['hash'] !== $responseHash || ($existing['remoteip_fingerprint'] ?? null) !== $remoteipFingerprint) {
+        if (
+            $existing['hash'] !== $responseHash
+            || ($existing['remoteip_fingerprint'] ?? null) !== $remoteipFingerprint
+            || ($existing['binding'] ?? null) !== $binding
+        ) {
             return [IdempotencyClaim::Conflict, null];
         }
         if ($existing['state'] === 'complete') {
@@ -59,7 +64,7 @@ final class ArraySiteVerifyIdempotencyStore implements SiteVerifyIdempotencyStor
         return [IdempotencyClaim::PendingSame, null];
     }
 
-    public function takeover(string $backendId, string $idempotencyKey, string $responseHash, int $ttlSeconds, string $remoteipFingerprint, ?int $leaseSeconds = null): array
+    public function takeover(string $backendId, string $idempotencyKey, string $responseHash, int $ttlSeconds, string $remoteipFingerprint, ?int $leaseSeconds = null, ?string $binding = null): array
     {
         $key = $this->key($backendId, $idempotencyKey);
         $existing = $this->records[$key] ?? null;
@@ -68,6 +73,7 @@ final class ArraySiteVerifyIdempotencyStore implements SiteVerifyIdempotencyStor
             || $existing['state'] !== 'pending'
             || $existing['hash'] !== $responseHash
             || ($existing['remoteip_fingerprint'] ?? null) !== $remoteipFingerprint
+            || ($existing['binding'] ?? null) !== $binding
             || ($existing['lease_expires_at'] ?? 0) >= $now
         ) {
             return [IdempotencyClaim::StillPending, null];

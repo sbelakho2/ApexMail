@@ -1216,17 +1216,52 @@ final class ChallengeController
         }
 
         // Anti-stockpiling admission (post-mint): the live-membership member
-        // is the minted nonce scored at its absolute expiry, which exists
-        // only once the record is minted (OutstandingChallenges::issue). The
-        // admission runs before handoff, so a refused admission discards the
-        // minted record and never hands out; a refusal here is a race the
-        // earlier checks did not see (concurrent issuances).
+        // is the minted nonce scored at its Redis-clock deadline, which
+        // exists only once the record is minted
+        // (OutstandingChallenges::issue). The accounting lifetime is the
+        // nominal challenge TTL PLUS the core verifier's permitted
+        // future-issuance skew (Verifier::MAX_CLOCK_SKEW): under a
+        // distributed issuer/verifier deployment an issuer clock up to 60s
+        // ahead of the Redis clock can mint a record that stays
+        // verifier-valid beyond its nominal TTL, and the outstanding
+        // memberships must keep counting it for the complete
+        // core-validity envelope (a hard anti-stockpiling bound may
+        // overcount, never undercount). The admission runs before handoff,
+        // so a refused admission discards the minted record and never
+        // hands out; a refusal here is a race the earlier checks did not
+        // see (concurrent issuances).
         if ($this->outstanding !== null) {
-            $admitted = $this->outstanding->issue(
-                $clientIp,
-                $challenge->nonce,
-                max(1, $challenge->ttlSecs),
-            );
+            try {
+                $admitted = $this->outstanding->issue(
+                    $clientIp,
+                    $challenge->nonce,
+                    max(1, $challenge->ttlSecs) + \KiwiCaptcha\Verifier::MAX_CLOCK_SKEW,
+                );
+            } catch (\Throwable $e) {
+                // The admission is the LAST pre-handoff step and the
+                // challenge has not been handed out: a Redis failure
+                // (or a violated verified-WAIT barrier) is resolved by
+                // rolling the ENTIRE issuance attempt back — the minted
+                // record is discarded, the admission is aborted
+                // (one-shot and idempotent: if the EVAL landed before the
+                // reply was lost, the abort releases it; if it never
+                // landed, it does nothing), the chain reservation is
+                // released, and the request answers the private
+                // structured 503 — never an uncaught exception and never
+                // a minted-but-never-handed-out record.
+                error_log(sprintf('kiwicaptcha: outstanding admission failed for nonce %s: %s', $challenge->nonce, $e->getMessage()));
+                $this->discardChallenge($challenge);
+                $this->outstanding?->abortedBeforeHandoff($challenge->nonce);
+                $this->releaseChain($chainId, $chainOwner);
+
+                return $this->privateJson(
+                    ['error' => ['code' => 'SERVICE_UNAVAILABLE', 'message' => 'Challenge issuance is temporarily unavailable. Try again later.']],
+                    Response::HTTP_SERVICE_UNAVAILABLE,
+                    $request,
+                    $riskSession,
+                    $mintedCookie,
+                );
+            }
             if ($admitted !== 1) {
                 $this->discardChallenge($challenge);
                 $this->releaseChain($chainId, $chainOwner);
@@ -1562,12 +1597,28 @@ final class ChallengeController
 
         // Bounded per-source limiter: the anti-stockpiling layer's own
         // per-IP cancellation window (a sliding window in the issuance
-        // rate-limiter style).
-        if ($this->outstanding !== null && !$this->outstanding->cancellationAdmission($clientIp)) {
-            return $this->privateJson(
-                ['error' => ['code' => 'CANCELLATION_RATE_LIMITED', 'message' => 'Too many cancellation requests from this address. Try again later.']],
-                Response::HTTP_TOO_MANY_REQUESTS,
-            );
+        // rate-limiter style). A Redis failure here is inside the
+        // endpoint's structured error boundary: the limiter fails closed
+        // (the retryable private 503 — the endpoint refuses rather than
+        // letting an unbounded cancellation stream through), never an
+        // uncaught exception escaping as a 500.
+        if ($this->outstanding !== null) {
+            try {
+                $admitted = $this->outstanding->cancellationAdmission($clientIp);
+            } catch (\Throwable $e) {
+                error_log(sprintf('kiwicaptcha: cancellation admission failed: %s', $e->getMessage()));
+
+                return $this->privateJson(
+                    ['error' => ['code' => 'SERVICE_UNAVAILABLE', 'message' => 'Cancellation is temporarily unavailable. Try again later.']],
+                    Response::HTTP_SERVICE_UNAVAILABLE,
+                );
+            }
+            if (!$admitted) {
+                return $this->privateJson(
+                    ['error' => ['code' => 'CANCELLATION_RATE_LIMITED', 'message' => 'Too many cancellation requests from this address. Try again later.']],
+                    Response::HTTP_TOO_MANY_REQUESTS,
+                );
+            }
         }
 
         // Risk attribution of a fresh cancellation: the ChallengeCancelled

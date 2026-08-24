@@ -636,6 +636,42 @@ final class ValidatorTest extends TestCase
         self::assertCount(0, $engine->validate($dto), 'a failed sidecar GET never fails a valid solve');
     }
 
+    public function testOutstandingCountsTheCompleteVerifierValidityEnvelopeUnderIssuerSkew(): void
+    {
+        // P1/P2: the accounting lifetime is the nominal TTL plus the core
+        // verifier's permitted future-issuance skew (MAX_CLOCK_SKEW), so a
+        // distributed issuer clock ahead of the Redis clock can never make
+        // the anti-stockpiling caps undercount a still-verifier-valid
+        // challenge: at real t+11 a token minted at t+30 (inside the
+        // permitted +60s skew) with a 10s TTL is still valid, and the
+        // outstanding memberships must still count it.
+        $client = new FakePredisClient();
+        $client->setTimeMs(1_800_000_000_000);
+        $base = 1_800_000_000;
+        $outstanding = new OutstandingChallenges($client, '{kiwi:skew-test}:outstanding:', RiskKeys::fromMaster(self::SECRET), 2, 100, 0);
+        $storage = new ArrayStorage();
+        $issuer = new Issuer(new Config(secretKey: self::SECRET, targetBits: 8, ttlSecs: 10), $storage, now: static fn (): int => $base + 30);
+        $challenge = $issuer->issue('login', '198.51.100.7');
+        self::assertSame(1, $outstanding->issue('198.51.100.7', $challenge->nonce, 10 + Verifier::MAX_CLOCK_SKEW), 'the controller admission adds the verifier skew grace');
+        $sourceKey = $outstanding->sourceKey('198.51.100.7');
+        self::assertSame(1, $client->counters[$sourceKey]);
+
+        // Real t+11: the token is still verifier-valid...
+        usleep(($challenge->minDurationMs + 10) * 1000);
+        $token = $this->solveToken($challenge->prefix, $challenge->salt, $challenge->targetBits, $challenge->nonce);
+        $verifier = new Verifier($storage, now: static fn (): int => $base + 11);
+        $outcome = $verifier->verify($token, self::SECRET, 'login', '198.51.100.7');
+        self::assertTrue($outcome->isOk(), sprintf('the token is still verifier-valid at t+11 under the permitted issuer skew, got %s', $outcome->code()));
+
+        // ...and the outstanding accounting still counts it: the members
+        // expire at Redis-now + ttl + skew, so the cap holds at 2 even
+        // after the nominal TTL passed.
+        $client->setTimeMs(1_800_000_011_000);
+        self::assertSame(1, $client->counters[$sourceKey], 'the outstanding membership still counts the challenge at t+11');
+        self::assertSame(1, $outstanding->issue('198.51.100.7', 'Y'.str_repeat('y', 43), 10 + Verifier::MAX_CLOCK_SKEW), 'a second challenge is admitted');
+        self::assertSame(0, $outstanding->issue('198.51.100.7', 'Z'.str_repeat('z', 43), 10 + Verifier::MAX_CLOCK_SKEW), 'the cap counts BOTH live members — the skew can never undercount the bound');
+    }
+
     public function testPostFieldFallbackCarriesTheBindingWithoutTheAttribute(): void
     {
         // The documented attribute is preferred, but the plain POSTed field

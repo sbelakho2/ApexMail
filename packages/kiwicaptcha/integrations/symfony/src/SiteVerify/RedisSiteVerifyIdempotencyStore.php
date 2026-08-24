@@ -40,15 +40,16 @@ local owner = ARGV[2]
 local ttl = tonumber(ARGV[3])
 local lease_seconds = tonumber(ARGV[4])
 local fingerprint = ARGV[5]
+local binding = ARGV[6]
 -- redis TIME returns bulk strings; tonumber makes the arithmetic explicit.
 local now = tonumber(redis.call('TIME')[1])
 local existing = redis.call('GET', key)
 if not existing then
-  redis.call('SET', key, cjson.encode({ response_hash = response_hash, remoteip_fingerprint = fingerprint, state = 'pending', owner = owner, result = cjson.null, lease_expires_at = now + lease_seconds }), 'EX', ttl)
+  redis.call('SET', key, cjson.encode({ response_hash = response_hash, remoteip_fingerprint = fingerprint, binding = binding, state = 'pending', owner = owner, result = cjson.null, lease_expires_at = now + lease_seconds }), 'EX', ttl)
   return 'claimed'
 end
 local rec = cjson.decode(existing)
-if rec.response_hash ~= response_hash or rec.remoteip_fingerprint ~= fingerprint then
+if rec.response_hash ~= response_hash or rec.remoteip_fingerprint ~= fingerprint or rec.binding ~= binding then
   return 'conflict'
 end
 if rec.state == 'complete' then
@@ -64,6 +65,7 @@ local response_hash = ARGV[2]
 local fingerprint = ARGV[3]
 local lease_seconds = tonumber(ARGV[4])
 local ttl = tonumber(ARGV[5])
+local binding = ARGV[6]
 local now = tonumber(redis.call('TIME')[1])
 local existing = redis.call('GET', key)
 if not existing then
@@ -82,6 +84,12 @@ end
 -- itself). A legacy record without a fingerprint matches nothing
 -- (fail-closed), exactly like the claim.
 if rec.remoteip_fingerprint ~= fingerprint then
+  return 'still_pending'
+end
+-- The canonical transaction binding is bound in the record too: a
+-- takeover under a different transaction context is refused, so the
+-- crash-recovery identity can never cross transaction boundaries.
+if rec.binding ~= binding then
   return 'still_pending'
 end
 -- A legacy record without a lease field is treated as already expired.
@@ -144,11 +152,11 @@ LUA;
     ) {
     }
 
-    public function claim(string $backendId, string $idempotencyKey, string $responseHash, int $ttlSeconds, string $remoteipFingerprint, ?int $leaseSeconds = null): array
+    public function claim(string $backendId, string $idempotencyKey, string $responseHash, int $ttlSeconds, string $remoteipFingerprint, ?int $leaseSeconds = null, ?string $binding = null): array
     {
         $owner = bin2hex(random_bytes(16));
         $lease = $leaseSeconds ?? $this->leaseSeconds;
-        $result = RedisEval::eval($this->redis, self::CLAIM_LUA, $this->key($backendId, $idempotencyKey), [$responseHash, $owner, max(1, $ttlSeconds), $lease, $remoteipFingerprint]);
+        $result = RedisEval::eval($this->redis, self::CLAIM_LUA, $this->key($backendId, $idempotencyKey), [$responseHash, $owner, max(1, $ttlSeconds), $lease, $remoteipFingerprint, $binding ?? '']);
 
         $claim = match ((string) $result) {
             'claimed' => IdempotencyClaim::Claimed,
@@ -160,7 +168,7 @@ LUA;
         return [$claim, $claim === IdempotencyClaim::Claimed ? $owner : null];
     }
 
-    public function takeover(string $backendId, string $idempotencyKey, string $responseHash, int $ttlSeconds, string $remoteipFingerprint, ?int $leaseSeconds = null): array
+    public function takeover(string $backendId, string $idempotencyKey, string $responseHash, int $ttlSeconds, string $remoteipFingerprint, ?int $leaseSeconds = null, ?string $binding = null): array
     {
         $owner = bin2hex(random_bytes(16));
         // The takeover Lua already receives the lease via ARGV[4]; pass
@@ -168,7 +176,7 @@ LUA;
         // maintained across the takeover (null = the configured lease —
         // the controller always passes null; the lease is never derived
         // from a token's remaining validity).
-        $result = RedisEval::eval($this->redis, self::TAKEOVER_LUA, $this->key($backendId, $idempotencyKey), [$owner, $responseHash, $remoteipFingerprint, $leaseSeconds ?? $this->leaseSeconds, max(1, $ttlSeconds)]);
+        $result = RedisEval::eval($this->redis, self::TAKEOVER_LUA, $this->key($backendId, $idempotencyKey), [$owner, $responseHash, $remoteipFingerprint, $leaseSeconds ?? $this->leaseSeconds, max(1, $ttlSeconds), $binding ?? '']);
 
         $takeover = match ((string) $result) {
             'took_over' => IdempotencyClaim::TookOver,

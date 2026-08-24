@@ -760,6 +760,17 @@ final class Verifier
      *                                       the sole authorization to resume.
      * @param string|null $expectedScope     required challenge scope (null = any).
      * @param string|null $clientIp          client IP for the optional IP binding.
+     * @param string|null $expectedRequestBinding the application transaction
+     *                                       binding a BOUND record's signed
+     *                                       request_binding must equal,
+     *                                       enforced before the resumed
+     *                                       derivation and the
+     *                                       committed-result fast path. An
+     *                                       explicitly unbound record
+     *                                       (BindingMode::None) is permitted
+     *                                       regardless of the expected
+     *                                       binding; null (the default)
+     *                                       keeps the binding unenforced.
      */
     public function resumeConsumedOperation(
         string $rawToken,
@@ -767,6 +778,7 @@ final class Verifier
         string $operationIdentity,
         ?string $expectedScope = null,
         ?string $clientIp = null,
+        ?string $expectedRequestBinding = null,
     ): VerifyOutcome {
         try {
             $token = SolutionToken::decode($rawToken);
@@ -798,6 +810,18 @@ final class Verifier
             || !hash_equals($consumed->operationIdentity, $operationIdentity)
         ) {
             return VerifyOutcome::invalid(VerifyError::ConsumeIndeterminate);
+        }
+
+        // 4b. Application transaction binding, enforced BEFORE the resumed
+        //     derivation and the committed-result fast path: a BOUND record
+        //     must equal the expected binding exactly, compared in constant
+        //     time. An explicitly unbound record (requestBinding null,
+        //     BindingMode::None) is permitted regardless of the expected
+        //     binding. Null (the default) keeps the binding unenforced.
+        if ($expectedRequestBinding !== null && $consumed->record->requestBinding !== null) {
+            if (!hash_equals($consumed->record->requestBinding, $expectedRequestBinding)) {
+                return VerifyOutcome::invalid(VerifyError::RequestBindingMismatch);
+            }
         }
 
         // Committed-result fast path: the deterministic outcome already
@@ -1047,8 +1071,10 @@ final class Verifier
      *   4.  scope: challenge scope matches the expected flow (WrongScope).
      *   4b. application transaction binding: a supplied expected request
      *       binding must equal the record's signed request_binding; an
-     *       unbound record with an expected binding is a mismatch
-     *       (RequestBindingMismatch).
+     *       explicitly unbound record (BindingMode::None) is permitted
+     *       regardless of the expected binding; only a record that
+     *       actually carries a binding must equal the expected one
+     *       (RequestBindingMismatch otherwise).
      *   5.  IP binding: the stored record is authoritative. An empty
      *       binding tag disables the check; a nonempty tag means the
      *       challenge is bound, so a missing client IP fails closed

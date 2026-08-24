@@ -5,6 +5,8 @@ declare(strict_types=1);
 namespace BelConsulting\KiwiCaptchaBundle\Controller;
 
 use BelConsulting\KiwiCaptchaBundle\Risk\SecurityEpochMonitor;
+use BelConsulting\KiwiCaptchaBundle\Validator\Constraints\KiwiCaptchaValidator;
+use BelConsulting\KiwiCaptchaBundle\Security\RequestScopeAdmissionGate;
 use BelConsulting\KiwiCaptchaBundle\SiteVerify\IdempotencyClaim;
 use BelConsulting\KiwiCaptchaBundle\SiteVerify\RedisEval;
 use BelConsulting\KiwiCaptchaBundle\SiteVerify\SiteVerifyIdempotencyStore;
@@ -184,6 +186,21 @@ final class SiteVerifyController
          * the static `$policyVersion` behavior exactly.
          */
         private readonly ?SecurityEpochMonitor $epochMonitor = null,
+        /**
+         * The authoritative transaction-binding resolver
+         * (risk.request_binding_authority). When configured, EVERY
+         * Siteverify redemption enforces the same pre-consume binding
+         * contract as the native path: the resolved binding is passed to
+         * the core verifier (and the resumed-operation path) as the
+         * expected request binding AND bound into the idempotency
+         * identity, so a proof anchored to one transaction can never
+         * succeed for another and an idempotency entry can never be
+         * reused across transaction contexts. Null when no authority is
+         * configured; the extension refuses the siteverify-secrets +
+         * request-binding-capable issuance combination without one at
+         * compile time.
+         */
+        private readonly ?\BelConsulting\KiwiCaptchaBundle\Risk\RequestBindingAuthorityInterface $bindingAuthority = null,
     ) {
         $this->recovery = $recovery ?? (new \KiwiCaptcha\ConsumedOutcomeRecovery($this->storage ?? new \KiwiCaptcha\Storage\ArrayStorage()));
         // The lease-ordering invariant is enforced at construction: the
@@ -376,18 +393,55 @@ final class SiteVerifyController
         // never a replay of the pre-change outcome.
         $backendId = hash('sha256', $secret.'|'.$expectedScope.'|'.$effectiveEpoch);
 
+        // The authoritative transaction binding, resolved BEFORE any
+        // claim or verification: when a request-binding authority is
+        // configured (risk.request_binding_authority), the endpoint
+        // enforces the same pre-consume transaction-binding contract as
+        // the native path — a challenge cryptographically anchored to one
+        // transaction is never redeemable for another through the
+        // provider-compatible surface either. The authority resolves from
+        // its own trusted inputs (session, cookies, server-attested
+        // headers); the request's `request_binding` field (native or
+        // provider vocabulary) is only a hint. An authority that cannot
+        // attribute the transaction refuses the request before anything
+        // is claimed or verified. Without an authority there is no
+        // server-side transaction input and the endpoint cannot enforce a
+        // binding: the configured combination is refused at container
+        // compile time (see the extension) rather than silently turning
+        // request binding off on this surface.
+        $presentedBinding = $request->attributes->get(KiwiCaptchaValidator::REQUEST_BINDING_ATTRIBUTE);
+        if (!\is_string($presentedBinding) || $presentedBinding === '') {
+            $posted = $request->request->get('request_binding');
+            $presentedBinding = \is_string($posted) ? $posted : null;
+        }
+        $canonicalBinding = null;
+        if ($this->bindingAuthority !== null) {
+            try {
+                $resolved = $this->bindingAuthority->resolve($request, $expectedScope, $presentedBinding);
+            } catch (\Throwable) {
+                // The authority cannot attribute this transaction: refuse
+                // before anything is claimed, verified or granted.
+                return new JsonResponse(['success' => false, 'error-codes' => ['bad-request']], Response::HTTP_BAD_REQUEST);
+            }
+            $canonicalBinding = \is_string($resolved) && $resolved !== '' ? $resolved : null;
+        }
+
         // The logical-operation identity of this claim: a single bounded
         // hex fingerprint of (backend identity, idempotency key, response
-        // hash, canonicalized remoteip fingerprint) computed before the
-        // verify. The same value is recorded as the operation identity in
-        // the verifier's atomic pending->consumed transition by every
-        // owner that performs a fresh verification (the Claimed path and
-        // the TookOver path alike; a non-idempotent request records
-        // nothing), and compared against the consumed record's own stored
-        // identity on the takeover path: reconstruction is
-        // recovery-eligible only when the record's identity equals this
-        // claim's fingerprint, written atomically with the state flip.
-        $operationFingerprint = hash('sha256', $backendId."\0".($idempotencyKey ?? "\0no-key")."\0".hash('sha256', $response)."\0".$this->remoteipFingerprint($remoteIp));
+        // hash, canonicalized remoteip fingerprint, canonical transaction
+        // binding) computed before the verify. The binding is part of the
+        // identity, so an idempotency entry can never be reused across
+        // different transaction contexts: the same key under a different
+        // authoritative binding is a conflict, never a cached success.
+        // The same value is recorded as the operation identity in the
+        // verifier's atomic pending->consumed transition by every owner
+        // that performs a fresh verification (the Claimed path and the
+        // TookOver path alike; a non-idempotent request records nothing),
+        // and compared against the consumed record's own stored identity
+        // on the takeover path: reconstruction is recovery-eligible only
+        // when the record's identity equals this claim's fingerprint,
+        // written atomically with the state flip.
+        $operationFingerprint = hash('sha256', $backendId."\0".($idempotencyKey ?? "\0no-key")."\0".hash('sha256', $response)."\0".$this->remoteipFingerprint($remoteIp)."\0".($canonicalBinding ?? "\0no-binding"));
 
         // The token is decoded before the claim so a malformed token is a
         // deterministic failure: the claiming request finalizes it, so a
@@ -416,7 +470,7 @@ final class SiteVerifyController
             $claimOwner = null;
             if ($idempotencyKey !== null && $this->idempotencyStore !== null) {
                 try {
-                    [$claim, $claimOwner] = $this->idempotencyStore->claim($backendId, $idempotencyKey, hash('sha256', $response), 300, $this->remoteipFingerprint($remoteIp));
+                    [$claim, $claimOwner] = $this->idempotencyStore->claim($backendId, $idempotencyKey, hash('sha256', $response), 300, $this->remoteipFingerprint($remoteIp), null, $canonicalBinding);
                 } catch (\Throwable) {
                     // The malformed-token claim is a raw store operation:
                     // nothing has been consumed (the decode failed), so a
@@ -475,7 +529,7 @@ final class SiteVerifyController
         if ($idempotencyKey !== null) {
             $idempotent = true;
             try {
-                [$claim, $claimOwner] = $this->idempotencyStore->claim($backendId, $idempotencyKey, hash('sha256', $response), 300, $this->remoteipFingerprint($remoteIp));
+                [$claim, $claimOwner] = $this->idempotencyStore->claim($backendId, $idempotencyKey, hash('sha256', $response), 300, $this->remoteipFingerprint($remoteIp), null, $canonicalBinding);
             } catch (\Throwable) {
                 // The claim is a raw store operation (a Redis outage):
                 // nothing has been consumed yet, so a same-key retry is
@@ -570,7 +624,7 @@ final class SiteVerifyController
                     // happens until the lease is at/expired from this
                     // waiter's perspective.
                     $leaseProbed = true;
-                    $attempt = $this->attemptTakeover($backendId, $idempotencyKey, $response, $remoteIp, $claimOwner, $claimedAt);
+                    $attempt = $this->attemptTakeover($backendId, $idempotencyKey, $response, $remoteIp, $claimOwner, $claimedAt, $canonicalBinding);
                     if ($attempt instanceof JsonResponse) {
                         return $attempt;
                     }
@@ -589,7 +643,7 @@ final class SiteVerifyController
                         $backoffMs = self::PENDING_SAME_POLL_BASE_MS;
                     }
                     if ($takeoverArmed) {
-                        $attempt = $this->attemptTakeover($backendId, $idempotencyKey, $response, $remoteIp, $claimOwner, $claimedAt);
+                        $attempt = $this->attemptTakeover($backendId, $idempotencyKey, $response, $remoteIp, $claimOwner, $claimedAt, $canonicalBinding);
                         if ($attempt instanceof JsonResponse) {
                             return $attempt;
                         }
@@ -665,13 +719,14 @@ final class SiteVerifyController
                         // API itself from being a replay oracle).
                         $reconstructed = $this->recovery->recover($response, $operationFingerprint);
                     } else {
-                        $resumeOutcome = $this->verifier->resumeConsumedOperation(
+                        $resumeOutcome = $this->withScopeAttribute($request, $expectedScope, fn () => $this->verifier->resumeConsumedOperation(
                             $response,
                             $this->secretKey,
                             $operationFingerprint,
                             $expectedScope,
                             $remoteIp,
-                        );
+                            $canonicalBinding,
+                        ));
                     }
                 }
             } catch (\Throwable) {
@@ -748,15 +803,24 @@ final class SiteVerifyController
         // non-idempotent request passes null and records no identity, so
         // a later keyed replay can never reconstruct.
         try {
-            $outcome = $this->verifier->verify(
-                $response,
-                $this->secretKey,
-                $expectedScope,
-                $remoteIp,
-                null,            // region expectation is application policy
-                false,           // telemetry is never authoritative here
-                $idempotent && ($claim === IdempotencyClaim::Claimed || $claim === IdempotencyClaim::TookOver) ? $operationFingerprint : null,
-            );
+            $outcome = $this->withScopeAttribute($request, $expectedScope, function () use ($response, $expectedScope, $remoteIp, $idempotent, $claim, $operationFingerprint, $canonicalBinding): \KiwiCaptcha\VerifyOutcome {
+                // The scope attribute drives the Argon per-scope admission
+                // budget (RequestScopeAdmissionGate): without it, every
+                // Siteverify redemption would fall into the unscoped
+                // global-only path and one busy scope could starve the
+                // others. The expected binding is enforced by the core
+                // BEFORE the consume, exactly like the native path.
+                return $this->verifier->verify(
+                    $response,
+                    $this->secretKey,
+                    $expectedScope,
+                    $remoteIp,
+                    null,            // region expectation is application policy
+                    false,           // telemetry is never authoritative here
+                    $idempotent && ($claim === IdempotencyClaim::Claimed || $claim === IdempotencyClaim::TookOver) ? $operationFingerprint : null,
+                    $canonicalBinding,
+                );
+            });
         } catch (\InvalidArgumentException) {
             // Defensive boundary: the remoteip was validated above, so
             // the core's IP canonicalization cannot throw here. An
@@ -974,10 +1038,10 @@ final class SiteVerifyController
      *         error, the entry stays pending, and a later retry can
      *         still take over or read the stored result.
      */
-    private function attemptTakeover(string $backendId, string $idempotencyKey, string $response, ?string $remoteIp, ?string &$claimOwner, ?float &$claimedAt): bool|JsonResponse
+    private function attemptTakeover(string $backendId, string $idempotencyKey, string $response, ?string $remoteIp, ?string &$claimOwner, ?float &$claimedAt, ?string $canonicalBinding): bool|JsonResponse
     {
         try {
-            [$takeover, $takeoverOwner] = $this->idempotencyStore->takeover($backendId, $idempotencyKey, hash('sha256', $response), 300, $this->remoteipFingerprint($remoteIp));
+            [$takeover, $takeoverOwner] = $this->idempotencyStore->takeover($backendId, $idempotencyKey, hash('sha256', $response), 300, $this->remoteipFingerprint($remoteIp), null, $canonicalBinding);
         } catch (\Throwable) {
             return $this->internalErrorResponse();
         }
@@ -1011,6 +1075,35 @@ final class SiteVerifyController
      * canonical array when the success-shape reads hit a storage outage,
      * since a storage failure after consumption must never 500.
      */
+    /**
+     * Run a callable with the request scope attribute stamped for the
+     * Argon per-scope admission budget (RequestScopeAdmissionGate reads
+     * the scope from the request attribute; without it every Siteverify
+     * redemption would fall into the unscoped global-only path and one
+     * busy scope could starve the others). The previous attribute value
+     * is restored afterwards.
+     *
+     * @template T
+     *
+     * @param callable(): T $fn
+     *
+     * @return T
+     */
+    private function withScopeAttribute(Request $request, string $scope, callable $fn): mixed
+    {
+        $previous = $request->attributes->get(RequestScopeAdmissionGate::SCOPE_ATTRIBUTE);
+        $request->attributes->set(RequestScopeAdmissionGate::SCOPE_ATTRIBUTE, $scope);
+        try {
+            return $fn();
+        } finally {
+            if ($previous === null) {
+                $request->attributes->remove(RequestScopeAdmissionGate::SCOPE_ATTRIBUTE);
+            } else {
+                $request->attributes->set(RequestScopeAdmissionGate::SCOPE_ATTRIBUTE, $previous);
+            }
+        }
+    }
+
     /**
      * The single successful-outcome return path: releases the solved
      * nonce's ORIGINAL outstanding slot and its live-outstanding

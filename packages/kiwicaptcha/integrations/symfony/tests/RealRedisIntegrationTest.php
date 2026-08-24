@@ -276,6 +276,37 @@ final class RealRedisIntegrationTest extends TestCase
         self::assertSame(1, $outstanding->issue('198.51.100.7', base64_encode(random_bytes(32)), 60));
     }
 
+    public function testOutstandingAdmissionIssuesAVerifiedWaitAgainstRealRedis(): void
+    {
+        // P1/P2: the admission write is protected by the configured
+        // replica-durability barrier exactly like the challenge storage —
+        // a successful admission issues one verified WAIT, and a refused
+        // admission (no write) never WAITs.
+        $this->client->flushall();
+        $secret = '0123456789abcdef0123456789abcdef';
+        $counting = new \BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\CommandCountingRedisClient('tcp://127.0.0.1:6399', ['timeout' => 2.0, 'read_write_timeout' => 2.0]);
+        $outstanding = new OutstandingChallenges($counting, '{kiwi:ci}:outstanding:', RiskKeys::fromMaster($secret), 1, 100, 5, 1, 100);
+
+        // The admission write lands, then the verified WAIT runs on the
+        // same connection; on this replica-less server it acknowledges 0
+        // of 1 and the barrier FAILS CLOSED (the caller must never learn
+        // a success that was not replicated).
+        try {
+            $outstanding->issue('198.51.100.7', base64_encode(random_bytes(32)), 60);
+            self::fail('the verified WAIT must fail closed when the replica count is unmet');
+        } catch (\KiwiCaptcha\Storage\ReplicaWaitException) {
+            // the fail-closed barrier fired ✓
+        }
+        self::assertCount(1, $counting->waits(), 'a successful admission issues exactly one verified WAIT');
+
+        // The admission write actually landed (the WAIT comes after the
+        // mutation): the source cap is full, and a refused admission
+        // performs no write and never WAITs.
+        self::assertSame(0, $outstanding->issue('198.51.100.7', base64_encode(random_bytes(32)), 60));
+        self::assertCount(1, $counting->waits(), 'a refused admission never WAITs');
+        $counting->disconnect();
+    }
+
     public function testMixedExpiryScoresCountExactlyAgainstRealRedis(): void
     {
         // The flagged concern: lex-range counting (ZLEXCOUNT) is only
@@ -376,7 +407,7 @@ final class RealRedisIntegrationTest extends TestCase
     public function testPerScopeBudgetAndGlobalCapAgainstRealRedis(): void
     {
         $sem = new RedisAdmissionSemaphore($this->client, 100, 'ci-scope', 45_000, 64, 2);
-        $scopeKey = '{kiwicaptcha:argon2:leases:ci-scope}:login';
+        $scopeKey = '{kiwicaptcha:argon2:leases:ci-scope}:'.hash('sha256', 'login');
 
         // Scope 'login' fills its own budget of 2 while the global cap is
         // nowhere near full; a second scope still acquires (fairness).

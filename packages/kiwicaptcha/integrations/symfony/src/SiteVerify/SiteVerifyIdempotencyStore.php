@@ -88,7 +88,7 @@ interface SiteVerifyIdempotencyStore
      *         (null = the store's fixed configured lease) sizes the owner
      *         lease window; the controller always passes null.
      */
-    public function claim(string $backendId, string $idempotencyKey, string $responseHash, int $ttlSeconds, string $remoteipFingerprint, ?int $leaseSeconds = null): array;
+    public function claim(string $backendId, string $idempotencyKey, string $responseHash, int $ttlSeconds, string $remoteipFingerprint, ?int $leaseSeconds = null, ?string $binding = null): array;
 
     /**
      * Persist the canonical provider response for a complete claim so a
@@ -129,7 +129,7 @@ interface SiteVerifyIdempotencyStore
      *         null when the lease is still held (or the entry is complete /
      *         a different response hash or remoteip fingerprint)
      */
-    public function takeover(string $backendId, string $idempotencyKey, string $responseHash, int $ttlSeconds, string $remoteipFingerprint, ?int $leaseSeconds = null): array;
+    public function takeover(string $backendId, string $idempotencyKey, string $responseHash, int $ttlSeconds, string $remoteipFingerprint, ?int $leaseSeconds = null, ?string $binding = null): array;
 
         /**
      * After verification, atomically confirm that this request still owns

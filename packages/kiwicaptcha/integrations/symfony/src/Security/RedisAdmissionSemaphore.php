@@ -205,11 +205,16 @@ LUA;
      * @param string|null $scope the scope string (the challenge's scope) for
      *                           the per-scope budget: the scope's
      *                           own lease set ({kiwicaptcha:argon2:leases:
-     *                           <ns>}:<scope>) is checked against
+     *                           <ns>}:<sha256(scope)>) is checked against
      *                           argon2_max_per_tenant in addition to the
      *                           global cap. Null = no per-scope attribution,
-     *                           only the global cap applies; the core
-     *                           verifier passes the stored record's scope.
+     *                           only the global cap applies; the bundle's
+     *                           RequestScopeAdmissionGate transports the
+     *                           scope through the request attribute that the
+     *                           native validator and the Siteverify
+     *                           endpoint stamp before verification (an
+     *                           unscoped acquire would silently skip the
+     *                           per-scope budget).
      */
     public function acquire(?string $scope = null): ?string
     {
@@ -220,11 +225,15 @@ LUA;
         $scopeKey = '';
         $hasScope = false;
         if ($scope !== null && $scope !== '') {
-        // Per-scope set: {kiwicaptcha:argon2:leases:<ns>}:<scope> —
-        // hash-tagged with the same family as the waiters counter
-        // (Cluster safe). The token carries the sanitized scope suffix
-        // so release() can remove the lease from both sets.
-            $scopeSuffix = preg_replace('/[^A-Za-z0-9_.-]/', '_', $scope) ?: 'scope';
+        // Per-scope set: {kiwicaptcha:argon2:leases:<ns>}:<sha256(scope)>
+        // — hash-tagged with the same family as the waiters counter
+        // (Cluster safe). The scope is HASHED, never sanitized: a
+        // lossy sanitization would collapse distinct legitimate scopes
+        // (tenant:a and tenant_a share one per-tenant budget, letting
+        // one starve the other) and would leak scope names into the
+        // key. The token carries the hashed scope suffix so release()
+        // can remove the lease from both sets.
+            $scopeSuffix = hash('sha256', $scope);
             $scopeKey = '{'.$this->key.'}:'.$scopeSuffix;
             $token .= '.'.$scopeSuffix;
             $hasScope = true;
@@ -243,8 +252,8 @@ LUA;
         if ($lease === 'disabled') {
             return;
         }
-        // A scoped lease token carries ".<sanitized-scope>" after the hex
-        // nonce; the scope suffix rebuilds the per-scope set key.
+        // A scoped lease token carries ".<sha256(scope)>" after the hex
+        // nonce; the hashed scope suffix rebuilds the per-scope set key.
         $scopeKey = '';
         $hasScope = false;
         $sep = strpos($lease, '.');
