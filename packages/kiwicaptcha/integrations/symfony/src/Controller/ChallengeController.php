@@ -1228,8 +1228,9 @@ final class ChallengeController
             // A mint or issuance fault classified as a client-side invalid
             // argument: the challenge was proven not handed out, so the
             // admitted outstanding slot is returned and the reservation
-            // released.
-            $this->rollbackUncommittedIssuance($challenge, $outstandingAdmissionHeld, $clientIp, $chainId, $chainOwner);
+            // released. The mint may have failed before the $challenge
+            // variable was assigned; the nullable parameter handles both.
+            $this->rollbackUncommittedIssuance($challenge ?? null, $outstandingAdmissionHeld, $clientIp, $chainId, $chainOwner);
 
             return $this->privateJson(
                 ['error' => ['code' => 'INVALID_SCOPE', 'message' => $e->getMessage()]],
@@ -1247,7 +1248,9 @@ final class ChallengeController
             // slot is returned and the reserved chain is released, so the
             // ticket is reusable.
             error_log(sprintf('kiwicaptcha: challenge issuance failed the replica-wait barrier: %s', $e->getMessage()));
-            $this->rollbackUncommittedIssuance($challenge, $outstandingAdmissionHeld, $clientIp, $chainId, $chainOwner);
+            // The mint's WAIT can fail before the $challenge variable is
+            // ever assigned; the nullable parameter handles both phases.
+            $this->rollbackUncommittedIssuance($challenge ?? null, $outstandingAdmissionHeld, $clientIp, $chainId, $chainOwner);
 
             return $this->privateJson(
                 ['error' => ['code' => 'SERVICE_UNAVAILABLE', 'message' => 'Challenge issuance is temporarily unavailable. Try again later.']],

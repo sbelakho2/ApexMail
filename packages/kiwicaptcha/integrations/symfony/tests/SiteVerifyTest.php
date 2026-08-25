@@ -349,17 +349,13 @@ final class SiteVerifyTest extends TestCase
         $first = $controller->siteverify($request());
         $refl = new \ReflectionObject($idem);
         $recordsProp = $refl->getProperty('records');
-        var_dump('DEBUG-RECORDS', $recordsProp->getValue($idem));
         self::assertSame(200, $first->getStatusCode());
         self::assertTrue(json_decode((string) $first->getContent(), true)['success']);
 
         // The same UUID under transaction B is a conflict (the binding is
         // part of the claim identity) — never the cached success.
-        var_dump('DEBUG-CALLS-AFTER-FIRST', $authority->calls);
         $authority->binding = 'txn-B';
         $second = $controller->siteverify($request());
-        var_dump('DEBUG-CALLS-AFTER-SECOND', $authority->calls);
-        var_dump('DEBUG-SECOND', $second->getStatusCode(), (string) $second->getContent());
         self::assertSame(400, $second->getStatusCode(), 'a changed transaction binding under the same idempotency UUID is a conflict');
         self::assertFalse(json_decode((string) $second->getContent(), true)['success']);
     }

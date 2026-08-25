@@ -158,7 +158,10 @@ LUA;
         private readonly \Predis\Client|\Redis $redis,
         private readonly string $namespace = 'kiwicaptcha',
         private readonly int $leaseSeconds = self::LEASE_SECONDS,
+        private readonly int $waitReplicas = 0,
+        private readonly int $waitTimeoutMs = 100,
     ) {
+        $this->refuseVerifiedWaitOnUnsupportedPredisClients();
     }
 
     public function claim(string $backendId, string $idempotencyKey, string $responseHash, int $ttlSeconds, string $remoteipFingerprint, ?int $leaseSeconds = null, ?string $binding = null): array
