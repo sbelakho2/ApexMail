@@ -31,7 +31,6 @@ use sha2::{Digest, Sha256};
 use crate::keys::DerivedKeys;
 use crate::profile::{ChallengeProfile, ProfileError};
 use crate::token::IssuedChallenge;
-use crate::verify::RequestBindingExpectation;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -1168,6 +1167,7 @@ mod hex {
 
 #[cfg(test)]
 mod tests {
+    use crate::verify::RequestBindingExpectation;
     use super::*;
 
     // Test "now_ns" values are epoch microseconds (1_700_000_000_000_000 µs

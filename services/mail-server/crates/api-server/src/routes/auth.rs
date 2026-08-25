@@ -247,6 +247,9 @@ pub async fn verify_kiwi_token(
         now_ns,
         min_duration_ms,
         expected_scope: scope,
+        // The api-server redemption carries no authoritative transaction
+        // binding input: the request binding is not enforced here.
+        expected_request_binding: kiwicaptcha::RequestBindingExpectation::Unenforced,
         // No region / issuer / policy-version pinning is configured on this
         // deployment — those enforcement knobs stay off.
         expected_region: None,
