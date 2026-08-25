@@ -88,10 +88,10 @@ final class ChainedIssuanceRollbackTest extends TestCase
         );
     }
 
-    private function chainController(StorageInterface $storage, ChainedChallengeTicketService $service, RiskGateway $gateway, ?OutstandingChallenges $outstanding = null): ChallengeController
+    private function chainController(StorageInterface $storage, ChainedChallengeTicketService $service, RiskGateway $gateway, ?OutstandingChallenges $outstanding = null, ?\KiwiCaptcha\Issuer $issuer = null): ChallengeController
     {
         return new ChallengeController(
-            $this->issuer($storage),
+            $issuer ?? $this->issuer($storage),
             null,
             true,
             $gateway,
@@ -222,6 +222,29 @@ final class ChainedIssuanceRollbackTest extends TestCase
         $requirement = $chainService->requirementFor($chainId);
         self::assertSame('issued', $requirement?->state);
         self::assertNotNull($requirement?->stage2Nonce);
+    }
+
+    public function testGenericMintFailureBeforeChallengeAssignmentIsAStructured503(): void
+    {
+        // R68-03: the issuer factory or the early issue() can throw BEFORE
+        // the $challenge variable is ever assigned — the generic catch's
+        // rollback must tolerate the unassigned state (never faulting the
+        // error-handling path itself) and answer the private structured
+        // 503 with the reservation released.
+        $storage = new ArrayStorage();
+        $chainStore = new ArrayChainedChallengeStateStore();
+        $chainService = $this->chainService($chainStore);
+        $requirement = $chainService->requireStage2($this->nonce(), 'login', 'txn-alpha', 1, RiskAction::Argon32, time() + 300);
+        $ticket = $chainService->ticketFor($requirement->chainId, time() + 300);
+
+        $mintStore = new ThrowingMintStorage($storage);
+        $mintStore->mintError = new \RuntimeException('simulated generic issuance backend failure');
+        $throwingIssuer = $this->issuer($mintStore);
+        $controller = $this->chainController($storage, $chainService, $this->riskStack(), issuer: $throwingIssuer);
+        $response = $controller->challenge($this->challengeRequest(json_encode(['scope' => 'login', 'chain_ticket' => $ticket, 'request_binding' => 'txn-alpha'], JSON_THROW_ON_ERROR)));
+        self::assertSame(503, $response->getStatusCode(), 'the generic mint failure answers the private structured 503');
+        self::assertSame('SERVICE_UNAVAILABLE', json_decode((string) $response->getContent(), true)['error']['code']);
+        self::assertSame('available', $chainService->requirementFor($requirement->chainId)?->state, 'the chain reservation is released');
     }
 
     public function testPostStage2CommitFailureNeverRollsBackTheIssuedState(): void
@@ -480,6 +503,12 @@ final class RollbackLostReplyChainStore implements TransactionalChainedChallenge
  * A risk state store whose feedback observation write throws — the
  * post-stage-2-commit risk feedback failure injection.
  */
+/**
+ * A storage whose store() write throws a generic backend failure — the
+ * mint can fail BEFORE the controller's $challenge variable is assigned.
+ */
+
+
 final class ThrowingFeedbackRiskStore implements \KiwiCaptcha\Risk\Storage\RiskStateStoreInterface
 {
     private readonly \BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\FakeRiskStateStore $inner;

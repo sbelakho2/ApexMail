@@ -177,6 +177,13 @@ LUA;
             default => IdempotencyClaim::Conflict,
         };
 
+        // The verified-WAIT durability barrier applies to the NEW claim
+        // write only: the read-only outcomes (pending_same,
+        // complete_same, conflict) never WAIT.
+        if ($claim === IdempotencyClaim::Claimed && $this->waitReplicas > 0) {
+            $this->waitAndVerify('the siteverify idempotency claim');
+        }
+
         return [$claim, $claim === IdempotencyClaim::Claimed ? $owner : null];
     }
 
@@ -194,6 +201,14 @@ LUA;
             'took_over' => IdempotencyClaim::TookOver,
             default => IdempotencyClaim::StillPending,
         };
+
+        // The verified-WAIT barrier applies to the successful takeover
+        // write only: a lost takeover write after a promotion would leave
+        // different nodes with different concepts of who owns the logical
+        // redemption. still_pending never WAITs.
+        if ($takeover === IdempotencyClaim::TookOver && $this->waitReplicas > 0) {
+            $this->waitAndVerify('the siteverify idempotency takeover');
+        }
 
         return [$takeover, $takeover === IdempotencyClaim::TookOver ? $owner : null];
     }
@@ -215,8 +230,15 @@ LUA;
     public function renew(string $backendId, string $idempotencyKey, string $owner): bool
     {
         $result = RedisEval::eval($this->redis, self::RENEW_LUA, $this->key($backendId, $idempotencyKey), [$owner, $this->leaseSeconds, max(1, $this->retentionTtl($idempotencyKey))]);
+        $renewed = (string) $result === '1';
+        // A lost renewal write after a promotion would resurrect an older
+        // (expired) lease state; the barrier applies to the successful
+        // renewal only.
+        if ($renewed && $this->waitReplicas > 0) {
+            $this->waitAndVerify('the siteverify idempotency renewal');
+        }
 
-        return (string) $result === '1';
+        return $renewed;
     }
 
     public function leaseSeconds(): int

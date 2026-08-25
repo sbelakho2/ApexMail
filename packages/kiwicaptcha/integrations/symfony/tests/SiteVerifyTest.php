@@ -281,10 +281,14 @@ final class SiteVerifyTest extends TestCase
         // and the mismatch must fail BEFORE the consume.
         $storage = new ArrayStorage();
         $issuer = new Issuer(new Config(secretKey: self::SECRET, algorithm: PoWAlgorithm::Sha256, targetBits: 8, ttlSecs: 120), $storage);
-        $challenge = $issuer->issue('login', '198.51.100.7', 'txn-A');
-        $solution = $this->solve($challenge->prefix, $challenge->salt, $challenge->targetBits);
-        usleep(($challenge->minDurationMs + 10) * 1000);
-        $token = SolutionToken::create($challenge->nonce, $solution, 5000, [])->encode();
+        $tokens = [];
+        foreach (['txn-A', 'txn-A'] as $i => $binding) {
+            $challenge = $issuer->issue('login', '198.51.100.7', $binding);
+            $solution = $this->solve($challenge->prefix, $challenge->salt, $challenge->targetBits);
+            usleep(($challenge->minDurationMs + 10) * 1000);
+            $tokens[$i] = SolutionToken::create($challenge->nonce, $solution, 5000, [])->encode();
+        }
+        $token = $tokens[0];
 
         // The authority resolves THIS transaction's binding (txn-B) from
         // its own trusted inputs — the siteverify request carries none.
@@ -358,6 +362,95 @@ final class SiteVerifyTest extends TestCase
         $second = $controller->siteverify($request());
         self::assertSame(400, $second->getStatusCode(), 'a changed transaction binding under the same idempotency UUID is a conflict');
         self::assertFalse(json_decode((string) $second->getContent(), true)['success']);
+    }
+
+    public function testJsonDuplicateKeysAreRefusedBeforeParsing(): void
+    {
+        // R68-04: the duplicate-key scanner works on the RAW document —
+        // a decode-then-scan can never see a duplicate (json_decode has
+        // already collapsed the members). {"secret":"A","secret":"B"} is
+        // refused with the bad-request, never silently last-wins.
+        $controller = $this->controller();
+        $response = $controller->siteverify(Request::create(
+            '/kiwi-captcha/siteverify',
+            'POST',
+            [],
+            [],
+            [],
+            ['CONTENT_TYPE' => 'application/json', 'HTTP_CONTENT_TYPE' => 'application/json'],
+            '{"secret":"0123456789abcdef0123456789abcdef","secret":"0123456789abcdef0123456789abcdef","response":"x"}',
+        ));
+        self::assertSame(400, $response->getStatusCode());
+        self::assertSame(['bad-request'], json_decode((string) $response->getContent(), true)['error-codes']);
+    }
+
+    public function testFormDuplicateParametersAreRefused(): void
+    {
+        // R68-05: the strict form decoder rejects duplicate parameter
+        // names — secret=A&secret=B is refused instead of being silently
+        // collapsed by the framework's parser.
+        $controller = $this->controller();
+        $response = $controller->siteverify(Request::create(
+            '/kiwi-captcha/siteverify',
+            'POST',
+            [],
+            [],
+            [],
+            ['CONTENT_TYPE' => 'application/x-www-form-urlencoded'],
+            'secret=0123456789abcdef0123456789abcdef&secret=0123456789abcdef0123456789abcdef&response=x',
+        ));
+        self::assertSame(400, $response->getStatusCode());
+        self::assertSame(['bad-request'], json_decode((string) $response->getContent(), true)['error-codes']);
+    }
+
+    public function testDuplicatedContentTypeAndEncodingHeadersAreRefused(): void
+    {
+        // R68-07: Content-Type and Content-Encoding are enforced singular.
+        $controller = $this->controller();
+        $request = Request::create('/kiwi-captcha/siteverify', 'POST', [
+            'secret' => self::SITEVERIFY_SECRET, 'response' => 'x', 'remoteip' => '127.0.0.1',
+        ]);
+        $request->headers->set('Content-Type', ['application/json', 'application/x-www-form-urlencoded']);
+        $response = $controller->siteverify($request);
+        self::assertSame(400, $response->getStatusCode(), 'a duplicated Content-Type is refused');
+    }
+
+    public function testJsonAndFormRequestBindingsAreEquivalent(): void
+    {
+        // R68-06: the presented request_binding comes from the ONE parsed
+        // body regardless of the transport — a JSON caller's
+        // request_binding is honored exactly like the form caller's, so
+        // the two encodings can never diverge in their binding behavior.
+        $storage = new ArrayStorage();
+        $issuer = new Issuer(new Config(secretKey: self::SECRET, algorithm: PoWAlgorithm::Sha256, targetBits: 8, ttlSecs: 120), $storage);
+        $tokens = [];
+        foreach ([0, 1] as $i) {
+            $challenge = $issuer->issue('login', '198.51.100.7', 'txn-A');
+            $solution = $this->solve($challenge->prefix, $challenge->salt, $challenge->targetBits);
+            usleep(($challenge->minDurationMs + 10) * 1000);
+            $tokens[$i] = SolutionToken::create($challenge->nonce, $solution, 5000, [])->encode();
+        }
+
+        $authority = new class implements RequestBindingAuthorityInterface {
+            public function resolve(Request $request, string $scope, ?string $presentedBinding): ?string
+            {
+                return $presentedBinding;
+            }
+        };
+        $controller = new SiteVerifyController(new Verifier($storage), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $storage, null, null, null, null, 90.0, 0, null, null, null, $authority);
+
+        $json = Request::create('/kiwi-captcha/siteverify', 'POST', [], [], [], ['CONTENT_TYPE' => 'application/json'], json_encode([
+            'secret' => self::SITEVERIFY_SECRET, 'response' => $tokens[0], 'remoteip' => '198.51.100.7', 'request_binding' => 'txn-A',
+        ], JSON_THROW_ON_ERROR));
+        $form = Request::create('/kiwi-captcha/siteverify', 'POST', [], [], [], ['CONTENT_TYPE' => 'application/x-www-form-urlencoded'], http_build_query([
+            'secret' => self::SITEVERIFY_SECRET, 'response' => $tokens[1], 'remoteip' => '198.51.100.7', 'request_binding' => 'txn-A',
+        ]));
+
+        $jsonBody = json_decode((string) $controller->siteverify($json)->getContent(), true);
+        $formBody = json_decode((string) $controller->siteverify($form)->getContent(), true);
+        self::assertSame(true, $jsonBody['success'] ?? null, 'the JSON request_binding is honored');
+        self::assertSame(true, $formBody['success'] ?? null, 'the form request_binding is honored identically');
+        self::assertSame($jsonBody['error-codes'] ?? null, $formBody['error-codes'] ?? null, 'JSON and form transports produce the identical logical result');
     }
 
     public function testSiteVerifyStampsTheScopeForTheArgonPerScopeBudget(): void

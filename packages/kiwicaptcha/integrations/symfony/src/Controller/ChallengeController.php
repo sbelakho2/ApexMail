@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace BelConsulting\KiwiCaptchaBundle\Controller;
 
 use BelConsulting\KiwiCaptchaBundle\Risk\AmbiguousForwardingException;
+use BelConsulting\KiwiCaptchaBundle\Http\JsonDuplicateKeyScanner;
 use BelConsulting\KiwiCaptchaBundle\Risk\ClientIpResolver;
 use BelConsulting\KiwiCaptchaBundle\Risk\ContinuityCookie;
 use BelConsulting\KiwiCaptchaBundle\Risk\RiskGateway;
@@ -119,7 +120,6 @@ final class ChallengeController
     private const MAX_CHALLENGE_BODY_BYTES = 8192;
 
     /** Recursion cap for the duplicate-key scanner (depth bombs). */
-    private const MAX_JSON_SCAN_DEPTH = 32;
 
     /**
      * The bounded shape of a challenge nonce for the cancellation
@@ -139,6 +139,8 @@ final class ChallengeController
      * single bounded nonce, so 1 KiB is generous.
      */
     private const MAX_CANCELLATION_BODY_BYTES = 1024;
+
+    private JsonDuplicateKeyScanner $jsonDuplicateKeyScanner;
 
     public function __construct(
         private readonly Issuer $issuer,
@@ -222,7 +224,8 @@ final class ChallengeController
          */
         private readonly ?\Closure $now = null,
     ) {
-    }
+    $this->jsonDuplicateKeyScanner = new JsonDuplicateKeyScanner();
+}
 
     public function challenge(Request $request): JsonResponse
     {
@@ -1266,9 +1269,13 @@ final class ChallengeController
             // challenge was proven not handed out, so the uncommitted
             // issuance attempt is rolled back and the private structured
             // 503 answers. A failure AFTER the durable stage-2 commit is
-            // handled inside the commit try block above, never here.
+            // handled inside the commit try block above, never here. The
+            // issuer factory and the mint can throw BEFORE the $challenge
+            // variable is ever assigned — the nullable parameter tolerates
+            // the unassigned state, so the error-handling path itself can
+            // never fault.
             error_log(sprintf('kiwicaptcha: challenge issuance backend failure: %s', $e->getMessage()));
-            $this->rollbackUncommittedIssuance($challenge, $outstandingAdmissionHeld, $clientIp, $chainId, $chainOwner);
+            $this->rollbackUncommittedIssuance($challenge ?? null, $outstandingAdmissionHeld, $clientIp, $chainId, $chainOwner);
 
             return $this->privateJson(
                 ['error' => ['code' => 'SERVICE_UNAVAILABLE', 'message' => 'Challenge issuance is temporarily unavailable. Try again later.']],
@@ -3002,197 +3009,44 @@ final class ChallengeController
     }
 
     /**
-     * Duplicate JSON key scanner: a small recursive walk over the raw JSON
-     * document that reports the first object key seen more than once at
-     * the same level. json_decode silently keeps the last occurrence,
-     * which is exactly the parser ambiguity the endpoint must refuse
-     * ({"scope":"a","scope":"b"} parses differently across
-     * intermediaries). Nested objects are scanned recursively. Returns
-     * the duplicated key for the error message, or null when the document
-     * is clean or cannot be walked (a malformed document is handled by
-     * the strict json_decode check that follows). The scanner only needs
-     * to be correct on documents json_decode already accepts.
+     * Duplicate JSON key scanner over the RAW document — the single
+     * shared implementation ({@see JsonDuplicateKeyScanner}) used by
+     * every security-sensitive endpoint. json_decode silently keeps the
+     * last occurrence, which is exactly the parser ambiguity the endpoint
+     * must refuse ({"scope":"a","scope":"b"} parses differently across
+     * intermediaries); the shared walker inspects the raw bytes, so a
+     * decode-then-scan can never mask a duplicate.
      */
     private function scanForDuplicateJsonKey(string $json): ?string
     {
-        $offset = 0;
-        try {
-            $this->scanJsonValue($json, $offset, 0);
-
-            return null;
-        } catch (DuplicateJsonKeyException $e) {
-            return $e->key;
-        } catch (MalformedJsonWalkException) {
-            return null;
-        }
+        return $this->jsonDuplicateKeyScanner->scanForDuplicateJsonKey($json);
     }
 
     /**
-     * Recursive JSON walker used by the duplicate-key scan. Consumes one
-     * value starting at $offset and returns nothing; throws
-     * {@see DuplicateJsonKeyException} on the first duplicated object key
-     * and {@see MalformedJsonWalkException} on anything it cannot walk.
-     * Both are internal control flow: the walker never validates the
-     * document, it only scans it.
-     *
-     * @param int $offset position in the raw JSON string (by reference)
+     * Strict form-urlencoded decoder: rejects duplicate parameter names
+     * and PHP bracket syntax, so the form transport has the same
+     * parser-ambiguity rigor as the JSON transport. Returns the decoded
+     * name=>value map, or null when the body is not strictly decodable.
      */
-    private function scanJsonValue(string $json, int &$offset, int $depth): void
+    private function decodeStrictFormBody(string $body): ?array
     {
-        if ($depth > self::MAX_JSON_SCAN_DEPTH) {
-            // Depth bomb: beyond the cap the document is "not walkable",
-            // and the strict json_decode below (which has its own depth
-            // guard) rejects it.
-            throw new MalformedJsonWalkException();
-        }
-        $length = \strlen($json);
-        $this->skipJsonWhitespace($json, $offset);
-        if ($offset >= $length) {
-            throw new MalformedJsonWalkException();
-        }
-        $ch = $json[$offset];
-
-        if ($ch === '{') {
-            $offset++;
-            $this->skipJsonWhitespace($json, $offset);
-            if ($offset < $length && $json[$offset] === '}') {
-                $offset++;
-
-                return;
+        $decoded = [];
+        foreach (explode('&', $body) as $pair) {
+            if ($pair === '') {
+                continue;
             }
-            $seen = [];
-            while (true) {
-                $this->skipJsonWhitespace($json, $offset);
-                $key = $this->scanJsonString($json, $offset);
-                if ($key === null) {
-                    throw new MalformedJsonWalkException();
-                }
-                if (isset($seen[$key])) {
-                    throw new DuplicateJsonKeyException($key);
-                }
-                $seen[$key] = true;
-                $this->skipJsonWhitespace($json, $offset);
-                if ($offset >= $length || $json[$offset] !== ':') {
-                    throw new MalformedJsonWalkException();
-                }
-                $offset++;
-                $this->scanJsonValue($json, $offset, $depth + 1);
-                $this->skipJsonWhitespace($json, $offset);
-                if ($offset >= $length) {
-                    throw new MalformedJsonWalkException();
-                }
-                $ch = $json[$offset];
-                $offset++;
-                if ($ch === '}') {
-                    return;
-                }
-                if ($ch !== ',') {
-                    throw new MalformedJsonWalkException();
-                }
+            $parts = explode('=', $pair, 2);
+            $name = rawurldecode($parts[0]);
+            if ($name === '' || str_contains($name, '[') || str_contains($name, ']')) {
+                return null;
             }
+            if (\array_key_exists($name, $decoded)) {
+                return null;
+            }
+            $decoded[$name] = rawurldecode($parts[1] ?? '');
         }
 
-        if ($ch === '[') {
-            $offset++;
-            $this->skipJsonWhitespace($json, $offset);
-            if ($offset < $length && $json[$offset] === ']') {
-                $offset++;
-
-                return;
-            }
-            while (true) {
-                $this->scanJsonValue($json, $offset, $depth + 1);
-                $this->skipJsonWhitespace($json, $offset);
-                if ($offset >= $length) {
-                    throw new MalformedJsonWalkException();
-                }
-                $ch = $json[$offset];
-                $offset++;
-                if ($ch === ']') {
-                    return;
-                }
-                if ($ch !== ',') {
-                    throw new MalformedJsonWalkException();
-                }
-            }
-        }
-
-        if ($ch === '"') {
-            $this->scanJsonString($json, $offset);
-
-            return;
-        }
-
-        // number / true / false / null: skip a bare token.
-        while ($offset < $length) {
-            $ch = $json[$offset];
-            if ($ch === ',' || $ch === '}' || $ch === ']' || $ch === ' ' || $ch === "\t" || $ch === "\n" || $ch === "\r") {
-                break;
-            }
-            $offset++;
-        }
-    }
-
-    /**
-     * Consume one JSON string starting at $offset (which must point at the
-     * opening quote) and return its decoded content, escape sequences
-     * resolved to the actual characters. Duplicate detection compares
-     * semantic keys: {"a":1,"\u0061":2} is one key spelled twice, exactly
-     * the parser ambiguity the scan refuses (json_decode canonicalizes
-     * both spellings into the same key). The JSON string grammar is
-     * decoded with json_decode itself, the surrogate-safe canonical
-     * decoder: \" \\ \/ \b \f \n \r \t and every mixed form land on
-     * their real characters. null when the string cannot be walked or its
-     * content is not decodable (a malformed document; the strict
-     * json_decode check that follows rejects it).
-     *
-     * @param int $offset position in the raw JSON string (by reference)
-     */
-    private function scanJsonString(string $json, int &$offset): ?string
-    {
-        $length = \strlen($json);
-        if ($offset >= $length || $json[$offset] !== '"') {
-            return null;
-        }
-        $start = $offset + 1;
-        $offset++;
-        while ($offset < $length) {
-            $ch = $json[$offset];
-            $offset++;
-            if ($ch === '"') {
-                $raw = substr($json, $start, $offset - $start - 1);
-                try {
-                    $decoded = json_decode('"'.$raw.'"', true, 512, JSON_THROW_ON_ERROR);
-                } catch (\JsonException) {
-                    return null;
-                }
-
-                return \is_string($decoded) ? $decoded : null;
-            }
-            if ($ch === '\\') {
-                if ($offset >= $length) {
-                    return null;
-                }
-                // Skip the escaped character (\" \\ \/ \b \f \n \r \t:
-                // a bare skip covers all of them; the exact decode above
-                // canonicalizes them).
-                $offset++;
-            }
-        }
-
-        return null;
-    }
-
-    private function skipJsonWhitespace(string $json, int &$offset): void
-    {
-        $length = \strlen($json);
-        while ($offset < $length) {
-            $ch = $json[$offset];
-            if ($ch !== ' ' && $ch !== "\t" && $ch !== "\n" && $ch !== "\r") {
-                break;
-            }
-            $offset++;
-        }
+        return $decoded;
     }
 
     /**
@@ -3239,20 +3093,4 @@ final class ChallengeController
  *           level. Carries the raw key for the error message. Never
  *           escapes the controller.
  */
-final class DuplicateJsonKeyException extends \RuntimeException
-{
-    public function __construct(public readonly string $key)
-    {
-        parent::__construct();
-    }
-}
 
-/**
- * @internal control-flow sentinel of the duplicate-JSON-key scan: thrown
- *           when the walker cannot advance through the document. The strict
- *           json_decode check handles the malformed body afterwards. Never
- *           escapes the controller.
- */
-final class MalformedJsonWalkException extends \RuntimeException
-{
-}

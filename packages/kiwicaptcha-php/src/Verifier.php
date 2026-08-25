@@ -820,15 +820,14 @@ final class Verifier
         }
 
         // 4b. Application transaction binding, enforced BEFORE the resumed
-        //     derivation and the committed-result fast path: a BOUND record
-        //     must equal the expected binding exactly, compared in constant
-        //     time. An explicitly unbound record (requestBinding null,
-        //     BindingMode::None) is permitted regardless of the expected
-        //     binding. Null (the default) keeps the binding unenforced.
-        if ($expectedRequestBinding !== null && $consumed->record->requestBinding !== null) {
-            if (!hash_equals($consumed->record->requestBinding, $expectedRequestBinding)) {
-                return VerifyOutcome::invalid(VerifyError::RequestBindingMismatch);
-            }
+        //     derivation AND the committed-result fast path, through the
+        //     SAME canonical helper as every other binding check (exact
+        //     Option-equality under RequestBindingExpectation::exact(),
+        //     the legacy compatibility mode, or unenforced) — there is NO
+        //     separate nullable interpretation left that a committed
+        //     result could bypass.
+        if (($e = $this->checkRequestBinding($consumed->record, $expectation)) !== null) {
+            return VerifyOutcome::invalid($e);
         }
 
         // Committed-result fast path: the deterministic outcome already

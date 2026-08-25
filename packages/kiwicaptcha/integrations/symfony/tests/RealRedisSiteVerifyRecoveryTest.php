@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace BelConsulting\KiwiCaptchaBundle\Tests;
 
 use BelConsulting\KiwiCaptchaBundle\Controller\SiteVerifyController;
+use BelConsulting\KiwiCaptchaBundle\SiteVerify\IdempotencyClaim;
 use BelConsulting\KiwiCaptchaBundle\Risk\SecurityEpochMonitor;
 use BelConsulting\KiwiCaptchaBundle\SiteVerify\RedisSiteVerifyIdempotencyStore;
 use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\FakePredisClient;
@@ -436,6 +437,67 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
      * ever committed, and every further same-UUID retry reproduces the
      * identical failure.
      */
+    public function testIdempotencyWritesIssueTransitionSensitiveVerifiedWaits(): void
+    {
+        // R68-01: EVERY successful ownership mutation (claim, takeover,
+        // renew, finalize) issues the verified WAIT — the durability
+        // guarantee is transition-sensitive, and the read-only outcomes
+        // (pending_same, complete_same, conflict, still_pending, refused
+        // finalize) never WAIT.
+        $counting = new \BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\CommandCountingRedisClient('tcp://127.0.0.1:6399', ['timeout' => 2.0, 'read_write_timeout' => 2.0]);
+        $store = new RedisSiteVerifyIdempotencyStore($counting, 'ci-idem-wait', 3, 1, 100);
+        $backendId = hash('sha256', self::SITEVERIFY_SECRET.'|login|0');
+        // A fresh key per run: the previous run's claim (whose WAIT threw
+        // after the write landed) must not turn this run's claim into
+        // pending_same.
+        $key = sprintf('223e4567-e89b-42d3-a456-42661417%04d', random_int(0, 9999));
+
+        // claim: the successful write issues exactly one WAIT (and then
+        // fails closed on this replica-less server: 0 of 1 acked).
+        $waitsBefore = \count($counting->waits());
+        try {
+            $store->claim($backendId, $key, 'hash-a', 300, 'ip:127.0.0.1', null, null);
+            self::fail('the claim WAIT must fail closed on a replica-less server');
+        } catch (\KiwiCaptcha\Storage\ReplicaWaitException) {
+            // the fail-closed barrier fired ✓
+        }
+        self::assertSame($waitsBefore + 1, \count($counting->waits()), 'the successful claim issues exactly one verified WAIT');
+
+        // The claim landed (the WAIT comes after the write): a second
+        // claim with the SAME hash is pending_same — the read-only
+        // outcome never WAITs.
+        [$claim2] = $store->claim($backendId, $key, 'hash-a', 300, 'ip:127.0.0.1', null, null);
+        self::assertSame(IdempotencyClaim::PendingSame, $claim2);
+        self::assertSame($waitsBefore + 1, \count($counting->waits()), 'pending_same never WAITs');
+
+        // renew: the successful renewal WAITs. The owner is acquired on a
+        // SECOND key through a WAIT-less store (the first claim's owner was
+        // lost to the fail-closed barrier), then renewed through the
+        // WAIT-enabled store.
+        $key2 = sprintf('223e4567-e89b-42d3-a456-42661417%04d', random_int(0, 9999));
+        $plain = new RedisSiteVerifyIdempotencyStore($counting, 'ci-idem-wait', 3);
+        [, $owner2] = $plain->claim($backendId, $key2, 'hash-b', 300, 'ip:127.0.0.1', null, null);
+        try {
+            $store->renew($backendId, $key2, (string) $owner2);
+            self::fail('the renewal WAIT must fail closed');
+        } catch (\KiwiCaptcha\Storage\ReplicaWaitException) {
+        }
+        self::assertSame($waitsBefore + 2, \count($counting->waits()), 'the successful renewal issues exactly one verified WAIT');
+
+        // finalize: the successful finalize WAITs; a refused finalize
+        // (the wrong owner) returns false and never WAITs.
+        $refused = $store->finalize($backendId, $key2, 'hash-b', 'wrong-owner', ['success' => true]);
+        self::assertFalse($refused, 'a refused finalize returns false');
+        self::assertSame($waitsBefore + 2, \count($counting->waits()), 'a refused finalize never WAITs');
+        try {
+            $store->finalize($backendId, $key2, 'hash-b', (string) $owner2, ['success' => true]);
+            self::fail('the successful finalize WAIT must fail closed');
+        } catch (\KiwiCaptcha\Storage\ReplicaWaitException) {
+        }
+        self::assertSame($waitsBefore + 3, \count($counting->waits()), 'the successful finalize issues exactly one verified WAIT');
+        $counting->disconnect();
+    }
+
     public function testResultlessResumePastSignedExpiryIsDeterministicallyExpired(): void
     {
         $probe = $this->redisOrSkip();

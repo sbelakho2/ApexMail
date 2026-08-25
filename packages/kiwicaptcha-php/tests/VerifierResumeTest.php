@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace KiwiCaptcha\Tests;
 
 use KiwiCaptcha\ChallengeRecord;
+use KiwiCaptcha\RequestBindingExpectation;
 use KiwiCaptcha\Config;
 use KiwiCaptcha\ConsumedRecord;
 use KiwiCaptcha\Issuer;
@@ -494,6 +495,36 @@ final class VerifierResumeTest extends TestCase
         $after = $storage->consumedState($record->nonce);
         self::assertNotNull($after?->consumedResult, 'the near-expiry resume must commit');
         self::assertTrue($after->consumedResult->valid);
+    }
+
+    public function testResumeCommittedResultMatrixEnforcesTheExactExpectation(): void
+    {
+        // R68-02: the committed-result fast path must NOT bypass the exact
+        // binding expectation — a stored success can never replay through
+        // an old nullable interpretation. The full matrix against
+        // resumeConsumedOperation() with a committed result:
+        //   unbound / Exact(null) accept; bound A / Exact(A) accept;
+        //   bound A / Exact(null) reject; unbound / Exact(A) reject;
+        //   bound A / Exact(B) reject; any / Unenforced accept.
+        $rows = [
+            [null, null, true],
+            ['txn-A', 'txn-A', true],
+            ['txn-A', null, false],
+            [null, 'txn-A', false],
+            ['txn-A', 'txn-B', false],
+            ['txn-A', 'txn-A', true, RequestBindingExpectation::unenforced()],
+        ];
+        foreach ($rows as $row) {
+            [$recordBinding, $expected, $shouldPass] = $row;
+            $expectation = $row[3] ?? RequestBindingExpectation::exact($expected);
+            [$inner, $record, $token] = $this->issueAndSolve(requestBinding: $recordBinding);
+            $identity = $this->identity('committed-'.($expected ?? 'null'));
+            $inner->consumeWithOperationIdentity($record->nonce, $identity);
+            self::assertTrue($inner->commitResult($record->nonce, true, $record->requestBinding), 'the committed result lands');
+            $verifier = new Verifier($inner, now: static fn (): int => self::ISSUED_AT + 10_000);
+            $outcome = $verifier->resumeConsumedOperation($token, Vectors::SECRET, $identity, 'login', self::CLIENT_IP, $expected, $expectation);
+            self::assertSame($shouldPass, $outcome->isOk(), sprintf('resume matrix record=%s expected=%s pass=%s got=%s', var_export($recordBinding, true), var_export($expected, true), var_export($shouldPass, true), $outcome->code()));
+        }
     }
 
     public function testResumeEnforcesTheExpectedRequestBindingBeforeDerivation(): void

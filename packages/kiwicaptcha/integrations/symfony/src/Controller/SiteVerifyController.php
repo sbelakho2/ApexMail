@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace BelConsulting\KiwiCaptchaBundle\Controller;
 
 use BelConsulting\KiwiCaptchaBundle\Risk\SecurityEpochMonitor;
+use BelConsulting\KiwiCaptchaBundle\Http\JsonDuplicateKeyScanner;
 use BelConsulting\KiwiCaptchaBundle\Validator\Constraints\KiwiCaptchaValidator;
 use BelConsulting\KiwiCaptchaBundle\Security\RequestScopeAdmissionGate;
 use BelConsulting\KiwiCaptchaBundle\SiteVerify\IdempotencyClaim;
@@ -211,7 +212,8 @@ final class SiteVerifyController
          */
         private readonly ?string $defaultRequestBinding = null,
     ) {
-        $this->recovery = $recovery ?? (new \KiwiCaptcha\ConsumedOutcomeRecovery($this->storage ?? new \KiwiCaptcha\Storage\ArrayStorage()));
+    $this->jsonDuplicateKeyScanner = new JsonDuplicateKeyScanner();
+    $this->recovery = $recovery ?? (new \KiwiCaptcha\ConsumedOutcomeRecovery($this->storage ?? new \KiwiCaptcha\Storage\ArrayStorage()));
         // The lease-ordering invariant is enforced at construction: the
         // waiter bound must exceed the fixed owner lease (the store's
         // configured lease, never derived from a token's remaining
@@ -280,6 +282,8 @@ final class SiteVerifyController
         return '{kiwicaptcha}:log-gate:siteverify-invalid-secret:'.(string) floor(time() / self::INVALID_SECRET_LOG_INTERVAL);
     }
 
+    private JsonDuplicateKeyScanner $jsonDuplicateKeyScanner;
+
     public function siteverify(Request $request): Response
     {
         if ($this->siteverifySecrets === []) {
@@ -299,6 +303,16 @@ final class SiteVerifyController
             return new JsonResponse(['success' => false, 'error-codes' => ['bad-request']], Response::HTTP_BAD_REQUEST);
         }
         if ($request->headers->has('Content-Length') && $request->headers->has('Transfer-Encoding')) {
+            return new JsonResponse(['success' => false, 'error-codes' => ['bad-request']], Response::HTTP_BAD_REQUEST);
+        }
+        // Content-Encoding and Content-Type are enforced SINGULAR too: a
+        // duplicated header (two different values) is the kind of
+        // ambiguity different proxies and application layers interpret
+        // differently, so it is refused rather than silently collapsed.
+        if (\count($request->headers->all('Content-Encoding')) > 1) {
+            return new JsonResponse(['success' => false, 'error-codes' => ['bad-request']], Response::HTTP_BAD_REQUEST);
+        }
+        if (\count($request->headers->all('Content-Type')) > 1) {
             return new JsonResponse(['success' => false, 'error-codes' => ['bad-request']], Response::HTTP_BAD_REQUEST);
         }
         $contentEncoding = strtolower(trim((string) $request->headers->get('Content-Encoding', '')));
@@ -438,10 +452,17 @@ final class SiteVerifyController
         // binding: the configured combination is refused at container
         // compile time (see the extension) rather than silently turning
         // request binding off on this surface.
+        // The presented binding comes from the ONE parsed-body object,
+        // regardless of whether the transport was JSON or form: the
+        // manually decoded JSON branch never populates the framework's
+        // parameter bag, so a JSON caller's request_binding must be read
+        // from $body itself — otherwise the two encodings would not have
+        // equivalent binding behavior. The request attribute (the native
+        // validator's transport) remains the precedence input.
         $presentedBinding = $request->attributes->get(KiwiCaptchaValidator::REQUEST_BINDING_ATTRIBUTE);
         if (!\is_string($presentedBinding) || $presentedBinding === '') {
-            $posted = $request->request->get('request_binding');
-            $presentedBinding = \is_string($posted) ? $posted : null;
+            $posted = $body['request_binding'] ?? null;
+            $presentedBinding = \is_string($posted) && $posted !== '' ? $posted : null;
         }
         $canonicalBinding = null;
         if ($this->bindingAuthority !== null) {
@@ -1385,6 +1406,36 @@ LUA;
     /**
      * @return array<string, mixed>|null
      */
+    /**
+     * Strict form-urlencoded decoder: rejects duplicate parameter names
+     * and PHP bracket syntax, so the form transport has the same
+     * parser-ambiguity rigor as the JSON transport. Returns the decoded
+     * name=>value map, or null when the body is not strictly decodable.
+     */
+    private function decodeStrictFormBody(string $body): ?array
+    {
+        if ($body === '') {
+            return null;
+        }
+        $decoded = [];
+        foreach (explode('&', $body) as $pair) {
+            if ($pair === '') {
+                continue;
+            }
+            $parts = explode('=', $pair, 2);
+            $name = rawurldecode($parts[0]);
+            if ($name === '' || str_contains($name, '[') || str_contains($name, ']')) {
+                return null;
+            }
+            if (\array_key_exists($name, $decoded)) {
+                return null;
+            }
+            $decoded[$name] = rawurldecode($parts[1] ?? '');
+        }
+
+        return $decoded;
+    }
+
     private function parseBody(Request $request, string $requestBody): ?array
     {
         // Framing rigor: only POST with an explicit identity content type
@@ -1417,7 +1468,24 @@ LUA;
             }
         }
         if ($contentType === 'application/x-www-form-urlencoded') {
-            return $request->request->all();
+            // The strict form decoder rejects duplicate parameter names
+            // and PHP bracket syntax, so the form transport has the same
+            // parser-ambiguity rigor as the JSON transport (a
+            // secret=A&secret=B request must never be silently collapsed
+            // into whichever interpretation the framework chose). An
+            // EMPTY raw body falls back to the framework-parsed bag (the
+            // framework's own form parser runs the same normalization; a
+            // real empty-body POST yields an empty bag, so the fallback
+            // cannot smuggle parameters past the strict decoder).
+            $strict = $this->decodeStrictFormBody($requestBody);
+            if ($strict !== null) {
+                return $strict;
+            }
+            if ($requestBody === '') {
+                return $request->request->all();
+            }
+
+            return null;
         }
 
         return null;
@@ -1430,36 +1498,18 @@ LUA;
      * ceiling plus a recursion cap, so a depth bomb cannot exhaust the
      * stack.
      */
+    /**
+     * The RAW-document duplicate-key scanner — the single shared
+     * implementation used by every security-sensitive endpoint
+     * ({@see JsonDuplicateKeyScanner}). A decode-then-scan can NEVER see
+     * a duplicate: json_decode has already collapsed the object members
+     * ({"secret":"A","secret":"B"} arrives as one secret), which is
+     * exactly the parser ambiguity that must be refused. The walker
+     * inspects the raw bytes, so the first duplicated key is found before
+     * any interpretation happens.
+     */
     private function scanJsonDuplicateKeys(string $json): ?string
     {
-        try {
-            $decoded = json_decode($json, true, 64, JSON_THROW_ON_ERROR);
-        } catch (\JsonException) {
-            return null;
-        }
-
-        return $this->scanDuplicateKeysRecursive($decoded);
-    }
-
-    private function scanDuplicateKeysRecursive(mixed $value): ?string
-    {
-        if (!\is_array($value)) {
-            return null;
-        }
-        $seen = [];
-        foreach ($value as $key => $child) {
-            if (\is_string($key)) {
-                if (isset($seen[$key])) {
-                    return $key;
-                }
-                $seen[$key] = true;
-            }
-            $duplicate = $this->scanDuplicateKeysRecursive($child);
-            if ($duplicate !== null) {
-                return $duplicate;
-            }
-        }
-
-        return null;
+        return $this->jsonDuplicateKeyScanner->scanForDuplicateJsonKey($json);
     }
 }
