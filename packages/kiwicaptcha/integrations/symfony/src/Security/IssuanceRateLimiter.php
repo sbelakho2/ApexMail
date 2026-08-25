@@ -535,8 +535,14 @@ LUA;
             ? $this->redis->time()
             : $this->redis->time();
 
-        if (!\is_array($time) || !isset($time[0])) {
-            return $this->now();
+        if (!\is_array($time) || !isset($time[0]) || !\is_numeric($time[0])) {
+            // Never fall back to the application clock for a Redis
+            // rate-limit epoch: the rotated identity epoch and the Lua
+            // sliding window need ONE Redis clock domain, and a malformed
+            // TIME must fail closed (the caller converts this to the
+            // structured 503) instead of silently re-introducing clock
+            // disagreement at an identity-rotation boundary.
+            throw new \RuntimeException('Redis TIME returned an invalid response');
         }
 
         return (float) $time[0];

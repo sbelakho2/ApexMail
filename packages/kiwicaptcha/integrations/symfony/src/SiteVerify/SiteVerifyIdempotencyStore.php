@@ -95,7 +95,7 @@ interface SiteVerifyIdempotencyStore
      * same-key retry returns the identical bytes. No-op unless this
      * request owns the claim AND the response hash matches the record.
      */
-    public function finalize(string $backendId, string $idempotencyKey, string $responseHash, string $owner, array $canonicalResponse): void;
+    public function finalize(string $backendId, string $idempotencyKey, string $responseHash, string $owner, array $canonicalResponse): bool;
 
     /** The stored canonical response for a complete-same claim, or null. */
     public function stored(string $backendId, string $idempotencyKey): ?array;

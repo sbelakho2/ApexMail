@@ -296,22 +296,34 @@ LUA;
      * issuance-rate-limiter style): bounds how many cancellation requests
      * one source may send, so the endpoint's per-IP cost is bounded.
      *   KEYS[1] = {kiwi:<ns>}:cancel:<hex>  (per-source window ZSET).
+     *   KEYS[2] = {kiwi:<ns>}:cancel:global (deployment-global window ZSET).
      *   ARGV[1] = per-IP cap.
      *   ARGV[2] = window in ms.
      *   ARGV[3] = unique request id (ZSET member).
-     * Returns 1 when the window has room, 0 when the cap is exhausted
-     * (after pruning expired hits). A Redis failure propagates: the caller
-     * fails closed.
+     *   ARGV[4] = deployment-global cap.
+     * Returns 1 when both windows have room, 0 when the per-source cap is
+     * exhausted, -1 when the deployment-global cap is exhausted (after
+     * pruning expired hits). A Redis failure propagates: the caller fails
+     * closed.
      */
     private const CANCEL_ADMISSION_SCRIPT = <<<'LUA'
 -- Outstanding challenge cancellation admission: per-source sliding window
+-- PLUS a deployment-global window. The global cap bounds the total
+-- cancellation request rate across every source (an attacker rotating IPs
+-- cannot force unlimited random-nonce storage lookups and source-limiter
+-- key churn); the per-source cap bounds any single source. No request
+-- touches storage before this succeeds.
 local time = redis.call('TIME')
 local now = tonumber(time[1])*1000 + math.floor(tonumber(time[2])/1000)
 local cutoff = now - tonumber(ARGV[2])
+redis.call('ZREMRANGEBYSCORE', KEYS[2], '-inf', cutoff)
+if redis.call('ZCARD', KEYS[2]) >= tonumber(ARGV[4]) then return -1 end
 redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', cutoff)
 if redis.call('ZCARD', KEYS[1]) >= tonumber(ARGV[1]) then return 0 end
 redis.call('ZADD', KEYS[1], now, ARGV[3])
+redis.call('ZADD', KEYS[2], now, ARGV[3])
 redis.call('PEXPIRE', KEYS[1], tonumber(ARGV[2]) + 1000)
+redis.call('PEXPIRE', KEYS[2], tonumber(ARGV[2]) + 1000)
 return 1
 LUA;
 
@@ -320,6 +332,9 @@ LUA;
 
     /** The cancellation endpoint's per-source cap per window. */
     public const CANCELLATION_PER_IP_CAP = 120;
+
+    /** The cancellation endpoint's deployment-global cap per window. */
+    public const CANCELLATION_GLOBAL_CAP = 20_000;
 
     /**
      * @param \Redis|\Predis\Client $redis           Redis client shared with
@@ -563,16 +578,17 @@ LUA;
      * endpoint refuses rather than letting an unbounded cancellation
      * stream through).
      */
-    public function cancellationAdmission(string $clientIp): bool
+    public function cancellationAdmission(string $clientIp): int
     {
         $source = $this->sourceKey($clientIp);
         $window = $this->keyPrefix.'cancel:'.substr($source, \strlen($this->keyPrefix));
 
-        return (int) $this->eval(self::CANCEL_ADMISSION_SCRIPT, [$window], [
+        return (int) $this->eval(self::CANCEL_ADMISSION_SCRIPT, [$window, $this->keyPrefix.'cancel:global'], [
             (string) self::CANCELLATION_PER_IP_CAP,
             (string) self::CANCELLATION_WINDOW_MS,
             bin2hex(random_bytes(16)),
-        ]) === 1;
+            (string) self::CANCELLATION_GLOBAL_CAP,
+        ]);
     }
 
     /**

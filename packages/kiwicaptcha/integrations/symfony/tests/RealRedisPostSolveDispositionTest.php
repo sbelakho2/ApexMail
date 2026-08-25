@@ -886,7 +886,7 @@ final class RealRedisPostSolveDispositionTest extends TestCase
         $dispositions = $this->store();
 
         $issuer = new Issuer(new Config(secretKey: self::SECRET, targetBits: 8, ttlSecs: 120), $storage);
-        $stage1 = $issuer->issue('login', '198.51.100.7');
+        $stage1 = $issuer->issue('login', '198.51.100.7', 'txn-alpha');
         $tokenB = $this->solve($stage1);
 
         $verifier = new Verifier($storage);
@@ -993,7 +993,7 @@ final class RealRedisPostSolveDispositionTest extends TestCase
         $dispositions = $this->store();
 
         $issuer = new Issuer(new Config(secretKey: self::SECRET, targetBits: 8, ttlSecs: 120), $storage);
-        $stage1 = $issuer->issue('login', '198.51.100.7');
+        $stage1 = $issuer->issue('login', '198.51.100.7', 'txn-alpha');
         $tokenB = $this->solve($stage1);
         $nonceB = SolutionToken::decode($tokenB)->nonce;
 
@@ -1110,7 +1110,7 @@ final class RealRedisPostSolveDispositionTest extends TestCase
         $dispositions = $this->store();
 
         $issuer = new Issuer(new Config(secretKey: self::SECRET, targetBits: 8, ttlSecs: 120), $storage);
-        $stage1 = $issuer->issue('login', '198.51.100.7');
+        $stage1 = $issuer->issue('login', '198.51.100.7', 'txn-alpha');
         $tokenB = $this->solve($stage1);
         $nonceB = SolutionToken::decode($tokenB)->nonce;
 

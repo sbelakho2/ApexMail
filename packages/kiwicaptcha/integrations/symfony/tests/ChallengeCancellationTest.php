@@ -678,6 +678,27 @@ final class ChallengeCancellationTest extends TestCase
         self::assertSame(1, $client->counters[$outstanding->sourceKey('198.51.100.7')] ?? 0);
     }
 
+    public function testGlobalCancellationWindowBoundsTheDeployment(): void
+    {
+        // P2: the cancellation admission enforces a deployment-global
+        // window in addition to the per-source window — an IP-rotating
+        // attacker cannot force unlimited random-nonce cancellation
+        // lookups or source-limiter key churn.
+        $client = new FakePredisClient();
+        $outstanding = new OutstandingChallenges($client, '{kiwi:cancel-global}:outstanding:', RiskKeys::fromMaster(self::SECRET), 5, 100, 0);
+
+        // Drive the REAL deployment-global cap (the constant) with fresh
+        // sources: each admission consumes a global slot regardless of the
+        // source, and the cap wins even for a source with per-source
+        // headroom.
+        $globalCap = OutstandingChallenges::CANCELLATION_GLOBAL_CAP;
+        for ($i = 0; $i < $globalCap; ++$i) {
+            self::assertSame(1, $outstanding->cancellationAdmission('198.51.100.'.($i % 250 + 1)));
+        }
+        self::assertSame(-1, $outstanding->cancellationAdmission('203.0.113.9'), 'the deployment-global window is exhausted — a NEW source is refused');
+        self::assertSame(-1, $outstanding->cancellationAdmission('198.51.100.7'), 'the global cap wins even for a source with per-source headroom');
+    }
+
     public function testHeterogeneousChallengeTtlsNeverResetThePerSourceBound(): void
     {
         // P1 regression: the old scalar per-source counter reset its

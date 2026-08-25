@@ -930,8 +930,23 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
         $idempotencyStoreRef = null;
         if ($redisRef !== null) {
             $redisNamespace = $riskConfig['redis']['namespace'] ?? 'kiwicaptcha';
-            $container->setDefinition(RedisSiteVerifyMetadataStore::class, new Definition(RedisSiteVerifyMetadataStore::class, [$redisRef, $redisNamespace]));
-            $container->setDefinition(RedisSiteVerifyIdempotencyStore::class, new Definition(RedisSiteVerifyIdempotencyStore::class, [$redisRef, $redisNamespace]));
+            $container->setDefinition(RedisSiteVerifyMetadataStore::class, new Definition(RedisSiteVerifyMetadataStore::class, [
+                $redisRef,
+                $redisNamespace,
+                $riskConfig['redis']['wait_replicas'] ?? 0,
+                $riskConfig['redis']['wait_timeout_ms'] ?? 100,
+            ]));
+            // The verified-WAIT durability knobs flow into the idempotency
+            // store like every other durability-critical Redis component
+            // (claim/takeover/renew/finalize WAIT; read-only outcomes never
+            // do).
+            $container->setDefinition(RedisSiteVerifyIdempotencyStore::class, new Definition(RedisSiteVerifyIdempotencyStore::class, [
+                $redisRef,
+                $redisNamespace,
+                RedisSiteVerifyIdempotencyStore::LEASE_SECONDS,
+                $riskConfig['redis']['wait_replicas'] ?? 0,
+                $riskConfig['redis']['wait_timeout_ms'] ?? 100,
+            ]));
             $metadataStoreRef = new Reference(RedisSiteVerifyMetadataStore::class);
             $idempotencyStoreRef = new Reference(RedisSiteVerifyIdempotencyStore::class);
         } else {
@@ -992,19 +1007,11 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             // refuses issuance with 503 `SERVICE_UNAVAILABLE`.
             ->setArgument('$epochMonitor', new Reference(SecurityEpochMonitor::class))
             // The authoritative transaction-binding resolver: when
-            // configured, every Siteverify redemption enforces the same
-            // pre-consume binding contract as the native path (the
-            // resolved binding feeds the core's expected request binding
-            // AND the idempotency identity). Without an authority there
-            // is no server-side transaction input; the endpoint then
-            // cannot enforce a binding, which is why the mixed
-            // configuration (authority + siteverify) is wired here
-            // rather than silently turning request binding off.
-            ->setArgument('$bindingAuthority', $bindingAuthorityRef)
             // The configured challenge TTL lets the anti-
             // stockpiling admission run before the challenge state is
             // created (the quota checks all precede the storage write).
             ->setArgument('$challengeTtlSecs', $config['challenge_ttl_secs'])
+            ->setArgument('$metadataRetentionMarginSecs', $riskConfig['redis']['ttl_margin_secs'] ?? 60)
             // The one-shot chain-ticket gate for stage-2 issuance
             // (risk.chaining; null = chaining disabled, so a ticket-bearing
             // request is then refused).
@@ -1057,7 +1064,7 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             // The shared Redis log gate for
             // invalid-secret flood suppression (null = suppressed detail).
             $riskConfig['siteverify_secrets'] !== [] ? $redisRef : null,
-            null, // idempotency wait bound (default)
+            (float) SiteVerifyController::IDEMPOTENCY_WAIT_SECS, // idempotency wait bound (the ctor default — never null, the param is float)
             $config['risk']['policy_version'] ?? 1, // security-policy epoch in the idempotency identity
         ]))
             ->setArgument('$outstanding', $riskConfig['enabled'] ? new Reference('kiwi_captcha.risk.outstanding') : null)
@@ -1069,6 +1076,17 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             // wiring (a Siteverify-only worker must observe policy
             // revocations and the max-stale fail-closed window too).
             ->setArgument('$epochMonitor', new Reference(SecurityEpochMonitor::class))
+            // The authoritative transaction-binding resolver
+            // (risk.request_binding_authority): when configured, EVERY
+            // Siteverify redemption enforces the same pre-consume binding
+            // contract as the native path (the resolved binding feeds the
+            // core's expected request binding AND the idempotency
+            // identity) — the mixed configuration is wired HERE, on the
+            // Siteverify surface, never silently turning request binding
+            // off. The static risk.request_binding is the fallback
+            // server-side transaction input when no authority exists.
+            ->setArgument('$bindingAuthority', $bindingAuthorityRef)
+            ->setArgument('$defaultRequestBinding', $staticBinding)
             // The logical-operation identity of the redemption rides in
             // the consumed runtime state (written atomically with the
             // pending->consumed transition). The recovery gate on the
@@ -1094,6 +1112,16 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
         // min_policy_epoch <= risk.policy_version; key absent = the
         // binary's own config is authoritative). Argon queue fullness and
         // transient probe timeouts never fail readiness.
+        // A finite container budget REQUIRES a finite Argon concurrency
+        // cap: 0 means "unlimited", and an unlimited memory-hard workload
+        // has no finite worst case — the combination is refused at compile
+        // time instead of silently modeling unlimited as concurrency 1.
+        if ($config['risk']['container_memory_mib'] !== null && $config['argon2_max_concurrent_verifications'] <= 0) {
+            throw new \LogicException(
+                'A finite risk.container_memory_mib requires a finite argon2_max_concurrent_verifications cap — 0 means "unlimited", and an unlimited memory-hard workload has no finite worst-case concurrency for the memory-budget readiness invariant.'
+            );
+        }
+
         $healthNamespace = preg_replace('/[^A-Za-z0-9_.-]/', '_', (string) $riskConfig['namespace']) ?: 'kiwi';
         $container->setDefinition(KiwiHealthController::class, (new Definition(KiwiHealthController::class, [
             $config['secret_key'],
@@ -1367,6 +1395,7 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
         }
 
         $id = $storageId;
+
         if ($container->hasAlias($id)) {
             $id = (string) $container->getAlias($id);
         }

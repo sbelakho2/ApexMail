@@ -93,7 +93,8 @@ final class ResultReceiptTest extends TestCase
         $receipt = json_decode($payload, true);
         self::assertSame($nonce, $receipt['jti'], 'the receipt jti is the verified challenge nonce');
         self::assertSame('login', $receipt['tenant'], 'the receipt tenant is the record scope');
-        self::assertSame('sha256', $receipt['action'], 'the receipt action is the record PoW algorithm');
+        self::assertSame('sha256', $receipt['algorithm'], 'the receipt algorithm is the record PoW algorithm');
+        self::assertSame(2, $receipt['v'], 'the receipt payload is the versioned v2 envelope');
         self::assertNull($receipt['request_binding'], 'an unbound record carries a null request_binding');
         self::assertIsInt($receipt['issued_at']);
         self::assertIsInt($receipt['expires_at']);

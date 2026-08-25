@@ -136,14 +136,27 @@ final class ResultReceiptSigner
         if (!$this->enabled()) {
             return null;
         }
+        // The versioned v2 payload: an offline receiver must validate the
+        // signature, the expected issuer/region, the policy epoch, the
+        // scope, the request binding, the required proof/profile, the
+        // expiry and the atomic first-seen JTI. v1 payloads (without the
+        // version marker) are NEVER treated as equivalent: a receiver
+        // demanding v2 must refuse them.
         $payload = (string) json_encode([
+            'v' => 2,
             'jti' => $record->nonce,
             'tenant' => $record->scope,
-            'action' => $record->algorithm->value,
             'request_binding' => $record->requestBinding,
             'issued_at' => $record->issuedAt,
             'expires_at' => $record->expiresAt,
             'issuer' => $record->issuer,
+            'region' => $record->region,
+            'policy_version' => $record->policyVersion,
+            'algorithm' => $record->algorithm->value,
+            'target_bits' => $record->targetBits,
+            'm_kib' => $record->mKib,
+            't' => $record->t,
+            'p' => $record->p,
         ], JSON_UNESCAPED_SLASHES);
 
         $signature = \sodium_crypto_sign_detached($payload, $this->secretKey);

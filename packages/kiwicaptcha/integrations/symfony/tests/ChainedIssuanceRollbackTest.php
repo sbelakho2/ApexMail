@@ -224,6 +224,62 @@ final class ChainedIssuanceRollbackTest extends TestCase
         self::assertNotNull($requirement?->stage2Nonce);
     }
 
+    public function testPostStage2CommitFailureNeverRollsBackTheIssuedState(): void
+    {
+        // P0: once markStage2Issued() confirms issued(N), NO later failure
+        // (here the risk feedback) may roll back the challenge record, the
+        // outstanding memberships or the chain — a rolled-back membership
+        // would resurrect a valid-but-unaccounted challenge.
+        $storage = new ArrayStorage();
+        $client = new RollbackFakeRedis();
+        $outstanding = new OutstandingChallenges($client, '{kiwi:rollback-test}:outstanding:', RiskKeys::fromMaster(self::SECRET), 5, 100, 0);
+        $chainStore = new ArrayChainedChallengeStateStore();
+        $chainService = $this->chainService($chainStore);
+        ['chainId' => $chainId, 'ticket' => $ticket] = $this->openChain($chainService);
+
+        // The risk store's feedback write throws AFTER the durable
+        // stage-2 commit (the challengeIssued risk feedback fails).
+        $keys = RiskKeys::fromMaster(self::SECRET);
+        $classifier = new \KiwiCaptcha\Risk\Network\CidrNetworkClassifier([]);
+        $policy = RiskPolicy::fromConfig([
+            'version' => RiskPolicy::CONTRACT_VERSION,
+            'weights' => [],
+            'scopes' => [1 => ['base_risk' => 100, 'minimum' => 'allow', 'post_solve_check' => false, 'degraded' => 'allow']],
+        ]);
+        $store = new ThrowingFeedbackRiskStore(SignalVector::fromArray(self::ARGON32_VECTOR));
+        $risk = new RiskGateway(
+            new \KiwiCaptcha\Risk\AdaptiveRiskEngine($store, $classifier, new RiskIdentityFactory($keys), new RiskScorer(), $policy, $keys),
+            $classifier,
+            new RiskProfileResolver(PoWAlgorithm::Sha256, 8),
+            ['login' => 1],
+            policy: $policy,
+        );
+        $controller = $this->chainController($storage, $chainService, $risk, outstanding: $outstanding);
+
+        $response = $controller->challenge($this->challengeRequest(json_encode(['scope' => 'login', 'chain_ticket' => $ticket, 'request_binding' => 'txn-alpha'], JSON_THROW_ON_ERROR)));
+        self::assertSame(503, $response->getStatusCode(), 'the post-commit feedback failure answers the private structured 503');
+        self::assertSame('SERVICE_UNAVAILABLE', json_decode((string) $response->getContent(), true)['error']['code']);
+
+        // NOTHING was rolled back: the chain stays issued(N), the record
+        // exists, the outstanding memberships still hold N.
+        $requirement = $chainService->requirementFor($chainId);
+        self::assertSame('issued', $requirement?->state, 'the chain stays durably issued');
+        self::assertIsString($requirement?->stage2Nonce);
+        $nonce = (string) $requirement?->stage2Nonce;
+        self::assertNotNull($storage->find($nonce), 'the challenge record N still exists');
+        self::assertSame(1, $client->counters[$this->sourceKey()] ?? 0, 'the original-source outstanding membership still holds N');
+        self::assertArrayHasKey($nonce, $client->zsets['{kiwi:rollback-test}:outstanding:global:live'] ?? [], 'the global live membership still holds N');
+
+        // The same chain retries: it recovers the SAME issued challenge —
+        // no re-mint, no re-admission.
+        $retry = $controller->challenge($this->challengeRequest(json_encode(['scope' => 'login', 'chain_ticket' => $ticket, 'request_binding' => 'txn-alpha'], JSON_THROW_ON_ERROR)));
+        self::assertSame(200, $retry->getStatusCode());
+        $retryNonce = json_decode((string) $retry->getContent(), true)['nonce'];
+        self::assertSame($nonce, $retryNonce, 'the retry recovers the identical issued challenge');
+        self::assertSame(1, $client->counters[$this->sourceKey()] ?? 0, 'the retry performs NO re-admission');
+        self::assertCount(1, $client->zsets['{kiwi:rollback-test}:outstanding:global:live'] ?? [], 'the retry performs NO re-mint');
+    }
+
     public function testIndeterminateChainIssuanceDoesNotRollBack(): void
     {
         $storage = new ArrayStorage();
@@ -420,6 +476,46 @@ final class RollbackLostReplyChainStore implements TransactionalChainedChallenge
  * floored at 0 plus a ZREM of the nonce). The counters and the live
  * membership are observable for the slot assertions.
  */
+/**
+ * A risk state store whose feedback observation write throws — the
+ * post-stage-2-commit risk feedback failure injection.
+ */
+final class ThrowingFeedbackRiskStore implements \KiwiCaptcha\Risk\Storage\RiskStateStoreInterface
+{
+    private readonly \BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\FakeRiskStateStore $inner;
+
+    public function __construct(\KiwiCaptcha\Risk\SignalVector $vector)
+    {
+        $this->inner = new \BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\FakeRiskStateStore($vector);
+    }
+
+    public function observe(\KiwiCaptcha\Risk\RiskObservation $observation): \KiwiCaptcha\Risk\SignalVector
+    {
+        // Only the post-commit ChallengeIssued feedback write throws; the
+        // pre-mint assessment observe passes through untouched.
+        if ($observation->event === \KiwiCaptcha\Risk\RiskEventKind::ChallengeIssued) {
+            throw new \RuntimeException('simulated risk feedback failure');
+        }
+
+        return $this->inner->observe($observation);
+    }
+
+    public function registerOutcome(string $decisionId, int $scope, int $decisionHour, int $score): bool
+    {
+        return false;
+    }
+
+    public function confirmOutcome(string $decisionId, bool $legitimate): int
+    {
+        return 0;
+    }
+
+    public function correctOutcome(string $decisionId, bool $legitimate): bool
+    {
+        return false;
+    }
+}
+
 final class RollbackFakeRedis extends \Predis\Client
 {
     /** @var array<string, int> plain incr counters */

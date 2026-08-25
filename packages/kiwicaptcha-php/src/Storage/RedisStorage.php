@@ -10,6 +10,9 @@ use KiwiCaptcha\ConsumedRecord;
 use KiwiCaptcha\ConsumedResult;
 use KiwiCaptcha\OperationIdentity;
 use KiwiCaptcha\OperationIdentityAwareStorageInterface;
+use KiwiCaptcha\ChallengeRuntimeState;
+use KiwiCaptcha\ChallengeRuntimeStateKind;
+use KiwiCaptcha\ChallengeRuntimeStateReadableInterface;
 
 /**
  * Redis-backed storage with atomic one-shot semantics.
@@ -53,7 +56,7 @@ use KiwiCaptcha\OperationIdentityAwareStorageInterface;
  * Implements {@see \KiwiCaptcha\AtomicStorageInterface}: the fused
  * read-transition makes consume() strict single-use under concurrency.
  */
-final class RedisStorage implements AtomicStorageInterface, \KiwiCaptcha\ConsumedStateReadableInterface, OperationIdentityAwareStorageInterface, \KiwiCaptcha\AtomicDeleteIfPendingInterface, \KiwiCaptcha\CancellableStorageInterface
+final class RedisStorage implements AtomicStorageInterface, \KiwiCaptcha\ConsumedStateReadableInterface, OperationIdentityAwareStorageInterface, \KiwiCaptcha\AtomicDeleteIfPendingInterface, \KiwiCaptcha\CancellableStorageInterface, \KiwiCaptcha\ChallengeRuntimeStateReadableInterface
 {
     /**
      * Atomic consume transition: GET the record; if present and not yet
@@ -727,6 +730,27 @@ LUA;
      * may report the cancellation. No WAIT is issued for missing,
      * consumed or already-cancelled, since no mutation occurred.
      */
+    public function runtimeState(string $nonce): ChallengeRuntimeState
+    {
+        // ONE GET: the state is decoded from the same bytes the
+        // pending->consumed/cancelled transitions wrote, never from two
+        // separate reads that could race.
+        $raw = $this->client->get($this->prefix.$nonce);
+        if (!\is_string($raw) || $raw === '') {
+            return new ChallengeRuntimeState(ChallengeRuntimeStateKind::Missing);
+        }
+        if (str_contains($raw, '"state":"cancelled"')) {
+            return new ChallengeRuntimeState(ChallengeRuntimeStateKind::Cancelled, $this->decode($raw));
+        }
+        if (str_contains($raw, '"state":"consumed"')) {
+            $consumed = $this->consumedState($nonce);
+
+            return new ChallengeRuntimeState(ChallengeRuntimeStateKind::Consumed, $consumed?->record, $consumed);
+        }
+
+        return new ChallengeRuntimeState(ChallengeRuntimeStateKind::Pending, $this->decode($raw));
+    }
+
     public function cancel(string $nonce): ?\KiwiCaptcha\CancellationResult
     {
         $key = $this->prefix.$nonce;

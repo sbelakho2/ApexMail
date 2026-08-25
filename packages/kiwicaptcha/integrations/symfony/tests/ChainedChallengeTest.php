@@ -310,7 +310,7 @@ final class ChainedChallengeTest extends TestCase
         $storage = new ArrayStorage();
         $chainStore = new ArrayChainedChallengeStateStore();
         $resolver = new RiskProfileResolver(PoWAlgorithm::Sha256, 8);
-        $challenge = $this->issuer($storage)->issue('login', '198.51.100.7')->toArray();
+        $challenge = $this->issuer($storage)->issue('login', '198.51.100.7', 'txn-alpha')->toArray();
         usleep(($challenge['minDurationMs'] + 10) * 1000);
         $token = $this->solveToken($challenge);
 
@@ -379,6 +379,86 @@ final class ChainedChallengeTest extends TestCase
 
     // ── chain_required disposition replay (expiry-preserving re-sign) ───
 
+    public function testCancelledStage2RearmsWithAFreshNonceAndReleasesTheSlot(): void
+    {
+        // P1: a CANCELLED stage-2 record is retained (find() still returns
+        // it, consumedState() stays null) — the state-aware recovery must
+        // never recover it as pending: the chain rearms with a fresh
+        // nonce and the cancelled nonce's outstanding slot is released.
+        $storage = new ArrayStorage();
+        $client = new RollbackFakeRedis();
+        $outstanding = new OutstandingChallenges($client, '{kiwi:rollback-test}:outstanding:', RiskKeys::fromMaster(self::SECRET), 5, 100, 0);
+        $chainStore = new ArrayChainedChallengeStateStore();
+        $chainService = $this->chainService($chainStore);
+        $requirement = $chainService->requireStage2($this->nonce(), 'login', 'txn-alpha', 1, RiskAction::Argon32, time() + 300);
+        $ticket = $chainService->ticketFor($requirement->chainId, time() + 300);
+        $chainId = $requirement->chainId;
+
+        $risk = $this->riskStack();
+        $controller = $this->chainController($storage, $chainService, $risk['gateway'], outstanding: $outstanding);
+        $first = $controller->challenge($this->challengeRequest(json_encode(['scope' => 'login', 'chain_ticket' => $ticket, 'request_binding' => 'txn-alpha'], JSON_THROW_ON_ERROR)));
+        self::assertSame(200, $first->getStatusCode());
+        $nonce = json_decode((string) $first->getContent(), true)['nonce'];
+
+        // The issued stage-2 is cancelled by the client; the record stays
+        // retained (the cancelled state).
+        self::assertNotNull($storage->cancel($nonce), 'the cancellation transition lands');
+        self::assertSame(\KiwiCaptcha\ChallengeRuntimeStateKind::Cancelled, $storage->runtimeState($nonce)->kind, 'the runtime state is CANCELLED, not pending');
+
+        // The same chain retries: the cancelled nonce is never recovered
+        // as pending — the chain rearms and a FRESH nonce is minted, with
+        // the old slot released.
+        $retry = $controller->challenge($this->challengeRequest(json_encode(['scope' => 'login', 'chain_ticket' => $ticket, 'request_binding' => 'txn-alpha'], JSON_THROW_ON_ERROR)));
+        self::assertSame(200, $retry->getStatusCode());
+        $freshNonce = json_decode((string) $retry->getContent(), true)['nonce'];
+        self::assertNotSame($nonce, $freshNonce, 'a cancelled stage-2 can never be recovered as pending');
+        $sourceKey = '{kiwi:rollback-test}:outstanding:'.hash_hmac('sha256', Issuer::canonicalIpFamily('198.51.100.7'), RiskKeys::fromMaster(self::SECRET)->event);
+        self::assertSame(1, $client->counters[$sourceKey] ?? 0, 'the fresh issuance holds exactly one slot');
+    }
+
+    public function testExpiredRetainedStage2IsRetiredBeforeRearm(): void
+    {
+        // P1: a signed-expired-but-retained PENDING record is atomically
+        // retired (pending->cancelled) before the chain rearm — the old
+        // nonce becomes provably non-redeemable, never merely abandoned.
+        $storage = new ArrayStorage();
+        $chainStore = new ArrayChainedChallengeStateStore();
+        $chainService = $this->chainService($chainStore);
+        $requirement = $chainService->requireStage2($this->nonce(), 'login', 'txn-alpha', 1, RiskAction::Argon32, time() + 300);
+        $ticket = $chainService->ticketFor($requirement->chainId, time() + 300);
+        $chainId = $requirement->chainId;
+
+        $risk = $this->riskStack();
+        $client = new RollbackFakeRedis();
+        $controller = $this->chainController($storage, $chainService, $risk['gateway'], outstanding: new OutstandingChallenges($client, '{kiwi:rollback-test}:outstanding:', RiskKeys::fromMaster(self::SECRET), 5, 100, 0));
+        $first = $controller->challenge($this->challengeRequest(json_encode(['scope' => 'login', 'chain_ticket' => $ticket, 'request_binding' => 'txn-alpha'], JSON_THROW_ON_ERROR)));
+        self::assertSame(200, $first->getStatusCode());
+        $nonce = json_decode((string) $first->getContent(), true)['nonce'];
+
+        // The record is still PENDING but its signed expiry passed (the
+        // retained-state replay margin keeps it physically present).
+        $record = $storage->find($nonce);
+        self::assertNotNull($record);
+        $storage->delete($nonce);
+        $expired = new \KiwiCaptcha\ChallengeRecord(
+            nonce: $record->nonce, scope: $record->scope, bindingTag: $record->bindingTag,
+            issuedAt: $record->issuedAt, expiresAt: 1, algorithm: $record->algorithm,
+            mKib: $record->mKib, t: $record->t, p: $record->p, targetBits: $record->targetBits,
+            salt: $record->salt, prefix: $record->prefix, challenge: $record->challenge,
+            minDurationMs: $record->minDurationMs, issuedAtNs: $record->issuedAtNs,
+            region: $record->region, requestBinding: $record->requestBinding, issuer: $record->issuer,
+            kid: $record->kid, hostname: $record->hostname,
+        );
+        $storage->store($expired);
+
+        $retry = $controller->challenge($this->challengeRequest(json_encode(['scope' => 'login', 'chain_ticket' => $ticket, 'request_binding' => 'txn-alpha'], JSON_THROW_ON_ERROR)));
+        self::assertSame(200, $retry->getStatusCode());
+        $freshNonce = json_decode((string) $retry->getContent(), true)['nonce'];
+        self::assertNotSame($nonce, $freshNonce, 'the expired retained stage-2 is retired and a fresh nonce minted');
+        self::assertNotNull($storage->find($nonce), 'the retired record is retained (cancelled) as the non-redeemability evidence');
+        self::assertSame(\KiwiCaptcha\ChallengeRuntimeStateKind::Cancelled, $storage->runtimeState($nonce)->kind, 'the retired nonce is provably non-redeemable');
+    }
+
     public function testChainRequiredDispositionReplayReSignsWithTheOriginalExpiry(): void
     {
         $storage = new ArrayStorage();
@@ -388,7 +468,7 @@ final class ChainedChallengeTest extends TestCase
         $risk = $this->riskStack(SignalVector::fromArray(self::ARGON32_VECTOR), $resolver);
         $disposition = new ArrayPostSolveDispositionStore();
 
-        $stage1 = $this->solvedStage1($storage);
+        $stage1 = $this->solvedStage1($storage, 'txn-alpha');
         $stack = new RequestStack();
         $stack->push(Request::create('/', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7']));
         $stack->getMainRequest()?->attributes->set(KiwiCaptchaValidator::OPERATION_ID_ATTRIBUTE, 'op-chained-test'); // the replay legs are the explicitly identified idempotent retry
@@ -455,7 +535,7 @@ final class ChainedChallengeTest extends TestCase
         $risk = $this->riskStack(SignalVector::fromArray(self::ARGON32_VECTOR), $resolver);
         $disposition = new ArrayPostSolveDispositionStore();
 
-        $stage1 = $this->solvedStage1($storage);
+        $stage1 = $this->solvedStage1($storage, 'txn-alpha');
         $stack = new RequestStack();
         $stack->push(Request::create('/', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7']));
         $stack->getMainRequest()?->attributes->set(KiwiCaptchaValidator::OPERATION_ID_ATTRIBUTE, 'op-chained-test'); // the replay legs are the explicitly identified idempotent retry
@@ -520,7 +600,7 @@ final class ChainedChallengeTest extends TestCase
         $risk = $this->riskStack(SignalVector::fromArray(self::ARGON32_VECTOR), $resolver);
         $disposition = new ArrayPostSolveDispositionStore();
 
-        $stage1 = $this->solvedStage1($storage);
+        $stage1 = $this->solvedStage1($storage, 'txn-alpha');
         $stack = new RequestStack();
         $stack->push(Request::create('/', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7']));
         $stack->getMainRequest()?->attributes->set(KiwiCaptchaValidator::OPERATION_ID_ATTRIBUTE, 'op-chained-test'); // the replay legs are the explicitly identified idempotent retry
@@ -619,7 +699,7 @@ final class ChainedChallengeTest extends TestCase
     {
         $storage = new ArrayStorage();
         $chainStore = new ArrayChainedChallengeStateStore();
-        $stage1 = $this->solvedStage1($storage);
+        $stage1 = $this->solvedStage1($storage, 'txn-alpha');
 
         // The reassessment demands StepUp (score 933): the violation is
         // the terminal application step-up — NO chain ticket can ever
@@ -2150,7 +2230,7 @@ final class ChainedChallengeTest extends TestCase
 
         // The baseline difficulty is 8 bits: the client's solved SHA-8 is
         // NOT the Sha16 rung — the reassessment (Sha16) opens the chain.
-        $stage1 = $this->solvedStage1($storage);
+        $stage1 = $this->solvedStage1($storage, 'txn-alpha');
         $risk = $this->riskStack(SignalVector::fromArray(self::SHA16_VECTOR), $resolver);
         $stack = new RequestStack();
         $stack->push(Request::create('/', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7']));
@@ -2173,7 +2253,7 @@ final class ChainedChallengeTest extends TestCase
         // Stage-1 proof at 16 bits: the solved SHA-16 IS the Sha16 rung —
         // the reassessment (Sha16) is already satisfied, no chain opens.
         $issuer = new Issuer(new Config(secretKey: self::SECRET, algorithm: PoWAlgorithm::Sha256, targetBits: 16, ttlSecs: 120), $storage);
-        $challenge = $issuer->issue('login', '198.51.100.7')->toArray();
+        $challenge = $issuer->issue('login', '198.51.100.7', 'txn-alpha')->toArray();
         usleep(($challenge['minDurationMs'] + 10) * 1000);
         $token = $this->solveToken($challenge);
 
@@ -2197,7 +2277,7 @@ final class ChainedChallengeTest extends TestCase
         // the chain opens with the required action (fail toward more
         // security: an unknown solve strength is never assumed to have
         // met the reassessed action).
-        $stage1 = $this->solvedStage1($storage);
+        $stage1 = $this->solvedStage1($storage, 'txn-alpha');
         $risk = $this->riskStack(SignalVector::fromArray(self::ARGON32_VECTOR), $resolver);
         $stack = new RequestStack();
         $stack->push(Request::create('/', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7']));
@@ -2254,7 +2334,7 @@ final class ChainedChallengeTest extends TestCase
 
         // Stage 1: solve + chain_required ticket (the reassessment
         // demands Argon32).
-        $stage1 = $this->solvedStage1($storage);
+        $stage1 = $this->solvedStage1($storage, 'txn-alpha');
         $stack = new RequestStack();
         $stack->push(Request::create('/', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7']));
         [$violations] = $this->validateChained($stage1['token'], $stack, $risk['gateway'], $storage, $chainStore, $metaStore, resolver: $resolver);
@@ -2322,7 +2402,7 @@ final class ChainedChallengeTest extends TestCase
         $storage = new ArrayStorage();
         $chainStore = new ArrayChainedChallengeStateStore();
         $chainService = $this->chainService($chainStore);
-        $stage1 = $this->solvedStage1($storage);
+        $stage1 = $this->solvedStage1($storage, 'txn-alpha');
 
         // Stage 1: the reassessment (Argon32) opens the chain.
         $risk = $this->riskStack(SignalVector::fromArray(self::ARGON32_VECTOR));
@@ -2370,7 +2450,7 @@ final class ChainedChallengeTest extends TestCase
         $storage = new ArrayStorage();
         $chainStore = new ArrayChainedChallengeStateStore();
         $chainService = $this->chainService($chainStore);
-        $stage1 = $this->solvedStage1($storage);
+        $stage1 = $this->solvedStage1($storage, 'txn-alpha');
 
         // Stage 1: the reassessment (Argon32) opens the chain.
         $risk = $this->riskStack(SignalVector::fromArray(self::ARGON32_VECTOR));
@@ -2418,7 +2498,7 @@ final class ChainedChallengeTest extends TestCase
         $storage = new ArrayStorage();
         $chainStore = new ArrayChainedChallengeStateStore();
         $chainService = $this->chainService($chainStore);
-        $stage1 = $this->solvedStage1($storage);
+        $stage1 = $this->solvedStage1($storage, 'txn-alpha');
 
         // Stage 1: the reassessment (Argon32) opens the chain.
         $risk = $this->riskStack(SignalVector::fromArray(self::ARGON32_VECTOR));
@@ -2662,7 +2742,7 @@ final class ChainedChallengeTest extends TestCase
         $resolver = new RiskProfileResolver(PoWAlgorithm::Sha256, 8);
         $risk = $this->riskStack(resolver: $resolver);
 
-        $stage1 = $this->solvedStage1($storage);
+        $stage1 = $this->solvedStage1($storage, 'txn-alpha');
         $stack = new RequestStack();
         $stack->push(Request::create('/', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7']));
         $stack->getMainRequest()?->attributes->set(KiwiCaptchaValidator::OPERATION_ID_ATTRIBUTE, 'op-chained-test'); // the replay legs are the explicitly identified idempotent retry
@@ -2695,7 +2775,7 @@ final class ChainedChallengeTest extends TestCase
         $risk = $this->riskStack(SignalVector::fromArray(self::ARGON32_VECTOR), $resolver);
 
         // Stage 1: the reassessment (Argon32) opens the chain.
-        $stage1 = $this->solvedStage1($storage);
+        $stage1 = $this->solvedStage1($storage, 'txn-alpha');
         $stack = new RequestStack();
         $stack->push(Request::create('/', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7']));
         $service = $this->chainService($chainStore);
@@ -2707,7 +2787,7 @@ final class ChainedChallengeTest extends TestCase
         // Stage 2: a real challenge is issued and the chain identity is
         // stamped into the metadata sidecar (the marker ends the chain at
         // stage 2 — the no-reassessment Pass path).
-        $stage2 = $this->issuer($storage)->issue('login', '198.51.100.7');
+        $stage2 = $this->issuer($storage)->issue('login', '198.51.100.7', 'txn-alpha');
         self::assertSame(ChainReservationResult::Available, $service->reserveStage2($chainId, 'owner-a'));
         self::assertSame(ChainIssuedResult::IssuedNew, $service->markIssued($chainId, 'owner-a', $stage2->nonce));
         $metaStore->store($stage2->nonce, new \BelConsulting\KiwiCaptchaBundle\SiteVerify\SiteVerifyMetadata(null, null, 'login', $chainId, 2), 300);
@@ -2745,7 +2825,7 @@ final class ChainedChallengeTest extends TestCase
         $resolver = new RiskProfileResolver(PoWAlgorithm::Sha256, 8);
         $risk = $this->riskStack(resolver: $resolver);
 
-        $stage1 = $this->solvedStage1($storage);
+        $stage1 = $this->solvedStage1($storage, 'txn-alpha');
         $stack = new RequestStack();
         $stack->push(Request::create('/', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7']));
         $chainService = $this->chainService($chainStore);
@@ -2757,7 +2837,7 @@ final class ChainedChallengeTest extends TestCase
         // only the failure path fails closed: a successful read without a
         // marker keeps the normal stage-1 flow — a fresh token passes.
         $failingMeta->findFails = false;
-        $challenge = $this->issuer($storage)->issue('login', '198.51.100.7')->toArray();
+        $challenge = $this->issuer($storage)->issue('login', '198.51.100.7', 'txn-alpha')->toArray();
         usleep(($challenge['minDurationMs'] + 10) * 1000);
         $token2 = $this->solveToken($challenge);
         $stack2 = new RequestStack();
@@ -2776,7 +2856,7 @@ final class ChainedChallengeTest extends TestCase
         $resolver = new RiskProfileResolver(PoWAlgorithm::Sha256, 8);
         $risk = $this->riskStack(resolver: $resolver);
 
-        $stage1 = $this->solvedStage1($storage);
+        $stage1 = $this->solvedStage1($storage, 'txn-alpha');
         $stack = new RequestStack();
         $stack->push(Request::create('/', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7']));
         [$violations] = $this->validateChained($stage1['token'], $stack, $risk['gateway'], $storage, $chainStore, resolver: $resolver);

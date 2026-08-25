@@ -7,6 +7,7 @@ namespace KiwiCaptcha\Tests;
 use KiwiCaptcha\ChallengeRecord;
 use KiwiCaptcha\Config;
 use KiwiCaptcha\Issuer;
+use KiwiCaptcha\RequestBindingExpectation;
 use KiwiCaptcha\SolutionToken;
 use KiwiCaptcha\Storage\ArrayStorage;
 use KiwiCaptcha\StorageInterface;
@@ -32,6 +33,11 @@ use PHPUnit\Framework\TestCase;
 final class ReplayIdentityGateTest extends TestCase
 {
     private const ISSUED_AT = 1_800_000_000;
+
+    private static function identityFor(string $key): string
+    {
+        return 'op-'.hash('sha256', $key);
+    }
 
     private const IDENTITY_A = 'op-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
     private const IDENTITY_B = 'op-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
@@ -175,6 +181,43 @@ final class ReplayIdentityGateTest extends TestCase
         $outcome = $verifier->verify($token, Vectors::SECRET, 'login', '198.51.100.7', expectedRequestBinding: 'txn-OTHER');
         self::assertSame(VerifyError::RequestBindingMismatch, $outcome->error, 'a record-bound mismatch is rejected before the consume');
         self::assertNull($storage->find($record->nonce), 'a PENDING record failing a cheap check is deleted per the one-shot policy');
+    }
+
+    public function testRequestBindingExpectationGoldenVectors(): void
+    {
+        // The exact Option-equality matrix (the protocol parity gate's
+        // PHP half): bound A / exact A pass; bound A / exact B mismatch;
+        // bound A / exact null mismatch; unbound / exact null pass;
+        // unbound / exact A mismatch; bound A / unenforced pass.
+        $rows = [
+            ['txn-A', 'txn-A', null, true],
+            ['txn-A', 'txn-B', null, false],
+            ['txn-A', null, null, false],
+            [null, null, null, true],
+            [null, 'txn-A', null, false],
+            ['txn-A', 'txn-A', RequestBindingExpectation::unenforced(), true],
+        ];
+        foreach ($rows as [$recordBinding, $expected, $_, $shouldPass]) {
+            [$storage, $record, $token] = $this->issueAndSolve(requestBinding: $recordBinding);
+            $verifier = new Verifier($storage, now: static fn (): int => self::ISSUED_AT);
+            $expectation = $_ ?? RequestBindingExpectation::exact($expected);
+            $outcome = $verifier->verify($token, Vectors::SECRET, 'login', '198.51.100.7', expectedRequestBinding: $expected, bindingExpectation: $expectation);
+            self::assertSame($shouldPass, $outcome->isOk(), sprintf('record=%s expected=%s pass=%s got=%s', var_export($recordBinding, true), var_export($expected, true), var_export($shouldPass, true), $outcome->code()));
+        }
+    }
+
+    public function testRequestBindingExpectationReplayRowsNeverBypassAMismatch(): void
+    {
+        // Every matrix row must survive a committed consumed result: a
+        // stored success must never bypass a new hard binding mismatch.
+        foreach ([['txn-A', 'txn-A', true], ['txn-A', 'txn-B', false], [null, null, true], [null, 'txn-A', false]] as [$recordBinding, $expected, $shouldPass]) {
+            [$inner, $record, $token] = $this->issueAndSolve(requestBinding: $recordBinding);
+            $inner->consumeWithOperationIdentity($record->nonce, self::identityFor('m-'.$expected ?? 'null'));
+            self::assertTrue($inner->commitResult($record->nonce, true, $record->requestBinding), 'the committed result lands');
+            $verifier = new Verifier($inner, now: static fn (): int => self::ISSUED_AT + 10_000);
+            $outcome = $verifier->verify($token, Vectors::SECRET, 'login', '198.51.100.7', operationIdentity: self::identityFor('m-'.$expected ?? 'null'), expectedRequestBinding: $expected, bindingExpectation: RequestBindingExpectation::exact($expected));
+            self::assertSame($shouldPass, $outcome->isOk(), sprintf('replay row record=%s expected=%s pass=%s got=%s', var_export($recordBinding, true), var_export($expected, true), var_export($shouldPass, true), $outcome->code()));
+        }
     }
 
     public function testExpectedRequestBindingWithAnUnboundRecordIsPermitted(): void

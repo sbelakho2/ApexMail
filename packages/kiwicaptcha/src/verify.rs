@@ -91,6 +91,50 @@ pub(crate) fn leading_zero_bits(hash: &[u8]) -> u32 {
 }
 
 /// The context for verifying a single solution.
+/// The explicit request-binding enforcement policy, mirroring the PHP
+/// `RequestBindingExpectation`: `Exact` requires Option-equality between
+/// the record's signed `request_binding` and the authoritative
+/// transaction binding (null == explicitly unbound, a string == the same
+/// bound transaction); `Unenforced` disables the check.
+#[derive(Debug, Clone, Copy)]
+pub enum RequestBindingExpectation<'a> {
+    Unenforced,
+    Exact(Option<&'a str>),
+}
+
+/// Constant-time byte equality (the request binding is compared without
+/// early exit; the bindings are transaction identifiers, the constant-time
+/// property is defense-in-depth).
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
+/// The ONE shared request-binding check used by every binding enforcement
+/// site (the generic verify_solution, the production Redis verifier's
+/// cheap phase, replay gate, post-consume revalidation and resume path):
+/// exact Option-equality, compared in constant time when both sides carry
+/// a string.
+pub(crate) fn check_request_binding(
+    record_binding: Option<&str>,
+    expectation: RequestBindingExpectation<'_>,
+) -> Result<(), VerifyError> {
+    match expectation {
+        RequestBindingExpectation::Unenforced => Ok(()),
+        RequestBindingExpectation::Exact(expected) => match (record_binding, expected) {
+            (None, None) => Ok(()),
+            (Some(actual), Some(expected)) if constant_time_eq(actual.as_bytes(), expected.as_bytes()) => Ok(()),
+            _ => Err(VerifyError::RequestBindingMismatch),
+        },
+    }
+}
+
 pub struct VerifyContext<'a> {
     /// The stored challenge record (looked up from storage by nonce). Passed
     /// as `&mut` because verification performs attempt accounting on the
@@ -144,6 +188,13 @@ pub struct VerifyContext<'a> {
     /// Expected auth scope. If [`Some`], the solution is rejected if the
     /// challenge was issued for a different scope (prevents cross-scope replay).
     pub expected_scope: Option<&'a str>,
+    /// The request-binding enforcement policy. [`RequestBindingExpectation::Exact`]
+    /// requires Option-equality with the authoritative transaction binding
+    /// (a bound record under a different or explicitly-unbound transaction
+    /// is rejected with [`VerifyError::RequestBindingMismatch`], and an
+    /// explicitly unbound record under a bound transaction is rejected
+    /// too); [`RequestBindingExpectation::Unenforced`] disables the check.
+    pub expected_request_binding: RequestBindingExpectation<'a>,
     /// Expected region. If [`Some`], the solution is rejected with
     /// [`VerifyError::WrongRegion`] when the stored record was issued for a
     /// different region — or for no region at all (a region-expecting
@@ -701,6 +752,12 @@ pub fn verify_solution(ctx: &mut VerifyContext<'_>) -> VerifyOutcome {
         }
     }
 
+    // 2b. Application transaction binding (exact Option-equality via the
+    //     shared helper).
+    if let Err(e) = check_request_binding(ctx.record.request_binding.as_deref(), ctx.expected_request_binding) {
+        return VerifyOutcome::Invalid(e);
+    }
+
     // 2c. Region validation: a deployment that expects a region
     //     rejects challenges issued for a different region — or for no region
     //     at all (fail closed).
@@ -1207,6 +1264,7 @@ mod tests {
             now_ns: NOW_NS + 5_000_000, // 5 s after issuance
             min_duration_ms: 0,
             expected_scope: None,
+            expected_request_binding: RequestBindingExpectation::Unenforced,
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
@@ -1228,6 +1286,27 @@ mod tests {
         let challenge = format!("{}.{}", B64.encode(canonical.as_bytes()), sig);
         record.challenge = challenge.clone();
         record.prefix = format!("{challenge}|{}|", record.salt);
+    }
+
+    #[test]
+    fn request_binding_expectation_golden_vectors() {
+        // The exact Option-equality matrix (the protocol parity gate's
+        // Rust half): bound A / exact A pass; bound A / exact B mismatch;
+        // bound A / exact null mismatch; unbound / exact null pass;
+        // unbound / exact A mismatch; bound A / unenforced pass.
+        let cases: [(&str, RequestBindingExpectation, bool); 6] = [
+            ("txn-A", RequestBindingExpectation::Exact(Some("txn-A")), true),
+            ("txn-A", RequestBindingExpectation::Exact(Some("txn-B")), false),
+            ("txn-A", RequestBindingExpectation::Exact(None), false),
+            ("", RequestBindingExpectation::Exact(None), true),
+            ("", RequestBindingExpectation::Exact(Some("txn-A")), false),
+            ("txn-A", RequestBindingExpectation::Unenforced, true),
+        ];
+        for (binding, expectation, should_pass) in cases {
+            let record_binding = if binding.is_empty() { None } else { Some(binding) };
+            let ok = check_request_binding(record_binding, expectation).is_ok();
+            assert_eq!(ok, should_pass, "binding={binding:?} expectation={expectation:?}");
+        }
     }
 
     #[test]
@@ -1629,6 +1708,7 @@ mod tests {
             now_ns: NOW_NS,
             min_duration_ms: 0,
             expected_scope: None,
+            expected_request_binding: RequestBindingExpectation::Unenforced,
             client_ip: Some("1.2.3.4"),
             expected_region: None,
             expected_issuer: None,
@@ -1664,6 +1744,7 @@ mod tests {
             now_ns: NOW_NS + 1_000_000, // 1 s elapsed < 60 s floor
             min_duration_ms: 60_000,
             expected_scope: None,
+            expected_request_binding: RequestBindingExpectation::Unenforced,
             client_ip: Some("1.2.3.4"),
             expected_region: None,
             expected_issuer: None,
@@ -1699,6 +1780,7 @@ mod tests {
             now_ns: NOW_NS, // same µs as issuance
             min_duration_ms: 0,
             expected_scope: None,
+            expected_request_binding: RequestBindingExpectation::Unenforced,
             client_ip: Some("1.2.3.4"),
             expected_region: None,
             expected_issuer: None,
@@ -1742,6 +1824,7 @@ mod tests {
             now_ns: NOW_NS + 5_000_000,
             min_duration_ms: 0,
             expected_scope: None,
+            expected_request_binding: RequestBindingExpectation::Unenforced,
             client_ip: Some("1.2.3.4"),
             expected_region: None,
             expected_issuer: None,
@@ -1775,6 +1858,7 @@ mod tests {
             now_ns: NOW_NS + 5_000_000,
             min_duration_ms: 0,
             expected_scope: None,
+            expected_request_binding: RequestBindingExpectation::Unenforced,
             client_ip: Some("1.2.3.4"),
             expected_region: None,
             expected_issuer: None,
@@ -1808,6 +1892,7 @@ mod tests {
             now_ns: NOW_NS + 5_000_000,
             min_duration_ms: 0,
             expected_scope: None,
+            expected_request_binding: RequestBindingExpectation::Unenforced,
             client_ip: Some("9.9.9.9"), // different from issuance IP 1.2.3.4
             expected_region: None,
             expected_issuer: None,
@@ -1841,6 +1926,7 @@ mod tests {
             now_ns: NOW_NS + 5_000_000,
             min_duration_ms: 0,
             expected_scope: None,
+            expected_request_binding: RequestBindingExpectation::Unenforced,
             client_ip: None,
             expected_region: None,
             expected_issuer: None,
@@ -1893,6 +1979,7 @@ mod tests {
             now_ns: NOW_NS + 5_000_000,
             min_duration_ms: 0,
             expected_scope: None,
+            expected_request_binding: RequestBindingExpectation::Unenforced,
             client_ip: Some("1.2.3.4"),
 
             expected_region: None,
@@ -1926,6 +2013,7 @@ mod tests {
             now_ns: NOW_NS + 5_000_000,
             min_duration_ms: 0,
             expected_scope: None,
+            expected_request_binding: RequestBindingExpectation::Unenforced,
             client_ip: Some("1.2.3.4"),
             expected_region: None,
             expected_issuer: None,
@@ -1951,6 +2039,7 @@ mod tests {
             now_ns: NOW_NS + 5_000_000,
             min_duration_ms: 0,
             expected_scope: None,
+            expected_request_binding: RequestBindingExpectation::Unenforced,
             client_ip: Some("1.2.3.4"),
             expected_region: None,
             expected_issuer: None,
@@ -1984,6 +2073,7 @@ mod tests {
             now_ns: NOW_NS + 5_000_000,
             min_duration_ms: 0,
             expected_scope: None,
+            expected_request_binding: RequestBindingExpectation::Unenforced,
             client_ip: Some("1.2.3.4"),
             expected_region: None,
             expected_issuer: None,
@@ -2007,6 +2097,7 @@ mod tests {
             now_ns: NOW_NS + 5_000_000,
             min_duration_ms: 0,
             expected_scope: None,
+            expected_request_binding: RequestBindingExpectation::Unenforced,
             client_ip: Some("1.2.3.4"),
             expected_region: None,
             expected_issuer: None,
@@ -2041,6 +2132,7 @@ mod tests {
             now_ns: NOW_NS + 5_000_000,
             min_duration_ms: 0,
             expected_scope: None,
+            expected_request_binding: RequestBindingExpectation::Unenforced,
             client_ip: Some("1.2.3.4"),
             expected_region: None,
             expected_issuer: None,
@@ -2073,6 +2165,7 @@ mod tests {
             now_ns: NOW_NS + 5_000_000,
             min_duration_ms: 0,
             expected_scope: None,
+            expected_request_binding: RequestBindingExpectation::Unenforced,
             client_ip: Some("1.2.3.4"),
             expected_region: None,
             expected_issuer: None,
@@ -2107,6 +2200,7 @@ mod tests {
             now_ns: NOW_NS + 5_000_000,
             min_duration_ms: 0,
             expected_scope: None,
+            expected_request_binding: RequestBindingExpectation::Unenforced,
             client_ip: Some("1.2.3.4"),
             expected_region: None,
             expected_issuer: None,
@@ -2133,6 +2227,7 @@ mod tests {
             now_ns: NOW_NS + 5_000_000,
             min_duration_ms: 0,
             expected_scope: None,
+            expected_request_binding: RequestBindingExpectation::Unenforced,
             client_ip: Some("1.2.3.4"),
             expected_region: None,
             expected_issuer: None,
@@ -2165,6 +2260,7 @@ mod tests {
             now_ns: NOW_NS + 5_000_000,
             min_duration_ms: 0,
             expected_scope: None,
+            expected_request_binding: RequestBindingExpectation::Unenforced,
             client_ip: Some("1.2.3.4"),
             expected_region: None,
             expected_issuer: None,
@@ -2198,6 +2294,7 @@ mod tests {
             now_ns: NOW_NS + 5_000_000,
             min_duration_ms: 0,
             expected_scope: None,
+            expected_request_binding: RequestBindingExpectation::Unenforced,
             client_ip: Some("1.2.3.4"),
             expected_region: None,
             expected_issuer: None,
@@ -2231,6 +2328,7 @@ mod tests {
             now_ns: NOW_NS + 5_000_000,
             min_duration_ms: 0,
             expected_scope: None,
+            expected_request_binding: RequestBindingExpectation::Unenforced,
             client_ip: Some("1.2.3.4"),
             expected_region: None,
             expected_issuer: None,
@@ -2266,6 +2364,7 @@ mod tests {
             now_ns: NOW_NS + 10_000_000,
             min_duration_ms: 0,
             expected_scope: None,
+            expected_request_binding: RequestBindingExpectation::Unenforced,
             client_ip: Some("1.2.3.4"),
             expected_region: None,
             expected_issuer: None,
@@ -2300,6 +2399,7 @@ mod tests {
             now_ns: NOW_NS.saturating_sub(1_000_000), // 1 s skew, issuer ahead
             min_duration_ms: 0,
             expected_scope: None,
+            expected_request_binding: RequestBindingExpectation::Unenforced,
             client_ip: Some("1.2.3.4"),
             expected_region: None,
             expected_issuer: None,
@@ -2333,6 +2433,7 @@ mod tests {
             now_ns: NOW_NS.saturating_sub(6_000_000), // 6 s skew
             min_duration_ms: 0,
             expected_scope: None,
+            expected_request_binding: RequestBindingExpectation::Unenforced,
             client_ip: Some("1.2.3.4"),
             expected_region: None,
             expected_issuer: None,
@@ -2572,6 +2673,7 @@ mod tests {
             now_ns: NOW_NS + 5_000_000,
             min_duration_ms: 0,
             expected_scope: Some("signup"),
+            expected_request_binding: RequestBindingExpectation::Unenforced,
             client_ip: Some("1.2.3.4"),
             expected_region: None,
             expected_issuer: None,
@@ -2603,6 +2705,7 @@ mod tests {
             now_ns: NOW_NS + 5_000_000,
             min_duration_ms: 0,
             expected_scope: None,
+            expected_request_binding: RequestBindingExpectation::Unenforced,
             client_ip: Some("1.2.3.4"),
             expected_region: None,
             expected_issuer: None,
@@ -2634,6 +2737,7 @@ mod tests {
             now_ns: NOW_NS + 5_000_000,
             min_duration_ms: 0,
             expected_scope: None,
+            expected_request_binding: RequestBindingExpectation::Unenforced,
             client_ip: Some("1.2.3.4"),
             expected_region: None,
             expected_issuer: None,
@@ -2734,6 +2838,7 @@ mod tests {
             now_ns: NOW_NS + 6_000, // 6 ms elapsed > 5 ms floor (µs)
             min_duration_ms: 0,
             expected_scope: None,
+            expected_request_binding: RequestBindingExpectation::Unenforced,
             client_ip: Some("1.2.3.4"),
             expected_region: None,
             expected_issuer: None,
@@ -2758,6 +2863,7 @@ mod tests {
             now_ns: NOW_NS + 4_999, // 4.999 ms elapsed < 5 ms floor (µs)
             min_duration_ms: 0,
             expected_scope: None,
+            expected_request_binding: RequestBindingExpectation::Unenforced,
             client_ip: Some("1.2.3.4"),
             expected_region: None,
             expected_issuer: None,
@@ -3023,6 +3129,7 @@ mod tests {
             now_ns: NOW_NS + 5_000_000,
             min_duration_ms: 0,
             expected_scope: None,
+            expected_request_binding: RequestBindingExpectation::Unenforced,
             client_ip: Some("1.2.3.4"),
             expected_region: None,
             expected_issuer: None,
@@ -3053,6 +3160,7 @@ mod tests {
             now_ns: NOW_NS + 5_000_000,
             min_duration_ms: 0,
             expected_scope: None,
+            expected_request_binding: RequestBindingExpectation::Unenforced,
             client_ip: Some("9.9.9.9"), // different from issuance IP 1.2.3.4
             expected_region: None,
             expected_issuer: None,
@@ -3094,6 +3202,7 @@ mod tests {
             now_ns: NOW_NS + 5_000_000,
             min_duration_ms: 0,
             expected_scope: None,
+            expected_request_binding: RequestBindingExpectation::Unenforced,
             expected_region: Some("us"),
             expected_issuer: None,
             expected_policy_version: None,
@@ -3127,6 +3236,7 @@ mod tests {
             now_ns: NOW_NS + 5_000_000,
             min_duration_ms: 0,
             expected_scope: None,
+            expected_request_binding: RequestBindingExpectation::Unenforced,
             expected_region: Some("us"),
             expected_issuer: None,
             expected_policy_version: None,
@@ -3160,6 +3270,7 @@ mod tests {
             now_ns: NOW_NS + 5_000_000,
             min_duration_ms: 0,
             expected_scope: None,
+            expected_request_binding: RequestBindingExpectation::Unenforced,
             expected_region: Some("us"),
             expected_issuer: None,
             expected_policy_version: None,
@@ -3186,6 +3297,7 @@ mod tests {
             now_ns: NOW_NS + 5_000_000,
             min_duration_ms: 0,
             expected_scope: None,
+            expected_request_binding: RequestBindingExpectation::Unenforced,
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
@@ -3223,6 +3335,7 @@ mod tests {
             now_ns: NOW_NS + 5_000_000,
             min_duration_ms: 0,
             expected_scope: None,
+            expected_request_binding: RequestBindingExpectation::Unenforced,
             expected_region: None,
             expected_issuer: Some("auth-gw-us"),
             expected_policy_version: None,
@@ -3257,6 +3370,7 @@ mod tests {
             now_ns: NOW_NS + 5_000_000,
             min_duration_ms: 0,
             expected_scope: None,
+            expected_request_binding: RequestBindingExpectation::Unenforced,
             expected_region: None,
             expected_issuer: Some("auth-gw"),
             expected_policy_version: None,
@@ -3290,6 +3404,7 @@ mod tests {
             now_ns: NOW_NS + 5_000_000,
             min_duration_ms: 0,
             expected_scope: None,
+            expected_request_binding: RequestBindingExpectation::Unenforced,
             expected_region: None,
             expected_issuer: Some("auth-gw"),
             expected_policy_version: None,
@@ -3316,6 +3431,7 @@ mod tests {
             now_ns: NOW_NS + 5_000_000,
             min_duration_ms: 0,
             expected_scope: None,
+            expected_request_binding: RequestBindingExpectation::Unenforced,
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
@@ -3400,6 +3516,7 @@ mod tests {
             now_ns: NOW_NS + 5_000_000,
             min_duration_ms: 0,
             expected_scope: None,
+            expected_request_binding: RequestBindingExpectation::Unenforced,
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
@@ -3429,6 +3546,7 @@ mod tests {
             now_ns: NOW_NS + 5_000_000,
             min_duration_ms: 0,
             expected_scope: None,
+            expected_request_binding: RequestBindingExpectation::Unenforced,
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
@@ -3455,6 +3573,7 @@ mod tests {
             now_ns: NOW_NS + 5_000_000,
             min_duration_ms: 0,
             expected_scope: None,
+            expected_request_binding: RequestBindingExpectation::Unenforced,
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
@@ -3493,6 +3612,7 @@ mod tests {
             now_ns: NOW_NS + 5_000_000,
             min_duration_ms: 0,
             expected_scope: None,
+            expected_request_binding: RequestBindingExpectation::Unenforced,
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
@@ -3519,6 +3639,7 @@ mod tests {
             now_ns: NOW_NS + 5_000_000,
             min_duration_ms: 0,
             expected_scope: None,
+            expected_request_binding: RequestBindingExpectation::Unenforced,
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
@@ -3560,6 +3681,7 @@ mod tests {
             now_ns: NOW_NS + 5_000_000,
             min_duration_ms: 0,
             expected_scope: None,
+            expected_request_binding: RequestBindingExpectation::Unenforced,
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
@@ -3590,6 +3712,7 @@ mod tests {
             now_ns: NOW_NS + 5_000_000,
             min_duration_ms: 0,
             expected_scope: None,
+            expected_request_binding: RequestBindingExpectation::Unenforced,
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
@@ -3620,6 +3743,7 @@ mod tests {
             now_ns: NOW_NS + 5_000_000,
             min_duration_ms: 0,
             expected_scope: None,
+            expected_request_binding: RequestBindingExpectation::Unenforced,
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
@@ -3665,6 +3789,7 @@ mod tests {
             now_ns: NOW_NS + 5_000_000,
             min_duration_ms: 0,
             expected_scope: None,
+            expected_request_binding: RequestBindingExpectation::Unenforced,
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
@@ -3692,6 +3817,7 @@ mod tests {
             now_ns: NOW_NS + 5_000_000,
             min_duration_ms: 0,
             expected_scope: None,
+            expected_request_binding: RequestBindingExpectation::Unenforced,
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
@@ -3733,6 +3859,7 @@ mod tests {
             now_ns: NOW_NS + 5_000_000,
             min_duration_ms: 0,
             expected_scope: None,
+            expected_request_binding: RequestBindingExpectation::Unenforced,
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
@@ -3971,6 +4098,7 @@ mod tests {
             now_ns: NOW_NS + 5_000_000,
             min_duration_ms: 0,
             expected_scope: None,
+            expected_request_binding: RequestBindingExpectation::Unenforced,
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
@@ -4003,6 +4131,7 @@ mod tests {
             now_ns: NOW_NS + 5_000_000,
             min_duration_ms: 0,
             expected_scope: None,
+            expected_request_binding: RequestBindingExpectation::Unenforced,
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
@@ -4042,6 +4171,7 @@ mod tests {
             now_ns: NOW_NS + 5_000_000,
             min_duration_ms: 0,
             expected_scope: None,
+            expected_request_binding: RequestBindingExpectation::Unenforced,
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
@@ -4092,6 +4222,7 @@ mod tests {
             now_ns: NOW_NS + 5_000_000,
             min_duration_ms: 0,
             expected_scope: None,
+            expected_request_binding: RequestBindingExpectation::Unenforced,
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
@@ -4315,6 +4446,7 @@ mod tests {
             now_ns: FIXTURE_NOW_NS + 5_000_000,
             min_duration_ms: 0,
             expected_scope: None,
+            expected_request_binding: RequestBindingExpectation::Unenforced,
             client_ip: Some("192.168.1.5"),
             expected_region: None,
             expected_issuer: None,
@@ -4402,6 +4534,7 @@ mod tests {
             now_ns: FIXTURE_NOW_NS + 5_000_000,
             min_duration_ms: 0,
             expected_scope: Some("signup"),
+            expected_request_binding: RequestBindingExpectation::Unenforced,
             client_ip: Some("1.2.3.4"),
             expected_region: None,
             expected_issuer: None,

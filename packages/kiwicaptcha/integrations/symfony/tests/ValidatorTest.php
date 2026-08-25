@@ -423,7 +423,7 @@ final class ValidatorTest extends TestCase
     /**
      * @return array{0: \Symfony\Component\Validator\Validator\ValidatorInterface, 1: RequestStack, 2: KiwiCaptchaValidator}
      */
-    private function buildBindingEngine(?Verifier $verifier = null, string $requestBinding = 'txn-123', bool $asAttribute = true, ?RequestBindingAuthorityInterface $authority = null): array
+    private function buildBindingEngine(?Verifier $verifier = null, ?string $requestBinding = 'txn-123', bool $asAttribute = true, ?RequestBindingAuthorityInterface $authority = null): array
     {
         $stack = new RequestStack();
         $request = Request::create('/', 'POST', ['kiwi_request_binding' => $requestBinding], [], [], ['REMOTE_ADDR' => '198.51.100.7']);
@@ -510,10 +510,15 @@ final class ValidatorTest extends TestCase
         self::assertSame(KiwiCaptcha::INVALID_OR_EXPIRED_ERROR, $violations[0]->getCode());
     }
 
-    public function testUnboundChallengeIgnoresTheRequestBinding(): void
+    public function testUnboundChallengeWithAnExpectedBindingIsRefused(): void
     {
-        // The record has NO binding (issue without requestBinding): the
-        // request may carry a binding (or not) — no check applies.
+        // The EXACT request-binding contract (RequestBindingExpectation):
+        // an authoritative transaction binding is Option-equality — an
+        // explicitly UNBOUND record under a canonical binding expectation
+        // is a mismatch (the deployment configured a binding context, so
+        // a challenge with no transaction anchor cannot redeem it). An
+        // unbound record passes only under an explicitly unbound
+        // transaction context (exact null).
         $challenge = $this->issuer->issue('login', '198.51.100.7');
         usleep(($challenge->minDurationMs + 10) * 1000);
         $token = $this->solveToken($challenge->prefix, $challenge->salt, $challenge->targetBits, $challenge->nonce);
@@ -526,7 +531,28 @@ final class ValidatorTest extends TestCase
         $meta = $engine->getMetadataFor($dto::class);
         $meta->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
 
-        self::assertCount(0, $engine->validate($dto), 'an unbound record must pass regardless of the request binding');
+        $violations = $engine->validate($dto);
+        self::assertCount(1, $violations, 'an unbound record under a canonical binding expectation is refused');
+        self::assertSame(KiwiCaptcha::INVALID_OR_EXPIRED_ERROR, $violations[0]->getCode());
+    }
+
+    public function testUnboundChallengePassesUnderAnExplicitlyUnboundTransaction(): void
+    {
+        // The exact contract's null row: an unbound record passes under
+        // an explicitly unbound transaction context (exact null).
+        $challenge = $this->issuer->issue('login', '198.51.100.7');
+        usleep(($challenge->minDurationMs + 10) * 1000);
+        $token = $this->solveToken($challenge->prefix, $challenge->salt, $challenge->targetBits, $challenge->nonce);
+
+        [$engine] = $this->buildBindingEngine(requestBinding: null);
+        $dto = new class {
+            public ?string $captcha = null;
+        };
+        $dto->captcha = $token;
+        $meta = $engine->getMetadataFor($dto::class);
+        $meta->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
+
+        self::assertCount(0, $engine->validate($dto), 'an unbound record passes under an explicitly unbound transaction context');
     }
 
     public function testBindingMismatchFailsBeforeTheConsume(): void
@@ -567,7 +593,7 @@ final class ValidatorTest extends TestCase
         $outstanding = new OutstandingChallenges($client, '{kiwi:validator-test}:outstanding:', RiskKeys::fromMaster(self::SECRET), 3, 100, 0);
         $storage = new ArrayStorage();
         $issuer = new Issuer(new Config(secretKey: self::SECRET, targetBits: 8), $storage);
-        $challenge = $issuer->issue('login', '198.51.100.7');
+        $challenge = $issuer->issue('login', '198.51.100.7', 'txn-123');
         self::assertSame(1, $outstanding->issue('198.51.100.7', $challenge->nonce, 120));
         $sourceKey = $outstanding->sourceKey('198.51.100.7');
         self::assertSame(1, $client->counters[$sourceKey]);
@@ -839,7 +865,7 @@ final class ValidatorTest extends TestCase
         $chainService = new ChainedChallengeTicketService($chainStore, self::SECRET, 300, 15, $this->bindingAuthority());
         $authority = new MappingBindingAuthority();
 
-        $challenge = $this->issuer->issue('login', '198.51.100.7');
+        $challenge = $this->issuer->issue('login', '198.51.100.7', 'server-transaction');
         usleep(($challenge->minDurationMs + 10) * 1000);
         $token = $this->solveToken($challenge->prefix, $challenge->salt, $challenge->targetBits, $challenge->nonce);
 
@@ -2456,7 +2482,7 @@ final class ValidatorTest extends TestCase
         $chainStore = new ArrayChainedChallengeStateStore();
         $chainService = new ChainedChallengeTicketService($chainStore, self::SECRET, 300, 15, $this->bindingAuthority());
 
-        $challenge = $this->issuer->issue('login', '198.51.100.7');
+        $challenge = $this->issuer->issue('login', '198.51.100.7', 'auth-txn-1');
         usleep(($challenge->minDurationMs + 10) * 1000);
         $token = $this->solveToken($challenge->prefix, $challenge->salt, $challenge->targetBits, $challenge->nonce);
         $nonce = \KiwiCaptcha\SolutionToken::decode($token)->nonce;
@@ -2521,7 +2547,7 @@ final class ValidatorTest extends TestCase
         });
         $chainService = new ChainedChallengeTicketService($chainStore, self::SECRET, 300, 15, $this->bindingAuthority());
 
-        $challenge = $this->issuer->issue('login', '198.51.100.7');
+        $challenge = $this->issuer->issue('login', '198.51.100.7', 'auth-txn-1');
         usleep(($challenge->minDurationMs + 10) * 1000);
         $token = $this->solveToken($challenge->prefix, $challenge->salt, $challenge->targetBits, $challenge->nonce);
         $dto = new class {
@@ -2698,7 +2724,7 @@ final class ValidatorTest extends TestCase
         $failing = new FailingTerminalChainStore($inner);
         $chainService = new ChainedChallengeTicketService($failing, self::SECRET, 300, 15, $this->bindingAuthority());
 
-        $challenge = $this->issuer->issue('login', '198.51.100.7');
+        $challenge = $this->issuer->issue('login', '198.51.100.7', 'auth-txn-1');
         usleep(($challenge->minDurationMs + 10) * 1000);
         $token = $this->solveToken($challenge->prefix, $challenge->salt, $challenge->targetBits, $challenge->nonce);
         $decisionRedis->strings['{kiwi:validator-test}:decision:'.$challenge->nonce] = (string) json_encode(['decision_id' => 'decision-D']);
@@ -2821,7 +2847,7 @@ final class ValidatorTest extends TestCase
         $chainService = new ChainedChallengeTicketService($chainStore, self::SECRET, 300, 15, $this->bindingAuthority());
         $chainX = $chainService->requireStage2(base64_encode(random_bytes(32)), 'login', 'auth-txn-1', 1, RiskAction::Argon32, time() + 300);
 
-        $challenge = $this->issuer->issue('login', '198.51.100.7');
+        $challenge = $this->issuer->issue('login', '198.51.100.7', 'auth-txn-1');
         usleep(($challenge->minDurationMs + 10) * 1000);
         $token = $this->solveToken($challenge->prefix, $challenge->salt, $challenge->targetBits, $challenge->nonce);
         $nonce = \KiwiCaptcha\SolutionToken::decode($token)->nonce;
@@ -2902,7 +2928,7 @@ final class ValidatorTest extends TestCase
         $chainService = new ChainedChallengeTicketService($chainStore, self::SECRET, 300, 15, $this->bindingAuthority());
         $chainX = $chainService->requireStage2(base64_encode(random_bytes(32)), 'login', 'auth-txn-1', 1, RiskAction::Argon32, time() + 300);
 
-        $challenge = $this->issuer->issue('login', '198.51.100.7');
+        $challenge = $this->issuer->issue('login', '198.51.100.7', 'auth-txn-1');
         usleep(($challenge->minDurationMs + 10) * 1000);
         $token = $this->solveToken($challenge->prefix, $challenge->salt, $challenge->targetBits, $challenge->nonce);
         $nonce = \KiwiCaptcha\SolutionToken::decode($token)->nonce;
@@ -2960,7 +2986,7 @@ final class ValidatorTest extends TestCase
         $chainStore = new ArrayChainedChallengeStateStore();
         $chainService = new ChainedChallengeTicketService($chainStore, self::SECRET, 300, 15, $this->bindingAuthority());
 
-        $challenge = $issuer->issue('login', '198.51.100.7');
+        $challenge = $issuer->issue('login', '198.51.100.7', 'auth-txn-1');
         usleep(($challenge->minDurationMs + 10) * 1000);
         $token = $this->solveToken($challenge->prefix, $challenge->salt, $challenge->targetBits, $challenge->nonce);
         $nonce = \KiwiCaptcha\SolutionToken::decode($token)->nonce;
@@ -3033,7 +3059,7 @@ final class ValidatorTest extends TestCase
         $chainService = new ChainedChallengeTicketService($chainStore, self::SECRET, 300, 15, $this->bindingAuthority());
 
         // Stage 1: the reassessment (Argon32) opens the chain.
-        $challenge1 = $this->issuer->issue('login', '198.51.100.7');
+        $challenge1 = $this->issuer->issue('login', '198.51.100.7', 'auth-txn-1');
         usleep(($challenge1->minDurationMs + 10) * 1000);
         $token1 = $this->solveToken($challenge1->prefix, $challenge1->salt, $challenge1->targetBits, $challenge1->nonce);
         $dto1 = new class {
@@ -3050,7 +3076,7 @@ final class ValidatorTest extends TestCase
 
         // Stage 2: the chain issues a real challenge (its nonce becomes
         // the chain's stage2Nonce).
-        $stage2 = $this->issuer->issue('login', '198.51.100.7');
+        $stage2 = $this->issuer->issue('login', '198.51.100.7', 'auth-txn-1');
         self::assertSame(ChainReservationResult::Available, $chainService->reserveStage2($chainId, 'owner-a'));
         self::assertSame(ChainIssuedResult::IssuedNew, $chainService->markIssued($chainId, 'owner-a', $stage2->nonce));
 
@@ -3176,7 +3202,7 @@ final class ValidatorTest extends TestCase
         $metaStore = new \BelConsulting\KiwiCaptchaBundle\SiteVerify\ArraySiteVerifyMetadataStore();
 
         // Stage 1: the reassessment (Argon32) opens the chain.
-        $challenge1 = $this->issuer->issue('login', '198.51.100.7');
+        $challenge1 = $this->issuer->issue('login', '198.51.100.7', 'auth-txn-1');
         usleep(($challenge1->minDurationMs + 10) * 1000);
         $token1 = $this->solveToken($challenge1->prefix, $challenge1->salt, $challenge1->targetBits, $challenge1->nonce);
         $dto1 = new class {
@@ -3194,7 +3220,7 @@ final class ValidatorTest extends TestCase
         // the chain's stage2Nonce), and the chain identity is stamped into
         // the metadata sidecar exactly as the controller does — the
         // marker ends the chain at stage 2 (no third-stage eligibility).
-        $stage2 = $this->issuer->issue('login', '198.51.100.7');
+        $stage2 = $this->issuer->issue('login', '198.51.100.7', 'auth-txn-1');
         self::assertSame(ChainReservationResult::Available, $chainService->reserveStage2($chainId, 'owner-a'));
         self::assertSame(ChainIssuedResult::IssuedNew, $chainService->markIssued($chainId, 'owner-a', $stage2->nonce));
         $metaStore->store($stage2->nonce, new \BelConsulting\KiwiCaptchaBundle\SiteVerify\SiteVerifyMetadata(null, null, 'login', $chainId, 2), 300);
@@ -3284,7 +3310,7 @@ final class ValidatorTest extends TestCase
 
         // Token A: the reassessment (Argon32) opens the chain.
         $risk['store']->setVector(SignalVector::fromArray(self::ARGON32_VECTOR));
-        $challengeA = $this->issuer->issue('login', '198.51.100.7');
+        $challengeA = $this->issuer->issue('login', '198.51.100.7', 'auth-txn-1');
         usleep(($challengeA->minDurationMs + 10) * 1000);
         $tokenA = $this->solveToken($challengeA->prefix, $challengeA->salt, $challengeA->targetBits, $challengeA->nonce);
         $dtoA = new class {
@@ -3302,7 +3328,7 @@ final class ValidatorTest extends TestCase
         // terminalization of the open obligation (the disposition is
         // durably finalized first).
         $risk['store']->setVector(SignalVector::fromArray(['network_risk' => 900]));
-        $challengeB = $this->issuer->issue('login', '198.51.100.7');
+        $challengeB = $this->issuer->issue('login', '198.51.100.7', 'auth-txn-1');
         usleep(($challengeB->minDurationMs + 10) * 1000);
         $tokenB = $this->solveToken($challengeB->prefix, $challengeB->salt, $challengeB->targetBits, $challengeB->nonce);
         $dtoB = new class {
@@ -3324,7 +3350,7 @@ final class ValidatorTest extends TestCase
         // Token C: a neutral assessment — still the terminal denial
         // (never chain_required, never Pass); the chain stays denied.
         $neutral = $this->riskStack(1, 'allow', 'allow', false, null, $resolver);
-        $challengeC = $this->issuer->issue('login', '198.51.100.7');
+        $challengeC = $this->issuer->issue('login', '198.51.100.7', 'auth-txn-1');
         usleep(($challengeC->minDurationMs + 10) * 1000);
         $tokenC = $this->solveToken($challengeC->prefix, $challengeC->salt, $challengeC->targetBits, $challengeC->nonce);
         $dtoC = new class {
@@ -3356,7 +3382,7 @@ final class ValidatorTest extends TestCase
 
         // Token A: the reassessment (Argon32) opens the chain.
         $risk['store']->setVector(SignalVector::fromArray(self::ARGON32_VECTOR));
-        $challengeA = $this->issuer->issue('login', '198.51.100.7');
+        $challengeA = $this->issuer->issue('login', '198.51.100.7', 'auth-txn-1');
         usleep(($challengeA->minDurationMs + 10) * 1000);
         $tokenA = $this->solveToken($challengeA->prefix, $challengeA->salt, $challengeA->targetBits, $challengeA->nonce);
         $dtoA = new class {
@@ -3373,7 +3399,7 @@ final class ValidatorTest extends TestCase
         // Token B: a fresh step-up — the terminal step-up AND the durable
         // terminalization of the open obligation.
         $risk['store']->setVector(SignalVector::fromArray(self::STEP_UP_VECTOR));
-        $challengeB = $this->issuer->issue('login', '198.51.100.7');
+        $challengeB = $this->issuer->issue('login', '198.51.100.7', 'auth-txn-1');
         usleep(($challengeB->minDurationMs + 10) * 1000);
         $tokenB = $this->solveToken($challengeB->prefix, $challengeB->salt, $challengeB->targetBits, $challengeB->nonce);
         $dtoB = new class {
@@ -3396,7 +3422,7 @@ final class ValidatorTest extends TestCase
         // (never chain_required, never Pass); the chain stays
         // step_up_required.
         $neutral = $this->riskStack(1, 'allow', 'allow', false, null, $resolver);
-        $challengeC = $this->issuer->issue('login', '198.51.100.7');
+        $challengeC = $this->issuer->issue('login', '198.51.100.7', 'auth-txn-1');
         usleep(($challengeC->minDurationMs + 10) * 1000);
         $tokenC = $this->solveToken($challengeC->prefix, $challengeC->salt, $challengeC->targetBits, $challengeC->nonce);
         $dtoC = new class {
@@ -3431,7 +3457,7 @@ final class ValidatorTest extends TestCase
 
         // Token A opens the chain (the create path delegates cleanly).
         $risk['store']->setVector(SignalVector::fromArray(self::ARGON32_VECTOR));
-        $challengeA = $this->issuer->issue('login', '198.51.100.7');
+        $challengeA = $this->issuer->issue('login', '198.51.100.7', 'auth-txn-1');
         usleep(($challengeA->minDurationMs + 10) * 1000);
         $tokenA = $this->solveToken($challengeA->prefix, $challengeA->salt, $challengeA->targetBits, $challengeA->nonce);
         $dtoA = new class {
@@ -3449,7 +3475,7 @@ final class ValidatorTest extends TestCase
         // closed temporary_unavailable; the chain stays available and
         // the disposition is never finalized.
         $risk['store']->setVector(SignalVector::fromArray(['network_risk' => 900]));
-        $challengeB = $this->issuer->issue('login', '198.51.100.7');
+        $challengeB = $this->issuer->issue('login', '198.51.100.7', 'auth-txn-1');
         usleep(($challengeB->minDurationMs + 10) * 1000);
         $tokenB = $this->solveToken($challengeB->prefix, $challengeB->salt, $challengeB->targetBits, $challengeB->nonce);
         $dtoB = new class {
@@ -3605,7 +3631,7 @@ final class ValidatorTest extends TestCase
         // terminalization of the open (issued) chain — the exact stage-2
         // nonce preserved.
         $risk['store']->setVector(SignalVector::fromArray(['network_risk' => 900]));
-        $challengeB = $this->issuer->issue('login', '198.51.100.7');
+        $challengeB = $this->issuer->issue('login', '198.51.100.7', 'auth-txn-1');
         usleep(($challengeB->minDurationMs + 10) * 1000);
         $tokenB = $this->solveToken($challengeB->prefix, $challengeB->salt, $challengeB->targetBits, $challengeB->nonce);
         $dtoB = new class {
@@ -3675,7 +3701,7 @@ final class ValidatorTest extends TestCase
         // terminal step-up AND the durable terminalization of the open
         // (issued) chain — the exact stage-2 nonce preserved.
         $risk['store']->setVector(SignalVector::fromArray(self::STEP_UP_VECTOR));
-        $challengeB = $this->issuer->issue('login', '198.51.100.7');
+        $challengeB = $this->issuer->issue('login', '198.51.100.7', 'auth-txn-1');
         usleep(($challengeB->minDurationMs + 10) * 1000);
         $tokenB = $this->solveToken($challengeB->prefix, $challengeB->salt, $challengeB->targetBits, $challengeB->nonce);
         $dtoB = new class {
@@ -3788,7 +3814,7 @@ final class ValidatorTest extends TestCase
 
         // Token A opens the chain (Argon32).
         $risk['store']->setVector(SignalVector::fromArray(self::ARGON32_VECTOR));
-        $challengeA = $this->issuer->issue('login', '198.51.100.7');
+        $challengeA = $this->issuer->issue('login', '198.51.100.7', 'auth-txn-1');
         usleep(($challengeA->minDurationMs + 10) * 1000);
         $tokenA = $this->solveToken($challengeA->prefix, $challengeA->salt, $challengeA->targetBits, $challengeA->nonce);
         $dtoA = new class {
@@ -3808,7 +3834,7 @@ final class ValidatorTest extends TestCase
         // terminality is already established, no bare Deny escapes
         // without its nonce disposition.
         $risk['store']->setVector(SignalVector::fromArray(['network_risk' => 900]));
-        $challengeB = $this->issuer->issue('login', '198.51.100.7');
+        $challengeB = $this->issuer->issue('login', '198.51.100.7', 'auth-txn-1');
         usleep(($challengeB->minDurationMs + 10) * 1000);
         $tokenB = $this->solveToken($challengeB->prefix, $challengeB->salt, $challengeB->targetBits, $challengeB->nonce);
         $dtoB = new class {

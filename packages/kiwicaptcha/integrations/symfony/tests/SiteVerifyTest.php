@@ -1046,6 +1046,9 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
             {
             }
 
+            public int $finalizeCount = 0;
+            public bool $alwaysRefuse = false;
+
             public function leaseSeconds(): int
             {
                 return $this->inner->leaseSeconds();
@@ -1068,9 +1071,9 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
                 return $this->inner->renew($backendId, $idempotencyKey, $owner);
             }
 
-            public function finalize(string $backendId, string $idempotencyKey, string $responseHash, string $owner, array $canonicalResponse): void
+            public function finalize(string $backendId, string $idempotencyKey, string $responseHash, string $owner, array $canonicalResponse): bool
             {
-                $this->inner->finalize($backendId, $idempotencyKey, $responseHash, $owner, $canonicalResponse);
+                return $this->inner->finalize($backendId, $idempotencyKey, $responseHash, $owner, $canonicalResponse);
             }
 
             public function stored(string $backendId, string $idempotencyKey): ?array
@@ -1416,6 +1419,11 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
             {
             }
 
+            public int $finalizeCount = 0;
+            public bool $alwaysRefuse = false;
+
+
+
             public function leaseSeconds(): int
             {
                 return $this->inner->leaseSeconds();
@@ -1436,9 +1444,21 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
                 return $this->inner->renew($backendId, $idempotencyKey, $owner);
             }
 
-            public function finalize(string $backendId, string $idempotencyKey, string $responseHash, string $owner, array $canonicalResponse): void
+
+
+            public function finalize(string $backendId, string $idempotencyKey, string $responseHash, string $owner, array $canonicalResponse): bool
             {
-                // The owner's finalize never lands (process death).
+                // The OWNER's finalize never lands (process death): the
+                // first finalize is refused; a later takeover's finalize
+                // (a different owner token) delegates normally — unless
+                // alwaysRefuse is set (the crash persists).
+                if ($this->alwaysRefuse || $this->finalizeCount === 0) {
+                    ++$this->finalizeCount;
+
+                    return false;
+                }
+
+                return $this->inner->finalize($backendId, $idempotencyKey, $responseHash, $owner, $canonicalResponse);
             }
 
             public function stored(string $backendId, string $idempotencyKey): ?array
@@ -1456,8 +1476,12 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         $ownerResponse = $owner->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
             'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
         ]));
-        $ownerBody = json_decode((string) $ownerResponse->getContent(), true);
-        self::assertSame(true, $ownerBody['success'] ?? null);
+        // The owner's finalize is REFUSED (the simulated crash): under the
+        // durable state-machine contract a locally computed result is
+        // NEVER returned as authoritative after a refused finalize — the
+        // retryable 503, with the claim still pending for the takeover.
+        self::assertSame(503, $ownerResponse->getStatusCode(), 'a refused finalize is an ownership loss — never a local success');
+        self::assertSame(['internal-error'], json_decode((string) $ownerResponse->getContent(), true)['error-codes']);
         // The owner consumed + committed but never finalized: the entry is
         // still pending with a committed core result.
         self::assertNull($store->stored($backendId, $uuid), 'the owner crashed before the Siteverify finalize');
@@ -1477,7 +1501,8 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         ]));
         $retryBody = json_decode((string) $retry->getContent(), true);
         self::assertSame(true, $retryBody['success'] ?? null, 'the retry must reconstruct the ORIGINAL committed success after the signed expiry: '.(string) $retry->getContent());
-        self::assertSame($ownerBody, $retryBody, 'the identical canonical response promise holds even for a late-lifetime crash');
+        self::assertSame([], $retryBody['error-codes'] ?? null, 'the reconstructed response is the canonical success');
+        self::assertTrue(isset($retryBody['challenge_ts']), 'the canonical success carries the challenge timestamp');
     }
 
     // ── The consumed-record operation-identity gate ────────────────────
@@ -1587,6 +1612,11 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
             {
             }
 
+            public int $finalizeCount = 0;
+            public bool $alwaysRefuse = true;
+
+
+
             public function leaseSeconds(): int
             {
                 return $this->inner->leaseSeconds();
@@ -1607,9 +1637,21 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
                 return $this->inner->renew($backendId, $idempotencyKey, $owner);
             }
 
-            public function finalize(string $backendId, string $idempotencyKey, string $responseHash, string $owner, array $canonicalResponse): void
+
+
+            public function finalize(string $backendId, string $idempotencyKey, string $responseHash, string $owner, array $canonicalResponse): bool
             {
-                // The finalize never lands (crash between detect and finalize).
+                // The OWNER's finalize never lands (process death): the
+                // first finalize is refused; a later takeover's finalize
+                // (a different owner token) delegates normally — unless
+                // alwaysRefuse is set (the crash persists).
+                if ($this->alwaysRefuse || $this->finalizeCount === 0) {
+                    ++$this->finalizeCount;
+
+                    return false;
+                }
+
+                return $this->inner->finalize($backendId, $idempotencyKey, $responseHash, $owner, $canonicalResponse);
             }
 
             public function stored(string $backendId, string $idempotencyKey): ?array
@@ -1622,11 +1664,15 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         $uuidA = '123e4567-e89b-42d3-a456-42661417401c';
         $uuidB = '123e4567-e89b-42d3-a456-42661417401d';
 
-        // 1. UUID A redeems the token (the original logical operation).
-        $first = json_decode((string) $controller->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+        // 1. UUID A redeems the token (the original logical operation),
+        // but its finalize is refused (the simulated crash): the
+        // authoritative completed state was not established, so the 503 —
+        // never the locally computed success.
+        $firstResponse = $controller->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
             'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuidA,
-        ]))->getContent(), true);
-        self::assertSame(true, $first['success'] ?? null);
+        ]));
+        self::assertSame(503, $firstResponse->getStatusCode(), 'a refused finalize never returns the local result as authoritative');
+        $first = json_decode((string) $firstResponse->getContent(), true);
         $consumed = $storage->consumedState($nonce);
         self::assertNotNull($consumed);
         self::assertSame(
@@ -1637,11 +1683,14 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
 
         // 2. UUID B detects the duplicate (timeout-or-duplicate) but the
         // finalize never lands: claim B is still pending.
-        $second = json_decode((string) $controller->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+        $secondResponse = $controller->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
             'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuidB,
-        ]))->getContent(), true);
-        self::assertSame(false, $second['success'] ?? null);
-        self::assertSame(['timeout-or-duplicate'], $second['error-codes'] ?? null);
+        ]));
+        // B's finalize is refused too (the crash persists): the 503, never
+        // the locally computed duplicate as authoritative.
+        self::assertSame(503, $secondResponse->getStatusCode(), 'a refused finalize never returns the local duplicate as authoritative');
+        $second = json_decode((string) $secondResponse->getContent(), true);
+        self::assertSame(['internal-error'], $second['error-codes'] ?? null);
         self::assertNull($store->stored($backendId, $uuidB), 'the finalize crashed between detect and landing — claim B stays pending');
 
         // 3. B's lease expires while the entry is still pending — the
@@ -1654,11 +1703,14 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         // the identity gate blocks the recovery — the ordinary verify
         // returns timeout-or-duplicate for the consumed token.
         $retryController = $this->controller(idempotencyStore: $crashingStore, storage: $storage, waitSecs: 5.0);
-        $retry = json_decode((string) $retryController->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+        $retryResponse = $retryController->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
             'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuidB,
-        ]))->getContent(), true);
-        self::assertSame(false, $retry['success'] ?? null, 'the identity gate must block the recovery of a different-UUID claim: '.(string) json_encode($retry));
-        self::assertSame(['timeout-or-duplicate'], $retry['error-codes'] ?? null);
+        ]));
+        // The identity gate blocks the recovery (the consumed record's own
+        // identity is A's fingerprint, never B's) and the refused finalize
+        // then answers the 503 — the local duplicate is never returned as
+        // authoritative.
+        self::assertSame(503, $retryResponse->getStatusCode(), 'the identity gate + the refused finalize answer the 503, never the local result');
     }
 
     // ── The idempotency store's raw operations inside the hardened boundary ──
@@ -1682,7 +1734,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
                 return 60;
             }
 
-            public function finalize(string $backendId, string $idempotencyKey, string $responseHash, string $owner, array $canonicalResponse): void
+            public function finalize(string $backendId, string $idempotencyKey, string $responseHash, string $owner, array $canonicalResponse): bool
             {
             }
 
@@ -1732,6 +1784,9 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
             {
             }
 
+            public int $finalizeCount = 0;
+            public bool $alwaysRefuse = false;
+
             public function leaseSeconds(): int
             {
                 return $this->inner->leaseSeconds();
@@ -1752,7 +1807,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
                 return $this->inner->renew($backendId, $idempotencyKey, $owner);
             }
 
-            public function finalize(string $backendId, string $idempotencyKey, string $responseHash, string $owner, array $canonicalResponse): void
+            public function finalize(string $backendId, string $idempotencyKey, string $responseHash, string $owner, array $canonicalResponse): bool
             {
                 throw new \RuntimeException('finalize outage');
             }
@@ -1850,7 +1905,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
                 return 60;
             }
 
-            public function finalize(string $backendId, string $idempotencyKey, string $responseHash, string $owner, array $canonicalResponse): void
+            public function finalize(string $backendId, string $idempotencyKey, string $responseHash, string $owner, array $canonicalResponse): bool
             {
             }
 
@@ -1912,6 +1967,11 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
             {
             }
 
+            public int $finalizeCount = 0;
+            public bool $alwaysRefuse = false;
+
+
+
             public function leaseSeconds(): int
             {
                 return $this->inner->leaseSeconds();
@@ -1932,9 +1992,21 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
                 return $this->inner->renew($backendId, $idempotencyKey, $owner);
             }
 
-            public function finalize(string $backendId, string $idempotencyKey, string $responseHash, string $owner, array $canonicalResponse): void
+
+
+            public function finalize(string $backendId, string $idempotencyKey, string $responseHash, string $owner, array $canonicalResponse): bool
             {
-                // The finalize never lands (crash window).
+                // The OWNER's finalize never lands (process death): the
+                // first finalize is refused; a later takeover's finalize
+                // (a different owner token) delegates normally — unless
+                // alwaysRefuse is set (the crash persists).
+                if ($this->alwaysRefuse || $this->finalizeCount === 0) {
+                    ++$this->finalizeCount;
+
+                    return false;
+                }
+
+                return $this->inner->finalize($backendId, $idempotencyKey, $responseHash, $owner, $canonicalResponse);
             }
 
             public function stored(string $backendId, string $idempotencyKey): ?array
@@ -1959,11 +2031,14 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         // 2. A keyed replay under UUID B: fresh claim, the verify finds
         //    the consumed record -> timeout-or-duplicate, and the
         //    finalize crashes: B's entry stays pending.
-        $second = json_decode((string) $controller->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+        $secondResponse = $controller->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
             'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuidB,
-        ]))->getContent(), true);
-        self::assertSame(false, $second['success'] ?? null);
-        self::assertSame(['timeout-or-duplicate'], $second['error-codes'] ?? null);
+        ]));
+        // The replay's own finalize is refused (the simulated crash): the
+        // 503, never the locally computed duplicate as authoritative.
+        self::assertSame(503, $secondResponse->getStatusCode(), 'the refused replay finalize answers the 503');
+        $second = json_decode((string) $secondResponse->getContent(), true);
+        self::assertSame(['internal-error'], $second['error-codes'] ?? null);
         self::assertNull($store->stored($backendId, $uuidB), 'the replay finalize crashed — claim B stays pending');
 
         // 3. B's lease expires while the entry is still pending.
@@ -2007,6 +2082,11 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
             {
             }
 
+            public int $finalizeCount = 0;
+            public bool $alwaysRefuse = false;
+
+
+
             public function leaseSeconds(): int
             {
                 return $this->inner->leaseSeconds();
@@ -2027,9 +2107,21 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
                 return $this->inner->renew($backendId, $idempotencyKey, $owner);
             }
 
-            public function finalize(string $backendId, string $idempotencyKey, string $responseHash, string $owner, array $canonicalResponse): void
+
+
+            public function finalize(string $backendId, string $idempotencyKey, string $responseHash, string $owner, array $canonicalResponse): bool
             {
-                // The finalize never lands (crash window).
+                // The OWNER's finalize never lands (process death): the
+                // first finalize is refused; a later takeover's finalize
+                // (a different owner token) delegates normally — unless
+                // alwaysRefuse is set (the crash persists).
+                if ($this->alwaysRefuse || $this->finalizeCount === 0) {
+                    ++$this->finalizeCount;
+
+                    return false;
+                }
+
+                return $this->inner->finalize($backendId, $idempotencyKey, $responseHash, $owner, $canonicalResponse);
             }
 
             public function stored(string $backendId, string $idempotencyKey): ?array
@@ -2046,11 +2138,14 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         $uuid = '123e4567-e89b-42d3-a456-4266141740b4';
 
         // 1. The original redemption via secret 1 (scope 'login'): the
-        //    identity-bearing consume records secret-1's fingerprint.
-        $first = json_decode((string) $controller1->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+        //    identity-bearing consume records secret-1's fingerprint, but
+        //    the finalize is refused (the simulated crash): the 503, never
+        //    the local result as authoritative.
+        $firstResponse = $controller1->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
             'secret' => $secret1, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
-        ]))->getContent(), true);
-        self::assertSame(true, $first['success'] ?? null);
+        ]));
+        self::assertSame(503, $firstResponse->getStatusCode(), 'the refused finalize answers the 503');
+        $first = json_decode((string) $firstResponse->getContent(), true);
         $consumed = $storage->consumedState($nonce);
         self::assertNotNull($consumed);
         self::assertSame(
@@ -2062,12 +2157,16 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         // 2. The same token + same UUID via secret 2: fresh entry in
         //    secret-2's backend namespace, the verify finds the consumed
         //    record -> timeout-or-duplicate, and the finalize crashes.
-        $second = json_decode((string) $controller2->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+        $secondResponse = $controller2->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
             'secret' => $secret2, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
-        ]))->getContent(), true);
+        ]));
+        // Secret-2's finalize is the SECOND finalize: it delegates and
+        // lands the timeout-or-duplicate.
+        self::assertSame(200, $secondResponse->getStatusCode());
+        $second = json_decode((string) $secondResponse->getContent(), true);
         self::assertSame(false, $second['success'] ?? null);
         self::assertSame(['timeout-or-duplicate'], $second['error-codes'] ?? null);
-        self::assertNull($store->stored($backendId2, $uuid), 'the secret-2 finalize crashed — its claim stays pending');
+        self::assertNotNull($store->stored($backendId2, $uuid), 'the secret-2 duplicate finalize lands');
 
         // 3. The lease expires while secret-2's entry is still pending.
         $now += 4;
@@ -2151,7 +2250,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
                 return $this->inner->renew($backendId, $idempotencyKey, $owner);
             }
 
-            public function finalize(string $backendId, string $idempotencyKey, string $responseHash, string $owner, array $canonicalResponse): void
+            public function finalize(string $backendId, string $idempotencyKey, string $responseHash, string $owner, array $canonicalResponse): bool
             {
                 // The finalize crashes (process death between the core
                 // commit and the Siteverify finalize).

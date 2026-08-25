@@ -84,14 +84,16 @@ final class ArraySiteVerifyIdempotencyStore implements SiteVerifyIdempotencyStor
         return [IdempotencyClaim::TookOver, $owner];
     }
 
-    public function finalize(string $backendId, string $idempotencyKey, string $responseHash, string $owner, array $canonicalResponse): void
+    public function finalize(string $backendId, string $idempotencyKey, string $responseHash, string $owner, array $canonicalResponse): bool
     {
         $key = $this->key($backendId, $idempotencyKey);
         $existing = $this->records[$key] ?? null;
-        if ($existing === null || $existing['owner'] !== $owner || $existing['hash'] !== $responseHash) {
-            return;
+        if ($existing === null || $existing['state'] !== 'pending' || $existing['owner'] !== $owner || $existing['hash'] !== $responseHash) {
+            return false;
         }
-        $this->records[$key] = array_replace($existing, ['state' => 'complete', 'result' => $canonicalResponse]);
+        $this->records[$key] = array_replace($existing, ['state' => 'complete', 'result' => $canonicalResponse, 'owner' => null, 'lease_expires_at' => null]);
+
+        return true;
     }
 
     public function renew(string $backendId, string $idempotencyKey, string $owner): bool
@@ -114,8 +116,14 @@ final class ArraySiteVerifyIdempotencyStore implements SiteVerifyIdempotencyStor
     public function stored(string $backendId, string $idempotencyKey): ?array
     {
         $existing = $this->records[$this->key($backendId, $idempotencyKey)] ?? null;
-        if ($existing === null || $existing['state'] !== 'complete') {
+        if ($existing === null) {
             return null;
+        }
+        if (($existing['state'] ?? '') !== 'complete') {
+            return null;
+        }
+        if (!\is_array($existing['result'] ?? null)) {
+            throw new SiteVerifyIdempotencyCorruptException('the completed idempotency record has no result');
         }
 
         return $existing['result'];

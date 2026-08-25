@@ -10,7 +10,7 @@
 
 use kiwicaptcha::{
     issue_challenge, now_epoch_micros, solve_for_test, verify_solution, BindingMode,
-    ChallengeConfig, PoWAlgorithm, SolutionToken, VerifyContext, VerifyOutcome,
+    ChallengeConfig, PoWAlgorithm, RequestBindingExpectation, SolutionToken, VerifyContext, VerifyOutcome,
 };
 
 /// The complete current `ChallengeConfig`: there is NO
@@ -83,6 +83,7 @@ fn quickstart() -> Result<(), String> {
         now_ns,
         min_duration_ms: 0, // floor is max(ctx, record.min_duration_ms); 0 = record only
         expected_scope: Some("login"),
+            expected_request_binding: RequestBindingExpectation::Unenforced,
         expected_region: None,
         expected_issuer: None,
         expected_policy_version: Some(1),

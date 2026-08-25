@@ -493,20 +493,30 @@ final class FakePredisClient extends \Predis\Client
 
         if (str_contains($script, 'Outstanding challenge cancellation admission')) {
             // OutstandingChallenges::cancellationAdmission: keys[1] the
-            // per-source cancellation window; argv[1] cap, argv[2] window
-            // ms, argv[3] request id. Prune -> cap -> `ZADD` + `PEXPIRE`.
+            // per-source cancellation window, keys[2] the deployment-global
+            // window; argv[1] cap, argv[2] window ms, argv[3] request id,
+            // argv[4] global cap. Prune global -> global cap (-1) -> prune
+            // source -> source cap (0) -> `ZADD` both + `PEXPIRE` both.
             $window = (string) $keys[0];
+            $globalWindow = (string) $keys[1];
             $cap = (int) $rest[0];
             $windowMs = (int) $rest[1];
             $requestId = (string) $rest[2];
+            $globalCap = (int) $rest[3];
             $now = $this->timeMs();
             $cutoff = $now - $windowMs;
+            $this->fakeZremrangebyscore([$globalWindow, '-inf', (string) $cutoff]);
+            if ($this->zcard($globalWindow) >= $globalCap) {
+                return -1;
+            }
             $this->fakeZremrangebyscore([$window, '-inf', (string) $cutoff]);
             if ($this->zcard($window) >= $cap) {
                 return 0;
             }
             $this->fakeZadd([$window, (string) $now, $requestId]);
+            $this->fakeZadd([$globalWindow, (string) $now, $requestId]);
             $this->fakePexpire([$window, (string) ($windowMs + 1000)]);
+            $this->fakePexpire([$globalWindow, (string) ($windowMs + 1000)]);
 
             return 1;
         }

@@ -200,7 +200,11 @@ LUA;
     }
 
     /**
-     * Acquire an Argon2id admission slot.
+     * Acquire an Argon2id admission slot. Immediate and non-blocking: on
+     * saturation (the global or per-scope cap is full) the method returns
+     * null right away and the "waiters" counter records the
+     * SATURATION-PRESSURE spike — a rejected request is never queued,
+     * polled or later admitted (the counter is a gauge, not a queue).
      *
      * @param string|null $scope the scope string (the challenge's scope) for
      *                           the per-scope budget: the scope's

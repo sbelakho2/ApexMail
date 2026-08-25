@@ -31,6 +31,7 @@ use sha2::{Digest, Sha256};
 use crate::keys::DerivedKeys;
 use crate::profile::{ChallengeProfile, ProfileError};
 use crate::token::IssuedChallenge;
+use crate::verify::RequestBindingExpectation;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -1861,6 +1862,7 @@ mod tests {
                 now_ns: 1_700_000_005_000_000,
                 min_duration_ms: 0,
                 expected_scope: None,
+            expected_request_binding: RequestBindingExpectation::Unenforced,
                 client_ip: Some("1.2.3.4"),
                 expected_region: None,
                 expected_issuer: None,
@@ -1913,6 +1915,7 @@ mod tests {
             now_ns: 1_700_000_005_000_000,
             min_duration_ms: 0,
             expected_scope: None,
+            expected_request_binding: RequestBindingExpectation::Unenforced,
             client_ip: Some("1.2.3.4"),
             expected_region: None,
             expected_issuer: None,

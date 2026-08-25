@@ -495,9 +495,10 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
                 return $this->inner->renew($backendId, $idempotencyKey, $owner);
             }
 
-            public function finalize(string $backendId, string $idempotencyKey, string $responseHash, string $owner, array $canonicalResponse): void
+            public function finalize(string $backendId, string $idempotencyKey, string $responseHash, string $owner, array $canonicalResponse): bool
             {
                 // The owner's finalize never lands (process death).
+                return false;
             }
 
             public function stored(string $backendId, string $idempotencyKey): ?array
@@ -511,9 +512,12 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
             $ownerResponse = $owner->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
                 'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
             ]));
+            // The owner's derivation crossed the signed expiry (the
+            // deterministic Expired) and its finalize is refused: the 503,
+            // never the local result as authoritative.
+            self::assertSame(503, $ownerResponse->getStatusCode(), 'the refused finalize answers the 503');
             $ownerBody = json_decode((string) $ownerResponse->getContent(), true);
-            self::assertSame(false, $ownerBody['success'] ?? null, 'the owner whose derivation crossed the signed expiry must get the deterministic Expired outcome');
-            self::assertSame(['timeout-or-duplicate'], $ownerBody['error-codes'] ?? null);
+            self::assertSame(['internal-error'], $ownerBody['error-codes'] ?? null);
             $consumed = $storage->consumedState($nonce);
             self::assertNotNull($consumed, 'the owner\'s transition EXECUTED on real Redis');
             self::assertSame(

@@ -160,25 +160,28 @@ final class KiwiHealthController
 
     /**
      * The memory-budget readiness invariant:
-     * `max(1, argon_concurrency)` x `MAX_PROFILE_MIB` + `MEMORY_HEADROOM_MIB`
+     * `argon_concurrency` x `MAX_PROFILE_MIB` + `MEMORY_HEADROOM_MIB`
      * `<= container_memory_mib`. True when the budget is null (the check is
      * skipped and documented) or the budget is large enough. A container
      * that cannot hold the worst-case verification memory load must not
      * serve traffic, since OOM in the middle of a memory-hard hash is a
      * security failure, not just an availability one.
      *
-     * The concurrency cap is floored at 1: a cap of 0 means "unlimited",
-     * for which no worst case exists, so the invariant then only
-     * guarantees the headroom (the operator must set a finite cap for a
-     * meaningful check).
+     * A concurrency cap of 0 means "unlimited" — an unlimited memory-hard
+     * workload has NO finite worst-case concurrency, so a finite
+     * container budget can never prove the invariant: the health check
+     * answers not-ready (and the container refuses the combination at
+     * compile time), never a silently floored 1.
      */
     public function memoryBudgetOk(): bool
     {
         if ($this->containerMemoryMib === null) {
             return true;
         }
-        $concurrency = max(1, $this->argonConcurrency);
-        $required = $concurrency * $this->maxProfileMib() + self::MEMORY_HEADROOM_MIB;
+        if ($this->argonConcurrency <= 0) {
+            return false;
+        }
+        $required = $this->argonConcurrency * $this->maxProfileMib() + self::MEMORY_HEADROOM_MIB;
 
         return $this->containerMemoryMib >= $required;
     }

@@ -62,7 +62,7 @@ pub use logo::{kiwi_lockup_svg, kiwi_logo_svg, kiwi_mark_svg, kiwi_shield_svg};
 pub use profile::{ChallengeProfile, ProfileError};
 pub use token::{DecodeError, IssuedChallenge, SolutionToken, MAX_TOKEN_RAW_BYTES};
 pub use verify::{
-    score_telemetry, solve_for_test, validate_record, verify_solution, VerifyContext, VerifyError,
+    score_telemetry, solve_for_test, validate_record, verify_solution, VerifyContext, RequestBindingExpectation, VerifyError,
     VerifyOutcome,
 };
 pub use widget::{kiwi_widget_html, kiwi_widget_html_default};

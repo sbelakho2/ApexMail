@@ -133,13 +133,22 @@ if not existing then
   return 0
 end
 local rec = cjson.decode(existing)
--- The finalize must authorize BOTH the current owner token AND the
--- response hash bound in the record: a finalize with the right owner
--- but the WRONG hash is an atomic no-op.
+-- The finalize must authorize the state, the current owner token AND
+-- the response hash bound in the record: only a PENDING claim owned by
+-- this exact request may become complete, so a refused finalize (a
+-- taken-over claim, a stale owner, a vanished key, a different
+-- response) is a hard FALSE the caller treats exactly like an ownership
+-- loss — a locally computed result is never returned as authoritative
+-- after a refused finalize.
+if rec.state ~= 'pending' then
+  return 0
+end
 if rec.owner ~= owner or rec.response_hash ~= response_hash then
   return 0
 end
 rec.state = 'complete'
+rec.owner = cjson.null
+rec.lease_expires_at = cjson.null
 rec.result = cjson.decode(result)
 redis.call('SET', key, cjson.encode(rec), 'EX', ttl)
 return 1
@@ -186,13 +195,18 @@ LUA;
         return [$takeover, $takeover === IdempotencyClaim::TookOver ? $owner : null];
     }
 
-    public function finalize(string $backendId, string $idempotencyKey, string $responseHash, string $owner, array $canonicalResponse): void
+    public function finalize(string $backendId, string $idempotencyKey, string $responseHash, string $owner, array $canonicalResponse): bool
     {
         $payload = (string) json_encode($canonicalResponse, JSON_THROW_ON_ERROR);
         $result = RedisEval::eval($this->redis, self::FINALIZE_LUA, $this->key($backendId, $idempotencyKey), [$owner, $responseHash, $payload, max(1, $this->retentionTtl($idempotencyKey))]);
-        // The owning request's finalize is authoritative; a failed Lua
-        // (lost key / foreign owner) is a no-op — the entry expires on TTL.
-        unset($result);
+        $finalized = (int) $result === 1;
+        // The verified-WAIT durability barrier applies to the successful
+        // finalize only: the completed state must survive a promotion.
+        if ($finalized && $this->waitReplicas > 0) {
+            $this->waitAndVerify('the siteverify idempotency finalize');
+        }
+
+        return $finalized;
     }
 
     public function renew(string $backendId, string $idempotencyKey, string $owner): bool
@@ -215,14 +229,24 @@ LUA;
         }
         try {
             $rec = json_decode($raw, true, 8, JSON_THROW_ON_ERROR);
-        } catch (\JsonException) {
-            return null;
+        } catch (\JsonException $e) {
+            // Corrupt security state is NEVER transformed into "nothing
+            // here": a malformed idempotency record maps to the typed
+            // fail-closed exception (the controller answers the 503).
+            throw new SiteVerifyIdempotencyCorruptException('the idempotency record is malformed', 0, $e);
         }
-        if (!\is_array($rec) || ($rec['state'] ?? '') !== 'complete' || !\is_array($rec['result'] ?? null)) {
-            return null;
+        if (!\is_array($rec)) {
+            throw new SiteVerifyIdempotencyCorruptException('the idempotency record is not an object');
+        }
+        if (($rec['state'] ?? '') === 'complete') {
+            if (!\is_array($rec['result'] ?? null)) {
+                throw new SiteVerifyIdempotencyCorruptException('the completed idempotency record has no result');
+            }
+
+            return $rec['result'];
         }
 
-        return $rec['result'];
+        return null;
     }
 
     private function retentionTtl(string $idempotencyKey): int
@@ -236,5 +260,52 @@ LUA;
     private function key(string $backendId, string $idempotencyKey): string
     {
         return sprintf('{%s}:%s%s:%s', $this->namespace, self::PREFIX, $backendId, $idempotencyKey);
+    }
+    private function waitAndVerify(string $what): void
+    {
+        if ($this->redis instanceof \Redis) {
+            $acked = $this->redis->rawCommand('WAIT', $this->waitReplicas, $this->waitTimeoutMs);
+        } else {
+            $acked = $this->redis->executeRaw(['WAIT', $this->waitReplicas, $this->waitTimeoutMs]);
+        }
+        if ($acked === false || $acked === null) {
+            throw new \KiwiCaptcha\Storage\ReplicaWaitException(sprintf(
+                'Redis WAIT failed after %s (waitReplicas=%d, timeout=%dms)',
+                $what,
+                $this->waitReplicas,
+                $this->waitTimeoutMs,
+            ));
+        }
+        if ((int) $acked < $this->waitReplicas) {
+            throw new \KiwiCaptcha\Storage\ReplicaWaitException(sprintf(
+                'Redis WAIT acknowledged %d of %d requested replicas after %s',
+                (int) $acked,
+                $this->waitReplicas,
+                $what,
+            ));
+        }
+    }
+
+    private function refuseVerifiedWaitOnUnsupportedPredisClients(): void
+    {
+        if ($this->waitReplicas <= 0 || !($this->redis instanceof \Predis\Client)) {
+            return;
+        }
+        $connection = $this->redis->getConnection();
+        if ($connection instanceof \Predis\Connection\Replication\ReplicationInterface
+            || $connection instanceof \Predis\Connection\Cluster\ClusterInterface
+        ) {
+            throw new \InvalidArgumentException(
+                'RedisSiteVerifyIdempotencyStore: verified-WAIT durability (waitReplicas > 0) is not supported on a Predis replication aggregate or cluster client — the verified barrier supports standalone Redis connections only; use a standalone connection with waitReplicas > 0, or keep waitReplicas = 0.'
+            );
+        }
+        if ($connection === null || $connection instanceof \Predis\Connection\RelayConnection) {
+            return;
+        }
+        if (!$connection->getParameters()->isDisabledRetry()) {
+            throw new \InvalidArgumentException(
+                'RedisSiteVerifyIdempotencyStore: verified-WAIT durability (waitReplicas > 0) is not supported on a retry-enabled standalone Predis client — retries must be disabled on the connection (remove the \'retry\' connection parameter), or keep waitReplicas = 0.'
+            );
+        }
     }
 }

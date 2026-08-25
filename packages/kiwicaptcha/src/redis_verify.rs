@@ -1588,7 +1588,7 @@ impl ProductionVerifier {
         client_ip: &str,
         now_ns: u64,
         operation_identity: Option<&str>,
-        expected_request_binding: Option<&str>,
+        expected_request_binding: RequestBindingExpectation<'_>,
     ) -> VerifyOutcome {
         // 1. Token decode. The counter is bounded here too: the decoder
         //    rejects counters at or above the solver cap
@@ -1878,13 +1878,13 @@ impl ProductionVerifier {
         scope: &str,
         client_ip: &str,
         now_ns: u64,
-        expected_request_binding: Option<&str>,
+        expected_request_binding: RequestBindingExpectation<'_>,
     ) -> Result<(), VerifyError> {
         self.check_authenticated_shape(record)?;
         self.check_ttl(record)?;
         self.check_scope(record, scope)?;
         self.check_deployment_expectations(record)?;
-        self.check_request_binding(record, expected_request_binding)?;
+        check_request_binding(record.request_binding.as_deref(), expected_request_binding)?;
         self.check_ip_binding(record, client_ip)?;
         self.check_min_duration(record, now_ns)?;
         Ok(())
@@ -2068,19 +2068,6 @@ impl ProductionVerifier {
     /// an unbound challenge satisfies no binding-pinned
     /// redemption. `None` (the default) leaves the binding
     /// unenforced (merely returned on a valid outcome).
-    fn check_request_binding(
-        &self,
-        record: &ChallengeRecord,
-        expected_request_binding: Option<&str>,
-    ) -> Result<(), VerifyError> {
-        if let Some(expected) = expected_request_binding {
-            match record.request_binding.as_deref() {
-                Some(actual) if ct_eq(actual.as_bytes(), expected.as_bytes()) => {}
-                _ => return Err(VerifyError::RequestBindingMismatch),
-            }
-        }
-        Ok(())
-    }
 
     /// IP binding. The stored record is authoritative: an empty
     ///     binding tag means binding is disabled; a non-empty tag means

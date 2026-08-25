@@ -339,7 +339,12 @@ final class Verifier
         bool $enforceTelemetry = false,
         ?string $operationIdentity = null,
         ?string $expectedRequestBinding = null,
+        ?RequestBindingExpectation $bindingExpectation = null,
     ): VerifyOutcome {
+        // The explicit enforcement policy: the legacy nullable argument
+        // maps to the temporary compatibility mode unless the caller
+        // supplies an exact/unenforced expectation.
+        $expectation = $bindingExpectation ?? RequestBindingExpectation::legacy($expectedRequestBinding);
         try {
             $token = SolutionToken::decode($rawToken);
         } catch (DecodeError $e) {
@@ -403,7 +408,7 @@ final class Verifier
         // to preserve). The same helper revalidates the retained
         // consumed record on the consumed-operation resume path
         // {@see self::resumeConsumedOperation()}.
-        $failure = $this->cheapPhaseCheck($peek, $secretKey, $expectedScope, $clientIp, true, $nowNs, $expectedRequestBinding);
+        $failure = $this->cheapPhaseCheck($peek, $secretKey, $expectedScope, $clientIp, true, $nowNs, $expectation);
         if ($failure !== null) {
             // The cleanup runs through the fused atomic transition when
             // the storage offers it ({@see AtomicDeleteIfPendingInterface}):
@@ -440,7 +445,7 @@ final class Verifier
                 // the evidence stays preserved by the fused transition,
                 // and only a clean pass falls through to the consumed
                 // branch.
-                $hard = $this->replaySecurityCheck($peek, $secretKey, $expectedScope, $expectedRequestBinding);
+                $hard = $this->replaySecurityCheck($peek, $secretKey, $expectedScope, $expectation);
                 if ($hard !== null) {
                     return VerifyOutcome::invalid($hard);
                 }
@@ -467,7 +472,7 @@ final class Verifier
                     // that also applies to this request. Any hard failure
                     // wins with the evidence preserved; only a clean pass
                     // falls through to the consume branch below.
-                    $hard = $this->replaySecurityCheck($peek, $secretKey, $expectedScope, $expectedRequestBinding);
+                    $hard = $this->replaySecurityCheck($peek, $secretKey, $expectedScope, $expectation);
                     if ($hard !== null) {
                         return VerifyOutcome::invalid($hard);
                     }
@@ -779,7 +784,9 @@ final class Verifier
         ?string $expectedScope = null,
         ?string $clientIp = null,
         ?string $expectedRequestBinding = null,
+        ?RequestBindingExpectation $bindingExpectation = null,
     ): VerifyOutcome {
+        $expectation = $bindingExpectation ?? RequestBindingExpectation::legacy($expectedRequestBinding);
         try {
             $token = SolutionToken::decode($rawToken);
         } catch (DecodeError $e) {
@@ -863,10 +870,10 @@ final class Verifier
         // buys nothing). An exempt failure runs the compositional replay
         // gate first — the same rule as the ordinary path: the exempt
         // circumstance may not mask a hard verdict that also applies.
-        $failure = $this->cheapPhaseCheck($record, $secretKey, $expectedScope, $clientIp, false);
+        $failure = $this->cheapPhaseCheck($record, $secretKey, $expectedScope, $clientIp, false, 0, $expectation);
         if ($failure !== null) {
             if ($failure->isReplayExempt()
-                && ($hard = $this->replaySecurityCheck($record, $secretKey, $expectedScope)) !== null
+                && ($hard = $this->replaySecurityCheck($record, $secretKey, $expectedScope, $expectation)) !== null
             ) {
                 return VerifyOutcome::invalid($hard);
             }
@@ -1127,8 +1134,8 @@ final class Verifier
         ?string $expectedScope,
         ?string $clientIp,
         bool $checkTiming,
-        ?int $nowNs = null,
-        ?string $expectedRequestBinding = null,
+        ?int $nowNs,
+        RequestBindingExpectation $expectation,
     ): ?VerifyError {
         // 1-2b. The authenticated hard core: structure, protocol gate,
         //       kid revocation/resolution, signature, Argon ceilings.
@@ -1145,7 +1152,7 @@ final class Verifier
         }
 
         // 4-4b. Scope and the expected request binding (hard).
-        if (($e = $this->checkScopeAndBinding($record, $expectedScope, $expectedRequestBinding)) !== null) {
+        if (($e = $this->checkScopeAndBinding($record, $expectedScope, $expectation)) !== null) {
             return $e;
         }
 
@@ -1201,12 +1208,12 @@ final class Verifier
         ChallengeRecord $record,
         string $secretKey,
         ?string $expectedScope,
-        ?string $expectedRequestBinding = null,
+        RequestBindingExpectation $expectation,
     ): ?VerifyError {
         if (($e = $this->checkAuthenticatedShape($record, $secretKey)) !== null) {
             return $e;
         }
-        if (($e = $this->checkScopeAndBinding($record, $expectedScope, $expectedRequestBinding)) !== null) {
+        if (($e = $this->checkScopeAndBinding($record, $expectedScope, $expectation)) !== null) {
             return $e;
         }
         if (($e = $this->checkDeploymentExpectations($record)) !== null) {
@@ -1311,30 +1318,54 @@ final class Verifier
      * authorization invariants, in cheap-phase order. Shared by the
      * cheap phase and the compositional replay gate.
      */
-    private function checkScopeAndBinding(ChallengeRecord $record, ?string $expectedScope, ?string $expectedRequestBinding): ?VerifyError
+    private function checkScopeAndBinding(ChallengeRecord $record, ?string $expectedScope, RequestBindingExpectation $expectation): ?VerifyError
     {
         // 4. Scope validation.
         if ($expectedScope !== null && $record->scope !== $expectedScope) {
             return VerifyError::WrongScope;
         }
 
-        // 4b. Application transaction binding: when the caller supplies
-        //     the expected request binding, a record that actually
-        //     carries a binding must equal it exactly, compared in
-        //     constant time. An EXPLICITLY UNBOUND record (requestBinding
-        //     null — issued under BindingMode::None) is permitted
-        //     regardless of the presented canonical binding: the
-        //     challenge's contract carries no transaction anchor, so the
-        //     application's binding expectation simply does not apply to
-        //     it. Null (the default) keeps the current behavior — the
-        //     binding is returned in the outcome, never enforced.
-        if ($expectedRequestBinding !== null && $record->requestBinding !== null) {
-            if (!hash_equals($record->requestBinding, $expectedRequestBinding)) {
-                return VerifyError::RequestBindingMismatch;
+        // 4b. Application transaction binding through the ONE shared
+        //     helper used by every binding check in the verifier (the
+        //     cheap phase, the replay gate, the final revalidation and
+        //     the resumed-operation path): exact Option-equality under
+        //     RequestBindingExpectation::exact(), the legacy
+        //     compatibility mode for the historical nullable argument,
+        //     or no enforcement under unenforced().
+        return $this->checkRequestBinding($record, $expectation);
+    }
+
+    /**
+     * The single request-binding check: exact Option-equality between the
+     * record's signed request_binding and the expectation's authoritative
+     * binding — null == explicitly unbound, a string == the same bound
+     * transaction — compared in constant time when both sides carry a
+     * string. Under the legacy compatibility mode a null expected binding
+     * disables enforcement entirely.
+     */
+    private function checkRequestBinding(ChallengeRecord $record, RequestBindingExpectation $expectation): ?VerifyError
+    {
+        if (!$expectation->enforced) {
+            return null;
+        }
+        if ($record->requestBinding === null || $expectation->expected === null) {
+            // The legacy compatibility mode does not require binding
+            // presence: an explicitly unbound record passes regardless of
+            // the expected binding (the historical behavior). The exact
+            // mode requires Option-equality: null == explicitly unbound,
+            // a string == the same bound transaction.
+            if ($record->requestBinding === null && !$expectation->requireBindingPresence) {
+                return null;
             }
+
+            return $record->requestBinding === $expectation->expected
+                ? null
+                : VerifyError::RequestBindingMismatch;
         }
 
-        return null;
+        return hash_equals($record->requestBinding, $expectation->expected)
+            ? null
+            : VerifyError::RequestBindingMismatch;
     }
 
     /**

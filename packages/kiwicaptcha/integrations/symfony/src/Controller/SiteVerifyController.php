@@ -201,6 +201,15 @@ final class SiteVerifyController
          * compile time.
          */
         private readonly ?\BelConsulting\KiwiCaptchaBundle\Risk\RequestBindingAuthorityInterface $bindingAuthority = null,
+        /**
+         * The static server-side transaction binding
+         * (risk.request_binding): the fallback transaction input when no
+         * authority is configured. A deployment that mints bound
+         * challenges without an authority must answer the Siteverify
+         * surface with this same server-side value, never silently
+         * turning request binding off.
+         */
+        private readonly ?string $defaultRequestBinding = null,
     ) {
         $this->recovery = $recovery ?? (new \KiwiCaptcha\ConsumedOutcomeRecovery($this->storage ?? new \KiwiCaptcha\Storage\ArrayStorage()));
         // The lease-ordering invariant is enforced at construction: the
@@ -275,6 +284,26 @@ final class SiteVerifyController
     {
         if ($this->siteverifySecrets === []) {
             return new JsonResponse(['success' => false, 'error-codes' => ['siteverify-not-configured']], Response::HTTP_NOT_FOUND);
+        }
+
+        // Framing rigor before anything is read: POST only; a duplicate
+        // Content-Length header is refused (header smuggling); Content-
+        // Length + Transfer-Encoding together is refused (smuggling);
+        // a Content-Encoding other than identity is refused (the provider
+        // contract never compresses).
+        if (!$request->isMethod('POST')) {
+            return new JsonResponse(['success' => false, 'error-codes' => ['bad-request']], Response::HTTP_BAD_REQUEST);
+        }
+        $contentLengths = $request->headers->all('Content-Length');
+        if (\count($contentLengths) > 1) {
+            return new JsonResponse(['success' => false, 'error-codes' => ['bad-request']], Response::HTTP_BAD_REQUEST);
+        }
+        if ($request->headers->has('Content-Length') && $request->headers->has('Transfer-Encoding')) {
+            return new JsonResponse(['success' => false, 'error-codes' => ['bad-request']], Response::HTTP_BAD_REQUEST);
+        }
+        $contentEncoding = strtolower(trim((string) $request->headers->get('Content-Encoding', '')));
+        if ($contentEncoding !== '' && $contentEncoding !== 'identity') {
+            return new JsonResponse(['success' => false, 'error-codes' => ['bad-request']], Response::HTTP_BAD_REQUEST);
         }
 
         // The body is read with a hard byte cap: at most MAX_BODY_BYTES +
@@ -416,14 +445,34 @@ final class SiteVerifyController
         }
         $canonicalBinding = null;
         if ($this->bindingAuthority !== null) {
+            // The authority's result is authoritative: a resolved binding
+            // is the transaction's binding, a resolved null is an
+            // explicitly UNBOUND transaction (the core's exact expectation
+            // then refuses any bound record). An InvalidArgumentException
+            // is a transaction mismatch (the 400 provider bad-request);
+            // any infrastructure failure is the retryable internal-error,
+            // never a client 400.
             try {
                 $resolved = $this->bindingAuthority->resolve($request, $expectedScope, $presentedBinding);
-            } catch (\Throwable) {
-                // The authority cannot attribute this transaction: refuse
-                // before anything is claimed, verified or granted.
+            } catch (\InvalidArgumentException) {
                 return new JsonResponse(['success' => false, 'error-codes' => ['bad-request']], Response::HTTP_BAD_REQUEST);
+            } catch (\Throwable) {
+                return $this->internalErrorResponse();
             }
             $canonicalBinding = \is_string($resolved) && $resolved !== '' ? $resolved : null;
+        } elseif ($this->defaultRequestBinding !== null) {
+            // The configured static server-side binding is authoritative
+            // when no authority exists.
+            $canonicalBinding = $this->defaultRequestBinding;
+        } elseif (\is_string($presentedBinding) && $presentedBinding !== '') {
+            // The authenticated backend's own request_binding field is
+            // accepted only after identifier validation (the siteverify
+            // secret is the authentication gate; a browser cannot reach
+            // this path).
+            if (preg_match('/^[A-Za-z0-9._:-]{1,128}$/', $presentedBinding) !== 1) {
+                return new JsonResponse(['success' => false, 'error-codes' => ['bad-request']], Response::HTTP_BAD_REQUEST);
+            }
+            $canonicalBinding = $presentedBinding;
         }
 
         // The logical-operation identity of this claim: a single bounded
@@ -485,6 +534,12 @@ final class SiteVerifyController
             if ($claim === IdempotencyClaim::CompleteSame) {
                 try {
                     $stored = $this->idempotencyStore->stored($backendId, $idempotencyKey);
+                } catch (SiteVerifyIdempotencyCorruptException $e) {
+                    // Corrupt security state is never "nothing here": the
+                    // typed fail-closed 503, never a fresh claim.
+                    error_log(sprintf('kiwicaptcha: corrupt siteverify idempotency record: %s', $e->getMessage()));
+
+                    return $this->internalErrorResponse();
                 } catch (\Throwable) {
                     return $this->internalErrorResponse();
                 }
@@ -543,6 +598,12 @@ final class SiteVerifyController
             if ($claim === IdempotencyClaim::CompleteSame) {
                 try {
                     $stored = $this->idempotencyStore->stored($backendId, $idempotencyKey);
+                } catch (SiteVerifyIdempotencyCorruptException $e) {
+                    // Corrupt security state is never "nothing here": the
+                    // typed fail-closed 503, never a fresh claim.
+                    error_log(sprintf('kiwicaptcha: corrupt siteverify idempotency record: %s', $e->getMessage()));
+
+                    return $this->internalErrorResponse();
                 } catch (\Throwable) {
                     return $this->internalErrorResponse();
                 }
@@ -726,6 +787,7 @@ final class SiteVerifyController
                             $expectedScope,
                             $remoteIp,
                             $canonicalBinding,
+                            \KiwiCaptcha\RequestBindingExpectation::exact($canonicalBinding),
                         ));
                     }
                 }
@@ -819,6 +881,7 @@ final class SiteVerifyController
                     false,           // telemetry is never authoritative here
                     $idempotent && ($claim === IdempotencyClaim::Claimed || $claim === IdempotencyClaim::TookOver) ? $operationFingerprint : null,
                     $canonicalBinding,
+                    \KiwiCaptcha\RequestBindingExpectation::exact($canonicalBinding),
                 );
             });
         } catch (\InvalidArgumentException) {
@@ -960,12 +1023,13 @@ final class SiteVerifyController
      * store's fixed configured lease, never derived from the token's
      * remaining validity.
      */
-    private function finalizeAsOwner(string $backendId, string $idempotencyKey, string $responseHash, string $owner, array $canonical, ?float $claimedAt): void
+    private function finalizeAsOwner(string $backendId, string $idempotencyKey, string $responseHash, string $owner, array $canonical, ?float $claimedAt): bool
     {
         if ($claimedAt !== null && microtime(true) - $claimedAt >= $this->idempotencyStore->leaseSeconds()) {
             $this->idempotencyStore?->renew($backendId, $idempotencyKey, $owner);
         }
-        $this->idempotencyStore?->finalize($backendId, $idempotencyKey, $responseHash, $owner, $canonical);
+
+        return $this->idempotencyStore?->finalize($backendId, $idempotencyKey, $responseHash, $owner, $canonical) ?? false;
     }
 
     /**
@@ -985,8 +1049,16 @@ final class SiteVerifyController
     private function finalizeSafely(string $backendId, string $idempotencyKey, string $responseHash, string $owner, array $canonical, ?float $claimedAt): ?JsonResponse
     {
         try {
-            $this->finalizeAsOwner($backendId, $idempotencyKey, $responseHash, $owner, $canonical, $claimedAt);
+            $finalized = $this->finalizeAsOwner($backendId, $idempotencyKey, $responseHash, $owner, $canonical, $claimedAt);
         } catch (\Throwable) {
+            return $this->internalErrorResponse();
+        }
+        if (!$finalized) {
+            // A REFUSED finalize is exactly an ownership loss: the claim
+            // was taken over (or the key vanished, or the state moved), so
+            // this request's locally computed result is NEVER returned as
+            // authoritative — the authoritative completed state was not
+            // established. The retryable 503.
             return $this->internalErrorResponse();
         }
 
@@ -1315,8 +1387,27 @@ LUA;
      */
     private function parseBody(Request $request, string $requestBody): ?array
     {
+        // Framing rigor: only POST with an explicit identity content type
+        // is accepted — the provider contract is application/json and
+        // application/x-www-form-urlencoded, and the parameter source is
+        // the BODY only (query parameters never create a second input
+        // namespace, and multipart/text/plain are refused rather than
+        // silently parsed).
+        if (!$request->isMethod('POST')) {
+            return null;
+        }
+        if ($request->query->count() > 0) {
+            return null;
+        }
         $contentType = strtolower(trim(explode(';', (string) $request->headers->get('Content-Type', ''), 2)[0]));
         if ($contentType === 'application/json') {
+            // The same recursive duplicate-key scanner as the challenge
+            // endpoint: {"secret":"A","secret":"B"} is refused, never
+            // silently last-wins.
+            $scan = $this->scanJsonDuplicateKeys($requestBody);
+            if ($scan !== null) {
+                return null;
+            }
             try {
                 $decoded = json_decode($requestBody, true, 32, JSON_THROW_ON_ERROR);
 
@@ -1325,7 +1416,50 @@ LUA;
                 return null;
             }
         }
+        if ($contentType === 'application/x-www-form-urlencoded') {
+            return $request->request->all();
+        }
 
-        return $request->request->all();
+        return null;
+    }
+
+    /**
+     * Recursive duplicate-key scanner for the JSON body (the same rule as
+     * the challenge endpoint): returns the first duplicated key, or null
+     * when the document has no duplicate keys. Bounded by the 16 KiB body
+     * ceiling plus a recursion cap, so a depth bomb cannot exhaust the
+     * stack.
+     */
+    private function scanJsonDuplicateKeys(string $json): ?string
+    {
+        try {
+            $decoded = json_decode($json, true, 64, JSON_THROW_ON_ERROR);
+        } catch (\JsonException) {
+            return null;
+        }
+
+        return $this->scanDuplicateKeysRecursive($decoded);
+    }
+
+    private function scanDuplicateKeysRecursive(mixed $value): ?string
+    {
+        if (!\is_array($value)) {
+            return null;
+        }
+        $seen = [];
+        foreach ($value as $key => $child) {
+            if (\is_string($key)) {
+                if (isset($seen[$key])) {
+                    return $key;
+                }
+                $seen[$key] = true;
+            }
+            $duplicate = $this->scanDuplicateKeysRecursive($child);
+            if ($duplicate !== null) {
+                return $duplicate;
+            }
+        }
+
+        return null;
     }
 }

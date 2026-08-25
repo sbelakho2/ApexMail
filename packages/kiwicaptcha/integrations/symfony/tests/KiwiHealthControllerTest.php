@@ -235,14 +235,25 @@ final class KiwiHealthControllerTest extends TestCase
         self::assertTrue($controller->memoryBudgetOk());
     }
 
-    public function testUnlimitedConcurrencyUsesOneHashForTheInvariant(): void
+    public function testUnlimitedConcurrencyWithABudgetIsNeverReady(): void
     {
-        // argon2_max_concurrent_verifications = 0 (unlimited) is treated as 1
-        // for the invariant (at least one hash must fit): 1 x 64 + 256 = 320.
-        $ok = new KiwiHealthController(self::SECRET, null, 'health-test', 1, null, 0, 320);
-        self::assertSame(200, $ok->ready()->getStatusCode(), 'the unlimited-cap floor (320 MiB) must fit');
+        // argon2_max_concurrent_verifications = 0 (unlimited): an
+        // unlimited memory-hard workload has NO finite worst-case
+        // concurrency, so a finite container budget can never prove the
+        // invariant — the readiness answers not-ready (and the container
+        // refuses the combination at compile time), never a silently
+        // floored 1.
+        $unlimited = new KiwiHealthController(self::SECRET, null, 'health-test', 1, null, 0, 100_000);
+        self::assertSame(503, $unlimited->ready()->getStatusCode(), 'unlimited concurrency with a finite budget is never ready');
 
-        $tooSmall = new KiwiHealthController(self::SECRET, null, 'health-test', 1, null, 0, 319);
-        self::assertSame(503, $tooSmall->ready()->getStatusCode());
+        // A null budget + unlimited is allowed, explicitly unchecked.
+        $unchecked = new KiwiHealthController(self::SECRET, null, 'health-test', 1, null, 0, null);
+        self::assertSame(200, $unchecked->ready()->getStatusCode(), 'no budget means the invariant is skipped and documented');
+
+        // A finite cap computes the exact worst case: 1 x 64 + 256 = 320.
+        $exact = new KiwiHealthController(self::SECRET, null, 'health-test', 1, null, 1, 320);
+        self::assertSame(200, $exact->ready()->getStatusCode(), 'exactly the required memory is ready');
+        $oneBelow = new KiwiHealthController(self::SECRET, null, 'health-test', 1, null, 1, 319);
+        self::assertSame(503, $oneBelow->ready()->getStatusCode(), 'one MiB below the requirement is not ready');
     }
 }

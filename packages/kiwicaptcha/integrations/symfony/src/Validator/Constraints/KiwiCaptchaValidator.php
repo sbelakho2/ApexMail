@@ -475,7 +475,7 @@ final class KiwiCaptchaValidator extends ConstraintValidator
         // The post-consume comparison below stays as a defensive
         // backstop for the configuration-drift case (a bound record
         // verified with no canonical binding configured).
-        $outcome = $this->verifier->verify($value, $this->secretKey, $constraint->scope, $clientIp, null, $this->enforceTelemetry, $operationIdentity, $canonicalBinding);
+        $outcome = $this->verifier->verify($value, $this->secretKey, $constraint->scope, $clientIp, null, $this->enforceTelemetry, $operationIdentity, $canonicalBinding, \KiwiCaptcha\RequestBindingExpectation::exact($canonicalBinding));
 
         // Ambiguous-consume deterministic retry: ConsumeIndeterminate
         // means the consume transition may have happened but its response

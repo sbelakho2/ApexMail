@@ -11,6 +11,9 @@ use KiwiCaptcha\ConsumedResult;
 use KiwiCaptcha\OperationIdentity;
 use KiwiCaptcha\OperationIdentityAwareStorageInterface;
 use KiwiCaptcha\StorageInterface;
+use KiwiCaptcha\ChallengeRuntimeStateReadableInterface;
+use KiwiCaptcha\ChallengeRuntimeStateKind;
+use KiwiCaptcha\ChallengeRuntimeState;
 
 /**
  * In-memory storage (single-process, non-persistent). Intended for tests,
@@ -39,7 +42,7 @@ use KiwiCaptcha\StorageInterface;
  * {@see \KiwiCaptcha\CancellableStorageInterface::cancel()}; a cancelled
  * record is unverifiable and retained until deletion.
  */
-final class ArrayStorage implements AtomicStorageInterface, \KiwiCaptcha\ConsumedStateReadableInterface, OperationIdentityAwareStorageInterface, \KiwiCaptcha\AtomicDeleteIfPendingInterface, \KiwiCaptcha\CancellableStorageInterface
+final class ArrayStorage implements AtomicStorageInterface, \KiwiCaptcha\ConsumedStateReadableInterface, OperationIdentityAwareStorageInterface, \KiwiCaptcha\AtomicDeleteIfPendingInterface, \KiwiCaptcha\CancellableStorageInterface, \KiwiCaptcha\ChallengeRuntimeStateReadableInterface
 {
     /** @var array<string, array{record: ChallengeRecord, consumed: bool, cancelled: bool, result: ConsumedResult|null, operationIdentity: string|null}> */
     private array $records = [];
@@ -171,6 +174,22 @@ final class ArrayStorage implements AtomicStorageInterface, \KiwiCaptcha\Consume
      * and kept; a consumed record is finalized and never cancellable; an
      * already-cancelled record is idempotent; a missing record is null.
      */
+    public function runtimeState(string $nonce): ChallengeRuntimeState
+    {
+        $entry = $this->records[$nonce] ?? null;
+        if ($entry === null) {
+            return new ChallengeRuntimeState(ChallengeRuntimeStateKind::Missing);
+        }
+        if ($entry['cancelled'] ?? false) {
+            return new ChallengeRuntimeState(ChallengeRuntimeStateKind::Cancelled, $entry['record']);
+        }
+        if ($entry['consumed']) {
+            return new ChallengeRuntimeState(ChallengeRuntimeStateKind::Consumed, $entry['record'], new ConsumedRecord($entry['record'], false, true, $entry['result'], $entry['operationIdentity']));
+        }
+
+        return new ChallengeRuntimeState(ChallengeRuntimeStateKind::Pending, $entry['record']);
+    }
+
     public function cancel(string $nonce): ?\KiwiCaptcha\CancellationResult
     {
         $entry = $this->records[$nonce] ?? null;

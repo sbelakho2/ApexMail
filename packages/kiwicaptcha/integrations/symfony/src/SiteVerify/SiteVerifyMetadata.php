@@ -37,15 +37,22 @@ final readonly class SiteVerifyMetadata
         public ?string $sitekey,
         public ?string $chainId = null,
         public int $chainDepth = 0,
+        public ?string $scope = null,
     ) {
     }
 
+    /**
+     * The versioned wire envelope: v:1 marks the shape so a malformed or
+     * version-unknown record can never be mistaken for missing metadata.
+     */
     public function toArray(): array
     {
         return [
+            'v' => 1,
             'action' => $this->action,
             'cdata' => $this->cdata,
             'sitekey' => $this->sitekey,
+            'scope' => $this->scope,
             'chainId' => $this->chainId,
             'chainDepth' => $this->chainDepth,
         ];
@@ -53,21 +60,25 @@ final readonly class SiteVerifyMetadata
 
     public static function fromArray(array $data): ?self
     {
+        if (isset($data['v']) && $data['v'] !== 1) {
+            throw new SiteVerifyMetadataCorruptException('unsupported metadata envelope version');
+        }
         $action = isset($data['action']) && \is_string($data['action']) ? $data['action'] : null;
         $cdata = isset($data['cdata']) && \is_string($data['cdata']) ? $data['cdata'] : null;
         $sitekey = isset($data['sitekey']) && \is_string($data['sitekey']) ? $data['sitekey'] : null;
+        $scope = isset($data['scope']) && \is_string($data['scope']) ? $data['scope'] : null;
         $chainId = isset($data['chainId']) && \is_string($data['chainId']) ? $data['chainId'] : null;
         $chainDepth = isset($data['chainDepth']) && \is_int($data['chainDepth']) ? $data['chainDepth'] : 0;
-        if ($action === null && $cdata === null && $sitekey === null && $chainId === null && $chainDepth === 0) {
+        if ($action === null && $cdata === null && $sitekey === null && $scope === null && $chainId === null && $chainDepth === 0) {
             return null;
         }
 
-        return new self($action, $cdata, $sitekey, $chainId, $chainDepth);
+        return new self($action, $cdata, $sitekey, $chainId, $chainDepth, $scope);
     }
 
     public function isEmpty(): bool
     {
         return $this->action === null && $this->cdata === null && $this->sitekey === null
-            && $this->chainId === null && $this->chainDepth === 0;
+            && $this->scope === null && $this->chainId === null && $this->chainDepth === 0;
     }
 }
