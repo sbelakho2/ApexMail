@@ -52,7 +52,10 @@ use Symfony\Component\HttpFoundation\Request;
  */
 final class RealRedisChainedChallengeTest extends TestCase
 {
-    private const REDIS_URL = 'tcp://127.0.0.1:6399';
+    private static function redisUrl(): string
+    {
+        return \BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\RedisTestUrl::resolve();
+    }
 
     private const SECRET = '0123456789abcdef0123456789abcdef';
 
@@ -65,11 +68,11 @@ final class RealRedisChainedChallengeTest extends TestCase
         if (!class_exists(\Predis\Client::class)) {
             self::markTestSkipped('predis/predis not installed');
         }
-        $this->client = new \Predis\Client(self::REDIS_URL);
+        $this->client = new \Predis\Client(self::redisUrl());
         try {
             $this->client->ping();
         } catch (\Throwable $e) {
-            self::markTestSkipped('Redis unreachable at '.self::REDIS_URL.': '.$e->getMessage());
+            self::markTestSkipped('Redis unreachable at '.self::redisUrl().': '.$e->getMessage());
         }
         $this->client->flushdb();
     }
@@ -230,7 +233,7 @@ final class RealRedisChainedChallengeTest extends TestCase
         $result = $store->markIssued($requirement->chainId, 'owner-a', $this->stageNonce('stage2-nonce'));
         self::assertSame('issued_new', $result);
 
-        $reconnected = $this->store(new \Predis\Client(self::REDIS_URL));
+        $reconnected = $this->store(new \Predis\Client(self::redisUrl()));
         $state = $reconnected->read($requirement->chainId);
         self::assertIsArray($state);
         self::assertSame('issued', $state['state'], 'the issued transition is durable');
@@ -458,7 +461,7 @@ final class RealRedisChainedChallengeTest extends TestCase
         $denied = $service->requireStage2($this->nonce(), 'login', 'txn-tdeny', 1, RiskAction::Sha18, $expiry);
         $deniedObligationId = $service->obligationIdFor('login', 'txn-tdeny', 1);
         self::assertSame(ChainVerifiedResult::DeniedNew, $service->markTransactionDenied($denied->chainId, $deniedObligationId));
-        $reconnected = $this->store(new \Predis\Client(self::REDIS_URL));
+        $reconnected = $this->store(new \Predis\Client(self::redisUrl()));
         $state = $reconnected->read($denied->chainId);
         self::assertIsArray($state, 'the terminalized record strictly decodes over real Redis');
         self::assertSame('denied', $state['state']);
@@ -687,7 +690,7 @@ final class RealRedisChainedChallengeTest extends TestCase
         // it cannot silently become issuable after a promotion. The
         // idempotent same-state replays and the reservation perform no
         // fresh write and never WAIT.
-        $counting = new CommandCountingRedisClient(self::REDIS_URL);
+        $counting = new CommandCountingRedisClient(self::redisUrl());
         $seed = new RedisChainedChallengeStateStore($counting, self::NAMESPACE);
         $hardened = new RedisChainedChallengeStateStore($counting, self::NAMESPACE, 1, 100);
         $service = new ChainedChallengeTicketService($seed, self::SECRET, 300, 15);

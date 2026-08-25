@@ -313,24 +313,7 @@ LUA;
 
     private function refuseVerifiedWaitOnUnsupportedPredisClients(): void
     {
-        if ($this->waitReplicas <= 0 || !($this->redis instanceof \Predis\Client)) {
-            return;
-        }
-        $connection = $this->redis->getConnection();
-        if ($connection instanceof \Predis\Connection\Replication\ReplicationInterface
-            || $connection instanceof \Predis\Connection\Cluster\ClusterInterface
-        ) {
-            throw new \InvalidArgumentException(
-                'RedisSiteVerifyIdempotencyStore: verified-WAIT durability (waitReplicas > 0) is not supported on a Predis replication aggregate or cluster client — the verified barrier supports standalone Redis connections only; use a standalone connection with waitReplicas > 0, or keep waitReplicas = 0.'
-            );
-        }
-        if ($connection === null || $connection instanceof \Predis\Connection\RelayConnection) {
-            return;
-        }
-        if (!$connection->getParameters()->isDisabledRetry()) {
-            throw new \InvalidArgumentException(
-                'RedisSiteVerifyIdempotencyStore: verified-WAIT durability (waitReplicas > 0) is not supported on a retry-enabled standalone Predis client — retries must be disabled on the connection (remove the \'retry\' connection parameter), or keep waitReplicas = 0.'
-            );
-        }
+        \KiwiCaptcha\VerifiedWaitGuard::refuseUnsupported($this->redis, $this->waitReplicas, 'RedisSiteVerifyIdempotencyStore');
     }
+
 }

@@ -388,41 +388,9 @@ LUA;
      */
     private function refuseVerifiedWaitOnUnsupportedPredisClients(): void
     {
-        if ($this->waitReplicas <= 0 || !($this->client instanceof \Predis\Client)) {
-            return;
-        }
-        $connection = $this->client->getConnection();
-        if ($connection instanceof \Predis\Connection\Replication\ReplicationInterface) {
-            throw new \InvalidArgumentException(
-                'RedisStorage: verified-WAIT durability (waitReplicas > 0) is not supported on a Predis replication aggregate (Sentinel or master-slave) — WAIT is connection-affine, counting replicas of the connection it is sent on, and the aggregate\'s failure retry executes the WAIT on a replacement connection whose write offset is empty, so the acknowledgement proves nothing about the original write\'s replication. The verified barrier supports standalone Redis connections only; use a standalone connection with waitReplicas > 0, or keep waitReplicas = 0 on an aggregate.'
-            );
-        }
-        if ($connection instanceof \Predis\Connection\Cluster\ClusterInterface) {
-            throw new \InvalidArgumentException(
-                'RedisStorage: verified-WAIT durability (waitReplicas > 0) is not supported on a Predis Redis Cluster client — WAIT is connection-relative and cannot be routed by slot. The verified barrier supports standalone Redis connections only; use a standalone connection with waitReplicas > 0, or keep waitReplicas = 0 on a cluster.'
-            );
-        }
-        if ($connection === null) {
-            // An in-memory stand-in with no real connection object (the
-            // tests' FakePredisClient skips the parent constructor): there
-            // is no Parameters instance to carry a retry policy and the
-            // stand-in overrides the command dispatch itself, so the
-            // vendored retry wrapper never engages.
-            return;
-        }
-        if ($connection instanceof \Predis\Connection\RelayConnection) {
-            // A relay connection dispatches commands directly, bypassing
-            // the vendored retry wrapper (Predis\Client::executeCommand
-            // excludes relay connections), so an explicit retry parameter
-            // is inert there and cannot replay a mutation.
-            return;
-        }
-        if (!$connection->getParameters()->isDisabledRetry()) {
-            throw new \InvalidArgumentException(
-                'RedisStorage: verified-WAIT durability (waitReplicas > 0) is not supported on a retry-enabled standalone Predis client — verified-WAIT durability requires that a durability-critical mutation is attempted exactly once on the connection whose subsequent WAIT establishes the replication offset, and a retry-enabled standalone Predis client can transparently re-execute the Lua mutation after a lost response, so the returned result may describe the second invocation rather than the one that mutated: a delete-if-pending eval whose first execution performed the terminal DEL is retried into a \'missing\' reply, and the verified WAIT that must follow the mutation is skipped, leaving a burned challenge resurrectable. Retries must be disabled on the connection (remove the \'retry\' connection parameter), or keep waitReplicas = 0.'
-            );
-        }
+        \KiwiCaptcha\VerifiedWaitGuard::refuseUnsupported($this->client, $this->waitReplicas, 'RedisStorage');
     }
+
 
     public function store(ChallengeRecord $record): void
     {

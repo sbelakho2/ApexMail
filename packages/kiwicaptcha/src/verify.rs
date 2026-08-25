@@ -129,7 +129,11 @@ pub(crate) fn check_request_binding(
         RequestBindingExpectation::Unenforced => Ok(()),
         RequestBindingExpectation::Exact(expected) => match (record_binding, expected) {
             (None, None) => Ok(()),
-            (Some(actual), Some(expected)) if constant_time_eq(actual.as_bytes(), expected.as_bytes()) => Ok(()),
+            (Some(actual), Some(expected))
+                if constant_time_eq(actual.as_bytes(), expected.as_bytes()) =>
+            {
+                Ok(())
+            }
             _ => Err(VerifyError::RequestBindingMismatch),
         },
     }
@@ -754,7 +758,10 @@ pub fn verify_solution(ctx: &mut VerifyContext<'_>) -> VerifyOutcome {
 
     // 2b. Application transaction binding (exact Option-equality via the
     //     shared helper).
-    if let Err(e) = check_request_binding(ctx.record.request_binding.as_deref(), ctx.expected_request_binding) {
+    if let Err(e) = check_request_binding(
+        ctx.record.request_binding.as_deref(),
+        ctx.expected_request_binding,
+    ) {
         return VerifyOutcome::Invalid(e);
     }
 
@@ -1295,17 +1302,32 @@ mod tests {
         // bound A / exact null mismatch; unbound / exact null pass;
         // unbound / exact A mismatch; bound A / unenforced pass.
         let cases: [(&str, RequestBindingExpectation, bool); 6] = [
-            ("txn-A", RequestBindingExpectation::Exact(Some("txn-A")), true),
-            ("txn-A", RequestBindingExpectation::Exact(Some("txn-B")), false),
+            (
+                "txn-A",
+                RequestBindingExpectation::Exact(Some("txn-A")),
+                true,
+            ),
+            (
+                "txn-A",
+                RequestBindingExpectation::Exact(Some("txn-B")),
+                false,
+            ),
             ("txn-A", RequestBindingExpectation::Exact(None), false),
             ("", RequestBindingExpectation::Exact(None), true),
             ("", RequestBindingExpectation::Exact(Some("txn-A")), false),
             ("txn-A", RequestBindingExpectation::Unenforced, true),
         ];
         for (binding, expectation, should_pass) in cases {
-            let record_binding = if binding.is_empty() { None } else { Some(binding) };
+            let record_binding = if binding.is_empty() {
+                None
+            } else {
+                Some(binding)
+            };
             let ok = check_request_binding(record_binding, expectation).is_ok();
-            assert_eq!(ok, should_pass, "binding={binding:?} expectation={expectation:?}");
+            assert_eq!(
+                ok, should_pass,
+                "binding={binding:?} expectation={expectation:?}"
+            );
         }
     }
 

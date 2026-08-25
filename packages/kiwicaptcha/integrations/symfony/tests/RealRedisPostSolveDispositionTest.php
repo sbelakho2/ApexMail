@@ -64,7 +64,7 @@ final class RealRedisPostSolveDispositionTest extends TestCase
         if (!class_exists(\Predis\Client::class)) {
             self::markTestSkipped('predis/predis not installed');
         }
-        $this->client = new \Predis\Client('tcp://127.0.0.1:6399');
+        $this->client = new \Predis\Client(\BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\RedisTestUrl::resolve());
         try {
             $this->client->ping();
         } catch (\Throwable $e) {
@@ -250,7 +250,7 @@ final class RealRedisPostSolveDispositionTest extends TestCase
         // handle and the record info the caller needs, so the validator
         // performs no read before or after the claim: claim -> compute ->
         // finalize.
-        $counting = new class('tcp://127.0.0.1:6399', ['timeout' => 2.0, 'read_write_timeout' => 2.0]) extends \Predis\Client {
+        $counting = new class(\BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\RedisTestUrl::resolve(), ['timeout' => 2.0, 'read_write_timeout' => 2.0]) extends \Predis\Client {
             /** @var list<array{0: string, 1: list<mixed>}> */
             public array $commands = [];
 
@@ -345,7 +345,7 @@ final class RealRedisPostSolveDispositionTest extends TestCase
      */
     private function countingClient(): CommandCountingRedisClient
     {
-        return new CommandCountingRedisClient('tcp://127.0.0.1:6399', ['timeout' => 2.0, 'read_write_timeout' => 2.0]);
+        return new CommandCountingRedisClient(\BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\RedisTestUrl::resolve(), ['timeout' => 2.0, 'read_write_timeout' => 2.0]);
     }
 
     public function testFreshFinalizeWaitsAndFailsClosedOnAViolatedAckAgainstRealRedis(): void

@@ -742,7 +742,7 @@ final class SiteVerifyTest extends TestCase
             self::markTestSkipped('predis/predis is not installed');
         }
         try {
-            $redis = new \Predis\Client('tcp://127.0.0.1:6399', ['timeout' => 1.0, 'read_write_timeout' => 1.0]);
+            $redis = new \Predis\Client(\BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\RedisTestUrl::resolve(), ['timeout' => 1.0, 'read_write_timeout' => 1.0]);
             $redis->ping();
         } catch (\Throwable) {
             self::markTestSkipped('no Redis at 127.0.0.1:6399');

@@ -284,7 +284,7 @@ final class RealRedisIntegrationTest extends TestCase
         // admission (no write) never WAITs.
         $this->client->flushall();
         $secret = '0123456789abcdef0123456789abcdef';
-        $counting = new \BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\CommandCountingRedisClient('tcp://127.0.0.1:6399', ['timeout' => 2.0, 'read_write_timeout' => 2.0]);
+        $counting = new \BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\CommandCountingRedisClient(\BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\RedisTestUrl::resolve(), ['timeout' => 2.0, 'read_write_timeout' => 2.0]);
         $outstanding = new OutstandingChallenges($counting, '{kiwi:ci}:outstanding:', RiskKeys::fromMaster($secret), 1, 100, 5, 1, 100);
 
         // The admission write lands, then the verified WAIT runs on the

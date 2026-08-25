@@ -44,7 +44,7 @@ final class SiteVerifyConcurrencyTest extends TestCase
             self::markTestSkipped('predis/predis is not installed');
         }
         try {
-            $probe = new \Predis\Client('tcp://127.0.0.1:6399', ['timeout' => 1.0, 'read_write_timeout' => 1.0]);
+            $probe = new \Predis\Client(\BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\RedisTestUrl::resolve(), ['timeout' => 1.0, 'read_write_timeout' => 1.0]);
             $probe->ping();
         } catch (\Throwable) {
             self::markTestSkipped('no Redis at 127.0.0.1:6399 — start one for the concurrency test');
@@ -83,7 +83,7 @@ final class SiteVerifyConcurrencyTest extends TestCase
                 }
                 $success = '0';
                 try {
-                    $client = new \Predis\Client('tcp://127.0.0.1:6399', ['timeout' => 2.0, 'read_write_timeout' => 2.0]);
+                    $client = new \Predis\Client(\BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\RedisTestUrl::resolve(), ['timeout' => 2.0, 'read_write_timeout' => 2.0]);
                     $storage = new RedisStorage($client);
                     $controller = new SiteVerifyController(
                         new Verifier($storage),
@@ -169,7 +169,7 @@ final class SiteVerifyConcurrencyTest extends TestCase
             self::markTestSkipped('predis/predis is not installed');
         }
         try {
-            $probe = new \Predis\Client('tcp://127.0.0.1:6399', ['timeout' => 1.0, 'read_write_timeout' => 1.0]);
+            $probe = new \Predis\Client(\BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\RedisTestUrl::resolve(), ['timeout' => 1.0, 'read_write_timeout' => 1.0]);
             $probe->ping();
         } catch (\Throwable) {
             self::markTestSkipped('no Redis at 127.0.0.1:6399 — start one for the concurrency test');
@@ -211,7 +211,7 @@ final class SiteVerifyConcurrencyTest extends TestCase
                 }
                 $line = 'error';
                 try {
-                    $client = new \Predis\Client('tcp://127.0.0.1:6399', ['timeout' => 15.0, 'read_write_timeout' => 15.0]);
+                    $client = new \Predis\Client(\BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\RedisTestUrl::resolve(), ['timeout' => 15.0, 'read_write_timeout' => 15.0]);
                     $storage = new RedisStorage($client);
                     $controller = new SiteVerifyController(
                         new Verifier($storage),
@@ -289,7 +289,7 @@ final class SiteVerifyConcurrencyTest extends TestCase
             self::markTestSkipped('predis/predis is not installed');
         }
         try {
-            $probe = new \Predis\Client('tcp://127.0.0.1:6399', ['timeout' => 1.0, 'read_write_timeout' => 1.0]);
+            $probe = new \Predis\Client(\BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\RedisTestUrl::resolve(), ['timeout' => 1.0, 'read_write_timeout' => 1.0]);
             $probe->ping();
         } catch (\Throwable) {
             self::markTestSkipped('no Redis at 127.0.0.1:6399 — start one for the concurrency test');
@@ -342,7 +342,7 @@ final class SiteVerifyConcurrencyTest extends TestCase
                 }
                 $line = 'error';
                 try {
-                    $client = new \Predis\Client('tcp://127.0.0.1:6399', ['timeout' => 15.0, 'read_write_timeout' => 15.0]);
+                    $client = new \Predis\Client(\BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\RedisTestUrl::resolve(), ['timeout' => 15.0, 'read_write_timeout' => 15.0]);
                     $storage = new RedisStorage($client);
                     $verifier = new Verifier($storage);
                     $monitor = new SecurityEpochMonitor($verifier, $policyRedis, 'test-ns', 1);
@@ -436,7 +436,7 @@ final class SiteVerifyConcurrencyTest extends TestCase
             self::markTestSkipped('pcntl/predis not available');
         }
         try {
-            $probe = new \Predis\Client('tcp://127.0.0.1:6399', ['timeout' => 2.0, 'read_write_timeout' => 2.0]);
+            $probe = new \Predis\Client(\BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\RedisTestUrl::resolve(), ['timeout' => 2.0, 'read_write_timeout' => 2.0]);
             $probe->ping();
         } catch (\Throwable) {
             self::markTestSkipped('no Redis at 127.0.0.1:6399');
@@ -489,7 +489,7 @@ final class SiteVerifyConcurrencyTest extends TestCase
                 }
                 $line = 'error';
                 try {
-                    $client = new \Predis\Client('tcp://127.0.0.1:6399', ['timeout' => 60.0, 'read_write_timeout' => 60.0]);
+                    $client = new \Predis\Client(\BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\RedisTestUrl::resolve(), ['timeout' => 60.0, 'read_write_timeout' => 60.0]);
                     $storage = new RedisStorage($client);
                     $controller = new SiteVerifyController(
                         new Verifier($storage),
@@ -550,7 +550,7 @@ final class SiteVerifyConcurrencyTest extends TestCase
         );
         // Exactly ONE redemption: the winner's consume left the record
         // consumed with its committed valid result.
-        $check = new \Predis\Client('tcp://127.0.0.1:6399', ['timeout' => 2.0, 'read_write_timeout' => 2.0]);
+        $check = new \Predis\Client(\BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\RedisTestUrl::resolve(), ['timeout' => 2.0, 'read_write_timeout' => 2.0]);
         $record = $check->get('kiwicaptcha:'.$challenge->nonce);
         $check->disconnect();
         self::assertIsString($record, 'the winner must leave the challenge record in place (consumed, not deleted)');
@@ -574,7 +574,7 @@ final class SiteVerifyConcurrencyTest extends TestCase
             self::markTestSkipped('pcntl/predis not available');
         }
         try {
-            $probe = new \Predis\Client('tcp://127.0.0.1:6399', ['timeout' => 2.0, 'read_write_timeout' => 2.0]);
+            $probe = new \Predis\Client(\BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\RedisTestUrl::resolve(), ['timeout' => 2.0, 'read_write_timeout' => 2.0]);
             $probe->ping();
         } catch (\Throwable) {
             self::markTestSkipped('no Redis at 127.0.0.1:6399');
@@ -606,7 +606,7 @@ final class SiteVerifyConcurrencyTest extends TestCase
             }
             $line = 'error';
             try {
-                $client = new \Predis\Client('tcp://127.0.0.1:6399', ['timeout' => 20.0, 'read_write_timeout' => 20.0]);
+                $client = new \Predis\Client(\BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\RedisTestUrl::resolve(), ['timeout' => 20.0, 'read_write_timeout' => 20.0]);
                 $sleepy = new class(new RedisStorage($client)) implements \KiwiCaptcha\AtomicStorageInterface {
                     public function __construct(private readonly \KiwiCaptcha\AtomicStorageInterface $inner)
                     {
@@ -672,7 +672,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         fclose($barrierFile);
         // The second request fires while the owner is inside the verifier.
         sleep(3);
-        $client = new \Predis\Client('tcp://127.0.0.1:6399', ['timeout' => 20.0, 'read_write_timeout' => 20.0]);
+        $client = new \Predis\Client(\BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\RedisTestUrl::resolve(), ['timeout' => 20.0, 'read_write_timeout' => 20.0]);
         $storage = new RedisStorage($client);
         $counting = new class($storage) implements \KiwiCaptcha\AtomicStorageInterface {
             public int $consumes = 0;
@@ -743,7 +743,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
 
         // Exactly ONE consumption (the owner's): the challenge record
         // stays in place, consumed, with the committed valid result.
-        $check = new \Predis\Client('tcp://127.0.0.1:6399', ['timeout' => 2.0, 'read_write_timeout' => 2.0]);
+        $check = new \Predis\Client(\BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\RedisTestUrl::resolve(), ['timeout' => 2.0, 'read_write_timeout' => 2.0]);
         $record = $check->get('kiwicaptcha:'.$challenge->nonce);
         $check->disconnect();
         self::assertIsString($record, 'the owner must leave the challenge record in place (consumed, not deleted)');
@@ -768,7 +768,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
             self::markTestSkipped('pcntl/predis not available');
         }
         try {
-            $probe = new \Predis\Client('tcp://127.0.0.1:6399', ['timeout' => 2.0, 'read_write_timeout' => 2.0]);
+            $probe = new \Predis\Client(\BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\RedisTestUrl::resolve(), ['timeout' => 2.0, 'read_write_timeout' => 2.0]);
             $probe->ping();
         } catch (\Throwable) {
             self::markTestSkipped('no Redis at 127.0.0.1:6399');
@@ -797,7 +797,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
             }
             $line = 'error';
             try {
-                $client = new \Predis\Client('tcp://127.0.0.1:6399', ['timeout' => 15.0, 'read_write_timeout' => 15.0]);
+                $client = new \Predis\Client(\BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\RedisTestUrl::resolve(), ['timeout' => 15.0, 'read_write_timeout' => 15.0]);
                 $sleepy = new class(new RedisStorage($client)) implements \KiwiCaptcha\AtomicStorageInterface {
                     public function __construct(private readonly \KiwiCaptcha\AtomicStorageInterface $inner)
                     {
@@ -867,7 +867,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         // still unconsumed; the owner's consume never delegated) and
         // finalizes its canonical success.
         sleep(4);
-        $client = new \Predis\Client('tcp://127.0.0.1:6399', ['timeout' => 15.0, 'read_write_timeout' => 15.0]);
+        $client = new \Predis\Client(\BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\RedisTestUrl::resolve(), ['timeout' => 15.0, 'read_write_timeout' => 15.0]);
         $storage = new RedisStorage($client);
         $taker = new SiteVerifyController(
             new Verifier($storage),
@@ -905,7 +905,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
             self::markTestSkipped('predis/predis is not installed');
         }
         try {
-            $probe = new \Predis\Client('tcp://127.0.0.1:6399', ['timeout' => 1.0, 'read_write_timeout' => 1.0]);
+            $probe = new \Predis\Client(\BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\RedisTestUrl::resolve(), ['timeout' => 1.0, 'read_write_timeout' => 1.0]);
             $probe->ping();
         } catch (\Throwable) {
             self::markTestSkipped('no Redis at 127.0.0.1:6399');
@@ -939,7 +939,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
             self::markTestSkipped('predis/predis is not installed');
         }
         try {
-            $probe = new \Predis\Client('tcp://127.0.0.1:6399', ['timeout' => 1.0, 'read_write_timeout' => 1.0]);
+            $probe = new \Predis\Client(\BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\RedisTestUrl::resolve(), ['timeout' => 1.0, 'read_write_timeout' => 1.0]);
             $probe->ping();
         } catch (\Throwable) {
             self::markTestSkipped('no Redis at 127.0.0.1:6399');
@@ -989,7 +989,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
             self::markTestSkipped('predis/predis is not installed');
         }
         try {
-            $probe = new \Predis\Client('tcp://127.0.0.1:6399', ['timeout' => 2.0, 'read_write_timeout' => 2.0]);
+            $probe = new \Predis\Client(\BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\RedisTestUrl::resolve(), ['timeout' => 2.0, 'read_write_timeout' => 2.0]);
             $probe->ping();
         } catch (\Throwable) {
             self::markTestSkipped('no Redis at 127.0.0.1:6399 — start one for the late-expiry crash-recovery test');
@@ -1184,7 +1184,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
             self::markTestSkipped('predis/predis is not installed');
         }
         try {
-            $probe = new \Predis\Client('tcp://127.0.0.1:6399', ['timeout' => 2.0, 'read_write_timeout' => 2.0]);
+            $probe = new \Predis\Client(\BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\RedisTestUrl::resolve(), ['timeout' => 2.0, 'read_write_timeout' => 2.0]);
             $probe->ping();
         } catch (\Throwable) {
             self::markTestSkipped('no Redis at 127.0.0.1:6399 — start one for the consumed-record identity regression test');
@@ -1268,7 +1268,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
             self::markTestSkipped('predis/predis is not installed');
         }
         try {
-            $probe = new \Predis\Client('tcp://127.0.0.1:6399', ['timeout' => 2.0, 'read_write_timeout' => 2.0]);
+            $probe = new \Predis\Client(\BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\RedisTestUrl::resolve(), ['timeout' => 2.0, 'read_write_timeout' => 2.0]);
             $probe->ping();
         } catch (\Throwable) {
             self::markTestSkipped('no Redis at 127.0.0.1:6399');
@@ -1385,7 +1385,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
             self::markTestSkipped('predis/predis is not installed');
         }
         try {
-            $probe = new \Predis\Client('tcp://127.0.0.1:6399', ['timeout' => 2.0, 'read_write_timeout' => 2.0]);
+            $probe = new \Predis\Client(\BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\RedisTestUrl::resolve(), ['timeout' => 2.0, 'read_write_timeout' => 2.0]);
             $probe->ping();
         } catch (\Throwable) {
             self::markTestSkipped('no Redis at 127.0.0.1:6399');
@@ -1515,7 +1515,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
             self::markTestSkipped('predis/predis is not installed');
         }
         try {
-            $probe = new \Predis\Client('tcp://127.0.0.1:6399', ['timeout' => 2.0, 'read_write_timeout' => 2.0]);
+            $probe = new \Predis\Client(\BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\RedisTestUrl::resolve(), ['timeout' => 2.0, 'read_write_timeout' => 2.0]);
             $probe->ping();
         } catch (\Throwable) {
             self::markTestSkipped('no Redis at 127.0.0.1:6399');
@@ -1556,7 +1556,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
                 }
                 $line = 'error';
                 try {
-                    $client = new \Predis\Client('tcp://127.0.0.1:6399', ['timeout' => 5.0, 'read_write_timeout' => 5.0]);
+                    $client = new \Predis\Client(\BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\RedisTestUrl::resolve(), ['timeout' => 5.0, 'read_write_timeout' => 5.0]);
                     $storage = new RedisStorage($client);
                     $idempotencyStore = new RedisSiteVerifyIdempotencyStore($client, 'kiwicaptcha', 3);
                     // The "crash" seam: finalize() never lands, so the
@@ -1671,7 +1671,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         // fingerprint — the identity is written atomically with the
         // pending→consumed transition, so the pre-verification claim
         // winner cannot claim an identity it did not win.
-        $check = new \Predis\Client('tcp://127.0.0.1:6399', ['timeout' => 2.0, 'read_write_timeout' => 2.0]);
+        $check = new \Predis\Client(\BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\RedisTestUrl::resolve(), ['timeout' => 2.0, 'read_write_timeout' => 2.0]);
         $storage = new RedisStorage($check);
         $consumed = $storage->consumedState($challenge->nonce);
         self::assertNotNull($consumed, 'the winner must leave the challenge record in place (consumed, not deleted)');
@@ -1734,7 +1734,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
             self::markTestSkipped('predis/predis is not installed');
         }
         try {
-            $probe = new \Predis\Client('tcp://127.0.0.1:6399', ['timeout' => 2.0, 'read_write_timeout' => 2.0]);
+            $probe = new \Predis\Client(\BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\RedisTestUrl::resolve(), ['timeout' => 2.0, 'read_write_timeout' => 2.0]);
             $probe->ping();
         } catch (\Throwable) {
             self::markTestSkipped('no Redis at 127.0.0.1:6399');
@@ -1892,7 +1892,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
             self::markTestSkipped('predis/predis is not installed');
         }
         try {
-            $probe = new \Predis\Client('tcp://127.0.0.1:6399', ['timeout' => 2.0, 'read_write_timeout' => 2.0]);
+            $probe = new \Predis\Client(\BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\RedisTestUrl::resolve(), ['timeout' => 2.0, 'read_write_timeout' => 2.0]);
             $probe->ping();
         } catch (\Throwable) {
             self::markTestSkipped('no Redis at 127.0.0.1:6399');
@@ -2024,7 +2024,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
             self::markTestSkipped('predis/predis is not installed');
         }
         try {
-            $probe = new \Predis\Client('tcp://127.0.0.1:6399', ['timeout' => 2.0, 'read_write_timeout' => 2.0]);
+            $probe = new \Predis\Client(\BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\RedisTestUrl::resolve(), ['timeout' => 2.0, 'read_write_timeout' => 2.0]);
             $probe->ping();
         } catch (\Throwable) {
             self::markTestSkipped('no Redis at 127.0.0.1:6399');

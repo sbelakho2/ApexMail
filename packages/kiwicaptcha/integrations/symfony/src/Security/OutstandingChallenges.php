@@ -664,37 +664,9 @@ LUA;
      */
     private function refuseVerifiedWaitOnUnsupportedPredisClients(): void
     {
-        if ($this->waitReplicas <= 0 || !($this->redis instanceof \Predis\Client)) {
-            return;
-        }
-        $connection = $this->redis->getConnection();
-        if ($connection instanceof \Predis\Connection\Replication\ReplicationInterface) {
-            throw new \InvalidArgumentException(
-                'OutstandingChallenges: verified-WAIT durability (waitReplicas > 0) is not supported on a Predis replication aggregate (Sentinel or master-slave) — WAIT is connection-affine, counting replicas of the connection it is sent on, and the aggregate\'s failure retry executes the WAIT on a replacement connection whose write offset is empty. The verified barrier supports standalone Redis connections only; use a standalone connection with waitReplicas > 0, or keep waitReplicas = 0 on an aggregate.'
-            );
-        }
-        if ($connection instanceof \Predis\Connection\Cluster\ClusterInterface) {
-            throw new \InvalidArgumentException(
-                'OutstandingChallenges: verified-WAIT durability (waitReplicas > 0) is not supported on a Predis Redis Cluster client — WAIT is connection-relative and cannot be routed by slot. The verified barrier supports standalone Redis connections only; use a standalone connection with waitReplicas > 0, or keep waitReplicas = 0 on a cluster.'
-            );
-        }
-        if ($connection === null) {
-            // An in-memory stand-in with no real connection object (the
-            // tests' fake clients skip the parent constructor): there is
-            // no Parameters instance to carry a retry policy and the
-            // stand-in overrides the command dispatch itself, so the
-            // vendored retry wrapper never engages.
-            return;
-        }
-        if ($connection instanceof \Predis\Connection\RelayConnection) {
-            return;
-        }
-        if (!$connection->getParameters()->isDisabledRetry()) {
-            throw new \InvalidArgumentException(
-                'OutstandingChallenges: verified-WAIT durability (waitReplicas > 0) is not supported on a retry-enabled standalone Predis client — verified-WAIT durability requires that a durability-critical mutation is attempted exactly once on the connection whose subsequent WAIT establishes the replication offset. Retries must be disabled on the connection (remove the \'retry\' connection parameter), or keep waitReplicas = 0.'
-            );
-        }
+        \KiwiCaptcha\VerifiedWaitGuard::refuseUnsupported($this->redis, $this->waitReplicas, 'OutstandingChallenges');
     }
+
 
     /**
      * Run a Lua script against whichever client implementation is in use.

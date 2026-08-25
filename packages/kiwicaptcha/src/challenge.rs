@@ -1167,8 +1167,8 @@ mod hex {
 
 #[cfg(test)]
 mod tests {
-    use crate::verify::RequestBindingExpectation;
     use super::*;
+    use crate::verify::RequestBindingExpectation;
 
     // Test "now_ns" values are epoch microseconds (1_700_000_000_000_000 µs
     // ≈ 2023-11-14 UTC) — the unit the crate shares with PHP, see
@@ -1862,7 +1862,7 @@ mod tests {
                 now_ns: 1_700_000_005_000_000,
                 min_duration_ms: 0,
                 expected_scope: None,
-            expected_request_binding: RequestBindingExpectation::Unenforced,
+                expected_request_binding: RequestBindingExpectation::Unenforced,
                 client_ip: Some("1.2.3.4"),
                 expected_region: None,
                 expected_issuer: None,

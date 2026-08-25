@@ -274,14 +274,36 @@ final class KiwiHealthController
         try {
             $policy = $this->redis->hgetall('{kiwi:'.$this->namespace.'}:security-policy');
             if (\is_array($policy) && $policy !== []) {
-                $minProtocol = (int) ($policy['min_protocol_version'] ?? 0);
-                $minEpoch = (int) ($policy['min_policy_epoch'] ?? 0);
-                if ($minProtocol > self::MAX_PROTOCOL_VERSION) {
-                    $ok = false;
-                    $reason = 'security_policy_incompatible:min_protocol_version_'.$minProtocol;
-                } elseif ($minEpoch > $this->policyVersion) {
-                    $ok = false;
-                    $reason = 'security_policy_incompatible:min_policy_epoch_'.$minEpoch;
+                // Corrupt PRESENT policy state must fail closed: a
+                // malformed min_protocol_version / min_policy_epoch (abc,
+                // -1, 1.5, 1e3, overflow) makes the node NOT ready — it is
+                // never silently collapsed toward zero and interpreted as
+                // absent.
+                foreach (['min_protocol_version', 'min_policy_epoch'] as $field) {
+                    if (\array_key_exists($field, $policy)) {
+                        $raw = $policy[$field];
+                        if (!\is_string($raw) || preg_match('/^(?:0|[1-9][0-9]*)$/D', $raw) !== 1) {
+                            $ok = false;
+                            $reason = 'security_policy_state_corrupt:'.$field;
+                        } else {
+                            $parsed = (int) $raw;
+                            if ((string) $parsed !== $raw) {
+                                $ok = false;
+                                $reason = 'security_policy_state_corrupt:'.$field;
+                            }
+                        }
+                    }
+                }
+                if ($ok) {
+                    $minProtocol = (int) ($policy['min_protocol_version'] ?? 0);
+                    $minEpoch = (int) ($policy['min_policy_epoch'] ?? 0);
+                    if ($minProtocol > self::MAX_PROTOCOL_VERSION) {
+                        $ok = false;
+                        $reason = 'security_policy_incompatible:min_protocol_version_'.$minProtocol;
+                    } elseif ($minEpoch > $this->policyVersion) {
+                        $ok = false;
+                        $reason = 'security_policy_incompatible:min_policy_epoch_'.$minEpoch;
+                    }
                 }
             }
         } catch (\Throwable) {

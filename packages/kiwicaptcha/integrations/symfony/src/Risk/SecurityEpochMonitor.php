@@ -215,16 +215,36 @@ final class SecurityEpochMonitor
         }
         try {
             $value = $this->redis->hget($this->policyKey(), self::MIN_POLICY_EPOCH_FIELD);
-            $this->lastSuccessAtMs = $now;
         } catch (\Throwable) {
             // Fail-safe: serve the last-observed max, never a weaker epoch.
             return null;
         }
-        if (!\is_numeric($value)) {
+        if ($value === null || $value === false) {
+            // A successful read with no central epoch configured (a fresh
+            // deployment): the monitor is healthy and the success mark is
+            // refreshed — only the last-observed max keeps serving.
+            $this->lastSuccessAtMs = $now;
+
             return null;
         }
+        // Corrupt PRESENT state must never be indistinguishable from
+        // absent state: the central policy epoch is a canonical unsigned
+        // decimal integer, and a malformed value (abc, -1, 1.5, 1e3,
+        // whitespace variants, integer overflow) is NOT a successful
+        // read — the stale window is NOT refreshed (the verification
+        // fails closed once the max-stale bound passes) and the
+        // last-observed max keeps serving.
+        if (!\is_string($value) || !preg_match('/^(?:0|[1-9][0-9]*)$/D', $value)) {
+            return null;
+        }
+        $epoch = (int) $value;
+        if ((string) $epoch !== $value) {
+            // Integer overflow: the value does not fit a PHP int.
+            return null;
+        }
+        $this->lastSuccessAtMs = $now;
 
-        return (int) $value;
+        return $epoch;
     }
 
     private function apply(int $epoch): void

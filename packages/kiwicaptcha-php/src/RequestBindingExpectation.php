@@ -27,12 +27,12 @@ namespace KiwiCaptcha;
  * only ever compares BOUND records), so existing callers keep their
  * semantics until they migrate to `exact()`.
  */
-final readonly class RequestBindingExpectation
+final class RequestBindingExpectation
 {
     private function __construct(
-        public bool $enforced,
-        public ?string $expected,
-        public bool $requireBindingPresence,
+        public readonly bool $enforced,
+        public readonly ?string $expected,
+        public readonly bool $requireBindingPresence,
     ) {
     }
 

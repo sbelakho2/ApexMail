@@ -23,7 +23,7 @@ use kiwicaptcha::redis_verify::{
     ProductionVerifier, RedisChallengeStore, StoredConsumedResult, DEFAULT_POOL_SIZE,
 };
 use kiwicaptcha::token::SolutionToken;
-use kiwicaptcha::verify::{solve_for_test, VerifyError, VerifyOutcome};
+use kiwicaptcha::verify::{solve_for_test, RequestBindingExpectation, VerifyError, VerifyOutcome};
 
 /// Gate that flatly grants (`true`) or refuses (`false`) capacity — the
 /// trait-based admission-gate contract.
@@ -244,7 +244,7 @@ fn verify_with(
     token: &str,
     issued_at_ns: u64,
     operation_identity: Option<&str>,
-    expected_request_binding: Option<&str>,
+    expected_request_binding: RequestBindingExpectation<'_>,
 ) -> VerifyOutcome {
     verifier.verify(
         token,
@@ -260,7 +260,13 @@ fn verify_with(
 /// derived minimum-duration floor (SHA 5 ms, Argon2id 50 ms) — and no
 /// operation identity / expected binding (the native-caller default).
 fn verify_at(verifier: &ProductionVerifier, token: &str, issued_at_ns: u64) -> VerifyOutcome {
-    verify_with(verifier, token, issued_at_ns, None, None)
+    verify_with(
+        verifier,
+        token,
+        issued_at_ns,
+        None,
+        RequestBindingExpectation::Unenforced,
+    )
 }
 
 #[test]
@@ -458,7 +464,14 @@ fn two_concurrent_verifies_exactly_one_derives() {
         let token = token.clone();
         handles.push(thread::spawn(move || {
             barrier.wait();
-            verifier.verify(&token, "login", IP, issued_at_ns + 1_000_000, None, None)
+            verifier.verify(
+                &token,
+                "login",
+                IP,
+                issued_at_ns + 1_000_000,
+                None,
+                RequestBindingExpectation::Unenforced,
+            )
         }));
     }
     barrier.wait();
@@ -546,7 +559,13 @@ fn replay_after_valid_verify_is_identity_gated() {
 
     // Identity-bearing first verification → fresh Valid.
     assert_eq!(
-        verify_with(&verifier, &token, issued_at_ns, Some("op-replay"), None),
+        verify_with(
+            &verifier,
+            &token,
+            issued_at_ns,
+            Some("op-replay"),
+            RequestBindingExpectation::Unenforced
+        ),
         VerifyOutcome::Valid {
             nonce: issued.record.nonce.clone(),
             request_binding: None,
@@ -557,7 +576,13 @@ fn replay_after_valid_verify_is_identity_gated() {
     // identity retry returns the same Valid from the stored result,
     // distinguishable from a fresh success.
     assert_eq!(
-        verify_with(&verifier, &token, issued_at_ns, Some("op-replay"), None),
+        verify_with(
+            &verifier,
+            &token,
+            issued_at_ns,
+            Some("op-replay"),
+            RequestBindingExpectation::Unenforced
+        ),
         VerifyOutcome::Valid {
             nonce: issued.record.nonce.clone(),
             request_binding: None,
@@ -606,7 +631,7 @@ fn replay_outcomes_follow_the_operation_identity_gate() {
             &token_a,
             issued_a.record.issued_at_ns,
             Some("op-a"),
-            None
+            RequestBindingExpectation::Unenforced
         ),
         VerifyOutcome::Valid {
             nonce: issued_a.record.nonce.clone(),
@@ -623,7 +648,7 @@ fn replay_outcomes_follow_the_operation_identity_gate() {
             &token_a,
             issued_a.record.issued_at_ns,
             Some("op-a"),
-            None
+            RequestBindingExpectation::Unenforced
         ),
         VerifyOutcome::Valid {
             nonce: issued_a.record.nonce.clone(),
@@ -640,7 +665,7 @@ fn replay_outcomes_follow_the_operation_identity_gate() {
             &token_a,
             issued_a.record.issued_at_ns,
             Some("op-b"),
-            None
+            RequestBindingExpectation::Unenforced
         ),
         VerifyOutcome::Invalid(VerifyError::AlreadyConsumed),
         "T + B: a different identity is AlreadyConsumed"
@@ -696,7 +721,7 @@ fn replay_outcomes_follow_the_operation_identity_gate() {
             &encode_token(&issued_wrong.record.nonce, wrong_counter),
             issued_wrong.record.issued_at_ns,
             Some("op-wrong"),
-            None
+            RequestBindingExpectation::Unenforced
         ),
         VerifyOutcome::Invalid(VerifyError::InsufficientWork),
         "wrong proof first: InsufficientWork"
@@ -707,7 +732,7 @@ fn replay_outcomes_follow_the_operation_identity_gate() {
             &encode_token(&issued_wrong.record.nonce, valid_counter),
             issued_wrong.record.issued_at_ns,
             None,
-            None
+            RequestBindingExpectation::Unenforced
         ),
         VerifyOutcome::Invalid(VerifyError::InsufficientWork),
         "the same nonce later: the deterministic invalid outcome replays without an identity"
@@ -740,7 +765,13 @@ fn expected_request_binding_is_enforced_in_the_cheap_phase() {
     // Match: the record's signed binding equals the expectation.
     verifier.store().store(&issued.record).unwrap();
     assert_eq!(
-        verify_with(&verifier, &token, issued_at_ns, None, Some("txn-1")),
+        verify_with(
+            &verifier,
+            &token,
+            issued_at_ns,
+            None,
+            RequestBindingExpectation::Exact(Some("txn-1"))
+        ),
         VerifyOutcome::Valid {
             nonce: issued.record.nonce.clone(),
             request_binding: Some("txn-1".into()),
@@ -769,7 +800,7 @@ fn expected_request_binding_is_enforced_in_the_cheap_phase() {
             &token_mismatch,
             issued_mismatch.record.issued_at_ns,
             None,
-            Some("txn-2")
+            RequestBindingExpectation::Exact(Some("txn-2"))
         ),
         VerifyOutcome::Invalid(VerifyError::RequestBindingMismatch),
         "a differing expected binding is RequestBindingMismatch"
@@ -781,7 +812,7 @@ fn expected_request_binding_is_enforced_in_the_cheap_phase() {
             &token_mismatch,
             issued_mismatch.record.issued_at_ns,
             None,
-            Some("txn-1")
+            RequestBindingExpectation::Exact(Some("txn-1"))
         ),
         VerifyOutcome::Invalid(VerifyError::RecordNotFound),
         "the binding-mismatch cheap failure consumed the pending record"
@@ -807,7 +838,7 @@ fn expected_request_binding_is_enforced_in_the_cheap_phase() {
             &token_unbound,
             issued_unbound.record.issued_at_ns,
             None,
-            Some("txn-1")
+            RequestBindingExpectation::Exact(Some("txn-1"))
         ),
         VerifyOutcome::Invalid(VerifyError::RequestBindingMismatch),
         "a record without a binding fails closed when one is expected"
@@ -833,7 +864,7 @@ fn expected_request_binding_is_enforced_in_the_cheap_phase() {
             &token_none,
             issued_none.record.issued_at_ns,
             None,
-            None
+            RequestBindingExpectation::Unenforced
         ),
         VerifyOutcome::Valid {
             nonce: issued_none.record.nonce.clone(),
@@ -892,7 +923,13 @@ fn consumed_evidence_survives_a_cheap_failure_past_expiry() {
     FAKE_EVIDENCE_NOW.store(now_unix() + 300, Ordering::SeqCst);
     let verifier = verifier_for(&url, &prefix).with_now_fn(fake_evidence_now);
     assert_eq!(
-        verify_with(&verifier, &token, issued_at_ns, Some("op-evidence"), None),
+        verify_with(
+            &verifier,
+            &token,
+            issued_at_ns,
+            Some("op-evidence"),
+            RequestBindingExpectation::Unenforced
+        ),
         VerifyOutcome::Valid {
             nonce: issued.record.nonce.clone(),
             request_binding: None,
@@ -994,7 +1031,14 @@ fn expired_record_returns_expired() {
 
         let verifier = verifier_for(&url, &prefix);
         verifier.store().store(&issued.record).unwrap();
-        match verifier.verify(&token, "login", IP, now_micros(), None, None) {
+        match verifier.verify(
+            &token,
+            "login",
+            IP,
+            now_micros(),
+            None,
+            RequestBindingExpectation::Unenforced,
+        ) {
             VerifyOutcome::Invalid(VerifyError::Expired) => return,
             VerifyOutcome::Invalid(VerifyError::RecordNotFound) => continue,
             other => panic!("expired record gave unexpected outcome: {other:?}"),
@@ -1234,7 +1278,7 @@ fn argon_lease_is_held_during_verify_and_released_by_drop() {
             IP,
             issued_at_ns + 1_000_000,
             None,
-            None,
+            RequestBindingExpectation::Unenforced,
         )
     });
 
@@ -1525,7 +1569,7 @@ fn unreachable_store_maps_find_error_to_storage_unavailable() {
             IP,
             now_micros(),
             None,
-            None
+            RequestBindingExpectation::Unenforced
         ),
         VerifyOutcome::Invalid(VerifyError::StorageUnavailable),
         "a find()/checkout failure must map to StorageUnavailable (the challenge is presumed intact), never RecordNotFound"
@@ -2869,17 +2913,38 @@ fn noncanonical_tokens_reach_the_verifier_as_malformed_token() {
     let url_safe = format!("-{}", &good[1..]); // '-' is outside the standard alphabet
     assert_ne!(url_safe, good);
     assert_eq!(
-        verifier.verify(&url_safe, "login", IP, issued_at_ns + 1_000_000, None, None),
+        verifier.verify(
+            &url_safe,
+            "login",
+            IP,
+            issued_at_ns + 1_000_000,
+            None,
+            RequestBindingExpectation::Unenforced
+        ),
         VerifyOutcome::Invalid(VerifyError::MalformedToken)
     );
     let unpadded = good.trim_end_matches('=');
     assert_eq!(
-        verifier.verify(unpadded, "login", IP, issued_at_ns + 1_000_000, None, None),
+        verifier.verify(
+            unpadded,
+            "login",
+            IP,
+            issued_at_ns + 1_000_000,
+            None,
+            RequestBindingExpectation::Unenforced
+        ),
         VerifyOutcome::Invalid(VerifyError::MalformedToken)
     );
     let loose = format!("{good}=");
     assert_eq!(
-        verifier.verify(&loose, "login", IP, issued_at_ns + 1_000_000, None, None),
+        verifier.verify(
+            &loose,
+            "login",
+            IP,
+            issued_at_ns + 1_000_000,
+            None,
+            RequestBindingExpectation::Unenforced
+        ),
         VerifyOutcome::Invalid(VerifyError::MalformedToken)
     );
 
@@ -3114,7 +3179,7 @@ fn future_issued_challenge_beyond_skew_is_rejected() {
             IP,
             issued.record.issued_at_ns + 1_000_000,
             None,
-            None
+            RequestBindingExpectation::Unenforced
         ),
         VerifyOutcome::Invalid(VerifyError::Expired),
         "a future-issued challenge beyond the clock skew must be rejected"
@@ -3160,7 +3225,7 @@ fn unknown_algorithm_variants_in_stored_records_are_record_not_found() {
                 IP,
                 now_micros(),
                 None,
-                None
+                RequestBindingExpectation::Unenforced
             ),
             VerifyOutcome::Invalid(VerifyError::RecordNotFound),
             "algorithm {algo:?} must be undecodable (RecordNotFound), like PHP"
@@ -3262,7 +3327,7 @@ fn oversized_stored_record_is_rejected_before_parse() {
             IP,
             now_micros(),
             None,
-            None
+            RequestBindingExpectation::Unenforced
         ),
         VerifyOutcome::Invalid(VerifyError::RecordNotFound),
         "a 10 MB stored value must be rejected at parse (RecordNotFound), like any corrupt key"
@@ -3363,7 +3428,7 @@ fn security_failures_win_on_matching_identity_replay_and_keep_the_evidence() {
                     IP,
                     issued_at_ns + 1_000_000,
                     Some("op-x"),
-                    None,
+                    RequestBindingExpectation::Unenforced,
                 )
             },
         ),
@@ -3377,7 +3442,7 @@ fn security_failures_win_on_matching_identity_replay_and_keep_the_evidence() {
                     IP,
                     issued_at_ns + 1_000_000,
                     Some("op-x"),
-                    Some("txn-OTHER"),
+                    RequestBindingExpectation::Exact(Some("txn-OTHER")),
                 )
             },
         ),
@@ -3391,7 +3456,7 @@ fn security_failures_win_on_matching_identity_replay_and_keep_the_evidence() {
                     IP,
                     issued_at_ns + 1_000_000,
                     Some("op-x"),
-                    None,
+                    RequestBindingExpectation::Unenforced,
                 )
             },
         ),
@@ -3405,7 +3470,7 @@ fn security_failures_win_on_matching_identity_replay_and_keep_the_evidence() {
                     IP,
                     issued_at_ns + 1_000_000,
                     Some("op-x"),
-                    None,
+                    RequestBindingExpectation::Unenforced,
                 )
             },
         ),
@@ -3419,7 +3484,7 @@ fn security_failures_win_on_matching_identity_replay_and_keep_the_evidence() {
                     IP,
                     issued_at_ns + 1_000_000,
                     Some("op-x"),
-                    None,
+                    RequestBindingExpectation::Unenforced,
                 )
             },
         ),
@@ -3450,7 +3515,7 @@ fn security_failures_win_on_matching_identity_replay_and_keep_the_evidence() {
                     &token,
                     issued_at_ns,
                     Some("op-x"),
-                    Some("txn-123")
+                    RequestBindingExpectation::Exact(Some("txn-123"))
                 ),
                 VerifyOutcome::Valid { .. }
             ),
@@ -3528,7 +3593,13 @@ fn exempt_timing_failures_still_resolve_through_the_identity_gate() {
         verifier.store().store(&issued.record).unwrap();
         assert!(
             matches!(
-                verify_with(&verifier, &token, issued_at_ns, Some("op-e"), None),
+                verify_with(
+                    &verifier,
+                    &token,
+                    issued_at_ns,
+                    Some("op-e"),
+                    RequestBindingExpectation::Unenforced
+                ),
                 VerifyOutcome::Valid { .. }
             ),
             "{label}: setup — the fresh verification succeeds"
@@ -3540,7 +3611,14 @@ fn exempt_timing_failures_still_resolve_through_the_identity_gate() {
         let replay_ip = if changed_ip { "203.0.113.9" } else { IP };
         assert!(
             matches!(
-                verifier.verify(&token, "login", replay_ip, receipt, Some("op-e"), None),
+                verifier.verify(
+                    &token,
+                    "login",
+                    replay_ip,
+                    receipt,
+                    Some("op-e"),
+                    RequestBindingExpectation::Unenforced
+                ),
                 VerifyOutcome::Valid {
                     from_stored_result: true,
                     ..
@@ -3831,7 +3909,7 @@ fn exempt_cheap_failure_never_masks_a_hard_verdict_on_a_consumed_replay() {
         // (scope, client_ip, expected_request_binding) for the replay call
         scope: &'static str,
         client_ip: &'static str,
-        expected_request_binding: Option<&'static str>,
+        expected_request_binding: RequestBindingExpectation<'static>,
         // now offset for the replay receipt: None = +1s, Some(s) = +s
         receipt_offset_s: u64,
         expiry_clock: bool,
@@ -3848,7 +3926,7 @@ fn exempt_cheap_failure_never_masks_a_hard_verdict_on_a_consumed_replay() {
             label: "expired + wrong scope",
             scope: "signup",
             client_ip: IP,
-            expected_request_binding: None,
+            expected_request_binding: RequestBindingExpectation::Unenforced,
             receipt_offset_s: 1,
             expiry_clock: true,
             region: None,
@@ -3861,7 +3939,7 @@ fn exempt_cheap_failure_never_masks_a_hard_verdict_on_a_consumed_replay() {
             label: "expired + request binding mismatch",
             scope: "login",
             client_ip: IP,
-            expected_request_binding: Some("txn-OTHER"),
+            expected_request_binding: RequestBindingExpectation::Exact(Some("txn-OTHER")),
             receipt_offset_s: 1,
             expiry_clock: true,
             region: None,
@@ -3874,7 +3952,7 @@ fn exempt_cheap_failure_never_masks_a_hard_verdict_on_a_consumed_replay() {
             label: "expired + wrong region",
             scope: "login",
             client_ip: IP,
-            expected_request_binding: Some("txn-123"),
+            expected_request_binding: RequestBindingExpectation::Exact(Some("txn-123")),
             receipt_offset_s: 1,
             expiry_clock: true,
             region: Some("eu"),
@@ -3887,7 +3965,7 @@ fn exempt_cheap_failure_never_masks_a_hard_verdict_on_a_consumed_replay() {
             label: "expired + wrong policy epoch",
             scope: "login",
             client_ip: IP,
-            expected_request_binding: Some("txn-123"),
+            expected_request_binding: RequestBindingExpectation::Exact(Some("txn-123")),
             receipt_offset_s: 1,
             expiry_clock: true,
             region: None,
@@ -3900,7 +3978,7 @@ fn exempt_cheap_failure_never_masks_a_hard_verdict_on_a_consumed_replay() {
             label: "expired + wrong issuer",
             scope: "login",
             client_ip: IP,
-            expected_request_binding: Some("txn-123"),
+            expected_request_binding: RequestBindingExpectation::Exact(Some("txn-123")),
             receipt_offset_s: 1,
             expiry_clock: true,
             region: None,
@@ -3914,7 +3992,7 @@ fn exempt_cheap_failure_never_masks_a_hard_verdict_on_a_consumed_replay() {
             label: "ip mismatch + minimum-duration floor",
             scope: "login",
             client_ip: "203.0.113.9",
-            expected_request_binding: Some("txn-123"),
+            expected_request_binding: RequestBindingExpectation::Exact(Some("txn-123")),
             receipt_offset_s: 1,
             expiry_clock: false,
             region: None,
@@ -3929,7 +4007,7 @@ fn exempt_cheap_failure_never_masks_a_hard_verdict_on_a_consumed_replay() {
             label: "ip mismatch behind wrong region (order pin)",
             scope: "login",
             client_ip: "203.0.113.9",
-            expected_request_binding: Some("txn-123"),
+            expected_request_binding: RequestBindingExpectation::Exact(Some("txn-123")),
             receipt_offset_s: 1,
             expiry_clock: false,
             region: Some("eu"),
@@ -4008,7 +4086,7 @@ fn exempt_circumstance_alone_still_replays_the_stored_success() {
                 client_ip,
                 issued_at_ns + 1_000_000,
                 Some("op-replay"),
-                Some("txn-123"),
+                RequestBindingExpectation::Exact(Some("txn-123")),
             ),
             VerifyOutcome::Valid {
                 nonce: nonce.clone(),
@@ -4057,7 +4135,7 @@ fn fresh_challenges_keep_the_first_error_precedence() {
             IP,
             issued_at_ns + 1_000_000,
             Some("op-replay"),
-            Some("txn-OTHER"),
+            RequestBindingExpectation::Exact(Some("txn-OTHER")),
         ),
         VerifyOutcome::Invalid(VerifyError::Expired),
         "the fresh path keeps the first-error precedence: Expired wins"

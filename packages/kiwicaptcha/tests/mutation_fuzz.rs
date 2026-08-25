@@ -18,7 +18,9 @@ use kiwicaptcha::challenge::{
     issue_challenge, BindingMode, ChallengeConfig, ChallengeRecord, PoWAlgorithm,
 };
 use kiwicaptcha::token::SolutionToken;
-use kiwicaptcha::verify::{validate_record, verify_solution, RequestBindingExpectation, VerifyContext};
+use kiwicaptcha::verify::{
+    validate_record, verify_solution, RequestBindingExpectation, VerifyContext,
+};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 
@@ -98,7 +100,7 @@ fn byte_mutations_never_panic_on_any_parse_path() {
                 now_ns: NOW_NS + 1_000_000,
                 min_duration_ms: 0,
                 expected_scope: None,
-            expected_request_binding: RequestBindingExpectation::Unenforced,
+                expected_request_binding: RequestBindingExpectation::Unenforced,
                 expected_region: None,
                 expected_issuer: None,
                 expected_policy_version: None,

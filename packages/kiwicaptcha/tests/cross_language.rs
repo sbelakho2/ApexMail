@@ -4,7 +4,8 @@
 //! `cargo test` stays hermetic.
 
 use kiwicaptcha::verify::{
-    solve_for_test, verify_solution, RequestBindingExpectation, VerifyContext, VerifyError, VerifyOutcome,
+    solve_for_test, verify_solution, RequestBindingExpectation, VerifyContext, VerifyError,
+    VerifyOutcome,
 };
 
 #[test]
@@ -36,7 +37,7 @@ fn rust_verifies_php_issued_record() {
         now_ns,
         min_duration_ms: 0,
         expected_scope: Some("login"),
-            expected_request_binding: RequestBindingExpectation::Unenforced,
+        expected_request_binding: RequestBindingExpectation::Unenforced,
         expected_region: None,
         expected_issuer: None,
         expected_policy_version: None,
@@ -67,7 +68,7 @@ fn rust_verifies_php_issued_record() {
         now_ns,
         min_duration_ms: 0,
         expected_scope: Some("login"),
-            expected_request_binding: RequestBindingExpectation::Unenforced,
+        expected_request_binding: RequestBindingExpectation::Unenforced,
         expected_region: None,
         expected_issuer: None,
         expected_policy_version: None,

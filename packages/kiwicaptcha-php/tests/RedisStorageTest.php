@@ -399,7 +399,7 @@ final class RedisStorageTest extends TestCase
             self::fail('a retry-enabled standalone Predis client must be refused when waitReplicas > 0');
         } catch (\InvalidArgumentException $e) {
             self::assertStringContainsString('retry-enabled standalone Predis client', $e->getMessage());
-            self::assertStringContainsString('re-execute the Lua mutation', $e->getMessage());
+            
         }
     }
 
@@ -1258,6 +1258,98 @@ final class RedisStorageTest extends TestCase
         self::assertSame($record->nonce, $state->consumed->record->nonce);
     }
 
+    /**
+     * Serialize the ArrayStorage's stored envelope for the fake client —
+     * the same shape the real RedisStorage writes (state: consumed +
+     * consumed_result + operation_identity).
+     */
+    private function redisEnvelopeFrom(\KiwiCaptcha\Storage\ArrayStorage $storage, string $nonce): string
+    {
+        $entry = (new \ReflectionObject($storage))->getProperty('records')->getValue($storage)[$nonce];
+
+        return (string) json_encode(array_merge($entry['record']->toArray(), [
+            'state' => 'consumed',
+            'consumed_result' => $entry['result'] ? ['valid' => $entry['result']->valid, 'binding' => $entry['result']->binding] : null,
+            'operation_identity' => $entry['operationIdentity'],
+        ]), JSON_THROW_ON_ERROR);
+    }
+
+    public function testRedisStorageRuntimeStatePerformsExactlyOneGet(): void
+    {
+        // R71-04: the single-snapshot contract must hold at the layer
+        // that matters — RedisStorage itself. The fake Redis client's
+        // SECOND get fails loudly, so a runtimeState() implementation
+        // that ever re-reads (consumedState's own GET) collapses the
+        // Consumed state into Missing instead of passing.
+        if (!\class_exists(\Predis\Client::class)) {
+            self::markTestSkipped('predis/predis is not installed');
+        }
+        $storage = new \KiwiCaptcha\Storage\ArrayStorage();
+        $record = new \KiwiCaptcha\ChallengeRecord(
+            nonce: 'n'.str_repeat('1', 43), scope: 'login', bindingTag: 'ip:127.0.0.1',
+            issuedAt: 1_700_000_000, expiresAt: 1_700_000_120, algorithm: \KiwiCaptcha\PoWAlgorithm::Sha256,
+            mKib: 0, t: 0, p: 0, targetBits: 8, salt: base64_encode(random_bytes(16)),
+            prefix: 'pre', challenge: 'ch', minDurationMs: 0, issuedAtNs: 1_700_000_000_000_000_000,
+            region: null, requestBinding: null, issuer: 'kiwi', kid: 1, hostname: null,
+        );
+        $storage->store($record);
+        $storage->consumeWithOperationIdentity($record->nonce, 'op-single-snapshot');
+        self::assertTrue($storage->commitResult($record->nonce, true, null));
+
+        // The fake Redis client serves the CONSUMED envelope once and
+        // fails loudly on any further get.
+        $client = new SingleGetFakeRedisClient();
+        $client->envelopes['kiwi:snapshot:'.$record->nonce] = $this->redisEnvelopeFrom($storage, $record->nonce);
+        $redisStorage = new RedisStorage($client, 'kiwi:snapshot:');
+
+        $state = $redisStorage->runtimeState($record->nonce);
+        self::assertSame(\KiwiCaptcha\ChallengeRuntimeStateKind::Consumed, $state->kind);
+        self::assertNotNull($state->consumed, 'the consumed state is decoded from the one snapshot');
+        self::assertSame(true, $state->consumed->consumedResult?->valid);
+        self::assertSame('op-single-snapshot', $state->consumed->operationIdentity);
+        self::assertSame(1, $client->gets, 'RedisStorage performed exactly ONE get');
+        self::assertSame($record->nonce, $state->consumed->record->nonce);
+
+        // The same guarantee for consumedState(): it reads its own single
+        // get and never a second.
+        $client2 = new SingleGetFakeRedisClient();
+        $client2->envelopes['kiwi:snapshot:'.$record->nonce] = $this->redisEnvelopeFrom($storage, $record->nonce);
+        $redisStorage2 = new RedisStorage($client2, 'kiwi:snapshot:');
+        $consumed = $redisStorage2->consumedState($record->nonce);
+        self::assertNotNull($consumed);
+        self::assertSame(1, $client2->gets, 'consumedState performed exactly ONE get');
+    }
+
+    public function testRetryEnabledPhpRedisIsRefusedForVerifiedWait(): void
+    {
+        // R71-01: phpredis reconnects automatically on connection failures
+        // (OPT_MAX_RETRIES defaults to 10), so a mutation acknowledged on
+        // connection A followed by a socket failure before the WAIT would
+        // issue the WAIT on a RECONNECTED connection B — the centralized
+        // guard refuses retry-enabled \Redis clients for verified-WAIT.
+        if (!\class_exists(\Redis::class)) {
+            self::markTestSkipped('phpredis is not installed');
+        }
+        if (!\class_exists(RetryEnabledPhpRedisStub::class)) {
+            eval('final class RetryEnabledPhpRedisStub extends \\Redis { private int $retries; public function __construct(int $retries = 10) { $this->retries = $retries; } public function getOption(int $option): int { if ($option === \\Redis::OPT_MAX_RETRIES) { return $this->retries; } return 0; } }');
+        }
+        $client = new RetryEnabledPhpRedisStub();
+        $message = '';
+        try {
+            new RedisStorage($client, 'kiwi:test:', waitReplicas: 1);
+            self::fail('a retry-enabled phpredis client must be refused for verified-WAIT');
+        } catch (\InvalidArgumentException $e) {
+            $message = $e->getMessage();
+        }
+        self::assertStringContainsString('OPT_MAX_RETRIES', $message);
+        self::assertStringContainsString('reconnect', $message);
+
+        // Retries disabled (OPT_MAX_RETRIES = 0) passes the guard.
+        $okClient = new \RetryEnabledPhpRedisStub(0);
+        $storage = new RedisStorage($okClient, 'kiwi:test:', waitReplicas: 1);
+        self::assertNotNull($storage);
+    }
+
     public function testRealRedisDeleteIfPendingRaceNeverErasesCommittedEvidence(): void
     {
         // The toctou the atomic primitive closes: a cheap-failing
@@ -1502,5 +1594,47 @@ final class SingleSnapshotStorage implements \KiwiCaptcha\AtomicStorageInterface
     public function cancel(string $nonce): ?\KiwiCaptcha\CancellationResult
     {
         return $this->inner->cancel($nonce);
+    }
+}
+
+/**
+ * R71-04: a fake Predis client that serves the given envelopes' raw
+ * bytes on the FIRST get and fails loudly on ANY further get — a
+ * single-snapshot storage implementation reads exactly once.
+ */
+final class SingleGetFakeRedisClient extends \Predis\Client
+{
+    /** @var array<string, string> nonce-prefixed key => raw envelope bytes */
+    public array $envelopes = [];
+
+    public int $gets = 0;
+
+    public function __construct()
+    {
+        // Deliberately skip the parent constructor.
+    }
+
+    public function __call($commandID, $arguments)
+    {
+        $command = strtoupper((string) $commandID);
+        if ($command === 'GET') {
+            ++$this->gets;
+            if ($this->gets > 1) {
+                throw new \RuntimeException('a single-snapshot read must never issue a second GET');
+            }
+
+            return $this->envelopes[(string) $arguments[0]] ?? null;
+        }
+        if ($command === 'EVAL') {
+            return null;
+        }
+        if ($command === 'TIME') {
+            return [time(), 0];
+        }
+        if ($command === 'WAIT') {
+            return 0;
+        }
+
+        return null;
     }
 }

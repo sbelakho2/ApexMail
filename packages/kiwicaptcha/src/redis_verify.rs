@@ -134,8 +134,9 @@ use crate::challenge::{
 };
 use crate::token::SolutionToken;
 use crate::verify::{
-    ct_eq, derive_hash, final_revalidate, leading_zero_bits, signature_from_challenge,
-    validate_record, VerifyError, VerifyOutcome, SKEW_TOLERANCE_US,
+    check_request_binding, ct_eq, derive_hash, final_revalidate, leading_zero_bits,
+    signature_from_challenge, validate_record, RequestBindingExpectation, VerifyError,
+    VerifyOutcome, SKEW_TOLERANCE_US,
 };
 use redis::ConnectionLike;
 
@@ -1915,12 +1916,16 @@ impl ProductionVerifier {
         record: &ChallengeRecord,
         scope: &str,
         now_ns: u64,
-        expected_request_binding: Option<&str>,
+        expected_request_binding: RequestBindingExpectation<'_>,
     ) -> Result<(), VerifyError> {
         self.check_authenticated_shape(record)?;
         self.check_scope(record, scope)?;
         self.check_deployment_expectations(record)?;
-        self.check_request_binding(record, expected_request_binding)?;
+        // The SAME canonical helper as every other binding enforcement
+        // site (exact Option-equality; the old nullable replay path is
+        // gone, so a committed result can never replay through an
+        // ambiguous interpretation).
+        check_request_binding(record.request_binding.as_deref(), expected_request_binding)?;
         self.check_min_duration(record, now_ns)?;
         Ok(())
     }
@@ -2068,7 +2073,6 @@ impl ProductionVerifier {
     /// an unbound challenge satisfies no binding-pinned
     /// redemption. `None` (the default) leaves the binding
     /// unenforced (merely returned on a valid outcome).
-
     /// IP binding. The stored record is authoritative: an empty
     ///     binding tag means binding is disabled; a non-empty tag means
     ///     the challenge is bound, so a mismatch fails closed
@@ -2234,7 +2238,14 @@ mod tests {
         let token = encode_token(&issued.record.nonce, counter);
         FAKE_NOW_CALLS.store(0, Ordering::SeqCst);
         assert_eq!(
-            verifier.verify(&token, "login", IP, issued_at_ns + 1_000_000, None, None),
+            verifier.verify(
+                &token,
+                "login",
+                IP,
+                issued_at_ns + 1_000_000,
+                None,
+                RequestBindingExpectation::Unenforced
+            ),
             VerifyOutcome::Invalid(VerifyError::Expired),
             "the final re-validation re-reads the clock: expired during the derive → Expired"
         );
@@ -2244,7 +2255,14 @@ mod tests {
         // (deterministic — pins the no-commit-on-gate-failure semantics).
         FAKE_NOW_CALLS.store(0, Ordering::SeqCst);
         assert_eq!(
-            verifier.verify(&token, "login", IP, issued_at_ns + 1_000_000, None, None),
+            verifier.verify(
+                &token,
+                "login",
+                IP,
+                issued_at_ns + 1_000_000,
+                None,
+                RequestBindingExpectation::Unenforced
+            ),
             VerifyOutcome::Invalid(VerifyError::ConsumeIndeterminate)
         );
     }
@@ -2448,7 +2466,7 @@ mod tests {
                 IP,
                 issued_at_ns + 1_000_000,
                 None,
-                None,
+                RequestBindingExpectation::Unenforced,
             ),
             VerifyOutcome::Invalid(VerifyError::RecordNotFound),
             "a valid token for a cancelled record fails closed as RecordNotFound"
