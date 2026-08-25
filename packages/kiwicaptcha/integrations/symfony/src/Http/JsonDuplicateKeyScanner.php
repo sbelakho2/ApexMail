@@ -26,7 +26,11 @@ final class JsonDuplicateKeyScanner
 
     /**
      * @return string|null the first duplicated key, or null when the
-     *                     document is clean or cannot be walked
+     *                     document is clean
+     *
+     * @throws MalformedJsonWalkException when the document's cleanliness
+     *         cannot be established (a >MAX_DEPTH document or a malformed
+     *         string) — callers must refuse, never treat it as clean
      */
     public function scanForDuplicateJsonKey(string $json): ?string
     {

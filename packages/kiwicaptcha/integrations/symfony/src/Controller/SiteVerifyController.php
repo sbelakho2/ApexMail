@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace BelConsulting\KiwiCaptchaBundle\Controller;
 
 use BelConsulting\KiwiCaptchaBundle\Risk\SecurityEpochMonitor;
+use BelConsulting\KiwiCaptchaBundle\Http\FramingChecksTrait;
 use BelConsulting\KiwiCaptchaBundle\Http\JsonDuplicateKeyScanner;
 use BelConsulting\KiwiCaptchaBundle\Validator\Constraints\KiwiCaptchaValidator;
 use BelConsulting\KiwiCaptchaBundle\Security\RequestScopeAdmissionGate;
@@ -79,6 +80,8 @@ use Symfony\Component\HttpFoundation\Response;
  */
 final class SiteVerifyController
 {
+    use FramingChecksTrait;
+
     /** Documented bounded maximum for the `response` token. */
     private const MAX_RESPONSE_BYTES = 8192;
 
@@ -212,8 +215,8 @@ final class SiteVerifyController
          */
         private readonly ?string $defaultRequestBinding = null,
     ) {
-    $this->jsonDuplicateKeyScanner = new JsonDuplicateKeyScanner();
-    $this->recovery = $recovery ?? (new \KiwiCaptcha\ConsumedOutcomeRecovery($this->storage ?? new \KiwiCaptcha\Storage\ArrayStorage()));
+        $this->jsonDuplicateKeyScanner = new JsonDuplicateKeyScanner();
+        $this->recovery = $recovery ?? (new \KiwiCaptcha\ConsumedOutcomeRecovery($this->storage ?? new \KiwiCaptcha\Storage\ArrayStorage()));
         // The lease-ordering invariant is enforced at construction: the
         // waiter bound must exceed the fixed owner lease (the store's
         // configured lease, never derived from a token's remaining
@@ -290,29 +293,17 @@ final class SiteVerifyController
             return new JsonResponse(['success' => false, 'error-codes' => ['siteverify-not-configured']], Response::HTTP_NOT_FOUND);
         }
 
-        // Framing rigor before anything is read: POST only; a duplicate
-        // Content-Length header is refused (header smuggling); Content-
-        // Length + Transfer-Encoding together is refused (smuggling);
-        // a Content-Encoding other than identity is refused (the provider
+        // The universal canonical-framing rule (the ONE definition of the
+        // HTTP framing policy, shared by every security-sensitive
+        // endpoint): POST only, Content-Length singular + canonical
+        // decimal grammar, Transfer-Encoding singular + 'chunked' only +
+        // never with Content-Length, Content-Type singular,
+        // Content-Encoding singular + identity only (the provider
         // contract never compresses).
         if (!$request->isMethod('POST')) {
             return new JsonResponse(['success' => false, 'error-codes' => ['bad-request']], Response::HTTP_BAD_REQUEST);
         }
-        $contentLengths = $request->headers->all('Content-Length');
-        if (\count($contentLengths) > 1) {
-            return new JsonResponse(['success' => false, 'error-codes' => ['bad-request']], Response::HTTP_BAD_REQUEST);
-        }
-        if ($request->headers->has('Content-Length') && $request->headers->has('Transfer-Encoding')) {
-            return new JsonResponse(['success' => false, 'error-codes' => ['bad-request']], Response::HTTP_BAD_REQUEST);
-        }
-        // Content-Encoding and Content-Type are enforced SINGULAR too: a
-        // duplicated header (two different values) is the kind of
-        // ambiguity different proxies and application layers interpret
-        // differently, so it is refused rather than silently collapsed.
-        if (\count($request->headers->all('Content-Encoding')) > 1) {
-            return new JsonResponse(['success' => false, 'error-codes' => ['bad-request']], Response::HTTP_BAD_REQUEST);
-        }
-        if (\count($request->headers->all('Content-Type')) > 1) {
+        if (!$this->framingHeadersAcceptable($request)) {
             return new JsonResponse(['success' => false, 'error-codes' => ['bad-request']], Response::HTTP_BAD_REQUEST);
         }
         $contentEncoding = strtolower(trim((string) $request->headers->get('Content-Encoding', '')));

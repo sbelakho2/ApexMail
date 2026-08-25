@@ -50,6 +50,39 @@ final class ChallengeFlowTest extends TestCase
         ), new ArrayStorage());
     }
 
+    public function testCanonicalFramingRejectsTransferEncodingAndMalformedContentLengths(): void
+    {
+        // R70-03/04: the universal framing rule rejects a duplicated or
+        // non-chunked Transfer-Encoding and a malformed Content-Length
+        // grammar (-1, +123, 123junk, "123, 123", empty), before any body
+        // is read.
+        $controller = new ChallengeController($this->issuer());
+
+        $transferCases = [
+            [['Transfer-Encoding', ['chunked', 'gzip']], 'duplicated Transfer-Encoding'],
+            [['Transfer-Encoding', 'gzip'], 'non-chunked Transfer-Encoding'],
+        ];
+        foreach ($transferCases as [$header, $value]) {
+            $request = Request::create('/challenge', 'POST', [], [], [], ['CONTENT_TYPE' => 'application/json', 'REMOTE_ADDR' => '127.0.0.1'], '{"scope":"login"}');
+            $request->headers->set($header[0], $value);
+            $response = $controller->challenge($request);
+            self::assertSame(400, $response->getStatusCode(), $header[0].'='.json_encode($value).' must be refused');
+        }
+
+        $badLengths = ['-1', '+123', '123junk', '123, 123', ''];
+        foreach ($badLengths as $value) {
+            $request = Request::create('/challenge', 'POST', [], [], [], ['CONTENT_TYPE' => 'application/json', 'REMOTE_ADDR' => '127.0.0.1'], '{"scope":"login"}');
+            $request->headers->set('Content-Length', $value);
+            $response = $controller->challenge($request);
+            self::assertSame(400, $response->getStatusCode(), 'the malformed Content-Length '.var_export($value, true).' must be refused');
+        }
+
+        // A canonical Content-Length is accepted.
+        $request = Request::create('/challenge', 'POST', [], [], [], ['CONTENT_TYPE' => 'application/json', 'REMOTE_ADDR' => '127.0.0.1'], '{"scope":"login"}');
+        $request->headers->set('Content-Length', '16');
+        self::assertLessThan(500, $controller->challenge($request)->getStatusCode());
+    }
+
     public function testMalformedJsonNeverEscapesAsA500(): void
     {
         // R69-01/02: malformed JSON strings (bad escape, unpaired

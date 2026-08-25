@@ -585,6 +585,22 @@ LUA;
         if (!\is_string($raw) || $raw === '' || !str_contains($raw, '"state":"consumed"')) {
             return null;
         }
+
+        return $this->decodeConsumedEnvelope($raw);
+    }
+
+    /**
+     * Decode a ConsumedRecord ENTIRELY from the stored envelope bytes —
+     * the record, the committed result and the operation identity are all
+     * parsed from the same $raw, with NO Redis operation. This is the
+     * single-snapshot guarantee of {@see ChallengeRuntimeStateReadableInterface}:
+     * the consumed state is never reconstructed from two separately timed
+     * reads (a retained record can expire between them, or a takeover can
+     * move it), so the caller always sees exactly the bytes one GET
+     * observed.
+     */
+    private function decodeConsumedEnvelope(string $raw): ?ConsumedRecord
+    {
         $record = $this->decode($raw);
         if ($record === null) {
             return null;
@@ -743,7 +759,9 @@ LUA;
             return new ChallengeRuntimeState(ChallengeRuntimeStateKind::Cancelled, $this->decode($raw));
         }
         if (str_contains($raw, '"state":"consumed"')) {
-            $consumed = $this->consumedState($nonce);
+            // Decoded ENTIRELY from the same $raw this method already
+            // holds — never a second GET.
+            $consumed = $this->decodeConsumedEnvelope($raw);
 
             return new ChallengeRuntimeState(ChallengeRuntimeStateKind::Consumed, $consumed?->record, $consumed);
         }

@@ -1223,6 +1223,41 @@ final class RedisStorageTest extends TestCase
         self::assertSame('missing', $storage->deleteIfPending('redis-nonce-1')->state, 'the failed-barrier delete still removed the record on the primary');
     }
 
+    public function testRuntimeStateConsumedDecodesFromTheSingleSnapshot(): void
+    {
+        // R70-01: runtimeState() must decode a consumed envelope ENTIRELY
+        // from the one GET it performs — a second read (consumedState's
+        // own GET) could observe a different world (the retained record
+        // expired, a takeover moved it). The adversarial fake deletes the
+        // key on the SECOND GET: if the implementation ever reads again,
+        // the state collapses to Missing; the single-snapshot contract
+        // keeps the Consumed state intact.
+        $inner = new \KiwiCaptcha\Storage\ArrayStorage();
+        $record = new \KiwiCaptcha\ChallengeRecord(
+            nonce: 'n'.str_repeat('1', 43), scope: 'login', bindingTag: 'ip:127.0.0.1',
+            issuedAt: 1_700_000_000, expiresAt: 1_700_000_120, algorithm: PoWAlgorithm::Sha256,
+            mKib: 0, t: 0, p: 0, targetBits: 8, salt: base64_encode(random_bytes(16)),
+            prefix: 'pre', challenge: 'ch', minDurationMs: 0, issuedAtNs: 1_700_000_000_000_000_000,
+            region: null, requestBinding: null, issuer: 'kiwi', kid: 1, hostname: null,
+        );
+        $storage = new \KiwiCaptcha\Storage\ArrayStorage();
+        $storage->store($record);
+        $storage->consumeWithOperationIdentity($record->nonce, 'op-single-snapshot');
+        self::assertTrue($storage->commitResult($record->nonce, true, null));
+
+        // The wrapping storage emulates the Redis envelope with a
+        // one-shot snapshot: every read returns the SAME bytes, and a
+        // hypothetical second read would explode.
+        $snapshot = new SingleSnapshotStorage($storage, $record->nonce);
+        $state = $snapshot->runtimeState($record->nonce);
+        self::assertSame(\KiwiCaptcha\ChallengeRuntimeStateKind::Consumed, $state->kind);
+        self::assertNotNull($state->consumed, 'the consumed state is decoded from the one snapshot');
+        self::assertSame(true, $state->consumed->consumedResult?->valid);
+        self::assertSame('op-single-snapshot', $state->consumed->operationIdentity);
+        self::assertSame(1, $snapshot->reads, 'exactly ONE snapshot read occurred');
+        self::assertSame($record->nonce, $state->consumed->record->nonce);
+    }
+
     public function testRealRedisDeleteIfPendingRaceNeverErasesCommittedEvidence(): void
     {
         // The toctou the atomic primitive closes: a cheap-failing
@@ -1398,5 +1433,74 @@ final class LostEvalReplyRetryConnection implements \Predis\Connection\NodeConne
     public function hasDataToRead(): bool
     {
         return false;
+    }
+}
+
+/**
+ * R70-01 adversarial storage: the first read returns the snapshot, ANY
+ * further read fails loudly — a single-snapshot implementation reads
+ * exactly once.
+ */
+final class SingleSnapshotStorage implements \KiwiCaptcha\AtomicStorageInterface, \KiwiCaptcha\ConsumedStateReadableInterface, \KiwiCaptcha\OperationIdentityAwareStorageInterface, \KiwiCaptcha\AtomicDeleteIfPendingInterface, \KiwiCaptcha\ChallengeRuntimeStateReadableInterface, \KiwiCaptcha\CancellableStorageInterface
+{
+    public int $reads = 0;
+
+    public function __construct(private readonly AtomicStorageInterface $inner, private readonly string $nonce)
+    {
+    }
+
+    public function runtimeState(string $nonce): \KiwiCaptcha\ChallengeRuntimeState
+    {
+        ++$this->reads;
+        if ($this->reads > 1) {
+            throw new \RuntimeException('a single-snapshot read must never issue a second read');
+        }
+
+        return $this->inner->runtimeState($nonce);
+    }
+
+    public function store(\KiwiCaptcha\ChallengeRecord $record): void
+    {
+        $this->inner->store($record);
+    }
+
+    public function find(string $nonce): ?\KiwiCaptcha\ChallengeRecord
+    {
+        return $this->inner->find($nonce);
+    }
+
+    public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
+    {
+        return $this->inner->consume($nonce);
+    }
+
+    public function consumeWithOperationIdentity(string $nonce, ?string $operationIdentity): ?\KiwiCaptcha\ConsumedRecord
+    {
+        return $this->inner->consumeWithOperationIdentity($nonce, $operationIdentity);
+    }
+
+    public function commitResult(string $nonce, bool $valid, ?string $binding): bool
+    {
+        return $this->inner->commitResult($nonce, $valid, $binding);
+    }
+
+    public function delete(string $nonce): void
+    {
+        $this->inner->delete($nonce);
+    }
+
+    public function consumedState(string $nonce): ?\KiwiCaptcha\ConsumedRecord
+    {
+        return $this->inner->consumedState($nonce);
+    }
+
+    public function deleteIfPending(string $nonce): \KiwiCaptcha\DeleteIfPendingResult
+    {
+        return $this->inner->deleteIfPending($nonce);
+    }
+
+    public function cancel(string $nonce): ?\KiwiCaptcha\CancellationResult
+    {
+        return $this->inner->cancel($nonce);
     }
 }

@@ -121,8 +121,6 @@ final class ChallengeController
      */
     private const MAX_CHALLENGE_BODY_BYTES = 8192;
 
-    /** Recursion cap for the duplicate-key scanner (depth bombs). */
-
     /**
      * The bounded shape of a challenge nonce for the cancellation
      * endpoint: base64 of 32 random bytes (44 chars, possibly ending in
@@ -226,8 +224,8 @@ final class ChallengeController
          */
         private readonly ?\Closure $now = null,
     ) {
-    $this->jsonDuplicateKeyScanner = new JsonDuplicateKeyScanner();
-}
+        $this->jsonDuplicateKeyScanner = new JsonDuplicateKeyScanner();
+    }
 
     public function challenge(Request $request): JsonResponse
     {
@@ -257,17 +255,15 @@ final class ChallengeController
             return $response;
         }
 
-        // HTTP framing: a request carrying both Content-Length and
-        // Transfer-Encoding, or a duplicate Content-Length, is
-        // request-smuggling ambiguity: intermediaries will frame the body
-        // differently, so the endpoint refuses before any body is read.
-        // Symfony's HeaderBag keeps every raw header value, so a crafted
-        // duplicate survives into the controller.
-        $contentLengths = $request->headers->all('content-length');
-        $transferEncodings = $request->headers->all('transfer-encoding');
-        if (\count($contentLengths) > 1 || ($contentLengths !== [] && $transferEncodings !== [])) {
+        // The universal canonical-framing rule (the ONE definition of the
+        // HTTP framing policy, shared by every security-sensitive
+        // endpoint): Content-Length singular + canonical decimal grammar,
+        // Transfer-Encoding singular + 'chunked' only + never with
+        // Content-Length, Content-Type singular, Content-Encoding
+        // singular.
+        if (!$this->framingHeadersAcceptable($request)) {
             return $this->privateJson(
-                ['error' => ['code' => 'FRAMING_REJECTED', 'message' => 'The request carries ambiguous HTTP framing (Content-Length and Transfer-Encoding together, or a duplicate Content-Length).']],
+                ['error' => ['code' => 'FRAMING_REJECTED', 'message' => 'The request carries ambiguous HTTP framing (Content-Length, Transfer-Encoding, Content-Type or Content-Encoding must each appear at most once, with canonical values).']],
                 Response::HTTP_BAD_REQUEST,
             );
         }
@@ -277,7 +273,8 @@ final class ChallengeController
         // admission controls. An oversized declared Content-Length is
         // rejected before any body is read (413); the actual read length
         // is capped too, since chunked uploads can skip a truthful
-        // Content-Length.
+        // Content-Length. The value is canonical (the framing rule above
+        // validated its grammar).
         $declaredLengths = $request->headers->all('content-length');
         foreach ($declaredLengths as $declared) {
             if (\is_string($declared) && (int) $declared > self::MAX_CHALLENGE_BODY_BYTES) {
@@ -1574,19 +1571,23 @@ final class ChallengeController
             return $response;
         }
 
-        // HTTP framing: request-smuggling ambiguity refused before any
-        // body is read.
-        $contentLengths = $request->headers->all('content-length');
-        $transferEncodings = $request->headers->all('transfer-encoding');
-        if (\count($contentLengths) > 1 || ($contentLengths !== [] && $transferEncodings !== [])) {
+        // The universal canonical-framing rule (the ONE definition of the
+        // HTTP framing policy, shared by every security-sensitive
+        // endpoint): Content-Length singular + canonical decimal grammar,
+        // Transfer-Encoding singular + 'chunked' only + never with
+        // Content-Length, Content-Type singular, Content-Encoding
+        // singular.
+        if (!$this->framingHeadersAcceptable($request)) {
             return $this->privateJson(
-                ['error' => ['code' => 'FRAMING_REJECTED', 'message' => 'The request carries ambiguous HTTP framing (Content-Length and Transfer-Encoding together, or a duplicate Content-Length).']],
+                ['error' => ['code' => 'FRAMING_REJECTED', 'message' => 'The request carries ambiguous HTTP framing (Content-Length, Transfer-Encoding, Content-Type or Content-Encoding must each appear at most once, with canonical values).']],
                 Response::HTTP_BAD_REQUEST,
             );
         }
 
         // Body ceiling: the declared Content-Length is rejected before any
-        // body is read (413); the actual read is capped too.
+        // body is read (413); the actual read is capped too. The value is
+        // canonical (the framing rule above validated its grammar).
+        $contentLengths = $request->headers->all('content-length');
         foreach ($contentLengths as $declared) {
             if (\is_string($declared) && (int) $declared > self::MAX_CANCELLATION_BODY_BYTES) {
                 return $this->privateJson(
