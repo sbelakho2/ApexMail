@@ -190,7 +190,7 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
 
         try {
             $owner = new SiteVerifyController(new Verifier($lost), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $lost, null, null, $store, null, 5.0);
-            $ownerResponse = $owner->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+            $ownerResponse = $owner->siteverify($this->siteverifyRequest([
                 'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
             ]));
             self::assertSame(503, $ownerResponse->getStatusCode(), 'the lost consume reply must map to the retryable 503 internal-error');
@@ -210,7 +210,7 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
 
             // The same-key retry takes over and resumes the derivation.
             $retry = new SiteVerifyController(new Verifier($storage), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $storage, null, null, $store, null, 5.0);
-            $retryResponse = $retry->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+            $retryResponse = $retry->siteverify($this->siteverifyRequest([
                 'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
             ]));
             $retryBody = json_decode((string) $retryResponse->getContent(), true);
@@ -224,7 +224,7 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
             // A same-UUID retry now returns the stored canonical bytes
             // (complete_same) — never a re-derivation.
             $replay = new SiteVerifyController(new Verifier($storage), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $storage, null, null, $store, null, 5.0);
-            $replayResponse = $replay->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+            $replayResponse = $replay->siteverify($this->siteverifyRequest([
                 'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
             ]));
             self::assertSame((string) $retryResponse->getContent(), (string) $replayResponse->getContent(), 'a same-UUID retry reproduces the identical canonical response');
@@ -270,7 +270,7 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
             $ownerVerifier = new Verifier($lost);
             $ownerMonitor = new SecurityEpochMonitor($ownerVerifier, $policyRedis, 'test-ns', 1);
             $owner = new SiteVerifyController($ownerVerifier, self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $lost, null, null, $store, null, 5.0, 0, null, null, $ownerMonitor);
-            $ownerResponse = $owner->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+            $ownerResponse = $owner->siteverify($this->siteverifyRequest([
                 'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
             ]));
             self::assertSame(503, $ownerResponse->getStatusCode(), 'the lost consume reply must map to the retryable 503 internal-error');
@@ -295,7 +295,7 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
             $retryVerifier = new Verifier($storage);
             $retryMonitor = new SecurityEpochMonitor($retryVerifier, $policyRedis, 'test-ns', 1);
             $retry = new SiteVerifyController($retryVerifier, self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $storage, null, null, $store, null, 5.0, 0, null, null, $retryMonitor);
-            $retryResponse = $retry->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+            $retryResponse = $retry->siteverify($this->siteverifyRequest([
                 'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
             ]));
             $retryBody = json_decode((string) $retryResponse->getContent(), true);
@@ -339,7 +339,7 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
 
         try {
             $owner = new SiteVerifyController(new Verifier($lost), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $lost, null, null, $store, null, 5.0);
-            $ownerResponse = $owner->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+            $ownerResponse = $owner->siteverify($this->siteverifyRequest([
                 'secret' => self::SITEVERIFY_SECRET, 'response' => $wrongToken, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
             ]));
             self::assertSame(503, $ownerResponse->getStatusCode());
@@ -355,7 +355,7 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
 
             usleep(2_500_000);
             $retry = new SiteVerifyController(new Verifier($storage), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $storage, null, null, $store, null, 5.0);
-            $retryResponse = $retry->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+            $retryResponse = $retry->siteverify($this->siteverifyRequest([
                 'secret' => self::SITEVERIFY_SECRET, 'response' => $wrongToken, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
             ]));
             $retryBody = json_decode((string) $retryResponse->getContent(), true);
@@ -370,7 +370,7 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
 
             // A same-UUID retry reproduces the identical canonical failure.
             $again = new SiteVerifyController(new Verifier($storage), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $storage, null, null, $store, null, 5.0);
-            $againResponse = $again->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+            $againResponse = $again->siteverify($this->siteverifyRequest([
                 'secret' => self::SITEVERIFY_SECRET, 'response' => $wrongToken, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
             ]));
             self::assertSame($retryBody, json_decode((string) $againResponse->getContent(), true), 'a same-UUID retry reproduces the identical canonical failure');
@@ -397,7 +397,7 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
 
         try {
             $owner = new SiteVerifyController(new Verifier($lost), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $lost, null, null, $store, null, 5.0);
-            $ownerResponse = $owner->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+            $ownerResponse = $owner->siteverify($this->siteverifyRequest([
                 'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
             ]));
             self::assertSame(503, $ownerResponse->getStatusCode(), 'the lost Argon consume reply maps to the retryable 503');
@@ -411,7 +411,7 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
 
             usleep(2_500_000);
             $retry = new SiteVerifyController(new Verifier($storage), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $storage, null, null, $store, null, 5.0);
-            $retryResponse = $retry->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+            $retryResponse = $retry->siteverify($this->siteverifyRequest([
                 'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
             ]));
             $retryBody = json_decode((string) $retryResponse->getContent(), true);
@@ -571,7 +571,7 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
 
         try {
             $owner = new SiteVerifyController(new Verifier($storage, now: $ownerClock), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $storage, null, null, $crashingStore, null, 5.0);
-            $ownerResponse = $owner->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+            $ownerResponse = $owner->siteverify($this->siteverifyRequest([
                 'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
             ]));
             // The owner's derivation crossed the signed expiry (the
@@ -597,7 +597,7 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
             // resume re-checks the signed expiry before deriving — the
             // deterministic Expired outcome, never a post-deadline Valid.
             $retry = new SiteVerifyController(new Verifier($storage), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $storage, null, null, $store, null, 5.0);
-            $retryResponse = $retry->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+            $retryResponse = $retry->siteverify($this->siteverifyRequest([
                 'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
             ]));
             $retryBody = json_decode((string) $retryResponse->getContent(), true);
@@ -609,7 +609,7 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
             // A same-UUID retry reproduces the identical canonical
             // failure — the redemption can never become successful again.
             $replay = new SiteVerifyController(new Verifier($storage), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $storage, null, null, $store, null, 5.0);
-            $replayResponse = $replay->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+            $replayResponse = $replay->siteverify($this->siteverifyRequest([
                 'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
             ]));
             self::assertSame($retryBody, json_decode((string) $replayResponse->getContent(), true), 'a same-UUID retry reproduces the identical canonical failure');
@@ -638,7 +638,7 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
 
         try {
             $owner = new SiteVerifyController(new Verifier($lost), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $lost, null, null, $store, null, 5.0);
-            $ownerResponse = $owner->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+            $ownerResponse = $owner->siteverify($this->siteverifyRequest([
                 'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuidA,
             ]));
             self::assertSame(503, $ownerResponse->getStatusCode());
@@ -652,13 +652,13 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
             // the identity gate refuses (the record carries A's identity)
             // and the resume never runs.
             $bFirst = new SiteVerifyController(new Verifier($storage), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $storage, null, null, $store, null, 5.0);
-            $bFirstResponse = $bFirst->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+            $bFirstResponse = $bFirst->siteverify($this->siteverifyRequest([
                 'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuidB,
             ]));
             self::assertSame(503, $bFirstResponse->getStatusCode(), 'B cannot derive a consumed-without-result record');
             usleep(2_500_000);
             $bRetry = new SiteVerifyController(new Verifier($storage), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $storage, null, null, $store, null, 5.0);
-            $bRetryResponse = $bRetry->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+            $bRetryResponse = $bRetry->siteverify($this->siteverifyRequest([
                 'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuidB,
             ]));
             self::assertSame(503, $bRetryResponse->getStatusCode(), 'a different UUID must NEVER resume the winner\'s derivation');
@@ -667,7 +667,7 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
             // A's own retry still resumes the original success.
             usleep(2_500_000);
             $aRetry = new SiteVerifyController(new Verifier($storage), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $storage, null, null, $store, null, 5.0);
-            $aRetryResponse = $aRetry->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+            $aRetryResponse = $aRetry->siteverify($this->siteverifyRequest([
                 'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuidA,
             ]));
             self::assertSame(true, json_decode((string) $aRetryResponse->getContent(), true)['success'] ?? null, 'the winner\'s same-key retry still resumes after B\'s refused attempts');
@@ -697,7 +697,7 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
 
         try {
             $owner = new SiteVerifyController(new Verifier($lost), self::SECRET, [$secret1 => 'login'], $lost, null, null, $store, null, 5.0);
-            $ownerResponse = $owner->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+            $ownerResponse = $owner->siteverify($this->siteverifyRequest([
                 'secret' => $secret1, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
             ]));
             self::assertSame(503, $ownerResponse->getStatusCode());
@@ -712,13 +712,13 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
             // backendId, so it differs from the record's identity (secret
             // 1's): never a resume.
             $s2First = new SiteVerifyController(new Verifier($storage), self::SECRET, [$secret2 => 'login'], $storage, null, null, $store, null, 5.0);
-            $s2FirstResponse = $s2First->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+            $s2FirstResponse = $s2First->siteverify($this->siteverifyRequest([
                 'secret' => $secret2, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
             ]));
             self::assertSame(503, $s2FirstResponse->getStatusCode());
             usleep(2_500_000);
             $s2Retry = new SiteVerifyController(new Verifier($storage), self::SECRET, [$secret2 => 'login'], $storage, null, null, $store, null, 5.0);
-            $s2RetryResponse = $s2Retry->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+            $s2RetryResponse = $s2Retry->siteverify($this->siteverifyRequest([
                 'secret' => $secret2, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
             ]));
             self::assertSame(503, $s2RetryResponse->getStatusCode(), 'a same-scope backend secret can never resume another backend\'s redemption');
@@ -745,7 +745,7 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
 
         try {
             $owner = new SiteVerifyController(new Verifier($lost), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $lost, null, null, $store, null, 5.0);
-            $ownerResponse = $owner->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+            $ownerResponse = $owner->siteverify($this->siteverifyRequest([
                 'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
             ]));
             self::assertSame(503, $ownerResponse->getStatusCode());
@@ -756,7 +756,7 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
             // the fingerprint includes the IP, so the entry is bound to
             // the original remoteip and the retry can never join.
             $conflict = new SiteVerifyController(new Verifier($storage), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $storage, null, null, $store, null, 5.0);
-            $conflictResponse = $conflict->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+            $conflictResponse = $conflict->siteverify($this->siteverifyRequest([
                 'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '203.0.113.9', 'idempotency_key' => $uuid,
             ]));
             self::assertSame(400, $conflictResponse->getStatusCode(), 'a changed remoteip under the same UUID must CONFLICT');
@@ -832,7 +832,7 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
 
         try {
             $owner = new SiteVerifyController(new Verifier($lostNoKey), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $lostNoKey, null, null, $store, null, 5.0);
-            $ownerResponse = $owner->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+            $ownerResponse = $owner->siteverify($this->siteverifyRequest([
                 'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1',
             ]));
             self::assertSame(503, $ownerResponse->getStatusCode());
@@ -842,7 +842,7 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
             // gate refuses, and the ordinary verify stays
             // ConsumeIndeterminate — 503, never a resume.
             $keyed = new SiteVerifyController(new Verifier($storage), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $storage, null, null, $store, null, 5.0);
-            $keyedResponse = $keyed->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+            $keyedResponse = $keyed->siteverify($this->siteverifyRequest([
                 'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuidB,
             ]));
             self::assertSame(503, $keyedResponse->getStatusCode(), 'a keyed replay of a no-key redemption must NEVER resume');
@@ -874,7 +874,7 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
             $lost = $this->lostConsumeReplyStorage($storage);
 
             $owner = new SiteVerifyController(new Verifier($lost), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $lost, null, null, $store, null, 5.0);
-            $ownerResponse = $owner->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+            $ownerResponse = $owner->siteverify($this->siteverifyRequest([
                 'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
             ]));
             self::assertSame(503, $ownerResponse->getStatusCode());
@@ -894,7 +894,7 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
             $outsideLease = $gate->acquire();
             self::assertIsString($outsideLease);
             $gated = new SiteVerifyController(new Verifier($storage, $gate), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $storage, null, null, $store, null, 5.0);
-            $gatedResponse = $gated->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+            $gatedResponse = $gated->siteverify($this->siteverifyRequest([
                 'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
             ]));
             self::assertSame(503, $gatedResponse->getStatusCode(), 'admission exhaustion during the resume must map to the retryable 503');
@@ -907,7 +907,7 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
             usleep(2_500_000);
             $gate->release($outsideLease);
             $retry = new SiteVerifyController(new Verifier($storage, $gate), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $storage, null, null, $store, null, 5.0);
-            $retryResponse = $retry->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+            $retryResponse = $retry->siteverify($this->siteverifyRequest([
                 'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
             ]));
             self::assertSame(true, json_decode((string) $retryResponse->getContent(), true)['success'] ?? null, 'with admission capacity available the resume must succeed: '.(string) $retryResponse->getContent());
@@ -935,7 +935,7 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
 
         try {
             $owner = new SiteVerifyController(new Verifier($lost), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $lost, null, null, $store, null, 5.0);
-            $ownerResponse = $owner->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+            $ownerResponse = $owner->siteverify($this->siteverifyRequest([
                 'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
             ]));
             self::assertSame(503, $ownerResponse->getStatusCode());
@@ -1001,7 +1001,7 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
             };
             usleep(2_500_000);
             $retry = new SiteVerifyController(new Verifier($lostCommit), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $lostCommit, null, null, $store, null, 5.0);
-            $retryResponse = $retry->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+            $retryResponse = $retry->siteverify($this->siteverifyRequest([
                 'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
             ]));
             $retryBody = json_decode((string) $retryResponse->getContent(), true);
@@ -1033,7 +1033,7 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
 
         try {
             $owner = new SiteVerifyController(new Verifier($lost), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $lost, null, null, $store, null, 5.0);
-            $ownerResponse = $owner->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+            $ownerResponse = $owner->siteverify($this->siteverifyRequest([
                 'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
             ]));
             self::assertSame(503, $ownerResponse->getStatusCode());
@@ -1045,7 +1045,7 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
             usleep(2_500_000);
             // Attempt A: the takeover wins and resumes (commits).
             $retryA = new SiteVerifyController(new Verifier($storage), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $storage, null, null, $store, null, 5.0);
-            $retryAResponse = $retryA->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+            $retryAResponse = $retryA->siteverify($this->siteverifyRequest([
                 'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
             ]));
             $retryABody = json_decode((string) $retryAResponse->getContent(), true);
@@ -1059,7 +1059,7 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
             self::assertTrue($direct->isOk(), sprintf('the second verifier resolves the retained result, got %s', $direct->code()));
             self::assertSame($nonce, $direct->nonce());
             $retryB = new SiteVerifyController(new Verifier($storage), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $storage, null, null, $store, null, 5.0);
-            $retryBResponse = $retryB->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+            $retryBResponse = $retryB->siteverify($this->siteverifyRequest([
                 'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
             ]));
             self::assertSame((string) $retryAResponse->getContent(), (string) $retryBResponse->getContent(), 'both recovery attempts see the IDENTICAL deterministic result');
@@ -1070,4 +1070,11 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
             $probe->del([$idemKey, 'kiwicaptcha:'.$nonce]);
         }
     }
+    private function siteverifyRequest(array $fields, string $contentType = 'application/x-www-form-urlencoded'): \Symfony\Component\HttpFoundation\Request
+    {
+        $body = $contentType === 'application/json' ? json_encode($fields, JSON_THROW_ON_ERROR) : http_build_query($fields);
+
+        return \Symfony\Component\HttpFoundation\Request::create('/kiwi-captcha/siteverify', 'POST', [], [], [], ['CONTENT_TYPE' => $contentType], (string) $body);
+    }
+
 }

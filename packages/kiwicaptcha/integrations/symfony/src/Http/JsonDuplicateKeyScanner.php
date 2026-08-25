@@ -22,7 +22,7 @@ namespace BelConsulting\KiwiCaptchaBundle\Http;
  */
 final class JsonDuplicateKeyScanner
 {
-    private const MAX_DEPTH = 64;
+    private const MAX_DEPTH = 32;
 
     /**
      * @return string|null the first duplicated key, or null when the
@@ -37,9 +37,14 @@ final class JsonDuplicateKeyScanner
             return null;
         } catch (DuplicateJsonKeyException $e) {
             return $e->key;
-        } catch (MalformedJsonWalkException) {
-            return null;
         }
+        // MalformedJsonWalkException deliberately PROPAGATES: the caller
+        // must distinguish "no duplicate found" from "the scanner could
+        // not establish cleanliness" (a >MAX_DEPTH document, a malformed
+        // string). Treating the unwalkable document as clean would let a
+        // deep-nested first value hide a duplicate from the scanner while
+        // the final parser (whose depth ceiling is the SAME 32) still
+        // accepts it — the fail-open depth bypass.
     }
 
     /**
@@ -184,7 +189,17 @@ final class JsonDuplicateKeyScanner
             return null;
         }
         $raw = substr($json, $offset, $end - $offset + 1);
-        $decoded = json_decode($raw, true, 4, JSON_THROW_ON_ERROR);
+        try {
+            $decoded = json_decode($raw, true, 4, JSON_THROW_ON_ERROR);
+        } catch (\JsonException) {
+            // A malformed escape, an unpaired surrogate or invalid UTF-8
+            // inside a string makes the per-string decode fail: that is a
+            // scanner-internal walker failure, translated into the scanner's
+            // own malformed sentinel so no JsonException can ever escape the
+            // scanner (callers must only ever see DuplicateJsonKeyException
+            // or MalformedJsonWalkException).
+            throw new MalformedJsonWalkException();
+        }
         if (!\is_string($decoded)) {
             return null;
         }

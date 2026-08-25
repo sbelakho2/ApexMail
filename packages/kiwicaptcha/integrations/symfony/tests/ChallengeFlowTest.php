@@ -50,6 +50,42 @@ final class ChallengeFlowTest extends TestCase
         ), new ArrayStorage());
     }
 
+    public function testMalformedJsonNeverEscapesAsA500(): void
+    {
+        // R69-01/02: malformed JSON strings (bad escape, unpaired
+        // surrogate, invalid UTF-8, truncated escape) and depth-bomb
+        // documents must produce the controlled 422, never an uncaught
+        // JsonException escaping to Symfony's 500 boundary — and a
+        // duplicate field hiding behind a >32-level value must never be
+        // accepted.
+        $controller = new ChallengeController($this->issuer());
+
+        $malformed = [
+            '{"scope":"\\uZZZZ"}' => 'bad escape',
+            '{"scope":"\\ud800"}' => 'unpaired surrogate',
+            '{"scope":"'.chr(0xFF).chr(0xFE).'"}' => 'invalid UTF-8',
+            '{"scope":"\\u' => 'truncated escape',
+        ];
+        foreach ($malformed as $body => $label) {
+            $response = $controller->challenge($this->jsonRequest($body));
+            self::assertLessThan(500, $response->getStatusCode(), $label.' must be a controlled 4xx: '.$body);
+        }
+
+        // A duplicate key whose first value is nested deeper than the
+        // scanner's 32-level ceiling: the scanner cannot establish
+        // cleanliness, so the document is REFUSED (never treated as
+        // clean) — the deep nesting cannot hide the duplicate.
+        $deep = '{"scope":'.str_repeat('[', 33).str_repeat(']', 33).',"scope":"login"}';
+        $response = $controller->challenge($this->jsonRequest($deep));
+        self::assertLessThan(500, $response->getStatusCode(), 'the deep-nested duplicate must be refused, not accepted');
+        self::assertSame(422, $response->getStatusCode(), 'the deep document answers the controlled 422');
+    }
+
+    private function jsonRequest(string $body): Request
+    {
+        return Request::create('/challenge', 'POST', [], [], [], ['CONTENT_TYPE' => 'application/json', 'REMOTE_ADDR' => '127.0.0.1'], $body);
+    }
+
     public function testChallengeControllerIssuesValidChallenge(): void
     {
         $controller = new ChallengeController($this->issuer());

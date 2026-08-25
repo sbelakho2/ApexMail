@@ -66,7 +66,7 @@ final class SiteVerifyBindingKernelTest extends TestCase
 
     private function request(string $token): Request
     {
-        return Request::create('/kiwi-captcha/siteverify', 'POST', [
+        return $this->siteverifyRequest([
             'secret' => SiteVerifyBindingTestKernel::SITEVERIFY_SECRET,
             'response' => $token,
             'remoteip' => '198.51.100.7',
@@ -84,4 +84,11 @@ final class SiteVerifyBindingKernelTest extends TestCase
 
         return SolutionToken::create($nonce, $counter, 5000, [])->encode();
     }
+    private function siteverifyRequest(array $fields, string $contentType = 'application/x-www-form-urlencoded'): \Symfony\Component\HttpFoundation\Request
+    {
+        $body = $contentType === 'application/json' ? json_encode($fields, JSON_THROW_ON_ERROR) : http_build_query($fields);
+
+        return \Symfony\Component\HttpFoundation\Request::create('/kiwi-captcha/siteverify', 'POST', [], [], [], ['CONTENT_TYPE' => $contentType], (string) $body);
+    }
+
 }

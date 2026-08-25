@@ -51,7 +51,7 @@ final class SiteVerifyTest extends TestCase
         // Verified immediately after issuance: the server-side timing floor
         // (minDurationMs 3000) rejects the solve as too fast — a too-fast
         // solution is an invalid response, never a malformed request.
-        $response = $controller->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+        $response = $controller->siteverify($this->siteverifyRequest([
             'secret' => self::SITEVERIFY_SECRET,
             'response' => $token,
             'remoteip' => '127.0.0.1',
@@ -80,7 +80,7 @@ final class SiteVerifyTest extends TestCase
         self::assertNotSame($valid, $wrong, 'the wrong counter must differ from the valid solution');
 
         $token = SolutionToken::create($challenge->nonce, $wrong, 5000, [])->encode();
-        $response = $controller->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+        $response = $controller->siteverify($this->siteverifyRequest([
             'secret' => self::SITEVERIFY_SECRET,
             'response' => $token,
             'remoteip' => '127.0.0.1',
@@ -107,6 +107,19 @@ final class SiteVerifyTest extends TestCase
      * The logical-operation identity a controller records for a claim
      * (must mirror the controller's fingerprint formula exactly).
      */
+    /**
+     * A form-encoded Siteverify request with the REAL body: the strict
+     * form decoder requires the raw body (the framework bag alone no
+     * longer carries the duplicate-name evidence), so the tests send the
+     * canonical application/x-www-form-urlencoded encoding.
+     */
+    private function siteverifyRequest(array $fields, string $contentType = 'application/x-www-form-urlencoded'): Request
+    {
+        $body = $contentType === 'application/json' ? json_encode($fields, JSON_THROW_ON_ERROR) : http_build_query($fields);
+
+        return Request::create('/kiwi-captcha/siteverify', 'POST', [], [], [], ['CONTENT_TYPE' => $contentType], (string) $body);
+    }
+
     private function fingerprint(string $backendId, ?string $idempotencyKey, string $response, ?string $remoteIp, ?string $canonicalBinding = null): string
     {
         return hash('sha256', $backendId."\0".($idempotencyKey ?? "\0no-key")."\0".hash('sha256', $response)."\0".$this->remoteipFingerprintForTest($remoteIp)."\0".($canonicalBinding ?? "\0no-binding"));
@@ -203,7 +216,7 @@ final class SiteVerifyTest extends TestCase
             null,
             $outstanding,
         );
-        $response = $controller->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+        $response = $controller->siteverify($this->siteverifyRequest([
             'secret' => self::SITEVERIFY_SECRET,
             'response' => $token,
             'remoteip' => '198.51.100.7',
@@ -249,7 +262,7 @@ final class SiteVerifyTest extends TestCase
             null,
             $outstanding,
         );
-        $request = fn (): Request => Request::create('/kiwi-captcha/siteverify', 'POST', [
+        $request = fn (): Request => $this->siteverifyRequest([
             'secret' => self::SITEVERIFY_SECRET,
             'response' => $token,
             'remoteip' => '198.51.100.7',
@@ -299,7 +312,7 @@ final class SiteVerifyTest extends TestCase
             }
         };
         $controller = new SiteVerifyController(new Verifier($storage), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $storage, null, null, null, null, 90.0, 0, null, null, null, $authority);
-        $response = $controller->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+        $response = $controller->siteverify($this->siteverifyRequest([
             'secret' => self::SITEVERIFY_SECRET,
             'response' => $token,
             'remoteip' => '198.51.100.7',
@@ -342,7 +355,7 @@ final class SiteVerifyTest extends TestCase
         };
         $idem = new ArraySiteVerifyIdempotencyStore();
         $controller = new SiteVerifyController(new Verifier($storage), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $storage, null, null, $idem, null, 90.0, 0, null, null, null, $authority);
-        $request = fn (): Request => Request::create('/kiwi-captcha/siteverify', 'POST', [
+        $request = fn (): Request => $this->siteverifyRequest([
             'secret' => self::SITEVERIFY_SECRET,
             'response' => $token,
             'remoteip' => '198.51.100.7',
@@ -362,6 +375,73 @@ final class SiteVerifyTest extends TestCase
         $second = $controller->siteverify($request());
         self::assertSame(400, $second->getStatusCode(), 'a changed transaction binding under the same idempotency UUID is a conflict');
         self::assertFalse(json_decode((string) $second->getContent(), true)['success']);
+    }
+
+    public function testMalformedJsonAndDeepDuplicatesNeverEscapeAsA500(): void
+    {
+        // R69-01/02: malformed JSON strings and depth-bomb documents are
+        // the controlled 400, never an uncaught JsonException or a
+        // fail-open duplicate acceptance.
+        $controller = $this->controller();
+        $malformed = [
+            '{"secret":"0123456789abcdef0123456789abcdef","response":"\\uZZZZ"}',
+            '{"secret":"0123456789abcdef0123456789abcdef","response":"\\ud800"}',
+            '{"secret":"0123456789abcdef0123456789abcdef","response":"'.chr(0xFF).'"}',
+            '{"secret":"0123456789abcdef0123456789abcdef","response":"\\u',
+        ];
+        foreach ($malformed as $body) {
+            $response = $controller->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [], [], [], ['CONTENT_TYPE' => 'application/json'], $body));
+            self::assertLessThan(500, $response->getStatusCode(), 'malformed JSON must be the controlled 4xx: '.$body);
+            self::assertSame(400, $response->getStatusCode());
+        }
+
+        // A duplicate secret whose first value is nested deeper than the
+        // 32-level ceiling: refused, never accepted.
+        $deep = '{"secret":'.str_repeat('[', 33).str_repeat(']', 33).',"secret":"0123456789abcdef0123456789abcdef","response":"x"}';
+        $response = $controller->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [], [], [], ['CONTENT_TYPE' => 'application/json'], $deep));
+        self::assertSame(400, $response->getStatusCode(), 'the deep-nested duplicate is refused');
+    }
+
+    public function testCanonicalFormEncodingWithPlusAndStrictEscapes(): void
+    {
+        // R69-03: '+' means a space (the canonical form encoding — a
+        // standards-compliant intermediary decodes '+' as a space, so the
+        // strict decoder must agree), a literal '+' is the RFC3986 %2B,
+        // and a malformed % escape is refused, not admitted.
+        $controller = $this->controller();
+        $refl = new \ReflectionMethod($controller, 'decodeStrictFormBody');
+
+        $plus = $refl->invoke($controller, 'a=b+c&d=e');
+        self::assertSame('b c', $plus['a'] ?? null, "'+' decodes to a space exactly like %20");
+        $pct20 = $refl->invoke($controller, 'a=b%20c&d=e');
+        self::assertSame($plus, $pct20, "'+' and %20 are the SAME canonical encoding");
+
+        // A malformed % escape is refused by the strict decoder.
+        $bad = Request::create('/kiwi-captcha/siteverify', 'POST', [], [], [], ['CONTENT_TYPE' => 'application/x-www-form-urlencoded'], 'secret=0123456789abcdef0123456789abcdef&response=x&remoteip=127.0.0.1&request_binding=txn%ZZ');
+        self::assertSame(400, $controller->siteverify($bad)->getStatusCode(), 'a malformed % escape is refused');
+    }
+
+    public function testInvalidAuthorityReturnedBindingIsRefusedAtTheBoundary(): void
+    {
+        // R69-05: the authority's returned binding must satisfy the
+        // identifier shape — an out-of-shape value is refused at the
+        // trust boundary, never allowed into the fingerprint/store.
+        $storage = new ArrayStorage();
+        $issuer = new Issuer(new Config(secretKey: self::SECRET, algorithm: PoWAlgorithm::Sha256, targetBits: 8, ttlSecs: 120), $storage);
+        $challenge = $issuer->issue('login', '198.51.100.7', 'txn-A');
+        $solution = $this->solve($challenge->prefix, $challenge->salt, $challenge->targetBits);
+        usleep(($challenge->minDurationMs + 10) * 1000);
+        $token = SolutionToken::create($challenge->nonce, $solution, 5000, [])->encode();
+
+        $authority = new class implements RequestBindingAuthorityInterface {
+            public function resolve(Request $request, string $scope, ?string $presentedBinding): ?string
+            {
+                return "txn-A\x00evil";
+            }
+        };
+        $controller = new SiteVerifyController(new Verifier($storage), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $storage, null, null, null, null, 90.0, 0, null, null, null, $authority);
+        $response = $controller->siteverify($this->siteverifyRequest(['secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '198.51.100.7']));
+        self::assertSame(400, $response->getStatusCode(), 'the authority\'s out-of-shape binding is refused at the boundary');
     }
 
     public function testJsonDuplicateKeysAreRefusedBeforeParsing(): void
@@ -407,7 +487,7 @@ final class SiteVerifyTest extends TestCase
     {
         // R68-07: Content-Type and Content-Encoding are enforced singular.
         $controller = $this->controller();
-        $request = Request::create('/kiwi-captcha/siteverify', 'POST', [
+        $request = $this->siteverifyRequest([
             'secret' => self::SITEVERIFY_SECRET, 'response' => 'x', 'remoteip' => '127.0.0.1',
         ]);
         $request->headers->set('Content-Type', ['application/json', 'application/x-www-form-urlencoded']);
@@ -483,7 +563,7 @@ final class SiteVerifyTest extends TestCase
         $semaphore = new RedisAdmissionSemaphore($client, 4, 'siteverify-argon', 45_000, 64, 1);
         $stack = new RequestStack();
         $gate = new RequestScopeAdmissionGate($semaphore, $stack);
-        $request = Request::create('/kiwi-captcha/siteverify', 'POST', [
+        $request = $this->siteverifyRequest([
             'secret' => self::SITEVERIFY_SECRET,
             'response' => $token,
             'remoteip' => '198.51.100.7',
@@ -517,7 +597,7 @@ final class SiteVerifyTest extends TestCase
         $storage = new ArrayStorage();
         $verifier = new Verifier($storage);
         $controller = new SiteVerifyController($verifier, self::SECRET, [], $storage);
-        $response = $controller->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', ['response' => 'x', 'secret' => 'x']));
+        $response = $controller->siteverify($this->siteverifyRequest(['response' => 'x', 'secret' => 'x']));
         self::assertSame(404, $response->getStatusCode());
     }
 
@@ -533,7 +613,7 @@ final class SiteVerifyTest extends TestCase
 
     public function testInvalidSecretIsRejectedWithProviderCode(): void
     {
-        $response = $this->controller()->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', ['response' => 'x', 'secret' => 'wrong']));
+        $response = $this->controller()->siteverify($this->siteverifyRequest(['response' => 'x', 'secret' => 'wrong']));
         self::assertSame(200, $response->getStatusCode());
         $json = json_decode((string) $response->getContent(), true);
         self::assertFalse($json['success']);
@@ -542,7 +622,7 @@ final class SiteVerifyTest extends TestCase
 
     public function testMissingResponseIsRejected(): void
     {
-        $response = $this->controller()->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', ['secret' => self::SITEVERIFY_SECRET]));
+        $response = $this->controller()->siteverify($this->siteverifyRequest(['secret' => self::SITEVERIFY_SECRET]));
         self::assertSame(['missing-input-response'], json_decode((string) $response->getContent(), true)['error-codes']);
     }
 
@@ -560,7 +640,7 @@ final class SiteVerifyTest extends TestCase
         $controller = new SiteVerifyController($verifier, self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $storage);
 
         // Form-encoded, with the end-user IP supplied by the trusted backend.
-        $response = $controller->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+        $response = $controller->siteverify($this->siteverifyRequest([
             'response' => $solution,
             'secret' => self::SITEVERIFY_SECRET,
             'remoteip' => '203.0.113.7',
@@ -599,7 +679,7 @@ final class SiteVerifyTest extends TestCase
         $verifier = new Verifier($storage);
         $controller = new SiteVerifyController($verifier, self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $storage);
 
-        $first = $controller->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', ['response' => $solution, 'secret' => self::SITEVERIFY_SECRET, 'remoteip' => '203.0.113.7']));
+        $first = $controller->siteverify($this->siteverifyRequest(['response' => $solution, 'secret' => self::SITEVERIFY_SECRET, 'remoteip' => '203.0.113.7']));
         self::assertTrue(json_decode((string) $first->getContent(), true)['success']);
 
         // The compatibility boundary distinguishes the first
@@ -607,7 +687,7 @@ final class SiteVerifyTest extends TestCase
         // same nonce MUST NOT report success again — it returns the
         // provider vocabulary for a consumed token. (The native verifier's
         // deterministic-result retry semantics stay internal.)
-        $replay = $controller->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', ['response' => $solution, 'secret' => self::SITEVERIFY_SECRET, 'remoteip' => '203.0.113.7']));
+        $replay = $controller->siteverify($this->siteverifyRequest(['response' => $solution, 'secret' => self::SITEVERIFY_SECRET, 'remoteip' => '203.0.113.7']));
         $json = json_decode((string) $replay->getContent(), true);
         self::assertFalse($json['success'], 'a replayed response must not succeed again');
         self::assertSame(['timeout-or-duplicate'], $json['error-codes']);
@@ -629,7 +709,7 @@ final class SiteVerifyTest extends TestCase
             'secret-admin' => 'admin_login',
         ], $storage);
 
-        $ok = $controller->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', ['response' => $solution, 'secret' => 'secret-login', 'remoteip' => '203.0.113.7']));
+        $ok = $controller->siteverify($this->siteverifyRequest(['response' => $solution, 'secret' => 'secret-login', 'remoteip' => '203.0.113.7']));
         self::assertTrue(json_decode((string) $ok->getContent(), true)['success']);
 
         // The same login token against the admin secret: the wrong
@@ -639,7 +719,7 @@ final class SiteVerifyTest extends TestCase
         // is preserved (never deleted by the hard failure). The provider
         // vocabulary surfaces the scope refusal as invalid-input-response
         // — the escalation is refused, never success.
-        $rejected = $controller->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', ['response' => $solution, 'secret' => 'secret-admin', 'remoteip' => '203.0.113.7']));
+        $rejected = $controller->siteverify($this->siteverifyRequest(['response' => $solution, 'secret' => 'secret-admin', 'remoteip' => '203.0.113.7']));
         $json = json_decode((string) $rejected->getContent(), true);
         self::assertFalse($json['success']);
         self::assertSame(['invalid-input-response'], $json['error-codes']);
@@ -650,7 +730,7 @@ final class SiteVerifyTest extends TestCase
         $adminChallenge = $issuer->issue('admin_login', '203.0.113.7');
         $adminSolution = $this->solveSolution($storage->find($adminChallenge->nonce));
         usleep(((int) $adminChallenge->minDurationMs + 10) * 1000);
-        $adminOk = $controller->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', ['response' => $adminSolution, 'secret' => 'secret-admin', 'remoteip' => '203.0.113.7']));
+        $adminOk = $controller->siteverify($this->siteverifyRequest(['response' => $adminSolution, 'secret' => 'secret-admin', 'remoteip' => '203.0.113.7']));
         self::assertTrue(json_decode((string) $adminOk->getContent(), true)['success'], 'the admin secret accepts its own scope');
     }
 
@@ -676,7 +756,7 @@ final class SiteVerifyTest extends TestCase
             usleep(((int) $challenge->minDurationMs + 10) * 1000);
             $verifier = new Verifier($storage);
             $controller = new SiteVerifyController($verifier, self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $storage);
-            $response = $controller->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+            $response = $controller->siteverify($this->siteverifyRequest([
                 'response' => $solution,
                 'secret' => self::SITEVERIFY_SECRET,
                 'remoteip' => '203.0.113.7',
@@ -700,7 +780,7 @@ final class SiteVerifyTest extends TestCase
         usleep(1_500_000);
         $verifier = new Verifier($storage);
         $controller = new SiteVerifyController($verifier, self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $storage);
-        $response = $controller->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', ['response' => $solution, 'secret' => self::SITEVERIFY_SECRET, 'remoteip' => '203.0.113.7']));
+        $response = $controller->siteverify($this->siteverifyRequest(['response' => $solution, 'secret' => self::SITEVERIFY_SECRET, 'remoteip' => '203.0.113.7']));
         $json = json_decode((string) $response->getContent(), true);
         self::assertFalse($json['success']);
         self::assertSame(['timeout-or-duplicate'], $json['error-codes']);
@@ -714,7 +794,7 @@ final class SiteVerifyTest extends TestCase
         $storage = new ArrayStorage();
         [$token] = $this->issuedToken($storage);
         $controller = $this->controller();
-        $response = $controller->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', ['response' => $token]));
+        $response = $controller->siteverify($this->siteverifyRequest(['response' => $token]));
         $body = json_decode((string) $response->getContent(), true);
         self::assertSame('missing-input-secret', $body['error-codes'][0] ?? null);
     }
@@ -724,7 +804,7 @@ final class SiteVerifyTest extends TestCase
         $storage = new ArrayStorage();
         [$token] = $this->issuedToken($storage);
         $controller = $this->controller();
-        $response = $controller->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', ['secret' => str_repeat('x', 24), 'response' => $token]));
+        $response = $controller->siteverify($this->siteverifyRequest(['secret' => str_repeat('x', 24), 'response' => $token]));
         $body = json_decode((string) $response->getContent(), true);
         self::assertSame('invalid-input-secret', $body['error-codes'][0] ?? null);
     }
@@ -734,7 +814,7 @@ final class SiteVerifyTest extends TestCase
         $storage = new ArrayStorage();
         [$token] = $this->issuedToken($storage);
         $controller = $this->controller(secrets: [self::SITEVERIFY_SECRET => 'login'], idempotencyStore: new ArraySiteVerifyIdempotencyStore());
-        $response = $controller->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+        $response = $controller->siteverify($this->siteverifyRequest([
             'secret' => self::SITEVERIFY_SECRET,
             'response' => $token,
             'idempotency_key' => 'not-a-uuid',
@@ -748,7 +828,7 @@ final class SiteVerifyTest extends TestCase
     {
         $storage = new ArrayStorage();
         $controller = $this->controller();
-        $response = $controller->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+        $response = $controller->siteverify($this->siteverifyRequest([
             'secret' => self::SITEVERIFY_SECRET,
             'response' => str_repeat('A', 9000),
         ]));
@@ -767,7 +847,7 @@ final class SiteVerifyTest extends TestCase
         $metadataStore->store($nonce, new SiteVerifyMetadata('checkout', 'order_19382', 'login'), 300);
         $controller = $this->controller(metadataStore: $metadataStore, storage: $storage);
 
-        $response = $controller->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+        $response = $controller->siteverify($this->siteverifyRequest([
             'secret' => self::SITEVERIFY_SECRET,
             'response' => $token,
             'remoteip' => '127.0.0.1',
@@ -788,18 +868,18 @@ final class SiteVerifyTest extends TestCase
         $controller = $this->controller(idempotencyStore: $store, storage: $storage);
         $uuid = '123e4567-e89b-42d3-a456-426614174000';
 
-        $first = json_decode((string) $controller->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+        $first = json_decode((string) $controller->siteverify($this->siteverifyRequest([
             'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
         ]))->getContent(), true);
         self::assertSame(true, $first['success'] ?? null);
 
-        $second = json_decode((string) $controller->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+        $second = json_decode((string) $controller->siteverify($this->siteverifyRequest([
             'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
         ]))->getContent(), true);
         self::assertSame($first, $second, 'a same-key retry must return the IDENTICAL canonical response');
 
         // Same token + a different key -> timeout-or-duplicate (no idempotency).
-        $third = json_decode((string) $controller->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+        $third = json_decode((string) $controller->siteverify($this->siteverifyRequest([
             'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => '223e4567-e89b-42d3-a456-426614174000',
         ]))->getContent(), true);
         self::assertSame(false, $third['success'] ?? null);
@@ -817,11 +897,11 @@ final class SiteVerifyTest extends TestCase
         $controller = $this->controller(idempotencyStore: $store, storage: $storage);
         $uuid = 'b23e4567-e89b-42d3-a456-426614174000';
 
-        $first = (string) $controller->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+        $first = (string) $controller->siteverify($this->siteverifyRequest([
             'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
         ]))->getContent();
         self::assertSame(true, json_decode($first, true)['success'] ?? null);
-        $second = (string) $controller->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+        $second = (string) $controller->siteverify($this->siteverifyRequest([
             'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
         ]))->getContent();
         self::assertSame($first, $second, 'same key + token + remoteip is the normal retry path: identical canonical bytes');
@@ -845,7 +925,7 @@ final class SiteVerifyTest extends TestCase
         [$claim] = $store->claim($backendId, $uuid, hash('sha256', $token), 300, 'ip:127.0.0.1');
         self::assertSame(IdempotencyClaim::Claimed, $claim);
 
-        $response = $controller->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+        $response = $controller->siteverify($this->siteverifyRequest([
             'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '203.0.113.9', 'idempotency_key' => $uuid,
         ]));
         self::assertSame(400, $response->getStatusCode());
@@ -863,12 +943,12 @@ final class SiteVerifyTest extends TestCase
         $controller = $this->controller(idempotencyStore: $store, storage: $storage);
         $uuid = 'a23e4567-e89b-42d3-a456-426614174000';
 
-        $first = $controller->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+        $first = $controller->siteverify($this->siteverifyRequest([
             'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
         ]));
         self::assertSame(200, $first->getStatusCode());
 
-        $second = $controller->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+        $second = $controller->siteverify($this->siteverifyRequest([
             'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '203.0.113.9', 'idempotency_key' => $uuid,
         ]));
         self::assertSame(400, $second->getStatusCode());
@@ -884,10 +964,10 @@ final class SiteVerifyTest extends TestCase
         $controller = $this->controller(idempotencyStore: $store);
         $uuid = '323e4567-e89b-42d3-a456-426614174000';
 
-        $controller->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+        $controller->siteverify($this->siteverifyRequest([
             'secret' => self::SITEVERIFY_SECRET, 'response' => $tokenA, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
         ]));
-        $second = json_decode((string) $controller->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+        $second = json_decode((string) $controller->siteverify($this->siteverifyRequest([
             'secret' => self::SITEVERIFY_SECRET, 'response' => $tokenB, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
         ]))->getContent(), true);
         self::assertSame('bad-request', $second['error-codes'][0] ?? null, 'same key + different token must be rejected');
@@ -901,14 +981,14 @@ final class SiteVerifyTest extends TestCase
         $controller = $this->controller(idempotencyStore: $store);
         $uuid = '423e4567-e89b-42d3-a456-426614174000';
         // A wrong remoteip makes the bound verification fail.
-        $first = json_decode((string) $controller->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+        $first = json_decode((string) $controller->siteverify($this->siteverifyRequest([
             'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '203.0.113.9', 'idempotency_key' => $uuid,
         ]))->getContent(), true);
         self::assertSame(false, $first['success'] ?? null);
         // Retry with the same remoteip and the same key -> the same
         // canonical failure (idempotency freezes the outcome; the
         // fingerprint binds the remoteip, so the retry must repeat it).
-        $second = json_decode((string) $controller->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+        $second = json_decode((string) $controller->siteverify($this->siteverifyRequest([
             'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '203.0.113.9', 'idempotency_key' => $uuid,
         ]))->getContent(), true);
         self::assertSame($first, $second);
@@ -926,11 +1006,11 @@ final class SiteVerifyTest extends TestCase
         $uuid = '523e4567-e89b-42d3-a456-426614174000';
         $controllerA = $this->controller(secrets: ['secret-A-'.str_repeat('a', 16) => 'login'], idempotencyStore: $store, storage: $storage);
         $controllerB = $this->controller(secrets: ['secret-B-'.str_repeat('b', 16) => 'login'], idempotencyStore: $store, storage: $storage);
-        $first = json_decode((string) $controllerA->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+        $first = json_decode((string) $controllerA->siteverify($this->siteverifyRequest([
             'secret' => 'secret-A-'.str_repeat('a', 16), 'response' => $tokenA, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
         ]))->getContent(), true);
         self::assertSame(true, $first['success'] ?? null);
-        $second = json_decode((string) $controllerB->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+        $second = json_decode((string) $controllerB->siteverify($this->siteverifyRequest([
             'secret' => 'secret-B-'.str_repeat('b', 16), 'response' => $tokenB, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
         ]))->getContent(), true);
         self::assertSame(true, $second['success'] ?? null, 'different backends must not collide on the same UUID');
@@ -1013,7 +1093,7 @@ final class SiteVerifyTest extends TestCase
         $backendId = hash('sha256', self::SITEVERIFY_SECRET.'|login|0');
         $malformed = 'not-a-valid-solution-token';
 
-        $first = (string) $controller->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+        $first = (string) $controller->siteverify($this->siteverifyRequest([
             'secret' => self::SITEVERIFY_SECRET, 'response' => $malformed, 'idempotency_key' => $uuid,
         ]))->getContent();
         $body = json_decode($first, true);
@@ -1021,7 +1101,7 @@ final class SiteVerifyTest extends TestCase
         self::assertSame(['invalid-input-response'], $body['error-codes'] ?? null);
 
         // A same-key retry reproduces the identical canonical failure.
-        $second = (string) $controller->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+        $second = (string) $controller->siteverify($this->siteverifyRequest([
             'secret' => self::SITEVERIFY_SECRET, 'response' => $malformed, 'idempotency_key' => $uuid,
         ]))->getContent();
         self::assertSame($first, $second, 'a same-key malformed retry must return the identical canonical failure');
@@ -1101,7 +1181,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         // polls through the lease expiry, wins the takeover, verifies and
         // finalizes with the takeover owner token.
         $winner = new SiteVerifyController($verifier, self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $counting, null, null, $store, null, 5.0);
-        $won = $winner->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+        $won = $winner->siteverify($this->siteverifyRequest([
             'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
         ]));
         $wonBody = json_decode((string) $won->getContent(), true);
@@ -1210,7 +1290,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         [$recording] = $this->recordingStore($store);
         $controller = $this->controller(idempotencyStore: $recording, storage: $storage, waitSecs: 5.0);
         $start = microtime(true);
-        $won = $controller->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+        $won = $controller->siteverify($this->siteverifyRequest([
             'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
         ]));
         $wonBody = json_decode((string) $won->getContent(), true);
@@ -1270,7 +1350,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         [$recording] = $this->recordingStore($store);
         $controller = $this->controller(idempotencyStore: $recording, storage: $storage, waitSecs: 2.5);
         $start = microtime(true);
-        $response = $controller->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+        $response = $controller->siteverify($this->siteverifyRequest([
             'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
         ]));
         self::assertSame(503, $response->getStatusCode(), 'the hard bound must answer the retryable 503 internal-error');
@@ -1361,7 +1441,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         [$token] = $this->issuedToken($storage);
         $controller = $this->controller(storage: $storage);
 
-        $response = $controller->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+        $response = $controller->siteverify($this->siteverifyRequest([
             'secret' => self::SITEVERIFY_SECRET,
             'response' => $token,
             'remoteip' => '203.0.113.4, 10.0.0.4',
@@ -1381,7 +1461,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         $controller = $this->controller(idempotencyStore: $store, storage: $storage);
         $uuid = 'c23e4567-e89b-42d3-a456-426614174000';
 
-        $response = $controller->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+        $response = $controller->siteverify($this->siteverifyRequest([
             'secret' => self::SITEVERIFY_SECRET,
             'response' => $token,
             'remoteip' => '203.0.113.4, 10.0.0.4',
@@ -1407,12 +1487,12 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         $controller = $this->controller(idempotencyStore: $store, storage: $storage);
         $uuid = 'd23e4567-e89b-42d3-a456-426614174000';
 
-        $first = (string) $controller->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+        $first = (string) $controller->siteverify($this->siteverifyRequest([
             'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '192.0.2.1', 'idempotency_key' => $uuid,
         ]))->getContent();
         self::assertSame(true, json_decode($first, true)['success'] ?? null);
 
-        $second = (string) $controller->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+        $second = (string) $controller->siteverify($this->siteverifyRequest([
             'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '::ffff:192.0.2.1', 'idempotency_key' => $uuid,
         ]))->getContent();
         self::assertSame($first, $second, 'the mapped-v6 spelling is the SAME identity: identical canonical bytes, not a conflict');
@@ -1562,7 +1642,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         // without finalizing. The identity-bearing consume (Claimed path)
         // recorded the owner's fingerprint in the consumed record.
         $owner = new SiteVerifyController(new Verifier($storage), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $storage, null, null, $crashingStore, null, 5.0);
-        $ownerResponse = $owner->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+        $ownerResponse = $owner->siteverify($this->siteverifyRequest([
             'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
         ]));
         // The owner's finalize is REFUSED (the simulated crash): under the
@@ -1585,7 +1665,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         // Wait past the signed expiry (ttl 5s) and the fixed 3s lease.
         sleep(7);
         $waiter = new SiteVerifyController(new Verifier($storage), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $storage, null, null, $crashingStore, null, 5.0);
-        $retry = $waiter->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+        $retry = $waiter->siteverify($this->siteverifyRequest([
             'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
         ]));
         $retryBody = json_decode((string) $retry->getContent(), true);
@@ -1627,7 +1707,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         $uuidB = '123e4567-e89b-42d3-a456-42661417401b';
 
         // 1. The original logical operation: UUID A redeems the token once.
-        $first = json_decode((string) $controller->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+        $first = json_decode((string) $controller->siteverify($this->siteverifyRequest([
             'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuidA,
         ]))->getContent(), true);
         self::assertSame(true, $first['success'] ?? null);
@@ -1647,7 +1727,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         // different logical operation: timeout-or-duplicate — and its
         // claim is finalized as CompleteSame with the canonical duplicate
         // (never left pending for a later takeover).
-        $second = json_decode((string) $controller->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+        $second = json_decode((string) $controller->siteverify($this->siteverifyRequest([
             'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuidB,
         ]))->getContent(), true);
         self::assertSame(false, $second['success'] ?? null);
@@ -1664,7 +1744,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         // 4. The retry with UUID B must still be timeout-or-duplicate —
         // a consumed token can never become successful again through a
         // different idempotency UUID.
-        $retry = json_decode((string) $controller->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+        $retry = json_decode((string) $controller->siteverify($this->siteverifyRequest([
             'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuidB,
         ]))->getContent(), true);
         self::assertSame(false, $retry['success'] ?? null, 'a consumed token must NEVER become successful again through a different idempotency UUID');
@@ -1757,7 +1837,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         // but its finalize is refused (the simulated crash): the
         // authoritative completed state was not established, so the 503 —
         // never the locally computed success.
-        $firstResponse = $controller->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+        $firstResponse = $controller->siteverify($this->siteverifyRequest([
             'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuidA,
         ]));
         self::assertSame(503, $firstResponse->getStatusCode(), 'a refused finalize never returns the local result as authoritative');
@@ -1772,7 +1852,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
 
         // 2. UUID B detects the duplicate (timeout-or-duplicate) but the
         // finalize never lands: claim B is still pending.
-        $secondResponse = $controller->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+        $secondResponse = $controller->siteverify($this->siteverifyRequest([
             'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuidB,
         ]));
         // B's finalize is refused too (the crash persists): the 503, never
@@ -1792,7 +1872,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         // the identity gate blocks the recovery — the ordinary verify
         // returns timeout-or-duplicate for the consumed token.
         $retryController = $this->controller(idempotencyStore: $crashingStore, storage: $storage, waitSecs: 5.0);
-        $retryResponse = $retryController->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+        $retryResponse = $retryController->siteverify($this->siteverifyRequest([
             'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuidB,
         ]));
         // The identity gate blocks the recovery (the consumed record's own
@@ -1844,7 +1924,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         };
         $controller = new SiteVerifyController(new Verifier($storage), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $storage, null, null, $throwing);
 
-        $response = $controller->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+        $response = $controller->siteverify($this->siteverifyRequest([
             'secret' => self::SITEVERIFY_SECRET,
             'response' => $token,
             'remoteip' => '127.0.0.1',
@@ -1915,7 +1995,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         // throws: 503 internal-error, never a 500, and the entry stays
         // pending.
         $owner = new SiteVerifyController(new Verifier($storage), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $storage, null, null, $finalizeThrowing, null, 5.0);
-        $ownerResponse = $owner->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+        $ownerResponse = $owner->siteverify($this->siteverifyRequest([
             'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
         ]));
         self::assertSame(503, $ownerResponse->getStatusCode(), 'a throwing finalize after consumption must map to 503 internal-error, never a 500');
@@ -1928,7 +2008,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         // same logical operation: same backend + UUID + response + IP).
         $now += 4;
         $retry = new SiteVerifyController(new Verifier($storage), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $storage, null, null, $inner, null, 5.0);
-        $retryResponse = $retry->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+        $retryResponse = $retry->siteverify($this->siteverifyRequest([
             'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
         ]));
         $retryBody = json_decode((string) $retryResponse->getContent(), true);
@@ -2015,7 +2095,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         };
         $controller = new SiteVerifyController(new Verifier($throwing), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $throwing, null, null, $throwingIdem);
 
-        $response = $controller->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+        $response = $controller->siteverify($this->siteverifyRequest([
             'secret' => self::SITEVERIFY_SECRET,
             'response' => $token,
             'remoteip' => '127.0.0.1',
@@ -2109,7 +2189,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
 
         // 1. The first redemption has NO idempotency key: success, and NO
         //    identity is recorded (the non-idempotent verify passes null).
-        $first = json_decode((string) $controller->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+        $first = json_decode((string) $controller->siteverify($this->siteverifyRequest([
             'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1',
         ]))->getContent(), true);
         self::assertSame(true, $first['success'] ?? null);
@@ -2120,7 +2200,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         // 2. A keyed replay under UUID B: fresh claim, the verify finds
         //    the consumed record -> timeout-or-duplicate, and the
         //    finalize crashes: B's entry stays pending.
-        $secondResponse = $controller->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+        $secondResponse = $controller->siteverify($this->siteverifyRequest([
             'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuidB,
         ]));
         // The replay's own finalize is refused (the simulated crash): the
@@ -2139,7 +2219,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         //    the takeover refuses reconstruction and the ordinary verify
         //    returns timeout-or-duplicate. The keyed replay can never
         //    register itself as the original.
-        $retry = json_decode((string) $controller->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+        $retry = json_decode((string) $controller->siteverify($this->siteverifyRequest([
             'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuidB,
         ]))->getContent(), true);
         self::assertSame(false, $retry['success'] ?? null, 'a keyed replay of a no-key redemption must NEVER reconstruct a success');
@@ -2230,7 +2310,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         //    identity-bearing consume records secret-1's fingerprint, but
         //    the finalize is refused (the simulated crash): the 503, never
         //    the local result as authoritative.
-        $firstResponse = $controller1->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+        $firstResponse = $controller1->siteverify($this->siteverifyRequest([
             'secret' => $secret1, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
         ]));
         self::assertSame(503, $firstResponse->getStatusCode(), 'the refused finalize answers the 503');
@@ -2246,7 +2326,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         // 2. The same token + same UUID via secret 2: fresh entry in
         //    secret-2's backend namespace, the verify finds the consumed
         //    record -> timeout-or-duplicate, and the finalize crashes.
-        $secondResponse = $controller2->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+        $secondResponse = $controller2->siteverify($this->siteverifyRequest([
             'secret' => $secret2, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
         ]));
         // Secret-2's finalize is the SECOND finalize: it delegates and
@@ -2265,7 +2345,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         //    fingerprint differs from the consumed record's identity
         //    (secret 1's): the takeover MUST NOT reconstruct — the
         //    ordinary verify returns timeout-or-duplicate.
-        $retry = json_decode((string) $controller2->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+        $retry = json_decode((string) $controller2->siteverify($this->siteverifyRequest([
             'secret' => $secret2, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
         ]))->getContent(), true);
         self::assertSame(false, $retry['success'] ?? null, 'a same-scope backend secret can never reconstruct another backend\'s redemption');
@@ -2352,7 +2432,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
             }
         };
         $bController = $this->controller(idempotencyStore: $finalizeThrowing, storage: $storage, waitSecs: 5.0);
-        $bResponse = $bController->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+        $bResponse = $bController->siteverify($this->siteverifyRequest([
             'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuidK,
         ]));
         self::assertSame(503, $bResponse->getStatusCode(), 'the takeover owner\'s crashed finalize must map to the retryable internal-error');
@@ -2377,7 +2457,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         // reconstruction succeeds with the identical canonical success
         // bytes.
         $cController = $this->controller(idempotencyStore: $store, storage: $storage, waitSecs: 5.0);
-        $cResponse = $cController->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+        $cResponse = $cController->siteverify($this->siteverifyRequest([
             'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuidK,
         ]));
         $cBody = json_decode((string) $cResponse->getContent(), true);
@@ -2404,7 +2484,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         self::assertSame(IdempotencyClaim::Claimed, $claimD);
         $now += 4;
         $dController = $this->controller(idempotencyStore: $store, storage: $storage, waitSecs: 5.0);
-        $dResponse = $dController->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+        $dResponse = $dController->siteverify($this->siteverifyRequest([
             'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuidK2,
         ]));
         $dBody = json_decode((string) $dResponse->getContent(), true);
@@ -2461,7 +2541,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         // hits the outage after consumption.
         $controller = new SiteVerifyController(new Verifier($storage), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $throwing);
 
-        $response = $controller->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+        $response = $controller->siteverify($this->siteverifyRequest([
             'secret' => self::SITEVERIFY_SECRET,
             'response' => $token,
             'remoteip' => '127.0.0.1',
@@ -2555,7 +2635,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
             }
         };
         $owner = new SiteVerifyController(new Verifier($lostReply), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $lostReply, null, null, $store, null, 5.0);
-        $ownerResponse = $owner->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+        $ownerResponse = $owner->siteverify($this->siteverifyRequest([
             'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
         ]));
         self::assertSame(503, $ownerResponse->getStatusCode(), 'the lost consume reply must map to the retryable 503 internal-error');
@@ -2576,7 +2656,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         // the uncommitted derivation is resumed and committed.
         $now += 4;
         $retry = $this->controller(idempotencyStore: $store, storage: $storage, waitSecs: 5.0);
-        $retryResponse = $retry->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+        $retryResponse = $retry->siteverify($this->siteverifyRequest([
             'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
         ]));
         $retryBody = json_decode((string) $retryResponse->getContent(), true);
@@ -2676,7 +2756,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
             }
         };
         $owner = new SiteVerifyController(new Verifier($lostReply), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $lostReply, null, null, $store, null, 5.0);
-        $ownerResponse = $owner->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+        $ownerResponse = $owner->siteverify($this->siteverifyRequest([
             'secret' => self::SITEVERIFY_SECRET, 'response' => $wrongToken, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
         ]));
         self::assertSame(503, $ownerResponse->getStatusCode(), 'the lost consume reply must map to the retryable 503 internal-error');
@@ -2688,7 +2768,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         // the canonical failure.
         $now += 4;
         $retry = $this->controller(idempotencyStore: $store, storage: $storage, waitSecs: 5.0);
-        $retryResponse = $retry->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+        $retryResponse = $retry->siteverify($this->siteverifyRequest([
             'secret' => self::SITEVERIFY_SECRET, 'response' => $wrongToken, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
         ]));
         $retryBody = json_decode((string) $retryResponse->getContent(), true);
@@ -2703,7 +2783,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         // A same-UUID retry now returns the identical stored canonical
         // failure (CompleteSame) — never a re-derivation.
         $again = $this->controller(idempotencyStore: $store, storage: $storage, waitSecs: 5.0);
-        $againResponse = $again->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+        $againResponse = $again->siteverify($this->siteverifyRequest([
             'secret' => self::SITEVERIFY_SECRET, 'response' => $wrongToken, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
         ]));
         self::assertSame($retryBody, json_decode((string) $againResponse->getContent(), true), 'a same-UUID retry reproduces the identical canonical failure');
@@ -2777,7 +2857,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
             }
         };
         $owner = new SiteVerifyController(new Verifier($lostReply), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $lostReply, null, null, $store, null, 5.0);
-        $ownerResponse = $owner->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+        $ownerResponse = $owner->siteverify($this->siteverifyRequest([
             'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuidA,
         ]));
         self::assertSame(503, $ownerResponse->getStatusCode());
@@ -2791,7 +2871,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         // retryable 503 (never a finalized duplicate). B's entry stays
         // pending; its lease expires.
         $bFirst = $this->controller(idempotencyStore: $store, storage: $storage, waitSecs: 5.0);
-        $bFirstResponse = $bFirst->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+        $bFirstResponse = $bFirst->siteverify($this->siteverifyRequest([
             'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuidB,
         ]));
         self::assertSame(503, $bFirstResponse->getStatusCode(), 'B cannot derive a consumed-without-result record — the retryable 503');
@@ -2803,7 +2883,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         // refused, so the resume never runs; the ordinary verify remains
         // ConsumeIndeterminate -> 503.
         $bRetry = $this->controller(idempotencyStore: $store, storage: $storage, waitSecs: 5.0);
-        $bRetryResponse = $bRetry->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+        $bRetryResponse = $bRetry->siteverify($this->siteverifyRequest([
             'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuidB,
         ]));
         $bRetryBody = json_decode((string) $bRetryResponse->getContent(), true);
@@ -2814,7 +2894,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         // A's own retry can still resume the original success.
         $now += 4;
         $aRetry = $this->controller(idempotencyStore: $store, storage: $storage, waitSecs: 5.0);
-        $aRetryResponse = $aRetry->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+        $aRetryResponse = $aRetry->siteverify($this->siteverifyRequest([
             'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuidA,
         ]));
         self::assertSame(true, json_decode((string) $aRetryResponse->getContent(), true)['success'] ?? null, 'the winner\'s same-key retry still resumes after B\'s refused attempts');
@@ -2888,7 +2968,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
             }
         };
         $owner = new SiteVerifyController(new Verifier($lostReply), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $lostReply, null, null, $store, null, 5.0);
-        $ownerResponse = $owner->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+        $ownerResponse = $owner->siteverify($this->siteverifyRequest([
             'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1',
         ]));
         self::assertSame(503, $ownerResponse->getStatusCode(), 'the no-key lost consume reply maps to the retryable 503');
@@ -2899,7 +2979,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         // The keyed replay claims a fresh entry, cannot resume (null
         // identity), and the ordinary verify stays ConsumeIndeterminate.
         $keyed = $this->controller(idempotencyStore: $store, storage: $storage, waitSecs: 5.0);
-        $keyedResponse = $keyed->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+        $keyedResponse = $keyed->siteverify($this->siteverifyRequest([
             'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuidB,
         ]));
         self::assertSame(503, $keyedResponse->getStatusCode(), 'a keyed replay of a no-key redemption must NEVER resume');
@@ -2972,7 +3052,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
             }
         };
         $owner = new SiteVerifyController(new Verifier($lostConsume), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $lostConsume, null, null, $store, null, 5.0);
-        $ownerResponse = $owner->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+        $ownerResponse = $owner->siteverify($this->siteverifyRequest([
             'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
         ]));
         self::assertSame(503, $ownerResponse->getStatusCode());
@@ -3031,7 +3111,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         };
         $now += 4;
         $retry = new SiteVerifyController(new Verifier($lostCommit), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $lostCommit, null, null, $store, null, 5.0);
-        $retryResponse = $retry->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+        $retryResponse = $retry->siteverify($this->siteverifyRequest([
             'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
         ]));
         $retryBody = json_decode((string) $retryResponse->getContent(), true);
@@ -3115,7 +3195,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
             }
         };
         $owner = new SiteVerifyController(new Verifier($lostReply), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $lostReply, null, null, $store, null, 5.0);
-        $ownerResponse = $owner->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+        $ownerResponse = $owner->siteverify($this->siteverifyRequest([
             'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
         ]));
         self::assertSame(503, $ownerResponse->getStatusCode());
@@ -3123,7 +3203,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         // Same UUID + changed remoteip: conflict at the claim layer — the
         // entry is bound to the original remoteip fingerprint.
         $conflict = $this->controller(idempotencyStore: $store, storage: $storage, waitSecs: 5.0);
-        $conflictResponse = $conflict->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+        $conflictResponse = $conflict->siteverify($this->siteverifyRequest([
             'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '203.0.113.9', 'idempotency_key' => $uuid,
         ]));
         self::assertSame(400, $conflictResponse->getStatusCode(), 'a changed remoteip under the same UUID must CONFLICT');
@@ -3218,7 +3298,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
                 }
             };
             $owner = new SiteVerifyController(new Verifier($lostReply), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $lostReply, null, null, $store, null, 5.0);
-            $ownerResponse = $owner->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+            $ownerResponse = $owner->siteverify($this->siteverifyRequest([
                 'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
             ]));
             self::assertSame(503, $ownerResponse->getStatusCode(), 'the lost Argon consume reply maps to the retryable 503');
@@ -3233,7 +3313,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
             $outsideLease = $gate->acquire(); // saturate the single slot from the outside
             self::assertIsString($outsideLease);
             $gated = new SiteVerifyController(new Verifier($storage, $gate), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $storage, null, null, $store, null, 5.0);
-            $gatedResponse = $gated->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+            $gatedResponse = $gated->siteverify($this->siteverifyRequest([
                 'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
             ]));
             self::assertSame(503, $gatedResponse->getStatusCode(), 'admission exhaustion during the resume must map to the retryable 503');
@@ -3246,7 +3326,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
             $now += 4;
             $gate->release($outsideLease);
             $retry = new SiteVerifyController(new Verifier($storage, $gate), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $storage, null, null, $store, null, 5.0);
-            $retryResponse = $retry->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+            $retryResponse = $retry->siteverify($this->siteverifyRequest([
                 'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
             ]));
             $retryBody = json_decode((string) $retryResponse->getContent(), true);
@@ -3341,7 +3421,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
             }
         };
         $owner = new SiteVerifyController(new Verifier($lostBeforeTransition), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $lostBeforeTransition, null, null, $store, null, 5.0);
-        $ownerResponse = $owner->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+        $ownerResponse = $owner->siteverify($this->siteverifyRequest([
             'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
         ]));
         self::assertSame(503, $ownerResponse->getStatusCode(), 'an indeterminate consume must map to the retryable 503 internal-error, never a permanent duplicate');
@@ -3355,7 +3435,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         // verify redeems the still-pending challenge to success.
         $now += 4;
         $retry = $this->controller(idempotencyStore: $store, storage: $storage, waitSecs: 5.0);
-        $retryResponse = $retry->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+        $retryResponse = $retry->siteverify($this->siteverifyRequest([
             'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
         ]));
         $retryBody = json_decode((string) $retryResponse->getContent(), true);
@@ -3466,7 +3546,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
             }
         };
         $owner = new SiteVerifyController(new Verifier($lostAfterTransition), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $lostAfterTransition, null, null, $store, null, 5.0);
-        $ownerResponse = $owner->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+        $ownerResponse = $owner->siteverify($this->siteverifyRequest([
             'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
         ]));
         self::assertSame(503, $ownerResponse->getStatusCode(), 'a lost response after the consume transition must map to the retryable 503 internal-error');
@@ -3489,7 +3569,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         // reconstruction returns the original canonical result bytes.
         $now += 4;
         $retry = $this->controller(idempotencyStore: $store, storage: $storage, waitSecs: 5.0);
-        $retryResponse = $retry->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+        $retryResponse = $retry->siteverify($this->siteverifyRequest([
             'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
         ]));
         $retryBody = json_decode((string) $retryResponse->getContent(), true);
@@ -3544,7 +3624,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         $controller = new SiteVerifyController($verifier, self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $storage, null, null, $store, null, 90.0, 2, null, null, $monitor);
         $uuid = 'f47ac10b-58cc-4372-a567-0e02b2c3d479';
 
-        $response = $controller->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+        $response = $controller->siteverify($this->siteverifyRequest([
             'secret' => self::SITEVERIFY_SECRET,
             'response' => $token,
             'remoteip' => '203.0.113.7',
@@ -3594,7 +3674,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         $backendId = hash('sha256', self::SITEVERIFY_SECRET.'|login|1');
 
         // Ordinary (non-idempotent) path.
-        $response = $controller->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+        $response = $controller->siteverify($this->siteverifyRequest([
             'secret' => self::SITEVERIFY_SECRET,
             'response' => $token,
             'remoteip' => '203.0.113.7',
@@ -3604,7 +3684,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         self::assertNull($storage->consumedState($nonce), 'no verification may run — the token stays pending');
 
         // Idempotent path: the claim must never be created.
-        $idemResponse = $controller->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+        $idemResponse = $controller->siteverify($this->siteverifyRequest([
             'secret' => self::SITEVERIFY_SECRET,
             'response' => $token,
             'remoteip' => '203.0.113.7',
@@ -3619,7 +3699,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         // confirmable again — the fail-closed 503s never burned it.
         $redis->failCommand = null;
         $clockMs = 0.0;
-        $recovered = $controller->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+        $recovered = $controller->siteverify($this->siteverifyRequest([
             'secret' => self::SITEVERIFY_SECRET,
             'response' => $token,
             'remoteip' => '203.0.113.7',
@@ -3707,7 +3787,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         $ownerVerifier = new Verifier($lostReply);
         [$redis, $monitor] = $this->monitorFixture($ownerVerifier, 1, 1, $monitorClock);
         $owner = new SiteVerifyController($ownerVerifier, self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $lostReply, null, null, $store, null, 5.0, 1, null, null, $monitor);
-        $ownerResponse = $owner->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+        $ownerResponse = $owner->siteverify($this->siteverifyRequest([
             'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
         ]));
         self::assertSame(503, $ownerResponse->getStatusCode(), 'the lost consume reply must map to the retryable 503 internal-error');
@@ -3727,7 +3807,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         // derivation is NOT resumed.
         $redis->failCommand = '*';
         $secs = 90;
-        $staleRetry = $owner->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+        $staleRetry = $owner->siteverify($this->siteverifyRequest([
             'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
         ]));
         self::assertSame(503, $staleRetry->getStatusCode(), 'a stale monitor must fail the retry closed');
@@ -3740,7 +3820,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         // original outcome.
         $redis->failCommand = null;
         $secs = 91;
-        $recoveredRetry = $owner->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+        $recoveredRetry = $owner->siteverify($this->siteverifyRequest([
             'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
         ]));
         $recoveredBody = json_decode((string) $recoveredRetry->getContent(), true);

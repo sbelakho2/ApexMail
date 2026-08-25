@@ -38,6 +38,8 @@ use Symfony\Component\HttpFoundation\Response;
  */
 final class ChallengeController
 {
+    use \BelConsulting\KiwiCaptchaBundle\Http\FramingChecksTrait;
+
     /**
      * The identifier charset for scopes and request bindings; the 1..128
      * ceiling is embedded in the pattern. Stricter than the core's "no '|'"
@@ -110,7 +112,7 @@ final class ChallengeController
      * duplicates. A duplicate gets 400 `DUPLICATE_HEADER` before any
      * header-derived identity is trusted.
      */
-    private const SECURITY_SINGULAR_HEADERS = ['origin', 'forwarded', 'x-forwarded-for', 'x-real-ip'];
+    private const SECURITY_SINGULAR_HEADERS = ['origin', 'forwarded', 'x-forwarded-for', 'x-real-ip', 'content-type', 'content-encoding'];
 
     /**
      * Hard ceiling for the challenge request body: the language is tiny, so
@@ -436,7 +438,19 @@ final class ChallengeController
         // any depth gets 422 `DUPLICATE_FIELD`. On a document it cannot walk,
         // the scanner returns null and the strict json_decode below handles
         // the malformed document.
-        $duplicateKey = $this->scanForDuplicateJsonKey($requestBody);
+        try {
+            $duplicateKey = $this->scanForDuplicateJsonKey($requestBody);
+        } catch (\BelConsulting\KiwiCaptchaBundle\Http\MalformedJsonWalkException) {
+            // The scanner could not establish cleanliness (a >MAX_DEPTH
+            // document or a malformed string): that is NEVER treated as
+            // clean — the document is refused, so a deep-nested first
+            // value can never hide a duplicate from the scanner while the
+            // final parser still accepts it.
+            return $this->privateJson(
+                ['error' => ['code' => 'INVALID_JSON', 'message' => 'The challenge request body must be a JSON object.']],
+                Response::HTTP_UNPROCESSABLE_ENTITY,
+            );
+        }
         if ($duplicateKey !== null) {
             return $this->privateJson(
                 ['error' => ['code' => 'DUPLICATE_FIELD', 'message' => 'The challenge request carries a duplicate JSON key: '.$duplicateKey.'.']],
@@ -449,8 +463,17 @@ final class ChallengeController
         // issued algorithm always comes from the server), request_binding.
         // Unknown fields are debug or override probes and get 422. A
         // non-object document is refused too; an empty JSON object {} is
-        // valid, since the fields are optional.
-        $decoded = json_decode($requestBody, false);
+        // valid, since the fields are optional. The decoder's depth
+        // ceiling is the SAME 32 as the scanner's, so a document the
+        // scanner could not walk can never be accepted afterwards.
+        try {
+            $decoded = json_decode($requestBody, false, 32, JSON_THROW_ON_ERROR);
+        } catch (\JsonException) {
+            return $this->privateJson(
+                ['error' => ['code' => 'INVALID_JSON', 'message' => 'The challenge request body must be a JSON object.']],
+                Response::HTTP_UNPROCESSABLE_ENTITY,
+            );
+        }
         if (!$decoded instanceof \stdClass) {
             return $this->privateJson(
                 ['error' => ['code' => 'INVALID_JSON', 'message' => 'The challenge request body must be a JSON object.']],
@@ -1665,8 +1688,18 @@ final class ChallengeController
             );
         }
 
-        // Duplicate JSON keys: the raw body is scanned before decoding.
-        $duplicateKey = $this->scanForDuplicateJsonKey($requestBody);
+        // Duplicate JSON keys: the raw body is scanned before decoding. A
+        // document the scanner cannot walk (depth bomb or malformed
+        // string) is refused — never treated as clean — and the decoder's
+        // depth ceiling is the SAME 32 as the scanner's.
+        try {
+            $duplicateKey = $this->scanForDuplicateJsonKey($requestBody);
+        } catch (\BelConsulting\KiwiCaptchaBundle\Http\MalformedJsonWalkException) {
+            return $this->privateJson(
+                ['error' => ['code' => 'INVALID_JSON', 'message' => 'The cancellation request body must be a JSON object.']],
+                Response::HTTP_UNPROCESSABLE_ENTITY,
+            );
+        }
         if ($duplicateKey !== null) {
             return $this->privateJson(
                 ['error' => ['code' => 'DUPLICATE_FIELD', 'message' => 'The cancellation request carries a duplicate JSON key: '.$duplicateKey.'.']],
@@ -1675,7 +1708,14 @@ final class ChallengeController
         }
 
         // A JSON object with exactly the documented fields.
-        $decoded = json_decode($requestBody, false);
+        try {
+            $decoded = json_decode($requestBody, false, 32, JSON_THROW_ON_ERROR);
+        } catch (\JsonException) {
+            return $this->privateJson(
+                ['error' => ['code' => 'INVALID_JSON', 'message' => 'The cancellation request body must be a JSON object.']],
+                Response::HTTP_UNPROCESSABLE_ENTITY,
+            );
+        }
         if (!$decoded instanceof \stdClass) {
             return $this->privateJson(
                 ['error' => ['code' => 'INVALID_JSON', 'message' => 'The cancellation request body must be a JSON object.']],

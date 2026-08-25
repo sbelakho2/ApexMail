@@ -480,7 +480,18 @@ final class SiteVerifyController
             } catch (\Throwable) {
                 return $this->internalErrorResponse();
             }
-            $canonicalBinding = \is_string($resolved) && $resolved !== '' ? $resolved : null;
+            if (\is_string($resolved) && $resolved !== '') {
+            // The authority's returned binding must satisfy the same
+            // identifier shape the issuance side enforces — a value
+            // outside it is refused at the trust boundary, never allowed
+            // into the idempotency fingerprint/store.
+            if (preg_match('/^[A-Za-z0-9._:-]{1,128}$/D', $resolved) !== 1) {
+                return new JsonResponse(['success' => false, 'error-codes' => ['bad-request']], Response::HTTP_BAD_REQUEST);
+            }
+            $canonicalBinding = $resolved;
+        } else {
+            $canonicalBinding = null;
+        }
         } elseif ($this->defaultRequestBinding !== null) {
             // The configured static server-side binding is authoritative
             // when no authority exists.
@@ -1423,17 +1434,59 @@ LUA;
                 continue;
             }
             $parts = explode('=', $pair, 2);
-            $name = rawurldecode($parts[0]);
-            if ($name === '' || str_contains($name, '[') || str_contains($name, ']')) {
+            // Canonical application/x-www-form-urlencoded: '+' means a
+            // space (rawurldecode would disagree with a standards-compliant
+            // intermediary), every '%' must be followed by exactly two hex
+            // digits (a malformed %ZZ is not canonical and is refused),
+            // and the decoded names must be non-empty, bracket-free and
+            // duplicate-free.
+            $name = $this->canonicalFormDecode($parts[0]);
+            if ($name === null || $name === '' || str_contains($name, '[') || str_contains($name, ']')) {
                 return null;
             }
             if (\array_key_exists($name, $decoded)) {
                 return null;
             }
-            $decoded[$name] = rawurldecode($parts[1] ?? '');
+            $value = $this->canonicalFormDecode($parts[1] ?? '');
+            if ($value === null) {
+                return null;
+            }
+            $decoded[$name] = $value;
         }
 
         return $decoded;
+    }
+
+    /**
+     * The canonical form-urlencoded decode of one component: '+' -> space,
+     * then percent-decode with strict '%'-escape validation. Returns null
+     * for a malformed escape (the strict decoder refuses it, never
+     * admitting a non-canonical body).
+     */
+    private function canonicalFormDecode(string $component): ?string
+    {
+        $length = \strlen($component);
+        $out = '';
+        for ($i = 0; $i < $length; ++$i) {
+            $ch = $component[$i];
+            if ($ch === '+') {
+                $out .= ' ';
+
+                continue;
+            }
+            if ($ch !== '%') {
+                $out .= $ch;
+
+                continue;
+            }
+            if ($i + 2 >= $length || !ctype_xdigit($component[$i + 1]) || !ctype_xdigit($component[$i + 2])) {
+                return null;
+            }
+            $out .= chr(hexdec(substr($component, $i + 1, 2)));
+            $i += 2;
+        }
+
+        return $out;
     }
 
     private function parseBody(Request $request, string $requestBody): ?array
@@ -1452,18 +1505,22 @@ LUA;
         }
         $contentType = strtolower(trim(explode(';', (string) $request->headers->get('Content-Type', ''), 2)[0]));
         if ($contentType === 'application/json') {
-            // The same recursive duplicate-key scanner as the challenge
-            // endpoint: {"secret":"A","secret":"B"} is refused, never
-            // silently last-wins.
-            $scan = $this->scanJsonDuplicateKeys($requestBody);
-            if ($scan !== null) {
-                return null;
-            }
+            // The shared raw-document duplicate-key scanner:
+            // {"secret":"A","secret":"B"} is refused, never silently
+            // last-wins. A document the scanner cannot walk (depth bomb or
+            // malformed string) is refused too — "could not establish
+            // cleanliness" is never treated as clean.
             try {
+                $scan = $this->scanJsonDuplicateKeys($requestBody);
+                if ($scan !== null) {
+                    return null;
+                }
                 $decoded = json_decode($requestBody, true, 32, JSON_THROW_ON_ERROR);
 
                 return \is_array($decoded) ? $decoded : null;
             } catch (\JsonException) {
+                return null;
+            } catch (\BelConsulting\KiwiCaptchaBundle\Http\MalformedJsonWalkException) {
                 return null;
             }
         }
@@ -1481,10 +1538,18 @@ LUA;
             if ($strict !== null) {
                 return $strict;
             }
-            if ($requestBody === '') {
+            if ($requestBody === '' && $request->request->count() === 0) {
+                // An empty body with an empty framework bag: the strict
+                // decoder found nothing — the empty request proceeds (the
+                // field validation then refuses the missing parameters).
                 return $request->request->all();
             }
 
+            // A non-empty body that failed the strict decode, OR an empty
+            // raw body with a POPULATED framework bag (the parameters were
+            // parsed upstream by a different parser, so the duplicate-name
+            // and bracket-syntax evidence is lost): fail closed rather
+            // than silently switching parsers.
             return null;
         }
 
