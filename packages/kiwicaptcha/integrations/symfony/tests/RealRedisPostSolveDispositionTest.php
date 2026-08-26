@@ -555,6 +555,56 @@ final class RealRedisPostSolveDispositionTest extends TestCase
         self::assertSame(PostSolveFinalizeOutcome::TransactionDenied, $guard, 'the stored Pass must never surface after the transaction terminalized');
     }
 
+    /**
+     * The guarded acceptance validates the full v2 chain schema, not a
+     * narrow predicate. A deliberately malformed record, such as v = 2
+     * with an unexpected state and a stage2Nonce equal to the current
+     * nonce, must never satisfy the authorization: the Pass is refused
+     * and fails closed.
+     */
+    public function testMalformedChainRecordNeverSatisfiesTheGuardedAcceptanceAgainstRealRedis(): void
+    {
+        $store = $this->store();
+        $nonce = bin2hex(random_bytes(16));
+        self::assertSame('claimed', $store->claim($nonce, 'owner-b', 300, null, self::GUARD_OBLIGATION, null, null)[0]);
+
+        // The audit's exact shape: an unexpected state with the current
+        // nonce as stage2Nonce. A narrow Lua predicate would let it
+        // through; the canonical schema predicate refuses it.
+        $corrupt = [
+            'v' => 2,
+            'stage1Nonce' => 'nonce-a',
+            'scope' => 'login',
+            'obligationId' => self::GUARD_OBLIGATION,
+            'requiredAction' => 'sha20',
+            'requiredRank' => 8,
+            'policyVersion' => 1,
+            'chainDepth' => 2,
+            'state' => 'unexpected-state',
+            'owner' => null,
+            'leaseUntil' => null,
+            'stage2Nonce' => $nonce,
+            'requestBinding' => 'auth',
+            'expiresAt' => time() + 300,
+        ];
+        $this->client->set($this->obligationKey(), self::GUARD_CHAIN, 'EX', 300);
+        $this->client->set($this->chainKey(), (string) json_encode($corrupt), 'EX', 300);
+
+        $outcome = $store->finalizeGuarded($nonce, 'owner-b', new PostSolveDisposition(PostSolveDispositionKind::Pass), self::GUARD_OBLIGATION, null, null);
+        self::assertNotSame(PostSolveFinalizeOutcome::Finalized, $outcome, 'a malformed chain record must never authorize the stale Pass');
+        self::assertSame(PostSolveFinalizeOutcome::ObligationChanged, $outcome, 'the malformed record fails closed');
+        $record = json_decode((string) $this->client->get($this->key($nonce)), true, 8, JSON_THROW_ON_ERROR);
+        self::assertSame('pending', $record['state'], 'the refused Pass performs no write');
+
+        // The complete-claim guard refuses the same malformed record.
+        $nonce2 = bin2hex(random_bytes(16));
+        self::assertSame('claimed', $store->claim($nonce2, 'owner-a', 300)[0]);
+        self::assertTrue($store->finalize($nonce2, 'owner-a', new PostSolveDisposition(PostSolveDispositionKind::Pass)));
+        [$claim, , $guard] = $store->claim($nonce2, 'owner-b', 300, null, self::GUARD_OBLIGATION, null, null);
+        self::assertSame('complete', $claim);
+        self::assertNotSame(PostSolveFinalizeOutcome::Finalized, $guard, 'the malformed chain record must never authorize the stored Pass replay');
+    }
+
     public function testChainRequiredDispositionWireShapeAgainstRealRedis(): void
     {
         $store = $this->store();

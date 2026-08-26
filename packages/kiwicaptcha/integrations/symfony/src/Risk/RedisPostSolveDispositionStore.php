@@ -140,7 +140,7 @@ final class RedisPostSolveDispositionStore implements PostSolveDispositionStore
      * record's disposition shape is validated by the store's strict
      * decoder on the read-only response.
      */
-    private const CLAIM_LUA = <<<'LUA'
+    private const CLAIM_LUA = ChainV2LuaPredicate::LUA . <<<'LUA'
 -- Post-solve disposition claim: single-writer per nonce.
 -- The existing state answers FIRST — complete/busy/takeover NEVER touch
 -- the nonce -> decision mapping; ONLY the missing path consumes it
@@ -223,7 +223,7 @@ if rec['state'] == 'complete' then
           return cjson.encode({ status = 'complete', record = rec, guard = 'obligation-changed' })
         end
         local ok, crec = pcall(cjson.decode, chained)
-        if not (ok and type(crec) == 'table' and tonumber(crec['v']) == 2) then
+        if not (ok and isValidChainRecord(crec)) then
           return cjson.encode({ status = 'complete', record = rec, guard = 'obligation-changed' })
         end
         if crec['state'] == 'denied' then
@@ -278,7 +278,7 @@ LUA;
      *   keys[1] = the record key
      *   argv[1] = owner token, argv[2] = disposition json
      */
-    private const FINALIZE_GUARDED_LUA = <<<'LUA'
+    private const FINALIZE_GUARDED_LUA = ChainV2LuaPredicate::LUA . <<<'LUA'
 -- Post-solve disposition guarded finalize: pending(owner) -> complete,
 -- with the transaction acceptance guard verified atomically with the
 -- write (the CAS ordering across the chain machine and the disposition
@@ -335,7 +335,7 @@ if ARGV[6] == '1' and ARGV[3] == 'pass' then
       return 'obligation-changed'
     end
     local ok, crec = pcall(cjson.decode, chained)
-    if not (ok and type(crec) == 'table' and tonumber(crec['v']) == 2) then
+    if not (ok and isValidChainRecord(crec)) then
       return 'obligation-changed'
     end
     if crec['state'] == 'denied' then

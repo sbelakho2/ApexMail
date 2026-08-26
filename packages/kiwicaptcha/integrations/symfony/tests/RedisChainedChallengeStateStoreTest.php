@@ -556,11 +556,53 @@ final class ChainRedisFake extends \Predis\Client
         return match (strtoupper((string) $commandID)) {
             'GET' => $this->strings[(string) $arguments[0]] ?? null,
             'SET' => $this->fakeSet($arguments),
+            'SETEX' => $this->fakeSetex($arguments),
             'TTL' => $this->fakeTtl((string) $arguments[0]),
             'TIME' => $this->fakeTime(),
             'EVAL' => $this->fakeEval($arguments),
             default => throw new \LogicException('unexpected command '.$commandID),
         };
+    }
+
+    private function fakeSetex(array $arguments): string
+    {
+        $this->strings[(string) $arguments[0]] = (string) $arguments[2];
+
+        return 'OK';
+    }
+
+    /**
+     * The recovery fence is a fresh same-namespace write on the accepting
+     * connection immediately before the WAIT. The fence key must be
+     * {kiwi:<ns>}:replication-fence, never a non-namespaced bare key and
+     * never an undefined-property access on PHP 8.2+. The write lands
+     * before the WAIT on the same connection, and a shortfall fails
+     * closed.
+     */
+    public function testEstablishReplicationFenceWritesTheNamespacedKeyAndWaits(): void
+    {
+        $store = $this->waitingStore();
+        $this->fake->calls = [];
+        $this->fake->waitAck = 1;
+
+        $store->establishReplicationFence('the stage-2 recovery acceptance');
+
+        $writes = array_values(array_filter($this->fake->calls, static fn (array $c): bool => $c[0] === 'SETEX'));
+        self::assertCount(1, $writes, 'the fence performs exactly one fresh write');
+        self::assertSame('{kiwi:kiwi-test}:replication-fence', $writes[0][1][0], 'the fence key is the same-namespace replication-fence key');
+        self::assertSame(60, $writes[0][1][1], 'the fence carries the bounded TTL');
+        self::assertCount(1, $this->fake->waits(), 'the fence WAITs on the same connection');
+        self::assertArrayHasKey('{kiwi:kiwi-test}:replication-fence', $this->fake->strings, 'the fresh fence value is stored');
+
+        $this->fake->waitAck = 0;
+        $this->fake->calls = [];
+        try {
+            $store->establishReplicationFence('a shortfalling recovery acceptance');
+            self::fail('a shortfalling fence must fail closed');
+        } catch (ReplicaWaitException $e) {
+            self::assertStringContainsString('acknowledged 0 of 1 requested replicas after a shortfalling recovery acceptance', $e->getMessage());
+        }
+        self::assertCount(1, $this->fake->waits(), 'the shortfalling fence still issued exactly one WAIT');
     }
 
     /** The raw-command escape hatch the store's verified WAIT uses. */

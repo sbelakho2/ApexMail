@@ -87,7 +87,7 @@ final class RedisChainedChallengeStateStore implements TransactionalChainedChall
      * caller applies the verified WAIT durability barrier to the
      * mutating arms only.
      */
-    private const CREATE_OR_GET_OBLIGATION_LUA = <<<'LUA'
+    private const CREATE_OR_GET_OBLIGATION_LUA = ChainV2LuaPredicate::LUA . <<<'LUA'
 -- Chain obligation create-or-get (chain + obligation, one hash tag).
 -- EVERY key the script touches is a declared KEYS argument: KEYS[3] is the
 -- chain the obligation mapping points at, resolved by the caller from a
@@ -103,7 +103,7 @@ if mapped then
   local chained = redis.call('GET', KEYS[3])
   if chained then
     local ok, rec = pcall(cjson.decode, chained)
-    if ok and type(rec) == 'table' and tonumber(rec['requiredRank']) then
+    if ok and isValidChainRecord(rec) then
       local newRank = tonumber(ARGV[6])
       if newRank > tonumber(rec['requiredRank']) then
         rec['requiredRank'] = newRank
@@ -157,7 +157,7 @@ LUA;
      * issue). A record without an expiry is corrupted state -> 'missing'
      * (never manufacture a lifetime).
      */
-    private const RESERVE_LUA = <<<'LUA'
+    private const RESERVE_LUA = ChainV2LuaPredicate::LUA . <<<'LUA'
 -- Chain reservation: owner-scoped SHORT lease (redis TIME + remaining TTL).
 local now = tonumber(redis.call('TIME')[1])
 local existing = redis.call('GET', KEYS[1])
@@ -171,6 +171,9 @@ if ttl <= 0 then
   return 'missing'
 end
 local rec = cjson.decode(existing)
+if not isValidChainRecord(rec) then
+  return 'corrupt'
+end
 if rec['state'] == 'issued' then
   return 'issued'
 end
@@ -224,13 +227,16 @@ LUA;
      * a non-owner (or an unreserved chain) -> 'not_owner', absent ->
      * 'missing'.
      */
-    private const MARK_ISSUED_LUA = <<<'LUA'
+    private const MARK_ISSUED_LUA = ChainV2LuaPredicate::LUA . <<<'LUA'
 -- Chain issuance: reserved(owner) -> issued(stage2Nonce), idempotent.
 local existing = redis.call('GET', KEYS[1])
 if not existing then
   return 'missing'
 end
 local rec = cjson.decode(existing)
+if not isValidChainRecord(rec) then
+  return 'corrupt'
+end
 if rec['state'] == 'reserved' then
   if rec['owner'] ~= ARGV[1] then
     return 'not_owner'
@@ -267,7 +273,7 @@ LUA;
      * chainId. Same nonce again -> 'verified_same'; a different nonce or
      * a non-issuable state -> 'conflict'; absent -> 'missing'.
      */
-    private const MARK_VERIFIED_LUA = <<<'LUA'
+    private const MARK_VERIFIED_LUA = ChainV2LuaPredicate::LUA . <<<'LUA'
 -- Chain verification: issued(stage2Nonce) -> verified(stage2Nonce), TERMINAL,
 -- deleting the obligation mapping only while it still points at this chain.
 local existing = redis.call('GET', KEYS[1])
@@ -275,6 +281,9 @@ if not existing then
   return 'missing'
 end
 local rec = cjson.decode(existing)
+if not isValidChainRecord(rec) then
+  return 'corrupt'
+end
 if rec['state'] == 'verified' then
   if rec['stage2Nonce'] == ARGV[1] then
     return 'verified_same'
@@ -301,7 +310,7 @@ LUA;
      * 'step_up_required_same'; a different nonce or a non-issuable state
      * -> 'conflict'; absent -> 'missing'.
      */
-    private const MARK_STEP_UP_REQUIRED_LUA = <<<'LUA'
+    private const MARK_STEP_UP_REQUIRED_LUA = ChainV2LuaPredicate::LUA . <<<'LUA'
 -- Chain step-up: issued(stage2Nonce) -> step_up_required(stage2Nonce), TERMINAL,
 -- keeping the obligation mapping (the transaction stays bound to the step-up).
 local existing = redis.call('GET', KEYS[1])
@@ -309,6 +318,9 @@ if not existing then
   return 'missing'
 end
 local rec = cjson.decode(existing)
+if not isValidChainRecord(rec) then
+  return 'corrupt'
+end
 if rec['state'] == 'step_up_required' then
   if rec['stage2Nonce'] == ARGV[1] then
     return 'step_up_required_same'
@@ -332,7 +344,7 @@ LUA;
      * 'denied_same'; a different nonce or a non-issuable state ->
      * 'conflict'; absent -> 'missing'.
      */
-    private const MARK_DENIED_LUA = <<<'LUA'
+    private const MARK_DENIED_LUA = ChainV2LuaPredicate::LUA . <<<'LUA'
 -- Chain denial: issued(stage2Nonce) -> denied(stage2Nonce), TERMINAL,
 -- keeping the obligation mapping (the transaction stays bound to the denial).
 local existing = redis.call('GET', KEYS[1])
@@ -340,6 +352,9 @@ if not existing then
   return 'missing'
 end
 local rec = cjson.decode(existing)
+if not isValidChainRecord(rec) then
+  return 'corrupt'
+end
 if rec['state'] == 'denied' then
   if rec['stage2Nonce'] == ARGV[1] then
     return 'denied_same'
@@ -373,7 +388,7 @@ LUA;
      * gone), 'already_completed' (the mapping is gone, the transaction
      * already ended via Pass), absent -> 'missing'.
      */
-    private const MARK_TRANSACTION_DENIED_LUA = <<<'LUA'
+    private const MARK_TRANSACTION_DENIED_LUA = ChainV2LuaPredicate::LUA . <<<'LUA'
 -- Transaction denial: OBLIGATION-BOUND NONCE-AGNOSTIC terminal transition of
 -- an OPEN obligation (available|reserved|issued|completed -> denied, KEEPTTL —
 -- the record keeps its OWN remaining TTL; the obligation mapping is KEPT, the
@@ -444,7 +459,7 @@ LUA;
      * mapping is gone, the transaction already ended via Pass), absent
      * -> 'missing'.
      */
-    private const MARK_TRANSACTION_STEP_UP_REQUIRED_LUA = <<<'LUA'
+    private const MARK_TRANSACTION_STEP_UP_REQUIRED_LUA = ChainV2LuaPredicate::LUA . <<<'LUA'
 -- Transaction step-up: OBLIGATION-BOUND NONCE-AGNOSTIC terminal transition of
 -- an OPEN obligation (available|reserved|issued|completed -> step_up_required,
 -- KEEPTTL — the record keeps its OWN remaining TTL; the obligation mapping is
@@ -524,13 +539,16 @@ LUA;
      * request can never free another owner's live reservation. The chain
      * TTL is preserved (KEEPTTL, Redis 6.0+).
      */
-    private const RELEASE_LUA = <<<'LUA'
+    private const RELEASE_LUA = ChainV2LuaPredicate::LUA . <<<'LUA'
 -- Chain release: reserved(owner) -> available, owner-gated.
 local existing = redis.call('GET', KEYS[1])
 if not existing then
   return false
 end
 local rec = cjson.decode(existing)
+if not isValidChainRecord(rec) then
+  return false
+end
 if rec['state'] ~= 'reserved' then
   return false
 end
@@ -799,6 +817,10 @@ LUA;
         $this->assertLiveRecord($chainId);
         $status = $this->evalScript(self::RESERVE_LUA, [$this->key($chainId)], [$ownerToken, (string) max(1, $leaseSecs)]);
 
+        if ($status === 'corrupt') {
+            throw new MalformedChainedChallengeStateException('the chain record is malformed at the reservation boundary');
+        }
+
         return \is_string($status) && \in_array($status, ['available', 'retry', 'busy', 'taken_over', 'issued', 'verified', 'completed', 'step_up_required', 'denied', 'missing'], true)
             ? $status
             : 'missing';
@@ -817,6 +839,9 @@ LUA;
     {
         $this->assertLiveRecord($chainId);
         $result = $this->evalScript(self::MARK_ISSUED_LUA, [$this->key($chainId)], [$ownerToken, $stage2Nonce]);
+        if ($result === 'corrupt') {
+            throw new MalformedChainedChallengeStateException('the chain record is malformed at the issuance boundary');
+        }
         $status = \is_string($result) && \in_array($result, ['issued_new', 'issued_same', 'verified_same', 'conflict', 'not_owner', 'missing'], true)
             ? $result
             : 'missing';
@@ -843,6 +868,9 @@ LUA;
             $this->key($chainId),
             $this->obligationKey((string) $record['obligationId']),
         ], [$stage2Nonce, $chainId]);
+        if ($result === 'corrupt') {
+            throw new MalformedChainedChallengeStateException('the chain record is malformed at the verification boundary');
+        }
         $status = \is_string($result) && \in_array($result, ['verified_new', 'verified_same', 'conflict', 'missing'], true)
             ? $result
             : 'missing';
@@ -864,6 +892,9 @@ LUA;
     {
         $this->assertLiveRecord($chainId);
         $result = $this->evalScript(self::MARK_STEP_UP_REQUIRED_LUA, [$this->key($chainId)], [$stage2Nonce]);
+        if ($result === 'corrupt') {
+            throw new MalformedChainedChallengeStateException('the chain record is malformed at the step-up boundary');
+        }
         $status = \is_string($result) && \in_array($result, ['step_up_required_new', 'step_up_required_same', 'conflict', 'missing'], true)
             ? $result
             : 'missing';
@@ -885,6 +916,9 @@ LUA;
     {
         $this->assertLiveRecord($chainId);
         $result = $this->evalScript(self::MARK_DENIED_LUA, [$this->key($chainId)], [$stage2Nonce]);
+        if ($result === 'corrupt') {
+            throw new MalformedChainedChallengeStateException('the chain record is malformed at the denial boundary');
+        }
         $status = \is_string($result) && \in_array($result, ['denied_new', 'denied_same', 'conflict', 'missing'], true)
             ? $result
             : 'missing';
@@ -912,6 +946,9 @@ LUA;
             $this->key($chainId),
             $this->obligationKey($obligationId),
         ], [$chainId, $obligationId]);
+        if ($result === 'corrupt') {
+            throw new MalformedChainedChallengeStateException('the chain record is malformed at the transaction-denial boundary');
+        }
         $status = \is_string($result) && \in_array($result, ['denied_new', 'denied_same', 'conflict', 'already_verified', 'already_completed', 'obligation_moved', 'missing'], true)
             ? $result
             : 'missing';
@@ -939,6 +976,9 @@ LUA;
             $this->key($chainId),
             $this->obligationKey($obligationId),
         ], [$chainId, $obligationId]);
+        if ($result === 'corrupt') {
+            throw new MalformedChainedChallengeStateException('the chain record is malformed at the transaction-step-up boundary');
+        }
         $status = \is_string($result) && \in_array($result, ['step_up_required_new', 'step_up_required_same', 'conflict', 'already_verified', 'already_completed', 'obligation_moved', 'missing'], true)
             ? $result
             : 'missing';
@@ -1274,7 +1314,10 @@ LUA;
         if ($this->waitReplicas <= 0) {
             return;
         }
-        $fenceKey = $this->keyPrefix.'replication-fence';
+        // The same-namespace fence key as the other stores: the chain
+        // store has no keyPrefix property, its keying model is the
+        // constructor namespace + the chain/obligation key helpers.
+        $fenceKey = sprintf('{kiwi:%s}:replication-fence', $this->namespace);
         $token = bin2hex(random_bytes(16));
         if ($this->redis instanceof \Redis) {
             $ok = $this->redis->set($fenceKey, $token, ['PX' => 60_000]);

@@ -10,6 +10,7 @@ use BelConsulting\KiwiCaptchaBundle\Risk\ChainIssuedResult;
 use BelConsulting\KiwiCaptchaBundle\Risk\ChainReservationResult;
 use BelConsulting\KiwiCaptchaBundle\Risk\ChainVerifiedResult;
 use BelConsulting\KiwiCaptchaBundle\Risk\ChainedChallengeTicketService;
+use BelConsulting\KiwiCaptchaBundle\Risk\MalformedChainedChallengeStateException;
 use BelConsulting\KiwiCaptchaBundle\Risk\ContinuityCookie;
 use BelConsulting\KiwiCaptchaBundle\Risk\RedisChainedChallengeStateStore;
 use BelConsulting\KiwiCaptchaBundle\Risk\RiskGateway;
@@ -594,6 +595,83 @@ final class RealRedisChainedChallengeTest extends TestCase
             self::assertNull($state?->stage2Nonce);
             self::assertSame($expiry, $state?->expiresAt, 'the original expiry is preserved on both stores');
             self::assertNotNull($service->findOpenRequirement('login', 'txn-parity2', 1), 'the obligation mapping is KEPT on both stores');
+        }
+    }
+
+    /**
+     * The canonical Lua schema predicate is enforced at every transition
+     * boundary, not only when PHP re-reads the record. A deliberately
+     * malformed record, such as v = 2 with an unexpected state, a
+     * reserved record missing its owner/lease, or an available record
+     * carrying a stage2Nonce, is refused fail-closed at reserve,
+     * issuance, verification and terminalization. It is never
+     * transitioned into valid state.
+     */
+    public function testMalformedChainRecordsFailClosedAtEveryTransitionBoundaryAgainstRealRedis(): void
+    {
+        $store = $this->store();
+        $chainId = 'malformed-chain';
+        $recordKey = '{kiwi:'.self::NAMESPACE.'}:chain:'.$chainId;
+        $valid = [
+            'v' => 2,
+            'stage1Nonce' => 'nonce-a',
+            'scope' => 'login',
+            'obligationId' => str_repeat('a', 64),
+            'requiredAction' => 'sha20',
+            'requiredRank' => 8,
+            'policyVersion' => 1,
+            'chainDepth' => 2,
+            'state' => 'available',
+            'owner' => null,
+            'leaseUntil' => null,
+            'stage2Nonce' => null,
+            'requestBinding' => 'auth',
+            'expiresAt' => time() + 300,
+        ];
+
+        // An unexpected state must never be transitioned by the reserve.
+        $corrupt = $valid;
+        $corrupt['state'] = 'unexpected-state';
+        $this->client->set($recordKey, (string) json_encode($corrupt), 'EX', 300);
+        try {
+            $store->reserve($chainId, 'owner-a', 15);
+            self::fail('a record with an unexpected state must be refused at the reservation boundary');
+        } catch (MalformedChainedChallengeStateException) {
+        }
+        $after = json_decode((string) $this->client->get($recordKey), true, 8, JSON_THROW_ON_ERROR);
+        self::assertSame('unexpected-state', $after['state'], 'the corrupt record is never transitioned');
+
+        // An available record carrying a stage2Nonce is malformed.
+        $corrupt = $valid;
+        $corrupt['stage2Nonce'] = 'stage-2-nonce';
+        $this->client->set($recordKey, (string) json_encode($corrupt), 'EX', 300);
+        try {
+            $store->reserve($chainId, 'owner-a', 15);
+            self::fail('a record with a stage2Nonce in the available state must be refused');
+        } catch (MalformedChainedChallengeStateException) {
+        }
+
+        // A reserved record missing its owner is malformed at issuance.
+        $corrupt = $valid;
+        $corrupt['state'] = 'reserved';
+        $corrupt['leaseUntil'] = time() + 30;
+        $this->client->set($recordKey, (string) json_encode($corrupt), 'EX', 300);
+        try {
+            $store->markIssued($chainId, 'owner-a', 'stage-2-nonce');
+            self::fail('a reserved record without an owner must be refused at the issuance boundary');
+        } catch (MalformedChainedChallengeStateException) {
+        }
+
+        // A denied record whose stage2Nonce is not a string is malformed
+        // at the verification boundary.
+        $corrupt = $valid;
+        $corrupt['state'] = 'denied';
+        $corrupt['stage2Nonce'] = 42;
+        $this->client->set($recordKey, (string) json_encode($corrupt), 'EX', 300);
+        try {
+            $store->markVerified($chainId, 'stage-2-nonce');
+            self::fail('a terminal record with a numeric stage2Nonce must be refused');
+        } catch (MalformedChainedChallengeStateException) {
         }
     }
 
