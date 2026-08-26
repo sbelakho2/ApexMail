@@ -379,6 +379,35 @@ final class ChainedChallengeTest extends TestCase
 
     // ── chain_required disposition replay (expiry-preserving re-sign) ───
 
+    public function testStage2RecoveryReEstablishesTheReplicationBarrier(): void
+    {
+        // The failed-barrier replay hole on the recovery path: the
+        // admission/markIssued writes may have landed with their WAIT
+        // failing (the earlier attempt answered 503), and a read-only
+        // recovery that hands out the SAME challenge would accept a
+        // slot/membership a promotion could lose. The recovery re-
+        // establishes the barrier; a shortfall fails closed with the 503.
+        $storage = new ArrayStorage();
+        $chainStore = new ArrayChainedChallengeStateStore();
+        $chainService = $this->chainService($chainStore);
+        $requirement = $chainService->requireStage2($this->nonce(), 'login', 'txn-alpha', 1, RiskAction::Argon32, time() + 300);
+        $ticket = $chainService->ticketFor($requirement->chainId, time() + 300);
+
+        $risk = $this->riskStack();
+        $controller = $this->chainController($storage, $chainService, $risk['gateway'], outstanding: new OutstandingChallenges(new RollbackFakeRedis(), '{kiwi:rollback-test}:outstanding:', RiskKeys::fromMaster(self::SECRET), 5, 100, 0));
+        $first = $controller->challenge($this->challengeRequest(json_encode(['scope' => 'login', 'chain_ticket' => $ticket, 'request_binding' => 'txn-alpha'], JSON_THROW_ON_ERROR)));
+        self::assertSame(200, $first->getStatusCode());
+
+        // The retry with the SAME chain recovers the issued challenge —
+        // the recovery confirms the outstanding + chain barriers (the
+        // fakes' WAIT answers the configured ack, so the recovery
+        // succeeds and the identical challenge is returned).
+        $retry = $controller->challenge($this->challengeRequest(json_encode(['scope' => 'login', 'chain_ticket' => $ticket, 'request_binding' => 'txn-alpha'], JSON_THROW_ON_ERROR)));
+        self::assertSame(200, $retry->getStatusCode(), 'the recovery re-establishes the barriers and hands the same challenge out');
+        $retryNonce = json_decode((string) $retry->getContent(), true)['nonce'];
+        self::assertSame(json_decode((string) $first->getContent(), true)['nonce'], $retryNonce, 'the recovered challenge is byte-identical');
+    }
+
     public function testCancelledStage2RearmsWithAFreshNonceAndReleasesTheSlot(): void
     {
         // P1: a CANCELLED stage-2 record is retained (find() still returns

@@ -196,11 +196,23 @@ final class RedisPostSolveDispositionDurabilityTest extends TestCase
         self::assertFalse($store->finalize($nonce, 'owner-c', new PostSolveDisposition(PostSolveDispositionKind::Pass)));
         self::assertCount(0, $this->waits($fake), 'a finalize on a complete record is refused and never WAITs');
 
-        // Reads never WAIT.
+        // Reads never WAIT for absent records — but a read that ACCEPTS a
+        // FINAL disposition re-establishes the barrier (the failed-barrier
+        // replay guard: the finalize that wrote it may have landed with
+        // its WAIT failing, and a read-only acceptance would return a
+        // decision a promotion could silently reverse).
         $fake->calls = [];
-        self::assertNotNull($store->read($nonce));
         self::assertNull($store->read(bin2hex(random_bytes(16))));
-        self::assertCount(0, $this->waits($fake), 'a read never WAITs');
+        self::assertCount(0, $this->waits($fake), 'an absent-record read never WAITs');
+        $fake->calls = [];
+        $fake->waitAck = 0;
+        try {
+            $store->read($nonce);
+            self::fail('the final-disposition read must re-establish the barrier and fail closed on an unacknowledged replica set');
+        } catch (\KiwiCaptcha\Storage\ReplicaWaitException) {
+            // the fail-closed acceptance barrier fired ✓
+        }
+        self::assertCount(1, $this->waits($fake), 'the final-disposition acceptance read issues exactly one verified WAIT');
     }
 
     public function testArrayStoreObservesTheSameMachineWithoutTheReplicaBarrier(): void

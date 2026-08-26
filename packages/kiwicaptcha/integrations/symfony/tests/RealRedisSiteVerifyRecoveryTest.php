@@ -495,6 +495,18 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
         } catch (\KiwiCaptcha\Storage\ReplicaWaitException) {
         }
         self::assertSame($waitsBefore + 3, \count($counting->waits()), 'the successful finalize issues exactly one verified WAIT');
+
+        // The failed-barrier replay guard on the READ side: a completed
+        // (stored-success) read must RE-ESTABLISH the barrier before
+        // accepting — a shortfall fails closed, never an unproven success.
+        // (The finalize's own WAIT threw, so the completed record's
+        // replication is unproven; the acceptance read re-checks it.)
+        try {
+            $store->stored($backendId, $key2);
+            self::fail('the stored-success acceptance must re-establish the barrier and fail closed');
+        } catch (\KiwiCaptcha\Storage\ReplicaWaitException) {
+        }
+        self::assertSame($waitsBefore + 4, \count($counting->waits()), 'the stored-success acceptance read issues exactly one verified WAIT');
         $counting->disconnect();
     }
 

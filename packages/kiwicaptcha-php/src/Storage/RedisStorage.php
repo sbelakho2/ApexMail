@@ -56,7 +56,7 @@ use KiwiCaptcha\ChallengeRuntimeStateReadableInterface;
  * Implements {@see \KiwiCaptcha\AtomicStorageInterface}: the fused
  * read-transition makes consume() strict single-use under concurrency.
  */
-final class RedisStorage implements AtomicStorageInterface, \KiwiCaptcha\ConsumedStateReadableInterface, OperationIdentityAwareStorageInterface, \KiwiCaptcha\AtomicDeleteIfPendingInterface, \KiwiCaptcha\CancellableStorageInterface, \KiwiCaptcha\ChallengeRuntimeStateReadableInterface
+final class RedisStorage implements AtomicStorageInterface, \KiwiCaptcha\ConsumedStateReadableInterface, OperationIdentityAwareStorageInterface, \KiwiCaptcha\AtomicDeleteIfPendingInterface, \KiwiCaptcha\CancellableStorageInterface, \KiwiCaptcha\ChallengeRuntimeStateReadableInterface, \KiwiCaptcha\ReplicationBarrierInterface
 {
     /**
      * Atomic consume transition: GET the record; if present and not yet
@@ -386,6 +386,14 @@ LUA;
      * connection. A future pinned-master implementation may
      * restore Sentinel support.
      */
+    public function confirmReplication(string $what): void
+    {
+        if ($this->waitReplicas <= 0) {
+            return;
+        }
+        $this->waitAndVerify($what);
+    }
+
     private function refuseVerifiedWaitOnUnsupportedPredisClients(): void
     {
         \KiwiCaptcha\VerifiedWaitGuard::refuseUnsupported($this->client, $this->waitReplicas, 'RedisStorage');

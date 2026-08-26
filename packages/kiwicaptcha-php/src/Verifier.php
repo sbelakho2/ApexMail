@@ -587,6 +587,17 @@ final class Verifier
                         && $consumed->operationIdentity !== null
                         && hash_equals($consumed->operationIdentity, $operationIdentity)
                     ) {
+                        // Failed-barrier replay guard: the consume/commit
+                        // mutations that produced this stored success may
+                        // have landed on the primary with their WAIT
+                        // failing. Accepting the stored result read-only
+                        // would return a success that a promotion could
+                        // lose — the barrier is RE-ESTABLISHED before the
+                        // acceptance (a shortfall fails closed).
+                        if ($this->storage instanceof \KiwiCaptcha\ReplicationBarrierInterface) {
+                            $this->storage->confirmReplication('the stored-result replay acceptance');
+                        }
+
                         return VerifyOutcome::valid($consumed->record->nonce, $consumed->consumedResult->binding, true);
                     }
 
@@ -835,6 +846,15 @@ final class Verifier
         // is returned unchanged, exactly the committed-outcome semantics of
         // the ordinary verify path.
         if ($consumed->consumedResult !== null) {
+            // Failed-barrier replay guard: the committed result's writes
+            // may have landed with their WAIT failing; accepting the
+            // stored success read-only would return a success a promotion
+            // could lose — the barrier is RE-ESTABLISHED before the
+            // acceptance (a shortfall fails closed).
+            if ($this->storage instanceof \KiwiCaptcha\ReplicationBarrierInterface) {
+                $this->storage->confirmReplication('the resumed committed-result acceptance');
+            }
+
             return $consumed->consumedResult->valid
                 ? VerifyOutcome::valid($consumed->record->nonce, $consumed->consumedResult->binding, true)
                 : VerifyOutcome::invalid(VerifyError::InsufficientWork);

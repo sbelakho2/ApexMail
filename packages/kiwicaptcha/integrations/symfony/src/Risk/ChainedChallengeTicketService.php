@@ -257,6 +257,13 @@ final class ChainedChallengeTicketService
      *
      * @return array{version: int, chainId: string, expiresAt: int}|null
      */
+    public function confirmReplication(string $what): void
+    {
+        if ($this->store instanceof \KiwiCaptcha\ReplicationBarrierInterface) {
+            $this->store->confirmReplication($what);
+        }
+    }
+
     public function verify(string $ticket): ?array
     {
         $parts = explode('.', $ticket, 2);

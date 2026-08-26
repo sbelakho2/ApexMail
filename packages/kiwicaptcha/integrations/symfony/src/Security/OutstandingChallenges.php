@@ -571,6 +571,14 @@ LUA;
         $this->release($nonce);
     }
 
+    public function confirmReplication(string $what): void
+    {
+        if ($this->waitReplicas <= 0) {
+            return;
+        }
+        $this->waitAndVerify($what);
+    }
+
     /**
      * Whether the source may send another cancellation request: the
      * endpoint's bounded per-IP limiter (a sliding window, pruned and

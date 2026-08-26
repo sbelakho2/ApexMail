@@ -1265,6 +1265,14 @@ LUA;
      * topology is standalone Redis only; keep waitReplicas = 0 on an
      * aggregate or a retry-enabled standalone client.
      */
+    public function confirmReplication(string $what): void
+    {
+        if ($this->waitReplicas <= 0) {
+            return;
+        }
+        $this->waitAndVerify($what);
+    }
+
     private function refuseVerifiedWaitOnUnsupportedPredisClients(): void
     {
         \KiwiCaptcha\VerifiedWaitGuard::refuseUnsupported($this->redis, $this->waitReplicas, 'RedisChainedChallengeStateStore');

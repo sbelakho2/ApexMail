@@ -267,6 +267,15 @@ LUA;
             if (!\is_array($rec['result'] ?? null)) {
                 throw new SiteVerifyIdempotencyCorruptException('the completed idempotency record has no result');
             }
+            // Failed-barrier replay guard: the finalize that wrote this
+            // completed record may have landed on the primary with its
+            // WAIT failing. Returning the stored success read-only would
+            // hand the caller a success a promotion could lose — the
+            // barrier is RE-ESTABLISHED before the acceptance (a shortfall
+            // throws and the caller answers the 503).
+            if ($this->waitReplicas > 0) {
+                $this->waitAndVerify('the siteverify stored-success acceptance');
+            }
 
             return $rec['result'];
         }

@@ -444,8 +444,28 @@ LUA;
         if (!\is_string($raw) || $raw === '') {
             return null;
         }
+        $record = self::recordFromDecoded(self::decodeRecord($raw));
+        if ($record !== null && $record->disposition !== null) {
+            // Failed-barrier replay guard: the finalize that wrote this
+            // final disposition may have landed on the primary with its
+            // WAIT failing; accepting the disposition read-only would
+            // let a promotion silently reverse the application decision —
+            // the barrier is RE-ESTABLISHED before the acceptance (a
+            // shortfall throws and the caller answers the 503).
+            if ($this->waitReplicas > 0) {
+                $this->waitAndVerify('the post-solve disposition acceptance');
+            }
+        }
 
-        return self::recordFromDecoded(self::decodeRecord($raw));
+        return $record;
+    }
+
+    public function confirmReplication(string $what): void
+    {
+        if ($this->waitReplicas <= 0) {
+            return;
+        }
+        $this->waitAndVerify($what);
     }
 
     public function finalize(string $nonce, string $owner, PostSolveDisposition $disposition): bool

@@ -497,6 +497,52 @@ final class VerifierResumeTest extends TestCase
         self::assertTrue($after->consumedResult->valid);
     }
 
+    public function testStoredResultReplayConfirmsTheReplicationBarrier(): void
+    {
+        // The failed-barrier replay hole: the consume/commit that produced
+        // a stored success may have landed on the primary with its WAIT
+        // failing. A later read-only replay that ACCEPTS the stored
+        // success must re-establish the barrier first — a shortfall fails
+        // closed (no unproven success), and a satisfied barrier returns
+        // the stored Valid.
+        [$inner, $record, $token] = $this->issueAndSolve(requestBinding: 'txn-1');
+        $inner->consumeWithOperationIdentity($record->nonce, $this->identity('barrier-replay'));
+        self::assertTrue($inner->commitResult($record->nonce, true, 'txn-1'));
+
+        // The barrier storage: a ReplicationBarrierInterface whose
+        // confirmReplication is configurable.
+        $barrier = new BarrierStorage($inner);
+        $verifier = new Verifier($barrier, now: static fn (): int => self::ISSUED_AT + 10_000);
+
+        $barrier->confirmResult = false;
+        try {
+            $outcome = $verifier->verify($token, Vectors::SECRET, 'login', '198.51.100.7', operationIdentity: $this->identity('barrier-replay'), expectedRequestBinding: 'txn-1', bindingExpectation: RequestBindingExpectation::exact('txn-1'));
+            var_dump('DEBUG-OUTCOME', $outcome->code());
+            self::fail('the stored-result replay must NOT return an unproven success');
+        } catch (\RuntimeException $e) {
+            self::assertSame('replication barrier shortfall', $e->getMessage());
+        }
+
+        // The barrier satisfied: the replay returns the stored Valid.
+        $barrier->confirmResult = true;
+        $outcome = $verifier->verify($token, Vectors::SECRET, 'login', '198.51.100.7', operationIdentity: $this->identity('barrier-replay'), expectedRequestBinding: 'txn-1', bindingExpectation: RequestBindingExpectation::exact('txn-1'));
+        self::assertTrue($outcome->isOk());
+        self::assertTrue($outcome->fromStoredResult, 'the replay is the stored Valid');
+
+        // The same guard on resumeConsumedOperation's committed-result
+        // fast path.
+        $barrier->confirmResult = false;
+        try {
+            $verifier->resumeConsumedOperation($token, Vectors::SECRET, $this->identity('barrier-replay'), 'login', self::CLIENT_IP, 'txn-1', RequestBindingExpectation::exact('txn-1'));
+            self::fail('the resumed committed-result must NOT return an unproven success');
+        } catch (\RuntimeException $e) {
+            self::assertSame('replication barrier shortfall', $e->getMessage());
+        }
+        $barrier->confirmResult = true;
+        $resumed = $verifier->resumeConsumedOperation($token, Vectors::SECRET, $this->identity('barrier-replay'), 'login', self::CLIENT_IP, 'txn-1', RequestBindingExpectation::exact('txn-1'));
+        self::assertTrue($resumed->isOk());
+    }
+
     public function testResumeCommittedResultMatrixEnforcesTheExactExpectation(): void
     {
         // R68-02: the committed-result fast path must NOT bypass the exact
@@ -886,5 +932,61 @@ final class VerifierResumeTest extends TestCase
         --$counter;
 
         return SolutionToken::create($challenge->nonce, $counter, 5000, [])->encode();
+    }
+}
+
+/**
+ * The failed-barrier replay guard test storage: delegates to the inner
+ * storage and lets the test control whether the replication barrier
+ * confirms or shortfalls.
+ */
+final class BarrierStorage implements \KiwiCaptcha\AtomicStorageInterface, \KiwiCaptcha\ConsumedStateReadableInterface, \KiwiCaptcha\OperationIdentityAwareStorageInterface, \KiwiCaptcha\ReplicationBarrierInterface
+{
+    public bool $confirmResult = true;
+
+    public function __construct(private readonly \KiwiCaptcha\Storage\ArrayStorage $inner)
+    {
+    }
+
+    public function store(\KiwiCaptcha\ChallengeRecord $record): void
+    {
+        $this->inner->store($record);
+    }
+
+    public function find(string $nonce): ?\KiwiCaptcha\ChallengeRecord
+    {
+        return $this->inner->find($nonce);
+    }
+
+    public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
+    {
+        return $this->inner->consume($nonce);
+    }
+
+    public function consumeWithOperationIdentity(string $nonce, ?string $operationIdentity): ?\KiwiCaptcha\ConsumedRecord
+    {
+        return $this->inner->consumeWithOperationIdentity($nonce, $operationIdentity);
+    }
+
+    public function commitResult(string $nonce, bool $valid, ?string $binding): bool
+    {
+        return $this->inner->commitResult($nonce, $valid, $binding);
+    }
+
+    public function delete(string $nonce): void
+    {
+        $this->inner->delete($nonce);
+    }
+
+    public function consumedState(string $nonce): ?\KiwiCaptcha\ConsumedRecord
+    {
+        return $this->inner->consumedState($nonce);
+    }
+
+    public function confirmReplication(string $what): void
+    {
+        if (!$this->confirmResult) {
+            throw new \RuntimeException('replication barrier shortfall');
+        }
     }
 }
