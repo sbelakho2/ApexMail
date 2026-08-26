@@ -345,9 +345,11 @@ LUA;
         // promoted replica may still hold the superseded owner's expired
         // state, so an un-replicated takeover could let a second owner
         // win the same nonce and duplicate the owner-scoped computation.
-        // The non-mutating paths (a complete/busy claim) performed no
-        // write, so no WAIT is issued: an idempotent retry must never
-        // turn a replica outage into a storage failure.
+        // A pending/busy claim performs no write and no WAIT (an
+        // idempotent retry must never turn a replica outage into a
+        // storage failure). A COMPLETE claim is an ACCEPTANCE, not a
+        // no-op: it establishes the causal fence below before the
+        // terminal record is returned.
         if ($this->waitReplicas > 0 && \in_array($data['status'], ['claimed', 'taken_over'], true)) {
             $this->waitAndVerify('the post-solve disposition claim');
         }

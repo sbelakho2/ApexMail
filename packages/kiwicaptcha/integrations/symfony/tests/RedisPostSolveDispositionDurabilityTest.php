@@ -20,10 +20,13 @@ use PHPUnit\Framework\TestCase;
  * one WAIT on the same connection and fails closed when fewer than
  * waitReplicas replicas acknowledged it. The caller never learns a
  * success that was not replicated, so a returned
- * Deny/StepUp/ChainRequired can never be reported as persisted and then
- * vanish on promotion. The non-mutating paths (busy/complete claims,
- * refused finalizes, reads) never WAIT, and the in-memory Array store
- * observes the same machine without any barrier (no replicas).
+ * Deny/StepUp/ChainRequired is substantially less likely to be lost on
+ * a stale-replica promotion (WAIT is durability hardening, not a
+ * consensus guarantee). A COMPLETE claim is an ACCEPTANCE of the
+ * terminal disposition and establishes the causal fence before the
+ * record is returned. The non-mutating paths (busy claims, refused
+ * finalizes, reads) never WAIT, and the in-memory Array store observes
+ * the same machine without any barrier (no replicas).
  */
 final class RedisPostSolveDispositionDurabilityTest extends TestCase
 {
