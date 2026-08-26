@@ -1062,13 +1062,29 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($path === '/siteverify' || $path =
     // A successful verification consumes the record (single-use); the
     // fixture's file stands in for the shared retained-state store, so the
     // record is removed only AFTER a successful redemption (the controller
-    // must see the pending record to verify it).
-    $response = $controller->siteverify(\Symfony\Component\HttpFoundation\Request::create('/kiwi-captcha/siteverify', 'POST', [
+    // must see the pending record to verify it). The request carries the
+    // RAW application/x-www-form-urlencoded body exactly like the
+    // production wire: SiteVerify deliberately fails closed when it is
+    // asked to trust a populated framework form bag without the original
+    // raw body (duplicate/bracket ambiguity can then no longer be proven
+    // absent), so the fixture must never use the 3rd-arg parameter bag.
+    $params = [
         'secret' => (string) ($body['secret'] ?? ''),
         'response' => (string) ($body['response'] ?? ''),
         'remoteip' => (string) ($body['remoteip'] ?? $_SERVER['REMOTE_ADDR'] ?? '127.0.0.1'),
         'action' => $body['action'] ?? null,
-    ]));
+    ];
+    $rawBody = http_build_query($params);
+    $request = \Symfony\Component\HttpFoundation\Request::create(
+        '/kiwi-captcha/siteverify',
+        'POST',
+        [],
+        [],
+        [],
+        ['CONTENT_TYPE' => 'application/x-www-form-urlencoded'],
+        $rawBody,
+    );
+    $response = $controller->siteverify($request);
     $decoded = SolutionToken::decode((string) ($body['response'] ?? ''));
     $success = $decoded instanceof SolutionToken && (bool) $response->getStatusCode() === false ? false : ($response->getStatusCode() >= 200 && $response->getStatusCode() < 300);
     if ($success) {

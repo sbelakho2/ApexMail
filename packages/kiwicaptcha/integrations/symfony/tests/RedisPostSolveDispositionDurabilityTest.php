@@ -180,11 +180,24 @@ final class RedisPostSolveDispositionDurabilityTest extends TestCase
         self::assertSame('pending', $store->claim($nonce, 'owner-b', 300)[0]);
         self::assertCount(0, $this->waits($fake), 'a busy claim performs no write and never WAITs');
 
-        // complete -> 'complete': a replay claim, no write, no WAIT.
+        // complete -> 'complete': a replay claim is an ACCEPTANCE of the
+        // terminal disposition — the causal fence must be established
+        // before the record is returned (the finalize may have landed
+        // with its WAIT failing); a shortfall fails closed.
         $seed->finalize($nonce, 'owner-a', new PostSolveDisposition(PostSolveDispositionKind::Pass));
         $fake->calls = [];
-        self::assertSame('complete', $store->claim($nonce, 'owner-c', 300)[0]);
-        self::assertCount(0, $this->waits($fake), 'a complete claim performs no write and never WAITs');
+        $fake->waitAck = 0;
+        try {
+            $store->claim($nonce, 'owner-c', 300);
+            self::fail('a complete claim must establish the causal fence and fail closed on a shortfall');
+        } catch (\KiwiCaptcha\Storage\ReplicaWaitException) {
+        }
+        self::assertCount(1, $this->waits($fake), 'a complete claim issues exactly one verified fence WAIT');
+        $fake->waitAck = 1;
+        $fake->calls = [];
+        self::assertSame('complete', $store->claim($nonce, 'owner-c', 300)[0], 'a satisfied fence returns the terminal record');
+        self::assertCount(1, $this->waits($fake), 'the satisfied complete claim still performs the causal fence');
+        $fake->waitAck = 0;
 
         // A refused finalize (non-owner) is an atomic no-op, no WAIT.
         $fake->calls = [];

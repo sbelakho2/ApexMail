@@ -421,11 +421,13 @@ final class RealRedisPostSolveDispositionTest extends TestCase
         $counting->disconnect();
     }
 
-    public function testBusyCompleteAndRefusedFinalizeNeverWaitAgainstRealRedis(): void
+    public function testBusyAndRefusedFinalizeNeverWaitAndCompleteClaimFencesAgainstRealRedis(): void
     {
-        // The non-mutating paths never hit the barrier: a busy claim, a
-        // complete claim and a refused finalize perform no fresh write
-        // and issue no WAIT.
+        // The non-mutating paths never hit the barrier: a busy claim and
+        // a refused finalize perform no fresh write and issue no WAIT. A
+        // COMPLETE claim is an ACCEPTANCE of the terminal disposition: it
+        // must establish the causal fence on the accepting connection
+        // before returning the record, and a shortfall fails closed.
         $counting = $this->countingClient();
         $seed = new RedisPostSolveDispositionStore($counting, 'ci-postsolve-wait-nmw');
         $hardened = new RedisPostSolveDispositionStore($counting, 'ci-postsolve-wait-nmw', 0, 1, 100);
@@ -438,8 +440,17 @@ final class RealRedisPostSolveDispositionTest extends TestCase
 
         $seed->finalize($nonce, 'owner-a', new PostSolveDisposition(PostSolveDispositionKind::Pass));
         $counting->commands = [];
-        self::assertSame('complete', $hardened->claim($nonce, 'owner-c', 305)[0], 'a replay claim reproduces the terminal record');
-        self::assertCount(0, $counting->waits(), 'a complete claim never WAITs');
+        try {
+            $hardened->claim($nonce, 'owner-c', 305);
+            self::fail('a complete claim must establish the causal fence and fail closed when the fence WAIT shortfalls');
+        } catch (ReplicaWaitException $e) {
+            self::assertStringContainsString('after the post-solve disposition complete-claim acceptance', $e->getMessage());
+        }
+        self::assertCount(1, $counting->waits(), 'the complete-claim acceptance issued exactly one verified fence WAIT');
+        $counting->commands = [];
+        $hardenedNoWait = new RedisPostSolveDispositionStore($counting, 'ci-postsolve-wait-nmw', 0, 0, 100);
+        self::assertSame('complete', $hardenedNoWait->claim($nonce, 'owner-c', 305)[0], 'without the barrier configured the terminal record is returned');
+        self::assertCount(0, $counting->waits(), 'no fence without wait_replicas');
 
         $counting->commands = [];
         self::assertFalse($hardened->finalize($nonce, 'owner-x', new PostSolveDisposition(PostSolveDispositionKind::Pass)));

@@ -74,18 +74,27 @@ use KiwiCaptcha\Storage\ReplicaWaitException;
  * {@see \KiwiCaptcha\Storage\RedisStorage}. Fewer than waitReplicas
  * acknowledged replicas raise {@see ReplicaWaitException}. The caller
  * never learns a success that was not replicated, so a Deny/StepUp/
- * ChainRequired disposition can never be reported as persisted and
- * then vanish on promotion. A lost final disposition would let the
+ * ChainRequired disposition is substantially less likely to be lost on
+ * a stale-replica promotion. Redis replication remains eventually
+ * consistent: the verified WAIT is durability hardening, not a
+ * consensus guarantee — acknowledged writes can still be lost under
+ * some failover and persistence patterns. A lost final disposition
+ * would let the
  * same logical operation retry, win a fresh claim and recompute. The
  * takeover's owner transfer is the same durability-relevant write as
  * the record creation. Under failover a promoted replica may still
  * hold the superseded owner's expired state, and an un-replicated
  * takeover would let a second owner win the same nonce. The
  * single-writer invariant needs the barrier too. The non-mutating
- * paths (a complete/busy claim, a refused finalize, and every read)
- * perform no write and never WAIT. An idempotent retry can therefore
- * never turn a replica outage into a storage failure. The verified
- * barrier supports the same standalone-connection matrix as the core.
+ * paths (a busy claim, a refused finalize) perform no write and never
+ * WAIT. A COMPLETE claim is an ACCEPTANCE of a previously-mutated
+ * terminal disposition: it establishes the causal replication fence
+ * before returning the terminal record, because the finalize may have
+ * landed with its WAIT failing and a promotion could otherwise
+ * silently reverse the accepted decision. An idempotent retry can
+ * therefore never turn a replica outage into a storage failure. The
+ * verified barrier supports the same standalone-connection matrix as
+ * the core.
  * A Predis replication aggregate (Sentinel or master-slave), a Predis
  * cluster aggregate and a retry-enabled standalone Predis client are
  * refused at construction with waitReplicas > 0.
@@ -348,6 +357,21 @@ LUA;
             // disposition shape included) before it is returned, so a
             // corrupt complete record fails closed on the read-only path.
             $record = self::recordFromDecoded(self::validateDecoded($data['record']));
+        }
+        if ($record !== null && $record->disposition !== null) {
+            // CAUSAL ACCEPTANCE FENCE: a complete (terminal) claim is an
+            // ACCEPTANCE of the finalize that may have landed on the
+            // primary with its WAIT failing (the earlier attempt answered
+            // temporary-unavailable). Returning the terminal record
+            // read-only would hand the application a Pass/Deny/StepUp
+            // that a promotion could silently reverse. The fence writes a
+            // fresh value on THIS accepting connection and WAITs, proving
+            // the replica set has advanced through the finalize's write; a
+            // shortfall fails closed and the terminal record is never
+            // returned.
+            if ($this->waitReplicas > 0) {
+                $this->establishReplicationFence('the post-solve disposition complete-claim acceptance');
+            }
         }
 
         return [$data['status'], $record];

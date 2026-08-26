@@ -29,8 +29,12 @@ use KiwiCaptcha\Storage\ReplicaWaitException;
  * {@see \KiwiCaptcha\Storage\RedisStorage}. Fewer than waitReplicas
  * acknowledged replicas raise {@see ReplicaWaitException}. The caller
  * never learns a success that was not replicated, so a returned
- * Deny/StepUp (or a cleared obligation) can never be reported as
- * persisted and then vanish on promotion. A lost terminal transition
+ * Deny/StepUp (or a cleared obligation) is substantially less likely
+ * to be lost on a stale-replica promotion. Redis replication remains
+ * eventually consistent: the verified WAIT is durability hardening,
+ * not a consensus guarantee — acknowledged writes can still be lost
+ * under some failover and persistence patterns. A lost terminal
+ * transition
  * would let the same logical operation retry against a stale replica
  * and issue or pass. The non-mutating paths (reads, the owner-scoped
  * reservation, the release, idempotent same-state replays and refusals)

@@ -27,6 +27,18 @@ use KiwiCaptcha\ChallengeRuntimeStateReadableInterface;
  * a single eval; Redis serializes the script, so exactly one caller wins
  * `consumedNow`, giving strict single-use under concurrency.
  *
+ * Durability contract: the verified replication WAIT (fresh fence write
+ * on the accepting connection, then WAIT) requires the configured
+ * replica count to acknowledge each security-state mutation before the
+ * caller learns success, and fails closed on a shortfall. It is
+ * durability HARDENING, not a consensus/linearizability guarantee:
+ * Redis replication remains eventually consistent, and even
+ * acknowledged writes can be lost under some failover and persistence
+ * patterns. Redis itself states that WAIT does not make Redis a
+ * strongly consistent (CP) store. Deployments that require
+ * acknowledged-writes-can-never-vanish must back the one-shot security
+ * state with a consensus-capable store instead.
+ *
  * - phpredis (\Redis): eval() with the script.
  * - Predis: eval() (the same script; the server must support Lua, i.e.
  *   any Redis >= 2.6).
@@ -171,8 +183,10 @@ LUA;
 --
 -- The DEL is a durability-critical write: the caller applies the same
 -- verified WAIT barrier as the other transitions, so a burned challenge
--- that only vanished from the primary can never be resurrected as
--- pending by a promoted stale replica.
+-- that only vanished from the primary is substantially less likely to
+-- be resurrected as pending by a promoted stale replica (WAIT is
+-- durability hardening, not a consensus guarantee: Redis replication
+-- remains eventually consistent across every failover pattern).
 local v = redis.call("GET", KEYS[1])
 if not v then
   return {'missing'}
@@ -695,8 +709,10 @@ LUA;
         }
         if ($state === 'cancelled') {
             // A cancelled record is dead but retained until its TTL — the
-            // cleanup never deletes it, so a cancellation can never be
-            // resurrected as pending by a promoted stale replica. No
+            // cleanup never deletes it, so a cancellation is
+            // substantially less likely to be resurrected as pending by
+            // a promoted stale replica (WAIT is durability hardening,
+            // not a consensus guarantee). No
             // ConsumedRecord rides along: the cancelled state is not
             // consumed evidence. No WAIT: no mutation occurred.
             return new \KiwiCaptcha\DeleteIfPendingResult('cancelled');
