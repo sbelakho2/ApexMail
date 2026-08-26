@@ -1061,7 +1061,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($path === '/siteverify' || $path =
     );
     // A successful verification consumes the record (single-use); the
     // fixture's file stands in for the shared retained-state store, so the
-    // record is removed only AFTER a successful redemption (the controller
+    // record is removed only after a successful redemption (the controller
     // must see the pending record to verify it). The request carries the
     // RAW application/x-www-form-urlencoded body exactly like the
     // production wire: SiteVerify deliberately fails closed when it is
@@ -1131,7 +1131,7 @@ if ($path === '/kiwi-worker.js' || $path === '/kiwicaptcha-wasm.js' || $path ===
     // rewritten: the driver must refuse it with the controlled
     // kiwi:solver-mismatch state instead of accepting a stale worker.
     if ($path === '/kiwi-worker-stale.js') {
-        $body = str_replace('2026-08-r1', '2026-08-r0', (string) $body);
+        $body = str_replace('2026-08-r2', '2026-08-r0', (string) $body);
     }
     echo $body;
 
