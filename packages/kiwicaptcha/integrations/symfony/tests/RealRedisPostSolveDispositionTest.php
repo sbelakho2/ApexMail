@@ -84,7 +84,7 @@ final class RealRedisPostSolveDispositionTest extends TestCase
         return '{kiwi:ci-postsolve}:postsolve:'.$nonce;
     }
 
-    private const GUARD_OBLIGATION = 'g000000000000000000000000000000000000000000000000000000000000000';
+    private const GUARD_OBLIGATION = 'a000000000000000000000000000000000000000000000000000000000000000';
 
     private const GUARD_CHAIN = 'guard-chain';
 
@@ -105,11 +105,11 @@ final class RealRedisPostSolveDispositionTest extends TestCase
         $this->client->set($this->obligationKey(), $mapped, 'EX', 300);
         $this->client->set($this->chainKey(), (string) json_encode([
             'v' => 2,
-            'stage1Nonce' => 'nonce-a',
+            'stage1Nonce' => 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQ=',
             'scope' => 'login',
             'obligationId' => self::GUARD_OBLIGATION,
             'requiredAction' => 'sha20',
-            'requiredRank' => 8,
+            'requiredRank' => 3,
             'policyVersion' => 1,
             'chainDepth' => 2,
             'state' => $state,
@@ -528,8 +528,12 @@ final class RealRedisPostSolveDispositionTest extends TestCase
 
     public function testAuthorizedStage2PassCommitsAgainstRealRedis(): void
     {
+        // The postsolve nonce in the real system IS the stage-2 challenge
+        // nonce (a canonical Kiwi nonce), which is exactly what the
+        // chain's stage2Nonce field stores — the guarded acceptance
+        // compares the two.
         $store = $this->store();
-        $nonce = bin2hex(random_bytes(16));
+        $nonce = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQ=';
         self::assertSame('claimed', $store->claim($nonce, 'owner-b', 300, null, self::GUARD_OBLIGATION, null, null)[0]);
         $this->seedChain('issued', $nonce);
 

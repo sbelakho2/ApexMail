@@ -2207,6 +2207,12 @@
       return "internal-error";
     }
     function compatExecute(arg, opts) {
+      // Registration readiness first: implicit compat renders complete
+      // asynchronously (the loader-glue bootstrap), so execute() awaits
+      // kiwiCompatReady before resolving its target — an immediate
+      // execute must observe the rendered widget, not a widget-less
+      // page.
+      return (kiwiCompatReady || Promise.resolve()).then(function () {
       // The hCaptcha async mode ({async:true}) is determined BEFORE
       // argument resolution: the async form normalizes BOTH resolution
       // failures — "missing-captcha" (no widget exists) and
@@ -2312,6 +2318,7 @@
         });
       }
       return p;
+      });
     }
     function compatResolveId(idOrEl) {
       // An OMITTED id targets the first created widget (the incumbent
@@ -2386,7 +2393,13 @@
     // calls render() itself (the documented explicit pattern); onload=<fn>
     // runs after the loader glue is ready so an immediate explicit Argon
     // render can never race the glue bootstrap.
-    (kiwiCompatGlueReady || Promise.resolve()).then(function () {
+    // The compat readiness gate: implicit renders happen after the
+    // loader-glue bootstrap, so an immediate execute()/getResponse() must
+    // await the registration. An execute racing the registration would
+    // resolve a widget-less target ("missing-captcha" / "invalid-captcha-
+    // id") instead of the real network outcome — the lifecycle race the
+    // browser suite exercises with the challenge endpoint down.
+    var kiwiCompatReady = (kiwiCompatGlueReady || Promise.resolve()).then(function () {
       if (compatOnloadName) {
         var onloadFn = window[compatOnloadName];
         if (typeof onloadFn === "function") kiwiSafeCallback(onloadFn);

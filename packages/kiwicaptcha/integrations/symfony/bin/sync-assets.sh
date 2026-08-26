@@ -10,6 +10,10 @@
 # Run this after rebuilding the wasm solver
 # (packages/kiwicaptcha-wasm/build.sh) or editing the driver/CSS.
 set -euo pipefail
+# Every copied asset must stay byte-identical to the canonical
+# packages/kiwicaptcha-wasm/assets: a stale mirror changes the behavior
+# a given installation path receives. The same parity is enforced by
+# packages/kiwicaptcha/tools/verify-asset-parity.sh and by build.sh.
 HERE="$(cd "$(dirname "$0")" && pwd)"        # .../integrations/symfony/bin
 BUNDLE_DIR="$(cd "$HERE/.." && pwd)"         # .../integrations/symfony
 ROOT="$(cd "$BUNDLE_DIR/../../../.." && pwd)" # repo root

@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace BelConsulting\KiwiCaptchaBundle\Tests;
 
 use BelConsulting\KiwiCaptchaBundle\Controller\ChallengeController;
+use BelConsulting\KiwiCaptchaBundle\Risk\RequestBindingAuthorityInterface;
 use BelConsulting\KiwiCaptchaBundle\DependencyInjection\KiwiCaptchaExtension;
 use Symfony\Component\DependencyInjection\Definition;
 use Symfony\Component\DependencyInjection\ContainerBuilder;
@@ -48,6 +49,40 @@ final class ChallengeFlowTest extends TestCase
             targetBits: 8, // fast solve for tests
             ttlSecs: 120,
         ), new ArrayStorage());
+    }
+
+    /**
+     * R77-03: a binding-authority infrastructure failure, any Throwable
+     * except InvalidArgumentException, must answer the private structured
+     * 503 with the `SERVICE_UNAVAILABLE` error code. It must never surface
+     * a raw exception or a 500, and never undefined-variable warnings
+     * from the early-failure branch (the continuity session and
+     * minted-cookie state are initialized before binding resolution).
+     */
+    public function testBindingAuthorityInfrastructureFailureIsAStructured503WithNoMutation(): void
+    {
+        $authority = new class implements RequestBindingAuthorityInterface {
+            public int $calls = 0;
+
+            public function resolve(Request $request, string $scope, ?string $presentedBinding): ?string
+            {
+                ++$this->calls;
+
+                throw new \RuntimeException('the authoritative binding backend is unavailable');
+            }
+        };
+        $storage = new ArrayStorage();
+        $issuer = new Issuer(new Config(secretKey: self::SECRET, algorithm: PoWAlgorithm::Sha256, targetBits: 8, ttlSecs: 120), $storage);
+        $controller = new ChallengeController($issuer, bindingAuthority: $authority);
+        $request = Request::create('/challenge', 'POST', [], [], [], ['CONTENT_TYPE' => 'application/json', 'REMOTE_ADDR' => '127.0.0.1'], '{"scope":"login","request_binding":"presented-hint"}');
+
+        $response = $controller->challenge($request);
+
+        self::assertSame(503, $response->getStatusCode(), 'an authority infrastructure failure is a retryable 503');
+        self::assertStringContainsString('SERVICE_UNAVAILABLE', (string) $response->getContent());
+        self::assertSame(1, $authority->calls, 'the authority was consulted exactly once');
+        $records = new \ReflectionProperty(ArrayStorage::class, 'records');
+        self::assertCount(0, $records->getValue($storage), 'the failure touches no challenge state');
     }
 
     public function testCanonicalFramingRejectsTransferEncodingAndMalformedContentLengths(): void

@@ -633,6 +633,14 @@ final class ChallengeController
         $presentedBinding = isset($payload['request_binding']) && $payload['request_binding'] !== null
             ? (string) $payload['request_binding']
             : null;
+        // The continuity session is read up front (pure, no side effects)
+        // so the binding-authority infrastructure-failure branch can emit
+        // its private response with fully initialized variables — a
+        // generic Throwable there must never cascade into undefined-
+        // variable warnings or a TypeError from uninitialized optional
+        // arguments. The rate-limit feedback below reuses the same read.
+        $riskSession = $this->continuityCookie?->read($request);
+        $mintedCookie = false;
         if ($this->bindingAuthority !== null) {
             try {
                 $requestBinding = $this->bindingAuthority->resolve($request, $scope, $presentedBinding);
@@ -685,12 +693,6 @@ final class ChallengeController
             }
         }
 
-        // The continuity session is read up front (pure, no side effects)
-        // so the rate-limit-hit feedback attributes the refusal to the same
-        // session signal the risk engine would key on. A rate-limited
-        // request never receives a cookie.
-        $riskSession = $this->continuityCookie?->read($request);
-        $mintedCookie = false;
 
         // Chain-ticket / open-chain gate (stage-2 issuance, risk.chaining):
         // the chain and its obligation mapping ({kiwi:<ns>}:chain-obligation:
