@@ -45,7 +45,7 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
             self::markTestSkipped('predis/predis is not installed');
         }
         try {
-            $probe = new \Predis\Client(\BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\RedisTestUrl::resolve(), ['timeout' => 5.0, 'read_write_timeout' => 5.0]);
+            $probe = new \Predis\Client(self::redisTestUrl(), ['timeout' => 5.0, 'read_write_timeout' => 5.0]);
             $probe->ping();
 
             return $probe;
@@ -444,7 +444,7 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
         // guarantee is transition-sensitive, and the read-only outcomes
         // (pending_same, complete_same, conflict, still_pending, refused
         // finalize) never WAIT.
-        $counting = new \BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\CommandCountingRedisClient(\BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\RedisTestUrl::resolve(), ['timeout' => 2.0, 'read_write_timeout' => 2.0]);
+        $counting = new \BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\CommandCountingRedisClient(self::redisTestUrl(), ['timeout' => 2.0, 'read_write_timeout' => 2.0]);
         $store = new RedisSiteVerifyIdempotencyStore($counting, 'ci-idem-wait', 3, 1, 100);
         $backendId = hash('sha256', self::SITEVERIFY_SECRET.'|login|0');
         // A fresh key per run: the previous run's claim (whose WAIT threw
@@ -1089,4 +1089,13 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
         return \Symfony\Component\HttpFoundation\Request::create('/kiwi-captcha/siteverify', 'POST', [], [], [], ['CONTENT_TYPE' => $contentType], (string) $body);
     }
 
+    private static function redisTestUrl(): string
+    {
+        $url = \BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\RedisTestUrl::resolve();
+        if ($url === null) {
+            self::markTestSkipped('KC_REDIS_URL/TEST_REDIS_URL not set — the real-Redis suites run in the CI Redis-service job');
+        }
+
+        return $url;
+    }
 }

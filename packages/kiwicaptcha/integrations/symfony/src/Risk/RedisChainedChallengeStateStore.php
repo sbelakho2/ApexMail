@@ -1265,10 +1265,20 @@ LUA;
      * topology is standalone Redis only; keep waitReplicas = 0 on an
      * aggregate or a retry-enabled standalone client.
      */
-    public function confirmReplication(string $what): void
+    public function establishReplicationFence(string $what): void
     {
         if ($this->waitReplicas <= 0) {
             return;
+        }
+        $fenceKey = $this->keyPrefix.'replication-fence';
+        $token = bin2hex(random_bytes(16));
+        if ($this->redis instanceof \Redis) {
+            $ok = $this->redis->set($fenceKey, $token, ['PX' => 60_000]);
+        } else {
+            $ok = $this->redis->setex($fenceKey, 60, $token);
+        }
+        if ($ok === false || $ok === null) {
+            throw new \KiwiCaptcha\Storage\ReplicaWaitException(sprintf('the replication fence write failed after %s', $what));
         }
         $this->waitAndVerify($what);
     }

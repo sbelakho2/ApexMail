@@ -742,7 +742,7 @@ final class SiteVerifyTest extends TestCase
             self::markTestSkipped('predis/predis is not installed');
         }
         try {
-            $redis = new \Predis\Client(\BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\RedisTestUrl::resolve(), ['timeout' => 1.0, 'read_write_timeout' => 1.0]);
+            $redis = new \Predis\Client(self::redisTestUrl(), ['timeout' => 1.0, 'read_write_timeout' => 1.0]);
             $redis->ping();
         } catch (\Throwable) {
             self::markTestSkipped('no Redis at 127.0.0.1:6399');
@@ -3827,6 +3827,15 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         self::assertSame(true, $recoveredBody['success'] ?? null, 'the fresh retry must take over the untouched entry and resume the original success: '.(string) $recoveredRetry->getContent());
         self::assertSame([], $recoveredBody['error-codes'] ?? null);
         self::assertNotNull($storage->consumedState($nonce)?->consumedResult, 'the resumed derivation must be committed');
+    }
+    private static function redisTestUrl(): string
+    {
+        $url = \BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\RedisTestUrl::resolve();
+        if ($url === null) {
+            self::markTestSkipped('KC_REDIS_URL/TEST_REDIS_URL not set — the real-Redis suites run in the CI Redis-service job');
+        }
+
+        return $url;
     }
 }
 

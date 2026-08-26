@@ -257,10 +257,10 @@ final class ChainedChallengeTicketService
      *
      * @return array{version: int, chainId: string, expiresAt: int}|null
      */
-    public function confirmReplication(string $what): void
+    public function establishReplicationFence(string $what): void
     {
         if ($this->store instanceof \KiwiCaptcha\ReplicationBarrierInterface) {
-            $this->store->confirmReplication($what);
+            $this->store->establishReplicationFence($what);
         }
     }
 

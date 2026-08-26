@@ -307,6 +307,7 @@ final class DispositionWaitRedisFake extends \Predis\Client
         return match (strtoupper((string) $commandID)) {
             'GET' => $this->strings[(string) $arguments[0]] ?? null,
             'SET' => $this->fakeSet($arguments),
+            'SETEX' => $this->fakeSetex($arguments),
             'GETDEL' => $this->fakeGetdel($arguments),
             'TIME' => [(int) floor($this->clockMs / 1000), (int) round(($this->clockMs - (int) floor($this->clockMs / 1000) * 1000) * 1000)],
             'EVAL' => $this->fakeEval($arguments),
@@ -325,6 +326,13 @@ final class DispositionWaitRedisFake extends \Predis\Client
     private function fakeSet(array $arguments): ?string
     {
         $this->strings[(string) $arguments[0]] = (string) $arguments[1];
+
+        return 'OK';
+    }
+
+    private function fakeSetex(array $arguments): ?string
+    {
+        $this->strings[(string) $arguments[0]] = (string) $arguments[2];
 
         return 'OK';
     }

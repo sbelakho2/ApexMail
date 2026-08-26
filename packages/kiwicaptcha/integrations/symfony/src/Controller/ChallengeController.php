@@ -2255,14 +2255,11 @@ final class ChallengeController
                 $record = $runtime->record;
                 if ($record !== null && $this->now() < $record->expiresAt) {
                     // Pending and still valid: recover the exact issuance
-                    // response (no re-mint, no re-admission).
+                    // response (no re-mint, no re-admission). Exactly one
+                    // fence per store before the hand-out.
                     $this->confirmRecoveryBarriers();
 
-                    $this->confirmRecoveryBarriers();
-
-            $this->confirmRecoveryBarriers();
-
-        return $this->privateJson($this->rebuildIssuanceResponse($record), Response::HTTP_OK, $request, $riskSession, $mintedCookie);
+                    return $this->privateJson($this->rebuildIssuanceResponse($record), Response::HTTP_OK, $request, $riskSession, $mintedCookie);
                 }
                 // Pending but signed-expired (retained by the replay
                 // margin): the old nonce must become PROVABLY
@@ -2364,12 +2361,11 @@ final class ChallengeController
             : null;
         if ($consumed === null) {
             // Pending: the issued challenge is still live, so recover the
-            // exact issuance response (no re-mint, no re-admission).
+            // exact issuance response (no re-mint, no re-admission). One
+            // fence before the hand-out.
             $this->confirmRecoveryBarriers();
 
-            $this->confirmRecoveryBarriers();
-
-        return $this->privateJson($this->rebuildIssuanceResponse($record), Response::HTTP_OK, $request, $riskSession, $mintedCookie);
+            return $this->privateJson($this->rebuildIssuanceResponse($record), Response::HTTP_OK, $request, $riskSession, $mintedCookie);
         }
         $result = $consumed->consumedResult;
         if ($result === null) {
@@ -2681,9 +2677,7 @@ final class ChallengeController
 
                 $this->confirmRecoveryBarriers();
 
-            $this->confirmRecoveryBarriers();
-
-        return $this->privateJson($this->rebuildIssuanceResponse($record), Response::HTTP_OK, $request, $riskSession, $mintedCookie);
+                return $this->privateJson($this->rebuildIssuanceResponse($record), Response::HTTP_OK, $request, $riskSession, $mintedCookie);
             case \BelConsulting\KiwiCaptchaBundle\Risk\PostSolveDispositionKind::StepUp:
                 // The final disposition is StepUp: transition to the
                 // terminal step_up_required (the obligation mapping is
@@ -2798,8 +2792,8 @@ final class ChallengeController
      */
     private function confirmRecoveryBarriers(): void
     {
-        $this->outstanding?->confirmReplication('the stage-2 recovery outstanding acceptance');
-        $this->chainTickets?->confirmReplication('the stage-2 recovery chain acceptance');
+        $this->outstanding?->establishReplicationFence('the stage-2 recovery outstanding acceptance');
+        $this->chainTickets?->establishReplicationFence('the stage-2 recovery chain acceptance');
     }
 
     private function rebuildIssuanceResponse(\KiwiCaptcha\ChallengeRecord $record): array

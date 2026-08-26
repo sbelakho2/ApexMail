@@ -595,7 +595,7 @@ final class Verifier
                         // lose — the barrier is RE-ESTABLISHED before the
                         // acceptance (a shortfall fails closed).
                         if ($this->storage instanceof \KiwiCaptcha\ReplicationBarrierInterface) {
-                            $this->storage->confirmReplication('the stored-result replay acceptance');
+                            $this->storage->establishReplicationFence('the stored-result replay acceptance');
                         }
 
                         return VerifyOutcome::valid($consumed->record->nonce, $consumed->consumedResult->binding, true);
@@ -852,7 +852,7 @@ final class Verifier
             // could lose — the barrier is RE-ESTABLISHED before the
             // acceptance (a shortfall fails closed).
             if ($this->storage instanceof \KiwiCaptcha\ReplicationBarrierInterface) {
-                $this->storage->confirmReplication('the resumed committed-result acceptance');
+                $this->storage->establishReplicationFence('the resumed committed-result acceptance');
             }
 
             return $consumed->consumedResult->valid

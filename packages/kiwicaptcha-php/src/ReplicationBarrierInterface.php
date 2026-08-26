@@ -5,23 +5,26 @@ declare(strict_types=1);
 namespace KiwiCaptcha;
 
 /**
- * A storage that can RE-ESTABLISH the verified replica-WAIT barrier at an
+ * A storage that can establish a causal replication fence at an
  * acceptance point.
  *
  * The failed-barrier replay hole: a security mutation can land on the
- * primary and its WAIT can still fail (fewer replicas acked than
- * configured). A later "same-state/read-only" retry that ACCEPTS the
- * mutated state — the stored-result replay, a completed idempotency
- * record, a recovered stage-2 challenge, a final disposition — must not
- * return success on replication-unproven state: a promotion could lose
- * it. Every such acceptance path calls confirmReplication() first: the
- * barrier waits for the configured replica count to catch up to the
- * server's current write offset (which includes the earlier mutation),
- * and a shortfall THROWS — the acceptance fails closed instead of
- * returning an unproven success. When waitReplicas <= 0 (the default),
- * the barrier is a no-op and the behavior is unchanged.
+ * primary and its WAIT can still fail (fewer replicas acknowledged than
+ * configured). A later retry on a DIFFERENT worker and Redis connection
+ * must not accept the mutated state without proving its durability: a
+ * bare WAIT on a connection that wrote nothing proves nothing about
+ * another connection's write (Redis defines WAIT relative to the
+ * writes sent by the current connection).
+ *
+ * The fence is a fresh write on the ACCEPTING connection immediately
+ * before the WAIT: Redis replication is ordered, so a replica that has
+ * acknowledged the later fence write has advanced through the preceding
+ * primary replication stream, including the originally unproven
+ * mutation. A shortfall THROWS and the acceptance fails closed instead
+ * of returning an unproven success. When waitReplicas <= 0 (the
+ * default), the fence is a no-op and the behavior is unchanged.
  */
 interface ReplicationBarrierInterface
 {
-    public function confirmReplication(string $what): void;
+    public function establishReplicationFence(string $what): void;
 }

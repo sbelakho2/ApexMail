@@ -54,7 +54,7 @@ final class RealRedisChainedChallengeTest extends TestCase
 {
     private static function redisUrl(): string
     {
-        return \BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\RedisTestUrl::resolve();
+        return self::redisTestUrl();
     }
 
     private const SECRET = '0123456789abcdef0123456789abcdef';
@@ -743,5 +743,14 @@ final class RealRedisChainedChallengeTest extends TestCase
         }
         self::assertCount(1, $counting->waits(), 'the failed step-up transition issued exactly one WAIT');
         $counting->disconnect();
+    }
+    private static function redisTestUrl(): string
+    {
+        $url = \BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\RedisTestUrl::resolve();
+        if ($url === null) {
+            self::markTestSkipped('KC_REDIS_URL/TEST_REDIS_URL not set — the real-Redis suites run in the CI Redis-service job');
+        }
+
+        return $url;
     }
 }

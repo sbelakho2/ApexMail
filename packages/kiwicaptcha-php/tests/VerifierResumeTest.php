@@ -983,7 +983,7 @@ final class BarrierStorage implements \KiwiCaptcha\AtomicStorageInterface, \Kiwi
         return $this->inner->consumedState($nonce);
     }
 
-    public function confirmReplication(string $what): void
+    public function establishReplicationFence(string $what): void
     {
         if (!$this->confirmResult) {
             throw new \RuntimeException('replication barrier shortfall');

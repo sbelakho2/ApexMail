@@ -386,10 +386,26 @@ LUA;
      * connection. A future pinned-master implementation may
      * restore Sentinel support.
      */
-    public function confirmReplication(string $what): void
+    public function establishReplicationFence(string $what): void
     {
         if ($this->waitReplicas <= 0) {
             return;
+        }
+        // The causal replication fence: a fresh write on THIS connection
+        // immediately before the WAIT. Replication is ordered, so a
+        // replica that acknowledges the fence has advanced through the
+        // preceding primary stream (the originally unproven mutation
+        // included); a bare WAIT on a connection that wrote nothing
+        // cannot prove another connection's write.
+        $fenceKey = $this->prefix.'replication-fence';
+        $token = bin2hex(random_bytes(16));
+        if ($this->client instanceof \Redis) {
+            $ok = $this->client->set($fenceKey, $token, ['PX' => 60_000]);
+        } else {
+            $ok = $this->client->setex($fenceKey, 60, $token);
+        }
+        if ($ok === false || $ok === null) {
+            throw new \KiwiCaptcha\Storage\ReplicaWaitException(sprintf('the replication fence write failed after %s', $what));
         }
         $this->waitAndVerify($what);
     }

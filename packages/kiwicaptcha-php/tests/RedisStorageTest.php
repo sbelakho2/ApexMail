@@ -1327,13 +1327,10 @@ final class RedisStorageTest extends TestCase
         // connection A followed by a socket failure before the WAIT would
         // issue the WAIT on a RECONNECTED connection B — the centralized
         // guard refuses retry-enabled \Redis clients for verified-WAIT.
-        if (!\class_exists(\Redis::class)) {
+        if (!\extension_loaded('redis')) {
             self::markTestSkipped('phpredis is not installed');
         }
-        if (!\class_exists(RetryEnabledPhpRedisStub::class)) {
-            eval('final class RetryEnabledPhpRedisStub extends \\Redis { private int $retries; public function __construct(int $retries = 10) { $this->retries = $retries; } public function getOption(int $option): int { if ($option === \\Redis::OPT_MAX_RETRIES) { return $this->retries; } return 0; } }');
-        }
-        $client = new RetryEnabledPhpRedisStub();
+        $client = new \KiwiCaptcha\Tests\Fixtures\RetryEnabledPhpRedisStub();
         $message = '';
         try {
             new RedisStorage($client, 'kiwi:test:', waitReplicas: 1);
@@ -1345,9 +1342,40 @@ final class RedisStorageTest extends TestCase
         self::assertStringContainsString('reconnect', $message);
 
         // Retries disabled (OPT_MAX_RETRIES = 0) passes the guard.
-        $okClient = new \RetryEnabledPhpRedisStub(0);
+        $okClient = new \KiwiCaptcha\Tests\Fixtures\RetryEnabledPhpRedisStub(0);
         $storage = new RedisStorage($okClient, 'kiwi:test:', waitReplicas: 1);
         self::assertNotNull($storage);
+    }
+
+    public function testRecoveryFenceWritesOnTheAcceptingConnection(): void
+    {
+        // R73-02: the recovery barrier is a CAUSAL FENCE on the ACCEPTING
+        // connection — a fresh write immediately before the WAIT — never
+        // a bare GET + WAIT. A read-only WAIT on connection B proves
+        // nothing about connection A's earlier write (Redis defines WAIT
+        // relative to the writes sent by the current connection), so the
+        // accepting side must write its own fence.
+        if (!\class_exists(\Predis\Client::class)) {
+            self::markTestSkipped('predis/predis is not installed');
+        }
+        $clientB = new FenceRecordingRedisClient();
+        $redisStorage = new RedisStorage($clientB, 'kiwi:fence:', waitReplicas: 1, waitTimeoutMs: 100);
+        try {
+            $redisStorage->establishReplicationFence('the recovery acceptance');
+            self::fail('the fence must fail closed when the replicas do not acknowledge');
+        } catch (\KiwiCaptcha\Storage\ReplicaWaitException) {
+            // the fail-closed fence fired ✓
+        }
+        self::assertGreaterThanOrEqual(2, \count($clientB->commands), 'the fence performs a write + a WAIT on the accepting connection');
+        self::assertSame('SETEX', $clientB->commands[0][0], 'the FIRST command on the accepting connection is the fence write');
+        self::assertSame('WAIT', $clientB->commands[1][0], 'the SECOND command is the WAIT on the SAME connection');
+        self::assertStringContainsString('replication-fence', (string) $clientB->commands[0][1][0], 'the fence write targets the dedicated fence key');
+
+        // A bare GET + WAIT (the old read-only implementation) must never
+        // appear: the fence always precedes the WAIT with a write.
+        foreach ($clientB->commands as $cmd) {
+            self::assertNotSame('GET', $cmd[0], 'no bare GET is part of the fence sequence');
+        }
     }
 
     public function testRealRedisDeleteIfPendingRaceNeverErasesCommittedEvidence(): void
@@ -1636,5 +1664,43 @@ final class SingleGetFakeRedisClient extends \Predis\Client
         }
 
         return null;
+    }
+}
+
+/**
+ * R73-02: a command-recording Predis fake for the accepting connection —
+ * records every command (SETEX, WAIT, GET, EVAL) so the test can prove
+ * the fence sequence is write-then-WAIT on the same connection.
+ */
+final class FenceRecordingRedisClient extends \Predis\Client
+{
+    /** @var list<array{0: string, 1: list<mixed>}> */
+    public array $commands = [];
+
+    public int $waitAck = 0;
+
+    public function __construct()
+    {
+        // Deliberately skip the parent constructor.
+    }
+
+    public function __call($commandID, $arguments)
+    {
+        $this->commands[] = [strtoupper((string) $commandID), $arguments];
+
+        return match (strtoupper((string) $commandID)) {
+            'SETEX', 'SET' => 'OK',
+            'GET' => null,
+            'TIME' => [time(), 0],
+            'EVAL' => null,
+            default => null,
+        };
+    }
+
+    public function executeRaw(array $arguments, &$error = null): mixed
+    {
+        $this->commands[] = [strtoupper((string) ($arguments[0] ?? '')), \array_slice($arguments, 1)];
+
+        return $this->waitAck;
     }
 }

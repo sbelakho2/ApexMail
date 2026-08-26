@@ -274,7 +274,7 @@ LUA;
             // barrier is RE-ESTABLISHED before the acceptance (a shortfall
             // throws and the caller answers the 503).
             if ($this->waitReplicas > 0) {
-                $this->waitAndVerify('the siteverify stored-success acceptance');
+                $this->establishReplicationFence('the siteverify stored-success acceptance');
             }
 
             return $rec['result'];
@@ -295,6 +295,24 @@ LUA;
     {
         return sprintf('{%s}:%s%s:%s', $this->namespace, self::PREFIX, $backendId, $idempotencyKey);
     }
+    public function establishReplicationFence(string $what): void
+    {
+        if ($this->waitReplicas <= 0) {
+            return;
+        }
+        $fenceKey = '{'.$this->namespace.':siteverify-idem}:replication-fence';
+        $token = bin2hex(random_bytes(16));
+        if ($this->redis instanceof \Redis) {
+            $ok = $this->redis->set($fenceKey, $token, ['PX' => 60_000]);
+        } else {
+            $ok = $this->redis->setex($fenceKey, 60, $token);
+        }
+        if ($ok === false || $ok === null) {
+            throw new \KiwiCaptcha\Storage\ReplicaWaitException(sprintf('the replication fence write failed after %s', $what));
+        }
+        $this->waitAndVerify($what);
+    }
+
     private function waitAndVerify(string $what): void
     {
         if ($this->redis instanceof \Redis) {
