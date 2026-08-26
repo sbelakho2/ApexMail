@@ -31,7 +31,7 @@ use KiwiCaptcha\ChallengeRuntimeStateReadableInterface;
  * on the accepting connection, then WAIT) requires the configured
  * replica count to acknowledge each security-state mutation before the
  * caller learns success, and fails closed on a shortfall. It is
- * durability HARDENING, not a consensus/linearizability guarantee:
+ * durability hardening rather than a consensus/linearizability guarantee:
  * Redis replication remains eventually consistent, and even
  * acknowledged writes can be lost under some failover and persistence
  * patterns. Redis itself states that WAIT does not make Redis a
@@ -405,7 +405,7 @@ LUA;
         if ($this->waitReplicas <= 0) {
             return;
         }
-        // The causal replication fence: a fresh write on THIS connection
+        // The causal replication fence: a fresh write on this connection
         // immediately before the WAIT. Replication is ordered, so a
         // replica that acknowledges the fence has advanced through the
         // preceding primary stream (the originally unproven mutation
@@ -596,13 +596,13 @@ LUA;
     }
 
     /**
-     * Decode a ConsumedRecord ENTIRELY from the stored envelope bytes —
+     * Decode a ConsumedRecord entirely from the stored envelope bytes —
      * the record, the committed result and the operation identity are all
      * parsed from the same $raw, with NO Redis operation. This is the
      * single-snapshot guarantee of {@see ChallengeRuntimeStateReadableInterface}:
      * the consumed state is never reconstructed from two separately timed
      * reads (a retained record can expire between them, or a takeover can
-     * move it), so the caller always sees exactly the bytes one GET
+     * move it). The caller always sees exactly the bytes one GET
      * observed.
      */
     private function decodeConsumedEnvelope(string $raw): ?ConsumedRecord
@@ -767,7 +767,7 @@ LUA;
             return new ChallengeRuntimeState(ChallengeRuntimeStateKind::Cancelled, $this->decode($raw));
         }
         if (str_contains($raw, '"state":"consumed"')) {
-            // Decoded ENTIRELY from the same $raw this method already
+            // Decoded entirely from the same $raw this method already
             // holds — never a second GET.
             $consumed = $this->decodeConsumedEnvelope($raw);
 

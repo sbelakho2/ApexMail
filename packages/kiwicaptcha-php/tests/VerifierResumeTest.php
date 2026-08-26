@@ -501,7 +501,7 @@ final class VerifierResumeTest extends TestCase
     {
         // The failed-barrier replay hole: the consume/commit that produced
         // a stored success may have landed on the primary with its WAIT
-        // failing. A later replay that ACCEPTS the stored success must
+        // failing. A later replay that accepts the stored success must
         // establish the replication fence first: a shortfall fails
         // closed (no unproven success), and a satisfied fence returns
         // the stored Valid.
@@ -576,7 +576,7 @@ final class VerifierResumeTest extends TestCase
     public function testResumeEnforcesTheExpectedRequestBindingBeforeDerivation(): void
     {
         // The resumed-operation path enforces the same pre-derivation
-        // transaction-binding contract as the ordinary verify: a BOUND
+        // transaction-binding contract as the ordinary verify: a bound
         // record must equal the expected binding, and an explicitly
         // unbound record is permitted regardless of the expected binding.
         [$inner, $record, $token] = $this->issueAndSolve(requestBinding: 'txn-1');

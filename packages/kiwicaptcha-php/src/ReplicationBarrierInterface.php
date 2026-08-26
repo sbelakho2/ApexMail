@@ -10,17 +10,17 @@ namespace KiwiCaptcha;
  *
  * The failed-barrier replay hole: a security mutation can land on the
  * primary and its WAIT can still fail (fewer replicas acknowledged than
- * configured). A later retry on a DIFFERENT worker and Redis connection
- * must not accept the mutated state without proving its durability: a
+ * configured). A later retry on a different worker and Redis connection
+ * must not accept the mutated state without proving its durability. A
  * bare WAIT on a connection that wrote nothing proves nothing about
- * another connection's write (Redis defines WAIT relative to the
+ * another connection's write: Redis defines WAIT relative to the
  * writes sent by the current connection).
  *
- * The fence is a fresh write on the ACCEPTING connection immediately
- * before the WAIT: Redis replication is ordered, so a replica that has
+ * The fence is a fresh write on the accepting connection immediately
+ * before the WAIT. Redis replication is ordered, so a replica that has
  * acknowledged the later fence write has advanced through the preceding
  * primary replication stream, including the originally unproven
- * mutation. A shortfall THROWS and the acceptance fails closed instead
+ * mutation. A shortfall throws and the acceptance fails closed instead
  * of returning an unproven success. When waitReplicas <= 0 (the
  * default), the fence is a no-op and the behavior is unchanged.
  */

@@ -11,11 +11,11 @@ use Symfony\Component\HttpFoundation\Request;
  * endpoint (challenge, cancellation, SiteVerify): one canonical HTTP
  * representation.
  *
- *   Content-Length:        max one occurrence, canonical decimal grammar
+ *   Content-Length:        max one occurrence, canonical decimal grammar.
  *   Transfer-Encoding:     max one occurrence, 'chunked' only, never
- *                          together with Content-Length
- *   Content-Type:          max one occurrence
- *   Content-Encoding:      max one occurrence
+ *                          together with Content-Length.
+ *   Content-Type:          max one occurrence.
+ *   Content-Encoding:      max one occurrence.
  *
  * A duplicated header (two different values) is the kind of ambiguity
  * different proxies and application layers interpret differently, so it

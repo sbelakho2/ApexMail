@@ -140,7 +140,7 @@ final class ResultReceiptSigner
         // signature, the expected issuer/region, the policy epoch, the
         // scope, the request binding, the required proof/profile, the
         // expiry and the atomic first-seen JTI. v1 payloads (without the
-        // version marker) are NEVER treated as equivalent: a receiver
+        // version marker) are never treated as equivalent: a receiver
         // demanding v2 must refuse them.
         $payload = (string) json_encode([
             'v' => 2,

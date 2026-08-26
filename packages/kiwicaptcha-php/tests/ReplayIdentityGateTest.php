@@ -225,7 +225,7 @@ final class ReplayIdentityGateTest extends TestCase
         // An explicitly unbound record (BindingMode::None at issuance)
         // carries no transaction anchor: the presented canonical binding
         // does not apply to it, so the expected-binding enforcement must
-        // permit it — the pre-consume enforcement exists for BOUND
+        // permit it — the pre-consume enforcement exists for bound
         // challenges, and rejecting unbound ones would break
         // binding_mode=none deployments.
         [$storage, $record, $token] = $this->issueAndSolve();

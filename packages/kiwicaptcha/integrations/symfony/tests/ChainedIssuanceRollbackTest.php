@@ -226,7 +226,7 @@ final class ChainedIssuanceRollbackTest extends TestCase
 
     public function testGenericMintFailureBeforeChallengeAssignmentIsAStructured503(): void
     {
-        // R68-03: the issuer factory or the early issue() can throw BEFORE
+        // R68-03: the issuer factory or the early issue() can throw before
         // the $challenge variable is ever assigned — the generic catch's
         // rollback must tolerate the unassigned state (never faulting the
         // error-handling path itself) and answer the private structured
@@ -260,7 +260,7 @@ final class ChainedIssuanceRollbackTest extends TestCase
         $chainService = $this->chainService($chainStore);
         ['chainId' => $chainId, 'ticket' => $ticket] = $this->openChain($chainService);
 
-        // The risk store's feedback write throws AFTER the durable
+        // The risk store's feedback write throws after the durable
         // stage-2 commit (the challengeIssued risk feedback fails).
         $keys = RiskKeys::fromMaster(self::SECRET);
         $classifier = new \KiwiCaptcha\Risk\Network\CidrNetworkClassifier([]);
@@ -283,7 +283,7 @@ final class ChainedIssuanceRollbackTest extends TestCase
         self::assertSame(503, $response->getStatusCode(), 'the post-commit feedback failure answers the private structured 503');
         self::assertSame('SERVICE_UNAVAILABLE', json_decode((string) $response->getContent(), true)['error']['code']);
 
-        // NOTHING was rolled back: the chain stays issued(N), the record
+        // Nothing was rolled back: the chain stays issued(N), the record
         // exists, the outstanding memberships still hold N.
         $requirement = $chainService->requirementFor($chainId);
         self::assertSame('issued', $requirement?->state, 'the chain stays durably issued');
@@ -293,7 +293,7 @@ final class ChainedIssuanceRollbackTest extends TestCase
         self::assertSame(1, $client->counters[$this->sourceKey()] ?? 0, 'the original-source outstanding membership still holds N');
         self::assertArrayHasKey($nonce, $client->zsets['{kiwi:rollback-test}:outstanding:global:live'] ?? [], 'the global live membership still holds N');
 
-        // The same chain retries: it recovers the SAME issued challenge —
+        // The same chain retries: it recovers the same issued challenge —
         // no re-mint, no re-admission.
         $retry = $controller->challenge($this->challengeRequest(json_encode(['scope' => 'login', 'chain_ticket' => $ticket, 'request_binding' => 'txn-alpha'], JSON_THROW_ON_ERROR)));
         self::assertSame(200, $retry->getStatusCode());
@@ -505,7 +505,7 @@ final class RollbackLostReplyChainStore implements TransactionalChainedChallenge
  */
 /**
  * A storage whose store() write throws a generic backend failure — the
- * mint can fail BEFORE the controller's $challenge variable is assigned.
+ * mint can fail before the controller's $challenge variable is assigned.
  */
 
 
@@ -608,7 +608,7 @@ final class RollbackFakeRedis extends \Predis\Client
         if (str_contains($script, 'Outstanding challenge release')) {
             // OutstandingChallenges::solved / ::abortedBeforeHandoff:
             // keys[1] the global live ZSET, keys[2] the nonce sidecar,
-            // keys[3] the ORIGINAL source's membership ZSET; argv[1] the
+            // keys[3] the original source's membership ZSET; argv[1] the
             // released nonce, argv[2] the caller-resolved source. One-shot,
             // nonce-authoritative.
             $global = (string) $keys[0];

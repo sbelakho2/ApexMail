@@ -171,7 +171,7 @@ final class SiteVerifyController
         /**
          * Anti-stockpiling accounting (wired when the risk layer is
          * enabled): every successful Siteverify redemption releases the
-         * solved nonce's ORIGINAL source slot and its live-outstanding
+         * solved nonce's original source slot and its live-outstanding
          * membership, exactly like native verification. The release is
          * one-shot and nonce-authoritative, so recovery and retry paths
          * are safe to call it too. Null (risk disabled, fixtures) keeps
@@ -192,13 +192,13 @@ final class SiteVerifyController
         private readonly ?SecurityEpochMonitor $epochMonitor = null,
         /**
          * The authoritative transaction-binding resolver
-         * (risk.request_binding_authority). When configured, EVERY
+         * (risk.request_binding_authority). When configured, every
          * Siteverify redemption enforces the same pre-consume binding
          * contract as the native path: the resolved binding is passed to
          * the core verifier (and the resumed-operation path) as the
-         * expected request binding AND bound into the idempotency
-         * identity, so a proof anchored to one transaction can never
-         * succeed for another and an idempotency entry can never be
+         * expected request binding and bound into the idempotency
+         * identity. A proof anchored to one transaction can never
+         * succeed for another, and an idempotency entry can never be
          * reused across transaction contexts. Null when no authority is
          * configured; the extension refuses the siteverify-secrets +
          * request-binding-capable issuance combination without one at
@@ -427,7 +427,7 @@ final class SiteVerifyController
         // never a replay of the pre-change outcome.
         $backendId = hash('sha256', $secret.'|'.$expectedScope.'|'.$effectiveEpoch);
 
-        // The authoritative transaction binding, resolved BEFORE any
+        // The authoritative transaction binding, resolved before any
         // claim or verification: when a request-binding authority is
         // configured (risk.request_binding_authority), the endpoint
         // enforces the same pre-consume transaction-binding contract as
@@ -459,7 +459,7 @@ final class SiteVerifyController
         if ($this->bindingAuthority !== null) {
             // The authority's result is authoritative: a resolved binding
             // is the transaction's binding, a resolved null is an
-            // explicitly UNBOUND transaction (the core's exact expectation
+            // explicitly unbound transaction (the core's exact expectation
             // then refuses any bound record). An InvalidArgumentException
             // is a transaction mismatch (the 400 provider bad-request);
             // any infrastructure failure is the retryable internal-error,
@@ -894,7 +894,7 @@ final class SiteVerifyController
                 // Siteverify redemption would fall into the unscoped
                 // global-only path and one busy scope could starve the
                 // others. The expected binding is enforced by the core
-                // BEFORE the consume, exactly like the native path.
+                // before the consume, exactly like the native path.
                 return $this->verifier->verify(
                     $response,
                     $this->secretKey,
@@ -1077,9 +1077,9 @@ final class SiteVerifyController
             return $this->internalErrorResponse();
         }
         if (!$finalized) {
-            // A REFUSED finalize is exactly an ownership loss: the claim
+            // A refused finalize is exactly an ownership loss: the claim
             // was taken over (or the key vanished, or the state moved), so
-            // this request's locally computed result is NEVER returned as
+            // this request's locally computed result is never returned as
             // authoritative — the authoritative completed state was not
             // established. The retryable 503.
             return $this->internalErrorResponse();
@@ -1173,9 +1173,9 @@ final class SiteVerifyController
     /**
      * Run a callable with the request scope attribute stamped for the
      * Argon per-scope admission budget (RequestScopeAdmissionGate reads
-     * the scope from the request attribute; without it every Siteverify
+     * the scope from the request attribute). Without it, every Siteverify
      * redemption would fall into the unscoped global-only path and one
-     * busy scope could starve the others). The previous attribute value
+     * busy scope could starve the others. The previous attribute value
      * is restored afterwards.
      *
      * @template T
@@ -1201,17 +1201,17 @@ final class SiteVerifyController
 
     /**
      * The single successful-outcome return path: releases the solved
-     * nonce's ORIGINAL outstanding slot and its live-outstanding
-     * membership (idempotent, nonce-authoritative, best-effort — a
-     * transient release failure is repaired by the same logical
-     * operation's later successful observation, since the ZREM-gated
-     * release is a no-op once released) and returns the canonical
-     * response. EVERY accepted successful outcome routes through here —
-     * the fresh verification, a reconstruction, a resume, a stored-result
+     * nonce's original outstanding slot and its live-outstanding
+     * membership (idempotent, nonce-authoritative, best-effort) and
+     * returns the canonical response. A transient release failure is
+     * repaired by the same logical operation's later successful
+     * observation, since the ZREM-gated release is a no-op once released.
+     * Every accepted successful outcome routes through here: the fresh
+     * verification, a reconstruction, a resume, a stored-result
      * duplicate, and every cached stored success a same-operation retry
      * observes (CompleteSame, PendingSame waiter, ownership-lost fallback
-     * alike, with the already-decoded token's nonce) — so the ordinary
-     * fresh-success path can never bypass the release and the
+     * alike, with the already-decoded token's nonce). So the ordinary
+     * fresh-success path can never bypass the release, and the
      * crash-recovery and waiter paths repair a failed one.
      */
     private function releaseAndJsonResponse(string $nonce, array $canonical): JsonResponse
@@ -1485,7 +1485,7 @@ LUA;
         // Framing rigor: only POST with an explicit identity content type
         // is accepted — the provider contract is application/json and
         // application/x-www-form-urlencoded, and the parameter source is
-        // the BODY only (query parameters never create a second input
+        // the body only (query parameters never create a second input
         // namespace, and multipart/text/plain are refused rather than
         // silently parsed).
         if (!$request->isMethod('POST')) {
@@ -1521,7 +1521,7 @@ LUA;
             // parser-ambiguity rigor as the JSON transport (a
             // secret=A&secret=B request must never be silently collapsed
             // into whichever interpretation the framework chose). An
-            // EMPTY raw body falls back to the framework-parsed bag (the
+            // empty raw body falls back to the framework-parsed bag (the
             // framework's own form parser runs the same normalization; a
             // real empty-body POST yields an empty bag, so the fallback
             // cannot smuggle parameters past the strict decoder).
@@ -1537,7 +1537,7 @@ LUA;
             }
 
             // A non-empty body that failed the strict decode, OR an empty
-            // raw body with a POPULATED framework bag (the parameters were
+            // raw body with a populated framework bag (the parameters were
             // parsed upstream by a different parser, so the duplicate-name
             // and bracket-syntax evidence is lost): fail closed rather
             // than silently switching parsers.
@@ -1557,7 +1557,7 @@ LUA;
     /**
      * The RAW-document duplicate-key scanner — the single shared
      * implementation used by every security-sensitive endpoint
-     * ({@see JsonDuplicateKeyScanner}). A decode-then-scan can NEVER see
+     * ({@see JsonDuplicateKeyScanner}). A decode-then-scan can never see
      * a duplicate: json_decode has already collapsed the object members
      * ({"secret":"A","secret":"B"} arrives as one secret), which is
      * exactly the parser ambiguity that must be refused. The walker

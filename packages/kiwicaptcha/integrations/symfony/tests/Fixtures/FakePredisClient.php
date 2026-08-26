@@ -245,7 +245,7 @@ final class FakePredisClient extends \Predis\Client
      * ('EX', ttl, 'NX') and the options-array form.
      */
     /**
-     * Test hook for the EXPIREAT the issuance script applies to the
+     * Test hook for the `EXPIREAT` the issuance script applies to the
      * membership keys (the key-level retention: the key dies at the
      * latest member deadline + margin).
      */
@@ -426,14 +426,14 @@ final class FakePredisClient extends \Predis\Client
             // expiry), keys[2] the global LIVE-outstanding ZSET, keys[3]
             // the issuance sidecar (nonce -> source pseudonym); argv[1]
             // source cap, argv[2] global cap, argv[3] sidecar TTL seconds,
-            // argv[4] the RELATIVE challenge lifetime (the membership
-            // deadlines are the FAKE Redis clock + lifetime), argv[5] the
+            // argv[4] the relative challenge lifetime (the membership
+            // deadlines are the fake Redis clock + lifetime), argv[5] the
             // minted nonce, argv[6] the source pseudonym, argv[7] the
-            // cleanup margin. Prune the SOURCE's ZSET by score -> ZCARD
+            // cleanup margin. Prune the source's ZSET by score -> ZCARD
             // cap -> global ZCARD cap -> `ZADD` both memberships (scored
             // at the fake-clock deadline) + SET the sidecar (EX) +
-            // EXPIREAT both keys at the latest deadline + margin. No
-            // scalar counter exists: the source bound is its LIVE
+            // `EXPIREAT` both keys at the latest deadline + margin. No
+            // scalar counter exists: the source bound is its live
             // membership (a well-defined score-range count), so a
             // heterogeneous challenge TTL can never reset it, and the key
             // TTLs bound stale-key retention.
@@ -468,12 +468,12 @@ final class FakePredisClient extends \Predis\Client
         if (str_contains($script, 'Outstanding challenge release')) {
             // OutstandingChallenges::solved / ::cancelled /
             // ::abortedBeforeHandoff: keys[1] the global live ZSET,
-            // keys[2] the nonce sidecar, keys[3] the ORIGINAL source's
+            // keys[2] the nonce sidecar, keys[3] the original source's
             // membership ZSET (the caller's plain-read resolution);
             // argv[1] the released nonce, argv[2] the caller-resolved
             // source pseudonym (re-verified against the sidecar). One-shot,
             // nonce-authoritative: only the ZREM of the nonce from the
-            // live membership releases the ORIGINAL source's member and
+            // live membership releases the original source's member and
             // deletes the sidecar; the caller's IP is never used. A
             // duplicate release (ZREM == 0) is a no-op.
             $live = (string) $keys[0];

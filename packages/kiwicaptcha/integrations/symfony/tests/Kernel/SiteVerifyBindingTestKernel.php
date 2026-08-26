@@ -24,7 +24,7 @@ use Symfony\Component\HttpFoundation\Request;
 /**
  * A counting storage used by the Siteverify DI-binding tests: every
  * pending→consumed transition increments a public counter, so a test can
- * prove a rejection happened BEFORE any consume.
+ * prove a rejection happened before any consume.
  */
 final class CountingStorage implements AtomicStorageInterface, ConsumedStateReadableInterface, OperationIdentityAwareStorageInterface, AtomicDeleteIfPendingInterface, CancellableStorageInterface
 {
@@ -103,7 +103,7 @@ final class AuthorityStub implements RequestBindingAuthorityInterface
 
 /**
  * The mandatory P0 regression kernel: risk.request_binding_authority +
- * risk.siteverify_secrets wired through the REAL container, so the test
+ * risk.siteverify_secrets wired through the real container, so the test
  * proves the SiteVerifyController receives the authority via DI (a
  * unit-constructed controller can never catch a wiring hole).
  */

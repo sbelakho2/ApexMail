@@ -5,28 +5,28 @@ declare(strict_types=1);
 namespace KiwiCaptcha;
 
 /**
- * The centralized verified-WAIT topology guard, shared by EVERY
+ * The centralized verified-WAIT topology guard, shared by every
  * durability-critical Redis component (the core RedisStorage, the
  * SiteVerify idempotency store, the siteverify metadata store, the
  * outstanding accounting, the chained-challenge state store and the
  * post-solve disposition store).
  *
- * Verified WAIT is CONNECTION-AFFINE: Redis defines WAIT relative to the
+ * Verified WAIT is connection-affine: Redis defines WAIT relative to the
  * writes sent by the current client connection, so the durability proof
- * is only valid when the mutation and the WAIT execute on the SAME
+ * is only valid when the mutation and the WAIT execute on the same
  * connection. The guard refuses configurations that can break the
  * affinity:
  *
  *  - Predis replication aggregates (Sentinel / master-slave) and Redis
- *    Cluster clients: WAIT is connection-relative and cannot be routed;
+ *    Cluster clients: WAIT is connection-relative and cannot be routed.
  *  - retry-enabled standalone Predis clients: the vendored retry wrapper
  *    can re-execute the WAIT on a replacement connection whose write
- *    offset is empty;
+ *    offset is empty.
  *  - retry-enabled phpredis (\\Redis) clients: phpredis automatically
- *    reconnects on connection failures (OPT_MAX_RETRIES defaults to 10),
- *    so a mutation acknowledged on connection A followed by a socket
- *    failure before the WAIT would issue the WAIT on a RECONNECTED
- *    connection B, whose acknowledgment says nothing about A's write
+ *    reconnects on connection failures (OPT_MAX_RETRIES defaults to 10).
+ *    A mutation acknowledged on connection A, followed by a socket
+ *    failure before the WAIT, would issue the WAIT on a reconnected
+ *    connection B. Its acknowledgment says nothing about A's write
  *    offset — exactly the stale-replica-promotion failure WAIT is meant
  *    to prevent.
  *

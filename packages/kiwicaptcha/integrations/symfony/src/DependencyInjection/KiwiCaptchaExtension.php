@@ -659,8 +659,8 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
 
             // Anti-stockpiling: bounded outstanding unsolved challenges per
             // source + deployment-wide. The accounting is an expiry-aware
-            // MEMBERSHIP, not a counter: one atomic Lua prunes expired
-            // members and checks both caps against the LIVE memberships
+            // membership, not a counter: one atomic Lua prunes expired
+            // members and checks both caps against the live memberships
             // ({kiwi:<ns>}:outstanding:<hex> — the per-source ZSET, the
             // source identity is HMAC(canonical ip, RiskKeys::event), so
             // the raw IP never appears in Redis — and
@@ -1077,11 +1077,11 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             // revocations and the max-stale fail-closed window too).
             ->setArgument('$epochMonitor', new Reference(SecurityEpochMonitor::class))
             // The authoritative transaction-binding resolver
-            // (risk.request_binding_authority): when configured, EVERY
+            // (risk.request_binding_authority): when configured, every
             // Siteverify redemption enforces the same pre-consume binding
             // contract as the native path (the resolved binding feeds the
             // core's expected request binding AND the idempotency
-            // identity) — the mixed configuration is wired HERE, on the
+            // identity) — the mixed configuration is wired here, on the
             // Siteverify surface, never silently turning request binding
             // off. The static risk.request_binding is the fallback
             // server-side transaction input when no authority exists.
@@ -1112,7 +1112,7 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
         // min_policy_epoch <= risk.policy_version; key absent = the
         // binary's own config is authoritative). Argon queue fullness and
         // transient probe timeouts never fail readiness.
-        // A finite container budget REQUIRES a finite Argon concurrency
+        // A finite container budget requires a finite Argon concurrency
         // cap: 0 means "unlimited", and an unlimited memory-hard workload
         // has no finite worst case — the combination is refused at compile
         // time instead of silently modeling unlimited as concurrency 1.

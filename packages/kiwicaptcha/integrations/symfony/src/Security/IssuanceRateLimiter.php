@@ -216,7 +216,7 @@ LUA;
         if ($this->maxChallenges <= 0 && ($this->redis === null || $this->globalMax <= 0)) {
             return 1;
         }
-        // Global-only mode short-circuits BEFORE any client identity is
+        // Global-only mode short-circuits before any client identity is
         // computed or rotated: with maxChallenges == 0 and globalMax > 0
         // the deployment-wide budget is the only limit, so no per-client
         // pseudonym is ever derived and no client key is ever written

@@ -242,7 +242,7 @@ final class RealRedisIntegrationTest extends TestCase
         self::assertGreaterThan(0, $this->client->ttl('{kiwi:ci}:outstanding:global:live'), 'the global ZSET key carries a key-level EXPIREAT');
 
         // Clock domain (P1/P2): the member deadlines are computed from
-        // Redis TIME + the RELATIVE lifetime inside the script, so the
+        // Redis TIME + the relative lifetime inside the script, so the
         // score sits at approximately Redis-now + 60 — a PHP/Redis clock
         // skew can never expire a still-valid member early.
         [$redisSecs] = $this->client->time();
@@ -260,7 +260,7 @@ final class RealRedisIntegrationTest extends TestCase
         self::assertGreaterThanOrEqual(60, $sidecarTtl, 'the sidecar EX = challenge lifetime (60) + ttl margin (5)');
         self::assertLessThanOrEqual(65, $sidecarTtl);
 
-        // A valid solve removes the nonce from BOTH memberships (the
+        // A valid solve removes the nonce from both memberships (the
         // one-shot, nonce-authoritative release) and deletes the sidecar.
         $outstanding->solved($nonceA);
         self::assertSame(2, $this->client->zcard($sourceKey), 'the solve releases the original source member');
@@ -289,7 +289,7 @@ final class RealRedisIntegrationTest extends TestCase
 
         // The admission write lands, then the verified WAIT runs on the
         // same connection; on this replica-less server it acknowledges 0
-        // of 1 and the barrier FAILS CLOSED (the caller must never learn
+        // of 1 and the barrier fails closed (the caller must never learn
         // a success that was not replicated).
         try {
             $outstanding->issue('198.51.100.7', base64_encode(random_bytes(32)), 60);
@@ -313,7 +313,7 @@ final class RealRedisIntegrationTest extends TestCase
         // defined for equal-score members, so a hard cap gated on it is
         // unsound under the members' differing expiry scores. The
         // per-source bound is a SCORE-range count — ZCARD after
-        // ZREMRANGEBYSCORE — which is exact under any score mix.
+        // `ZREMRANGEBYSCORE` — which is exact under any score mix.
         $this->client->flushall();
         $secret = '0123456789abcdef0123456789abcdef';
         $outstanding = new OutstandingChallenges($this->client, '{kiwi:ci}:outstanding:', RiskKeys::fromMaster($secret), 3, 100, 0);

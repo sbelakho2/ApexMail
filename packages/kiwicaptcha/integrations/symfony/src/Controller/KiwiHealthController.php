@@ -167,7 +167,7 @@ final class KiwiHealthController
      * serve traffic, since OOM in the middle of a memory-hard hash is a
      * security failure, not just an availability one.
      *
-     * A concurrency cap of 0 means "unlimited" — an unlimited memory-hard
+     * A concurrency cap of 0 means "unlimited". An unlimited memory-hard
      * workload has NO finite worst-case concurrency, so a finite
      * container budget can never prove the invariant: the health check
      * answers not-ready (and the container refuses the combination at
@@ -274,7 +274,7 @@ final class KiwiHealthController
         try {
             $policy = $this->redis->hgetall('{kiwi:'.$this->namespace.'}:security-policy');
             if (\is_array($policy) && $policy !== []) {
-                // Corrupt PRESENT policy state must fail closed: a
+                // Corrupt present policy state must fail closed: a
                 // malformed min_protocol_version / min_policy_epoch (abc,
                 // -1, 1.5, 1e3, overflow) makes the node NOT ready — it is
                 // never silently collapsed toward zero and interpreted as

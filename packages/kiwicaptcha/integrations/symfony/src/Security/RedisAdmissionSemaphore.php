@@ -43,11 +43,11 @@ final class RedisAdmissionSemaphore implements VerificationAdmissionGate
      * budget:
      *   KEYS[1]  = lease set key (global).
      *   KEYS[2]  = waiters counter key.
-     *   KEYS[3]  = per-scope lease set key; the GLOBAL lease set key is
+     *   KEYS[3]  = per-scope lease set key. The global lease set key is
      *              declared in its place when there is no scope (a real
-     *              same-slot key, never an empty placeholder — an empty
-     *              string has its own hash slot and would break the EVAL
-     *              on Cluster), gated by ARGV[6].
+     *              same-slot key, never an empty placeholder), gated by
+     *              ARGV[6]. An empty string has its own hash slot and
+     *              would break the EVAL on Cluster.
      *   ARGV[1]  = max concurrent leases (global cap).
      *   ARGV[2]  = lease lifetime in ms (LEASE_MS).
      *   ARGV[3]  = unique lease token.
@@ -114,12 +114,12 @@ LUA;
      * suffix, from that scope's set. ZREM of an absent member is a no-op,
      * so stale releases cannot remove a newer lease.
      *
-     * KEYS[1] = lease set key (global)
-     * KEYS[2] = per-scope lease set key; the GLOBAL lease set key is
+     * KEYS[1] = lease set key (global).
+     * KEYS[2] = per-scope lease set key; the global lease set key is
      *           declared in its place when there is no scope (a real
-     *           same-slot key, never an empty placeholder)
-     * ARGV[1] = lease token to release
-     * ARGV[2] = 1 when KEYS[2] is a live per-scope set, else 0
+     *           same-slot key, never an empty placeholder).
+     * ARGV[1] = lease token to release.
+     * ARGV[2] = 1 when KEYS[2] is a live per-scope set, else 0.
      */
     private const RELEASE_SCRIPT = <<<'LUA'
 -- Admission release with per-scope lease removal
@@ -203,7 +203,7 @@ LUA;
      * Acquire an Argon2id admission slot. Immediate and non-blocking: on
      * saturation (the global or per-scope cap is full) the method returns
      * null right away and the "waiters" counter records the
-     * SATURATION-PRESSURE spike — a rejected request is never queued,
+     * saturation-pressure spike. A rejected request is never queued,
      * polled or later admitted (the counter is a gauge, not a queue).
      *
      * @param string|null $scope the scope string (the challenge's scope) for
@@ -231,7 +231,7 @@ LUA;
         if ($scope !== null && $scope !== '') {
         // Per-scope set: {kiwicaptcha:argon2:leases:<ns>}:<sha256(scope)>
         // — hash-tagged with the same family as the waiters counter
-        // (Cluster safe). The scope is HASHED, never sanitized: a
+        // (Cluster safe). The scope is hashed, never sanitized: a
         // lossy sanitization would collapse distinct legitimate scopes
         // (tenant:a and tenant_a share one per-tenant budget, letting
         // one starve the other) and would leak scope names into the

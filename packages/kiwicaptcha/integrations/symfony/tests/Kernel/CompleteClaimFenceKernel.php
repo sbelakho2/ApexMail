@@ -16,7 +16,7 @@ use Symfony\Component\DependencyInjection\ContainerBuilder;
  * risk.redis_service ('risk_fake_redis') wired as TWO intentionally
  * separate in-memory clients, both with wait_replicas = 1. Used to prove
  * the post-solve complete-claim acceptance establishes its causal fence
- * on the RISK connection itself: an unrelated fence on the separate core
+ * on the risk connection itself: an unrelated fence on the separate core
  * connection shares no replication stream and can never cover the risk
  * store's acceptance.
  */

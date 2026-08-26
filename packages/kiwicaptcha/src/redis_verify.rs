@@ -1921,7 +1921,7 @@ impl ProductionVerifier {
         self.check_authenticated_shape(record)?;
         self.check_scope(record, scope)?;
         self.check_deployment_expectations(record)?;
-        // The SAME canonical helper as every other binding enforcement
+        // The same canonical helper as every other binding enforcement
         // site (exact Option-equality; the old nullable replay path is
         // gone, so a committed result can never replay through an
         // ambiguous interpretation).

@@ -384,7 +384,7 @@ final class ChainedChallengeTest extends TestCase
         // The failed-barrier replay hole on the recovery path: the
         // admission/markIssued writes may have landed with their WAIT
         // failing (the earlier attempt answered 503), and a read-only
-        // recovery that hands out the SAME challenge would accept a
+        // recovery that hands out the same challenge would accept a
         // slot/membership a promotion could lose. The recovery re-
         // establishes the barrier; a shortfall fails closed with the 503.
         $storage = new ArrayStorage();
@@ -398,7 +398,7 @@ final class ChainedChallengeTest extends TestCase
         $first = $controller->challenge($this->challengeRequest(json_encode(['scope' => 'login', 'chain_ticket' => $ticket, 'request_binding' => 'txn-alpha'], JSON_THROW_ON_ERROR)));
         self::assertSame(200, $first->getStatusCode());
 
-        // The retry with the SAME chain recovers the issued challenge —
+        // The retry with the same chain recovers the issued challenge —
         // the recovery confirms the outstanding + chain barriers (the
         // fakes' WAIT answers the configured ack, so the recovery
         // succeeds and the identical challenge is returned).
@@ -410,7 +410,7 @@ final class ChainedChallengeTest extends TestCase
 
     public function testCancelledStage2RearmsWithAFreshNonceAndReleasesTheSlot(): void
     {
-        // P1: a CANCELLED stage-2 record is retained (find() still returns
+        // P1: a cancelled stage-2 record is retained: find() still returns
         // it, consumedState() stays null) — the state-aware recovery must
         // never recover it as pending: the chain rearms with a fresh
         // nonce and the cancelled nonce's outstanding slot is released.
@@ -435,7 +435,7 @@ final class ChainedChallengeTest extends TestCase
         self::assertSame(\KiwiCaptcha\ChallengeRuntimeStateKind::Cancelled, $storage->runtimeState($nonce)->kind, 'the runtime state is CANCELLED, not pending');
 
         // The same chain retries: the cancelled nonce is never recovered
-        // as pending — the chain rearms and a FRESH nonce is minted, with
+        // as pending — the chain rearms and a fresh nonce is minted, with
         // the old slot released.
         $retry = $controller->challenge($this->challengeRequest(json_encode(['scope' => 'login', 'chain_ticket' => $ticket, 'request_binding' => 'txn-alpha'], JSON_THROW_ON_ERROR)));
         self::assertSame(200, $retry->getStatusCode());
@@ -447,7 +447,7 @@ final class ChainedChallengeTest extends TestCase
 
     public function testExpiredRetainedStage2IsRetiredBeforeRearm(): void
     {
-        // P1: a signed-expired-but-retained PENDING record is atomically
+        // P1: a signed-expired-but-retained pending record is atomically
         // retired (pending->cancelled) before the chain rearm — the old
         // nonce becomes provably non-redeemable, never merely abandoned.
         $storage = new ArrayStorage();
@@ -464,7 +464,7 @@ final class ChainedChallengeTest extends TestCase
         self::assertSame(200, $first->getStatusCode());
         $nonce = json_decode((string) $first->getContent(), true)['nonce'];
 
-        // The record is still PENDING but its signed expiry passed (the
+        // The record is still pending but its signed expiry passed (the
         // retained-state replay margin keeps it physically present).
         $record = $storage->find($nonce);
         self::assertNotNull($record);
@@ -4589,11 +4589,11 @@ final class AbortAwareFakeRedis extends \Predis\Client
         if (str_contains($script, 'Outstanding challenge release')) {
             // OutstandingChallenges::solved / ::cancelled /
             // ::abortedBeforeHandoff: keys[1] the global live ZSET,
-            // keys[2] the nonce sidecar, keys[3] the ORIGINAL source's
+            // keys[2] the nonce sidecar, keys[3] the original source's
             // membership ZSET; argv[1] the released nonce, argv[2] the
             // caller-resolved source (re-verified against the sidecar).
             // One-shot, nonce-authoritative: only the ZREM of the nonce
-            // from the live membership releases the ORIGINAL source's
+            // from the live membership releases the original source's
             // member and deletes the sidecar; the caller's IP is never
             // used.
             $global = (string) $keys[0];

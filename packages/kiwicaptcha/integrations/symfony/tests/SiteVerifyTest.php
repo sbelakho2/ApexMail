@@ -108,7 +108,7 @@ final class SiteVerifyTest extends TestCase
      * (must mirror the controller's fingerprint formula exactly).
      */
     /**
-     * A form-encoded Siteverify request with the REAL body: the strict
+     * A form-encoded Siteverify request with the real body: the strict
      * form decoder requires the raw body (the framework bag alone no
      * longer carries the duplicate-name evidence), so the tests send the
      * canonical application/x-www-form-urlencoded encoding.
@@ -291,7 +291,7 @@ final class SiteVerifyTest extends TestCase
         // P1: the transaction-binding security boundary must hold on the
         // provider-compatible endpoint too — a proof cryptographically
         // anchored to transaction A must never succeed for transaction B,
-        // and the mismatch must fail BEFORE the consume.
+        // and the mismatch must fail before the consume.
         $storage = new ArrayStorage();
         $issuer = new Issuer(new Config(secretKey: self::SECRET, algorithm: PoWAlgorithm::Sha256, targetBits: 8, ttlSecs: 120), $storage);
         $tokens = [];
@@ -303,7 +303,7 @@ final class SiteVerifyTest extends TestCase
         }
         $token = $tokens[0];
 
-        // The authority resolves THIS transaction's binding (txn-B) from
+        // The authority resolves this transaction's binding (txn-B) from
         // its own trusted inputs — the siteverify request carries none.
         $authority = new class implements RequestBindingAuthorityInterface {
             public function resolve(Request $request, string $scope, ?string $presentedBinding): ?string
@@ -575,7 +575,7 @@ final class SiteVerifyTest extends TestCase
         self::assertSame(200, $response->getStatusCode());
         self::assertTrue(json_decode((string) $response->getContent(), true)['success']);
 
-        // The acquire EVAL's per-scope KEYS[3] must be the SCOPE's own
+        // The acquire EVAL's per-scope KEYS[3] must be the scope's own
         // lease set — not the unscoped global placeholder — proving the
         // endpoint stamped the expected scope for the Argon per-scope
         // budget (one busy scope can never starve the others through the
@@ -1617,7 +1617,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
 
             public function finalize(string $backendId, string $idempotencyKey, string $responseHash, string $owner, array $canonicalResponse): bool
             {
-                // The OWNER's finalize never lands (process death): the
+                // The owner's finalize never lands (process death): the
                 // first finalize is refused; a later takeover's finalize
                 // (a different owner token) delegates normally — unless
                 // alwaysRefuse is set (the crash persists).
@@ -1645,9 +1645,9 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         $ownerResponse = $owner->siteverify($this->siteverifyRequest([
             'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
         ]));
-        // The owner's finalize is REFUSED (the simulated crash): under the
+        // The owner's finalize is refused (the simulated crash): under the
         // durable state-machine contract a locally computed result is
-        // NEVER returned as authoritative after a refused finalize — the
+        // never returned as authoritative after a refused finalize — the
         // retryable 503, with the claim still pending for the takeover.
         self::assertSame(503, $ownerResponse->getStatusCode(), 'a refused finalize is an ownership loss — never a local success');
         self::assertSame(['internal-error'], json_decode((string) $ownerResponse->getContent(), true)['error-codes']);
@@ -1810,7 +1810,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
 
             public function finalize(string $backendId, string $idempotencyKey, string $responseHash, string $owner, array $canonicalResponse): bool
             {
-                // The OWNER's finalize never lands (process death): the
+                // The owner's finalize never lands (process death): the
                 // first finalize is refused; a later takeover's finalize
                 // (a different owner token) delegates normally — unless
                 // alwaysRefuse is set (the crash persists).
@@ -2165,7 +2165,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
 
             public function finalize(string $backendId, string $idempotencyKey, string $responseHash, string $owner, array $canonicalResponse): bool
             {
-                // The OWNER's finalize never lands (process death): the
+                // The owner's finalize never lands (process death): the
                 // first finalize is refused; a later takeover's finalize
                 // (a different owner token) delegates normally — unless
                 // alwaysRefuse is set (the crash persists).
@@ -2280,7 +2280,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
 
             public function finalize(string $backendId, string $idempotencyKey, string $responseHash, string $owner, array $canonicalResponse): bool
             {
-                // The OWNER's finalize never lands (process death): the
+                // The owner's finalize never lands (process death): the
                 // first finalize is refused; a later takeover's finalize
                 // (a different owner token) delegates normally — unless
                 // alwaysRefuse is set (the crash persists).
@@ -2329,7 +2329,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         $secondResponse = $controller2->siteverify($this->siteverifyRequest([
             'secret' => $secret2, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
         ]));
-        // Secret-2's finalize is the SECOND finalize: it delegates and
+        // Secret-2's finalize is the second finalize: it delegates and
         // lands the timeout-or-duplicate.
         self::assertSame(200, $secondResponse->getStatusCode());
         $second = json_decode((string) $secondResponse->getContent(), true);

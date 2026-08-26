@@ -1225,11 +1225,11 @@ final class RedisStorageTest extends TestCase
 
     public function testRuntimeStateConsumedDecodesFromTheSingleSnapshot(): void
     {
-        // R70-01: runtimeState() must decode a consumed envelope ENTIRELY
+        // R70-01: runtimeState() must decode a consumed envelope entirely
         // from the one GET it performs — a second read (consumedState's
         // own GET) could observe a different world (the retained record
         // expired, a takeover moved it). The adversarial fake deletes the
-        // key on the SECOND GET: if the implementation ever reads again,
+        // key on the second GET: if the implementation ever reads again,
         // the state collapses to Missing; the single-snapshot contract
         // keeps the Consumed state intact.
         $inner = new \KiwiCaptcha\Storage\ArrayStorage();
@@ -1246,7 +1246,7 @@ final class RedisStorageTest extends TestCase
         self::assertTrue($storage->commitResult($record->nonce, true, null));
 
         // The wrapping storage emulates the Redis envelope with a
-        // one-shot snapshot: every read returns the SAME bytes, and a
+        // one-shot snapshot: every read returns the same bytes, and a
         // hypothetical second read would explode.
         $snapshot = new SingleSnapshotStorage($storage, $record->nonce);
         $state = $snapshot->runtimeState($record->nonce);
@@ -1278,7 +1278,7 @@ final class RedisStorageTest extends TestCase
     {
         // R71-04: the single-snapshot contract must hold at the layer
         // that matters — RedisStorage itself. The fake Redis client's
-        // SECOND get fails loudly, so a runtimeState() implementation
+        // second get fails loudly, so a runtimeState() implementation
         // that ever re-reads (consumedState's own GET) collapses the
         // Consumed state into Missing instead of passing.
         if (!\class_exists(\Predis\Client::class)) {
@@ -1296,7 +1296,7 @@ final class RedisStorageTest extends TestCase
         $storage->consumeWithOperationIdentity($record->nonce, 'op-single-snapshot');
         self::assertTrue($storage->commitResult($record->nonce, true, null));
 
-        // The fake Redis client serves the CONSUMED envelope once and
+        // The fake Redis client serves the consumed envelope once and
         // fails loudly on any further get.
         $client = new SingleGetFakeRedisClient();
         $client->envelopes['kiwi:snapshot:'.$record->nonce] = $this->redisEnvelopeFrom($storage, $record->nonce);
@@ -1325,7 +1325,7 @@ final class RedisStorageTest extends TestCase
         // R71-01: phpredis reconnects automatically on connection failures
         // (OPT_MAX_RETRIES defaults to 10), so a mutation acknowledged on
         // connection A followed by a socket failure before the WAIT would
-        // issue the WAIT on a RECONNECTED connection B — the centralized
+        // issue the WAIT on a reconnected connection B — the centralized
         // guard refuses retry-enabled \Redis clients for verified-WAIT.
         if (!\extension_loaded('redis')) {
             self::markTestSkipped('phpredis is not installed');
@@ -1349,7 +1349,7 @@ final class RedisStorageTest extends TestCase
 
     public function testRecoveryFenceWritesOnTheAcceptingConnection(): void
     {
-        // R73-02: the recovery barrier is a CAUSAL FENCE on the ACCEPTING
+        // R73-02: the recovery barrier is a causal fence on the accepting
         // connection — a fresh write immediately before the WAIT — never
         // a bare GET + WAIT. A read-only WAIT on connection B proves
         // nothing about connection A's earlier write (Redis defines WAIT
@@ -1627,7 +1627,7 @@ final class SingleSnapshotStorage implements \KiwiCaptcha\AtomicStorageInterface
 
 /**
  * R71-04: a fake Predis client that serves the given envelopes' raw
- * bytes on the FIRST get and fails loudly on ANY further get — a
+ * bytes on the first get and fails loudly on ANY further get — a
  * single-snapshot storage implementation reads exactly once.
  */
 final class SingleGetFakeRedisClient extends \Predis\Client
@@ -1669,7 +1669,7 @@ final class SingleGetFakeRedisClient extends \Predis\Client
 
 /**
  * R73-02: a command-recording Predis fake for the accepting connection —
- * records every command (SETEX, WAIT, GET, EVAL) so the test can prove
+ * records every command (`SETEX`, WAIT, GET, EVAL) so the test can prove
  * the fence sequence is write-then-WAIT on the same connection.
  */
 final class FenceRecordingRedisClient extends \Predis\Client

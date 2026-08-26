@@ -439,7 +439,7 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
      */
     public function testIdempotencyWritesIssueTransitionSensitiveVerifiedWaits(): void
     {
-        // R68-01: EVERY successful ownership mutation (claim, takeover,
+        // R68-01: every successful ownership mutation (claim, takeover,
         // renew, finalize) issues the verified WAIT — the durability
         // guarantee is transition-sensitive, and the read-only outcomes
         // (pending_same, complete_same, conflict, still_pending, refused
@@ -464,14 +464,14 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
         self::assertSame($waitsBefore + 1, \count($counting->waits()), 'the successful claim issues exactly one verified WAIT');
 
         // The claim landed (the WAIT comes after the write): a second
-        // claim with the SAME hash is pending_same — the read-only
+        // claim with the same hash is pending_same — the read-only
         // outcome never WAITs.
         [$claim2] = $store->claim($backendId, $key, 'hash-a', 300, 'ip:127.0.0.1', null, null);
         self::assertSame(IdempotencyClaim::PendingSame, $claim2);
         self::assertSame($waitsBefore + 1, \count($counting->waits()), 'pending_same never WAITs');
 
         // renew: the successful renewal WAITs. The owner is acquired on a
-        // SECOND key through a WAIT-less store (the first claim's owner was
+        // second key through a WAIT-less store (the first claim's owner was
         // lost to the fail-closed barrier), then renewed through the
         // WAIT-enabled store.
         $key2 = sprintf('223e4567-e89b-42d3-a456-42661417%04d', random_int(0, 9999));
@@ -496,8 +496,8 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
         }
         self::assertSame($waitsBefore + 3, \count($counting->waits()), 'the successful finalize issues exactly one verified WAIT');
 
-        // The failed-barrier replay guard on the READ side: a completed
-        // (stored-success) read must RE-ESTABLISH the barrier before
+        // The failed-barrier replay guard on the read side: a completed
+        // (stored-success) read must re-establish the barrier before
         // accepting — a shortfall fails closed, never an unproven success.
         // (The finalize's own WAIT threw, so the completed record's
         // replication is unproven; the acceptance read re-checks it.)

@@ -255,7 +255,7 @@ LUA;
         try {
             $rec = json_decode($raw, true, 8, JSON_THROW_ON_ERROR);
         } catch (\JsonException $e) {
-            // Corrupt security state is NEVER transformed into "nothing
+            // Corrupt security state is never transformed into "nothing
             // here": a malformed idempotency record maps to the typed
             // fail-closed exception (the controller answers the 503).
             throw new SiteVerifyIdempotencyCorruptException('the idempotency record is malformed', 0, $e);
@@ -271,7 +271,7 @@ LUA;
             // completed record may have landed on the primary with its
             // WAIT failing. Returning the stored success read-only would
             // hand the caller a success a promotion could lose — the
-            // barrier is RE-ESTABLISHED before the acceptance (a shortfall
+            // barrier is re-established before the acceptance (a shortfall
             // throws and the caller answers the 503).
             if ($this->waitReplicas > 0) {
                 $this->establishReplicationFence('the siteverify stored-success acceptance');

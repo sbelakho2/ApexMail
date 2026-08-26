@@ -308,10 +308,10 @@ final class Verifier
      *                                     different identity is
      *                                     AlreadyConsumed.
      * @param string|null $expectedRequestBinding the application transaction
-     *                                     binding a BOUND record's signed
+     *                                     binding a bound record's signed
      *                                     request_binding must equal, enforced
-     *                                     before the consume. An EXPLICITLY
-     *                                     UNBOUND record (request_binding
+     *                                     before the consume. An explicitly
+     *                                     unbound record (request_binding
      *                                     null, BindingMode::None) is
      *                                     permitted regardless of the
      *                                     expected binding; a record with a
@@ -592,7 +592,7 @@ final class Verifier
                         // have landed on the primary with their WAIT
                         // failing. Accepting the stored result read-only
                         // would return a success that a promotion could
-                        // lose — the barrier is RE-ESTABLISHED before the
+                        // lose — the barrier is re-established before the
                         // acceptance (a shortfall fails closed).
                         if ($this->storage instanceof \KiwiCaptcha\ReplicationBarrierInterface) {
                             $this->storage->establishReplicationFence('the stored-result replay acceptance');
@@ -777,7 +777,7 @@ final class Verifier
      * @param string|null $expectedScope     required challenge scope (null = any).
      * @param string|null $clientIp          client IP for the optional IP binding.
      * @param string|null $expectedRequestBinding the application transaction
-     *                                       binding a BOUND record's signed
+     *                                       binding a bound record's signed
      *                                       request_binding must equal,
      *                                       enforced before the resumed
      *                                       derivation and the
@@ -830,9 +830,9 @@ final class Verifier
             return VerifyOutcome::invalid(VerifyError::ConsumeIndeterminate);
         }
 
-        // 4b. Application transaction binding, enforced BEFORE the resumed
+        // 4b. Application transaction binding, enforced before the resumed
         //     derivation AND the committed-result fast path, through the
-        //     SAME canonical helper as every other binding check (exact
+        //     same canonical helper as every other binding check (exact
         //     Option-equality under RequestBindingExpectation::exact(),
         //     the legacy compatibility mode, or unenforced) — there is NO
         //     separate nullable interpretation left that a committed
@@ -849,7 +849,7 @@ final class Verifier
             // Failed-barrier replay guard: the committed result's writes
             // may have landed with their WAIT failing; accepting the
             // stored success read-only would return a success a promotion
-            // could lose — the barrier is RE-ESTABLISHED before the
+            // could lose — the barrier is re-established before the
             // acceptance (a shortfall fails closed).
             if ($this->storage instanceof \KiwiCaptcha\ReplicationBarrierInterface) {
                 $this->storage->establishReplicationFence('the resumed committed-result acceptance');
@@ -1096,9 +1096,9 @@ final class Verifier
      *       than the future-skew bound ahead, is Expired.
      *   4.  scope: challenge scope matches the expected flow (WrongScope).
      *   4b. application transaction binding: a supplied expected request
-     *       binding must equal the record's signed request_binding; an
+     *       binding must equal the record's signed request_binding. An
      *       explicitly unbound record (BindingMode::None) is permitted
-     *       regardless of the expected binding; only a record that
+     *       regardless of the expected binding. Only a record that
      *       actually carries a binding must equal the expected one
      *       (RequestBindingMismatch otherwise).
      *   5.  IP binding: the stored record is authoritative. An empty

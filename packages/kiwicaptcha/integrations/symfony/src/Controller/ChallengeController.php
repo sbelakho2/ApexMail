@@ -439,7 +439,7 @@ final class ChallengeController
             $duplicateKey = $this->scanForDuplicateJsonKey($requestBody);
         } catch (\BelConsulting\KiwiCaptchaBundle\Http\MalformedJsonWalkException) {
             // The scanner could not establish cleanliness (a >MAX_DEPTH
-            // document or a malformed string): that is NEVER treated as
+            // document or a malformed string): that is never treated as
             // clean — the document is refused, so a deep-nested first
             // value can never hide a duplicate from the scanner while the
             // final parser still accepts it.
@@ -461,7 +461,7 @@ final class ChallengeController
         // Unknown fields are debug or override probes and get 422. A
         // non-object document is refused too; an empty JSON object {} is
         // valid, since the fields are optional. The decoder's depth
-        // ceiling is the SAME 32 as the scanner's, so a document the
+        // ceiling is the same 32 as the scanner's, so a document the
         // scanner could not walk can never be accepted afterwards.
         try {
             $decoded = json_decode($requestBody, false, 32, JSON_THROW_ON_ERROR);
@@ -648,7 +648,7 @@ final class ChallengeController
                     Response::HTTP_UNPROCESSABLE_ENTITY,
                 );
             } catch (\Throwable $e) {
-                // An INFRASTRUCTURE failure of the authority is never a
+                // An infrastructure failure of the authority is never a
                 // client 422: nothing has been touched, so the private
                 // structured 503 is the retryable answer.
                 error_log(sprintf('kiwicaptcha: request binding authority unavailable: %s', $e->getMessage()));
@@ -926,7 +926,7 @@ final class ChallengeController
                 // GlobalCapacityHit, which is identity-neutral. Unknown
                 // scopes (reject/baseline modes) are skipped silently,
                 // since there is no reputation to attribute to. The
-                // attribution is BEST-EFFORT: a valid 429 must never turn
+                // attribution is best-effort: a valid 429 must never turn
                 // into a 500 because the observability write failed.
                 $scopeId = $this->riskScopeId($scope);
                 if ($scopeId !== null) {
@@ -1288,9 +1288,9 @@ final class ChallengeController
             // no raw backend exception crosses the HTTP boundary — the
             // challenge was proven not handed out, so the uncommitted
             // issuance attempt is rolled back and the private structured
-            // 503 answers. A failure AFTER the durable stage-2 commit is
+            // 503 answers. A failure after the durable stage-2 commit is
             // handled inside the commit try block above, never here. The
-            // issuer factory and the mint can throw BEFORE the $challenge
+            // issuer factory and the mint can throw before the $challenge
             // variable is ever assigned — the nullable parameter tolerates
             // the unassigned state, so the error-handling path itself can
             // never fault.
@@ -1310,7 +1310,7 @@ final class ChallengeController
         // is the minted nonce scored at its Redis-clock deadline, which
         // exists only once the record is minted
         // (OutstandingChallenges::issue). The accounting lifetime is the
-        // nominal challenge TTL PLUS the core verifier's permitted
+        // nominal challenge TTL plus the core verifier's permitted
         // future-issuance skew (Verifier::MAX_CLOCK_SKEW): under a
         // distributed issuer/verifier deployment an issuer clock up to 60s
         // ahead of the Redis clock can mint a record that stays
@@ -1329,10 +1329,10 @@ final class ChallengeController
                     max(1, $challenge->ttlSecs) + \KiwiCaptcha\Verifier::MAX_CLOCK_SKEW,
                 );
             } catch (\Throwable $e) {
-                // The admission is the LAST pre-handoff step and the
+                // The admission is the last pre-handoff step and the
                 // challenge has not been handed out: a Redis failure
                 // (or a violated verified-WAIT barrier) is resolved by
-                // rolling the ENTIRE issuance attempt back — the minted
+                // rolling the entire issuance attempt back — the minted
                 // record is discarded, the admission is aborted
                 // (one-shot and idempotent: if the EVAL landed before the
                 // reply was lost, the abort releases it; if it never
@@ -1396,7 +1396,7 @@ final class ChallengeController
                     ),
                     // The metadata retention equals the issued challenge's
                     // lifetime plus the configured retained-state margin —
-                    // the SAME conservative clock/failover envelope as the
+                    // the same conservative clock/failover envelope as the
                     // core consumed-state retention, so the crash-recovery
                     // evidence can never outlive the metadata it needs.
                     max(60, $challenge->ttlSecs) + $this->metadataRetentionMarginSecs,
@@ -1463,12 +1463,12 @@ final class ChallengeController
             }
         } catch (\Throwable $e) {
             if ($stage2IssuedCommitted) {
-                // Failure AFTER the durable stage-2 commit (e.g. the risk
+                // Failure after the durable stage-2 commit (e.g. the risk
                 // feedback): intentionally NO mutation — the challenge
                 // record, the outstanding memberships and the chain's
                 // issued(N) state all remain, and the private structured
                 // 503 tells the client to retry (the retry recovers the
-                // SAME issued challenge, byte-identical, with no re-mint
+                // same issued challenge, byte-identical, with no re-mint
                 // and no re-admission).
                 error_log(sprintf('kiwicaptcha: post-commit issuance feedback failed for nonce_id=%s: %s', substr(hash('sha256', $challenge->nonce), 0, 16), $e->getMessage()));
 
@@ -1480,7 +1480,7 @@ final class ChallengeController
                     $mintedCookie,
                 );
             }
-            // Failure BEFORE any durable commit: the challenge was proven
+            // Failure before any durable commit: the challenge was proven
             // not handed out, so the whole uncommitted issuance attempt is
             // rolled back (the minted record discarded, the admitted
             // outstanding slot returned, the chain reservation released);
@@ -1692,7 +1692,7 @@ final class ChallengeController
         // Duplicate JSON keys: the raw body is scanned before decoding. A
         // document the scanner cannot walk (depth bomb or malformed
         // string) is refused — never treated as clean — and the decoder's
-        // depth ceiling is the SAME 32 as the scanner's.
+        // depth ceiling is the same 32 as the scanner's.
         try {
             $duplicateKey = $this->scanForDuplicateJsonKey($requestBody);
         } catch (\BelConsulting\KiwiCaptchaBundle\Http\MalformedJsonWalkException) {
@@ -1967,7 +1967,7 @@ final class ChallengeController
      * Return an admitted outstanding slot when the challenge was proven
      * never handed out (OutstandingChallenges::abortedBeforeHandoff: the
      * nonce-authoritative one-shot release — the nonce leaves the global
-     * live membership and the ORIGINAL source membership from the
+     * live membership and the original source membership from the
      * issuance sidecar, never this request's own source). Composed by
      * {@see self::rollbackUncommittedIssuance()}, the single
      * proven-not-handed-off cleanup primitive. The caller must not roll
@@ -2010,11 +2010,11 @@ final class ChallengeController
      * stage-2.
      */
     /**
-     * Roll back the ENTIRE uncommitted issuance attempt: the minted
+     * Roll back the entire uncommitted issuance attempt: the minted
      * record is discarded, the admitted outstanding slot is returned
      * (one-shot, nonce-authoritative — safe even when the admission EVAL
      * landed but its reply was lost), and the chain reservation is
-     * released. ONLY valid before the durable stage-2 commit: after
+     * released. Only valid before the durable stage-2 commit: after
      * issued(N) is confirmed, nothing may be rolled back.
      */
     private function rollbackUncommittedIssuance(?\KiwiCaptcha\Challenge $challenge, bool $outstandingAdmissionHeld, string $clientIp, ?string $chainId, ?string $chainOwner): void
@@ -2220,7 +2220,7 @@ final class ChallengeController
             );
         }
         // The runtime state is read in ONE snapshot (the storage
-        // capability), so a CANCELLED record — which `find()` still
+        // capability), so a cancelled record — which `find()` still
         // returns and `consumedState()` leaves null — can never be
         // mistaken for a usable pending challenge, and an expired-but-
         // retained pending record is retired atomically instead of being
@@ -2262,7 +2262,7 @@ final class ChallengeController
                     return $this->privateJson($this->rebuildIssuanceResponse($record), Response::HTTP_OK, $request, $riskSession, $mintedCookie);
                 }
                 // Pending but signed-expired (retained by the replay
-                // margin): the old nonce must become PROVABLY
+                // margin): the old nonce must become provably
                 // non-redeemable before the chain is rearmed — the atomic
                 // pending->cancelled transition. If the cancellation wins,
                 // the outstanding slot is released and the chain rearmed;
@@ -2587,11 +2587,12 @@ final class ChallengeController
      * The consumed-valid stage-2 disposition: the core's committed result
      * is not terminal by itself — the nonce's final disposition comes from
      * the post-solve disposition store. Pass -> markVerified (the chain
-     * ends, the obligation clears atomically) + the same challenge is
-     * recovered; StepUp -> markStepUpRequired (the obligation is kept) +
-     * the terminal step-up response; Deny -> markDenied (the obligation is
-     * kept) + the terminal risk-denied response; missing/pending -> the
-     * retryable 503.
+     * ends, the obligation clears atomically) and the same challenge is
+     * recovered. StepUp -> markStepUpRequired (the obligation is kept) and
+     * the terminal step-up response is returned. Deny -> markDenied (the
+     * obligation is kept) and the terminal risk-denied response is
+     * returned. A missing or pending disposition answers the retryable
+     * 503.
      */
     private function resolveConsumedStage2Disposition(string $chainId, \KiwiCaptcha\ChallengeRecord $record, string $stage2Nonce, Request $request, ?string $riskSession, bool $mintedCookie): ?JsonResponse
     {
@@ -2784,11 +2785,11 @@ final class ChallengeController
      * Failed-barrier replay guard for the stage-2 recovery: the recovered
      * challenge's outstanding admission and chain markIssued writes may
      * have landed on the primary with their WAIT failing (the earlier
-     * attempt answered the 503). A READ-ONLY recovery that hands the same
+     * attempt answered the 503). A read-only recovery that hands the same
      * challenge out would accept a slot/membership a promotion could
-     * lose — the barriers are RE-ESTABLISHED before the hand-out (a
+     * lose. The barriers are re-established before the hand-out: a
      * shortfall propagates and the retryable 503 answers, so the
-     * challenge is never handed out on unproven state).
+     * challenge is never handed out on unproven state.
      */
     private function confirmRecoveryBarriers(): void
     {

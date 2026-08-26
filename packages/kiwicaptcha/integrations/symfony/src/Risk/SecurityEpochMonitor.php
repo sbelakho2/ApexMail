@@ -227,7 +227,7 @@ final class SecurityEpochMonitor
 
             return null;
         }
-        // Corrupt PRESENT state must never be indistinguishable from
+        // Corrupt present state must never be indistinguishable from
         // absent state: the central policy epoch is a canonical unsigned
         // decimal integer, and a malformed value (abc, -1, 1.5, 1e3,
         // whitespace variants, integer overflow) is NOT a successful

@@ -6,25 +6,25 @@ namespace KiwiCaptcha;
 
 /**
  * The explicit request-binding enforcement policy, replacing the ambiguous
- * nullable "expected request binding" (null previously meant BOTH "the
+ * nullable "expected request binding" (null previously meant both "the
  * transaction is explicitly unbound" AND "do not enforce", which let a
  * bound record escape comparison whenever the authoritative transaction
  * resolved to null).
  *
- * The exact semantics are Option-equality:
+ * The exact semantics are Option-equality.
  *
  *   Record binding | Expectation     | Result
  *   -------------- | --------------- | ------------------------------
- *   bound A        | exact A         | pass
- *   bound A        | exact B         | RequestBindingMismatch
- *   bound A        | exact null      | RequestBindingMismatch
- *   unbound        | exact null      | pass
- *   unbound        | exact A         | RequestBindingMismatch
- *   bound/unbound  | unenforced      | pass (no enforcement)
+ *   bound A        | exact A         | pass.
+ *   bound A        | exact B         | RequestBindingMismatch.
+ *   bound A        | exact null      | RequestBindingMismatch.
+ *   unbound        | exact null      | pass.
+ *   unbound        | exact A         | RequestBindingMismatch.
+ *   bound/unbound  | unenforced      | pass (no enforcement).
  *
  * `legacy()` reproduces the pre-migration nullable behavior exactly (a
  * null expected binding disables enforcement; a non-null expected binding
- * only ever compares BOUND records), so existing callers keep their
+ * only ever compares bound records), so existing callers keep their
  * semantics until they migrate to `exact()`.
  */
 final class RequestBindingExpectation

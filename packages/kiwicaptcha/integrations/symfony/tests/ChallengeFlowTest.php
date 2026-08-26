@@ -106,7 +106,7 @@ final class ChallengeFlowTest extends TestCase
 
         // A duplicate key whose first value is nested deeper than the
         // scanner's 32-level ceiling: the scanner cannot establish
-        // cleanliness, so the document is REFUSED (never treated as
+        // cleanliness, so the document is refused (never treated as
         // clean) — the deep nesting cannot hide the duplicate.
         $deep = '{"scope":'.str_repeat('[', 33).str_repeat(']', 33).',"scope":"login"}';
         $response = $controller->challenge($this->jsonRequest($deep));

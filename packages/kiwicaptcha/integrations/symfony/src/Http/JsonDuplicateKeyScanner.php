@@ -11,7 +11,7 @@ namespace BelConsulting\KiwiCaptchaBundle\Http;
  * exactly the parser ambiguity the security-sensitive endpoints must
  * refuse ({"secret":"A","secret":"B"} parses differently across CDNs,
  * WAFs, proxies and logging layers — first-wins in one, last-wins in
- * another). A decode-then-scan approach can NEVER see a duplicate: the
+ * another). A decode-then-scan approach can never see a duplicate: the
  * decode has already collapsed the object members, so the walker works
  * directly on the raw bytes.
  *
@@ -42,12 +42,12 @@ final class JsonDuplicateKeyScanner
         } catch (DuplicateJsonKeyException $e) {
             return $e->key;
         }
-        // MalformedJsonWalkException deliberately PROPAGATES: the caller
+        // MalformedJsonWalkException deliberately propagates: the caller
         // must distinguish "no duplicate found" from "the scanner could
         // not establish cleanliness" (a >MAX_DEPTH document, a malformed
         // string). Treating the unwalkable document as clean would let a
         // deep-nested first value hide a duplicate from the scanner while
-        // the final parser (whose depth ceiling is the SAME 32) still
+        // the final parser (whose depth ceiling is the same 32) still
         // accepts it — the fail-open depth bypass.
     }
 

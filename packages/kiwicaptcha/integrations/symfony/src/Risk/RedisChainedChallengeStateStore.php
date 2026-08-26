@@ -75,9 +75,9 @@ final class RedisChainedChallengeStateStore implements TransactionalChainedChall
      * reassessment is stronger, never lowering. The obligation points at
      * a missing/corrupt chain -> compare-delete the stale mapping and
      * create the chain fresh (a stale mapping can never block a
-     * transaction). The pointed-at chain is a DECLARED key (KEYS[3]),
+     * transaction). The pointed-at chain is a declared key (KEYS[3]),
      * resolved by the caller from a plain read and re-verified inside
-     * the script, so no key name is constructed from stored data; a
+     * the script, so no key name is constructed from stored data. A
      * mapping that moved between the read and the script answers
      * 'moved' and the caller retries (bounded, fail-closed on
      * exhaustion). The reply is a three-element table {chainId, mutated,

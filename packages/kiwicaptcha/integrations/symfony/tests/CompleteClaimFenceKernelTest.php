@@ -12,18 +12,18 @@ use KiwiCaptcha\Storage\ReplicaWaitException;
 use PHPUnit\Framework\TestCase;
 
 /**
- * The terminal post-solve complete-claim acceptance is a CAUSAL FENCE
+ * The terminal post-solve complete-claim acceptance is a causal fence
  * on the accepting (risk) connection, proven at the kernel level with
  * the bundle core Redis and risk.redis_service intentionally separate.
  *
  * Connection A finalizes a Pass with its mutation WAIT shortfalling: the
  * request fails, but the complete(Pass) record remains on the primary.
- * An unrelated fence on the SEPARATE core connection shares no
+ * An unrelated fence on the separate core connection shares no
  * replication stream. Connection B then claims the same nonce and sees
- * 'complete': it must write its OWN fence (SETEX replication-fence) and
+ * 'complete': it must write its own fence (`SETEX` replication-fence) and
  * WAIT on the risk connection before the terminal record may be
- * returned — a shortfall raises ReplicaWaitException and never returns
- * the disposition, and a satisfied fence returns it.
+ * returned. A shortfall raises ReplicaWaitException and never returns
+ * the disposition; a satisfied fence returns it.
  */
 final class CompleteClaimFenceKernelTest extends TestCase
 {
@@ -35,7 +35,7 @@ final class CompleteClaimFenceKernelTest extends TestCase
         return array_values(array_filter($fake->calls, static fn (array $c): bool => $c[0] === 'WAIT'));
     }
 
-    /** @return list<array{0: string, 1: list<mixed>}> the replication-fence SETEX commands */
+    /** @return list<array{0: string, 1: list<mixed>}> the replication-fence `SETEX` commands */
     private function fenceWrites(DispositionWaitRedisFake $fake): array
     {
         return array_values(array_filter(
@@ -66,7 +66,7 @@ final class CompleteClaimFenceKernelTest extends TestCase
             } catch (ReplicaWaitException) {
             }
 
-            // An unrelated CORE recovery fence on the separate core
+            // An unrelated core recovery fence on the separate core
             // connection: it must never cover the risk store's acceptance.
             $coreFake->calls = [];
             $coreFake->setex('{kiwi:core}:replication-fence', 60, 'unrelated-core-token');

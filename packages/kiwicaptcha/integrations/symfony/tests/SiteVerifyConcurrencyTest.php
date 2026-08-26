@@ -1047,7 +1047,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
 
             public function finalize(string $backendId, string $idempotencyKey, string $responseHash, string $owner, array $canonicalResponse): bool
             {
-                // The OWNER's finalize never lands (process death): the
+                // The owner's finalize never lands (process death): the
                 // first finalize is refused; a later takeover's finalize
                 // delegates normally.
                 if ($this->finalizeCount === 0) {
@@ -1658,7 +1658,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         // logical operation), and the other UUID must have zero
         // successes.
         $successLines = array_values(array_filter($results, static fn (string $r): bool => str_starts_with($r, 'success:')));
-        // The crash seam refuses EVERY finalize, so under the durable
+        // The crash seam refuses every finalize, so under the durable
         // state-machine contract no local result is authoritative: the
         // atomic winner consumes and commits, but the refused finalize
         // answers the 503 — zero successes, and the loser UUID can never
@@ -1683,7 +1683,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         $loserUuid = $winnerUuid === $uuidA ? $uuidB : $uuidA;
         // The crash seam refuses every finalize, so no local result is
         // authoritative (zero successes asserted above) — the consumed
-        // record's identity still names the ACTUAL atomic consume winner.
+        // record's identity still names the actual atomic consume winner.
         self::assertSame([], $successUuids, 'the crash seam refuses every finalize — no local result is authoritative');
 
         // The lease expires while both entries are still pending (the

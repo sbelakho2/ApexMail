@@ -651,7 +651,7 @@ final class ChallengeCancellationTest extends TestCase
     {
         // P2: a Redis failure during the post-mint admission (or a
         // violated verified-WAIT barrier) is resolved by rolling the
-        // ENTIRE issuance attempt back — the private structured 503,
+        // entire issuance attempt back — the private structured 503,
         // the minted record discarded, the admission aborted
         // (one-shot/idempotent), nothing handed out — never an uncaught
         // exception and never a minted-but-never-handed-out record.
@@ -687,7 +687,7 @@ final class ChallengeCancellationTest extends TestCase
         $client = new FakePredisClient();
         $outstanding = new OutstandingChallenges($client, '{kiwi:cancel-global}:outstanding:', RiskKeys::fromMaster(self::SECRET), 5, 100, 0);
 
-        // Drive the REAL deployment-global cap (the constant) with fresh
+        // Drive the real deployment-global cap (the constant) with fresh
         // sources: each admission consumes a global slot regardless of the
         // source, and the cap wins even for a source with per-source
         // headroom.
@@ -707,7 +707,7 @@ final class ChallengeCancellationTest extends TestCase
         // challenges and admit unbounded issuance from that source. The
         // per-source representation is an expiry-aware membership: only
         // the member whose score passed expires, and the bound counts
-        // exactly the LIVE members.
+        // exactly the live members.
         $client = new FakePredisClient();
         $client->setTimeMs(1_700_000_000_000);
         $outstanding = new OutstandingChallenges($client, '{kiwi:ttl-test}:outstanding:', RiskKeys::fromMaster(self::SECRET), 2, 100, 0);
@@ -730,7 +730,7 @@ final class ChallengeCancellationTest extends TestCase
         self::assertSame(0, $outstanding->issue('198.51.100.7', 'E'.str_repeat('e', 43), $base + 300, 300), 'the two long-lived members still occupy the bound');
 
         // The count is the source ZSET's ZCARD after the score prune: a
-        // well-defined score-range count under the members' DIFFERING
+        // well-defined score-range count under the members' differing
         // expiry scores (lex-range counting is only defined for
         // equal-score members and must never gate a hard bound).
         $sourceMembers = array_keys($client->zsets[$sourceZset] ?? []);
@@ -749,7 +749,7 @@ final class ChallengeCancellationTest extends TestCase
     public function testAbortFromAnotherSourceReturnsTheOriginalSourceSlot(): void
     {
         // The abort is nonce-authoritative like solve and cancel: the
-        // ORIGINAL issuer's slot is released from the issuance sidecar,
+        // original issuer's slot is released from the issuance sidecar,
         // never the rollback's own source.
         $client = new FakePredisClient();
         $outstanding = new OutstandingChallenges($client, self::OUTSTANDING_PREFIX, RiskKeys::fromMaster(self::SECRET), 5, 100, 0);

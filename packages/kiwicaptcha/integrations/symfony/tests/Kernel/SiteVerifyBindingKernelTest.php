@@ -14,8 +14,7 @@ use Symfony\Component\HttpKernel\KernelInterface;
 
 /**
  * P0 regression: the binding authority must actually reach the
- * SiteVerifyController THROUGH the container. The round-66 wiring landed
- * on the ChallengeController definition instead (a duplicate setter with
+ * SiteVerifyController through the container. The round-66 wiring landed * on the ChallengeController definition instead (a duplicate setter with
  * a Siteverify comment); a unit-constructed controller cannot catch that
  * class of hole, so this test boots a real kernel and redeems real tokens.
  */
@@ -51,8 +50,8 @@ final class SiteVerifyBindingKernelTest extends TestCase
         self::assertTrue(json_decode((string) $responseA->getContent(), true)['success'], 'the txn-A-bound token succeeds under the txn-A authoritative context');
         self::assertGreaterThan(0, $authority->calls, 'the container-wired SiteVerifyController consulted the binding authority');
 
-        // A challenge anchored to txn-B is refused BEFORE the consume:
-        // the record must still be PENDING (never consumed, never burned).
+        // A challenge anchored to txn-B is refused before the consume:
+        // the record must still be pending (never consumed, never burned).
         $challengeB = $issuer->issue('payment', '198.51.100.7', 'txn-B');
         $tokenB = $this->solve($challengeB->prefix, $challengeB->salt, $challengeB->targetBits, $challengeB->nonce);
         usleep(($challengeB->minDurationMs + 10) * 1000);

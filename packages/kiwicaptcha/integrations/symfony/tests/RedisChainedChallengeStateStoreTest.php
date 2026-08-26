@@ -409,7 +409,7 @@ final class RedisChainedChallengeStateStoreTest extends TestCase
 
     public function testCreateOrGetObligationMovedMappingConverges(): void
     {
-        // The pointed-at chain is a DECLARED key resolved from a plain
+        // The pointed-at chain is a declared key resolved from a plain
         // read and re-verified inside the script: when a concurrent
         // create-or-get moves the mapping between the read and the
         // script, the script answers 'moved' and the caller re-reads and
