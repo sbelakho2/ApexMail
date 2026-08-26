@@ -501,9 +501,9 @@ final class VerifierResumeTest extends TestCase
     {
         // The failed-barrier replay hole: the consume/commit that produced
         // a stored success may have landed on the primary with its WAIT
-        // failing. A later read-only replay that ACCEPTS the stored
-        // success must re-establish the barrier first — a shortfall fails
-        // closed (no unproven success), and a satisfied barrier returns
+        // failing. A later replay that ACCEPTS the stored success must
+        // establish the replication fence first: a shortfall fails
+        // closed (no unproven success), and a satisfied fence returns
         // the stored Valid.
         [$inner, $record, $token] = $this->issueAndSolve(requestBinding: 'txn-1');
         $inner->consumeWithOperationIdentity($record->nonce, $this->identity('barrier-replay'));
