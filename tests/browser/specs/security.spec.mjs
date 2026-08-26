@@ -496,7 +496,7 @@ test.describe('KiwiCaptcha solver version coupling', () => {
 test.describe('KiwiCaptcha no wasm-downgrade fallback', () => {
   test('solver failures cannot change the requested algorithm — one fetch, attribute-only algorithm (static source assertion)', () => {
     const src = driverSource();
-    // Exactly THREE fetch calls exist in the whole driver: the
+    // Exactly three fetch calls exist in the whole driver: the
     // loader-glue fetch (the external /api.js path fetches its own
     // source to hand the wasm glue to the Blob worker), the challenge
     // fetch and the bounded cancellation fetch ({endpoint}/cancel).
