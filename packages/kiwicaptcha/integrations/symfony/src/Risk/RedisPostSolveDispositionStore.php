@@ -87,10 +87,10 @@ use KiwiCaptcha\Storage\ReplicaWaitException;
  * takeover would let a second owner win the same nonce. The
  * single-writer invariant needs the barrier too. The non-mutating
  * paths (a busy claim, a refused finalize) perform no write and never
- * WAIT. A COMPLETE claim is an ACCEPTANCE of a previously-mutated
+ * WAIT. A complete claim is an acceptance of a previously-mutated
  * terminal disposition: it establishes the causal replication fence
- * before returning the terminal record, because the finalize may have
- * landed with its WAIT failing and a promotion could otherwise
+ * before returning the terminal record. The finalize may have
+ * landed with its WAIT failing, and a promotion could otherwise
  * silently reverse the accepted decision. An idempotent retry can
  * therefore never turn a replica outage into a storage failure. The
  * verified barrier supports the same standalone-connection matrix as
@@ -112,12 +112,12 @@ final class RedisPostSolveDispositionStore implements PostSolveDispositionStore
     /**
      * Single-Lua claim: one atomic transition per nonce.
      *   keys[1] = {kiwi:<ns>}:postsolve:<nonce>.
-     *   keys[2] = the nonce -> decision mapping key
-     *             ({kiwi:<ns>}:decision:<nonce>); when there is none, the
-     *             RECORD KEY itself is declared in its place — a real
-     *             same-slot key, never an empty placeholder (an empty
-     *             string has its own hash slot and would break the EVAL
-     *             on Cluster) — and the ARGV[4] flag gates it.
+ *   keys[2] = the nonce -> decision mapping key
+ *             ({kiwi:<ns>}:decision:<nonce>); when there is none, the
+ *             record key itself is declared in its place. A real
+ *             same-slot key, never an empty placeholder (an empty
+ *             string has its own hash slot and would break the EVAL
+ *             on Cluster). The ARGV[4] flag gates it.
      *   argv[1] = owner token, argv[2] = lease seconds, argv[3] = record
      *             TTL, argv[4] = 1 when KEYS[2] is a live decision
      *             mapping, else 0 (the placeholder must not be read).
@@ -151,6 +151,15 @@ final class RedisPostSolveDispositionStore implements PostSolveDispositionStore
 -- no separate read. A corrupt existing record is refused fail-closed
 -- ('corrupt') before any mutation — never healed by a takeover, never
 -- answered as a valid disposition.
+--
+-- Transaction acceptance guard (ARGV[7] == '1', chaining wired): the
+-- complete-claim branch re-verifies the transaction's obligation
+-- atomically with the claim read, so a stored Pass can never be replayed
+-- after the transaction advanced. KEYS[3] is the obligation mapping
+-- (same hash tag; the placeholder record key when the guard is off) and
+-- KEYS[4] the chain record the snapshot observed (placeholder when the
+-- snapshot saw no chain). ARGV[5] = this nonce, ARGV[6] = the snapshot
+-- chain id ('' when none).
 local now = tonumber(redis.call('TIME')[1])
 local existing = redis.call('GET', KEYS[1])
 if not existing then
@@ -185,6 +194,50 @@ if rec['v'] ~= 1 and rec['v'] ~= 2 then
   return cjson.encode({ status = 'corrupt' })
 end
 if rec['state'] == 'complete' then
+  if ARGV[7] == '1' then
+    local disp = rec['disposition']
+    if type(disp) == 'table' and disp['kind'] == 'pass' then
+      local mapped = redis.call('GET', KEYS[3])
+      if mapped == nil then
+        if ARGV[6] ~= '' then
+          return cjson.encode({ status = 'complete', record = rec, guard = 'obligation-changed' })
+        end
+      else
+        if ARGV[6] == '' then
+          -- The snapshot saw no chain; the obligation now exists. Read
+          -- the chain record at the pre-resolved id, re-verified against
+          -- the mapping: terminal denied/step_up dominate the stored
+          -- Pass; an open nonterminal chain whose current stage-2 nonce
+          -- is not this nonce refuses ChainRequired.
+          if ARGV[8] == '' or mapped ~= ARGV[8] then
+            return cjson.encode({ status = 'complete', record = rec, guard = 'obligation-changed' })
+          end
+        else
+          -- The snapshot saw a chain: the mapping must still point at it.
+          if mapped ~= ARGV[6] then
+            return cjson.encode({ status = 'complete', record = rec, guard = 'obligation-changed' })
+          end
+        end
+        local chained = redis.call('GET', KEYS[4])
+        if not chained then
+          return cjson.encode({ status = 'complete', record = rec, guard = 'obligation-changed' })
+        end
+        local ok, crec = pcall(cjson.decode, chained)
+        if not (ok and type(crec) == 'table' and tonumber(crec['v']) == 2) then
+          return cjson.encode({ status = 'complete', record = rec, guard = 'obligation-changed' })
+        end
+        if crec['state'] == 'denied' then
+          return cjson.encode({ status = 'complete', record = rec, guard = 'transaction-denied' })
+        end
+        if crec['state'] == 'step_up_required' then
+          return cjson.encode({ status = 'complete', record = rec, guard = 'transaction-step-up' })
+        end
+        if crec['stage2Nonce'] == nil or crec['stage2Nonce'] == cjson.null or crec['stage2Nonce'] ~= ARGV[5] then
+          return cjson.encode({ status = 'complete', record = rec, guard = 'chain-required' })
+        end
+      end
+    end
+  end
   return cjson.encode({ status = 'complete', record = rec })
 end
 if rec['state'] ~= 'pending' then
@@ -225,6 +278,85 @@ LUA;
      *   keys[1] = the record key
      *   argv[1] = owner token, argv[2] = disposition json
      */
+    private const FINALIZE_GUARDED_LUA = <<<'LUA'
+-- Post-solve disposition guarded finalize: pending(owner) -> complete,
+-- with the transaction acceptance guard verified atomically with the
+-- write (the CAS ordering across the chain machine and the disposition
+-- machine). KEYS[1] = the record, KEYS[2] = the obligation mapping
+-- (placeholder when the guard is off), KEYS[3] = the chain record the
+-- snapshot observed (placeholder when the snapshot saw no chain).
+-- ARGV[1] = owner, ARGV[2] = the disposition wire JSON, ARGV[3] = the
+-- candidate kind, ARGV[4] = the snapshot chain id ('' when none),
+-- ARGV[5] = this nonce, ARGV[6] = guard flag ('1' when chaining is
+-- wired). A Pass candidate is refused when the transaction now maps to
+-- a terminal denied/step_up_required chain, or to an open nonterminal
+-- chain whose current stage-2 nonce is not this nonce, or when the
+-- obligation moved since the snapshot. Deny/StepUp/ChainRequired
+-- candidates are terminal or contract responses and finalize on the
+-- record checks alone.
+local existing = redis.call('GET', KEYS[1])
+if not existing then
+  return 'missing'
+end
+local rec = cjson.decode(existing)
+if rec['v'] ~= 1 and rec['v'] ~= 2 then
+  return 'corrupt'
+end
+if rec['state'] ~= 'pending' then
+  return 'corrupt'
+end
+if rec['owner'] ~= ARGV[1] then
+  return 'ownership-lost'
+end
+if ARGV[6] == '1' and ARGV[3] == 'pass' then
+  local mapped = redis.call('GET', KEYS[2])
+  if mapped == nil then
+    if ARGV[4] ~= '' then
+      return 'obligation-changed'
+    end
+  else
+    if ARGV[4] == '' then
+      -- The snapshot saw no chain; the obligation now exists. Read the
+      -- chain record at the pre-resolved id, re-verified against the
+      -- mapping: terminal denied/step_up dominate the stale Pass; an
+      -- open nonterminal chain whose current stage-2 nonce is not this
+      -- nonce refuses ChainRequired.
+      if ARGV[7] == '' or mapped ~= ARGV[7] then
+        return 'obligation-changed'
+      end
+    else
+      -- The snapshot saw a chain: the mapping must still point at it.
+      if mapped ~= ARGV[4] then
+        return 'obligation-changed'
+      end
+    end
+    local chained = redis.call('GET', KEYS[3])
+    if not chained then
+      return 'obligation-changed'
+    end
+    local ok, crec = pcall(cjson.decode, chained)
+    if not (ok and type(crec) == 'table' and tonumber(crec['v']) == 2) then
+      return 'obligation-changed'
+    end
+    if crec['state'] == 'denied' then
+      return 'transaction-denied'
+    end
+    if crec['state'] == 'step_up_required' then
+      return 'transaction-step-up'
+    end
+    if crec['stage2Nonce'] == nil or crec['stage2Nonce'] == cjson.null or crec['stage2Nonce'] ~= ARGV[5] then
+      return 'chain-required'
+    end
+  end
+end
+rec['state'] = 'complete'
+rec['owner'] = cjson.null
+rec['lease_until'] = cjson.null
+rec['disposition'] = cjson.decode(ARGV[2])
+redis.call('SET', KEYS[1], cjson.encode(rec), 'KEEPTTL')
+return 'finalized'
+LUA;
+
     private const FINALIZE_LUA = <<<'LUA'
 -- Post-solve disposition finalize: pending(owner) -> complete.
 local existing = redis.call('GET', KEYS[1])
@@ -296,7 +428,7 @@ LUA;
         $this->refuseVerifiedWaitOnUnsupportedPredisClients();
     }
 
-    public function claim(string $nonce, string $owner, int $ttlSeconds, ?string $decisionKey = null): array
+    public function claim(string $nonce, string $owner, int $ttlSeconds, ?string $decisionKey = null, ?string $obligationId = null, ?string $snapshotChainId = null, ?string $expectedStage2Nonce = null): array
     {
         // The strict existing-record validation runs inside the claim
         // Lua (fail closed before any transition) and the claim response
@@ -305,19 +437,52 @@ LUA;
         // takeover and never answered as a valid disposition, and the
         // caller performs claim -> compute -> finalize with no separate
         // read round-trip.
+        //
+        // Transaction acceptance guard: when chaining is wired the
+        // obligation id is always derivable from the same transaction
+        // inputs, so the mapping key is declared even when the snapshot
+        // saw no chain (the guard must see an obligation that opened
+        // after the snapshot). The chain key is the snapshot's chain id;
+        // a real same-slot placeholder is declared when the snapshot saw
+        // no chain (that branch never reads it).
         $recordTtl = max(1, $this->ttlSecs > 0 ? $this->ttlSecs : $ttlSeconds);
         $recordKey = $this->key($nonce);
+        // The guard is enabled whenever chaining is wired: a null
+        // snapshot chain id is the legitimate no-chain snapshot (the
+        // guard must still see an obligation that opened after it).
+        $guardEnabled = $obligationId !== null;
+        $obligationKey = $guardEnabled ? sprintf('{kiwi:%s}:chain-obligation:%s', $this->namespace, $obligationId) : $recordKey;
+        // When the snapshot saw no chain, pre-resolve the current mapped
+        // chain id (a plain read, re-verified inside the script against
+        // the obligation mapping) so the guard can read the chain record
+        // at the mapped id; the EVAL contract holds (the script never
+        // constructs a key name from stored data).
+        $resolvedChainId = '';
+        if ($guardEnabled && ($snapshotChainId ?? '') === '') {
+            $mapped = $this->redis->get($obligationKey);
+            if (\is_string($mapped) && $mapped !== '') {
+                $resolvedChainId = $mapped;
+            }
+        }
+        $chainId = $snapshotChainId ?? $resolvedChainId;
+        $chainKey = $guardEnabled && $chainId !== '' ? sprintf('{kiwi:%s}:chain:%s', $this->namespace, $chainId) : $recordKey;
         // A real same-slot placeholder, never an empty string: when there
         // is no decision mapping the record key itself is declared in
         // KEYS[2] and the ARGV[4] flag keeps the script from touching it.
         $payload = $this->evalScript(self::CLAIM_LUA, [
             $recordKey,
             $decisionKey ?? $recordKey,
+            $obligationKey,
+            $chainKey,
         ], [
             $owner,
             (string) self::LEASE_SECS,
             (string) $recordTtl,
             $decisionKey !== null ? '1' : '0',
+            $nonce,
+            $guardEnabled ? ($snapshotChainId ?? '') : '',
+            $guardEnabled ? '1' : '0',
+            $guardEnabled ? $resolvedChainId : '',
         ]);
 
         try {
@@ -336,6 +501,12 @@ LUA;
             // fail closed, never defaulted into a valid outcome.
             throw new MalformedPostSolveDispositionException(sprintf('post-solve disposition claim returned an unknown status (%s)', $data['status']));
         }
+        $guard = isset($data['guard']) && \is_string($data['guard'])
+            ? PostSolveFinalizeOutcome::tryFrom($data['guard'])
+            : PostSolveFinalizeOutcome::Finalized;
+        if ($guard === null) {
+            throw new MalformedPostSolveDispositionException('post-solve disposition claim returned an unknown guard outcome');
+        }
         // Durability barrier: the verified WAIT runs for both fresh
         // mutations — the record creation ('claimed', the pending record
         // and the decision-mapping consumption landed in one Lua) and
@@ -347,7 +518,7 @@ LUA;
         // win the same nonce and duplicate the owner-scoped computation.
         // A pending/busy claim performs no write and no WAIT (an
         // idempotent retry must never turn a replica outage into a
-        // storage failure). A COMPLETE claim is an ACCEPTANCE, not a
+        // storage failure). A complete claim is an acceptance, not a
         // no-op: it establishes the causal fence below before the
         // terminal record is returned.
         if ($this->waitReplicas > 0 && \in_array($data['status'], ['claimed', 'taken_over'], true)) {
@@ -361,13 +532,13 @@ LUA;
             $record = self::recordFromDecoded(self::validateDecoded($data['record']));
         }
         if ($record !== null && $record->disposition !== null) {
-            // CAUSAL ACCEPTANCE FENCE: a complete (terminal) claim is an
-            // ACCEPTANCE of the finalize that may have landed on the
+            // causal acceptance fence: a complete (terminal) claim is an
+            // acceptance of the finalize that may have landed on the
             // primary with its WAIT failing (the earlier attempt answered
             // temporary-unavailable). Returning the terminal record
             // read-only would hand the application a Pass/Deny/StepUp
             // that a promotion could silently reverse. The fence writes a
-            // fresh value on THIS accepting connection and WAITs, proving
+            // fresh value on this accepting connection and WAITs, proving
             // the replica set has advanced through the finalize's write; a
             // shortfall fails closed and the terminal record is never
             // returned.
@@ -376,7 +547,7 @@ LUA;
             }
         }
 
-        return [$data['status'], $record];
+        return [$data['status'], $record, $guard];
     }
 
     /**
@@ -476,7 +647,7 @@ LUA;
             // final disposition may have landed on the primary with its
             // WAIT failing; accepting the disposition read-only would
             // let a promotion silently reverse the application decision —
-            // the barrier is RE-ESTABLISHED before the acceptance (a
+            // the barrier is re-established before the acceptance (a
             // shortfall throws and the caller answers the 503).
             if ($this->waitReplicas > 0) {
                 $this->establishReplicationFence('the post-solve disposition acceptance');
@@ -526,6 +697,50 @@ LUA;
         }
 
         return $finalized;
+    }
+
+    public function finalizeGuarded(string $nonce, string $owner, PostSolveDisposition $disposition, ?string $obligationId, ?string $snapshotChainId, ?string $expectedStage2Nonce): PostSolveFinalizeOutcome
+    {
+        $recordKey = $this->key($nonce);
+        $guardEnabled = $obligationId !== null;
+        $obligationKey = $guardEnabled ? sprintf('{kiwi:%s}:chain-obligation:%s', $this->namespace, $obligationId) : $recordKey;
+        // Same pre-resolution as the claim: a snapshot without a chain
+        // needs the mapped chain record read at the current id, re-
+        // verified inside the script against the obligation.
+        $resolvedChainId = '';
+        if ($guardEnabled && ($snapshotChainId ?? '') === '') {
+            $mapped = $this->redis->get($obligationKey);
+            if (\is_string($mapped) && $mapped !== '') {
+                $resolvedChainId = $mapped;
+            }
+        }
+        $chainId = $snapshotChainId ?? $resolvedChainId;
+        $chainKey = $guardEnabled && $chainId !== '' ? sprintf('{kiwi:%s}:chain:%s', $this->namespace, $chainId) : $recordKey;
+        $outcome = RedisEval::eval($this->redis, self::FINALIZE_GUARDED_LUA, [$recordKey, $obligationKey, $chainKey], [
+            $owner,
+            (string) json_encode(self::wire($disposition), JSON_THROW_ON_ERROR),
+            $disposition->kind->value,
+            $guardEnabled ? ($snapshotChainId ?? '') : '',
+            $nonce,
+            $guardEnabled ? '1' : '0',
+            $guardEnabled ? $resolvedChainId : '',
+        ]);
+        if (!\is_string($outcome)) {
+            throw new MalformedPostSolveDispositionException('post-solve disposition guarded finalize returned an unreadable response');
+        }
+        $typed = PostSolveFinalizeOutcome::tryFrom($outcome);
+        if ($typed === null) {
+            throw new MalformedPostSolveDispositionException(sprintf('post-solve disposition guarded finalize returned an unknown outcome (%s)', $outcome));
+        }
+
+        // Durability barrier: the same verified WAIT as the plain
+        // finalize, only for an actually-committed acceptance (a refused
+        // candidate performed no write and never WAITs).
+        if ($typed === PostSolveFinalizeOutcome::Finalized && $this->waitReplicas > 0) {
+            $this->waitAndVerify('the post-solve disposition guarded finalize');
+        }
+
+        return $typed;
     }
 
     private function key(string $nonce): string

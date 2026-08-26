@@ -22,7 +22,7 @@ use PHPUnit\Framework\TestCase;
  * success that was not replicated, so a returned
  * Deny/StepUp/ChainRequired is substantially less likely to be lost on
  * a stale-replica promotion (WAIT is durability hardening, not a
- * consensus guarantee). A COMPLETE claim is an ACCEPTANCE of the
+ * consensus guarantee). A complete claim is an acceptance of the
  * terminal disposition and establishes the causal fence before the
  * record is returned. The non-mutating paths (busy claims, refused
  * finalizes, reads) never WAIT, and the in-memory Array store observes
@@ -183,7 +183,7 @@ final class RedisPostSolveDispositionDurabilityTest extends TestCase
         self::assertSame('pending', $store->claim($nonce, 'owner-b', 300)[0]);
         self::assertCount(0, $this->waits($fake), 'a busy claim performs no write and never WAITs');
 
-        // complete -> 'complete': a replay claim is an ACCEPTANCE of the
+        // complete -> 'complete': a replay claim is an acceptance of the
         // terminal disposition — the causal fence must be established
         // before the record is returned (the finalize may have landed
         // with its WAIT failing); a shortfall fails closed.
@@ -212,8 +212,8 @@ final class RedisPostSolveDispositionDurabilityTest extends TestCase
         self::assertFalse($store->finalize($nonce, 'owner-c', new PostSolveDisposition(PostSolveDispositionKind::Pass)));
         self::assertCount(0, $this->waits($fake), 'a finalize on a complete record is refused and never WAITs');
 
-        // Reads never WAIT for absent records — but a read that ACCEPTS a
-        // FINAL disposition re-establishes the barrier (the failed-barrier
+        // Reads never WAIT for absent records — but a read that accepts a
+        // final disposition re-establishes the barrier (the failed-barrier
         // replay guard: the finalize that wrote it may have landed with
         // its WAIT failing, and a read-only acceptance would return a
         // decision a promotion could silently reverse).
@@ -373,6 +373,9 @@ final class DispositionWaitRedisFake extends \Predis\Client
         if (str_contains($script, 'Post-solve disposition claim')) {
             return $this->luaClaim($keys, $args);
         }
+        if (str_contains($script, 'Post-solve disposition guarded finalize')) {
+            return $this->luaFinalizeGuarded($keys, $args);
+        }
         if (str_contains($script, 'Post-solve disposition finalize')) {
             return $this->luaFinalize($keys, $args);
         }
@@ -385,9 +388,15 @@ final class DispositionWaitRedisFake extends \Predis\Client
     {
         $recordKey = (string) $keys[0];
         $decisionKey = (string) $keys[1];
+        $obligationKey = (string) ($keys[2] ?? $recordKey);
+        $chainKey = (string) ($keys[3] ?? $recordKey);
         $owner = (string) $args[0];
         $leaseSecs = (int) $args[1];
         $ttlSecs = (int) $args[2];
+        $nonce = (string) ($args[4] ?? '');
+        $snapshotChainId = (string) ($args[5] ?? '');
+        $guardEnabled = ($args[6] ?? '0') === '1';
+        $resolvedChainId = (string) ($args[7] ?? '');
         $now = (int) floor($this->clockMs / 1000);
         $existing = $this->strings[$recordKey] ?? null;
         if ($existing === null) {
@@ -418,6 +427,13 @@ final class DispositionWaitRedisFake extends \Predis\Client
             return (string) json_encode(['status' => 'corrupt'], JSON_THROW_ON_ERROR);
         }
         if (($rec['state'] ?? null) === 'complete') {
+            if ($guardEnabled && ($rec['disposition']['kind'] ?? null) === 'pass') {
+                $guard = $this->guardOutcome($obligationKey, $chainKey, $snapshotChainId, $nonce, $resolvedChainId);
+                if ($guard !== null) {
+                    return (string) json_encode(['status' => 'complete', 'record' => $rec, 'guard' => $guard], JSON_THROW_ON_ERROR);
+                }
+            }
+
             return (string) json_encode(['status' => 'complete', 'record' => $rec], JSON_THROW_ON_ERROR);
         }
         if (($rec['state'] ?? null) !== 'pending'
@@ -463,5 +479,93 @@ final class DispositionWaitRedisFake extends \Predis\Client
         $this->strings[$recordKey] = (string) json_encode($rec, JSON_THROW_ON_ERROR);
 
         return true;
+    }
+
+    /**
+     * The guarded finalize Lua mirror: the transaction acceptance guard
+     * runs atomically with the pending(owner) -> complete write. Keys:
+     * record, obligation mapping, chain record. Args: owner, disposition
+     * wire, candidate kind, snapshot chain id, nonce, guard flag.
+     */
+    private function luaFinalizeGuarded(array $keys, array $args): string
+    {
+        $recordKey = (string) $keys[0];
+        $obligationKey = (string) ($keys[1] ?? $recordKey);
+        $chainKey = (string) ($keys[2] ?? $recordKey);
+        $owner = (string) $args[0];
+        $disposition = json_decode((string) $args[1], true, 8, JSON_THROW_ON_ERROR);
+        $kind = (string) $args[2];
+        $snapshotChainId = (string) $args[3];
+        $nonce = (string) $args[4];
+        $guardEnabled = ($args[5] ?? '0') === '1';
+        $resolvedChainId = (string) ($args[6] ?? '');
+        $existing = $this->strings[$recordKey] ?? null;
+        if ($existing === null) {
+            return 'missing';
+        }
+        $rec = json_decode($existing, true, 8, JSON_THROW_ON_ERROR);
+        if (($rec['v'] ?? null) !== 1 && ($rec['v'] ?? null) !== 2) {
+            return 'corrupt';
+        }
+        if (($rec['state'] ?? null) !== 'pending') {
+            return 'corrupt';
+        }
+        if (($rec['owner'] ?? null) !== $owner) {
+            return 'ownership-lost';
+        }
+        if ($guardEnabled && $kind === 'pass') {
+            $guard = $this->guardOutcome($obligationKey, $chainKey, $snapshotChainId, $nonce, $resolvedChainId);
+            if ($guard !== null) {
+                return $guard;
+            }
+        }
+        $rec['state'] = 'complete';
+        $rec['owner'] = null;
+        $rec['lease_until'] = null;
+        $rec['disposition'] = $disposition;
+        $this->strings[$recordKey] = (string) json_encode($rec, JSON_THROW_ON_ERROR);
+
+        return 'finalized';
+    }
+
+    /**
+     * The transaction acceptance guard (the shared mirror of the claim
+     * complete branch and the guarded finalize): null when the Pass is
+     * authorized, else the typed refusal.
+     */
+    private function guardOutcome(string $obligationKey, string $chainKey, string $snapshotChainId, string $nonce, string $resolvedChainId = ''): ?string
+    {
+        $mapped = $this->strings[$obligationKey] ?? null;
+        if ($mapped === null) {
+            return $snapshotChainId !== '' ? 'obligation-changed' : null;
+        }
+        if ($snapshotChainId === '') {
+            // A chain opened after the snapshot: read the record at the
+            // pre-resolved id (re-verified against the mapping).
+            if ($resolvedChainId === '' || $mapped !== $resolvedChainId) {
+                return 'obligation-changed';
+            }
+        } elseif ($mapped !== $snapshotChainId) {
+            return 'obligation-changed';
+        }
+        $chained = $this->strings[$chainKey] ?? null;
+        if ($chained === null) {
+            return 'obligation-changed';
+        }
+        $crec = json_decode($chained, true, 8, JSON_THROW_ON_ERROR);
+        if (!\is_array($crec) || ($crec['v'] ?? null) !== 2) {
+            return 'obligation-changed';
+        }
+        if (($crec['state'] ?? null) === 'denied') {
+            return 'transaction-denied';
+        }
+        if (($crec['state'] ?? null) === 'step_up_required') {
+            return 'transaction-step-up';
+        }
+        if (($crec['stage2Nonce'] ?? null) !== $nonce) {
+            return 'chain-required';
+        }
+
+        return null;
     }
 }

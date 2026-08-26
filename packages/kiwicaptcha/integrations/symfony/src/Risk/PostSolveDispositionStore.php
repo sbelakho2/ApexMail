@@ -36,7 +36,7 @@ interface PostSolveDispositionStore
      * never observe a different record than the one the claim decided
      * on.
      *
-     * @return array{0: 'claimed'|'pending'|'taken_over'|'complete', 1: ?PostSolveDispositionRecord}
+     * @return array{0: 'claimed'|'pending'|'taken_over'|'complete', 1: ?PostSolveDispositionRecord, 2: PostSolveFinalizeOutcome}
      *         claimed:     the caller holds a fresh claim, missing
      *                      going to pending(me). The response carries the
      *                      pending record (the consumed decision handle
@@ -80,10 +80,30 @@ interface PostSolveDispositionStore
      *                                 with the first owner's decision id.
      *                                 null = no decision mapping (the
      *                                 records carry null).
+     * @param string|null $obligationId the transaction obligation id
+     *                                 (the chained-store obligation
+     *                                 mapping key suffix) when chaining
+     *                                 is wired. The complete-claim
+     *                                 acceptance is then guarded
+     *                                 atomically against the transaction
+     *                                 state: a stored Pass can never be
+     *                                 replayed after the transaction
+     *                                 advanced to a terminal state or an
+     *                                 open chain whose current stage-2
+     *                                 nonce is not this nonce. null = no
+     *                                 guard (no chaining).
+     * @param string|null $snapshotChainId the chain id the requirement
+     *                                 snapshot observed, null when the
+     *                                 snapshot saw no chain. The guard
+     *                                 refuses when the obligation moved.
+     * @param string|null $expectedStage2Nonce the snapshot requirement's
+     *                                 issued stage-2 nonce (the only
+     *                                 nonce whose stored Pass the
+     *                                 transaction authorizes).
      *
      * @throws \Throwable when the store is unavailable (fail closed)
      */
-    public function claim(string $nonce, string $owner, int $ttlSeconds, ?string $decisionKey = null): array;
+    public function claim(string $nonce, string $owner, int $ttlSeconds, ?string $decisionKey = null, ?string $obligationId = null, ?string $snapshotChainId = null, ?string $expectedStage2Nonce = null): array;
 
     /**
      * Read the current record behind a nonce, or null when absent/expired.
@@ -100,4 +120,43 @@ interface PostSolveDispositionStore
      * @throws \Throwable when the store is unavailable (fail closed)
      */
     public function finalize(string $nonce, string $owner, PostSolveDisposition $disposition): bool;
+
+    /**
+     * The obligation-aware guarded finalize: atomically transition
+     * pending(me) -> complete(disposition) only when the transaction
+     * state still authorizes the acceptance. This is the CAS ordering
+     * across the transaction-level chain machine and the nonce-level
+     * disposition machine: the requirement snapshot was resolved before
+     * the claim, and a concurrent requireStage2 or terminalization may
+     * have advanced the transaction since. Committing a stale Pass in
+     * that window would hand the application a decision the transaction
+     * no longer authorizes, so the write is guarded.
+     *
+     * A Pass candidate is refused (with the typed outcome) when the
+     * obligation now maps to a terminal denied / step_up_required chain,
+     * or to an open nonterminal chain whose current stage-2 nonce is not
+     * this nonce. The same holds when the obligation moved since the
+     * snapshot.. Deny,
+     * StepUp and ChainRequired candidates are terminal or contract
+     * responses: never weaker than required, so they finalize on the
+     * record checks alone.
+     *
+     * @param string $nonce               the verified challenge nonce.
+     * @param string $owner               the claim owner token.
+     * @param PostSolveDisposition $disposition the candidate disposition.
+     * @param string|null $obligationId   the transaction obligation id
+     *                                    when chaining is wired (null =
+     *                                    no guard).
+     * @param string|null $snapshotChainId the chain id the requirement
+     *                                    snapshot observed (null = the
+     *                                    snapshot saw no chain).
+     * @param string|null $expectedStage2Nonce the snapshot's issued
+     *                                    stage-2 nonce.
+     *
+     * @return PostSolveFinalizeOutcome Finalized when the acceptance
+     *         committed; the typed refusal otherwise.
+     *
+     * @throws \Throwable when the store is unavailable (fail closed)
+     */
+    public function finalizeGuarded(string $nonce, string $owner, PostSolveDisposition $disposition, ?string $obligationId, ?string $snapshotChainId, ?string $expectedStage2Nonce): PostSolveFinalizeOutcome;
 }

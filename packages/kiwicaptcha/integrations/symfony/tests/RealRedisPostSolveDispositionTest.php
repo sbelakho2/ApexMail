@@ -12,6 +12,7 @@ use BelConsulting\KiwiCaptchaBundle\Risk\ContinuityCookie;
 use BelConsulting\KiwiCaptchaBundle\Risk\MalformedPostSolveDispositionException;
 use BelConsulting\KiwiCaptchaBundle\Risk\PostSolveDisposition;
 use BelConsulting\KiwiCaptchaBundle\Risk\PostSolveDispositionKind;
+use BelConsulting\KiwiCaptchaBundle\Risk\PostSolveFinalizeOutcome;
 use BelConsulting\KiwiCaptchaBundle\Risk\RedisChainedChallengeStateStore;
 use BelConsulting\KiwiCaptchaBundle\Risk\RedisPostSolveDispositionStore;
 use BelConsulting\KiwiCaptchaBundle\Risk\RiskGateway;
@@ -81,6 +82,43 @@ final class RealRedisPostSolveDispositionTest extends TestCase
     private function key(string $nonce): string
     {
         return '{kiwi:ci-postsolve}:postsolve:'.$nonce;
+    }
+
+    private const GUARD_OBLIGATION = 'g000000000000000000000000000000000000000000000000000000000000000';
+
+    private const GUARD_CHAIN = 'guard-chain';
+
+    private function obligationKey(): string
+    {
+        return '{kiwi:ci-postsolve}:chain-obligation:'.self::GUARD_OBLIGATION;
+    }
+
+    private function chainKey(): string
+    {
+        return '{kiwi:ci-postsolve}:chain:'.self::GUARD_CHAIN;
+    }
+
+    /** Seed the chain v2 record + the obligation mapping (the guard's read surface). */
+    private function seedChain(string $state, ?string $stage2Nonce = null, ?string $mappedChain = null): void
+    {
+        $mapped = $mappedChain ?? self::GUARD_CHAIN;
+        $this->client->set($this->obligationKey(), $mapped, 'EX', 300);
+        $this->client->set($this->chainKey(), (string) json_encode([
+            'v' => 2,
+            'stage1Nonce' => 'nonce-a',
+            'scope' => 'login',
+            'obligationId' => self::GUARD_OBLIGATION,
+            'requiredAction' => 'sha20',
+            'requiredRank' => 8,
+            'policyVersion' => 1,
+            'chainDepth' => 2,
+            'state' => $state,
+            'owner' => null,
+            'leaseUntil' => null,
+            'stage2Nonce' => $stage2Nonce,
+            'requestBinding' => 'auth',
+            'expiresAt' => time() + 300,
+        ], JSON_THROW_ON_ERROR), 'EX', 300);
     }
 
     private function decisionKey(string $nonce): string
@@ -425,7 +463,7 @@ final class RealRedisPostSolveDispositionTest extends TestCase
     {
         // The non-mutating paths never hit the barrier: a busy claim and
         // a refused finalize perform no fresh write and issue no WAIT. A
-        // COMPLETE claim is an ACCEPTANCE of the terminal disposition: it
+        // complete claim is an acceptance of the terminal disposition: it
         // must establish the causal fence on the accepting connection
         // before returning the record, and a shortfall fails closed.
         $counting = $this->countingClient();
@@ -457,6 +495,64 @@ final class RealRedisPostSolveDispositionTest extends TestCase
         self::assertFalse($hardened->finalize($nonce, 'owner-c', new PostSolveDisposition(PostSolveDispositionKind::Pass)));
         self::assertCount(0, $counting->waits(), 'a refused finalize is not a mutation and never WAITs');
         $counting->disconnect();
+    }
+
+    public function testFreshPassAgainstConcurrentChainRequiredAgainstRealRedis(): void
+    {
+        // Worker B claims with the no-chain snapshot; Worker A opens the
+        // transaction's chain; B attempts the stale Pass finalize: the
+        // real Lua refuses atomically with ChainRequired and performs no
+        // write.
+        $store = $this->store();
+        $nonce = bin2hex(random_bytes(16));
+        [$claim] = $store->claim($nonce, 'owner-b', 300, null, self::GUARD_OBLIGATION, null, null);
+        self::assertSame('claimed', $claim);
+        $this->seedChain('available');
+
+        $outcome = $store->finalizeGuarded($nonce, 'owner-b', new PostSolveDisposition(PostSolveDispositionKind::Pass), self::GUARD_OBLIGATION, null, null);
+        self::assertSame(PostSolveFinalizeOutcome::ChainRequired, $outcome, 'the stale Pass is never committed after the chain opened');
+        $record = json_decode((string) $this->client->get($this->key($nonce)), true, 8, JSON_THROW_ON_ERROR);
+        self::assertSame('pending', $record['state'], 'the refused Pass performs no write');
+    }
+
+    public function testFreshPassAgainstConcurrentTerminalDenialAgainstRealRedis(): void
+    {
+        $store = $this->store();
+        $nonce = bin2hex(random_bytes(16));
+        self::assertSame('claimed', $store->claim($nonce, 'owner-b', 300, null, self::GUARD_OBLIGATION, null, null)[0]);
+        $this->seedChain('denied');
+
+        $outcome = $store->finalizeGuarded($nonce, 'owner-b', new PostSolveDisposition(PostSolveDispositionKind::Pass), self::GUARD_OBLIGATION, null, null);
+        self::assertSame(PostSolveFinalizeOutcome::TransactionDenied, $outcome, 'a terminal denial dominates the stale Pass');
+    }
+
+    public function testAuthorizedStage2PassCommitsAgainstRealRedis(): void
+    {
+        $store = $this->store();
+        $nonce = bin2hex(random_bytes(16));
+        self::assertSame('claimed', $store->claim($nonce, 'owner-b', 300, null, self::GUARD_OBLIGATION, null, null)[0]);
+        $this->seedChain('issued', $nonce);
+
+        $outcome = $store->finalizeGuarded($nonce, 'owner-b', new PostSolveDisposition(PostSolveDispositionKind::Pass), self::GUARD_OBLIGATION, self::GUARD_CHAIN, $nonce);
+        self::assertSame(PostSolveFinalizeOutcome::Finalized, $outcome, 'the chain own stage-2 nonce is authorized');
+        self::assertSame('complete', json_decode((string) $this->client->get($this->key($nonce)), true, 8, JSON_THROW_ON_ERROR)['state']);
+    }
+
+    public function testCompletePassReplayAgainstConcurrentTerminalDenialAgainstRealRedis(): void
+    {
+        // Worker A durably persisted Pass, then the transaction
+        // terminalized; Worker B's guarded complete-claim must refuse
+        // the stored Pass with TransactionDenied — B never reaches
+        // application success.
+        $store = $this->store();
+        $nonce = bin2hex(random_bytes(16));
+        self::assertSame('claimed', $store->claim($nonce, 'owner-a', 300)[0]);
+        self::assertTrue($store->finalize($nonce, 'owner-a', new PostSolveDisposition(PostSolveDispositionKind::Pass)));
+        $this->seedChain('denied');
+
+        [$claim, , $guard] = $store->claim($nonce, 'owner-b', 300, null, self::GUARD_OBLIGATION, null, null);
+        self::assertSame('complete', $claim);
+        self::assertSame(PostSolveFinalizeOutcome::TransactionDenied, $guard, 'the stored Pass must never surface after the transaction terminalized');
     }
 
     public function testChainRequiredDispositionWireShapeAgainstRealRedis(): void

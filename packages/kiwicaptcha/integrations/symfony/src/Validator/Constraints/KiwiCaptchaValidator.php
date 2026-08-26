@@ -10,6 +10,7 @@ use BelConsulting\KiwiCaptchaBundle\Risk\ChainVerifiedResult;
 use BelConsulting\KiwiCaptchaBundle\Risk\ClientIpResolver;
 use BelConsulting\KiwiCaptchaBundle\Risk\ContinuityCookie;
 use BelConsulting\KiwiCaptchaBundle\Risk\PostSolveDisposition;
+use BelConsulting\KiwiCaptchaBundle\Risk\PostSolveFinalizeOutcome;
 use BelConsulting\KiwiCaptchaBundle\Risk\PostSolveDispositionKind;
 use BelConsulting\KiwiCaptchaBundle\Risk\PostSolveDispositionStore;
 use BelConsulting\KiwiCaptchaBundle\Risk\PostSolveDispositionUnavailableException;
@@ -463,10 +464,10 @@ final class KiwiCaptchaValidator extends ConstraintValidator
         // The operation identity is recorded with the pending→consumed
         // transition and gates the replay of the stored success.
         //
-        // The transaction binding is enforced by the CORE, before the
+        // The transaction binding is enforced by the core, before the
         // one-shot consume: the canonical binding resolved above is
         // passed as the expected request binding, so a bound challenge
-        // verified under the wrong transaction fails BEFORE its proof is
+        // verified under the wrong transaction fails before its proof is
         // consumed and burned, and the outstanding release never fires
         // for it. The core's contract keeps BindingMode::None intact: an
         // explicitly unbound record (null binding) is permitted
@@ -571,10 +572,10 @@ final class KiwiCaptchaValidator extends ConstraintValidator
         }
 
         // Resource accounting: the PoW is solved regardless of the later
-        // risk disposition — the solved nonce's ORIGINAL source slot and
+        // risk disposition — the solved nonce's original source slot and
         // its live-outstanding membership are released through the
         // idempotent, nonce-authoritative hook (one-shot, ZREM-gated).
-        // It runs for EVERY accepted successful outcome, stored-result
+        // It runs for every accepted successful outcome, stored-result
         // retries included: a transient release failure during the
         // original verification must be repaired by the same logical
         // operation's retry (the deterministic committed result is
@@ -957,8 +958,22 @@ final class KiwiCaptchaValidator extends ConstraintValidator
             // response carries the claim outcome AND the record the
             // caller needs for that outcome, so the fresh path is exactly
             // claim -> compute -> finalize with no separate read.
+            //
+            // Transaction acceptance guard: the requirement snapshot is
+            // re-verified atomically with each acceptance (the claim's
+            // complete branch and the guarded finalize). The obligation
+            // id is derivable from the same transaction inputs whenever
+            // chaining is wired, so the guard can see an obligation that
+            // opened after the snapshot — a stale Pass is never committed
+            // (or replayed) once the transaction advanced.
             $decisionKey = $this->risk?->decisionKeyFor($nonce);
-            [$claim, $claimRecord] = $this->dispositionStore->claim($nonce, $owner, $ttl, $decisionKey);
+            $obligationId = null;
+            $snapshotChainId = null;
+            if ($this->chainTickets !== null && $this->bindingAuthority !== null && $canonicalBinding !== null) {
+                $obligationId = $this->chainTickets->obligationIdFor($constraint->scope, $canonicalBinding, $this->policyVersion);
+                $snapshotChainId = $requirement?->chainId ?? null;
+            }
+            [$claim, $claimRecord, $claimGuard] = $this->dispositionStore->claim($nonce, $owner, $ttl, $decisionKey, $obligationId, $snapshotChainId, $requirement?->stage2Nonce);
         } catch (\Throwable $e) {
             throw new PostSolveDispositionUnavailableException('the post-solve disposition store is unavailable', 0, $e);
         }
@@ -969,6 +984,39 @@ final class KiwiCaptchaValidator extends ConstraintValidator
                 // Complete without a usable disposition: corrupt state —
                 // never silently pass.
                 throw new PostSolveDispositionUnavailableException('the post-solve disposition record is corrupt');
+            }
+            // The claim's atomic acceptance guard re-verified the
+            // transaction state at claim time. It dominates the stored
+            // record: a Pass persisted before the transaction
+            // terminalized (or before a chain opened) is never replayed
+            // once the transaction advanced — the terminal outcome or an
+            // authoritative re-resolution answers instead.
+            if ($claimGuard === PostSolveFinalizeOutcome::TransactionDenied) {
+                $disposition = new PostSolveDisposition(PostSolveDispositionKind::Deny, $claimRecord?->decisionId);
+                if ($this->risk !== null && $disposition->decisionId !== null) {
+                    $this->risk->setCurrentDecisionId($disposition->decisionId);
+                }
+
+                return [$disposition, true, $requirement];
+            }
+            if ($claimGuard === PostSolveFinalizeOutcome::TransactionStepUp) {
+                $disposition = new PostSolveDisposition(PostSolveDispositionKind::StepUp, $claimRecord?->decisionId);
+                if ($this->risk !== null && $disposition->decisionId !== null) {
+                    $this->risk->setCurrentDecisionId($disposition->decisionId);
+                }
+
+                return [$disposition, true, $requirement];
+            }
+            if ($claimGuard === PostSolveFinalizeOutcome::ChainRequired) {
+                $disposition = $this->reResolvedChainRequiredDisposition($constraint, $canonicalBinding, $claimRecord?->decisionId);
+
+                return [$disposition, true, $requirement];
+            }
+            if ($claimGuard === PostSolveFinalizeOutcome::ObligationChanged) {
+                // The obligation moved since the snapshot: never accept
+                // the stale record — the retry re-resolves the fresh
+                // requirement and reconstructs the disposition.
+                throw new PostSolveDispositionUnavailableException('the chain obligation moved during the post-solve acceptance');
             }
             // Terminal transaction state dominates — replays included: a
             // persisted nonce disposition (e.g. a Pass persisted before
@@ -1012,15 +1060,57 @@ final class KiwiCaptchaValidator extends ConstraintValidator
         $disposition = $this->assessFinalDisposition($token, $outcome, $request, $constraint, $ip, $session, $nonce, $canonicalBinding, $storedDecisionId, $requirement);
 
         try {
-            $finalized = $this->dispositionStore->finalize($nonce, $owner, $disposition);
+            $outcome = $this->dispositionStore->finalizeGuarded($nonce, $owner, $disposition, $obligationId, $snapshotChainId, $requirement?->stage2Nonce);
         } catch (\Throwable $e) {
             throw new PostSolveDispositionUnavailableException('the post-solve disposition could not be persisted', 0, $e);
         }
-        if (!$finalized) {
-            throw new PostSolveDispositionUnavailableException('the post-solve disposition finalize was refused');
+        switch ($outcome) {
+            case PostSolveFinalizeOutcome::Finalized:
+                break;
+            case PostSolveFinalizeOutcome::TransactionDenied:
+                // The transaction terminalized between the snapshot and
+                // the finalize: the terminal outcome answers, never the
+                // stale Pass (the retry persists it durably via the
+                // terminal-dominance path).
+                $disposition = new PostSolveDisposition(PostSolveDispositionKind::Deny, $storedDecisionId);
+                break;
+            case PostSolveFinalizeOutcome::TransactionStepUp:
+                $disposition = new PostSolveDisposition(PostSolveDispositionKind::StepUp, $storedDecisionId);
+                break;
+            case PostSolveFinalizeOutcome::ChainRequired:
+                // A chain opened (or a stage-2 was issued for another
+                // nonce) after the snapshot: the stale Pass is not
+                // committed; the authoritative re-resolution answers
+                // ChainRequired.
+                $disposition = $this->reResolvedChainRequiredDisposition($constraint, $canonicalBinding, $storedDecisionId);
+                break;
+            case PostSolveFinalizeOutcome::ObligationChanged:
+                // The obligation moved since the snapshot: fail closed —
+                // the retry re-resolves the fresh requirement.
+                throw new PostSolveDispositionUnavailableException('the chain obligation moved during the post-solve finalize');
+            case PostSolveFinalizeOutcome::OwnershipLost:
+            case PostSolveFinalizeOutcome::Missing:
+            case PostSolveFinalizeOutcome::Corrupt:
+                throw new PostSolveDispositionUnavailableException('the post-solve disposition finalize was refused');
         }
 
         return [$disposition, false, $requirement];
+    }
+
+    /**
+     * Re-resolve the open chain requirement and build the ChainRequired
+     * disposition for the guard's authoritative re-resolution. The
+     * chain must still exist (an obligation that vanished mid-acceptance
+     * is fail-closed temporary-unavailable; the retry re-resolves).
+     */
+    private function reResolvedChainRequiredDisposition(KiwiCaptcha $constraint, ?string $canonicalBinding, ?string $decisionId): PostSolveDisposition
+    {
+        $fresh = $this->openRequirementFor($constraint, $canonicalBinding);
+        if ($fresh === null) {
+            throw new PostSolveDispositionUnavailableException('the chain requirement vanished during the post-solve acceptance');
+        }
+
+        return new PostSolveDisposition(PostSolveDispositionKind::ChainRequired, $decisionId, $fresh->chainId, $fresh->expiresAt);
     }
 
     /**

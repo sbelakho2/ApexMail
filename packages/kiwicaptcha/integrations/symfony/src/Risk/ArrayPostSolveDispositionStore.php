@@ -90,7 +90,7 @@ final class ArrayPostSolveDispositionStore implements PostSolveDispositionStore
     ) {
     }
 
-    public function claim(string $nonce, string $owner, int $ttlSeconds, ?string $decisionKey = null): array
+    public function claim(string $nonce, string $owner, int $ttlSeconds, ?string $decisionKey = null, ?string $obligationId = null, ?string $snapshotChainId = null, ?string $expectedStage2Nonce = null): array
     {
         $now = $this->now();
         if ($this->expired($nonce, $now)) {
@@ -104,17 +104,21 @@ final class ArrayPostSolveDispositionStore implements PostSolveDispositionStore
             if ($existing['state'] === 'complete') {
                 // A completed disposition is terminal: the replay claim
                 // answers 'complete' with the complete record and never
-                // touches the decision key.
-                return ['complete', self::recordFromExisting($existing)];
+                // touches the decision key. The in-memory store cannot
+                // observe the transaction chain state (no shared backend),
+                // so the acceptance guard passes through with Finalized:
+                // chaining with real transaction state always wires the
+                // Redis store.
+                return ['complete', self::recordFromExisting($existing), PostSolveFinalizeOutcome::Finalized];
             }
             if ($existing['owner'] === $owner) {
-                return ['pending', null];
+                return ['pending', null, PostSolveFinalizeOutcome::Finalized];
             }
             if ($existing['leaseUntil'] !== null && $existing['leaseUntil'] > $now) {
                 // Another owner's claim is live: busy — the decision key
                 // is never touched (the mapping stays resolvable for the
                 // caller who will win the next claim).
-                return ['pending', null];
+                return ['pending', null, PostSolveFinalizeOutcome::Finalized];
             }
             // Expired lease: takeover. The original decision handle is
             // preserved — a takeover never consumes the decision mapping
@@ -125,7 +129,7 @@ final class ArrayPostSolveDispositionStore implements PostSolveDispositionStore
             $this->records[$nonce]['leaseUntil'] = $now + self::LEASE_SECS;
             $this->records[$nonce]['disposition'] = null;
 
-            return ['taken_over', self::recordFromExisting($this->records[$nonce])];
+            return ['taken_over', self::recordFromExisting($this->records[$nonce]), PostSolveFinalizeOutcome::Finalized];
         }
         // missing: the only path that consumes the decision mapping
         // (getdel semantics, at most one winner) — the paired decision id
@@ -143,7 +147,32 @@ final class ArrayPostSolveDispositionStore implements PostSolveDispositionStore
             'decisionId' => $decisionId,
         ];
 
-        return ['claimed', self::recordFromExisting($this->records[$nonce])];
+        return ['claimed', self::recordFromExisting($this->records[$nonce]), PostSolveFinalizeOutcome::Finalized];
+    }
+
+    public function finalizeGuarded(string $nonce, string $owner, PostSolveDisposition $disposition, ?string $obligationId, ?string $snapshotChainId, ?string $expectedStage2Nonce): PostSolveFinalizeOutcome
+    {
+        // The in-memory store cannot observe the transaction chain state
+        // (no shared backend); chaining with real transaction state
+        // always wires the Redis store. The record checks mirror the
+        // plain finalize and the acceptance passes through as Finalized.
+        if ($this->finalize($nonce, $owner, $disposition)) {
+            return PostSolveFinalizeOutcome::Finalized;
+        }
+        $now = $this->now();
+        if ($this->expired($nonce, $now)) {
+            unset($this->records[$nonce]);
+
+            return PostSolveFinalizeOutcome::Missing;
+        }
+        $existing = $this->records[$nonce] ?? null;
+        if ($existing === null) {
+            return PostSolveFinalizeOutcome::Missing;
+        }
+
+        return $existing['state'] !== 'pending' || $existing['owner'] !== $owner
+            ? PostSolveFinalizeOutcome::OwnershipLost
+            : PostSolveFinalizeOutcome::Corrupt;
     }
 
     /**

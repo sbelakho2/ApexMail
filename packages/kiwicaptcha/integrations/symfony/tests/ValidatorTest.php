@@ -14,6 +14,7 @@ use BelConsulting\KiwiCaptchaBundle\Risk\ChainReservationResult;
 use BelConsulting\KiwiCaptchaBundle\Risk\ChainVerifiedResult;
 use BelConsulting\KiwiCaptchaBundle\Risk\MalformedPostSolveDispositionException;
 use BelConsulting\KiwiCaptchaBundle\Risk\PostSolveDisposition;
+use BelConsulting\KiwiCaptchaBundle\Risk\PostSolveFinalizeOutcome;
 use BelConsulting\KiwiCaptchaBundle\Risk\PostSolveDispositionKind;
 use BelConsulting\KiwiCaptchaBundle\Risk\PostSolveDispositionRecord;
 use BelConsulting\KiwiCaptchaBundle\Risk\PostSolveDispositionStore;
@@ -383,7 +384,7 @@ final class ValidatorTest extends TestCase
         $sourceKey = $outstanding->sourceKey('198.51.100.7');
         self::assertSame(2, $client->counters[$sourceKey]);
 
-        // A valid solve of an actually-issued nonce releases its ORIGINAL
+        // A valid solve of an actually-issued nonce releases its original
         // source slot (the nonce-authoritative one-shot model).
         $challenge = $challengeA;
         usleep(($challenge->minDurationMs + 10) * 1000);
@@ -512,9 +513,9 @@ final class ValidatorTest extends TestCase
 
     public function testUnboundChallengeWithAnExpectedBindingIsRefused(): void
     {
-        // The EXACT request-binding contract (RequestBindingExpectation):
+        // The exact request-binding contract (RequestBindingExpectation):
         // an authoritative transaction binding is Option-equality — an
-        // explicitly UNBOUND record under a canonical binding expectation
+        // explicitly unbound record under a canonical binding expectation
         // is a mismatch (the deployment configured a binding context, so
         // a challenge with no transaction anchor cannot redeem it). An
         // unbound record passes only under an explicitly unbound
@@ -558,7 +559,7 @@ final class ValidatorTest extends TestCase
     public function testBindingMismatchFailsBeforeTheConsume(): void
     {
         // P2/P3 regression: the request-binding enforcement moved into the
-        // core's PRE-CONSUME phase. A wrong-transaction proof must fail
+        // core's pre-consume phase. A wrong-transaction proof must fail
         // without consuming the challenge (no deterministic result is
         // committed and nothing is released), so the valid proof is not
         // burned by the mismatch.
@@ -587,7 +588,7 @@ final class ValidatorTest extends TestCase
         // retries, so a transient release failure during the original
         // verification could never be repaired by the same logical
         // operation's retry. solved() is idempotent and ZREM-gated, so
-        // EVERY accepted successful outcome — stored-result retries
+        // every accepted successful outcome — stored-result retries
         // included — re-releases.
         $client = new FakePredisClient();
         $outstanding = new OutstandingChallenges($client, '{kiwi:validator-test}:outstanding:', RiskKeys::fromMaster(self::SECRET), 3, 100, 0);
@@ -633,7 +634,7 @@ final class ValidatorTest extends TestCase
 
     public function testReleaseSidecarReadFailureIsBestEffort(): void
     {
-        // P2: the ENTIRE release — the plain sidecar GET included — sits
+        // P2: the entire release — the plain sidecar GET included — sits
         // inside the exception boundary, so a Redis failure on the read
         // can never fail a valid solve (the memberships decay by their
         // deadlines and the same logical operation's retry re-releases).
@@ -1763,13 +1764,13 @@ final class ValidatorTest extends TestCase
             ) {
             }
 
-            public function claim(string $nonce, string $owner, int $ttlSeconds, ?string $decisionKey = null): array
+            public function claim(string $nonce, string $owner, int $ttlSeconds, ?string $decisionKey = null, ?string $obligationId = null, ?string $snapshotChainId = null, ?string $expectedStage2Nonce = null): array
             {
                 if ($this->failClaim) {
                     throw new \RuntimeException('simulated claim outage');
                 }
 
-                return $this->inner->claim($nonce, $owner, $ttlSeconds, $decisionKey);
+                return $this->inner->claim($nonce, $owner, $ttlSeconds, $decisionKey, $obligationId, $snapshotChainId, $expectedStage2Nonce);
             }
 
             public function read(string $nonce): ?PostSolveDispositionRecord
@@ -1788,6 +1789,15 @@ final class ValidatorTest extends TestCase
                 }
 
                 return $this->inner->finalize($nonce, $owner, $disposition);
+            }
+
+            public function finalizeGuarded(string $nonce, string $owner, PostSolveDisposition $disposition, ?string $obligationId, ?string $snapshotChainId, ?string $expectedStage2Nonce): PostSolveFinalizeOutcome
+            {
+                if ($this->failFinalize) {
+                    throw new \RuntimeException('simulated finalize outage');
+                }
+
+                return $this->inner->finalizeGuarded($nonce, $owner, $disposition, $obligationId, $snapshotChainId, $expectedStage2Nonce);
             }
         };
     }
@@ -1961,11 +1971,11 @@ final class ValidatorTest extends TestCase
             {
             }
 
-            public function claim(string $nonce, string $owner, int $ttlSeconds, ?string $decisionKey = null): array
+            public function claim(string $nonce, string $owner, int $ttlSeconds, ?string $decisionKey = null, ?string $obligationId = null, ?string $snapshotChainId = null, ?string $expectedStage2Nonce = null): array
             {
                 ++$this->claims;
 
-                return $this->inner->claim($nonce, $owner, $ttlSeconds, $decisionKey);
+                return $this->inner->claim($nonce, $owner, $ttlSeconds, $decisionKey, $obligationId, $snapshotChainId, $expectedStage2Nonce);
             }
 
             public function read(string $nonce): ?PostSolveDispositionRecord
@@ -1980,6 +1990,13 @@ final class ValidatorTest extends TestCase
                 ++$this->finalizes;
 
                 return $this->inner->finalize($nonce, $owner, $disposition);
+            }
+
+            public function finalizeGuarded(string $nonce, string $owner, PostSolveDisposition $disposition, ?string $obligationId, ?string $snapshotChainId, ?string $expectedStage2Nonce): PostSolveFinalizeOutcome
+            {
+                ++$this->finalizes;
+
+                return $this->inner->finalizeGuarded($nonce, $owner, $disposition, $obligationId, $snapshotChainId, $expectedStage2Nonce);
             }
         };
 

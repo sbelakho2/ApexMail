@@ -18,14 +18,19 @@ namespace BelConsulting\KiwiCaptchaBundle\SiteVerify;
 final class RedisEval
 {
     /**
-     * @param list<mixed> $args the script ARGV values (after the key)
+     * @param string|list<string> $key  a single declared key, or the
+     *                                  declared KEYS list (all keys must
+     *                                  share one hash tag)
+     * @param list<mixed> $args the script ARGV values (after the keys)
      */
-    public static function eval(\Predis\Client|\Redis $client, string $script, string $key, array $args): mixed
+    public static function eval(\Predis\Client|\Redis $client, string $script, string|array $key, array $args): mixed
     {
+        $keys = \is_array($key) ? \array_values($key) : [$key];
+
         if ($client instanceof \Redis) {
-            return $client->eval($script, [$key, ...$args], 1);
+            return $client->eval($script, [...$keys, ...$args], \count($keys));
         }
 
-        return $client->eval($script, 1, $key, ...$args);
+        return $client->eval($script, \count($keys), ...$keys, ...$args);
     }
 }
