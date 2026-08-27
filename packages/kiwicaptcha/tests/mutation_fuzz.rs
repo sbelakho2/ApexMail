@@ -96,7 +96,7 @@ fn byte_mutations_never_panic_on_any_parse_path() {
                 revoked_kids: None,
                 counter: 1,
                 duration_ms: 5000,
-                now_unix: &mut || NOW_UNIX + 1,
+                now_unix: Some(&mut || NOW_UNIX + 1),
                 now_ns: NOW_NS + 1_000_000,
                 min_duration_ms: 0,
                 expected_scope: None,

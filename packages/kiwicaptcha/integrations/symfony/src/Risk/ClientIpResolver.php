@@ -58,32 +58,39 @@ final class ClientIpResolver
 {
     public const MODE_DIRECT = 'direct';
     public const MODE_SYMFONY_TRUSTED_PROXIES = 'symfony_trusted_proxies';
+    /** The explicit opt-in inheritance mode: use Symfony's global trusted-proxy state. */
+    public const MODE_SYMFONY_GLOBAL = 'symfony_global';
 
-    private const VALID_MODES = [self::MODE_DIRECT, self::MODE_SYMFONY_TRUSTED_PROXIES];
+    private const VALID_MODES = [self::MODE_DIRECT, self::MODE_SYMFONY_TRUSTED_PROXIES, self::MODE_SYMFONY_GLOBAL];
 
     /**
      * @param string              $mode                       risk.client_ip_mode
      * @param list<string>        $trustedProxies             risk.trusted_proxies
      *                                                        (CIDRs / exact IPs)
      * @param bool                $rejectAmbiguousForwarding  risk.reject_ambiguous_forwarding
-     *                                                        (the DI config
-     *                                                        default is true
-     *                                                        since round 80;
-     *                                                        this constructor
-     *                                                        default exists
-     *                                                        for direct
-     *                                                        construction)
+     *                                                        (defaults true;
+     *                                                        ambiguity is
+     *                                                        rejected unless
+     *                                                        explicitly
+     *                                                        allowed)
      * @param LoggerInterface|null $logger                    anomaly log target
+     *
+     * The trust contract is Kiwi-owned. Mode "direct" always uses the
+     * socket peer. Mode "symfony_trusted_proxies" trusts exactly the
+     * configured list; an empty list means trust nobody (forwarding
+     * headers are ignored, and Symfony's global trusted-proxy state is
+     * never inherited implicitly). Mode "symfony_global" is the explicit
+     * opt-in that inherits the global state.
      */
     public function __construct(
         private readonly string $mode = self::MODE_SYMFONY_TRUSTED_PROXIES,
         private readonly array $trustedProxies = [],
-        private readonly bool $rejectAmbiguousForwarding = false,
+        private readonly bool $rejectAmbiguousForwarding = true,
         private readonly ?LoggerInterface $logger = null,
     ) {
         if (!\in_array($mode, self::VALID_MODES, true)) {
             throw new \InvalidArgumentException(sprintf(
-                'client_ip_mode must be "direct" or "symfony_trusted_proxies" (got "%s")',
+                'client_ip_mode must be "direct", "symfony_trusted_proxies" or "symfony_global" (got "%s")',
                 $mode,
             ));
         }
@@ -103,24 +110,54 @@ final class ClientIpResolver
             return (string) $request->server->get('REMOTE_ADDR', '');
         }
 
-        if ($this->trustedProxies !== []) {
-            // Configure Symfony's trusted-proxy machinery from the CIDR list
-            // (static, process-wide — the mode owns this configuration).
-            Request::setTrustedProxies($this->trustedProxies, Request::HEADER_X_FORWARDED_FOR | Request::HEADER_FORWARDED);
-        }
+        // Symfony's trusted-proxy state is process-global: Kiwi saves it,
+        // applies its own scoped configuration for the derivation, and
+        // restores it afterwards, so Kiwi's security boundary can never
+        // mutate (or be silently mutated by) the application's global
+        // proxy configuration.
+        $previousProxies = Request::getTrustedProxies();
+        $previousHeaderSet = Request::getTrustedHeaderSet();
+        try {
+            if ($this->mode === self::MODE_SYMFONY_TRUSTED_PROXIES && $this->trustedProxies !== []) {
+                // Trust exactly the configured peers (never inherited).
+                Request::setTrustedProxies($this->trustedProxies, Request::HEADER_X_FORWARDED_FOR | Request::HEADER_FORWARDED);
+            } elseif ($this->mode === self::MODE_SYMFONY_GLOBAL) {
+                // The explicit opt-in: inherit the application's global
+                // trusted-proxy state (the operator selected this mode).
+                Request::setTrustedProxies(\is_array($previousProxies) ? $previousProxies : [], Request::HEADER_X_FORWARDED_FOR | Request::HEADER_FORWARDED);
+            } else {
+                // symfony_trusted_proxies with an empty list: trust nobody
+                // — the configured contract, never the global inheritance.
+                Request::setTrustedProxies([], Request::HEADER_X_FORWARDED_FOR | Request::HEADER_FORWARDED);
+            }
 
+            return self::resolveWithTrust($request, $this->rejectAmbiguousForwarding, $this->logger);
+        } finally {
+            Request::setTrustedProxies($previousProxies, $previousHeaderSet);
+        }
+    }
+
+    /**
+     * The canonical client IP under the scoped trust configuration.
+     *
+     * @throws AmbiguousForwardingException when reject_ambiguous_forwarding
+     *                                      is true and a trusted peer sends
+     *                                      both forwarding headers
+     */
+    private static function resolveWithTrust(Request $request, bool $rejectAmbiguousForwarding, ?LoggerInterface $logger): string
+    {
         $peer = (string) $request->server->get('REMOTE_ADDR', '');
-        $effectiveTrust = $this->trustedProxies !== [] ? $this->trustedProxies : Request::getTrustedProxies();
+        $effectiveTrust = Request::getTrustedProxies();
         if ($peer !== ''
             && IpUtils::checkIp($peer, $effectiveTrust)
             && $request->headers->has('X-Forwarded-For')
             && $request->headers->has('Forwarded')
         ) {
             $message = 'kiwicaptcha.risk: a trusted proxy sent BOTH X-Forwarded-For and Forwarded — the canonical client IP is ambiguous';
-            if ($this->rejectAmbiguousForwarding) {
+            if ($rejectAmbiguousForwarding) {
                 throw new AmbiguousForwardingException($message);
             }
-            $this->logger?->warning($message);
+            $logger?->warning($message);
 
             // Symfony itself refuses to derive an IP from both trusted
             // headers (ConflictingHeadersException). Without rejection the

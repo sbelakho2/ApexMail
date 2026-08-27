@@ -356,6 +356,32 @@ test.describe('KiwiCaptcha chained challenges (transaction obligation)', () => {
     expect(withTicketBody.nonce).toBeUndefined();
   });
 
+  test('a proof minted under txn-A fails when redeemed under txn-B with no chain side effects', async ({ page }) => {
+    // The cross-transaction isolation E2E: a stage-1 challenge is minted
+    // bound to txn-A (the fixture mirrors the production issuance), the
+    // browser solves it, and the submission presents the wrong
+    // transaction txn-B. The exact-binding contract refuses the proof
+    // (request_binding_mismatch), the application verification fails,
+    // and no chain state is created or advanced for either transaction
+    // (the chain only opens after a verified stage-1 solve).
+    await page.goto('/?chaining=1&binding=txn-A');
+    await solve(page);
+    const token = await tokenOf(page);
+
+    const mismatched = await chainVerify(page, token, { binding: 'txn-B' });
+    expect(mismatched.ok).toBe(false);
+    expect(mismatched.code).toBe('request_binding_mismatch');
+    expect(mismatched.chain_required).toBeUndefined();
+    expect(mismatched.chain_ticket).toBeUndefined();
+
+    // No chain was created for txn-B (and none for txn-A) as a side
+    // effect: a fresh stage-1 for txn-B is still an ordinary challenge
+    // (no auto-resumed stage-2, no open obligation).
+    const clean = await challengePost(page, { scope: 'login', request_binding: 'txn-B' });
+    expect(nonceOf(clean)).not.toBeNull();
+    expect(clean.chain_ticket).toBeUndefined();
+  });
+
   test('the fixture chain store mirrors the production terminal-state machine', async ({ page }) => {
     // The fixture-level self-test pins the store semantics that the HTTP
     // flow cannot reach directly: reserve() answers the terminal statuses

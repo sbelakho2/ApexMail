@@ -171,15 +171,17 @@ pub struct VerifyContext<'a> {
     /// the minimum duration (that is measured server-side via
     /// `issued_at_ns`/`now_ns`); it is only fed to the telemetry scorer.
     pub duration_ms: u64,
-    /// The injectable server clock provider (Unix seconds), invoked by
-    /// the verifier itself twice: once at receipt (the TTL checks) and
-    /// once after the expensive derivation (the final re-validation). A
-    /// caller-precomputed timestamp could not detect a challenge that
-    /// expired while the proof was deriving; the clock must be read
-    /// inside `verify_solution` around the derivation, so this is a
-    /// callable, never a value. Tests inject a counter closure; the
-    /// production Redis verifier supplies its own clock function.
-    pub now_unix: &'a mut dyn FnMut() -> u64,
+    /// The optional injectable server clock provider (Unix seconds).
+    /// `None`, the safe default, makes the verifier read the real system
+    /// clock itself, twice: once at receipt (the TTL checks) and once
+    /// after the expensive derivation (the final re-validation), so a
+    /// challenge that expired while the proof was deriving is always
+    /// detected. Injection (`Some`) exists only for deterministic
+    /// testing and specialized applications: a caller-supplied constant
+    /// closure would silently defeat the mid-derive expiry check, so the
+    /// default must not require the caller to remember to supply a live
+    /// clock.
+    pub now_unix: Option<&'a mut dyn FnMut() -> u64>,
     /// The server's receipt time in epoch microseconds — the same unit as the
     /// record's `issued_at_ns` (the field names keep the `_ns`
     /// suffix; the unit is microseconds, shared with PHP). Together they
@@ -654,6 +656,26 @@ pub(crate) fn check_argon2_ceilings(record: &ChallengeRecord) -> Result<(), Veri
 /// 11. Re-derive the SHA-256/Argon2id hash and check leading zero bits (the
 ///     actual PoW). The valid outcome's `nonce` field carries the consumed
 ///     canonical nonce (jti).
+/// Read the verifier's clock: the injected closure when one is supplied
+/// (deterministic tests, specialized applications), otherwise the real
+/// system clock in Unix seconds — the safe default that makes the
+/// mid-derive expiry check real for every integration that does not
+/// deliberately inject a clock.
+fn read_clock(ctx: &mut VerifyContext<'_>) -> u64 {
+    match &mut ctx.now_unix {
+        Some(clock) => clock(),
+        None => real_now_unix(),
+    }
+}
+
+/// The real system clock in Unix seconds.
+pub(crate) fn real_now_unix() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
 pub fn verify_solution(ctx: &mut VerifyContext<'_>) -> VerifyOutcome {
     // 0. Attempt accounting — counted on every verification call, correct or
     //    not, so a wrong-candidate loop cannot burn unbounded server-side
@@ -746,8 +768,10 @@ pub fn verify_solution(ctx: &mut VerifyContext<'_>) -> VerifyOutcome {
     //    verifier clock — the issuer and verifier clocks are broken. The
     //    first clock read happens here (the receipt time); the clock is
     //    read again after the derivation for the final re-validation, so
-    //    a challenge that expires mid-derive is detected.
-    let receipt_now = (ctx.now_unix)();
+    //    a challenge that expires mid-derive is detected. With no
+    //    injected clock (the safe default) the verifier reads the real
+    //    system clock.
+    let receipt_now = read_clock(ctx);
     if receipt_now >= ctx.record.expires_at {
         return VerifyOutcome::Invalid(VerifyError::Expired);
     }
@@ -894,9 +918,10 @@ pub fn verify_solution(ctx: &mut VerifyContext<'_>) -> VerifyOutcome {
     //     currently applied expectation snapshot (they are not
     //     dynamically re-resolved mid-verification; the security-epoch
     //     design bounds revocation latency through its short cache).
+    let final_now = read_clock(ctx);
     if let Err(e) = final_revalidate(
         ctx.record,
-        (ctx.now_unix)(),
+        final_now,
         ctx.expected_region,
         ctx.expected_policy_version,
         ctx.expected_issuer,
@@ -1218,6 +1243,10 @@ mod tests {
     const NOW_NS: u64 = 1_700_000_000_000_000;
 
     fn make_record(target_bits: u32) -> ChallengeRecord {
+        make_record_at(target_bits, NOW_UNIX, NOW_NS)
+    }
+
+    fn make_record_at(target_bits: u32, now_unix: u64, now_ns: u64) -> ChallengeRecord {
         let config = ChallengeConfig {
             secret_key: "test-key-16-bytes!".into(),
             kid: 1,
@@ -1239,7 +1268,7 @@ mod tests {
             policy_version: 1,
         };
         let issued =
-            issue_challenge(&config, "login", "1.2.3.4", NOW_UNIX, NOW_NS, 0, None).unwrap();
+            issue_challenge(&config, "login", "1.2.3.4", now_unix, now_ns, 0, None).unwrap();
         issued.record
     }
 
@@ -1277,7 +1306,7 @@ mod tests {
             revoked_kids: None,
             counter,
             duration_ms,
-            now_unix: &mut || NOW_UNIX + 1,
+            now_unix: Some(&mut || NOW_UNIX + 1),
             now_ns: NOW_NS + 5_000_000, // 5 s after issuance
             min_duration_ms: 0,
             expected_scope: None,
@@ -1736,7 +1765,7 @@ mod tests {
             revoked_kids: None,
             counter,
             duration_ms: 5000,
-            now_unix: &mut || NOW_UNIX + 121, // past TTL
+            now_unix: Some(&mut || NOW_UNIX + 121), // past TTL
             now_ns: NOW_NS,
             min_duration_ms: 0,
             expected_scope: None,
@@ -1772,7 +1801,7 @@ mod tests {
             revoked_kids: None,
             counter,
             duration_ms: 60_000, // client forges a 60 s solve — must NOT help
-            now_unix: &mut || NOW_UNIX + 1,
+            now_unix: Some(&mut || NOW_UNIX + 1),
             now_ns: NOW_NS + 1_000_000, // 1 s elapsed < 60 s floor
             min_duration_ms: 60_000,
             expected_scope: None,
@@ -1808,7 +1837,7 @@ mod tests {
             revoked_kids: None,
             counter,
             duration_ms: 5000, // forged
-            now_unix: &mut || NOW_UNIX,
+            now_unix: Some(&mut || NOW_UNIX),
             now_ns: NOW_NS, // same µs as issuance
             min_duration_ms: 0,
             expected_scope: None,
@@ -1852,7 +1881,7 @@ mod tests {
             revoked_kids: None,
             counter,
             duration_ms: 5000,
-            now_unix: &mut || NOW_UNIX + 1,
+            now_unix: Some(&mut || NOW_UNIX + 1),
             now_ns: NOW_NS + 5_000_000,
             min_duration_ms: 0,
             expected_scope: None,
@@ -1886,7 +1915,7 @@ mod tests {
             revoked_kids: None,
             counter,
             duration_ms: 5000,
-            now_unix: &mut || NOW_UNIX + 1,
+            now_unix: Some(&mut || NOW_UNIX + 1),
             now_ns: NOW_NS + 5_000_000,
             min_duration_ms: 0,
             expected_scope: None,
@@ -1920,7 +1949,7 @@ mod tests {
             revoked_kids: None,
             counter,
             duration_ms: 5000,
-            now_unix: &mut || NOW_UNIX + 1,
+            now_unix: Some(&mut || NOW_UNIX + 1),
             now_ns: NOW_NS + 5_000_000,
             min_duration_ms: 0,
             expected_scope: None,
@@ -1954,7 +1983,7 @@ mod tests {
             revoked_kids: None,
             counter,
             duration_ms: 5000,
-            now_unix: &mut || NOW_UNIX + 1,
+            now_unix: Some(&mut || NOW_UNIX + 1),
             now_ns: NOW_NS + 5_000_000,
             min_duration_ms: 0,
             expected_scope: None,
@@ -2007,7 +2036,7 @@ mod tests {
             revoked_kids: None,
             counter: counter2,
             duration_ms: 5000,
-            now_unix: &mut || NOW_UNIX + 1,
+            now_unix: Some(&mut || NOW_UNIX + 1),
             now_ns: NOW_NS + 5_000_000,
             min_duration_ms: 0,
             expected_scope: None,
@@ -2041,7 +2070,7 @@ mod tests {
             revoked_kids: None,
             counter: wrong,
             duration_ms: 5000,
-            now_unix: &mut || NOW_UNIX + 1,
+            now_unix: Some(&mut || NOW_UNIX + 1),
             now_ns: NOW_NS + 5_000_000,
             min_duration_ms: 0,
             expected_scope: None,
@@ -2067,7 +2096,7 @@ mod tests {
             revoked_kids: None,
             counter,
             duration_ms: 5000,
-            now_unix: &mut || NOW_UNIX + 1,
+            now_unix: Some(&mut || NOW_UNIX + 1),
             now_ns: NOW_NS + 5_000_000,
             min_duration_ms: 0,
             expected_scope: None,
@@ -2101,7 +2130,7 @@ mod tests {
             revoked_kids: None,
             counter: wrong,
             duration_ms: 5000,
-            now_unix: &mut || NOW_UNIX + 1,
+            now_unix: Some(&mut || NOW_UNIX + 1),
             now_ns: NOW_NS + 5_000_000,
             min_duration_ms: 0,
             expected_scope: None,
@@ -2125,7 +2154,7 @@ mod tests {
             revoked_kids: None,
             counter,
             duration_ms: 5000,
-            now_unix: &mut || NOW_UNIX + 1,
+            now_unix: Some(&mut || NOW_UNIX + 1),
             now_ns: NOW_NS + 5_000_000,
             min_duration_ms: 0,
             expected_scope: None,
@@ -2160,7 +2189,7 @@ mod tests {
             revoked_kids: None,
             counter,
             duration_ms: 5000,
-            now_unix: &mut || NOW_UNIX + 1,
+            now_unix: Some(&mut || NOW_UNIX + 1),
             now_ns: NOW_NS + 5_000_000,
             min_duration_ms: 0,
             expected_scope: None,
@@ -2193,7 +2222,7 @@ mod tests {
             revoked_kids: None,
             counter,
             duration_ms: 5000,
-            now_unix: &mut || NOW_UNIX + 1,
+            now_unix: Some(&mut || NOW_UNIX + 1),
             now_ns: NOW_NS + 5_000_000,
             min_duration_ms: 0,
             expected_scope: None,
@@ -2228,7 +2257,7 @@ mod tests {
             revoked_kids: None,
             counter,
             duration_ms: 5000,
-            now_unix: &mut || NOW_UNIX + 1,
+            now_unix: Some(&mut || NOW_UNIX + 1),
             now_ns: NOW_NS + 5_000_000,
             min_duration_ms: 0,
             expected_scope: None,
@@ -2255,7 +2284,7 @@ mod tests {
             revoked_kids: None,
             counter,
             duration_ms: 5000,
-            now_unix: &mut || NOW_UNIX + 1,
+            now_unix: Some(&mut || NOW_UNIX + 1),
             now_ns: NOW_NS + 5_000_000,
             min_duration_ms: 0,
             expected_scope: None,
@@ -2288,7 +2317,7 @@ mod tests {
             revoked_kids: None,
             counter,
             duration_ms: 5000,
-            now_unix: &mut || NOW_UNIX + 1,
+            now_unix: Some(&mut || NOW_UNIX + 1),
             now_ns: NOW_NS + 5_000_000,
             min_duration_ms: 0,
             expected_scope: None,
@@ -2322,7 +2351,7 @@ mod tests {
             revoked_kids: None,
             counter,
             duration_ms: 5000,
-            now_unix: &mut || NOW_UNIX + 1,
+            now_unix: Some(&mut || NOW_UNIX + 1),
             now_ns: NOW_NS + 5_000_000,
             min_duration_ms: 0,
             expected_scope: None,
@@ -2356,7 +2385,7 @@ mod tests {
             revoked_kids: None,
             counter,
             duration_ms: 5000,
-            now_unix: &mut || NOW_UNIX + 1,
+            now_unix: Some(&mut || NOW_UNIX + 1),
             now_ns: NOW_NS + 5_000_000,
             min_duration_ms: 0,
             expected_scope: None,
@@ -2392,7 +2421,7 @@ mod tests {
             revoked_kids: None,
             counter,
             duration_ms: 60_000, // a forged long client duration must NOT resurrect the legacy path
-            now_unix: &mut || NOW_UNIX + 1,
+            now_unix: Some(&mut || NOW_UNIX + 1),
             now_ns: NOW_NS + 10_000_000,
             min_duration_ms: 0,
             expected_scope: None,
@@ -2427,7 +2456,7 @@ mod tests {
             revoked_kids: None,
             counter,
             duration_ms: 5000,
-            now_unix: &mut || NOW_UNIX + 1,
+            now_unix: Some(&mut || NOW_UNIX + 1),
             now_ns: NOW_NS.saturating_sub(1_000_000), // 1 s skew, issuer ahead
             min_duration_ms: 0,
             expected_scope: None,
@@ -2461,7 +2490,7 @@ mod tests {
             revoked_kids: None,
             counter,
             duration_ms: 5000,
-            now_unix: &mut || NOW_UNIX + 1,
+            now_unix: Some(&mut || NOW_UNIX + 1),
             now_ns: NOW_NS.saturating_sub(6_000_000), // 6 s skew
             min_duration_ms: 0,
             expected_scope: None,
@@ -2626,14 +2655,14 @@ mod tests {
             revoked_kids: None,
             counter,
             duration_ms: 5000,
-            now_unix: &mut || {
+            now_unix: Some(&mut || {
                 clock_calls += 1;
                 if clock_calls == 1 {
                     expires_at - 1
                 } else {
                     expires_at + 1
                 }
-            },
+            }),
             now_ns: NOW_NS + 5_000_000,
             min_duration_ms: 0,
             expected_scope: None,
@@ -2667,7 +2696,7 @@ mod tests {
             revoked_kids: None,
             counter: counter2,
             duration_ms: 5000,
-            now_unix: &mut || expires_at - 10,
+            now_unix: Some(&mut || expires_at - 10),
             now_ns: NOW_NS + 5_000_000,
             min_duration_ms: 0,
             expected_scope: None,
@@ -2685,6 +2714,45 @@ mod tests {
             verify_solution(&mut ctx2),
             VerifyOutcome::Valid { .. }
         ));
+    }
+
+    #[test]
+    fn the_safe_default_clock_is_the_real_system_clock() {
+        // No injected clock (the documented integration default): the
+        // verifier reads the real system clock itself, so a freshly
+        // issued challenge verifies (the TTL + the post-derive checks
+        // both use the live clock, not a caller snapshot). The record is
+        // issued at the real clock; make_record's fixed test epoch
+        // would look future-dated to the live clock.
+        let now = real_now_unix();
+        let now_ns = crate::challenge::now_epoch_micros();
+        let mut record = make_record_at(8, now, now_ns);
+        let counter = solve_for_test(&record).unwrap();
+        let mut ctx = VerifyContext {
+            record: &mut record,
+            secret_key: "test-key-16-bytes!",
+            secrets_by_kid: None,
+            revoked_kids: None,
+            counter,
+            duration_ms: 5000,
+            now_unix: None,
+            now_ns: now_ns + 5_000_000,
+            min_duration_ms: 0,
+            expected_scope: None,
+            expected_request_binding: RequestBindingExpectation::Unenforced,
+            expected_region: None,
+            expected_issuer: None,
+            expected_policy_version: None,
+            client_ip: Some("1.2.3.4"),
+            telemetry: None,
+            enforce_telemetry: false,
+            max_attempts: 0,
+            accept_legacy_v1: false,
+        };
+        assert!(
+            matches!(verify_solution(&mut ctx), VerifyOutcome::Valid { .. }),
+            "the None default reads the live system clock and verifies a fresh challenge"
+        );
     }
 
     #[test]
@@ -2782,7 +2850,7 @@ mod tests {
             revoked_kids: None,
             counter,
             duration_ms: 5000,
-            now_unix: &mut || 1_000_001,
+            now_unix: Some(&mut || 1_000_001),
             now_ns: NOW_NS + 5_000_000,
             min_duration_ms: 0,
             expected_scope: Some("signup"),
@@ -2814,7 +2882,7 @@ mod tests {
             revoked_kids: None,
             counter,
             duration_ms: 5000,
-            now_unix: &mut || expires_at, // exactly at expiry
+            now_unix: Some(&mut || expires_at), // exactly at expiry
             now_ns: NOW_NS + 5_000_000,
             min_duration_ms: 0,
             expected_scope: None,
@@ -2846,7 +2914,7 @@ mod tests {
             revoked_kids: None,
             counter,
             duration_ms: 5000,
-            now_unix: &mut || expires_at - 1,
+            now_unix: Some(&mut || expires_at - 1),
             now_ns: NOW_NS + 5_000_000,
             min_duration_ms: 0,
             expected_scope: None,
@@ -2947,7 +3015,7 @@ mod tests {
             revoked_kids: None,
             counter,
             duration_ms: 5000,
-            now_unix: &mut || NOW_UNIX + 1,
+            now_unix: Some(&mut || NOW_UNIX + 1),
             now_ns: NOW_NS + 6_000, // 6 ms elapsed > 5 ms floor (µs)
             min_duration_ms: 0,
             expected_scope: None,
@@ -2972,7 +3040,7 @@ mod tests {
             revoked_kids: None,
             counter,
             duration_ms: 60_000, // forged long client duration must NOT help
-            now_unix: &mut || NOW_UNIX + 1,
+            now_unix: Some(&mut || NOW_UNIX + 1),
             now_ns: NOW_NS + 4_999, // 4.999 ms elapsed < 5 ms floor (µs)
             min_duration_ms: 0,
             expected_scope: None,
@@ -3238,7 +3306,7 @@ mod tests {
             revoked_kids: None,
             counter,
             duration_ms: 5000,
-            now_unix: &mut || NOW_UNIX + 1,
+            now_unix: Some(&mut || NOW_UNIX + 1),
             now_ns: NOW_NS + 5_000_000,
             min_duration_ms: 0,
             expected_scope: None,
@@ -3269,7 +3337,7 @@ mod tests {
             revoked_kids: None,
             counter,
             duration_ms: 5000,
-            now_unix: &mut || NOW_UNIX + 1,
+            now_unix: Some(&mut || NOW_UNIX + 1),
             now_ns: NOW_NS + 5_000_000,
             min_duration_ms: 0,
             expected_scope: None,
@@ -3311,7 +3379,7 @@ mod tests {
             revoked_kids: None,
             counter,
             duration_ms: 5000,
-            now_unix: &mut || NOW_UNIX + 1,
+            now_unix: Some(&mut || NOW_UNIX + 1),
             now_ns: NOW_NS + 5_000_000,
             min_duration_ms: 0,
             expected_scope: None,
@@ -3345,7 +3413,7 @@ mod tests {
             revoked_kids: None,
             counter,
             duration_ms: 5000,
-            now_unix: &mut || NOW_UNIX + 1,
+            now_unix: Some(&mut || NOW_UNIX + 1),
             now_ns: NOW_NS + 5_000_000,
             min_duration_ms: 0,
             expected_scope: None,
@@ -3379,7 +3447,7 @@ mod tests {
             revoked_kids: None,
             counter,
             duration_ms: 5000,
-            now_unix: &mut || NOW_UNIX + 1,
+            now_unix: Some(&mut || NOW_UNIX + 1),
             now_ns: NOW_NS + 5_000_000,
             min_duration_ms: 0,
             expected_scope: None,
@@ -3406,7 +3474,7 @@ mod tests {
             revoked_kids: None,
             counter,
             duration_ms: 5000,
-            now_unix: &mut || NOW_UNIX + 1,
+            now_unix: Some(&mut || NOW_UNIX + 1),
             now_ns: NOW_NS + 5_000_000,
             min_duration_ms: 0,
             expected_scope: None,
@@ -3444,7 +3512,7 @@ mod tests {
             revoked_kids: None,
             counter,
             duration_ms: 5000,
-            now_unix: &mut || NOW_UNIX + 1,
+            now_unix: Some(&mut || NOW_UNIX + 1),
             now_ns: NOW_NS + 5_000_000,
             min_duration_ms: 0,
             expected_scope: None,
@@ -3479,7 +3547,7 @@ mod tests {
             revoked_kids: None,
             counter,
             duration_ms: 5000,
-            now_unix: &mut || NOW_UNIX + 1,
+            now_unix: Some(&mut || NOW_UNIX + 1),
             now_ns: NOW_NS + 5_000_000,
             min_duration_ms: 0,
             expected_scope: None,
@@ -3513,7 +3581,7 @@ mod tests {
             revoked_kids: None,
             counter,
             duration_ms: 5000,
-            now_unix: &mut || NOW_UNIX + 1,
+            now_unix: Some(&mut || NOW_UNIX + 1),
             now_ns: NOW_NS + 5_000_000,
             min_duration_ms: 0,
             expected_scope: None,
@@ -3540,7 +3608,7 @@ mod tests {
             revoked_kids: None,
             counter,
             duration_ms: 5000,
-            now_unix: &mut || NOW_UNIX + 1,
+            now_unix: Some(&mut || NOW_UNIX + 1),
             now_ns: NOW_NS + 5_000_000,
             min_duration_ms: 0,
             expected_scope: None,
@@ -3625,7 +3693,7 @@ mod tests {
             revoked_kids: None,
             counter,
             duration_ms: 5000,
-            now_unix: &mut || NOW_UNIX + 1,
+            now_unix: Some(&mut || NOW_UNIX + 1),
             now_ns: NOW_NS + 5_000_000,
             min_duration_ms: 0,
             expected_scope: None,
@@ -3655,7 +3723,7 @@ mod tests {
             revoked_kids: None,
             counter,
             duration_ms: 5000,
-            now_unix: &mut || NOW_UNIX + 1,
+            now_unix: Some(&mut || NOW_UNIX + 1),
             now_ns: NOW_NS + 5_000_000,
             min_duration_ms: 0,
             expected_scope: None,
@@ -3682,7 +3750,7 @@ mod tests {
             revoked_kids: None,
             counter,
             duration_ms: 5000,
-            now_unix: &mut || NOW_UNIX + 1,
+            now_unix: Some(&mut || NOW_UNIX + 1),
             now_ns: NOW_NS + 5_000_000,
             min_duration_ms: 0,
             expected_scope: None,
@@ -3721,7 +3789,7 @@ mod tests {
             revoked_kids: None,
             counter,
             duration_ms: 5000,
-            now_unix: &mut || NOW_UNIX + 1,
+            now_unix: Some(&mut || NOW_UNIX + 1),
             now_ns: NOW_NS + 5_000_000,
             min_duration_ms: 0,
             expected_scope: None,
@@ -3748,7 +3816,7 @@ mod tests {
             revoked_kids: None,
             counter,
             duration_ms: 5000,
-            now_unix: &mut || NOW_UNIX + 1,
+            now_unix: Some(&mut || NOW_UNIX + 1),
             now_ns: NOW_NS + 5_000_000,
             min_duration_ms: 0,
             expected_scope: None,
@@ -3790,7 +3858,7 @@ mod tests {
             revoked_kids: None,
             counter,
             duration_ms: 5000,
-            now_unix: &mut || NOW_UNIX + 1,
+            now_unix: Some(&mut || NOW_UNIX + 1),
             now_ns: NOW_NS + 5_000_000,
             min_duration_ms: 0,
             expected_scope: None,
@@ -3821,7 +3889,7 @@ mod tests {
             revoked_kids: None,
             counter: counter2,
             duration_ms: 5000,
-            now_unix: &mut || NOW_UNIX + 1,
+            now_unix: Some(&mut || NOW_UNIX + 1),
             now_ns: NOW_NS + 5_000_000,
             min_duration_ms: 0,
             expected_scope: None,
@@ -3852,7 +3920,7 @@ mod tests {
             revoked_kids: None,
             counter,
             duration_ms: 5000,
-            now_unix: &mut || NOW_UNIX + 1,
+            now_unix: Some(&mut || NOW_UNIX + 1),
             now_ns: NOW_NS + 5_000_000,
             min_duration_ms: 0,
             expected_scope: None,
@@ -3898,7 +3966,7 @@ mod tests {
             revoked_kids: Some(&revoked),
             counter,
             duration_ms: 5000,
-            now_unix: &mut || NOW_UNIX + 1,
+            now_unix: Some(&mut || NOW_UNIX + 1),
             now_ns: NOW_NS + 5_000_000,
             min_duration_ms: 0,
             expected_scope: None,
@@ -3926,7 +3994,7 @@ mod tests {
             revoked_kids: Some(&revoked),
             counter,
             duration_ms: 5000,
-            now_unix: &mut || NOW_UNIX + 1,
+            now_unix: Some(&mut || NOW_UNIX + 1),
             now_ns: NOW_NS + 5_000_000,
             min_duration_ms: 0,
             expected_scope: None,
@@ -3968,7 +4036,7 @@ mod tests {
             revoked_kids: Some(&revoked),
             counter,
             duration_ms: 5000,
-            now_unix: &mut || NOW_UNIX + 1,
+            now_unix: Some(&mut || NOW_UNIX + 1),
             now_ns: NOW_NS + 5_000_000,
             min_duration_ms: 0,
             expected_scope: None,
@@ -4207,7 +4275,7 @@ mod tests {
             revoked_kids: None,
             counter,
             duration_ms: 5000,
-            now_unix: &mut || NOW_UNIX + 1, // issued_at > now + 60 → invalid
+            now_unix: Some(&mut || NOW_UNIX + 1), // issued_at > now + 60 → invalid
             now_ns: NOW_NS + 5_000_000,
             min_duration_ms: 0,
             expected_scope: None,
@@ -4240,7 +4308,7 @@ mod tests {
             revoked_kids: None,
             counter,
             duration_ms: 5000,
-            now_unix: &mut || NOW_UNIX + 1,
+            now_unix: Some(&mut || NOW_UNIX + 1),
             now_ns: NOW_NS + 5_000_000,
             min_duration_ms: 0,
             expected_scope: None,
@@ -4280,7 +4348,7 @@ mod tests {
             revoked_kids: None,
             counter,
             duration_ms: 5000,
-            now_unix: &mut || cheap_now,
+            now_unix: Some(&mut || cheap_now),
             now_ns: NOW_NS + 5_000_000,
             min_duration_ms: 0,
             expected_scope: None,
@@ -4331,7 +4399,7 @@ mod tests {
             revoked_kids: None,
             counter,
             duration_ms: 5000,
-            now_unix: &mut || now_unix,
+            now_unix: Some(&mut || now_unix),
             now_ns: NOW_NS + 5_000_000,
             min_duration_ms: 0,
             expected_scope: None,
@@ -4555,7 +4623,7 @@ mod tests {
             revoked_kids: None,
             counter,
             duration_ms: 5000,
-            now_unix: &mut || 1_700_000_100, // before expires_at 1_700_000_120
+            now_unix: Some(&mut || 1_700_000_100), // before expires_at 1_700_000_120
             now_ns: FIXTURE_NOW_NS + 5_000_000,
             min_duration_ms: 0,
             expected_scope: None,
@@ -4643,7 +4711,7 @@ mod tests {
             revoked_kids: None,
             counter,
             duration_ms: 5000,
-            now_unix: &mut || 1_700_000_100,
+            now_unix: Some(&mut || 1_700_000_100),
             now_ns: FIXTURE_NOW_NS + 5_000_000,
             min_duration_ms: 0,
             expected_scope: Some("signup"),

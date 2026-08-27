@@ -1600,11 +1600,16 @@ impl ProductionVerifier {
     ///   other caller sees [`VerifyError::AlreadyConsumed`]. The
     ///   deterministic invalid outcome replays without an identity (it
     ///   grants nothing).
-    /// - `expected_request_binding` — when provided, the record's signed
-    ///   `request_binding` must match exactly (constant-time compare); a
-    ///   differing binding — or a record without one — is rejected with
-    ///   [`VerifyError::RequestBindingMismatch`]. `None` disables the
-    ///   check (the binding is then merely returned on a valid outcome).
+    /// - `expected_request_binding` — a [`RequestBindingExpectation`]
+    ///   value, not an optional: [`RequestBindingExpectation::Exact`]
+    ///   requires Option-equality with the record's signed
+    ///   `request_binding` (a differing binding, a bound record under an
+    ///   explicitly-unbound expectation, or an unbound record under a
+    ///   bound expectation are all [`VerifyError::RequestBindingMismatch`]);
+    ///   [`RequestBindingExpectation::Unenforced`] is the explicit
+    ///   bypass (the binding is then merely returned on a valid
+    ///   outcome). There is no implicit "None disables" — the bypass
+    ///   must be named, exactly like the PHP `RequestBindingExpectation`.
     ///
     /// Flow: decode → peek (GET) → cheap validation → Argon admission gate
     /// (acquire → lease) → atomic consume (pending→consumed transition, the
@@ -1874,6 +1879,99 @@ impl ProductionVerifier {
             let _ =
                 self.store
                     .commit_result(&token.nonce, false, record.request_binding.as_deref());
+            VerifyOutcome::Invalid(VerifyError::InsufficientWork)
+        }
+    }
+
+    /// Resume an interrupted same-operation redemption — the PHP
+    /// `resumeConsumedOperation()` parity. The record is consumed
+    /// without a committed result (the original winner's commit failed,
+    /// or its response was lost); the exact constant-time match of the
+    /// presented operation identity with the recorded one is the sole
+    /// authorization to reconstruct. The binding expectation and the signed expiry are
+    /// re-checked (the expiry with the clock read before AND after the
+    /// re-derivation, so a resume crossing the deadline mid-derive is
+    /// Expired), then the proof is re-derived from the presented token
+    /// and committed deterministically: the retry sees a committed
+    /// outcome instead of ConsumeIndeterminate. No replay is possible:
+    /// the one-shot consume is the authorization boundary, and a
+    /// mismatched identity, a different binding or an absent record all
+    /// fail closed.
+    pub fn resume_consumed_operation(
+        &self,
+        token: &str,
+        operation_identity: &str,
+        expected_request_binding: RequestBindingExpectation<'_>,
+    ) -> VerifyOutcome {
+        // 1. Token decode (the shared decoder bounds the counter).
+        let token = match SolutionToken::decode(token) {
+            Ok(token) => token,
+            Err(_) => return VerifyOutcome::Invalid(VerifyError::MalformedToken),
+        };
+
+        // 2. The retained consumed state must exist (the record was
+        //    consumed and retained, or expired away).
+        let state = match self.store.consumed_state(&token.nonce) {
+            Ok(Some(state)) => state,
+            Ok(None) => return VerifyOutcome::Invalid(VerifyError::RecordNotFound),
+            Err(_) => return VerifyOutcome::Invalid(VerifyError::StorageUnavailable),
+        };
+
+        // 3. The identity gate: the exact constant-time match with the
+        //    recorded identity is the sole authorization to reconstruct.
+        let identity_ok = match state.operation_identity.as_deref() {
+            Some(recorded) => ct_eq(recorded.as_bytes(), operation_identity.as_bytes()),
+            None => false,
+        };
+        if !identity_ok {
+            return VerifyOutcome::Invalid(VerifyError::AlreadyConsumed);
+        }
+
+        // 4. The binding expectation (the same shared exact helper).
+        if let Err(e) = check_request_binding(
+            state.record.request_binding.as_deref(),
+            expected_request_binding,
+        ) {
+            return VerifyOutcome::Invalid(e);
+        }
+
+        // 5. The signed expiry gate with the clock read before AND after
+        //    the re-derivation.
+        let receipt_now = (self.now_unix)();
+        if receipt_now >= state.record.expires_at {
+            return VerifyOutcome::Invalid(VerifyError::Expired);
+        }
+
+        // 6. Re-derive the proof from the presented token and commit the
+        //    deterministic outcome (best-effort, like the ordinary
+        //    commit: a failed commit degrades the retry to
+        //    ConsumeIndeterminate, never to a replay).
+        let hash = match derive_hash(&state.record, token.counter) {
+            Ok(h) => h,
+            Err(e) => return VerifyOutcome::Invalid(e),
+        };
+        let final_now = (self.now_unix)();
+        if final_now >= state.record.expires_at {
+            return VerifyOutcome::Invalid(VerifyError::Expired);
+        }
+        if leading_zero_bits(&hash) >= state.record.target_bits {
+            let outcome = VerifyOutcome::Valid {
+                nonce: state.record.nonce.clone(),
+                request_binding: state.record.request_binding.clone(),
+                from_stored_result: false,
+            };
+            let _ = self.store.commit_result(
+                &token.nonce,
+                true,
+                state.record.request_binding.as_deref(),
+            );
+            outcome
+        } else {
+            let _ = self.store.commit_result(
+                &token.nonce,
+                false,
+                state.record.request_binding.as_deref(),
+            );
             VerifyOutcome::Invalid(VerifyError::InsufficientWork)
         }
     }
@@ -2435,6 +2533,96 @@ mod tests {
                 }
             ),
             "a wait-free store returns the retained Valid: {outcome2:?}"
+        );
+    }
+
+    #[test]
+    fn resume_consumed_operation_reconstructs_the_interrupted_redemption() {
+        // The PHP-parity resultless-consume recovery: the original
+        // winner's consume landed but its commit never did (crash /
+        // lost response). The exact-identity resume re-derives and
+        // commits deterministically; a mismatched identity is refused
+        // (AlreadyConsumed — one solved token can never fund a second
+        // operation).
+        let Some(url) = redis_url() else { return };
+        let prefix = format!("kiwitest:resume:{}:", std::process::id());
+        let issued = issue_challenge(
+            &sha_config(4),
+            "login",
+            IP,
+            now_unix(),
+            now_micros(),
+            0,
+            None,
+        )
+        .unwrap();
+        let identity = "logical-op-resume";
+        let token = encode_token(
+            &issued.record.nonce,
+            solve_for_test(&issued.record).expect("4-bit sha solves"),
+        );
+        let issued_at_ns = issued.record.issued_at_ns;
+
+        let store =
+            RedisChallengeStore::new(redis::Client::open(url.clone()).unwrap(), prefix.clone());
+        store.store(&issued.record).unwrap();
+        assert!(
+            store
+                .consume_with_operation_identity(&issued.record.nonce, Some(identity))
+                .unwrap()
+                .is_some(),
+            "the consume transition lands"
+        );
+        // No commit: the interrupted winner never persisted its outcome.
+
+        let verifier = ProductionVerifier::new(
+            RedisChallengeStore::new(redis::Client::open(url.clone()).unwrap(), prefix.clone()),
+            SECRET,
+        );
+        // A mismatched identity is refused.
+        let wrong = verifier.resume_consumed_operation(
+            &token,
+            "logical-op-someone-else",
+            RequestBindingExpectation::Unenforced,
+        );
+        assert_eq!(
+            wrong,
+            VerifyOutcome::Invalid(VerifyError::AlreadyConsumed),
+            "a mismatched identity can never reconstruct the redemption"
+        );
+
+        // The exact identity reconstructs: re-derive + commit -> Valid.
+        let resumed = verifier.resume_consumed_operation(
+            &token,
+            identity,
+            RequestBindingExpectation::Unenforced,
+        );
+        assert!(
+            matches!(resumed, VerifyOutcome::Valid { .. }),
+            "the exact-identity resume reconstructs the redemption: {resumed:?}"
+        );
+        assert_eq!(issued_at_ns, issued.record.issued_at_ns);
+
+        // The retry now sees the committed outcome (no more
+        // ConsumeIndeterminate): the same verify with the identity
+        // replays the stored success.
+        let replay = verifier.verify(
+            &token,
+            "login",
+            IP,
+            issued_at_ns + 1_000_000,
+            Some(identity),
+            RequestBindingExpectation::Unenforced,
+        );
+        assert!(
+            matches!(
+                replay,
+                VerifyOutcome::Valid {
+                    from_stored_result: true,
+                    ..
+                }
+            ),
+            "the committed outcome is now deterministically retained: {replay:?}"
         );
     }
 

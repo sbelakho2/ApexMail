@@ -987,7 +987,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($path === '/challenge' || $path ==
             return true;
         }
     }
-    $challenge = $issuer->issue($scope, (string) ($_SERVER['REMOTE_ADDR'] ?? '127.0.0.1'));
+    // The fixture mirrors the production binding contract: the stage-1
+    // challenge is minted bound to the presented transaction binding
+    // (the same value the chain machinery opens the obligation under), so
+    // the browser E2E can prove that a proof minted under txn-A fails
+    // when redeemed under txn-B — the stored proof really carries the
+    // binding, exactly like the bundle's issuance.
+    $presentedBinding = isset($body['request_binding']) && is_string($body['request_binding']) ? $body['request_binding'] : null;
+    $challenge = $issuer->issue($scope, (string) ($_SERVER['REMOTE_ADDR'] ?? '127.0.0.1'), $presentedBinding);
     $record = $issueStorage->find($challenge->nonce);
     if ($record === null) {
         http_response_code(500);
@@ -1109,11 +1116,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $path === '/verify') {
         return true;
     }
     $storage = new ArrayStorage();
-    $storage->store(\KiwiCaptcha\ChallengeRecord::fromArray(json_decode((string) file_get_contents(recordFile($nonce)), true)));
+    $record = \KiwiCaptcha\ChallengeRecord::fromArray(json_decode((string) file_get_contents(recordFile($nonce)), true));
+    $storage->store($record);
     @unlink(recordFile($nonce));
     $verifier = new Verifier($storage);
     $scope = (string) ($body['scope'] ?? 'login');
-    $outcome = $verifier->verify((string) ($body['token'] ?? ''), $secret, $scope, (string) ($_SERVER['REMOTE_ADDR'] ?? '127.0.0.1'));
+    // The exact-binding contract: a challenge minted bound to a
+    // transaction must be redeemed against that same binding (the stored
+    // proof's own transaction anchor — the production canonical binding
+    // would come from the request's authoritative resolution; the
+    // fixture's verify endpoint uses the stored value).
+    $outcome = $verifier->verify((string) ($body['token'] ?? ''), $secret, $scope, (string) ($_SERVER['REMOTE_ADDR'] ?? '127.0.0.1'), expectedRequestBinding: $record->requestBinding);
     echo json_encode(['ok' => $outcome->isOk(), 'code' => $outcome->code()]);
 
     return true;

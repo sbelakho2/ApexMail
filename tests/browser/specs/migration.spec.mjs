@@ -95,7 +95,10 @@ test.describe('KiwiCaptcha migration compatibility', () => {
       data: { secret: 'compat-secret-42', response: token, remoteip: '127.0.0.1', action: 'admin', cdata: 'forged' },
     });
     const body = await verified.json();
-    expect(body.success).toBe(true);
+    // The provider error code is surfaced in the failure message so a
+    // first-attempt failure is diagnosable (the audit's request: never
+    // assert success without the response's error details).
+    expect(body.success, `siteverify must succeed — full response: ${JSON.stringify(body)}`).toBe(true);
     expect(body.action, 'the response action must come from SERVER state, never the request').toBe('checkout');
     expect(body.cdata, 'the response cdata must come from SERVER state, never the request').toBe('order_19382');
 

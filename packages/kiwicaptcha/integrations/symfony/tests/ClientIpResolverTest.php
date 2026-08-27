@@ -95,6 +95,35 @@ final class ClientIpResolverTest extends TestCase
         ])), 'an empty trusted_proxies list must ignore forwarding headers everywhere');
     }
 
+    public function testEmptyTrustedProxiesNeverInheritsSymfonyGlobalTrust(): void
+    {
+        // The Kiwi-owned trust contract: an empty risk.trusted_proxies
+        // list means trust nobody — Symfony's process-global trusted
+        // proxies are never inherited implicitly, even when the
+        // application configured a broad global set. The forwarded
+        // address is ignored and the socket peer is the canonical IP.
+        Request::setTrustedProxies(['10.0.0.0/8'], Request::HEADER_X_FORWARDED_FOR | Request::HEADER_FORWARDED);
+        $resolver = new ClientIpResolver(ClientIpResolver::MODE_SYMFONY_TRUSTED_PROXIES, []);
+        $ip = $resolver->resolve($this->request('10.1.2.3', [
+            'X-Forwarded-For' => '203.0.113.9',
+        ]));
+        self::assertSame('10.1.2.3', $ip, 'the global Symfony trust is never inherited with an empty Kiwi list');
+        self::assertSame(['10.0.0.0/8'], Request::getTrustedProxies(), 'the resolver restores the application global trust afterwards');
+    }
+
+    public function testSymfonyGlobalModeIsTheExplicitInheritanceOptIn(): void
+    {
+        // The explicit mode that inherits Symfony's global trust — the
+        // operator selected it deliberately.
+        Request::setTrustedProxies(['10.0.0.0/8'], Request::HEADER_X_FORWARDED_FOR | Request::HEADER_FORWARDED);
+        $resolver = new ClientIpResolver(ClientIpResolver::MODE_SYMFONY_GLOBAL, []);
+        $ip = $resolver->resolve($this->request('10.1.2.3', [
+            'X-Forwarded-For' => '203.0.113.9',
+        ]));
+        self::assertSame('203.0.113.9', $ip, 'the explicit symfony_global mode inherits the configured global trust');
+        self::assertSame(['10.0.0.0/8'], Request::getTrustedProxies(), 'the resolver restores the application global trust afterwards');
+    }
+
     public function testBothForwardingHeadersFromTrustedPeerAreLoggedByDefault(): void
     {
         $logs = [];

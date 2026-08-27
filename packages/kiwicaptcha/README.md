@@ -273,17 +273,21 @@ let mut ctx = VerifyContext {
     revoked_kids: None,
     counter: solution.counter,
     duration_ms: solution.duration_ms, // client-reported — telemetry only
-    now_unix: &mut || now_unix,       // the injectable server clock (Unix
-                                       // seconds): the verifier reads it
-                                       // ITSELF twice — once at receipt
-                                       // (the TTL checks) and once AFTER
-                                       // the expensive derivation (the
+    now_unix: None,                   // THE SAFE DEFAULT: no injected
+                                       // clock — the verifier reads the
+                                       // real system clock itself twice
+                                       // (once at receipt for the TTL
+                                       // checks, once after the
+                                       // expensive derivation for the
                                        // final post-derive expiry
                                        // re-validation), so a challenge
                                        // that expired mid-derive is
-                                       // detected. Supply a closure; the
-                                       // production Redis verifier uses
-                                       // its own clock function.
+                                       // detected. Injection (Some(&mut
+                                       // || ...)) exists only for
+                                       // deterministic tests and
+                                       // specialized applications — a
+                                       // constant closure would defeat
+                                       // the mid-derive expiry check.
     now_ns,                            // receipt time in EPOCH MICROSECONDS
                                        // (server-side elapsed-duration check)
     min_duration_ms: 0,                // floor is max(ctx, record.min_duration_ms);

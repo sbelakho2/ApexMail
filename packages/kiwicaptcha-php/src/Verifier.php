@@ -345,17 +345,15 @@ final class Verifier
         ?string $expectedRequestBinding = null,
         ?RequestBindingExpectation $bindingExpectation = null,
     ): VerifyOutcome {
-        // The explicit enforcement policy: the legacy nullable argument
-        // maps to the temporary compatibility mode unless the caller
-        // supplies an exact/unenforced expectation.
         // The default binding semantics are exact: `expectedRequestBinding`
         // means "require the challenge to be bound to this transaction",
-        // so an unbound record fails closed. The legacy compatibility
-        // mode, where an unbound record passes regardless of the expected
-        // binding and null disables enforcement entirely, remains
-        // available only through the explicitly named
-        // RequestBindingExpectation::legacy() value; it is never silently
-        // chosen by the plain parameter.
+        // so an unbound record under a presented expected binding fails
+        // closed. The legacy compatibility mode, where an unbound record
+        // passes regardless of the expected binding and null disables
+        // enforcement entirely, remains available only through the
+        // explicitly named RequestBindingExpectation::legacy() value; it
+        // is never silently chosen by the plain parameter (the nullable
+        // argument is NOT a temporary compatibility switch).
         $expectation = $bindingExpectation ?? RequestBindingExpectation::exact($expectedRequestBinding);
         try {
             $token = SolutionToken::decode($rawToken);
@@ -1395,9 +1393,9 @@ final class Verifier
         //     helper used by every binding check in the verifier (the
         //     cheap phase, the replay gate, the final revalidation and
         //     the resumed-operation path): exact Option-equality under
-        //     RequestBindingExpectation::exact(), the legacy
-        //     compatibility mode for the historical nullable argument,
-        //     or no enforcement under unenforced().
+        //     RequestBindingExpectation::exact(), the explicitly named
+        //     legacy mode under RequestBindingExpectation::legacy(), or
+        //     no enforcement under unenforced().
         return $this->checkRequestBinding($record, $expectation);
     }
 
