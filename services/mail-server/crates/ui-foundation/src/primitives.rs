@@ -715,7 +715,7 @@ impl<'a> RadioGroup<'a> {
                 option_id, checked, tabindex, item.value, state,
                 radio_variant_class(self.variant),
                 radio_size_class(self.size),
-                disabled, indicator, &option_id, item.label,
+                disabled, indicator, option_id, item.label,
             )
         }).collect::<Vec<_>>().join("");
 

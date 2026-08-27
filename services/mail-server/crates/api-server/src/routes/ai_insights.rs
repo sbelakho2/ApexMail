@@ -123,7 +123,7 @@ async fn send_time_optimization(
         "send_time:{}:{}:{}",
         auth.tenant_id,
         recipient.unwrap_or("all"),
-        &tz
+        tz
     );
 
     match sqlx::query("DELETE FROM ai_send_time_cache WHERE expires_at <= NOW()")

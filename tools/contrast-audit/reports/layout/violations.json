@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-08-22T23:36:39.116Z",
+  "generatedAt": "2026-08-27T12:46:25.711Z",
   "runs": 1055,
   "totalFindings": 0,
   "byKind": {},
@@ -8,6 +8,15 @@
       "surface": "web",
       "page": "/",
       "theme": "dark",
+      "viewport": "desktop",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "web",
+      "page": "/",
+      "theme": "light",
       "viewport": "mobile",
       "error": null,
       "docSpill": 0,
@@ -17,15 +26,6 @@
       "surface": "web",
       "page": "/",
       "theme": "light",
-      "viewport": "mobile",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "web",
-      "page": "/",
-      "theme": "light",
       "viewport": "desktop",
       "error": null,
       "docSpill": 0,
@@ -35,7 +35,7 @@
       "surface": "web",
       "page": "/",
       "theme": "dark",
-      "viewport": "desktop",
+      "viewport": "mobile",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -61,7 +61,7 @@
     {
       "surface": "web",
       "page": "/login",
-      "theme": "dark-class",
+      "theme": "dark",
       "viewport": "desktop",
       "error": null,
       "docSpill": 0,
@@ -80,24 +80,6 @@
       "surface": "web",
       "page": "/login",
       "theme": "dark",
-      "viewport": "desktop",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "web",
-      "page": "/login",
-      "theme": "light",
-      "viewport": "mobile",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "web",
-      "page": "/signup",
-      "theme": "light",
       "viewport": "mobile",
       "error": null,
       "docSpill": 0,
@@ -106,7 +88,7 @@
     {
       "surface": "web",
       "page": "/login",
-      "theme": "dark",
+      "theme": "light",
       "viewport": "mobile",
       "error": null,
       "docSpill": 0,
@@ -114,18 +96,18 @@
     },
     {
       "surface": "web",
-      "page": "/forgot-password",
+      "page": "/signup",
       "theme": "light",
+      "viewport": "mobile",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "web",
+      "page": "/login",
+      "theme": "dark-class",
       "viewport": "desktop",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "web",
-      "page": "/forgot-password",
-      "theme": "light",
-      "viewport": "mobile",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -143,6 +125,24 @@
       "surface": "web",
       "page": "/signup",
       "theme": "dark",
+      "viewport": "mobile",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "web",
+      "page": "/forgot-password",
+      "theme": "light",
+      "viewport": "mobile",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "web",
+      "page": "/forgot-password",
+      "theme": "light",
       "viewport": "desktop",
       "error": null,
       "docSpill": 0,
@@ -152,7 +152,7 @@
       "surface": "web",
       "page": "/signup",
       "theme": "dark",
-      "viewport": "mobile",
+      "viewport": "desktop",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -187,7 +187,7 @@
     {
       "surface": "web",
       "page": "/reset-password",
-      "theme": "dark",
+      "theme": "light",
       "viewport": "mobile",
       "error": null,
       "docSpill": 0,
@@ -198,15 +198,6 @@
       "page": "/reset-password",
       "theme": "light",
       "viewport": "desktop",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "web",
-      "page": "/reset-password",
-      "theme": "light",
-      "viewport": "mobile",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -222,7 +213,7 @@
     },
     {
       "surface": "web",
-      "page": "/verify-email",
+      "page": "/reset-password",
       "theme": "dark",
       "viewport": "mobile",
       "error": null,
@@ -242,7 +233,7 @@
       "surface": "web",
       "page": "/verify-email",
       "theme": "dark",
-      "viewport": "desktop",
+      "viewport": "mobile",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -260,6 +251,15 @@
       "surface": "web",
       "page": "/verify-email",
       "theme": "dark-class",
+      "viewport": "desktop",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "web",
+      "page": "/verify-email",
+      "theme": "dark",
       "viewport": "desktop",
       "error": null,
       "docSpill": 0,
@@ -278,24 +278,6 @@
       "surface": "web",
       "page": "/dashboard",
       "theme": "light",
-      "viewport": "mobile",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "web",
-      "page": "/dashboard",
-      "theme": "dark",
-      "viewport": "mobile",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "web",
-      "page": "/dashboard",
-      "theme": "light",
       "viewport": "desktop",
       "error": null,
       "docSpill": 0,
@@ -312,15 +294,6 @@
     },
     {
       "surface": "web",
-      "page": "/campaigns",
-      "theme": "light",
-      "viewport": "desktop",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "web",
       "page": "/dashboard",
       "theme": "dark-class",
       "viewport": "desktop",
@@ -330,6 +303,42 @@
     },
     {
       "surface": "web",
+      "page": "/dashboard",
+      "theme": "light",
+      "viewport": "mobile",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "web",
+      "page": "/dashboard",
+      "theme": "dark",
+      "viewport": "mobile",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "web",
+      "page": "/campaigns",
+      "theme": "light",
+      "viewport": "desktop",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "web",
+      "page": "/campaigns/new",
+      "theme": "light",
+      "viewport": "mobile",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "web",
       "page": "/campaigns",
       "theme": "dark",
       "viewport": "mobile",
@@ -339,6 +348,15 @@
     },
     {
       "surface": "web",
+      "page": "/campaigns/new",
+      "theme": "light",
+      "viewport": "desktop",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "web",
       "page": "/campaigns",
       "theme": "light",
       "viewport": "mobile",
@@ -357,15 +375,6 @@
     },
     {
       "surface": "web",
-      "page": "/campaigns/new",
-      "theme": "light",
-      "viewport": "mobile",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "web",
       "page": "/campaigns",
       "theme": "dark",
       "viewport": "desktop",
@@ -375,15 +384,6 @@
     },
     {
       "surface": "web",
-      "page": "/campaigns/new",
-      "theme": "light",
-      "viewport": "desktop",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "web",
       "page": "/campaigns/c_1",
       "theme": "dark",
       "viewport": "desktop",
@@ -413,7 +413,7 @@
       "surface": "web",
       "page": "/campaigns/new",
       "theme": "dark",
-      "viewport": "mobile",
+      "viewport": "desktop",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -431,16 +431,7 @@
       "surface": "web",
       "page": "/campaigns/new",
       "theme": "dark",
-      "viewport": "desktop",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "web",
-      "page": "/campaigns/c_1",
-      "theme": "dark-class",
-      "viewport": "desktop",
+      "viewport": "mobile",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -457,26 +448,8 @@
     {
       "surface": "web",
       "page": "/campaigns/c_1/edit",
-      "theme": "dark",
-      "viewport": "mobile",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "web",
-      "page": "/campaigns/c_1/edit",
       "theme": "light",
       "viewport": "mobile",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "web",
-      "page": "/campaigns/c_1/edit",
-      "theme": "dark",
-      "viewport": "desktop",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -493,6 +466,33 @@
     {
       "surface": "web",
       "page": "/campaigns/c_1/edit",
+      "theme": "dark",
+      "viewport": "mobile",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "web",
+      "page": "/campaigns/c_1",
+      "theme": "dark-class",
+      "viewport": "desktop",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "web",
+      "page": "/campaigns/c_1/edit",
+      "theme": "dark",
+      "viewport": "desktop",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "web",
+      "page": "/campaigns/c_1/edit",
       "theme": "dark-class",
       "viewport": "desktop",
       "error": null,
@@ -503,7 +503,16 @@
       "surface": "web",
       "page": "/contacts",
       "theme": "light",
-      "viewport": "mobile",
+      "viewport": "desktop",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "web",
+      "page": "/contacts",
+      "theme": "dark",
+      "viewport": "desktop",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -521,7 +530,7 @@
       "surface": "web",
       "page": "/contacts",
       "theme": "light",
-      "viewport": "desktop",
+      "viewport": "mobile",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -530,15 +539,6 @@
       "surface": "web",
       "page": "/contacts",
       "theme": "dark-class",
-      "viewport": "desktop",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "web",
-      "page": "/contacts",
-      "theme": "dark",
       "viewport": "desktop",
       "error": null,
       "docSpill": 0,
@@ -547,8 +547,8 @@
     {
       "surface": "web",
       "page": "/contacts/new",
-      "theme": "light",
-      "viewport": "mobile",
+      "theme": "dark",
+      "viewport": "desktop",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -565,6 +565,15 @@
     {
       "surface": "web",
       "page": "/contacts/new",
+      "theme": "light",
+      "viewport": "desktop",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "web",
+      "page": "/contacts/new",
       "theme": "dark",
       "viewport": "mobile",
       "error": null,
@@ -575,7 +584,7 @@
       "surface": "web",
       "page": "/contacts/new",
       "theme": "light",
-      "viewport": "desktop",
+      "viewport": "mobile",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -591,8 +600,8 @@
     },
     {
       "surface": "web",
-      "page": "/contacts/new",
-      "theme": "dark",
+      "page": "/lists/new",
+      "theme": "light",
       "viewport": "desktop",
       "error": null,
       "docSpill": 0,
@@ -609,15 +618,6 @@
     },
     {
       "surface": "web",
-      "page": "/lists/new",
-      "theme": "light",
-      "viewport": "desktop",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "web",
       "page": "/lists",
       "theme": "dark",
       "viewport": "mobile",
@@ -630,15 +630,6 @@
       "page": "/lists",
       "theme": "light",
       "viewport": "mobile",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "web",
-      "page": "/lists",
-      "theme": "dark",
-      "viewport": "desktop",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -654,8 +645,26 @@
     },
     {
       "surface": "web",
+      "page": "/lists",
+      "theme": "dark",
+      "viewport": "desktop",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "web",
       "page": "/lists/new",
       "theme": "dark",
+      "viewport": "desktop",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "web",
+      "page": "/templates",
+      "theme": "light",
       "viewport": "desktop",
       "error": null,
       "docSpill": 0,
@@ -675,15 +684,6 @@
       "page": "/templates",
       "theme": "light",
       "viewport": "mobile",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "web",
-      "page": "/templates",
-      "theme": "light",
-      "viewport": "desktop",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -718,6 +718,15 @@
     {
       "surface": "web",
       "page": "/templates/new",
+      "theme": "dark",
+      "viewport": "mobile",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "web",
+      "page": "/templates/new",
       "theme": "light",
       "viewport": "mobile",
       "error": null,
@@ -736,15 +745,6 @@
     {
       "surface": "web",
       "page": "/templates/new",
-      "theme": "dark",
-      "viewport": "mobile",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "web",
-      "page": "/templates/new",
       "theme": "light",
       "viewport": "desktop",
       "error": null,
@@ -763,15 +763,6 @@
     {
       "surface": "web",
       "page": "/reports",
-      "theme": "light",
-      "viewport": "mobile",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "web",
-      "page": "/reports",
       "theme": "dark",
       "viewport": "mobile",
       "error": null,
@@ -792,6 +783,24 @@
       "page": "/reports",
       "theme": "dark-class",
       "viewport": "desktop",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "web",
+      "page": "/reports",
+      "theme": "dark",
+      "viewport": "desktop",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "web",
+      "page": "/reports",
+      "theme": "light",
+      "viewport": "mobile",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -807,26 +816,8 @@
     },
     {
       "surface": "web",
-      "page": "/reports",
-      "theme": "dark",
-      "viewport": "desktop",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "web",
       "page": "/reports/deliverability",
       "theme": "dark",
-      "viewport": "desktop",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "web",
-      "page": "/reports/deliverability",
-      "theme": "light",
       "viewport": "mobile",
       "error": null,
       "docSpill": 0,
@@ -835,7 +826,7 @@
     {
       "surface": "web",
       "page": "/reports/deliverability",
-      "theme": "dark",
+      "theme": "light",
       "viewport": "mobile",
       "error": null,
       "docSpill": 0,
@@ -845,6 +836,15 @@
       "surface": "web",
       "page": "/analytics",
       "theme": "light",
+      "viewport": "desktop",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "web",
+      "page": "/reports/deliverability",
+      "theme": "dark",
       "viewport": "desktop",
       "error": null,
       "docSpill": 0,
@@ -889,7 +889,7 @@
     {
       "surface": "web",
       "page": "/analytics",
-      "theme": "dark",
+      "theme": "dark-class",
       "viewport": "desktop",
       "error": null,
       "docSpill": 0,
@@ -898,7 +898,7 @@
     {
       "surface": "web",
       "page": "/analytics",
-      "theme": "dark-class",
+      "theme": "dark",
       "viewport": "desktop",
       "error": null,
       "docSpill": 0,
@@ -942,6 +942,24 @@
     },
     {
       "surface": "web",
+      "page": "/inbox-placement/new",
+      "theme": "light",
+      "viewport": "mobile",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "web",
+      "page": "/inbox-placement/new",
+      "theme": "light",
+      "viewport": "desktop",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "web",
       "page": "/inbox-placement",
       "theme": "dark-class",
       "viewport": "desktop",
@@ -952,34 +970,7 @@
     {
       "surface": "web",
       "page": "/inbox-placement/new",
-      "theme": "light",
-      "viewport": "desktop",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "web",
-      "page": "/inbox-placement/new",
       "theme": "dark",
-      "viewport": "desktop",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "web",
-      "page": "/inbox-placement/new",
-      "theme": "light",
-      "viewport": "mobile",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "web",
-      "page": "/inbox-placement/t_1",
-      "theme": "light",
       "viewport": "desktop",
       "error": null,
       "docSpill": 0,
@@ -1005,9 +996,9 @@
     },
     {
       "surface": "web",
-      "page": "/inbox-placement/new",
-      "theme": "dark",
-      "viewport": "mobile",
+      "page": "/inbox-placement/t_1",
+      "theme": "light",
+      "viewport": "desktop",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -1024,6 +1015,15 @@
     {
       "surface": "web",
       "page": "/inbox-placement/new",
+      "theme": "dark",
+      "viewport": "mobile",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "web",
+      "page": "/inbox-placement/new",
       "theme": "dark-class",
       "viewport": "desktop",
       "error": null,
@@ -1033,25 +1033,7 @@
     {
       "surface": "web",
       "page": "/events",
-      "theme": "light",
-      "viewport": "mobile",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "web",
-      "page": "/events",
       "theme": "dark",
-      "viewport": "mobile",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "web",
-      "page": "/events",
-      "theme": "dark-class",
       "viewport": "desktop",
       "error": null,
       "docSpill": 0,
@@ -1070,7 +1052,16 @@
       "surface": "web",
       "page": "/events",
       "theme": "dark",
-      "viewport": "desktop",
+      "viewport": "mobile",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "web",
+      "page": "/events",
+      "theme": "light",
+      "viewport": "mobile",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -1086,8 +1077,8 @@
     },
     {
       "surface": "web",
-      "page": "/domains/new",
-      "theme": "light",
+      "page": "/events",
+      "theme": "dark-class",
       "viewport": "desktop",
       "error": null,
       "docSpill": 0,
@@ -1107,6 +1098,15 @@
       "page": "/domains",
       "theme": "light",
       "viewport": "mobile",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "web",
+      "page": "/domains/new",
+      "theme": "light",
+      "viewport": "desktop",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -1141,7 +1141,7 @@
     {
       "surface": "web",
       "page": "/domains/new",
-      "theme": "dark",
+      "theme": "light",
       "viewport": "mobile",
       "error": null,
       "docSpill": 0,
@@ -1159,7 +1159,7 @@
     {
       "surface": "web",
       "page": "/domains/new",
-      "theme": "light",
+      "theme": "dark",
       "viewport": "mobile",
       "error": null,
       "docSpill": 0,
@@ -1169,15 +1169,6 @@
       "surface": "web",
       "page": "/settings",
       "theme": "light",
-      "viewport": "desktop",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "web",
-      "page": "/domains/new",
-      "theme": "dark",
       "viewport": "desktop",
       "error": null,
       "docSpill": 0,
@@ -1194,6 +1185,15 @@
     },
     {
       "surface": "web",
+      "page": "/domains/new",
+      "theme": "dark",
+      "viewport": "desktop",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "web",
       "page": "/settings/api-keys",
       "theme": "light",
       "viewport": "mobile",
@@ -1206,6 +1206,33 @@
       "page": "/settings",
       "theme": "dark",
       "viewport": "mobile",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "web",
+      "page": "/settings/api-keys",
+      "theme": "dark",
+      "viewport": "desktop",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "web",
+      "page": "/settings/api-keys",
+      "theme": "light",
+      "viewport": "desktop",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "web",
+      "page": "/settings",
+      "theme": "dark",
+      "viewport": "desktop",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -1214,33 +1241,6 @@
       "surface": "web",
       "page": "/settings",
       "theme": "dark-class",
-      "viewport": "desktop",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "web",
-      "page": "/settings/api-keys",
-      "theme": "light",
-      "viewport": "desktop",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "web",
-      "page": "/settings/api-keys",
-      "theme": "dark",
-      "viewport": "desktop",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "web",
-      "page": "/settings",
-      "theme": "dark",
       "viewport": "desktop",
       "error": null,
       "docSpill": 0,
@@ -1276,7 +1276,7 @@
     {
       "surface": "web",
       "page": "/settings/team",
-      "theme": "light",
+      "theme": "dark",
       "viewport": "desktop",
       "error": null,
       "docSpill": 0,
@@ -1294,7 +1294,16 @@
     {
       "surface": "web",
       "page": "/settings/team",
-      "theme": "dark",
+      "theme": "light",
+      "viewport": "desktop",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "web",
+      "page": "/settings/billing",
+      "theme": "light",
       "viewport": "desktop",
       "error": null,
       "docSpill": 0,
@@ -1304,7 +1313,7 @@
       "surface": "web",
       "page": "/settings/billing",
       "theme": "dark",
-      "viewport": "mobile",
+      "viewport": "desktop",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -1330,8 +1339,8 @@
     {
       "surface": "web",
       "page": "/settings/billing",
-      "theme": "dark-class",
-      "viewport": "desktop",
+      "theme": "dark",
+      "viewport": "mobile",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -1339,16 +1348,7 @@
     {
       "surface": "web",
       "page": "/settings/billing",
-      "theme": "light",
-      "viewport": "desktop",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "web",
-      "page": "/settings/billing",
-      "theme": "dark",
+      "theme": "dark-class",
       "viewport": "desktop",
       "error": null,
       "docSpill": 0,
@@ -1384,7 +1384,7 @@
     {
       "surface": "web",
       "page": "/settings/dedicated-ips",
-      "theme": "dark-class",
+      "theme": "light",
       "viewport": "desktop",
       "error": null,
       "docSpill": 0,
@@ -1393,7 +1393,7 @@
     {
       "surface": "web",
       "page": "/settings/dedicated-ips",
-      "theme": "light",
+      "theme": "dark-class",
       "viewport": "desktop",
       "error": null,
       "docSpill": 0,
@@ -1403,6 +1403,51 @@
       "surface": "web",
       "page": "/settings/webhooks",
       "theme": "light",
+      "viewport": "desktop",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "web",
+      "page": "/settings/webhooks",
+      "theme": "dark",
+      "viewport": "mobile",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "web",
+      "page": "/settings/webhooks",
+      "theme": "light",
+      "viewport": "mobile",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "web",
+      "page": "/settings/profile",
+      "theme": "light",
+      "viewport": "desktop",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "web",
+      "page": "/settings/profile",
+      "theme": "light",
+      "viewport": "mobile",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "web",
+      "page": "/settings/webhooks",
+      "theme": "dark",
       "viewport": "desktop",
       "error": null,
       "docSpill": 0,
@@ -1418,46 +1463,10 @@
       "findings": []
     },
     {
-      "surface": "web",
-      "page": "/settings/webhooks",
+      "surface": "control-plane",
+      "page": "/login",
       "theme": "light",
       "viewport": "mobile",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "web",
-      "page": "/settings/profile",
-      "theme": "light",
-      "viewport": "mobile",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "web",
-      "page": "/settings/webhooks",
-      "theme": "dark",
-      "viewport": "mobile",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "web",
-      "page": "/settings/webhooks",
-      "theme": "dark",
-      "viewport": "desktop",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "web",
-      "page": "/settings/profile",
-      "theme": "light",
-      "viewport": "desktop",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -1481,15 +1490,6 @@
       "findings": []
     },
     {
-      "surface": "control-plane",
-      "page": "/login",
-      "theme": "light",
-      "viewport": "mobile",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
       "surface": "web",
       "page": "/settings/profile",
       "theme": "dark",
@@ -1519,8 +1519,8 @@
     {
       "surface": "control-plane",
       "page": "/login",
-      "theme": "dark",
-      "viewport": "mobile",
+      "theme": "dark-class",
+      "viewport": "desktop",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -1528,7 +1528,16 @@
     {
       "surface": "control-plane",
       "page": "/login",
-      "theme": "dark-class",
+      "theme": "dark",
+      "viewport": "mobile",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "control-plane",
+      "page": "/",
+      "theme": "light",
       "viewport": "desktop",
       "error": null,
       "docSpill": 0,
@@ -1555,44 +1564,8 @@
     {
       "surface": "control-plane",
       "page": "/",
-      "theme": "light",
-      "viewport": "desktop",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "control-plane",
-      "page": "/",
       "theme": "dark",
       "viewport": "desktop",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "control-plane",
-      "page": "/dashboard",
-      "theme": "dark",
-      "viewport": "desktop",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "control-plane",
-      "page": "/dashboard",
-      "theme": "dark",
-      "viewport": "mobile",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "control-plane",
-      "page": "/dashboard",
-      "theme": "light",
-      "viewport": "mobile",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -1609,7 +1582,25 @@
     {
       "surface": "control-plane",
       "page": "/dashboard",
+      "theme": "dark",
+      "viewport": "mobile",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "control-plane",
+      "page": "/dashboard",
       "theme": "light",
+      "viewport": "mobile",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "control-plane",
+      "page": "/dashboard",
+      "theme": "dark",
       "viewport": "desktop",
       "error": null,
       "docSpill": 0,
@@ -1619,6 +1610,15 @@
       "surface": "control-plane",
       "page": "/",
       "theme": "dark-class",
+      "viewport": "desktop",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "control-plane",
+      "page": "/dashboard",
+      "theme": "light",
       "viewport": "desktop",
       "error": null,
       "docSpill": 0,
@@ -1654,7 +1654,7 @@
     {
       "surface": "control-plane",
       "page": "/tenants",
-      "theme": "light",
+      "theme": "dark",
       "viewport": "desktop",
       "error": null,
       "docSpill": 0,
@@ -1672,7 +1672,7 @@
     {
       "surface": "control-plane",
       "page": "/tenants",
-      "theme": "dark",
+      "theme": "light",
       "viewport": "desktop",
       "error": null,
       "docSpill": 0,
@@ -1681,7 +1681,7 @@
     {
       "surface": "control-plane",
       "page": "/tenants/new",
-      "theme": "light",
+      "theme": "dark",
       "viewport": "mobile",
       "error": null,
       "docSpill": 0,
@@ -1690,7 +1690,7 @@
     {
       "surface": "control-plane",
       "page": "/tenants/new",
-      "theme": "dark",
+      "theme": "light",
       "viewport": "mobile",
       "error": null,
       "docSpill": 0,
@@ -1744,7 +1744,7 @@
     {
       "surface": "control-plane",
       "page": "/audit",
-      "theme": "dark",
+      "theme": "dark-class",
       "viewport": "desktop",
       "error": null,
       "docSpill": 0,
@@ -1753,7 +1753,7 @@
     {
       "surface": "control-plane",
       "page": "/audit",
-      "theme": "dark-class",
+      "theme": "dark",
       "viewport": "desktop",
       "error": null,
       "docSpill": 0,
@@ -1808,15 +1808,6 @@
       "surface": "control-plane",
       "page": "/analytics",
       "theme": "dark",
-      "viewport": "mobile",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "control-plane",
-      "page": "/analytics",
-      "theme": "dark",
       "viewport": "desktop",
       "error": null,
       "docSpill": 0,
@@ -1842,16 +1833,7 @@
     },
     {
       "surface": "control-plane",
-      "page": "/operators",
-      "theme": "light",
-      "viewport": "mobile",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "control-plane",
-      "page": "/operators",
+      "page": "/analytics",
       "theme": "dark",
       "viewport": "mobile",
       "error": null,
@@ -1863,6 +1845,24 @@
       "page": "/operators",
       "theme": "dark",
       "viewport": "desktop",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "control-plane",
+      "page": "/operators",
+      "theme": "dark",
+      "viewport": "mobile",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "control-plane",
+      "page": "/operators",
+      "theme": "light",
+      "viewport": "mobile",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -1879,7 +1879,7 @@
     {
       "surface": "control-plane",
       "page": "/operators",
-      "theme": "light",
+      "theme": "dark-class",
       "viewport": "desktop",
       "error": null,
       "docSpill": 0,
@@ -1888,17 +1888,8 @@
     {
       "surface": "control-plane",
       "page": "/operators",
-      "theme": "dark-class",
-      "viewport": "desktop",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "control-plane",
-      "page": "/operators/new",
       "theme": "light",
-      "viewport": "mobile",
+      "viewport": "desktop",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -1914,27 +1905,9 @@
     },
     {
       "surface": "control-plane",
-      "page": "/discovery",
-      "theme": "light",
-      "viewport": "desktop",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "control-plane",
-      "page": "/operators/new",
-      "theme": "dark",
-      "viewport": "desktop",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "control-plane",
       "page": "/operators/new",
       "theme": "light",
-      "viewport": "desktop",
+      "viewport": "mobile",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -1950,7 +1923,16 @@
     },
     {
       "surface": "control-plane",
-      "page": "/discovery",
+      "page": "/operators/new",
+      "theme": "light",
+      "viewport": "desktop",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "control-plane",
+      "page": "/operators/new",
       "theme": "dark",
       "viewport": "desktop",
       "error": null,
@@ -1960,8 +1942,8 @@
     {
       "surface": "control-plane",
       "page": "/discovery",
-      "theme": "dark",
-      "viewport": "mobile",
+      "theme": "light",
+      "viewport": "desktop",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -1978,7 +1960,25 @@
     {
       "surface": "control-plane",
       "page": "/discovery",
+      "theme": "dark",
+      "viewport": "mobile",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "control-plane",
+      "page": "/discovery",
       "theme": "dark-class",
+      "viewport": "desktop",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "control-plane",
+      "page": "/discovery",
+      "theme": "dark",
       "viewport": "desktop",
       "error": null,
       "docSpill": 0,
@@ -2013,24 +2013,6 @@
     },
     {
       "surface": "control-plane",
-      "page": "/infrastructure",
-      "theme": "dark",
-      "viewport": "desktop",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "control-plane",
-      "page": "/infrastructure",
-      "theme": "light",
-      "viewport": "desktop",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "control-plane",
       "page": "/jobs",
       "theme": "dark",
       "viewport": "mobile",
@@ -2040,6 +2022,24 @@
     },
     {
       "surface": "control-plane",
+      "page": "/infrastructure",
+      "theme": "light",
+      "viewport": "desktop",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "control-plane",
+      "page": "/infrastructure",
+      "theme": "dark",
+      "viewport": "desktop",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "control-plane",
       "page": "/jobs",
       "theme": "dark",
       "viewport": "desktop",
@@ -2068,7 +2068,7 @@
     {
       "surface": "control-plane",
       "page": "/infrastructure/nodes",
-      "theme": "light",
+      "theme": "dark",
       "viewport": "mobile",
       "error": null,
       "docSpill": 0,
@@ -2077,8 +2077,8 @@
     {
       "surface": "control-plane",
       "page": "/infrastructure/nodes",
-      "theme": "dark",
-      "viewport": "desktop",
+      "theme": "light",
+      "viewport": "mobile",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -2096,7 +2096,7 @@
       "surface": "control-plane",
       "page": "/infrastructure/nodes",
       "theme": "dark",
-      "viewport": "mobile",
+      "viewport": "desktop",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -2105,6 +2105,15 @@
       "surface": "control-plane",
       "page": "/infrastructure/nodes",
       "theme": "light",
+      "viewport": "desktop",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "control-plane",
+      "page": "/infrastructure/queues",
+      "theme": "dark",
       "viewport": "desktop",
       "error": null,
       "docSpill": 0,
@@ -2149,7 +2158,7 @@
     {
       "surface": "control-plane",
       "page": "/infrastructure/queues",
-      "theme": "dark",
+      "theme": "light",
       "viewport": "desktop",
       "error": null,
       "docSpill": 0,
@@ -2157,9 +2166,9 @@
     },
     {
       "surface": "control-plane",
-      "page": "/infrastructure/queues",
-      "theme": "light",
-      "viewport": "desktop",
+      "page": "/domains",
+      "theme": "dark",
+      "viewport": "mobile",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -2176,7 +2185,7 @@
     {
       "surface": "control-plane",
       "page": "/domains",
-      "theme": "dark",
+      "theme": "light",
       "viewport": "mobile",
       "error": null,
       "docSpill": 0,
@@ -2185,8 +2194,8 @@
     {
       "surface": "control-plane",
       "page": "/domains",
-      "theme": "light",
-      "viewport": "mobile",
+      "theme": "dark",
+      "viewport": "desktop",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -2211,15 +2220,6 @@
     },
     {
       "surface": "control-plane",
-      "page": "/domains",
-      "theme": "dark",
-      "viewport": "desktop",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "control-plane",
       "page": "/billing",
       "theme": "dark",
       "viewport": "mobile",
@@ -2230,15 +2230,6 @@
     {
       "surface": "control-plane",
       "page": "/billing",
-      "theme": "light",
-      "viewport": "mobile",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "control-plane",
-      "page": "/billing/plans",
       "theme": "light",
       "viewport": "mobile",
       "error": null,
@@ -2274,6 +2265,15 @@
     },
     {
       "surface": "control-plane",
+      "page": "/billing/plans",
+      "theme": "light",
+      "viewport": "mobile",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "control-plane",
       "page": "/compliance",
       "theme": "light",
       "viewport": "mobile",
@@ -2284,7 +2284,7 @@
     {
       "surface": "control-plane",
       "page": "/compliance",
-      "theme": "dark",
+      "theme": "light",
       "viewport": "desktop",
       "error": null,
       "docSpill": 0,
@@ -2293,7 +2293,7 @@
     {
       "surface": "control-plane",
       "page": "/compliance",
-      "theme": "light",
+      "theme": "dark",
       "viewport": "desktop",
       "error": null,
       "docSpill": 0,
@@ -2329,8 +2329,8 @@
     {
       "surface": "control-plane",
       "page": "/compliance/gdpr",
-      "theme": "dark",
-      "viewport": "mobile",
+      "theme": "light",
+      "viewport": "desktop",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -2339,6 +2339,24 @@
       "surface": "control-plane",
       "page": "/compliance/gdpr",
       "theme": "light",
+      "viewport": "mobile",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "control-plane",
+      "page": "/compliance/gdpr",
+      "theme": "dark",
+      "viewport": "desktop",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "control-plane",
+      "page": "/compliance/gdpr",
+      "theme": "dark",
       "viewport": "mobile",
       "error": null,
       "docSpill": 0,
@@ -2355,24 +2373,6 @@
     },
     {
       "surface": "control-plane",
-      "page": "/compliance/gdpr",
-      "theme": "dark",
-      "viewport": "desktop",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "control-plane",
-      "page": "/compliance/gdpr",
-      "theme": "light",
-      "viewport": "desktop",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "control-plane",
       "page": "/compliance",
       "theme": "dark-class",
       "viewport": "desktop",
@@ -2384,15 +2384,6 @@
       "surface": "control-plane",
       "page": "/alerts",
       "theme": "dark",
-      "viewport": "desktop",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "control-plane",
-      "page": "/alerts",
-      "theme": "dark",
       "viewport": "mobile",
       "error": null,
       "docSpill": 0,
@@ -2419,6 +2410,15 @@
     {
       "surface": "control-plane",
       "page": "/alerts",
+      "theme": "light",
+      "viewport": "desktop",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "control-plane",
+      "page": "/alerts",
       "theme": "dark-class",
       "viewport": "desktop",
       "error": null,
@@ -2428,7 +2428,7 @@
     {
       "surface": "control-plane",
       "page": "/alerts",
-      "theme": "light",
+      "theme": "dark",
       "viewport": "desktop",
       "error": null,
       "docSpill": 0,
@@ -2446,6 +2446,15 @@
     {
       "surface": "control-plane",
       "page": "/alerts/rules",
+      "theme": "light",
+      "viewport": "mobile",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "control-plane",
+      "page": "/alerts/rules",
       "theme": "dark",
       "viewport": "mobile",
       "error": null,
@@ -2456,24 +2465,6 @@
       "surface": "control-plane",
       "page": "/alerts/rules",
       "theme": "light",
-      "viewport": "mobile",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "control-plane",
-      "page": "/alerts/rules",
-      "theme": "light",
-      "viewport": "desktop",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "control-plane",
-      "page": "/alerts/rules",
-      "theme": "dark",
       "viewport": "desktop",
       "error": null,
       "docSpill": 0,
@@ -2483,6 +2474,15 @@
       "surface": "control-plane",
       "page": "/alerts/rules",
       "theme": "dark-class",
+      "viewport": "desktop",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "control-plane",
+      "page": "/alerts/rules",
+      "theme": "dark",
       "viewport": "desktop",
       "error": null,
       "docSpill": 0,
@@ -2546,7 +2546,7 @@
       "surface": "control-plane",
       "page": "/settings/security",
       "theme": "dark",
-      "viewport": "mobile",
+      "viewport": "desktop",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -2554,6 +2554,15 @@
     {
       "surface": "control-plane",
       "page": "/settings/security",
+      "theme": "dark",
+      "viewport": "mobile",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "control-plane",
+      "page": "/cp",
       "theme": "dark",
       "viewport": "desktop",
       "error": null,
@@ -2574,15 +2583,6 @@
       "page": "/cp",
       "theme": "light",
       "viewport": "mobile",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "control-plane",
-      "page": "/cp",
-      "theme": "dark",
-      "viewport": "desktop",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -2600,7 +2600,7 @@
       "surface": "control-plane",
       "page": "/cp/tenants",
       "theme": "dark",
-      "viewport": "desktop",
+      "viewport": "mobile",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -2616,7 +2616,7 @@
     },
     {
       "surface": "control-plane",
-      "page": "/cp/tenants",
+      "page": "/cp",
       "theme": "dark",
       "viewport": "mobile",
       "error": null,
@@ -2625,9 +2625,9 @@
     },
     {
       "surface": "control-plane",
-      "page": "/cp",
+      "page": "/cp/tenants",
       "theme": "dark",
-      "viewport": "mobile",
+      "viewport": "desktop",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -2671,7 +2671,7 @@
     {
       "surface": "control-plane",
       "page": "/cp/audit",
-      "theme": "dark",
+      "theme": "light",
       "viewport": "desktop",
       "error": null,
       "docSpill": 0,
@@ -2680,7 +2680,7 @@
     {
       "surface": "control-plane",
       "page": "/cp/audit",
-      "theme": "light",
+      "theme": "dark",
       "viewport": "desktop",
       "error": null,
       "docSpill": 0,
@@ -2717,16 +2717,7 @@
       "surface": "control-plane",
       "page": "/cp/sales",
       "theme": "dark",
-      "viewport": "desktop",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "control-plane",
-      "page": "/cp/sales",
-      "theme": "light",
-      "viewport": "desktop",
+      "viewport": "mobile",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -2736,6 +2727,15 @@
       "page": "/cp/sales",
       "theme": "light",
       "viewport": "mobile",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "control-plane",
+      "page": "/cp/sales",
+      "theme": "light",
+      "viewport": "desktop",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -2744,7 +2744,7 @@
       "surface": "control-plane",
       "page": "/cp/sales",
       "theme": "dark",
-      "viewport": "mobile",
+      "viewport": "desktop",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -2778,8 +2778,26 @@
     },
     {
       "surface": "control-plane",
+      "page": "/cp/security",
+      "theme": "light",
+      "viewport": "mobile",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "control-plane",
       "page": "/cp/infrastructure",
       "theme": "dark",
+      "viewport": "desktop",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "control-plane",
+      "page": "/cp/security",
+      "theme": "light",
       "viewport": "desktop",
       "error": null,
       "docSpill": 0,
@@ -2797,24 +2815,6 @@
     {
       "surface": "control-plane",
       "page": "/cp/security",
-      "theme": "light",
-      "viewport": "desktop",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "control-plane",
-      "page": "/cp/security",
-      "theme": "light",
-      "viewport": "mobile",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "control-plane",
-      "page": "/cp/security",
       "theme": "dark",
       "viewport": "desktop",
       "error": null,
@@ -2826,6 +2826,15 @@
       "page": "/cp/security",
       "theme": "dark",
       "viewport": "mobile",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "control-plane",
+      "page": "/cp/security",
+      "theme": "dark-class",
+      "viewport": "desktop",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -2842,7 +2851,7 @@
     {
       "surface": "marketing",
       "page": "/404.html",
-      "theme": "light",
+      "theme": "dark",
       "viewport": "desktop",
       "error": null,
       "docSpill": 0,
@@ -2851,16 +2860,7 @@
     {
       "surface": "marketing",
       "page": "/404.html",
-      "theme": "dark",
-      "viewport": "desktop",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "control-plane",
-      "page": "/cp/security",
-      "theme": "dark-class",
+      "theme": "light",
       "viewport": "desktop",
       "error": null,
       "docSpill": 0,
@@ -2888,7 +2888,7 @@
       "surface": "marketing",
       "page": "/about/",
       "theme": "dark",
-      "viewport": "mobile",
+      "viewport": "desktop",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -2897,7 +2897,7 @@
       "surface": "marketing",
       "page": "/about/",
       "theme": "dark",
-      "viewport": "desktop",
+      "viewport": "mobile",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -2923,8 +2923,8 @@
     {
       "surface": "marketing",
       "page": "/acceptable-use/",
-      "theme": "dark",
-      "viewport": "desktop",
+      "theme": "light",
+      "viewport": "mobile",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -2932,17 +2932,8 @@
     {
       "surface": "marketing",
       "page": "/acceptable-use/",
-      "theme": "light",
-      "viewport": "mobile",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
-      "page": "/anti-spam/",
-      "theme": "light",
-      "viewport": "mobile",
+      "theme": "dark",
+      "viewport": "desktop",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -2961,6 +2952,15 @@
       "page": "/anti-spam/",
       "theme": "dark",
       "viewport": "desktop",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/anti-spam/",
+      "theme": "light",
+      "viewport": "mobile",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -3030,24 +3030,6 @@
     },
     {
       "surface": "marketing",
-      "page": "/case-studies/",
-      "theme": "light",
-      "viewport": "desktop",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
-      "page": "/case-studies/",
-      "theme": "light",
-      "viewport": "mobile",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
       "page": "/architecture/",
       "theme": "light",
       "viewport": "mobile",
@@ -3058,6 +3040,24 @@
     {
       "surface": "marketing",
       "page": "/case-studies/",
+      "theme": "light",
+      "viewport": "mobile",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/case-studies/",
+      "theme": "light",
+      "viewport": "desktop",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/case-studies/",
       "theme": "dark",
       "viewport": "desktop",
       "error": null,
@@ -3095,15 +3095,6 @@
       "surface": "marketing",
       "page": "/compare/amazon-ses/",
       "theme": "light",
-      "viewport": "mobile",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
-      "page": "/compare/amazon-ses/",
-      "theme": "light",
       "viewport": "desktop",
       "error": null,
       "docSpill": 0,
@@ -3112,7 +3103,25 @@
     {
       "surface": "marketing",
       "page": "/compare/amazon-ses/",
+      "theme": "light",
+      "viewport": "mobile",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/compare/amazon-ses/",
       "theme": "dark",
+      "viewport": "desktop",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/compare/",
+      "theme": "light",
       "viewport": "desktop",
       "error": null,
       "docSpill": 0,
@@ -3131,15 +3140,6 @@
       "surface": "marketing",
       "page": "/compare/",
       "theme": "light",
-      "viewport": "desktop",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
-      "page": "/compare/",
-      "theme": "light",
       "viewport": "mobile",
       "error": null,
       "docSpill": 0,
@@ -3192,24 +3192,6 @@
     },
     {
       "surface": "marketing",
-      "page": "/compare/methodology/",
-      "theme": "light",
-      "viewport": "mobile",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
-      "page": "/compare/methodology/",
-      "theme": "light",
-      "viewport": "desktop",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
       "page": "/compare/mailgun/",
       "theme": "dark",
       "viewport": "mobile",
@@ -3220,8 +3202,17 @@
     {
       "surface": "marketing",
       "page": "/compare/methodology/",
-      "theme": "dark",
+      "theme": "light",
       "viewport": "mobile",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/compare/methodology/",
+      "theme": "light",
+      "viewport": "desktop",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -3237,6 +3228,15 @@
     },
     {
       "surface": "marketing",
+      "page": "/compare/methodology/",
+      "theme": "dark",
+      "viewport": "mobile",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
       "page": "/compare/postmark/",
       "theme": "light",
       "viewport": "desktop",
@@ -3257,25 +3257,7 @@
       "surface": "marketing",
       "page": "/compare/postmark/",
       "theme": "dark",
-      "viewport": "desktop",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
-      "page": "/compare/resend/",
-      "theme": "light",
       "viewport": "mobile",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
-      "page": "/compare/resend/",
-      "theme": "light",
-      "viewport": "desktop",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -3284,6 +3266,24 @@
       "surface": "marketing",
       "page": "/compare/postmark/",
       "theme": "dark",
+      "viewport": "desktop",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/compare/resend/",
+      "theme": "light",
+      "viewport": "desktop",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/compare/resend/",
+      "theme": "light",
       "viewport": "mobile",
       "error": null,
       "docSpill": 0,
@@ -3311,7 +3311,7 @@
       "surface": "marketing",
       "page": "/compare/sendgrid/",
       "theme": "light",
-      "viewport": "desktop",
+      "viewport": "mobile",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -3320,7 +3320,7 @@
       "surface": "marketing",
       "page": "/compare/sendgrid/",
       "theme": "light",
-      "viewport": "mobile",
+      "viewport": "desktop",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -3365,25 +3365,7 @@
       "surface": "marketing",
       "page": "/compliance/",
       "theme": "dark",
-      "viewport": "desktop",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
-      "page": "/contact/enterprise/",
-      "theme": "light",
       "viewport": "mobile",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
-      "page": "/contact/enterprise/",
-      "theme": "light",
-      "viewport": "desktop",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -3392,6 +3374,24 @@
       "surface": "marketing",
       "page": "/compliance/",
       "theme": "dark",
+      "viewport": "desktop",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/contact/enterprise/",
+      "theme": "light",
+      "viewport": "desktop",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/contact/enterprise/",
+      "theme": "light",
       "viewport": "mobile",
       "error": null,
       "docSpill": 0,
@@ -3408,15 +3408,6 @@
     },
     {
       "surface": "marketing",
-      "page": "/contact/",
-      "theme": "light",
-      "viewport": "desktop",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
       "page": "/contact/enterprise/",
       "theme": "dark",
       "viewport": "mobile",
@@ -3427,6 +3418,24 @@
     {
       "surface": "marketing",
       "page": "/contact/",
+      "theme": "light",
+      "viewport": "mobile",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/contact/",
+      "theme": "light",
+      "viewport": "desktop",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/contact/",
       "theme": "dark",
       "viewport": "desktop",
       "error": null,
@@ -3444,15 +3453,6 @@
     },
     {
       "surface": "marketing",
-      "page": "/contact/",
-      "theme": "light",
-      "viewport": "mobile",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
       "page": "/contact/sales/",
       "theme": "light",
       "viewport": "desktop",
@@ -3463,33 +3463,6 @@
     {
       "surface": "marketing",
       "page": "/contact/sales/",
-      "theme": "dark",
-      "viewport": "desktop",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
-      "page": "/contact/sales/",
-      "theme": "light",
-      "viewport": "mobile",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
-      "page": "/contact/security/",
-      "theme": "light",
-      "viewport": "desktop",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
-      "page": "/contact/security/",
       "theme": "light",
       "viewport": "mobile",
       "error": null,
@@ -3507,9 +3480,36 @@
     },
     {
       "surface": "marketing",
+      "page": "/contact/sales/",
+      "theme": "dark",
+      "viewport": "desktop",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/contact/security/",
+      "theme": "light",
+      "viewport": "desktop",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
       "page": "/contact/security/",
       "theme": "dark",
       "viewport": "desktop",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/contact/security/",
+      "theme": "light",
+      "viewport": "mobile",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -3545,7 +3545,7 @@
       "surface": "marketing",
       "page": "/cookies/",
       "theme": "dark",
-      "viewport": "mobile",
+      "viewport": "desktop",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -3554,7 +3554,7 @@
       "surface": "marketing",
       "page": "/cookies/",
       "theme": "dark",
-      "viewport": "desktop",
+      "viewport": "mobile",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -3579,27 +3579,9 @@
     },
     {
       "surface": "marketing",
-      "page": "/de/about/",
-      "theme": "light",
-      "viewport": "desktop",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
       "page": "/data-locations/",
       "theme": "dark",
       "viewport": "desktop",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
-      "page": "/de/about/",
-      "theme": "light",
-      "viewport": "mobile",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -3616,6 +3598,24 @@
     {
       "surface": "marketing",
       "page": "/de/about/",
+      "theme": "light",
+      "viewport": "desktop",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/de/about/",
+      "theme": "light",
+      "viewport": "mobile",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/de/about/",
       "theme": "dark",
       "viewport": "desktop",
       "error": null,
@@ -3627,15 +3627,6 @@
       "page": "/de/about/",
       "theme": "dark",
       "viewport": "mobile",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
-      "page": "/de/acceptable-use/",
-      "theme": "dark",
-      "viewport": "desktop",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -3662,6 +3653,15 @@
       "surface": "marketing",
       "page": "/de/anti-spam/",
       "theme": "light",
+      "viewport": "desktop",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/de/acceptable-use/",
+      "theme": "dark",
       "viewport": "desktop",
       "error": null,
       "docSpill": 0,
@@ -3707,15 +3707,6 @@
       "surface": "marketing",
       "page": "/de/case-studies/",
       "theme": "light",
-      "viewport": "desktop",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
-      "page": "/de/case-studies/",
-      "theme": "light",
       "viewport": "mobile",
       "error": null,
       "docSpill": 0,
@@ -3724,7 +3715,7 @@
     {
       "surface": "marketing",
       "page": "/de/case-studies/",
-      "theme": "dark",
+      "theme": "light",
       "viewport": "desktop",
       "error": null,
       "docSpill": 0,
@@ -3734,6 +3725,15 @@
       "surface": "marketing",
       "page": "/de/case-studies/",
       "theme": "dark",
+      "viewport": "desktop",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/de/case-studies/",
+      "theme": "dark",
       "viewport": "mobile",
       "error": null,
       "docSpill": 0,
@@ -3751,8 +3751,8 @@
     {
       "surface": "marketing",
       "page": "/de/compare/amazon-ses/",
-      "theme": "dark",
-      "viewport": "desktop",
+      "theme": "light",
+      "viewport": "mobile",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -3769,8 +3769,8 @@
     {
       "surface": "marketing",
       "page": "/de/compare/amazon-ses/",
-      "theme": "light",
-      "viewport": "mobile",
+      "theme": "dark",
+      "viewport": "desktop",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -3797,7 +3797,7 @@
       "surface": "marketing",
       "page": "/de/compare/",
       "theme": "dark",
-      "viewport": "mobile",
+      "viewport": "desktop",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -3806,7 +3806,7 @@
       "surface": "marketing",
       "page": "/de/compare/",
       "theme": "dark",
-      "viewport": "desktop",
+      "viewport": "mobile",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -3823,6 +3823,15 @@
     {
       "surface": "marketing",
       "page": "/de/compare/mailgun/",
+      "theme": "light",
+      "viewport": "mobile",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/de/compare/mailgun/",
       "theme": "dark",
       "viewport": "desktop",
       "error": null,
@@ -3832,7 +3841,7 @@
     {
       "surface": "marketing",
       "page": "/de/compare/mailgun/",
-      "theme": "light",
+      "theme": "dark",
       "viewport": "mobile",
       "error": null,
       "docSpill": 0,
@@ -3860,15 +3869,6 @@
       "surface": "marketing",
       "page": "/de/compare/methodology/",
       "theme": "dark",
-      "viewport": "mobile",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
-      "page": "/de/compare/methodology/",
-      "theme": "dark",
       "viewport": "desktop",
       "error": null,
       "docSpill": 0,
@@ -3876,7 +3876,7 @@
     },
     {
       "surface": "marketing",
-      "page": "/de/compare/mailgun/",
+      "page": "/de/compare/methodology/",
       "theme": "dark",
       "viewport": "mobile",
       "error": null,
@@ -3906,6 +3906,15 @@
       "page": "/de/compare/postmark/",
       "theme": "dark",
       "viewport": "desktop",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/de/compare/postmark/",
+      "theme": "dark",
+      "viewport": "mobile",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -3915,15 +3924,6 @@
       "page": "/de/compare/resend/",
       "theme": "light",
       "viewport": "desktop",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
-      "page": "/de/compare/postmark/",
-      "theme": "dark",
-      "viewport": "mobile",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -3967,15 +3967,6 @@
     {
       "surface": "marketing",
       "page": "/de/compare/sendgrid/",
-      "theme": "dark",
-      "viewport": "mobile",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
-      "page": "/de/compare/sendgrid/",
       "theme": "light",
       "viewport": "mobile",
       "error": null,
@@ -3993,6 +3984,15 @@
     },
     {
       "surface": "marketing",
+      "page": "/de/compare/sendgrid/",
+      "theme": "dark",
+      "viewport": "mobile",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
       "page": "/de/compliance/",
       "theme": "light",
       "viewport": "desktop",
@@ -4011,35 +4011,8 @@
     },
     {
       "surface": "marketing",
-      "page": "/de/contact/enterprise/",
-      "theme": "light",
-      "viewport": "mobile",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
       "page": "/de/compliance/",
       "theme": "dark",
-      "viewport": "desktop",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
-      "page": "/de/contact/enterprise/",
-      "theme": "dark",
-      "viewport": "desktop",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
-      "page": "/de/contact/enterprise/",
-      "theme": "light",
       "viewport": "desktop",
       "error": null,
       "docSpill": 0,
@@ -4056,7 +4029,7 @@
     },
     {
       "surface": "marketing",
-      "page": "/de/contact/",
+      "page": "/de/contact/enterprise/",
       "theme": "light",
       "viewport": "desktop",
       "error": null,
@@ -4065,7 +4038,7 @@
     },
     {
       "surface": "marketing",
-      "page": "/de/contact/",
+      "page": "/de/contact/enterprise/",
       "theme": "light",
       "viewport": "mobile",
       "error": null,
@@ -4074,9 +4047,9 @@
     },
     {
       "surface": "marketing",
-      "page": "/de/contact/",
+      "page": "/de/contact/enterprise/",
       "theme": "dark",
-      "viewport": "mobile",
+      "viewport": "desktop",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -4093,8 +4066,35 @@
     {
       "surface": "marketing",
       "page": "/de/contact/",
+      "theme": "light",
+      "viewport": "mobile",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/de/contact/",
+      "theme": "light",
+      "viewport": "desktop",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/de/contact/",
       "theme": "dark",
       "viewport": "desktop",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/de/contact/",
+      "theme": "dark",
+      "viewport": "mobile",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -4104,6 +4104,15 @@
       "page": "/de/contact/sales/",
       "theme": "light",
       "viewport": "desktop",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/de/contact/sales/",
+      "theme": "dark",
+      "viewport": "mobile",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -4113,6 +4122,15 @@
       "page": "/de/contact/sales/",
       "theme": "light",
       "viewport": "mobile",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/de/contact/sales/",
+      "theme": "dark",
+      "viewport": "desktop",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -4128,24 +4146,6 @@
     },
     {
       "surface": "marketing",
-      "page": "/de/contact/sales/",
-      "theme": "dark",
-      "viewport": "mobile",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
-      "page": "/de/contact/sales/",
-      "theme": "dark",
-      "viewport": "desktop",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
       "page": "/de/contact/security/",
       "theme": "light",
       "viewport": "mobile",
@@ -4164,15 +4164,6 @@
     },
     {
       "surface": "marketing",
-      "page": "/de/cookies/",
-      "theme": "light",
-      "viewport": "desktop",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
       "page": "/de/contact/security/",
       "theme": "dark",
       "viewport": "mobile",
@@ -4183,6 +4174,24 @@
     {
       "surface": "marketing",
       "page": "/de/cookies/",
+      "theme": "light",
+      "viewport": "mobile",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/de/cookies/",
+      "theme": "light",
+      "viewport": "desktop",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/de/cookies/",
       "theme": "dark",
       "viewport": "desktop",
       "error": null,
@@ -4193,15 +4202,6 @@
       "surface": "marketing",
       "page": "/de/cookies/",
       "theme": "dark",
-      "viewport": "mobile",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
-      "page": "/de/cookies/",
-      "theme": "light",
       "viewport": "mobile",
       "error": null,
       "docSpill": 0,
@@ -4227,15 +4227,6 @@
     },
     {
       "surface": "marketing",
-      "page": "/de/dpa/",
-      "theme": "light",
-      "viewport": "desktop",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
       "page": "/de/data-locations/",
       "theme": "dark",
       "viewport": "mobile",
@@ -4256,6 +4247,15 @@
       "surface": "marketing",
       "page": "/de/dpa/",
       "theme": "light",
+      "viewport": "desktop",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/de/dpa/",
+      "theme": "light",
       "viewport": "mobile",
       "error": null,
       "docSpill": 0,
@@ -4264,33 +4264,6 @@
     {
       "surface": "marketing",
       "page": "/de/dpa/",
-      "theme": "dark",
-      "viewport": "desktop",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
-      "page": "/de/enterprise/",
-      "theme": "dark",
-      "viewport": "mobile",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
-      "page": "/de/enterprise/",
-      "theme": "light",
-      "viewport": "desktop",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
-      "page": "/de/enterprise/",
       "theme": "dark",
       "viewport": "desktop",
       "error": null,
@@ -4310,6 +4283,33 @@
       "surface": "marketing",
       "page": "/de/enterprise/",
       "theme": "light",
+      "viewport": "desktop",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/de/enterprise/",
+      "theme": "light",
+      "viewport": "mobile",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/de/enterprise/",
+      "theme": "dark",
+      "viewport": "desktop",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/de/enterprise/",
+      "theme": "dark",
       "viewport": "mobile",
       "error": null,
       "docSpill": 0,
@@ -4318,24 +4318,6 @@
     {
       "surface": "marketing",
       "page": "/de/features/",
-      "theme": "light",
-      "viewport": "desktop",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
-      "page": "/de/forensic/",
-      "theme": "light",
-      "viewport": "mobile",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
-      "page": "/de/forensic/",
       "theme": "light",
       "viewport": "desktop",
       "error": null,
@@ -4372,8 +4354,44 @@
     {
       "surface": "marketing",
       "page": "/de/forensic/",
+      "theme": "light",
+      "viewport": "desktop",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/de/forensic/",
+      "theme": "light",
+      "viewport": "mobile",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/de/forensic/",
       "theme": "dark",
       "viewport": "desktop",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/de/inbox-placement/",
+      "theme": "light",
+      "viewport": "desktop",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/de/inbox-placement/",
+      "theme": "light",
+      "viewport": "mobile",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -4390,17 +4408,8 @@
     {
       "surface": "marketing",
       "page": "/de/inbox-placement/",
-      "theme": "light",
+      "theme": "dark",
       "viewport": "desktop",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
-      "page": "/de/inbox-placement/",
-      "theme": "light",
-      "viewport": "mobile",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -4416,7 +4425,25 @@
     },
     {
       "surface": "marketing",
-      "page": "/de/inbox-placement/",
+      "page": "/de/",
+      "theme": "light",
+      "viewport": "desktop",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/de/",
+      "theme": "light",
+      "viewport": "mobile",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/de/",
       "theme": "dark",
       "viewport": "desktop",
       "error": null,
@@ -4426,6 +4453,15 @@
     {
       "surface": "marketing",
       "page": "/de/",
+      "theme": "dark",
+      "viewport": "mobile",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/de/pricing/calculator/",
       "theme": "light",
       "viewport": "desktop",
       "error": null,
@@ -4436,42 +4472,6 @@
       "surface": "marketing",
       "page": "/de/pricing/calculator/",
       "theme": "light",
-      "viewport": "mobile",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
-      "page": "/de/pricing/calculator/",
-      "theme": "light",
-      "viewport": "desktop",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
-      "page": "/de/",
-      "theme": "light",
-      "viewport": "mobile",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
-      "page": "/de/",
-      "theme": "dark",
-      "viewport": "desktop",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
-      "page": "/de/",
-      "theme": "dark",
       "viewport": "mobile",
       "error": null,
       "docSpill": 0,
@@ -4508,6 +4508,24 @@
       "surface": "marketing",
       "page": "/de/pricing/",
       "theme": "light",
+      "viewport": "mobile",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/de/pricing/",
+      "theme": "dark",
+      "viewport": "desktop",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/de/pricing/",
+      "theme": "dark",
       "viewport": "mobile",
       "error": null,
       "docSpill": 0,
@@ -4524,36 +4542,18 @@
     },
     {
       "surface": "marketing",
-      "page": "/de/pricing/",
-      "theme": "dark",
-      "viewport": "desktop",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
-      "page": "/de/pricing/",
-      "theme": "dark",
-      "viewport": "mobile",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
-      "page": "/de/privacy/",
-      "theme": "dark",
-      "viewport": "desktop",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
       "page": "/de/privacy/",
       "theme": "light",
       "viewport": "mobile",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/de/privacy/",
+      "theme": "dark",
+      "viewport": "desktop",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -4590,6 +4590,15 @@
       "page": "/de/private-cloud/",
       "theme": "dark",
       "viewport": "desktop",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/de/private-cloud/",
+      "theme": "dark",
+      "viewport": "mobile",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -4641,15 +4650,6 @@
     },
     {
       "surface": "marketing",
-      "page": "/de/private-cloud/",
-      "theme": "dark",
-      "viewport": "mobile",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
       "page": "/de/responsible-disclosure/",
       "theme": "light",
       "viewport": "mobile",
@@ -4661,7 +4661,7 @@
       "surface": "marketing",
       "page": "/de/responsible-disclosure/",
       "theme": "dark",
-      "viewport": "mobile",
+      "viewport": "desktop",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -4670,15 +4670,6 @@
       "surface": "marketing",
       "page": "/de/responsible-disclosure/",
       "theme": "dark",
-      "viewport": "desktop",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
-      "page": "/de/secure-email-for-regulated-saas/",
-      "theme": "light",
       "viewport": "mobile",
       "error": null,
       "docSpill": 0,
@@ -4689,6 +4680,15 @@
       "page": "/de/secure-email-for-regulated-saas/",
       "theme": "light",
       "viewport": "desktop",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/de/secure-email-for-regulated-saas/",
+      "theme": "light",
+      "viewport": "mobile",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -4715,15 +4715,6 @@
       "surface": "marketing",
       "page": "/de/security/",
       "theme": "light",
-      "viewport": "desktop",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
-      "page": "/de/security/",
-      "theme": "light",
       "viewport": "mobile",
       "error": null,
       "docSpill": 0,
@@ -4731,7 +4722,7 @@
     },
     {
       "surface": "marketing",
-      "page": "/de/sla/",
+      "page": "/de/security/",
       "theme": "light",
       "viewport": "desktop",
       "error": null,
@@ -4760,6 +4751,15 @@
       "surface": "marketing",
       "page": "/de/sla/",
       "theme": "light",
+      "viewport": "desktop",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/de/sla/",
+      "theme": "light",
       "viewport": "mobile",
       "error": null,
       "docSpill": 0,
@@ -4769,15 +4769,6 @@
       "surface": "marketing",
       "page": "/de/sla/",
       "theme": "dark",
-      "viewport": "desktop",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
-      "page": "/de/solutions/enterprise/",
-      "theme": "light",
       "viewport": "desktop",
       "error": null,
       "docSpill": 0,
@@ -4795,7 +4786,7 @@
     {
       "surface": "marketing",
       "page": "/de/solutions/enterprise/",
-      "theme": "dark",
+      "theme": "light",
       "viewport": "desktop",
       "error": null,
       "docSpill": 0,
@@ -4806,6 +4797,15 @@
       "page": "/de/solutions/enterprise/",
       "theme": "light",
       "viewport": "mobile",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/de/solutions/enterprise/",
+      "theme": "dark",
+      "viewport": "desktop",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -4823,7 +4823,7 @@
       "surface": "marketing",
       "page": "/de/solutions/high-volume-sending/",
       "theme": "light",
-      "viewport": "mobile",
+      "viewport": "desktop",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -4832,7 +4832,7 @@
       "surface": "marketing",
       "page": "/de/solutions/high-volume-sending/",
       "theme": "light",
-      "viewport": "desktop",
+      "viewport": "mobile",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -4867,15 +4867,6 @@
     {
       "surface": "marketing",
       "page": "/de/solutions/",
-      "theme": "light",
-      "viewport": "mobile",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
-      "page": "/de/solutions/",
       "theme": "dark",
       "viewport": "desktop",
       "error": null,
@@ -4886,6 +4877,15 @@
       "surface": "marketing",
       "page": "/de/solutions/",
       "theme": "dark",
+      "viewport": "mobile",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/de/solutions/",
+      "theme": "light",
       "viewport": "mobile",
       "error": null,
       "docSpill": 0,
@@ -4903,8 +4903,8 @@
     {
       "surface": "marketing",
       "page": "/de/solutions/migration/",
-      "theme": "light",
-      "viewport": "mobile",
+      "theme": "dark",
+      "viewport": "desktop",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -4912,8 +4912,8 @@
     {
       "surface": "marketing",
       "page": "/de/solutions/migration/",
-      "theme": "dark",
-      "viewport": "desktop",
+      "theme": "light",
+      "viewport": "mobile",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -4929,8 +4929,8 @@
     },
     {
       "surface": "marketing",
-      "page": "/de/solutions/migration/",
-      "theme": "dark",
+      "page": "/de/solutions/regulated-industries/",
+      "theme": "light",
       "viewport": "mobile",
       "error": null,
       "docSpill": 0,
@@ -4938,8 +4938,8 @@
     },
     {
       "surface": "marketing",
-      "page": "/de/solutions/regulated-industries/",
-      "theme": "light",
+      "page": "/de/solutions/migration/",
+      "theme": "dark",
       "viewport": "mobile",
       "error": null,
       "docSpill": 0,
@@ -4975,6 +4975,15 @@
     {
       "surface": "marketing",
       "page": "/de/solutions/saas-platforms/",
+      "theme": "dark",
+      "viewport": "desktop",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/de/solutions/saas-platforms/",
       "theme": "light",
       "viewport": "mobile",
       "error": null,
@@ -4992,8 +5001,8 @@
     },
     {
       "surface": "marketing",
-      "page": "/de/solutions/saas-platforms/",
-      "theme": "dark",
+      "page": "/de/solutions/transactional-email/",
+      "theme": "light",
       "viewport": "desktop",
       "error": null,
       "docSpill": 0,
@@ -5002,7 +5011,7 @@
     {
       "surface": "marketing",
       "page": "/de/solutions/transactional-email/",
-      "theme": "light",
+      "theme": "dark",
       "viewport": "desktop",
       "error": null,
       "docSpill": 0,
@@ -5019,27 +5028,9 @@
     },
     {
       "surface": "marketing",
-      "page": "/de/solutions/transactional-email/",
-      "theme": "dark",
-      "viewport": "desktop",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
       "page": "/de/status/",
       "theme": "light",
       "viewport": "mobile",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
-      "page": "/de/status/",
-      "theme": "dark",
-      "viewport": "desktop",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -5058,6 +5049,15 @@
       "page": "/de/solutions/transactional-email/",
       "theme": "dark",
       "viewport": "mobile",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/de/status/",
+      "theme": "dark",
+      "viewport": "desktop",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -5083,6 +5083,15 @@
     {
       "surface": "marketing",
       "page": "/de/subprocessors/",
+      "theme": "light",
+      "viewport": "mobile",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/de/subprocessors/",
       "theme": "dark",
       "viewport": "desktop",
       "error": null,
@@ -5093,15 +5102,6 @@
       "surface": "marketing",
       "page": "/de/subprocessors/",
       "theme": "dark",
-      "viewport": "mobile",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
-      "page": "/de/subprocessors/",
-      "theme": "light",
       "viewport": "mobile",
       "error": null,
       "docSpill": 0,
@@ -5163,6 +5163,15 @@
     },
     {
       "surface": "marketing",
+      "page": "/docs/alerts/",
+      "theme": "dark",
+      "viewport": "desktop",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
       "page": "/docs/analytics/",
       "theme": "light",
       "viewport": "desktop",
@@ -5174,24 +5183,6 @@
       "surface": "marketing",
       "page": "/docs/alerts/",
       "theme": "dark",
-      "viewport": "desktop",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
-      "page": "/docs/alerts/",
-      "theme": "dark",
-      "viewport": "mobile",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
-      "page": "/docs/analytics/",
-      "theme": "light",
       "viewport": "mobile",
       "error": null,
       "docSpill": 0,
@@ -5209,6 +5200,15 @@
     {
       "surface": "marketing",
       "page": "/docs/analytics/",
+      "theme": "light",
+      "viewport": "mobile",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/docs/analytics/",
       "theme": "dark",
       "viewport": "mobile",
       "error": null,
@@ -5219,15 +5219,6 @@
       "surface": "marketing",
       "page": "/docs/api/grader/",
       "theme": "light",
-      "viewport": "mobile",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
-      "page": "/docs/api/grader/",
-      "theme": "dark",
       "viewport": "desktop",
       "error": null,
       "docSpill": 0,
@@ -5237,6 +5228,15 @@
       "surface": "marketing",
       "page": "/docs/api/grader/",
       "theme": "light",
+      "viewport": "mobile",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/docs/api/grader/",
+      "theme": "dark",
       "viewport": "desktop",
       "error": null,
       "docSpill": 0,
@@ -5255,7 +5255,7 @@
       "surface": "marketing",
       "page": "/docs/api/",
       "theme": "light",
-      "viewport": "mobile",
+      "viewport": "desktop",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -5264,7 +5264,7 @@
       "surface": "marketing",
       "page": "/docs/api/",
       "theme": "light",
-      "viewport": "desktop",
+      "viewport": "mobile",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -5307,9 +5307,9 @@
     },
     {
       "surface": "marketing",
-      "page": "/docs/",
-      "theme": "light",
-      "viewport": "mobile",
+      "page": "/docs/api/openapi/",
+      "theme": "dark",
+      "viewport": "desktop",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -5325,15 +5325,6 @@
     },
     {
       "surface": "marketing",
-      "page": "/docs/api/openapi/",
-      "theme": "dark",
-      "viewport": "desktop",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
       "page": "/docs/",
       "theme": "light",
       "viewport": "desktop",
@@ -5344,6 +5335,15 @@
     {
       "surface": "marketing",
       "page": "/docs/",
+      "theme": "light",
+      "viewport": "mobile",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/docs/",
       "theme": "dark",
       "viewport": "desktop",
       "error": null,
@@ -5371,15 +5371,6 @@
     {
       "surface": "marketing",
       "page": "/docs/sdks/",
-      "theme": "dark",
-      "viewport": "desktop",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
-      "page": "/docs/sdks/",
       "theme": "light",
       "viewport": "mobile",
       "error": null,
@@ -5390,6 +5381,15 @@
       "surface": "marketing",
       "page": "/docs/sdks/",
       "theme": "dark",
+      "viewport": "desktop",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/docs/sdks/",
+      "theme": "dark",
       "viewport": "mobile",
       "error": null,
       "docSpill": 0,
@@ -5398,24 +5398,6 @@
     {
       "surface": "marketing",
       "page": "/docs/webhooks/",
-      "theme": "light",
-      "viewport": "desktop",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
-      "page": "/dpa/",
-      "theme": "light",
-      "viewport": "mobile",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
-      "page": "/dpa/",
       "theme": "light",
       "viewport": "desktop",
       "error": null,
@@ -5452,15 +5434,15 @@
     {
       "surface": "marketing",
       "page": "/dpa/",
-      "theme": "dark",
-      "viewport": "desktop",
+      "theme": "light",
+      "viewport": "mobile",
       "error": null,
       "docSpill": 0,
       "findings": []
     },
     {
       "surface": "marketing",
-      "page": "/enterprise/",
+      "page": "/dpa/",
       "theme": "light",
       "viewport": "desktop",
       "error": null,
@@ -5469,7 +5451,7 @@
     },
     {
       "surface": "marketing",
-      "page": "/enterprise/",
+      "page": "/dpa/",
       "theme": "dark",
       "viewport": "desktop",
       "error": null,
@@ -5489,6 +5471,15 @@
       "surface": "marketing",
       "page": "/enterprise/",
       "theme": "light",
+      "viewport": "desktop",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/enterprise/",
+      "theme": "light",
       "viewport": "mobile",
       "error": null,
       "docSpill": 0,
@@ -5505,6 +5496,15 @@
     },
     {
       "surface": "marketing",
+      "page": "/enterprise/",
+      "theme": "dark",
+      "viewport": "desktop",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
       "page": "/es/about/",
       "theme": "light",
       "viewport": "desktop",
@@ -5525,7 +5525,7 @@
       "surface": "marketing",
       "page": "/es/about/",
       "theme": "dark",
-      "viewport": "mobile",
+      "viewport": "desktop",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -5534,7 +5534,7 @@
       "surface": "marketing",
       "page": "/es/about/",
       "theme": "dark",
-      "viewport": "desktop",
+      "viewport": "mobile",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -5551,8 +5551,8 @@
     {
       "surface": "marketing",
       "page": "/es/acceptable-use/",
-      "theme": "dark",
-      "viewport": "desktop",
+      "theme": "light",
+      "viewport": "mobile",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -5560,24 +5560,6 @@
     {
       "surface": "marketing",
       "page": "/es/acceptable-use/",
-      "theme": "light",
-      "viewport": "mobile",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
-      "page": "/es/anti-spam/",
-      "theme": "light",
-      "viewport": "mobile",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
-      "page": "/es/anti-spam/",
       "theme": "dark",
       "viewport": "desktop",
       "error": null,
@@ -5598,6 +5580,24 @@
       "page": "/es/acceptable-use/",
       "theme": "dark",
       "viewport": "mobile",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/es/anti-spam/",
+      "theme": "light",
+      "viewport": "mobile",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/es/anti-spam/",
+      "theme": "dark",
+      "viewport": "desktop",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -5651,6 +5651,15 @@
       "surface": "marketing",
       "page": "/es/compare/amazon-ses/",
       "theme": "light",
+      "viewport": "mobile",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/es/compare/amazon-ses/",
+      "theme": "light",
       "viewport": "desktop",
       "error": null,
       "docSpill": 0,
@@ -5667,45 +5676,9 @@
     },
     {
       "surface": "marketing",
-      "page": "/es/compare/amazon-ses/",
-      "theme": "light",
-      "viewport": "mobile",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
-      "page": "/es/compare/",
-      "theme": "light",
-      "viewport": "mobile",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
       "page": "/es/compare/",
       "theme": "light",
       "viewport": "desktop",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
-      "page": "/es/compare/",
-      "theme": "dark",
-      "viewport": "desktop",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
-      "page": "/es/compare/",
-      "theme": "dark",
-      "viewport": "mobile",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -5721,9 +5694,45 @@
     },
     {
       "surface": "marketing",
+      "page": "/es/compare/",
+      "theme": "light",
+      "viewport": "mobile",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/es/compare/",
+      "theme": "dark",
+      "viewport": "mobile",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/es/compare/",
+      "theme": "dark",
+      "viewport": "desktop",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
       "page": "/es/compare/mailgun/",
       "theme": "light",
       "viewport": "desktop",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/es/compare/mailgun/",
+      "theme": "light",
+      "viewport": "mobile",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -5740,7 +5749,7 @@
     {
       "surface": "marketing",
       "page": "/es/compare/mailgun/",
-      "theme": "light",
+      "theme": "dark",
       "viewport": "mobile",
       "error": null,
       "docSpill": 0,
@@ -5759,15 +5768,6 @@
       "surface": "marketing",
       "page": "/es/compare/methodology/",
       "theme": "light",
-      "viewport": "mobile",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
-      "page": "/es/compare/mailgun/",
-      "theme": "dark",
       "viewport": "mobile",
       "error": null,
       "docSpill": 0,
@@ -5794,15 +5794,6 @@
     {
       "surface": "marketing",
       "page": "/es/compare/postmark/",
-      "theme": "dark",
-      "viewport": "mobile",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
-      "page": "/es/compare/postmark/",
       "theme": "light",
       "viewport": "mobile",
       "error": null,
@@ -5814,6 +5805,15 @@
       "page": "/es/compare/postmark/",
       "theme": "light",
       "viewport": "desktop",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/es/compare/postmark/",
+      "theme": "dark",
+      "viewport": "mobile",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -5867,15 +5867,6 @@
       "surface": "marketing",
       "page": "/es/compare/sendgrid/",
       "theme": "light",
-      "viewport": "mobile",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
-      "page": "/es/compare/sendgrid/",
-      "theme": "light",
       "viewport": "desktop",
       "error": null,
       "docSpill": 0,
@@ -5884,6 +5875,15 @@
     {
       "surface": "marketing",
       "page": "/es/compare/sendgrid/",
+      "theme": "light",
+      "viewport": "mobile",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/es/compare/sendgrid/",
       "theme": "dark",
       "viewport": "desktop",
       "error": null,
@@ -5903,15 +5903,6 @@
       "surface": "marketing",
       "page": "/es/compliance/",
       "theme": "light",
-      "viewport": "desktop",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
-      "page": "/es/compliance/",
-      "theme": "light",
       "viewport": "mobile",
       "error": null,
       "docSpill": 0,
@@ -5920,6 +5911,15 @@
     {
       "surface": "marketing",
       "page": "/es/compliance/",
+      "theme": "light",
+      "viewport": "desktop",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/es/compliance/",
       "theme": "dark",
       "viewport": "mobile",
       "error": null,
@@ -5946,15 +5946,6 @@
     },
     {
       "surface": "marketing",
-      "page": "/es/contact/",
-      "theme": "light",
-      "viewport": "mobile",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
       "page": "/es/contact/enterprise/",
       "theme": "light",
       "viewport": "mobile",
@@ -5966,7 +5957,7 @@
       "surface": "marketing",
       "page": "/es/contact/enterprise/",
       "theme": "dark",
-      "viewport": "desktop",
+      "viewport": "mobile",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -5975,6 +5966,15 @@
       "surface": "marketing",
       "page": "/es/contact/enterprise/",
       "theme": "dark",
+      "viewport": "desktop",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/es/contact/",
+      "theme": "light",
       "viewport": "mobile",
       "error": null,
       "docSpill": 0,
@@ -6018,6 +6018,15 @@
     },
     {
       "surface": "marketing",
+      "page": "/es/contact/sales/",
+      "theme": "light",
+      "viewport": "mobile",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
       "page": "/es/contact/security/",
       "theme": "light",
       "viewport": "desktop",
@@ -6037,15 +6046,6 @@
     {
       "surface": "marketing",
       "page": "/es/contact/sales/",
-      "theme": "light",
-      "viewport": "mobile",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
-      "page": "/es/contact/sales/",
       "theme": "dark",
       "viewport": "mobile",
       "error": null,
@@ -6083,15 +6083,6 @@
       "surface": "marketing",
       "page": "/es/cookies/",
       "theme": "light",
-      "viewport": "mobile",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
-      "page": "/es/cookies/",
-      "theme": "light",
       "viewport": "desktop",
       "error": null,
       "docSpill": 0,
@@ -6100,6 +6091,15 @@
     {
       "surface": "marketing",
       "page": "/es/cookies/",
+      "theme": "light",
+      "viewport": "mobile",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/es/cookies/",
       "theme": "dark",
       "viewport": "desktop",
       "error": null,
@@ -6126,6 +6126,15 @@
     },
     {
       "surface": "marketing",
+      "page": "/es/data-locations/",
+      "theme": "light",
+      "viewport": "mobile",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
       "page": "/es/dpa/",
       "theme": "light",
       "viewport": "desktop",
@@ -6145,15 +6154,6 @@
     {
       "surface": "marketing",
       "page": "/es/data-locations/",
-      "theme": "light",
-      "viewport": "mobile",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
-      "page": "/es/data-locations/",
       "theme": "dark",
       "viewport": "mobile",
       "error": null,
@@ -6180,33 +6180,6 @@
     },
     {
       "surface": "marketing",
-      "page": "/es/enterprise/",
-      "theme": "light",
-      "viewport": "mobile",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
-      "page": "/es/enterprise/",
-      "theme": "dark",
-      "viewport": "desktop",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
-      "page": "/es/enterprise/",
-      "theme": "light",
-      "viewport": "desktop",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
       "page": "/es/dpa/",
       "theme": "dark",
       "viewport": "mobile",
@@ -6217,6 +6190,33 @@
     {
       "surface": "marketing",
       "page": "/es/enterprise/",
+      "theme": "light",
+      "viewport": "mobile",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/es/enterprise/",
+      "theme": "light",
+      "viewport": "desktop",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/es/enterprise/",
+      "theme": "dark",
+      "viewport": "desktop",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/es/enterprise/",
       "theme": "dark",
       "viewport": "mobile",
       "error": null,
@@ -6228,6 +6228,15 @@
       "page": "/es/features/",
       "theme": "light",
       "viewport": "desktop",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/es/features/",
+      "theme": "light",
+      "viewport": "mobile",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -6244,7 +6253,7 @@
     {
       "surface": "marketing",
       "page": "/es/features/",
-      "theme": "light",
+      "theme": "dark",
       "viewport": "mobile",
       "error": null,
       "docSpill": 0,
@@ -6255,15 +6264,6 @@
       "page": "/es/features/",
       "theme": "dark",
       "viewport": "desktop",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
-      "page": "/es/features/",
-      "theme": "dark",
-      "viewport": "mobile",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -6299,7 +6299,7 @@
       "surface": "marketing",
       "page": "/es/inbox-placement/",
       "theme": "light",
-      "viewport": "mobile",
+      "viewport": "desktop",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -6308,7 +6308,7 @@
       "surface": "marketing",
       "page": "/es/inbox-placement/",
       "theme": "light",
-      "viewport": "desktop",
+      "viewport": "mobile",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -6335,7 +6335,7 @@
       "surface": "marketing",
       "page": "/es/",
       "theme": "light",
-      "viewport": "mobile",
+      "viewport": "desktop",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -6344,7 +6344,7 @@
       "surface": "marketing",
       "page": "/es/",
       "theme": "light",
-      "viewport": "desktop",
+      "viewport": "mobile",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -6389,7 +6389,7 @@
       "surface": "marketing",
       "page": "/es/pricing/calculator/",
       "theme": "dark",
-      "viewport": "mobile",
+      "viewport": "desktop",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -6398,7 +6398,7 @@
       "surface": "marketing",
       "page": "/es/pricing/calculator/",
       "theme": "dark",
-      "viewport": "desktop",
+      "viewport": "mobile",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -6432,33 +6432,6 @@
     },
     {
       "surface": "marketing",
-      "page": "/es/privacy/",
-      "theme": "dark",
-      "viewport": "desktop",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
-      "page": "/es/privacy/",
-      "theme": "light",
-      "viewport": "desktop",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
-      "page": "/es/privacy/",
-      "theme": "light",
-      "viewport": "mobile",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
       "page": "/es/pricing/",
       "theme": "dark",
       "viewport": "mobile",
@@ -6469,8 +6442,35 @@
     {
       "surface": "marketing",
       "page": "/es/privacy/",
+      "theme": "light",
+      "viewport": "desktop",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/es/privacy/",
+      "theme": "light",
+      "viewport": "mobile",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/es/privacy/",
       "theme": "dark",
       "viewport": "mobile",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/es/privacy/",
+      "theme": "dark",
+      "viewport": "desktop",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -6480,6 +6480,42 @@
       "page": "/es/private-cloud/",
       "theme": "light",
       "viewport": "desktop",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/es/private-cloud/",
+      "theme": "light",
+      "viewport": "mobile",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/es/private-cloud/",
+      "theme": "dark",
+      "viewport": "desktop",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/es/private-cloud/",
+      "theme": "dark",
+      "viewport": "mobile",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/es/quickstart/",
+      "theme": "light",
+      "viewport": "mobile",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -6489,42 +6525,6 @@
       "page": "/es/quickstart/",
       "theme": "light",
       "viewport": "desktop",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
-      "page": "/es/quickstart/",
-      "theme": "light",
-      "viewport": "mobile",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
-      "page": "/es/private-cloud/",
-      "theme": "light",
-      "viewport": "mobile",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
-      "page": "/es/private-cloud/",
-      "theme": "dark",
-      "viewport": "desktop",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
-      "page": "/es/private-cloud/",
-      "theme": "dark",
-      "viewport": "mobile",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -6550,15 +6550,6 @@
     {
       "surface": "marketing",
       "page": "/es/responsible-disclosure/",
-      "theme": "dark",
-      "viewport": "desktop",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
-      "page": "/es/responsible-disclosure/",
       "theme": "light",
       "viewport": "desktop",
       "error": null,
@@ -6570,6 +6561,24 @@
       "page": "/es/responsible-disclosure/",
       "theme": "light",
       "viewport": "mobile",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/es/responsible-disclosure/",
+      "theme": "dark",
+      "viewport": "mobile",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/es/responsible-disclosure/",
+      "theme": "dark",
+      "viewport": "desktop",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -6579,15 +6588,6 @@
       "page": "/es/secure-email-for-regulated-saas/",
       "theme": "light",
       "viewport": "desktop",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
-      "page": "/es/responsible-disclosure/",
-      "theme": "dark",
-      "viewport": "mobile",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -6657,15 +6657,6 @@
     },
     {
       "surface": "marketing",
-      "page": "/es/sla/",
-      "theme": "light",
-      "viewport": "mobile",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
       "page": "/es/security/",
       "theme": "dark",
       "viewport": "mobile",
@@ -6675,17 +6666,8 @@
     },
     {
       "surface": "marketing",
-      "page": "/es/solutions/enterprise/",
-      "theme": "light",
-      "viewport": "desktop",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
       "page": "/es/sla/",
-      "theme": "dark",
+      "theme": "light",
       "viewport": "mobile",
       "error": null,
       "docSpill": 0,
@@ -6702,6 +6684,24 @@
     },
     {
       "surface": "marketing",
+      "page": "/es/sla/",
+      "theme": "dark",
+      "viewport": "mobile",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/es/solutions/enterprise/",
+      "theme": "light",
+      "viewport": "desktop",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
       "page": "/es/solutions/enterprise/",
       "theme": "light",
       "viewport": "mobile",
@@ -6739,8 +6739,8 @@
     {
       "surface": "marketing",
       "page": "/es/solutions/high-volume-sending/",
-      "theme": "dark",
-      "viewport": "desktop",
+      "theme": "light",
+      "viewport": "mobile",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -6748,25 +6748,7 @@
     {
       "surface": "marketing",
       "page": "/es/solutions/high-volume-sending/",
-      "theme": "light",
-      "viewport": "mobile",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
-      "page": "/es/solutions/",
-      "theme": "light",
-      "viewport": "mobile",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
-      "page": "/es/solutions/",
-      "theme": "light",
+      "theme": "dark",
       "viewport": "desktop",
       "error": null,
       "docSpill": 0,
@@ -6775,7 +6757,7 @@
     {
       "surface": "marketing",
       "page": "/es/solutions/",
-      "theme": "dark",
+      "theme": "light",
       "viewport": "desktop",
       "error": null,
       "docSpill": 0,
@@ -6793,6 +6775,24 @@
     {
       "surface": "marketing",
       "page": "/es/solutions/",
+      "theme": "light",
+      "viewport": "mobile",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/es/solutions/",
+      "theme": "dark",
+      "viewport": "desktop",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/es/solutions/",
       "theme": "dark",
       "viewport": "mobile",
       "error": null,
@@ -6804,6 +6804,33 @@
       "page": "/es/solutions/migration/",
       "theme": "light",
       "viewport": "desktop",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/es/solutions/migration/",
+      "theme": "light",
+      "viewport": "mobile",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/es/solutions/migration/",
+      "theme": "dark",
+      "viewport": "desktop",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/es/solutions/migration/",
+      "theme": "dark",
+      "viewport": "mobile",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -6819,26 +6846,8 @@
     },
     {
       "surface": "marketing",
-      "page": "/es/solutions/migration/",
+      "page": "/es/solutions/regulated-industries/",
       "theme": "light",
-      "viewport": "mobile",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
-      "page": "/es/solutions/migration/",
-      "theme": "dark",
-      "viewport": "desktop",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
-      "page": "/es/solutions/migration/",
-      "theme": "dark",
       "viewport": "mobile",
       "error": null,
       "docSpill": 0,
@@ -6849,15 +6858,6 @@
       "page": "/es/solutions/regulated-industries/",
       "theme": "dark",
       "viewport": "desktop",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
-      "page": "/es/solutions/regulated-industries/",
-      "theme": "light",
-      "viewport": "mobile",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -6918,15 +6918,6 @@
     },
     {
       "surface": "marketing",
-      "page": "/es/status/",
-      "theme": "light",
-      "viewport": "desktop",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
       "page": "/es/solutions/transactional-email/",
       "theme": "light",
       "viewport": "mobile",
@@ -6938,7 +6929,7 @@
       "surface": "marketing",
       "page": "/es/solutions/transactional-email/",
       "theme": "dark",
-      "viewport": "mobile",
+      "viewport": "desktop",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -6947,7 +6938,25 @@
       "surface": "marketing",
       "page": "/es/solutions/transactional-email/",
       "theme": "dark",
+      "viewport": "mobile",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/es/status/",
+      "theme": "light",
       "viewport": "desktop",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/es/status/",
+      "theme": "light",
+      "viewport": "mobile",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -6963,18 +6972,9 @@
     },
     {
       "surface": "marketing",
-      "page": "/es/status/",
-      "theme": "light",
-      "viewport": "mobile",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
       "page": "/es/subprocessors/",
       "theme": "light",
-      "viewport": "mobile",
+      "viewport": "desktop",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -6992,7 +6992,7 @@
       "surface": "marketing",
       "page": "/es/subprocessors/",
       "theme": "light",
-      "viewport": "desktop",
+      "viewport": "mobile",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -7036,7 +7036,7 @@
     {
       "surface": "marketing",
       "page": "/es/terms/",
-      "theme": "dark",
+      "theme": "light",
       "viewport": "mobile",
       "error": null,
       "docSpill": 0,
@@ -7045,7 +7045,7 @@
     {
       "surface": "marketing",
       "page": "/es/terms/",
-      "theme": "light",
+      "theme": "dark",
       "viewport": "mobile",
       "error": null,
       "docSpill": 0,
@@ -7082,24 +7082,6 @@
       "surface": "marketing",
       "page": "/forensic/",
       "theme": "light",
-      "viewport": "mobile",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
-      "page": "/forensic/",
-      "theme": "dark",
-      "viewport": "desktop",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
-      "page": "/forensic/",
-      "theme": "light",
       "viewport": "desktop",
       "error": null,
       "docSpill": 0,
@@ -7116,8 +7098,17 @@
     },
     {
       "surface": "marketing",
-      "page": "/fr/about/",
+      "page": "/forensic/",
       "theme": "light",
+      "viewport": "mobile",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/forensic/",
+      "theme": "dark",
       "viewport": "desktop",
       "error": null,
       "docSpill": 0,
@@ -7135,8 +7126,8 @@
     {
       "surface": "marketing",
       "page": "/fr/about/",
-      "theme": "dark",
-      "viewport": "mobile",
+      "theme": "light",
+      "viewport": "desktop",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -7161,6 +7152,15 @@
     },
     {
       "surface": "marketing",
+      "page": "/fr/about/",
+      "theme": "dark",
+      "viewport": "mobile",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
       "page": "/fr/acceptable-use/",
       "theme": "light",
       "viewport": "desktop",
@@ -7188,24 +7188,6 @@
     },
     {
       "surface": "marketing",
-      "page": "/fr/anti-spam/",
-      "theme": "light",
-      "viewport": "desktop",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
-      "page": "/fr/anti-spam/",
-      "theme": "light",
-      "viewport": "mobile",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
       "page": "/fr/acceptable-use/",
       "theme": "dark",
       "viewport": "mobile",
@@ -7216,7 +7198,16 @@
     {
       "surface": "marketing",
       "page": "/fr/anti-spam/",
-      "theme": "dark",
+      "theme": "light",
+      "viewport": "desktop",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/fr/anti-spam/",
+      "theme": "light",
       "viewport": "mobile",
       "error": null,
       "docSpill": 0,
@@ -7227,6 +7218,15 @@
       "page": "/fr/anti-spam/",
       "theme": "dark",
       "viewport": "desktop",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/fr/anti-spam/",
+      "theme": "dark",
+      "viewport": "mobile",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -7279,8 +7279,8 @@
     {
       "surface": "marketing",
       "page": "/fr/compare/amazon-ses/",
-      "theme": "dark",
-      "viewport": "desktop",
+      "theme": "light",
+      "viewport": "mobile",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -7288,17 +7288,8 @@
     {
       "surface": "marketing",
       "page": "/fr/compare/amazon-ses/",
-      "theme": "light",
-      "viewport": "mobile",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
-      "page": "/fr/compare/",
-      "theme": "light",
-      "viewport": "mobile",
+      "theme": "dark",
+      "viewport": "desktop",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -7315,16 +7306,7 @@
     {
       "surface": "marketing",
       "page": "/fr/compare/",
-      "theme": "dark",
-      "viewport": "desktop",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
-      "page": "/fr/compare/",
-      "theme": "dark",
+      "theme": "light",
       "viewport": "mobile",
       "error": null,
       "docSpill": 0,
@@ -7341,9 +7323,45 @@
     },
     {
       "surface": "marketing",
+      "page": "/fr/compare/",
+      "theme": "dark",
+      "viewport": "mobile",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/fr/compare/",
+      "theme": "dark",
+      "viewport": "desktop",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
       "page": "/fr/compare/mailgun/",
       "theme": "light",
       "viewport": "desktop",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/fr/compare/mailgun/",
+      "theme": "light",
+      "viewport": "mobile",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/fr/compare/mailgun/",
+      "theme": "dark",
+      "viewport": "mobile",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -7368,27 +7386,9 @@
     },
     {
       "surface": "marketing",
-      "page": "/fr/compare/mailgun/",
-      "theme": "light",
-      "viewport": "mobile",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
       "page": "/fr/compare/methodology/",
       "theme": "light",
       "viewport": "desktop",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
-      "page": "/fr/compare/mailgun/",
-      "theme": "dark",
-      "viewport": "mobile",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -7433,7 +7433,7 @@
       "surface": "marketing",
       "page": "/fr/compare/postmark/",
       "theme": "dark",
-      "viewport": "desktop",
+      "viewport": "mobile",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -7442,7 +7442,7 @@
       "surface": "marketing",
       "page": "/fr/compare/postmark/",
       "theme": "dark",
-      "viewport": "mobile",
+      "viewport": "desktop",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -7487,15 +7487,6 @@
       "surface": "marketing",
       "page": "/fr/compare/sendgrid/",
       "theme": "light",
-      "viewport": "desktop",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
-      "page": "/fr/compare/sendgrid/",
-      "theme": "light",
       "viewport": "mobile",
       "error": null,
       "docSpill": 0,
@@ -7504,7 +7495,7 @@
     {
       "surface": "marketing",
       "page": "/fr/compare/sendgrid/",
-      "theme": "dark",
+      "theme": "light",
       "viewport": "desktop",
       "error": null,
       "docSpill": 0,
@@ -7514,7 +7505,25 @@
       "surface": "marketing",
       "page": "/fr/compare/sendgrid/",
       "theme": "dark",
+      "viewport": "desktop",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/fr/compare/sendgrid/",
+      "theme": "dark",
       "viewport": "mobile",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/fr/compliance/",
+      "theme": "light",
+      "viewport": "desktop",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -7531,7 +7540,16 @@
     {
       "surface": "marketing",
       "page": "/fr/compliance/",
-      "theme": "light",
+      "theme": "dark",
+      "viewport": "mobile",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/fr/compliance/",
+      "theme": "dark",
       "viewport": "desktop",
       "error": null,
       "docSpill": 0,
@@ -7542,24 +7560,6 @@
       "page": "/fr/contact/enterprise/",
       "theme": "light",
       "viewport": "desktop",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
-      "page": "/fr/compliance/",
-      "theme": "dark",
-      "viewport": "desktop",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
-      "page": "/fr/compliance/",
-      "theme": "dark",
-      "viewport": "mobile",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -7603,15 +7603,6 @@
     {
       "surface": "marketing",
       "page": "/fr/contact/",
-      "theme": "dark",
-      "viewport": "desktop",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
-      "page": "/fr/contact/",
       "theme": "light",
       "viewport": "mobile",
       "error": null,
@@ -7622,6 +7613,15 @@
       "surface": "marketing",
       "page": "/fr/contact/",
       "theme": "dark",
+      "viewport": "desktop",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/fr/contact/",
+      "theme": "dark",
       "viewport": "mobile",
       "error": null,
       "docSpill": 0,
@@ -7647,15 +7647,6 @@
     },
     {
       "surface": "marketing",
-      "page": "/fr/contact/security/",
-      "theme": "light",
-      "viewport": "desktop",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
       "page": "/fr/contact/sales/",
       "theme": "dark",
       "viewport": "desktop",
@@ -7675,7 +7666,16 @@
     {
       "surface": "marketing",
       "page": "/fr/contact/security/",
-      "theme": "dark",
+      "theme": "light",
+      "viewport": "desktop",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/fr/contact/security/",
+      "theme": "light",
       "viewport": "mobile",
       "error": null,
       "docSpill": 0,
@@ -7693,7 +7693,7 @@
     {
       "surface": "marketing",
       "page": "/fr/contact/security/",
-      "theme": "light",
+      "theme": "dark",
       "viewport": "mobile",
       "error": null,
       "docSpill": 0,
@@ -7703,7 +7703,7 @@
       "surface": "marketing",
       "page": "/fr/cookies/",
       "theme": "light",
-      "viewport": "mobile",
+      "viewport": "desktop",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -7712,7 +7712,7 @@
       "surface": "marketing",
       "page": "/fr/cookies/",
       "theme": "light",
-      "viewport": "desktop",
+      "viewport": "mobile",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -7755,8 +7755,8 @@
     },
     {
       "surface": "marketing",
-      "page": "/fr/dpa/",
-      "theme": "light",
+      "page": "/fr/data-locations/",
+      "theme": "dark",
       "viewport": "desktop",
       "error": null,
       "docSpill": 0,
@@ -7773,17 +7773,8 @@
     },
     {
       "surface": "marketing",
-      "page": "/fr/data-locations/",
-      "theme": "dark",
-      "viewport": "desktop",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
       "page": "/fr/dpa/",
-      "theme": "dark",
+      "theme": "light",
       "viewport": "desktop",
       "error": null,
       "docSpill": 0,
@@ -7800,25 +7791,7 @@
     },
     {
       "surface": "marketing",
-      "page": "/fr/enterprise/",
-      "theme": "light",
-      "viewport": "mobile",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
-      "page": "/fr/enterprise/",
-      "theme": "light",
-      "viewport": "desktop",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
-      "page": "/fr/enterprise/",
+      "page": "/fr/dpa/",
       "theme": "dark",
       "viewport": "desktop",
       "error": null,
@@ -7837,6 +7810,69 @@
     {
       "surface": "marketing",
       "page": "/fr/enterprise/",
+      "theme": "light",
+      "viewport": "desktop",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/fr/enterprise/",
+      "theme": "light",
+      "viewport": "mobile",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/fr/enterprise/",
+      "theme": "dark",
+      "viewport": "desktop",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/fr/enterprise/",
+      "theme": "dark",
+      "viewport": "mobile",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/fr/features/",
+      "theme": "light",
+      "viewport": "desktop",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/fr/features/",
+      "theme": "light",
+      "viewport": "mobile",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/fr/features/",
+      "theme": "dark",
+      "viewport": "desktop",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/fr/features/",
       "theme": "dark",
       "viewport": "mobile",
       "error": null,
@@ -7854,34 +7890,7 @@
     },
     {
       "surface": "marketing",
-      "page": "/fr/features/",
-      "theme": "light",
-      "viewport": "desktop",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
-      "page": "/fr/features/",
-      "theme": "dark",
-      "viewport": "desktop",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
-      "page": "/fr/features/",
-      "theme": "dark",
-      "viewport": "mobile",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
-      "page": "/fr/features/",
+      "page": "/fr/forensic/",
       "theme": "light",
       "viewport": "mobile",
       "error": null,
@@ -7891,8 +7900,8 @@
     {
       "surface": "marketing",
       "page": "/fr/forensic/",
-      "theme": "light",
-      "viewport": "mobile",
+      "theme": "dark",
+      "viewport": "desktop",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -7908,8 +7917,8 @@
     },
     {
       "surface": "marketing",
-      "page": "/fr/forensic/",
-      "theme": "dark",
+      "page": "/fr/inbox-placement/",
+      "theme": "light",
       "viewport": "desktop",
       "error": null,
       "docSpill": 0,
@@ -7927,6 +7936,24 @@
     {
       "surface": "marketing",
       "page": "/fr/inbox-placement/",
+      "theme": "dark",
+      "viewport": "desktop",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/fr/inbox-placement/",
+      "theme": "dark",
+      "viewport": "mobile",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/fr/",
       "theme": "light",
       "viewport": "desktop",
       "error": null,
@@ -7935,17 +7962,8 @@
     },
     {
       "surface": "marketing",
-      "page": "/fr/inbox-placement/",
-      "theme": "dark",
-      "viewport": "desktop",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
-      "page": "/fr/inbox-placement/",
-      "theme": "dark",
+      "page": "/fr/",
+      "theme": "light",
       "viewport": "mobile",
       "error": null,
       "docSpill": 0,
@@ -7956,24 +7974,6 @@
       "page": "/fr/pricing/calculator/",
       "theme": "light",
       "viewport": "desktop",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
-      "page": "/fr/",
-      "theme": "light",
-      "viewport": "desktop",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
-      "page": "/fr/",
-      "theme": "light",
-      "viewport": "mobile",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -8046,6 +8046,15 @@
       "page": "/fr/pricing/",
       "theme": "dark",
       "viewport": "desktop",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/fr/pricing/",
+      "theme": "dark",
+      "viewport": "mobile",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -8063,15 +8072,6 @@
       "surface": "marketing",
       "page": "/fr/privacy/",
       "theme": "light",
-      "viewport": "mobile",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
-      "page": "/fr/pricing/",
-      "theme": "dark",
       "viewport": "mobile",
       "error": null,
       "docSpill": 0,
@@ -8108,6 +8108,24 @@
       "surface": "marketing",
       "page": "/fr/private-cloud/",
       "theme": "light",
+      "viewport": "mobile",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/fr/private-cloud/",
+      "theme": "dark",
+      "viewport": "desktop",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/fr/private-cloud/",
+      "theme": "dark",
       "viewport": "mobile",
       "error": null,
       "docSpill": 0,
@@ -8126,24 +8144,6 @@
       "surface": "marketing",
       "page": "/fr/quickstart/",
       "theme": "light",
-      "viewport": "mobile",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
-      "page": "/fr/private-cloud/",
-      "theme": "dark",
-      "viewport": "desktop",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
-      "page": "/fr/private-cloud/",
-      "theme": "dark",
       "viewport": "mobile",
       "error": null,
       "docSpill": 0,
@@ -8225,7 +8225,7 @@
       "surface": "marketing",
       "page": "/fr/secure-email-for-regulated-saas/",
       "theme": "dark",
-      "viewport": "mobile",
+      "viewport": "desktop",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -8234,7 +8234,7 @@
       "surface": "marketing",
       "page": "/fr/secure-email-for-regulated-saas/",
       "theme": "dark",
-      "viewport": "desktop",
+      "viewport": "mobile",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -8268,6 +8268,15 @@
     },
     {
       "surface": "marketing",
+      "page": "/fr/security/",
+      "theme": "dark",
+      "viewport": "mobile",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
       "page": "/fr/sla/",
       "theme": "light",
       "viewport": "desktop",
@@ -8286,7 +8295,16 @@
     },
     {
       "surface": "marketing",
-      "page": "/fr/security/",
+      "page": "/fr/sla/",
+      "theme": "dark",
+      "viewport": "desktop",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/fr/sla/",
       "theme": "dark",
       "viewport": "mobile",
       "error": null,
@@ -8298,24 +8316,6 @@
       "page": "/fr/solutions/enterprise/",
       "theme": "light",
       "viewport": "desktop",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
-      "page": "/fr/sla/",
-      "theme": "dark",
-      "viewport": "desktop",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
-      "page": "/fr/sla/",
-      "theme": "dark",
-      "viewport": "mobile",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -8350,15 +8350,6 @@
     {
       "surface": "marketing",
       "page": "/fr/solutions/high-volume-sending/",
-      "theme": "dark",
-      "viewport": "desktop",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
-      "page": "/fr/solutions/high-volume-sending/",
       "theme": "light",
       "viewport": "desktop",
       "error": null,
@@ -8376,34 +8367,7 @@
     },
     {
       "surface": "marketing",
-      "page": "/fr/solutions/",
-      "theme": "light",
-      "viewport": "desktop",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
-      "page": "/fr/solutions/",
-      "theme": "light",
-      "viewport": "mobile",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
-      "page": "/fr/solutions/",
-      "theme": "dark",
-      "viewport": "mobile",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
-      "page": "/fr/solutions/",
+      "page": "/fr/solutions/high-volume-sending/",
       "theme": "dark",
       "viewport": "desktop",
       "error": null,
@@ -8413,6 +8377,42 @@
     {
       "surface": "marketing",
       "page": "/fr/solutions/high-volume-sending/",
+      "theme": "dark",
+      "viewport": "mobile",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/fr/solutions/",
+      "theme": "light",
+      "viewport": "desktop",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/fr/solutions/",
+      "theme": "light",
+      "viewport": "mobile",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/fr/solutions/",
+      "theme": "dark",
+      "viewport": "desktop",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/fr/solutions/",
       "theme": "dark",
       "viewport": "mobile",
       "error": null,
@@ -8424,6 +8424,33 @@
       "page": "/fr/solutions/migration/",
       "theme": "light",
       "viewport": "desktop",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/fr/solutions/migration/",
+      "theme": "light",
+      "viewport": "mobile",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/fr/solutions/migration/",
+      "theme": "dark",
+      "viewport": "desktop",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/fr/solutions/migration/",
+      "theme": "dark",
+      "viewport": "mobile",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -8441,33 +8468,6 @@
       "surface": "marketing",
       "page": "/fr/solutions/regulated-industries/",
       "theme": "light",
-      "viewport": "mobile",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
-      "page": "/fr/solutions/migration/",
-      "theme": "light",
-      "viewport": "mobile",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
-      "page": "/fr/solutions/migration/",
-      "theme": "dark",
-      "viewport": "desktop",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
-      "page": "/fr/solutions/migration/",
-      "theme": "dark",
       "viewport": "mobile",
       "error": null,
       "docSpill": 0,
@@ -8513,7 +8513,7 @@
       "surface": "marketing",
       "page": "/fr/solutions/saas-platforms/",
       "theme": "dark",
-      "viewport": "mobile",
+      "viewport": "desktop",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -8522,7 +8522,7 @@
       "surface": "marketing",
       "page": "/fr/solutions/saas-platforms/",
       "theme": "dark",
-      "viewport": "desktop",
+      "viewport": "mobile",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -8532,15 +8532,6 @@
       "page": "/fr/solutions/transactional-email/",
       "theme": "light",
       "viewport": "desktop",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
-      "page": "/fr/solutions/transactional-email/",
-      "theme": "dark",
-      "viewport": "mobile",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -8565,36 +8556,36 @@
     },
     {
       "surface": "marketing",
+      "page": "/fr/solutions/transactional-email/",
+      "theme": "dark",
+      "viewport": "mobile",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/fr/status/",
+      "theme": "light",
+      "viewport": "desktop",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/fr/status/",
+      "theme": "light",
+      "viewport": "mobile",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
       "page": "/fr/status/",
       "theme": "dark",
       "viewport": "desktop",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
-      "page": "/fr/status/",
-      "theme": "light",
-      "viewport": "desktop",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
-      "page": "/fr/status/",
-      "theme": "light",
-      "viewport": "mobile",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
-      "page": "/fr/subprocessors/",
-      "theme": "light",
-      "viewport": "mobile",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -8620,7 +8611,7 @@
     {
       "surface": "marketing",
       "page": "/fr/subprocessors/",
-      "theme": "dark",
+      "theme": "light",
       "viewport": "mobile",
       "error": null,
       "docSpill": 0,
@@ -8631,6 +8622,15 @@
       "page": "/fr/subprocessors/",
       "theme": "dark",
       "viewport": "desktop",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/fr/subprocessors/",
+      "theme": "dark",
+      "viewport": "mobile",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -8664,33 +8664,6 @@
     },
     {
       "surface": "marketing",
-      "page": "/inbox-placement/",
-      "theme": "light",
-      "viewport": "mobile",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
-      "page": "/inbox-placement/",
-      "theme": "light",
-      "viewport": "desktop",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
-      "page": "/inbox-placement/",
-      "theme": "dark",
-      "viewport": "desktop",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
       "page": "/fr/terms/",
       "theme": "dark",
       "viewport": "mobile",
@@ -8701,6 +8674,33 @@
     {
       "surface": "marketing",
       "page": "/inbox-placement/",
+      "theme": "light",
+      "viewport": "mobile",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/inbox-placement/",
+      "theme": "light",
+      "viewport": "desktop",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/inbox-placement/",
+      "theme": "dark",
+      "viewport": "desktop",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/inbox-placement/",
       "theme": "dark",
       "viewport": "mobile",
       "error": null,
@@ -8711,6 +8711,33 @@
       "surface": "marketing",
       "page": "/",
       "theme": "light",
+      "viewport": "desktop",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/",
+      "theme": "light",
+      "viewport": "mobile",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/",
+      "theme": "dark",
+      "viewport": "mobile",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/",
+      "theme": "dark",
       "viewport": "desktop",
       "error": null,
       "docSpill": 0,
@@ -8727,26 +8754,8 @@
     },
     {
       "surface": "marketing",
-      "page": "/",
-      "theme": "dark",
-      "viewport": "desktop",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
-      "page": "/",
+      "page": "/performance-methodology/",
       "theme": "light",
-      "viewport": "mobile",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
-      "page": "/",
-      "theme": "dark",
       "viewport": "mobile",
       "error": null,
       "docSpill": 0,
@@ -8755,8 +8764,8 @@
     {
       "surface": "marketing",
       "page": "/performance-methodology/",
-      "theme": "light",
-      "viewport": "mobile",
+      "theme": "dark",
+      "viewport": "desktop",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -8781,15 +8790,6 @@
     },
     {
       "surface": "marketing",
-      "page": "/performance-methodology/",
-      "theme": "dark",
-      "viewport": "desktop",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
       "page": "/pricing/calculator/",
       "theme": "light",
       "viewport": "mobile",
@@ -8801,15 +8801,6 @@
       "surface": "marketing",
       "page": "/pricing/calculator/",
       "theme": "dark",
-      "viewport": "desktop",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
-      "page": "/privacy/do-not-sell/",
-      "theme": "light",
       "viewport": "desktop",
       "error": null,
       "docSpill": 0,
@@ -8836,15 +8827,6 @@
     {
       "surface": "marketing",
       "page": "/pricing/",
-      "theme": "dark",
-      "viewport": "desktop",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
-      "page": "/pricing/",
       "theme": "light",
       "viewport": "mobile",
       "error": null,
@@ -8855,6 +8837,24 @@
       "surface": "marketing",
       "page": "/pricing/",
       "theme": "dark",
+      "viewport": "desktop",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/privacy/do-not-sell/",
+      "theme": "light",
+      "viewport": "desktop",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/pricing/",
+      "theme": "dark",
       "viewport": "mobile",
       "error": null,
       "docSpill": 0,
@@ -8873,7 +8873,7 @@
       "surface": "marketing",
       "page": "/privacy/do-not-sell/",
       "theme": "dark",
-      "viewport": "mobile",
+      "viewport": "desktop",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -8882,7 +8882,7 @@
       "surface": "marketing",
       "page": "/privacy/do-not-sell/",
       "theme": "dark",
-      "viewport": "desktop",
+      "viewport": "mobile",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -8927,7 +8927,7 @@
       "surface": "marketing",
       "page": "/private-cloud/",
       "theme": "light",
-      "viewport": "mobile",
+      "viewport": "desktop",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -8936,16 +8936,7 @@
       "surface": "marketing",
       "page": "/private-cloud/",
       "theme": "light",
-      "viewport": "desktop",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
-      "page": "/private-cloud/",
-      "theme": "dark",
-      "viewport": "desktop",
+      "viewport": "mobile",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -8955,6 +8946,15 @@
       "page": "/private-cloud/",
       "theme": "dark",
       "viewport": "mobile",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/private-cloud/",
+      "theme": "dark",
+      "viewport": "desktop",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -8970,16 +8970,7 @@
     },
     {
       "surface": "marketing",
-      "page": "/responsible-disclosure/",
-      "theme": "light",
-      "viewport": "desktop",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
-      "page": "/responsible-disclosure/",
+      "page": "/quickstart/",
       "theme": "light",
       "viewport": "mobile",
       "error": null,
@@ -8989,8 +8980,8 @@
     {
       "surface": "marketing",
       "page": "/quickstart/",
-      "theme": "light",
-      "viewport": "mobile",
+      "theme": "dark",
+      "viewport": "desktop",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -9007,7 +8998,16 @@
     {
       "surface": "marketing",
       "page": "/responsible-disclosure/",
-      "theme": "dark",
+      "theme": "light",
+      "viewport": "mobile",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/responsible-disclosure/",
+      "theme": "light",
       "viewport": "desktop",
       "error": null,
       "docSpill": 0,
@@ -9015,7 +9015,7 @@
     },
     {
       "surface": "marketing",
-      "page": "/quickstart/",
+      "page": "/responsible-disclosure/",
       "theme": "dark",
       "viewport": "desktop",
       "error": null,
@@ -9079,8 +9079,8 @@
     {
       "surface": "marketing",
       "page": "/security/",
-      "theme": "dark",
-      "viewport": "desktop",
+      "theme": "light",
+      "viewport": "mobile",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -9088,33 +9088,6 @@
     {
       "surface": "marketing",
       "page": "/security/",
-      "theme": "light",
-      "viewport": "mobile",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
-      "page": "/sla/",
-      "theme": "light",
-      "viewport": "desktop",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
-      "page": "/sla/",
-      "theme": "light",
-      "viewport": "mobile",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
-      "page": "/sla/",
       "theme": "dark",
       "viewport": "desktop",
       "error": null,
@@ -9132,9 +9105,27 @@
     },
     {
       "surface": "marketing",
-      "page": "/solutions/enterprise/",
-      "theme": "dark",
+      "page": "/sla/",
+      "theme": "light",
+      "viewport": "desktop",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/sla/",
+      "theme": "light",
       "viewport": "mobile",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/sla/",
+      "theme": "dark",
+      "viewport": "desktop",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -9151,15 +9142,6 @@
     {
       "surface": "marketing",
       "page": "/solutions/enterprise/",
-      "theme": "dark",
-      "viewport": "desktop",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
-      "page": "/solutions/enterprise/",
       "theme": "light",
       "viewport": "desktop",
       "error": null,
@@ -9177,9 +9159,54 @@
     },
     {
       "surface": "marketing",
+      "page": "/solutions/enterprise/",
+      "theme": "dark",
+      "viewport": "mobile",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/solutions/enterprise/",
+      "theme": "dark",
+      "viewport": "desktop",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
       "page": "/solutions/high-volume-sending/",
       "theme": "light",
       "viewport": "desktop",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/solutions/high-volume-sending/",
+      "theme": "light",
+      "viewport": "mobile",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/solutions/high-volume-sending/",
+      "theme": "dark",
+      "viewport": "desktop",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/solutions/high-volume-sending/",
+      "theme": "dark",
+      "viewport": "mobile",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -9189,33 +9216,6 @@
       "page": "/solutions/",
       "theme": "light",
       "viewport": "desktop",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
-      "page": "/solutions/high-volume-sending/",
-      "theme": "light",
-      "viewport": "mobile",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
-      "page": "/solutions/high-volume-sending/",
-      "theme": "dark",
-      "viewport": "desktop",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
-      "page": "/solutions/high-volume-sending/",
-      "theme": "dark",
-      "viewport": "mobile",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -9251,34 +9251,16 @@
       "surface": "marketing",
       "page": "/solutions/migration/",
       "theme": "light",
+      "viewport": "desktop",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/solutions/migration/",
+      "theme": "light",
       "viewport": "mobile",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
-      "page": "/solutions/migration/",
-      "theme": "light",
-      "viewport": "desktop",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
-      "page": "/solutions/regulated-industries/",
-      "theme": "light",
-      "viewport": "desktop",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
-      "page": "/solutions/migration/",
-      "theme": "dark",
-      "viewport": "desktop",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -9294,8 +9276,26 @@
     },
     {
       "surface": "marketing",
-      "page": "/solutions/regulated-industries/",
+      "page": "/solutions/migration/",
       "theme": "dark",
+      "viewport": "desktop",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/solutions/regulated-industries/",
+      "theme": "light",
+      "viewport": "desktop",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/solutions/regulated-industries/",
+      "theme": "light",
       "viewport": "mobile",
       "error": null,
       "docSpill": 0,
@@ -9313,7 +9313,7 @@
     {
       "surface": "marketing",
       "page": "/solutions/regulated-industries/",
-      "theme": "light",
+      "theme": "dark",
       "viewport": "mobile",
       "error": null,
       "docSpill": 0,
@@ -9342,6 +9342,15 @@
       "page": "/solutions/saas-platforms/",
       "theme": "dark",
       "viewport": "desktop",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/solutions/saas-platforms/",
+      "theme": "dark",
+      "viewport": "mobile",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -9351,15 +9360,6 @@
       "page": "/solutions/transactional-email/",
       "theme": "light",
       "viewport": "desktop",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
-      "page": "/solutions/saas-platforms/",
-      "theme": "dark",
-      "viewport": "mobile",
       "error": null,
       "docSpill": 0,
       "findings": []
@@ -9411,15 +9411,6 @@
     },
     {
       "surface": "marketing",
-      "page": "/subprocessors/",
-      "theme": "light",
-      "viewport": "desktop",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
       "page": "/status/",
       "theme": "dark",
       "viewport": "desktop",
@@ -9448,6 +9439,15 @@
     {
       "surface": "marketing",
       "page": "/subprocessors/",
+      "theme": "light",
+      "viewport": "desktop",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/subprocessors/",
       "theme": "dark",
       "viewport": "desktop",
       "error": null,
@@ -9466,15 +9466,6 @@
     {
       "surface": "marketing",
       "page": "/terms/",
-      "theme": "dark",
-      "viewport": "desktop",
-      "error": null,
-      "docSpill": 0,
-      "findings": []
-    },
-    {
-      "surface": "marketing",
-      "page": "/terms/",
       "theme": "light",
       "viewport": "desktop",
       "error": null,
@@ -9495,6 +9486,15 @@
       "page": "/terms/",
       "theme": "dark",
       "viewport": "mobile",
+      "error": null,
+      "docSpill": 0,
+      "findings": []
+    },
+    {
+      "surface": "marketing",
+      "page": "/terms/",
+      "theme": "dark",
+      "viewport": "desktop",
       "error": null,
       "docSpill": 0,
       "findings": []

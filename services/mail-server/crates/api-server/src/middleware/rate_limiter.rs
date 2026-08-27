@@ -557,6 +557,7 @@ fn is_in_trusted(ip: IpAddr, ranges: &[IpNetwork]) -> bool {
 
 /// A sliding-window rate limiter that interpolates between the current and
 /// previous window counts for smoother limiting.
+#[allow(clippy::result_unit_err)]
 pub async fn sliding_window_count(
     state: &AppState,
     tenant_id: &str,

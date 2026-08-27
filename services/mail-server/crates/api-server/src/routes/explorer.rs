@@ -114,12 +114,14 @@ async fn sandbox(state: &AppState) -> Result<&'static Sandbox, String> {
         // A previous process created the key but its plaintext is lost
         // (hashed at rest). Rotate: revoke old, insert new — the explorer is
         // stateless so rotation is invisible.
-        sqlx::query("UPDATE api_keys SET revoked_at = $2 WHERE tenant_id = $1 AND revoked_at IS NULL")
-            .bind(SANDBOX_TENANT_ID)
-            .bind(now)
-            .execute(&state.db)
-            .await
-            .map_err(|e| format!("sandbox key rotation failed: {e}"))?;
+        sqlx::query(
+            "UPDATE api_keys SET revoked_at = $2 WHERE tenant_id = $1 AND revoked_at IS NULL",
+        )
+        .bind(SANDBOX_TENANT_ID)
+        .bind(now)
+        .execute(&state.db)
+        .await
+        .map_err(|e| format!("sandbox key rotation failed: {e}"))?;
         insert_key(state, &key_hash, now).await?;
         raw_key
     } else {
@@ -131,7 +133,11 @@ async fn sandbox(state: &AppState) -> Result<&'static Sandbox, String> {
     Ok(SANDBOX.get().expect("just set"))
 }
 
-async fn insert_key(state: &AppState, key_hash: &str, now: chrono::DateTime<chrono::Utc>) -> Result<(), String> {
+async fn insert_key(
+    state: &AppState,
+    key_hash: &str,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<(), String> {
     let prefix: String = "sbx_".to_string();
     sqlx::query(
         "INSERT INTO api_keys (id, tenant_id, name, key_prefix, key_hash, scopes, expires_at, created_at, updated_at)
@@ -174,7 +180,6 @@ async fn rate_limit(state: &AppState, ip: &str) -> bool {
 }
 
 async fn redis_rate_limit(state: &AppState, key: &str) -> bool {
-    use redis::AsyncCommands;
     let mut conn = match state.redis.get().await {
         Ok(c) => c,
         Err(e) => {
@@ -233,10 +238,10 @@ async fn dispatch(
     api_key: &str,
     json_body: Option<&str>,
 ) -> (u16, serde_json::Value) {
-    let mut builder = Request::builder()
-        .method(method)
-        .uri(uri)
-        .header("x-api-key", HeaderValue::from_str(api_key).expect("api key is ascii"));
+    let mut builder = Request::builder().method(method).uri(uri).header(
+        "x-api-key",
+        HeaderValue::from_str(api_key).expect("api key is ascii"),
+    );
     if json_body.is_some() {
         builder = builder.header("content-type", "application/json");
     }
@@ -258,9 +263,9 @@ async fn dispatch(
     let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
         .await
         .unwrap_or_default();
-    let value = serde_json::from_slice(&bytes).unwrap_or_else(|_| {
-        serde_json::json!({"raw": String::from_utf8_lossy(&bytes).to_string()})
-    });
+    let value = serde_json::from_slice(&bytes).unwrap_or_else(
+        |_| serde_json::json!({"raw": String::from_utf8_lossy(&bytes).to_string()}),
+    );
     (status, value)
 }
 
@@ -279,13 +284,15 @@ fn all_recipients_example_com(body: &serde_json::Value) -> Result<(), String> {
             ))
         }
     };
-    let mut check_list = |field: &str| -> Result<(), String> {
+    let check_list = |field: &str| -> Result<(), String> {
         match body.get(field) {
             None | Some(serde_json::Value::Null) => Ok(()),
             Some(serde_json::Value::String(s)) => check(s),
             Some(serde_json::Value::Array(items)) => {
                 for item in items {
-                    let s = item.as_str().ok_or_else(|| format!("{field} entries must be strings"))?;
+                    let s = item
+                        .as_str()
+                        .ok_or_else(|| format!("{field} entries must be strings"))?;
                     check(s)?;
                 }
                 Ok(())
@@ -317,10 +324,16 @@ pub async fn exec(
     Form(form): Form<ExplorerForm>,
 ) -> Response {
     if !rate_limit(&state, &client_ip(&headers)).await {
-        return error_page(StatusCode::TOO_MANY_REQUESTS, "Too many sandbox requests — try again in a minute.");
+        return error_page(
+            StatusCode::TOO_MANY_REQUESTS,
+            "Too many sandbox requests — try again in a minute.",
+        );
     }
     if form.body.len() > MAX_BODY_BYTES {
-        return error_page(StatusCode::PAYLOAD_TOO_LARGE, "Request body exceeds the 8 KiB sandbox limit.");
+        return error_page(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "Request body exceeds the 8 KiB sandbox limit.",
+        );
     }
     let sandbox = match sandbox(&state).await {
         Ok(s) => s,
@@ -339,11 +352,22 @@ pub async fn exec(
                     // Force from= the sandbox domain when absent (the real
                     // handler enforces ownership of example.com anyway).
                     let mut payload = parsed;
-                    if payload.get("from").and_then(|f| f.as_str()).map_or(true, |f| f.trim().is_empty()) {
+                    if payload
+                        .get("from")
+                        .and_then(|f| f.as_str())
+                        .is_none_or(|f| f.trim().is_empty())
+                    {
                         payload["from"] = serde_json::json!("sandbox@example.com");
                     }
                     let json = payload.to_string();
-                    let (status, body) = dispatch(&state, Method::POST, "/v1/messages", &sandbox.api_key, Some(&json)).await;
+                    let (status, body) = dispatch(
+                        &state,
+                        Method::POST,
+                        "/v1/messages",
+                        &sandbox.api_key,
+                        Some(&json),
+                    )
+                    .await;
                     ("POST", "/v1/messages", status, body)
                 }
                 Err(reason) => {
@@ -353,11 +377,19 @@ pub async fn exec(
             },
         },
         "messages" => {
-            let (status, body) = dispatch(&state, Method::GET, "/v1/messages?limit=20", &sandbox.api_key, None).await;
+            let (status, body) = dispatch(
+                &state,
+                Method::GET,
+                "/v1/messages?limit=20",
+                &sandbox.api_key,
+                None,
+            )
+            .await;
             ("GET", "/v1/messages?limit=20", status, body)
         }
         "domains" => {
-            let (status, body) = dispatch(&state, Method::GET, "/v1/domains", &sandbox.api_key, None).await;
+            let (status, body) =
+                dispatch(&state, Method::GET, "/v1/domains", &sandbox.api_key, None).await;
             ("GET", "/v1/domains", status, body)
         }
         "add_domain" => match serde_json::from_str::<serde_json::Value>(&form.body) {
@@ -365,14 +397,23 @@ pub async fn exec(
                 let body = serde_json::json!({"error": {"code": "invalid_json", "message": format!("{e}")}});
                 ("POST", "/v1/domains", 400u16, body)
             }
-            Ok(parsed) => if !is_example_com_domain(&parsed) {
-                let body = serde_json::json!({"error": {"code": "sandbox_domain_policy", "message": "The explorer sandbox registers subdomains of example.com only."}});
-                ("POST", "/v1/domains", 422, body)
-            } else {
-                let json = parsed.to_string();
-                let (status, body) = dispatch(&state, Method::POST, "/v1/domains", &sandbox.api_key, Some(&json)).await;
-                ("POST", "/v1/domains", status, body)
-            },
+            Ok(parsed) => {
+                if !is_example_com_domain(&parsed) {
+                    let body = serde_json::json!({"error": {"code": "sandbox_domain_policy", "message": "The explorer sandbox registers subdomains of example.com only."}});
+                    ("POST", "/v1/domains", 422, body)
+                } else {
+                    let json = parsed.to_string();
+                    let (status, body) = dispatch(
+                        &state,
+                        Method::POST,
+                        "/v1/domains",
+                        &sandbox.api_key,
+                        Some(&json),
+                    )
+                    .await;
+                    ("POST", "/v1/domains", status, body)
+                }
+            }
         },
         other => {
             let body = serde_json::json!({"error": {"code": "unknown_lane", "message": format!("unknown lane {other:?}")}});
@@ -392,7 +433,11 @@ pub async fn exec(
 }
 
 fn is_example_com_domain(body: &serde_json::Value) -> bool {
-    match body.get("name").or_else(|| body.get("domain")).and_then(|n| n.as_str()) {
+    match body
+        .get("name")
+        .or_else(|| body.get("domain"))
+        .and_then(|n| n.as_str())
+    {
         Some(n) => {
             let lower = n.trim().to_ascii_lowercase();
             lower == "example.com" || lower.ends_with(".example.com")
@@ -410,7 +455,11 @@ fn error_page(status: StatusCode, message: &str) -> Response {
         body: serde_json::json!({"error": {"message": message}}),
         request_body: String::new(),
     };
-    (status, Html(ui_foundation::explorer::explorer_response_page(&outcome))).into_response()
+    (
+        status,
+        Html(ui_foundation::explorer::explorer_response_page(&outcome)),
+    )
+        .into_response()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -434,11 +483,21 @@ pub struct CalculatorForm {
     #[serde(default = "calc_default_cycle")]
     pub billing_cycle: String,
 }
-fn calc_default_cycle() -> String { "monthly".to_string() }
-fn calc_default_volume() -> i64 { 50_000 }
-fn calc_default_peak() -> i64 { 2_500 }
-fn calc_default_domains() -> i64 { 2 }
-fn calc_default_users() -> i64 { 3 }
+fn calc_default_cycle() -> String {
+    "monthly".to_string()
+}
+fn calc_default_volume() -> i64 {
+    50_000
+}
+fn calc_default_peak() -> i64 {
+    2_500
+}
+fn calc_default_domains() -> i64 {
+    2
+}
+fn calc_default_users() -> i64 {
+    3
+}
 
 pub async fn calculate(
     State(_state): State<AppState>,
@@ -470,7 +529,10 @@ pub async fn calculate(
             emphasis: l.2,
         })
         .collect();
-    Html(ui_foundation::explorer::calculator_response_page(&inputs, &ui_lines, &note)).into_response()
+    Html(ui_foundation::explorer::calculator_response_page(
+        &inputs, &ui_lines, &note,
+    ))
+    .into_response()
 }
 
 fn sanitize_calculator(mut f: CalculatorForm) -> CalculatorForm {
@@ -491,10 +553,7 @@ fn compute_calculator(f: &CalculatorForm) -> Vec<(String, String, bool)> {
     // Cheapest plan whose included volume fits; overage applies beyond it.
     let mut fitting: Vec<&billing_service::plans::PlanSeed> = plans
         .iter()
-        .filter(|p| {
-            ((p.email_limit >= f.volume || p.name == "free"))
-                && p.name != "enterprise"
-        })
+        .filter(|p| (p.email_limit >= f.volume || p.name == "free") && p.name != "enterprise")
         .collect();
     fitting.sort_by_key(|p| p.price_monthly);
     let chosen: Option<&billing_service::plans::PlanSeed> = fitting
@@ -508,10 +567,22 @@ fn compute_calculator(f: &CalculatorForm) -> Vec<(String, String, bool)> {
         let limit = plan.email_limit.max(0);
         let base = plan.price_monthly;
         let overage = billing_service::plans::calculate_overage_cost(f.volume, limit);
-        rows.push((format!("Plan — {}", title(&plan.name)), format!("€{:.2}", base as f64 / 100.0), false));
-        rows.push(("Included emails / month".to_string(), format_int(limit), false));
+        rows.push((
+            format!("Plan — {}", title(plan.name)),
+            format!("€{:.2}", base as f64 / 100.0),
+            false,
+        ));
+        rows.push((
+            "Included emails / month".to_string(),
+            format_int(limit),
+            false,
+        ));
         if overage > 0 {
-            rows.push(("Overage".to_string(), format!("€{:.2}", overage as f64 / 100.0), false));
+            rows.push((
+                "Overage".to_string(),
+                format!("€{:.2}", overage as f64 / 100.0),
+                false,
+            ));
         }
         let total = base + overage;
         // Dedicated IP add-on: €30/mo per IP (Pro and above), per the catalog.
@@ -521,20 +592,48 @@ fn compute_calculator(f: &CalculatorForm) -> Vec<(String, String, bool)> {
             0
         };
         if ip_fee > 0 {
-            rows.push((format!("Dedicated IPs ({}× €30)", f.dedicated_ips), format!("€{:.2}", ip_fee as f64 / 100.0), false));
+            rows.push((
+                format!("Dedicated IPs ({}× €30)", f.dedicated_ips),
+                format!("€{:.2}", ip_fee as f64 / 100.0),
+                false,
+            ));
         } else if f.dedicated_ips > 0 {
-            rows.push(("Dedicated IPs".to_string(), "available on Pro+".to_string(), false));
+            rows.push((
+                "Dedicated IPs".to_string(),
+                "available on Pro+".to_string(),
+                false,
+            ));
         }
         let grand = total + ip_fee;
         if f.billing_cycle == "annual" {
-            rows.push(("Monthly equivalent".to_string(), format!("€{:.2}", grand as f64 / 100.0), false));
-            rows.push(("Annual total (2 months free)".to_string(), format!("€{:.2}", (grand * 10) as f64 / 100.0), true));
+            rows.push((
+                "Monthly equivalent".to_string(),
+                format!("€{:.2}", grand as f64 / 100.0),
+                false,
+            ));
+            rows.push((
+                "Annual total (2 months free)".to_string(),
+                format!("€{:.2}", (grand * 10) as f64 / 100.0),
+                true,
+            ));
         } else {
-            rows.push(("Monthly total".to_string(), format!("€{:.2}", grand as f64 / 100.0), true));
-            rows.push(("Annual alternative".to_string(), format!("€{:.2}", (grand * 10) as f64 / 100.0), false));
+            rows.push((
+                "Monthly total".to_string(),
+                format!("€{:.2}", grand as f64 / 100.0),
+                true,
+            ));
+            rows.push((
+                "Annual alternative".to_string(),
+                format!("€{:.2}", (grand * 10) as f64 / 100.0),
+                false,
+            ));
         }
     } else {
-        rows.push(("Plan".to_string(), "Contact us — Enterprise".to_string(), true));
+        rows.push((
+            "Plan".to_string(),
+            "Contact us — Enterprise".to_string(),
+            true,
+        ));
     }
     rows.push(("Sending domains".to_string(), format_int(f.domains), false));
     rows.push(("Team users".to_string(), format_int(f.team_users), false));
@@ -577,7 +676,8 @@ mod tests {
 
     #[test]
     fn recipient_policy_accepts_only_example_com() {
-        let ok = serde_json::json!({"to": ["a@example.com", "B@Example.COM"], "cc": ["c@example.com"]});
+        let ok =
+            serde_json::json!({"to": ["a@example.com", "B@Example.COM"], "cc": ["c@example.com"]});
         assert!(all_recipients_example_com(&ok).is_ok());
         let bad = serde_json::json!({"to": ["a@evil.com"]});
         assert!(all_recipients_example_com(&bad).is_err());
@@ -589,15 +689,31 @@ mod tests {
 
     #[test]
     fn domain_policy_rejects_non_example() {
-        assert!(is_example_com_domain(&serde_json::json!({"name": "shop.example.com"})));
-        assert!(is_example_com_domain(&serde_json::json!({"name": "example.com"})));
-        assert!(!is_example_com_domain(&serde_json::json!({"name": "evil.com"})));
-        assert!(!is_example_com_domain(&serde_json::json!({"name": "evilexample.com"})));
+        assert!(is_example_com_domain(
+            &serde_json::json!({"name": "shop.example.com"})
+        ));
+        assert!(is_example_com_domain(
+            &serde_json::json!({"name": "example.com"})
+        ));
+        assert!(!is_example_com_domain(
+            &serde_json::json!({"name": "evil.com"})
+        ));
+        assert!(!is_example_com_domain(
+            &serde_json::json!({"name": "evilexample.com"})
+        ));
     }
 
     #[test]
     fn calculator_clamps_and_formats() {
-        let f = sanitize_calculator(CalculatorForm { volume: -5, peak_daily: 10_000_000_000, domains: 0, team_users: 99_999 });
+        let f = sanitize_calculator(CalculatorForm {
+            volume: -5,
+            peak_daily: 10_000_000_000,
+            domains: 0,
+            dedicated_ips: 0,
+            support: None,
+            billing_cycle: String::new(),
+            team_users: 99_999,
+        });
         assert_eq!(f.volume, 0);
         assert_eq!(f.peak_daily, 50_000_000);
         assert_eq!(f.domains, 1);
@@ -607,10 +723,22 @@ mod tests {
 
     #[test]
     fn calculator_picks_cheapest_fitting_plan() {
-        let f = CalculatorForm { volume: 40_000, peak_daily: 2_000, domains: 1, team_users: 1, ..Default::default() };
+        let f = CalculatorForm {
+            volume: 40_000,
+            peak_daily: 2_000,
+            domains: 1,
+            team_users: 1,
+            ..Default::default()
+        };
         let rows = compute_calculator(&f);
-        let plan_row = rows.iter().find(|r| r.0.starts_with("Plan —")).expect("plan row");
-        assert!(plan_row.0.contains("Starter") || plan_row.0.contains("Free"), "{plan_row:?}");
+        let plan_row = rows
+            .iter()
+            .find(|r| r.0.starts_with("Plan —"))
+            .expect("plan row");
+        assert!(
+            plan_row.0.contains("Starter") || plan_row.0.contains("Free"),
+            "{plan_row:?}"
+        );
         let total = rows.iter().find(|r| r.0 == "Monthly total").expect("total");
         assert!(total.1.starts_with("€"));
     }

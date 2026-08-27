@@ -9,5 +9,14 @@ license.workspace = true
 tonic.workspace = true
 prost.workspace = true
 
+# The tonic/prost generated server traits return Result<_, tonic::Status>
+# (>128 bytes) — generated code, not ours to restructure.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = [] }
+
+[lints.clippy]
+result_large_err = "allow"
+
+
 [build-dependencies]
 tonic-build.workspace = true

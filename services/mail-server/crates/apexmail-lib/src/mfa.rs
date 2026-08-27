@@ -194,10 +194,7 @@ fn base32_decode(input: &str) -> Option<Vec<u8>> {
 
     for &c in input {
         let c_upper = c.to_ascii_uppercase();
-        let val = match alphabet.iter().position(|&a| a == c_upper) {
-            Some(v) => v as u64,
-            None => return None,
-        };
+        let val = alphabet.iter().position(|&a| a == c_upper)? as u64;
         bits = (bits << 5) | val;
         bit_count += 5;
         if bit_count >= 8 {

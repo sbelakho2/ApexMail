@@ -41,11 +41,7 @@ fn render_json_pretty(value: &serde_json::Value, max_bytes: usize) -> String {
         while !body_is_char_boundary(&pretty, cut) {
             cut -= 1;
         }
-        format!(
-            "{}\n… (truncated at {} bytes)",
-            &pretty[..cut],
-            max_bytes
-        )
+        format!("{}\n… (truncated at {} bytes)", &pretty[..cut], max_bytes)
     } else {
         pretty
     };
@@ -149,7 +145,11 @@ pub fn explorer_response_page(outcome: &ExplorerOutcome) -> String {
     <p style="font-size:.7rem;color:#71717a;margin-top:.9rem;line-height:1.5">Executed against the live sandbox API with a real sandbox key. Send-lane recipients are limited to the reserved example.com domain; delivery is genuinely attempted and the full lifecycle (queued → attempted → bounced) is visible in the Messages lane.</p>
   </div>
 </div>"#,
-        method_modifier = if outcome.method == "GET" { " apx-chip--get" } else { "" },
+        method_modifier = if outcome.method == "GET" {
+            " apx-chip--get"
+        } else {
+            ""
+        },
         method = outcome.method,
         path = esc(outcome.path),
         status = outcome.status,
@@ -265,8 +265,16 @@ mod tests {
         let page = calculator_response_page(
             &[("volume".into(), "50,000".into())],
             &[
-                CalculatorLine { label: "Plan".into(), value: "Starter".into(), emphasis: false },
-                CalculatorLine { label: "Monthly total".into(), value: "€25".into(), emphasis: true },
+                CalculatorLine {
+                    label: "Plan".into(),
+                    value: "Starter".into(),
+                    emphasis: false,
+                },
+                CalculatorLine {
+                    label: "Monthly total".into(),
+                    value: "€25".into(),
+                    emphasis: true,
+                },
             ],
             "Cheapest plan that fits <your> volume.",
         );
