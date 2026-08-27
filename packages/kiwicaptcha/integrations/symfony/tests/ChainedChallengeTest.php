@@ -4301,12 +4301,6 @@ final class ChainStateStoreInterceptor implements TransactionalChainedChallengeS
 }
 
 /**
- * A chained-challenge state store decorator with a test seam: after every
- * reserve() the optional callback runs (while the reservation is held),
- * so a test can interleave a second request with the same ticket and
- * observe the in-progress 503 boundary.
- */
-/**
  * Wraps a chain store and lets the recovery fence fail closed (the
  * KCA-77-02 regression: the read-after-exception acceptance must not
  * hand the challenge out when the fence shortfalls).

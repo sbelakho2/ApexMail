@@ -1249,18 +1249,12 @@ impl RedisChallengeStore {
         Ok(stored == 1)
     }
 
-    /// Issue the replica wait with `wait_replicas` and `wait_timeout_ms`,
-    /// failing closed when the acknowledged-replica count is below the
-    /// configured threshold. The wait blocks up to its timeout before
-    /// replying, so the connection's read timeout is temporarily raised to
-    /// `timeout_ms + 500 ms` headroom and restored to the default read
-    /// timeout afterwards (even when the wait itself failed).
-    /// The causal replication fence — the PHP
-    /// [`ReplicationBarrierInterface`] mirror. A fresh random fence write
+    /// The causal replication fence, the PHP
+    /// [`ReplicationBarrierInterface`] mirror: a fresh random fence write
     /// on the current connection immediately before the WAIT proves the
     /// replica set advanced through the preceding primary replication
     /// stream, including an earlier uncertain write from another
-    /// connection: a bare WAIT on a connection that wrote nothing cannot
+    /// connection. A bare WAIT on a connection that wrote nothing cannot
     /// prove another connection's write (the round-72 read-only barrier
     /// hole). A shortfall fails closed. No-op when `wait_replicas == 0`.
     pub fn establish_replication_fence(&self, what: &str) -> redis::RedisResult<()> {
@@ -1295,6 +1289,12 @@ impl RedisChallengeStore {
         })
     }
 
+    /// Issue the replica wait with `wait_replicas` and `wait_timeout_ms`,
+    /// failing closed when the acknowledged-replica count is below the
+    /// configured threshold. The wait blocks up to its timeout before
+    /// replying, so the connection's read timeout is temporarily raised to
+    /// `timeout_ms + 500 ms` headroom and restored to the default read
+    /// timeout afterwards (even when the wait itself failed).
     fn wait_verified(
         c: &mut ManagedConnection,
         wait_replicas: u32,
