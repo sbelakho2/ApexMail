@@ -82,18 +82,31 @@ async fn sandbox(state: &AppState) -> Result<&'static Sandbox, String> {
     .await
     .map_err(|e| format!("sandbox domain check failed: {e}"))?;
     if existing_domain.is_none() {
+        // Real DKIM keypair, encrypted exactly like the real create-domain
+        // handler (routes/domains.rs) — the REAL send path requires
+        // dkim_private_key LIKE 'dkim:v1:%' and dkim_enabled to accept a send.
+        let domain_id = uuid::Uuid::new_v4();
+        let key_pair = apexmail_lib::dkim::generate_dkim_keypair()
+            .map_err(|e| format!("sandbox dkim keypair failed: {e}"))?;
+        let aad =
+            apexmail_lib::dkim::dkim_private_key_aad(SANDBOX_TENANT_ID, &domain_id.to_string());
+        let encrypted =
+            apexmail_lib::dkim::encrypt_dkim_private_key(&key_pair.private_key_pem, &aad)
+                .map_err(|e| format!("sandbox dkim encrypt failed: {e}"))?;
         sqlx::query(
             "INSERT INTO domains (id, tenant_id, name, status, spf_verified, dkim_verified,
              dmarc_verified, return_path_verified, mta_sts_verified, bimi_verified,
              tlsrpt_verified, dkim_selector, dkim_public_key, dkim_private_key, dkim_enabled,
              ses_verified, verified, created_at, updated_at)
              VALUES ($1,$2,'example.com','verified',true,true,true,true,true,true,true,
-             'sbx', '', NULL, false, true, true, $3, $3)
+             'sbx', $4, $5, true, false, true, $3, $3)
              ON CONFLICT DO NOTHING",
         )
-        .bind(uuid::Uuid::new_v4())
+        .bind(domain_id)
         .bind(SANDBOX_TENANT_ID)
         .bind(now)
+        .bind(&key_pair.public_key)
+        .bind(&encrypted)
         .execute(&state.db)
         .await
         .map_err(|e| format!("sandbox domain provision failed: {e}"))?;
