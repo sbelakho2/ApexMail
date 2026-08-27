@@ -4141,3 +4141,315 @@ fn fresh_challenges_keep_the_first_error_precedence() {
         "the fresh path keeps the first-error precedence: Expired wins"
     );
 }
+#[test]
+fn resume_rejects_an_emergency_revoked_key() {
+    // The recovery is never a weaker verification mode: an
+    // emergency-revoked kid rejects the resume exactly like a fresh
+    // verification (the full cheap phase reruns the revoked/future
+    // key guard before any derivation).
+    let Some(url) = redis_url() else { return };
+    let prefix = format!("kiwitest:resume-revoked:{}:", std::process::id());
+    let issued = issue_challenge(
+        &sha_config(4),
+        "login",
+        IP,
+        now_unix(),
+        now_micros(),
+        0,
+        None,
+    )
+    .unwrap();
+    let identity = "logical-op-resume-revoked";
+    let token = encode_token(
+        &issued.record.nonce,
+        solve_for_test(&issued.record).expect("4-bit sha solves"),
+    );
+    let issued_at_ns = issued.record.issued_at_ns;
+
+    let store = RedisChallengeStore::new(redis::Client::open(url.clone()).unwrap(), prefix.clone());
+    store.store(&issued.record).unwrap();
+    assert!(store
+        .consume_with_operation_identity(&issued.record.nonce, Some(identity))
+        .unwrap()
+        .is_some());
+
+    let verifier = ProductionVerifier::new(
+        RedisChallengeStore::new(redis::Client::open(url.clone()).unwrap(), prefix.clone()),
+        SECRET,
+    )
+    .with_revoked_kids([issued.record.kid]);
+    let outcome = verifier.resume_consumed_operation(
+        &token,
+        identity,
+        "login",
+        IP,
+        issued_at_ns + 1_000_000,
+        RequestBindingExpectation::Unenforced,
+    );
+    assert!(
+        matches!(outcome, VerifyOutcome::Invalid(VerifyError::UnknownKid)),
+        "an emergency-revoked key rejects the recovery: {outcome:?}"
+    );
+}
+
+#[test]
+fn resume_rejects_a_bumped_policy_epoch() {
+    // A policy-epoch bump between the consume and the retry rejects
+    // the recovery exactly like a fresh verification (the deployment
+    // expectations rerun inside the cheap phase).
+    let Some(url) = redis_url() else { return };
+    let prefix = format!("kiwitest:resume-policy:{}:", std::process::id());
+    let issued = issue_challenge(
+        &sha_config(4),
+        "login",
+        IP,
+        now_unix(),
+        now_micros(),
+        0,
+        None,
+    )
+    .unwrap();
+    let identity = "logical-op-resume-policy";
+    let token = encode_token(
+        &issued.record.nonce,
+        solve_for_test(&issued.record).expect("4-bit sha solves"),
+    );
+    let issued_at_ns = issued.record.issued_at_ns;
+
+    let store = RedisChallengeStore::new(redis::Client::open(url.clone()).unwrap(), prefix.clone());
+    store.store(&issued.record).unwrap();
+    assert!(store
+        .consume_with_operation_identity(&issued.record.nonce, Some(identity))
+        .unwrap()
+        .is_some());
+
+    let verifier = ProductionVerifier::new(
+        RedisChallengeStore::new(redis::Client::open(url.clone()).unwrap(), prefix.clone()),
+        SECRET,
+    )
+    .with_expected_policy_version(issued.record.policy_version + 1);
+    let outcome = verifier.resume_consumed_operation(
+        &token,
+        identity,
+        "login",
+        IP,
+        issued_at_ns + 1_000_000,
+        RequestBindingExpectation::Unenforced,
+    );
+    assert!(
+        matches!(
+            outcome,
+            VerifyOutcome::Invalid(VerifyError::WrongPolicyVersion)
+        ),
+        "a bumped policy epoch rejects the recovery: {outcome:?}"
+    );
+}
+
+#[test]
+fn resume_resolves_an_already_completed_record_without_redriving() {
+    // Stored result first: an already-completed consumed record
+    // resolves through the identity-gated, replication-fenced
+    // stored-result path — the recovery never re-derives a committed
+    // outcome, and the Argon admission gate is never touched.
+    let Some(url) = redis_url() else { return };
+    let prefix = format!("kiwitest:resume-completed:{}:", std::process::id());
+    let issued = issue_challenge(
+        &sha_config(4),
+        "login",
+        IP,
+        now_unix(),
+        now_micros(),
+        0,
+        None,
+    )
+    .unwrap();
+    let identity = "logical-op-resume-completed";
+    let token = encode_token(
+        &issued.record.nonce,
+        solve_for_test(&issued.record).expect("4-bit sha solves"),
+    );
+    let issued_at_ns = issued.record.issued_at_ns;
+
+    let store = RedisChallengeStore::new(redis::Client::open(url.clone()).unwrap(), prefix.clone());
+    store.store(&issued.record).unwrap();
+    assert!(store
+        .consume_with_operation_identity(&issued.record.nonce, Some(identity))
+        .unwrap()
+        .is_some());
+    store
+        .commit_result(
+            &issued.record.nonce,
+            true,
+            issued.record.request_binding.as_deref(),
+        )
+        .unwrap();
+
+    let gate = CountingGate {
+        active: Arc::new(AtomicUsize::new(0)),
+        acquired: Arc::new(AtomicUsize::new(0)),
+        released: Arc::new(AtomicUsize::new(0)),
+        accept: true,
+    };
+    let acquired = gate.acquired.clone();
+    let outcome = ProductionVerifier::new(
+        RedisChallengeStore::new(redis::Client::open(url.clone()).unwrap(), prefix.clone()),
+        SECRET,
+    )
+    .with_argon_gate(gate)
+    .resume_consumed_operation(
+        &token,
+        identity,
+        "login",
+        IP,
+        issued_at_ns + 1_000_000,
+        RequestBindingExpectation::Unenforced,
+    );
+    assert!(
+        matches!(
+            outcome,
+            VerifyOutcome::Valid {
+                from_stored_result: true,
+                ..
+            }
+        ),
+        "the completed record resolves through the stored-result path: {outcome:?}"
+    );
+    assert_eq!(
+        acquired.load(Ordering::SeqCst),
+        0,
+        "no re-derivation: the Argon admission gate is never touched for a completed record"
+    );
+}
+
+#[test]
+fn resume_applies_the_argon_admission_gate() {
+    // The recovery must not bypass the memory-hard verification
+    // protections: a refused capacity lease answers
+    // CapacityExceeded, never a re-derived Valid.
+    let Some(url) = redis_url() else { return };
+    let prefix = format!("kiwitest:resume-gate:{}:", std::process::id());
+    let issued = issue_challenge(
+        &argon_config(2),
+        "login",
+        IP,
+        now_unix(),
+        now_micros(),
+        0,
+        None,
+    )
+    .unwrap();
+    let identity = "logical-op-resume-gate";
+    let counter = solve_for_test(&issued.record).expect("2-bit argon solves");
+    let token = encode_token(&issued.record.nonce, counter);
+    let issued_at_ns = issued.record.issued_at_ns;
+
+    let store = RedisChallengeStore::new(redis::Client::open(url.clone()).unwrap(), prefix.clone());
+    store.store(&issued.record).unwrap();
+    assert!(store
+        .consume_with_operation_identity(&issued.record.nonce, Some(identity))
+        .unwrap()
+        .is_some());
+
+    let verifier = ProductionVerifier::new(
+        RedisChallengeStore::new(redis::Client::open(url.clone()).unwrap(), prefix.clone()),
+        SECRET,
+    )
+    .with_argon_gate(BoolGate(false));
+    let outcome = verifier.resume_consumed_operation(
+        &token,
+        identity,
+        "login",
+        IP,
+        issued_at_ns + 1_000_000,
+        RequestBindingExpectation::Unenforced,
+    );
+    assert!(
+        matches!(
+            outcome,
+            VerifyOutcome::Invalid(VerifyError::CapacityExceeded)
+        ),
+        "a refused capacity lease answers CapacityExceeded: {outcome:?}"
+    );
+}
+
+#[test]
+fn resume_derivation_is_serialized_by_the_atomic_claim() {
+    // The atomic re-derivation claim: exactly one concurrent
+    // same-operation recovery derives. The first resume acquires the
+    // claim + the admission lease and commits; the second resume
+    // resolves the committed outcome through the stored-result path
+    // and never re-acquires the Argon capacity.
+    let Some(url) = redis_url() else { return };
+    let prefix = format!("kiwitest:resume-serialized:{}:", std::process::id());
+    let issued = issue_challenge(
+        &argon_config(2),
+        "login",
+        IP,
+        now_unix(),
+        now_micros(),
+        0,
+        None,
+    )
+    .unwrap();
+    let identity = "logical-op-resume-serialized";
+    let counter = solve_for_test(&issued.record).expect("2-bit argon solves");
+    let token = encode_token(&issued.record.nonce, counter);
+    let issued_at_ns = issued.record.issued_at_ns;
+
+    let store = RedisChallengeStore::new(redis::Client::open(url.clone()).unwrap(), prefix.clone());
+    store.store(&issued.record).unwrap();
+    assert!(store
+        .consume_with_operation_identity(&issued.record.nonce, Some(identity))
+        .unwrap()
+        .is_some());
+
+    let gate = CountingGate {
+        active: Arc::new(AtomicUsize::new(0)),
+        acquired: Arc::new(AtomicUsize::new(0)),
+        released: Arc::new(AtomicUsize::new(0)),
+        accept: true,
+    };
+    let acquired = gate.acquired.clone();
+    let verifier = ProductionVerifier::new(
+        RedisChallengeStore::new(redis::Client::open(url.clone()).unwrap(), prefix.clone()),
+        SECRET,
+    )
+    .with_argon_gate(gate);
+
+    let first = verifier.resume_consumed_operation(
+        &token,
+        identity,
+        "login",
+        IP,
+        issued_at_ns + 1_000_000,
+        RequestBindingExpectation::Unenforced,
+    );
+    assert!(
+        matches!(first, VerifyOutcome::Valid { .. }),
+        "the first resume derives and commits: {first:?}"
+    );
+
+    let second = verifier.resume_consumed_operation(
+        &token,
+        identity,
+        "login",
+        IP,
+        issued_at_ns + 1_000_000,
+        RequestBindingExpectation::Unenforced,
+    );
+    assert!(
+        matches!(
+            second,
+            VerifyOutcome::Valid {
+                from_stored_result: true,
+                ..
+            }
+        ),
+        "the second resume resolves the committed outcome without re-deriving: {second:?}"
+    );
+    assert_eq!(
+            acquired.load(Ordering::SeqCst),
+            1,
+            "exactly one Argon acquisition across both resumes — the claim serialized the re-derivation"
+        );
+}

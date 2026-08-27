@@ -22,6 +22,15 @@ namespace KiwiCaptcha\Risk;
  * state script applies NO change, so the issued-and-abandoned challenge
  * keeps its issue-debt contribution (iss, which decays naturally and is
  * repaid only by an actual SolveSuccess). The kind stays for
+ * replay/compat compatibility.
+ *
+ * The trust-source invariant: SolveSuccess is trust-neutral. A valid
+ * PoW proves expenditure (which the economic model explicitly permits
+ * bots to pay), never legitimacy. Only server/application-confirmed
+ * outcomes (ProtectedActionSuccess, AuthenticationSuccess,
+ * ConfirmedLegitimate) may decrement risk; attacker-controllable
+ * evidence may add risk or repay a specific debt, never subtract it.
+ * Mirrored in the canonical risk Lua and in the Rust risk package.
  * observability — the cancellation is a resource-lifecycle operation
  * (the record is terminalized and the live-cap bookkeeping freed), never
  * a debt refund. Cancellation is client-influenceable (the endpoint

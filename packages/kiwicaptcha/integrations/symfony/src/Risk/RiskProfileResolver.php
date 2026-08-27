@@ -57,6 +57,17 @@ use KiwiCaptcha\Risk\RiskAction;
 final class RiskProfileResolver
 {
     /**
+     * Calibration note: the highest Argon rung (target 8, about 256
+     * expected Argon2id evaluations at the fixed 16 MiB envelope) must
+     * be calibrated against physical low-end mobile hardware: cheap and
+     * mid-range Android, older and recent iPhone, battery-saver and
+     * thermal-throttled states. Measure p50/p90/p99 solve time and
+     * failure rate; desktop estimates do not transfer. The rung must
+     * never be weakened based on client-reported device capabilities,
+     * since bots lie. If it proves too expensive for legitimate mobile
+     * users, adjust the server-selected ladder globally or transition
+     * earlier to StepUp.
+     *
      * @param int   $argonEnvelopeMemoryKib the fixed Argon2id memory envelope
      *                                      (risk.argon_verification_memory_kib)
      *                                      for all adaptive Argon actions,
