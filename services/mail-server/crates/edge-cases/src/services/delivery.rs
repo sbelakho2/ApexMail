@@ -10,7 +10,6 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use std::sync::OnceLock;
-use trust_dns_resolver::config::ResolverConfig;
 use trust_dns_resolver::TokioResolver;
 
 use crate::config::{LoopDetectionConfig, RetryConfig, AUTO_SUBMITTED_VALUES};
@@ -136,12 +135,10 @@ pub struct DeliveryService {
 }
 
 static DELIVERY_RESOLVER: LazyLock<TokioResolver> = LazyLock::new(|| {
-    trust_dns_resolver::Resolver::builder_with_config(
-        ResolverConfig::default(),
-        trust_dns_resolver::net::runtime::TokioRuntimeProvider::default(),
-    )
-    .build()
-    .expect("system resolver configuration is always buildable")
+    trust_dns_resolver::Resolver::builder_tokio()
+        .expect("system resolver configuration is always buildable")
+        .build()
+        .expect("system resolver configuration is always buildable")
 });
 
 impl DeliveryService {

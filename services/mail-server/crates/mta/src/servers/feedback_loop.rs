@@ -19,8 +19,6 @@ use tokio::io::{AsyncWriteExt, BufStream};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Notify;
 use tracing::{debug, error, info, warn};
-use trust_dns_resolver::config::ResolverConfig;
-use trust_dns_resolver::net::runtime::TokioRuntimeProvider;
 use trust_dns_resolver::{Resolver, TokioResolver};
 use uuid::Uuid;
 
@@ -43,7 +41,8 @@ const DATA_TOTAL_TIMEOUT: Duration = Duration::from_secs(600);
 // trust-dns 0.26: TokioAsyncResolver::tokio is gone; build a TokioResolver
 // (builder defaults already equal ResolverOpts::default()).
 static FBL_RESOLVER: LazyLock<TokioResolver> = LazyLock::new(|| {
-    Resolver::builder_with_config(ResolverConfig::default(), TokioRuntimeProvider::default())
+    Resolver::builder_tokio()
+        .expect("system resolver configuration is always buildable")
         .build()
         .expect("system resolver configuration is always buildable")
 });

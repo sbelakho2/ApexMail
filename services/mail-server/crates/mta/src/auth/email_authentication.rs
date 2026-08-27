@@ -9,8 +9,6 @@ use std::time::Duration;
 use mail_auth::{AuthenticatedMessage, DkimResult, Resolver, SpfResult};
 use moka::sync::Cache;
 use serde::{Deserialize, Serialize};
-use trust_dns_resolver::config::ResolverConfig;
-use trust_dns_resolver::net::runtime::TokioRuntimeProvider;
 use trust_dns_resolver::TokioResolver;
 
 use crate::config::EmailAuthConfig;
@@ -191,12 +189,10 @@ impl EmailAuthenticator {
         // #120:Shared DNS resolver for DMARC TXT lookups (avoids per-call allocation).
         // trust-dns 0.26: TokioAsyncResolver::tokio is gone; build a TokioResolver
         // (builder defaults already equal ResolverOpts::default()).
-        let dns_resolver = trust_dns_resolver::Resolver::builder_with_config(
-            ResolverConfig::default(),
-            TokioRuntimeProvider::default(),
-        )
-        .build()
-        .map_err(|e| anyhow::anyhow!("dns resolver: {e}"))?;
+        let dns_resolver = trust_dns_resolver::Resolver::builder_tokio()
+            .map_err(|e| anyhow::anyhow!("dns resolver: {e}"))?
+            .build()
+            .map_err(|e| anyhow::anyhow!("dns resolver: {e}"))?;
 
         // Default SPF cache: 10K entries, 5 min TTL
         let spf_cache = Cache::builder()
@@ -832,12 +828,10 @@ mod tests {
         let resolver = Resolver::new_system_conf().ok()?;
         // trust-dns 0.26: build the TokioResolver via the builder API; the
         // default builder options equal the old default ResolverOpts.
-        let dns_resolver = trust_dns_resolver::Resolver::builder_with_config(
-            ResolverConfig::default(),
-            TokioRuntimeProvider::default(),
-        )
-        .build()
-        .ok()?;
+        let dns_resolver = trust_dns_resolver::Resolver::builder_tokio()
+            .ok()?
+            .build()
+            .ok()?;
         Some(EmailAuthenticator {
             resolver,
             dns_resolver,

@@ -12,15 +12,14 @@ use std::sync::LazyLock;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use tracing::debug;
-use trust_dns_resolver::config::ResolverConfig;
-use trust_dns_resolver::net::runtime::TokioRuntimeProvider;
 use trust_dns_resolver::{Resolver, TokioResolver};
 
 // #134:Shared DNS resolver – avoids creating a new resolver per verification call.
 // trust-dns 0.26: TokioAsyncResolver::tokio is gone; build a TokioResolver
 // (builder defaults already equal ResolverOpts::default()).
 static MTA_STS_RESOLVER: LazyLock<TokioResolver> = LazyLock::new(|| {
-    Resolver::builder_with_config(ResolverConfig::default(), TokioRuntimeProvider::default())
+    Resolver::builder_tokio()
+        .expect("system resolver configuration is always buildable")
         .build()
         .expect("system resolver configuration is always buildable")
 });

@@ -18,8 +18,6 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Notify;
 use tokio_rustls::TlsAcceptor;
 use tracing::{debug, info, warn};
-use trust_dns_resolver::config::ResolverConfig;
-use trust_dns_resolver::net::runtime::TokioRuntimeProvider;
 use trust_dns_resolver::{Resolver, TokioResolver};
 use uuid::Uuid;
 
@@ -45,7 +43,8 @@ use super::util::{
 // trust-dns 0.26: TokioAsyncResolver::tokio is gone; build a TokioResolver
 // (builder defaults already equal ResolverOpts::default()).
 static INBOUND_RDNS_RESOLVER: LazyLock<TokioResolver> = LazyLock::new(|| {
-    Resolver::builder_with_config(ResolverConfig::default(), TokioRuntimeProvider::default())
+    Resolver::builder_tokio()
+        .expect("system resolver configuration is always buildable")
         .build()
         .expect("system resolver configuration is always buildable")
 });

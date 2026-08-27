@@ -125,7 +125,7 @@ pub async fn handle_stream(
     let tenant_id = claims.tenant_id.clone();
 
     // ── Check concurrent connection limit ─────────────────────────────
-    let conn_key = format!("sse:conns:{}", &tenant_id);
+    let conn_key = format!("sse:conns:{}", tenant_id);
     let conn_check: Result<bool, String> = async {
         let mut conn = state.redis.get().await.map_err(|e| format!("Redis: {e}"))?;
         let count: u64 = redis::cmd("INCR")
@@ -195,7 +195,7 @@ pub async fn handle_stream(
     );
 
     // ── Subscribe to Redis Pub/Sub channel ────────────────────────────
-    let channel = format!("events:{}", &tenant_id);
+    let channel = format!("events:{}", tenant_id);
     let redis_url = state.config.redis.url.clone();
     // Decrement connection count cleanup
     let cleanup_redis = state.redis.clone();

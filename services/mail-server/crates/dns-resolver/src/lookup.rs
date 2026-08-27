@@ -45,6 +45,17 @@ pub struct DnsLookup {
 }
 
 fn build_resolver(config: ResolverConfig, opts: ResolverOpts) -> Result<TokioResolver, DnsError> {
+    // hickory 0.26: ResolverConfig::default() carries NO nameservers — the
+    // system configuration comes from builder_tokio() (/etc/resolv.conf).
+    // When the caller passes the empty default, fall back to system conf.
+    if config.name_servers().is_empty() {
+        let mut builder =
+            Resolver::builder_tokio().map_err(|e| DnsError::InvalidConfig(e.to_string()))?;
+        *builder.options_mut() = opts;
+        return builder
+            .build()
+            .map_err(|e| DnsError::InvalidConfig(e.to_string()));
+    }
     Resolver::builder_with_config(config, TokioRuntimeProvider::default())
         .with_options(opts)
         .build()
