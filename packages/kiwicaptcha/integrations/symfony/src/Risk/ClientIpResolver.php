@@ -176,17 +176,63 @@ final class ClientIpResolver
     /**
      * The locally derived client from a single X-Forwarded-For header:
      * the trusted-chain walk — from the rightmost entry (the trusted
-     * peer's direct client) toward the left, the first IP outside the
-     * trust list is the canonical client. The same semantics as
-     * Symfony's trusted-chain derivation, computed without any
+     * peer's direct client) toward the left, the first validated IP
+     * outside the trust list is the canonical client. The same semantics
+     * as Symfony's trusted-chain derivation, computed without any
      * process-global state.
      */
     private static function clientFromXForwardedFor(Request $request, array $effectiveTrust): ?string
     {
         $ips = array_reverse(array_map('trim', explode(',', (string) $request->headers->get('X-Forwarded-For'))));
-        foreach ($ips as $ip) {
-            if ($ip !== '' && !IpUtils::checkIp($ip, $effectiveTrust)) {
-                return $ip;
+
+        return self::trustedChainClient($ips, $effectiveTrust);
+    }
+
+    /**
+     * The locally derived client from a single Forwarded header. The
+     * `for=` node identifiers of every element are collected, then the
+     * same right-to-left trusted-chain walk as the XFF parser is
+     * applied. An appending (rather than sanitizing) trusted proxy that
+     * passes a client-supplied left-side `for=` cannot spoof the
+     * canonical client: the walk starts at the direct-peer side and the
+     * first untrusted validated address wins.
+     */
+    private static function clientFromForwarded(Request $request, array $effectiveTrust): ?string
+    {
+        $header = (string) $request->headers->get('Forwarded');
+        $identifiers = [];
+        // Every element (comma-separated) may carry for= plus other
+        // parameters (by=, proto=, host=); the for= may be quoted and may
+        // carry an optional port (IPv4 form, or a bracketed IPv6 form).
+        foreach (explode(',', $header) as $element) {
+            if (preg_match('/(?:^|;)\s*for\s*=\s*("[^"]*"|[^;\s]+)/i', $element, $m) === 1) {
+                $identifiers[] = trim($m[1], '"');
+            }
+        }
+        if ($identifiers === []) {
+            return null;
+        }
+
+        return self::trustedChainClient(array_reverse($identifiers), $effectiveTrust);
+    }
+
+    /**
+     * The canonical trusted-chain walk: from the direct-peer side of the
+     * chain (the reversed input) toward the left, the first candidate
+     * that parses as a real IP address and is outside the trust list is
+     * the canonical client. Candidates that are not actual IP addresses
+     * (arbitrary tokens, `unknown`, `_obfuscated`, malformed ports) are
+     * never returned: the trust boundary enforces its output contract.
+     */
+    private static function trustedChainClient(array $candidates, array $effectiveTrust): ?string
+    {
+        foreach ($candidates as $candidate) {
+            $canonical = self::canonicalIp($candidate);
+            if ($canonical === null) {
+                continue;
+            }
+            if (!IpUtils::checkIp($canonical, $effectiveTrust)) {
+                return $canonical;
             }
         }
 
@@ -194,24 +240,63 @@ final class ClientIpResolver
     }
 
     /**
-     * The locally derived client from a single Forwarded header: the
-     * first entry's `for=` parameter when it names an untrusted address
-     * (the IPv6 bracket form is unwrapped).
+     * The canonical IP text for a node identifier, or null when it is
+     * not a genuine address. Handles the RFC 7239 forms: bare IPv4,
+     * IPv4 with a port (`192.0.2.10:4711`), bracketed IPv6 with an
+     * optional port (`[2001:db8::1]`, `[2001:db8::1]:4711`), and quoted
+     * variants. Rejects `unknown`, `_obfuscated` and arbitrary tokens.
+     * Validates with inet_pton, normalizes IPv4-mapped IPv6, and
+     * returns the canonical inet_ntop text.
      */
-    private static function clientFromForwarded(Request $request, array $effectiveTrust): ?string
+    private static function canonicalIp(string $identifier): ?string
     {
-        $header = (string) $request->headers->get('Forwarded');
-        if (preg_match('/(?:^|[,;]) *for=("[^"]+"|[^;,]+)/i', $header, $m) !== 1) {
+        $value = trim($identifier);
+        if ($value === '' || $value === 'unknown' || str_starts_with($value, '_')) {
             return null;
         }
-        $value = trim($m[1], '"');
-        if (str_starts_with($value, '[')) {
-            $value = trim($value, '[]');
+        $candidate = $value;
+        if (str_starts_with($candidate, '[')) {
+            $closing = strpos($candidate, ']');
+            if ($closing === false) {
+                return null;
+            }
+            $candidate = substr($candidate, 1, $closing - 1);
+        } elseif (substr_count($candidate, ':') === 1 && str_contains($candidate, ':')) {
+            // IPv4 with a port: 192.0.2.10:4711 — the last colon splits
+            // the port only when the left side is a valid IPv4 AND the
+            // port is a genuine numeric port (a malformed port like
+            // 192.0.2.10:notaport is rejected, never guessed).
+            $parts = explode(':', $candidate);
+            if (\count($parts) === 2
+                && filter_var($parts[0], FILTER_VALIDATE_IP, FILTER_FLAG_IPV4)
+                && \ctype_digit($parts[1])
+                && (int) $parts[1] >= 1
+                && (int) $parts[1] <= 65535
+            ) {
+                $candidate = $parts[0];
+            }
         }
-        if ($value === '' || IpUtils::checkIp($value, $effectiveTrust)) {
+        if (str_contains($candidate, ':')) {
+            // Bracketed-with-port remainder ([2001:db8::1]:4711 already
+            // handled above; a bare "2001:db8::1:4711" is ambiguous and
+            // rejected rather than guessed).
+            if (substr_count($candidate, ':') < 2) {
+                $parts = explode(':', $candidate);
+                $last = array_pop($parts);
+                if (filter_var($last, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4)) {
+                    $candidate = implode(':', $parts);
+                }
+            }
+        }
+        $packed = @inet_pton($candidate);
+        if ($packed === false) {
             return null;
+        }
+        if (\strlen($packed) === 16 && str_starts_with($candidate, '::ffff:')) {
+            // IPv4-mapped IPv6 normalizes to the IPv4 form.
+            return substr($candidate, 7);
         }
 
-        return $value;
+        return (string) inet_ntop($packed);
     }
 }

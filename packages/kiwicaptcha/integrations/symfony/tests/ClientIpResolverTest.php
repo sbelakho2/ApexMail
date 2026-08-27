@@ -223,4 +223,41 @@ final class ClientIpResolverTest extends TestCase
         self::assertSame(400, $response->getStatusCode());
         self::assertSame('AMBIGUOUS_FORWARDING', json_decode((string) $response->getContent(), true)['error']['code']);
     }
+    public function testForwardedPerformsTheSameRightToLeftChainWalkAsXff(): void
+    {
+        // An appending (rather than sanitizing) trusted proxy passes a
+        // client-supplied left-side for= through: the right-to-left walk
+        // must select the first validated untrusted address from the
+        // direct-peer side, so the attacker-spoofed left value can
+        // never win.
+        Request::setTrustedProxies(['10.0.0.0/8'], Request::HEADER_X_FORWARDED_FOR | Request::HEADER_FORWARDED);
+        $resolver = new ClientIpResolver(ClientIpResolver::MODE_SYMFONY_TRUSTED_PROXIES, ['10.0.0.0/8']);
+        $ip = $resolver->resolve($this->request('10.1.2.3', [
+            'Forwarded' => 'for=attacker-spoofed, for=198.51.100.25, for=10.0.0.8',
+        ]));
+        self::assertSame('198.51.100.25', $ip, 'the trusted-chain walk wins: the left-side spoofed token is never the client');
+        Request::setTrustedProxies([], -1);
+    }
+
+    public function testForwardedNodeIdentifiersAreValidatedIpAddresses(): void
+    {
+        Request::setTrustedProxies(['10.0.0.0/8'], Request::HEADER_X_FORWARDED_FOR | Request::HEADER_FORWARDED);
+        $resolver = new ClientIpResolver(ClientIpResolver::MODE_SYMFONY_TRUSTED_PROXIES, ['10.0.0.0/8']);
+
+        // RFC 7239 forms that ARE genuine addresses.
+        $ip = $resolver->resolve($this->request('10.1.2.3', ['Forwarded' => 'for=192.0.2.10:4711']));
+        self::assertSame('192.0.2.10', $ip, 'IPv4 with a port parses to the bare address');
+        $ip = $resolver->resolve($this->request('10.1.2.3', ['Forwarded' => 'for="[2001:db8::1]:4711"']));
+        self::assertSame('2001:db8::1', $ip, 'bracketed IPv6 with a port parses to the bare address');
+        $ip = $resolver->resolve($this->request('10.1.2.3', ['Forwarded' => 'for="[::ffff:192.0.2.44]"']));
+        self::assertSame('192.0.2.44', $ip, 'IPv4-mapped IPv6 normalizes to the IPv4 form');
+
+        // Non-address identifiers are never returned as the client: the
+        // canonical IP falls back to the socket peer.
+        foreach (['unknown', '_obfuscated', 'not-an-ip', '192.0.2.10:notaport'] as $token) {
+            $ip = $resolver->resolve($this->request('10.1.2.3', ['Forwarded' => 'for='.$token]));
+            self::assertSame('10.1.2.3', $ip, 'the token "'.$token.'" is not a valid node identifier and cannot spoof the client');
+        }
+        Request::setTrustedProxies([], -1);
+    }
 }

@@ -110,9 +110,10 @@ final class SiteVerifyController
      * milliseconds: the first stored-result poll after the wait starts.
      * The interval doubles on every poll up to
      * {@see self::PENDING_SAME_POLL_MAX_MS}. A duplicate idempotency
-     * request that has to wait for the full 90 s bound issues roughly
-     * 90 polls (one per second at the ceiling), instead of ~900 at a
-     * fixed 100 ms cadence.
+     * request waiting the full per-request bound (~2 s, see
+     * {@see self::IDEMPOTENCY_WAIT_SECS}) issues roughly 5 polls
+     * (100/200/400/800/1000 ms), instead of ~20 at a fixed 100 ms
+     * cadence.
      */
     private const PENDING_SAME_POLL_BASE_MS = 100;
 

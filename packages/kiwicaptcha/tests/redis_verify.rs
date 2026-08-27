@@ -4453,3 +4453,66 @@ fn resume_derivation_is_serialized_by_the_atomic_claim() {
             "exactly one Argon acquisition across both resumes — the claim serialized the re-derivation"
         );
 }
+#[test]
+fn resume_releases_the_claim_on_an_early_return() {
+    // The RAII guard: an early return (here the pre-derive expiry
+    // gate) releases the derivation claim, so the lock never blocks a
+    // later retry: a fresh claim can be acquired immediately.
+    let Some(url) = redis_url() else { return };
+    let prefix = format!("kiwitest:resume-release:{}:", std::process::id());
+    let issued = issue_challenge(
+        &sha_config(4),
+        "login",
+        IP,
+        now_unix(),
+        now_micros(),
+        0,
+        None,
+    )
+    .unwrap();
+    let identity = "logical-op-resume-release";
+    let token = encode_token(
+        &issued.record.nonce,
+        solve_for_test(&issued.record).expect("4-bit sha solves"),
+    );
+    let issued_at_ns = issued.record.issued_at_ns;
+
+    let store = RedisChallengeStore::new(redis::Client::open(url.clone()).unwrap(), prefix.clone());
+    store.store(&issued.record).unwrap();
+    assert!(store
+        .consume_with_operation_identity(&issued.record.nonce, Some(identity))
+        .unwrap()
+        .is_some());
+
+    // A clock far past the signed expiry: the receipt gate returns
+    // Expired after the claim was taken, so the guard must release it.
+    fn far_future() -> u64 {
+        now_unix() + 200
+    }
+    let verifier = ProductionVerifier::new(
+        RedisChallengeStore::new(redis::Client::open(url.clone()).unwrap(), prefix.clone()),
+        SECRET,
+    )
+    .with_now_fn(far_future);
+    let outcome = verifier.resume_consumed_operation(
+        &token,
+        identity,
+        "login",
+        IP,
+        issued_at_ns + 1_000_000,
+        RequestBindingExpectation::Unenforced,
+    );
+    assert!(
+        matches!(outcome, VerifyOutcome::Invalid(VerifyError::Expired)),
+        "the past-expiry resume is Expired: {outcome:?}"
+    );
+
+    // The early return released the claim: a fresh claim succeeds.
+    assert!(
+        store
+            .claim_resume_derivation(&issued.record.nonce)
+            .unwrap()
+            .is_some(),
+        "the RAII guard must release the claim on the early return"
+    );
+}

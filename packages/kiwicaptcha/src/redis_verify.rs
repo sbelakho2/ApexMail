@@ -292,6 +292,12 @@ impl r2d2::ManageConnection for StoreConnectionManager {
 /// would rewrite large integers (`issued_at_ns` ~1.7e15) in scientific
 /// notation, which the strict cross-language parsers reject. PHP mirrors
 /// this script byte-for-byte.
+/// The resume-claim TTL: a crashed recovery leaves only this short
+/// lease before a later retry may claim again (a 60s poison marker
+/// would block resultless recovery for its full TTL even when nothing
+/// is running).
+const CLAIM_TTL_SECS: u64 = 60;
+
 const CONSUME_TRANSITION_LUA: &str = r#"
 -- The state marker is replaced IN PLACE (the record's JSON bytes are
 -- never re-encoded — large integers would switch to scientific
@@ -1125,29 +1131,74 @@ impl RedisChallengeStore {
     /// and resolve the winner's committed outcome. The claim is a
     /// short-TTL marker keyed by the nonce; a claim on a record that is
     /// NOT consumed-resultless (or an already-claimed one) returns false.
-    pub fn claim_resume_derivation(&self, nonce: &str) -> redis::RedisResult<bool> {
+    /// Atomically claim the re-derivation ownership of a resultless
+    /// consumed record (the resume path): exactly one concurrent
+    /// same-operation recovery may derive + commit; the losers re-read
+    /// and resolve the winner's committed outcome. The claim stores a
+    /// random owner token (compare-and-delete release, RAII-guarded on
+    /// every early return) under `resume-claim:<nonce>` with a short
+    /// TTL — a crash leaves only the short lease, which is exactly what
+    /// the TTL covers. The resultless check uses the RAW marker (the
+    /// same strategy as the rest of this storage layer, which never
+    /// re-encodes the record's JSON bytes): the envelope stores
+    /// `"consumed_result":null`, and cjson decodes a JSON null to
+    /// `cjson.null`, NOT Lua nil — a decoded-field comparison would
+    /// refuse every resultless record.
+    pub fn claim_resume_derivation(&self, nonce: &str) -> redis::RedisResult<Option<String>> {
         let record_key = format!("{}{}", self.prefix, nonce);
         let claim_key = format!("{}resume-claim:{}", self.prefix, nonce);
+        let owner: String = security_random::<16>()
+            .map(|token| token.iter().map(|b| format!("{b:02x}")).collect())
+            .unwrap_or_else(|_| format!("r{}", std::process::id()));
         let mut conn = self.checkout()?;
         let script = redis::Script::new(
             r#"
             local existing = redis.call('GET', KEYS[1])
             if not existing then
-                return 0
+                return nil
             end
-            local rec = cjson.decode(existing)
-            if rec['state'] ~= 'consumed' or rec['consumed_result'] ~= nil then
-                return 0
+            -- Raw-marker resultless check: the envelope stores
+            -- "consumed_result":null (cjson decodes a JSON null to
+            -- cjson.null, never Lua nil).
+            if not string.find(existing, '"state":"consumed"', 1, true) then
+                return nil
             end
-            if redis.call('SET', KEYS[2], '1', 'EX', 60, 'NX') then
-                return 1
+            if not string.find(existing, '"consumed_result":null', 1, true) then
+                return nil
+            end
+            if redis.call('SET', KEYS[2], ARGV[1], 'EX', ARGV[2], 'NX') then
+                return ARGV[1]
+            end
+            return nil
+            "#,
+        );
+        let claimed: Option<String> = script
+            .key(&record_key)
+            .key(&claim_key)
+            .arg(&owner)
+            .arg(CLAIM_TTL_SECS)
+            .invoke(&mut conn)?;
+
+        Ok(claimed)
+    }
+
+    /// Compare-and-delete the resume claim: only the claim's owner may
+    /// release it (a stale owner after a crash + TTL expiry can never
+    /// delete a newer recovery's claim).
+    pub fn release_resume_derivation(&self, nonce: &str, owner: &str) -> redis::RedisResult<bool> {
+        let claim_key = format!("{}resume-claim:{}", self.prefix, nonce);
+        let mut conn = self.checkout()?;
+        let script = redis::Script::new(
+            r#"
+            if redis.call('GET', KEYS[1]) == ARGV[1] then
+                return redis.call('DEL', KEYS[1])
             end
             return 0
             "#,
         );
-        let claimed: i64 = script.key(&record_key).key(&claim_key).invoke(&mut conn)?;
+        let released: i64 = script.key(&claim_key).arg(owner).invoke(&mut conn)?;
 
-        Ok(claimed == 1)
+        Ok(released == 1)
     }
 
     /// The atomic delete-if-pending cleanup — ONE Lua script decides
@@ -1285,6 +1336,67 @@ impl RedisChallengeStore {
             let args = [if valid { "1" } else { "0" }, binding.unwrap_or("")];
             let r =
                 Self::invoke_script::<i64>(c, &redis::Script::new(COMMIT_RESULT_LUA), &key, &args)?;
+            if r == 1 && wait_replicas > 0 {
+                Self::wait_verified(c, wait_replicas, wait_timeout_ms)?;
+            }
+            Ok(r)
+        })?;
+        Ok(stored == 1)
+    }
+
+    /// The resume-path commit that also clears the re-derivation claim
+    /// atomically with the result write: the commit Lua declares the
+    /// claim key and deletes it only when it still holds this owner's
+    /// token (a crashed + TTL-expired stale owner can never delete a
+    /// newer recovery's claim). The verified replica wait still applies
+    /// to the fresh mutation.
+    pub fn commit_result_clearing_claim(
+        &self,
+        nonce: &str,
+        valid: bool,
+        binding: Option<&str>,
+        claim_owner: &str,
+    ) -> redis::RedisResult<bool> {
+        let record_key = format!("{}{}", self.prefix, nonce);
+        let claim_key = format!("{}resume-claim:{}", self.prefix, nonce);
+        let wait_replicas = self.wait_replicas;
+        let wait_timeout_ms = self.wait_timeout_ms;
+        let mut conn = self.checkout()?;
+        let script = redis::Script::new(
+            r#"
+            -- The same in-place marker splice as COMMIT_RESULT_LUA, with
+            -- the claim clear: KEYS[1] = record, KEYS[2] = the resume
+            -- claim, ARGV[1] = valid, ARGV[2] = binding, ARGV[3] = the
+            -- claim owner.
+            local v = redis.call('GET', KEYS[1])
+            if not v then return 0 end
+            if not string.find(v, '"state":"consumed"', 1, true) then return 0 end
+            if not string.find(v, '"consumed_result":null', 1, true) then return 0 end
+            local result
+            if ARGV[2] ~= '' then
+                result = cjson.encode({valid = ARGV[1] == '1', binding = ARGV[2]})
+            else
+                result = cjson.encode({valid = ARGV[1] == '1', binding = cjson.null})
+            end
+            local updated, n = string.gsub(v, '"consumed_result":null', '"consumed_result":' .. result, 1)
+            if n ~= 1 then return 0 end
+            local ttl = redis.call('TTL', KEYS[1])
+            if ttl < 1 then ttl = 1 end
+            redis.call('SET', KEYS[1], updated, 'EX', ttl)
+            if redis.call('GET', KEYS[2]) == ARGV[3] then
+                redis.call('DEL', KEYS[2])
+            end
+            return 1
+            "#,
+        );
+        let stored = Self::run_command(&mut conn, |c| {
+            let r: i64 = script
+                .key(&record_key)
+                .key(&claim_key)
+                .arg(if valid { "1" } else { "0" })
+                .arg(binding.unwrap_or(""))
+                .arg(claim_owner)
+                .invoke(c)?;
             if r == 1 && wait_replicas > 0 {
                 Self::wait_verified(c, wait_replicas, wait_timeout_ms)?;
             }
@@ -1468,6 +1580,33 @@ fn real_now_unix() -> u64 {
     now_epoch_micros() / 1_000_000
 }
 
+/// RAII release of the resume claim: dropped on every early return
+/// (expiry, derivation error, store failure) so the lock never
+/// blocks later retries; a process crash leaves only the short TTL
+/// lease, which is exactly what the TTL covers.
+struct ResumeClaimGuard<'a> {
+    store: &'a RedisChallengeStore,
+    nonce: String,
+    owner: String,
+    released: bool,
+}
+
+impl ResumeClaimGuard<'_> {
+    fn release(&mut self) {
+        self.released = true;
+    }
+}
+
+impl Drop for ResumeClaimGuard<'_> {
+    fn drop(&mut self) {
+        if !self.released {
+            let _ = self
+                .store
+                .release_resume_derivation(&self.nonce, &self.owner);
+        }
+    }
+}
+
 impl ProductionVerifier {
     /// Build a verifier with no Argon admission gate, no legacy-v1
     /// acceptance, and no expected region / policy epoch / issuer (all
@@ -1557,6 +1696,7 @@ impl ProductionVerifier {
     }
 
     /// The configured expected region, if any.
+    /// (the builder sets it; the reader returns it)
     pub fn expected_region(&self) -> Option<&str> {
         self.expected_region.as_deref()
     }
@@ -1995,26 +2135,14 @@ impl ProductionVerifier {
             return VerifyOutcome::Invalid(e);
         }
 
-        // 6. Atomic re-derivation ownership: exactly one concurrent
-        //    same-operation recovery derives; the losers re-read and
-        //    resolve the winner's committed outcome (never an
-        //    unsynchronized derive storm).
-        match self.store.claim_resume_derivation(&token.nonce) {
-            Ok(true) => {}
-            Ok(false) => {
-                return match self.store.consumed_state(&token.nonce) {
-                    Ok(Some(loser_state)) if loser_state.stored_result.is_some() => {
-                        self.resolve_consumed(loser_state, Some(operation_identity))
-                    }
-                    _ => VerifyOutcome::Invalid(VerifyError::ConsumeIndeterminate),
-                };
-            }
-            Err(_) => return VerifyOutcome::Invalid(VerifyError::StorageUnavailable),
-        }
-
-        // 7. The Argon admission gate — the same capacity control as
-        //    normal verification (the recovery must not bypass the
-        //    memory-hard verification protections).
+        // 6. The Argon admission gate first — the same capacity control
+        //    as normal verification (the recovery must not bypass the
+        //    memory-hard verification protections). Admission rejection
+        //    is NOT the operation whose duplication is dangerous
+        //    (derivation is), so a refused/unavailable capacity lease
+        //    returns before the derivation lock is ever taken — a
+        //    temporary admission problem cannot poison the recovery
+        //    claim for later retries.
         let _lease = if state.record.algorithm == PoWAlgorithm::Argon2id {
             match &self.argon_gate {
                 Some(gate) => match gate.acquire(&state.record) {
@@ -2028,6 +2156,32 @@ impl ProductionVerifier {
             None
         };
 
+        // 7. The atomic re-derivation claim with an owner token: exactly
+        //    one concurrent same-operation recovery derives; the losers
+        //    re-read and resolve the winner's committed outcome (never
+        //    an unsynchronized derive storm). The RAII guard releases
+        //    the claim on every early return (expiry, derivation error,
+        //    store failure) so the lock never blocks later retries; a
+        //    process crash leaves only the short TTL lease.
+        let claim_owner = match self.store.claim_resume_derivation(&token.nonce) {
+            Ok(Some(owner)) => owner,
+            Ok(None) => {
+                return match self.store.consumed_state(&token.nonce) {
+                    Ok(Some(loser_state)) if loser_state.stored_result.is_some() => {
+                        self.resolve_consumed(loser_state, Some(operation_identity))
+                    }
+                    _ => VerifyOutcome::Invalid(VerifyError::ConsumeIndeterminate),
+                };
+            }
+            Err(_) => return VerifyOutcome::Invalid(VerifyError::StorageUnavailable),
+        };
+        let mut claim_guard = ResumeClaimGuard {
+            store: &self.store,
+            nonce: token.nonce.clone(),
+            owner: claim_owner,
+            released: false,
+        };
+
         // 8. The signed expiry gate with the clock read before AND after
         //    the re-derivation.
         let receipt_now = (self.now_unix)();
@@ -2036,10 +2190,11 @@ impl ProductionVerifier {
         }
 
         // 9. Re-derive the proof from the presented token and commit the
-        //    deterministic outcome (best-effort, like the ordinary
-        //    commit: a failed commit degrades the retry to
-        //    ConsumeIndeterminate, never to a replay; the verified wait
-        //    covers the fresh mutation when wait_replicas is configured).
+        //    deterministic outcome, clearing the claim atomically with
+        //    the result write (best-effort like the ordinary commit: a
+        //    failed commit degrades the retry to ConsumeIndeterminate,
+        //    never to a replay; the verified wait covers the fresh
+        //    mutation when wait_replicas is configured).
         let hash = match derive_hash(&state.record, token.counter) {
             Ok(h) => h,
             Err(e) => return VerifyOutcome::Invalid(e),
@@ -2048,26 +2203,25 @@ impl ProductionVerifier {
         if final_now >= state.record.expires_at {
             return VerifyOutcome::Invalid(VerifyError::Expired);
         }
-        if leading_zero_bits(&hash) >= state.record.target_bits {
-            let outcome = VerifyOutcome::Valid {
+        let outcome = if leading_zero_bits(&hash) >= state.record.target_bits {
+            VerifyOutcome::Valid {
                 nonce: state.record.nonce.clone(),
                 request_binding: state.record.request_binding.clone(),
                 from_stored_result: false,
-            };
-            let _ = self.store.commit_result(
-                &token.nonce,
-                true,
-                state.record.request_binding.as_deref(),
-            );
-            outcome
+            }
         } else {
-            let _ = self.store.commit_result(
-                &token.nonce,
-                false,
-                state.record.request_binding.as_deref(),
-            );
             VerifyOutcome::Invalid(VerifyError::InsufficientWork)
-        }
+        };
+        let valid = matches!(outcome, VerifyOutcome::Valid { .. });
+        let _ = self.store.commit_result_clearing_claim(
+            &token.nonce,
+            valid,
+            state.record.request_binding.as_deref(),
+            &claim_guard.owner,
+        );
+        claim_guard.release();
+
+        outcome
     }
 
     /// Resolve the outcome of an already-consumed record — the retained

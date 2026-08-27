@@ -137,7 +137,10 @@ final class RedisRiskStateStoreTest extends TestCase
         self::assertSame(150, $vector->trustCredit); // source trust only, never the principal's
 
         // SolveSuccess (3) against a present session on a fresh store:
-        // session trust +150 -> 150*1000/10000 = 15.
+        // PoW success repays challenge debt only and cannot establish
+        // legitimacy — the trust-source invariant (a valid PoW proves
+        // expenditure, which bots are explicitly permitted to pay, never
+        // humanity), so the session trust credit stays zero.
         $store = $this->store();
         $vector = $store->observe($this->observation(
             str_repeat('b', 32),
@@ -148,7 +151,7 @@ final class RedisRiskStateStoreTest extends TestCase
             str_repeat('e', 32),
             null,
         ));
-        self::assertSame(15, $vector->trustCredit);
+        self::assertSame(0, $vector->trustCredit, 'SolveSuccess is trust-neutral: it repays the issued-debt, never builds legitimacy');
         self::assertSame(0, $vector->principalCredit);
 
         // No session/principal: no credit at all.

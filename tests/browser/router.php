@@ -1113,10 +1113,24 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($path === '/siteverify' || $path =
         // test needs. Run the core verifier directly against the retained
         // record and log the internal outcome code.
         $diagStorage = new ArrayStorage();
-        $diagRecord = challengeRecordOf($nonce);
-        if ($diagRecord !== null) {
+        $diagRecordArray = challengeRecordOf($nonce);
+        if ($diagRecordArray !== null) {
+            $diagRecord = \KiwiCaptcha\ChallengeRecord::fromArray($diagRecordArray);
             $diagStorage->store($diagRecord);
-            $diagOutcome = (new Verifier($diagStorage))->verify((string) ($body['response'] ?? ''), $GLOBALS['kiwi_secret'], (string) ($body['action'] ?? 'login'), (string) ($body['remoteip'] ?? '127.0.0.1'));
+            // The diagnostic must mirror the SiteVerify verification
+            // context exactly, except for the provider error mapping:
+            // the expected scope is the fixture's server-side secret
+            // mapping ('login'), never the client-submitted action
+            // ('admin' in the forging test — using it would print a
+            // misleading wrong_scope), and the same exact request-binding
+            // expectation as the controller applies.
+            $diagOutcome = (new Verifier($diagStorage))->verify(
+                (string) ($body['response'] ?? ''),
+                $GLOBALS['kiwi_secret'],
+                'login',
+                (string) ($body['remoteip'] ?? '127.0.0.1'),
+                expectedRequestBinding: $diagRecord->requestBinding,
+            );
             error_log(sprintf('kiwicaptcha-browser-fixture: siteverify internal outcome: %s (provider payload: %s)', $diagOutcome->isOk() ? 'ok' : $diagOutcome->code(), json_encode($payload)));
         }
     }
