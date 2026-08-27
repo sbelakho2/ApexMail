@@ -265,7 +265,7 @@ pub async fn verify_kiwi_token(
         revoked_kids: None,
         counter: solution.counter,
         duration_ms: solution.duration_ms,
-        now_unix: &mut now_unix,
+        now_unix: Some(&mut now_unix),
         now_ns,
         min_duration_ms,
         expected_scope: scope,
