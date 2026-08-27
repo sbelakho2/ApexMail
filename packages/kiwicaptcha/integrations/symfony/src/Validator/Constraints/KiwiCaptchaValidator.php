@@ -443,7 +443,7 @@ final class KiwiCaptchaValidator extends ConstraintValidator
         // fromStoredResult outcome reached through it is therefore refused
         // below (strict single-use); only the explicit operation-id
         // component authorizes the idempotent replay.
-        $operationId = $this->operationIdFor($constraint, $request);
+        $operationId = $this->operationIdFor($request);
         if ($operationId !== null) {
             $operationContext = 'opid:'.$operationId;
         } elseif ($canonicalBinding !== null) {
@@ -565,11 +565,13 @@ final class KiwiCaptchaValidator extends ConstraintValidator
         // the signed record binding against that same resolved canonical
         // value, using the core verifier's authoritative record read (the
         // verified outcome's requestBinding). A challenge minted for one
-        // transaction is never redeemable for another. Unbound records
-        // (binding null) skip the check entirely. For a stored-result
-        // retry the outcome's requestBinding() is the stored consumed
-        // binding, so the same rule gives the stored-result contract:
-        // same binding -> same success, different binding ->
+        // transaction is never redeemable for another. The rule is exact
+        // Option equality: an unbound record passes only under a null
+        // canonical binding (a bound transaction presented against an
+        // unbound record is refused). For a stored-result retry the
+        // outcome's requestBinding() is the stored consumed binding, so
+        // the same rule gives the stored-result contract: same binding
+        // -> same success, different binding ->
         // invalid_or_expired.
         if (!$this->requestBindingMatches($outcome, $canonicalBinding)) {
             $this->logger?->info('KiwiCaptcha: valid proof rejected — request binding mismatch', [
@@ -728,18 +730,20 @@ final class KiwiCaptchaValidator extends ConstraintValidator
     }
 
     /**
-     * The record's signed request_binding,
-     * VerifyOutcome::requestBinding(), must equal the canonical binding
-     * of the request: the authority's server-owned resolution when an
-     * authority is configured, the raw request binding otherwise (the
-     * value the caller resolved once, before the comparison). An
-     * unbound record (null binding) skips the check.
+     * The defensive post-verify binding backstop with exact Option
+     * equality, the single definition of "binding matches" everywhere.
+     * Record null + canonical null passes; record A + canonical A
+     * passes; everything else fails (record null + canonical non-null,
+     * record A + canonical null, record A + canonical B). There is no
+     * weaker second definition in the pipeline: the core verifier's
+     * exact expectation is the primary gate, and this helper must agree
+     * with it.
      */
     private function requestBindingMatches(\KiwiCaptcha\VerifyOutcome $outcome, ?string $canonicalBinding): bool
     {
         $recordBinding = \method_exists($outcome, 'requestBinding') ? $outcome->requestBinding() : null;
         if ($recordBinding === null) {
-            return true;
+            return $canonicalBinding === null;
         }
 
         return $canonicalBinding !== null && hash_equals($recordBinding, $canonicalBinding);
@@ -2151,22 +2155,19 @@ final class KiwiCaptchaValidator extends ConstraintValidator
 
     /**
      * The request's explicit per-operation id (kiwi_operation_id): the
-     * server-set request attribute only. The raw POSTed field and the
-     * constraint's static option are deliberately never accepted. A
-     * client-chosen identity would let the attacker enable the
+     * server-set request attribute only — the one unambiguous replay
+     * API. A client-chosen identity would let the attacker enable the
      * idempotent-replay path, and a permanently static value can never
-     * mean one particular logical business operation. It would turn
-     * every redemption of a consumed token under the same annotation
-     * into the same logical operation, and the app then performing the
-     * protected action again is exactly the replay this layer must not
-     * silently bless. Only the per-request attribute, generated or
-     * derived server-side from authenticated transaction state, may
+     * mean one particular logical business operation (every redemption
+     * of a consumed token under the same annotation would become the
+     * same logical operation). Only the per-request attribute, generated
+     * or derived server-side from authenticated transaction state, may
      * unlock the replay. Only a well-shaped identifier counts
      * ([A-Za-z0-9._:-], 1..128 bytes, the same narrow alphabet as the
      * request binding); a malformed value is ignored (strict single-use
      * applies) rather than silently re-enabling replay.
      */
-    private function operationIdFor(KiwiCaptcha $constraint, ?Request $request): ?string
+    private function operationIdFor(?Request $request): ?string
     {
         $operationId = $request?->attributes->get(self::OPERATION_ID_ATTRIBUTE);
         if (!\is_string($operationId) || $operationId === '' || !Config::isValidIdentifier($operationId, 128)) {

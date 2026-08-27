@@ -66,6 +66,13 @@ final class ClientIpResolver
      * @param list<string>        $trustedProxies             risk.trusted_proxies
      *                                                        (CIDRs / exact IPs)
      * @param bool                $rejectAmbiguousForwarding  risk.reject_ambiguous_forwarding
+     *                                                        (the DI config
+     *                                                        default is true
+     *                                                        since round 80;
+     *                                                        this constructor
+     *                                                        default exists
+     *                                                        for direct
+     *                                                        construction)
      * @param LoggerInterface|null $logger                    anomaly log target
      */
     public function __construct(

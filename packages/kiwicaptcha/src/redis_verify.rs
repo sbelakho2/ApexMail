@@ -1833,14 +1833,18 @@ impl ProductionVerifier {
             Err(e) => return VerifyOutcome::Invalid(e),
         };
 
-        // 7b. Post-derive final re-validation: re-read the
-        //     current server time and the current expectations — the
-        //     challenge may have expired during the expensive derivation,
-        //     or the policy epoch / region / issuer expectations may have
-        //     changed while the hash was computing. A failure here is
-        //     terminal: the record is already consumed, no outcome is
-        //     committed, and a concurrent loser sees ConsumeIndeterminate
-        //     (honest — the stored result only ever is a proof verdict).
+        // 7b. Post-derive final re-validation: the server clock is
+        //     re-read (the challenge may have expired during the
+        //     expensive derivation — the clock is the one truly dynamic
+        //     input), and the expectations are re-checked against the
+        //     verifier's currently applied snapshot (policy epoch,
+        //     region, issuer are verifier configuration, not re-resolved
+        //     mid-verification; the security-epoch design bounds
+        //     revocation latency through its short cache). A failure
+        //     here is terminal: the record is already consumed, no
+        //     outcome is committed, and a concurrent loser sees
+        //     ConsumeIndeterminate (honest — the stored result only ever
+        //     is a proof verdict).
         if let Err(e) = final_revalidate(
             &record,
             (self.now_unix)(),

@@ -758,7 +758,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $path === '/chain-verify') {
     }
     $storage = new ArrayStorage();
     $storage->store(\KiwiCaptcha\ChallengeRecord::fromArray(json_decode((string) file_get_contents(recordFile($nonce)), true)));
-    $outcome = (new Verifier($storage))->verify($token, $GLOBALS['kiwi_secret'], $scope, (string) ($_SERVER['REMOTE_ADDR'] ?? '127.0.0.1'));
+    // The exact-binding contract: the challenge was minted bound to the
+    // transaction ($binding, carried in the form body); the redemption
+    // must present it (the exact default refuses a bound challenge
+    // without its binding).
+    $outcome = (new Verifier($storage))->verify($token, $GLOBALS['kiwi_secret'], $scope, (string) ($_SERVER['REMOTE_ADDR'] ?? '127.0.0.1'), expectedRequestBinding: $binding);
     if (!$outcome->isOk()) {
         echo json_encode(['ok' => false, 'code' => $outcome->code()]);
 

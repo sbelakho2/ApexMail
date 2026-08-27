@@ -315,12 +315,16 @@ final class Verifier
      *                                     null, BindingMode::None) is
      *                                     permitted regardless of the
      *                                     expected binding; a record with a
-     *                                     different one,
-     *                                     is rejected with
-     *                                     RequestBindingMismatch. Null (the
-     *                                     default) keeps the current behavior:
-     *                                     the binding is returned in the
-     *                                     outcome, never enforced.
+     *                                     different one is rejected with
+     *                                     RequestBindingMismatch. Null
+     *                                     (the default) under the exact
+     *                                     semantics refuses a bound
+     *                                     record that does not present
+     *                                     its binding; the legacy
+     *                                     unenforced behavior is
+     *                                     available only through the
+     *                                     explicitly named
+     *                                     RequestBindingExpectation::legacy().
      *
      * One-shot model: cheap-check failures delete the peeked record —
      * never an already-consumed retained record, whose consumed state is

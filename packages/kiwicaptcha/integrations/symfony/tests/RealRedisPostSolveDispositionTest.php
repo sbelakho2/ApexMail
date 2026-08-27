@@ -1055,7 +1055,7 @@ final class RealRedisPostSolveDispositionTest extends TestCase
         // The pre-verify records the validator's own operation identity
         // (scope 'login', the authority's canonical binding 'txn-alpha'),
         // so the validator's replays below are identity-proven.
-        self::assertTrue($verifier->verify($tokenB, self::SECRET, 'login', '198.51.100.7', $nowNs, operationIdentity: $this->operationIdentity('login', 'txn-alpha'))->isOk());
+        self::assertTrue($verifier->verify($tokenB, self::SECRET, 'login', '198.51.100.7', $nowNs, operationIdentity: $this->operationIdentity('login', 'txn-alpha'), expectedRequestBinding: 'txn-alpha')->isOk());
 
         $stack = new RequestStack();
         $stack->push(Request::create('/', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7']));
@@ -1163,7 +1163,7 @@ final class RealRedisPostSolveDispositionTest extends TestCase
         // The pre-verify records the validator's own operation identity
         // (scope 'login', the authority's canonical binding 'txn-alpha'),
         // so the validator's replays below are identity-proven.
-        self::assertTrue($verifier->verify($tokenB, self::SECRET, 'login', '198.51.100.7', $nowNs, operationIdentity: $this->operationIdentity('login', 'txn-alpha'))->isOk());
+        self::assertTrue($verifier->verify($tokenB, self::SECRET, 'login', '198.51.100.7', $nowNs, operationIdentity: $this->operationIdentity('login', 'txn-alpha'), expectedRequestBinding: 'txn-alpha')->isOk());
 
         // Chain X opens for the transaction; the exact legacy v1 wire is
         // seeded for B's nonce.
@@ -1280,7 +1280,7 @@ final class RealRedisPostSolveDispositionTest extends TestCase
         // The pre-verify records the validator's own operation identity
         // (scope 'login', the authority's canonical binding 'txn-alpha'),
         // so the validator's validations below are identity-proven.
-        self::assertTrue($verifier->verify($tokenB, self::SECRET, 'login', '198.51.100.7', $nowNs, operationIdentity: $this->operationIdentity('login', 'txn-alpha'))->isOk());
+        self::assertTrue($verifier->verify($tokenB, self::SECRET, 'login', '198.51.100.7', $nowNs, operationIdentity: $this->operationIdentity('login', 'txn-alpha'), expectedRequestBinding: 'txn-alpha')->isOk());
 
         $chainX = $chainService->requireStage2(base64_encode(random_bytes(32)), 'login', 'txn-alpha', 1, RiskAction::Argon32, time() + 300);
 
