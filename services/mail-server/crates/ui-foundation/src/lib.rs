@@ -3,6 +3,7 @@ pub mod axum_router;
 pub mod charts;
 pub mod csrf;
 pub mod data;
+pub mod explorer;
 pub mod flash;
 pub mod icons;
 pub mod leptos_views;

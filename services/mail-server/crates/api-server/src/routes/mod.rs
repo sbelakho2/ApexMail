@@ -11,6 +11,7 @@ pub mod contacts;
 pub mod dashboard;
 pub mod dedicated_ips;
 pub mod domains;
+pub mod explorer;
 pub mod events;
 pub mod health;
 pub mod helpers;

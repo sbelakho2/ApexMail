@@ -662,6 +662,7 @@ pub fn build_app(state: AppState) -> Router {
 
     Router::new()
         .merge(public)
+        .merge(routes::explorer::router())
         .merge(authenticated)
         .fallback(fallback_handler)
         .layer(axum::middleware::from_fn(null_byte_check))

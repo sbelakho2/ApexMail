@@ -206,10 +206,14 @@ pub async fn verify_kiwi_token(
         }
     }
 
-    let now_unix = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
+    // kiwicaptcha's VerifyContext takes the clock as a closure so tests can
+    // time-travel; production pins it to the system clock.
+    let mut now_unix = || {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0)
+    };
 
     // Minimum duration: the per-challenge floor was derived at issuance from
     // the algorithm + difficulty (an operator override via KIWI_MIN_DURATION_MS
@@ -233,8 +237,26 @@ pub async fn verify_kiwi_token(
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_micros() as u64) // epoch MICROseconds — kiwicaptcha's issued_at_ns/now_ns unit
         .unwrap_or(0);
+
+    // kiwicaptcha's VerifyContext carries a `&mut dyn FnMut` clock (not
+    // Send): acquire the Argon2 permit FIRST, then build ctx and scope it
+    // to the sync verify call so the handler future stays Send.
+    let _argon2_permit = if record.algorithm == kiwicaptcha::PoWAlgorithm::Argon2id {
+        let semaphore = ARGON2_VERIFY_SEMAPHORE
+            .get_or_init(|| Arc::new(Semaphore::new(config.kiwi_argon2_max_concurrent as usize)))
+            .clone();
+        Some(
+            semaphore
+                .acquire_owned()
+                .await
+                .map_err(|_| ApiError::Internal("CAPTCHA verification capacity exceeded".into()))?,
+        )
+    } else {
+        None
+    };
+
     let mut record_mut = record.clone();
-    let mut ctx = kiwicaptcha::VerifyContext {
+    let ctx = kiwicaptcha::VerifyContext {
         record: &mut record_mut,
         secret_key: &config.kiwi_secret_key,
         // No key rotation configured: the single secret verifies every record
@@ -243,7 +265,7 @@ pub async fn verify_kiwi_token(
         revoked_kids: None,
         counter: solution.counter,
         duration_ms: solution.duration_ms,
-        now_unix,
+        now_unix: &mut now_unix,
         now_ns,
         min_duration_ms,
         expected_scope: scope,
@@ -283,21 +305,14 @@ pub async fn verify_kiwi_token(
     // verifications server-wide (not just per nonce). SHA-256 verifications
     // are cheap and not gated. (RAII permit: held to the end of the scope,
     // never read.)
-    let _argon2_permit = if record.algorithm == kiwicaptcha::PoWAlgorithm::Argon2id {
-        let semaphore = ARGON2_VERIFY_SEMAPHORE
-            .get_or_init(|| Arc::new(Semaphore::new(config.kiwi_argon2_max_concurrent as usize)))
-            .clone();
-        Some(
-            semaphore
-                .acquire_owned()
-                .await
-                .map_err(|_| ApiError::Internal("CAPTCHA verification capacity exceeded".into()))?,
-        )
-    } else {
-        None
+    // kiwicaptcha's VerifyContext carries a `&mut dyn FnMut` clock (not
+    // Send): scope it to the sync verify call so the async fn future stays
+    // Send across the awaits below (the permit is acquired above).
+    let outcome = {
+        let mut ctx = ctx;
+        kiwicaptcha::verify_solution(&mut ctx)
     };
-
-    match kiwicaptcha::verify_solution(&mut ctx) {
+    match outcome {
         // `Valid` is a struct variant carrying the consumed challenge's nonce
         // (jti) and any request binding — neither is needed here: consumption
         // is keyed by `solution.nonce` below.
