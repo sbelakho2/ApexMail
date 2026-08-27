@@ -344,7 +344,15 @@ final class Verifier
         // The explicit enforcement policy: the legacy nullable argument
         // maps to the temporary compatibility mode unless the caller
         // supplies an exact/unenforced expectation.
-        $expectation = $bindingExpectation ?? RequestBindingExpectation::legacy($expectedRequestBinding);
+        // The default binding semantics are exact: `expectedRequestBinding`
+        // means "require the challenge to be bound to this transaction",
+        // so an unbound record fails closed. The legacy compatibility
+        // mode, where an unbound record passes regardless of the expected
+        // binding and null disables enforcement entirely, remains
+        // available only through the explicitly named
+        // RequestBindingExpectation::legacy() value; it is never silently
+        // chosen by the plain parameter.
+        $expectation = $bindingExpectation ?? RequestBindingExpectation::exact($expectedRequestBinding);
         try {
             $token = SolutionToken::decode($rawToken);
         } catch (DecodeError $e) {
@@ -781,12 +789,22 @@ final class Verifier
      *                                       request_binding must equal,
      *                                       enforced before the resumed
      *                                       derivation and the
-     *                                       committed-result fast path. An
+     *                                       committed-result fast path.
+     *                                       The default semantics are
+     *                                       exact Option-equality: an
      *                                       explicitly unbound record
-     *                                       (BindingMode::None) is permitted
-     *                                       regardless of the expected
-     *                                       binding; null (the default)
-     *                                       keeps the binding unenforced.
+     *                                       under a presented expected
+     *                                       binding is
+     *                                       RequestBindingMismatch (fail
+     *                                       closed), and a bound record
+     *                                       under null is refused too.
+     *                                       The legacy compatibility mode
+     *                                       is available only through the
+     *                                       explicitly named
+     *                                       RequestBindingExpectation::legacy();
+     *                                       null with the legacy
+     *                                       expectation keeps the binding
+     *                                       unenforced.
      */
     public function resumeConsumedOperation(
         string $rawToken,
@@ -797,7 +815,12 @@ final class Verifier
         ?string $expectedRequestBinding = null,
         ?RequestBindingExpectation $bindingExpectation = null,
     ): VerifyOutcome {
-        $expectation = $bindingExpectation ?? RequestBindingExpectation::legacy($expectedRequestBinding);
+        // The default binding semantics are exact, as on the verify()
+        // path: expectedRequestBinding requires the challenge to be bound
+        // to this transaction. The legacy compatibility mode is available
+        // only through the explicitly named
+        // RequestBindingExpectation::legacy() value.
+        $expectation = $bindingExpectation ?? RequestBindingExpectation::exact($expectedRequestBinding);
         try {
             $token = SolutionToken::decode($rawToken);
         } catch (DecodeError $e) {
@@ -1113,12 +1136,14 @@ final class Verifier
      *   3.  TTL (only when $checkTiming): expired, or an issuance more
      *       than the future-skew bound ahead, is Expired.
      *   4.  scope: challenge scope matches the expected flow (WrongScope).
-     *   4b. application transaction binding: a supplied expected request
-     *       binding must equal the record's signed request_binding. An
-     *       explicitly unbound record (BindingMode::None) is permitted
-     *       regardless of the expected binding. Only a record that
-     *       actually carries a binding must equal the expected one
-     *       (RequestBindingMismatch otherwise).
+     *   4b. application transaction binding: the default expectation is
+     *       exact Option-equality — a bound record must present its
+     *       binding (RequestBindingMismatch otherwise) and an explicitly
+     *       unbound record under a presented expected binding is refused
+     *       too. The legacy mode, where an unbound record is permitted
+     *       regardless of the expected binding, is available only
+     *       through the explicitly named
+     *       RequestBindingExpectation::legacy().
      *   5.  IP binding: the stored record is authoritative. An empty
      *       binding tag disables the check; a nonempty tag means the
      *       challenge is bound, so a missing client IP fails closed

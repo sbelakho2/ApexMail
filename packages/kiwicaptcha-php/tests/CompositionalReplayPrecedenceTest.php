@@ -11,6 +11,7 @@ use KiwiCaptcha\Storage\ArrayStorage;
 use KiwiCaptcha\StorageInterface;
 use KiwiCaptcha\Verifier;
 use KiwiCaptcha\VerifyError;
+use KiwiCaptcha\RequestBindingExpectation;
 use KiwiCaptcha\VerifyOutcome;
 use KiwiCaptcha\Tests\Fixtures\Vectors;
 use PHPUnit\Framework\TestCase;
@@ -72,7 +73,7 @@ final class CompositionalReplayPrecedenceTest extends TestCase
         $token = self::solveToken($challenge->prefix, $challenge->salt, $challenge->nonce, $challenge->targetBits);
 
         $verifier = new Verifier($storage, now: self::clock());
-        $first = $verifier->verify($token, Vectors::SECRET, 'login', self::IP, operationIdentity: self::IDENTITY_A);
+        $first = $verifier->verify($token, Vectors::SECRET, 'login', self::IP, operationIdentity: self::IDENTITY_A, bindingExpectation: RequestBindingExpectation::exact($requestBinding));
         self::assertTrue($first->isOk(), sprintf('the setup redemption must verify fresh, got %s', $first->code()));
         self::assertNotNull($storage->consumedState($record->nonce)?->consumedResult, 'the setup committed the valid result');
 
@@ -129,7 +130,7 @@ final class CompositionalReplayPrecedenceTest extends TestCase
         return [
             // expired (the TTL group precedes everything below it)
             'expired + wrong scope' => [
-                static fn (Verifier $v, string $t): VerifyOutcome => $v->verify($t, $secret, 'signup', self::IP, operationIdentity: self::IDENTITY_A),
+                static fn (Verifier $v, string $t): VerifyOutcome => $v->verify($t, $secret, 'signup', self::IP, operationIdentity: self::IDENTITY_A, bindingExpectation: RequestBindingExpectation::exact('txn-123')),
                 VerifyError::WrongScope,
                 static fn (ArrayStorage $s): Verifier => new Verifier($s, now: $expired),
             ],
@@ -139,49 +140,49 @@ final class CompositionalReplayPrecedenceTest extends TestCase
                 static fn (ArrayStorage $s): Verifier => new Verifier($s, now: $expired),
             ],
             'expired + wrong region' => [
-                static fn (Verifier $v, string $t): VerifyOutcome => $v->verify($t, $secret, 'login', self::IP, operationIdentity: self::IDENTITY_A),
+                static fn (Verifier $v, string $t): VerifyOutcome => $v->verify($t, $secret, 'login', self::IP, operationIdentity: self::IDENTITY_A, bindingExpectation: RequestBindingExpectation::exact('txn-123')),
                 VerifyError::WrongRegion,
                 static fn (ArrayStorage $s): Verifier => new Verifier($s, now: $expired, region: 'eu'),
             ],
             'expired + wrong policy epoch' => [
-                static fn (Verifier $v, string $t): VerifyOutcome => $v->verify($t, $secret, 'login', self::IP, operationIdentity: self::IDENTITY_A),
+                static fn (Verifier $v, string $t): VerifyOutcome => $v->verify($t, $secret, 'login', self::IP, operationIdentity: self::IDENTITY_A, bindingExpectation: RequestBindingExpectation::exact('txn-123')),
                 VerifyError::WrongPolicyVersion,
                 static fn (ArrayStorage $s): Verifier => new Verifier($s, now: $expired, expectedPolicyVersion: 2),
             ],
             'expired + wrong issuer' => [
-                static fn (Verifier $v, string $t): VerifyOutcome => $v->verify($t, $secret, 'login', self::IP, operationIdentity: self::IDENTITY_A),
+                static fn (Verifier $v, string $t): VerifyOutcome => $v->verify($t, $secret, 'login', self::IP, operationIdentity: self::IDENTITY_A, bindingExpectation: RequestBindingExpectation::exact('txn-123')),
                 VerifyError::WrongIssuer,
                 static fn (ArrayStorage $s): Verifier => new Verifier($s, now: $expired, expectedIssuer: 'prod'),
             ],
             // IP mismatch (the IP group precedes region/policy/issuer)
             'ip mismatch + wrong region' => [
-                static fn (Verifier $v, string $t): VerifyOutcome => $v->verify($t, $secret, 'login', self::OTHER_IP, operationIdentity: self::IDENTITY_A),
+                static fn (Verifier $v, string $t): VerifyOutcome => $v->verify($t, $secret, 'login', self::OTHER_IP, operationIdentity: self::IDENTITY_A, bindingExpectation: RequestBindingExpectation::exact('txn-123')),
                 VerifyError::WrongRegion,
                 static fn (ArrayStorage $s): Verifier => new Verifier($s, now: $clock, region: 'eu'),
             ],
             'ip mismatch + wrong policy epoch' => [
-                static fn (Verifier $v, string $t): VerifyOutcome => $v->verify($t, $secret, 'login', self::OTHER_IP, operationIdentity: self::IDENTITY_A),
+                static fn (Verifier $v, string $t): VerifyOutcome => $v->verify($t, $secret, 'login', self::OTHER_IP, operationIdentity: self::IDENTITY_A, bindingExpectation: RequestBindingExpectation::exact('txn-123')),
                 VerifyError::WrongPolicyVersion,
                 static fn (ArrayStorage $s): Verifier => new Verifier($s, now: $clock, expectedPolicyVersion: 2),
             ],
             'ip mismatch + wrong issuer' => [
-                static fn (Verifier $v, string $t): VerifyOutcome => $v->verify($t, $secret, 'login', self::OTHER_IP, operationIdentity: self::IDENTITY_A),
+                static fn (Verifier $v, string $t): VerifyOutcome => $v->verify($t, $secret, 'login', self::OTHER_IP, operationIdentity: self::IDENTITY_A, bindingExpectation: RequestBindingExpectation::exact('txn-123')),
                 VerifyError::WrongIssuer,
                 static fn (ArrayStorage $s): Verifier => new Verifier($s, now: $clock, expectedIssuer: 'prod'),
             ],
             // missing client IP (checked before region/policy/issuer)
             'missing client ip + wrong region' => [
-                static fn (Verifier $v, string $t): VerifyOutcome => $v->verify($t, $secret, 'login', null, operationIdentity: self::IDENTITY_A),
+                static fn (Verifier $v, string $t): VerifyOutcome => $v->verify($t, $secret, 'login', null, operationIdentity: self::IDENTITY_A, bindingExpectation: RequestBindingExpectation::exact('txn-123')),
                 VerifyError::WrongRegion,
                 static fn (ArrayStorage $s): Verifier => new Verifier($s, now: $clock, region: 'eu'),
             ],
             'missing client ip + wrong policy epoch' => [
-                static fn (Verifier $v, string $t): VerifyOutcome => $v->verify($t, $secret, 'login', null, operationIdentity: self::IDENTITY_A),
+                static fn (Verifier $v, string $t): VerifyOutcome => $v->verify($t, $secret, 'login', null, operationIdentity: self::IDENTITY_A, bindingExpectation: RequestBindingExpectation::exact('txn-123')),
                 VerifyError::WrongPolicyVersion,
                 static fn (ArrayStorage $s): Verifier => new Verifier($s, now: $clock, expectedPolicyVersion: 2),
             ],
             'missing client ip + wrong issuer' => [
-                static fn (Verifier $v, string $t): VerifyOutcome => $v->verify($t, $secret, 'login', null, operationIdentity: self::IDENTITY_A),
+                static fn (Verifier $v, string $t): VerifyOutcome => $v->verify($t, $secret, 'login', null, operationIdentity: self::IDENTITY_A, bindingExpectation: RequestBindingExpectation::exact('txn-123')),
                 VerifyError::WrongIssuer,
                 static fn (ArrayStorage $s): Verifier => new Verifier($s, now: $clock, expectedIssuer: 'prod'),
             ],
@@ -214,7 +215,7 @@ final class CompositionalReplayPrecedenceTest extends TestCase
 
         return [
             'ip mismatch behind wrong scope' => [
-                static fn (Verifier $v, string $t): VerifyOutcome => $v->verify($t, $secret, 'signup', self::OTHER_IP, operationIdentity: self::IDENTITY_A),
+                static fn (Verifier $v, string $t): VerifyOutcome => $v->verify($t, $secret, 'signup', self::OTHER_IP, operationIdentity: self::IDENTITY_A, bindingExpectation: RequestBindingExpectation::exact('txn-123')),
                 VerifyError::WrongScope,
                 static fn (ArrayStorage $s): Verifier => new Verifier($s, now: $clock),
             ],
@@ -224,7 +225,7 @@ final class CompositionalReplayPrecedenceTest extends TestCase
                 static fn (ArrayStorage $s): Verifier => new Verifier($s, now: $clock),
             ],
             'missing client ip behind wrong scope' => [
-                static fn (Verifier $v, string $t): VerifyOutcome => $v->verify($t, $secret, 'signup', null, operationIdentity: self::IDENTITY_A),
+                static fn (Verifier $v, string $t): VerifyOutcome => $v->verify($t, $secret, 'signup', null, operationIdentity: self::IDENTITY_A, bindingExpectation: RequestBindingExpectation::exact('txn-123')),
                 VerifyError::WrongScope,
                 static fn (ArrayStorage $s): Verifier => new Verifier($s, now: $clock),
             ],
@@ -234,7 +235,7 @@ final class CompositionalReplayPrecedenceTest extends TestCase
                 static fn (ArrayStorage $s): Verifier => new Verifier($s, now: $clock),
             ],
             'telemetry gate behind wrong scope' => [
-                static fn (Verifier $v, string $t): VerifyOutcome => $v->verify($t, $secret, 'signup', self::IP, enforceTelemetry: true, operationIdentity: self::IDENTITY_A),
+                static fn (Verifier $v, string $t): VerifyOutcome => $v->verify($t, $secret, 'signup', self::IP, enforceTelemetry: true, operationIdentity: self::IDENTITY_A, bindingExpectation: RequestBindingExpectation::exact('txn-123')),
                 VerifyError::WrongScope,
                 static fn (ArrayStorage $s): Verifier => new Verifier($s, now: $clock),
             ],
@@ -244,17 +245,17 @@ final class CompositionalReplayPrecedenceTest extends TestCase
                 static fn (ArrayStorage $s): Verifier => new Verifier($s, now: $clock),
             ],
             'telemetry gate behind wrong region' => [
-                static fn (Verifier $v, string $t): VerifyOutcome => $v->verify($t, $secret, 'login', self::IP, enforceTelemetry: true, operationIdentity: self::IDENTITY_A),
+                static fn (Verifier $v, string $t): VerifyOutcome => $v->verify($t, $secret, 'login', self::IP, enforceTelemetry: true, operationIdentity: self::IDENTITY_A, bindingExpectation: RequestBindingExpectation::exact('txn-123')),
                 VerifyError::WrongRegion,
                 static fn (ArrayStorage $s): Verifier => new Verifier($s, now: $clock, region: 'eu'),
             ],
             'telemetry gate behind wrong policy epoch' => [
-                static fn (Verifier $v, string $t): VerifyOutcome => $v->verify($t, $secret, 'login', self::IP, enforceTelemetry: true, operationIdentity: self::IDENTITY_A),
+                static fn (Verifier $v, string $t): VerifyOutcome => $v->verify($t, $secret, 'login', self::IP, enforceTelemetry: true, operationIdentity: self::IDENTITY_A, bindingExpectation: RequestBindingExpectation::exact('txn-123')),
                 VerifyError::WrongPolicyVersion,
                 static fn (ArrayStorage $s): Verifier => new Verifier($s, now: $clock, expectedPolicyVersion: 2),
             ],
             'telemetry gate behind wrong issuer' => [
-                static fn (Verifier $v, string $t): VerifyOutcome => $v->verify($t, $secret, 'login', self::IP, enforceTelemetry: true, operationIdentity: self::IDENTITY_A),
+                static fn (Verifier $v, string $t): VerifyOutcome => $v->verify($t, $secret, 'login', self::IP, enforceTelemetry: true, operationIdentity: self::IDENTITY_A, bindingExpectation: RequestBindingExpectation::exact('txn-123')),
                 VerifyError::WrongIssuer,
                 static fn (ArrayStorage $s): Verifier => new Verifier($s, now: $clock, expectedIssuer: 'prod'),
             ],
@@ -285,19 +286,19 @@ final class CompositionalReplayPrecedenceTest extends TestCase
 
         return [
             'expired alone' => [
-                static fn (Verifier $v, string $t): VerifyOutcome => $v->verify($t, $secret, 'login', self::IP, operationIdentity: self::IDENTITY_A),
+                static fn (Verifier $v, string $t): VerifyOutcome => $v->verify($t, $secret, 'login', self::IP, operationIdentity: self::IDENTITY_A, bindingExpectation: RequestBindingExpectation::exact('txn-123')),
                 static fn (ArrayStorage $s): Verifier => new Verifier($s, now: $expired),
             ],
             'ip mismatch alone' => [
-                static fn (Verifier $v, string $t): VerifyOutcome => $v->verify($t, $secret, 'login', self::OTHER_IP, operationIdentity: self::IDENTITY_A),
+                static fn (Verifier $v, string $t): VerifyOutcome => $v->verify($t, $secret, 'login', self::OTHER_IP, operationIdentity: self::IDENTITY_A, bindingExpectation: RequestBindingExpectation::exact('txn-123')),
                 static fn (ArrayStorage $s): Verifier => new Verifier($s, now: $clock),
             ],
             'missing client ip alone' => [
-                static fn (Verifier $v, string $t): VerifyOutcome => $v->verify($t, $secret, 'login', null, operationIdentity: self::IDENTITY_A),
+                static fn (Verifier $v, string $t): VerifyOutcome => $v->verify($t, $secret, 'login', null, operationIdentity: self::IDENTITY_A, bindingExpectation: RequestBindingExpectation::exact('txn-123')),
                 static fn (ArrayStorage $s): Verifier => new Verifier($s, now: $clock),
             ],
             'telemetry gate alone' => [
-                static fn (Verifier $v, string $t): VerifyOutcome => $v->verify($t, $secret, 'login', self::IP, enforceTelemetry: true, operationIdentity: self::IDENTITY_A),
+                static fn (Verifier $v, string $t): VerifyOutcome => $v->verify($t, $secret, 'login', self::IP, enforceTelemetry: true, operationIdentity: self::IDENTITY_A, bindingExpectation: RequestBindingExpectation::exact('txn-123')),
                 static fn (ArrayStorage $s): Verifier => new Verifier($s, now: $clock),
             ],
         ];

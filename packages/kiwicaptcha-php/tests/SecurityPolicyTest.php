@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace KiwiCaptcha\Tests;
 
+use KiwiCaptcha\RequestBindingExpectation;
 use KiwiCaptcha\ChallengeRecord;
 use KiwiCaptcha\Config;
 use KiwiCaptcha\Issuer;
@@ -153,6 +154,7 @@ final class SecurityPolicyTest extends TestCase
             'login',
             '198.51.100.7',
             nowNs: $record->issuedAtNs + 1_000_000,
+            bindingExpectation: RequestBindingExpectation::exact('txn-abc'),
         );
         self::assertTrue($outcome->isOk(), sprintf('expected valid, got %s', $outcome->code()));
         self::assertSame('txn-abc', $outcome->requestBinding(), 'a valid outcome exposes the record request binding');

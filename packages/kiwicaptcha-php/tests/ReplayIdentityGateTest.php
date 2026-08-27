@@ -220,29 +220,49 @@ final class ReplayIdentityGateTest extends TestCase
         }
     }
 
-    public function testExpectedRequestBindingWithAnUnboundRecordIsPermitted(): void
+    public function testLegacySemanticsMustBeRequestedExplicitlyAndExactIsTheDefault(): void
     {
-        // An explicitly unbound record (BindingMode::None at issuance)
-        // carries no transaction anchor: the presented canonical binding
-        // does not apply to it, so the expected-binding enforcement must
-        // permit it — the pre-consume enforcement exists for bound
-        // challenges, and rejecting unbound ones would break
-        // binding_mode=none deployments.
+        // The default binding semantics are exact: `expectedRequestBinding`
+        // means "require the challenge to be bound to this transaction",
+        // so an explicitly unbound record under an expected binding is
+        // RequestBindingMismatch, never silently permitted (the legacy
+        // compatibility mode is only reachable through the explicitly
+        // named RequestBindingExpectation::legacy()).
+        // Two independent records: the exact-default assertion burns its
+        // pending record (binding mismatch is a one-shot cheap failure),
+        // so the legacy assertion gets its own.
         [$storage, $record, $token] = $this->issueAndSolve();
         $verifier = new Verifier($storage, now: static fn (): int => self::ISSUED_AT);
 
         $outcome = $verifier->verify($token, Vectors::SECRET, 'login', '198.51.100.7', expectedRequestBinding: 'txn-123');
-        self::assertTrue($outcome->isOk(), 'an explicitly unbound record is permitted under any expected binding');
+        self::assertSame(VerifyError::RequestBindingMismatch, $outcome->error, 'the exact default refuses an unbound record under an expected binding');
+
+        // The explicitly named compatibility API preserves the legacy
+        // behavior: an unbound record passes under an expected binding.
+        [$storageB, , $tokenB] = $this->issueAndSolve();
+        $verifierB = new Verifier($storageB, now: static fn (): int => self::ISSUED_AT);
+        $legacy = $verifierB->verify($tokenB, Vectors::SECRET, 'login', '198.51.100.7', expectedRequestBinding: 'txn-123', bindingExpectation: RequestBindingExpectation::legacy('txn-123'));
+        self::assertTrue($legacy->isOk(), 'the named legacy API preserves the unbound-record compatibility behavior');
     }
 
-    public function testNullExpectedRequestBindingLeavesTheBindingUnenforced(): void
+    public function testNullExpectedRequestBindingRefusesABoundRecordUnderExactAndLegacyMustBeNamed(): void
     {
+        // Under the exact default, a bound record presented without its
+        // binding is RequestBindingMismatch (fail closed): the caller must
+        // present the binding the challenge is anchored to.
         [$storage, $record, $token] = $this->issueAndSolve(requestBinding: 'txn-123');
         $verifier = new Verifier($storage, now: static fn (): int => self::ISSUED_AT);
 
         $outcome = $verifier->verify($token, Vectors::SECRET, 'login', '198.51.100.7');
-        self::assertTrue($outcome->isOk(), 'null expected binding keeps the current behavior');
-        self::assertSame('txn-123', $outcome->requestBinding, 'the binding is returned in the outcome, never enforced');
+        self::assertSame(VerifyError::RequestBindingMismatch, $outcome->error, 'a bound record without its binding fails closed under the exact default');
+
+        // The explicitly named legacy API keeps the unenforced behavior
+        // (its own record: the exact-default assertion burned its one).
+        [$storageB, , $tokenB] = $this->issueAndSolve(requestBinding: 'txn-123');
+        $verifierB = new Verifier($storageB, now: static fn (): int => self::ISSUED_AT);
+        $legacy = $verifierB->verify($tokenB, Vectors::SECRET, 'login', '198.51.100.7', bindingExpectation: RequestBindingExpectation::legacy(null));
+        self::assertTrue($legacy->isOk(), 'the named legacy API keeps the unenforced behavior');
+        self::assertSame('txn-123', $legacy->requestBinding, 'the binding is returned in the outcome, never enforced under the named legacy API');
     }
 
     // ── the consumed-evidence preservation on cheap-phase failures ─────
@@ -379,7 +399,7 @@ final class ReplayIdentityGateTest extends TestCase
 
         return [
             'wrong scope' => [
-                static fn (Verifier $v, string $t): \KiwiCaptcha\VerifyOutcome => $v->verify($t, $secret, 'signup', '198.51.100.7', operationIdentity: self::IDENTITY_A),
+                static fn (Verifier $v, string $t): \KiwiCaptcha\VerifyOutcome => $v->verify($t, $secret, 'signup', '198.51.100.7', operationIdentity: self::IDENTITY_A, bindingExpectation: RequestBindingExpectation::exact('txn-123')),
                 VerifyError::WrongScope,
             ],
             'changed expected request binding' => [
@@ -387,32 +407,32 @@ final class ReplayIdentityGateTest extends TestCase
                 VerifyError::RequestBindingMismatch,
             ],
             'wrong policy epoch' => [
-                static fn (Verifier $v, string $t): \KiwiCaptcha\VerifyOutcome => $v->verify($t, $secret, 'login', '198.51.100.7', operationIdentity: self::IDENTITY_A),
+                static fn (Verifier $v, string $t): \KiwiCaptcha\VerifyOutcome => $v->verify($t, $secret, 'login', '198.51.100.7', operationIdentity: self::IDENTITY_A, bindingExpectation: RequestBindingExpectation::exact('txn-123')),
                 VerifyError::WrongPolicyVersion,
                 static fn (StorageInterface $s): Verifier => new Verifier($s, now: self::clock(), expectedPolicyVersion: 2),
             ],
             'wrong region' => [
-                static fn (Verifier $v, string $t): \KiwiCaptcha\VerifyOutcome => $v->verify($t, $secret, 'login', '198.51.100.7', operationIdentity: self::IDENTITY_A),
+                static fn (Verifier $v, string $t): \KiwiCaptcha\VerifyOutcome => $v->verify($t, $secret, 'login', '198.51.100.7', operationIdentity: self::IDENTITY_A, bindingExpectation: RequestBindingExpectation::exact('txn-123')),
                 VerifyError::WrongRegion,
                 static fn (StorageInterface $s): Verifier => new Verifier($s, now: self::clock(), region: 'eu'),
             ],
             'wrong issuer' => [
-                static fn (Verifier $v, string $t): \KiwiCaptcha\VerifyOutcome => $v->verify($t, $secret, 'login', '198.51.100.7', operationIdentity: self::IDENTITY_A),
+                static fn (Verifier $v, string $t): \KiwiCaptcha\VerifyOutcome => $v->verify($t, $secret, 'login', '198.51.100.7', operationIdentity: self::IDENTITY_A, bindingExpectation: RequestBindingExpectation::exact('txn-123')),
                 VerifyError::WrongIssuer,
                 static fn (StorageInterface $s): Verifier => new Verifier($s, now: self::clock(), expectedIssuer: 'prod'),
             ],
             'revoked kid' => [
-                static fn (Verifier $v, string $t): \KiwiCaptcha\VerifyOutcome => $v->verify($t, $secret, 'login', '198.51.100.7', operationIdentity: self::IDENTITY_A),
+                static fn (Verifier $v, string $t): \KiwiCaptcha\VerifyOutcome => $v->verify($t, $secret, 'login', '198.51.100.7', operationIdentity: self::IDENTITY_A, bindingExpectation: RequestBindingExpectation::exact('txn-123')),
                 VerifyError::UnknownKid,
                 static fn (StorageInterface $s): Verifier => new Verifier($s, now: self::clock(), revokedKids: [1]),
             ],
             'unknown kid (forward guard)' => [
-                static fn (Verifier $v, string $t): \KiwiCaptcha\VerifyOutcome => $v->verify($t, $secret, 'login', '198.51.100.7', operationIdentity: self::IDENTITY_A),
+                static fn (Verifier $v, string $t): \KiwiCaptcha\VerifyOutcome => $v->verify($t, $secret, 'login', '198.51.100.7', operationIdentity: self::IDENTITY_A, bindingExpectation: RequestBindingExpectation::exact('txn-123')),
                 VerifyError::UnknownKid,
                 static fn (StorageInterface $s): Verifier => new Verifier($s, now: self::clock(), secretsByKid: [2 => $other]),
             ],
             'bad signature (different secret)' => [
-                static fn (Verifier $v, string $t): \KiwiCaptcha\VerifyOutcome => $v->verify($t, $other, 'login', '198.51.100.7', operationIdentity: self::IDENTITY_A),
+                static fn (Verifier $v, string $t): \KiwiCaptcha\VerifyOutcome => $v->verify($t, $other, 'login', '198.51.100.7', operationIdentity: self::IDENTITY_A, bindingExpectation: RequestBindingExpectation::exact('txn-123')),
                 VerifyError::BadSignature,
             ],
         ];
@@ -423,7 +443,7 @@ final class ReplayIdentityGateTest extends TestCase
     {
         [$storage, $record, $token] = $this->issueAndSolve(requestBinding: 'txn-123');
         $first = new Verifier($storage, now: static fn (): int => self::ISSUED_AT);
-        self::assertTrue($first->verify($token, Vectors::SECRET, 'login', '198.51.100.7', operationIdentity: self::IDENTITY_A)->isOk());
+        self::assertTrue($first->verify($token, Vectors::SECRET, 'login', '198.51.100.7', operationIdentity: self::IDENTITY_A, bindingExpectation: RequestBindingExpectation::exact('txn-123'))->isOk());
         self::assertNotNull($storage->consumedState($record->nonce)?->consumedResult, 'the setup committed the valid result');
 
         $replayVerifier = $replayVerifierFactory !== null

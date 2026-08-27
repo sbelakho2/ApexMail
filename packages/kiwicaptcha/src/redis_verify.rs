@@ -22,6 +22,19 @@
 //! between transition and commit) gets
 //! [`VerifyError::ConsumeIndeterminate`].
 //!
+//! Recovery gap (documented, not a replay risk): the result commit is
+//! deliberately best-effort, so a caller can receive `Valid` while the
+//! commit failed; a retry then sees consumed-without-result and gets
+//! [`VerifyError::ConsumeIndeterminate`]. That never permits a replay
+//! (the one-shot consume is the authorization boundary), but it creates a
+//! recovery/idempotency availability gap: the interrupted same-operation
+//! redemption cannot be reconstructed through the Rust verifier alone.
+//! The PHP core's `resumeConsumedOperation()` is the reference semantics
+//! for that reconstruction (a carefully constrained identity gate re-
+//! derives and re-commits); the Rust verifier's equivalent recovery
+//! operation is the intended follow-up if the Rust path must provide the
+//! same end-to-end idempotent semantics as PHP/Symfony.
+//!
 //! The retained success is identity-gated: an already-consumed record with
 //! a committed valid outcome replays that success only for the logical
 //! operation that recorded it (the supplied operation identity must match
@@ -128,8 +141,8 @@
 //! Strict disables telemetry anyway). The Rust production API deliberately
 //! does not enforce telemetry — this is the documented parity boundary.
 
-use crate::challenge::{security_random,
-    binding_tag, hash_ip, now_epoch_micros, payload_from_record, verify_signature,
+use crate::challenge::{
+    binding_tag, hash_ip, now_epoch_micros, payload_from_record, security_random, verify_signature,
     verify_signature_v2, ChallengeRecord, PoWAlgorithm,
 };
 use crate::token::SolutionToken;
@@ -2377,11 +2390,9 @@ mod tests {
 
         // The accepting verifier requires one acknowledged replica: the
         // fence WAIT returns 0 acked and must fail closed.
-        let hardened = RedisChallengeStore::new(
-            redis::Client::open(url.clone()).unwrap(),
-            prefix.clone(),
-        )
-        .with_wait(1, 100);
+        let hardened =
+            RedisChallengeStore::new(redis::Client::open(url.clone()).unwrap(), prefix.clone())
+                .with_wait(1, 100);
         let verifier = ProductionVerifier::new(hardened, SECRET);
         let outcome = verifier.verify(
             &token,

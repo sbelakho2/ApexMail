@@ -642,8 +642,9 @@ pub struct Issued {
 /// (identified by IP hash + scope) re-requests within a 1-second window.
 ///
 /// Entries older than 1 second are pruned lazily on every `get` and `put`,
-/// so the map never accumulates stale entries (bounded by the number of
-/// distinct IP+scope pairs seen within the 1-second window).
+/// and the map is HARD-bounded: a `put` that would exceed the maximum
+/// evicts the oldest entry, so 256 is a real memory maximum regardless of
+/// how many distinct IP+scope pairs arrive within a window.
 pub struct ChallengeCache {
     entries: HashMap<String, (Issued, Instant)>,
     /// Fresh entries survive up to this age before being pruned.
@@ -796,6 +797,23 @@ impl ChallengeCache {
         // clients request challenges in quick succession.
         if self.entries.len() >= 256 {
             self.prune();
+        }
+        // Hard bound: pruning removes only expired entries, so a burst
+        // of distinct fresh keys inside one TTL window could otherwise
+        // grow the map without limit. After the prune, the map is still
+        // over the maximum: evict the oldest entry (the linear scan is
+        // acceptable at the 256-entry scale; a cache miss is already the
+        // cheaper alternative to a fresh issuance, and the bound is what
+        // matters: 256 is a real maximum, not a per-second rate).
+        if self.entries.len() >= 256 {
+            let oldest = self
+                .entries
+                .iter()
+                .min_by_key(|(_, (_, ts))| *ts)
+                .map(|(k, _)| k.clone());
+            if let Some(oldest_key) = oldest {
+                self.entries.remove(&oldest_key);
+            }
         }
         let key = Self::cache_key(ip_hash, scope);
         self.entries.insert(key, (issued, Instant::now()));
@@ -1639,6 +1657,53 @@ mod tests {
     }
 
     #[test]
+    fn challenge_cache_is_hard_bounded_even_with_all_fresh_entries() {
+        // The audit's finding: pruning removes only expired entries, so
+        // a burst of distinct fresh keys inside one window could
+        // previously grow the map without limit. The hard bound evicts
+        // the oldest entry after the prune, so 256 is a real maximum.
+        let mut cache = ChallengeCache::with_ttl_for_test(Duration::from_secs(60));
+        let config = ChallengeConfig {
+            secret_key: "test-key-16-bytes!".into(),
+            kid: 1,
+            algorithm: PoWAlgorithm::Sha256,
+            m_kib: 65_536,
+            t: 2,
+            p: 1,
+            target_bits: 18,
+            ttl_secs: 120,
+            auto_tune: false,
+            auto_tune_min_bits: 10,
+            auto_tune_max_bits: 24,
+            binding_mode: BindingMode::Bound,
+            region: None,
+            issuer: None,
+            policy_version: 1,
+            argon2_target_bits: 8,
+            min_duration_ms: None,
+        };
+        // 300 distinct fresh keys — far beyond the 256 maximum.
+        for i in 0..300 {
+            let issued = issue_challenge(
+                &config,
+                "login",
+                "1.2.3.4",
+                1_800_000_000,
+                1_800_000_000_000,
+                0,
+                None,
+            )
+            .unwrap();
+            cache.put(&format!("hash-{i}"), "login", issued);
+        }
+        assert_eq!(
+            cache.len(),
+            256,
+            "the cache is HARD-bounded at 256 even when every entry is fresh"
+        );
+    }
+
+    #[test]
     fn challenge_cache_put_prunes_expired_entries() {
         let mut cache = ChallengeCache::with_ttl_for_test(Duration::from_secs(60));
         let config = ChallengeConfig {
@@ -1859,6 +1924,7 @@ mod tests {
                 counter,
                 duration_ms: 5000,
                 now_unix: 1_000_001,
+                now_after_derive: 1_000_001,
                 now_ns: 1_700_000_005_000_000,
                 min_duration_ms: 0,
                 expected_scope: None,
@@ -1912,6 +1978,7 @@ mod tests {
             counter,
             duration_ms: 5000,
             now_unix: 1_000_001,
+            now_after_derive: 1_000_001,
             now_ns: 1_700_000_005_000_000,
             min_duration_ms: 0,
             expected_scope: None,

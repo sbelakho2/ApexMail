@@ -273,7 +273,14 @@ let mut ctx = VerifyContext {
     revoked_kids: None,
     counter: solution.counter,
     duration_ms: solution.duration_ms, // client-reported — telemetry only
-    now_unix,                          // TTL check (seconds)
+    now_unix,                          // TTL check (seconds, receipt time)
+    now_after_derive: now_unix,        // the server clock RE-READ after the
+                                       // expensive derivation — the final
+                                       // post-derive expiry re-validation
+                                       // uses THIS value, so a challenge
+                                       // that expired mid-derive is
+                                       // detected (re-read the clock, never
+                                       // reuse the pre-derive snapshot)
     now_ns,                            // receipt time in EPOCH MICROSECONDS
                                        // (server-side elapsed-duration check)
     min_duration_ms: 0,                // floor is max(ctx, record.min_duration_ms);

@@ -73,11 +73,13 @@ final class KiwiCaptchaValidator extends ConstraintValidator
      * Request attribute holding the explicit per-operation identity
      * (`kiwi_operation_id`) of the logical operation redeeming the token,
      * e.g. the application's idempotency key for the protected action.
-     * Resolution order: this attribute, then the constraint's static
-     * `operationId` option. The id must be unique per logical operation.
-     * The raw POSTed `kiwi_operation_id` field is deliberately never
-     * accepted: a client-chosen identity would let the attacker enable
-     * the idempotent-replay path.
+     * The replay-authorizing identity comes from this attribute only.
+     * The raw POSTed `kiwi_operation_id` field and the constraint's
+     * static option are deliberately never accepted: a client-chosen
+     * identity lets the attacker enable the replay path, and a constant
+     * value can never mean one particular logical operation. The id must
+     * be unique per logical business operation and should be generated
+     * or derived server-side per transaction.
      *
      * Replay semantics: by default (no explicit operation id) verification
      * is strictly single-use. The core records an operation identity with
@@ -457,11 +459,15 @@ final class KiwiCaptchaValidator extends ConstraintValidator
         // core verifier's own read, inside the verification, is the only
         // record read of the pipeline (the validator no longer peeks the
         // record to decide whether an expected request binding applies).
-        // The signed-record binding comparison below enforces the contract
-        // against the verified outcome's own requestBinding — the same
-        // rule for a bound record (must equal the canonical binding) and
-        // an unbound record (skipped entirely — BindingMode::None
-        // deployments verify regardless of any presented binding).
+        // The expectation passed below is exact (RequestBindingExpectation
+        // Option-equality): a bound record must equal the canonical
+        // binding, and an explicitly unbound record (null) is permitted
+        // only under a null canonical binding. An unbound record under a
+        // presented canonical binding is RequestBindingMismatch (fail
+        // closed, stricter than the comment this replaces). BindingMode,
+        // the IP-binding tag, is a distinct mechanism and is not
+        // conflated here: the request binding is the application
+        // transaction anchor, the binding tag is the client-IP anchor.
 
         // CapacityExceeded (Argon2id admission saturated) surfaces as a
         // regular failed verification — fail closed as a captcha violation.
@@ -473,13 +479,13 @@ final class KiwiCaptchaValidator extends ConstraintValidator
         // passed as the expected request binding, so a bound challenge
         // verified under the wrong transaction fails before its proof is
         // consumed and burned, and the outstanding release never fires
-        // for it. The core's contract keeps BindingMode::None intact: an
-        // explicitly unbound record (null binding) is permitted
-        // regardless of the presented canonical binding; only a record
-        // that actually carries a binding must equal the expected one.
-        // The post-consume comparison below stays as a defensive
-        // backstop for the configuration-drift case (a bound record
-        // verified with no canonical binding configured).
+        // for it. The expectation is exact Option-equality: an unbound
+        // record under a presented canonical binding is refused, and a
+        // bound record under a null canonical binding is refused too
+        // (the caller must present the binding it is anchored to). The
+        // post-consume comparison below stays as a defensive backstop
+        // for the configuration-drift case (a bound record verified with
+        // no canonical binding configured).
         $outcome = $this->verifier->verify($value, $this->secretKey, $constraint->scope, $clientIp, null, $this->enforceTelemetry, $operationIdentity, $canonicalBinding, \KiwiCaptcha\RequestBindingExpectation::exact($canonicalBinding));
 
         // Ambiguous-consume deterministic retry: ConsumeIndeterminate
@@ -1745,8 +1751,19 @@ final class KiwiCaptchaValidator extends ConstraintValidator
      * answers temporary_unavailable, a violation, never a silent pass,
      * never a raw exception — and never a consumed token (the
      * verification has not run yet). A null resolution, the transaction
-     * is invalid/unknown, is the normal invalid-binding outcome;
-     * without an authority the raw request binding applies unchanged.
+     * is invalid/unknown, is the normal invalid-binding outcome.
+     *
+     * The security boundary: with a RequestBindingAuthorityInterface the
+     * binding is server-authoritative. The presented value is merely a
+     * hint; the authority's resolution is the transaction identity that
+     * gets signed and later enforced exactly. Without an authority the
+     * raw request binding applies unchanged: the HMAC proves the server
+     * signed X and the same X was presented at redemption, which is
+     * cryptographic self-consistency (it prevents accidental or
+     * token-transplant mismatch) but not server-side transaction
+     * authorization. An attacker who chooses X for both the challenge
+     * request and the redemption satisfies it, so security-sensitive
+     * operations should treat the authority as mandatory.
      *
      * @throws PostSolveDispositionUnavailableException when the authority
      *                                                 fails, fail closed
@@ -2134,20 +2151,24 @@ final class KiwiCaptchaValidator extends ConstraintValidator
 
     /**
      * The request's explicit per-operation id (kiwi_operation_id): the
-     * documented request attribute first, then the constraint's static
-     * option. The raw POSTed field is deliberately never accepted: a
+     * server-set request attribute only. The raw POSTed field and the
+     * constraint's static option are deliberately never accepted. A
      * client-chosen identity would let the attacker enable the
-     * idempotent-replay path. Only a well-shaped identifier counts
-     * ([A-Za-z0-9._:-], 1..128 bytes — the same narrow alphabet as the
+     * idempotent-replay path, and a permanently static value can never
+     * mean one particular logical business operation. It would turn
+     * every redemption of a consumed token under the same annotation
+     * into the same logical operation, and the app then performing the
+     * protected action again is exactly the replay this layer must not
+     * silently bless. Only the per-request attribute, generated or
+     * derived server-side from authenticated transaction state, may
+     * unlock the replay. Only a well-shaped identifier counts
+     * ([A-Za-z0-9._:-], 1..128 bytes, the same narrow alphabet as the
      * request binding); a malformed value is ignored (strict single-use
      * applies) rather than silently re-enabling replay.
      */
     private function operationIdFor(KiwiCaptcha $constraint, ?Request $request): ?string
     {
         $operationId = $request?->attributes->get(self::OPERATION_ID_ATTRIBUTE);
-        if (!\is_string($operationId) || $operationId === '') {
-            $operationId = $constraint->operationId;
-        }
         if (!\is_string($operationId) || $operationId === '' || !Config::isValidIdentifier($operationId, 128)) {
             return null;
         }

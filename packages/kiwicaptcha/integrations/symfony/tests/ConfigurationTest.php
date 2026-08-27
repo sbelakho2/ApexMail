@@ -745,9 +745,9 @@ final class ConfigurationTest extends TestCase
         self::assertSame(['10.0.0.0/8', '192.168.1.5'], $proxies);
     }
 
-    public function testRejectAmbiguousForwardingDefaultsToFalse(): void
+    public function testRejectAmbiguousForwardingDefaultsToTrue(): void
     {
-        self::assertFalse($this->process()['risk']['reject_ambiguous_forwarding'], 'reject_ambiguous_forwarding defaults to false (the anomaly is logged)');
+        self::assertTrue($this->process()['risk']['reject_ambiguous_forwarding'], 'reject_ambiguous_forwarding defaults to true (ambiguity is rejected in production by default)');
         self::assertTrue($this->process(['risk' => ['reject_ambiguous_forwarding' => true]])['risk']['reject_ambiguous_forwarding']);
     }
 

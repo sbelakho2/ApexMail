@@ -110,7 +110,7 @@ final class ClientIpResolverTest extends TestCase
         $resolver = new ClientIpResolver(ClientIpResolver::MODE_SYMFONY_TRUSTED_PROXIES, ['10.0.0.0/8'], false, $logger);
 
         // Both headers from a trusted peer: the anomaly is logged, the
-        // request proceeds (reject_ambiguous_forwarding defaults false).
+        // request proceeds when the resolver is constructed with the flag false.
         $ip = $resolver->resolve($this->request('10.1.2.3', [
             'X-Forwarded-For' => '203.0.113.9',
             'Forwarded' => 'for=198.51.100.9',
