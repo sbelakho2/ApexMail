@@ -48,7 +48,7 @@ struct Sandbox {
 
 /// The sandbox tenant id is a fixed 26-char value (VARCHAR(26) per migration
 /// 064; charset follows the existing lowercase-alphanumeric nanoid style).
-const SANDBOX_TENANT_ID: &str = "sbx0explorer00000000000000x";
+const SANDBOX_TENANT_ID: &str = "sbx0explorer0000000000000x";
 
 static SANDBOX: OnceLock<Sandbox> = OnceLock::new();
 
@@ -160,23 +160,9 @@ async fn insert_key(
 // ─────────────────────────────────────────────────────────────────────────────
 
 async fn rate_limit(state: &AppState, ip: &str) -> bool {
-    let key = format!("explorer_rl:{ip}");
-    match sqlx::query_scalar::<_, i64>(
-        // Redis INCR-with-TTL via the pool the rest of the crate uses; if
-        // Redis is unavailable, fail OPEN (warn) — availability of a public
-        // playground outranks a hard fail on cache blips.
-        "SELECT 1",
-    )
-    .fetch_one(&state.db)
-    .await
-    {
-        // placeholder — replaced below by the Redis client path
-        Ok(_) => redis_rate_limit(state, &key).await,
-        Err(_) => {
-            tracing::warn!("explorer rate-limit backend unavailable — allowing (fail-open)");
-            true
-        }
-    }
+    // Fail OPEN when Redis is unavailable (warn) — availability of a public
+    // playground outranks a hard fail on cache blips.
+    redis_rate_limit(state, &format!("explorer_rl:{ip}")).await
 }
 
 async fn redis_rate_limit(state: &AppState, key: &str) -> bool {
