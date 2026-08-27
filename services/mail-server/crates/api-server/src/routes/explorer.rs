@@ -99,7 +99,7 @@ async fn sandbox(state: &AppState) -> Result<&'static Sandbox, String> {
              tlsrpt_verified, dkim_selector, dkim_public_key, dkim_private_key, dkim_enabled,
              ses_verified, verified, created_at, updated_at)
              VALUES ($1,$2,'example.com','verified',true,true,true,true,true,true,true,
-             'sbx', $4, $5, true, false, true, $3, $3)
+             'sbx', $4, $5, true, true, true, $3, $3)
              ON CONFLICT DO NOTHING",
         )
         .bind(domain_id)
