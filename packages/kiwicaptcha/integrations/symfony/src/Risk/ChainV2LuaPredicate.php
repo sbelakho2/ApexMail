@@ -13,7 +13,8 @@ namespace BelConsulting\KiwiCaptchaBundle\Risk;
  * owner/lease/stage2-nonce invariants or a malformed field is corrupt and
  * fails closed. The Lua scripts must preserve that contract at the point
  * of authorization, not only when PHP re-reads the record. This function
- * is the exhaustive semantic mirror of the PHP validator. It tests
+ * is the exhaustive semantic mirror of the PHP validator over the
+ * canonical Kiwi-produced representation. It tests
  * exact numeric and string types, the canonical Kiwi nonce shape (43
  * chars of the base64 alphabet plus one trailing '='), the canonical
  * scope and request-binding identifier shape, and the
@@ -29,7 +30,9 @@ namespace BelConsulting\KiwiCaptchaBundle\Risk;
  * float with an integral value (2.0) decodes as a Lua number equal to 2,
  * while PHP's json_decode yields a float that is_int() rejects. The
  * canonical writers never emit float literals (cjson encodes integers as
- * integers), so the corpus excludes that representation.
+ * integers), so the equivalence is exact over the canonical
+ * Kiwi-produced representation, and the differential corpus excludes
+ * only that representation.
  *
  * The predicate is prepended to each transition script (the const
  * concatenation with the script body's heredoc).

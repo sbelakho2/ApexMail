@@ -2492,7 +2492,27 @@ final class ChallengeController
                 );
             }
             if (($current->state === 'issued' || $current->state === 'verified') && $current->stage2Nonce === $challenge->nonce) {
-                // The transition succeeded before the throw, so continue.
+                // The transition succeeded before the throw — but the
+                // throw may itself have been the mutation's WAIT
+                // shortfalling, so the issued state was never proven
+                // durable. A read-only recovery here would hand the
+                // stage-2 challenge out over an unreplicated issued
+                // state a stale-replica promotion could resurrect into a
+                // re-mint. The fresh causal fence is established before
+                // the challenge is handed out (a shortfall fails closed
+                // to 503), exactly like the subsequent-request recovery
+                // path.
+                try {
+                    $this->confirmRecoveryBarriers();
+                } catch (\Throwable $fenceFailure) {
+                    error_log(sprintf('kiwicaptcha: stage-2 recovery fence failed after the issuance transition: %s', $fenceFailure->getMessage()));
+
+                    return $this->privateJson(
+                        ['error' => ['code' => 'SERVICE_UNAVAILABLE', 'message' => 'Challenge issuance is temporarily unavailable. Try again later.']],
+                        Response::HTTP_SERVICE_UNAVAILABLE,
+                    );
+                }
+
                 return null;
             }
             if ($current->state === 'reserved' && $current->owner === $chainOwner) {
@@ -2522,8 +2542,29 @@ final class ChallengeController
         }
         switch ($result) {
             case \BelConsulting\KiwiCaptchaBundle\Risk\ChainIssuedResult::IssuedNew:
+                // The fresh transition's own verified WAIT already ran
+                // (markIssued WAITs on issued_new); the hand-out needs no
+                // further fence.
+                return null;
             case \BelConsulting\KiwiCaptchaBundle\Risk\ChainIssuedResult::IssuedSame:
             case \BelConsulting\KiwiCaptchaBundle\Risk\ChainIssuedResult::VerifiedSame:
+                // A same-state replay is a recovery acceptance: this
+                // request did not mutate, and the already-issued state
+                // may have been created by an earlier attempt whose WAIT
+                // shortfalled. The fresh causal fence proves the issued
+                // state advanced through the replicas before the
+                // challenge is handed out (a shortfall fails closed).
+                try {
+                    $this->confirmRecoveryBarriers();
+                } catch (\Throwable $fenceFailure) {
+                    error_log(sprintf('kiwicaptcha: stage-2 recovery fence failed on the same-state replay: %s', $fenceFailure->getMessage()));
+
+                    return $this->privateJson(
+                        ['error' => ['code' => 'SERVICE_UNAVAILABLE', 'message' => 'Challenge issuance is temporarily unavailable. Try again later.']],
+                        Response::HTTP_SERVICE_UNAVAILABLE,
+                    );
+                }
+
                 return null;
             case \BelConsulting\KiwiCaptchaBundle\Risk\ChainIssuedResult::Conflict:
             case \BelConsulting\KiwiCaptchaBundle\Risk\ChainIssuedResult::NotOwner:

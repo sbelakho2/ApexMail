@@ -128,7 +128,7 @@
 //! Strict disables telemetry anyway). The Rust production API deliberately
 //! does not enforce telemetry — this is the documented parity boundary.
 
-use crate::challenge::{
+use crate::challenge::{security_random,
     binding_tag, hash_ip, now_epoch_micros, payload_from_record, verify_signature,
     verify_signature_v2, ChallengeRecord, PoWAlgorithm,
 };
@@ -1255,6 +1255,46 @@ impl RedisChallengeStore {
     /// replying, so the connection's read timeout is temporarily raised to
     /// `timeout_ms + 500 ms` headroom and restored to the default read
     /// timeout afterwards (even when the wait itself failed).
+    /// The causal replication fence — the PHP
+    /// [`ReplicationBarrierInterface`] mirror. A fresh random fence write
+    /// on the current connection immediately before the WAIT proves the
+    /// replica set advanced through the preceding primary replication
+    /// stream, including an earlier uncertain write from another
+    /// connection: a bare WAIT on a connection that wrote nothing cannot
+    /// prove another connection's write (the round-72 read-only barrier
+    /// hole). A shortfall fails closed. No-op when `wait_replicas == 0`.
+    pub fn establish_replication_fence(&self, what: &str) -> redis::RedisResult<()> {
+        let (wait_replicas, wait_timeout_ms) = self.wait_config();
+        if wait_replicas == 0 {
+            return Ok(());
+        }
+        let fence_key = format!("{}replication-fence", self.prefix);
+        let mut token = [0u8; 16];
+        if let Err(e) = security_random::<16>().map(|t| {
+            token.copy_from_slice(&t);
+        }) {
+            return Err(redis::RedisError::from((
+                redis::ErrorKind::IoError,
+                "replication fence token generation failed",
+                e.to_string(),
+            )));
+        }
+        let token_hex: String = token.iter().map(|b| format!("{b:02x}")).collect();
+        let mut conn = self.checkout()?;
+        redis::cmd("SETEX")
+            .arg(&fence_key)
+            .arg(60)
+            .arg(&token_hex)
+            .query::<String>(&mut conn)?;
+        Self::wait_verified(&mut conn, wait_replicas, wait_timeout_ms).map_err(|e| {
+            redis::RedisError::from((
+                e.kind(),
+                "replication fence not satisfied",
+                format!("{what}: {}", e.detail().unwrap_or("shortfall")),
+            ))
+        })
+    }
+
     fn wait_verified(
         c: &mut ManagedConnection,
         wait_replicas: u32,
@@ -1851,6 +1891,22 @@ impl ProductionVerifier {
                     _ => false,
                 };
                 if identity_ok {
+                    // Failed-barrier replay guard (the PHP mirror): the
+                    // consume and commit mutations that produced this
+                    // stored success may have landed on the primary with
+                    // their WAIT failing, leaving the replica still
+                    // holding the pending challenge. Accepting the
+                    // retained success read-only would return a Valid a
+                    // stale-replica promotion could resurrect into a
+                    // second redemption — the causal fence is
+                    // re-established before the acceptance; a shortfall
+                    // fails closed to StorageUnavailable, never Valid.
+                    if let Err(_) = self
+                        .store
+                        .establish_replication_fence("the Rust retained-result acceptance")
+                    {
+                        return VerifyOutcome::Invalid(VerifyError::StorageUnavailable);
+                    }
                     VerifyOutcome::Valid {
                         nonce: state.record.nonce,
                         request_binding: result.binding,
@@ -2268,6 +2324,104 @@ mod tests {
     }
 
     // ── allocation-after-length, recursion ─────────────────────────────
+
+    #[test]
+    fn retained_valid_recovery_requires_the_causal_fence() {
+        // KCA-77-03: the Rust retained-valid acceptance sits behind the
+        // causal replication fence exactly like PHP. The consume and
+        // commit mutations that produced the stored success may have
+        // landed on the primary with their WAIT failing, so accepting it
+        // read-only would return a Valid a stale-replica promotion could
+        // resurrect into a second redemption. A shortfalling fence
+        // (standalone Redis acknowledges nothing) fails closed to
+        // StorageUnavailable, never Valid; a wait-free accepting store
+        // returns the retained Valid.
+        let Some(url) = redis_url() else { return };
+        let prefix = format!("kiwitest:fence-retained:{}:", std::process::id());
+        let issued = issue_challenge(
+            &sha_config(4),
+            "login",
+            IP,
+            now_unix(),
+            now_micros(),
+            0,
+            None,
+        )
+        .unwrap();
+        let identity = "logical-op-fence-retained";
+        let issued_at_ns = issued.record.issued_at_ns;
+        let token = encode_token(
+            &issued.record.nonce,
+            solve_for_test(&issued.record).expect("4-bit sha solves"),
+        );
+
+        // The durable state: consume-with-identity + the deterministic
+        // valid commit via a plain wait-free store.
+        let plain =
+            RedisChallengeStore::new(redis::Client::open(url.clone()).unwrap(), prefix.clone());
+        plain.store(&issued.record).unwrap();
+        assert!(
+            plain
+                .consume_with_operation_identity(&issued.record.nonce, Some(identity))
+                .unwrap()
+                .is_some(),
+            "the consume transition lands"
+        );
+        plain
+            .commit_result(
+                &issued.record.nonce,
+                true,
+                issued.record.request_binding.as_deref(),
+            )
+            .unwrap();
+
+        // The accepting verifier requires one acknowledged replica: the
+        // fence WAIT returns 0 acked and must fail closed.
+        let hardened = RedisChallengeStore::new(
+            redis::Client::open(url.clone()).unwrap(),
+            prefix.clone(),
+        )
+        .with_wait(1, 100);
+        let verifier = ProductionVerifier::new(hardened, SECRET);
+        let outcome = verifier.verify(
+            &token,
+            "login",
+            IP,
+            issued_at_ns + 1_000_000,
+            Some(identity),
+            RequestBindingExpectation::Unenforced,
+        );
+        assert!(
+            matches!(
+                outcome,
+                VerifyOutcome::Invalid(VerifyError::StorageUnavailable)
+            ),
+            "a shortfalling fence must fail closed to StorageUnavailable, never Valid: {outcome:?}"
+        );
+
+        // The wait-free accepting store returns the retained Valid.
+        let plain2 =
+            RedisChallengeStore::new(redis::Client::open(url.clone()).unwrap(), prefix.clone());
+        let verifier2 = ProductionVerifier::new(plain2, SECRET);
+        let outcome2 = verifier2.verify(
+            &token,
+            "login",
+            IP,
+            issued_at_ns + 1_000_000,
+            Some(identity),
+            RequestBindingExpectation::Unenforced,
+        );
+        assert!(
+            matches!(
+                outcome2,
+                VerifyOutcome::Valid {
+                    from_stored_result: true,
+                    ..
+                }
+            ),
+            "a wait-free store returns the retained Valid: {outcome2:?}"
+        );
+    }
 
     #[test]
     fn oversized_stored_value_is_rejected_before_any_parse() {

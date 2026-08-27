@@ -514,13 +514,16 @@ LUA;
      * reservation fields + stage2Nonce cleared, KEEPTTL. A different
      * nonce or any other state is an atomic no-op (false).
      */
-    private const REARM_LUA = <<<'LUA'
+    private const REARM_LUA = ChainV2LuaPredicate::LUA . <<<'LUA'
 -- Chain rearm: issued(expectedNonce) -> available (a fresh stage-2 mint).
 local existing = redis.call('GET', KEYS[1])
 if not existing then
   return false
 end
 local rec = cjson.decode(existing)
+if not isValidChainRecord(rec) then
+  return false
+end
 if (rec['state'] ~= 'issued' and rec['state'] ~= 'completed') or rec['stage2Nonce'] ~= ARGV[1] then
   return false
 end
@@ -569,13 +572,16 @@ LUA;
      * reservation fields are cleared (the completed record keeps its TTL
      * so a retry recovers the issued challenge).
      */
-    private const COMPLETE_LUA = <<<'LUA'
+    private const COMPLETE_LUA = ChainV2LuaPredicate::LUA . <<<'LUA'
 -- Chain completion (DEPRECATED legacy): reserved(owner) -> completed(stage2Nonce).
 local existing = redis.call('GET', KEYS[1])
 if not existing then
   return false
 end
 local rec = cjson.decode(existing)
+if not isValidChainRecord(rec) then
+  return false
+end
 if rec['state'] ~= 'reserved' then
   return false
 end

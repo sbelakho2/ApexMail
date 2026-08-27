@@ -1162,6 +1162,43 @@ final class ChainedChallengeTest extends TestCase
         self::assertSame(1, $client->counters[$sourceKey] ?? 0);
     }
 
+    /**
+     * KCA-77-02: the same-request read-after-exception recovery must
+     * hand the stage-2 challenge out only behind the fresh causal fence.
+     * The markIssued throw may itself be the mutation's WAIT
+     * shortfalling: a read-only recovery would return the challenge over
+     * an unreplicated issued state. A shortfalling fence fails closed
+     * (503, never HTTP 200); a satisfied fence recovers HTTP 200.
+     */
+    public function testMarkIssuedReadAfterExceptionHandsOutOnlyBehindTheCausalFence(): void
+    {
+        $storage = new ArrayStorage();
+        $client = new AbortAwareFakeRedis();
+        $outstanding = new OutstandingChallenges($client, '{kiwi:chain-test}:outstanding:', RiskKeys::fromMaster(self::SECRET), 5, 100, 0);
+        $lostReply = new LostReplyChainStore(new ArrayChainedChallengeStateStore(), throwAfterIssued: true);
+        $fenceFailing = new FenceThrowingChainStore($lostReply);
+        $chainService = $this->chainService($fenceFailing);
+        $stage1 = $this->solvedStage1($storage);
+        $requirement = $chainService->requireStage2($stage1['nonce'], 'login', '', 1, RiskAction::Argon32, time() + 300);
+        $ticket = $chainService->ticketFor($requirement->chainId, time() + 300);
+        $risk = $this->riskStack(SignalVector::fromArray(self::ARGON32_VECTOR));
+        $controller = $this->chainController($storage, $chainService, $risk['gateway'], outstanding: $outstanding);
+
+        // The markIssued transition lands, then throws; the state read
+        // confirms issued with the current nonce; the recovery fence
+        // shortfalls -> the challenge must not be handed out.
+        $fenceFailing->throwOnFence = true;
+        $response = $controller->challenge($this->challengeRequest(json_encode(['scope' => 'login', 'chain_ticket' => $ticket], JSON_THROW_ON_ERROR)));
+        self::assertSame(503, $response->getStatusCode(), sprintf('a shortfalling recovery fence must fail closed: %s', (string) $response->getContent()));
+        self::assertStringContainsString('SERVICE_UNAVAILABLE', (string) $response->getContent());
+        self::assertArrayNotHasKey('nonce', json_decode((string) $response->getContent(), true), 'no challenge may be handed out behind a shortfalling fence');
+
+        // The satisfied fence recovers the issuance.
+        $fenceFailing->throwOnFence = false;
+        $response = $controller->challenge($this->challengeRequest(json_encode(['scope' => 'login', 'chain_ticket' => $ticket], JSON_THROW_ON_ERROR)));
+        self::assertSame(200, $response->getStatusCode(), sprintf('a satisfied recovery fence recovers the issuance: %s', (string) $response->getContent()));
+    }
+
     public function testIssuedResponseLostNextRequestReturnsTheExactSameChallenge(): void
     {
         $storage = new ArrayStorage();
@@ -1288,7 +1325,7 @@ final class ChainedChallengeTest extends TestCase
         self::assertSame(ChainVerifiedResult::StepUpRequiredNew, $service->markStepUpRequired($requirement->chainId, $this->stageNonce('stage2-nonce')));
 
         $state = $service->requirementFor($requirement->chainId);
-        self::assertSame('step_up_required', $state?->state, 'step_up_required is the TERMINAL state');
+        self::assertSame('step_up_required', $state?->state, 'step_up_required is the terminal state');
         self::assertSame($this->stageNonce('stage2-nonce'), $state?->stage2Nonce);
         self::assertSame(ChainVerifiedResult::StepUpRequiredSame, $service->markStepUpRequired($requirement->chainId, $this->stageNonce('stage2-nonce')), 'a same-nonce retry is idempotent');
         self::assertSame(ChainVerifiedResult::Conflict, $service->markStepUpRequired($requirement->chainId, $this->stageNonce('other-nonce')), 'a different nonce on a TERMINAL state is a conflict');
@@ -4269,6 +4306,115 @@ final class ChainStateStoreInterceptor implements TransactionalChainedChallengeS
  * so a test can interleave a second request with the same ticket and
  * observe the in-progress 503 boundary.
  */
+/**
+ * Wraps a chain store and lets the recovery fence fail closed (the
+ * KCA-77-02 regression: the read-after-exception acceptance must not
+ * hand the challenge out when the fence shortfalls).
+ */
+final class FenceThrowingChainStore implements TransactionalChainedChallengeStateStore, \KiwiCaptcha\ReplicationBarrierInterface
+{
+    public bool $throwOnFence = false;
+
+    public function __construct(private readonly TransactionalChainedChallengeStateStore $inner)
+    {
+    }
+
+    public function create(string $chainId, string $stage1Nonce, string $scope, int $ttlSecs, ?string $requestBinding = null, ?string $requiredAction = null, int $policyVersion = 1): void
+    {
+        $this->inner->create($chainId, $stage1Nonce, $scope, $ttlSecs, $requestBinding, $requiredAction, $policyVersion);
+    }
+
+    public function createWithObligation(string $chainId, string $obligationId, string $stage1Nonce, string $scope, ?string $requestBinding, string $requiredAction, int $policyVersion, int $ttlSecs): void
+    {
+        $this->inner->createWithObligation($chainId, $obligationId, $stage1Nonce, $scope, $requestBinding, $requiredAction, $policyVersion, $ttlSecs);
+    }
+
+    public function requirementFor(string $chainId): ?ChainRequirement
+    {
+        return $this->inner->requirementFor($chainId);
+    }
+
+    public function createOrGetObligation(string $obligationId, string $chainId, string $stage1Nonce, string $scope, string $requestBinding, string $requiredAction, int $requiredRank, int $policyVersion, int $expiresAt, int $ttlSecs): string
+    {
+        return $this->inner->createOrGetObligation($obligationId, $chainId, $stage1Nonce, $scope, $requestBinding, $requiredAction, $requiredRank, $policyVersion, $expiresAt, $ttlSecs);
+    }
+
+    public function reserve(string $chainId, string $ownerToken, int $leaseSecs): string
+    {
+        return $this->inner->reserve($chainId, $ownerToken, $leaseSecs);
+    }
+
+    public function release(string $chainId, string $ownerToken): void
+    {
+        $this->inner->release($chainId, $ownerToken);
+    }
+
+    public function markIssued(string $chainId, string $ownerToken, string $stage2Nonce): string
+    {
+        return $this->inner->markIssued($chainId, $ownerToken, $stage2Nonce);
+    }
+
+    public function markVerified(string $chainId, string $stage2Nonce): string
+    {
+        return $this->inner->markVerified($chainId, $stage2Nonce);
+    }
+
+    public function markStepUpRequired(string $chainId, string $stage2Nonce): string
+    {
+        return $this->inner->markStepUpRequired($chainId, $stage2Nonce);
+    }
+
+    public function markDenied(string $chainId, string $stage2Nonce): string
+    {
+        return $this->inner->markDenied($chainId, $stage2Nonce);
+    }
+
+    public function markTransactionDenied(string $chainId, string $obligationId): string
+    {
+        return $this->inner->markTransactionDenied($chainId, $obligationId);
+    }
+
+    public function markTransactionStepUpRequired(string $chainId, string $obligationId): string
+    {
+        return $this->inner->markTransactionStepUpRequired($chainId, $obligationId);
+    }
+
+    public function rearmIssued(string $chainId, string $expectedStage2Nonce): bool
+    {
+        return $this->inner->rearmIssued($chainId, $expectedStage2Nonce);
+    }
+
+    public function complete(string $chainId, string $ownerToken, string $stage2Nonce): ?array
+    {
+        return $this->inner->complete($chainId, $ownerToken, $stage2Nonce);
+    }
+
+    public function read(string $chainId): ?array
+    {
+        return $this->inner->read($chainId);
+    }
+
+    public function establishReplicationFence(string $what): void
+    {
+        if ($this->throwOnFence) {
+            throw new \KiwiCaptcha\Storage\ReplicaWaitException('the stage-2 recovery fence shortfalled');
+        }
+        if ($this->inner instanceof \KiwiCaptcha\ReplicationBarrierInterface) {
+            $this->inner->establishReplicationFence($what);
+        }
+    }
+
+    public function obligationChainId(string $obligationId): ?string
+    {
+        return $this->inner->obligationChainId($obligationId);
+    }
+
+    public function deleteObligation(string $chainId, string $obligationId): void
+    {
+        $this->inner->deleteObligation($chainId, $obligationId);
+    }
+}
+
 final class LostReplyChainStore implements TransactionalChainedChallengeStateStore
 {
     /** Whether the issuance transition throws after the real transition. */

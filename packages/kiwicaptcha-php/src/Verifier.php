@@ -983,6 +983,24 @@ final class Verifier
                     $after = null;
                 }
                 if ($after?->consumedResult !== null) {
+                    // Failed-barrier replay guard: both mutations of this
+                    // resume, the original consume and the commitResult,
+                    // may have landed on the primary with their WAIT
+                    // failing, leaving the replica still holding the
+                    // pending challenge. Accepting the read-back success
+                    // would return a Valid a stale-replica promotion could
+                    // resurrect into a second redemption. The causal
+                    // fence is re-established on this accepting connection
+                    // before the acceptance, and a shortfall fails closed
+                    // to StorageUnavailable, never Valid.
+                    try {
+                        if ($this->storage instanceof \KiwiCaptcha\ReplicationBarrierInterface) {
+                            $this->storage->establishReplicationFence('the resumed post-commit read acceptance');
+                        }
+                    } catch (\Throwable $fenceFailure) {
+                        return VerifyOutcome::invalid(VerifyError::StorageUnavailable);
+                    }
+
                     return $after->consumedResult->valid
                         ? VerifyOutcome::valid($after->record->nonce, $after->consumedResult->binding, true)
                         : VerifyOutcome::invalid(VerifyError::InsufficientWork);

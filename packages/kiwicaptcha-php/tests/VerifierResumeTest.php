@@ -512,12 +512,11 @@ final class VerifierResumeTest extends TestCase
         // The barrier storage: a ReplicationBarrierInterface whose
         // confirmReplication is configurable.
         $barrier = new BarrierStorage($inner);
-        $verifier = new Verifier($barrier, now: static fn (): int => self::ISSUED_AT + 10_000);
+        $verifier = new Verifier($barrier, now: static fn (): int => self::ISSUED_AT);
 
         $barrier->confirmResult = false;
         try {
             $outcome = $verifier->verify($token, Vectors::SECRET, 'login', '198.51.100.7', operationIdentity: $this->identity('barrier-replay'), expectedRequestBinding: 'txn-1', bindingExpectation: RequestBindingExpectation::exact('txn-1'));
-            var_dump('DEBUG-OUTCOME', $outcome->code());
             self::fail('the stored-result replay must NOT return an unproven success');
         } catch (\RuntimeException $e) {
             self::assertSame('replication barrier shortfall', $e->getMessage());
@@ -606,6 +605,37 @@ final class VerifierResumeTest extends TestCase
         self::assertTrue($outcome->isOk(), sprintf('the committed-result recovery must stay expiry-exempt, got %s', $outcome->code()));
         self::assertSame($record->nonce, $outcome->nonce());
         self::assertSame(true, $inner->consumedState($record->nonce)?->consumedResult?->valid);
+    }
+
+    /**
+     * KCA-77-01: the resume post-commit read-back must accept a stored
+     * Valid only behind the causal fence. The dangerous sequence: the
+     * original consume lands with its WAIT failing, the resume's
+     * commitResult write lands with its WAIT failing, and the
+     * read-after-failure sees the stored Valid. Accepting it read-only
+     * would return a success a stale-replica promotion could resurrect
+     * into a second redemption. A shortfalling fence fails closed to
+     * StorageUnavailable, never Valid; a satisfied fence returns the
+     * stored Valid.
+     */
+    public function testResumePostCommitReadBackAcceptsStoredValidOnlyBehindTheCausalFence(): void
+    {
+        [$inner, $record, $token] = $this->issueAndSolve(requestBinding: 'txn-2');
+        $inner->consumeWithOperationIdentity($record->nonce, $this->identity('post-commit-fence'));
+
+        $barrier = new FailingCommitBarrierStorage($inner);
+        $verifier = new Verifier($barrier, now: static fn (): int => self::ISSUED_AT);
+
+        $barrier->failCommit = true;
+        $barrier->confirmResult = false;
+        $outcome = $verifier->resumeConsumedOperation($token, Vectors::SECRET, $this->identity('post-commit-fence'), 'login', self::CLIENT_IP, 'txn-2', RequestBindingExpectation::exact('txn-2'));
+        self::assertFalse($outcome->isOk(), 'a shortfalling fence must never return the stored Valid');
+        self::assertSame('storage_unavailable', $outcome->code(), 'the failed fence degrades to StorageUnavailable, never Valid');
+
+        $barrier->confirmResult = true;
+        $outcome = $verifier->resumeConsumedOperation($token, Vectors::SECRET, $this->identity('post-commit-fence'), 'login', self::CLIENT_IP, 'txn-2', RequestBindingExpectation::exact('txn-2'));
+        self::assertTrue($outcome->isOk(), 'a satisfied fence returns the stored Valid');
+        self::assertTrue($outcome->fromStoredResult, 'the accepted Valid is the read-back stored result');
     }
 
     public function testWrongIdentityIsRefused(): void
@@ -990,3 +1020,68 @@ final class BarrierStorage implements \KiwiCaptcha\AtomicStorageInterface, \Kiwi
         }
     }
 }
+/**
+ * The barrier storage whose commitResult write lands but then throws
+ * (the mutation reached the primary, its WAIT shortfalled): the resume
+ * catch-branch reads the stored result back and must fence before
+ * accepting it.
+ */
+final class FailingCommitBarrierStorage implements \KiwiCaptcha\AtomicStorageInterface, \KiwiCaptcha\ConsumedStateReadableInterface, \KiwiCaptcha\OperationIdentityAwareStorageInterface, \KiwiCaptcha\ReplicationBarrierInterface
+{
+    public bool $failCommit = false;
+
+    public bool $confirmResult = true;
+
+    public function __construct(private readonly \KiwiCaptcha\Storage\ArrayStorage $inner)
+    {
+    }
+
+    public function store(\KiwiCaptcha\ChallengeRecord $record): void
+    {
+        $this->inner->store($record);
+    }
+
+    public function find(string $nonce): ?\KiwiCaptcha\ChallengeRecord
+    {
+        return $this->inner->find($nonce);
+    }
+
+    public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
+    {
+        return $this->inner->consume($nonce);
+    }
+
+    public function consumeWithOperationIdentity(string $nonce, ?string $operationIdentity): ?\KiwiCaptcha\ConsumedRecord
+    {
+        return $this->inner->consumeWithOperationIdentity($nonce, $operationIdentity);
+    }
+
+    public function commitResult(string $nonce, bool $valid, ?string $binding): bool
+    {
+        $ok = $this->inner->commitResult($nonce, $valid, $binding);
+        if ($this->failCommit) {
+            throw new \RuntimeException('the commit WAIT shortfalled');
+        }
+
+        return $ok;
+    }
+
+    public function delete(string $nonce): void
+    {
+        $this->inner->delete($nonce);
+    }
+
+    public function consumedState(string $nonce): ?\KiwiCaptcha\ConsumedRecord
+    {
+        return $this->inner->consumedState($nonce);
+    }
+
+    public function establishReplicationFence(string $what): void
+    {
+        if (!$this->confirmResult) {
+            throw new \RuntimeException('replication barrier shortfall');
+        }
+    }
+}
+
+
