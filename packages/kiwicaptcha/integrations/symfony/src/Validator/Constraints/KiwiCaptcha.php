@@ -113,9 +113,11 @@ class KiwiCaptcha extends Constraint
      * the token, e.g. an idempotency key): with it, a retried request
      * re-presenting the same id plus the same token replays the stored
      * verification outcome (the idempotent retry); without it, a consumed
-     * token never validates twice (strict single-use). Per-request values
-     * (the request attribute / POSTed kiwi_operation_id field) take
-     * precedence over this static option. The id MUST be unique per
+     * token never validates twice (strict single-use). A per-request
+     * value (the server-set request attribute) takes precedence over
+     * this static option; the raw POSTed kiwi_operation_id field is
+     * deliberately never accepted, since a client-chosen identity would
+     * let the attacker enable the replay path. The id MUST be unique per
      * logical operation — a constant here would re-enable cross-request
      * replay of consumed tokens.
      */

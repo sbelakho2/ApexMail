@@ -31,12 +31,15 @@ use Symfony\Component\Validator\Validation;
  *    replayed_token violation). The core replay path skips the
  *    IP/TTL/telemetry cheap checks, so the gate must hold regardless of
  *    IP, expiry or telemetry.
- *  - explicit operation ID (kiwi_operation_id: the request attribute, the
- *    POSTed field, or the constraint option): idempotent retry. The same
- *    logical operation re-presenting the same id plus the same token
- *    replays the stored success (IP/TTL/telemetry exempt — the committed
- *    outcome was durably recorded after the original checks passed). A
- *    different id, a different token, or a different binding is refused.
+ *  - explicit operation ID (kiwi_operation_id: the server-set request
+ *    attribute or the constraint option; the raw POSTed field is
+ *    deliberately never accepted, because a client-chosen identity
+ *    would let the attacker enable the replay path): idempotent retry. The
+ *    same logical operation re-presenting the same id plus the same
+ *    token replays the stored success (IP/TTL/telemetry exempt — the
+ *    committed outcome was durably recorded after the original checks
+ *    passed). A different id, a different token, or a different binding
+ *    is refused.
  *  - binding authority: the canonical binding still participates in the
  *    identity, so a replay under a different binding never matches.
  */
@@ -220,21 +223,36 @@ final class OperationIdentityReplayTest extends TestCase
         self::assertSame(KiwiCaptcha::INVALID_OR_EXPIRED_ERROR, $violations[0]->getCode());
     }
 
-    public function testOperationIdFromThePostedFieldGatesTheReplay(): void
+    /**
+     * KCA-79-01: the raw POSTed kiwi_operation_id is attacker-controlled
+     * and must never unlock the idempotent stored-result replay, so one
+     * paid PoW cannot fund repeated protected requests. The first
+     * validation succeeds; the same token re-presented with the same
+     * client-chosen id is refused with the replayed_token violation
+     * (strict single-use), while the same id through the server-set
+     * request attribute still authorizes the intended idempotent retry.
+     */
+    public function testPostedOperationIdNeverAuthorizesTheReplay(): void
     {
+        // Sequence A, the audit's exact attack: the attacker submits a
+        // valid token with a client-chosen POST kiwi_operation_id, then
+        // resubmits the same token with the same id. The POST field is
+        // ignored (server-owned identity only), so the second request
+        // replays nothing and gets the replayed_token violation.
         [$storage, $verifier, $token] = $this->solvedToken();
-
         $engine1 = $this->engine($verifier, post: ['kiwi_operation_id' => 'signup-123']);
         self::assertCount(0, $this->validate($engine1, $token));
 
-        // Same operation id re-presented through the POST field (the
-        // attribute takes precedence; both drive the idempotent retry).
         $engine2 = $this->engine($verifier, ip: self::OTHER_IP, post: ['kiwi_operation_id' => 'signup-123']);
-        self::assertCount(0, $this->validate($engine2, $token), 'the POSTed kiwi_operation_id drives the idempotent retry');
+        $violations = $this->validate($engine2, $token);
+        self::assertCount(1, $violations, 'a client-supplied kiwi_operation_id must never authorize the replay');
+        self::assertSame(KiwiCaptcha::REPLAYED_TOKEN_ERROR, $violations[0]->getCode(), 'the replay is refused with the replayed_token violation');
 
-        // A different POSTed operation id is a different operation.
-        $engine3 = $this->engine($verifier, ip: self::OTHER_IP, post: ['kiwi_operation_id' => 'signup-999']);
-        self::assertCount(1, $this->validate($engine3, $token));
+        // Sequence B, the trusted channel: the server-set request
+        // attribute authorizes the intended idempotent retry.
+        [$storageB, $verifierB, $tokenB] = $this->solvedToken();
+        self::assertCount(0, $this->validate($this->engine($verifierB, operationId: 'signup-123'), $tokenB));
+        self::assertCount(0, $this->validate($this->engine($verifierB, ip: self::OTHER_IP, operationId: 'signup-123'), $tokenB), 'the trusted request attribute still authorizes the idempotent retry');
     }
 
     // ── binding authority ────────────────────────────────────────────────────

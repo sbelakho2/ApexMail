@@ -1628,6 +1628,63 @@ final class ValidatorTest extends TestCase
         self::assertNull($stack3->getMainRequest()?->attributes->get(KiwiCaptchaValidator::VERIFIED_JTI_ATTRIBUTE));
     }
 
+    /**
+     * KCA-79-02: the ambiguous-consume normalization synthesizes the
+     * stored Valid only behind the causal replication fence — the consume
+     * and commit mutations may have landed with their WAIT failing, so a
+     * read-only synthesis would return an authorization a stale-replica
+     * promotion could resurrect. A shortfalling fence leaves the outcome
+     * indeterminate (retryable temporary_unavailable), never a
+     * synthesized Valid; a satisfied fence resolves the stored success.
+     */
+    public function testAmbiguousConsumeNormalizationFencesTheStoredAcceptance(): void
+    {
+        $storage = new ConsumedStateStorage();
+        $verifier = new Verifier($storage);
+        $challenge = $this->issueBoundChallenge('txn-123', $storage);
+        usleep(($challenge->minDurationMs + 10) * 1000);
+        $token = $this->solveToken($challenge->prefix, $challenge->salt, $challenge->targetBits, $challenge->nonce);
+
+        // The original attempt consumes, derives and commits the valid
+        // result.
+        [$engine] = $this->buildRetryEngine($verifier, $storage, binding: 'txn-123', operationId: 'op-123');
+        $dto = new class {
+            public ?string $captcha = null;
+        };
+        $dto->captcha = $token;
+        $meta = $engine->getMetadataFor($dto::class);
+        $meta->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
+        self::assertCount(0, $engine->validate($dto));
+        self::assertNotNull($storage->consumedState($challenge->nonce)?->consumedResult);
+
+        // The retry loses the consume response AND the replication fence
+        // shortfalls: the normalization must NOT synthesize the Valid —
+        // the outcome stays indeterminate (temporary_unavailable).
+        $storage->throwOnConsume = true;
+        $storage->throwOnFence = true;
+        [$engine2] = $this->buildRetryEngine($verifier, $storage, binding: 'txn-123', operationId: 'op-123');
+        $dto2 = new class {
+            public ?string $captcha = null;
+        };
+        $dto2->captcha = $token;
+        $meta2 = $engine2->getMetadataFor($dto2::class);
+        $meta2->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
+        $violations = $engine2->validate($dto2);
+        self::assertCount(1, $violations, 'a shortfalling fence must never synthesize the stored Valid');
+        self::assertSame(KiwiCaptcha::TEMPORARY_UNAVAILABLE_ERROR, $violations[0]->getCode(), 'the failed fence leaves the retryable temporary_unavailable outcome');
+
+        // The satisfied fence resolves the stored success.
+        $storage->throwOnFence = false;
+        [$engine3] = $this->buildRetryEngine($verifier, $storage, binding: 'txn-123', operationId: 'op-123');
+        $dto3 = new class {
+            public ?string $captcha = null;
+        };
+        $dto3->captcha = $token;
+        $meta3 = $engine3->getMetadataFor($dto3::class);
+        $meta3->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
+        self::assertCount(0, $engine3->validate($dto3), 'a satisfied fence resolves the stored success');
+    }
+
 // ── quic IP-migration policy ───────────────────────────────────────────────
 
     /**

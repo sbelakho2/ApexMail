@@ -8,6 +8,7 @@ use KiwiCaptcha\ChallengeRecord;
 use KiwiCaptcha\ConsumedRecord;
 use KiwiCaptcha\ConsumedStateReadableInterface;
 use KiwiCaptcha\OperationIdentityAwareStorageInterface;
+use KiwiCaptcha\ReplicationBarrierInterface;
 use KiwiCaptcha\Storage\ArrayStorage;
 use KiwiCaptcha\StorageInterface;
 
@@ -24,7 +25,7 @@ use KiwiCaptcha\StorageInterface;
  * (`consumes`, `deletes`, `commits`) so tests can assert "no second
  * derive / no re-consume" via the storage counters.
  */
-final class ConsumedStateStorage implements StorageInterface, ConsumedStateReadableInterface, OperationIdentityAwareStorageInterface
+final class ConsumedStateStorage implements StorageInterface, ConsumedStateReadableInterface, OperationIdentityAwareStorageInterface, ReplicationBarrierInterface
 {
     public int $consumes = 0;
     public int $deletes = 0;
@@ -32,6 +33,16 @@ final class ConsumedStateStorage implements StorageInterface, ConsumedStateReada
 
     /** When true, consume() throws — simulating a lost response. */
     public bool $throwOnConsume = false;
+
+    /** When true, the replication fence throws — simulating a shortfall. */
+    public bool $throwOnFence = false;
+
+    public function establishReplicationFence(string $what): void
+    {
+        if ($this->throwOnFence) {
+            throw new \RuntimeException('replication fence shortfall');
+        }
+    }
 
     public function __construct(private readonly ArrayStorage $inner = new ArrayStorage())
     {

@@ -73,9 +73,11 @@ final class KiwiCaptchaValidator extends ConstraintValidator
      * Request attribute holding the explicit per-operation identity
      * (`kiwi_operation_id`) of the logical operation redeeming the token,
      * e.g. the application's idempotency key for the protected action.
-     * Resolution order: this attribute, then the raw POSTed
-     * `kiwi_operation_id` field, then the constraint's static
+     * Resolution order: this attribute, then the constraint's static
      * `operationId` option. The id must be unique per logical operation.
+     * The raw POSTed `kiwi_operation_id` field is deliberately never
+     * accepted: a client-chosen identity would let the attacker enable
+     * the idempotent-replay path.
      *
      * Replay semantics: by default (no explicit operation id) verification
      * is strictly single-use. The core records an operation identity with
@@ -420,8 +422,10 @@ final class KiwiCaptchaValidator extends ConstraintValidator
         // context in order of availability:
         //
         //  1. the explicit per-operation id the application supplies
-        //     (kiwi_operation_id — the request attribute, the POSTed field,
-        //     or the constraint option; an idempotency-key-shaped value).
+        //     (kiwi_operation_id — the request attribute or the
+        //     constraint option; the raw POSTed field is deliberately
+        //     never accepted, since a client-chosen identity would let
+        //     the attacker enable the replay path).
         //     The identity then carries an explicit operation-id component,
         //     which is the only component that authorizes the replay of a
         //     stored committed success (the idempotent retry);
@@ -507,7 +511,8 @@ final class KiwiCaptchaValidator extends ConstraintValidator
         // the token (a different form submission re-posting the token),
         // so without the explicit component the replay is refused here:
         // strict single-use by default, idempotent retry only through
-        // kiwi_operation_id. The IP/TTL/telemetry cheap checks are not
+        // a server-owned kiwi_operation_id. The IP/TTL/telemetry cheap
+        // checks are not
         // re-run on the core's replay path, which is exactly why this
         // gate must hold for everything except the proven identity.
         if ($outcome->isOk() && $this->isStoredResult($outcome) && $operationId === null) {
@@ -826,6 +831,25 @@ final class KiwiCaptchaValidator extends ConstraintValidator
         // bound to one transaction is never redeemable for another,
         // retries included. The replay gate above applies the same
         // explicit-operation-id rule to this outcome as to the core's.
+        //
+        // Failed-barrier replay guard: the consume and commit mutations
+        // that produced this stored success may have landed on the
+        // primary with their WAIT failing. Synthesizing the Valid here
+        // read-only would return an authorization a stale-replica
+        // promotion could resurrect — the causal fence is re-established
+        // before the acceptance, exactly like every other stored-result
+        // acceptance (the core replay paths, the resume read-back, the
+        // Rust verifier, the SiteVerify idempotency store). A shortfall
+        // leaves the outcome indeterminate (retryable temporary
+        // unavailable), never a synthesized Valid.
+        try {
+            if ($this->storage instanceof \KiwiCaptcha\ReplicationBarrierInterface) {
+                $this->storage->establishReplicationFence('the validator ambiguous-outcome stored acceptance');
+            }
+        } catch (\Throwable) {
+            return $outcome;
+        }
+
         return VerifyOutcome::valid($consumed->record->nonce, $consumed->consumedResult?->binding, true);
     }
 
@@ -2110,18 +2134,17 @@ final class KiwiCaptchaValidator extends ConstraintValidator
 
     /**
      * The request's explicit per-operation id (kiwi_operation_id): the
-     * documented request attribute first, then the raw POSTed field, then
-     * the constraint's static option. Only a well-shaped identifier
-     * counts ([A-Za-z0-9._:-], 1..128 bytes — the same narrow alphabet as
-     * the request binding); a malformed value is ignored (strict
-     * single-use applies) rather than silently re-enabling replay.
+     * documented request attribute first, then the constraint's static
+     * option. The raw POSTed field is deliberately never accepted: a
+     * client-chosen identity would let the attacker enable the
+     * idempotent-replay path. Only a well-shaped identifier counts
+     * ([A-Za-z0-9._:-], 1..128 bytes — the same narrow alphabet as the
+     * request binding); a malformed value is ignored (strict single-use
+     * applies) rather than silently re-enabling replay.
      */
     private function operationIdFor(KiwiCaptcha $constraint, ?Request $request): ?string
     {
         $operationId = $request?->attributes->get(self::OPERATION_ID_ATTRIBUTE);
-        if (!\is_string($operationId) || $operationId === '') {
-            $operationId = $request?->request->get('kiwi_operation_id');
-        }
         if (!\is_string($operationId) || $operationId === '') {
             $operationId = $constraint->operationId;
         }
